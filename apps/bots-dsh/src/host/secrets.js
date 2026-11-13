@@ -24,8 +24,14 @@ const MAX_REQUESTS = 20
 const USED_SAVE_MS = 5000
 
 export const envName = name => `${ENV_PREFIX}${name}`
-export const canUse = (secret, botId) => secret !== undefined && botId !== undefined
+// A secret scoped to one Session (`session`, set by a Session mount, capabilities.js
+// mountCapability) is never a Bot's, whatever its Bot list says.
+export const canUse = (secret, botId) => secret !== undefined && botId !== undefined && secret.session === undefined
   && (secret.scope === 'all' || (Array.isArray(secret.scope) && secret.scope.includes(botId)))
+export const canUseInSession = (secret, sessionId) => secret !== undefined && typeof sessionId === 'string'
+  && sessionId !== '' && secret.session === sessionId
+// A secret no Bot may use, which a Session mount may scope to its Session.
+const forNoBot = secret => Array.isArray(secret?.scope) && secret.scope.length === 0
 
 // A value below the write floor can only reach the store by hand-editing secrets.json, and
 // nothing can use it safely: the redactor cannot match a 1-3 character value (it sits inside
@@ -213,7 +219,9 @@ export function install(rt) {
   const { ctx, home, state } = rt
   const path = join(home, 'secrets.json')
 
-  /** @type {Map<string, {name:string, value:string, purpose:string, scope:'all'|string[], requestedBy:string|null, createdAt:number, updatedAt:number, lastUsedAt?:number}>} */
+  // `session` is kept beside an empty Bot list, never in `scope`: a version without it reads
+  // an unknown scope as every Bot, but reads this entry as no Bot's.
+  /** @type {Map<string, {name:string, value:string, purpose:string, scope:'all'|string[], session?:string, requestedBy:string|null, createdAt:number, updatedAt:number, lastUsedAt?:number}>} */
   const secrets = new Map()
   let loaded = null
   let writing = Promise.resolve()
@@ -303,6 +311,7 @@ export function install(rt) {
         value: entry.value,
         purpose: typeof entry.purpose === 'string' ? entry.purpose : '',
         scope: entry.scope === 'all' ? 'all' : Array.isArray(entry.scope) ? entry.scope.filter(id => typeof id === 'string') : 'all',
+        ...(typeof entry.session === 'string' && entry.session !== '' ? { session: entry.session } : {}),
         requestedBy: typeof entry.requestedBy === 'string' ? entry.requestedBy : null,
         createdAt: Number(entry.createdAt) || Date.now(),
         updatedAt: Number(entry.updatedAt) || Date.now(),
@@ -379,6 +388,7 @@ export function install(rt) {
     return names.length === 0 ? 'no Bot' : names.join(', ')
   }
   const usage = name => `$${envName(name)} in bash, or $env:${envName(name)} in PowerShell`
+  const sessionOnly = name => `${name} is scoped to one Session's capability, and no Bot may use it.`
 
   async function tell(botId, text) {
     if (rt.botOf(botId) === undefined) return
@@ -443,6 +453,7 @@ export function install(rt) {
     name: secret.name,
     purpose: secret.purpose,
     scope: secret.scope,
+    ...(secret.session !== undefined ? { session: secret.session } : {}),
     requestedBy: secret.requestedBy,
     createdAt: secret.createdAt,
     updatedAt: secret.updatedAt,
@@ -460,6 +471,7 @@ export function install(rt) {
       if (body.requestId !== undefined) {
         const { botId, request } = pendingRequest(body.requestId)
         const existing = secrets.get(request.name)
+        if (existing?.session !== undefined) throw refusal(sessionOnly(request.name))
         let scope
         if (existing === undefined || request.kind === 'fill') scope = body.scope === 'bot' ? [botId] : 'all'
         else scope = existing.scope === 'all' ? 'all' : [...new Set([...existing.scope, botId])]
@@ -482,11 +494,15 @@ export function install(rt) {
       const name = normalizeName(body.name)
       if (!SECRET_NAME.test(name)) throw refusal('A name uses capitals, digits, and underscores, and starts with a letter')
       const existing = secrets.get(name)
+      const scope = body.scope !== undefined ? cleanScope(body.scope) : existing?.scope ?? 'all'
+      // A new value keeps a Session's scope; handing the key to Bots goes through secret-update.
+      if (existing?.session !== undefined && !forNoBot({ scope })) throw refusal(`${sessionOnly(name)} Change who may use it under Who may use it.`)
       secrets.set(name, {
         name,
         value,
         purpose: typeof body.purpose === 'string' && body.purpose.trim() !== '' ? body.purpose.trim().slice(0, 300) : existing?.purpose ?? '',
-        scope: body.scope !== undefined ? cleanScope(body.scope) : existing?.scope ?? 'all',
+        scope,
+        ...(existing?.session !== undefined ? { session: existing.session } : {}),
         requestedBy: existing?.requestedBy ?? null,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
@@ -501,6 +517,7 @@ export function install(rt) {
       const secret = secrets.get(request.name)
       if (secret === undefined) throw refusal(`${request.name} is not saved yet`)
       if (held(secret)) throw refusal(heldReason(request.name))
+      if (secret.session !== undefined) throw refusal(sessionOnly(request.name))
       if (!canUse(secret, botId)) secret.scope = [...new Set([...secret.scope, botId])]
       secret.updatedAt = Date.now()
       settle(botId, request, 'allowed')
@@ -520,6 +537,8 @@ export function install(rt) {
       const secret = secrets.get(normalizeName(body.name))
       if (secret === undefined) throw refusal('No such key')
       if (body.scope !== undefined) secret.scope = cleanScope(body.scope)
+      // The person who gives the key to Bots ends its Session scope.
+      if (!forNoBot(secret)) delete secret.session
       if (typeof body.purpose === 'string') secret.purpose = body.purpose.trim().slice(0, 300)
       secret.updatedAt = Date.now()
       const notes = []
@@ -553,6 +572,64 @@ export function install(rt) {
     } catch { return false }
     if (secrets.get(name)?.value !== expectedValue) return false
     return endpoints['secret-delete']({ name })
+  }
+
+  // Scopes each named secret to one Session, for a Session mount (capabilities.js). A secret
+  // qualifies only while no Bot may use it; one already scoped to this Session stays so, and
+  // one scoped to another Session is refused. The scope is saved, so it outlives a restart.
+  // Checks and changes run in one synchronous stretch after loading, so two mounts cannot both
+  // take one secret.
+  async function bindSessionSecrets(names, sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') throw refusal('Name the Session the secrets are for.')
+    await loadSecrets()
+    const bind = []
+    for (const name of new Set(names)) {
+      const secret = secrets.get(name)
+      if (secret === undefined) throw refusal(`No secret named ${name}. Save it in Settings → Secrets for no Bot first.`)
+      if (held(secret)) throw refusal(heldReason(name))
+      if (secret.session === sessionId) continue
+      if (secret.session !== undefined) throw refusal(`${name} is scoped to another Session.`)
+      if (!forNoBot(secret)) throw refusal(`${name} is for ${scopeText(secret.scope)}. A Session's secret is one no Bot may use: in Settings → Secrets, choose Chosen Bots with none picked.`)
+      bind.push(secret)
+    }
+    if (bind.length === 0) return
+    const readOnly = rt.readOnly()
+    if (readOnly !== undefined) throw refusal(readOnly)
+    for (const secret of bind) secret.session = sessionId
+    try {
+      changed()
+      await persist()
+    } catch (error) {
+      for (const secret of bind) if (secret.session === sessionId) delete secret.session
+      changed()
+      throw error
+    }
+  }
+  async function sessionSecretNames(sessionId) {
+    await loadSecrets()
+    return [...secrets.values()].filter(secret => canUseInSession(secret, sessionId)).map(secret => secret.name)
+  }
+  // Ends the Session scope of each named secret still scoped to that Session: it is no Bot's
+  // and no Session's again until a mount scopes it anew.
+  async function releaseSessionSecrets(names, sessionId) {
+    await loadSecrets()
+    const released = []
+    for (const name of new Set(names)) {
+      const secret = secrets.get(name)
+      if (secret?.session !== sessionId) continue
+      delete secret.session
+      released.push(secret)
+    }
+    if (released.length === 0) return false
+    try {
+      changed()
+      await persist()
+    } catch (error) {
+      for (const secret of released) if (secret.session === undefined) secret.session = sessionId
+      changed()
+      throw error
+    }
+    return true
   }
 
   // A deleted Bot leaves every list it was on, and its cards go with it.
@@ -598,6 +675,8 @@ export function install(rt) {
       const { work, unknown } = cleanGitHubWork(args.github)
       if (unknown.length > 0) return `Unknown GitHub work: ${unknown.join(', ')}. Pass github with ${Object.keys(GITHUB_WORK).join(', ')}.`
       const stored = secrets.get(name)
+      // A Session's secret is never offered to a Bot, not even on a card.
+      if (stored?.session !== undefined) return `${sessionOnly(name)} Ask for your key under another name.`
       // A held entry is invisible to a Bot: asking again shows the fill card, so the user
       // can replace the unredactable value.
       const secret = held(stored) ? undefined : stored
@@ -647,10 +726,13 @@ export function install(rt) {
       await loadSecrets()
       const self = callerOf(exec)
       if (rt.botOf(self) === undefined) return 'Only Bots on the team can use list_secrets.'
-      if (secrets.size === 0) return 'No keys are saved yet. Ask for one with request_secret.'
+      // A Session's secret is never offered to a Bot: not listed here, and a Bot that names it
+      // in request_secret is only told it cannot have it.
+      const listed = secretsView().filter(secret => secret.session === undefined)
+      if (listed.length === 0) return 'No keys are saved yet. Ask for one with request_secret.'
       return [
         'Saved keys (values are never shown):',
-        ...secretsView().map((secret) => {
+        ...listed.map((secret) => {
           const stored = secrets.get(secret.name)
           const use = held(stored)
             ? `held: its saved value is shorter than ${MIN_VALUE} characters, so nothing uses it; save a new value`
@@ -663,7 +745,7 @@ export function install(rt) {
 
   // Keep the whole result for wrappers that read content before the registry
   // re-renders it. Auxiliary fields must lose secrets before they can be saved too.
-  ctx.on('tools/execute', async (exec, next) => {
+  ctx.on('tools/execute', async function redactToolResult(exec, next) {
     const result = await next()
     if (secrets.size === 0 || result === null || typeof result !== 'object') return result
     return redactDeep(result, redact)
@@ -710,7 +792,8 @@ export function install(rt) {
     let unregister = null
     let declared = ''
     refreshEnv = () => {
-      const list = [...secrets.values()].filter(secret => !held(secret)).sort((a, b) => a.name.localeCompare(b.name))
+      // A Session's secret reaches no shell, so it is not declared to any.
+      const list = [...secrets.values()].filter(secret => !held(secret) && secret.session === undefined).sort((a, b) => a.name.localeCompare(b.name))
       const key = list.map(secret => `${secret.name}\u0000${secret.purpose}`).join('\n')
       if (key === declared) return
       unregister?.()
@@ -751,6 +834,10 @@ export function install(rt) {
     secretsView,
     secretValue: name => (held(secrets.get(name)) ? undefined : secrets.get(name)?.value),
     canUseSecret: (name, botId) => !held(secrets.get(name)) && canUse(secrets.get(name), botId),
+    canUseSecretInSession: (name, sessionId) => !held(secrets.get(name)) && canUseInSession(secrets.get(name), sessionId),
+    bindSessionSecrets,
+    releaseSessionSecrets,
+    sessionSecretNames,
     secretHeldReason: name => (held(secrets.get(name)) ? heldReason(name) : undefined),
     secretEndpoint,
     deleteSecretIfUnchanged,

@@ -10,6 +10,7 @@ const ENSURE_TIMEOUT_MS = 15_000
 // One initialize request, as the mount sends it. The SDK's reconnect budget is not a probe:
 // a save that retried would leave the user waiting on a server that already refused.
 const PROBE_TIMEOUT_MS = 10_000
+const SAVED_BY_BOT = name => `${name} was last saved by a Bot, not in Settings → Capabilities. A Session mount takes only a capability the person saved there; save it there to use it.`
 const PROBE_EXCERPT_CHARS = 200
 const PROBE_REASON_CHARS = 300
 const PROBE_BODY = JSON.stringify({
@@ -75,6 +76,13 @@ export function install(rt) {
   let loadingSecrets = 0
   let stopped = false
 
+  // What another plugin mounted into one plain Session (mountCapability), by Session id:
+  // name -> { secrets }, the secrets that mount may resolve. In memory only: a restart
+  // restores none, and the plugin that owns the Session mounts again. Each status of such a
+  // mount is kept by Session id and capability name.
+  const grants = new Map()
+  const grantStatuses = new Map()
+
   const library = () => state.capabilities.items
   const ensureLibrary = () => {
     state.capabilities ??= { items: {} }
@@ -136,6 +144,13 @@ export function install(rt) {
         } catch { throw refusal('Enter a valid HTTP or HTTPS URL.') }
         Object.assign(item, { transport, url, headers: stringMap(body.headers, 'Headers'), approved: true })
       }
+      // A Bot may name only keys saved for it: a key it may not use never goes where it says.
+      if (!ui) {
+        const others = [...referencedSecrets(item)].filter(secret => !rt.canUseSecret(secret, botId))
+        if (others.length > 0) throw refusal(`Not saved: ${item.name} uses ${others.join(', ')}, which ${others.length === 1 ? 'is' : 'are'} not saved for you. A capability you save may use only keys saved for you; ask for one with request_secret.`)
+      }
+      // Only the person's own save in Settings marks it as theirs; a Session mount takes no other.
+      if (ui) item.fromSettings = true
     } else if (kind === 'skill') {
       item.content = String(body.content ?? '').trim()
     } else {
@@ -149,7 +164,7 @@ export function install(rt) {
     return item
   }
   const capabilitySave = async (body, options = {}) => {
-    await rt.load()
+    await loadInputs()
     writeCheck()
     const item = itemInput(body ?? {}, options)
     if (item.kind === 'mcp' && item.transport === 'streamable-http') {
@@ -238,6 +253,14 @@ export function install(rt) {
       }
       if (byItem.size === 0) sessionStatuses.delete(botId)
     }
+    grantStatuses.delete(sessionId)
+  }
+  // A Bot's mount reports under its Bot; a Session mount under its Session.
+  const setStatus = (owner, name, sessionId, status) => {
+    if (owner.botId !== undefined) return statusSet(owner.botId, name, sessionId, status)
+    let byName = grantStatuses.get(sessionId)
+    if (!byName) grantStatuses.set(sessionId, byName = new Map())
+    byName.set(name, status)
   }
   const statusFor = (botId, name) => {
     const values = [...(sessionStatuses.get(botId)?.get(name)?.values() ?? [])]
@@ -287,24 +310,46 @@ export function install(rt) {
     }
     return pluginPromise
   }
-  function secretFor(name, botId) {
-    const value = rt.canUseSecret(name, botId) ? rt.secretValue(name) : undefined
-    if (value === undefined) throw refusal(rt.secretHeldReason?.(name) ?? `Secret ${name} is missing or unavailable for this Bot.`)
+  // A Session that belongs to a Bot (its chat, a group, a task or run, an earlier part, or a
+  // subagent of one) never takes a Session mount.
+  // Another plugin's own Session that it names to the team (rt.hooks.sessionOwner) stays its own.
+  const botOwned = (sessionId) => {
+    if (rt.selfOf(sessionId) !== undefined) return true
+    const owner = rt.teamOwnerOf?.(sessionId)
+    return owner !== undefined && owner.kind !== 'hook'
+  }
+  // A Bot mount resolves the secrets the Bot's scope gives it. A Session mount resolves only a
+  // secret its live grant names and that is scoped to that one Session, never one a Bot may use.
+  const mayResolve = (name, owner) => {
+    if (owner.botId !== undefined) return rt.canUseSecret(name, owner.botId)
+    return owner.grant !== undefined && grants.get(owner.sessionId)?.get(owner.name) === owner.grant
+      && owner.grant.secrets.has(name) && rt.canUseSecretInSession(name, owner.sessionId) && !botOwned(owner.sessionId)
+  }
+  function secretFor(name, owner) {
+    const value = mayResolve(name, owner) ? rt.secretValue(name) : undefined
+    if (value === undefined) throw refusal(rt.secretHeldReason?.(name) ?? `Secret ${name} is missing or unavailable for this ${owner.botId !== undefined ? 'Bot' : 'Session'}.`)
     return value
   }
-  function resolveValues(values, botId) {
+  function resolveValues(values, owner) {
     const resolved = {}
     for (const [key, raw] of Object.entries(values ?? {})) {
-      resolved[key] = String(raw).replace(SECRET_REFERENCE, (_match, name) => secretFor(name, botId))
+      resolved[key] = String(raw).replace(SECRET_REFERENCE, (_match, name) => secretFor(name, owner))
     }
     return resolved
   }
-  const resolveUrl = (url, botId) => String(url).replace(SECRET_REFERENCE, (_match, name) => encodeUrlComponent(secretFor(name, botId)))
-  const resolveList = (list, botId) => (list ?? []).map(raw => String(raw).replace(SECRET_REFERENCE, (_match, name) => secretFor(name, botId)))
-  const configFor = (item, botId) => {
+  const resolveUrl = (url, owner) => String(url).replace(SECRET_REFERENCE, (_match, name) => encodeUrlComponent(secretFor(name, owner)))
+  const resolveList = (list, owner) => (list ?? []).map(raw => String(raw).replace(SECRET_REFERENCE, (_match, name) => secretFor(name, owner)))
+  const configFor = (item, owner) => {
     if (item.kind === 'skill') return { name: item.name, description: item.description, content: item.content }
-    if (item.transport === 'stdio') return { transport: 'stdio', serverName: item.name, command: item.command, args: resolveList(item.args, botId), env: resolveValues(item.env, botId), failOnStartupError: true }
-    return { transport: 'streamable-http', serverName: item.name, url: resolveUrl(item.url, botId), headers: resolveValues(item.headers, botId), failOnStartupError: true }
+    if (item.transport === 'stdio') return { transport: 'stdio', serverName: item.name, command: item.command, args: resolveList(item.args, owner), env: resolveValues(item.env, owner), failOnStartupError: true }
+    return { transport: 'streamable-http', serverName: item.name, url: resolveUrl(item.url, owner), headers: resolveValues(item.headers, owner), failOnStartupError: true }
+  }
+  // Every secret an MCP item names where the mount resolves them.
+  const referencedSecrets = (item) => {
+    const texts = item.transport === 'stdio'
+      ? [...(item.args ?? []), ...Object.values(item.env ?? {})]
+      : [item.url, ...Object.values(item.headers ?? {})]
+    return new Set(texts.flatMap(text => [...String(text ?? '').matchAll(SECRET_REFERENCE)].map(match => match[1])))
   }
   // A Bot resolves only the secrets it may use; the operator saving from Settings resolves a
   // stored secret only when some Bot could use it, and the value only ever goes to the URL.
@@ -390,8 +435,11 @@ export function install(rt) {
   const disposeMount = async mount => {
     if (mount?.fiber) await Promise.resolve().then(() => mount.fiber.dispose()).catch(() => {})
   }
-  const mountOne = async (agent, bot, agentMounts, name) => {
+  // One capability into one Agent, for its Bot ({ botId }) or for its Session alone
+  // ({ sessionId }: a Session mount, which resolves secrets through its grant).
+  const mountOne = async (agent, mountFor, agentMounts, name) => {
     const sessionId = agent.session.id
+    const owner = mountFor.botId !== undefined ? mountFor : { sessionId, name, grant: grants.get(sessionId)?.get(name) }
     const item = own(library(), name)
     const drop = async () => {
       await disposeMount(agentMounts.get(name))
@@ -399,21 +447,28 @@ export function install(rt) {
     }
     if (item.kind === 'mcp' && item.transport === 'stdio' && item.approved !== true) {
       await drop()
-      statusSet(bot.id, name, sessionId, { state: 'needs-approval' })
+      setStatus(owner, name, sessionId, { state: 'needs-approval' })
+      return
+    }
+    // A Session mount runs only what the person saved: once a Bot changes it, it stops until
+    // the person saves it again in Settings.
+    if (owner.botId === undefined && item.fromSettings !== true) {
+      await drop()
+      setStatus(owner, name, sessionId, { state: 'error', error: SAVED_BY_BOT(name) })
       return
     }
     let config
     try {
-      config = configFor(item, bot.id)
+      config = configFor(item, owner)
     } catch (error) {
       await drop()
-      statusSet(bot.id, name, sessionId, { state: 'error', error: rt.redactSecrets(error.message).slice(0, 300) })
+      setStatus(owner, name, sessionId, { state: 'error', error: rt.redactSecrets(error.message).slice(0, 300) })
       return
     }
     const key = `${name}:${createHash('sha256').update(JSON.stringify(config)).digest('hex')}`
     if (agentMounts.get(name)?.key === key) return
     await drop()
-    statusSet(bot.id, name, sessionId, { state: 'connecting' })
+    setStatus(owner, name, sessionId, { state: 'connecting' })
     try {
       const plugin = item.kind === 'skill'
         ? {
@@ -429,16 +484,29 @@ export function install(rt) {
       agentMounts.set(name, { key, fiber })
       await fiber.await()
       if (stopped || agents.get(sessionId)?.deref() !== agent) return
-      statusSet(bot.id, name, sessionId, { state: 'ready' })
+      setStatus(owner, name, sessionId, { state: 'ready' })
     } catch (error) {
       await drop()
       const message = rt.redactSecrets([error, error?.cause].filter(Boolean).map(part => String(part?.message ?? part)).join(': ') || 'Connection failed').slice(0, 300)
-      statusSet(bot.id, name, sessionId, { state: 'error', error: message })
+      setStatus(owner, name, sessionId, { state: 'error', error: message })
     }
+  }
+  // The Session mounts still granted for a Session. A grant whose capability was deleted, or
+  // is no longer an MCP server, ends with it, and so does the scope of its secrets.
+  const grantedNames = (sessionId) => {
+    const names = new Set()
+    for (const [name, grant] of grants.get(sessionId) ?? []) {
+      if (own(library(), name)?.kind === 'mcp') {
+        names.add(name)
+        continue
+      }
+      void endGrant(sessionId, name, grant)
+    }
+    return names
   }
   const reconcileAgent = async (agent, bot) => {
     const sessionId = agent.session.id
-    const desired = bot ? expandCapabilityNames(bot.capabilities, library()) : new Set()
+    const desired = bot ? expandCapabilityNames(bot.capabilities, library()) : grantedNames(sessionId)
     const agentMounts = mounts.get(agent) ?? new Map()
     if (desired.size > 0) mounts.set(agent, agentMounts)
     if (bot) {
@@ -446,14 +514,17 @@ export function install(rt) {
         if (!desired.has(name)) clearStatus(bot.id, name, sessionId)
       }
     } else {
+      const statuses = grantStatuses.get(sessionId)
       clearSession(sessionId)
+      for (const [name, status] of statuses ?? []) if (desired.has(name)) setStatus({ sessionId }, name, sessionId, status)
     }
     for (const [name, mount] of agentMounts) {
       if (desired.has(name)) continue
       await disposeMount(mount)
       agentMounts.delete(name)
     }
-    await Promise.all([...desired].map(name => mountOne(agent, bot, agentMounts, name)))
+    const mountFor = bot ? { botId: bot.id } : { sessionId }
+    await Promise.all([...desired].map(name => mountOne(agent, mountFor, agentMounts, name)))
     if (agentMounts.size === 0 && mounts.get(agent) === agentMounts) mounts.delete(agent)
   }
   const botOfSession = sessionId => (rt.isBotSession(sessionId) ? rt.botOf(rt.selfOf(sessionId)) : undefined)
@@ -548,6 +619,107 @@ export function install(rt) {
       mounts.delete(agent)
     }, `ds-bot: capabilities ${sessionId}`)
   }
+  // Ends one grant. Nothing resolves its secrets from here on (mayResolve wants the live
+  // grant); its mount goes at the Session's next reconcile, and each of its secrets that no
+  // other grant of the Session names goes back to no Session.
+  const endGrant = async (sessionId, name, grant) => {
+    const byName = grants.get(sessionId)
+    if (byName?.get(name) !== grant) return false
+    byName.delete(name)
+    if (byName.size === 0) grants.delete(sessionId)
+    grantStatuses.get(sessionId)?.delete(name)
+    const kept = new Set([...byName.values()].flatMap(other => [...other.secrets]))
+    const free = [...grant.secrets].filter(secret => !kept.has(secret))
+    if (free.length > 0) {
+      await rt.releaseSessionSecrets(free, sessionId)
+        .catch(error => rt.warn('ds-bot: secrets of %s stay scoped to Session %s: %s', name, sessionId, error?.message ?? error))
+    }
+    return true
+  }
+  const grantSecretsOf = (grant) => {
+    const list = grant?.secrets ?? []
+    if (!Array.isArray(list) || list.some(name => typeof name !== 'string')) throw refusal('grant.secrets must be a list of secret names.')
+    return new Set(list)
+  }
+  const mountView = (sessionId, name) => {
+    const status = grantStatuses.get(sessionId)?.get(name) ?? { state: 'connecting' }
+    return { sessionId, name, state: status.state, ...(status.error ? { error: status.error } : {}), toolPrefix: `mcp__${name}__` }
+  }
+  // Another plugin mounts one MCP capability into one plain Session it owns (an answer
+  // thread, for one person), and only there: its tools go into that Session's Agent scope,
+  // and the secrets it uses are scoped to that Session (secrets.js bindSessionSecrets).
+  async function mountCapability(sessionId, name, grant = {}) {
+    if (typeof sessionId !== 'string' || sessionId === '') throw refusal('Name the Session to mount the capability into.')
+    if (stopped) throw refusal('The Bot team has stopped.')
+    await loadInputs()
+    if (botOwned(sessionId)) throw refusal('This Session belongs to a Bot. A Bot takes capabilities through its own list, never through a Session mount.')
+    const item = own(library(), String(name ?? ''))
+    if (!item) throw refusal(`No capability named ${name}.`)
+    if (item.kind !== 'mcp') throw refusal(`${item.name} is not an MCP server. Only an MCP server mounts into one Session.`)
+    if (item.fromSettings !== true) throw refusal(SAVED_BY_BOT(item.name))
+    const secrets = grantSecretsOf(grant)
+    const used = referencedSecrets(item)
+    const missing = [...used].filter(secret => !secrets.has(secret))
+    if (missing.length > 0) throw refusal(`${item.name} uses ${missing.join(', ')}; the grant must name ${missing.length === 1 ? 'it' : 'them'}.`)
+    const unused = [...secrets].filter(secret => !used.has(secret))
+    if (unused.length > 0) throw refusal(`${item.name} does not use ${unused.join(', ')}.`)
+    let agent
+    try {
+      agent = await rt.resolveAgent(sessionId)
+    } catch (error) {
+      throw refusal(`Session ${sessionId} is not available: ${rt.redactSecrets(String(error?.message ?? error)).slice(0, 300)}`)
+    }
+    if (stopped) throw refusal('The Bot team has stopped.')
+    await rt.bindSessionSecrets([...secrets], sessionId)
+    let byName = grants.get(sessionId)
+    if (!byName) grants.set(sessionId, byName = new Map())
+    const previous = byName.get(item.name)
+    const same = previous !== undefined && previous.secrets.size === secrets.size && [...secrets].every(secret => previous.secrets.has(secret))
+    if (!same) {
+      byName.set(item.name, { secrets })
+      // A grant that now names fewer secrets frees those no grant of the Session still names.
+      const kept = new Set([...byName.values()].flatMap(other => [...other.secrets]))
+      const dropped = [...(previous?.secrets ?? [])].filter(secret => !kept.has(secret))
+      if (dropped.length > 0) {
+        await rt.releaseSessionSecrets(dropped, sessionId)
+          .catch(error => rt.warn('ds-bot: secrets of %s stay scoped to Session %s: %s', item.name, sessionId, error?.message ?? error))
+      }
+    }
+    trackAgent(agent)
+    await prepare(agent, sessionId)
+    return mountView(sessionId, item.name)
+  }
+  // Withdraws a Session mount: nothing resolves its secrets from then on, its mount goes, and
+  // the Session scope of its secrets ends. The saved scope ends also with no live mount (after
+  // a restart there is none): the secrets the capability uses, or, when it is gone, each
+  // secret scoped to the Session that no saved capability and no live mount there still use.
+  // True when a mount or a scope ended.
+  async function unmountCapability(sessionId, name) {
+    if (typeof sessionId !== 'string' || sessionId === '') throw refusal('Name the Session to unmount the capability from.')
+    const key = String(name ?? '')
+    const grant = grants.get(sessionId)?.get(key)
+    let ended = false
+    if (grant !== undefined) {
+      const agent = agents.get(sessionId)?.deref()
+      const ending = endGrant(sessionId, key, grant)
+      if (agent !== undefined) await reconcileOne(agent)
+      ended = await ending
+    }
+    await rt.load()
+    const item = own(library(), key)
+    const live = new Set([...(grants.get(sessionId)?.values() ?? [])].flatMap(other => [...other.secrets]))
+    let scoped
+    if (item?.kind === 'mcp') {
+      scoped = [...referencedSecrets(item)]
+    } else {
+      // The capability is gone: only the Session's keys that no saved MCP capability still uses.
+      const used = new Set(Object.values(library()).filter(other => other.kind === 'mcp').flatMap(other => [...referencedSecrets(other)]))
+      scoped = (await rt.sessionSecretNames(sessionId)).filter(secret => !used.has(secret))
+    }
+    const free = scoped.filter(secret => !live.has(secret))
+    const released = free.length > 0 && await rt.releaseSessionSecrets(free, sessionId)
+    return ended || released
+  }
   const trackBotAgents = async bot => {
     const sessionIds = new Set()
     try {
@@ -609,10 +781,21 @@ export function install(rt) {
     try {
       await rt.load()
       const bot = botOfSession(agent.session.id)
-      if ((bot?.capabilities ?? []).length > 0) await prepare(agent, agent.session.id)
+      // A Session mount follows its Session to each new Agent (a clear, a compaction).
+      if ((bot?.capabilities ?? []).length > 0 || (!bot && grants.has(agent.session.id))) await prepare(agent, agent.session.id)
     } catch (error) {
       rt.warn('ds-bot: capability load failed: %s', error)
     }
+  })
+  // A Session that closes takes its Session mounts with it; the Session scope of their
+  // secrets stays, so after this only that Session can mount them again.
+  ctx.on('session/disposed', function releaseSessionMounts(session) {
+    const sessionId = session?.id
+    if (!grants.has(sessionId)) return
+    grants.delete(sessionId)
+    grantStatuses.delete(sessionId)
+    const agent = agents.get(sessionId)?.deref()
+    if (agent !== undefined) void reconcileOne(agent)
   })
   ctx.effect(() => {
     void rt.load().then(async () => {
@@ -627,6 +810,8 @@ export function install(rt) {
       mounts.clear()
       agents.clear()
       sessionStatuses.clear()
+      grants.clear()
+      grantStatuses.clear()
       await Promise.all(live.flatMap(agentMounts => [...agentMounts.values()].map(disposeMount)))
     }
   }, 'ds-bot: capabilities')
@@ -642,5 +827,7 @@ export function install(rt) {
     ensureCapabilities,
     expandCapabilities: names => expandCapabilityNames(names, library()),
     changeCapabilityAttachment: changeAttachment,
+    mountCapability,
+    unmountCapability,
   })
 }

@@ -560,7 +560,10 @@ test('mounts agent-only MCP and skills, remounts changed config, resolves scoped
   assert.equal(skills.get('chief').get('guide').content, 'Changed capability marker.')
   assert.equal(mounts.filter(mount => mount.plugin === mcpPlugin && mount.config.serverName === 'echo').length, 5)
   assert.equal(rt.capabilityStatusesView().worker.team.state, 'ready')
-  await rt.capabilitySave({ ...mcp('missing-secret'), transport: 'streamable-http', url: 'https://example.test/mcp', headers: { Authorization: '$DSH_SECRET_TOKEN' } }, { botId: 'worker' })
+  // A Bot cannot save one with a key that is not its own; the person can, and the mount reports it.
+  const missingSecret = { ...mcp('missing-secret'), transport: 'streamable-http', url: 'https://example.test/mcp', headers: { Authorization: '$DSH_SECRET_TOKEN' } }
+  await assert.rejects(rt.capabilitySave(missingSecret, { botId: 'worker' }), /Not saved: missing-secret uses TOKEN, which is not saved for you/)
+  await rt.capabilitySave({ ...missingSecret, unverified: true }, { ui: true })
   await rt.changeCapabilityAttachment('attach', { name: 'missing-secret' }, 'worker')
   await rt.scheduleCapabilitiesReconcile()
   assert.equal(rt.capabilityStatusesView().worker['missing-secret'].state, 'error')
