@@ -1167,7 +1167,9 @@ export function moveHooks({ modsDir, log = () => {}, warnings = [], binDir = nul
   let hooks = null;
   let link = null;
   try { hooks = { ...syncHooks({ modsDir, extra: window ? [...openSpaces(), ...botPaneFolders()] : [], log, warnLedgers }), crossed }; } catch (error) {
-    warnings.push(`the briefing hooks were not moved (${error.message}); each rewritten settings.local.json has its backup beside it`);
+    const said = `the briefing hooks were not moved (${error.message}); each rewritten settings.local.json has its backup beside it`;
+    warnings.push(said);
+    log(`warning: ${said}`);
   }
   if (binDir) {
     try {

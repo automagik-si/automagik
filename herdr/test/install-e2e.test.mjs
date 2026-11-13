@@ -29,6 +29,8 @@ const { keys: TEST_KEYS, pointerBytes, signatureOf } = await import("./pointer.m
 const RELEASE = "3.57.0";
 /** The latest sidebar-only release (v0.2-v0.4.x: automagik-herdr-<v>.tgz, spaces-agents only). */
 const OLD = "0.4.0";
+/** A run's output with its exit code and stderr, for the message of an assertion about its notice. */
+const ran = (r) => `exit ${r.code}\nstderr:\n${r.err}\nstdout:\n${r.out}`;
 /** Paths update.mjs carries over from the replaced folder (D10): never in the archive. */
 const PRIVATE = (rel) => rel.split("/").some((s) => s.startsWith(".") || s === "node_modules");
 
@@ -413,7 +415,7 @@ test(`e2e (b): a v0.4.0 sidebar-only install is replaced by the whole pack (${la
   assert.equal(JSON.parse(readFileSync(projSettings, "utf8")).hooks.UserPromptSubmit[0].hooks[0].command, hookCommand(m.appHome));
   const out = r.out.split("\n");
   const from = out.indexOf("IMPORTANT: the bots' briefing hook moved to a new path in 1 settings file:");
-  assert.ok(from > 0, r.out);
+  assert.ok(from > 0, ran(r));
   assert.equal(out[from + 1], `  ${proj}: ${projSettings}`);
   assert.match(out[from + 2], /keeps the OLD hook and gets NO briefing until it is restarted\. Restart the bot: am restart <bot> \(or the bot row's Restart\)/);
   assert.match(out[from + 3], /were not rewritten .*am start <bot>/);
@@ -491,7 +493,7 @@ test("e2e: a pack whose sidebar ships no command fails loudly and leaves no dang
   assert.match(r.err, /has neither automagik-herdr nor automagik-herdr\.mjs, so automagik-herdr is not linked\. Removed /);
   assert.equal(readdirSync(dirname(m.link)).includes("automagik-herdr"), false, "no link left behind");
   // The run stopped at the link, after the pack crossed the rename: the held hooks notice still prints.
-  assert.match(r.out, /^IMPORTANT: the sidebar moved to a new folder, and no settings file's briefing hook was rewritten/m);
+  assert.match(r.out, /^IMPORTANT: the sidebar moved to a new folder, and no settings file's briefing hook was rewritten/m, ran(r));
 });
 
 test("e2e: a project unknown at the upgrade keeps its hook and is warned about; opened as a space, a rerun moves it", { skip: !haveGit && "no git work tree" }, (t) => {
@@ -520,7 +522,7 @@ test("e2e: a project unknown at the upgrade keeps its hook and is warned about; 
   // Crossing the rename with no file rewritten still warns, last.
   const lines = up.out.split("\n");
   const at = lines.findIndex((l) => l.startsWith("IMPORTANT: the sidebar moved to a new folder, and no settings file's briefing hook was rewritten"));
-  assert.ok(at > 0, up.out);
+  assert.ok(at > 0, ran(up));
   assert.match(lines[at + 1], /keeps the OLD hook and gets NO briefing until it is restarted\. Restart the bot: am restart <bot> \(or the bot row's Restart\)/);
   assert.match(lines[at + 2], /were not rewritten .*open it as a space in Herdr and run the installer again/);
   assert.ok(lines.findIndex((l) => l.startsWith("Done: Automagik Herdr")) > at);
@@ -534,11 +536,11 @@ test("e2e: a project unknown at the upgrade keeps its hook and is warned about; 
   assert.ok(existsSync(`${file}.am-backup`), "its original kept beside it");
   const said = again.out.split("\n");
   const from = said.indexOf("IMPORTANT: the bots' briefing hook moved to a new path in 1 settings file:");
-  assert.ok(from >= 0, again.out);
+  assert.ok(from >= 0, ran(again));
   assert.equal(said[from + 1], `  ${proj}: ${file}`);
   assert.ok(!again.out.includes("notice: "), "the tag never shows");
   // A third run: nothing left to move, and no notice.
   const third = m.oneLiner("--yes");
   assert.equal(third.code, 0, third.err);
-  assert.ok(!third.out.includes("IMPORTANT:"), third.out);
+  assert.ok(!third.out.includes("IMPORTANT:"), ran(third));
 });
