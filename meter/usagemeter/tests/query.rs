@@ -4357,3 +4357,412 @@ fn custom_interval_clips_evidence_and_keeps_historical_actor_totals() {
     );
     assert!(schema().valid(&v), "{:#?}", schema().errors(&v));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Exact-date answers add the hourly-only tokens as before-evidence (#1126 follow-up).
+
+const OTHER_REPO: &str = "example.com/acme/gadgets";
+const ALIAS_REPO: &str = "example.com/old-acme/widgets";
+
+/// One hourly rollup row with no per-call record, written through the store (state none, so the
+/// rollup reads as before evidence, as a repaired row does).
+#[allow(clippy::too_many_arguments)]
+fn put_hourly(
+    s: &scenes::Scene,
+    model: &str,
+    repo: Option<&str>,
+    branch: Option<&str>,
+    hour: &str,
+    tokens: [i64; 5],
+    machine: &str,
+    events: i64,
+) {
+    use meter::event::{Precision, RollupKey};
+    let key = RollupKey {
+        harness: "claude-code".into(),
+        model: model.into(),
+        machine: machine.into(),
+        repo: repo.map(Into::into),
+        branch: branch.map(Into::into),
+        hour_ms: t(hour),
+        ..RollupKey::default()
+    };
+    s.store()
+        .conn
+        .execute(
+            "INSERT INTO usage(id, hour_ms, harness, model, machine, repo, branch, input_uncached,
+               cache_read, cache_write_5m, cache_write_1h, output, precision, events, updated_ms)
+             VALUES(?1, ?2, 'claude-code', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'exact', ?12, 0)",
+            params![
+                key.id(Precision::Exact),
+                key.hour_ms,
+                model,
+                machine,
+                repo,
+                branch,
+                tokens[0],
+                tokens[1],
+                tokens[2],
+                tokens[3],
+                tokens[4],
+                events
+            ],
+        )
+        .unwrap();
+}
+
+fn excess_scene() -> scenes::Scene {
+    // Evidence from 10:00; hour 10 holds two calls (1650 tokens) and its hourly row says the same.
+    interval_scene(true)
+}
+
+fn ask(s: &scenes::Scene, by: &str, since: &str, until: &str, extra: &[&str]) -> Value {
+    let mut a = interval_args(by, since, until);
+    a.extend(extra.iter().map(|x| x.to_string()));
+    let (code, raw) = s.query(&a);
+    assert_eq!(code, 0, "{raw}");
+    let v: Value = serde_json::from_str(&raw).unwrap();
+    assert!(schema().valid(&v), "{:#?}", schema().errors(&v));
+    v
+}
+
+/// The answer's rows without the coverage word, which turns `partial` when unattributed tokens
+/// appear and is the one thing a hourly-only row may change in them.
+fn rows_without_coverage(v: &Value) -> Value {
+    let mut rows = v["rows"].clone();
+    for r in rows.as_array_mut().unwrap() {
+        r["attribution"].as_object_mut().unwrap().remove("coverage");
+    }
+    rows
+}
+
+/// `unattributed.tokens_total` and `actor_unattributed.tokens_before_evidence`.
+fn figures(v: &Value) -> (i64, i64) {
+    (
+        int(&v["unattributed"]["tokens_total"]),
+        int(&v["actor_unattributed"]["tokens_before_evidence"]),
+    )
+}
+
+#[test]
+fn an_exact_date_answer_adds_hourly_only_tokens_as_before_evidence() {
+    // T1
+    let s = excess_scene();
+    let (since, until) = ("2026-11-08T10:00:00Z", "2026-11-08T14:00:00Z");
+    let base: Vec<Value> = ["branch", "bot"]
+        .iter()
+        .map(|by| ask(&s, by, since, until, &[]))
+        .collect();
+    assert_eq!(figures(&base[0]), (0, 0));
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        Some(REPO),
+        None,
+        "2026-11-08T11:00:00Z",
+        [400, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        Some(REPO),
+        None,
+        "2026-11-08T12:00:00Z",
+        [20, 30, 0, 0, 5],
+        "",
+        0,
+    );
+    for (by, before) in ["branch", "bot"].iter().zip(&base) {
+        let v = ask(&s, by, since, until, &[]);
+        assert_eq!(figures(&v), (455, 455), "{by}: {v}");
+        assert_eq!(
+            rows_without_coverage(&v),
+            rows_without_coverage(before),
+            "{by}: branch and bot rows stay"
+        );
+        assert_eq!(v["rows"][0]["attribution"]["coverage"], "partial");
+        assert_eq!(
+            v["actor_unattributed"]["tokens_total"],
+            json!(int(&before["actor_unattributed"]["tokens_total"]) + 455)
+        );
+        assert_eq!(
+            v["actor_unattributed"]["parts"][0]["reason"],
+            "before_evidence"
+        );
+    }
+}
+
+#[test]
+fn hourly_equal_to_evidence_adds_nothing() {
+    // T2
+    let s = excess_scene();
+    let v = ask(
+        &s,
+        "branch",
+        "2026-11-08T10:00:00Z",
+        "2026-11-08T11:00:00Z",
+        &[],
+    );
+    assert_eq!(figures(&v), (0, 0), "{v}");
+    assert_eq!(v["rows"][0]["tokens"]["total"], 1650);
+}
+
+#[test]
+fn a_column_over_the_calls_counts_alone_and_a_second_model_counts_too() {
+    // T3, and the two-model hour: a column over the calls counts on its own (the shortfall of
+    // another column takes nothing off it), and one model's shortfall never hides another's excess.
+    let s = excess_scene();
+    let (since, until) = ("2026-11-08T10:00:00Z", "2026-11-08T11:00:00Z");
+    s.store()
+        .conn
+        .execute(
+            "UPDATE usage SET input_uncached = 200, cache_read = 0, output = 0
+             WHERE hour_ms = ?1 AND model = ?2",
+            params![t(since), CLAUDE_MODEL],
+        )
+        .unwrap();
+    // Column-wise: input is 90 over the calls' 110, cache read and output are short; only the 90
+    // counts (a total-wise difference would be negative and count nothing).
+    let v = ask(&s, "branch", since, until, &[]);
+    assert_eq!(figures(&v), (90, 90), "{v}");
+    put_hourly(
+        &s,
+        "claude-sonnet-5-5",
+        Some(REPO),
+        None,
+        since,
+        [300, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    let v = ask(&s, "branch", since, until, &[]);
+    assert_eq!(figures(&v), (390, 390), "{v}");
+    assert_eq!(v["rows"][0]["tokens"]["total"], 1650);
+}
+
+#[test]
+fn a_partly_covered_hour_at_either_end_is_not_added() {
+    // T4
+    let s = excess_scene();
+    for (h, n) in [("11", 400), ("12", 50), ("13", 7)] {
+        put_hourly(
+            &s,
+            CLAUDE_MODEL,
+            Some(REPO),
+            None,
+            &format!("2026-11-08T{h}:00:00Z"),
+            [n, 0, 0, 0, 0],
+            "",
+            0,
+        );
+    }
+    let v = ask(
+        &s,
+        "branch",
+        "2026-11-08T11:30:00Z",
+        "2026-11-08T13:30:00Z",
+        &[],
+    );
+    assert_eq!(figures(&v), (50, 50), "{v}");
+    let v = ask(
+        &s,
+        "branch",
+        "2026-11-08T11:00:00Z",
+        "2026-11-08T13:00:00Z",
+        &[],
+    );
+    assert_eq!(figures(&v), (450, 450), "{v}");
+}
+
+#[test]
+fn a_repo_alias_counts_and_another_repo_does_not() {
+    // T5 and T6
+    let s = excess_scene();
+    let (since, until) = ("2026-11-08T10:00:00Z", "2026-11-08T14:00:00Z");
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        Some(ALIAS_REPO),
+        None,
+        "2026-11-08T11:00:00Z",
+        [60, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        Some(OTHER_REPO),
+        None,
+        "2026-11-08T11:00:00Z",
+        [9000, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        None,
+        None,
+        "2026-11-08T11:00:00Z",
+        [8000, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    let v = ask(&s, "branch", since, until, &[]);
+    assert_eq!(figures(&v), (0, 0), "no alias, no other repo: {v}");
+    let v = ask(&s, "branch", since, until, &["--repo-alias", ALIAS_REPO]);
+    assert_eq!(figures(&v), (60, 60), "{v}");
+}
+
+#[test]
+fn hours_before_evidence_keep_their_number_and_are_not_counted_twice() {
+    // T7: 77 tokens at 09:00 (before evidence) are read once, the 11:00 excess once.
+    let s = excess_scene();
+    let (since, until) = ("2026-11-08T09:00:00Z", "2026-11-08T13:00:00Z");
+    let v = ask(&s, "branch", since, until, &[]);
+    assert_eq!(int(&v["actor_unattributed"]["tokens_before_evidence"]), 77);
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        Some(REPO),
+        None,
+        "2026-11-08T11:00:00Z",
+        [400, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    let v = ask(&s, "branch", since, until, &[]);
+    assert_eq!(
+        int(&v["actor_unattributed"]["tokens_before_evidence"]),
+        477,
+        "{v}"
+    );
+    // The existing reader drops the branch of the hour before evidence, so it is unattributed too.
+    assert_eq!(int(&v["unattributed"]["tokens_total"]), 477, "{v}");
+}
+
+#[test]
+fn an_interval_over_whole_hours_equals_the_named_window() {
+    // T8
+    let s = excess_scene();
+    for (h, n) in [("11", 400), ("12", 50), ("15", 7)] {
+        put_hourly(
+            &s,
+            CLAUDE_MODEL,
+            Some(REPO),
+            None,
+            &format!("2026-11-08T{h}:00:00Z"),
+            [n, 0, 0, 0, 0],
+            "",
+            0,
+        );
+    }
+    let interval = ask(
+        &s,
+        "branch",
+        "2026-11-08T10:00:00Z",
+        "2026-11-08T20:00:00Z",
+        &[],
+    );
+    let (code, raw) = s.query(&{
+        let mut a = scenes::args(false, &["feat/interval"]);
+        a.extend(["--window".into(), "d1".into()]);
+        a
+    });
+    assert_eq!(code, 0, "{raw}");
+    let named: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(named["window"]["end"], interval["window"]["end"]);
+    // From evidence_from on the two agree; the named window also holds the 77 tokens of the
+    // hour before it (a frozen rollup), which the interval does not ask for.
+    assert_eq!(figures(&interval), (457, 457), "{interval}");
+    assert_eq!(figures(&named), (457, 534), "{named}");
+}
+
+#[test]
+fn a_repair_shaped_row_moves_the_window_and_the_whole_hour_interval_by_exactly_its_tokens() {
+    // Follow-up 2: the window figure is pinned at integration level.
+    let s = excess_scene();
+    let ask_all = |s: &scenes::Scene| -> Vec<Value> {
+        let mut out = Vec::new();
+        for by in ["branch", "bot"] {
+            for w in ["d7", "d30"] {
+                let mut a = scenes::args(by == "bot", &["feat/interval"]);
+                a.extend(["--window".into(), w.into()]);
+                let (code, raw) = s.query(&a);
+                assert_eq!(code, 0, "{raw}");
+                let v: Value = serde_json::from_str(&raw).unwrap();
+                assert!(schema().valid(&v), "{:#?}", schema().errors(&v));
+                out.push(v);
+            }
+        }
+        out
+    };
+    let base = ask_all(&s);
+    let int_base = ask(
+        &s,
+        "branch",
+        "2026-11-01T00:00:00Z",
+        "2026-11-08T20:00:00Z",
+        &[],
+    );
+    // Repair-shaped: state none, repo set, branch NULL, machine '', exact, events 0.
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        Some(REPO),
+        None,
+        "2026-11-05T08:00:00Z",
+        [207_318_459, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    // The same shape after evidence_from, where a state-none row must still read as before evidence.
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        Some(REPO),
+        None,
+        "2026-11-08T12:00:00Z",
+        [1_000_000, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    // A row with no repo: it is not in the repo's answer.
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        None,
+        None,
+        "2026-11-08T12:00:00Z",
+        [5_000_000, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    let after = ask_all(&s);
+    for (b, a) in base.iter().zip(&after) {
+        let (bu, bb) = figures(b);
+        let (au, ab) = figures(a);
+        assert_eq!(au - bu, 208_318_459, "{a}");
+        assert_eq!(ab - bb, 208_318_459, "{a}");
+        assert_eq!(
+            rows_without_coverage(a),
+            rows_without_coverage(b),
+            "branch and bot rows unchanged"
+        );
+    }
+    let int_after = ask(
+        &s,
+        "branch",
+        "2026-11-01T00:00:00Z",
+        "2026-11-08T20:00:00Z",
+        &[],
+    );
+    assert_eq!(
+        figures(&int_after).0 - figures(&int_base).0,
+        208_318_459,
+        "the interval agrees: {int_after}"
+    );
+}

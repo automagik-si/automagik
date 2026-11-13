@@ -93,6 +93,7 @@ usagemeter query --repo <host/owner/repo> --branch <b> [--branch <b> ...] --json
 - **One call per project.** One `--repo`, every branch the project's cards need, at most 500 per
   call and within the byte budget below (proposed). More is a usage error, never a silent cut.
   `--window` defaults to `d30`. `--json` is required: v1 has no text output. v1 does not page.
+  `--since` and `--until` ask for an exact interval instead; it also counts the hourly tokens with no per-call record in its whole hours, as before-evidence actor tokens (RFC 0021 (d)).
 - **Fork and exit.** The process reads, prints one JSON document on stdout and exits. No daemon,
   no listener, no background child.
 - **Branches match exactly**, case-sensitive, against the branch the meter recorded from the log

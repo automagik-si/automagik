@@ -412,6 +412,12 @@ rule, never enter it. A branch row keeps `branch_window` and its full total, the
 `evidence_from` included, which is RFC 0018 (b)'s fallback; only its `attribution.actor` counts
 split that total.
 
+An exact-date answer (`--since` and `--until`) also counts the hourly tokens that no per-call record
+holds, in each whole hour of the interval from `evidence_from` on, as `tokens_before_evidence`
+(per hour, harness, model and repo, each token kind's hourly total less its per-call total, never
+below 0); no branch row or bot row changes, a named window is read as before, and an hour only
+partly inside the interval is not added, so the answer stays a lower bound there.
+
 `attribution.precision` was `"branch_window"` alone in the v1 schema. Delivery 2 widened it in
 place to `branch_window`, `task_interval`, `actor_interval` and added the optional fields above
 in one schema pull request, before RFC 0017's delivery 4 cut the first release that shipped the

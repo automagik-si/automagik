@@ -503,7 +503,7 @@ impl Report {
         }
         for (h, (g, t)) in &self.outside {
             s.push_str(&format!(
-                "outside range (reported, not repaired): {h}: {g} rows short, {} tokens\n",
+                "outside range (reported, not repaired): {h}: {g} groups counted short (the oracle holds more under the same hour, model and precision; the same tokens may sit in another precision or model of that hour), {} tokens\n",
                 th(*t)
             ));
         }
