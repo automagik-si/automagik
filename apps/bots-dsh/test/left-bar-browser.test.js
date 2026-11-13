@@ -167,12 +167,28 @@ test('the list says when rows lie above or below it; a press reaches the caller'
   if (!page) return
   await mount(page, { kase: 'many', skin: 'stage' })
   const edges = () => page.evaluate(() => { const scroll = document.querySelector('.lb-scroll'); return { above: scroll.hasAttribute('data-above'), more: scroll.hasAttribute('data-more') } })
+  // The edge as it is drawn: a line the list's whole width, with a shade on the rows under it.
+  // At rest the lower edge is the Code line's own short line, and the upper edge is nothing.
+  const drawn = () => page.evaluate(() => {
+    const scroll = document.querySelector('.lb-scroll')
+    const edge = (pseudo, side) => {
+      const style = getComputedStyle(scroll, pseudo)
+      return { line: style[`border${side}Width`] === '1px' && style[`border${side}Style`] === 'solid', wide: style.left === '0px' && style.right === '0px', shade: style.backgroundImage.includes('gradient') }
+    }
+    return { above: edge('::before', 'Top'), more: edge('::after', 'Bottom') }
+  })
+  const EDGE = { line: true, wide: true, shade: true }
+  const REST = { line: true, wide: false, shade: false }
+  const NONE = { line: false, wide: false, shade: false }
   assert.deepEqual(await edges(), { above: false, more: true })
+  assert.deepEqual(await drawn(), { above: NONE, more: EDGE }, 'rows lie below: the last one goes under a drawn edge')
   await page.evaluate(() => { const rows = document.querySelector('.lb-rows'); rows.scrollTop = rows.scrollHeight })
   await page.waitForFunction(() => document.querySelector('.lb-scroll').hasAttribute('data-above'))
   assert.deepEqual(await edges(), { above: true, more: false })
+  assert.deepEqual(await drawn(), { above: EDGE, more: REST }, 'rows lie above: the first one goes under a drawn edge')
   await mount(page, { kase: 'team', skin: 'stage' })
   assert.deepEqual(await edges(), { above: false, more: false }, 'a list that fits has no shaded edge')
+  assert.deepEqual(await drawn(), { above: NONE, more: REST }, 'a list that fits draws no scroll edge')
   await page.getByRole('button', { name: 'Tess' }).click()
   await page.getByRole('button', { name: 'Genie, Needs you' }).click()
   await page.getByRole('button', { name: 'Add a project' }).click()
