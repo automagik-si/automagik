@@ -1,7 +1,8 @@
 // The new left bar's parts (left-bar-*.js) in a real browser, on the demo page
 // (fixtures/left-bar-browser-app.js): round 1.1's sizes, both skins, both themes, at 1440 and 390;
 // every mark named, every picture loaded, nothing cut sideways; a size is a token change; the
-// list's edges say when rows lie under them; a press reaches the caller.
+// list's edges say when rows lie under them; a press reaches the caller; the view's switch reads
+// Chat and Terminal.
 // LEFT_BAR_SHOTS=<folder> saves a screenshot of each case, skin, width and theme there.
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
@@ -153,13 +154,78 @@ test('a size is a token change: taller rows and bigger art, and the art is drawn
   assert.ok(at.rows.bot.every(height => height === 38))
   assert.ok(at.art.every(width => width === 32))
   assert.ok(at.tiles.every(tile => tile.width === 40))
-  // A baked pet's character stands in 150 of its cell's 208 units: that box is the art's box.
-  const pets = await page.evaluate(() => [...document.querySelectorAll('.lb-row[data-kind=bot] .lb-art')].map((art) => { const a = art.getBoundingClientRect(); const p = art.querySelector('.bt-pet').getBoundingClientRect(); return { box: p.height * 150 / 208, centre: (p.top + p.height * 121 / 208) - (a.top + a.height / 2), whole: Number.isInteger(p.top) && Number.isInteger(p.height) } }))
+  // A baked pet's character stands in a box of its cell's 208 units, 150 tall with its middle at
+  // 121; Omni's own (Juno's here) is fitted by a box of 166 and a twelfth, its middle at 115.
+  // That box is the art's box.
+  const pets = await page.evaluate(() => [...document.querySelectorAll('.lb-row[data-kind=bot]')].map((row) => {
+    const a = row.querySelector('.lb-art').getBoundingClientRect()
+    const p = row.querySelector('.bt-pet').getBoundingClientRect()
+    const [body, middle] = row.dataset.id === 'juno' ? [166 * 13 / 12, 115] : [150, 121]
+    return { id: row.dataset.id, box: p.height * body / 208, centre: (p.top + p.height * middle / 208) - (a.top + a.height / 2), whole: Number.isInteger(p.top) && Number.isInteger(p.height) }
+  }))
+  assert.ok(pets.some(pet => pet.id === 'juno') && pets.length > 2)
   for (const pet of pets) {
-    assert.ok(Math.abs(pet.box - 32) <= 1, `the character's box is ${pet.box.toFixed(1)} px in art of 32`)
-    assert.ok(Math.abs(pet.centre) <= 1, `the character's box is ${pet.centre.toFixed(1)} px off the art's centre`)
+    assert.ok(Math.abs(pet.box - 32) <= 1, `${pet.id}: the character's box is ${pet.box.toFixed(1)} px in art of 32`)
+    assert.ok(Math.abs(pet.centre) <= 1, `${pet.id}: the character's box is ${pet.centre.toFixed(1)} px off the art's centre`)
     assert.equal(pet.whole, true, 'the pet stands on whole pixels')
   }
+})
+
+// What each Bot's character paints, in px of the page, measured on the pet's own picture: the
+// cell on show, drawn at the size on show, and read for the pixels that are not clear.
+const painted = page => page.evaluate(async () => {
+  const rows = [...document.querySelectorAll('.lb-row[data-kind=bot]')]
+  return Promise.all(rows.map(async (row) => {
+    const art = row.querySelector('.lb-art').getBoundingClientRect()
+    const cell = row.querySelector('.bt-pet-cell')
+    const at = cell.getBoundingClientRect()
+    const style = getComputedStyle(cell)
+    const image = new Image()
+    image.src = /url\("(.+)"\)/.exec(style.backgroundImage)[1]
+    await image.decode()
+    const [width, height] = style.backgroundSize.split(' ').map(parseFloat)
+    const [x, y] = style.backgroundPosition.split(' ').map(parseFloat)
+    const zoom = 4
+    const canvas = Object.assign(document.createElement('canvas'), { width: Math.ceil(at.width * zoom), height: Math.ceil(at.height * zoom) })
+    const context = canvas.getContext('2d')
+    context.drawImage(image, x * zoom, y * zoom, width * zoom, height * zoom)
+    const { data } = context.getImageData(0, 0, canvas.width, canvas.height)
+    let [left, top, right, bottom] = [canvas.width, canvas.height, -1, -1]
+    for (let py = 0; py < canvas.height; py += 1) {
+      for (let px = 0; px < canvas.width; px += 1) {
+        if (data[(py * canvas.width + px) * 4 + 3] < 40) continue
+        left = Math.min(left, px); right = Math.max(right, px); top = Math.min(top, py); bottom = Math.max(bottom, py)
+      }
+    }
+    const span = { left: at.left + left / zoom, right: at.left + (right + 1) / zoom, top: at.top + top / zoom, bottom: at.top + (bottom + 1) / zoom }
+    return {
+      id: row.dataset.id, art: art.width, width: span.right - span.left, height: span.bottom - span.top,
+      // How far the paint runs out of the art's box, and how far its middle is from the box's.
+      over: Math.max(art.left - span.left, span.right - art.right, art.top - span.top, span.bottom - art.bottom),
+      dx: (span.left + span.right) / 2 - (art.left + art.right) / 2, dy: (span.top + span.bottom) / 2 - (art.top + art.bottom) / 2,
+    }
+  }))
+})
+
+test('every character stands at one size by eye: none is drawn larger than the others', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await mount(page, { kase: 'many', skin: 'stage' })
+  const all = await painted(page)
+  assert.ok(all.length >= 12 && all.some(pet => pet.id === 'juno'), 'the many case holds Juno, drawn from Omni\'s own art, and eleven others')
+  const said = pet => `${pet.id} paints ${pet.width.toFixed(1)} by ${pet.height.toFixed(1)} px, ${pet.over.toFixed(1)} px out of its box, its middle ${pet.dx.toFixed(1)},${pet.dy.toFixed(1)} px off`
+  const side = pet => Math.max(pet.width, pet.height)
+  for (const pet of all) {
+    assert.equal(pet.art, 28)
+    // Its larger side is 24 to 26 px of the 28 px box, whatever its shape; it stays in the box, in the middle.
+    assert.ok(side(pet) >= 23.5 && side(pet) <= 26.5, said(pet))
+    assert.ok(pet.over <= 0.5, said(pet))
+    assert.ok(Math.abs(pet.dx) <= 1 && Math.abs(pet.dy) <= 1.5, said(pet))
+  }
+  // Juno's character is Omni's own art, baked larger than the others: it is fitted to their size.
+  const juno = all.find(pet => pet.id === 'juno')
+  const others = all.filter(pet => pet !== juno)
+  assert.ok(side(juno) <= Math.max(...others.map(side)) + 0.5, `${said(juno)}; the largest of the others is ${Math.max(...others.map(side)).toFixed(1)} px`)
 })
 
 test('the list says when rows lie above or below it; a press reaches the caller', async (t) => {
@@ -167,19 +233,23 @@ test('the list says when rows lie above or below it; a press reaches the caller'
   if (!page) return
   await mount(page, { kase: 'many', skin: 'stage' })
   const edges = () => page.evaluate(() => { const scroll = document.querySelector('.lb-scroll'); return { above: scroll.hasAttribute('data-above'), more: scroll.hasAttribute('data-more') } })
-  // The edge as it is drawn: a line the list's whole width, with a shade on the rows under it.
-  // At rest the lower edge is the Code line's own short line, and the upper edge is nothing.
+  // The edge as it is drawn: a line the list's whole width, and the rows fading over their last
+  // 12 px before it, so a row cut by the edge is not sliced through its name. At rest the lower
+  // edge is the Code line's own short line, and the upper edge is nothing.
   const drawn = () => page.evaluate(() => {
     const scroll = document.querySelector('.lb-scroll')
+    const mask = getComputedStyle(scroll.querySelector('.lb-rows')).maskImage
+    const clear = 'rgba(0, 0, 0, 0)'
+    const fades = { Top: mask.startsWith(`linear-gradient(${clear}, rgb(0, 0, 0) 12px`), Bottom: mask.endsWith(`rgb(0, 0, 0) calc(100% - 12px), ${clear})`) }
     const edge = (pseudo, side) => {
       const style = getComputedStyle(scroll, pseudo)
-      return { line: style[`border${side}Width`] === '1px' && style[`border${side}Style`] === 'solid', wide: style.left === '0px' && style.right === '0px', shade: style.backgroundImage.includes('gradient') }
+      return { line: style[`border${side}Width`] === '1px' && style[`border${side}Style`] === 'solid', wide: style.left === '0px' && style.right === '0px', fade: fades[side] }
     }
     return { above: edge('::before', 'Top'), more: edge('::after', 'Bottom') }
   })
-  const EDGE = { line: true, wide: true, shade: true }
-  const REST = { line: true, wide: false, shade: false }
-  const NONE = { line: false, wide: false, shade: false }
+  const EDGE = { line: true, wide: true, fade: true }
+  const REST = { line: true, wide: false, fade: false }
+  const NONE = { line: false, wide: false, fade: false }
   assert.deepEqual(await edges(), { above: false, more: true })
   assert.deepEqual(await drawn(), { above: NONE, more: EDGE }, 'rows lie below: the last one goes under a drawn edge')
   await page.evaluate(() => { const rows = document.querySelector('.lb-rows'); rows.scrollTop = rows.scrollHeight })
@@ -194,6 +264,53 @@ test('the list says when rows lie above or below it; a press reaches the caller'
   await page.getByRole('button', { name: 'Add a project' }).click()
   await page.getByRole('button', { name: 'Help desk' }).click()
   assert.deepEqual(await page.evaluate(() => window.opened), ['chat:pip/ch-help/tess', 'project:genie', 'add', 'channel:pip/ch-help'])
+})
+
+test('the view\'s switch reads Chat and Terminal, the open face raised, on both themes', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  const read = () => page.evaluate(() => {
+    const box = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, height: r.height } }
+    const group = document.querySelector('.lb-face')
+    const head = box(group.parentElement)
+    const track = box(group)
+    return {
+      name: group.getAttribute('aria-label'),
+      parts: [...group.querySelectorAll('button')].map((part) => {
+        const style = getComputedStyle(part)
+        const glyph = box(part.querySelector('svg'))
+        return { word: part.textContent, pressed: part.getAttribute('aria-pressed'), ground: style.backgroundColor !== 'rgba(0, 0, 0, 0)', line: style.boxShadow !== 'none', glyph: glyph.height, top: box(part).top, inTrack: box(part).left >= track.left && box(part).right <= track.right }
+      }),
+      height: track.height,
+      inHead: track.top >= head.top && track.bottom <= head.bottom && track.right <= head.right,
+      // The track is centred on the head's line, with the Bot's name.
+      centred: Math.abs((track.top + track.bottom) / 2 - (head.top + head.bottom) / 2) <= 1,
+    }
+  })
+  for (const dark of [false, true]) {
+    const where = dark ? 'dark' : 'light'
+    await mount(page, { kase: 'team', skin: 'stage', dark })
+    const at = await read()
+    assert.equal(at.name, 'This Bot as', where)
+    assert.deepEqual(at.parts.map(part => [part.word, part.pressed]), [['Chat', 'true'], ['Terminal', 'false']], where)
+    assert.deepEqual(at.parts.map(part => [part.ground, part.line]), [[true, true], [false, false]], `${where}: only the open face is raised`)
+    assert.ok(at.parts.every(part => part.glyph === 15 && part.inTrack) && at.parts[0].top === at.parts[1].top, `${where}: two parts on one line, each with its glyph`)
+    assert.equal(at.height, 32, where)
+    assert.ok(at.inHead && at.centred, `${where}: the switch sits in the view's head`)
+  }
+  // A press opens the other face and reaches the caller; a press on the open face does nothing.
+  await page.getByRole('button', { name: 'Terminal' }).click()
+  await page.getByRole('button', { name: 'Terminal' }).click()
+  assert.deepEqual((await read()).parts.map(part => [part.pressed, part.ground]), [['false', false], ['true', true]])
+  await page.getByRole('button', { name: 'Chat', exact: true }).click()
+  assert.deepEqual(await page.evaluate(() => window.opened), ['face:terminal', 'face:chat'])
+  // A height is a token change.
+  await mount(page, { kase: 'team', skin: 'flat', tokens: { '--lb-face-h': '36px' } })
+  assert.equal((await read()).height, 36)
+  // The phone shows the bar alone: no view, so no switch.
+  await page.setViewportSize(PHONE)
+  await mount(page, { kase: 'team', skin: 'stage', fill: true })
+  assert.equal(await page.locator('.lb-face').count(), 0)
 })
 
 test('screenshots of every case, skin, width and theme', { skip: !SHOTS && 'set LEFT_BAR_SHOTS to save them' }, async (t) => {

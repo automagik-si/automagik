@@ -1,6 +1,6 @@
 // -------------------------------------------------------------------------
 // The new left bar's sheet (direction C, "Foot line"): the panel, the project rail, the Team
-// rows and the status marks. Its skin and its sizes are custom properties, so another skin, a
+// rows, the status marks and the view's Chat and Terminal switch. Its skin and its sizes are custom properties, so another skin, a
 // taller row or a bigger character is a change of tokens and no rule below changes.
 //
 // The names and values are design round 1.1's. Two skins. "stage", the default: the bar stands
@@ -35,10 +35,13 @@ const SIZES = {
   '--lb-mark': '12px',
   '--lb-mark-ink': 'var(--plum,rgba(0,0,0,.78))',
   '--lb-line': 'var(--st-line,var(--bt-line))',
-  // The shade a scroll edge casts on the rows under it.
-  '--lb-edge-shade': 'rgba(0,0,0,.14)',
+  // How far the rows fade before a scroll edge.
+  '--lb-edge-fade': '12px',
+  // The view's switch: its height, its glyphs, its corners.
+  '--lb-face-h': '32px',
+  '--lb-face-glyph': '15px',
+  '--lb-face-r': '11px',
 }
-const DARK = { '--lb-edge-shade': 'rgba(0,0,0,.4)' }
 
 export const LEFT_BAR_SKINS = Object.freeze({
   stage: Object.freeze({
@@ -101,17 +104,20 @@ body[data-ds-dark-theme] .lb-tile .lb-on-light,body:not([data-ds-dark-theme]) .l
 `
 
 // The list scrolls inside .lb-scroll. Its lower edge is a quiet line while everything fits. When
-// rows lie under it, the line runs the list's whole width and casts a shade on them, so a row
-// cut by the edge reads as going under what stands below, not as a row that was clipped. The
-// upper edge does the same once the list has moved. --lb-inset and --lb-chat-inset are where a
+// rows lie under it, the line runs the list's whole width and the rows fade over their last
+// --lb-edge-fade before it, so a row cut by the edge reads as scrolling on, not as a row that
+// was sliced. The upper edge does the same once the list has moved. --lb-inset and --lb-chat-inset are where a
 // channel's and a chat's name start: they follow the art by default, and either can be set.
 const ROWS = `
 .lb-scroll{position:relative;flex:1;display:flex;flex-direction:column;min-height:0}
 .lb-scroll::before,.lb-scroll::after{content:'';position:absolute;left:8px;right:8px;height:14px;pointer-events:none}
 .lb-scroll::before{top:0}
 .lb-scroll::after{bottom:0;border-bottom:1px solid var(--lb-line)}
-.lb-scroll[data-above]::before{left:0;right:0;border-top:1px solid var(--st-line-2,var(--bt-line-2));background:linear-gradient(to bottom,var(--lb-edge-shade),transparent)}
-.lb-scroll[data-more]::after{left:0;right:0;border-bottom-color:var(--st-line-2,var(--bt-line-2));background:linear-gradient(to top,var(--lb-edge-shade),transparent)}
+.lb-scroll[data-above]::before{left:0;right:0;border-top:1px solid var(--st-line-2,var(--bt-line-2))}
+.lb-scroll[data-more]::after{left:0;right:0;border-bottom-color:var(--st-line-2,var(--bt-line-2))}
+.lb-scroll[data-more] .lb-rows{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - var(--lb-edge-fade)),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - var(--lb-edge-fade)),transparent)}
+.lb-scroll[data-above] .lb-rows{-webkit-mask-image:linear-gradient(to bottom,transparent,#000 var(--lb-edge-fade));mask-image:linear-gradient(to bottom,transparent,#000 var(--lb-edge-fade))}
+.lb-scroll[data-above][data-more] .lb-rows{-webkit-mask-image:linear-gradient(to bottom,transparent,#000 var(--lb-edge-fade),#000 calc(100% - var(--lb-edge-fade)),transparent);mask-image:linear-gradient(to bottom,transparent,#000 var(--lb-edge-fade),#000 calc(100% - var(--lb-edge-fade)),transparent)}
 .lb-rows{flex:1;display:flex;flex-direction:column;min-height:0;padding:2px 8px 4px;box-sizing:border-box;overflow-y:auto;scrollbar-width:none}
 .lb-row{flex:none;display:flex;align-items:center;gap:var(--lb-art-gap);width:100%;min-width:0;height:var(--lb-row-h);margin:0;padding:0 10px 0 8px;box-sizing:border-box;border:0;border-radius:var(--lb-row-r);background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .lb-row:hover{background:var(--bt-hover)}
@@ -162,8 +168,18 @@ body[data-bt-motion=quiet] .lb-mark-arc{animation:none}
 @media (prefers-reduced-motion:reduce){.lb-mark-arc{animation:none}}
 `
 
+// The view's switch stands on the view's own ground, not on the bar's, so it reads the theme's
+// colours and no skin token: a sunk track, and the open face raised on the theme's paper.
+const FACES = `
+.lb-face{flex:none;display:inline-flex;align-items:stretch;gap:2px;height:var(--lb-face-h);padding:3px;box-sizing:border-box;border-radius:var(--lb-face-r);background:var(--bt-hover)}
+.lb-face-part{flex:none;display:inline-flex;align-items:center;gap:6px;margin:0;padding:0 12px 0 10px;border:0;border-radius:var(--st-r-seg,8px);background:none;color:color-mix(in srgb,var(--bt-ink) 72%,transparent);font:var(--bt-weight-label,500) 13px/1 var(--bt-head-font,var(--bt-font));white-space:nowrap;cursor:pointer}
+.lb-face-part:hover{color:var(--bt-ink)}
+.lb-face-part[aria-pressed=true]{background:var(--st-paper,var(--bt-card));color:var(--bt-ink);box-shadow:0 1px 0 var(--lb-line);cursor:default}
+.lb-face-part:focus-visible{outline:3px solid var(--st-ring,var(--bt-accent));outline-offset:1px}
+.lb-face-glyph{flex:none;display:block;width:var(--lb-face-glyph);height:var(--lb-face-glyph)}
+`
+
 export const LEFT_BAR_CSS = `
 ${tokenCss('body', LEFT_BAR_TOKENS)}
-${tokenCss('body[data-ds-dark-theme]', DARK)}
 ${tokenCss('[data-lb-skin=flat]', LEFT_BAR_SKINS.flat)}
-${tokenCss('[data-lb-skin=stage]', LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS}${MARKS}`
+${tokenCss('[data-lb-skin=stage]', LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS}${MARKS}${FACES}`

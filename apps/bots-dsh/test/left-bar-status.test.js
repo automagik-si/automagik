@@ -96,7 +96,7 @@ test('the mascot states and the bar statuses map both ways', () => {
 test('the words the dictionary has are translated; the owed ones read English until the switch', () => {
   // These go into i18n.js with the switch to the new bar: i18n.js is one of the files the
   // DS Bot 0.3.6 merge rewrites, so this branch does not touch it.
-  assert.deepEqual({ ...OWED_WORDS }, { idle: 'Idle', off: 'Not running', team: 'Team', projects: 'Projects', add: 'Add a project' })
+  assert.deepEqual({ ...OWED_WORDS }, { idle: 'Idle', off: 'Not running', team: 'Team', projects: 'Projects', add: 'Add a project', faces: 'This Bot as' })
   const off = zh()
   try {
     assert.equal(word('working'), '工作中')

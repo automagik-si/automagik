@@ -13,6 +13,7 @@ const bundle = await build({
       "export * from './src/client/left-bar-status.js'",
       "export * from './src/client/left-bar-team.js'",
       "export * from './src/client/left-bar-rail.js'",
+      "export * from './src/client/left-bar-faces.js'",
       "export * from './src/client/left-bar-css.js'",
       "export { installLocale } from './src/client/i18n.js'",
     ].join('\n'),

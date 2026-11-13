@@ -1,9 +1,9 @@
-// Browser fixture for the new left bar's parts (left-bar-*.js): the project rail, the Team rows
-// and the status marks, with the Bot team's real styles, themes and Bot art, on made-up data.
-// Every name here is invented. The head, the Code line, the Account row and the view beside the
-// bar are stand-ins drawn by this page only, so the parts sit where direction C puts them: they
-// are not product parts.
-import { createElement as h } from 'react'
+// Browser fixture for the new left bar's parts (left-bar-*.js): the project rail, the Team rows,
+// the status marks and the view's Chat and Terminal switch, with the Bot team's real styles,
+// themes and Bot art, on made-up data. Every name here is invented. The head, the Code line, the
+// Account row and the view beside the bar (all of it but its switch) are stand-ins drawn by this
+// page only, so the parts sit where direction C puts them: they are not product parts.
+import { createElement as h, useState } from 'react'
 import { SHELL_CSS } from '../../src/client/styles.js'
 import { PET_CSS } from '../../src/client/pet.js'
 import { allThemes, themeCss } from '../../src/client/themes.js'
@@ -14,6 +14,7 @@ import { LEFT_BAR_CSS, tokenCss } from '../../src/client/left-bar-css.js'
 import { StatusMark } from '../../src/client/left-bar-status.js'
 import { TeamRows } from '../../src/client/left-bar-team.js'
 import { ProjectRail } from '../../src/client/left-bar-rail.js'
+import { FaceSwitch } from '../../src/client/left-bar-faces.js'
 // The brand's own marks, unchanged (docs/brand, "Which logo file"): ink on a light ground, cream
 // on a dark one; Omni's small drawing, since a tile is under 56 px.
 import lampInk from '../../../../docs/brand/logo/svg/genie-lamp-ink.svg'
@@ -38,6 +39,7 @@ body{background:var(--bt-main);overflow:hidden;-webkit-font-smoothing:antialiase
 .fx-view-head{flex:none;display:flex;align-items:center;gap:10px;height:66px;padding:0 24px 0 16px;box-sizing:border-box;border-bottom:1px solid var(--lb-line)}
 .fx-view-name{font:var(--bt-weight-strong) 17px/1.3 var(--bt-head-font);letter-spacing:-.01em}
 .fx-view-role{font-size:13px;opacity:.72}
+.fx-view-tool{color:color-mix(in srgb,var(--bt-ink) 72%,transparent)}
 .fx-talk{flex:1;min-height:0;display:flex;flex-direction:column;justify-content:flex-end;gap:10px;width:100%;max-width:760px;margin:0 auto;padding:0 24px 18px;box-sizing:border-box}
 .fx-said{max-width:520px;padding:10px 14px;border-radius:18px;align-self:flex-start;background:var(--bt-bubble)}
 .fx-said-you{align-self:flex-end;background:var(--bt-user);color:var(--bt-user-ink)}
@@ -103,10 +105,15 @@ const GLYPHS = {
 const renderGlyph = channel => h('svg', { viewBox: '0 0 24 24' }, GLYPHS[channel.kind])
 const line = (paths, size = 18) => h('svg', { width: size, height: size, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, paths.map(d => h('path', { key: d, d })))
 
-// The open Bot's view, as a quiet stand-in: the bar is compared beside it, as in the design's pictures.
+// The open Bot's view, as a quiet stand-in: the bar is compared beside it, as in the design's
+// pictures. Its switch is the real part; the page keeps which face is open.
 function View() {
+  const [face, setFace] = useState('chat')
+  const onFace = (next) => { window.opened.push(`face:${next}`); setFace(next) }
   return h('main', { className: 'fx-view' },
-    h('header', { className: 'fx-view-head' }, h(BotMark, { bot: JUNO, size: 28 }), h('span', { className: 'fx-view-name' }, JUNO.name), h('span', { className: 'fx-view-role' }, 'Orchestrator')),
+    h('header', { className: 'fx-view-head' }, h(BotMark, { bot: JUNO, size: 28 }), h('span', { className: 'fx-view-name' }, JUNO.name), h('span', { className: 'fx-view-role' }, 'Orchestrator'),
+      h('span', { className: 'fx-grow' }), h(FaceSwitch, { face, onFace }),
+      h('span', { className: 'fx-tool fx-view-tool' }, line(['M10 17a7 7 0 1 0 0-14 7 7 0 0 0 0 14z', 'M10 9.2v4.3', 'M10 6.6h.01'], 16))),
     h('div', { className: 'fx-talk' },
       h('div', { className: 'fx-said' }, 'Morning. Tess on Help desk is waiting for you, and Mika is being answered now.'),
       h('div', { className: 'fx-said fx-said-you' }, 'Open Tess first.'),

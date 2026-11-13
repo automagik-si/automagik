@@ -110,16 +110,28 @@ function useScrollEdges(ref, count) {
 // character fills when it is drawn still. The pet stays on whole pixels. A pet the team
 // installed keeps the art's size, since its cell is its own; until a bake is ready, and where
 // the browser cannot bake, the character is drawn still at the same size.
-const BAKED_FIT = CELL.height / BODY
-const BAKED_LIFT = (FLOOR - BODY / 2 - CELL.height / 2) / CELL.height
+//
+// Omni's own character is baked from its clay picture: 16 units larger than BODY, with its feet
+// 2 under the FLOOR (pet-bake.js, omniLayers). It paints that whole box from edge to edge, where
+// the other characters leave about a twelfth of theirs clear, so it is fitted by a box a twelfth
+// larger than the one it paints: it then stands at the size of the Bots beside it, by eye.
+const OMNI_PAINTS = BODY + 16
+const PET_BOX = { body: BODY, middle: FLOOR - BODY / 2 }
+const OMNI_BOX = { body: OMNI_PAINTS * 13 / 12, middle: FLOOR + 2 - OMNI_PAINTS / 2 }
+/** How much larger than the art a baked pet is drawn, and how far it is lifted, as parts of its cell. */
+export function bakedFit(bake) {
+  const { body, middle } = bake?.clay === 'omni' ? OMNI_BOX : PET_BOX
+  return { fit: CELL.height / body, lift: (middle - CELL.height / 2) / CELL.height }
+}
 function BotArt({ bot, size, state }) {
   const wants = petOf(bot, lookOf(bot), { live: true, size })
   const baked = useBaked(wants?.bake)
   if (!wants?.bake) return h(BotMark, { bot, size, state, live: true })
   if (!baked) return h(BotMark, { bot, size, state })
-  const margin = Math.round((size * BAKED_FIT - size) / 2)
+  const { fit, lift } = bakedFit(wants.bake)
+  const margin = Math.round((size * fit - size) / 2)
   const drawn = size + 2 * margin
-  return h('span', { className: 'lb-art-pet', style: { left: -margin, top: -margin - Math.round(drawn * BAKED_LIFT) } },
+  return h('span', { className: 'lb-art-pet', style: { left: -margin, top: -margin - Math.round(drawn * lift) } },
     h('span', { className: 'bt-mark', 'data-shape': 'pet', 'data-state': state, 'data-live': '', 'aria-hidden': true, style: { width: drawn, height: drawn } },
       h(PetSprite, { pet: baked, size: drawn, state, live: true })))
 }

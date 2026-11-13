@@ -42,3 +42,14 @@ test('the working ring rests when motion is turned down', () => {
   assert.match(LEFT_BAR_CSS, /body\[data-bt-motion=quiet\] \.lb-mark-arc\{animation:none\}/)
   assert.match(LEFT_BAR_CSS, /@media \(prefers-reduced-motion:reduce\)\{\.lb-mark-arc\{animation:none\}\}/)
 })
+
+test('a scroll edge is a full line and a short fade of the rows, in either direction', () => {
+  assert.equal(LEFT_BAR_TOKENS['--lb-edge-fade'], '12px')
+  const fade = selector => new RegExp(`${selector.replace(/[.[\]]/g, '\\$&')} \\.lb-rows\\{-webkit-mask-image:(linear-gradient\\([^;]+\\));mask-image:\\1\\}`).exec(LEFT_BAR_CSS)?.[1]
+  assert.equal(fade('.lb-scroll[data-more]'), 'linear-gradient(to bottom,#000 calc(100% - var(--lb-edge-fade)),transparent)')
+  assert.equal(fade('.lb-scroll[data-above]'), 'linear-gradient(to bottom,transparent,#000 var(--lb-edge-fade))')
+  assert.equal(fade('.lb-scroll[data-above][data-more]'), 'linear-gradient(to bottom,transparent,#000 var(--lb-edge-fade),#000 calc(100% - var(--lb-edge-fade)),transparent)')
+  assert.match(LEFT_BAR_CSS, /\.lb-scroll\[data-more\]::after\{left:0;right:0;border-bottom-color:/, 'the line stays, the list\'s whole width')
+  assert.match(LEFT_BAR_CSS, /\.lb-scroll\[data-above\]::before\{left:0;right:0;border-top:1px solid /)
+  assert.doesNotMatch(LEFT_BAR_CSS, /--lb-edge-shade/, 'no shade is cast on the rows')
+})

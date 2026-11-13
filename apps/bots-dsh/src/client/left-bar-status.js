@@ -15,10 +15,11 @@ import { t } from './i18n.js'
 export const STATUSES = Object.freeze(['working', 'needs', 'idle', 'error', 'off'])
 export const statusOr = status => (STATUSES.includes(status) ? status : 'idle')
 
-// The bar's words. Three are in the dictionary already. The other five reach t() through a
+// The bar's words. Three are in the dictionary already. The other six reach t() through a
 // name, not as literals, because the dictionary (i18n.js) is one of the files the merge
 // rewrites: their entries go in with the switch, and until then every language reads the
-// English (test/left-bar-status.test.js lists what is owed).
+// English (test/left-bar-status.test.js lists what is owed). `faces` names the view's Chat and
+// Terminal switch (left-bar-faces.js).
 const SAID = { working: () => t('Working'), needs: () => t('Needs you'), error: () => t('Error') }
 export const OWED_WORDS = Object.freeze({
   idle: 'Idle',
@@ -26,6 +27,7 @@ export const OWED_WORDS = Object.freeze({
   team: 'Team',
   projects: 'Projects',
   add: 'Add a project',
+  faces: 'This Bot as',
 })
 export const word = name => (SAID[name] ? SAID[name]() : t(OWED_WORDS[name]))
 

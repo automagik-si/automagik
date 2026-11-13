@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { findAll, hasClass, parts, render, textOf } from './left-bar-load.js'
 
-const { TeamRows, botRowStatus, teamRows } = parts
+const { TeamRows, bakedFit, botRowStatus, teamRows } = parts
 
 const chat = (id, status = 'idle') => ({ id, name: `Chat ${id}`, status })
 const bot = (id, more = {}) => ({ id, name: `Bot ${id}`, status: 'idle', ...more })
@@ -132,4 +132,19 @@ test('the statuses that show a word are the caller\'s to choose', () => {
   const tree = draw({ worded: ['needs', 'working'] })
   assert.equal(textOf(row(tree, 'front')), 'Bot frontWorking')
   assert.equal(draw({ label: 'Studio' }).children[0].props['aria-label'], 'Studio')
+})
+
+test('a baked character is fitted by its own box; Omni\'s, which paints its whole box, by one a twelfth larger', () => {
+  // A cell is 208 tall. A character stands 150 tall on the floor at 196, so its middle is at 121.
+  const pet = bakedFit({ shape: 'star', color: 'teal' })
+  assert.equal(pet.fit, 208 / 150)
+  assert.equal(pet.lift, (121 - 104) / 208)
+  assert.ok(Math.abs(28 * pet.fit * 150 / 208 - 28) < 1e-9, 'drawn at its fit, the character\'s box is the art\'s')
+  // Omni's own is baked 166 tall with its feet at 198 (pet-bake.js): its middle is at 115.
+  const omni = bakedFit({ clay: 'omni' })
+  assert.equal(omni.fit, 208 / (166 * 13 / 12))
+  assert.equal(omni.lift, (115 - 104) / 208)
+  const paints = 28 * omni.fit * 166 / 208
+  assert.ok(paints > 25.5 && paints < 26.2, `Omni's character paints ${paints.toFixed(2)} px of an art box of 28, as the widest of the others do`)
+  assert.deepEqual(bakedFit(undefined), pet)
 })
