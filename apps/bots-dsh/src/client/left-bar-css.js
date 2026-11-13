@@ -142,16 +142,17 @@ const ROWS = `
 `
 
 // Each mark has its own shape as well as its colour. The working ring turns; it rests where
-// motion is turned down, in the app (data-bt-motion) or in the system.
+// motion is turned down, in the app (data-bt-motion) or in the system. The error word is text
+// and reads the strong red; its mark is a fill and keeps the brand's red (status-colours.test.js).
 const MARKS = `
 .lb-st{flex:none;display:inline-flex;align-items:center;gap:6px;font:400 12px/1 var(--bt-font);color:var(--lb-muted);white-space:nowrap;text-transform:lowercase}
 .lb-st-needs{color:var(--lb-needs-ink)}
-.lb-st-error{color:var(--st-bad-strong,var(--st-bad,var(--bt-danger)))}
+.lb-st-error{color:var(--st-bad-strong,var(--bt-danger))}
 .lb-mark{flex:none;display:block;width:var(--lb-mark);height:var(--lb-mark)}
 .lb-mark svg{display:block;width:100%;height:100%;overflow:visible}
 .lb-mark-working{color:var(--st-work,var(--bt-accent))}
 .lb-mark-needs{color:var(--st-warndot,var(--bt-star,var(--bt-accent)))}
-.lb-mark-error{color:var(--st-bad,var(--bt-danger))}
+.lb-mark-error rect{fill:var(--st-bad,var(--bt-danger))}
 .lb-mark-idle,.lb-mark-off{color:var(--lb-muted);opacity:.7}
 .lb-mark-needs .lb-mark-glyph{stroke:var(--lb-mark-ink)}
 .lb-mark-error .lb-mark-glyph{stroke:var(--bt-main)}
