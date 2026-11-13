@@ -327,9 +327,115 @@ object Teams {
         else -> line(b.main)
     }
 
-    /** Every bot waiting on the person that can be answered now, oldest request first. */
+    // ---- Home's needs-you deck. It reads Home's own Needs you list, not the Team bubbles: the list its count
+    // tiles and badge use, so the deck never shows fewer cards than the count (RFC 0015 D29, #732).
+    /**
+     * The old Teams-bot source of the deck: every bot waiting on the person that a live pane can answer, oldest
+     * first. No screen reads it any more ([deckCards] is Home's deck); the reads tests keep it as the rule for which
+     * panes are answerable.
+     */
     fun deck(teams: List<Team>): List<Pair<Team, Bot>> = teams.filter { !it.stale }
         .flatMap { t -> t.bots.filter { it.needsYou && it.ref != null }.map { t to it } }.sortedBy { it.second.statusMs }
+    /**
+     * One card from Home's Needs you list: who asks, where, and what. A card with a [chat] has no terminal menu to
+     * answer, so it opens that chat instead of sending keys.
+     */
+    data class DeckCard(val ref: TerminalRef, val title: String, val where: String, val agent: String, val message: String,
+                        val kind: String, val statusMs: Long, val turn: Long, val chat: TerminalRef?) {
+        val opensChat get() = chat != null
+    }
+
+    /** One request: a new request from the same agent (a later turn or status) is another card. */
+    fun deckKey(c: DeckCard) = "${c.ref.hostId}|${c.ref.address}|${c.turn}:${c.statusMs}"
+
+    /**
+     * Home's Needs you entries as deck cards, in Home's order. [fromChat] maps a pane row raised to its Bot chat
+     * ([Cockpit.Raised.fromChat]); a `dsh:` row is a chat on its own. [location] names the project or machine.
+     */
+    fun deckCards(entries: List<Cockpit.Entry>, fromChat: Map<TerminalRef, TerminalRef> = emptyMap(),
+                  location: (TerminalRef) -> String = { "" }): List<DeckCard> = entries.map { e ->
+        val t = e.terminal
+        val chat = if (Chat.isDsh(e.ref.address)) e.ref else fromChat[e.ref]
+        DeckCard(e.ref, t.title.ifBlank { t.agent.ifBlank { "Agent" } }, location(e.ref), t.agent, t.message, t.kind,
+            t.statusMs, t.turn, chat)
+    }
+
+    /** What the deck shows: the cards left, "all clear", or offline (requests it can't reach now). */
+    sealed interface DeckView {
+        data class Cards(val cards: List<DeckCard>) : DeckView
+        /** No terminal cards are left, but these Bot-chat requests still wait. */
+        data class Chats(val cards: List<DeckCard>) : DeckView
+        data object Clear : DeckView
+        /** [waiting]: the requests last seen on machines the phone can't reach now. */
+        data class Offline(val waiting: Int) : DeckView
+    }
+
+    /**
+     * [cards] without the ones [answered], or the end. Offline when nothing is left but [offline] requests are on
+     * machines the phone can't reach, or (with no connected machine) [waiting] were seen before the link dropped;
+     * all clear once they were answered (or there were none).
+     */
+    fun deckView(cards: List<DeckCard>, answered: Set<String>, anyConnected: Boolean, waiting: Int, offline: Int = 0,
+                 chats: List<DeckCard> = emptyList()): DeckView {
+        val left = cards.filter { deckKey(it) !in answered }
+        if (left.isNotEmpty()) return DeckView.Cards(left)
+        // All clear only when every counted request is gone; Bot-chat requests live here until answered.
+        if (chats.isNotEmpty()) return DeckView.Chats(chats)
+        val lost = maxOf(offline, if (!anyConnected) waiting else 0)
+        return if (lost > 0) DeckView.Offline(lost) else DeckView.Clear
+    }
+
+    /** The deck's exit window: after this the deck advances even if the exit animation never reported back. */
+    const val DECK_EXIT_MS = 700L
+
+    /** The next card and how many sit behind the top card. */
+    data class Under(val next: DeckCard?, val behind: Int)
+
+    /**
+     * [Under] for the card being answered: [leaving] is dropped from [cards] before choosing the next one, so the
+     * card behind is never the answered card itself while Home still lists it.
+     */
+    fun deckUnder(cards: List<DeckCard>, leaving: String?): Under {
+        if (leaving == null) return Under(cards.getOrNull(1), (cards.size - 1).coerceAtLeast(0))
+        val rest = cards.filter { deckKey(it) != leaving }
+        return Under(rest.firstOrNull(), rest.size)
+    }
+
+    /** A leaving card keeps its last menu; a new read lands only while the card is not leaving. */
+    fun deckMenu(current: Prompt.Menu?, incoming: Prompt.Menu?, sending: Boolean): Prompt.Menu? =
+        if (sending) current else incoming
+
+    /**
+     * Whether the phone can answer this card: a terminal can always be opened; a Bot chat only when its bridge
+     * takes phone writes and the chat does not say to answer on the computer.
+     */
+    fun deckAnswerable(c: DeckCard): Boolean = c.chat == null
+
+    /** The connected Bot-chat requests that keep the deck from All clear until they are answered. */
+    fun deckChats(cards: List<DeckCard>): List<DeckCard> = cards.filter { it.chat != null }
+
+    /** The word a Home row shows for a request the deck cannot answer in place. */
+    fun chatWaitLabel(t: CoreTerminal): String =
+        if (t.message == Chat.ANSWER_ON_COMPUTER || t.message == Cockpit.READ_ONLY) "On computer" else "In chat"
+
+    /**
+     * The deck's open state and "opened from the deck" flag after a selection: Back from a card opened from the deck
+     * keeps the deck and clears the flag; a selection from anywhere else closes it.
+     */
+    fun deckAfterSelection(open: Boolean, fromDeck: Boolean, selected: TerminalRef?): Pair<Boolean, Boolean> = when {
+        selected == null -> open to false
+        fromDeck -> open to true
+        else -> false to false
+    }
+
+    /** A swipe's answer, by the axis it moved most along: up opens, right is Yes, left is No; short of [threshold], none. */
+    enum class Swipe { YES, NO, OPEN, NONE }
+    fun swipe(dx: Float, dy: Float, threshold: Float, canYes: Boolean, canNo: Boolean): Swipe = when {
+        -dy > kotlin.math.abs(dx) -> if (-dy > threshold) Swipe.OPEN else Swipe.NONE
+        dx > threshold && canYes -> Swipe.YES
+        dx < -threshold && canNo -> Swipe.NO
+        else -> Swipe.NONE
+    }
     /** Whether an answer reached the agent ([PocketViewModel.choose]'s outcome): only then does its card leave the deck. */
     fun sent(outcome: String) = outcome.startsWith("You chose")
 

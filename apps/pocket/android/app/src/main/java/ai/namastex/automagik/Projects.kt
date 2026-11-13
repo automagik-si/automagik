@@ -135,6 +135,11 @@ object Projects {
                      val fromChat: Map<TerminalRef, TerminalRef> = emptyMap()) {
         private fun count(rank: Int) = sections.find { it.rank == rank }?.entries?.size ?: 0
         val needsYou get() = count(Cockpit.BLOCKED)
+        /** The needs-you rows the deck can answer in place: terminals, not chats raised above them. */
+        val answerableNeedsYou get() = sections.find { it.rank == Cockpit.BLOCKED }?.entries
+            ?.count { !Chat.isDsh(it.ref.address) && it.ref !in fromChat } ?: 0
+        /** Home's badge and tile count every blocked row, including a request waiting in a Bot chat. */
+        val homeNeedsYou get() = needsYou
         val working get() = count(Cockpit.WORKING)
         /** The key a row's finished turn is looked at by: its chat's for a pane row raised to its chat, else its own. */
         fun seenKey(ref: TerminalRef, t: CoreTerminal) = Cockpit.seenKey(fromChat[ref] ?: ref, t.turn)

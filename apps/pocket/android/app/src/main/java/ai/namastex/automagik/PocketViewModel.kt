@@ -559,13 +559,20 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
      * A terminal screen's answer button: [choose], then show the outcome. [done] runs either way, told whether it was
      * sent ([Teams.sent]).
      */
-    fun answer(ref: TerminalRef, msg: String, dialog: String, options: List<String>, choice: Prompt.Choice, done: (sent: Boolean) -> Unit) {
+    fun answer(ref: TerminalRef, msg: String, dialog: String, options: List<String>, choice: Prompt.Choice,
+               short: String? = null, done: (sent: Boolean) -> Unit) {
         viewModelScope.launch {
             var sent = false
-            try { val outcome = choose(ref, msg, dialog, options, choice.index, choice.label); sent = Teams.sent(outcome); _state.update { it.copy(message = outcome) } }
-            finally { done(sent) }
+            try {
+                val outcome = choose(ref, msg, dialog, options, choice.index, choice.label)
+                sent = Teams.sent(outcome)
+                // The deck's strip says "Yes"/"No"; everywhere else keeps the whole choice in the outcome.
+                _state.update { it.copy(message = if (sent && short != null) "You chose: $short" else outcome) }
+            } finally { done(sent) }
         }
     }
+    /** The preview's failing request fails once, so the deck's error strip renders and the retry can move on. */
+    private val previewFailed = mutableSetOf<String>()
     /** The preview has no core: its blocked agent checks the dialog and menu the same way, logs the keys it would get, and moves on. */
     private fun choosePreview(ref: TerminalRef, msg: String, dialog: String, options: List<String>, index: Int, label: String): String {
         val t = terminalOf(ref)
@@ -576,10 +583,17 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
         if (dialog.isBlank() || menu.dialog.isBlank()) return Prompt.NOT_READABLE
         if (!Prompt.sameDialog(dialog, menu)) return Prompt.CHANGED
         if (!Prompt.unchanged(options, menu)) return "Not sent: its options changed. Open the agent to answer."
+        // The sample's failing request: a valid menu that changes before the keys land once, so the deck shows its error.
+        if (ref.address == "t9" && previewFailed.add(ref.address)) return Prompt.CHANGED
         android.util.Log.i("PocketPrompt", "preview ${ref.address} keys=${Prompt.keys(menu, index).joinToString(",")}")
+        val running = when (ref.address) {
+            "t8" -> "Running the lint check"
+            "t9" -> "Deploying the sample build"
+            else -> "Running the test suite"
+        }
         _state.update { s ->
             val m = s.machines[ref.hostId] ?: return@update s
-            val moved = m.terminals.map { if (it.address == ref.address) it.copy(status = "working", kind = "", message = "Running the test suite") else it }
+            val moved = m.terminals.map { if (it.address == ref.address) it.copy(status = "working", kind = "", message = running) else it }
             s.copy(machines = s.machines + (ref.hostId to m.copy(terminals = moved)))
         }
         if (state.value.selected == ref) { if (state.value.nativeDisplay) nativeReady(cols, rows) else terminalReady(cols, rows) }
@@ -1321,6 +1335,7 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
     }
     fun enterDemo() {
         clients.keys.toList().forEach { disconnect(it) }
+        previewFailed.clear()
         val id = "preview"
         // The sample main bot's chat, listed as a real bridge would list it, so Team's bubble and the chat pane agree.
         _botChats.update { it + (id to Result.success(ChatDemo.listing())) }
@@ -1332,10 +1347,14 @@ class PocketViewModel(application: Application, private val initDispatcher: Coro
             CoreTerminal("t4", "Shell", "~/work/website", "live", "", "zsh", "", 80, 24),
             CoreTerminal("t5", "Release notes", "~/work/herdr-squad", "live", "working", "Codex", "Drafting the changelog", 80, 24),
             CoreTerminal("t6", "Landing copy", "~/work/website", "live", "idle", "Claude Code", "", 80, 24, labels = mapOf("bot" to "b-demo-writer")),
-            CoreTerminal("t7", "Notes", "~/work/notes", "live", "idle", "Claude Code", "", 80, 24, labels = mapOf("bot" to "b-demo-scribe")))
+            CoreTerminal("t7", "Notes", "~/work/notes", "live", "idle", "Claude Code", "", 80, 24, labels = mapOf("bot" to "b-demo-scribe")),
+            // A second waiting agent, so sample data renders a deck of two cards; t9's first answer fails to
+            // show the deck's error strip.
+            CoreTerminal("t8", "Release gate", "~/work/herdr", "live", "blocked", "Claude Code", "Run the lint check?", 80, 24, labels = mapOf("bot" to "b-demo-review"), kind = "permission"),
+            CoreTerminal("t9", "Sample deploy", "~/work/herdr", "live", "blocked", "Claude Code", "Approve the sample deploy?", 80, 24, labels = mapOf("bot" to "b-demo-flaky"), kind = "permission"))
             // Each one's last change, so the Teams rows show times and the scribe has dozed off.
-            .map { t -> t.copy(statusMs = System.currentTimeMillis() - mapOf("t1" to 1L, "t2" to 3L, "t3" to 14L, "t5" to 6L, "t6" to 4L, "t7" to 95L).getOrDefault(t.address, 0L) * 60_000L) }
-        val spaces = listOf(PocketSpace("sp1", "herdr", "~/work/herdr", "", listOf(PocketTab("tb2", "Android", listOf("t2", "t3")), PocketTab("tb1", "Authentication", listOf("t1")))),
+            .map { t -> t.copy(statusMs = System.currentTimeMillis() - mapOf("t1" to 1L, "t2" to 3L, "t3" to 14L, "t5" to 6L, "t6" to 4L, "t7" to 95L, "t8" to 2L, "t9" to 99L).getOrDefault(t.address, 0L) * 60_000L) }
+        val spaces = listOf(PocketSpace("sp1", "herdr", "~/work/herdr", "", listOf(PocketTab("tb2", "Android", listOf("t2", "t3")), PocketTab("tb1", "Authentication", listOf("t1")), PocketTab("tb7", "Release gate", listOf("t8")), PocketTab("tb8", "Deploy", listOf("t9")))),
             PocketSpace("sp3", "Release squad", "~/work/herdr-squad", "", listOf(PocketTab("tb4", "Notes", listOf("t5")))),
             PocketSpace("sp2", "Website", "~/work/website", "", listOf(PocketTab("tb3", "Shell", listOf("t4")), PocketTab("tb5", "Copy", listOf("t6")))),
             PocketSpace("sp4", "Notes", "~/work/notes", "", listOf(PocketTab("tb6", "Notes", listOf("t7")))))
@@ -1373,15 +1392,24 @@ internal fun previewScreen(t: CoreTerminal?) = "Automagik  ·  Interface preview
     "  ${t?.message ?: "Ready for your next task."}\n\n  This is sample output. Connect your machine for a live terminal.\n\n" + previewMenu(t)
 
 /** A permission shaped like Claude Code's, for the preview's agent that is blocked on one. */
-internal fun previewMenu(t: CoreTerminal?) = if (t?.attention != true || t.kind != "permission") "" else """
-⏺ Bash(npm test)
+internal fun previewMenu(t: CoreTerminal?): String {
+    if (t?.attention != true || t.kind != "permission") return ""
+    // Each sample request carries its own command, so the second deck card does not repeat the first's block.
+    val (command, purpose) = when (t.address) {
+        "t8" -> "npm run lint" to "Run the lint check"
+        "t9" -> "./deploy.sh" to "Deploy the sample build"
+        else -> "npm test" to "Run the test suite"
+    }
+    return """
+⏺ Bash($command)
 ────────────────────────────────────────
  Bash command
-   npm test
-   Run the test suite
+   $command
+   $purpose
  Do you want to proceed?
  ❯ 1. Yes
-   2. Yes, and don’t ask again for npm test commands in this project
+   2. Yes, and don’t ask again for $command commands in this project
    3. No, and tell Claude what to do differently (esc)
  Esc to cancel
 """.trimStart()
+}

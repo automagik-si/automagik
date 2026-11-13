@@ -3,8 +3,12 @@ package ai.namastex.automagik
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import java.io.File
 import java.time.ZoneOffset
 
@@ -504,5 +508,181 @@ class TeamsTest {
         val dshOnly = Teams.bubbles(listOf(Teams.Team("h|x", "h", "", "/w", "W", Teams.Icon.Letter, null, listOf(lead))),
             mapOf("h" to listOf(dshRow("b-main", status = "blocked"))))
         assertEquals(emptyMap<TerminalRef, TerminalRef>(), Teams.paneChats(dshOnly))
+    }
+
+    // ---- Home's needs-you deck
+
+    private fun deckEntry(address: String, turn: Long = 1, statusMs: Long = 10, kind: String = "permission",
+                          title: String = "Integrator", message: String = "Run 2 commands?", app: String = "claude-code") =
+        Cockpit.Entry(TerminalRef("h", address),
+            CoreTerminal(address, title, "/w", "live", "blocked", if (app == "dsh") "Automagik Bot" else app, message, 80, 24,
+                app = app, statusMs = statusMs, turn = turn, kind = kind), Cockpit.BLOCKED)
+
+    @Test fun theDeckCardsComeFromHomesNeedsYouEntriesInTheirOrder() {
+        val first = deckEntry("t1", turn = 1, statusMs = 100)
+        val second = deckEntry("t2", turn = 2, statusMs = 200, title = "Builder", message = "May I push?")
+        val cards = Teams.deckCards(listOf(second, first)) { "brain-v3" }
+        assertEquals(listOf("t2", "t1"), cards.map { it.ref.address })
+        assertEquals(listOf("Builder", "Integrator"), cards.map { it.title })
+        assertEquals(listOf("May I push?", "Run 2 commands?"), cards.map { it.message })
+        assertEquals(listOf("brain-v3", "brain-v3"), cards.map { it.where })
+        assertEquals(listOf("2:200", "1:100"), cards.map { it.turn to it.statusMs }.map { "${it.first}:${it.second}" })
+        assertTrue(cards.none { it.opensChat })
+    }
+
+    @Test fun aChatCardAndAPaneRaisedToItsChatOpenTheChat() {
+        val chat = TerminalRef("h", "dsh:s1")
+        val lone = Teams.deckCards(listOf(deckEntry("dsh:s1", kind = "question", title = "Lead", message = "Which branch?", app = "dsh"))) { "Home" }
+        assertEquals(chat, lone.single().chat)
+        assertTrue(lone.single().opensChat)
+        // A pane row whose chat is the more urgent keeps the pane ref but opens the chat ([Cockpit.Raised.fromChat]).
+        val pane = deckEntry("t1", kind = "question", title = "Lead", message = "Which branch?")
+        val raised = Teams.deckCards(listOf(pane), mapOf(TerminalRef("h", "t1") to chat)) { "Home" }
+        assertEquals(TerminalRef("h", "t1"), raised.single().ref)
+        assertEquals(chat, raised.single().chat)
+        // Every other row still answers its own terminal.
+        assertNull(Teams.deckCards(listOf(pane)).single().chat)
+    }
+
+    @Test fun onlyAnsweredCardsLeaveAndDisconnectIsOfflineNotAllClear() {
+        val one = Teams.deckCards(listOf(deckEntry("t1", turn = 1, statusMs = 100))) { "P" }.single()
+        val two = Teams.deckCards(listOf(deckEntry("t2", turn = 2, statusMs = 200))) { "P" }.single()
+        val cards = listOf(two, one)
+        assertEquals(Teams.DeckView.Cards(cards), Teams.deckView(cards, emptySet(), anyConnected = true, waiting = 2))
+        assertEquals(Teams.DeckView.Cards(listOf(two)), Teams.deckView(cards, setOf(Teams.deckKey(one)), anyConnected = true, waiting = 1))
+        // A new request from the same agent (a later turn) is another card.
+        val later = one.copy(turn = 3, statusMs = 300)
+        assertEquals(Teams.DeckView.Cards(listOf(later)), Teams.deckView(listOf(later), setOf(Teams.deckKey(one)), anyConnected = true, waiting = 1))
+        assertEquals(Teams.DeckView.Clear, Teams.deckView(cards, setOf(Teams.deckKey(one), Teams.deckKey(two)), anyConnected = true, waiting = 0))
+        // The link dropped with unanswered requests: offline, never a false all clear.
+        assertEquals(Teams.DeckView.Offline(2), Teams.deckView(emptyList(), emptySet(), anyConnected = false, waiting = 2))
+        assertEquals(Teams.DeckView.Clear, Teams.deckView(emptyList(), emptySet(), anyConnected = false, waiting = 0))
+        // A machine dropped while another is still connected: its waiting cards are offline, not all clear.
+        assertEquals(Teams.DeckView.Offline(1), Teams.deckView(emptyList(), emptySet(), anyConnected = true, waiting = 0, offline = 1))
+        assertEquals(Teams.DeckView.Clear, Teams.deckView(emptyList(), emptySet(), anyConnected = true, waiting = 0, offline = 0))
+    }
+
+    @Test fun everyChatCardIsSkippedAndItsHomeRowSaysWhereToAnswer() {
+        val chat = Teams.DeckCard(TerminalRef("h", "dsh:reader"), "Reader", "herdr", "Automagik Bot",
+            Chat.ANSWER_ON_COMPUTER, "question", 1, 2, TerminalRef("h", "dsh:reader"))
+        val writable = chat.copy(message = "Which branch?")
+        val terminal = chat.copy(ref = TerminalRef("h", "t1"), chat = null, message = "Run?")
+        assertTrue(!Teams.deckAnswerable(chat))
+        assertTrue(!Teams.deckAnswerable(writable))
+        assertTrue(Teams.deckAnswerable(terminal))
+        assertEquals(listOf(terminal), listOf(chat, writable, terminal).filter(Teams::deckAnswerable))
+        assertEquals("On computer", Teams.chatWaitLabel(deckEntry("dsh:reader", kind = "question").terminal.copy(message = Chat.ANSWER_ON_COMPUTER)))
+        assertEquals("In chat", Teams.chatWaitLabel(deckEntry("dsh:reader", kind = "question").terminal.copy(message = "Which branch?")))
+    }
+
+    @Test fun theMergedSampleDeckWalksFromFirstCardToAllClear() {
+        fun chat(id: String, message: String) = Teams.DeckCard(TerminalRef("h", "dsh:$id"), id, "herdr", "Automagik Bot",
+            message, "question", 1, 2, TerminalRef("h", "dsh:$id"))
+        fun terminal(address: String) = Teams.DeckCard(TerminalRef("h", address), address, "herdr", "Claude Code",
+            "Run?", "permission", 3, 1, null)
+        val sample = listOf(chat("reader", Chat.ANSWER_ON_COMPUTER), chat("captain", "Which branch?"),
+            terminal("t1"), terminal("t8"), terminal("t9"))
+        val deck = sample.filter(Teams::deckAnswerable)
+        assertEquals(listOf("t1", "t8", "t9"), deck.map { it.ref.address })
+        var answered = emptySet<String>()
+        while (true) {
+            val view = Teams.deckView(deck, answered, anyConnected = true, waiting = deck.size - answered.size)
+            if (view is Teams.DeckView.Clear) break
+            val card = (view as Teams.DeckView.Cards).cards.first()
+            answered = answered + Teams.deckKey(card)
+        }
+        assertEquals(3, answered.size)
+    }
+
+    @Test fun aLeavingCardKeepsItsMenu() {
+        val menu = Prompt.Menu(listOf("1. Yes", "2. No"), 0, "Run?")
+        val next = menu.copy(cursor = 1)
+        assertSame(menu, Teams.deckMenu(menu, null, sending = true))
+        assertSame(menu, Teams.deckMenu(menu, next, sending = true))
+        assertSame(next, Teams.deckMenu(menu, next, sending = false))
+    }
+
+    @Test fun theLeavingCardIsNotTheCardBehind() {
+        val cards = Teams.deckCards(listOf(deckEntry("t1"), deckEntry("t2"), deckEntry("t3"))) { "P" }
+        val under = Teams.deckUnder(cards, Teams.deckKey(cards[0]))
+        assertEquals(cards[1], under.next)
+        assertEquals(2, under.behind)
+        val normal = Teams.deckUnder(cards.drop(1), null)
+        assertEquals(cards[2], normal.next)
+        assertEquals(1, normal.behind)
+    }
+
+    @Test fun anAnswerIsRecordedWhenTheCardMotionIsCancelled() {
+        // Close, Back and Open all dispose the card's scope during the confirm window.
+        for (reason in listOf("Close", "Back", "Open")) {
+            val recorded = mutableListOf<String>()
+            var done: ((Boolean) -> Unit)? = null
+            val scope = CoroutineScope(Job())
+            DeckSend(scope, record = { recorded += it }, finish = { _ -> }, returnMotion = {}).send("k",
+                dispatch = { done = it }, exit = {})
+            scope.cancel()
+            done!!.invoke(true)
+            assertEquals(reason, listOf("k"), recorded)
+        }
+    }
+
+    @Test fun theSampleDeckDoesNotShowAllClearWhileChatsWait() {
+        fun chat(id: String, message: String) = Teams.DeckCard(TerminalRef("h", "dsh:$id"), id, "herdr", "Automagik Bot",
+            message, "question", 1, 2, TerminalRef("h", "dsh:$id"))
+        fun terminal(address: String) = Teams.DeckCard(TerminalRef("h", address), address, "herdr", "Claude Code",
+            "Run?", "permission", 3, 1, null)
+        val sample = listOf(chat("reader", Chat.ANSWER_ON_COMPUTER), chat("captain", "Which branch?"),
+            terminal("t1"), terminal("t8"), terminal("t9"))
+        val terminals = sample.filter(Teams::deckAnswerable)
+        val chats = sample.filter { it.chat != null }
+        var answered = emptySet<String>()
+        var view = Teams.deckView(terminals, answered, anyConnected = true, waiting = terminals.size, chats = chats)
+        while (view is Teams.DeckView.Cards) {
+            val card = view.cards.first()
+            answered = answered + Teams.deckKey(card)
+            view = Teams.deckView(terminals, answered, anyConnected = true, waiting = terminals.size - answered.size, chats = chats)
+        }
+        // Only Bot-chat requests are left; the count is above zero, so this is never Clear.
+        assertTrue(view is Teams.DeckView.Chats)
+        val waiting = (view as Teams.DeckView.Chats).cards
+        assertEquals(chats, waiting)
+        assertEquals(chats.map { it.ref }, waiting.map { it.ref })
+        assertTrue(Teams.deckView(emptyList(), emptySet(), anyConnected = true, waiting = chats.size, chats = chats) is Teams.DeckView.Chats)
+        // A chat request answered in its chat is no longer in Home's list, so the deck drops it.
+        val remaining = Teams.deckChats(sample - chats[0])
+        assertEquals(chats.drop(1), remaining)
+        assertEquals(remaining, (Teams.deckView(emptyList(), emptySet(), anyConnected = true, waiting = remaining.size, chats = remaining) as Teams.DeckView.Chats).cards)
+        assertEquals(3, answered.size)
+    }
+
+    @Test fun eachPreviewRequestShowsItsOwnCommand() {
+        fun sample(address: String, message: String) =
+            CoreTerminal(address, "x", "/w", "live", "blocked", "Claude Code", message, 80, 24, kind = "permission")
+        assertTrue("npm test" in previewMenu(sample("t1", "Run the test suite?")))
+        val second = previewMenu(sample("t8", "Run the lint check?"))
+        assertTrue("npm run lint" in second)
+        assertTrue("npm test" !in second)
+        val third = previewMenu(sample("t9", "Approve the sample deploy?"))
+        assertTrue("./deploy.sh" in third)
+        assertTrue("npm test" !in third)
+    }
+
+    @Test fun backFromADeckOpenedCardReturnsToTheDeckAndAnExternalSelectionClosesIt() {
+        val card = TerminalRef("h", "t1")
+        assertEquals(true to true, Teams.deckAfterSelection(open = true, fromDeck = true, selected = card))
+        assertEquals(true to false, Teams.deckAfterSelection(open = true, fromDeck = true, selected = null))
+        assertEquals(false to false, Teams.deckAfterSelection(open = true, fromDeck = false, selected = card))
+        assertEquals(true to false, Teams.deckAfterSelection(open = true, fromDeck = false, selected = null))
+        // A closed deck stays closed when a card opens from anywhere.
+        assertEquals(false to false, Teams.deckAfterSelection(open = false, fromDeck = false, selected = card))
+    }
+
+    @Test fun aSwipeFollowsTheAxisItMovedMostAlong() {
+        val t = 100f
+        assertEquals(Teams.Swipe.OPEN, Teams.swipe(dx = 120f, dy = -200f, t, canYes = true, canNo = true))   // diagonal, mostly up
+        assertEquals(Teams.Swipe.YES, Teams.swipe(dx = 200f, dy = -120f, t, canYes = true, canNo = true))   // diagonal, mostly right
+        assertEquals(Teams.Swipe.NO, Teams.swipe(dx = -150f, dy = 0f, t, canYes = true, canNo = true))
+        assertEquals(Teams.Swipe.NONE, Teams.swipe(dx = 150f, dy = 0f, t, canYes = false, canNo = true))   // no Yes to send
+        assertEquals(Teams.Swipe.NONE, Teams.swipe(dx = 60f, dy = -80f, t, canYes = true, canNo = true))    // too short
     }
 }

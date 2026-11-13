@@ -167,6 +167,42 @@ class HomeChatsTest {
         assertTrue(p.sections.flatMap { it.entries }.none { it.ref.address == "dsh:s4" })
     }
 
+    /** The deck reads Home's own Needs you list: its count equals the cards, chats and terminals in Home's order. */
+    @Test fun theDeckReadsHomesNeedsYouListNotTheTeamBubbles() {
+        val rows = listOf(row("s1", "blocked", kind = "question", msg = "Which branch?"),
+            row("s2", "blocked", kind = "permission", msg = "Run 2 commands?"))
+        val p = pulse(chats(rows), pane("t1", "blocked", ms = 50), pane("t2", "working"))
+        val needs = p.sections.first { it.rank == Cockpit.BLOCKED }
+        assertEquals(3, p.needsYou)
+        val cards = Teams.deckCards(needs.entries, p.fromChat) { if (Chat.isDsh(it.address)) "Bot chats" else "W" }
+        assertEquals(p.needsYou, cards.size)
+        assertEquals(needs.entries.map { it.ref }, cards.map { it.ref })
+        // A chat row is a chat card; a terminal row keeps its terminal menu.
+        assertEquals(listOf(true, true, false), cards.map { it.opensChat })
+        assertEquals(listOf(TerminalRef(host, "dsh:s1"), TerminalRef(host, "dsh:s2"), null), cards.map { it.chat })
+        assertEquals(listOf("Bot chats", "Bot chats", "W"), cards.map { it.where })
+    }
+
+    /** Home's badge and tile count every waiting request, including one waiting in a Bot chat. */
+    @Test fun homeCountsARequestWaitingInABotChat() {
+        val rows = listOf(row("s1", "blocked", kind = "question"))
+        val p = pulse(chats(rows), pane("t1", "blocked"))
+        assertEquals(2, p.homeNeedsYou)
+        assertEquals(1, p.answerableNeedsYou)
+        assertEquals(2, Nav.badge(Nav.HOME_TAB, p.homeNeedsYou, 0))
+    }
+
+    /** A pane row raised to its chat keeps the pane's name and project, and opens the chat. */
+    @Test fun theDecksPaneRaisedToItsChatOpensThatChat() {
+        val paneRef = TerminalRef(host, "t1"); val chatRef = TerminalRef(host, "dsh:s1")
+        val lead = Teams.Bot("b-main", "Lead", true, null, Teams.IDLE, "", 0L, paneRef, "")
+        val team = Teams.Team("$host||/w", host, "", "/w", "W", Teams.Icon.Letter, null, listOf(lead))
+        val rows = listOf(row("s1", "blocked", kind = "question", msg = "Which branch?", registryId = "b-main"))
+        val p = pulse(chats(rows, teams = listOf(team)), pane("t1", "working", bot = "b-main"))
+        val card = Teams.deckCards(p.sections.first().entries, p.fromChat) { "W" }.single()
+        assertEquals(paneRef, card.ref); assertEquals(chatRef, card.chat); assertTrue(card.opensChat)
+    }
+
     @Test fun theWatchStartsQuietForgetsUnlistedChatsAndKeepsItsReceiptThroughTheTurn() {
         val k = ChatWatch.key(host, "dsh:s1")
         val quiet = ChatWatch.read(emptyMap(), host, listOf(row("s1", "idle")), 1)

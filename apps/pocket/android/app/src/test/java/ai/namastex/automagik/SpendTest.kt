@@ -265,6 +265,13 @@ class SpendTest {
         assertTrue(widthDp("≥$7.80", 14) <= TodayTiles.textWidthDp(360))
     }
 
+    /** The four tiles grow with the font setting: two 24sp lines, 20dp padding and 4dp slack at 1.3x. */
+    @Test fun todayTileHeightFitsAtTheLargestFontScale() {
+        assertEquals(72f, TodayTiles.heightDp(1f).value, 0.01f)
+        assertEquals(86.4f, TodayTiles.heightDp(1.3f).value, 0.01f)
+        assertTrue(TodayTiles.heightDp(1.3f).value >= 2 * 24f * 1.3f + 20f)
+    }
+
     @Test fun previewDocsParseAndMerge() {
         val readings = SpendDemo.readings(now)
         assertEquals(2, readings.size); assertTrue(readings.values.all { it is Spend.Report })
