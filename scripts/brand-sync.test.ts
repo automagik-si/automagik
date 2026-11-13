@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { BRAND, FOLDERS, OLD_RECORD, RECORD, SOURCE, TOOL, check, replaceFile, staleness, write } from './brand-sync.mjs';
@@ -131,6 +131,47 @@ describe('the brand copy tool (scripts/brand-sync.mjs)', () => {
     expect(existsSync(join(target, 'docs/brand/logo/old-mark.svg'))).toBe(false);
     expect(check({ to: target }).problems).toEqual([]);
     expect(run(target, '--check', '--remote', source).status).toBe(0);
+  });
+
+  test("--check fails a record whose commit was changed: it must be a real commit of Automagik whose brand files hash to the record", () => {
+    const { source, target, first } = small();
+    write({ to: target, from: source });
+    const recordPath = join(target, RECORD);
+    const original = readFileSync(recordPath, 'utf8');
+    expect(run(target, '--check', '--remote', source).status).toBe(0);
+
+    // A commit that is nowhere in Automagik's repository.
+    const fake = 'a'.repeat(40);
+    writeFileSync(recordPath, original.replace(first, fake));
+    const missing = run(target, '--check', '--remote', source);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain(`the commit ${fake.slice(0, 12)} in ${RECORD} is not a commit of Automagik's repository`);
+
+    // A real commit, whose brand is not the one recorded.
+    put(source, 'docs/brand/tokens/tokens.css', ':root{--bt-main:#000}\n');
+    const later = commit(source, 'a new colour');
+    writeFileSync(recordPath, original.replace(first, later));
+    const other = run(target, '--check', '--remote', source);
+    expect(other.status).toBe(1);
+    expect(other.stderr).toContain('docs/brand/tokens/tokens.css is recorded with a hash that Automagik');
+
+    writeFileSync(recordPath, original);
+    expect(run(target, '--check', '--remote', source).status).toBe(0);
+  });
+
+  test("--write keeps each file's mode as the source has it: an executable stays 0755, the rest 0644", () => {
+    const { source, target } = repositories(fill => {
+      put(fill, 'docs/brand/README.md', '# Brand\n');
+      put(fill, 'docs/brand/tools/run.sh', '#!/bin/sh\n');
+      put(fill, SKILL, '---\nname: automagik-brand\n---\n');
+      put(fill, TOOL, readFileSync(join(ROOT, TOOL)));
+      chmodSync(join(fill, 'docs/brand/tools/run.sh'), 0o755);
+    });
+    write({ to: target, from: source });
+    expect(lstatSync(join(target, 'docs/brand/tools/run.sh')).mode & 0o777).toBe(0o755);
+    expect(lstatSync(join(target, 'docs/brand/README.md')).mode & 0o777).toBe(0o644);
+    write({ to: target, from: source });
+    expect(lstatSync(join(target, 'docs/brand/tools/run.sh')).mode & 0o777).toBe(0o755);
   });
 
   test('a file the source dropped is removed by the next --write, with its folder', () => {

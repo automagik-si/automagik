@@ -398,6 +398,44 @@ export function check({ to }) {
 }
 
 /**
+ * Whether the record's commit is real: a commit of Automagik's repository whose brand files, as
+ * committed, hash to the values the record holds. Else the record could name any commit, edited
+ * by hand, and the check (file hashes alone) would pass. Never throws. `ok`; `bad` with its
+ * `problems`; `offline` when the remote did not answer, so nothing could be said.
+ */
+export function verifyCommit({ commit, files, into, remote = `${SOURCE}.git` }) {
+  if (remote.startsWith('-')) return { state: 'offline', why: `not a remote: ${remote}`, problems: [] };
+  let repo;
+  try {
+    repo = scratchRepo(remote);
+    try {
+      git(['fetch', '-q', '--depth', '1', 'origin', commit], { dir: repo, timeout: NETWORK_MS });
+    } catch (error) {
+      try { git(['ls-remote', remote, 'HEAD'], { timeout: NETWORK_MS }); } catch { return { state: 'offline', why: reason(error), problems: [] }; }
+      return { state: 'bad', problems: [`the commit ${short(commit)} in ${RECORD} is not a commit of Automagik's repository (${reason(error)})`] };
+    }
+    if (git(['cat-file', '-t', commit], { dir: repo }).trim() !== 'commit') return { state: 'bad', problems: [`${commit} in ${RECORD} is not a commit`] };
+    const there = {};
+    for (const line of git(['ls-tree', '-r', '-z', commit, '--', ...FOLDERS, TOOL], { dir: repo }).split('\0').filter(Boolean)) {
+      const tab = line.indexOf('\t');
+      const [, type, oid] = line.slice(0, tab).split(' ');
+      if (type === 'blob') there[placed(line.slice(tab + 1), into)] = oid;
+    }
+    const problems = [];
+    for (const path of Object.keys(files).sort()) {
+      if (!there[path]) problems.push(`${path} is recorded, but Automagik's commit ${short(commit)} has no such file`);
+      else if (sha256(git(['cat-file', 'blob', there[path]], { dir: repo, buffer: true })) !== files[path]) problems.push(`${path} is recorded with a hash that Automagik's commit ${short(commit)} does not have`);
+    }
+    for (const path of Object.keys(there).sort()) if (!Object.hasOwn(files, path)) problems.push(`Automagik's commit ${short(commit)} has ${path}, which ${RECORD} does not record`);
+    return problems.length ? { state: 'bad', problems } : { state: 'ok', problems: [] };
+  } catch (error) {
+    return { state: 'offline', why: reason(error), problems: [] };
+  } finally {
+    if (repo) rmSync(repo, { recursive: true, force: true });
+  }
+}
+
+/**
  * Looks at Automagik's dev: is the brand there still the one at `commit`? Never throws.
  * `current`: the same files. `behind`: they differ and `commit` is in dev's history, so dev is
  * ahead and a fresh copy brings it. `apart`: they differ and `commit` is not on dev (a copy made
@@ -495,6 +533,12 @@ export function main(argv, { out = console.log, err = console.error, cwd = proce
       return 0;
     }
     const found = check({ to });
+    if (found.commit && !found.problems.length) {
+      const recordFiles = JSON.parse(readFileSync(join(realpathSync(resolve(to)), found.record), 'utf8')).files;
+      const proof = verifyCommit({ commit: found.commit, files: recordFiles, into: found.into, remote: options.remote });
+      found.problems.push(...proof.problems);
+      if (proof.state === 'offline') out(`brand-sync: could not check the record's commit against Automagik's repository (offline?): ${proof.why}`);
+    }
     if (found.problems.length) {
       for (const problem of found.problems) err(`brand-sync: ${problem}`);
       err(`brand-sync: the copy is never edited here. Change the files in Automagik's repository, then run: ${WRITE}`);
