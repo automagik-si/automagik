@@ -60,8 +60,19 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   another provider; the reviewer sees the bridge tool, its redacted arguments and its schema
   before the body runs. A denial is `AUTO_REVIEW_DENIED`, a failed reviewer refuses with
   `AUTO_REVIEW_FAILED`, a review past its deadline is `AUTO_REVIEW_TIMEOUT`, and the call never
-  runs. A Manual or Full call with no open step is `BRIDGE_NO_STEP`; one whose advertisement or
-  call row cannot be written is `BRIDGE_RECORD_FAILED`, and the call does not run. **A call that
+  runs. A call that comes between two steps of a turn while the agent's prompt is still running
+  (after a `step/end`, before the next `step/start`) waits for the next step, at most 30 s, and is
+  recorded and reviewed there; it ends with no rows if the turn ends, its caller goes away, the
+  bridge is revoked or the turn is stopped (#969). Otherwise a Manual or Full call with no open
+  step is `BRIDGE_NO_STEP` (Auto: `AUTO_REVIEW_NO_STEP`); one whose advertisement or
+  call row cannot be written is `BRIDGE_RECORD_FAILED`, and the call does not run. The rows' call
+  id is the agent's own `_meta.callId` only when it is 1 to 128 characters of `A-Z a-z 0-9 _ . : -`
+  and does not start with `acp_` (the mirror's ids); otherwise the plugin mints `bridge_<16 hex>`
+  and logs the replacement. **Codex's MCP approvals.** With `dshTools` on, `acp-codex`'s MCP calls
+  get no mirror card (it gives them no structured name), so a `session/request_permission` Codex
+  sends for one (codex-acp's MCP tool approval) is answered at once: allow once for the `dsh`
+  server (the bridge's own approval is the one dialog), the agent's reject option for any other
+  or unnamed server, which is logged (#969). **A call that
   outlives its step (#957).** The agent runs its calls in parallel, and the bridge puts no
   deadline on one (a long wait, a slow command and an open approval dialog are legitimate), so
   DSH can end the step a call was recorded in while it still runs. The write guard below then

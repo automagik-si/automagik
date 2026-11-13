@@ -10,7 +10,7 @@ import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, client, methods, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { batchSafe } from './batch-spawn.js'
 import { HOME_ENV, releaseRun, trackRun } from './cli-homes.js'
-import { isBridgeName } from './names.js'
+import { BRIDGE_NAME, isBridgeName } from './names.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -640,6 +640,7 @@ export class AgentRun {
   markCall(tool, update) {
     const name = structuredNameOf(update)
     if (name !== undefined) tool.structuredName = name
+    if (typeof update?.rawInput?.server === 'string') tool.mcpServer = update.rawInput.server
     if (update?._meta?.is_mcp_tool_call === true) tool.mcp = true
     if (tool.structuredName !== undefined && tool.structuredName.startsWith('mcp__')) tool.mcp = true
     if (isBridgeName(tool.structuredName)) tool.bridge = true
@@ -689,6 +690,25 @@ export class AgentRun {
     permission?.answer(refusal(tool.refused, permission.options))
   }
 
+  /** A skipped fork MCP call has no mirror to answer its question. */
+  answerSkippedMcp(tool, options) {
+    if (this.spec.dshTools !== true || this.spec.refresh !== 'fork' || tool.mcp !== true) return undefined
+    const answerFor = (choices) => {
+      if (tool.mcpServer !== BRIDGE_NAME) return refusal('rejected', choices)
+      const allow = choices.find(option => option.kind === 'allow_once') ?? choices.find(option => option.kind === 'allow_always')
+      return allow === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: allow.optionId } }
+    }
+    // A question already stored is answered from its own options, a new one (`options`) from its own.
+    const stored = tool.permission
+    if (stored !== undefined) stored.answer(answerFor(stored.options ?? []))
+    const answer = answerFor(options ?? stored?.options ?? [])
+    // Refused with no dialog: the log says so, once per question answered.
+    if (tool.mcpServer !== BRIDGE_NAME && (stored !== undefined || options !== undefined)) {
+      try { this.spec.onRefusedMcp?.(tool) } catch {}
+    }
+    return answer
+  }
+
   /**
    * @param {any} params the agent's `session/request_permission`
    * @param {AbortSignal} [signal] aborts when the agent withdraws the request (`$/cancel_request`)
@@ -704,6 +724,12 @@ export class AgentRun {
       this.changeTool(tool, { ...details, status: undefined })
       try { this.spec.onAsked?.(tool) } catch {}
     }
+    // The queued tool event is read after this synchronous handler: mark standalone approvals
+    // before the adapter can turn one into a mirror card.
+    if (params._meta?.is_mcp_tool_approval === true) {
+      tool.mcp = true
+      if (typeof params.toolCall?.rawInput?.serverName === 'string') tool.mcpServer = params.toolCall.rawInput.serverName
+    }
     // The bridge's call is not the mirror's: acp-dsh answers this ACP request itself with
     // `allow-once` and raises no DSH dialog from it. The bridge's own `approval/request` is the
     // one dialog the person sees (RFC 0003, amendment, "One dialog per call").
@@ -712,6 +738,8 @@ export class AgentRun {
         ?? (params.options ?? []).find(option => option.kind === 'allow_always')
       return Promise.resolve(once === undefined ? { outcome: { outcome: 'cancelled' } } : { outcome: { outcome: 'selected', optionId: once.optionId } })
     }
+    const skipped = this.answerSkippedMcp(tool, params.options ?? [])
+    if (skipped !== undefined) return Promise.resolve(skipped)
     // DSH already refused this call before the mirror's body could ask (refuse): no body is
     // left to answer the agent, so the refusal is its answer.
     if (tool.refused !== undefined) return Promise.resolve(refusal(tool.refused, params.options ?? []))

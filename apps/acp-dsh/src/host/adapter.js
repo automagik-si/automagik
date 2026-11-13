@@ -787,7 +787,7 @@ export class AcpAdapter extends LlmAdapter {
    */
   async refork(agent, live, dshAgent, signal) {
     const previous = live.bridge
-    const next = this.backchannel.mint({ sessionId: dshAgent?.session?.id, agent: dshAgent, name: agent.name })
+    const next = this.backchannel.mint({ sessionId: dshAgent?.session?.id, agent: dshAgent, name: agent.name, promptRunning: () => live.open === true && live.run?.busy === true })
     live.bridge = next
     try {
       await live.run.held(() => live.run.fork({
@@ -1113,7 +1113,7 @@ export class AcpAdapter extends LlmAdapter {
             if (this.bridgeOn(agent)) {
               await this.backchannel.listen()
               if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined || options.signal?.aborted)) throw new Error('Image permission changed while the bridge started.')
-              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name })
+              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true })
             }
             this.diagnostics?.started(sessionId, this, agent, state)
             const run = new AgentRun({
@@ -1126,10 +1126,12 @@ export class AcpAdapter extends LlmAdapter {
                 ? { sessionMeta: { disableBuiltInTools: true } }
                 : asks ? { sessionMeta: agent.hardAsk() } : {}),
               dshTools: this.bridgeOn(agent),
+              refresh: agent.refresh,
               onReady: state.bridge === undefined ? undefined : () => this.ready(agent, state),
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
               onToolCall: tool => this.checkDrift(sessionId, agent, tool),
               onIgnored: message => this.warn(message),
+              onRefusedMcp: tool => this.warn(`${agent.name} asked to run an MCP tool of ${typeof tool.mcpServer === 'string' ? `server "${tool.mcpServer.slice(0, 80)}"` : 'an unnamed server'}: refused, only the ${BRIDGE_NAME} bridge's tools run with DSH's tools on`),
               onMode: seen => this.diagnostics?.mode(sessionId, state, seen),
               ...(agent.startMs === undefined ? {} : { startMs: agent.startMs }),
               ...(agent.requestMs === undefined ? {} : { requestMs: agent.requestMs }),
@@ -1391,6 +1393,7 @@ export class AcpAdapter extends LlmAdapter {
           || tool.structuredName === 'ToolSearch'
           || (agent.refresh === 'fork' && tool.mcp === true)
         if (this.bridgeOn(agent) && skip) {
+          live.run.answerSkippedMcp(tool)
           if (tool.drift === true) {
             // Drift can be discovered after the nameless event was queued. No card will ask
             // its question: the built-in call already started and is being cancelled. A
