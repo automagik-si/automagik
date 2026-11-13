@@ -29,16 +29,22 @@ async function fixture(t, scenario = 'ready') {
   // closed frame and reported a cleanup it could not confirm (#1223). So keep this
   // computer's deadline long for those scenarios and hand the script a short one on its way
   // to stdin, far inside it: its closed frame is then read before close() judges.
+  // The handoff is per start script: every real-start open gets it, and handed() is the
+  // last one while handoffs() counts them. A test that keeps a cancel of its own only
+  // moves this computer's wait; the start script is still handed the short cancel.
   const realStart = scenario.startsWith('runtime-'), scriptCancelMs = 300
   const deadlines = { start: 5000, control: 3000, cancel: realStart ? 2000 : 250 }
-  let handed
+  let handed, handoffs = 0
   const handShortCancel = spawn => (...args) => {
     const child = spawn(...args)
     if (!realStart) return child
+    let childHanded = false
     const write = child.stdin.write.bind(child.stdin)
     child.stdin.write = (data, ...rest) => {
-      if (handed !== undefined || typeof data !== 'string' || !data.startsWith('{')) return write(data, ...rest)
+      if (childHanded || typeof data !== 'string' || !data.startsWith('{')) return write(data, ...rest)
+      childHanded = true
       handed = scriptCancelMs
+      handoffs++
       return write(`${JSON.stringify({ ...JSON.parse(data), cancelMs: scriptCancelMs })}\n`, ...rest)
     }
     return child
@@ -62,7 +68,7 @@ async function fixture(t, scenario = 'ready') {
   const open = async (ssh = config, overrides = {}) => { const connection = await startHermesSsh(ssh, { ...options, ...overrides, spawn: handShortCancel(overrides.spawn ?? spawnChild) }); connections.push(connection); return connection }
   t.after(async () => { for (const connection of connections) await connection.close().catch(error => error.localClosed); await rm(home, { recursive: true, force: true }) })
   const trust = (expected, overrides = {}) => trustHermesSshHostKey(config, expected, { env: options.env, home, temp: home, deadlines: options.deadlines, ...overrides })
-  return { home, config, options, open, trust, credential, localPort, remotePort, records, untilRecord, hostKey, knownHosts, scriptCancelMs, handed: () => handed }
+  return { home, config, options, open, trust, credential, localPort, remotePort, records, untilRecord, hostKey, knownHosts, scriptCancelMs, handed: () => handed, handoffs: () => handoffs }
 }
 
 test('system ssh respects config/key arguments, enforces known-host key-only auth and tunnels numeric loopback', async t => {
@@ -333,8 +339,14 @@ test('our supervisor bounds the remote lease with heartbeats even when SSH stdin
 test('the remote supervisor force-stops only its owned fake child when graceful termination expires', async t => {
   const f = await fixture(t, 'runtime-ignore-term')
   const hermesPath = await fakeRuntime(f)
-  // Only the stop is short here: the start and the tunnel keep a long deadline.
-  const connection = await f.open({ ...f.config, hermesPath }, { deadlines: { start: 10000, control: 3000, cancel: 1000 } })
+  // Only this computer's stop is short here: the start and the tunnel keep a long
+  // deadline, and the fixture still hands the start script its own short cancel.
+  const deadlines = { start: 10000, control: 3000, cancel: 1000 }
+  const connection = await f.open({ ...f.config, hermesPath }, { deadlines })
+  // The 1000 ms kept here is this computer's wait (800 ms); the script's stop budget
+  // comes from the 300 ms the fixture hands it (grace 120, cancel 210).
+  assert.equal(f.handed(), f.scriptCancelMs, 'the start script was handed the short cancel in place of the one kept here')
+  assert.ok(f.scriptCancelMs < deadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
   const runtime = (await f.records()).find(record => record.event === 'runtime-start')
   await connection.close()
   assert.throws(() => process.kill(runtime.pid, 0), { code: 'ESRCH' })
@@ -368,7 +380,12 @@ for (const [exitsFirst, withoutWaitid] of [[false, false], [true, false], [true,
   test(`owned group cleanup includes a TERM-ignoring descendant when its leader exits ${exitsFirst ? 'before close' : 'on TERM'}${withoutWaitid ? ' without waitid' : ''}`, { timeout: 10000 }, async t => {
     const f = await fixture(t, withoutWaitid ? 'runtime-leader-exits-first-no-waitid' : exitsFirst ? 'runtime-leader-exits-first' : 'runtime-leader-exits-term')
     const hermesPath = await fakeRuntime(f)
-    const connection = await f.open({ ...f.config, hermesPath }, { deadlines: { start: 10000, control: 3000, cancel: 1000 } })
+    const deadlines = { start: 10000, control: 3000, cancel: 1000 }
+    const connection = await f.open({ ...f.config, hermesPath }, { deadlines })
+    // The fixture hands this start script 300 ms; the 1000 ms here is only this
+    // computer's 800 ms wait for the group to end.
+    assert.equal(f.handed(), f.scriptCancelMs, 'the start script was handed the short cancel in place of the one kept here')
+    assert.ok(f.scriptCancelMs < deadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
     const records = await f.records()
     const leader = records.find(record => record.event === 'runtime-start')
     const descendant = records.find(record => record.event === 'descendant-start')
@@ -480,7 +497,10 @@ test('a Hermes that never says ready, or reports no usable port, is named by the
   // processes, and the bare timeout here wins (seen on CI). So this computer's deadline is
   // long, and the script is handed a short one in place of the one sent: long enough to probe
   // and start the fake Hermes and read its first line, and far from this computer's.
-  const deadlines = { start: 20000, control: 5000, cancel: 800 }, scriptStartMs = 3000
+  // The stop window stays the fixture's long one (2000 ms): the script's stop budget is
+  // handed 300 ms (grace 120, cancel 210), so 1600 ms leaves it far inside. An own 800 ms
+  // left only 640 ms, 340 ms against the hand-off's upper bound: the #1223 shape.
+  const deadlines = { start: 20000, control: 5000, cancel: slow.options.deadlines.cancel }, scriptStartMs = 3000
   const { spawn } = await import('node:child_process')
   // Hand the start script a deadline in place of the one sent, and record it: the script's
   // own clock then ends well before this computer's, and the test can say what it was given.
@@ -505,19 +525,60 @@ test('a Hermes that never says ready, or reports no usable port, is named by the
   // What was really handed over: a deadline for the script that ends before this computer's.
   assert.equal(startClock.handed(), scriptStartMs, 'the start script was handed the short deadline')
   assert.ok(scriptStartMs < deadlines.start, "the script's deadline ends inside this computer's")
+  assert.equal(slow.handed(), slow.scriptCancelMs, 'the fixture handed the short cancel through this test’s own wrapper')
+  assert.ok(slow.scriptCancelMs < deadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
+  assert.equal(deadlines.cancel, slow.options.deadlines.cancel, "the stop window is the fixture's long one, not an own shorter cancel")
   assert.match(failure.sshDetail.hermes.join('\n'), /sample server still loading/)
   assert.ok(!JSON.stringify(failure.sshDetail).includes(slow.credential))
   const started = (await slow.records()).find(record => record.event === 'runtime-start')
   assert.throws(() => process.kill(started.pid, 0), { code: 'ESRCH' }, 'the Hermes that was not ready is stopped')
 
   const port = await fixture(t, 'runtime-bad-port')
-  // The same two clocks meet at cleanup here, and the fixture keeps them apart: the long
-  // deadline is this computer's, the short one the start script's.
-  await assert.rejects(port.open({ ...port.config, hermesPath: await fakeRuntime(port) }), error => error.code === 'bot/hermes-ssh-port' && error.sshError === 'port-missing' && error.sshStage === 'hermes-start' && !error.cleanupUnknown)
+  // The port half starts a full fake runtime before it reads the bad port. Keep the
+  // 10000/5000 start and control windows this half had before #1245, so a loaded computer
+  // reports the port rather than a bare start timeout; the stop window and the script's
+  // short cancel stay the fixture's.
+  const portDeadlines = { ...port.options.deadlines, start: 10000, control: 5000 }
+  let portHandshake
+  const portSpawn = (...args) => {
+    const child = spawnChild(...args)
+    const write = child.stdin.write.bind(child.stdin)
+    child.stdin.write = (data, ...rest) => {
+      if (portHandshake !== undefined || typeof data !== 'string' || !data.startsWith('{')) return write(data, ...rest)
+      portHandshake = JSON.parse(data)
+      return write(data, ...rest)
+    }
+    return child
+  }
+  await assert.rejects(port.open({ ...port.config, hermesPath: await fakeRuntime(port) }, { deadlines: portDeadlines, spawn: portSpawn }), error => error.code === 'bot/hermes-ssh-port' && error.sshError === 'port-missing' && error.sshStage === 'hermes-start' && !error.cleanupUnknown)
   assert.equal((await port.records()).filter(record => record.event === 'spawn').length, 1)
+  assert.ok(portHandshake.startMs > 5000, `the start script keeps a start clock wider than the fixture default (${portHandshake.startMs} ms)`)
+  assert.equal(portHandshake.controlMs, portDeadlines.control, 'the start script keeps the restored control window')
   assert.equal(port.handed(), port.scriptCancelMs, 'the script was handed the short cancel in place of the one kept here')
-  assert.ok(port.scriptCancelMs < port.options.deadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
+  assert.ok(port.scriptCancelMs < portDeadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
   assert.equal((await port.records()).at(-1).event, 'closed', 'the start script ended by itself, after its closed frame')
+})
+
+test('a second real-start open on one fixture hands each start script the short cancel', async t => {
+  const f = await fixture(t, 'runtime-ready')
+  const hermesPath = await fakeRuntime(f)
+  const handshakes = []
+  const capture = (...args) => {
+    const child = spawnChild(...args)
+    let captured = false
+    const write = child.stdin.write.bind(child.stdin)
+    child.stdin.write = (data, ...rest) => {
+      if (!captured && typeof data === 'string' && data.startsWith('{')) { captured = true; handshakes.push(JSON.parse(data)) }
+      return write(data, ...rest)
+    }
+    return child
+  }
+  const first = await f.open({ ...f.config, hermesPath }, { spawn: capture })
+  const second = await f.open({ ...f.config, hermesPath }, { spawn: capture })
+  assert.equal(handshakes.length, 2, 'both start scripts reached their handshake')
+  assert.deepEqual(handshakes.map(handshake => handshake.cancelMs), [f.scriptCancelMs, f.scriptCancelMs], 'each start script was handed the short cancel, not the one kept here')
+  assert.equal(f.handoffs(), 2, 'the fixture recorded one handoff per start script')
+  await Promise.all([first.close(), second.close()])
 })
 
 test('a token of the wrong shape and a fault inside the start script are their own kinds', async t => {
