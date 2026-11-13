@@ -3,6 +3,7 @@
 // their shell, tool results lose it before they are saved, and every model request
 // has it replaced by [secret:<NAME>] before it leaves.
 import { randomUUID } from 'node:crypto'
+import { types } from 'node:util'
 import { refusal } from './refusal.js'
 import { chmodSync, copyFileSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises'
@@ -19,6 +20,11 @@ export const ENV_PREFIX = 'DSH_SECRET_'
 // stands alone: no letter or digit right before or after it.
 export const MIN_VALUE = 4
 export const WHOLE_VALUE = 8
+// A piece of a secret left at a cut edge: shorter pieces (a path segment, a host
+// name) are too short to tell from ordinary text.
+export const EDGE_MIN = 12
+const STDERR = '[stderr]\n'
+const TRUNCATED = '\n[output truncated'
 export const MAX_VALUE = 16384
 const MAX_REQUESTS = 20
 const USED_SAVE_MS = 5000
@@ -45,6 +51,48 @@ export function normalizeName(raw) {
 // too keeps the sent URL equal to the text the redactor looks for.
 export const encodeUrlComponent = value => encodeURIComponent(value).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
 
+const quotePattern = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+// Consume escaped backslashes together: \\u is literal text, not a JSON escape.
+const formTokens = /%[0-9a-fA-F]{2}|\\(?:u[0-9a-fA-F]{4}|\\)|[\s\S]/g
+const hexToken = token => token.length === 3 && token[0] === '%' || token.length === 6 && token.startsWith('\\u')
+const hexTokens = /%[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\\\/g
+// Lower-cases only the hex digits of %XX and real \uXXXX escapes; the length never changes,
+// so an offset in the key is an offset in the text.
+const formKey = value => value.replace(hexTokens, token => token === '\\\\' ? token : token.toLowerCase())
+const formPattern = value => value.replace(formTokens, token => hexToken(token)
+  ? quotePattern(token).replace(/[a-fA-F]/g, c => `[${c.toLowerCase()}${c.toUpperCase()}]`)
+  : quotePattern(token))
+// A match that opens with a backslash is real only after an even run of backslashes:
+// after an odd one, its backslash is the second half of an escaped `\\`.
+const escapedAt = (text, index) => {
+  let run = 0
+  while (index - run > 0 && text[index - run - 1] === '\\') run++
+  return run % 2 === 1
+}
+// Cut pieces of an encoded form may start or end inside a %XX or \uXXXX token, where
+// the token cannot be recognized, so their hex letters are compared in one case.
+const foldHex = text => text.replace(/[A-F]/g, c => c.toLowerCase())
+// KMP: the longest suffix of `text` that is a proper prefix of `form`, in linear time.
+const failure = (form) => {
+  const table = new Int32Array(form.length)
+  for (let i = 1, k = 0; i < form.length; i++) {
+    while (k && form[i] !== form[k]) k = table[k - 1]
+    if (form[i] === form[k]) k++
+    table[i] = k
+  }
+  return table
+}
+const overlap = (form, table, text) => {
+  let k = 0
+  for (let i = 0; i < text.length; i++) {
+    while (k && text[i] !== form[k]) k = table[k - 1]
+    if (text[i] === form[k]) k++
+    if (k === form.length) k = table[k - 1]
+  }
+  return k
+}
+const reverse = text => text.split('').reverse().join('')
+
 // One function that replaces every known value in a string, longest first so a value
 // that contains another is replaced whole. JSON-escaped and URL-encoded forms are covered too.
 // `wholeWords: false` matches a short value inside a word as well: the global policy keeps the
@@ -56,51 +104,359 @@ export function redactor(entries, { wholeWords = true } = {}) {
     if (typeof value !== 'string' || value.length < MIN_VALUE) continue
     const label = `[secret:${name}]`
     const short = value.length < WHOLE_VALUE
-    pairs.push([value, label, short])
     const escaped = JSON.stringify(value).slice(1, -1)
-    if (escaped !== value) pairs.push([escaped, label, short])
-    // encodeURIComponent throws on a lone surrogate; such a value cannot sit in a URL anyway.
-    const encoded = value.isWellFormed() ? encodeUrlComponent(value) : value
-    if (encoded !== value && encoded !== escaped) pairs.push([encoded, label, short])
+    const forms = new Set([value, escaped, escaped.replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)])
+    // encodeURIComponent throws on a lone surrogate; it cannot sit in a URL anyway.
+    if (value.isWellFormed()) {
+      forms.add(encodeURIComponent(value))
+      forms.add(encodeUrlComponent(value))
+    }
+    for (const form of forms) pairs.push([form, label, short, form === value])
   }
   pairs.sort((a, b) => b[0].length - a[0].length)
   if (pairs.length === 0) return text => text
-  // One pass, so a label already written is never matched again.
   const labels = new Map()
-  for (const [value, label] of pairs) if (!labels.has(value)) labels.set(value, label)
-  const quote = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const word = value => `(?<![\\p{L}\\p{N}])${quote(value)}(?![\\p{L}\\p{N}])`
-  const parts = pairs.map(([value, , short]) => (short && wholeWords ? word(value) : quote(value)))
-  const pattern = new RegExp(parts.join('|'), 'gu')
-  return (text) => {
-    if (typeof text !== 'string' || !pairs.some(([value]) => text.includes(value))) return text
-    return text.replace(pattern, match => labels.get(match) ?? match)
+  // An escape-led form (JSON or ASCII JSON starting with `\uXXXX`, `\"`...) is real only
+  // after an even run of backslashes; the raw value is taken as it stands.
+  const escapeLed = new Set()
+  const sources = []
+  for (const [value, label, short, raw] of pairs) {
+    const key = formKey(value)
+    if (!labels.has(key)) labels.set(key, label)
+    if (!raw && value.startsWith('\\')) escapeLed.add(key)
+    const source = formPattern(value)
+    sources.push(short && wholeWords ? `(?<![\\p{L}\\p{N}])${source}(?![\\p{L}\\p{N}])` : source)
   }
+  // Compiled on first use, so text without a secret never builds it. A pattern too large
+  // for the engine falls back to one pattern per form, longest first; its error is never
+  // let out, since its message quotes the secrets.
+  let patterns
+  // V8 compiles a pattern on its first run, so a test run is part of building one.
+  const build = (source) => {
+    const pattern = new RegExp(source, 'gu')
+    pattern.test('')
+    return pattern
+  }
+  const compile = () => {
+    if (patterns) return patterns
+    try { patterns = [build(sources.join('|'))] } catch {
+      // A form whose own pattern is too large is searched literally, in its exact case
+      // and with its hex in one case (formKey keeps offsets).
+      patterns = sources.map((source, i) => {
+        try { return build(source) } catch { return pairs[i][0] }
+      })
+    }
+    return patterns
+  }
+  const rejected = (text, start, match) => match.startsWith('\\') && escapedAt(text, start) && escapeLed.has(formKey(match))
+  // Every whole match as [start, end, label], in text order, never overlapping.
+  const wholeMatches = (text) => {
+    const found = []
+    const list = compile()
+    const single = list.length === 1 && typeof list[0] !== 'string'
+    const take = (start, end, match) => {
+      if (!single && found.some(([from, to]) => from < end && start < to)) return
+      found.push([start, end, labels.get(formKey(match))])
+    }
+    let textKey
+    for (const pattern of list) {
+      if (typeof pattern === 'string') {
+        const literal = (source, form) => {
+          for (let at = source.indexOf(form); at !== -1; at = source.indexOf(form, at + 1)) {
+            const match = text.slice(at, at + form.length)
+            if (!rejected(text, at, match)) take(at, at + form.length, match)
+          }
+        }
+        literal(text, pattern)
+        textKey ??= formKey(text)
+        if (formKey(pattern) !== pattern || textKey !== text) literal(textKey, formKey(pattern))
+        continue
+      }
+      pattern.lastIndex = 0
+      for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+        // A rejected escape may hide a secret inside it: search again one step on.
+        if (rejected(text, match.index, match[0])) { pattern.lastIndex = match.index + 1; continue }
+        take(match.index, match.index + match[0].length, match[0])
+      }
+    }
+    return found.sort((x, y) => x[0] - y[0])
+  }
+  const rawForms = [...new Set(pairs.map(([form]) => form))]
+  const keys = [...labels.keys()]
+  // Literal precheck: an exact form, or a form with its hex in another case.
+  const present = (text) => {
+    if (rawForms.some(form => text.includes(form))) return true
+    if (!text.includes('%') && !text.includes('\\')) return false
+    const key = formKey(text)
+    return keys.some(form => key.includes(form))
+  }
+  // One edge per exact form: two secrets whose forms differ only in case keep both.
+  const edges = [...new Map(pairs.filter(([form, , short]) => !short && form.length > EDGE_MIN)
+    .map(([form, label, , raw]) => {
+      const folded = formKey(form) !== form || /%[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}/.test(form)
+      const key = folded ? foldHex(form) : form
+      // Hex digits inside the form's %XX and \uXXXX tokens: the only places a cut piece
+      // may differ from the form in case.
+      const hex = new Uint8Array(form.length)
+      for (const token of form.matchAll(/%[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\\\/g)) {
+        if (token[0] !== '\\\\') for (let i = token.index + (token[0][0] === '%' ? 1 : 2); i < token.index + token[0].length; i++) hex[i] = 1
+      }
+      return [form, { key, form, label, raw, folded, hex, rev: reverse(key) }]
+    })).values()]
+  const anchors = new Set(edges.flatMap(({ key }) => [key.slice(0, EDGE_MIN), key.slice(-EDGE_MIN)]))
+  // Literal anchors, no `u` flag, so an anchor cut inside a surrogate pair still matches.
+  const anchorPattern = anchors.size ? new RegExp([...anchors].map(quotePattern).join('|')) : null
+  // Every region to replace: whole matches, plus cut pieces at the edges of a cut text.
+  // Overlapping regions merge into one, labelled by every secret in it, and text outside
+  // them is never reprocessed, so word boundaries stay as they were.
+  const regions = (text, cut) => {
+    const found = present(text) ? wholeMatches(text) : []
+    const foldedText = cut ? foldHex(text) : ''
+    if (cut && anchorPattern.test(text) || cut && anchorPattern.test(foldedText)) {
+      const labelsIn = Array.from(text.matchAll(/\[secret:[^\]\r\n]*\]/g), match => [match.index, match.index + match[0].length])
+      // Only where a cut lands: DSH keeps a stream's tail, so a suffix piece opens the
+      // text (or the stream after `[stderr]`); a head cut leaves a prefix piece at the
+      // end (or before DSH's truncation notice). A byte cut inside a character decodes
+      // to up to three U+FFFD first. Pieces elsewhere are ordinary text.
+      const starts = [0], ends = [text.length]
+      for (let at = text.indexOf(STDERR); at !== -1; at = text.indexOf(STDERR, at + 1)) starts.push(at + STDERR.length)
+      for (let at = text.indexOf(TRUNCATED); at !== -1; at = text.indexOf(TRUNCATED, at + 1)) ends.push(at)
+      for (let i = 0; i < starts.length; i++) {
+        for (let n = 0; n < 3 && text[starts[i]] === '\uFFFD'; n++) starts[i]++
+      }
+      // Folding matched the piece; outside hex tokens it must match in exact case.
+      const exact = (edge, start, size, at) => {
+        if (!edge.folded) return true
+        for (let i = 0; i < size; i++) {
+          if (text[start + i] !== edge.form[at + i] && !edge.hex[at + i]) return false
+        }
+        return true
+      }
+      const offer = (start, end, edge) => {
+        if (end - start < EDGE_MIN) return
+        if (!edge.raw && text[start] === '\\' && escapedAt(text, start)) return
+        if (labelsIn.some(([from, to]) => from < end && start < to)) return
+        found.push([start, end, edge.label])
+      }
+      for (const edge of edges) {
+        const source = edge.folded ? foldedText : text
+        const length = edge.key.length
+        for (const from of starts) {
+          const window = source.slice(from, from + length - 1)
+          if (!window.includes(edge.key.slice(-EDGE_MIN))) continue
+          edge.revTable ??= failure(edge.rev)
+          // A border that fails the exact check gives way to the next shorter one.
+          let size = overlap(edge.rev, edge.revTable, reverse(window))
+          while (size >= EDGE_MIN && !exact(edge, from, size, length - size)) size = edge.revTable[size - 1]
+          offer(from, from + size, edge)
+        }
+        for (const to of ends) {
+          const window = source.slice(Math.max(0, to - length + 1), to)
+          if (!window.includes(edge.key.slice(0, EDGE_MIN))) continue
+          edge.table ??= failure(edge.key)
+          let size = overlap(edge.key, edge.table, window)
+          while (size >= EDGE_MIN && !exact(edge, to - size, size, 0)) size = edge.table[size - 1]
+          offer(to - size, to, edge)
+        }
+      }
+    }
+    found.sort((x, y) => x[0] - y[0] || y[1] - x[1])
+    const merged = []
+    for (const [start, end, label] of found) {
+      const last = merged.at(-1)
+      if (last && start < last[1]) {
+        // A region inside another adds nothing; one running past it adds its label.
+        if (end > last[1]) {
+          last[1] = end
+          if (!last[2].includes(label)) last[2].push(label)
+        }
+      } else merged.push([start, end, [label]])
+    }
+    return merged
+  }
+  // Edges count only in text known to be cut: a rendered DSH result carries its notice,
+  // and `cut` serves a stream's `{ text, truncated: true }` (see redactDeep).
+  const apply = (text, cut) => {
+    if (typeof text !== 'string') return text
+    const found = regions(text, Boolean(anchorPattern) && (cut || text.includes(TRUNCATED)))
+    if (found.length === 0) return text
+    const chunks = []
+    let cursor = 0
+    for (const [start, end, names] of found) {
+      chunks.push(text.slice(cursor, start), names.join(''))
+      cursor = end
+    }
+    chunks.push(text.slice(cursor))
+    return chunks.join('')
+  }
+  const redact = text => apply(text, false)
+  redact.cut = text => apply(text, true)
+  return redact
 }
+
+// Maps/sets (including weak), dates, regexps, buffers/views, promises, boxed
+// primitives, WeakRefs and functions are opaque, including their subclasses.
+const opaquePrototypes = new Set([
+  Map, Set, WeakMap, WeakSet, Date, RegExp, ArrayBuffer, SharedArrayBuffer,
+  Promise, String, Number, Boolean, BigInt, Symbol, WeakRef, DataView,
+].map(type => type.prototype))
+opaquePrototypes.add(Object.getPrototypeOf(Uint8Array.prototype))
+const opaqueObject = value => types.isMap(value) || types.isSet(value) || types.isWeakMap(value)
+  || types.isWeakSet(value) || types.isDate(value) || types.isRegExp(value)
+  || types.isAnyArrayBuffer(value) || types.isArrayBufferView(value)
+  || types.isPromise(value) || types.isBoxedPrimitive(value)
+const errorFields = new Set(['message', 'stack', 'cause', 'errors'])
+const FAST = Object.freeze({ enumerable: true })
+const REDACTION_FAILED = '[redacted: redaction failed]'
+const arrayIndex = /^(0|[1-9][0-9]{0,9})$/
+const isIndex = key => arrayIndex.test(key) && Number(key) < 0xffffffff
 
 // Returns the same reference when nothing changed, so callers can tell cheaply.
 export function redactDeep(value, redact) {
-  if (typeof value === 'string') return redact(value)
-  if (Array.isArray(value)) {
-    let changed = false
-    const next = value.map((item) => {
-      const replaced = redactDeep(item, redact)
-      if (replaced !== item) changed = true
-      return replaced
-    })
-    return changed ? next : value
+  // A redactor that fails must not hand the text back: it may hold a secret.
+  const replace = (text, cut = false) => {
+    try {
+      const result = cut && typeof redact.cut === 'function' ? redact.cut(text) : redact(text)
+      return typeof result === 'string' ? result : REDACTION_FAILED
+    } catch { return REDACTION_FAILED }
   }
-  if (value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
-    let changed = false
-    const next = {}
-    for (const [key, item] of Object.entries(value)) {
-      const replaced = redactDeep(item, redact)
-      if (replaced !== item) changed = true
-      next[key] = replaced
+  if (typeof value === 'string') return replace(value)
+  const records = new Map()
+  const pending = []
+  const visit = node => {
+    if (node === null || typeof node !== 'object') return null
+    if (records.has(node)) return records.get(node)
+    const record = { node, parents: [], props: [], dirty: false }
+    records.set(node, record)
+    pending.push(record)
+    return record
+  }
+  const root = visit(value)
+  if (!root) return value
+  for (let i = 0; i < pending.length; i++) {
+    const record = pending[i]
+    const node = record.node
+    let props
+    try {
+      record.proto = Object.getPrototypeOf(node)
+      // A native Error stays an Error whatever its prototype was set to.
+      record.error = types.isNativeError(node)
+      // A native Map, Date... stays opaque even with a null prototype. Plain objects
+      // (most of every payload) skip the check.
+      if (!record.error && record.proto !== Object.prototype && !Array.isArray(node) && opaqueObject(node)) continue
+      if (record.proto !== Object.prototype && record.proto !== Array.prototype && record.proto !== null) {
+        const seen = new Set()
+        for (let proto = record.proto; proto !== null; proto = Object.getPrototypeOf(proto)) {
+          if (opaquePrototypes.has(proto) || seen.has(proto)) throw new TypeError('opaque prototype')
+          seen.add(proto)
+          if (proto === Error.prototype) record.error = true
+        }
+      }
+      record.array = Array.isArray(node)
+      // Plain data (not a Proxy) is read like JSON: own enumerable keys and their
+      // values. Full descriptors are taken only for a node that gets copied.
+      if (!record.error && !types.isProxy(node) && (record.proto === Object.prototype || record.proto === Array.prototype || record.proto === null)) {
+        record.fast = true
+        // Arrays serialize every index, enumerable or not.
+        const names = record.array
+          ? Object.getOwnPropertyNames(node).filter(key => key !== 'length' && (isIndex(key) || Object.prototype.propertyIsEnumerable.call(node, key)))
+          : Object.keys(node)
+        props = names.map(key => ({ key, descriptor: FAST }))
+      } else props = Reflect.ownKeys(node).map(key => ({ key, descriptor: Object.getOwnPropertyDescriptor(node, key) }))
+      // A proxy may remove a key between ownKeys and descriptor inspection.
+      props = props.filter(prop => prop.descriptor)
+      if (record.array && !record.fast) {
+        record.length = props.find(prop => prop.key === 'length').descriptor
+        if (!Number.isInteger(record.length.value) || record.length.value < 0 || record.length.value > 0xffffffff) continue
+      }
+    } catch { continue }
+    record.props = props
+    // A DSH output stream `{ text, truncated: true }` was cut, so its text edges count.
+    let cut = false
+    try { cut = props.some(prop => prop.key === 'truncated') && node.truncated === true } catch {}
+    for (const prop of props) {
+      const { key, descriptor } = prop
+      prop.nextKey = key
+      if (typeof key !== 'string' || !(descriptor.enumerable || record.error && errorFields.has(key) || record.array && isIndex(key))) continue
+      // Array indices stay: renaming one would drop the element.
+      prop.nextKey = record.array && isIndex(key) ? key : replace(key)
+      if (prop.nextKey !== key) record.dirty = true
+      let item
+      try { item = descriptor === FAST ? node[key] : 'value' in descriptor ? descriptor.value : descriptor.get ? Reflect.apply(descriptor.get, node, []) : undefined } catch { continue }
+      prop.read = true
+      prop.value = typeof item === 'string' ? replace(item, cut && key === 'text') : item
+      if (typeof item === 'string' && prop.value !== item) record.dirty = true
+      prop.child = visit(item)
+      if (prop.child) prop.child.parents.push(record)
     }
-    return changed ? next : value
   }
-  return value
+  // Propagate through reverse edges before allocating: cycles copy as a unit.
+  const dirty = pending.filter(record => record.dirty)
+  for (let i = 0; i < dirty.length; i++) {
+    for (const parent of dirty[i].parents) {
+      if (parent.dirty) continue
+      parent.dirty = true
+      dirty.push(parent)
+    }
+  }
+  if (!root.dirty) return value
+  for (const record of dirty) {
+    if (!record.fast) continue
+    const node = record.node
+    const walked = new Map(record.props.map(prop => [prop.key, prop]))
+    record.props = Reflect.ownKeys(node).map((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(node, key)
+      let prop = walked.get(key)
+      if (!prop) {
+        prop = { key, nextKey: key }
+        // A key that appeared after the walk (a getter that caches) is redacted on its own.
+        if (typeof key === 'string' && descriptor && 'value' in descriptor && (descriptor.enumerable || record.array && isIndex(key))) {
+          prop.nextKey = record.array && isIndex(key) ? key : replace(key)
+          prop.read = true
+          prop.value = typeof descriptor.value === 'string' ? replace(descriptor.value) : redactDeep(descriptor.value, redact)
+        }
+      }
+      prop.descriptor = descriptor
+      return prop
+    })
+    if (record.array) record.length = Object.getOwnPropertyDescriptor(node, 'length')
+  }
+  for (const record of dirty) {
+    if (record.array) {
+      record.copy = new Array(record.length.value)
+      // An Array subclass keeps its prototype (and so its methods).
+      if (record.proto !== Array.prototype) Object.setPrototypeOf(record.copy, record.proto)
+    }
+    else if (record.error) {
+      record.copy = new Error()
+      for (const key of Reflect.ownKeys(record.copy)) Reflect.deleteProperty(record.copy, key)
+      Object.setPrototypeOf(record.copy, record.proto)
+    } else record.copy = Object.create(record.proto)
+  }
+  for (const record of dirty) {
+    const used = new Set(record.array ? ['length'] : [])
+    for (const prop of record.props) {
+      if (record.array && prop.key === 'length') continue
+      let key = prop.nextKey
+      if (typeof key === 'string') {
+        let suffix = 2
+        const outside = record.array && /^(0|[1-9][0-9]*)$/.test(key)
+          && Number(key) < 0xffffffff && Number(key) >= record.length.value
+        if (outside) key = `${prop.nextKey}#${suffix++}`
+        while (used.has(key)) key = `${prop.nextKey}#${suffix++}`
+      }
+      used.add(key)
+      let descriptor = prop.descriptor
+      if (prop.read) descriptor = {
+        value: prop.child?.dirty ? prop.child.copy : prop.value,
+        enumerable: descriptor.enumerable, configurable: descriptor.configurable,
+        writable: 'writable' in descriptor ? descriptor.writable : true,
+      }
+      Object.defineProperty(record.copy, key, descriptor)
+    }
+    if (record.array) Object.defineProperty(record.copy, 'length', record.length)
+  }
+  return root.copy
 }
 
 export function install(rt) {
