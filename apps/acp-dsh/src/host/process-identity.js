@@ -19,25 +19,39 @@ export function validBirth(value) {
   return value.platform === 'win32' && typeof value.start === 'string' && /^[1-9][0-9]{0,18}$/.test(value.start)
 }
 
+// The command name may contain spaces and parentheses. Fields start after its last ')'.
+export function parseProcStat(pid, stat) {
+  const end = stat.lastIndexOf(')')
+  if (!stat.startsWith(`${pid} (`) || end < 0 || stat[end + 1] !== ' ') return null
+  const fields = stat.slice(end + 2).trim().split(/\s+/)
+  if (fields.length < 50 || !/^[A-Za-z]$/.test(fields[0])) return null
+  return {
+    ppid: Number(fields[1]), pgid: Number(fields[2]), session: Number(fields[3]),
+    start: fields[19],
+  }
+}
+
 export function processBirth(pid, { platform = process.platform, read = readFileSync,
-  exec = execFileSync, systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT } = {}) {
-  if (!pidOf(pid)) return null
+  exec = execFileSync, systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT,
+  now = Date.now, until = Infinity } = {}) {
+  if (!pidOf(pid) || now() >= until) return null
   try {
     let value
     if (platform === 'linux') {
       const boot = read('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+      if (now() >= until) return null
       const stat = read(`/proc/${pid}/stat`, 'utf8')
-      const end = stat.lastIndexOf(')')
-      if (!stat.startsWith(`${pid} (`) || end < 0 || stat[end + 1] !== ' ') return null
-      const fields = stat.slice(end + 2).trim().split(/\s+/)
-      if (fields.length < 50 || !/^[A-Za-z]$/.test(fields[0])) return null
-      value = { platform, boot, start: fields[19] }
+      const parsed = parseProcStat(pid, stat)
+      if (!parsed) return null
+      value = { platform, boot, start: parsed.start }
     } else {
       const options = { encoding: 'utf8', timeout: PS_BOUND_MS, maxBuffer: 1024, windowsHide: true }
       let output
       if (platform === 'darwin') {
+        if (now() >= until) return null
         output = exec('/bin/ps', ['-p', String(pid), '-o', 'lstart='], {
-          ...options, env: { LC_ALL: 'C', TZ: 'UTC' },
+          ...options, timeout: Math.max(1, Math.min(PS_BOUND_MS, until - now())),
+          env: { LC_ALL: 'C', TZ: 'UTC' },
         })
       } else if (platform === 'win32') {
         if (typeof systemRoot !== 'string' || !win32.isAbsolute(systemRoot)) return null
@@ -47,7 +61,7 @@ export function processBirth(pid, { platform = process.platform, read = readFile
       } else return null
       value = { platform, start: output.trim().replace(/\s+/g, ' ') }
     }
-    return validBirth(value) ? value : null
+    return now() < until && validBirth(value) ? value : null
   } catch { return null }
 }
 
