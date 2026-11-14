@@ -302,7 +302,11 @@ export function install(rt) {
       `You are number ${index + 1} of ${round.slots.length}. ${before === 0 ? 'Nobody spoke before you' : `${before} went before you`}${after === 0 ? ', and you are the last.' : `; ${after} after you will see your message.`}`,
       ROOM_REPLY,
     ].filter(Boolean).join('\n\n')
-    return { text, files: [...earlier, ...current].flatMap(line => line.files ?? []) }
+    return {
+      text,
+      files: [...earlier, ...current].flatMap(line => line.files ?? []),
+      uploads: [...earlier, ...current].flatMap(line => line.uploads ?? []),
+    }
   }
 
   // Members whose turn in this group is running, and since when.
@@ -334,7 +338,8 @@ export function install(rt) {
   // member's Session, so a member at work is never cut off. `by` is the member that
   // called it, which answers what the turn posts after the round moved on. What the
   // member writes before its last step is posted at once and collected in `said`.
-  async function roomTurn(room, member, sessionId, { text, files }, note, signal, round, by, said = []) {
+  async function roomTurn(room, member, sessionId, prompt, note, signal, round, by, said = []) {
+    const { text, files, uploads } = prompt
     if (signal.aborted) return null
     const startedAt = Date.now()
     const exchangeId = randomUUID()
@@ -371,7 +376,10 @@ export function install(rt) {
       signal.addEventListener('abort', () => finish(null), { once: true })
     })
     try {
-      await rt.deliver({ fromId: undefined, toId: member.id, sessionId, role: 'room', roomId: room.id, exchangeId, note, text, files, steer: busy, ...(by ? { askedBy: by } : {}) })
+      await rt.deliver({
+        fromId: undefined, toId: member.id, sessionId, role: 'room', roomId: room.id,
+        exchangeId, note, text, files, uploads, steer: busy, ...(by ? { askedBy: by } : {}),
+      })
       // The prompt reached the member: its read position moves on.
       room.seen[member.id] = seenAt
       // Still held by an earlier request: this turn cannot start until the user answers.
@@ -562,7 +570,8 @@ export function install(rt) {
       const text = session.brief === undefined ? prompt.text : `${session.brief}\n\n${prompt.text}`
       const said = []
       const startedAt = Date.now()
-      const reply = await roomTurn(room, member, session.id, { text, files: prompt.files }, slot.note ?? 'your turn', signal, round, slot.by, said)
+      const reply = await roomTurn(room, member, session.id, { ...prompt, text },
+        slot.note ?? 'your turn', signal, round, slot.by, said)
       round.speaking = null
       for (const stop of rt.stopsIn?.(session.id, startedAt) ?? []) {
         round.replies.push({ kind: 'permission-stop', botId: member.id, name: member.name, color: member.color, why: stop.why, count: stop.count, time: stop.last })
@@ -657,6 +666,7 @@ export function install(rt) {
           ...(post.botId ? { who: rt.botOf(post.botId)?.name ?? post.name ?? 'Bot', botId: post.botId } : { who: 'User' }),
           text,
           ...(post.files === undefined ? {} : { files: post.files }),
+          ...(post.uploads === undefined ? {} : { uploads: post.uploads }),
         })
       }
       // The user wrote here — or pressed Continue, which opens the same round

@@ -58,7 +58,7 @@ export async function prepareUpload({ blocks, replay = [], run, attachments, cwd
       throw error('An ACP prompt can contain at most 20 uploaded images.')
     }
     const ref = reference(block.attachment)
-    if (!images) {
+    if (!images || block.copyOnly === true) {
       const text = { type: 'text', text: textOnlyImageText(ref) }
       copies.set(text, block)
       return text

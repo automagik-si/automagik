@@ -8,7 +8,11 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { LlmAdapter, boundContextSummary, createUserMessage, isAgentLoopRequest, offloadedImageText } from '@deepseek-ai/dsh-llm'
+import { isDeepStrictEqual } from 'node:util'
+import {
+  LlmAdapter, boundContextSummary, createUserMessage, fileHandleText,
+  isAgentLoopRequest, offloadedImageText,
+} from '@deepseek-ai/dsh-llm'
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
 import { recordDrift } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
@@ -197,16 +201,107 @@ export function promptOf(messages, redact = text => text) {
   return [{ type: 'text', text: text || (own.some(message => message.source?.kind === 'retry') ? 'Continue.' : '') }]
 }
 
+// A group relay carries pointers only. Both Sessions and the current membership must
+// agree before the person's durable row can supply a reference for a workspace copy.
+function ownsRoomUploads(ctx, session, roomId) {
+  try {
+    const team = ctx?.get?.('omniTeam')
+    const owner = team?.groupOwners?.get(session?.id)
+    if (!session?.id || owner?.roomId !== roomId || !owner.botId) return false
+    const room = team.roomOf(roomId)
+    return Array.isArray(room?.members) && room.members.includes(owner.botId) &&
+      room.sessions?.[owner.botId] === session.id
+  } catch { return false }
+}
+
+function roomUploads(row, saved, session, ctx) {
+  const fresh = message => message?.source?.kind === 'bot' &&
+    message.source.role === 'room' && !isHandoff(message) &&
+    !message.source.resumed && !message.source.retried && !message.source.resume
+  const uploads = row.source?.uploads
+  if (!fresh(row) || !fresh(saved) || uploads?.v !== 1 ||
+      typeof uploads.roomId !== 'string' || !Array.isArray(uploads.items) ||
+      !isDeepStrictEqual(saved.source.uploads, uploads)) return []
+  let group
+  try {
+    if (!ownsRoomUploads(ctx, session, uploads.roomId)) return []
+    group = ctx.agents?.get(uploads.roomId)?.session?.deriveMessages?.()
+  } catch { return [] }
+  if (!Array.isArray(group)) return []
+  return uploads.items.flatMap(item => {
+    if (!item || typeof item.messageId !== 'string' ||
+        typeof item.attachmentId !== 'string' ||
+        !Number.isInteger(item.blockIndex) || item.blockIndex < 0 ||
+        !['file', 'image'].includes(item.kind)) return []
+    const person = group.find(message => message.id === item.messageId)
+    if (person?.source?.kind !== 'user' || person.source.handoff ||
+        !Array.isArray(person.content) || item.blockIndex >= person.content.length) return []
+    const block = person.content[item.blockIndex]
+    return block?.type === item.kind &&
+      block.attachment?.attachmentId === item.attachmentId && !block.offloaded
+      ? [{ type: block.type, attachment: block.attachment, copyOnly: true }] : []
+  })
+}
+
+function isFileHandle(text, ref) {
+  if (text === fileHandleText(ref, undefined)) return true
+  if (typeof text !== 'string') return false
+  const template = fileHandleText(ref, '')
+  // DSH's quoted() uses JSON.stringify for names and paths.
+  const empty = JSON.stringify('')
+  const marker = ': verbatim read-only copy saved at '
+  const at = template.lastIndexOf(marker + empty)
+  if (at < 0) return false
+  const head = template.slice(0, at + marker.length)
+  const tail = template.slice(at + marker.length + empty.length)
+  if (!text.startsWith(head) || !text.endsWith(tail)) return false
+  const middle = text.slice(head.length, text.length - tail.length)
+  try {
+    const path = JSON.parse(middle)
+    return typeof path === 'string' && JSON.stringify(path) === middle
+  } catch { return false }
+}
+
 // Legacy fallback rows still supply text, never fresh image authority. Retry and handoff
 // rows likewise cannot replay an earlier accepted image. Undefined keeps the text path exact.
-function uploadBlocks(messages, redact, session) {
+function uploadBlocks(messages, redact, session, ctx) {
   const selected = promptRows(messages).rows
   const durable = session?.deriveMessages?.() ?? []
   const files = new Set()
+  const relays = new Set()
   const rows = selected.map(row => {
+    const saved = row.id ? durable.find(message => message.id === row.id) : undefined
+    const verified = roomUploads(row, saved, session, ctx)
+    if (verified.length > 0) {
+      const content = Array.isArray(row.content)
+        ? row.content.filter(block => block?.type === 'text') : []
+      if (!Array.isArray(row.content)) content.push({ type: 'text', text: textOf(row.content) })
+      const consumed = new Set()
+      for (const block of verified) {
+        const index = Array.isArray(saved.content) && Array.isArray(row.content) &&
+          saved.content.length === row.content.length
+          ? saved.content.findIndex((part, index) => {
+            if (consumed.has(index) || part?.type !== 'file' || block.type !== 'file' ||
+                part.attachment?.attachmentId !== block.attachment.attachmentId ||
+                part.attachment?.name !== block.attachment.name ||
+                row.content[index]?.type !== 'text') return false
+            return isFileHandle(row.content[index].text, part.attachment)
+          }) : -1
+        const projected = index < 0 ? undefined : row.content[index]
+        const at = projected === undefined ? -1 : content.indexOf(projected)
+        if (at < 0) content.push(block)
+        else {
+          content.splice(at, 1, block)
+          consumed.add(index)
+        }
+        files.add(block)
+      }
+      const relay = { ...row, content }
+      relays.add(relay)
+      return relay
+    }
     if (row.source?.kind !== 'user' || isHandoff(row) || !row.id ||
         !Array.isArray(row.content)) return row
-    const saved = durable.find(message => message.id === row.id)
     if (!saved || saved.source?.kind !== 'user' || isHandoff(saved) ||
         !Array.isArray(saved.content) || saved.content.length !== row.content.length) return row
     if (saved.content.some((block, index) =>
@@ -218,7 +313,8 @@ function uploadBlocks(messages, redact, session) {
       return file
     }) }
   })
-  const genuine = row => row.source?.kind === 'user' && !isHandoff(row)
+  const genuine = row => relays.has(row) ||
+    (row.source?.kind === 'user' && !isHandoff(row))
   const upload = block => block?.type === 'image' || files.has(block)
   if (!rows.some(row => genuine(row) && Array.isArray(row.content) &&
       row.content.some(upload))) return undefined
@@ -234,7 +330,7 @@ function uploadBlocks(messages, redact, session) {
       blocks.push({ ...parts[i] })
     }
   }
-  return blocks
+  return { blocks, roomIds: [...relays].map(row => row.source.uploads.roomId) }
 }
 
 /** Where a Session title on an agent's chat goes when DSH's default model is an agent too. */
@@ -1384,7 +1480,8 @@ export class AcpAdapter extends LlmAdapter {
         if (live.ownSent === true || live.fileOwner) this.end(sessionId, live)
         return yield finish('error', `${agent.name} would not take DSH's permission level: ${error?.message ?? error}`)
       }
-      const uploads = uploadBlocks(options.messages, this.redact, dshAgent?.session)
+      const uploads = uploadBlocks(
+        options.messages, this.redact, dshAgent?.session, this.ctx)
       const uploadRun = live.run
       const uploadSession = uploadRun.sessionId
       // Only the asynchronous upload path uses this stricter ownership check. Never
@@ -1394,7 +1491,8 @@ export class AcpAdapter extends LlmAdapter {
         this.starting.get(sessionId) === entry && this.live.get(sessionId) === live &&
         live.run === uploadRun && uploadRun.alive && uploadRun.sessionId === uploadSession &&
         live.dshAgent === dshAgent && this.ctx.agents?.get(sessionId) === dshAgent &&
-        this.agents.get(options.provider) === agent
+        this.agents.get(options.provider) === agent &&
+        uploads.roomIds.every(roomId => ownsRoomUploads(this.ctx, dshAgent?.session, roomId))
       )
       const uploadStopped = () => options.signal?.aborted ? STOPPED()
         : finish('error', entry.held ?? live.held ?? 'Uploaded image turn changed before the prompt. Send again.', 'acp_upload_content')
@@ -1404,7 +1502,7 @@ export class AcpAdapter extends LlmAdapter {
         entry.upload = { controller, run: uploadRun, live }
         try {
           prepared = await prepareUpload({
-            blocks: uploads, replay: live.replay, run: uploadRun,
+            blocks: uploads.blocks, replay: live.replay, run: uploadRun,
             attachments: this.ctx.get?.('attachments'), cwd: dshAgent?.session?.header?.cwd,
             warn: message => this.warn(message),
             signal: options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal,
