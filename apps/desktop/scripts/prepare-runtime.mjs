@@ -64,9 +64,10 @@ for (const file of DSH_TUI_FILES) {
   mkdirSync(dirname(join(dshTuiBuild, file)), { recursive: true })
   cpSync(join(dshTuiSource, file), join(dshTuiBuild, file))
 }
-// The child runner stays outside the app's asar so the packaged binary can run it as Node.
+// The child runner and its helper stay outside the app's asar so it can run as Node.
 const dshTuiRunner = join(APP, 'src', 'dsh-tui-run.mjs')
 cpSync(dshTuiRunner, join(dshTuiBuild, 'dsh-tui-run.mjs'))
+cpSync(join(APP, 'src', 'close-inherited.cjs'), join(dshTuiBuild, 'close-inherited.cjs'))
 writeFileSync(join(dshTuiBuild, 'package.json'), DSH_TUI_PACKAGE)
 say(`copied the shared dsh-TUI installer (${DSH_TUI_FILES.join(', ')}) and its runner`)
 // Omni at the pinned commit: only its plugin folders and the harness they are tested on.

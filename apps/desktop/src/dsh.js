@@ -11,13 +11,14 @@
 // It is apart from a dsh you already run (~/.dsh) and from the Bot team installed into that
 // one (~/.automagik/bots), so neither sees the other's Bots or Sessions. Omni's own folder
 // (~/.omni: its sandbox, the Bun its channels download) is Omni's.
-import { execFile, spawn } from 'node:child_process'
+import { execFile, spawn as nodeSpawn } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { cp, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { delimiter, join, resolve, win32 } from 'node:path'
 import { DEFAULTS as PRIVACY_DEFAULTS, privacyEnv } from './privacy.js'
+import { CLOSE_INHERITED } from './child-paths.js'
 
 export const PROFILE = 'omni'
 const READY_TIMEOUT_MS = 120_000
@@ -855,6 +856,7 @@ export const busyFileOf = home => join(home, 'busy.json')
  */
 export function startDsh({
   node, bin, env, port, cwd, log, privacy, timeoutMs = READY_TIMEOUT_MS, onSpawn, urlFile,
+  spawn = nodeSpawn,
 }) {
   // A file left by an earlier start must not sign this one in: dsh writes its own once it is
   // ready, and this start falls back to it when dsh's output is unavailable. A removal that
@@ -870,7 +872,12 @@ export function startDsh({
       log?.write(`automagik: could not remove the previous launch URL ${urlFile}: ${reason}\n`)
     }
   }
-  const child = spawn(node, [bin, '--profile', PROFILE, ...(privacy ? ['--patch', privacy] : []), '--no-open', '--host', '127.0.0.1', '--port', String(port)], {
+  const args = [
+    '--require', CLOSE_INHERITED, bin, '--profile', PROFILE,
+    ...(privacy ? ['--patch', privacy] : []),
+    '--no-open', '--host', '127.0.0.1', '--port', String(port),
+  ]
+  const child = spawn(node, args, {
     cwd, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
   onSpawn?.(child)
