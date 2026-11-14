@@ -1,3 +1,7 @@
+// The one switch for new WhatsApp sign-ups. While false, the form offers email only and the
+// endpoint refuses a WhatsApp sign-up, so no new code is issued. Codes already issued still
+// confirm through whatsapp-confirm, and removal still takes a WhatsApp sender or code.
+export const WHATSAPP_SIGNUPS_OPEN = false
 export const WHATSAPP_BACKLOG_SECONDS = 180 * 86400
 export const CONSENT_VERSION = '2026-11-11'
 export const encoder = new TextEncoder()

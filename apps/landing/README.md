@@ -17,7 +17,8 @@ with its source digest in `assets/art/manifest.json`.
 The committed HTML needs no Pages build step. A page carries one script, the family drawer's
 own (see "The family drawer"); nothing else on a page runs script. The home
 has one small film slot: a real still with one quiet line until the film exists. Cloud is coming soon and carries intent, consent and removal
-forms, with email or inbound-first WhatsApp confirmation. No launch or marketing email.
+forms, with email confirmation; inbound-first WhatsApp confirmation is paused
+(`WHATSAPP_SIGNUPS_OPEN`, see `waitlist/README.md`). No launch or marketing email.
 The meter is not a product or page. Herdr and DSH are Desktop installation channels.
 Pages carries no Arca page: no file at `/arca/` and nothing under it. Arca's own page is
 live at that address since 2026-11-13, and the stand-in this site kept there until then is
@@ -387,8 +388,11 @@ No Worker route, redirect or account setting is changed by this source update.
 
 ## WhatsApp timing
 
-WhatsApp remains visible beside email. The form warns in English and Portuguese that
-confirmation may take a little while. Our support Bot sends the v2 envelope with the original
+New WhatsApp sign-ups are paused (`WHATSAPP_SIGNUPS_OPEN` in `waitlist/lib/shared.js`): the form
+offers email only and the endpoint refuses a WhatsApp sign-up. When the switch is on, the form
+offers WhatsApp beside email and warns in English and Portuguese that confirmation may take a
+little while. Codes issued before the pause confirm as follows. Our support Bot sends the
+v2 envelope with the original
 message receive time in top-level `timestamp` (Unix milliseconds). The callback accepts a
 message received at or before the code's 30-minute expiry, even if processed days later.
 More than two minutes ahead of processing time is 400; missing/invalid receive time is 400.
