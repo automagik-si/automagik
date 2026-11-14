@@ -184,6 +184,7 @@ export function apply(ctx, config = {}, {
   // The chat's image keeper (`keepImages`): where an image an agent makes in a chat is kept so the
   // chat can show it. One at a time; the Bot team registers its images folder.
   let imageKeeper
+  const identityReaders = new Set()
   // The turn gates (`holdTurns`): each registrant's own entry, so one never replaces another's.
   const turnGates = new Set()
   let ownAnswerer
@@ -192,6 +193,23 @@ export function apply(ctx, config = {}, {
     ownMode: () => (ownContested ? undefined : ownAnswerer?.answer),
     holds: () => [...turnGates].map(entry => entry.gate),
     images: () => imageKeeper,
+    botIdentity: sessionId => {
+      let identity
+      for (const { reader } of identityReaders) {
+        let found
+        try { found = reader(sessionId) } catch {
+          warn(ctx, 'a Bot identity reader failed; no identity is sent')
+          return undefined
+        }
+        if (found === undefined) continue
+        if (identity !== undefined) {
+          warn(ctx, 'competing Bot identities for one Session; no identity is sent')
+          return undefined
+        }
+        identity = found
+      }
+      return identity
+    },
     // The raw tri-state: an absent setting takes each agent's own switch in AcpAdapter.
     dshTools: () => flagOf(config.dshTools),
     backchannel,
@@ -1309,6 +1327,13 @@ export function apply(ctx, config = {}, {
      * message to show as it is.
      */
     generateImage,
+    /** Read only the Bot that owns this Session. Returns this registration's disposer. */
+    botIdentity(reader) {
+      if (typeof reader !== 'function') return () => {}
+      const entry = { reader }
+      identityReaders.add(entry)
+      return () => { identityReaders.delete(entry) }
+    },
     /**
      * Where an image an agent makes in a chat goes (agent-image.js): `keeper` is
      * { start?({ callId, sessionId, via }), keep({ callId, sessionId, base64, mimeType, via }) ->

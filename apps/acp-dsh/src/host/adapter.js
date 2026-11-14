@@ -426,7 +426,12 @@ export class AcpAdapter extends LlmAdapter {
    *   replaces CANCEL_WAIT_MS; `timers` is the clock all three run on. Tests set them, so none
    *   waits a real deadline out.
    */
-  constructor(ctx, agents, { dshTools = () => false, backchannel, redactor, onSignedOut, images = () => undefined, access, holds, ownMode = () => undefined, ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS, fileDrainMs = 6000, timers = globalThis } = {}) {
+  constructor(ctx, agents, {
+    dshTools = () => false, backchannel, redactor, onSignedOut, images = () => undefined,
+    botIdentity = () => undefined, access, holds, ownMode = () => undefined,
+    ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
+    fileDrainMs = 6000, timers = globalThis,
+  } = {}) {
     super()
     this.cancelWaitMs = cancelWaitMs
     this.timers = timers
@@ -448,6 +453,7 @@ export class AcpAdapter extends LlmAdapter {
     this.ctx = ctx
     this.agents = agents
     this.dshTools = dshTools
+    this.botIdentity = botIdentity
     this.backchannel = backchannel
     this.redact = redactor ?? (text => text)
     this.live = new Map()
@@ -1191,11 +1197,26 @@ export class AcpAdapter extends LlmAdapter {
               state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true })
             }
             this.diagnostics?.started(sessionId, this, agent, state)
+            const takesIdentity = ['acp-claude', 'acp-codex'].includes(options.provider)
             const run = new AgentRun({
               ...spec,
               cwd: dshAgent?.session?.header?.cwd
                 ?? spec.env?.AUTOMAGIK_BOT_CLI_HOME ?? homedir(),
               name: agent.name,
+              botIdentity: () => {
+                if (!takesIdentity) return undefined
+                const identity = this.botIdentity(sessionId)
+                if (typeof identity?.name !== 'string' || !identity.name.trim()) return undefined
+                const { name, role, instructions } = identity
+                return '# Your identity\n'
+                  + `You are ${name}, a Bot on the user's team.`
+                  + (role ? ` Your role: ${role}.` : '')
+                  + (instructions ? `\n\n${instructions}` : '')
+              },
+              // Which way the Bot's identity went (never its text), for the log.
+              onIdentity: takesIdentity ? delivery => {
+                try { this.ctx.logger?.info?.(`acp-dsh: ${agent.name} Bot identity: ${delivery}`) } catch {}
+              } : undefined,
               mcpServers: state.bridge === undefined ? [] : [this.bridgeServer(state.bridge)],
               ...(this.bridgeOn(agent) && agent.disableBuiltInTools === true
                 ? { sessionMeta: { disableBuiltInTools: true } }

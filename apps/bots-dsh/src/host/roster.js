@@ -1,4 +1,5 @@
 import { markOf } from '../shared/permission-levels.js'
+import { ROLE_MAX } from '../shared/bot-profile.js'
 // Roster: creating, changing, and deleting Bots and group chats, the Main Bot role, and
 // the first Main Bot of a new team.
 import { mkdir } from 'node:fs/promises'
@@ -14,7 +15,7 @@ import { cleanDenyTools } from './tool-deny.js'
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
 // characters become spaces.
-export const ROLE_MAX = 24
+export { ROLE_MAX }
 export function cleanRole(value) {
   if (value === undefined || value === null) return ''
   if (typeof value !== 'string') throw refusal('A role is a few words of text')

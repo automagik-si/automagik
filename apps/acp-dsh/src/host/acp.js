@@ -190,10 +190,22 @@ export class AgentRun {
         error.code = 'acp_protocol_mismatch'
         throw error
       }
+      const identity = this.spec.botIdentity?.()
+      this.identityDelivery = identity
+        ? this.init.agentCapabilities?.sessionCapabilities?.systemPrompt != null
+          ? 'systemPrompt' : 'preamble'
+        : 'none'
+      if (this.identityDelivery === 'systemPrompt') {
+        this.systemPrompt = { mode: 'append', content: [{ type: 'text', text: identity }] }
+      } else if (this.identityDelivery === 'preamble') {
+        this.identityPreamble = identity
+      }
+      this.spec.onIdentity?.(this.identityDelivery)
       const session = await this.conn.newSession({
         cwd,
         mcpServers,
         ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }),
+        ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
       })
       this.sessionId = session.sessionId
       this.modes = session.modes
@@ -242,7 +254,10 @@ export class AgentRun {
   async fork({ cwd, mcpServers }) {
     if (typeof this.conn.forkSession !== 'function') throw new Error('it cannot fork its session')
     const source = this.sessionId
-    const answer = await this.held(() => this.conn.forkSession({ sessionId: source, cwd, mcpServers }))
+    const answer = await this.held(() => this.conn.forkSession({
+      sessionId: source, cwd, mcpServers,
+      ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
+    }))
     this.sessionId = answer.sessionId
     if (answer.modes !== undefined && answer.modes !== null) this.modes = answer.modes
     if (Array.isArray(answer.configOptions)) this.options = withModels(answer.configOptions, answer.models ?? modelStateOf(this.options))
@@ -367,6 +382,10 @@ export class AgentRun {
       this.tools.delete(id)
     }
     this.holdOn()
+    if (this.identityPreamble !== undefined) {
+      prompt = [{ type: 'text', text: this.identityPreamble }, ...prompt]
+      this.identityPreamble = undefined
+    }
     const run = this.conn.prompt({ sessionId: this.sessionId, prompt })
     this.prompting = Promise.race([run, this.gone]).then(
       result => this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' }),

@@ -895,3 +895,22 @@ Automagik's judge asks the person for hard-to-undo steps and after three consecu
 Codex's reviewer is a single CLI switch; global rules or reviewer policy would also change other Bots. No CLI home is written. Codex review counts can produce a refusal-stop notice, but the actual denial-limit ending and Claude Code auto mode still need captures. The host notice and tool result remain English like their neighbors. The permission questions explain that an allowed API escalation and native-agent tools may change files outside the Bot's folder. Existing Codex wording remains unchanged.
 
 RFC 0031 follow-up: rule 5 is per mark, with exact API models; rule 6 no longer refuses bridges. Questions 4 and 5 are answered by the own model/background model split and explicit failure-to-person behavior. The threat model's bridged-dialog statement gains “or the background model decides it”. “Not scheduled” is narrowed: any request reaching a counting chat may lead to a judged step; schedules themselves are not treated as the person's requests. RFC 0031's text remains for its owner.
+
+### Bot identity on ACP (amended 2026-11-14, #1269)
+
+Claude Code and Codex receive only the owning Bot's name, role and instructions through a
+Session-scoped reader. They never receive the native DSH system prompt through this channel.
+Delivery works with or without the DSH tools bridge. Remote Hermes gets no identity through
+this channel; it uses its own profile instructions.
+
+When the agent advertises `sessionCapabilities.systemPrompt`, a fresh session receives that
+identity in `systemPrompt` with `mode: 'append'`, after the agent's own system instructions.
+It extends those instructions and never replaces them. A tool-refresh fork carries the same
+identity snapshot. Without that capability, identity is prepended once to the first prompt,
+before replay and user content.
+That fallback has user-message precedence, not system-level precedence.
+
+Edits do not restart a running session. The existing profile-edit notice carries changes there,
+with its existing self-edit exceptions; each fresh session reads the current profile. A preserved
+unbridged Codex session returning from a native route still keeps its original identity snapshot.
+Repository-file consent in RFC 0014 is unchanged.

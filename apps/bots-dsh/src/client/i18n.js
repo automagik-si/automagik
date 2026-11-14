@@ -5,6 +5,12 @@
 export const NAMESPACE = 'omni-ui'
 
 const ZH = {
+  "What will it do?": "它会做什么？",
+  "Add instructions": "添加说明",
+  "Part of the Bot's system prompt. You can change it later in its details.":
+    "这是 Bot 系统提示词的一部分。你可以稍后在详情中更改。",
+  "New Bots start at {level}.": "新 Bot 从 {level} 开始。",
+  "This model uses its Hermes profile's own instructions.": "此模型使用其 Hermes 配置文件自己的说明。",
   "Force update": "强制更新",
   "Stop and update": "停止并更新",
   "Stops running conversations and sign-ins, installs every available update and restarts.": "停止正在进行的对话和登录，安装所有可用更新并重启。",

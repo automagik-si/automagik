@@ -65,6 +65,11 @@ function SessionFileApproval({ matched: { pending, item }, renderFactorySlot }) 
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
+  "What will it do?": "它会做什么？",
+  "Add instructions": "添加说明",
+  "Part of the Bot's system prompt. You can change it later in its details.": "这是 Bot 系统提示词的一部分。你可以稍后在详情中更改。",
+  "New Bots start at {level}.": "新 Bot 从 {level} 开始。",
+  "This model uses its Hermes profile's own instructions.": "此模型使用其 Hermes 配置文件自己的说明。",
   "Force update": "强制更新",
   "Stop and update": "停止并更新",
   "Stops running conversations and sign-ins, installs every available update and restarts.": "停止正在进行的对话和登录，安装所有可用更新并重启。",
@@ -21031,13 +21036,18 @@ function startModel(roster) {
   const models = (roster.models ?? []).filter(setUp);
   return (models.find((model) => model.ref === roster.defaultModel) ?? models.find((model) => model.superseded !== true) ?? models[0])?.ref ?? "";
 }
-function createPayload({ name, look, image, model, effort, brief }) {
+function createPayload({ name, look, image, model, effort, brief, role, instructions }) {
   const payload = { name, color: look.color, avatar: image ? { shape: look.shape, image } : { shape: look.shape } };
   if (model) payload.model = model;
   if (effort !== void 0) payload.effort = effort;
   if (brief) payload.brief = brief;
+  if (role?.trim()) payload.role = role.trim();
+  if (instructions?.trim()) payload.instructions = instructions.trim();
   return payload;
 }
+
+// src/shared/bot-profile.js
+var ROLE_MAX = 24;
 
 // src/client/create-bot.js
 var import_react54 = require("react");
@@ -21052,6 +21062,9 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const [image, setImage] = (0, import_react54.useState)(null);
   const [library, setLibrary] = (0, import_react54.useState)(false);
   const [name, setName] = (0, import_react54.useState)(start2?.name ?? "");
+  const [role, setRole] = (0, import_react54.useState)("");
+  const [instructions, setInstructions] = (0, import_react54.useState)("");
+  const [showInstructions, setShowInstructions] = (0, import_react54.useState)(false);
   const [model, setModel] = (0, import_react54.useState)(() => startModel(roster));
   const [effort, setEffort] = (0, import_react54.useState)(void 0);
   const [busy, setBusy] = (0, import_react54.useState)(false);
@@ -21066,12 +21079,22 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const finalName = name.trim() || fallbackName;
   const clash = roster.bots.some((bot) => bot.name.toLowerCase() === finalName.toLowerCase());
   const problem = nameProblem(finalName);
+  const permission = roster.prefs?.permission ?? roster.permissions?.defaultPreset;
   const create = async () => {
     if (busy || clash || problem) return;
     setError("");
     setBusy(true);
     try {
-      const bot = await actions.createBot(createPayload({ name: finalName, look, image, model, effort, brief }));
+      const bot = await actions.createBot(createPayload({
+        name: finalName,
+        look,
+        image,
+        model,
+        effort,
+        brief,
+        role,
+        instructions
+      }));
       onCreated(bot);
     } catch (failure) {
       setError(failure?.message ?? String(failure));
@@ -21158,6 +21181,18 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
       problem ? (0, import_react54.createElement)("span", { className: "bt-note bt-danger" }, hostText(problem)) : clash ? (0, import_react54.createElement)("span", { className: "bt-note bt-danger" }, t("A Bot named {name} already exists", { name: finalName })) : null
     ),
     (0, import_react54.createElement)(
+      "label",
+      { className: "bt-field" },
+      (0, import_react54.createElement)("span", { className: "bt-field-label" }, t("Role")),
+      (0, import_react54.createElement)("input", {
+        className: "bt-input",
+        value: role,
+        maxLength: ROLE_MAX,
+        "aria-label": t("Role"),
+        onChange: (event) => setRole(event.target.value)
+      })
+    ),
+    (0, import_react54.createElement)(
       "div",
       { className: "bt-field" },
       (0, import_react54.createElement)("span", { className: "bt-field-label" }, t("Model")),
@@ -21166,6 +21201,44 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
         setEffort(void 0);
       }, onPickEffort: (picked) => setEffort(picked ?? null) }),
       (0, import_react54.createElement)("span", { className: "bt-note" }, (roster.models ?? []).length > 0 ? t("The Bot runs on this model. You can change it later in its details.") : t("Add a provider and a model in DeepSeek Harness first, or pick one in the Bot's chat later."))
+    ),
+    (0, import_react54.createElement)("div", { className: "bt-create-step" }, t("What will it do?")),
+    (0, import_react54.createElement)("button", {
+      type: "button",
+      className: "bt-soft",
+      "aria-expanded": showInstructions,
+      onClick: () => setShowInstructions((value) => !value)
+    }, t("Add instructions")),
+    // The form's own input look, as tall as the Settings instructions area.
+    showInstructions ? (0, import_react54.createElement)(
+      "div",
+      { className: "bt-field" },
+      (0, import_react54.createElement)("textarea", {
+        className: "bt-input",
+        value: instructions,
+        style: { height: "auto", minHeight: 112, padding: "8px 10px", lineHeight: "19px", resize: "vertical" },
+        "aria-label": t("What will it do?"),
+        placeholder: t("What this Bot is responsible for…"),
+        onChange: (event) => setInstructions(event.target.value),
+        onKeyDown: (event) => {
+          if (event.key === "Enter") event.stopPropagation();
+        }
+      }),
+      (0, import_react54.createElement)(
+        "div",
+        { className: "bt-note" },
+        t("Part of the Bot's system prompt. You can change it later in its details.")
+      )
+    ) : null,
+    remoteOfBot({ model }) ? (0, import_react54.createElement)(
+      "div",
+      { className: "bt-note" },
+      t("This model uses its Hermes profile's own instructions.")
+    ) : null,
+    permission == null ? null : (0, import_react54.createElement)(
+      "div",
+      { className: "bt-note" },
+      t("New Bots start at {level}.", { level: presetName(permission, roster.permissions) })
     ),
     error ? (0, import_react54.createElement)("div", { className: "bt-error", role: "alert", style: { padding: 0 } }, error) : null,
     (0, import_react54.createElement)(
