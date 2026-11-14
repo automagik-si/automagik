@@ -1,5 +1,5 @@
 import qrcode from '../../waitlist/vendor/qrcode.mjs'
-import { boundedBody, cleanup, CONSENT_VERSION, codePattern, hash, hmac, now } from '../../waitlist/lib/shared.js'
+import { boundedBody, cleanup, CONSENT_VERSION, codePattern, hash, hmac, now, WHATSAPP_SIGNUPS_OPEN } from '../../waitlist/lib/shared.js'
 import { escape, htmlPage, privacyNote, unavailable, waitlistForm } from '../../waitlist/lib/ui.js'
 
 const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
@@ -28,6 +28,8 @@ export async function onRequest({ request, env }) {
   try { fields = new URLSearchParams(await boundedBody(request)) } catch { return bad() }
   const action = fields.get('action')
   if (!['add', 'remove', 'confirm'].includes(action)) return bad()
+  // A stale page or a direct POST gets no new WhatsApp code while sign-ups are paused.
+  if (action === 'add' && fields.get('channel') === 'whatsapp' && !WHATSAPP_SIGNUPS_OPEN) return unavailable()
   if (!env.WAITLIST_DB || !env.WAITLIST_CONFIRM_SECRET || env.WAITLIST_DATA_JURISDICTION !== 'eu') return unavailable()
   const db = env.WAITLIST_DB
   try {

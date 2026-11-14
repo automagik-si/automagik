@@ -44,6 +44,17 @@ email request during the 24-hour cooldown gives the same generic confirmation in
 without sending another email. Preview uses fake/test contacts and a dedicated database.
 Do not use a live list for browser tests.
 
+## WhatsApp sign-ups are paused
+
+New WhatsApp sign-ups stay off until the support Bot's confirmation path is live. One switch
+holds it: `WHATSAPP_SIGNUPS_OPEN` in `lib/shared.js`. While it is `false`, the form offers email
+only, and `POST /api/waitlist` answers a WhatsApp sign-up with the same unavailable page as its
+other refusals, before any database write: no row and no code. Codes issued before the pause
+still confirm through `/api/waitlist/whatsapp-confirm` under the received-time contract below,
+and removal still takes a WhatsApp sender ID/number or code. The privacy note describes those
+earlier sign-ups. Turning WhatsApp back on is that one line set to `true`, then
+`node apps/landing/scripts/build-pages.mjs` to regenerate `cloud/index.html`.
+
 ## Endpoints
 
 - `POST /api/waitlist`, native form encoding: `action=add|remove|confirm`.
@@ -89,8 +100,9 @@ processors. Owner access/correction is through the privacy role address.
 ## Verification before go-live
 
 Run the local page/waitlist/browser gates, then have the owner check the configured preview:
-register one test email, confirm it, and remove it; register WhatsApp, send the prepared code
-to the selected support Bot number, see one reply, retry the same delivery ID, try a new message
+register one test email, confirm it, and remove it; with `WHATSAPP_SIGNUPS_OPEN` on, register
+WhatsApp, send the prepared code to the selected support Bot number, see one reply, retry the
+same delivery ID, try a new message
 for the used code (409), then remove the entry. Confirm the list's columns, jurisdiction and
 absence of message text/body/name. Check that request-body logging is disabled in any
 account-level tooling or proxy. No source code reads or logs the request body on failure.
@@ -98,9 +110,10 @@ Local tests mock Resend and use real local SQLite; they do not claim live D1/Res
 
 ## Received-time contract
 
-WhatsApp remains an enabled choice alongside email. The form displays “WhatsApp confirmation
-may take a little while” and “A confirmação pelo WhatsApp pode demorar um pouco.” The support
-Bot calls with `Authorization: Bearer <WAITLIST_CONFIRM_SECRET>` and the v2 envelope:
+While WhatsApp sign-ups are open, the form offers WhatsApp beside email and displays
+“WhatsApp confirmation may take a little while” and “A confirmação pelo WhatsApp pode demorar
+um pouco.” The support Bot calls with `Authorization: Bearer <WAITLIST_CONFIRM_SECRET>` and
+the v2 envelope:
 `type=message.received`, `payload.content.text`, `payload.from`, `payload.externalId` and
 original top-level `timestamp` in Unix milliseconds. No body/name/text is logged or stored.
 
