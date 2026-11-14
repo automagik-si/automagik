@@ -173,3 +173,61 @@ test('cancel after step/start but before the waiting call resumes writes no rows
   h.assertClean()
   assertLoadable(h.session)
 })
+
+for (const level of ['full', 'manual']) {
+  for (const timing of ['before', 'after']) {
+    test(`#969 resume: B ${level} prompt ends ${timing} ready`, { timeout: 5_000 }, async t => {
+      let running = true
+      const h = waitingHost(t, { level, promptRunning: () => running })
+      const reviews = []
+      h.backchannel.ctx.llm = { stream: options => { reviews.push(options); return (async function* () {})() } }
+      assertLoadable(h.session, ' at the waiting baseline')
+      h.assertClean()
+      const caller = new AbortController()
+      const guard = h.session[Symbol.for('@automagik/acp-dsh/write-guard')]
+      const listenersBefore = guard.listeners.size
+      const callerBefore = getEventListeners(caller.signal, 'abort').length
+      const before = h.session.snapshotEvents()
+      const pending = h.backchannel.call(h.record, { name: 'bash', arguments: { command: 'echo probe' }, signal: caller.signal })
+      let settled = false
+      pending.then(() => { settled = true }, () => { settled = true })
+      try {
+        await ticks()
+        assert.equal(settled, false)
+        assert.equal(h.record.controllers.size, 1)
+        assert.equal(guard.listeners.size, listenersBefore + 1)
+        assert.equal(getEventListeners(caller.signal, 'abort').length, callerBefore + 1)
+        assert.deepEqual(h.session.snapshotEvents(), before)
+        if (timing === 'before') running = false
+        h.startStep()
+        if (timing === 'after') running = false // No await after the synchronous ready notification.
+        const afterStart = h.session.snapshotEvents()
+        // Old code reaches the existing held fake ask/body. Drain them without erasing evidence.
+        const deadline = Date.now() + 1_000
+        while (!settled && Date.now() < deadline) {
+          h.answer()
+          h.finish()
+          await ticks()
+        }
+        assert.equal(settled, true, 'the response settles after draining any existing fake work')
+        const response = await pending
+        const afterResponse = h.session.snapshotEvents()
+        const work = { asks: h.asks.length, bodies: h.bodies.length, reviews: reviews.length }
+        h.assertClean()
+        assert.equal(guard.listeners.size, listenersBefore)
+        assert.equal(getEventListeners(caller.signal, 'abort').length, callerBefore)
+        h.endStep()
+        h.endTurn()
+        assertLoadable(h.session, ' after the test-owned step and turn close')
+        t.diagnostic(JSON.stringify({ code: response.error?.code ?? null, isError: response.isError, newRows: afterResponse.length - afterStart.length, ...work }))
+        assert.equal(response.error?.code, 'BRIDGE_NO_STEP')
+        assert.deepEqual(afterResponse, afterStart, 'no advertisement, call, result or other row')
+        assert.deepEqual(work, { asks: 0, bodies: 0, reviews: 0 })
+      } finally {
+        h.answer()
+        h.finish()
+        h.backchannel.dispose()
+      }
+    })
+  }
+}

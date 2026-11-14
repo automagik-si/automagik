@@ -694,6 +694,7 @@ export class AgentRun {
   answerSkippedMcp(tool, options) {
     if (this.spec.dshTools !== true || this.spec.refresh !== 'fork' || tool.mcp !== true) return undefined
     const answerFor = (choices) => {
+      if (tool.unanswerable === true) return CANCELLED
       if (tool.mcpServer !== BRIDGE_NAME) return refusal('rejected', choices)
       const allow = choices.find(option => option.kind === 'allow_once') ?? choices.find(option => option.kind === 'allow_always')
       return allow === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: allow.optionId } }
@@ -703,7 +704,7 @@ export class AgentRun {
     if (stored !== undefined) stored.answer(answerFor(stored.options ?? []))
     const answer = answerFor(options ?? stored?.options ?? [])
     // Refused with no dialog: the log says so, once per question answered.
-    if (tool.mcpServer !== BRIDGE_NAME && (stored !== undefined || options !== undefined)) {
+    if (tool.unanswerable !== true && tool.mcpServer !== BRIDGE_NAME && (stored !== undefined || options !== undefined)) {
       try { this.spec.onRefusedMcp?.(tool) } catch {}
     }
     return answer

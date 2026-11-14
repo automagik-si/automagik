@@ -127,3 +127,129 @@ test('fork bridge MCP permission falls back to allow_always', async () => {
   assert.deepEqual(answer, { outcome: { outcome: 'selected', optionId: 'always' } })
   assert.equal(run.tools.get('standalone').bridge, undefined)
 })
+
+const RESUME_CANCELLED = { outcome: { outcome: 'cancelled' } }
+const resumeOptions = (shape, prefix) => [
+  { optionId: `${prefix}-always`, kind: 'allow_always' },
+  ...(shape === 'both' ? [{ optionId: `${prefix}-once`, kind: 'allow_once' }] : []),
+]
+
+async function resumeSoon(promise) {
+  let timer
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('permission did not settle within 500 ms')), 500) }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// The real AgentRun prompt/endPrompt lifecycle, with a test-owned connection and no process.
+function resumeRun(t, { dshTools = true, onRefusedMcp } = {}) {
+  const run = new AgentRun({ name: 'Resume probe', dshTools, refresh: 'fork', onRefusedMcp })
+  run.gone = new Promise(() => {})
+  t.after(() => run.letGo(true))
+  const begin = () => {
+    let resolvePrompt
+    run.conn = { prompt: () => new Promise(resolve => { resolvePrompt = resolve }) }
+    const prompting = run.prompt([{ type: 'text', text: 'resume probe' }])
+    return async () => {
+      resolvePrompt({ stopReason: 'end_turn' })
+      await resumeSoon(prompting)
+    }
+  }
+  return { run, begin }
+}
+
+for (const kind of ['regular', 'standalone']) {
+  for (const shape of ['both', 'always-only']) {
+    test(`#969 resume: A ${kind} late ${shape}`, { timeout: 5_000 }, async t => {
+      const { run, begin } = resumeRun(t)
+      await begin()()
+      assert.equal(run.busy, false)
+      assert.equal(run.promptEnded, true)
+      const id = `late-${kind}-${shape}`
+      if (kind === 'regular') {
+        run.onUpdate({ sessionUpdate: 'tool_call', toolCallId: id, status: 'pending', _meta: { is_mcp_tool_call: true }, rawInput: { server: 'dsh' } })
+      }
+      const answers = []
+      // Collect both actual answers before asserting, even when old code wrongly allows them.
+      for (const attempt of ['first', 'repeat']) {
+        answers.push(await resumeSoon(run.onPermission({
+          ...(kind === 'standalone' ? { _meta: { is_mcp_tool_approval: true } } : {}),
+          toolCall: { toolCallId: id, ...(kind === 'standalone' ? { rawInput: { serverName: 'dsh' } } : {}) },
+          options: resumeOptions(shape, attempt),
+        })))
+      }
+      const tool = run.tools.get(id)
+      assert.equal(tool.unanswerable, true)
+      assert.equal(tool.bridge, undefined)
+      assert.equal(tool.permission, undefined)
+      assert.deepEqual(answers, [RESUME_CANCELLED, RESUME_CANCELLED])
+    })
+  }
+}
+
+for (const invocation of ['helper', 'incoming']) {
+  for (const shape of ['both', 'always-only']) {
+    test(`#969 resume: A stored ${invocation} ${shape}`, { timeout: 5_000 }, async t => {
+      const { run } = resumeRun(t, { dshTools: false })
+      const tool = run.seeTool({ toolCallId: 'stored-resume', _meta: { is_mcp_tool_call: true }, rawInput: { server: 'dsh' } })
+      const storedOptions = resumeOptions(shape, 'stored')
+      const pending = run.onPermission({ toolCall: { toolCallId: tool.id }, options: storedOptions })
+      const permission = tool.permission
+      assert.ok(permission)
+      assert.deepEqual(permission.options, storedOptions)
+      let settled = false
+      pending.then(() => { settled = true })
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(settled, false, 'the real stored question is still pending')
+      // Explicit helper-state fixture: normal endPrompt would already cancel this question.
+      tool.unanswerable = true
+      run.spec.dshTools = true
+      const returned = invocation === 'helper'
+        ? run.answerSkippedMcp(tool)
+        : run.answerSkippedMcp(tool, resumeOptions(shape, 'incoming'))
+      const stored = await resumeSoon(pending)
+      assert.equal(settled, true)
+      assert.equal(tool.permission, undefined)
+      assert.deepEqual({ stored, returned }, { stored: RESUME_CANCELLED, returned: RESUME_CANCELLED })
+    })
+  }
+}
+
+for (const server of ['personal', undefined]) {
+  test(`#969 resume: A unanswerable foreign ${server ?? 'unnamed'}`, { timeout: 5_000 }, async t => {
+    const refused = []
+    const { run } = resumeRun(t, { onRefusedMcp: tool => refused.push(tool.id) })
+    const tool = run.seeTool({ toolCallId: 'foreign-resume', _meta: { is_mcp_tool_call: true }, rawInput: { server } })
+    // This is the existing helper-state mark, not a simulated natural prompt end.
+    tool.unanswerable = true
+    const answer = await resumeSoon(run.onPermission({
+      toolCall: { toolCallId: tool.id },
+      options: [{ optionId: 'reject-foreign', kind: 'reject_once' }],
+    }))
+    assert.equal(tool.permission, undefined)
+    assert.deepEqual({ answer, refused }, { answer: RESUME_CANCELLED, refused: [] })
+  })
+}
+
+test('#969 resume: A known-live post-end control', { timeout: 5_000 }, async t => {
+  const { run, begin } = resumeRun(t)
+  const end = begin()
+  assert.equal(run.busy, true)
+  run.onUpdate({ sessionUpdate: 'tool_call', toolCallId: 'known-live', status: 'pending', _meta: { is_mcp_tool_call: true }, rawInput: { server: 'dsh' } })
+  await end()
+  const tool = run.tools.get('known-live')
+  assert.notEqual(tool.unanswerable, true)
+  assert.equal(run.promptEnded, true)
+  const both = await resumeSoon(run.onPermission({ toolCall: { toolCallId: tool.id }, options: resumeOptions('both', 'live') }))
+  const always = await resumeSoon(run.onPermission({ toolCall: { toolCallId: tool.id }, options: resumeOptions('always-only', 'live') }))
+  assert.deepEqual([both, always], [
+    { outcome: { outcome: 'selected', optionId: 'live-once' } },
+    { outcome: { outcome: 'selected', optionId: 'live-always' } },
+  ])
+  assert.equal(tool.permission, undefined)
+})

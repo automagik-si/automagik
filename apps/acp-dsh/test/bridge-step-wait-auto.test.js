@@ -44,10 +44,10 @@ const failedResult = (callId, decision) => ({
   }],
 })
 
-function reviewHost({ sandbox = 'danger-full-access', policy = 'ask', preset = 'auto', override = 'never', answer = 'allowed-once', tools = TOOLS, headerTools = tools, route = true, decisions = [], reviewTimeoutMs = 5000, holdBody = false, holdApproval = false, failCallRow = false } = {}) {
+function reviewHost({ sandbox = 'danger-full-access', policy = 'ask', preset = 'auto', override = 'never', answer = 'allowed-once', tools = TOOLS, headerTools = tools, route = true, decisions = [], reviewTimeoutMs = 5000, holdBody = false, holdApproval = false, failCallRow = false, initialStep = 0 } = {}) {
   const session = Session.create('s1')
   session.append('turn/start', { turn: 1 })
-  session.append('step/start', { turn: 1, step: 0 })
+  session.append('step/start', { turn: 1, step: initialStep })
   if (route) {
     session.append('request/header', {
       header: { config: { provider: 'acp-fake', model: 'default' }, ...(headerTools.length > 0 ? { tools: headerTools } : {}) },
@@ -274,3 +274,52 @@ test('#969: a guard left by an older copy of this module (no listeners) is polle
     older.release()
   }
 })
+
+import { getEventListeners } from 'node:events'
+import { assertLoadable } from './support/bridge-host.js'
+
+for (const timing of ['before', 'after']) {
+  test(`#969 resume: B auto prompt ends ${timing} ready`, { timeout: 5_000 }, async t => {
+    const h = reviewHost({ initialStep: 1, decisions: [ALLOW] })
+    try {
+      assertLoadable(h.session, ' at the Auto baseline')
+      h.session.append('step/end', { turn: 1, step: 1 })
+      let running = true
+      const record = h.backchannel.mint({ sessionId: 's1', agent: h.agent, name: 'Resume probe', promptRunning: () => running })
+      const caller = new AbortController()
+      const guard = h.session[Symbol.for('@automagik/acp-dsh/write-guard')]
+      const listenersBefore = guard.listeners.size
+      const abortBefore = getEventListeners(record.abort.signal, 'abort').length
+      const callerBefore = getEventListeners(caller.signal, 'abort').length
+      const controllersBefore = record.controllers.size
+      const before = h.session.snapshotEvents()
+      const pending = h.backchannel.call(record, { name: 'bash', arguments: { command: 'echo probe' }, signal: caller.signal })
+      await settle()
+      assert.equal(record.controllers.size, controllersBefore + 1)
+      assert.equal(guard.listeners.size, listenersBefore + 1)
+      assert.equal(getEventListeners(record.abort.signal, 'abort').length, abortBefore + 1)
+      assert.equal(getEventListeners(caller.signal, 'abort').length, callerBefore + 1)
+      assert.deepEqual(h.session.snapshotEvents(), before)
+      if (timing === 'before') running = false
+      h.session.append('step/start', { turn: 1, step: 2 })
+      if (timing === 'after') running = false // No await before the ready continuation sees this.
+      const afterStart = h.session.snapshotEvents()
+      const response = await pending
+      const afterResponse = h.session.snapshotEvents()
+      const work = { asks: h.asked.length, reviews: h.streams.length, bodies: h.executed.length }
+      assert.equal(record.controllers.size, controllersBefore)
+      assert.equal(guard.listeners.size, listenersBefore)
+      assert.equal(getEventListeners(record.abort.signal, 'abort').length, abortBefore)
+      assert.equal(getEventListeners(caller.signal, 'abort').length, callerBefore)
+      h.session.append('step/end', { turn: 1, step: 2 })
+      h.session.append('turn/end', { turn: 1, reason: 'stop' })
+      assertLoadable(h.session, ' after the test-owned Auto step and turn close')
+      t.diagnostic(JSON.stringify({ code: response.error?.code ?? null, isError: response.isError, newRows: afterResponse.length - afterStart.length, ...work }))
+      assert.equal(response.error?.code, 'AUTO_REVIEW_NO_STEP')
+      assert.deepEqual(afterResponse, afterStart, 'no advertisement, call, result or other row')
+      assert.deepEqual(work, { asks: 0, reviews: 0, bodies: 0 })
+    } finally {
+      h.backchannel.dispose()
+    }
+  })
+}

@@ -735,6 +735,7 @@ export class Backchannel {
           }
           waited = 'ended'
         }
+        if (waited === 'ready' && record.promptRunning?.() !== true) waited = 'ended'
       } finally {
         record.controllers.delete(waiting)
         if (record.closed && record.controllers.size === 0) record.guard?.release()
