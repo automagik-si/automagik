@@ -53,6 +53,11 @@ export const HELD_TEXT = 'This conversation is on hold while its permission leve
 // the previous one made. A Symbol.for key is the same key in the reloaded module.
 const MIRROR_REGISTRATION = Symbol.for('@automagik/acp-dsh/mirror-registration')
 
+const bridgeRow = message => (
+  (message?.role === 'assistant' && message?.source?.synthetic === SYNTHETIC_KIND)
+  || (message?.role === 'developer' && message?.source?.kind === SYNTHETIC_KIND)
+)
+
 const detailed = tool => (tool.rawInput !== undefined && tool.rawInput !== null && Object.keys(tool.rawInput).length > 0) || tool.permission !== undefined || tool.status !== 'pending'
 function settle(tool, ms) {
   if (detailed(tool)) return Promise.resolve()
@@ -1150,18 +1155,21 @@ export class AcpAdapter extends LlmAdapter {
     const last = options.messages.at(-1)
     // The step after a mirror call's result continues the agent's turn. The bridge writes result
     // rows of its own (a DSH tool call's result, or the row that closes a call still open when
-    // its step ended, #957), and one of those can come after the mirror call's result: the
-    // mirror result is looked for among all the tool messages the transcript ends with.
+    // its step ended, #957). Its advertisement can also follow the mirror result (#1293).
+    // Look back through tool messages and bridge rows for the mirror result.
     const mirrorAnswered = (() => {
-      for (let i = options.messages.length - 1; i >= 0 && options.messages[i]?.role === 'tool'; i--) {
-        if (live?.calls.has(options.messages[i].toolCallId)) return true
+      for (let i = options.messages.length - 1; i >= 0; i--) {
+        const message = options.messages[i]
+        if (bridgeRow(message)) continue
+        if (message?.role !== 'tool') return false
+        if (live?.calls.has(message.toolCallId)) return true
       }
       return false
     })()
     const continuing = mirrorAnswered && live?.provider === options.provider && live.open
     if (continuing) started()
     if (!continuing) {
-      if (last?.role === 'tool') {
+      if (options.messages.findLast(message => !bridgeRow(message))?.role === 'tool') {
         // The agent may still be on the prompt this step belonged to. Nobody is reading it any
         // more, so it is asked to stop now, and its session is ended if it has not stopped in
         // the time a cancel gets (`reap`, which also answers whatever it was still asking),
