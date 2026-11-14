@@ -5,9 +5,11 @@
 import { assembleLlmStream } from './models.js'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { OCR_CACHE_MAX, OCR_PROMPT, OCR_RETRY_MS, OCR_TIMEOUT_MS } from './constants.js'
 import { replaceFile } from './files.js'
 import { splitRef } from './text.js'
+import { freezeLoopRequest } from './secrets.js'
 
 export function offloadTargets(session, beforeSeq) {
   const targets = []
@@ -186,7 +188,12 @@ export function install(rt) {
       }
       // `next` cannot take new messages, so the rewritten request starts over; it
       // carries no image, so this listener lets it through.
-      yield* ctx.llm.stream({ ...options, messages: await withImagesAsText(options.messages, options.sessionId) })
+      const request = {
+        ...options,
+        messages: await withImagesAsText(options.messages, options.sessionId),
+      }
+      if (isAgentLoopRequest(options)) markAgentLoopRequest(freezeLoopRequest(request))
+      yield* ctx.llm.stream(request)
     })()
   })
 

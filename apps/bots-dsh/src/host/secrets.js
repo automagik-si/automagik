@@ -9,6 +9,7 @@ import { chmodSync, copyFileSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { GITHUB_TOKEN_DAYS, GITHUB_WORK, cleanGitHubWork, githubPermissions, isGitHubTokenName } from '../shared/github-token.js'
 import { replaceFile } from './files.js'
 import { output } from './tools.js'
@@ -584,6 +585,19 @@ export function redactDeep(value, redact) {
   return root.copy
 }
 
+// Rebuilt loop requests keep DSH's frozen content and envelope contract.
+export function freezeLoopRequest(request) {
+  const pending = [request.messages, request.system]
+  while (pending.length > 0) {
+    const node = pending.pop()
+    if (node === null || typeof node !== 'object' || Object.isFrozen(node)) continue
+    if (node instanceof AbortSignal) continue
+    Object.freeze(node)
+    for (const child of Object.values(node)) pending.push(child)
+  }
+  return Object.freeze(request)
+}
+
 export function install(rt) {
   const { ctx, home, state } = rt
   const path = join(home, 'secrets.json')
@@ -1049,6 +1063,8 @@ export function install(rt) {
   // request starts over; it then carries no value and passes through here.
   // A value that is part of its own label would be replaced again on every pass, so a
   // request this listener rewrote passes straight through.
+  // The agent loop mark belongs to the request object, so carry it to the copy
+  // to keep agent routes accepting the redacted request.
   const rewritten = new WeakSet()
   ctx.on('llm/stream', (options, next) => {
     if (secrets.size === 0 || rewritten.has(options.messages)) return next()
@@ -1058,7 +1074,9 @@ export function install(rt) {
     const fresh = [...(messages ?? [])]
     rewritten.add(fresh)
     rt.carryUsageTag(options.messages, fresh)
-    return ctx.llm.stream({ ...options, messages: fresh, ...(system !== undefined ? { system } : {}) })
+    const request = { ...options, messages: fresh, ...(system !== undefined ? { system } : {}) }
+    if (isAgentLoopRequest(options)) markAgentLoopRequest(freezeLoopRequest(request))
+    return ctx.llm.stream(request)
   })
 
   function resolveEnv(execution) {

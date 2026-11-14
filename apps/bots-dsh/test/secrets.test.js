@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { inspect } from 'node:util'
+import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { EDGE_MIN } from '../src/host/secrets.js'
 import { apply } from '../index.js'
 import { canUse, encodeUrlComponent, normalizeName, redactDeep, redactor, SECRET_NAME } from '../src/host/secrets.js'
@@ -605,6 +606,86 @@ test('tool results and model requests lose the values', async (t) => {
   stream({ ...options, messages: frozenMessages }, next)
   assert.equal(passed.length, 2)
   assert.equal(bench.streamed.at(-1).messages[0].content[0].text, 'my key is [secret:DEMO_TOKEN]')
+})
+
+test('secret rewrites preserve only existing agent loop marks across turns', async (t) => {
+  const bench = start()
+  t.after(bench.stop)
+  const value = fresh()
+  assert.equal((await bench.call('secret-set', { name: 'DEMO_TOKEN', value })).ok, true)
+  const stream = bench.listeners['llm/stream'].at(-2)
+  const first = markAgentLoopRequest({
+    provider: 'acp', model: 'agent', sessionId: 'b2',
+    system: [{ type: 'text', text: `Use ${value}` }],
+    messages: [{ role: 'user', content: [{ type: 'text', text: `my key is ${value}` }] }],
+  })
+  const later = markAgentLoopRequest({
+    ...first,
+    system: { text: `Use ${value}` },
+    messages: [
+      ...first.messages,
+      { role: 'assistant', content: [{ type: 'text', text: 'Ready.' }] },
+      { role: 'user', content: [{ type: 'text', text: 'Continue.' }] },
+    ],
+  })
+  const unmarked = { ...first }
+  const freeze = (node) => {
+    if (node === null || typeof node !== 'object') return
+    if (node instanceof AbortSignal) return
+    for (const child of Object.values(node)) freeze(child)
+    Object.freeze(node)
+  }
+  const assertFrozen = (node) => {
+    if (node === null || typeof node !== 'object') return
+    assert.ok(Object.isFrozen(node))
+    for (const child of Object.values(node)) assertFrozen(child)
+  }
+  for (const [original, marked] of [[first, true], [later, true], [unmarked, false]]) {
+    const before = structuredClone(original)
+    freeze(original)
+    const count = bench.streamed.length
+    stream(original, () => assert.fail('a saved value must be redacted before dispatch'))
+    assert.equal(bench.streamed.length, count + 1)
+    const sent = bench.streamed.at(-1)
+    assert.notEqual(sent, original)
+    assert.equal(isAgentLoopRequest(sent), marked)
+    assert.equal(Object.isFrozen(sent), marked)
+    if (marked) {
+      assertFrozen(sent)
+      assert.throws(() => { sent.model = 'changed' }, TypeError)
+    }
+    assert.equal(sent.messages[0].content[0].text, 'my key is [secret:DEMO_TOKEN]')
+    assert.ok(!JSON.stringify(sent).includes(value))
+    assert.deepEqual(sent, {
+      ...before,
+      system: Array.isArray(before.system)
+        ? [{ type: 'text', text: 'Use [secret:DEMO_TOKEN]' }]
+        : { text: 'Use [secret:DEMO_TOKEN]' },
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'my key is [secret:DEMO_TOKEN]' }] },
+        ...before.messages.slice(1),
+      ],
+    })
+    assert.deepEqual(original, before)
+    assert.equal(isAgentLoopRequest(original), marked)
+  }
+
+  const controller = new AbortController()
+  const withSignal = markAgentLoopRequest({
+    ...first,
+    messages: [{
+      role: 'user',
+      content: [{ type: 'text', text: value, signal: controller.signal }],
+    }],
+  })
+  freeze(withSignal)
+  stream(withSignal, () => assert.fail('a saved value must be redacted before dispatch'))
+  const sent = bench.streamed.at(-1)
+  assert.equal(isAgentLoopRequest(sent), true)
+  assert.equal(sent.messages[0].content[0].text, '[secret:DEMO_TOKEN]')
+  assert.equal(sent.messages[0].content[0].signal, controller.signal)
+  assert.equal(Object.isFrozen(controller.signal), false)
+  assert.doesNotThrow(() => controller.abort())
 })
 
 test('whole tool results preserve fields and redact auxiliary values on success and error', async (t) => {
