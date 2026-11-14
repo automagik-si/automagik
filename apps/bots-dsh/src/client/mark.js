@@ -156,7 +156,8 @@ function DrawnMark({ bot, look, size = 36, state = 'idle', live = false, gaze = 
   }
   if (image) return h('span', common, h('img', { className: 'bt-mark-img', src: image, alt: '', draggable: false, onError: () => setBroken(image) }))
   // A clay character is one picture: the body motions of its state move it whole (.bt-b),
-  // and its face follows the state. Small marks frame Genie's head.
+  // and its face follows the state. Genie is always the whole figure; the head alone is retired.
+  // data-frame stays only as a marker for small marks and has no style.
   const art = clayArtOf(bot, look)
   if (art) {
     const face = faceOf(common['data-state'], poked)
