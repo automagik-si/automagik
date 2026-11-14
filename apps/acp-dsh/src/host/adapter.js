@@ -460,7 +460,18 @@ export class AcpAdapter extends LlmAdapter {
         if (this.live.get(owner.session.id)?.fileOwner === owner) this.endSession(owner.session.id, 'Image session permission expired.')
       },
     })
-    this.tool = mirrorTool({ sessionFiles: (...args) => this.sessionFiles.ask(...args), runOf: sessionId => this.live.get(sessionId), cancelled: (sessionId, live) => this.reap(sessionId, live), approval: () => ctx.get?.('approval'), sandboxPolicy: () => ctx.get?.('sandboxPolicy'), permissionPresets: () => ctx.get?.('permissionPresets'), images, attachments: () => ctx.get?.('attachments') })
+    this.tool = mirrorTool({
+      sessionFiles: (...args) => this.sessionFiles.ask(...args),
+      runOf: sessionId => this.live.get(sessionId),
+      cancelled: (sessionId, live) => this.reap(sessionId, live),
+      bridgeApprovals: (sessionId, position, signal) =>
+        this.backchannel?.awaitApprovals?.(sessionId, position, signal),
+      approval: () => ctx.get?.('approval'),
+      sandboxPolicy: () => ctx.get?.('sandboxPolicy'),
+      permissionPresets: () => ctx.get?.('permissionPresets'),
+      images,
+      attachments: () => ctx.get?.('attachments'),
+    })
     // A new chat's first model step lists its tools after `agent/created`: register the mirror
     // tool there in every agent's own scope, with the step condition that admits it only on
     // this adapter's routes. A chat is created on DSH's default route and may be picked to an

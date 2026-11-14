@@ -470,6 +470,8 @@ export class Backchannel {
       listed: false,
       closed: false,
       waiters: new Set(),
+      approvalCalls: new Set(),
+      approvalWaiters: new Set(),
       abort: new AbortController(),
       // The controller of every call in flight (#957): each call has its own, so Stop, the end
       // of its turn or a caller that went away ends that call without revoking the bridge.
@@ -704,6 +706,67 @@ export class Backchannel {
     })
   }
 
+  /** Keep the mirror in its step until that step's approval calls have written their results. */
+  async awaitApprovals(sessionId, position, signal) {
+    try {
+      if (position !== undefined) await this.waitForApprovalCalls(sessionId, position, signal)
+    } catch {}
+  }
+
+  /** No deadline: an unanswered approval may keep its step open for as long as it needs. */
+  waitForApprovalCalls(sessionId, { turn, step }, signal) {
+    return new Promise(resolve => {
+      let poll
+      let done = false
+      const subscriptions = new Map()
+      const unsubscribe = record => {
+        try { subscriptions.get(record)?.() } catch {}
+        record.approvalWaiters.delete(check)
+        record.abort.signal.removeEventListener('abort', check)
+        subscriptions.delete(record)
+      }
+      const finish = () => {
+        if (done) return
+        done = true
+        clearInterval(poll)
+        for (const record of subscriptions.keys()) unsubscribe(record)
+        signal?.removeEventListener('abort', finish)
+        resolve()
+      }
+      const check = () => {
+        if (done) return
+        try {
+          const records = [...this.records.values()].filter(record =>
+            record.sessionId === sessionId && !record.closed)
+          for (const record of subscriptions.keys()) {
+            if (!records.includes(record)) unsubscribe(record)
+          }
+          let pending = false
+          for (const record of records) {
+            if (!subscriptions.has(record)) {
+              subscriptions.set(record, undefined)
+              record.approvalWaiters.add(check)
+              record.abort.signal.addEventListener('abort', check, { once: true })
+              subscriptions.set(record, record.guard?.subscribe?.(() => check()))
+            }
+            const open = openStepOf(record.agent?.session)
+            if (open?.turn !== turn || open?.step !== step) return finish()
+            pending ||= record.promptRunning?.() === true && [...record.approvalCalls].some(call =>
+              call.turn === turn && call.step === step && !call.stopped.aborted)
+          }
+          if (!pending || signal?.aborted) finish()
+        } catch { finish() }
+      }
+      try {
+        // The prompt can end or another record can be minted without a Session write.
+        poll = setInterval(check, 25)
+        poll.unref?.()
+        signal?.addEventListener('abort', finish, { once: true })
+        check()
+      } catch { finish() }
+    })
+  }
+
   /**
    * Run one DSH tool call for the bridge: it must be offered, DSH must approve it, and only
    * then does it run. Rows land on the Session as DSH's own tool rows do, so the chat shows the
@@ -816,6 +879,18 @@ export class Backchannel {
         ? recordFailed(`The bridge could not record ${name}: ${cause?.message ?? cause}`)
         : unavailable('AUTO_REVIEW_FAILED', `Auto review could not record this call: ${cause?.message ?? cause}`)
     }
+    let controller
+    const approvalCall = { turn, step, stopped }
+    const releaseApproval = () => {
+      if (!record.approvalCalls.delete(approvalCall)) return
+      stopped.removeEventListener('abort', releaseApproval)
+      controller?.signal.removeEventListener('abort', releaseApproval)
+      for (const wake of record.approvalWaiters) wake()
+    }
+    if (!level.full) {
+      record.approvalCalls.add(approvalCall)
+      stopped.addEventListener('abort', releaseApproval, { once: true })
+    }
     let answered = false
     const settle = async (content, isError, rawInfo) => {
       // The row is plain JSON with string fields: a tool's own error object is not trusted to be.
@@ -860,7 +935,6 @@ export class Backchannel {
         ...(info === undefined ? {} : { error: info }),
       }
     }
-    let controller
     let unwatch
     let unwatchPre
     let timer
@@ -931,6 +1005,7 @@ export class Backchannel {
       // allowed body out of the deadline and covers a level change while the ask is pending.
       if (!levelChanged && level.auto && typeof this.ctx?.on === 'function') {
         controller = new AbortController()
+        controller.signal.addEventListener('abort', releaseApproval, { once: true })
         timer = setTimeout(() => {
           timedOut = true
           controller.abort(new Error('Auto review timed out'))
@@ -1023,6 +1098,7 @@ export class Backchannel {
       unwatchPre?.()
       // After its step ended this writes nothing: the write guard hid the block there.
       hideSynthetic()
+      releaseApproval()
       leave()
     }
   }
