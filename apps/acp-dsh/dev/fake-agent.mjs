@@ -368,6 +368,30 @@ const implementation = {
       await update({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thought sk-abcdef123456' } })
       return { stopReason: 'end_turn' }
     }
+    // Codex asks about either a pending MCP tool call or a standalone server approval.
+    const mcpAsk = /mcp-ask-(bridge|other|standalone|unknown)/.exec(said)
+    if (mcpAsk !== null) {
+      const standalone = mcpAsk[1] === 'standalone'
+      const server = mcpAsk[1] === 'other' ? 'personal' : 'dsh'
+      const toolCallId = `mcp-ask-${session.turns}`
+      const rawInput = standalone ? { serverName: server } : { ...(mcpAsk[1] === 'unknown' ? {} : { server }), tool: 'bash', arguments: {} }
+      const toolCall = { toolCallId, title: standalone ? 'Approve MCP server' : `mcp.${server}.bash`, kind: 'other', rawInput }
+      if (!standalone) await update({ sessionUpdate: 'tool_call', ...toolCall, status: 'pending', _meta: { is_mcp_tool_call: true } })
+      const answer = await conn.requestPermission({
+        sessionId,
+        toolCall,
+        _meta: { is_mcp_tool_approval: true },
+        options: [
+          { optionId: 'yes', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'always', name: 'Allow always', kind: 'allow_always' },
+          { optionId: 'no', name: 'Reject', kind: 'reject_once' },
+        ],
+      })
+      const outcome = answer.outcome.outcome === 'selected' ? answer.outcome.optionId : answer.outcome.outcome
+      await update({ sessionUpdate: 'tool_call_update', toolCallId, status: outcome === 'yes' ? 'completed' : 'failed' })
+      await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` MCP permission: ${outcome}.` } })
+      return { stopReason: 'end_turn' }
+    }
     // An MCP call from codex-acp: no structured name at all, only `is_mcp_tool_call`.
     if (/mcp-call/.test(said)) {
       const toolCallId = `mcp-${session.turns}`
