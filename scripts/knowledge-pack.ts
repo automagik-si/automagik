@@ -22,8 +22,10 @@
  *   - the top-level README (README, or README[.<lang>].md|mdx|markdown|txt|rst);
  *   - docs/**: .md, .mdx, .txt;
  *   - in the `docs` repository, every .md and .mdx.
- * Never a path with a dot-folder or dot-file segment, nor node_modules; never a symlink, a file
- * with a NUL byte (binary) or one over 2 MiB. Issues, PRs, wikis and discussions are never read.
+ * Never a path with a dot-folder or dot-file segment, nor node_modules, nor one with an excluded
+ * folder anywhere in it (EXCLUDED_FOLDERS: _internal, plans, research, runbooks, incident-response,
+ * rfcs, design, brand/components: internal notes, not knowledge for the people the bot answers);
+ * never a symlink, a file with a NUL byte (binary) or one over 2 MiB. Issues, PRs, wikis and discussions are never read.
  * A repository that yields no file is left out.
  *
  * Each file is written to <out>/<repo>/<path> with a short stamp first: the repository, the path,
@@ -35,7 +37,10 @@
  * Built into a temporary folder beside <out>, then checked with the repository's privacy rules
  * (herdr/scripts/privacy-check.mjs: home paths, private names, personal emails, credentials,
  * database files) over every file of the pack. Any hit prints `file:line: rule` and fails the
- * build. Only a clean pack replaces the old one: the old folder is renamed aside, the new one
+ * build, except one the pack's own placeholder list names (scripts/knowledge-pack-placeholders.json:
+ * documentation placeholders and the org's public role contacts, each an exact match or an
+ * anchored pattern for the email or home-path rule only). That list is the pack's alone: it never
+ * goes into the repository's privacy list, and it never names a person's name, home or address. Only a clean pack replaces the old one: the old folder is renamed aside, the new one
  * renamed in (both on the same filesystem), and the old one removed. A failed run removes its
  * temporary folder and leaves the old pack as it was. An existing <out> that is neither empty nor
  * a pack (no manifest.json of this kind) is never replaced.
@@ -79,10 +84,19 @@ const README = /^README(?:\.[A-Za-z0-9-]+)?\.(?:md|mdx|markdown|txt|rst)$/i;
 const DOCS_EXT = /\.(?:md|mdx|txt)$/i;
 const MARKDOWN = /\.(?:md|mdx)$/i;
 
+/** Folders left out wherever they sit in a path; a two-part entry matches two folders in a row. */
+export const EXCLUDED_FOLDERS = ['_internal', 'plans', 'research', 'runbooks', 'incident-response', 'rfcs', 'design', 'brand/components'];
+const excludedFolder = (folders: string[]) =>
+  EXCLUDED_FOLDERS.some((entry) => {
+    const want = entry.split('/');
+    return folders.some((_, i) => want.every((w, j) => folders[i + j] === w));
+  });
+
 /** Whether `path` (repo-relative, forward slashes) of repository `repo` goes into the pack. */
 export function allowed(repo: string, path: string): boolean {
   const parts = path.split('/');
   if (parts.some((p) => !p || p.startsWith('.') || p === 'node_modules')) return false;
+  if (excludedFolder(parts.slice(0, -1))) return false;
   if (parts.length === 1 && (parts[0] === 'README' || README.test(parts[0]))) return true;
   if (parts[0] === 'docs' && parts.length > 1 && DOCS_EXT.test(path)) return true;
   return repo === 'docs' && MARKDOWN.test(path);
@@ -230,16 +244,49 @@ function walk(dir: string, prefix = ''): string[] {
   return out.sort(byText);
 }
 
+export const PLACEHOLDERS_PATH = join(import.meta.dir, 'knowledge-pack-placeholders.json');
+/** The rules a placeholder may pass: never a private name, a secret or a database file. */
+const PLACEHOLDER_RULES = ['email', 'home-path'];
+export type Placeholder = { rule: string; match?: string; pattern?: string; why: string };
+
 /**
- * The privacy rules over every file of a folder outside git: `file:line: rule` per hit. The
- * list's per-file allowed text names this repository's files, not the pack's, so it is not used.
+ * The pack's placeholder list, checked: each entry names the email or home-path rule, a why, and
+ * either an exact `match` or a `pattern` anchored with ^ and $. Returns a test for one hit.
  */
-export function privacyHits(dir: string): string[] {
+export function placeholderTest(entries: Placeholder[]): (hit: { rule: string; match: string }) => boolean {
+  if (!Array.isArray(entries)) throw new Error('placeholders: the list must be an array');
+  const tests = entries.map((e, i) => {
+    const at = `placeholders[${i}]`;
+    if (!PLACEHOLDER_RULES.includes(e?.rule)) throw new Error(`${at}: rule must be one of ${PLACEHOLDER_RULES.join(', ')}`);
+    if (typeof e.why !== 'string' || !e.why) throw new Error(`${at}: needs a why`);
+    if ((e.match === undefined) === (e.pattern === undefined)) throw new Error(`${at}: needs one of match or pattern`);
+    if (e.match !== undefined) {
+      if (typeof e.match !== 'string' || !e.match) throw new Error(`${at}: match must be a non-empty string`);
+      return (h: { rule: string; match: string }) => h.rule === e.rule && h.match === e.match;
+    }
+    if (typeof e.pattern !== 'string' || !e.pattern.startsWith('^') || !e.pattern.endsWith('$')) {
+      throw new Error(`${at}: pattern must be anchored with ^ and $`);
+    }
+    const re = new RegExp(e.pattern);
+    return (h: { rule: string; match: string }) => h.rule === e.rule && re.test(h.match);
+  });
+  return (hit) => tests.some((t) => t(hit));
+}
+
+/**
+ * The privacy rules over every file of a folder outside git: `file:line: rule` per hit, minus the
+ * pack's placeholders. The repository list's per-file allowed text names this repository's
+ * files, not the pack's, so it is not used.
+ */
+export function privacyHits(dir: string, placeholders: Placeholder[] = JSON.parse(readFileSync(PLACEHOLDERS_PATH, 'utf8')).placeholders): string[] {
   const list = { ...loadList(), lines: [] };
   const denied = denyMatcher(list.deny);
+  const isPlaceholder = placeholderTest(placeholders);
   const hits: string[] = [];
   for (const file of walk(dir)) {
-    for (const h of scan(file, fileText(readFileSync(join(dir, file))), list, denied, '\0')) hits.push(`${h.file}:${h.line}: ${h.rule}`);
+    for (const h of scan(file, fileText(readFileSync(join(dir, file))), list, denied, '\0')) {
+      if (!isPlaceholder(h)) hits.push(`${h.file}:${h.line}: ${h.rule}`);
+    }
   }
   return hits;
 }

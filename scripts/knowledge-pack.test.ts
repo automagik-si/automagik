@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { allowed, build, KIND, readTar, sourceUrl, stamp, type Manifest } from './knowledge-pack';
+import { allowed, build, EXCLUDED_FOLDERS, KIND, PLACEHOLDERS_PATH, placeholderTest, readTar, sourceUrl, stamp, type Manifest } from './knowledge-pack';
 
 // A fake GitHub on a local port: the org listing and each repository's tarball, as git archive
 // makes it (a pax global header naming the commit, then the files under one top folder).
@@ -73,13 +73,24 @@ const GENIE: FakeRepo = {
     'src/index.ts': 'export const x = 1;\n',
     'examples/guide.md': '# Not docs\n',
     'CONTRIBUTING.md': '# Contributing\n',
+    // Excluded folders, wherever they sit; the home path inside one would be a privacy hit.
+    'docs/_internal/notes.md': `# Internal\n\n${['', 'home', 'ana'].join('/')}\n`,
+    'docs/plans/p.md': '# Plan\n',
+    'docs/x/research/r.md': '# Research\n',
+    'docs/runbooks/x.md': '# Runbook\n',
+    'docs/incident-response/i.md': '# Incident\n',
+    'docs/rfcs/0001.md': '# RFC\n',
+    'docs/design/d.md': '# Design\n',
+    'docs/brand/components/Button/README.md': '# Button\n',
+    'docs/brand/README.md': '# Brand\n',
+    'docs/design.md': '# Design notes\n',
   },
 };
 const DOCS: FakeRepo = {
   name: 'docs',
   branch: 'main',
   commit: C2,
-  files: { 'intro.md': '# Intro\n', 'guides/setup.mdx': '# Setup\n', 'mint.json': '{}\n', 'robots.txt': 'User-agent: *\n', '.github/PULL_REQUEST_TEMPLATE.md': '# PR\n' },
+  files: { 'intro.md': '# Intro\n', 'genie/_internal/cli.mdx': '# CLI\n', 'guides/setup.mdx': '# Setup\n', 'mint.json': '{}\n', 'robots.txt': 'User-agent: *\n', '.github/PULL_REQUEST_TEMPLATE.md': '# PR\n' },
 };
 const OMNI: FakeRepo = { name: 'omni', branch: 'dev/next', commit: C3, files: { 'README': 'Omni\n', 'src/a.ts': '' } };
 const OTHERS: FakeRepo[] = [
@@ -151,6 +162,8 @@ describe('the knowledge pack', () => {
       'docs/intro.md',
       'genie/README.md',
       'genie/README.pt-BR.md',
+      'genie/docs/brand/README.md',
+      'genie/docs/design.md',
       'genie/docs/guide.md',
       'genie/docs/notes.txt',
       'genie/docs/sub/deep.mdx',
@@ -177,6 +190,17 @@ describe('the knowledge pack', () => {
     expect(allowed('docs', '.github/a.md')).toBe(false);
   });
 
+  test('each excluded folder is left out wherever it sits; a file of that name is not a folder', () => {
+    for (const folder of EXCLUDED_FOLDERS) {
+      for (const path of [`docs/${folder}/a.md`, `docs/x/${folder}/y/a.mdx`]) expect([path, allowed('genie', path)]).toEqual([path, false]);
+      expect(allowed('docs', `genie/${folder}/a.md`)).toBe(false);
+    }
+    expect(allowed('genie', 'docs/brand/README.md')).toBe(true);
+    expect(allowed('genie', 'docs/components/a.md')).toBe(true);
+    expect(allowed('genie', 'docs/design.md')).toBe(true);
+    expect(allowed('genie', 'docs/rfcs.md')).toBe(true);
+  });
+
   test('each file carries its stamp, and the manifest lists every file with its size, sha256 and totals', async () => {
     const out = freshOut();
     const m = await build({ ...gh.opts, out });
@@ -199,10 +223,10 @@ describe('the knowledge pack', () => {
     expect(manifest.files.find((f) => f.repo === 'omni')).toMatchObject({ path: 'README', commit: C3 });
     expect(manifest.repos).toEqual([
       { name: 'docs', commit: C2, files: 2, bytes: expect.any(Number) },
-      { name: 'genie', commit: C1, files: 5, bytes: expect.any(Number) },
+      { name: 'genie', commit: C1, files: 7, bytes: expect.any(Number) },
       { name: 'omni', commit: C3, files: 1, bytes: expect.any(Number) },
     ]);
-    expect(manifest.totals).toEqual({ files: 8, bytes: manifest.files.reduce((s, f) => s + f.bytes, 0), repos: 3 });
+    expect(manifest.totals).toEqual({ files: 10, bytes: manifest.files.reduce((s, f) => s + f.bytes, 0), repos: 3 });
     expect(readFileSync(join(out, 'manifest.json'), 'utf8')).not.toMatch(/20\d\d-\d\d-\d\d/);
   });
 
@@ -232,6 +256,47 @@ describe('the knowledge pack', () => {
     }
     expect(snapshot(out)).toEqual(before);
     expect(readdirSync(join(out, '..'))).toEqual(['knowledge']);
+  });
+
+  test('pack placeholders pass; a real-looking personal email or home path still fails', async () => {
+    const at = (local: string, domain: string) => `${local}@${domain}`;
+    const home = (name: string) => `/${'home'}/${name}`;
+    const withGuide = (text: string) => [{ ...GENIE, files: { ...GENIE.files, 'docs/guide.md': text } }, DOCS, OMNI];
+    const placeholders = [at('you', 'gmail.com'), at('5511999999999', 's.whatsapp.net'), at('120363123456789', 'g.us'),
+      at('omni', '2.YYMMDD'), at('git', 'github.com'), `${home('user')}/x`, `${home('genie')}/.claude`, home('automagik')];
+    gh.set(withGuide(`# Guide\n\n${placeholders.join('\n')}\n`));
+    try {
+      await build({ ...gh.opts, out: freshOut() });
+      const personal = [at('ana.souza', 'gmail.com'), at('xyou', 'gmail.com'), at('5511987654321', 's.whatsapp.net'), home('username'), home('ana')];
+      gh.set(withGuide(`# Guide\n\n${personal.join('\n')}\n`));
+      const error = await build({ ...gh.opts, out: freshOut() }).then(() => null, (e) => e);
+      expect(error?.hits).toEqual([
+        'genie/docs/guide.md:10: email',
+        'genie/docs/guide.md:11: email',
+        'genie/docs/guide.md:12: email',
+        'genie/docs/guide.md:13: home-path',
+        'genie/docs/guide.md:14: home-path',
+      ]);
+    } finally {
+      gh.set(ALL);
+    }
+  });
+
+  test('the placeholder list is checked: email or home-path only, a why, an exact match or an anchored pattern', () => {
+    const shipped = JSON.parse(readFileSync(PLACEHOLDERS_PATH, 'utf8')).placeholders;
+    expect(() => placeholderTest(shipped)).not.toThrow();
+    expect(new Set(shipped.map((e: { rule: string }) => e.rule))).toEqual(new Set(['email', 'home-path']));
+    for (const rule of ['private-name', 'secret', 'db-file']) {
+      expect(() => placeholderTest([{ rule, match: 'x', why: 'w' }])).toThrow(/rule must be one of email, home-path/);
+    }
+    expect(() => placeholderTest([{ rule: 'email', match: 'x', why: '' }])).toThrow(/needs a why/);
+    expect(() => placeholderTest([{ rule: 'email', match: 'x', pattern: '^x$', why: 'w' }])).toThrow(/one of match or pattern/);
+    expect(() => placeholderTest([{ rule: 'email', pattern: 'x', why: 'w' }])).toThrow(/anchored/);
+    const pass = placeholderTest([{ rule: 'email', pattern: '^a[0-9]$', why: 'w' }, { rule: 'home-path', match: 'h', why: 'w' }]);
+    expect(pass({ rule: 'email', match: 'a1' })).toBe(true);
+    expect(pass({ rule: 'email', match: 'a12' })).toBe(false);
+    expect(pass({ rule: 'email', match: 'h' })).toBe(false);
+    expect(pass({ rule: 'home-path', match: 'h' })).toBe(true);
   });
 
   test('a read GitHub refuses fails the build and keeps the old pack', async () => {
@@ -273,7 +338,7 @@ describe('the knowledge pack', () => {
     const proc = Bun.spawn([process.execPath, join(import.meta.dir, 'knowledge-pack.ts'), ...args], { env, stdout: 'pipe', stderr: 'pipe' });
     const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
     expect(code).toBe(0);
-    expect(stdout).toMatch(/knowledge pack: 8 file\(s\), \d+ bytes, 3 repo\(s\); privacy check clean/);
+    expect(stdout).toMatch(/knowledge pack: 10 file\(s\), \d+ bytes, 3 repo\(s\); privacy check clean/);
     expect(existsSync(join(out, 'manifest.json'))).toBe(true);
     expect(gh.seen.length).toBeGreaterThan(1);
     expect(gh.seen.filter((s) => s.authorization !== null)).toEqual([]);
