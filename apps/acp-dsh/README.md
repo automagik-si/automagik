@@ -434,6 +434,10 @@ serialized params (images, text, replay and session id), with 1 KiB reserved sep
 JSON-RPC envelope below the SDK's 32 MiB receiver limit. Preparation shares a ten-second
 deadline and stops with the turn.
 
+ACP group members get copies of the person's group uploads, verified against the person's
+own durable row in the group and the member's current group ownership. Images arrive as
+copy paths beside the group's OCR text. Other Bot relays never get upload copies.
+
 History, retries, handoffs and replay confer no fresh upload authority. Offloaded images keep
 DSH's omission text and gain no copy. Native DSH routes keep DSH's own readable store path.
 Existing group OCR, remote tools and Pocket text-only input are unchanged.
