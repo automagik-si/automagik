@@ -43,6 +43,8 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   (`_meta.disableBuiltInTools`); a structured call that is not an MCP name is recorded as
   `plugin:acp-dsh/toolset-drift` and its turn is cancelled — the detector runs at every session
   start, and it detects and cancels because the update arrives after the call began.
+  DSH's `read_image` works for Claude Code because acp-dsh declares its models as taking images;
+  other ACP agents keep no declaration.
   `acp-codex` has no such switch, so it is bridged only with an explicit `dshTools: true`;
   absent or `false` means no bridge and its built-ins stay its own tool set. Until a structured
   name is proven in its tool calls, it draws no ACP card for an MCP call. The person's

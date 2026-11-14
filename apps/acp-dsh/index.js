@@ -416,6 +416,7 @@ export function apply(ctx, config = {}, {
     // The adapter reads these off the agent object: without them the bridge default would not
     // find Claude's switch, the drift detector would never run and Codex would never fork.
     ...(spec.disableBuiltInTools === true ? { disableBuiltInTools: true } : {}),
+    ...(spec.imageInput === true ? { imageInput: true } : {}),
     ...(spec.drift === true ? { drift: true } : {}),
     ...(spec.refresh === undefined ? {} : { refresh: spec.refresh }),
     // A native agent takes no bridge, names its own sign-in command when signed out, and says

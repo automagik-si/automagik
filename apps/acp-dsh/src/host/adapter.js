@@ -928,6 +928,7 @@ export class AcpAdapter extends LlmAdapter {
 
   // An agent whose ACP adapter is not installed yet lists no model, so nothing (a picker, a
   // Bot's model) can choose one that cannot answer.
+  // Omit modalities here so bots-dsh never picks ACP models for OCR side requests.
   async listModels(provider) {
     const agent = this.agents.get(provider)
     if (agent === undefined || agent.installed?.() === false) return []
@@ -937,9 +938,16 @@ export class AcpAdapter extends LlmAdapter {
   // A model's efforts are the ones the agent offers for it; DSH turns down any other before the
   // agent sees it. An id the agent does not list resolves bare, as DSH's routing allows.
   async resolveModel(provider, model) {
-    const found = await this.agents.get(provider)?.catalog.model(model)
-    if (found === undefined) return { provider, id: model, name: model }
-    return { provider, id: found.id, name: found.name, ...(found.description ? { description: found.description } : {}), ...(found.reasoning ? { reasoning: found.reasoning } : {}) }
+    const agent = this.agents.get(provider)
+    const found = await agent?.catalog.model(model)
+    const imageInput = agent?.imageInput === true ? { inputModalities: ['text', 'image'] } : {}
+    if (found === undefined) return { provider, id: model, name: model, ...imageInput }
+    return {
+      provider, id: found.id, name: found.name,
+      ...(found.description ? { description: found.description } : {}),
+      ...(found.reasoning ? { reasoning: found.reasoning } : {}),
+      ...imageInput,
+    }
   }
 
   // The mirror tool lives in the agent's own scope: no other Session's model sees it. The

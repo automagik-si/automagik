@@ -129,6 +129,9 @@ export const AGENTS = Object.freeze({
     // the built-in file tools (and Bash, read from the adapter's bundle), so a structured call
     // that is not an MCP name is drift. A changed tool list is announced, not forked.
     disableBuiltInTools: true,
+    // Claude Code reads images DSH's tools return over the bridge (read_image), so DSH must
+    // see its models as taking image input.
+    imageInput: true,
     drift: true,
     refresh: 'list',
   }),
