@@ -7,6 +7,10 @@ const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const decimal = /^(0|[1-9][0-9]{0,30})$/
 const startDate = /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}$/
 const pidOf = pid => Number.isSafeInteger(pid) && pid > 1
+// ps answers at once. A cold Windows PowerShell 5.1 start alone can pass 2 s (CI killed
+// every first call at the old 2 s bound), and a timed-out read leaves no usable birth.
+const PS_BOUND_MS = 2000
+const POWERSHELL_BOUND_MS = 10_000
 
 export function validBirth(value) {
   if (!value || typeof value !== 'object') return false
@@ -29,7 +33,7 @@ export function processBirth(pid, { platform = process.platform, read = readFile
       if (fields.length < 50 || !/^[A-Za-z]$/.test(fields[0])) return null
       value = { platform, boot, start: fields[19] }
     } else {
-      const options = { encoding: 'utf8', timeout: 2000, maxBuffer: 1024, windowsHide: true }
+      const options = { encoding: 'utf8', timeout: PS_BOUND_MS, maxBuffer: 1024, windowsHide: true }
       let output
       if (platform === 'darwin') {
         output = exec('/bin/ps', ['-p', String(pid), '-o', 'lstart='], {
@@ -39,7 +43,7 @@ export function processBirth(pid, { platform = process.platform, read = readFile
         if (typeof systemRoot !== 'string' || !win32.isAbsolute(systemRoot)) return null
         const script = `$ErrorActionPreference='Stop'; try { [System.Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToUniversalTime().Ticks.ToString([System.Globalization.CultureInfo]::InvariantCulture) } catch { exit 1 }`
         output = exec(win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-          ['-NoProfile', '-NonInteractive', '-Command', script], options)
+          ['-NoProfile', '-NonInteractive', '-Command', script], { ...options, timeout: POWERSHELL_BOUND_MS })
       } else return null
       value = { platform, start: output.trim().replace(/\s+/g, ' ') }
     }
