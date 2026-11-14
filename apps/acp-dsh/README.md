@@ -76,10 +76,13 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   server (the bridge's own approval is the one dialog), the agent's reject option for any other
   or unnamed server, which is logged (#969). **A call that
   outlives its step (#957).** The agent runs its calls in parallel, and the bridge puts no
-  deadline on one (a long wait, a slow command and an open approval dialog are legitimate), so
-  DSH can end the step a call was recorded in while it still runs. The write guard below then
-  closes it before the `step/end` row and drops its late result; the agent still gets the real
-  answer. Each call has its own abort controller: Stop, the end of its turn and a caller that
+  deadline on one (a long wait, a slow command and an open approval dialog are legitimate).
+  Before its step ends, an own-tool card waits for bridge calls of that step asking for approval
+  or under Auto review to write their results, with no deadline; Full-access calls are unchanged.
+  Stop, revoke and the prompt's end release the wait.
+  The write guard still closes calls a forced boundary leaves open before `step/end` and drops
+  their late results; the agent still gets the real answer.
+  Each call has its own abort controller: Stop, the end of its turn and a caller that
   went away (an MCP `notifications/cancelled`, a closed request) stop that call as
   `BRIDGE_CANCELLED` and keep the bridge. A call whose `tool/call` row cannot be written is
   answered with DSH's own not-started row, and a bridge revoked with a call in flight keeps
