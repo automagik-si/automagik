@@ -1,6 +1,6 @@
 {
   "name": "@automagik/pets",
-  "version": "3.142.4",
+  "version": "3.142.5",
   "private": true,
   "description": "automagik-pets: bakes the Bot team's characters into Codex v2 pet folders without a browser, for DSH and Automagik Herdr",
   "homepage": "https://github.com/automagik-si/automagik/tree/dev/apps/automagik-pets#readme",
