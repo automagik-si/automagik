@@ -67,7 +67,7 @@ test('Windows uses system PowerShell with fixed flags and lossless decimal UTC t
   assert.deepEqual(call[1].slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command'])
   assert.match(call[1][3], /GetProcessById\(42\).*ToUniversalTime\(\).Ticks.ToString/)
   assert.match(call[1][3], /catch \{ exit 1 \}/)
-  assert.equal(call[2].timeout, 2000)
+  assert.equal(call[2].timeout, 10_000)
   assert.equal(call[2].maxBuffer, 1024)
   assert.equal(processState(42, identity, { probe, identity: () => ({ platform: 'win32', start: '639301724551234568' }) }), 'dead')
   for (const output of ['', '0', '6.39301724551234567e17', '639301724551234567\nerror']) {
