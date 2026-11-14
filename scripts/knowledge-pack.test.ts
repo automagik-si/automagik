@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { allowed, build, EXCLUDED_FOLDERS, KIND, PLACEHOLDERS_PATH, placeholderTest, readTar, sourceUrl, stamp, type Manifest } from './knowledge-pack';
+import { allowed, build, EXCLUDED_FOLDERS, KIND, PLACEHOLDERS_PATH, placeholderTest, privacyHits, readTar, sourceUrl, stamp, type Manifest } from './knowledge-pack';
 
 // A fake GitHub on a local port: the org listing and each repository's tarball, as git archive
 // makes it (a pax global header naming the commit, then the files under one top folder).
@@ -297,6 +297,22 @@ describe('the knowledge pack', () => {
     expect(pass({ rule: 'email', match: 'a12' })).toBe(false);
     expect(pass({ rule: 'email', match: 'h' })).toBe(false);
     expect(pass({ rule: 'home-path', match: 'h' })).toBe(true);
+    expect(pass({ rule: 'home-path', match: 'a1' })).toBe(false);
+    expect(pass({ rule: 'secret', match: 'a1' })).toBe(false);
+  });
+
+  test('a pattern placeholder is bound to its rule: a hit under another rule whose text matches it still fails', () => {
+    const dir = join(scratch, `rule-bound-${++n}`);
+    mkdirSync(dir, { recursive: true });
+    const token = `${'gh'}p_${'A1'.repeat(18)}`;
+    writeFileSync(join(dir, 'a.md'), `# A\n\n${['', 'home', 'ana'].join('/')}\n${token}\n`);
+    const hits = ['a.md:3: home-path', 'a.md:4: secret'];
+    expect(privacyHits(dir, [])).toEqual(hits);
+    // Email-rule patterns whose text covers each hit's match let neither through.
+    const broad = [{ rule: 'email', pattern: `^${['', 'home', 'ana'].join('/')}$`, why: 'w' }, { rule: 'email', pattern: '^ghp_.*$', why: 'w' }];
+    expect(privacyHits(dir, broad)).toEqual(hits);
+    // The same patterns under the hit's own rule do pass it.
+    expect(privacyHits(dir, [{ ...broad[0], rule: 'home-path' }])).toEqual(['a.md:4: secret']);
   });
 
   test('a read GitHub refuses fails the build and keeps the old pack', async () => {
