@@ -96,6 +96,38 @@ var ZH = {
   "1 approval waiting": "1 项批准请求待处理",
   "{count} approvals waiting": "{count} 项批准请求待处理",
   "{count} requests to use {tool}": "{count} 个使用 {tool} 的请求",
+  "No Hermes bots found": "未找到 Hermes Bot",
+  "No Hermes bots found on {host}": "{host} 上没有找到 Hermes Bot",
+  "Automagik reads each Hermes home, its serve and its profiles. None answered on this computer.": "Automagik 会读取每个 Hermes 数据目录、它的 serve 和配置，但这台电脑上没有可用的。",
+  "Install Hermes there, or choose another computer.": "请在那里安装 Hermes，或选择另一台电脑。",
+  "Pick one of your SSH hosts. Automagik finds the Hermes bots there.": "选择一个 SSH 主机。Automagik 会在那里查找 Hermes Bot。",
+  "Find the bots": "查找 Bot",
+  "Pick the bot": "选择 Bot",
+  "These are the Hermes bots on {host}. Pick the one to chat with.": "这些是 {host} 上的 Hermes Bot。选择要聊天的那个。",
+  "No Hermes bots found on {host}. Install Hermes there, or choose another computer.": "{host} 上没有找到 Hermes Bot。请在那里安装 Hermes，或选择另一台电脑。",
+  "Hermes bots": "Hermes Bot",
+  "Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.": "请在 {host} 的终端里用“{command}”启动它。Automagik 从不启动或重启 Hermes。",
+  "{count} bots on {host}": "{host} 上有 {count} 个 Bot",
+  "Check again": "再次检查",
+  "Use this bot": "使用此 Bot",
+  "Finding the Hermes bots on {host}": "正在查找 {host} 上的 Hermes Bot",
+  "Reading Hermes homes and serve records": "正在读取 Hermes 数据目录和 serve 记录",
+  "This only reads. Automagik never starts or restarts Hermes.": "此操作只读取。Automagik 从不启动或重启 Hermes。",
+  "Finding the bots…": "正在查找 Bot…",
+  "Add another Hermes": "添加另一个 Hermes",
+  "Point at the Hermes folder on {host}. Automagik reads its config.yaml and its serve record, and the gateway-locks folder beside it.": "指向 {host} 上的 Hermes 文件夹。Automagik 会读取它的 config.yaml、它的 serve 记录，以及旁边的 gateway-locks 文件夹。",
+  "Hermes folder on {host}": "{host} 上的 Hermes 文件夹",
+  "An absolute folder on the remote computer. Nothing else there is read.": "远程电脑上的绝对文件夹。不会读取那里的其他内容。",
+  "Add and find bots": "添加并查找 Bot",
+  "Enter an absolute Hermes folder": "请输入绝对 Hermes 文件夹",
+  "The folder must be on the remote computer, such as /Users/you/.hermes.": "文件夹必须在远程电脑上，例如 /Users/you/.hermes。",
+  "Enter the folder once; it is remembered for this computer.": "只需输入一次文件夹；它会为此电脑记住。",
+  "Install Hermes there, add another Hermes folder, or choose another computer.": "请在那里安装 Hermes、添加另一个 Hermes 文件夹，或选择另一台电脑。",
+  "Point at the Hermes folder on {host}. Automagik reads only that Hermes’s settings and its server record, and never a key.": "指向 {host} 上的 Hermes 文件夹。Automagik 只读取该 Hermes 的设置和它的服务器记录，绝不读取密钥。",
+  "An absolute folder on the remote computer. It reads config.yaml and the gateway-locks folder beside it; nothing else.": "远程电脑上的绝对文件夹。它会读取 config.yaml 和旁边的 gateway-locks 文件夹，不读取其他内容。",
+  "No Hermes found in {folder}": "在 {folder} 中没有找到 Hermes",
+  "The folder on {host} holds no Hermes settings or server record.": "{host} 上的该文件夹没有 Hermes 设置或服务器记录。",
+  "Point at the folder that holds Hermes, or choose another computer.": "请指向包含 Hermes 的文件夹，或选择另一台电脑。",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",
@@ -5845,7 +5877,7 @@ function usePaneLeft() {
 var import_react15 = require("react");
 var import_react_dom2 = require("react-dom");
 var EMPTY_SSH = { host: "", user: "", port: "", identityFile: "", hermesPath: "", hermesHome: "" };
-var draftOf = (view) => ({ mode: view?.mode === "remote" && view?.address ? "remote" : "ssh", address: view?.address ?? "", authMode: view?.authMode === "password" ? "password" : "token", credentialRef: view?.credentialRef ?? "", credential: "", username: view?.username ?? "", password: "", ssh: { ...EMPTY_SSH, ...view?.ssh } });
+var draftOf = (view) => ({ mode: view?.mode === "remote" && view?.address ? "remote" : "ssh", extraHomes: Array.isArray(view?.extraHomes) ? view.extraHomes : [], address: view?.address ?? "", authMode: view?.authMode === "password" ? "password" : "token", credentialRef: view?.credentialRef ?? "", credential: "", username: view?.username ?? "", password: "", ssh: { ...EMPTY_SSH, ...view?.ssh } });
 var configured = (view) => view?.enabled === true && Boolean(view?.profile);
 var freshSecrets = (draft) => ({ ...draft, credential: "", password: "" });
 var connectionLabel = (draft) => draft.mode === "ssh" ? draft.ssh.host : draft.address.replace(/^https?:\/\//, "").replace(/\/$/, "");
@@ -5870,6 +5902,35 @@ var sshHostRows = (rows2) => {
     if (!item.alias || seen.has(item.alias)) return [];
     seen.add(item.alias);
     return [item];
+  });
+};
+var botModelLine = (item) => !item.model ? "" : `${item.model}${item.provider && !item.model.toLowerCase().startsWith(`${item.provider.toLowerCase()}/`) ? ` (${item.provider})` : ""}`;
+var botRows = (rows2) => {
+  const seen = /* @__PURE__ */ new Set();
+  return (Array.isArray(rows2) ? rows2 : []).slice(0, 60).flatMap((row) => {
+    if (!row || typeof row !== "object") return [];
+    const text2 = (value, max) => typeof value === "string" && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value) ? value : "";
+    const home = text2(row.home, 4096), id = text2(row.id, 100);
+    if (!home.startsWith("/") || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(id)) return [];
+    const running2 = row.running === true;
+    const recordDir = running2 ? text2(row.recordDir, 4096) : "";
+    const port = running2 && Number.isSafeInteger(row.port) && row.port > 0 && row.port < 65536 ? row.port : 0;
+    const key = `${home}
+${id}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [{
+      key,
+      home,
+      id,
+      running: running2,
+      name: text2(row.name, 100) || id,
+      model: text2(row.model, 200),
+      provider: text2(row.provider, 100),
+      recordDir: recordDir.startsWith("/") && !recordDir.split("/").includes("..") ? recordDir : "",
+      port,
+      start: text2(row.start, 500)
+    }];
   });
 };
 function SshHostPicker({ host, onPick }) {
@@ -6074,9 +6135,13 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
   const [error, setError] = (0, import_react15.useState)(null);
   const [test, setTest] = (0, import_react15.useState)(null);
   const [profile, setProfile] = (0, import_react15.useState)("");
+  const [bots, setBots] = (0, import_react15.useState)([]);
+  const [bot, setBot] = (0, import_react15.useState)("");
+  const [addHome, setAddHome] = (0, import_react15.useState)("");
   const [choosingKey, setChoosingKey] = (0, import_react15.useState)(false);
   const [details, setDetails] = (0, import_react15.useState)(false);
   const request = (0, import_react15.useRef)(null);
+  const retry = (0, import_react15.useRef)(null);
   const testLease = (0, import_react15.useRef)(null);
   const testRequest = (0, import_react15.useRef)(null);
   const saving = (0, import_react15.useRef)(false);
@@ -6099,6 +6164,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     setStep("error");
     setStatus("error");
   };
+  const picked = bots.find((item) => item.key === bot);
   const discardTest = (testId, requestId = testRequest.current) => {
     if (!testId && !requestId) return;
     if (testId && testLease.current === testId) testLease.current = null;
@@ -6189,6 +6255,72 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     setError(null);
     setDraft((current) => ({ ...current, mode: "ssh", ssh: { ...EMPTY_SSH, host: value } }));
   };
+  const findBots = async (extra = draft.extraHomes) => {
+    if (saving.current) return;
+    discardTest(testLease.current);
+    const generation = ++epoch.current;
+    const requestId = globalThis.crypto.randomUUID();
+    const payload = { ssh: { ...draft.ssh, port: draft.ssh.port === "" ? void 0 : Number(draft.ssh.port) }, extraHomes: extra, requestId };
+    retry.current = findBots;
+    stopProgress();
+    setStep("working");
+    setStatus("connecting");
+    setStage("detect");
+    setError(null);
+    setTest(null);
+    setBots([]);
+    let answer;
+    try {
+      answer = await run2("hermes-remote-detect", payload);
+      if (!live.current || generation !== epoch.current) return;
+    } catch (failure) {
+      if (!live.current || generation !== epoch.current || failure?.name === "AbortError") return;
+      const detail = await failureDetail({ requestId });
+      if (!live.current || generation !== epoch.current) return;
+      failed(failure, draft, detail, requestId);
+      return;
+    }
+    const found = botRows(answer?.bots);
+    const host = shortText(draft.ssh.host.trim());
+    setBots(found);
+    setStatus("idle");
+    const first = found.find((item) => item.running && item.recordDir) ?? found.find((item) => item.running) ?? found[0];
+    setBot(first?.key ?? "");
+    if (found.length === 1 && first.running && first.recordDir) {
+      setStep("bots");
+      const target = { ...draft, extraHomes: extra, mode: "ssh", ssh: { ...draft.ssh, hermesHome: first.home, recordDir: first.recordDir } };
+      setDraft(target);
+      await connect(target, first);
+      return;
+    }
+    if (found.length) {
+      setStep("bots");
+      return;
+    }
+    const pointed = extra.at(-1);
+    if (pointed) {
+      setError({
+        heading: t("No Hermes found in {folder}", { folder: pointed }),
+        text: t("The folder on {host} holds no Hermes settings or server record.", { host }),
+        hint: t("Point at the folder that holds Hermes, or choose another computer."),
+        ssh: true,
+        addHome: true,
+        requestId
+      });
+    } else {
+      setError({
+        heading: t("No Hermes bots found"),
+        title: t("No Hermes bots found on {host}", { host }),
+        text: t("Automagik reads each Hermes home, its serve and its profiles. None answered on this computer."),
+        hint: t("Install Hermes there, add another Hermes folder, or choose another computer."),
+        ssh: true,
+        addHome: true,
+        requestId
+      });
+    }
+    setStep("error");
+    setStatus("error");
+  };
   const save = async (testId, chosen, shown = draft) => {
     if (saving.current) return;
     saving.current = true;
@@ -6212,13 +6344,19 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       saving.current = false;
     }
   };
-  const connect = async () => {
+  const connect = async (target = draft, chosenBot = null) => {
     if (saving.current) return;
     discardTest(testLease.current);
     const generation = ++epoch.current;
     const requestId = globalThis.crypto.randomUUID();
+    retry.current = () => connect(target, chosenBot);
     testRequest.current = requestId;
-    const payload = { ...draft, ssh: { ...draft.ssh, port: draft.ssh.port === "" ? void 0 : Number(draft.ssh.port) }, requestId };
+    const ssh2 = { ...target.ssh, port: target.ssh.port === "" ? void 0 : Number(target.ssh.port) };
+    if (chosenBot) {
+      ssh2.hermesHome = chosenBot.home;
+      ssh2.recordDir = chosenBot.recordDir;
+    }
+    const payload = { ...target, ssh: ssh2, extraHomes: target.extraHomes ?? draft.extraHomes, ...chosenBot ? { profile: chosenBot.id } : {}, requestId };
     stopProgress();
     setStep("working");
     setStatus("connecting");
@@ -6255,6 +6393,16 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       if (live.current && generation === epoch.current) setDraft(freshSecrets);
     }
     const profiles = answer.profiles ?? [];
+    if (chosenBot) {
+      const chosen2 = profiles.some((item) => item.id === chosenBot.id) ? chosenBot.id : "";
+      setTest(answer);
+      setProfile(chosen2);
+      setStage("connected");
+      if (chosen2) {
+        await save(answer.testId, chosen2, payload);
+        return;
+      }
+    }
     const chosen = profiles.some((item) => item.id === answer.defaultProfile) ? answer.defaultProfile : profiles[0]?.id ?? "";
     setTest(answer);
     setProfile(chosen);
@@ -6266,6 +6414,25 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     }
     await save(answer.testId, chosen, payload);
   };
+  const addHermesHome = async () => {
+    const folder = addHome.trim();
+    if (!folder.startsWith("/") || folder.split("/").includes("..")) {
+      setError({ heading: t("Add another Hermes"), title: t("Enter an absolute Hermes folder"), text: t("The folder must be on the remote computer, such as /Users/you/.hermes."), hint: t("Enter the folder once; it is remembered for this computer."), ssh: true });
+      setStep("error");
+      setStatus("error");
+      return;
+    }
+    const next = [.../* @__PURE__ */ new Set([...draft.extraHomes, folder])].slice(0, 20);
+    setDraft((current) => ({ ...current, extraHomes: next }));
+    setAddHome("");
+    await findBots(next);
+  };
+  const useBot = () => {
+    if (saving.current || !picked?.running || !picked.recordDir) return;
+    const target = { ...draft, mode: "ssh", ssh: { ...draft.ssh, hermesHome: picked.home, recordDir: picked.recordDir } };
+    setDraft(target);
+    void connect(target, picked);
+  };
   const trustHost = async () => {
     if (saving.current || !error?.trust || !error.requestId) return;
     const generation = ++epoch.current, requestId = error.requestId, shown = draft;
@@ -6273,7 +6440,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     try {
       await run2("hermes-remote-ssh-trust", { requestId });
       if (!live.current || generation !== epoch.current) return;
-      await connect();
+      await (retry.current ?? connect)();
     } catch (failure) {
       if (!live.current || generation !== epoch.current || failure?.name === "AbortError") return;
       const detail = await failureDetail({ requestId });
@@ -6306,11 +6473,11 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     content = (0, import_react15.createElement)(
       import_react15.Fragment,
       null,
-      (0, import_react15.createElement)("p", { className: "bt-hw-lead" }, t("Pick one of your SSH hosts. Automagik finds the Hermes there and opens a chat.")),
+      (0, import_react15.createElement)("p", { className: "bt-hw-lead" }, t("Pick one of your SSH hosts. Automagik finds the Hermes bots there.")),
       (0, import_react15.createElement)(SshHostPicker, { host: draft.ssh.host, onPick: pickSshHost }),
       (0, import_react15.createElement)(Field, { label: t("SSH host or config name"), value: draft.ssh.host, onChange: typeSshHost, hint: t("You can also use a name from your SSH config.") })
     );
-    footer = (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { onClick: close }, t("Cancel")), (0, import_react15.createElement)(Button, { primary: true, disabled: status === "loading" || draft.mode !== "ssh" || !validDetails, onClick: connect }, t("Connect"), " →"));
+    footer = (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { onClick: close }, t("Cancel")), (0, import_react15.createElement)(Button, { primary: true, disabled: status === "loading" || draft.mode !== "ssh" || !validDetails, onClick: () => findBots() }, t("Connect"), " →"));
   } else if (step2 === "more") {
     heading = t("More options");
     const route = (0, import_react15.createElement)("div", { className: "bt-hw-field" }, (0, import_react15.createElement)("span", null, t("How would you like to connect?")), (0, import_react15.createElement)("div", { className: "bt-hw-segments", role: "group", "aria-label": t("How would you like to connect?") }, [["ssh", t("Through SSH")], ["remote", t("Remote address")]].map(([id, name]) => (0, import_react15.createElement)("button", { key: id, type: "button", "aria-pressed": draft.mode === id, onClick: () => change("mode", id) }, name))));
@@ -6334,7 +6501,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     footer = (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { onClick: () => {
       setDraft((current) => ({ ...freshSecrets(current), mode: "ssh" }));
       setStep("host");
-    } }, t("Back")), (0, import_react15.createElement)(Button, { primary: true, disabled: status === "loading" || !validDetails, onClick: connect }, t("Connect"), " →"));
+    } }, t("Back")), (0, import_react15.createElement)(Button, { primary: true, disabled: status === "loading" || !validDetails, onClick: draft.mode === "ssh" ? () => findBots() : () => connect() }, t("Connect"), " →"));
   } else if (step2 === "error") {
     heading = error?.heading ?? t("We couldn’t connect");
     const facts = error?.rows?.length ? (0, import_react15.createElement)("div", { className: "bt-hw-summary bt-hw-facts" }, error.rows.map((row) => (0, import_react15.createElement)(Pair, { key: row.label, ...row }))) : null;
@@ -6342,7 +6509,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     content = error?.trust ? (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)("div", { className: "bt-hw-result bt-hw-ask", role: "alert" }, (0, import_react15.createElement)("span", { className: "bt-hw-result-icon" }, (0, import_react15.createElement)(ShieldIcon)), (0, import_react15.createElement)("h3", null, error.title), (0, import_react15.createElement)("p", null, error.text)), facts, (0, import_react15.createElement)(Note, null, error.hint)) : (0, import_react15.createElement)(
       import_react15.Fragment,
       null,
-      (0, import_react15.createElement)("div", { className: "bt-hw-result bt-hw-failed", role: "alert" }, (0, import_react15.createElement)("span", { className: "bt-hw-result-icon" }, "!"), (0, import_react15.createElement)("h3", null, error?.title)),
+      (0, import_react15.createElement)("div", { className: "bt-hw-result bt-hw-failed", role: "alert" }, (0, import_react15.createElement)("span", { className: "bt-hw-result-icon" }, "!"), error?.title ? (0, import_react15.createElement)("h3", null, error.title) : null),
       (0, import_react15.createElement)(Note, { error: true }, error?.hint),
       error?.text || facts || said.length ? (0, import_react15.createElement)("button", { type: "button", className: "bt-hw-details-toggle", "aria-expanded": details, onClick: () => setDetails((on) => !on) }, t("Details"), (0, import_react15.createElement)("span", { "aria-hidden": true }, details ? "−" : "+")) : null,
       details ? (0, import_react15.createElement)(
@@ -6354,7 +6521,74 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
         error?.ssh ? (0, import_react15.createElement)("p", { className: "bt-hw-quiet" }, t("Settings → Feedback keeps a line about this failure for a report.")) : null
       ) : null
     );
-    footer = error?.trust ? (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { disabled: status === "trusting", onClick: () => setStep("host") }, t("Back")), (0, import_react15.createElement)(Button, { primary: true, disabled: status === "trusting", onClick: trustHost }, status === "trusting" ? t("Trusting…") : t("Trust this host"), " →")) : validDetails ? (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { onClick: () => setStep("more") }, t("More options")), (0, import_react15.createElement)(Button, { primary: true, onClick: connect }, t("Try again"), " →")) : (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { onClick: close }, t("Cancel")), (0, import_react15.createElement)(Button, { primary: true, onClick: () => setStep(draft.mode === "ssh" ? "host" : "more") }, draft.mode === "ssh" ? t("Back") : t("More options"), " →"));
+    footer = error?.trust ? (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { disabled: status === "trusting", onClick: () => setStep("host") }, t("Back")), (0, import_react15.createElement)(Button, { primary: true, disabled: status === "trusting", onClick: trustHost }, status === "trusting" ? t("Trusting…") : t("Trust this host"), " →")) : validDetails ? (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { onClick: () => setStep("more") }, t("More options")), error?.addHome ? (0, import_react15.createElement)(Button, { onClick: () => {
+      setAddHome("");
+      setStep("add-home");
+    } }, t("Add another Hermes")) : null, (0, import_react15.createElement)(Button, { primary: true, onClick: () => (retry.current ?? connect)() }, t("Try again"), " →")) : (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { onClick: close }, t("Cancel")), (0, import_react15.createElement)(Button, { primary: true, onClick: () => setStep(draft.mode === "ssh" ? "host" : "more") }, draft.mode === "ssh" ? t("Back") : t("More options"), " →"));
+  } else if (step2 === "bots") {
+    heading = t("Pick the bot");
+    const host = shortText(draft.ssh.host.trim()) || t("the other computer");
+    content = (0, import_react15.createElement)(
+      import_react15.Fragment,
+      null,
+      (0, import_react15.createElement)("p", { className: "bt-hw-lead" }, t("These are the Hermes bots on {host}. Pick the one to chat with.", { host })),
+      bots.length === 0 ? (0, import_react15.createElement)(Note, { error: true }, t("No Hermes bots found on {host}. Install Hermes there, or choose another computer.", { host })) : (0, import_react15.createElement)("div", { className: "bt-hw-bots", role: "radiogroup", "aria-label": t("Hermes bots") }, bots.map((item) => (0, import_react15.createElement)(
+        "button",
+        {
+          key: item.key,
+          type: "button",
+          role: "radio",
+          "aria-checked": bot === item.key,
+          "data-bot": item.id,
+          "data-running": item.running ? "true" : "false",
+          className: "bt-hw-bot",
+          disabled: status === "saving",
+          onClick: () => {
+            if (!saving.current) setBot(item.key);
+          }
+        },
+        (0, import_react15.createElement)("span", { className: "bt-hw-radio" }),
+        (0, import_react15.createElement)(
+          "span",
+          { className: "bt-hw-bot-copy" },
+          (0, import_react15.createElement)("strong", null, item.name),
+          item.model ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-model" }, `${t("Model")}: ${botModelLine(item)}`) : null,
+          !item.running && item.start ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.", { command: item.start, host })) : null
+        ),
+        (0, import_react15.createElement)("span", { className: `bt-hw-bot-state${item.running ? " bt-hw-bot-ok" : ""}` }, item.running ? t("Running") : t("Not running"))
+      ))),
+      (0, import_react15.createElement)(
+        "div",
+        { className: "bt-hw-profile-tools" },
+        (0, import_react15.createElement)("span", null, t("{count} bots on {host}", { count: bots.length, host })),
+        (0, import_react15.createElement)("button", { type: "button", disabled: status === "refreshing" || status === "saving", onClick: () => findBots() }, t("Check again"))
+      )
+    );
+    footer = (0, import_react15.createElement)(
+      import_react15.Fragment,
+      null,
+      (0, import_react15.createElement)(Button, { disabled: status === "saving", onClick: () => setStep("host") }, t("Back")),
+      (0, import_react15.createElement)(Button, { disabled: status === "saving", onClick: () => {
+        setAddHome("");
+        setStep("add-home");
+      } }, t("Add another Hermes")),
+      (0, import_react15.createElement)(Button, { primary: true, disabled: status === "saving" || !picked?.running || !picked?.recordDir, onClick: useBot }, status === "saving" ? t("Opening…") : t("Use this bot"), " →")
+    );
+  } else if (step2 === "add-home") {
+    heading = t("Add another Hermes");
+    const host = shortText(draft.ssh.host.trim()) || t("the other computer");
+    content = (0, import_react15.createElement)(
+      import_react15.Fragment,
+      null,
+      (0, import_react15.createElement)("p", { className: "bt-hw-lead" }, t("Point at the Hermes folder on {host}. Automagik reads only that Hermes’s settings and its server record, and never a key.", { host })),
+      (0, import_react15.createElement)(Field, { label: t("Hermes folder on {host}", { host }), value: addHome, onChange: setAddHome, placeholder: "/Users/you/.hermes", hint: t("An absolute folder on the remote computer. It reads config.yaml and the gateway-locks folder beside it; nothing else.") })
+    );
+    footer = (0, import_react15.createElement)(
+      import_react15.Fragment,
+      null,
+      (0, import_react15.createElement)(Button, { disabled: status === "saving", onClick: () => setStep(bots.length ? "bots" : "host") }, t("Back")),
+      (0, import_react15.createElement)(Button, { primary: true, disabled: status === "saving" || !addHome.trim().startsWith("/"), onClick: addHermesHome }, status === "saving" ? t("Finding the bots…") : t("Add and find bots"), " →")
+    );
   } else if (step2 === "profile") {
     heading = t("Which profile would you like?");
     const profiles = test?.profiles ?? [];
@@ -6375,9 +6609,22 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       if (!saving.current) {
         discardTest(testLease.current);
         setTest(null);
-        setStep(draft.mode === "ssh" ? "host" : "more");
+        setStep(bots.length ? "bots" : draft.mode === "ssh" ? "host" : "more");
       }
     } }, t("Back")), (0, import_react15.createElement)(Button, { primary: true, disabled: !profile || status === "saving" || status === "refreshing", onClick: () => save(test.testId, profile) }, status === "saving" ? t("Opening…") : t("Use this profile"), " →"));
+  } else if (stage === "detect") {
+    heading = t("Finding the Hermes bots on {host}", { host: label });
+    content = (0, import_react15.createElement)(
+      "div",
+      { className: "bt-hw-checks", role: "status" },
+      (0, import_react15.createElement)(
+        "div",
+        { className: "bt-hw-check-row" },
+        (0, import_react15.createElement)("span", { className: "bt-hw-status bt-hw-working" }, (0, import_react15.createElement)("span", { className: "bt-hw-spinner" })),
+        (0, import_react15.createElement)("div", null, (0, import_react15.createElement)("strong", null, t("Reading Hermes homes and serve records")), (0, import_react15.createElement)("small", null, t("This only reads. Automagik never starts or restarts Hermes.")))
+      )
+    );
+    footer = (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { onClick: close }, t("Cancel")), (0, import_react15.createElement)(Button, { disabled: true }, t("Finding the bots…")));
   } else {
     heading = t("Connecting to {address}", { address: label });
     const at = status === "saving" ? 3 : ["reach", "sign-in", "open", "connected"].indexOf(stage);
@@ -6515,6 +6762,20 @@ var HERMES_REMOTE_CSS = `${HERMES_MARK_CSS}
 .bt-hw-result{text-align:center;padding:10px 28px 28px}.bt-hw-result-icon{display:grid;place-items:center;width:58px;height:58px;margin:8px auto 16px;border-radius:50%}.bt-hw-result-icon svg{width:30px;height:30px}.bt-hw-success .bt-hw-result-icon{background:color-mix(in srgb,var(--bt-green) 10%,var(--bt-card));color:var(--bt-green)}.bt-hw-failed .bt-hw-result-icon{background:color-mix(in srgb,var(--bt-danger) 10%,var(--bt-card));color:var(--bt-danger);font-size:30px}.bt-hw-result h3{font:var(--bt-weight-title,700) 20px var(--bt-head-font,var(--bt-font));margin:0 0 10px}.bt-hw-result p{margin:0;color:var(--bt-ink-2);font-size:14px;line-height:22px}.bt-hw-details-toggle{display:flex;align-items:center;justify-content:center;gap:8px;margin:14px auto;border:0;background:none;color:var(--bt-ink-2);font:12px var(--bt-font);padding:4px 8px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}.bt-hw-details>.bt-hw-quiet{margin:0 0 14px}.bt-hw-summary{border:1px solid var(--st-line,var(--bt-line));border-radius:var(--bt-hw-summary-radius,11px);overflow:hidden;background:var(--st-raised,var(--bt-main))}.bt-hw-pair{display:flex;justify-content:space-between;gap:20px;padding:14px 16px;border-bottom:1px solid var(--st-line,var(--bt-line));font-size:13px}.bt-hw-pair:last-child{border:0}.bt-hw-pair span{color:var(--bt-ink-2);flex:none}.bt-hw-pair strong{font-weight:500;overflow-wrap:anywhere;min-width:0;text-align:right}.bt-hw-mono{font:12px/18px ui-monospace,SFMono-Regular,Menlo,monospace}.bt-hw-facts{margin:0 0 14px}.bt-hw-result+.bt-hw-facts{margin-top:-6px}.bt-hw-ask .bt-hw-result-icon{background:var(--st-lilac,var(--bt-active));color:var(--st-lilac-ink,var(--bt-ink))}.bt-hw-lines{margin:0 0 14px;border:1px solid var(--st-line,var(--bt-line));border-radius:var(--bt-hw-summary-radius,11px);background:color-mix(in srgb,var(--st-sunk,var(--bt-hover)) 55%,var(--bt-card));overflow:hidden}.bt-hw-lines>span{display:block;padding:11px 16px 0;font-size:11px;font-weight:600;color:var(--bt-ink-2)}.bt-hw-lines pre{margin:0;padding:6px 16px 12px;max-height:126px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--bt-ink);font:12px/18px ui-monospace,SFMono-Regular,Menlo,monospace}.bt-hw-profiles{border:1px solid var(--st-cyan,var(--bt-accent));border-radius:12px;background:var(--st-raised,var(--bt-main));overflow:hidden}.bt-hw-profile{display:flex;align-items:center;gap:14px;width:100%;padding:20px;border:0;border-bottom:1px solid var(--bt-line);background:transparent;color:var(--bt-ink);text-align:left;cursor:pointer}.bt-hw-profile:last-child{border-bottom:0}.bt-hw-profile[aria-checked=true]{box-shadow:inset 0 0 0 1px var(--st-cyan,var(--bt-accent))}.bt-hw-profile>span:nth-child(2){display:flex;flex-direction:column;gap:5px}.bt-hw-profile strong{font-size:15px}.bt-hw-profile small{font-size:12px;color:var(--bt-ink-2)}.bt-hw-radio{width:18px;height:18px;box-sizing:border-box;border:1px solid var(--bt-line-2);border-radius:50%;background:var(--bt-card)}[aria-checked=true]>.bt-hw-radio{border:5px solid var(--st-cyan,var(--bt-accent))}.bt-hw-tag{margin-left:auto;padding:4px 8px;border-radius:6px;background:var(--st-lilac,var(--bt-active));color:var(--st-lilac-ink,var(--bt-ink));font-size:11px}.bt-hw-profile-tools{display:flex;justify-content:space-between;font-size:12px;color:var(--bt-ink-2);margin:14px 0 22px}.bt-hw-profile-tools button{border:0;background:none;padding:0;color:var(--bt-ink);font:inherit;text-decoration:underline;text-underline-offset:3px;cursor:pointer}.bt-hw-remember{display:flex;gap:9px;align-items:center;font-size:12px;color:var(--bt-green);margin:16px 0}.bt-hw-limits{font-size:12px;line-height:19px;color:var(--bt-ink-2);margin:18px 0 0}.bt-hw-compact{padding-top:0;padding-bottom:18px}.bt-hw-compact .bt-hw-result-icon{margin-top:0}
 .bt-hw-host-picker{margin:0 0 20px;padding:14px;border:1px solid var(--st-line,var(--bt-line-2));border-radius:12px;background:var(--st-raised,var(--bt-main));min-width:0}.bt-hw-host-title{display:block;font-size:13px;margin-bottom:10px}.bt-hw-host-picker .bt-hw-field{margin:0 0 10px;gap:6px}.bt-hw-host-picker .bt-hw-field>span{font-size:12px;font-weight:400;color:var(--bt-ink-2)}.bt-hw-host-picker .bt-hw-field input{height:34px;font-size:13px}.bt-hw-host-list{max-height:248px;overflow:auto;overscroll-behavior:contain;border:1px solid var(--st-line,var(--bt-line));border-radius:8px}.bt-hw-host-choice{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;border:0;border-bottom:1px solid var(--st-line,var(--bt-line));padding:9px 10px;background:transparent;color:var(--bt-ink);font:inherit;text-align:left;cursor:pointer}.bt-hw-host-choice:last-child{border-bottom:0}.bt-hw-host-choice:hover,.bt-hw-host-choice[aria-pressed=true]{background:var(--bt-hover)}.bt-hw-host-choice>span{display:flex;flex-direction:column;gap:3px;min-width:0}.bt-hw-host-choice strong{font-size:13px;font-weight:600;overflow-wrap:anywhere}.bt-hw-host-choice small{font-size:11px;color:var(--bt-ink-2);overflow-wrap:anywhere}.bt-hw-host-choice svg{flex:none;width:14px;height:14px;color:var(--st-cyan,var(--bt-accent))}.bt-hw-host-hint{margin:0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}.bt-hw-other-hosts{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;border:0;background:none;color:var(--bt-ink-2);font:12px var(--bt-font);padding:12px 0 0;text-align:left;cursor:pointer}.bt-hw-other-hosts+ .bt-hw-host-list{margin-top:10px}
 @media(max-width:640px){.bt-hermes-wizard{width:calc(100vw - 20px);max-height:calc(100dvh - 20px)}.bt-hw-head,.bt-hw-content{padding:18px}.bt-hw-foot{padding:14px 18px}.bt-hw-two{grid-template-columns:1fr}}
+.bt-hw-bots{border:1px solid var(--st-line,var(--bt-line-2));border-radius:var(--bt-r-menu,14px);background:var(--st-paper,var(--bt-card));overflow:hidden}
+.bt-hw-bot{display:flex;align-items:flex-start;gap:13px;width:100%;padding:17px 18px;border:0;border-bottom:1px solid var(--st-line,var(--bt-line));background:transparent;color:var(--bt-ink,var(--bt-ink));text-align:left;cursor:pointer;font:inherit}
+.bt-hw-bot:last-child{border-bottom:0}.bt-hw-bot:hover{background:var(--st-raised,var(--bt-hover))}
+.bt-hw-bot[aria-checked=true]{background:var(--st-raised,var(--bt-main));box-shadow:inset 0 0 0 1px var(--st-cyan,var(--bt-accent))}
+.bt-hw-bot>.bt-hw-radio{margin-top:3px;flex:none}
+.bt-hw-bot-copy{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.bt-hw-bot-copy strong{font:var(--bt-weight-strong,600) 15px var(--bt-head-font,var(--bt-font));overflow-wrap:anywhere}
+.bt-hw-bot-copy small{font-size:12px;line-height:18px;color:var(--bt-ink-2);overflow-wrap:anywhere}
+.bt-hw-bot-model{font-size:12px}
+.bt-hw-bot-start{margin-top:4px;color:var(--bt-ink-2);padding-left:9px;border-left:2px solid var(--st-warn,var(--bt-line-2))}
+.bt-hw-bot-state{display:inline-flex;align-items:center;gap:6px;flex:none;margin-left:auto;font:var(--bt-weight-label,500) 11px var(--bt-head-font,var(--bt-font));letter-spacing:.05em;text-transform:uppercase;color:var(--bt-ink-2);white-space:nowrap}
+.bt-hw-bot-state::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--st-bad,var(--bt-danger))}
+.bt-hw-bot-ok{color:var(--st-ok,var(--bt-green))}.bt-hw-bot-ok::before{background:var(--st-ok,var(--bt-green))}
+@media(max-width:560px){.bt-hw-bot-state{margin-left:0}.bt-hw-bot{flex-wrap:wrap}.bt-hw-bot-copy{flex-basis:calc(100% - 46px)}}
 @media(prefers-reduced-motion:reduce){.bt-hw-spinner{animation:none}}
 `;
 
