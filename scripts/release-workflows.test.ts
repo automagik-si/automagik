@@ -18,6 +18,58 @@ function bash(script: string, args: string[] = [], env: Record<string, string> =
   return { status: run.status, out: run.stdout, err: run.stderr };
 }
 
+// The `run: |` block of the step named `name`, dedented.
+function runOf(lines: string[], name: string): string {
+  const at = lines.findIndex(line => line.trim() === `- name: ${name}`);
+  if (at < 0) return '';
+  const run = lines.findIndex((line, i) => i > at && line.trim() === 'run: |');
+  if (run < 0) return '';
+  const base = lines[run].length - lines[run].trimStart().length;
+  const body: string[] = [];
+  for (const line of lines.slice(run + 1)) {
+    if (line.trim() !== '' && line.length - line.trimStart().length <= base) break;
+    body.push(line);
+  }
+  const by = Math.min(...body.filter(line => line.trim() !== '').map(line => line.length - line.trimStart().length));
+  return body.map(line => line.slice(by)).join('\n');
+}
+
+// A fake gh: `release view` answers the feeds (or says the release is missing), `workflow run`
+// logs the dispatch, and every call is recorded.
+function fakeGh(options: { feeds?: string[]; missing?: boolean; failView?: string; failDispatch?: boolean } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'release-retry-'));
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const log = join(dir, 'gh.log');
+  const feeds = join(dir, 'feeds');
+  writeFileSync(log, '');
+  writeFileSync(feeds, (options.feeds ?? []).map(name => `${name}\n`).join(''));
+  const script = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    `echo "$*" >> "${log}"`,
+    'case "$*" in',
+    '  *"release view v9.9.9"*)',
+    options.missing || options.failView ? `    echo ${JSON.stringify(options.failView ?? 'release not found')} >&2; exit 1` : '    :',
+    '    case "$*" in',
+    `      *"--json assets"*) cat "${feeds}" ;;`,
+    '    esac',
+    '    ;;',
+    '  *"workflow run desktop-build.yml"*)',
+    options.failDispatch ? '    exit 1' : '    :',
+    '    ;;',
+    '  *) echo "unexpected gh: $*" >&2; exit 64 ;;',
+    'esac',
+  ].join('\n');
+  writeFileSync(join(bin, 'gh'), script);
+  chmodSync(join(bin, 'gh'), 0o755);
+  return {
+    run: (script: string, env: Record<string, string> = {}) => bash(script, [], { PATH: `${bin}:${process.env.PATH ?? ''}`, GITHUB_REPOSITORY: 'owner/repo', VERSION: '9.9.9', TAG: 'v9.9.9', PRERELEASE: 'false', ...env }),
+    calls: () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
 describe('the desktop build adding its files to an existing release', () => {
   const lines = workflow('desktop-build.yml');
   const step = lines.findIndex(line => line.includes('name: Add the builds to the release'));
@@ -32,6 +84,130 @@ describe('the desktop build adding its files to an existing release', () => {
     expect(run.status).toBe(0);
     // The meter's binaries, their sums and signed pointer are the meter jobs' own (release.yml): spared.
     expect(run.out.trim().split('\n')).toEqual(['Automagik-9.9.9-arm64.dmg', 'lane.json.old', 'SHA256SUMS']);
+  });
+});
+
+describe('the desktop publish refusing a second feed', () => {
+  const lines = workflow('desktop-build.yml');
+  const parsed = Bun.YAML.parse(lines.join('\n')) as any;
+  const guard = runOf(lines, 'Never a second feed');
+
+  test('is a real step, skipped only by a deliberate rebuild, and one publish per version', () => {
+    expect(guard).toContain('already carries');
+    expect(guard).toContain('replace=true');
+    const step = lines.findIndex(line => line.trim() === '- name: Never a second feed');
+    expect(lines.slice(step, step + 4).map(line => line.trim())).toContain('if: ${{ inputs.replace != true }}');
+    expect(parsed.jobs.release.concurrency).toEqual({ group: 'desktop-publish-${{ needs.version.outputs.version }}', 'cancel-in-progress': false });
+    expect(parsed.on.workflow_call.inputs.replace.default).toBe(false);
+    expect(parsed.on.workflow_dispatch.inputs.replace.default).toBe(false);
+  });
+
+  test('a release that already carries a feed is refused, naming it and the way past', () => {
+    const gh = fakeGh({ feeds: ['latest-mac.yml'] });
+    try {
+      const run = gh.run(guard);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain('v9.9.9 already carries latest-mac.yml');
+      expect(run.out).toContain('replace=true');
+      expect(gh.calls()).toEqual(['release view v9.9.9 --repo owner/repo --json assets --jq .assets[].name']);
+    } finally {
+      gh.cleanup();
+    }
+  });
+
+  test('no feed publishes, and a release that does not exist yet is created by this build', () => {
+    const clean = fakeGh({ feeds: [] });
+    try {
+      const run = clean.run(guard);
+      expect(run.status).toBe(0);
+      expect(run.out).toContain('v9.9.9 carries no desktop feed: publishing');
+    } finally {
+      clean.cleanup();
+    }
+    const missing = fakeGh({ missing: true });
+    try {
+      const run = missing.run(guard);
+      expect(run.status).toBe(0);
+      expect(run.out).toContain('v9.9.9 does not exist yet: this build creates it');
+    } finally {
+      missing.cleanup();
+    }
+  });
+
+  test('any other failed read stops the publish: no feed is assumed from an API error', () => {
+    const gh = fakeGh({ failView: 'HTTP 500: server error' });
+    try {
+      const run = gh.run(guard);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain('::error ::could not read v9.9.9: HTTP 500: server error');
+    } finally {
+      gh.cleanup();
+    }
+  });
+});
+
+describe('the desktop publish retry', () => {
+  const lines = workflow('release.yml');
+  const parsed = Bun.YAML.parse(lines.join('\n')) as any;
+  const retry = runOf(lines, 'Dispatch one rebuild when the release has no feed');
+  const dispatch = 'workflow run desktop-build.yml --repo owner/repo --ref dev -f ref=v9.9.9 -f publish=true -f replace=false -f prerelease=false';
+
+  test('runs only for a failed desktop job on a cut version, after the cut', () => {
+    expect(parsed.jobs['desktop-retry'].needs).toEqual(['cut', 'desktop']);
+    expect(parsed.jobs['desktop-retry'].if).toContain('!cancelled()');
+    expect(parsed.jobs['desktop-retry'].if).toContain("needs.cut.outputs.version != ''");
+    expect(parsed.jobs['desktop-retry'].if).toContain("needs.desktop.result == 'failure'");
+  });
+
+  test('no feed: one dispatch for the same tag, with replace=false', () => {
+    const gh = fakeGh({ feeds: [] });
+    try {
+      const run = gh.run(retry);
+      expect(run.status).toBe(0);
+      expect(gh.calls().at(-1)).toBe(dispatch);
+      expect(run.out).toContain('dispatched desktop-build.yml for v9.9.9');
+    } finally {
+      gh.cleanup();
+    }
+  });
+
+  test('a feed already there: no second build', () => {
+    const gh = fakeGh({ feeds: ['latest-linux.yml'] });
+    try {
+      const run = gh.run(retry);
+      expect(run.status).toBe(0);
+      expect(gh.calls().some(call => call.startsWith('workflow run'))).toBe(false);
+      expect(run.out).toContain('already carries a desktop feed');
+    } finally {
+      gh.cleanup();
+    }
+  });
+
+  test('a missing release or a refused dispatch fails the retry, never a silent skip', () => {
+    const missing = fakeGh({ missing: true });
+    try {
+      const run = missing.run(retry);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain('::error ::could not read v9.9.9: release not found');
+      expect(missing.calls().some(call => call.startsWith('workflow run'))).toBe(false);
+    } finally {
+      missing.cleanup();
+    }
+    const refused = fakeGh({ feeds: [], failDispatch: true });
+    try {
+      expect(refused.run(retry).status).toBe(1);
+    } finally {
+      refused.cleanup();
+    }
+    const unreadable = fakeGh({ failView: 'HTTP 500: server error' });
+    try {
+      const run = unreadable.run(retry);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain('::error ::could not read v9.9.9: HTTP 500: server error');
+      expect(unreadable.calls().some(call => call.startsWith('workflow run'))).toBe(false);
+    } finally {
+      unreadable.cleanup();
+    }
   });
 });
 
