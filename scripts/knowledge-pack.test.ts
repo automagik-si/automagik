@@ -4,7 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { allowed, build, EXCLUDED_FOLDERS, KIND, PLACEHOLDERS_PATH, placeholderTest, privacyHits, readTar, sourceUrl, stamp, type Manifest } from './knowledge-pack';
+import {
+  allowed, build, EXCLUDED_FOLDERS, EXCLUDED_WORDS, hasLiteral, KIND, PLACEHOLDERS_PATH, placeholderTest, privacyHits, readTar, sourceUrl, stamp, stem,
+  type Manifest, type Placeholder,
+} from './knowledge-pack';
 
 // A fake GitHub on a local port: the org listing and each repository's tarball, as git archive
 // makes it (a pax global header naming the commit, then the files under one top folder).
@@ -84,6 +87,12 @@ const GENIE: FakeRepo = {
     'docs/brand/components/Button/README.md': '# Button\n',
     'docs/brand/README.md': '# Brand\n',
     'docs/design.md': '# Design notes\n',
+    // Excluded words, as a folder or a word of the file name's stem, in any case.
+    'docs/cloud/0024-delivery-0-evidence.md': `# Evidence\n\n${['', 'home', 'ana'].join('/')}\n`,
+    'docs/API/Internal.md': '# Internal API\n',
+    'docs/Deployment/x.md': '# Deploy\n',
+    'docs/dogfood-report.md': '# Dogfood\n',
+    'docs/RFCs/0002.md': '# RFC\n',
   },
 };
 const DOCS: FakeRepo = {
@@ -201,6 +210,39 @@ describe('the knowledge pack', () => {
     expect(allowed('genie', 'docs/rfcs.md')).toBe(true);
   });
 
+  test('excluded folders match whatever the letter case', () => {
+    for (const path of ['docs/RFCs/a.md', 'docs/Plans/a.md', 'docs/_INTERNAL/a.md', 'docs/Brand/Components/a.md', 'docs/x/Incident-Response/a.md']) {
+      expect([path, allowed('genie', path)]).toEqual([path, false]);
+    }
+    expect(allowed('docs', 'Design/a.mdx')).toBe(false);
+  });
+
+  test('an excluded word as a folder, or as a word of the file-name stem, is left out in any case', () => {
+    expect(EXCLUDED_WORDS).toEqual(['evidence', 'perf', 'performance', 'deployment', 'migration', 'internal', 'dogfood']);
+    // The stem is the name without its last extension.
+    expect([stem('a.md'), stem('a.b.mdx'), stem('README'), stem('x-evidence.md')]).toEqual(['a', 'a.b', 'README', 'x-evidence']);
+    for (const word of EXCLUDED_WORDS) {
+      for (const path of [`docs/${word}/a.md`, `docs/x/${word.toUpperCase()}/a.md`, `docs/${word}.md`, `docs/x/0001-${word}.md`,
+        `docs/${word}-notes.md`, `docs/a-${word}-b.mdx`, `docs/a_${word}.txt`, `docs/${word[0].toUpperCase()}${word.slice(1)}.md`]) {
+        expect([path, allowed('genie', path)]).toEqual([path, false]);
+      }
+      expect([word, allowed('docs', `guides/${word}.mdx`)]).toEqual([word, false]);
+    }
+    // The cases named by the ruling.
+    for (const path of ['docs/cloud/0024-delivery-0-evidence.md', 'docs/meter/0021-d7-d8-evidence.md', 'docs/api/internal.md',
+      'docs/deployment/x.md', 'docs/migration/plan.md', 'docs/performance/x.md', 'docs/perf/x.md', 'docs/dogfood-report.md']) {
+      expect([path, allowed('genie', path)]).toEqual([path, false]);
+    }
+    expect(allowed('docs', 'cloud/0024-delivery-0-evidence.md')).toBe(false);
+    // Ordinary product pages, and near words that are not an excluded word, are kept.
+    for (const path of ['docs/guide.md', 'docs/getting-started.md', 'docs/cloud/overview.md', 'docs/api/reference.md', 'docs/deploy.md',
+      'docs/internals.md', 'docs/migrations.md', 'docs/evidently.md', 'docs/performer.md', 'docs/dogfooding.md', 'docs/self-hosting/install.md']) {
+      expect([path, allowed('genie', path)]).toEqual([path, true]);
+    }
+    expect(allowed('genie', 'README.md')).toBe(true);
+    expect(allowed('docs', 'guides/setup.mdx')).toBe(true);
+  });
+
   test('each file carries its stamp, and the manifest lists every file with its size, sha256 and totals', async () => {
     const out = freshOut();
     const m = await build({ ...gh.opts, out });
@@ -263,19 +305,22 @@ describe('the knowledge pack', () => {
     const home = (name: string) => `/${'home'}/${name}`;
     const withGuide = (text: string) => [{ ...GENIE, files: { ...GENIE.files, 'docs/guide.md': text } }, DOCS, OMNI];
     const placeholders = [at('you', 'gmail.com'), at('5511999999999', 's.whatsapp.net'), at('120363123456789', 'g.us'),
-      at('omni', '2.YYMMDD'), at('git', 'github.com'), `${home('user')}/x`, `${home('genie')}/.claude`, home('automagik')];
+      at('omni', '2.YYMMDD'), at('git', 'github.com'), at('dpo', 'namastex.ai'), `${home('user')}/x`, `${home('genie')}/.claude`, home('automagik')];
     gh.set(withGuide(`# Guide\n\n${placeholders.join('\n')}\n`));
     try {
       await build({ ...gh.opts, out: freshOut() });
-      const personal = [at('ana.souza', 'gmail.com'), at('xyou', 'gmail.com'), at('5511987654321', 's.whatsapp.net'), home('username'), home('ana')];
+      // A tool address outside the three listed ones is a hit too.
+      const personal = [at('ana.souza', 'gmail.com'), at('xyou', 'gmail.com'), at('5511987654321', 's.whatsapp.net'), at('support', 'github.com'),
+        home('username'), home('ana')];
       gh.set(withGuide(`# Guide\n\n${personal.join('\n')}\n`));
       const error = await build({ ...gh.opts, out: freshOut() }).then(() => null, (e) => e);
       expect(error?.hits).toEqual([
         'genie/docs/guide.md:10: email',
         'genie/docs/guide.md:11: email',
         'genie/docs/guide.md:12: email',
-        'genie/docs/guide.md:13: home-path',
+        'genie/docs/guide.md:13: email',
         'genie/docs/guide.md:14: home-path',
+        'genie/docs/guide.md:15: home-path',
       ]);
     } finally {
       gh.set(ALL);
@@ -299,6 +344,83 @@ describe('the knowledge pack', () => {
     expect(pass({ rule: 'home-path', match: 'h' })).toBe(true);
     expect(pass({ rule: 'home-path', match: 'a1' })).toBe(false);
     expect(pass({ rule: 'secret', match: 'a1' })).toBe(false);
+  });
+
+  test('a placeholder pattern that matches empty text, has no literal part or matches unrelated text is refused', () => {
+    const load = (pattern: string, rule = 'email') => () => placeholderTest([{ rule, pattern, why: 'w' }]);
+    for (const pattern of ['^$', '^.*$', '^(?:x)?$', '^[\\s\\S]*$', '^\\w*$', '^(?:omni@.*)?$']) expect(load(pattern)).toThrow(/matches empty text/);
+    for (const pattern of ['^.+$', '^[\\s\\S]+$', '^\\S+$', '^(?:.)+$', '^\\w+\\s?\\d*$', '^[a-z0-9@./]+$', '^.{1,}$']) {
+      expect(load(pattern)).toThrow(/has no literal part/);
+    }
+    // A literal part is not enough: the pattern must not match unrelated text.
+    const at = String.fromCharCode(64);
+    const home = ['', 'home', ''].join('/');
+    for (const pattern of [`^.*${at}.*$`, `^[^${at}]+${at}.+$`, '^.+\\..+$', '^(?:omni|.+)$', `^omni${at}.*$|^.+$`, `^(?:omni${at}.+)$`]) {
+      expect(load(pattern)).toThrow(/matches unrelated text/);
+    }
+    for (const pattern of [`^${home}.+$`, `^(?:/Users|/home)/[a-z0-9]+$`, `^${home}[^/]+$`]) expect(load(pattern, 'home-path')).toThrow(/matches unrelated text/);
+    // What counts as a literal part.
+    expect(['^x$', '^\\.$', '^\\u0040$', '^a{2}$', '^[0-9]+b$'].map(hasLiteral)).toEqual([true, true, true, true, true]);
+    expect(['^.*$', '^[abc]+$', '^\\d{2,4}$', '^(?:\\s|\\S)+$', '^(?<n>.)\\b$'].map(hasLiteral)).toEqual([false, false, false, false, false]);
+    // A narrow pattern still loads and passes only its own text.
+    const omni = placeholderTest([{ rule: 'email', pattern: `^omni${at}[0-9]+\\.[0-9A-Za-z]+$`, why: 'w' }]);
+    expect(omni({ rule: 'email', match: `omni${at}2.251115` })).toBe(true);
+    expect(omni({ rule: 'email', match: `omni${at}example.io` })).toBe(false);
+  });
+
+  test('every shipped placeholder is one of the ruled kinds, and none names a person, a home or a personal address', () => {
+    const shipped: Placeholder[] = JSON.parse(readFileSync(PLACEHOLDERS_PATH, 'utf8')).placeholders;
+    const at = String.fromCharCode(64);
+    const split = (text: string) => { const i = text.lastIndexOf(at); return [text.slice(0, i), text.slice(i + 1)]; };
+    // Example addresses: a placeholder word or one letter, at a placeholder domain or a one-letter one.
+    const EXAMPLE_LOCAL = /^(?:[a-z]|you|your|seu|me|user|personal|work|alice|bob|engineering)$/;
+    const EXAMPLE_DOMAIN = /^(?:[a-z]\.com|gmail\.com|company\.com|email\.com|yourdomain\.com)$/;
+    // Example WhatsApp JIDs: country 55 + area 11 or a 120363 group prefix, then 9s, 0s or a counting run.
+    const RUN = '01234567890123456789';
+    const fakeDigits = (d: string) => d === '...' || d === 'xxx' || /^9+$/.test(d) || /^0+$/.test(d) || (d.length > 0 && RUN.includes(d));
+    const exampleJid = (local: string, domain: string) =>
+      (domain === 's.whatsapp.net' || domain === 'g.us') &&
+      local.split('-').every((part) => [/^5511/, /^120363/, /^/].some((prefix) => fakeDigits(part.replace(prefix, ''))));
+    const ROLE = /^(?:privacidade|dpo|security)$/;
+    const ORG = /^namastex\.(?:ai|io)$/;
+    const HOMES = ['user', 'genie', 'automagik'].map((n) => ['', 'home', n].join('/'));
+    // Public service and tool addresses: exactly these three, exact matches only. A new one needs Chat's word.
+    const TOOLS = [['git', 'github.com'], ['actions', 'github.com'], ['security', 'npmjs.com']].map(([l, d]) => `${l}${at}${d}`);
+    const kind = (e: Placeholder): string | null => {
+      if (e.rule === 'home-path') return e.match !== undefined && HOMES.includes(e.match) ? 'generic home' : null;
+      if (e.rule !== 'email') return null;
+      if (e.pattern !== undefined) {
+        // Only omni@<version> may be a pattern: a pattern of any other kind (a tool address included) is refused.
+        const re = new RegExp(e.pattern);
+        const omni = e.pattern.startsWith(`^omni${at}`) && re.test(`omni${at}2.251115`) && !re.test(`omni${at}rk4t.io`);
+        return omni ? 'omni version' : null;
+      }
+      if (e.match !== undefined && TOOLS.includes(e.match)) return 'public service or tool address';
+      const [local, domain] = split(e.match ?? '');
+      if (EXAMPLE_LOCAL.test(local) && EXAMPLE_DOMAIN.test(domain)) return 'example address';
+      if (exampleJid(local, domain)) return 'example WhatsApp JID';
+      if (ROLE.test(local) && ORG.test(domain)) return 'org role contact';
+      return null;
+    };
+    expect(shipped.length).toBeGreaterThan(0);
+    expect(shipped.map((e) => [e.match ?? e.pattern, kind(e)]).filter(([, k]) => k === null)).toEqual([]);
+    expect(new Set(shipped.map(kind))).toEqual(
+      new Set(['example address', 'example WhatsApp JID', 'generic home', 'omni version', 'org role contact', 'public service or tool address']),
+    );
+    expect(shipped.filter((e) => kind(e) === 'public service or tool address').map((e) => e.match).sort()).toEqual([...TOOLS].sort());
+    // The kinds' own edges: a real-looking number, another home, a personal or tool address fail.
+    const no = (e: Partial<Placeholder>) => expect([e, kind({ why: 'w', ...e } as Placeholder)]).toEqual([e, null]);
+    no({ rule: 'email', match: `5511987654321${at}s.whatsapp.net` });
+    no({ rule: 'email', match: `ana.souza${at}gmail.com` });
+    no({ rule: 'email', match: `support${at}github.com` });
+    no({ rule: 'email', match: `security${at}github.com` });
+    // A tool address is an exact match bound to the email rule: as a pattern, or under another rule, it is refused.
+    no({ rule: 'email', pattern: `^git${at}github\\.com$` });
+    no({ rule: 'email', pattern: `^actions${at}github\\.com$` });
+    no({ rule: 'home-path', match: `git${at}github.com` });
+    no({ rule: 'home-path', match: ['', 'home', 'ana'].join('/') });
+    no({ rule: 'email', pattern: `^omni${at}.+$` });
+    no({ rule: 'email', pattern: `^you${at}gmail\\.com$` });
   });
 
   test('a pattern placeholder is bound to its rule: a hit under another rule whose text matches it still fails', () => {

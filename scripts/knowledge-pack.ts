@@ -22,10 +22,15 @@
  *   - the top-level README (README, or README[.<lang>].md|mdx|markdown|txt|rst);
  *   - docs/**: .md, .mdx, .txt;
  *   - in the `docs` repository, every .md and .mdx.
- * Never a path with a dot-folder or dot-file segment, nor node_modules, nor one with an excluded
- * folder anywhere in it (EXCLUDED_FOLDERS: _internal, plans, research, runbooks, incident-response,
- * rfcs, design, brand/components: internal notes, not knowledge for the people the bot answers);
- * never a symlink, a file with a NUL byte (binary) or one over 2 MiB. Issues, PRs, wikis and discussions are never read.
+ * Never a path with a dot-folder or dot-file segment, nor node_modules; never a path with an
+ * excluded folder anywhere in it (EXCLUDED_FOLDERS: _internal, plans, research, runbooks,
+ * incident-response, rfcs, design, brand/components), nor one with a folder or a file-name stem
+ * of an excluded word (EXCLUDED_WORDS: evidence, perf, performance, deployment, migration,
+ * internal, dogfood). Internal notes, not knowledge for the people the bot answers. Both match
+ * whatever the letter case. A stem is the file name without its last extension, and it matches
+ * when one of its words (split at -, _ and .) is an excluded word: `migration.md`,
+ * `0024-delivery-0-evidence.md`, `dogfood-report.md`. Never a symlink, a file with a NUL byte
+ * (binary) or one over 2 MiB. Issues, PRs, wikis and discussions are never read.
  * A repository that yields no file is left out.
  *
  * Each file is written to <out>/<repo>/<path> with a short stamp first: the repository, the path,
@@ -39,15 +44,17 @@
  * database files) over every file of the pack. Any hit prints `file:line: rule` and fails the
  * build, except one the pack's own placeholder list names (scripts/knowledge-pack-placeholders.json:
  * documentation placeholders and the org's public role contacts, each an exact match or an
- * anchored pattern for the email or home-path rule only). That list is the pack's alone: it never
- * goes into the repository's privacy list, and it never names a person's name, home or address. Only a clean pack replaces the old one: the old folder is renamed aside, the new one
+ * anchored pattern for the email or home-path rule only; a pattern that matches empty text, has no
+ * literal part or matches unrelated text is refused at load, so no entry can waive a whole rule).
+ * That list is the pack's alone: it never goes into the repository's privacy list, and it never
+ * names a person's name, home or address. Only a clean pack replaces the old one: the old folder is renamed aside, the new one
  * renamed in (both on the same filesystem), and the old one removed. A failed run removes its
  * temporary folder and leaves the old pack as it was. An existing <out> that is neither empty nor
  * a pack (no manifest.json of this kind) is never replaced.
  *
  * Exit: 0 built, 1 failed (old pack kept), 2 usage.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -84,19 +91,32 @@ const README = /^README(?:\.[A-Za-z0-9-]+)?\.(?:md|mdx|markdown|txt|rst)$/i;
 const DOCS_EXT = /\.(?:md|mdx|txt)$/i;
 const MARKDOWN = /\.(?:md|mdx)$/i;
 
-/** Folders left out wherever they sit in a path; a two-part entry matches two folders in a row. */
+/**
+ * Folders left out wherever they sit in a path, whatever the case; a two-part entry matches two
+ * folders in a row. A file of the same name is kept (`docs/design.md`).
+ */
 export const EXCLUDED_FOLDERS = ['_internal', 'plans', 'research', 'runbooks', 'incident-response', 'rfcs', 'design', 'brand/components'];
+/**
+ * Words left out as a folder anywhere in a path, or as a word of the file name's stem (the name
+ * without its last extension, split at -, _ and .), whatever the case.
+ */
+export const EXCLUDED_WORDS = ['evidence', 'perf', 'performance', 'deployment', 'migration', 'internal', 'dogfood'];
 const excludedFolder = (folders: string[]) =>
   EXCLUDED_FOLDERS.some((entry) => {
     const want = entry.split('/');
     return folders.some((_, i) => want.every((w, j) => folders[i + j] === w));
   });
+/** A file name's stem: the name without its last extension (`a.b.md` is `a.b`). */
+export const stem = (name: string) => (name.lastIndexOf('.') > 0 ? name.slice(0, name.lastIndexOf('.')) : name);
+const excludedWord = (folders: string[], name: string) =>
+  folders.some((f) => EXCLUDED_WORDS.includes(f)) || stem(name).split(/[-_.]/).some((w) => EXCLUDED_WORDS.includes(w));
 
 /** Whether `path` (repo-relative, forward slashes) of repository `repo` goes into the pack. */
 export function allowed(repo: string, path: string): boolean {
   const parts = path.split('/');
   if (parts.some((p) => !p || p.startsWith('.') || p === 'node_modules')) return false;
-  if (excludedFolder(parts.slice(0, -1))) return false;
+  const lower = parts.map((p) => p.toLowerCase());
+  if (excludedFolder(lower.slice(0, -1)) || excludedWord(lower.slice(0, -1), lower[lower.length - 1])) return false;
   if (parts.length === 1 && (parts[0] === 'README' || README.test(parts[0]))) return true;
   if (parts[0] === 'docs' && parts.length > 1 && DOCS_EXT.test(path)) return true;
   return repo === 'docs' && MARKDOWN.test(path);
@@ -250,8 +270,56 @@ const PLACEHOLDER_RULES = ['email', 'home-path'];
 export type Placeholder = { rule: string; match?: string; pattern?: string; why: string };
 
 /**
+ * Whether a pattern holds a literal character: one outside a class, a group's syntax, a quantifier
+ * or an anchor, and not a class escape (\d, \w, \s and their capitals). `\.` and `\u0040` count.
+ */
+export function hasLiteral(pattern: string): boolean {
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === '\\') {
+      const next = pattern[++i];
+      if (next === undefined) return false;
+      if (!'dDwWsSbB'.includes(next)) return true;
+      continue;
+    }
+    if (c === '[') {
+      for (i++; i < pattern.length && pattern[i] !== ']'; i++) if (pattern[i] === '\\') i++;
+      continue;
+    }
+    if (c === '{') {
+      const close = pattern.indexOf('}', i);
+      if (close !== -1 && /^\{\d*(?:,\d*)?\}$/.test(pattern.slice(i, close + 1))) { i = close; continue; }
+      return true;
+    }
+    if (c === '(' && pattern[i + 1] === '?') {
+      // A group's head: (?: (?= (?! (?<= (?<! or (?<name>.
+      const head = /^\(\?(?::|=|!|<=|<!|<[A-Za-z_][A-Za-z0-9_]*>)/.exec(pattern.slice(i));
+      if (head) { i += head[0].length - 1; continue; }
+    }
+    if ('^$.|()*+?'.includes(c)) continue;
+    return true;
+  }
+  return false;
+}
+
+/** Text a placeholder pattern must not match: unrelated words, and a hit of each rule's shape. */
+function probes(): string[] {
+  const word = () => Array.from(randomBytes(9), (b) => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('');
+  // Addresses and homes are joined from parts, so the repository's own privacy scan reads none.
+  const address = (local: string, domain: string) => [local, domain].join('\u0040');
+  const home = (name: string) => ['', 'home', name].join('/');
+  const users = (name: string) => ['', 'Users', name].join('/');
+  const fixed = [' ', 'x', 'hello world', 'zq7#kP!', '\n', address('q8v2m', 'rk4t.io'), address('omni', 'rk4t.io'), home('q8v2m'), users('q8v2m')];
+  const random = [word(), `${word()} ${word()}`, address(word(), `${word()}.com`), home(word()), users(word())];
+  return [...fixed, ...random];
+}
+
+/**
  * The pack's placeholder list, checked: each entry names the email or home-path rule, a why, and
- * either an exact `match` or a `pattern` anchored with ^ and $. Returns a test for one hit.
+ * either an exact `match` or a `pattern` anchored with ^ and $. A pattern that matches empty text,
+ * has no literal part, or matches unrelated text (fixed probes and random words, addresses and
+ * home paths) is refused: a placeholder may pass one text, never a whole rule. Returns a test for
+ * one hit.
  */
 export function placeholderTest(entries: Placeholder[]): (hit: { rule: string; match: string }) => boolean {
   if (!Array.isArray(entries)) throw new Error('placeholders: the list must be an array');
@@ -268,6 +336,10 @@ export function placeholderTest(entries: Placeholder[]): (hit: { rule: string; m
       throw new Error(`${at}: pattern must be anchored with ^ and $`);
     }
     const re = new RegExp(e.pattern);
+    if (re.test('')) throw new Error(`${at}: pattern ${e.pattern} matches empty text`);
+    if (!hasLiteral(e.pattern)) throw new Error(`${at}: pattern ${e.pattern} has no literal part`);
+    const loose = probes().find((p) => re.test(p));
+    if (loose !== undefined) throw new Error(`${at}: pattern ${e.pattern} matches unrelated text (${JSON.stringify(loose)})`);
     return (h: { rule: string; match: string }) => h.rule === e.rule && re.test(h.match);
   });
   return (hit) => tests.some((t) => t(hit));
