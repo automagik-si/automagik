@@ -3,8 +3,12 @@
     "The knowledge pack's own placeholder list (scripts/knowledge-pack.ts): privacy hits it lets pass in",
     "the pack only, never in this repository (never add these to herdr/scripts/privacy-list.json). Each is",
     "an exact match or an anchored pattern for the email or home-path rule; never a person's name, home",
-    "or address. Written with JSON escapes (\\u0040 for the at sign, \\/ for a slash) so the repository's own privacy scan, which reads",
-    "raw text, does not read them as addresses or paths."
+    "or address. Only these kinds: example addresses, example WhatsApp JIDs, the generic homes \/home\/user,",
+    "\/home\/genie and \/home\/automagik, omni\u0040<version> strings, and the org's role contacts",
+    "(privacidade\u0040, dpo\u0040, security\u0040); knowledge-pack.test.ts fails on any other entry. A pattern",
+    "that matches empty text, has no literal part or matches unrelated text is refused at load.",
+    "Written with JSON escapes (\\u0040 for the at sign, \\/ for a slash) so the repository's own privacy",
+    "scan, which reads raw text, does not read them as addresses or paths."
   ],
   "placeholders": [
     {
@@ -126,26 +130,6 @@
       "rule": "email",
       "match": "xxx\u0040g.us",
       "why": "an example WhatsApp JID in documentation"
-    },
-    {
-      "rule": "email",
-      "match": "git\u0040github.com",
-      "why": "a tool or service address, not a person"
-    },
-    {
-      "rule": "email",
-      "match": "actions\u0040github.com",
-      "why": "a tool or service address, not a person"
-    },
-    {
-      "rule": "email",
-      "match": "security\u0040npmjs.com",
-      "why": "a tool or service address, not a person"
-    },
-    {
-      "rule": "email",
-      "match": "image.repository\u0040image.digest",
-      "why": "a tool or service address, not a person"
     },
     {
       "rule": "email",
