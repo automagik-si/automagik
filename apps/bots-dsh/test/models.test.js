@@ -216,6 +216,73 @@ test('applying a Bot model leaves the DSH default as the user set it', async () 
   assert.equal(bot.appliedModel, 'deepseek/v4-flash')
 })
 
+// A chat carried over from an older Remote Hermes ref keeps its own Session route when the
+// Bot moves to the attached serve's one row. Selecting attach on that Session would make
+// DSH price a model switch on the attach row and fail MODEL_SWITCH_COMPACTION_FAILED before
+// the turn; the attach transport serves the row whatever ref the request names, so leaving
+// the route alone is what lets the carried-over turn dispatch.
+test('a carried-over chat on a Hermes route keeps its route when the Bot moves to attach', async () => {
+  for (const history of [1, 400]) {
+    const { rt, selected } = bench({ providers: { 'hermes-remote': ['attach'] } })
+    rt.ctx.llm.listModels = async provider => provider === 'hermes-remote'
+      ? [{ id: 'attach', name: 'gpt-6-astra (openai-codex)', model: 'gpt-6-astra', providerId: 'openai-codex', contextWindow: 200_000 }]
+      : []
+    const routes = new Map([
+      ['b1', { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' }],
+      ['g1', { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' }],
+      ['b2', { provider: 'acp-claude', model: 'opus' }],
+    ])
+    const messages = Array.from({ length: history }, (_, index) => ({ role: 'user', content: `message ${index}` }))
+    rt.ctx.sessions = { get: id => ({ deriveMessages: () => messages, requestHeader: () => ({ config: routes.get(id) }) }) }
+    rt.groupSessionsOf = id => (id === 'b1' ? ['g1'] : [])
+    const bot = { id: 'b1', model: 'hermes-remote/attach', appliedModel: 'hermes-remote/attach' }
+    assert.equal(await rt.applyModel(bot, { force: true }), 'hermes-remote/attach')
+    assert.deepEqual(selected, [], `no in-place switch on the carried-over chat (${history} messages)`)
+    assert.equal(bot.appliedModel, 'hermes-remote/attach')
+    // A Session on another provider still takes the switch: only the attached route is kept.
+    const other = { id: 'b2', model: 'hermes-remote/attach' }
+    assert.equal(await rt.applyModel(other, { force: true }), 'hermes-remote/attach')
+    assert.deepEqual(selected, ['b2:hermes-remote/attach'])
+  }
+})
+
+test('a carried-over chat that is not loaded still keeps its Hermes route', async () => {
+  const { rt, selected } = bench({ providers: { 'hermes-remote': ['attach'] } })
+  rt.ctx.llm.listModels = async provider => provider === 'hermes-remote'
+    ? [{ id: 'attach', name: 'gpt-6-astra (openai-codex)', model: 'gpt-6-astra', providerId: 'openai-codex', contextWindow: 200_000 }]
+    : []
+  rt.ctx.sessions = { get: () => undefined }
+  // The stored Session's last request is what decides, not a pick's history.
+  const persistence = {
+    open: async id => id === 'b1'
+      ? {
+        read: async () => ({ events: [{ type: 'request/header', data: { header: { config: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } } }] }),
+        release: async () => {},
+      }
+      : undefined,
+  }
+  const get = rt.ctx.get
+  rt.ctx.get = name => name === 'sessionPersistence' ? persistence : get(name)
+  const carried = { id: 'b1', model: 'hermes-remote/attach', appliedModel: 'hermes-remote/attach', previousModel: 'hermes-remote/attach' }
+  assert.equal(await rt.applyModel(carried, { force: true }), 'hermes-remote/attach')
+  assert.deepEqual(selected, [], 'no in-place switch while the carried chat is not loaded')
+  // A new chat has no stored route: it takes attach.
+  const fresh = { id: 'b2', model: 'hermes-remote/attach' }
+  assert.equal(await rt.applyModel(fresh, { force: true }), 'hermes-remote/attach')
+  assert.deepEqual(selected, ['b2:hermes-remote/attach'])
+})
+
+// A connection by address and token is not the attached serve: a change between two of its
+// Hermes models must still select the new model on the chat. Only the attach row keeps the
+// carried route.
+test('a change between two Hermes models on an address connection still moves the chat', async () => {
+  const { rt, selected } = bench({ providers: { 'hermes-remote': ['sample:model-a', 'sample:model-b'] } })
+  rt.ctx.sessions = { get: () => ({ requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model-a' } }) }) }
+  const bot = { id: 'b1', model: 'hermes-remote/sample:model-b', appliedModel: 'hermes-remote/sample:model-a' }
+  assert.equal(await rt.applyModel(bot, { force: true }), 'hermes-remote/sample:model-b')
+  assert.deepEqual(selected, ['b1:hermes-remote/sample:model-b'])
+})
+
 // One conversation's model is its Bot's alone: a pick moves that Bot's own Sessions (its chat
 // and its seats in groups) and nothing of another Bot, nor the default a new Bot starts on.
 test('a model picked for one Bot never moves another Bot\'s model or level', async () => {

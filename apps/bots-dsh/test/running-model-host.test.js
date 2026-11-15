@@ -7,11 +7,11 @@ import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 
 const saved = 'deepseek/saved'
-function start() {
+function start(savedModel = saved, extra = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-running-model-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify({
     version: 1, mainBotIds: ['m1'], revision: 1,
-    bots: { m1: { id: 'm1', sessionId: 'part-current', name: 'Test Bot', role: 'Orchestrator', instructions: '', createdAt: 1, model: saved, appliedModel: saved } },
+    bots: { m1: { id: 'm1', sessionId: 'part-current', name: 'Test Bot', role: 'Orchestrator', instructions: '', createdAt: 1, model: savedModel, appliedModel: savedModel, ...extra } },
     rooms: {}, exchanges: [], exchangeTurns: {}, questions: {},
   }))
   const agents = new Map()
@@ -39,6 +39,29 @@ const noRunning = bot => {
   assert.equal(Object.hasOwn(bot, 'runningModel'), false)
   assert.equal(Object.hasOwn(bot, 'runningEffort'), false)
 }
+
+test('a carried chat reports the attach row it runs on, not the ref it still carries', async t => {
+  const attach = 'hermes-remote/attach'
+  const { call, stop, agents } = start(attach, { previousModel: 'hermes-remote/nous:openai/gpt-6-astra' })
+  t.after(stop)
+  const before = await call('state')
+  assert.equal(botOf(before).model, attach)
+  // The Session's own selection is the carried-over ref the attach transport serves.
+  agents.set(botOf(before).sessionId, { model: { current: () => ({ provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' }) } })
+  const view = await poll(call, before)
+  assert.equal(botOf(view).runningModel, attach)
+  assert.equal(botOf(view).model, attach)
+  assert.equal(botOf(view).previousModel, 'hermes-remote/nous:openai/gpt-6-astra')
+})
+
+test('a non-attach Hermes Bot reports its own served model, not the attach row', async t => {
+  const { call, stop, agents } = start('hermes-remote/sample:model-b')
+  t.after(stop)
+  const before = await call('state')
+  agents.set(botOf(before).sessionId, { model: { current: () => ({ provider: 'hermes-remote', model: 'sample:model-a' }) } })
+  const view = await poll(call, before)
+  assert.equal(botOf(view).runningModel, 'hermes-remote/sample:model-a')
+})
 
 test('live selections update the poll view without changing or persisting the saved model', async t => {
   const { call, stop, agents, home, rt, ctx } = start()

@@ -345,10 +345,15 @@ function profilesOf(value) {
     const model = text(item.model) ? item.model.trim().slice(0, 200) : ''
     const provider = text(item.provider) ? item.provider.trim().slice(0, 100) : ''
     if (model && !/^[\x20-\x7e]+$/.test(model)) continue
+    // A serve may name the profile model's capacity (camelCase here, snake_case from the
+    // remote record). It is forwarded when present; attachedModelOf supplies the floor.
+    const contextWindow = Number.isInteger(item.contextWindow) && item.contextWindow > 0 ? item.contextWindow
+      : Number.isInteger(item.context_window) && item.context_window > 0 ? item.context_window : undefined
     rows.push({
       id: item.id,
       name: text(item.name) && item.name.trim() ? item.name.trim().slice(0, 100) : item.id,
       model, provider, running: item.running === true,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
     })
   }
   return rows
