@@ -197,7 +197,7 @@ async function acpShots(browser, url, dir, problems) {
   // After onboarding: Settings → Claude Code and Codex.
   const page = await open(ACP_STATES.ready, { companionDone: true, teamDone: true, connectOmniSkipped: true, connectAiDone: true, welcomeDone: true })
   try {
-    await page.locator('.bt-tile, .bt-row').first().waitFor({ timeout: 90_000 })
+    await page.locator('.bt-row, .lb-row').first().waitFor({ timeout: 90_000 })
     await page.waitForTimeout(3000)
     // DSH's own onboarding steps (its Preview Notice, a DeepSeek sign-in) go first.
     for (let i = 0; i < 4; i++) {
@@ -317,8 +317,10 @@ try {
       if (message.type() === 'error' && /client-modules|did not activate|not loaded because/.test(message.text())) problems.push(`console: ${message.text()}`)
     })
     await page.goto(url)
-    // The welcome's stage (first run) or the Bot team's sidebar.
-    await page.locator('.bt-tile, .bt-row, .oa-stage').first().waitFor({ timeout: 90_000 }).catch(() => problems.push('neither the welcome nor the Bot team showed'))
+    // The welcome's stage (first run: stage.js, every onboarding step) or the Bot team's sidebar:
+    // the narrow rail's rows or the new left bar's. scripts/boot-check-selectors.test.ts keeps
+    // every class waited on here drawn by a client, so a rename fails a test, not the boot.
+    await page.locator('.oai-stage, .bt-row, .lb-row').first().waitFor({ timeout: 90_000 }).catch(() => problems.push('neither the welcome nor the Bot team showed'))
     await page.waitForTimeout(3000)
     const entries = await page.evaluate(() => (window.__DSH_BOOT__?.entries ?? []).map(row => row.id ?? row.name))
     const body = await page.evaluate(() => document.body.innerText)
