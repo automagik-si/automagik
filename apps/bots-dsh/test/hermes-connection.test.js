@@ -11,6 +11,13 @@ import { fakeContext } from './fake-ctx.js'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 
 const deadlines = { start: 300, control: 100, cancel: 10 }
+async function until(predicate, what) {
+  const deadline = Date.now() + 3000
+  while (!predicate()) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`)
+    await new Promise(resolve => setImmediate(resolve))
+  }
+}
 const response = (value, status = 200, cookies = []) => ({ ok: status >= 200 && status < 300, status, json: async () => value, headers: { getSetCookie: () => cookies } })
 function dashboard(overrides = {}) {
   const credential = randomUUID(), access = randomUUID(), refresh = randomUUID(), password = randomUUID(), username = `sample-${randomUUID()}`
@@ -47,7 +54,7 @@ function runtime(t, fixture, overrides = {}) {
     },
   }
   class Wire {
-    constructor(options) { this.options = options; this.listeners = new Set(); this.secrets = new Set(options.redactionSecrets); this.sent = []; wires.push(this) }
+    constructor(options) { this.options = options; this.attached = options.attached === true; this.listeners = new Set(); this.secrets = new Set(options.redactionSecrets); this.sent = []; this.sessionIdentities = []; this.modelsCalled = false; wires.push(this) }
     async connect() {
       if (overrides.gatewayDelay) await new Promise((resolve, reject) => {
         const timer = setTimeout(resolve, overrides.gatewayDelay)
@@ -56,9 +63,17 @@ function runtime(t, fixture, overrides = {}) {
       await overrides.onConnect?.(this)
       return this
     }
-    async session() { await overrides.beforeSession?.(this); return { session_id: randomUUID(), stored_session_id: randomUUID(), info: { desktop_contract: 8, approval_mode: 'manual', yolo: false } } }
-    async models() { await overrides.beforeModels?.(this); return overrides.models ?? [{ id: 'sample:model', model: 'model', provider: 'sample', name: 'Sample model' }] }
-    async request(method, params) { this.sent.push({ method, params }); await overrides.onRequest?.(method, params, this); return {} }
+    async session(identity) { this.sessionIdentities.push(identity); await overrides.beforeSession?.(this); return { session_id: 'runtime-session', stored_session_id: 'stored-session', ...(this.attached ? { subscription_id: 'subscription' } : {}), info: { desktop_contract: 8, approval_mode: 'manual', yolo: false, model: 'fixture/bot-model', provider: 'fixture', stored_session_id: 'stored-session', profile_name: 'default' } } }
+    check(snapshot) { return snapshot }
+    async models() { this.modelsCalled = true; await overrides.beforeModels?.(this); return overrides.models ?? [{ id: 'sample:model', model: 'model', provider: 'sample', name: 'Sample model' }] }
+    async request(method, params) {
+      this.sent.push({ method, params })
+      await overrides.onRequest?.(method, params, this)
+      if (method === 'session.activate') return { session_id: 'runtime-session', stored_session_id: 'stored-session', subscription_id: 'subscription', info: { desktop_contract: 8, approval_mode: 'manual', yolo: false, model: 'fixture/bot-model', provider: 'fixture', stored_session_id: 'stored-session', profile_name: 'default' } }
+      if (method === 'session.events.since') return { events: [], latest_seq: 0, epoch: 'epoch-a', truncated: false, count: 0, open_requests: [] }
+      return {}
+    }
+    redact(text) { return text }
     close() { if (this.closed) return; this.closed = true; this.cancelConnect?.(); for (const listener of this.listeners) listener({ kind: 'lost' }) }
   }
   install(rt, { transport: options => new Wire(options), fetch: fixture.fetch, deadlines, ...overrides })
@@ -323,11 +338,12 @@ test('one action budget covers delayed auth plus gateway startup and closes the 
   assert.equal(h.rt.hermesRemote.view().enabled, false)
 })
 test('saved SSH connects serialize and tests-only cancellation preserves the active owned lease', async t => {
-  const f = dashboard(), gates = [barrier(), barrier()]; let started = 0, closed = 0, models = 0
+  const f = dashboard(), gates = [barrier(), barrier()]; let started = 0, closed = 0, holds = 0
+  const profiles = [{ id: 'sample-profile', name: 'Sample profile', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true }]
   const h = runtime(t, { ...f, fetch: sshFetch }, {
     deadlines: { start: 1000, control: 500, cancel: 300 },
-    startSsh: async () => { started++; return { address: 'http://127.0.0.1:12345', credential: f.credential, close: async () => { closed++ } } },
-    beforeModels: async () => { if (h.rt.hermesRemote.view().enabled) { const gate = gates[models++]; gate.reach(); await gate.held } },
+    startSsh: async () => { started++; return { attached: true, address: 'http://127.0.0.1:12345', credential: f.credential, authHeaders: { Authorization: `Bearer ${f.credential}` }, profiles, defaultProfile: 'sample-profile', close: async () => { closed++ } } },
+    beforeSession: async () => { if (h.rt.hermesRemote.view().enabled) { const gate = gates[holds++]; gate.reach(); await gate.held } },
   })
   const tested = await h.rt.hermesRemote.test({ mode: 'ssh', ssh: { host: 'example.invalid' } })
   await h.rt.hermesRemote.save({ testId: tested.testId, profile: 'sample-profile' })
@@ -336,7 +352,7 @@ test('saved SSH connects serialize and tests-only cancellation preserves the act
   await gates[0].entered
   const second = h.rt.hermesRemote.connect(), cancel = h.rt.hermesRemote.disconnect({ testsOnly: true })
   await eventTurn()
-  assert.equal(models, 1); assert.equal(started, 2); assert.equal(closed, 1)
+  assert.equal(holds, 1); assert.equal(started, 2); assert.equal(closed, 1)
   gates[0].release(); await first
   await gates[1].entered
   assert.equal(closed, 2); assert.equal(started, 3)
@@ -1044,3 +1060,226 @@ for (const cancel of [true, false]) {
     assert.ok(h.wires.every(wire => !wire.sent.some(frame => frame.method === 'prompt.submit')), 'cancelled or expired queued work never submits later')
   })
 }
+
+test('an attached SSH connection uses the CLI-read profiles and model, stores the token, and skips the API', async () => {
+  const credential = randomUUID().replaceAll('-', ''), profiles = [
+    { id: 'default', name: 'Hefesto', model: 'anthropic/sample-model', provider: 'anthropic', running: true },
+    { id: 'second', name: 'Second', model: 'openai/other-model', provider: 'openai', running: false },
+  ]
+  let fetched = 0, closed = 0, updated
+  const connection = await prepareHermesConnection({ mode: 'ssh', ssh: { host: 'example.invalid' } }, {
+    deadlines,
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => { closed++ } }),
+    fetch: async () => { fetched++; throw Error('an attached serve is not discovered over REST') },
+    onAuthUpdate: async value => { updated = value },
+  })
+  assert.equal(fetched, 0, 'no model or profile list is requested over REST')
+  assert.equal(connection.attached, true)
+  assert.deepEqual(connection.profiles, profiles)
+  assert.equal(connection.defaultProfile, 'default')
+  assert.deepEqual(connection.authHeaders, { Authorization: `Bearer ${credential}` })
+  assert.deepEqual(connection.secret, { kind: 'attach', credential }, 'the host token is handed to the secret endpoint, never the config')
+  assert.deepEqual(updated, { kind: 'attach', credential })
+  assert.deepEqual(await refreshHermesProfiles(connection, {
+    fetch: async () => { throw Error('no refresh request') },
+    startSsh: async () => ({ attached: true, profiles, ssh: { host: 'example.invalid' }, close: async () => {} }),
+    deadlines,
+  }), profiles)
+  await connection.close()
+  assert.equal(closed, 1, 'closing the connection closes its tunnel')
+})
+
+test('an attached SSH test joins Bot Chat, stores the host token only through secret-set and shows the bot model', async t => {
+  const f = dashboard(), credential = randomUUID().replaceAll('-', '')
+  const profiles = [
+    { id: 'default', name: 'Hefesto', model: 'fixture/bot-model', provider: 'fixture', running: true },
+    { id: 'second', name: 'Second', model: 'fixture/other-model', provider: 'fixture', running: false },
+  ]
+  let closed = 0
+  const h = runtime(t, f, {
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => { closed++ } }),
+  })
+  const request = { mode: 'ssh', ssh: { host: 'example.invalid' }, requestId: randomUUID() }
+  const tested = await h.endpoints.get('hermes-remote-test')(request)
+  assert.deepEqual(tested.profiles, profiles)
+  assert.equal(tested.defaultProfile, 'default')
+  const view = await h.endpoints.get('hermes-remote-save')({ testId: tested.testId, profile: 'default' })
+  assert.equal(view.attached, true)
+  assert.equal(view.profile, 'default')
+  assert.equal(view.models.length, 1)
+  assert.equal(view.models[0].id, 'attach')
+  assert.match(view.models[0].name, /fixture\/bot-model/)
+  assert.equal(view.model.name, view.models[0].name)
+  const saved = h.secretCalls.filter(call => call.endpoint === 'secret-set')
+  assert.equal(saved.length >= 1, true)
+  assert.equal(saved.at(-1).name, 'HERMES_REMOTE_ATTACH_CREDENTIAL')
+  assert.deepEqual(JSON.parse(saved.at(-1).value), { kind: 'attach', credential })
+  assert.equal(saved.at(-1).purpose, 'Remote Hermes attached serve token')
+  assert.deepEqual(h.rt.state.prefs.hermesRemote.profiles, profiles, 'the profile rows the picker and a reconnect read are saved')
+  assert.equal(JSON.stringify(h.rt.state).includes(credential), false, 'the host token never reaches the saved state')
+  assert.equal(JSON.stringify(view).includes(credential), false, 'the host token never reaches the view')
+  const wire = h.wires.find(entry => entry.attached)
+  assert.ok(wire, 'the attached wire was used')
+  assert.equal(wire.sessionIdentities[0]?.canonicalBot, true, 'the probe joins the Bot Chat and never creates one')
+  assert.ok(wire.sent.some(call => call.method === 'session.detach'), 'the probe detached its viewer')
+  assert.ok(!wire.sent.some(call => call.method === 'session.close'), 'the probe never closed the bot session')
+  const again = await h.endpoints.get('hermes-remote-discover')({}, undefined)
+  assert.match(again.models[0].name, /fixture\/bot-model/, 'a reconnect uses the saved profile rows, never a blank Hermes row')
+  assert.equal(again.model.name, again.models[0].name)
+  await h.endpoints.get('hermes-remote-disconnect')({})
+  assert.ok(closed >= 1, 'disconnect closes the tunnel')
+})
+
+test('a saved SSH record from the previous release is normalized on first open: one model, Bot Chat JOIN, no create or override', async t => {
+  const profiles = [{ id: 'default', name: 'Default', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true }]
+  const credential = randomUUID().replaceAll('-', '')
+  const h = runtime(t, dashboard(), {
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => {} }),
+  })
+  h.rt.state.prefs.hermesRemote = {
+    enabled: true, mode: 'ssh', authMode: 'token', address: '', ssh: { host: 'example.invalid' }, profile: 'default', setupVersion: 1,
+    models: [{ id: 'zeta:one', model: 'one', provider: 'zeta', name: 'One' }, { id: 'acme:llama-9:70b-q4', model: 'llama-9:70b-q4', provider: 'acme', name: 'Llama' }, { id: 'omega:three', model: 'three', provider: 'omega', name: 'Three' }],
+    pairedBotId: 'bot1',
+  }
+  h.rt.state.bots = {
+    bot1: { id: 'bot1', name: 'Bot', model: 'hermes-remote/acme:llama-9:70b-q4', appliedModel: 'hermes-remote/acme:llama-9:70b-q4' },
+    bot2: { id: 'bot2', name: 'Other Bot', model: 'hermes-remote/zeta:one', appliedModel: 'hermes-remote/zeta:one' },
+  }
+  h.rt.state.hermesSessions = { 'bot:bot1': { canonicalBot: true, storedSessionId: 'old-stored', runtimeSessionId: 'old-runtime', pendingSubmit: true, uncertain: true, epoch: 'old-epoch', lastSeq: 9 } }
+  h.rt.chatOwners = new Map([['chat-1', 'bot1']])
+  assert.deepEqual(await h.rt.hermesRemote.adapter.listModels('hermes-remote'), [], 'the retired remote-address models are hidden before the first connect')
+  const view = await h.endpoints.get('hermes-remote-connect')({ cached: true })
+  assert.deepEqual((await h.rt.hermesRemote.adapter.listModels('hermes-remote')).map(model => model.id), ['attach'], 'after normalize the only row is the profile model')
+  const saved = h.rt.state.prefs.hermesRemote, wire = h.wires.at(-1)
+  assert.equal(view.attached, true)
+  assert.equal(view.profileName, 'Default')
+  assert.equal(view.models.length, 1)
+  assert.equal(view.models[0].id, 'attach')
+  assert.match(view.models[0].name, /acme\/llama-9:70b-q4/)
+  assert.equal(view.model.name, view.models[0].name)
+  assert.equal(view.modelRef, 'hermes-remote/attach')
+  assert.equal(saved.attached, true)
+  assert.equal(saved.profiles.length, 1)
+  assert.equal(saved.models.length, 1)
+  assert.equal(saved.models[0].id, 'attach')
+  assert.equal(saved.credentialRef, 'HERMES_REMOTE_ATTACH_CREDENTIAL')
+  assert.equal(h.rt.state.bots.bot1.model, 'hermes-remote/attach')
+  assert.equal(h.rt.state.bots.bot1.appliedModel, 'hermes-remote/attach')
+  assert.equal(h.rt.state.bots.bot2.model, 'hermes-remote/attach', 'an unpaired Bot on the same provider loses its old ref too')
+  assert.equal(h.rt.state.hermesSessions['bot:bot1'].pendingSubmit, false, 'the old private-serve turn is cleared in the same step')
+  assert.equal(h.rt.state.hermesSessions['bot:bot1'].uncertain, false)
+  assert.equal(h.rt.state.hermesSessions['bot:bot1'].storedSessionId, undefined)
+  assert.ok(h.secretCalls.some(call => call.endpoint === 'secret-set' && call.name === 'HERMES_REMOTE_ATTACH_CREDENTIAL'))
+  assert.equal(wire.attached, true)
+  assert.equal(wire.sessionIdentities[0].canonicalBot, true)
+  assert.equal(wire.modelsCalled, false)
+  assert.ok(!wire.sent.some(call => ['session.create', 'config.set', 'model.options', 'session.close'].includes(call.method)), 'an attached open never creates, closes or overrides')
+  assert.ok(wire.sent.some(call => call.method === 'session.detach'), 'discover detaches its viewer')
+  assert.equal(h.rt.hermesRemote.adapter.identity('chat-1').canonicalBot, true)
+  assert.equal(h.rt.state.hermesSessions['bot:bot1'].canonicalBot, true)
+  const again = await h.endpoints.get('hermes-remote-discover')({}, undefined)
+  assert.match(again.models[0].name, /acme\/llama-9:70b-q4/, 'a reconnect rebuilds the row from the live connection')
+})
+
+test('a live chat opened through install() gets the attached wire and detaches on close', async t => {
+  const profiles = [{ id: 'default', name: 'Default', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true }]
+  const credential = randomUUID().replaceAll('-', '')
+  const h = runtime(t, dashboard(), {
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => {} }),
+  })
+  h.rt.state.prefs.hermesRemote = {
+    enabled: true, mode: 'ssh', authMode: 'token', address: '', ssh: { host: 'example.invalid' }, profile: 'default', setupVersion: 1,
+    attached: true, profiles, models: [{ id: 'attach', name: 'acme/llama-9:70b-q4 (acme)', model: 'acme/llama-9:70b-q4', provider: 'acme', providerId: 'acme' }],
+  }
+  h.rt.state.hermesSessions = {}
+  const agent = h.rt.ctx.scopeAgent('chat-1')
+  h.rt.ctx.provide('agents', { get: id => id === 'chat-1' ? agent : undefined, list: () => [agent], roots: () => [agent] })
+  const controller = new AbortController()
+  const stream = h.rt.hermesRemote.adapter.stream(markAgentLoopRequest({ provider: 'hermes-remote', model: 'attach', sessionId: 'chat-1', signal: controller.signal, messages: [{ role: 'user', content: 'Sample' }] }))
+  const chunks = []
+  const consume = (async () => { try { for await (const chunk of stream) chunks.push(chunk) } catch {} })()
+  await until(() => h.wires.at(-1)?.sent.some(call => call.method === 'prompt.submit'), 'the chat to submit')
+  const wire = h.wires.at(-1)
+  assert.equal(wire.attached, true, 'a live chat wire is attached')
+  assert.equal(wire.sessionIdentities[0].canonicalBot, true)
+  assert.equal(wire.modelsCalled, false)
+  assert.ok(!wire.sent.some(call => ['session.create', 'config.set', 'model.options', 'session.close'].includes(call.method)))
+  controller.abort()
+  await consume
+  await until(() => wire.sent.some(call => call.method === 'session.detach'), 'the attached chat to detach on close')
+  assert.ok(!wire.sent.some(call => call.method === 'session.close'))
+})
+
+test('refreshing an attached connection re-reads its profiles over SSH', async () => {
+  const old = [{ id: 'default', name: 'Default', model: 'old/model', provider: 'p', running: true }]
+  const next = [{ id: 'default', name: 'Default', model: 'new/model', provider: 'p', running: true }]
+  const seen = []
+  const connection = { attached: true, ssh: { host: 'example.invalid' }, profiles: old, credential: 'old-token', authHeaders: { Authorization: 'Bearer old-token' }, redactionSecrets: ['old-token'] }
+  const profiles = await refreshHermesProfiles(connection, {
+    startSsh: async (ssh, options) => {
+      seen.push({ ssh, options })
+      return {
+        attached: true, profiles: next, ssh,
+        credential: 'fresh-token', authHeaders: { Authorization: 'Bearer fresh-token' }, redactionSecrets: ['fresh-token'],
+        secret: { kind: 'attach', credential: 'fresh-token' }, close: async () => { seen.push('closed') },
+      }
+    },
+  })
+  assert.deepEqual(profiles, next)
+  assert.equal(connection.profiles[0].model, 'new/model')
+  assert.equal(connection.credential, 'fresh-token', 'the refreshed test keeps the token the serve just issued')
+  assert.deepEqual(connection.authHeaders, { Authorization: 'Bearer fresh-token' })
+  assert.deepEqual(connection.secret, { kind: 'attach', credential: 'fresh-token' })
+  assert.deepEqual([...connection.redactionSecrets].sort(), ['fresh-token', 'old-token'])
+  assert.deepEqual(seen[0].ssh, { host: 'example.invalid' })
+  assert.equal(seen.at(-1), 'closed')
+})
+
+test('a saved profile missing from the serve is refused, never replaced by the first profile', async t => {
+  const profiles = [{ id: 'default', name: 'Default', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true }]
+  const credential = randomUUID().replaceAll('-', '')
+  let closed = 0
+  const h = runtime(t, dashboard(), {
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => { closed++ } }),
+  })
+  h.rt.state.prefs.hermesRemote = {
+    enabled: true, mode: 'ssh', authMode: 'token', address: '', ssh: { host: 'example.invalid' }, profile: 'gone', setupVersion: 1,
+    models: [{ id: 'zeta:one', model: 'one', provider: 'zeta', name: 'One' }], pairedBotId: 'bot1',
+  }
+  h.rt.state.bots = { bot1: { id: 'bot1', name: 'Bot', model: 'hermes-remote/zeta:one', appliedModel: 'hermes-remote/zeta:one' } }
+  await assert.rejects(h.endpoints.get('hermes-remote-connect')({ cached: true }), error => error.code === 'bot/hermes-attach-profile' && /not served there/.test(error.message))
+  assert.equal(h.rt.state.prefs.hermesRemote.profile, 'gone', 'the saved profile is not silently replaced')
+  assert.equal(h.rt.state.bots.bot1.model, 'hermes-remote/zeta:one', 'the Bot is not moved to another profile')
+  assert.ok(!h.secretCalls.some(call => call.endpoint === 'secret-set'), 'no token is stored for a refused profile')
+  assert.equal(closed, 1, 'the attempted tunnel is released')
+  assert.deepEqual(await h.rt.hermesRemote.adapter.listModels('hermes-remote'), [], 'the unchanged old model list is not offered')
+})
+
+test('one recovery action clears only a carried-over turn, leaving a current-connection uncertain turn alone', async t => {
+  const credential = randomUUID().replaceAll('-', '')
+  const profiles = [{ id: 'default', name: 'Default', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true }]
+  const h = runtime(t, dashboard(), {
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => {} }),
+  })
+  h.rt.state.prefs.hermesRemote = {
+    enabled: true, mode: 'ssh', attached: true, address: '', ssh: { host: 'example.invalid' }, profile: 'default', setupVersion: 1,
+    profiles,
+    models: [{ id: 'attach', name: 'acme/llama-9:70b-q4 (acme)', model: 'acme/llama-9:70b-q4', provider: 'acme', providerId: 'acme' }],
+  }
+  h.rt.state.hermesSessions = {
+    current: { canonicalBot: true, storedSessionId: 'stored-session', runtimeSessionId: 'runtime-current', pendingSubmit: true, uncertain: true },
+    'chat-1': { canonicalBot: true, storedSessionId: 'old-private', runtimeSessionId: 'old-runtime', pendingSubmit: true, uncertain: true, epoch: 'old', lastSeq: 12, subscriptionId: 'old-sub' },
+  }
+  const view = await h.endpoints.get('hermes-remote-recover')()
+  const current = h.rt.state.hermesSessions.current
+  const old = h.rt.state.hermesSessions['chat-1']
+  assert.equal(current.pendingSubmit, true, 'the current connection turn is not discarded')
+  assert.equal(current.uncertain, true)
+  assert.equal(current.storedSessionId, 'stored-session')
+  assert.equal(old.pendingSubmit, false, 'the old private-serve turn is cleared')
+  assert.equal(old.uncertain, false)
+  assert.equal(old.storedSessionId, undefined)
+  const currentView = view.sessions.find(session => session.sessionId === 'current')
+  assert.equal(currentView?.pendingSubmit, true)
+  assert.ok(h.snapshots.length >= 1, 'the cleared old state is saved')
+})

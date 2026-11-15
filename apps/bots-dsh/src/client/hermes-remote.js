@@ -105,7 +105,8 @@ function failureFacts(value) {
 }
 const STAGES = {
   details: () => t('Checking the SSH details'), 'ssh-sign-in': () => t('Signing in with SSH'), 'host-key': () => t('Checking the host key'),
-  'remote-start': () => t('Finding Hermes'), 'hermes-start': () => t('Starting Hermes'), tunnel: () => t('Opening the tunnel'),
+  'remote-start': () => t('Finding Hermes'), 'hermes-start': () => t('Starting Hermes'),
+  'attach-record': () => t('Reading the Hermes connection record'), 'attach-profiles': () => t('Reading the Hermes profiles'), tunnel: () => t('Opening the tunnel'),
   token: () => t('Signing in to Hermes'), profiles: () => t('Listing profiles'), chat: () => t('Opening a chat connection'),
 }
 
@@ -142,14 +143,26 @@ function screenFor(code, draft, facts) {
       text: facts.minimum ? t('“hermes --version” on {host} named no release, so Automagik cannot tell whether it is new enough. This connection needs v{version} or newer.', { host, version: facts.minimum }) : t('“hermes --version” on {host} named no release, so Automagik cannot tell whether it is new enough.', { host }),
       hint: step.hint, rows: updateRows(facts, step), ssh: true }
   }
+  // Attach: the app never starts or restarts Hermes, so it says what is missing and how
+  // the person starts it there.
+  if (code === 'bot/hermes-attach-profile') return {
+    heading: t('The saved profile is not served there'),
+    title: t('Choose this Hermes profile again'),
+    text: t('This connection’s saved Hermes profile is not served on that machine.'),
+    hint: t('Open the connection setup and choose a profile that Hermes serves there.'),
+    ssh: true,
+  }
+  if (code === 'bot/hermes-attach-not-running' || code === 'bot/hermes-attach-record') return { heading: t('Hermes is not running there'), title: t('Start Hermes on {host}', { host }), text: t('Hermes is not running on {host}. Start it there with “hermes serve”, then try again.', { host }), hint: t('Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.', { host }), ssh: true }
+  if (code === 'bot/hermes-attach-gateway') return { heading: t('Hermes is running there as a gateway'), title: t('Start “hermes serve” on {host}', { host }), text: t('The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.', { host }), hint: t('Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.', { host }), ssh: true }
+  if (code === 'bot/hermes-attach-profiles') return { heading: t('Hermes’s profiles could not be read'), title: t('Hermes on {host} did not list its profiles', { host }), text: t('Hermes is running on {host}, but its own profile list could not be read.', { host }), hint: t('Run “hermes profile list” on {host}, then try again.', { host }), ssh: true }
   if (code === 'bot/hermes-ssh-platform') return { heading: t('This computer cannot run the SSH connection yet'), title: t('Check the remote system and Python'), text: t('The remote computer needs Linux or macOS, Python 3, and a supported Hermes installation.'), hint: t('Check Python and the supported system on the other computer, then try again.'), ssh: true }
   if (code === 'bot/hermes-ssh-exited') return { heading: t('Hermes stopped while starting'), title: t('Hermes on {host} stopped before it was ready', { host }), text: facts.exit !== undefined ? t('SSH signed in and started Hermes, but Hermes exited with code {code}.', { code: facts.exit }) : t('SSH signed in and started Hermes, but Hermes stopped right away.'), hint: t('Run “hermes serve” on {host} to see the full error, fix it there, then try again.', { host }), ssh: true }
   if (code === 'bot/hermes-ssh-not-ready') return { heading: t('Hermes took too long to start'), title: t('Hermes on {host} was not ready in time', { host }), text: t('SSH signed in and started Hermes, but Hermes did not say it was ready before the deadline.'), hint: t('Check that Hermes starts normally on {host}, then try again.', { host }), ssh: true }
   if (code === 'bot/hermes-ssh-port') return { heading: t('Hermes did not report its port'), title: t('Hermes on {host} started without a port', { host }), text: t('Hermes is running there, but it never said which port it listens on, so there is nothing to connect to.'), hint: t('Update Hermes on {host}, then try again.', { host }), ssh: true }
-  if (code === 'bot/hermes-ssh-handshake' || (draft.mode === 'ssh' && code === 'bot/hermes-auth')) return { heading: t('The one-time token was not accepted'), title: t('Automagik and {host} could not agree on this connection', { host }), text: t('The start script or Hermes on {host} did not accept the one-time token made for this connection.', { host }), hint: t('Try again. If it keeps failing, update Hermes on {host} and check that signing in there prints no extra text.', { host }), ssh: true }
-  if (code === 'bot/hermes-ssh-tunnel') return { heading: t('The tunnel did not open'), title: t('SSH could not open a tunnel to Hermes on {host}', { host }), text: t('Hermes started, but the SSH tunnel from this computer to it did not start listening, or carried no answer.'), hint: t('Check that {host} allows port forwarding, then try again.', { host }), ssh: true }
+  if (code === 'bot/hermes-ssh-handshake' || (draft.mode === 'ssh' && code === 'bot/hermes-auth')) return { heading: t('The private connection check failed'), title: t('Automagik and {host} could not agree on this connection', { host }), text: t('The attach script or Hermes on {host} did not complete the private connection check.', { host }), hint: t('Try again. If it keeps failing, update Hermes on {host} and check that signing in there prints no extra text.', { host }), ssh: true }
+  if (code === 'bot/hermes-ssh-tunnel') return { heading: t('The tunnel did not open'), title: t('SSH could not open a tunnel to Hermes on {host}', { host }), text: t('The SSH tunnel from this computer to Hermes did not start listening, or carried no answer.'), hint: t('Check that {host} allows port forwarding, then try again.', { host }), ssh: true }
   if (code === 'bot/hermes-ssh-forward') return { heading: t('A port from your SSH config is in use'), title: facts.port ? t('Port {port} from the SSH config for {host} is busy', { port: facts.port, host }) : t('A port forward in the SSH config for {host} could not start', { host }), text: t('The SSH config entry for {host} forwards its own ports. One is already in use on this computer, usually by another SSH session to the same host, so SSH closed the tunnel.', { host }), hint: t('Close the other SSH session to {host}, or remove the forward from its config entry, then try again.', { host }), ssh: true }
-  if (code === 'bot/hermes-ssh-script') return { heading: t('The start script stopped'), title: t('Automagik’s start script failed on {host}', { host }), text: t('SSH signed in, but the small script that finds and starts Hermes stopped with an error.'), hint: t('Check that Python 3 works on {host} and that this user can run Hermes, then try again.', { host }), ssh: true }
+  if (code === 'bot/hermes-ssh-script') return { heading: t('The attach script stopped'), title: t('Automagik’s attach script failed on {host}', { host }), text: t('SSH signed in, but the small script that reads Hermes stopped with an error.'), hint: t('Check that Python 3 works on {host} and that this user can run Hermes, then try again.', { host }), ssh: true }
   if (code === 'bot/hermes-ssh-details') return { heading: t('Check the SSH details'), title: t('These SSH details can’t be used'), text: t('The host, user, port, key path or Hermes path has characters SSH does not accept.'), hint: t('Edit the SSH details, then try again.'), ssh: true }
   if (code === 'bot/hermes-ssh-timeout' || code === 'bot/hermes-timeout') return { heading: t('The connection timed out'), title: t('The other computer did not become ready in time'), hint: t('Check that the other computer is reachable and Hermes can start, then try again.'), ssh: draft.mode === 'ssh' }
   if (code === 'bot/hermes-ssh-unreachable') return { heading: t('We could not reach the other computer'), title: t('Check the SSH address and connection'), text: t('Check the host or config name, network, and SSH access to the other computer.'), hint: t('Confirm that SSH can reach this computer, then try again.'), ssh: true }
@@ -169,7 +182,7 @@ function screenFor(code, draft, facts) {
   }
   // A changed key is never trusted from here, whatever the host says about it.
   if (code.includes('host-key')) return { heading: t('This host’s key has changed'), title: t('The key for {host} is not the one this computer saved', { host }), text: t('The host may have been reinstalled, or something may be between you and it. Automagik will not connect and cannot trust the new key for you.'), hint: t('Connect once in a terminal to verify the SSH host key, then try again.'), ssh: true }
-  if (draft.mode === 'ssh' && code === 'bot/hermes-ssh-missing') return { heading: t('SSH couldn’t open Hermes'), title: t('Check the Hermes installation'), text: t('Install or update Hermes on the other computer, or enter its executable path. Then try again.'), hint: t('Install Hermes on {host}, or enter its path under More options, then try again.', { host }), ssh: true }
+  if (draft.mode === 'ssh' && code === 'bot/hermes-ssh-missing') return { heading: t('SSH couldn’t find Hermes'), title: t('Check the Hermes installation'), text: t('Automagik looks for Hermes through the other computer’s login shell (bash -lc “command -v hermes”) and its usual folders, and found none. Install or update Hermes there, or enter its executable path.'), hint: t('Install Hermes on {host}, or enter its path under More options, then try again.', { host }), ssh: true }
   if (code === 'bot/hermes-expired') return { heading: t('Connect again'), title: t('The connection waited too long and was closed'), hint: t('Choose Try again to connect.') }
   if (code === 'bot/hermes-profiles') return { heading: t('We couldn’t list the profiles'), title: t('Hermes on {host} offered no profile to chat with', { host }), hint: t('Check that Hermes on {host} has a profile, then try again.', { host }) }
   if (code === 'bot/hermes-unsupported') return { heading: t('This Hermes can’t be used here'), title: t('Hermes on {host} is run by a gateway that owns its sessions', { host }), hint: t('Connect to a Hermes started with “hermes serve”.') }
@@ -434,7 +447,11 @@ export function HermesRemoteConnect({ onClose, onConnected, edit = false, more =
     heading = t('Which profile would you like?')
     const profiles = test?.profiles ?? []
     content = h(Fragment, null, h('p', { className: 'bt-hw-lead' }, t('The Hermes on {address} has more than one profile.', { address: label })),
-      profiles.length === 0 ? h(Note, { error: true }, t('No profiles are available. Check the connection and try again.')) : h('div', { className: 'bt-hw-profiles', role: 'radiogroup', 'aria-label': t('Profile') }, profiles.map(item => h('button', { key: item.id, type: 'button', className: 'bt-hw-profile', role: 'radio', 'aria-checked': profile === item.id, disabled: status === 'saving', onClick: () => { if (!saving.current) setProfile(item.id) } }, h('span', { className: 'bt-hw-radio' }), h('span', null, h('strong', null, item.name), item.id === test?.defaultProfile ? h('small', null, t('Hermes’s default')) : null), profile === item.id ? h('span', { className: 'bt-hw-tag' }, t('Selected')) : null))),
+      profiles.length === 0 ? h(Note, { error: true }, t('No profiles are available. Check the connection and try again.')) : h('div', { className: 'bt-hw-profiles', role: 'radiogroup', 'aria-label': t('Profile') }, profiles.map(item => h('button', { key: item.id, type: 'button', className: 'bt-hw-profile', role: 'radio', 'aria-checked': profile === item.id, disabled: status === 'saving', onClick: () => { if (!saving.current) setProfile(item.id) } }, h('span', { className: 'bt-hw-radio' }), h('span', null, h('strong', null, item.name), h('small', null, [
+                item.model ? (item.provider ? `${item.model} · ${item.provider}` : item.model) : t('No model set'),
+                item.running === false ? t('Not running') : item.running === true ? t('Running') : null,
+                item.id === test?.defaultProfile ? t('Hermes’s default') : null,
+              ].filter(Boolean).join(' · '))), profile === item.id ? h('span', { className: 'bt-hw-tag' }, t('Selected')) : null))),
       h('div', { className: 'bt-hw-profile-tools' }, h('span', null, t('{count} profiles available', { count: profiles.length })), h('button', { type: 'button', disabled: status === 'refreshing' || status === 'saving', onClick: refreshProfiles }, t('Refresh list'))))
     footer = h(Fragment, null, h(Button, { disabled: status === 'saving', onClick: () => { if (!saving.current) { discardTest(testLease.current); setTest(null); setStep(draft.mode === 'ssh' ? 'host' : 'more') } } }, t('Back')), h(Button, { primary: true, disabled: !profile || status === 'saving' || status === 'refreshing', onClick: () => save(test.testId, profile) }, status === 'saving' ? t('Opening…') : t('Use this profile'), ' →'))
   } else {
@@ -464,6 +481,7 @@ export function HermesRemoteConnect({ onClose, onConnected, edit = false, more =
 export function HermesRemoteSettings({ run, Section, actions }) {
   const [view, setView] = useState(null)
   const [pairing, setPairing] = useState(false)
+  const [recovering, setRecovering] = useState(false)
   const [editing, setEditing] = useState(null)
   const [reconciliation, setReconciliation] = useState(null)
   useEffect(() => { let on = true; void run(api('hermes-remote').then(next => { if (on) setView(next) })); return () => { on = false } }, [])
@@ -471,9 +489,13 @@ export function HermesRemoteSettings({ run, Section, actions }) {
   const where = view.mode === 'ssh' ? view.ssh?.host : view.address
   return h(Fragment, null, h('style', null, HERMES_REMOTE_CSS), h(Section, null,
     h('div', { className: 'bt-set-row' }, h('div', { className: 'bt-set-copy' }, h('span', null, t('Chat with a Hermes agent on another computer.')), h('span', { className: 'bt-set-hint' }, t('Your bots’ team tools (messages to other bots, secrets, memory, schedules) are not available in these chats.')))),
-    h('div', { className: 'bt-set-row' }, h('div', { className: 'bt-set-copy' }, h('span', null, configured(view) ? where : t('No connection saved')), configured(view) ? h('span', { className: 'bt-set-hint' }, t('Profile: {profile}', { profile: view.profile })) : null),
+    h('div', { className: 'bt-set-row' }, h('div', { className: 'bt-set-copy' }, h('span', null, configured(view) ? where : t('No connection saved')), configured(view) ? h('span', { className: 'bt-set-hint' }, t('Profile: {profile}', { profile: view.profileName || view.profile })) : null,
+      view.attached === true && view.model ? h('span', { className: 'bt-set-hint' }, `${t('Model')}: ${view.model.name}`) : null),
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setEditing('host') }, configured(view) ? t('Change computer') : t('Set up connection')),
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setEditing('more') }, t('More'))),
+    configured(view) && (view.sessions ?? []).some(info => info.pendingSubmit || info.uncertain) ? h('div', { className: 'bt-set-row' },
+      h('div', { className: 'bt-set-copy' }, h('span', null, t('An unfinished turn from an earlier connection can block changes.')), h('span', { className: 'bt-set-hint' }, t('Clear it to join the Bot Chat; the old turn cannot be resumed.'))),
+      h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: recovering, onClick: () => { setRecovering(true); void run(api('hermes-remote-recover').then(next => setView(next)).finally(() => setRecovering(false))) } }, t('Clear old remote turns'))) : null,
     configured(view) ? h('div', { className: 'bt-set-row' },
       h('label', null, t('Pair Hermes Bot'), h('select', { 'aria-label': t('Pair Hermes Bot'), value: view.pairedBotId ?? '', disabled: pairing,
         onChange: event => {

@@ -109,6 +109,26 @@ test('Settings names the saved computer and profile, shows no key, and More open
   assert.deepEqual(failures, [])
 })
 
+test('Settings clears a stuck carried-over remote turn in one click', async t => {
+  const stuck = { ...connectedView(), sessions: [{ sessionId: 'chat-1', pendingSubmit: true, uncertain: true }] }
+  const calls = []
+  const { document, click } = await renderSettings(t, async call => {
+    calls.push(call)
+    return call.endpoint === 'hermes-remote-recover' ? { ...stuck, sessions: [] } : stuck
+  })
+  assert.match(document.body.textContent, /An unfinished turn from an earlier connection can block changes/)
+  await click('Clear old remote turns')
+  await waitFor(() => calls.some(call => call.endpoint === 'hermes-remote-recover'), 'the recovery request')
+  await waitFor(() => !document.body.textContent.includes('Clear old remote turns'), 'the recovery row to clear')
+})
+
+test('Settings names an attached connection by its profile display name and shows its own model', async t => {
+  const model = { id: 'attach', name: 'acme/llama-9:70b-q4 (acme)' }
+  const { document } = await renderSettings(t, async () => ({ ...connectedView(), attached: true, profileName: 'Made-Up Display', models: [model], model }))
+  assert.match(document.body.textContent, /Profile: Made-Up Display/)
+  assert.match(document.body.textContent, /Model: acme\/llama-9:70b-q4 \(acme\)/)
+})
+
 test('Settings keeps the Bot pairing beside the computer, and the Hermes home is asked only under More', async t => {
   const view = () => ({ ...connectedView(), bots: [{ id: 'sample-bot', name: 'Sample Bot' }], pairedBotId: '' })
   const settings = await renderSettings(t, async () => view())
@@ -182,7 +202,10 @@ test('Settings renders redacted role+text history returned by the real resume an
 })
 
 const connectedView = () => ({ ...sampleView(), enabled: true, address: 'https://example.invalid', profile: 'sample-profile', mode: 'remote', authMode: 'token', modelRef: 'hermes-remote/sample-model', models: [{ id: 'sample-model', name: 'Sample model' }] })
-const testView = () => ({ testId: randomUUID(), profiles: [{ id: 'sample-profile', name: 'sample-profile' }, { id: 'other-profile', name: 'other-profile' }], defaultProfile: 'sample-profile', status: 'connected' })
+const testView = () => ({ testId: randomUUID(), profiles: [
+    { id: 'sample-profile', name: 'Sample profile', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true },
+    { id: 'other-profile', name: 'Other profile', model: 'openai/gpt-5.1', provider: 'openai', running: false },
+  ], defaultProfile: 'sample-profile', status: 'connected' })
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
 
 async function startWizard(t, overrides = {}, options = {}) {
@@ -306,6 +329,8 @@ test('the wizard shows honest progress, asks for a profile only when there are s
   pending.resolve(testView())
   await waitFor(() => document.querySelector('[data-step=profile]'), 'profile choice')
   assert.match(document.body.textContent, /The Hermes on example\.invalid has more than one profile/)
+  assert.match(document.body.textContent, /acme\/llama-9:70b-q4 · acme/)
+  assert.match(document.body.textContent, /Not running/)
   assert.equal(document.querySelector('[role=radio]').getAttribute('aria-checked'), 'true')
   await click('Refresh list')
   await waitFor(() => calls.some(call => call.endpoint === 'hermes-remote-test-profiles'), 'profile refresh')
@@ -411,7 +436,7 @@ test('several profiles open the picker on the one Hermes calls its default', asy
   await waitFor(() => render.document.querySelector('[data-step=profile]'), 'profile choice')
   assert.equal(render.document.querySelectorAll('[role=radio]').length, 3)
   assert.deepEqual(checked(render.document), ['other-profile'])
-  assert.equal(render.document.querySelector('[role=radio][aria-checked=true] small').textContent, 'Hermes’s default')
+  assert.equal(render.document.querySelector('[role=radio][aria-checked=true] small').textContent, 'No model set · Hermes’s default')
   assert.ok(!render.calls.some(call => call.endpoint === 'hermes-remote-save'), 'nothing is kept before the person chooses')
   await render.click('Use this profile')
   await waitFor(() => render.opened.length === 1, 'the chat to open')
@@ -663,7 +688,8 @@ test('missing remote Hermes gets a path and installation action instead of raw S
   await waitFor(() => render.document.querySelector('[data-status=error]'), 'missing Hermes error')
   assert.equal(render.document.querySelector('.bt-hw-error-note').textContent, 'Install Hermes on example.invalid, or enter its path under More options, then try again.')
   await render.click('Details')
-  assert.match(render.document.body.textContent, /Install or update Hermes on the other computer/)
+  assert.match(render.document.body.textContent, /login shell \(bash -lc “command -v hermes”\)/)
+  assert.match(render.document.body.textContent, /Install or update Hermes there/)
   assert.match(render.document.body.textContent, /enter its executable path/)
 })
 
@@ -1109,6 +1135,10 @@ const fingerprint = 'SHA256:sampleSampleSampleSampleSampleSampleSample1'
 
 test('every SSH failure kind has its own screen, naming the host and the next step', async t => {
   const cases = [
+    ['bot/hermes-attach-profile', { kind: 'attach-profile', stage: 'attach-profiles' },
+      'The saved profile is not served there', 'Choose this Hermes profile again', 'This connection’s saved Hermes profile is not served on that machine.', 'Open the connection setup and choose a profile that Hermes serves there.'],
+    ['bot/hermes-attach-not-running', { kind: 'serve-not-running', stage: 'attach-record' },
+      'Hermes is not running there', 'Start Hermes on sample-box', 'Hermes is not running on sample-box. Start it there with “hermes serve”, then try again.', 'Run “hermes serve” on sample-box in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.'],
     ['bot/hermes-ssh-exited', { kind: 'hermes-exited', stage: 'hermes-start', exit: 3, hermes: ['sample start failure', 'could not read ~/.hermes/config.yaml'] },
       'Hermes stopped while starting', 'Hermes on sample-box stopped before it was ready', 'SSH signed in and started Hermes, but Hermes exited with code 3.', 'Run “hermes serve” on sample-box to see the full error, fix it there, then try again.'],
     ['bot/hermes-ssh-exited', { kind: 'hermes-exited', stage: 'hermes-start' },
@@ -1118,13 +1148,13 @@ test('every SSH failure kind has its own screen, naming the host and the next st
     ['bot/hermes-ssh-port', { kind: 'port-missing', stage: 'hermes-start' },
       'Hermes did not report its port', 'Hermes on sample-box started without a port', 'Hermes is running there, but it never said which port it listens on, so there is nothing to connect to.', 'Update Hermes on sample-box, then try again.'],
     ['bot/hermes-ssh-handshake', { kind: 'handshake', stage: 'token' },
-      'The one-time token was not accepted', 'Automagik and sample-box could not agree on this connection', 'The start script or Hermes on sample-box did not accept the one-time token made for this connection.', 'Try again. If it keeps failing, update Hermes on sample-box and check that signing in there prints no extra text.'],
+      'The private connection check failed', 'Automagik and sample-box could not agree on this connection', 'The attach script or Hermes on sample-box did not complete the private connection check.', 'Try again. If it keeps failing, update Hermes on sample-box and check that signing in there prints no extra text.'],
     ['bot/hermes-ssh-tunnel', { kind: 'tunnel', stage: 'tunnel', ssh: ['sample tunnel line'] },
-      'The tunnel did not open', 'SSH could not open a tunnel to Hermes on sample-box', 'Hermes started, but the SSH tunnel from this computer to it did not start listening, or carried no answer.', 'Check that sample-box allows port forwarding, then try again.'],
+      'The tunnel did not open', 'SSH could not open a tunnel to Hermes on sample-box', 'The SSH tunnel from this computer to Hermes did not start listening, or carried no answer.', 'Check that sample-box allows port forwarding, then try again.'],
     ['bot/hermes-ssh-forward', { kind: 'forward-conflict', stage: 'tunnel', port: 8080 },
       'A port from your SSH config is in use', 'Port 8080 from the SSH config for sample-box is busy', 'The SSH config entry for sample-box forwards its own ports.', 'Close the other SSH session to sample-box, or remove the forward from its config entry, then try again.'],
     ['bot/hermes-ssh-script', { kind: 'remote-script', stage: 'remote-start', fault: 'PermissionError', errno: 13, line: 92 },
-      'The start script stopped', 'Automagik’s start script failed on sample-box', 'SSH signed in, but the small script that finds and starts Hermes stopped with an error.', 'Check that Python 3 works on sample-box and that this user can run Hermes, then try again.'],
+      'The attach script stopped', 'Automagik’s attach script failed on sample-box', 'SSH signed in, but the small script that reads Hermes stopped with an error.', 'Check that Python 3 works on sample-box and that this user can run Hermes, then try again.'],
     ['bot/hermes-ssh-details', { kind: 'invalid-details', stage: 'details' },
       'Check the SSH details', 'These SSH details can’t be used', 'The host, user, port, key path or Hermes path has characters SSH does not accept.', 'Edit the SSH details, then try again.'],
     ['bot/hermes-ssh-update', { kind: 'update-required', stage: 'remote-start' },

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { readFile } from 'node:fs/promises'
 import { HermesTransport, RemoteChat, remoteAddress, HERMES_DEADLINES } from './hermes-transport.js'
-import { prepareHermesConnection, refreshHermesProfiles } from './hermes-connection.js'
+import { attachedModelOf, prepareHermesConnection, refreshHermesProfiles } from './hermes-connection.js'
 import { discoverSshHosts } from './hermes-ssh-hosts.js'
 import { redactSshNames } from './hermes-ssh-names.js'
 import { HERMES_MINIMUM } from './hermes-ssh.js'
@@ -11,6 +11,7 @@ import { refusal } from './refusal.js'
 
 export const HERMES_PROVIDER = 'hermes-remote'
 const CREDENTIAL_REF = 'HERMES_REMOTE_CREDENTIAL'
+const ATTACH_CREDENTIAL_REF = 'HERMES_REMOTE_ATTACH_CREDENTIAL'
 const TEST_LIFETIME = 5 * 60_000
 const CHAT_BUSY = 'A chat is still running on this connection; stop it or wait.'
 const fail = (message, kind = 'connection') => refusal(message, { code: `bot/hermes-${kind}` })
@@ -21,6 +22,7 @@ const CONNECTION_ERRORS = Object.freeze({
   'bot/hermes-auth': 'Hermes did not accept the saved sign-in. Check the token or sign in again.',
   'bot/hermes-connection': 'Remote Hermes could not connect. Check the connection details and try again.',
   'bot/hermes-profiles': 'Hermes could not open the selected profile. Check its available profiles and try again.',
+  'bot/hermes-attach-profile': 'This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.',
   'bot/hermes-expired': 'This connection waited too long and was closed. Connect again.',
   'bot/hermes-unsupported': 'This Hermes is run by a gateway that owns its sessions. Connect to a Hermes started with “hermes serve”.',
   'bot/hermes-outdated': 'Remote Hermes is too old for this connection. Update Hermes, then connect again.',
@@ -37,6 +39,10 @@ const CONNECTION_ERRORS = Object.freeze({
   'bot/hermes-ssh-timeout': 'SSH did not answer in time. Check the connection and try again.',
   'bot/hermes-ssh-unreachable': 'SSH could not reach the other computer. Check the host and connection.',
   'bot/hermes-ssh-cleanup': 'The SSH connection could not confirm remote cleanup. Check the remote Hermes before reconnecting.',
+  'bot/hermes-attach-not-running': 'Hermes is not running on the other computer. Start it there with “hermes serve”, then try again.',
+  'bot/hermes-attach-gateway': 'Hermes is running there as a gateway that owns its sessions. Start “hermes serve” there, then try again.',
+  'bot/hermes-attach-record': 'Hermes is not running there: its connection record or private token is stale. Start “hermes serve” there, then try again.',
+  'bot/hermes-attach-profiles': 'Hermes is running there, but its profiles could not be read. Run “hermes profile list” there, then try again.',
   'bot/hermes-ssh-host-key-unknown': 'This computer has not connected to this SSH host before. Check its host key and trust it before connecting again.',
   'bot/hermes-ssh-exited': 'Hermes stopped on the other computer before it was ready.',
   'bot/hermes-ssh-not-ready': 'Hermes started on the other computer but was not ready in time.',
@@ -111,10 +117,37 @@ export function install(rt, { transport = options => new HermesTransport(options
     return entry
   }
   const record = () => state.prefs?.hermesRemote ?? { enabled: false, models: [] }
+  // Every saved SSH connection is an attached connection now; records written before this
+  // feature carry no `attached` flag. Their models/profiles are rebuilt from the live
+  // connection on first use, never trusted from the old remote-address list.
+  const attachedRecord = value => value?.mode === 'ssh' || value?.attached === true
+  const attachedRows = (value, connection) => Array.isArray(connection?.profiles) ? connection.profiles
+    : Array.isArray(value?.profiles) ? value.profiles : []
+  const attachedModelFor = (value, connection) => {
+    const rows = attachedRows(value, connection)
+    // Only the saved profile may name this connection's model. If the serve no longer
+    // offers it, the view shows none and normalizeAttached refuses; it must never borrow
+    // another profile's Bot Chat by falling back to the first row.
+    const row = rows.find(profile => profile.id === (value?.profile ?? ''))
+    if (row) return attachedModelOf(row)
+    const models = Array.isArray(value?.models) ? value.models : []
+    return models.length === 1 && models[0]?.id === 'attach' ? models[0] : undefined
+  }
+  const attachedModelsCurrent = value => attachedRecord(value) && value?.models?.length === 1
+    && value.models[0]?.id === 'attach' && Array.isArray(value?.profiles) && value.profiles.length > 0
   const sessions = () => state.hermesSessions ??= {}
   const enabled = () => record().enabled === true
   const identity = id => {
-    const paired = record().pairedBotId
+    const config = record(), paired = config.pairedBotId
+    // An attached serve has one rolling Bot Chat per profile: every chat joins it, never
+    // creates, renames or archives a conversation. Pairing still scopes the one Bot.
+    if (attachedRecord(config)) {
+      if (paired && rt.chatOwners?.get(id) !== paired) throw fail('This Hermes profile is paired to another Bot chat.', 'pairing')
+      const key = paired ? `bot:${paired}` : id
+      const joined = sessions()[key]
+      if (joined) { joined.canonicalBot = true; return joined }
+      return sessions()[key] = { canonicalBot: true }
+    }
     if (paired) {
       // Only this bot's current own-chat segment may enter its forever-chat. Groups,
       // tasks and other bots must not leak their context into the paired identity.
@@ -213,6 +246,90 @@ export function install(rt, { transport = options => new HermesTransport(options
   function requireReplaceable() {
     if (Object.values(state.hermesSessions ?? {}).some(info => info.pendingSubmit || info.uncertain)) throw fail(CHAT_BUSY, 'busy')
   }
+  // A record saved by a previous release has no `attached` flag, no profile rows and its
+  // old remote-address model list. Once the serve's own profiles are known, rebuild all
+  // three and replace an old remote model ref on the paired Bot, so the first open is a
+  // Bot Chat join on the profile's own model and never a model override.
+  let attachNormalization
+  function normalizeAttached(connection) {
+    if (connection?.attached !== true) return Promise.resolve()
+    const config = record(), profiles = Array.isArray(connection.profiles) ? connection.profiles : []
+    const row = profiles.find(profile => profile.id === config.profile)
+    // A saved profile the serve no longer offers is a refusal, not a silent move to the
+    // first profile: that could join a different Bot's forever-chat.
+    if (!row) return Promise.reject(fail('This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.', 'attach-profile'))
+    const models = [attachedModelOf(row)]
+    const bots = Object.values(state.bots ?? {})
+    const botsStale = bots.some(bot => ['model', 'appliedModel'].some(key => typeof bot?.[key] === 'string'
+      && bot[key].startsWith(`${HERMES_PROVIDER}/`) && bot[key] !== `${HERMES_PROVIDER}/attach`))
+    // A record from the previous release carried chats whose old private serve is gone.
+    // Their pending/uncertain flags would block the Bot Chat join and every save; the first
+    // attached normalization clears that stale state in one step, before the chat opens.
+    const migration = config.attached !== true
+    const stale = config.mode !== 'ssh' || migration || config.setupVersion !== 1
+      || config.profile !== row.id || JSON.stringify(config.profiles ?? []) !== JSON.stringify(profiles)
+      || JSON.stringify(config.models ?? []) !== JSON.stringify(models) || !config.credentialRef || botsStale
+    if (!stale) return Promise.resolve()
+    return attachNormalization ??= mutate(async () => {
+      if (disposed) return
+      const current = record()
+      if (current !== config) return
+      const selected = profiles.find(profile => profile.id === current.profile) ?? row
+      // The secret first: if the store refuses it, no half-migrated record is left behind.
+      if (!current.credentialRef && connection.credential) {
+        await rt.secretEndpoint('secret-set', { name: ATTACH_CREDENTIAL_REF, value: JSON.stringify({ kind: 'attach', credential: connection.credential }), purpose: 'Remote Hermes attached serve token', scope: [] })
+        current.credentialRef = ATTACH_CREDENTIAL_REF
+      }
+      current.mode = 'ssh'; current.attached = true; current.setupVersion = 1; current.profile = selected.id
+      current.profiles = profiles
+      current.models = [attachedModelOf(selected)]
+      if (migration) {
+        for (const info of Object.values(state.hermesSessions ?? {})) {
+          if (!info || (!info.pendingSubmit && !info.uncertain)) continue
+          info.pendingSubmit = false; info.uncertain = false
+          delete info.storedSessionId; delete info.runtimeSessionId; delete info.epoch; delete info.lastSeq; delete info.subscriptionId
+        }
+      }
+      // Every Bot on this provider now has one served row. An unpaired Bot's old ref is
+      // just as stale as the paired one's, and would keep failing its next turn.
+      for (const bot of bots) {
+        for (const key of ['model', 'appliedModel']) {
+          if (typeof bot?.[key] === 'string' && bot[key].startsWith(`${HERMES_PROVIDER}/`) && bot[key] !== `${HERMES_PROVIDER}/attach`) bot[key] = `${HERMES_PROVIDER}/attach`
+        }
+      }
+      await saveState()
+      publish()
+    }, true).finally(() => { if (attachNormalization) attachNormalization = undefined })
+  }
+  // One-step recovery for a chat left pending/uncertain by an earlier connection. It first
+  // asks the attached serve which session is the Bot Chat; a chat whose stored id is the
+  // current Bot Chat is left alone (its turn belongs to this connection and must be
+  // reconciled, not discarded).
+  async function recoverSessions(signal) {
+    await rt.load()
+    if (disposed) throw fail('The connection is closing.', 'busy')
+    if (adapter.live.size) throw fail(CHAT_BUSY, 'busy')
+    let run, botChatId
+    try {
+      run = await open({ identity: { canonicalBot: true }, signal })
+      await run.prepare()
+      botChatId = run.identity?.storedSessionId
+    } finally {
+      if (run) await run.close().catch(() => {})
+      await drain()
+    }
+    if (!botChatId) throw fail('The Bot Chat could not be identified; reconcile in Hermes before clearing old turns.', 'pairing')
+    let changed = false
+    for (const info of Object.values(state.hermesSessions ?? {})) {
+      if (!info || (!info.pendingSubmit && !info.uncertain) || !info.storedSessionId) continue
+      if (info.storedSessionId === botChatId) continue
+      info.pendingSubmit = false; info.uncertain = false
+      delete info.storedSessionId; delete info.runtimeSessionId; delete info.epoch; delete info.lastSeq; delete info.subscriptionId
+      changed = true
+    }
+    if (changed) { await saveState(); publish() }
+    return view()
+  }
   function lease(connection, held = false) {
     const entry = { connection, held, users: 0, closed: false }
     entry.close = () => {
@@ -244,7 +361,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     if (!config.setupVersion) return { kind: 'token', credential: value }
     try {
       const secret = JSON.parse(value)
-      if (secret?.kind === 'token' || secret?.kind === 'session') return secret
+      if (secret?.kind === 'token' || secret?.kind === 'session' || secret?.kind === 'attach') return secret
     } catch {}
     throw fail('The saved sign-in is unavailable. Set up this connection again.', 'auth')
   }
@@ -273,14 +390,20 @@ export function install(rt, { transport = options => new HermesTransport(options
     if (currentLease && !currentLease.closed) return currentLease
     if (!pendingConnection) {
       const owner = generation, controller = new AbortController()
-      const secret = config.mode === 'ssh' ? undefined : savedSecret(config)
+      const secret = config.mode === 'ssh'
+        ? (config.attached === true && config.credentialRef ? savedSecret(config) : undefined)
+        : savedSecret(config)
       const pending = { controller, waiters: 0 }
       pendingConnection = pending
       pending.task = prepareHermesConnection({ mode: config.mode, address: config.address, authMode: config.authMode, ssh: config.ssh }, {
         fetch: fetcher, startSsh, signal: controller.signal, deadlines: remaining(until), secret, discover: false,
         onAuthUpdate: updated => mutate(async () => {
+          if (!config.credentialRef) return
           if (disposed || owner !== generation || record().credentialRef !== config.credentialRef) throw fail('Connection setup was cancelled.')
-          await rt.secretEndpoint('secret-set', { name: config.credentialRef, value: JSON.stringify(updated), purpose: 'Remote Hermes authenticated connection', scope: [] })
+          await rt.secretEndpoint('secret-set', {
+            name: config.credentialRef, value: JSON.stringify(updated), scope: [],
+            purpose: updated.kind === 'attach' ? 'Remote Hermes attached serve token' : 'Remote Hermes authenticated connection',
+          })
         }, true),
       }).then(async connection => {
         if (disposed || disconnecting || owner !== generation || controller.signal.aborted) {
@@ -324,12 +447,20 @@ export function install(rt, { transport = options => new HermesTransport(options
         throw fail('Connection setup was cancelled.')
       }
       const connection = owned?.connection
+      if (connection?.attached === true) {
+        try { await normalizeAttached(connection) }
+        catch (error) {
+          if (owned && !owned.users) await owned.close().catch(() => {})
+          throw error
+        }
+      }
       const credential = connection?.credential ?? savedSecret(config).credential
       if (owned) owned.users++
       let wire
       try {
         wire = transport(connection ? {
           address: connection.address, profile: options.profile ?? config.profile, credential, authHeaders: connection.authHeaders,
+          attached: connection.attached === true,
           allowLoopback: connection.allowLoopback, redactionSecrets: connection.redactionSecrets,
           deadlines: remaining(startup.until),
           fetch: async (...args) => {
@@ -386,10 +517,23 @@ export function install(rt, { transport = options => new HermesTransport(options
       throw error?.code === 'bot/refused' && error.cleanupUnknown !== true ? error : connectionFailure(error)
     }
   }
+  // The rows the model menu and listModels may see: an attached connection exposes only
+  // its selected profile's own row. Before the first connect an old SSH record exposes
+  // none, never the retired remote-address model list.
+  const servedModels = () => {
+    const config = record()
+    if (!attachedRecord(config)) return config.models ?? []
+    const row = attachedModelFor(config)
+    return row ? [row] : []
+  }
   // The model the connected view names: the one a Bot on this connection already saved,
   // when the connection serves it. The first served model seeds a Bot that has none yet
   // (first setup), never a Bot that already picked one.
   const currentModelRef = () => {
+    if (attachedRecord(record())) {
+      const row = attachedModelFor(record())
+      return row ? `${HERMES_PROVIDER}/${row.id}` : undefined
+    }
     const models = record().models ?? []
     const served = new Set(models.map(model => `${HERMES_PROVIDER}/${model.id}`))
     const bots = Object.values(state.bots ?? {})
@@ -401,21 +545,33 @@ export function install(rt, { transport = options => new HermesTransport(options
     }
     return models[0] ? `${HERMES_PROVIDER}/${models[0].id}` : undefined
   }
-  const view = () => ({
-    enabled: enabled(), mode: record().mode ?? 'remote', authMode: record().authMode ?? 'token',
-    address: record().address ?? '', profile: record().profile ?? '', ssh: record().mode === 'ssh' ? sshFields(record().ssh) : undefined,
-    pairedBotId: record().pairedBotId ?? '',
-    bots: Object.values(state.bots ?? {}).map(bot => ({ id: bot.id, name: bot.name })),
-    credentialRef: record().credentialRef ?? '', credentialSet: record().mode === 'ssh' ? Boolean(record().enabled) : Boolean(rt.secretValue?.(record().credentialRef)),
-    models: record().models ?? [], limitations: MISSING_TOOLS, minimum: HERMES_MINIMUM,
-    modelRef: currentModelRef(),
-    sessions: Object.entries(state.hermesSessions ?? {}).map(([sessionId, info]) => ({ sessionId, ...info })),
-  })
+  const view = () => {
+    const config = record(), attached = attachedRecord(config)
+    // An attached connection has exactly one model row: the selected profile's own. Old
+    // saved remote-address model lists are never shown as the attached bot's model.
+    const row = attached ? attachedModelFor(config) : undefined
+    const profile = attached && Array.isArray(config.profiles) ? config.profiles.find(item => item.id === config.profile) : undefined
+    return {
+      enabled: enabled(), mode: config.mode ?? 'remote', authMode: config.authMode ?? 'token',
+      address: config.address ?? '', profile: config.profile ?? '', profileName: profile?.name ?? '',
+      ssh: config.mode === 'ssh' ? sshFields(config.ssh) : undefined,
+      pairedBotId: config.pairedBotId ?? '',
+      bots: Object.values(state.bots ?? {}).map(bot => ({ id: bot.id, name: bot.name })),
+      credentialRef: config.credentialRef ?? '', credentialSet: config.mode === 'ssh' ? Boolean(config.enabled) : Boolean(rt.secretValue?.(config.credentialRef)),
+      models: attached ? (row ? [row] : []) : config.models ?? [], attached, model: row,
+      limitations: MISSING_TOOLS, minimum: HERMES_MINIMUM,
+      modelRef: currentModelRef(),
+      sessions: Object.entries(state.hermesSessions ?? {}).map(([sessionId, info]) => ({ sessionId, ...info })),
+    }
+  }
   const publish = () => {
     if (disposed) return
     adapter.registerAll()
     registration?.(); registration = undefined
-    if (enabled() && (record().models?.length ?? 0) > 0) registration = ctx.llm.registerAdapter([HERMES_PROVIDER], adapter)
+    // Keep the provider registered for an attached connection even before its first
+    // connect: the model menu then lists no row (never the retired list), while an old
+    // chat can still open and let the first attach normalization fill the one real row.
+    if (enabled() && (attachedRecord(record()) || servedModels().length > 0)) registration = ctx.llm.registerAdapter([HERMES_PROVIDER], adapter)
     rt.dropCatalog?.()
   }
   async function stopLive() {
@@ -476,7 +632,11 @@ export function install(rt, { transport = options => new HermesTransport(options
         if (disposed || owner !== testGeneration || controller.signal.aborted) throw fail('Connection setup was cancelled.')
       } catch (error) { if (error && typeof error === 'object') error.hermesStage ??= 'chat'; await entry.lease.close(); throw error }
       // Keep only connection references and ephemeral session material, never the submitted password/user.
-      entry.config = { mode: connection.mode, authMode: connection.authMode, address: connection.mode === 'remote' ? connection.address : '', ...(connection.mode === 'ssh' ? { ssh: sshFields(connection.ssh) } : {}) }
+      entry.config = {
+        mode: connection.mode, authMode: connection.authMode, address: connection.mode === 'remote' ? connection.address : '',
+        ...(connection.mode === 'ssh' ? { ssh: sshFields(connection.ssh) } : {}),
+        ...(connection.attached === true ? { attached: true, profiles: connection.profiles } : {}),
+      }
       entry.timer = setTimeout(() => { entry.controller.abort(); void mutate(async () => { if (tested === entry) { tested = undefined; await entry.lease.close() } }).catch(() => {}) }, testLifetime)
       entry.timer.unref?.()
       tested = entry
@@ -521,8 +681,11 @@ export function install(rt, { transport = options => new HermesTransport(options
     }
   }
   async function probe(owned, profile, signal, until) {
-    // Probe a chosen profile without enabling the adapter or sending a message.
+    // Probe a chosen profile without enabling the adapter or sending a message. An
+    // attached serve is probed by joining its Bot Chat, never by asking for a model list.
+    const attached = owned.connection.attached === true
     const wire = transport({ address: owned.connection.address, profile, credential: owned.connection.credential,
+      attached,
       authHeaders: owned.connection.authHeaders, allowLoopback: owned.connection.allowLoopback, redactionSecrets: owned.connection.redactionSecrets,
       deadlines: remaining(until), fetch: async (...args) => {
         const response = await owned.connection.fetch(...args)
@@ -539,17 +702,27 @@ export function install(rt, { transport = options => new HermesTransport(options
       if (signal?.aborted) throw fail('Connection setup was cancelled.')
       await wire.connect()
       if (signal?.aborted) throw fail('Connection setup was cancelled or timed out.')
-      run = new RemoteChat(wire)
+      // The test joins the profile's one Bot Chat; it never creates a conversation.
+      run = new RemoteChat(wire, { identity: attached ? { canonicalBot: true } : {} })
       await run.prepare()
       if (signal?.aborted) throw fail('Connection setup was cancelled or timed out.')
+      if (attached) {
+        const row = owned.connection.profiles.find(item => item.id === profile) ?? owned.connection.profiles[0]
+        return row ? [attachedModelOf(row)] : []
+      }
       const models = await wire.models()
       if (signal?.aborted) throw fail('Connection setup was cancelled or timed out.')
       if (!models.length) throw fail('This profile has no available models. Configure a model in Hermes and try again.', 'profiles')
       return models
     } finally {
       signal?.removeEventListener('abort', abort)
-      if (run?.identity.runtimeSessionId && !signal?.aborted) await wire.request('session.close', { session_id: run.identity.runtimeSessionId }).catch(() => {})
-      if (run) run.dispose(); else wire.close()
+      // An attached viewer detaches; an app-owned probe session closes. Neither path
+      // stops the remote Hermes.
+      if (run && attached) await run.close().catch(() => {})
+      else if (run) {
+        if (run.identity.runtimeSessionId) await wire.request('session.close', { session_id: run.identity.runtimeSessionId }).catch(() => {})
+        run.dispose()
+      } else wire.close()
     }
   }
   async function saveTest(body, signal, startup = budget(signal)) {
@@ -564,7 +737,8 @@ export function install(rt, { transport = options => new HermesTransport(options
     const signal = AbortSignal.any([startup.signal, entry.controller.signal])
     if (signal.aborted) throw fail('Connection setup was cancelled.')
     entry.checkSource?.()
-    const profile = entry.lease.connection.profiles.find(profile => profile.id === body.profile)?.id
+    const chosen = entry.lease.connection.profiles.find(profile => profile.id === body.profile)
+    const profile = chosen?.id
     if (!profile) throw fail('Choose a profile returned by this Hermes.', 'profiles')
     const next = { ...entry.config, profile, setupVersion: 1, enabled: true }
     if (record().pairedBotId) {
@@ -581,7 +755,8 @@ export function install(rt, { transport = options => new HermesTransport(options
     await entry.lease.close()
     if (tested !== entry || disposed || signal?.aborted) throw fail('Connection setup was cancelled.')
     entry.checkSource?.()
-    const name = entry.reuseReference ?? (entry.lease.connection.secret ? `HERMES_REMOTE_${randomUUID().replaceAll('-', '').toUpperCase()}` : undefined)
+    const attached = entry.lease.connection.attached === true
+    const name = entry.reuseReference ?? (entry.lease.connection.secret ? (attached ? ATTACH_CREDENTIAL_REF : `HERMES_REMOTE_${randomUUID().replaceAll('-', '').toUpperCase()}`) : undefined)
     const writesSecret = Boolean(name && !entry.reuseReference)
     let installed, installedSessions, saveGeneration
     try {
@@ -592,11 +767,14 @@ export function install(rt, { transport = options => new HermesTransport(options
       if (tested !== entry || disposed || signal?.aborted || generation !== saveGeneration) throw fail('Connection setup was cancelled.')
       entry.checkSavedSource?.()
       requireReplaceable()
-      if (writesSecret) await rt.secretEndpoint('secret-set', { name, value: JSON.stringify(entry.lease.connection.secret), purpose: 'Remote Hermes authenticated connection', scope: [] })
+      if (writesSecret) await rt.secretEndpoint('secret-set', {
+        name, value: JSON.stringify(entry.lease.connection.secret), scope: [],
+        purpose: attached ? 'Remote Hermes attached serve token' : 'Remote Hermes authenticated connection',
+      })
       if (tested !== entry || disposed || signal?.aborted || generation !== saveGeneration) throw fail('Connection setup was cancelled.')
       entry.checkSavedSource?.()
       state.prefs ??= {}
-      installed = { ...next, models, ...(name ? { credentialRef: name } : {}) }
+      installed = { ...next, models, ...(attached ? { attached: true, profiles: entry.lease.connection.profiles } : {}), ...(name ? { credentialRef: name } : {}) }
       state.prefs.hermesRemote = installed
       if (changed) state.hermesSessions = installedSessions = {}
       await saveState()
@@ -655,16 +833,23 @@ export function install(rt, { transport = options => new HermesTransport(options
     return view()
   }
   async function discover(signal, startup = budget(signal)) {
-    let run
+    let run, attached = false
     try {
-      run = await open({ signal: startup.signal, startup })
+      attached = attachedRecord(record())
+      run = await open({ signal: startup.signal, startup, ...(attached ? { identity: { canonicalBot: true } } : {}) })
       await run.prepare()
-      record().models = await run.transport.models()
+      if (attached) {
+        const row = attachedModelFor(record())
+        record().models = row ? [row] : []
+      } else record().models = await run.transport.models()
       await saveState(); publish()
       return view()
     } finally {
-      if (run?.identity.runtimeSessionId) await run.transport.request('session.close', { session_id: run.identity.runtimeSessionId }).catch(() => {})
-      run?.dispose()
+      if (run && attached) await run.close().catch(() => {})
+      else if (run) {
+        if (run.identity.runtimeSessionId) await run.transport.request('session.close', { session_id: run.identity.runtimeSessionId }).catch(() => {})
+        run.dispose()
+      }
       startup.finish()
       await drain()
     }
@@ -673,9 +858,12 @@ export function install(rt, { transport = options => new HermesTransport(options
     await rt.load(); await rt.loadSecrets()
     if (!enabled()) throw fail('Set up Remote Hermes before connecting.')
     // Opening a configured connection shows the models it already saved: a throwaway
-    // session just to list them again is not opened. Only a first setup, or an explicit
-    // connect/refresh without `cached`, discovers.
-    if (body?.cached === true && (record().models?.length ?? 0) > 0) return view()
+    // session just to list them again is not opened. An attached connection is only
+    // current once its single row and its profile rows are saved; an old SSH record is
+    // normalized by discover, never trusted from its old remote-address model list.
+    if (body?.cached === true) {
+      if (attachedRecord(record()) ? attachedModelsCurrent(record()) : (record().models?.length ?? 0) > 0) return view()
+    }
     return discover(signal, startup)
   }
   async function savePair(botId, signal) {
@@ -717,7 +905,7 @@ export function install(rt, { transport = options => new HermesTransport(options
       requireReplaceable()
       if (signal?.aborted) throw fail('Pairing was cancelled.', 'pairing')
       return await savePair(botId, signal)
-    } finally { run.dispose(); await drain() }
+    } finally { await run.close().catch(() => {}); await drain() }
   }
   async function disconnect(body = {}) {
     await cancelTests(body?.testsOnly ? { testId: body.testId, requestId: body.requestId } : undefined)
@@ -731,7 +919,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     if (!entry || entry.id !== body?.testId || entry.expires <= now() || entry.lease.closed) throw fail('This connection waited too long and was closed. Connect again.', 'expired')
     entry.checkSource?.()
     const combined = signal ? AbortSignal.any([signal, entry.controller.signal]) : entry.controller.signal
-    const profiles = await refreshHermesProfiles(entry.lease.connection, { fetch: entry.fetch, signal: combined, deadlines: startup ? remaining(startup.until) : deadlines })
+    const profiles = await refreshHermesProfiles(entry.lease.connection, { fetch: entry.fetch, startSsh, signal: combined, deadlines: startup ? remaining(startup.until) : deadlines })
     entry.checkSource?.()
     if (tested !== entry || entry.expires <= now() || combined.aborted) throw fail('This connection waited too long or was cancelled. Connect again.', 'expired')
     entry.lease.connection.profiles = profiles
@@ -776,9 +964,10 @@ export function install(rt, { transport = options => new HermesTransport(options
     })
     return waiting(task, startup, false).catch(error => { startup.finish(); throw error })
   }
-  adapter = new RemoteChatAdapter(rt, { open: openChat, models: () => record().models ?? [], identity, save: saveState, enabled })
+  adapter = new RemoteChatAdapter(rt, { open: openChat, models: servedModels, identity, save: saveState, enabled, attached: () => attachedRecord(record()) })
   api.adapter = adapter
   rt.hooks.endpoint('hermes-remote', async () => { await rt.load(); await rt.loadSecrets(); return view() }, { read: true })
+  rt.hooks.endpoint('hermes-remote-recover', (_body, signal) => recoverSessions(signal))
   rt.hooks.endpoint('hermes-remote-ssh-hosts', async (_body, signal) => {
     try {
       const found = await sshHosts({ signal })
@@ -811,7 +1000,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     try {
       const result = await run.reconcile()
       return { ...view(), reconciliation: { unknown: result.unknown, gap: result.gap, messages: result.snapshot.messages, inflight: result.snapshot.inflight } }
-    } finally { run.dispose(); await drain() }
+    } finally { await run.close().catch(() => {}); await drain() }
   }, signal))
   ctx.effect(() => {
     void rt.load().then(() => mutate(publish)).catch(() => {})

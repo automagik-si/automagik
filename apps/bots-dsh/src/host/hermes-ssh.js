@@ -20,7 +20,11 @@ const messages = Object.freeze({
   'host-key-changed': 'The SSH host key has changed. Verify the host in a terminal before trying again.',
   'auth-failed': 'SSH key authentication failed. Check the SSH alias or identity file and load your key into your SSH agent.',
   'interactive-auth': 'SSH requires an interactive check. Complete it once in a terminal, then try this connection again.',
-  'hermes-not-found': 'Hermes was not found on the remote computer. Install it there or check the Hermes executable path.',
+  'hermes-not-found': 'Hermes was not found on the remote computer through its login shell (bash -lc “command -v hermes”). Install it there or check the Hermes executable path.',
+  'serve-not-running': 'Hermes is not running on the remote computer. Start it there with “hermes serve”, then try again.',
+  'serve-gateway': 'Hermes is running there as a gateway that owns its sessions. Start “hermes serve” there, then try again.',
+  'serve-record': 'Hermes is not running there: its connection record or private token is stale. Start “hermes serve” there, then try again.',
+  'serve-profiles': 'Hermes is running there, but its profiles could not be read. Run “hermes profile list” there, then try again.',
   'update-required': `Update Hermes on the remote computer to v${HERMES_MINIMUM} or newer. This connection cannot use an older Hermes.`,
   'version-unknown': `Hermes on the remote computer did not report a release number. This connection needs v${HERMES_MINIMUM} or newer.`,
   'unsupported-platform': 'This SSH connection requires a Linux or macOS remote with Python 3 and an existing Hermes installation.',
@@ -43,6 +47,8 @@ const publicCodes = {
   'port-missing': 'bot/hermes-ssh-port', handshake: 'bot/hermes-ssh-handshake', tunnel: 'bot/hermes-ssh-tunnel',
   'forward-conflict': 'bot/hermes-ssh-forward', 'remote-script': 'bot/hermes-ssh-script', 'invalid-details': 'bot/hermes-ssh-details',
   timeout: 'bot/hermes-ssh-timeout', unreachable: 'bot/hermes-ssh-unreachable', cleanup: 'bot/hermes-ssh-cleanup',
+  'serve-not-running': 'bot/hermes-attach-not-running', 'serve-gateway': 'bot/hermes-attach-gateway',
+  'serve-record': 'bot/hermes-attach-record', 'serve-profiles': 'bot/hermes-attach-profiles',
 }
 /** Every public SSH code, for the callers that pass a known kind through unchanged. */
 export const HERMES_SSH_CODES = Object.freeze(['bot/hermes-ssh', ...Object.values(publicCodes)])
@@ -632,4 +638,16 @@ export async function trustHermesSshHostKey(ssh, expected, {
   } finally {
     await rm(folder, { recursive: true, force: true }).catch(() => {})
   }
+}
+
+// Shared with the attach path: the same SSH details, the same one SSH command, and the
+// same failure vocabulary. Nothing here starts or stops anything on the remote.
+export {
+  destination as hermesSshDestination,
+  failure as hermesSshFailure,
+  sshFailure as hermesSshFailureFromStderr,
+  named as hermesSshNamed,
+  sshTail as hermesSshTail,
+  allocateLoopbackPort as hermesSshAllocatePort,
+  quote as hermesSshQuote,
 }

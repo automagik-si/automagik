@@ -31,10 +31,25 @@ export function connectionRedactor(values) {
   }
 }
 
+// What the attached connection offers DSH: one model row, the bot's own. The id is stable
+// across profile changes so a paired Bot keeps its model reference; the name is the model
+// and provider the CLI reported, never parsed out of a joined provider:model string.
+export function attachedModelOf(profile) {
+  const model = typeof profile?.model === 'string' ? profile.model.trim() : ''
+  const provider = typeof profile?.provider === 'string' ? profile.provider.trim() : ''
+  return {
+    id: 'attach',
+    name: model ? (provider ? `${model} (${provider})` : model) : 'Hermes',
+    provider: 'hermes-remote',
+    model,
+    providerId: provider,
+  }
+}
+
 // Only the SSH factory can grant HTTP loopback. No draft flag changes this boundary.
 export async function prepareHermesConnection(draft, {
   fetch: fetcher = globalThis.fetch,
-  startSsh = async (...args) => (await import('./hermes-ssh.js')).startHermesSsh(...args),
+  startSsh = async (...args) => (await import('./hermes-attach.js')).startHermesAttach(...args),
   signal,
   deadlines = HERMES_DEADLINES,
   secret,
@@ -50,9 +65,9 @@ export async function prepareHermesConnection(draft, {
   signal?.addEventListener('abort', abort, { once: true })
   const until = Date.now() + deadlines.start
   const startup = setTimeout(abort, deadlines.start)
-  let owned
+  let owned, attached = false
   const authMode = draft.mode === 'ssh' ? 'token' : draft.authMode === 'password' ? 'password' : 'token'
-  let address, credential, authHeaders, persisted
+  let address, credential, authHeaders, persisted, profiles = [], defaultProfile
   const redactionSecrets = []
   const addCookieSecret = value => {
     for (const secret of [value, value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value]) {
@@ -130,14 +145,23 @@ export async function prepareHermesConnection(draft, {
       for (const name of ['user', 'identityFile', 'hermesPath', 'hermesHome']) if (draft.ssh[name] !== undefined && draft.ssh[name] !== '' && !clean(draft.ssh[name], 4096)) throw fail('Enter valid optional SSH details.', 'ssh')
       const ssh = Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome'].filter(name => draft.ssh[name] !== undefined).map(name => [name, draft.ssh[name]]))
       phase = 'ssh'
-      owned = await startSsh(ssh, { signal: controller.signal, deadlines })
+      owned = await startSsh(ssh, { signal: controller.signal, deadlines, onProgress })
       phase = 'token'
       remaining()
       address = remoteAddress(owned.address, { allowLoopback: true })
       if (!clean(owned.credential)) throw fail('SSH did not return a usable Hermes credential.')
+      attached = owned.attached === true
+      // The attached serve's host token goes to REST as a bearer and to the socket as
+      // ?token=. It is only ever persisted through the app's existing secret endpoint.
       credential = owned.credential
-      authHeaders = { 'X-Hermes-Session-Token': credential }
-      persisted = undefined // SSH credentials belong to the owned process, never its saved config.
+      authHeaders = attached ? { Authorization: `Bearer ${credential}` } : { 'X-Hermes-Session-Token': credential }
+      persisted = attached ? { kind: 'attach', credential } : undefined
+      if (attached) {
+        await onAuthUpdate?.(persisted)
+        if (!Array.isArray(owned.profiles) || !owned.profiles.length) throw fail('Hermes is running there, but its profiles could not be read.', 'profiles')
+        profiles = owned.profiles
+        defaultProfile = owned.defaultProfile
+      }
     } else {
       address = remoteAddress(draft.address)
       if (!['token', 'password'].includes(draft.authMode)) throw fail('Choose Session token or User and password.')
@@ -180,8 +204,8 @@ export async function prepareHermesConnection(draft, {
     // Cookie components are independently sensitive when a remote echoes one value.
     if (authHeaders.Cookie) for (const cookie of authHeaders.Cookie.split(';')) addCookieSecret(cookie.slice(cookie.indexOf('=') + 1).trim())
     const redact = connectionRedactor(redactionSecrets)
-    let profiles = [], defaultProfile
-    if (discover) {
+    if (attached && Array.isArray(owned?.profiles)) { profiles = owned.profiles; defaultProfile = owned.defaultProfile }
+    if (discover && !attached) {
       const { value: status } = await request('/api/status')
       onProgress('sign-in')
       phase = 'profiles'
@@ -208,9 +232,10 @@ export async function prepareHermesConnection(draft, {
       if (!profiles.some(profile => profile.id === defaultProfile)) defaultProfile = profiles[0].id
       onProgress('open')
     }
+    if (attached) onProgress('open')
     let closePromise
     return {
-      mode: draft.mode, authMode, address, credential, authHeaders, redactionSecrets, profiles, defaultProfile,
+      mode: draft.mode, authMode, address, credential, authHeaders, redactionSecrets, profiles, defaultProfile, attached,
       ssh: draft.mode === 'ssh' ? Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome'].filter(name => draft.ssh[name] !== undefined).map(name => [name, draft.ssh[name]])) : undefined,
       secret: persisted,
       allowLoopback: draft.mode === 'ssh',
@@ -234,7 +259,30 @@ export async function prepareHermesConnection(draft, {
 }
 
 // Refresh an already-tested target without retaining or requesting the login password.
-export async function refreshHermesProfiles(connection, options) {
+// An attached serve's list is re-read through the same SSH path: the old tunnel's rows
+// are evidence of what the CLI said then, not of a profile added or started since.
+export async function refreshHermesProfiles(connection, options = {}) {
+  if (connection.attached === true) {
+    const startSsh = options.startSsh ?? (async (...args) => (await import('./hermes-attach.js')).startHermesAttach(...args))
+    if (!connection.ssh) return connection.profiles
+    const owned = await startSsh(connection.ssh, { signal: options.signal, deadlines: options.deadlines })
+    try {
+      if (!Array.isArray(owned.profiles) || !owned.profiles.length) throw fail('Hermes is running there, but its profiles could not be read.', 'profiles')
+      connection.profiles = owned.profiles
+      connection.ssh = owned.ssh ?? connection.ssh
+      connection.defaultProfile = owned.defaultProfile ?? connection.defaultProfile
+      // Keep the fresh host token from this read. The caller's test connection is the one
+      // that will be saved; dropping it here would leave the save on a token that a
+      // restarted serve no longer accepts.
+      if (owned.credential) {
+        connection.credential = owned.credential
+        connection.authHeaders = owned.authHeaders ?? { Authorization: `Bearer ${owned.credential}` }
+        connection.redactionSecrets = [...new Set([...(connection.redactionSecrets ?? []), ...(owned.redactionSecrets ?? []), owned.credential])]
+        connection.secret = owned.secret ?? { kind: 'attach', credential: owned.credential }
+      }
+      return connection.profiles
+    } finally { try { await owned.close?.() } catch {} }
+  }
   const refreshed = await prepareHermesConnection({ mode: 'remote', authMode: connection.authMode }, { ...options, existingConnection: connection })
   return refreshed.profiles
 }
