@@ -78,6 +78,29 @@ function asDispatched(message, provider) {
   return { ...message, source: { kind: 'model', provider: source.provider, model: source.model } }
 }
 
+// The request envelope read once: provider, model, sessionId, purpose, messages and signal
+// must be own data properties. An accessor or a Proxy could answer the guard with the
+// Session's values and the adapter with others, so only own data is accepted and the stream
+// never reads the envelope again after this.
+function requestFields(options) {
+  if (options === null || typeof options !== 'object') return undefined
+  const marked = isAgentLoopRequest(options)
+  // The loop always freezes; a marked object is the loop's own, so only an unmarked envelope
+  // must prove it is the frozen copy DSH dispatches.
+  if (!marked && (types.isProxy(options) || !Object.isFrozen(options))) return undefined
+  const field = name => {
+    const descriptor = Object.getOwnPropertyDescriptor(options, name)
+    if (descriptor === undefined) return { absent: true }
+    return 'value' in descriptor ? { value: descriptor.value } : { accessor: true }
+  }
+  const provider = field('provider'), model = field('model'), sessionId = field('sessionId')
+  const messages = field('messages'), purpose = field('purpose'), signal = field('signal')
+  const text = entry => entry !== undefined && entry.accessor !== true && typeof entry.value === 'string' && entry.value !== ''
+  if (!text(provider) || !text(model) || !text(sessionId) || messages?.accessor === true || !Array.isArray(messages?.value)) return undefined
+  if (purpose?.accessor === true || signal?.accessor === true) return undefined
+  return { provider: provider.value, model: model.value, sessionId: sessionId.value, purpose: purpose?.value, messages: messages.value, signal: signal?.value, marked }
+}
+
 export class RemoteChatAdapter extends LlmAdapter {
   constructor(rt, { open, models, identity, save, enabled }) {
     super()
@@ -133,23 +156,29 @@ export class RemoteChatAdapter extends LlmAdapter {
   // A subset, a reordering, a rebuilt message with new text, or a new text under an old id
   // is not that turn and is refused.
   static ownTurn(options, agent, filePath = () => undefined) {
-    if (isAgentLoopRequest(options)) return true
-    if (!Object.isFrozen(options) || options.purpose !== undefined || !Array.isArray(options.messages) || options.messages.length === 0) return false
-    const header = agent?.session?.requestHeader?.()
-    if (header?.config?.provider !== options.provider || header?.config?.model !== options.model) return false
+    const request = requestFields(options)
+    return request !== undefined && RemoteChatAdapter.ownTurnFields(request, agent, filePath)
+  }
+
+  static ownTurnFields(request, agent, filePath = () => undefined) {
+    if (request.marked) return true
+    if (request.purpose !== undefined || request.messages.length === 0) return false
+    let header
+    try { header = agent?.session?.requestHeader?.() } catch { return false }
+    if (header?.config?.provider !== request.provider || header?.config?.model !== request.model) return false
     let derived
     try { derived = agent.session.deriveMessages?.() } catch { return false }
     if (!Array.isArray(derived)) return false
     let expected
     try { expected = projectFilesToText(derived.filter(message => message?.role !== 'developer'), filePath) } catch { return false }
-    if (expected.length !== options.messages.length || expected.length === 0) return false
+    if (expected.length !== request.messages.length || expected.length === 0) return false
     // Only deep-frozen plain data: no toJSON, accessors, Proxies or class instances can make one
     // read (this comparison) differ from the next (the text the adapter actually submits).
-    if (!plainData(options.messages)) return false
-    const want = expected.map(message => asDispatched(message, options.provider))
-    if (!want.every((message, index) => isDeepStrictEqual(options.messages[index], message))) return false
+    if (!plainData(request.messages)) return false
+    const want = expected.map(message => asDispatched(message, request.provider))
+    if (!want.every((message, index) => isDeepStrictEqual(request.messages[index], message))) return false
     // The payload itself, read exactly as the stream reads it, must be that turn's text.
-    return RemoteChatAdapter.promptText(options.messages) === RemoteChatAdapter.promptText(expected)
+    return RemoteChatAdapter.promptText(request.messages) === RemoteChatAdapter.promptText(expected)
   }
 
   // The text one request submits to the remote: the trailing run of person messages.
@@ -170,27 +199,28 @@ export class RemoteChatAdapter extends LlmAdapter {
   }
 
   async *stream(options) {
-    if (!this.enabled() || !options.sessionId) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
-    const agent = service(this.rt.ctx, 'agents')?.get?.(options.sessionId)
-    if (!RemoteChatAdapter.ownTurn(options, agent, ref => this.filePath(ref))) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
+    const request = requestFields(options)
+    if (!this.enabled() || !request) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
+    const agent = service(this.rt.ctx, 'agents')?.get?.(request.sessionId)
+    if (!RemoteChatAdapter.ownTurnFields(request, agent, ref => this.filePath(ref))) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
     if (!agent) return yield finish('error', 'Remote Hermes needs a live Automagik chat to show its tools and approvals.')
     this.register(agent)
-    let entry = this.live.get(options.sessionId)
-    const continuing = options.messages.at(-1)?.role === 'tool' && entry?.calls.has(options.messages.at(-1)?.toolCallId)
-    if (!continuing && entry) { entry.run.dispose(); this.live.delete(options.sessionId); entry = undefined }
+    let entry = this.live.get(request.sessionId)
+    const continuing = request.messages.at(-1)?.role === 'tool' && entry?.calls.has(request.messages.at(-1)?.toolCallId)
+    if (!continuing && entry) { entry.run.dispose(); this.live.delete(request.sessionId); entry = undefined }
     let index = 0
     let complete = false
     let yieldedTool = false
     const stop = () => { entry?.abortWake?.(); if (entry) void entry.run.stop() }
-    options.signal?.addEventListener('abort', stop, { once: true })
+    request.signal?.addEventListener('abort', stop, { once: true })
     try {
-      if (options.signal?.aborted) return yield finish('aborted', 'Stopped before a remote submit.')
+      if (request.signal?.aborted) return yield finish('aborted', 'Stopped before a remote submit.')
       if (!entry) {
-        const identity = this.identity(options.sessionId)
-        const run = await this.open({ identity, save: this.save, signal: options.signal, question: (params, withdrawn) => remoteApproval(this.rt.ctx, agent, params, AbortSignal.any([options.signal, withdrawn].filter(Boolean))) })
+        const identity = this.identity(request.sessionId)
+        const run = await this.open({ identity, save: this.save, signal: request.signal, question: (params, withdrawn) => remoteApproval(this.rt.ctx, agent, params, AbortSignal.any([request.signal, withdrawn].filter(Boolean))) })
         entry = { run, calls: new Set() }
-        this.live.set(options.sessionId, entry)
-        if (options.signal?.aborted) return yield finish('aborted', 'Stopped before a remote submit.')
+        this.live.set(request.sessionId, entry)
+        if (request.signal?.aborted) return yield finish('aborted', 'Stopped before a remote submit.')
         if (identity.pendingSubmit || identity.uncertain) {
           const reconciled = await run.reconcile({ answerQuestions: true })
           yield* textBlocks('Resuming the existing remote turn. This new message was not submitted.', index++)
@@ -206,9 +236,9 @@ export class RemoteChatAdapter extends LlmAdapter {
             return yield finish('stop')
           }
         } else {
-        const model = this.models().find(model => model.id === options.model)
+        const model = this.models().find(model => model.id === request.model)
         if (!model) { complete = true; return yield finish('error', 'Discover this remote model again before using it.') }
-        const text = RemoteChatAdapter.promptText(options.messages)
+        const text = RemoteChatAdapter.promptText(request.messages)
         if (!text) return yield finish('error', 'Remote Hermes accepts text in this delivery.')
         // Prompts never contain the standing credential or a transient ticket.
         await run.submit(run.transport.redact(text), model)
@@ -216,7 +246,7 @@ export class RemoteChatAdapter extends LlmAdapter {
       }
       for (;;) {
         const row = await Promise.race([entry.run.next(), new Promise(resolve => {
-          if (options.signal?.aborted) resolve({ kind: 'error', text: LOST })
+          if (request.signal?.aborted) resolve({ kind: 'error', text: LOST })
           else entry.abortWake = () => resolve({ kind: 'error', text: LOST })
         })])
         if (row.kind === 'text') yield* textBlocks(row.text, index++)
@@ -237,9 +267,9 @@ export class RemoteChatAdapter extends LlmAdapter {
     } catch (error) {
       yield finish('error', error?.code === 'bot/hermes-busy' ? 'A chat is still running on this connection; stop it or wait.' : error?.code === 'bot/hermes' ? error.message : 'Remote Hermes could not complete this turn. Reconcile the remote session before sending again.')
     } finally {
-      options.signal?.removeEventListener('abort', stop)
+      request.signal?.removeEventListener('abort', stop)
       if (entry && !yieldedTool) {
-        this.live.delete(options.sessionId)
+        this.live.delete(request.sessionId)
         if (!complete && entry.run.identity.pendingSubmit) await entry.run.stop()
         else entry.run.dispose()
       }

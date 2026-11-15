@@ -550,6 +550,46 @@ test('each hardening check is pinned by a forgery equal to the Session message',
   assert.equal(RemoteChatAdapter.ownTurn(envelope([unfrozen]), agent), false)
 })
 
+test('each request field must be own data: an equal-value accessor envelope is refused', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  const real = Object.freeze([Object.freeze({ type: 'text', text: 'say OK' })])
+  const user = Object.freeze({ role: 'user', id: 'm-1', content: real })
+  const session = { deriveMessages: () => [user], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const base = () => ({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: [user], tools: Object.freeze([]) })
+  const plain = Object.freeze({ ...base(), messages: Object.freeze([user]) })
+  assert.equal(RemoteChatAdapter.ownTurn(plain, agent), true)
+  // Every accessor below answers the same value as the plain envelope; only its kind differs.
+  const withAccessor = (name, value) => {
+    const envelope = base()
+    Object.defineProperty(envelope, name, { get: () => value, enumerable: true, configurable: true })
+    return Object.freeze(envelope)
+  }
+  for (const [name, value] of [['provider', 'hermes-remote'], ['model', 'sample:model'], ['sessionId', 'sample-chat'], ['purpose', undefined], ['messages', Object.freeze([user])]]) {
+    assert.equal(RemoteChatAdapter.ownTurn(withAccessor(name, value), agent), false, `a ${name} accessor is not own data`)
+  }
+  // The envelope itself cannot be a Proxy answering as the plain one.
+  assert.equal(RemoteChatAdapter.ownTurn(new Proxy(plain, {}), agent), false)
+  // A Session header that throws refuses instead of escaping the guard.
+  const throwing = { id: 'sample-chat', session: { requestHeader: () => { throw new Error('sample') }, deriveMessages: () => [user] } }
+  assert.equal(RemoteChatAdapter.ownTurn(plain, throwing), false)
+  // The stream refuses those envelopes too and never submits to the remote.
+  for (const envelope of [withAccessor('messages', Object.freeze([user])), withAccessor('model', 'sample:model')]) {
+    const chunks = []
+    for await (const chunk of adapter.stream(envelope)) chunks.push(chunk)
+    assert.equal(chunks.at(-1).reason.failure.code, 'REMOTE_HERMES')
+    assert.equal(f.sent.filter(frame => frame.method === 'prompt.submit').length, 0)
+  }
+})
+
 test('connection is off by default, record stores a reference and credential stays mode 0600', async t => {
   const home = await mkdtemp(join(tmpdir(), 'hermes-fixture-'))
   t.after(() => rm(home, { recursive: true, force: true }))
