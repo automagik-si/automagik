@@ -5,7 +5,7 @@
 // answers, sends or interrupts; delivery 2L serves the writes, owner-only, and 1L ships without
 // them. Every row comes from what exists (the registry, herdr-core's status, the transcript) and
 // nothing here starts, stops or restarts anything.
-import { createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { Fragment, createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { call } from './api.js'
 import { MarkdownText } from './dsh-primitives.js'
 import { hostText, t } from './i18n.js'
@@ -159,7 +159,11 @@ export function WaitingCard({ approval, question }) {
   return h('section', { className: 'bt-seat-wait', role: 'status', 'data-seat-wait': '' },
     h('div', { className: 'bt-seat-wait-head' }, h('span', { className: 'bt-seat-wait-dot', 'aria-hidden': true }), t('Needs you')),
     tool !== '' || line !== '' ? h('p', { className: 'bt-seat-wait-line' }, tool !== '' ? h('strong', null, tool) : null, tool !== '' && line !== '' ? ' · ' : null, line) : null,
-    options.length > 0 ? h('div', { className: 'bt-seat-wait-options' }, options.map(option => h('span', { key: option, className: 'bt-seat-chip' }, option))) : null,
+    options.length > 0
+      ? h('p', { className: 'bt-seat-wait-options' }, options.map((option, index) => h(Fragment, { key: option },
+          index === 0 ? null : h('span', { className: 'bt-seat-wait-sep', 'aria-hidden': true }, ' · '),
+          h('span', { className: 'bt-seat-option' }, option))))
+      : null,
     h('p', { className: 'bt-seat-wait-note' }, t('Answer in the terminal. This view shows the card and never answers it.')))
 }
 
@@ -229,7 +233,7 @@ export function SeatChatPanel({ onBack }) {
         h('div', { className: 'bt-seat-sub' }, seatLine)),
       h('span', { className: 'bt-seat-status', 'data-status': status, title: word(status), 'aria-label': word(status) },
         h('span', { className: 'bt-seat-status-mark', 'data-status': status, 'aria-hidden': true }),
-        status === 'needs' ? word(status) : null)),
+        word(status))),
     h('div', { className: 'bt-seat-body' },
       needs ? h(WaitingCard, { approval: face.approval, question: face.question }) : null,
       face.error !== null
@@ -278,8 +282,8 @@ export const SEAT_CHAT_CSS = `
 .bt-seat-wait-head{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;line-height:18px}
 .bt-seat-wait-dot{width:8px;height:8px;border-radius:50%;background:var(--st-warn,var(--bt-ink))}
 .bt-seat-wait-line{margin:6px 0 0;font-size:12px;line-height:18px;color:var(--bt-ink-2);overflow-wrap:anywhere}
-.bt-seat-wait-options{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
-.bt-seat-chip{padding:3px 9px;border-radius:999px;border:.5px solid var(--bt-line-2);background:var(--bt-main);font-size:12px;line-height:17px;color:var(--bt-ink-2)}
+.bt-seat-wait-options{margin:9px 0 0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}
+.bt-seat-option{font-weight:600}
 .bt-seat-wait-note{margin:9px 0 0;font-size:11px;line-height:16px;color:var(--bt-ink-3)}
 .bt-seat-scroll{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:16px 20px 24px}
 .bt-seat-userrow{display:flex;justify-content:flex-end}

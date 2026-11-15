@@ -21357,7 +21357,7 @@ var SAID = {
 };
 var WORDS = Object.freeze(Object.keys(SAID));
 var word = (name) => SAID[name]();
-var WORDED = Object.freeze(["needs"]);
+var WORDED = Object.freeze(["needs", "off"]);
 var QUIET = Object.freeze(["idle"]);
 var FIRST = ["needs", "error", "working"];
 var worstStatus = (statuses) => FIRST.find((status) => statuses.includes(status)) ?? "idle";
@@ -21898,6 +21898,7 @@ function teamOf({ roster, order, status, marked = {}, current, now = Date.now(),
   const seating = seats.map((seat) => ({
     id: `seat:${seat.id}`,
     seat: true,
+    artId: seat.id,
     name: seat.name,
     project: seat.project,
     terminal: seat.terminal,
@@ -21928,7 +21929,7 @@ function SeatGlyph({ size }) {
   );
 }
 var renderArt = (bot, size, state) => {
-  if (bot.seat) return (0, import_react55.createElement)(SeatGlyph, { size: Math.round(size * 0.8) });
+  if (bot.seat) return bot.artId ? drawBot({ id: bot.artId, name: bot.name }, size, state) : (0, import_react55.createElement)(SeatGlyph, { size: Math.round(size * 0.8) });
   if (bot.dsh === "tasks") return (0, import_react55.createElement)(TasksIcon, { size: Math.round(size * 0.72) });
   if (bot.dsh === "agent") return (0, import_react55.createElement)(BotMark, { bot: { id: bot.id }, look: DSH_LOOK, size });
   return drawBot(bot, size, state);
@@ -22142,7 +22143,12 @@ function WaitingCard({ approval, question }) {
     { className: "bt-seat-wait", role: "status", "data-seat-wait": "" },
     (0, import_react56.createElement)("div", { className: "bt-seat-wait-head" }, (0, import_react56.createElement)("span", { className: "bt-seat-wait-dot", "aria-hidden": true }), t("Needs you")),
     tool !== "" || line !== "" ? (0, import_react56.createElement)("p", { className: "bt-seat-wait-line" }, tool !== "" ? (0, import_react56.createElement)("strong", null, tool) : null, tool !== "" && line !== "" ? " · " : null, line) : null,
-    options.length > 0 ? (0, import_react56.createElement)("div", { className: "bt-seat-wait-options" }, options.map((option) => (0, import_react56.createElement)("span", { key: option, className: "bt-seat-chip" }, option))) : null,
+    options.length > 0 ? (0, import_react56.createElement)("p", { className: "bt-seat-wait-options" }, options.map((option, index) => (0, import_react56.createElement)(
+      import_react56.Fragment,
+      { key: option },
+      index === 0 ? null : (0, import_react56.createElement)("span", { className: "bt-seat-wait-sep", "aria-hidden": true }, " · "),
+      (0, import_react56.createElement)("span", { className: "bt-seat-option" }, option)
+    ))) : null,
     (0, import_react56.createElement)("p", { className: "bt-seat-wait-note" }, t("Answer in the terminal. This view shows the card and never answers it."))
   );
 }
@@ -22221,7 +22227,7 @@ function SeatChatPanel({ onBack }) {
         "span",
         { className: "bt-seat-status", "data-status": status, title: word(status), "aria-label": word(status) },
         (0, import_react56.createElement)("span", { className: "bt-seat-status-mark", "data-status": status, "aria-hidden": true }),
-        status === "needs" ? word(status) : null
+        word(status)
       )
     ),
     (0, import_react56.createElement)(
@@ -22278,8 +22284,8 @@ var SEAT_CHAT_CSS = `
 .bt-seat-wait-head{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;line-height:18px}
 .bt-seat-wait-dot{width:8px;height:8px;border-radius:50%;background:var(--st-warn,var(--bt-ink))}
 .bt-seat-wait-line{margin:6px 0 0;font-size:12px;line-height:18px;color:var(--bt-ink-2);overflow-wrap:anywhere}
-.bt-seat-wait-options{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
-.bt-seat-chip{padding:3px 9px;border-radius:999px;border:.5px solid var(--bt-line-2);background:var(--bt-main);font-size:12px;line-height:17px;color:var(--bt-ink-2)}
+.bt-seat-wait-options{margin:9px 0 0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}
+.bt-seat-option{font-weight:600}
 .bt-seat-wait-note{margin:9px 0 0;font-size:11px;line-height:16px;color:var(--bt-ink-3)}
 .bt-seat-scroll{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:16px 20px 24px}
 .bt-seat-userrow{display:flex;justify-content:flex-end}

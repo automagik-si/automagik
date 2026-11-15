@@ -11,8 +11,9 @@ const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
 const bundle = await build({
   stdin: {
     contents: [
-      "export { teamOf } from './src/client/left-bar.js'",
+      "export { teamOf, renderArt } from './src/client/left-bar.js'",
       "export * from './src/client/seat-chat.js'",
+      "export { QUIET, WORDED, word } from './src/client/left-bar-status.js'",
       "export { installLocale } from './src/client/i18n.js'",
     ].join('\n'),
     resolveDir: PLUGIN,
@@ -36,7 +37,7 @@ const module = { exports: {} }
 new Function('module', 'exports', 'require', bundle.outputFiles[0].text)(module, module.exports, name => (name === 'react' ? react : {}))
 
 const {
-  EMPTY_FACE, SeatChatPanel, SeatRow, WaitingCard, mergeFace, seatAgentName, seatChatView, seatClientId, seatSourceNote, seatWordOf, teamOf,
+  EMPTY_FACE, QUIET, SeatChatPanel, SeatRow, WaitingCard, WORDED, mergeFace, renderArt, seatAgentName, seatChatView, seatClientId, seatSourceNote, seatWordOf, teamOf, word,
 } = module.exports
 
 /** An element with its function components drawn, down to tags and text. */
@@ -50,6 +51,7 @@ function render(element) {
 const textOf = node => (node === null || node === undefined ? '' : typeof node !== 'object' ? String(node) : Array.isArray(node) ? node.map(textOf).join('') : node.children.map(textOf).join(''))
 const findAll = (node, match) => (!node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(child => findAll(child, match)) : [...(match(node) ? [node] : []), ...node.children.flatMap(child => findAll(child, match))])
 const buttons = node => findAll(node, entry => entry.type === 'button')
+const hasClassOf = (node, name) => String(node.props?.className ?? '').split(' ').includes(name)
 
 const seat = {
   id: 'b-aaaaaaaaaa', name: 'Orchestrator One', project: 'Project One', terminal: 't1',
@@ -70,6 +72,7 @@ test('the bar puts a seat under the Main Bot, marked as a seat, with its own sta
   assert.equal(won.status, 'working')
   assert.equal(won.agent, 'claude')
   assert.equal(won.terminal, 't1')
+  assert.equal(won.artId, seat.id, 'the seat wears its registry Bot’s own character and colour')
   assert.deepEqual(won.channels, [])
   assert.equal(won.unread, false)
   assert.equal(team.bots.at(-1).id, 'other', 'the DSH Bots stay under the seats')
@@ -85,6 +88,8 @@ test('a seat row opens its face, not a DSH chat, and the waiting card shows with
   assert.match(cardText, /Deny/)
   assert.match(cardText, /never answers/)
   assert.equal(buttons(card).length, 0, 'the card has no button at all: show only')
+  assert.equal(findAll(card, node => hasClassOf(node, 'bt-seat-option')).length, 2, 'the choices are plain text')
+  assert.match(cardText, /Allow once · Deny/, 'the choices read as one line, not as controls')
 
   const question = render(WaitingCard({ approval: null, question: { kind: 'question', prompt: 'Which deploy?', options: ['staging', 'production'], answerable: false, why: 'answer-in-terminal' } }))
   assert.match(textOf(question), /Which deploy\?/)
@@ -120,6 +125,16 @@ test('a read of another seat replaces the face: one seat never shows another sea
   assert.equal(mergeFace(one, { rows: [] }, 't1').rows.length, 2)
 })
 
+test('one mark set: idle draws no mark, and a seat that is not running says so in words', () => {
+  assert.equal(QUIET.includes('idle'), true, 'idle is silent for a Bot and for a seat')
+  assert.equal(WORDED.includes('off'), true, 'not running says its word, never a bare hollow ring')
+  assert.equal(word('off'), 'Not running')
+  // The seat art is the registry Bot's character; the pane glyph is only the no-Bot fallback.
+  const art = renderArt({ seat: true, artId: 'b-novaaaaaaa', name: 'Nova' }, 28, 'working')
+  assert.equal(art.props.bot.id, 'b-novaaaaaaa', 'the look hashes the registry id, never the row key')
+  assert.equal(renderArt({ seat: true }, 28, 'idle').type?.name, 'SeatGlyph')
+})
+
 test('the panel says where the rows come from and what it never does', () => {
   assert.equal(seatWordOf({ state: 'blocked' }), 'needs')
   assert.equal(seatWordOf({ state: 'error' }), 'error')
@@ -132,6 +147,16 @@ test('the panel says where the rows come from and what it never does', () => {
   assert.match(seatSourceNote({ chat: 'transcript' }), /never runs or types/)
   const empty = render(SeatChatPanel({ onBack: () => {} }))
   assert.match(textOf(empty), /Choose a seat/)
+  // The header says its status word, working included: a lone dot is not enough.
+  seatChatView.set({ seat: { ...seat, status: 'working' } })
+  try {
+    const open = render(SeatChatPanel({ onBack: () => {} }))
+    assert.match(textOf(open), /Orchestrator One/)
+    assert.match(textOf(open), /Working/)
+    assert.match(textOf(open), /This computer/)
+  } finally {
+    seatChatView.set({ seat: null })
+  }
 })
 
 test('the window keeps one seat-chat id across reloads and never trusts a bad one', () => {
@@ -147,5 +172,6 @@ test('the window keeps one seat-chat id across reloads and never trusts a bad on
 
 test('the panel is its own keyed main panel, not a Session', () => {
   assert.equal(module.exports.SEAT_CHAT_PANEL, 'seat-chat')
+  seatChatView.set({ seat: null })
   assert.deepEqual(seatChatView.getSnapshot(), { seat: null }, 'the store names no seat before the bar opens one')
 })

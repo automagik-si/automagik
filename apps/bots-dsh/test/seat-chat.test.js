@@ -57,7 +57,7 @@ test('the listing joins the registry to this computer\'s terminals, never anothe
     projects: [{ name: 'Project One', folder: '/srv/one' }],
   })
   t.after(fixture.stop)
-  const { engine, chat, stop } = seatChat(fixture.home, {
+  const { chat, stop } = seatChat(fixture.home, {
     registryPath: fixture.registryPath,
     terminals: [
       terminal('t1', ONE, { transcript: fixture.transcript }),
@@ -80,7 +80,7 @@ test('the listing joins the registry to this computer\'s terminals, never anothe
 test('a seat opens as its transcript rows, read only, and a remote or unknown terminal is refused', async (t) => {
   const fixture = homeWith({ bots: [{ id: ONE, name: 'Orchestrator One' }] })
   t.after(fixture.stop)
-  const { hc, engine, chat, stop } = seatChat(fixture.home, {
+  const { hc, chat, stop } = seatChat(fixture.home, {
     registryPath: fixture.registryPath,
     terminals: [terminal('t1', ONE, { transcript: fixture.transcript })],
   })

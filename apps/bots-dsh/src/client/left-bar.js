@@ -108,8 +108,10 @@ export function teamOf({ roster, order, status, marked = {}, current, now = Date
   }
   // The seats on this computer are Team rows too (RFC 0022 (i)): each orchestrator as a chat.
   // They sit under the Main Bot, before the DSH Bots, and no row starts or stops anything.
+  // `artId` is the registry Bot's own id, so the seat wears the same character and colour a
+  // Bot row would (the row's id keeps the `seat:` prefix so a seat and a DSH Bot never collide).
   const seating = seats.map(seat => ({
-    id: `seat:${seat.id}`, seat: true, name: seat.name, project: seat.project,
+    id: `seat:${seat.id}`, seat: true, artId: seat.id, name: seat.name, project: seat.project,
     terminal: seat.terminal, agent: seat.agent, chat: seat.chat, status: seat.status,
     channels: [], unread: false,
   }))
@@ -127,16 +129,18 @@ export function teamOf({ roster, order, status, marked = {}, current, now = Date
   return { frontId: main?.id, bots, groups }
 }
 
-// A seat is a terminal in Herdr, not a DSH Bot: a plain pane glyph, drawn at the art's size.
+// A seat with no registry Bot behind it has no character of its own: a plain pane glyph.
 function SeatGlyph({ size }) {
   return h('svg', { width: size, height: size, viewBox: '0 0 24 24', 'aria-hidden': true, style: { color: 'inherit', opacity: 0.62 } },
     h('rect', { x: 3, y: 4.5, width: 18, height: 15, rx: 4, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 }),
     h('path', { d: 'M7.5 9.5l3 2.7-3 2.7M13 15h3.5', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }))
 }
 
-// A DSH bot wears DSH's own mark, the tasks record its icon; a Bot its character.
-const renderArt = (bot, size, state) => {
-  if (bot.seat) return h(SeatGlyph, { size: Math.round(size * 0.8) })
+// A DSH bot wears DSH's own mark, the tasks record its icon; a Bot its character. A seat is a
+// humanized Bot: it wears the registry Bot's own character and colour; the pane glyph is only
+// for a seat with no Bot behind it.
+export const renderArt = (bot, size, state) => {
+  if (bot.seat) return bot.artId ? drawBot({ id: bot.artId, name: bot.name }, size, state) : h(SeatGlyph, { size: Math.round(size * 0.8) })
   if (bot.dsh === 'tasks') return h(TasksIcon, { size: Math.round(size * 0.72) })
   if (bot.dsh === 'agent') return h(BotMark, { bot: { id: bot.id }, look: DSH_LOOK, size })
   return drawBot(bot, size, state)
