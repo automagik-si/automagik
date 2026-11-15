@@ -12,7 +12,7 @@ import { t } from './i18n.js'
 // applies (this one: Welcome and Connect AI; @automagik/omni-channels-dsh: Connect Omni),
 // so the rail names only the steps this DSH will show. Labels are English keys, read in the DSH
 // language as the rail draws them (i18n.js).
-export const RAIL = [['omni-companion', 'Your companion'], ['omni-team', 'Your team'], ['omni-connect', 'Connect Omni'], ['omni-connect-ai', 'Connect AI']]
+export const RAIL = [['omni-companion', 'Your companion'], ['omni-team', 'Your team'], ['omni-connect', 'Connect Omni'], ['omni-migrate', 'From another tool'], ['omni-connect-ai', 'Connect AI']]
 const ANNOUNCED = Symbol.for('automagik.omni.onboarding-steps')
 
 /** Marks step `id` as present until the returned function runs. */
@@ -27,7 +27,7 @@ export function railSteps(current, scope = globalThis) {
   const steps = scope[ANNOUNCED]
   return RAIL.filter(([id]) => id === current || steps?.has(id) === true)
 }
-export const FLAG_OF = { 'omni-companion': 'companionDone', 'omni-team': 'teamDone', 'omni-connect-ai': 'connectAiDone' }
+export const FLAG_OF = { 'omni-companion': 'companionDone', 'omni-team': 'teamDone', 'omni-migrate': 'migrateDone', 'omni-connect-ai': 'connectAiDone' }
 
 export const reducedMotion = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
@@ -122,7 +122,7 @@ function useTypewriter(text) {
 function Rail({ at }) {
   const steps = railSteps(at)
   const here = steps.findIndex(([id]) => id === at)
-  return h('ol', { className: 'oai-rail', 'aria-label': t('Setup steps') },
+  return h('ol', { className: `oai-rail${steps.length > 4 ? ' oai-rail-many' : ''}`, 'aria-label': t('Setup steps') },
     steps.map(([id, label], index) => h('li', {
       key: id,
       className: index < here ? 'oai-done' : index === here ? 'oai-on' : '',

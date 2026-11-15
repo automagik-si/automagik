@@ -251,7 +251,7 @@ test('under a pt-BR locale, the team step renders in Brazilian Portuguese', () =
 // The team step, the Claude Code and Codex rows and the rest of the welcome share the namespace
 // (welcome-flow-i18n.test.js renders the rest).
 const read = file => readFileSync(new URL(`../src/client/${file}`, import.meta.url), 'utf8')
-const FLOW = ['connect-ai.js', 'subscriptions.js', 'companion.js', 'companion-art.js', 'stage.js', 'api.js']
+const FLOW = ['connect-ai.js', 'subscriptions.js', 'companion.js', 'companion-art.js', 'stage.js', 'api.js', 'migrate.js']
 const source = ['team.js', 'acp-agents.js', 'power-shortcut.js', ...FLOW].map(read).join('\n')
 const keysOf = text => [...text.matchAll(/\bt\(\s*(['"`])((?:\\.|(?!\1).)*)\1/g)].map(match => match[2].replace(/\\(['"`\\])/g, '$1'))
 const placeholders = text => [...text.matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort().join(',')
