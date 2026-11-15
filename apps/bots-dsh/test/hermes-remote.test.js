@@ -1116,3 +1116,23 @@ test('approval churn during activate is bounded and observational capture never 
     assert.ok(!f.sent.some(frame => frame.id === request.id || frame.method === 'prompt.submit'))
   }
 })
+
+test('a zero-or-two Bot Chat refusal reaches the chat with its own sentence, not the generic reconcile line', async t => {
+  const agent = { session: { id: 'sample-pairing' }, ctx: { tools: { register: () => () => {} } } }
+  const ctx = fakeContext({ services: { agents: { get: () => agent, list: () => [agent] } } })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true,
+    models: () => [{ id: 'attach', name: 'Attach', model: 'm', provider: 'p' }],
+    identity: () => ({ canonicalBot: true }),
+    save: async () => {},
+    attached: () => true,
+    open: async () => { throw Object.assign(new Error('This profile must have exactly one existing Bot Chat. Open it in Hermes before pairing.'), { code: 'bot/hermes-pairing' }) },
+  })
+  t.after(() => adapter.dispose())
+  const chunks = []
+  for await (const chunk of adapter.stream(markAgentLoopRequest({ provider: 'hermes-remote', model: 'attach', sessionId: 'sample-pairing', messages: [{ role: 'user', content: 'Sample' }] }))) chunks.push(chunk)
+  const finish = chunks.at(-1)
+  assert.equal(finish.type, 'finish')
+  assert.equal(finish.reason.kind, 'error')
+  assert.match(finish.reason.failure.message, /exactly one existing Bot Chat/)
+})

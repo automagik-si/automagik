@@ -34,7 +34,12 @@ def run(argv, timeout, env=None):
             result.stdout[:131072].decode("utf-8", "replace"),
             result.stderr[-8192:].decode("utf-8", "replace"))
 
-def tail(text):
+def tail(text, secret=""):
+    # The exact host token is removed here, before the frame leaves the remote: an error
+    # tail can reach this computer before the token frame does, so shape masking alone is
+    # not enough.
+    if isinstance(secret, str) and secret:
+        text = text.replace(secret, "[hidden]")
     lines = [re.sub(r"[\x00-\x1f\x7f]", " ", line).strip()[:240] for line in text.splitlines()]
     return [line for line in lines if line][-3:]
 
@@ -191,16 +196,19 @@ def config_model(hermes, ident, timeout, env=None):
             provider = value
         elif not model:
             model = value
-    if not model and len(lines) == 1 and ":" not in lines[0]:
+    # A bare scalar (no --json on an older release) is the model whole, colon and all:
+    # llama9:70b-q4 and openrouter/auto are ids, not provider:model pairs. A field line
+    # was already read above, so only a non-field single line falls through to here.
+    if not model and not provider and len(lines) == 1 and not re.match(r"^(default|model|provider)\s*:", lines[0]):
         model = lines[0].strip("\"'")
     return model, provider
 
 def show_profile(hermes, ident, timeout, env=None):
-    """Display name and running state from the CLI's own profile show."""
+    """Display name, running state and model fields from the CLI's own profile show."""
     code, out, _ = run([hermes, "profile", "show", ident], timeout, env)
     if code != 0:
         return None
-    display, running = "", None
+    display, running, model, provider = "", None, "", ""
     for line in out.splitlines():
         profile = re.match(r"^\s*Profile:\s*(.+?)\s*$", line)
         if profile:
@@ -210,7 +218,15 @@ def show_profile(hermes, ident, timeout, env=None):
         gateway = re.match(r"^\s*Gateway:\s*(running|stopped)\s*$", line)
         if gateway:
             running = gateway.group(1) == "running"
-    return {"name": display, "running": running}
+        shown_model = re.match(r"^\s*Model:\s*(.+?)\s*$", line)
+        if shown_model:
+            value = shown_model.group(1).strip()
+            named_model = re.match(r"^(?P<model>.+?)\s+\((?P<provider>[^()]+)\)$", value)
+            if named_model:
+                model, provider = named_model.group("model").strip(), named_model.group("provider").strip()
+            else:
+                model = value
+    return {"name": display, "running": running, "model": model, "provider": provider}
 
 try:
     initial = bytearray()
@@ -264,25 +280,35 @@ try:
     emit("stage", name="attach-profiles")
     profile_budget = min(30.0, max(control, start_until - time.monotonic()))
     listed_code, listing, listing_err = run([hermes, "profile", "list"], profile_budget, cli_env)
-    if listed_code != 0:
-        raise Fault("serve-profiles", tail=tail(listing_err or listing))
-    profiles = parse_list(listing)
-    if not profiles:
-        raise Fault("serve-profiles")
+    listed_rows = parse_list(listing) if listed_code == 0 else []
+    # The record's served set is the authoritative id list; the human table is only the
+    # active marker and a fallback for a release that publishes no set. A profile is never
+    # silently dropped: a failed show or config leaves its id, and a late deadline is an
+    # explicit refusal, not a shorter list.
+    recorded = [value for value in (record.get("profiles") or [])
+                if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", value)]
+    ids = recorded or [row["id"] for row in listed_rows]
+    if not ids:
+        raise Fault("serve-profiles", tail=tail(listing_err or listing, token))
+    if len(ids) > 50:
+        raise Fault("serve-profiles", tail=["more than 50 profiles"])
+    rows = {row["id"]: row for row in listed_rows}
     kept = []
-    for row in profiles[:50]:
+    for ident in ids:
         if time.monotonic() >= start_until:
-            break
+            raise Fault("serve-profiles", tail=["profile reads exceeded the deadline"])
         budget = min(30.0, max(control, start_until - time.monotonic()))
-        shown_profile = show_profile(hermes, row["id"], budget, cli_env)
-        model, provider = config_model(hermes, row["id"], budget, cli_env)
+        row = rows.get(ident, {"id": ident, "name": ident, "model": "", "provider": "", "running": False, "active": False})
+        shown_profile = show_profile(hermes, ident, budget, cli_env)
+        model, provider = config_model(hermes, ident, budget, cli_env)
+        shown_running = (shown_profile or {}).get("running")
         kept.append({
-            "id": row["id"],
+            "id": ident,
             "name": (shown_profile or {}).get("name") or row["name"],
-            "model": model or row["model"],
-            "provider": provider or row["provider"],
-            "running": bool((shown_profile or {}).get("running", row["running"])),
-            "active": row["active"],
+            "model": model or (shown_profile or {}).get("model") or row["model"],
+            "provider": provider or (shown_profile or {}).get("provider") or row["provider"],
+            "running": bool(shown_running if shown_running is not None else row["running"]),
+            "active": bool(row.get("active")),
         })
     if not kept:
         raise Fault("serve-profiles")
@@ -313,7 +339,7 @@ function profilesOf(value) {
     if (!item || typeof item !== 'object' || !PROFILE_ID.test(item.id ?? '')) continue
     const model = text(item.model) ? item.model.trim().slice(0, 200) : ''
     const provider = text(item.provider) ? item.provider.trim().slice(0, 100) : ''
-    if (model && (!/^[\x20-\x7e]+$/.test(model) || /[/:]\s*$/.test(model))) continue
+    if (model && !/^[\x20-\x7e]+$/.test(model)) continue
     rows.push({
       id: item.id,
       name: text(item.name) && item.name.trim() ? item.name.trim().slice(0, 100) : item.id,

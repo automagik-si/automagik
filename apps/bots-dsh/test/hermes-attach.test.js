@@ -180,10 +180,25 @@ test('the attach reader contains no start, stop, signal or kill path', () => {
   assert.doesNotMatch(attachSupervisor, /"session\.create"/)
 })
 
+test('a model id ending in a colon or slash is kept whole', async t => {
+  const frames = [
+    { type: 'record', port: 9119, pid: 77, profiles: [
+      { id: 'default', name: 'Default', model: 'org/model:', provider: 'org', running: true },
+      { id: 'second', name: 'Second', model: 'path/model/', provider: 'path', running: false },
+    ] },
+    { type: 'token', value: token },
+    { type: 'ready', port: 9119 },
+  ]
+  const ssh = fakeSsh(t, { frames })
+  const connection = await startHermesAttach({ host: 'example.invalid' }, { spawn: ssh.spawn, allocatePort: async () => 40123, deadlines })
+  t.after(() => connection.close())
+  assert.deepEqual(connection.profiles.map(row => row.model), ['org/model:', 'path/model/'])
+})
+
 // The reader itself, run against a scratch state folder and a fake Hermes CLI: the 0600
 // token file is the only credential, its fingerprint must match, and the recorded owner
 // must answer as itself.
-async function readerHome(t, { mode = 0o600, fingerprint = true, record = true, servePid } = {}) {
+async function readerHome(t, { mode = 0o600, fingerprint = true, record = true, noProfiles = false, servePid } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'hermes-attach-'))
   const lock = join(home, 'locks')
   await writeFile(join(home, '.keep'), '')
@@ -191,35 +206,55 @@ async function readerHome(t, { mode = 0o600, fingerprint = true, record = true, 
   await mkdir(lock, { recursive: true })
   const hermes = join(home, 'hermes')
   await writeFile(hermes, `#!/usr/bin/env python3
-import sys
+import json, os, sys
 args = sys.argv[1:]
+mode = os.environ.get("FAKE_READER", "")
+lock = os.environ.get("HERMES_GATEWAY_LOCK_DIR", "")
+models = {
+    "default": ("acme/llama-9:70b-q4", "acme"),
+    "second": ("openai/gpt-5.1", "openai"),
+    "third": ("openrouter/auto", "openrouter"),
+}
+try:
+    secret = open(os.path.join(lock, "host-serve.token")).read().strip()
+except OSError:
+    secret = ""
 if args == ["--version"]:
     print("Hermes Agent v0.22.5")
 elif args == ["profile", "list"]:
+    if mode == "leak":
+        print(secret)
+        sys.exit(1)
     print("")
     print(" Profile          Model                        Gateway      Alias        Distribution")
     print(" ---------------- ---------------------------- ------------ ------------ --------------------")
-    print(" Hefesto (default) anthropic/claude-sonnet-4-5   running      -            -")
-    print("  Second (second)  openai/gpt-5.1               stopped      second       -")
+    print(" A Very Long Display Name (default) acme/llama-9:70b-q4 running - -")
+    if mode != "omit-second":
+        print("  Second (second)  openai/gpt-5.1               stopped      second       -")
+    print("  Third (third)    openrouter/auto              running      third        -")
     print("")
-elif args == ["profile", "show", "default"]:
+elif args in (["profile", "show", "default"], ["profile", "show", "second"], ["profile", "show", "third"]):
+    ident = args[2]
+    display = {"default": "A Very Long Display Name (default)", "second": "Second (second)", "third": "Third (third)"}[ident]
+    model, provider = models[ident]
+    gateway = "stopped" if ident == "second" else "running"
     print("")
-    print("Profile: Hefesto (default)")
+    print("Profile: " + display)
     print("Path:    /tmp/hermes")
-    print("Model:   anthropic/claude-sonnet-4-5 (anthropic)")
-    print("Gateway: running")
+    print("Model:   " + model + " (" + provider + ")")
+    print("Gateway: " + gateway)
     print("")
-elif args == ["profile", "show", "second"]:
-    print("")
-    print("Profile: Second (second)")
-    print("Path:    /tmp/hermes-second")
-    print("Model:   openai/gpt-5.1 (openai)")
-    print("Gateway: stopped")
-    print("")
-elif args == ["-p", "default", "config", "get", "model", "--json"]:
-    print('{\"default\": \"anthropic/claude-sonnet-4-5\", \"provider\": \"anthropic\"}')
-elif args == ["-p", "second", "config", "get", "model", "--json"]:
-    print('{\"default\": \"openai/gpt-5.1\", \"provider\": \"openai\"}')
+elif args[0:1] == ["-p"] and args[-1:] == ["--json"]:
+    if mode == "scalar":
+        sys.exit(1)
+    ident = args[1]
+    model, provider = models[ident]
+    print(json.dumps({"default": model, "provider": provider}))
+elif args[0:1] == ["-p"] and args[2:5] == ["config", "get", "model"]:
+    if mode != "scalar":
+        sys.exit(1)
+    model, _ = models[args[1]]
+    print(model)
 else:
     sys.exit(1)
 `, { mode: 0o755 })
@@ -232,17 +267,17 @@ else:
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const port = server.address().port
   t.after(async () => { await new Promise(resolve => server.close(resolve)); await rm(home, { recursive: true, force: true, maxRetries: 5 }) })
-  if (record) await writeFile(join(lock, 'host-serve.json'), JSON.stringify({ role: 'serve', port, pid: process.pid, protocolVersion: 1, tokenFingerprint: fingerprint ? createHash('sha256').update(token).digest('hex').slice(0, 16) : 'f'.repeat(16), profiles: ['default', 'second'] }))
+  if (record) await writeFile(join(lock, 'host-serve.json'), JSON.stringify({ role: 'serve', port, pid: process.pid, protocolVersion: 1, tokenFingerprint: fingerprint ? createHash('sha256').update(token).digest('hex').slice(0, 16) : 'f'.repeat(16), profiles: noProfiles ? [] : ['default', 'second', 'third'] }))
   await writeFile(join(lock, 'host-serve.token'), token, { mode })
   await chmod(join(lock, 'host-serve.token'), mode)
   return { home, lock, hermes }
 }
 
-function runReader(t, { home, hermes }, { nonce = randomBytes(8).toString('hex') } = {}) {
+function runReader(t, { home, hermes }, { nonce = randomBytes(8).toString('hex'), mode = '' } = {}) {
   return new Promise((resolve, reject) => {
     let proc
     try {
-      proc = spawnChild('python3', ['-u', '-c', attachSupervisor], { env: { ...process.env, HERMES_GATEWAY_LOCK_DIR: join(home, 'locks') }, stdio: ['pipe', 'pipe', 'pipe'] })
+      proc = spawnChild('python3', ['-u', '-c', attachSupervisor], { env: { ...process.env, HERMES_GATEWAY_LOCK_DIR: join(home, 'locks'), ...(mode ? { FAKE_READER: mode } : {}) }, stdio: ['pipe', 'pipe', 'pipe'] })
     } catch (error) { reject(error); return }
     let out = '', err = ''
     proc.on('error', error => reject(Object.assign(error, { code: error.code === 'ENOENT' ? 'NO_PYTHON' : error.code })))
@@ -272,12 +307,41 @@ test('the reader reads only the 0600 token file and the fields of the bot model'
   const record = frames.find(frame => frame.type === 'record')
   assert.ok(record, JSON.stringify(frames))
   assert.deepEqual(record.profiles.map(row => [row.id, row.name, row.model, row.provider, row.running]), [
-    ['default', 'Hefesto', 'anthropic/claude-sonnet-4-5', 'anthropic', true],
+    ['default', 'A Very Long Display Name', 'acme/llama-9:70b-q4', 'acme', true],
     ['second', 'Second', 'openai/gpt-5.1', 'openai', false],
+    ['third', 'Third', 'openrouter/auto', 'openrouter', true],
   ])
   assert.equal(record.active, 'default')
   assert.equal(frames.find(frame => frame.type === 'token').value, token)
   assert.equal(frames.find(frame => frame.type === 'ready').port, record.port)
+})
+
+test('a release without --json prints the model as a whole scalar, colon and all', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const home = await readerHome(t)
+  const frames = await runReader(t, home, { mode: 'scalar' })
+  const record = frames.find(frame => frame.type === 'record')
+  assert.ok(record, JSON.stringify(frames))
+  assert.deepEqual(record.profiles.map(row => row.model), ['acme/llama-9:70b-q4', 'openai/gpt-5.1', 'openrouter/auto'])
+})
+
+test('a profile missing from the human table is still read from the record', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const home = await readerHome(t)
+  const record = (await runReader(t, home, { mode: 'omit-second' })).find(frame => frame.type === 'record')
+  assert.ok(record, 'the record is emitted')
+  assert.deepEqual(record.profiles.map(row => row.id), ['default', 'second', 'third'])
+  assert.equal(record.profiles.find(row => row.id === 'second').model, 'openai/gpt-5.1')
+})
+
+test('a token printed in an early error tail is redacted before the token frame', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const home = await readerHome(t, { noProfiles: true })
+  const frames = await runReader(t, home, { mode: 'leak' })
+  const error = frames.find(frame => frame.type === 'error')
+  assert.equal(error?.code, 'serve-profiles', JSON.stringify(frames))
+  assert.equal(frames.find(frame => frame.type === 'token'), undefined)
+  assert.ok(!JSON.stringify(frames).includes(token), 'the host token never leaves in an error tail')
 })
 
 test('a token file another user could read, or a stale fingerprint, is refused', async t => {

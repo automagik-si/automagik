@@ -55,9 +55,9 @@ function* textBlocks(text, index) {
 }
 
 export class RemoteChatAdapter extends LlmAdapter {
-  constructor(rt, { open, models, identity, save, enabled }) {
+  constructor(rt, { open, models, identity, save, enabled, attached = () => false }) {
     super()
-    Object.assign(this, { rt, open, models, identity, save, enabled })
+    Object.assign(this, { rt, open, models, identity, save, enabled, attached })
     this.live = new Map()
     this.registrations = new Map()
     this.mirror = defineTool({
@@ -137,7 +137,9 @@ export class RemoteChatAdapter extends LlmAdapter {
             return yield finish('stop')
           }
         } else {
-        const model = this.models().find(model => model.id === options.model)
+        // An attached connection has one row: the bot's own model. A carried-over
+        // old ref is replaced by that row, never sent as a model or a provider.
+        const model = this.models().find(model => model.id === options.model) ?? (this.attached() ? this.models()[0] : undefined)
         if (!model) { complete = true; return yield finish('error', 'Discover this remote model again before using it.') }
         let start = options.messages.length
         while (start > 0 && options.messages[start - 1].role === 'user') start--
@@ -169,7 +171,7 @@ export class RemoteChatAdapter extends LlmAdapter {
         if (row.kind === 'done') { complete = true; return yield finish('stop') }
       }
     } catch (error) {
-      yield finish('error', error?.code === 'bot/hermes-busy' ? 'A chat is still running on this connection; stop it or wait.' : error?.code === 'bot/hermes' ? error.message : 'Remote Hermes could not complete this turn. Reconcile the remote session before sending again.')
+      yield finish('error', error?.code === 'bot/hermes-busy' ? 'A chat is still running on this connection; stop it or wait.' : ['bot/hermes', 'bot/hermes-pairing'].includes(error?.code) ? error.message : 'Remote Hermes could not complete this turn. Reconcile the remote session before sending again.')
     } finally {
       options.signal?.removeEventListener('abort', stop)
       if (entry && !yieldedTool) {

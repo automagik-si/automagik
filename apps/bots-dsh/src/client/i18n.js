@@ -163,6 +163,8 @@ const ZH = {
   "SSH signed in, but the small script that reads Hermes stopped with an error.": "SSH 登录成功，但读取 Hermes 的小脚本出错停止了。",
   "Reading the Hermes connection record": "正在读取 Hermes 的连接记录",
   "Reading the Hermes profiles": "正在读取 Hermes 的配置",
+  "Running": "运行中",
+  "Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.": "请在 {host} 的终端里运行“hermes serve”。Automagik 从不启动或重启 Hermes。如果那里的 Hermes 以网关方式运行，请为此聊天启动“hermes serve”。",
   "Hermes is not running there": "Hermes 在那里没有运行",
   "Start Hermes on {host}": "在 {host} 上启动 Hermes",
   "Hermes is not running on {host}. Start it there with “hermes serve”, then try again.": "{host} 上的 Hermes 没有运行。请在那里用“hermes serve”启动它，然后重试。",

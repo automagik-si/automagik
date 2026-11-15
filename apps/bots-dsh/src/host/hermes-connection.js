@@ -259,11 +259,20 @@ export async function prepareHermesConnection(draft, {
 }
 
 // Refresh an already-tested target without retaining or requesting the login password.
-export async function refreshHermesProfiles(connection, options) {
-  // An attached serve's profiles were read read-only through its CLI when the tunnel
-  // opened; refreshing them would need another SSH read, never an API that could list
-  // a different set.
-  if (connection.attached === true) return connection.profiles
+// An attached serve's list is re-read through the same SSH path: the old tunnel's rows
+// are evidence of what the CLI said then, not of a profile added or started since.
+export async function refreshHermesProfiles(connection, options = {}) {
+  if (connection.attached === true) {
+    const startSsh = options.startSsh ?? (async (...args) => (await import('./hermes-attach.js')).startHermesAttach(...args))
+    if (!connection.ssh) return connection.profiles
+    const owned = await startSsh(connection.ssh, { signal: options.signal, deadlines: options.deadlines })
+    try {
+      if (!Array.isArray(owned.profiles) || !owned.profiles.length) throw fail('Hermes is running there, but its profiles could not be read.', 'profiles')
+      connection.profiles = owned.profiles
+      connection.ssh = owned.ssh ?? connection.ssh
+      return connection.profiles
+    } finally { try { await owned.close?.() } catch {} }
+  }
   const refreshed = await prepareHermesConnection({ mode: 'remote', authMode: connection.authMode }, { ...options, existingConnection: connection })
   return refreshed.profiles
 }

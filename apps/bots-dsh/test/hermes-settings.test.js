@@ -109,6 +109,13 @@ test('Settings names the saved computer and profile, shows no key, and More open
   assert.deepEqual(failures, [])
 })
 
+test('Settings names an attached connection by its profile display name and shows its own model', async t => {
+  const model = { id: 'attach', name: 'acme/llama-9:70b-q4 (acme)' }
+  const { document } = await renderSettings(t, async () => ({ ...connectedView(), attached: true, profileName: 'Made-Up Display', models: [model], model }))
+  assert.match(document.body.textContent, /Profile: Made-Up Display/)
+  assert.match(document.body.textContent, /Model: acme\/llama-9:70b-q4 \(acme\)/)
+})
+
 test('Settings keeps the Bot pairing beside the computer, and the Hermes home is asked only under More', async t => {
   const view = () => ({ ...connectedView(), bots: [{ id: 'sample-bot', name: 'Sample Bot' }], pairedBotId: '' })
   const settings = await renderSettings(t, async () => view())
@@ -182,7 +189,10 @@ test('Settings renders redacted role+text history returned by the real resume an
 })
 
 const connectedView = () => ({ ...sampleView(), enabled: true, address: 'https://example.invalid', profile: 'sample-profile', mode: 'remote', authMode: 'token', modelRef: 'hermes-remote/sample-model', models: [{ id: 'sample-model', name: 'Sample model' }] })
-const testView = () => ({ testId: randomUUID(), profiles: [{ id: 'sample-profile', name: 'sample-profile' }, { id: 'other-profile', name: 'other-profile' }], defaultProfile: 'sample-profile', status: 'connected' })
+const testView = () => ({ testId: randomUUID(), profiles: [
+    { id: 'sample-profile', name: 'Sample profile', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true },
+    { id: 'other-profile', name: 'Other profile', model: 'openai/gpt-5.1', provider: 'openai', running: false },
+  ], defaultProfile: 'sample-profile', status: 'connected' })
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done }); return { promise, resolve } }
 
 async function startWizard(t, overrides = {}, options = {}) {
@@ -306,6 +316,8 @@ test('the wizard shows honest progress, asks for a profile only when there are s
   pending.resolve(testView())
   await waitFor(() => document.querySelector('[data-step=profile]'), 'profile choice')
   assert.match(document.body.textContent, /The Hermes on example\.invalid has more than one profile/)
+  assert.match(document.body.textContent, /acme\/llama-9:70b-q4 · acme/)
+  assert.match(document.body.textContent, /Not running/)
   assert.equal(document.querySelector('[role=radio]').getAttribute('aria-checked'), 'true')
   await click('Refresh list')
   await waitFor(() => calls.some(call => call.endpoint === 'hermes-remote-test-profiles'), 'profile refresh')
@@ -1110,6 +1122,8 @@ const fingerprint = 'SHA256:sampleSampleSampleSampleSampleSampleSample1'
 
 test('every SSH failure kind has its own screen, naming the host and the next step', async t => {
   const cases = [
+    ['bot/hermes-attach-not-running', { kind: 'serve-not-running', stage: 'attach-record' },
+      'Hermes is not running there', 'Start Hermes on sample-box', 'Hermes is not running on sample-box. Start it there with “hermes serve”, then try again.', 'Run “hermes serve” on sample-box in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.'],
     ['bot/hermes-ssh-exited', { kind: 'hermes-exited', stage: 'hermes-start', exit: 3, hermes: ['sample start failure', 'could not read ~/.hermes/config.yaml'] },
       'Hermes stopped while starting', 'Hermes on sample-box stopped before it was ready', 'SSH signed in and started Hermes, but Hermes exited with code 3.', 'Run “hermes serve” on sample-box to see the full error, fix it there, then try again.'],
     ['bot/hermes-ssh-exited', { kind: 'hermes-exited', stage: 'hermes-start' },
