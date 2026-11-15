@@ -1,5 +1,6 @@
 // A transport-neutral row adapter: a native transport supplies text/tool/done rows and
 // receives individual approval answers. DSH owns the visible tool cards and level policy.
+import { types, isDeepStrictEqual } from 'node:util'
 import { LlmAdapter, isAgentLoopRequest, projectFilesToText } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { LOST } from './hermes-transport.js'
@@ -52,6 +53,29 @@ function* textBlocks(text, index) {
   yield { type: 'block-start', index, blockType: 'text' }
   yield { type: 'text-delta', index, text }
   yield { type: 'block-end', index, block: { type: 'text', text } }
+}
+
+// Deep-frozen plain data only: an object with its own toJSON, a getter, a Proxy or a class
+// prototype could answer one read and behave differently on the next, so it is not a message.
+function plainData(value) {
+  if (value === null || typeof value !== 'object') return typeof value !== 'function'
+  if (types.isProxy(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  if (Array.isArray(value) ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) return false
+  if (Object.hasOwn(value, 'toJSON') || !Object.isFrozen(value)) return false
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (descriptor.get !== undefined || descriptor.set !== undefined || !('value' in descriptor)) return false
+    if (!plainData(descriptor.value)) return false
+  }
+  return true
+}
+
+// The envelope DSH dispatches for one Session message: a foreign answer that carries replay
+// state is rebuilt as a plain model source; everything else is the message itself.
+function asDispatched(message, provider) {
+  const source = message?.source
+  if (message?.role !== 'assistant' || source?.replayState === undefined || source?.provider === provider) return message
+  return { ...message, source: { kind: 'model', provider: source.provider, model: source.model } }
 }
 
 export class RemoteChatAdapter extends LlmAdapter {
@@ -116,15 +140,24 @@ export class RemoteChatAdapter extends LlmAdapter {
     let derived
     try { derived = agent.session.deriveMessages?.() } catch { return false }
     if (!Array.isArray(derived)) return false
-    const expected = projectFilesToText(derived.filter(message => message?.role !== 'developer'), filePath)
+    let expected
+    try { expected = projectFilesToText(derived.filter(message => message?.role !== 'developer'), filePath) } catch { return false }
     if (expected.length !== options.messages.length || expected.length === 0) return false
-    return expected.every((message, index) => {
-      const got = options.messages[index]
-      if (got === message) return true
-      // The runtime rebuilt this one for a file projection: same message, same projected content.
-      return typeof message?.id === 'string' && got?.id === message.id && got?.role === message.role
-        && JSON.stringify(got.content) === JSON.stringify(message.content)
-    })
+    // Only deep-frozen plain data: no toJSON, accessors, Proxies or class instances can make one
+    // read (this comparison) differ from the next (the text the adapter actually submits).
+    if (!plainData(options.messages)) return false
+    const want = expected.map(message => asDispatched(message, options.provider))
+    if (!want.every((message, index) => isDeepStrictEqual(options.messages[index], message))) return false
+    // The payload itself, read exactly as the stream reads it, must be that turn's text.
+    return RemoteChatAdapter.promptText(options.messages) === RemoteChatAdapter.promptText(expected)
+  }
+
+  // The text one request submits to the remote: the trailing run of person messages.
+  static promptText(messages) {
+    let start = messages.length
+    while (start > 0 && messages[start - 1].role === 'user') start--
+    return messages.slice(start).filter(message => message.source?.kind !== 'acp-session').map(message =>
+      typeof message.content === 'string' ? message.content : (message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')).join('\n\n')
   }
 
   // The runtime's own read path for a durable file reference, so the same projection can be
@@ -175,10 +208,7 @@ export class RemoteChatAdapter extends LlmAdapter {
         } else {
         const model = this.models().find(model => model.id === options.model)
         if (!model) { complete = true; return yield finish('error', 'Discover this remote model again before using it.') }
-        let start = options.messages.length
-        while (start > 0 && options.messages[start - 1].role === 'user') start--
-        const text = options.messages.slice(start).filter(message => message.source?.kind !== 'acp-session').map(message =>
-          typeof message.content === 'string' ? message.content : (message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')).join('\n\n')
+        const text = RemoteChatAdapter.promptText(options.messages)
         if (!text) return yield finish('error', 'Remote Hermes accepts text in this delivery.')
         // Prompts never contain the standing credential or a transient ticket.
         await run.submit(run.transport.redact(text), model)
