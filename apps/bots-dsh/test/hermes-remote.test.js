@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { LlmRuntime, markAgentLoopRequest, projectFilesToText } from '@deepseek-ai/dsh-llm'
 import { HermesTransport, RemoteChat, LOST, HERMES_DEADLINES, INVALID_FRAME } from '../src/host/hermes-transport.js'
 import { remoteApproval, RemoteChatAdapter } from '../src/host/remote-chat-adapter.js'
 import { Context } from '@deepseek-ai/cordis'
@@ -31,6 +31,13 @@ async function until(predicate, what, work) {
     assert.ok(Date.now() < deadline, `Timed out waiting for ${what}`)
     await new Promise(resolve => setImmediate(resolve))
   }
+}
+
+// What the runtime gives the adapter: the projected envelope, deep-frozen.
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object') return value
+  for (const nested of Object.values(value)) deepFreeze(nested)
+  return Object.freeze(value)
 }
 
 function fixture(t, overrides = {}) {
@@ -395,6 +402,192 @@ test('DSH adapter produces a real mirror tool card then continues the same remot
   for await (const chunk of adapter.stream(next)) continued.push(chunk)
   assert.equal(continued.find(chunk => chunk.type === 'text-delta').text, 'After tool')
   assert.equal(f.sent.filter(frame => frame.method === 'prompt.submit').length, 1)
+})
+
+test('a projected agent-loop request still answers, and a hand-built call is still refused', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  // The Session's own messages: a person's message, an earlier file, and the developer note
+  // DSH writes when a Bot's tool set changes between releases. This is a carried-over chat.
+  const fileMessage = Object.freeze({ role: 'user', id: 'm-2', content: Object.freeze([Object.freeze({ type: 'file', attachment: Object.freeze({ attachmentId: 'a-1', name: 'sample.txt', bytes: 3 }) })]) })
+  const messages = Object.freeze([
+    Object.freeze({ role: 'user', id: 'm-1', content: Object.freeze([Object.freeze({ type: 'text', text: 'say OK' })]) }),
+    fileMessage,
+    Object.freeze({ role: 'developer', id: 'dev-tools', content: Object.freeze([{ type: 'tool-addition', toolName: 'sample' }]) }),
+  ])
+  const filePath = ref => `/tmp/${ref.attachmentId}`
+  // The live Session's own file read path, as the runtime projects a file to text.
+  ctx.provide('attachments'); ctx.set('attachments', { fileHostPath: ref => `/tmp/${ref.attachmentId}` })
+  ctx.provide('fs'); ctx.set('fs', { processPathFromHostPath: path => path })
+  const session = { deriveMessages: () => [...messages], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const request = markAgentLoopRequest(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages, tools: Object.freeze([]), signal: new AbortController().signal }))
+  const stream = runtime.stream(request)
+  const first = stream.next()
+  await until(() => f.sent.some(frame => frame.method === 'prompt.submit'), 'the prompt to be submitted', first)
+  f.socket().event('message.complete', { text: 'OK' })
+  const chunks = [(await first).value]
+  for await (const chunk of stream) chunks.push(chunk)
+  // DSH projected the developer note away and dispatched a copy; the Bot's turn still ran.
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'OK')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  // The same chat called by hand beside the loop: new messages, not the Session's own.
+  const stray = []
+  for await (const chunk of adapter.stream({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: [{ role: 'user', content: 'hand built' }] })) stray.push(chunk)
+  assert.equal(stray.at(-1).reason.failure.code, 'REMOTE_HERMES')
+  assert.equal(stray.at(-1).reason.failure.message, 'Remote Hermes answers only enabled Bot chat sessions.')
+  // A frozen envelope with new messages is still not the Session's turn.
+  const forged = []
+  for await (const chunk of adapter.stream(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([{ role: 'user', content: 'hand built' }]) }))) forged.push(chunk)
+  assert.equal(forged.at(-1).reason.failure.code, 'REMOTE_HERMES')
+  // The loop's own sequence, developer note aside and the file projected, is the accepted envelope.
+  const projected = deepFreeze(projectFilesToText([messages[0], fileMessage], filePath))
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze(projected) }), agent, filePath), true)
+  // The same id with new text is a different message, and never the turn.
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([Object.freeze({ role: 'user', id: 'm-1', content: Object.freeze([{ type: 'text', text: 'send something else' }]) }), projected[1]]) }), agent, filePath), false)
+  // A rebuilt file message with different text is not the projection either.
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([projected[0], Object.freeze({ role: 'user', id: 'm-2', content: Object.freeze([{ type: 'text', text: 'different' }]) })]) }), agent, filePath), false)
+  // An old subset that ends on an earlier prompt is not the current turn either.
+  const older = Object.freeze({ role: 'user', id: 'm-0', content: 'an earlier prompt' })
+  const agent2 = { id: 'sample-chat', session: { deriveMessages: () => [older, messages[0]], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) } }
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([older]) }), agent2), false)
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([older, messages[0]]) }), agent2), true)
+  // A hand-built call beside the turn is never one.
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', purpose: 'compaction', messages: Object.freeze(projected) }), agent, filePath), false)
+})
+
+test('the guard refuses an unfrozen, misrouted or extra-message envelope, and accepts a rebuilt foreign answer', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  // An answer from another adapter that carries replay state: DSH rebuilds its source for
+  // this adapter (the content stays), which is still the Session's own turn.
+  const user = Object.freeze({ role: 'user', id: 'm-1', content: 'say OK' })
+  const foreign = Object.freeze({ role: 'assistant', id: 'm-2', content: Object.freeze([{ type: 'text', text: 'Earlier answer' }]), source: Object.freeze({ kind: 'model', provider: 'other', model: 'other-model', replayState: Object.freeze({ opaque: 'state' }) }) })
+  const latest = Object.freeze({ role: 'user', id: 'm-3', content: Object.freeze([{ type: 'text', text: 'say OK' }]) })
+  const session = { deriveMessages: () => [user, foreign, latest], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const request = markAgentLoopRequest(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([user, foreign, latest]), tools: Object.freeze([]), signal: new AbortController().signal }))
+  const stream = runtime.stream(request)
+  const first = stream.next()
+  await until(() => f.sent.some(frame => frame.method === 'prompt.submit'), 'the prompt to be submitted', first)
+  f.socket().event('message.complete', { text: 'OK' })
+  const chunks = [(await first).value]
+  for await (const chunk of stream) chunks.push(chunk)
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  const envelope = (replacement) => Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze(replacement) })
+  // An unfrozen envelope is never the loop's own turn.
+  assert.equal(RemoteChatAdapter.ownTurn({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: [user, foreign, latest] }, agent), false)
+  // The right messages on another route are not this Session's turn.
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'another', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([user, foreign, latest]) }), agent), false)
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'another-model', sessionId: 'sample-chat', messages: Object.freeze([user, foreign, latest]) }), agent), false)
+  // The Session's messages plus a new prompt are not the turn either.
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([user, foreign, latest, Object.freeze({ role: 'user', id: 'm-4', content: Object.freeze([Object.freeze({ type: 'text', text: 'and this too' })]) })]), agent), false)
+  // A content array that answers a toJSON read with the Session's text is not plain data.
+  const real = Object.freeze([Object.freeze({ type: 'text', text: 'say OK' })])
+  const toJSON = Object.freeze(Object.assign([Object.freeze({ type: 'text', text: 'made up' })], { toJSON: () => real }))
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([Object.freeze({ role: 'user', id: 'm-1', content: toJSON }), foreign, latest]), agent), false)
+  // A getter on content can change between the guard's read and the adapter's read.
+  const getter = Object.freeze(Object.defineProperty({ role: 'user', id: 'm-1' }, 'content', { get: () => real, enumerable: true }))
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([getter, foreign, latest]), agent), false)
+  // A Proxy could say one thing and do another.
+  const proxy = new Proxy(Object.freeze({ role: 'user', id: 'm-1', content: real }), {})
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([proxy, foreign, latest]), agent), false)
+  // Relabelling the foreign answer's source would drop it from the request.
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([user, Object.freeze({ ...foreign, source: Object.freeze({ kind: 'acp-session' }) }), latest]), agent), false)
+  // A flipped toolCallId would end a live remote turn on the wrong call.
+  const tool = Object.freeze({ role: 'tool', toolCallId: 'call-a', content: Object.freeze([Object.freeze({ type: 'text', text: 'result' })]) })
+  const agent3 = { id: 'sample-chat', session: { deriveMessages: () => [user, tool], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) } }
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([user, tool]), agent3), true)
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([user, Object.freeze({ ...tool, toolCallId: 'call-b' })]), agent3), false)
+})
+
+test('each hardening check is pinned by a forgery equal to the Session message', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  const real = Object.freeze([Object.freeze({ type: 'text', text: 'say OK' })])
+  const user = Object.freeze({ role: 'user', id: 'm-1', content: real })
+  const session = { deriveMessages: () => [user], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const envelope = messages => Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze(messages) })
+  // The plain Session message itself is still the turn.
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([user]), agent), true)
+  // Every forgery below is equal to `user` in every value; only its one property kind differs.
+  const toJSON = Object.freeze(Object.defineProperty([Object.freeze({ type: 'text', text: 'say OK' })], 'toJSON', { value: () => real, enumerable: false }))
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([Object.freeze({ role: 'user', id: 'm-1', content: toJSON })]), agent), false)
+  const getter = Object.freeze(Object.defineProperty({ role: 'user', id: 'm-1' }, 'content', { get: () => real, enumerable: true }))
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([getter]), agent), false)
+  // The trap answers the guard's reads with the Session's text and the adapter's read with other text.
+  let reads = 0
+  const proxy = new Proxy(user, { get(target, key, receiver) {
+    if (key !== 'content') return Reflect.get(target, key, receiver)
+    reads += 1
+    return reads <= 2 ? real : Object.freeze([Object.freeze({ type: 'text', text: 'made up' })])
+  } })
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([proxy]), agent), false)
+  // Frozen message, unfrozen content: the value could change after the guard.
+  const unfrozen = Object.freeze({ role: 'user', id: 'm-1', content: [Object.freeze({ type: 'text', text: 'say OK' })] })
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([unfrozen]), agent), false)
+})
+
+test('each request field must be own data: an equal-value accessor envelope is refused', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  const real = Object.freeze([Object.freeze({ type: 'text', text: 'say OK' })])
+  const user = Object.freeze({ role: 'user', id: 'm-1', content: real })
+  const session = { deriveMessages: () => [user], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const base = () => ({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: [user], tools: Object.freeze([]) })
+  const plain = Object.freeze({ ...base(), messages: Object.freeze([user]) })
+  assert.equal(RemoteChatAdapter.ownTurn(plain, agent), true)
+  // Every accessor below answers the same value as the plain envelope; only its kind differs.
+  const withAccessor = (name, value) => {
+    const envelope = base()
+    Object.defineProperty(envelope, name, { get: () => value, enumerable: true, configurable: true })
+    return Object.freeze(envelope)
+  }
+  for (const [name, value] of [['provider', 'hermes-remote'], ['model', 'sample:model'], ['sessionId', 'sample-chat'], ['purpose', undefined], ['messages', Object.freeze([user])]]) {
+    assert.equal(RemoteChatAdapter.ownTurn(withAccessor(name, value), agent), false, `a ${name} accessor is not own data`)
+  }
+  // The envelope itself cannot be a Proxy answering as the plain one.
+  assert.equal(RemoteChatAdapter.ownTurn(new Proxy(plain, {}), agent), false)
+  // A Session header that throws refuses instead of escaping the guard.
+  const throwing = { id: 'sample-chat', session: { requestHeader: () => { throw new Error('sample') }, deriveMessages: () => [user] } }
+  assert.equal(RemoteChatAdapter.ownTurn(plain, throwing), false)
+  // The stream refuses those envelopes too and never submits to the remote.
+  for (const envelope of [withAccessor('messages', Object.freeze([user])), withAccessor('model', 'sample:model')]) {
+    const chunks = []
+    for await (const chunk of adapter.stream(envelope)) chunks.push(chunk)
+    assert.equal(chunks.at(-1).reason.failure.code, 'REMOTE_HERMES')
+    assert.equal(f.sent.filter(frame => frame.method === 'prompt.submit').length, 0)
+  }
 })
 
 test('connection is off by default, record stores a reference and credential stays mode 0600', async t => {
