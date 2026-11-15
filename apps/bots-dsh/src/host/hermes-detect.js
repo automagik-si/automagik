@@ -299,16 +299,24 @@ def normalized_home(path):
     return value
 
 def candidate_homes(explicit, extra=()):
-    homes, seen = [], set()
+    homes, seen, spellings = [], set(), {}
     def add(path):
-        home = normalized_home(path)
-        if not home or home in seen:
+        if not isinstance(path, str) or not path.startswith("/"):
+            return
+        spelled = os.path.normpath(path)
+        home = normalized_home(spelled)
+        if not home:
+            return
+        if home in seen:
+            if spelled not in spellings.get(home, []):
+                spellings.setdefault(home, []).append(spelled)
             return
         if not os.path.isdir(home):
             return
         seen.add(home)
         if os.path.isfile(os.path.join(home, "config.yaml")) or walk_records(home, 2.0):
             homes.append(home)
+            spellings.setdefault(home, []).append(spelled)
     add(explicit)
     for path in extra:
         add(path)
@@ -320,7 +328,7 @@ def candidate_homes(explicit, extra=()):
             add(os.path.join(share, entry, "hermes"))
     except OSError:
         pass
-    return homes
+    return homes, spellings
 
 try:
     initial = bytearray()
@@ -352,7 +360,7 @@ try:
         for value in extra[:20]:
             if isinstance(value, str) and value.startswith("/") and ".." not in value.split("/"):
                 extra_homes.append(value)
-    homes = candidate_homes(options.get("hermesHome", ""), extra_homes)
+    homes, spellings = candidate_homes(options.get("hermesHome", ""), extra_homes)
     records, seen = {}, set()
     def remember(folder, owner=""):
         """Read one record folder; owner is the home whose own tree holds it.
@@ -380,22 +388,33 @@ try:
     # A beside folder is the same path for every home under one parent. It belongs to
     # the only home with that parent; with two homes there it is ambiguous and no home
     # takes it, so the answer never depends on the order the homes were found.
-    beside_owners = {}
+    beside_owners, beside_of = {}, {}
     for home in list(homes):
-        try:
-            key = os.path.realpath(beside_dir(home))
-        except OSError:
-            key = beside_dir(home)
-        beside_owners.setdefault(key, []).append(home)
+        folders = []
+        for spelled in (spellings.get(home) or [home]):
+            for folder in (beside_dir(spelled), beside_dir(home)):
+                try:
+                    key = os.path.realpath(folder)
+                except OSError:
+                    key = folder
+                beside_owners.setdefault(key, set()).add(home)
+                if folder not in folders:
+                    folders.append(folder)
+        beside_of[home] = folders
+    ambiguous = set()
+    for owners in beside_owners.values():
+        if len(owners) > 1:
+            ambiguous.update(owners)
     for home in list(homes):
         for folder in home_lock_dirs(home):
             remember(folder, home)
-        try:
-            key = os.path.realpath(beside_dir(home))
-        except OSError:
-            key = beside_dir(home)
-        if len(beside_owners.get(key, [])) == 1:
-            remember(beside_dir(home), home)
+        for folder in beside_of.get(home, []):
+            try:
+                key = os.path.realpath(folder)
+            except OSError:
+                key = folder
+            if len(beside_owners.get(key, set())) == 1:
+                remember(folder, home)
         for folder in walk_records(home, min(3.0, control)):
             remember(folder, home)
     # Hermes's serve writes no home field (0.23.x and current main), so a nameless
@@ -428,9 +447,13 @@ try:
     for record in record_dirs:
         if record.get("owner"):
             continue
-        named = normalized_home(record.get("home") or "")
+        raw_named = record.get("home") or ""
+        named = normalized_home(raw_named)
         if named and os.path.isdir(named) and named not in homes and len(homes) < 12:
             homes.append(named)
+            spellings.setdefault(named, [])
+            if os.path.normpath(raw_named) not in spellings[named]:
+                spellings[named].append(os.path.normpath(raw_named))
     if len(homes) > 12:
         homes = homes[:12]
     emit("stage", name="detect-profiles")
@@ -451,10 +474,14 @@ try:
         if not target:
             # The record lives in the shared account folder; its own report may name the
             # home that wrote it. A home already served by a distinct record is not re-owned.
-            named = normalized_home(record.get("home") or "")
+            raw_named = record.get("home") or ""
+            named = normalized_home(raw_named)
             if named and os.path.isdir(named):
                 if named not in attributed and len(homes) < 12:
                     homes.append(named)
+                    spellings.setdefault(named, [])
+                    if os.path.normpath(raw_named) not in spellings[named]:
+                        spellings[named].append(os.path.normpath(raw_named))
                     attributed[named] = []
                     profiles[named] = profiles_of(hermes, named, min(20.0, control))
                 owned = [item for item in record_dirs if item.get("owner") == named]
@@ -486,7 +513,10 @@ try:
             for ident in record.get("profiles") or []:
                 rows.setdefault(ident, {"id": ident, "name": ident, "model": "", "gateway": False})
         sandbox = any(record.get("home") and not same(record["home"], home) for record in attributed[home])
-        emit("home", home=home, state="running" if live else "stopped", sandbox=sandbox,
+        # A home whose only record can be in a beside folder shared with another home
+        # cannot be resolved; say why instead of a silent Not running.
+        blocked = "shared-beside" if home in ambiguous and not attributed[home] else ""
+        emit("home", home=home, state="running" if live else "stopped", sandbox=sandbox, blocked=blocked,
              serve={"port": live[0]["port"], "recordDir": live[0]["recordDir"],
                     "served": live[0].get("profiles") or []} if live else None)
         for ident in list(rows.keys())[:50]:
@@ -500,6 +530,7 @@ try:
                  model=text(model, 200), provider=text(provider, 100), running=running,
                  recordDir=served_by[0]["recordDir"] if running else "",
                  port=served_by[0]["port"] if running else 0,
+                 blocked=blocked if not running else "",
                  start=start_command(home, ident, bool(attributed[home])))
             emitted += 1
     emit("ready", homes=len(homes), bots=emitted, hermes=bool(hermes))
@@ -523,6 +554,7 @@ function botOf(value) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(value.id ?? '')) return undefined
   if (!homePath(value.home)) return undefined
   const running = value.running === true
+  const blocked = !running && value.blocked === 'shared-beside' ? 'shared-beside' : ''
   const chosen = running && recordFolder(value.recordDir) && Number.isSafeInteger(value.port) && value.port > 0 && value.port < 65536
   // A running bot without its own record folder and port is not a shape this reader emits.
   if (running && !chosen) return undefined
@@ -533,6 +565,7 @@ function botOf(value) {
     provider: clean(value.provider, 100) ? value.provider : '',
     running,
     recordDir: chosen ? value.recordDir : '', port: chosen ? value.port : 0,
+    blocked,
     start: clean(value.start, 500) ? value.start : '',
   }
 }

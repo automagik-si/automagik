@@ -268,6 +268,23 @@ test('a pointed folder with a stopped Hermes shows the start-it line and cannot 
   assert.ok(!calls.some(call => call.endpoint === 'hermes-remote-test'), 'nothing tests a stopped bot')
 })
 
+test('a bot in a shared serve-record folder says plainly why it cannot be picked', async t => {
+  const bot = { home: '/srv/shared-hermes', id: 'default', name: 'Juniper', model: 'acme/juniper', provider: 'acme', running: false, recordDir: '', port: 0, blocked: 'shared-beside', start: 'hermes serve' }
+  const { document, calls } = await mount(t, { detection: { bots: [bot] } })
+  await click(document, 'Use SSH host sample-box')
+  await click(document, 'Connect')
+  const deadline = Date.now() + 5000
+  while (!document.querySelector('[data-step=bots]')) {
+    assert.ok(Date.now() < deadline, 'the bot picker opens')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const row = document.querySelector('.bt-hw-bot')
+  assert.match(row.textContent, /Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here\. Start its serve from its own folder, or add that folder with Add another Hermes\./)
+  const use = [...document.querySelectorAll('.bt-hw-foot button')].find(button => button.textContent.includes('Use this bot'))
+  assert.equal(use.disabled, true)
+  assert.ok(!calls.some(call => call.endpoint === 'hermes-remote-test'), 'nothing tests or starts it')
+})
+
 test('no bot at all is said plainly, with the fix, not an empty list', async t => {
   const { document } = await mount(t, { detection: { bots: [] } })
   await click(document, 'Use SSH host sample-box')

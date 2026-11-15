@@ -69,6 +69,7 @@ const ZH = {
   "No Hermes found in {folder}": "在 {folder} 中没有找到 Hermes",
   "The folder on {host} holds no Hermes settings or server record.": "{host} 上的该文件夹没有 Hermes 设置或服务器记录。",
   "Point at the folder that holds Hermes, or choose another computer.": "请指向包含 Hermes 的文件夹，或选择另一台电脑。",
+  "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Start its serve from its own folder, or add that folder with Add another Hermes.": "它的 serve 记录位于与另一个 Hermes 数据目录共享的文件夹中，因此无法在此选择。请从它自己的文件夹启动 serve，或用“添加另一个 Hermes”添加该文件夹。",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",

@@ -128,6 +128,7 @@ var ZH = {
   "No Hermes found in {folder}": "在 {folder} 中没有找到 Hermes",
   "The folder on {host} holds no Hermes settings or server record.": "{host} 上的该文件夹没有 Hermes 设置或服务器记录。",
   "Point at the folder that holds Hermes, or choose another computer.": "请指向包含 Hermes 的文件夹，或选择另一台电脑。",
+  "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Start its serve from its own folder, or add that folder with Add another Hermes.": "它的 serve 记录位于与另一个 Hermes 数据目录共享的文件夹中，因此无法在此选择。请从它自己的文件夹启动 serve，或用“添加另一个 Hermes”添加该文件夹。",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",
@@ -5929,6 +5930,7 @@ ${id}`;
       provider: text2(row.provider, 100),
       recordDir: recordDir.startsWith("/") && !recordDir.split("/").includes("..") ? recordDir : "",
       port,
+      blocked: !running2 && row.blocked === "shared-beside" ? "shared-beside" : "",
       start: text2(row.start, 500)
     }];
   });
@@ -6553,6 +6555,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
           { className: "bt-hw-bot-copy" },
           (0, import_react15.createElement)("strong", null, item.name),
           item.model ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-model" }, `${t("Model")}: ${botModelLine(item)}`) : null,
+          item.blocked === "shared-beside" ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-blocked" }, t("Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Start its serve from its own folder, or add that folder with Add another Hermes.")) : null,
           !item.running && item.start ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.", { command: item.start, host })) : null
         ),
         (0, import_react15.createElement)("span", { className: `bt-hw-bot-state${item.running ? " bt-hw-bot-ok" : ""}` }, item.running ? t("Running") : t("Not running"))
@@ -6772,6 +6775,7 @@ var HERMES_REMOTE_CSS = `${HERMES_MARK_CSS}
 .bt-hw-bot-copy small{font-size:12px;line-height:18px;color:var(--bt-ink-2);overflow-wrap:anywhere}
 .bt-hw-bot-model{font-size:12px}
 .bt-hw-bot-start{margin-top:4px;color:var(--bt-ink-2);padding-left:9px;border-left:2px solid var(--st-warn,var(--bt-line-2))}
+.bt-hw-bot-blocked{margin-top:4px;color:var(--bt-ink-2);padding-left:9px;border-left:2px solid var(--st-line-2,var(--bt-line-2))}
 .bt-hw-bot-state{display:inline-flex;align-items:center;gap:6px;flex:none;margin-left:auto;font:var(--bt-weight-label,500) 11px var(--bt-head-font,var(--bt-font));letter-spacing:.05em;text-transform:uppercase;color:var(--bt-ink-2);white-space:nowrap}
 .bt-hw-bot-state::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--st-bad,var(--bt-danger))}
 .bt-hw-bot-ok{color:var(--st-ok,var(--bt-green))}.bt-hw-bot-ok::before{background:var(--st-ok,var(--bt-green))}

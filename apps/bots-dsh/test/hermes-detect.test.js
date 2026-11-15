@@ -233,10 +233,10 @@ sys.exit(2)
 }
 
 function runReader(fixture, options = {}) {
-  const { gatewayLockDir = '', ...handshake } = options
+  const { gatewayLockDir = '', envHermesHome = '', ...handshake } = options
   return new Promise((resolve, reject) => {
     const proc = spawnChild('python3', ['-u', '-c', detectSupervisor], {
-      env: { ...process.env, HOME: fixture.root, HERMES_HOME: '', HERMES_GATEWAY_LOCK_DIR: gatewayLockDir, XDG_STATE_HOME: join(fixture.root, 'state'), FAKE_HERMES_SPEC: join(fixture.root, 'spec.json'), FAKE_HERMES_LOG: fixture.log },
+      env: { ...process.env, HOME: fixture.root, HERMES_HOME: envHermesHome, HERMES_GATEWAY_LOCK_DIR: gatewayLockDir, XDG_STATE_HOME: join(fixture.root, 'state'), FAKE_HERMES_SPEC: join(fixture.root, 'spec.json'), FAKE_HERMES_LOG: fixture.log },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     let out = '', err = ''
@@ -551,6 +551,76 @@ test('a clone home written with a trailing slash still finds its beside serve', 
   assert.equal(bot.recordDir, beside)
 })
 
+test('a symlinked home keeps the record folder beside the link', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const real = join(fixture.root, 'moved', 'hermes')
+  await mkdir(real, { recursive: true })
+  await writeFile(join(real, 'config.yaml'), 'model: moved/model\n')
+  const spec = JSON.parse(await readFile(join(fixture.root, 'spec.json'), 'utf8'))
+  spec.homes[real] = { profiles: [{ name: 'Moved', id: 'default', model: 'moved/model', gateway: 'running' }] }
+  await writeFile(join(fixture.root, 'spec.json'), JSON.stringify(spec))
+  const links = join(fixture.root, 'links')
+  await mkdir(links, { recursive: true })
+  const link = join(links, 'hermes-link')
+  await symlink(real, link)
+  const beside = join(links, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const { frames } = await runReader(fixture, { hermesHome: link })
+  const bot = botsOf(frames).find(row => row.home === real)
+  assert.ok(bot, JSON.stringify(frames))
+  assert.equal(bot.running, true, 'the serve beside the link is found')
+  assert.equal(bot.recordDir, beside)
+})
+
+test('a home moved to another disk and linked back keeps the record beside the link', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const moved = await mkdtemp(join(tmpdir(), 'hermes-moved-'))
+  t.after(() => rm(moved, { recursive: true, force: true }))
+  await writeFile(join(moved, 'config.yaml'), 'model: moved/model\n')
+  const spec = JSON.parse(await readFile(join(fixture.root, 'spec.json'), 'utf8'))
+  spec.homes[moved] = { profiles: [{ name: 'Moved', id: 'default', model: 'moved/model', gateway: 'running' }] }
+  await writeFile(join(fixture.root, 'spec.json'), JSON.stringify(spec))
+  const links = join(fixture.root, 'links')
+  await mkdir(links, { recursive: true })
+  const link = join(links, 'moved-hermes')
+  await symlink(moved, link)
+  const beside = join(links, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const { frames } = await runReader(fixture, { hermesHome: link })
+  const bot = botsOf(frames).find(row => row.home === moved)
+  assert.ok(bot, JSON.stringify(frames))
+  assert.equal(bot.running, true)
+  assert.equal(bot.recordDir, beside)
+})
+
+test('the login default home is normalized before it owns the account record', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const shared = join(fixture.root, 'shared-locks')
+  await mkdir(shared, { recursive: true })
+  await writeFile(join(shared, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const { frames } = await runReader(fixture, { envHermesHome: `${fixture.primary}/`, gatewayLockDir: shared })
+  const bot = botsOf(frames).find(row => row.home === fixture.primary && row.id === 'default')
+  assert.equal(bot.running, true, 'the trailing-slash login home is the default home')
+  assert.equal(bot.recordDir, shared)
+})
+
+test('a record naming the default home with a trailing slash is attributed to it', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const shared = join(fixture.root, 'shared-locks')
+  await mkdir(shared, { recursive: true })
+  await writeFile(join(shared, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: `${fixture.primary}/` }))
+  const { frames } = await runReader(fixture, { gatewayLockDir: shared })
+  const bot = botsOf(frames).find(row => row.home === fixture.primary && row.id === 'default')
+  assert.equal(bot.running, true)
+  assert.equal(bot.recordDir, shared)
+})
+
 test('a record folder beside two homes under one parent belongs to neither', async t => {
   if (!await hasPython()) { t.skip('python3 is not available'); return }
   const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
@@ -567,8 +637,12 @@ test('a record folder beside two homes under one parent belongs to neither', asy
   await mkdir(account, { recursive: true })
   const { frames } = await runReader(fixture, { hermesHome: fixture.primary, extraHomes: [picked], gatewayLockDir: account })
   const rows = botsOf(frames)
-  assert.equal(rows.find(row => row.home === fixture.primary).running, false, 'the default home does not take it')
-  assert.equal(rows.find(row => row.home === picked).running, false, 'the added home does not take it either')
+  const primaryBot = rows.find(row => row.home === fixture.primary)
+  const pickedBot = rows.find(row => row.home === picked)
+  assert.equal(primaryBot.running, false, 'the default home does not take it')
+  assert.equal(primaryBot.blocked, 'shared-beside', 'the default home says why it cannot be picked')
+  assert.equal(pickedBot.running, false, 'the added home does not take it either')
+  assert.equal(pickedBot.blocked, 'shared-beside')
   assert.ok(!rows.some(row => row.recordDir === beside), 'an ambiguous beside folder is not credited')
 })
 
@@ -807,6 +881,25 @@ test('a gateway-locks folder beside the chosen home supplies its only record', a
   await rm(join(fixture.chosen, 'host-serve.json'))
   const { frames } = await runAttach(fixture, { stateDir: '', hermesHome: fixture.home })
   assert.equal(frames.find(frame => frame.type === 'token')?.value, fixture.sharedToken)
+})
+
+test('a symlinked home finds its record beside the link, as detection does', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await attachFixture(t)
+  const links = join(fixture.root, 'links')
+  await mkdir(links, { recursive: true })
+  const link = join(links, 'hermes-link')
+  await symlink(fixture.home, link)
+  const beside = join(links, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', port: fixture.port, pid: process.pid, protocolVersion: 1, profiles: ['default'], home: '' }))
+  await writeFile(join(beside, 'host-serve.token'), fixture.sharedToken, { mode: 0o600 })
+  await chmod(join(beside, 'host-serve.token'), 0o600)
+  await rm(join(fixture.chosen, 'host-serve.json'))
+  const account = join(fixture.root, 'account-locks')
+  await mkdir(account, { recursive: true })
+  const { frames } = await runAttach(fixture, { stateDir: '', hermesHome: link, gatewayLockDir: account })
+  assert.equal(frames.find(frame => frame.type === 'token')?.value, fixture.sharedToken, 'the link beside record is used')
 })
 
 test('a beside record shared by two homes is never an implicit pick for either', async t => {

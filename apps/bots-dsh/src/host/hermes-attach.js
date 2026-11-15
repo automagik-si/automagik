@@ -167,15 +167,25 @@ def state_folder(explicit, launch_home):
         if isinstance(folder, str) and folder.startswith("/") and folder not in target:
             target.append(folder)
     if isinstance(launch_home, str) and launch_home.startswith("/"):
-        # "Beside" the home: a home at .../<name>/hermes keeps its record in
-        # .../<name>/gateway-locks, a sibling of the home folder. Only when this is the
-        # one Hermes home under that parent; otherwise the folder is ambiguous.
-        if only_home_in_parent(launch_home):
-            add(os.path.join(os.path.dirname(os.path.normpath(launch_home)), "gateway-locks"), own)
-        add(os.path.join(launch_home, "gateway-locks"), own)
-        add(os.path.join(launch_home, ".local", "state", "hermes", "gateway-locks"), own)
-        add(os.path.join(launch_home, "state", "hermes", "gateway-locks"), own)
-        add(os.path.join(launch_home, ".state", "hermes", "gateway-locks"), own)
+        # The home as written and, when it is a symlink, the home it points at. A
+        # home moved to another disk keeps its record beside the link, and a real
+        # home keeps its own beside folder; each is taken only when it is the single
+        # Hermes home under that parent.
+        written = os.path.normpath(launch_home)
+        homes = [written]
+        try:
+            real = os.path.realpath(written)
+        except OSError:
+            real = written
+        if real not in homes:
+            homes.append(real)
+        for home in homes:
+            if only_home_in_parent(home):
+                add(os.path.join(os.path.dirname(home), "gateway-locks"), own)
+            add(os.path.join(home, "gateway-locks"), own)
+            add(os.path.join(home, ".local", "state", "hermes", "gateway-locks"), own)
+            add(os.path.join(home, "state", "hermes", "gateway-locks"), own)
+            add(os.path.join(home, ".state", "hermes", "gateway-locks"), own)
     root = os.environ.get("HERMES_GATEWAY_LOCK_DIR", "").strip()
     if root:
         add(root, own if inside(root, launch_home) else shared)

@@ -2710,5 +2710,6 @@
   "No Hermes found in {folder}": "Nenhum Hermes encontrado em {folder}",
   "The folder on {host} holds no Hermes settings or server record.": "A pasta em {host} não tem configurações nem registro do servidor do Hermes.",
   "Point at the folder that holds Hermes, or choose another computer.": "Aponte para a pasta que contém o Hermes ou escolha outro computador.",
-  "The folder must be on the remote computer, such as /srv/hermes.": "A pasta deve estar no computador remoto, por exemplo /srv/hermes."
+  "The folder must be on the remote computer, such as /srv/hermes.": "A pasta deve estar no computador remoto, por exemplo /srv/hermes.",
+  "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Start its serve from its own folder, or add that folder with Add another Hermes.": "O registro do serve está numa pasta compartilhada com outra pasta do Hermes, então não pode ser escolhido aqui. Inicie o serve a partir da própria pasta, ou adicione essa pasta com Adicionar outro Hermes."
 }

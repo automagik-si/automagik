@@ -59,7 +59,7 @@ const botRows = rows => {
       model: text(row.model, 200),
       provider: text(row.provider, 100),
       recordDir: recordDir.startsWith('/') && !recordDir.split('/').includes('..') ? recordDir : '',
-      port, start: text(row.start, 500),
+      port, blocked: !running && row.blocked === 'shared-beside' ? 'shared-beside' : '', start: text(row.start, 500),
     }]
   })
 }
@@ -575,6 +575,7 @@ export function HermesRemoteConnect({ onClose, onConnected, edit = false, more =
         }, h('span', { className: 'bt-hw-radio' }),
         h('span', { className: 'bt-hw-bot-copy' }, h('strong', null, item.name),
           item.model ? h('small', { className: 'bt-hw-bot-model' }, `${t('Model')}: ${botModelLine(item)}`) : null,
+          item.blocked === 'shared-beside' ? h('small', { className: 'bt-hw-bot-blocked' }, t('Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Start its serve from its own folder, or add that folder with Add another Hermes.')) : null,
           !item.running && item.start ? h('small', { className: 'bt-hw-bot-start' }, t('Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.', { command: item.start, host })) : null),
         h('span', { className: `bt-hw-bot-state${item.running ? ' bt-hw-bot-ok' : ''}` }, item.running ? t('Running') : t('Not running'))))),
       h('div', { className: 'bt-hw-profile-tools' }, h('span', null, t('{count} bots on {host}', { count: bots.length, host })),
@@ -687,6 +688,7 @@ export const HERMES_REMOTE_CSS = `${HERMES_MARK_CSS}
 .bt-hw-bot-copy small{font-size:12px;line-height:18px;color:var(--bt-ink-2);overflow-wrap:anywhere}
 .bt-hw-bot-model{font-size:12px}
 .bt-hw-bot-start{margin-top:4px;color:var(--bt-ink-2);padding-left:9px;border-left:2px solid var(--st-warn,var(--bt-line-2))}
+.bt-hw-bot-blocked{margin-top:4px;color:var(--bt-ink-2);padding-left:9px;border-left:2px solid var(--st-line-2,var(--bt-line-2))}
 .bt-hw-bot-state{display:inline-flex;align-items:center;gap:6px;flex:none;margin-left:auto;font:var(--bt-weight-label,500) 11px var(--bt-head-font,var(--bt-font));letter-spacing:.05em;text-transform:uppercase;color:var(--bt-ink-2);white-space:nowrap}
 .bt-hw-bot-state::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--st-bad,var(--bt-danger))}
 .bt-hw-bot-ok{color:var(--st-ok,var(--bt-green))}.bt-hw-bot-ok::before{background:var(--st-ok,var(--bt-green))}
