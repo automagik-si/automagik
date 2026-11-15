@@ -628,7 +628,7 @@ export const MIGRATE_CSS = `
 .oai-mig-key{display:flex;align-items:center;gap:13px;padding:12px 14px;border-radius:var(--oai-r-sm);${recessed('color-mix(in srgb,var(--oai-lilac) 34%,var(--oai-niche))')};margin-bottom:15px}
 .oai-mig-lock{position:relative;flex:none;width:34px;height:30px;display:grid;place-items:end center;padding-bottom:2px}
 .oai-mig-lock i{display:block;width:26px;height:20px;border-radius:6px 7px 5px 7px;${raised('var(--oai-lilac)', 2)};position:relative}
-.oai-mig-lock::before{content:"";position:absolute;top:1px;left:9px;width:16px;height:14px;border:3px solid color-mix(in srgb,var(--oai-lilac-ink) 55%,var(--oai-lilac));border-bottom:0;border-radius:9px 9px 0 0}
+.oai-mig-lock::before{content:"";position:absolute;top:1px;left:50%;transform:translateX(-50%);width:16px;height:14px;border:3px solid color-mix(in srgb,var(--oai-lilac-ink) 55%,var(--oai-lilac));border-bottom:0;border-radius:9px 9px 0 0}
 .oai-mig-keytext{display:grid;gap:2px;line-height:1.35;min-width:0}
 .oai-mig-keytext strong{font:var(--bt-weight-strong,700) 13px/1.35 var(--oai-head);color:var(--oai-ink)}
 .oai-mig-keytext span{font-size:11.5px;color:var(--oai-ink2)}
