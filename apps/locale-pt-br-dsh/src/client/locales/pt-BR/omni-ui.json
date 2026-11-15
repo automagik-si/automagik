@@ -2703,12 +2703,12 @@
   "An absolute folder on the remote computer. Nothing else there is read.": "Uma pasta absoluta no computador remoto. Nada mais ali é lido.",
   "Add and find bots": "Adicionar e encontrar bots",
   "Enter an absolute Hermes folder": "Informe uma pasta absoluta do Hermes",
-  "The folder must be on the remote computer, such as /Users/you/.hermes.": "A pasta deve estar no computador remoto, por exemplo /Users/you/.hermes.",
   "Enter the folder once; it is remembered for this computer.": "Informe a pasta uma vez; a pasta fica lembrada para este computador.",
   "Install Hermes there, add another Hermes folder, or choose another computer.": "Instale o Hermes lá, adicione outra pasta do Hermes ou escolha outro computador.",
   "Point at the Hermes folder on {host}. Automagik reads only that Hermes’s settings and its server record, and never a key.": "Aponte para a pasta do Hermes em {host}. O Automagik lê apenas as configurações desse Hermes e o registro do servidor, e nunca uma chave.",
   "An absolute folder on the remote computer. It reads config.yaml and the gateway-locks folder beside it; nothing else.": "Uma pasta absoluta no computador remoto. Apenas o config.yaml e a pasta gateway-locks ao lado são lidos; nada mais.",
   "No Hermes found in {folder}": "Nenhum Hermes encontrado em {folder}",
   "The folder on {host} holds no Hermes settings or server record.": "A pasta em {host} não tem configurações nem registro do servidor do Hermes.",
-  "Point at the folder that holds Hermes, or choose another computer.": "Aponte para a pasta que contém o Hermes ou escolha outro computador."
+  "Point at the folder that holds Hermes, or choose another computer.": "Aponte para a pasta que contém o Hermes ou escolha outro computador.",
+  "The folder must be on the remote computer, such as /srv/hermes.": "A pasta deve estar no computador remoto, por exemplo /srv/hermes."
 }

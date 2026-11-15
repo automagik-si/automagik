@@ -120,7 +120,7 @@ var ZH = {
   "An absolute folder on the remote computer. Nothing else there is read.": "远程电脑上的绝对文件夹。不会读取那里的其他内容。",
   "Add and find bots": "添加并查找 Bot",
   "Enter an absolute Hermes folder": "请输入绝对 Hermes 文件夹",
-  "The folder must be on the remote computer, such as /Users/you/.hermes.": "文件夹必须在远程电脑上，例如 /Users/you/.hermes。",
+  "The folder must be on the remote computer, such as /srv/hermes.": "文件夹必须在远程电脑上，例如 /srv/hermes。",
   "Enter the folder once; it is remembered for this computer.": "只需输入一次文件夹；它会为此电脑记住。",
   "Install Hermes there, add another Hermes folder, or choose another computer.": "请在那里安装 Hermes、添加另一个 Hermes 文件夹，或选择另一台电脑。",
   "Point at the Hermes folder on {host}. Automagik reads only that Hermes’s settings and its server record, and never a key.": "指向 {host} 上的 Hermes 文件夹。Automagik 只读取该 Hermes 的设置和它的服务器记录，绝不读取密钥。",
@@ -6417,7 +6417,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
   const addHermesHome = async () => {
     const folder = addHome.trim();
     if (!folder.startsWith("/") || folder.split("/").includes("..")) {
-      setError({ heading: t("Add another Hermes"), title: t("Enter an absolute Hermes folder"), text: t("The folder must be on the remote computer, such as /Users/you/.hermes."), hint: t("Enter the folder once; it is remembered for this computer."), ssh: true });
+      setError({ heading: t("Add another Hermes"), title: t("Enter an absolute Hermes folder"), text: t("The folder must be on the remote computer, such as /srv/hermes."), hint: t("Enter the folder once; it is remembered for this computer."), ssh: true });
       setStep("error");
       setStatus("error");
       return;
@@ -6581,7 +6581,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       import_react15.Fragment,
       null,
       (0, import_react15.createElement)("p", { className: "bt-hw-lead" }, t("Point at the Hermes folder on {host}. Automagik reads only that Hermes’s settings and its server record, and never a key.", { host })),
-      (0, import_react15.createElement)(Field, { label: t("Hermes folder on {host}", { host }), value: addHome, onChange: setAddHome, placeholder: "/Users/you/.hermes", hint: t("An absolute folder on the remote computer. It reads config.yaml and the gateway-locks folder beside it; nothing else.") })
+      (0, import_react15.createElement)(Field, { label: t("Hermes folder on {host}", { host }), value: addHome, onChange: setAddHome, placeholder: "/srv/hermes", hint: t("An absolute folder on the remote computer. It reads config.yaml and the gateway-locks folder beside it; nothing else.") })
     );
     footer = (0, import_react15.createElement)(
       import_react15.Fragment,

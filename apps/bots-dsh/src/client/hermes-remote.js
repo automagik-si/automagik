@@ -471,7 +471,7 @@ export function HermesRemoteConnect({ onClose, onConnected, edit = false, more =
   const addHermesHome = async () => {
     const folder = addHome.trim()
     if (!folder.startsWith('/') || folder.split('/').includes('..')) {
-      setError({ heading: t('Add another Hermes'), title: t('Enter an absolute Hermes folder'), text: t('The folder must be on the remote computer, such as /Users/you/.hermes.'), hint: t('Enter the folder once; it is remembered for this computer.'), ssh: true })
+      setError({ heading: t('Add another Hermes'), title: t('Enter an absolute Hermes folder'), text: t('The folder must be on the remote computer, such as /srv/hermes.'), hint: t('Enter the folder once; it is remembered for this computer.'), ssh: true })
       setStep('error'); setStatus('error')
       return
     }
@@ -588,7 +588,7 @@ export function HermesRemoteConnect({ onClose, onConnected, edit = false, more =
     const host = shortText(draft.ssh.host.trim()) || t('the other computer')
     content = h(Fragment, null,
       h('p', { className: 'bt-hw-lead' }, t('Point at the Hermes folder on {host}. Automagik reads only that Hermes’s settings and its server record, and never a key.', { host })),
-      h(Field, { label: t('Hermes folder on {host}', { host }), value: addHome, onChange: setAddHome, placeholder: '/Users/you/.hermes', hint: t('An absolute folder on the remote computer. It reads config.yaml and the gateway-locks folder beside it; nothing else.') }))
+      h(Field, { label: t('Hermes folder on {host}', { host }), value: addHome, onChange: setAddHome, placeholder: '/srv/hermes', hint: t('An absolute folder on the remote computer. It reads config.yaml and the gateway-locks folder beside it; nothing else.') }))
     footer = h(Fragment, null,
       h(Button, { disabled: status === 'saving', onClick: () => setStep(bots.length ? 'bots' : 'host') }, t('Back')),
       h(Button, { primary: true, disabled: status === 'saving' || !addHome.trim().startsWith('/'), onClick: addHermesHome }, status === 'saving' ? t('Finding the bots…') : t('Add and find bots'), ' →'))

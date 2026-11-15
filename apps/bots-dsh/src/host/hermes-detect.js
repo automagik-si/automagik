@@ -275,15 +275,16 @@ def user_lock_dirs():
     return folders
 
 def home_lock_dirs(home):
-    # "Beside" is the folder next to the home, not under it: a home at
-    # .../<name>/hermes keeps its record in .../<name>/gateway-locks.
-    beside = os.path.join(os.path.dirname(os.path.normpath(home)), "gateway-locks")
-    return [beside] + [os.path.join(home, relative) for relative in (
+    return [os.path.join(home, relative) for relative in (
         "gateway-locks",
         os.path.join(".local", "state", "hermes", "gateway-locks"),
         os.path.join("state", "hermes", "gateway-locks"),
         os.path.join(".state", "hermes", "gateway-locks"),
     )]
+
+def beside_dir(home):
+    """The record folder next to the home: <parent>/gateway-locks, a sibling."""
+    return os.path.join(os.path.dirname(os.path.normpath(home)), "gateway-locks")
 
 def candidate_homes(explicit, extra=()):
     homes = []
@@ -362,16 +363,33 @@ try:
         records[key] = record
     for folder in user_lock_dirs():
         remember(folder)
+    # A beside folder is the same path for every home under one parent. It belongs to
+    # the only home with that parent; with two homes there it is ambiguous and no home
+    # takes it, so the answer never depends on the order the homes were found.
+    beside_owners = {}
+    for home in list(homes):
+        try:
+            key = os.path.realpath(beside_dir(home))
+        except OSError:
+            key = beside_dir(home)
+        beside_owners.setdefault(key, []).append(home)
     for home in list(homes):
         for folder in home_lock_dirs(home):
             remember(folder, home)
+        try:
+            key = os.path.realpath(beside_dir(home))
+        except OSError:
+            key = beside_dir(home)
+        if len(beside_owners.get(key, [])) == 1:
+            remember(beside_dir(home), home)
         for folder in walk_records(home, min(3.0, control)):
             remember(folder, home)
     # Hermes's serve writes no home field (0.23.x and current main), so a nameless
     # record in the account folder is the DEFAULT home's own serve. A record that names
     # another existing home is left for attribution (a home owning a different serve
     # keeps it). The default home is the one Hermes uses with no HERMES_HOME override.
-    default_home = options.get("hermesHome") or os.environ.get("HERMES_HOME", "").strip()
+    # Only the login environment decides the default home: a saved pick must never change it.
+    default_home = os.environ.get("HERMES_HOME", "").strip()
     if not isinstance(default_home, str) or not default_home.startswith("/"):
         default_home = os.path.join(os.path.expanduser("~"), ".hermes")
     shared_keys = set()

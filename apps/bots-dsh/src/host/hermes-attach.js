@@ -116,6 +116,33 @@ def is_default_home(home):
     except OSError:
         return home == default_home()
 
+def only_home_in_parent(home):
+    """True when no other Hermes home shares this home's parent.
+
+    A beside folder is <parent>/gateway-locks, the same path for every home under that
+    parent. With a second Hermes home beside it, the record there is ambiguous and this
+    home must not take it; the explicit folder from detection is the way to pick it.
+    """
+    path = os.path.normpath(home)
+    parent, name = os.path.dirname(path), os.path.basename(path)
+    try:
+        entries = list(os.scandir(parent))
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.name == name:
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if os.path.isfile(os.path.join(entry.path, "config.yaml")):
+                return False
+            if os.path.isdir(os.path.join(entry.path, "gateway-locks")):
+                return False
+        except OSError:
+            continue
+    return True
+
 def state_folder(explicit, launch_home):
     """The chosen serve's own record folder.
 
@@ -141,8 +168,10 @@ def state_folder(explicit, launch_home):
             target.append(folder)
     if isinstance(launch_home, str) and launch_home.startswith("/"):
         # "Beside" the home: a home at .../<name>/hermes keeps its record in
-        # .../<name>/gateway-locks, a sibling of the home folder.
-        add(os.path.join(os.path.dirname(os.path.normpath(launch_home)), "gateway-locks"), own)
+        # .../<name>/gateway-locks, a sibling of the home folder. Only when this is the
+        # one Hermes home under that parent; otherwise the folder is ambiguous.
+        if only_home_in_parent(launch_home):
+            add(os.path.join(os.path.dirname(os.path.normpath(launch_home)), "gateway-locks"), own)
         add(os.path.join(launch_home, "gateway-locks"), own)
         add(os.path.join(launch_home, ".local", "state", "hermes", "gateway-locks"), own)
         add(os.path.join(launch_home, "state", "hermes", "gateway-locks"), own)
