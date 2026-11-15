@@ -332,6 +332,10 @@ const stepBack = (label, onClick) => h('button', { type: 'button', role: 'menuit
 // `onLevel(model, effort)` pick; the menu offers the provider's API key where it can.
 export function ModelSteps({ roster, bot, view, current, picked, levelName, go, onModel, onLevel, onManage, onRemote }) {
   const models = roster.models ?? []
+  const remote = roster.prefs?.hermesRemote
+  // A saved Remote Hermes profile lists its models directly; setup is for a first
+  // connection, and an explicit manage row below reopens the wizard on purpose.
+  const remoteConfigured = remote?.enabled === true && Boolean(remote.profile)
   const currentRoute = current === undefined ? undefined : modelRoute(roster, current).route
   const levelModel = view.step === 'levels' ? models.find(entry => entry.ref === view.ref) : undefined
   const levels = levelModel === undefined ? [] : effortRows(knownEfforts(levelModel))
@@ -364,7 +368,9 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
     return h('div', { key: `models:${route}:${view.provider ?? view.agent ?? ''}`, className: 'bt-model-step', role: 'group', 'aria-label': t('Models') },
       stepBack(backLabel, () => go(back.view)),
       route === 'hermes-remote' ? h('div', { className: 'bt-model-none' }, t("Your bots’ team tools (messages to other bots, secrets, memory, schedules) are not available in these chats.")) : null,
-      route === 'hermes-remote' && list.length === 0 ? h('div', { className: 'bt-model-none' }, t('Off by default. Set up Remote Hermes in Bot settings.')) : null,
+      route === 'hermes-remote' && list.length === 0
+        ? h('div', { className: 'bt-model-none' }, remoteConfigured ? t('No models are known for this connection yet. Manage the connection to list them.') : t('Off by default. Set up Remote Hermes in Bot settings.'))
+        : null,
       h('div', { className: 'bt-menu-sep', role: 'separator' }),
       groups.length === 0 ? h('div', { className: 'bt-model-none' }, t('No models are set up for this route yet.')) : null,
       groups.map(([label, entries]) => h(Fragment, { key: label },
@@ -388,7 +394,15 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
             : entry.ref === roster.defaultModel ? h('span', { className: 'bt-menu-hint' }, t('Default')) : null,
           h(Tick, { on: !herdr && !pending && entry.ref === current }),
           more ? h(ChevronRightIcon) : null)
-        }))))
+        }))),
+      // An explicit way back to the wizard once the connection is saved: a model row never
+      // opens it on its own.
+      route === 'hermes-remote' && onRemote
+        ? h(Fragment, { key: 'manage' },
+          h('div', { className: 'bt-menu-sep', role: 'separator' }),
+          h('button', { type: 'button', role: 'menuitem', 'data-manage-connection': '', onClick: onRemote },
+            h(SlidersIcon), h('span', { className: 'bt-menu-label' }, t('Manage connection…'))))
+        : null)
   }
   if (view.step === 'agents') {
     const route = view.route
@@ -422,20 +436,20 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
     routes.length === 0 ? h('div', { className: 'bt-model-none' }, t('No route is available for this Bot.')) : null,
     routes.map((route) => {
       const here = route === currentRoute && current !== undefined
-      const remembered = roster.prefs?.hermesRemote
-      const rememberedProfile = remembered?.enabled ? remembered.profile : undefined
-      const now = route === 'hermes-remote' && onRemote
+      const rememberedProfile = remote?.enabled ? remote.profile : undefined
+      const setup = route === 'hermes-remote' && onRemote !== undefined && !remoteConfigured
+      const now = route === 'hermes-remote' && onRemote !== undefined
         ? rememberedProfile || t('Set up')
         : here
         ? [modelRoute(roster, current).connection, levelName].filter(Boolean).join(' · ')
         : route === 'herdr' ? t('Not available yet') : undefined
       return h('button', {
-        key: route, type: 'button', role: 'menuitem', 'aria-haspopup': route === 'hermes-remote' && onRemote ? 'dialog' : 'menu', 'data-current': here ? '' : undefined,
+        key: route, type: 'button', role: 'menuitem', 'aria-haspopup': setup ? 'dialog' : 'menu', 'data-current': here ? '' : undefined,
         'data-route': route, 'data-unavailable': route === 'herdr' ? '' : undefined,
         title: route === 'acp' ? t('Agent Client Protocol') : route === 'herdr' ? t('Not available yet') : undefined,
         'aria-label': here ? t('{route}, current model {model}', { route: routeName(route), model: now ?? '' })
           : now ? `${routeName(route)} · ${now}` : `${routeName(route)} · ${routeDetail(route)}`,
-        onClick: () => route === 'hermes-remote' && onRemote ? onRemote() : go(route === 'native' || route === 'hermes-remote' ? { step: 'models', route } : { step: 'agents', route }),
+        onClick: () => setup ? onRemote() : go(route === 'native' || route === 'hermes-remote' ? { step: 'models', route } : { step: 'agents', route }),
       },
       h(RouteMark, { route }),
       h('span', { className: 'bt-menu-label' }, routeName(route)),
@@ -579,6 +593,8 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   live.current = isOpen
   const shown = modelOf(bot, roster)
   const current = bot.model ?? bot.appliedModel
+  const currentRef = useRef(current)
+  currentRef.current = current
   const currentRoute = current === undefined ? undefined : modelRoute(roster, current)
   const shownRunning = running && bar && current !== undefined && typeof bot.runningModel === 'string' && bot.runningModel !== current
     ? modelOf({ model: bot.runningModel }, roster) : undefined
@@ -759,6 +775,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     remote.current.active = false
     remote.current.generation++
     setHermes(false)
+    // A saved connection comes back naming the model the Bot already runs on. Only a Bot
+    // without one takes the connection's first model at first setup: a completed connect
+    // never replaces a pick the person made.
+    if (currentRef.current !== undefined) { finish(); return }
     if (crossing(next.modelRef)) {
       keys.current = true
       setView(MENU_ROOT)

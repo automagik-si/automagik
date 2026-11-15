@@ -332,6 +332,8 @@ var ZH = {
   "Chat with a Hermes agent on another computer.": "与另一台电脑上的 Hermes 智能体聊天。",
   "Remote Hermes": "远程 Hermes",
   "Off by default. Set up Remote Hermes in Bot settings.": "默认关闭。请在 Bot 设置中设置远程 Hermes。",
+  "No models are known for this connection yet. Manage the connection to list them.": "此连接尚不清楚有哪些模型。请管理连接以列出模型。",
+  "Manage connection…": "管理连接…",
   "Credential": "凭据",
   "Save a credential to connect.": "请先保存连接凭据。",
   "Enable Remote Hermes": "启用远程 Hermes",
@@ -5505,7 +5507,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       if (!edit && configured(next)) {
         setStep("working");
         setStatus("connecting");
-        const connected = await run2("hermes-remote-connect");
+        const connected = await run2("hermes-remote-connect", { cached: (next.models?.length ?? 0) > 0 });
         if (!live.current || generation !== epoch.current) return;
         await callbacks.current.onConnected?.(connected);
       } else setStatus("idle");
@@ -6101,6 +6103,8 @@ var stepBack = (label, onClick) => (0, import_react16.createElement)(
 );
 function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2, go, onModel, onLevel, onManage, onRemote }) {
   const models = roster.models ?? [];
+  const remote = roster.prefs?.hermesRemote;
+  const remoteConfigured = remote?.enabled === true && Boolean(remote.profile);
   const currentRoute = current === void 0 ? void 0 : modelRoute(roster, current).route;
   const levelModel = view.step === "levels" ? models.find((entry) => entry.ref === view.ref) : void 0;
   const levels = levelModel === void 0 ? [] : effortRows(knownEfforts(levelModel));
@@ -6139,7 +6143,7 @@ function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2,
       { key: `models:${route}:${view.provider ?? view.agent ?? ""}`, className: "bt-model-step", role: "group", "aria-label": t("Models") },
       stepBack(backLabel, () => go(back.view)),
       route === "hermes-remote" ? (0, import_react16.createElement)("div", { className: "bt-model-none" }, t("Your bots’ team tools (messages to other bots, secrets, memory, schedules) are not available in these chats.")) : null,
-      route === "hermes-remote" && list.length === 0 ? (0, import_react16.createElement)("div", { className: "bt-model-none" }, t("Off by default. Set up Remote Hermes in Bot settings.")) : null,
+      route === "hermes-remote" && list.length === 0 ? (0, import_react16.createElement)("div", { className: "bt-model-none" }, remoteConfigured ? t("No models are known for this connection yet. Manage the connection to list them.") : t("Off by default. Set up Remote Hermes in Bot settings.")) : null,
       (0, import_react16.createElement)("div", { className: "bt-menu-sep", role: "separator" }),
       groups.length === 0 ? (0, import_react16.createElement)("div", { className: "bt-model-none" }, t("No models are set up for this route yet.")) : null,
       groups.map(([label, entries2]) => (0, import_react16.createElement)(
@@ -6172,7 +6176,20 @@ function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2,
             more ? (0, import_react16.createElement)(ChevronRightIcon) : null
           );
         })
-      ))
+      )),
+      // An explicit way back to the wizard once the connection is saved: a model row never
+      // opens it on its own.
+      route === "hermes-remote" && onRemote ? (0, import_react16.createElement)(
+        import_react16.Fragment,
+        { key: "manage" },
+        (0, import_react16.createElement)("div", { className: "bt-menu-sep", role: "separator" }),
+        (0, import_react16.createElement)(
+          "button",
+          { type: "button", role: "menuitem", "data-manage-connection": "", onClick: onRemote },
+          (0, import_react16.createElement)(SlidersIcon),
+          (0, import_react16.createElement)("span", { className: "bt-menu-label" }, t("Manage connection…"))
+        )
+      ) : null
     );
   }
   if (view.step === "agents") {
@@ -6219,22 +6236,22 @@ function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2,
     routes.length === 0 ? (0, import_react16.createElement)("div", { className: "bt-model-none" }, t("No route is available for this Bot.")) : null,
     routes.map((route) => {
       const here = route === currentRoute && current !== void 0;
-      const remembered = roster.prefs?.hermesRemote;
-      const rememberedProfile = remembered?.enabled ? remembered.profile : void 0;
-      const now = route === "hermes-remote" && onRemote ? rememberedProfile || t("Set up") : here ? [modelRoute(roster, current).connection, levelName2].filter(Boolean).join(" · ") : route === "herdr" ? t("Not available yet") : void 0;
+      const rememberedProfile = remote?.enabled ? remote.profile : void 0;
+      const setup = route === "hermes-remote" && onRemote !== void 0 && !remoteConfigured;
+      const now = route === "hermes-remote" && onRemote !== void 0 ? rememberedProfile || t("Set up") : here ? [modelRoute(roster, current).connection, levelName2].filter(Boolean).join(" · ") : route === "herdr" ? t("Not available yet") : void 0;
       return (0, import_react16.createElement)(
         "button",
         {
           key: route,
           type: "button",
           role: "menuitem",
-          "aria-haspopup": route === "hermes-remote" && onRemote ? "dialog" : "menu",
+          "aria-haspopup": setup ? "dialog" : "menu",
           "data-current": here ? "" : void 0,
           "data-route": route,
           "data-unavailable": route === "herdr" ? "" : void 0,
           title: route === "acp" ? t("Agent Client Protocol") : route === "herdr" ? t("Not available yet") : void 0,
           "aria-label": here ? t("{route}, current model {model}", { route: routeName(route), model: now ?? "" }) : now ? `${routeName(route)} · ${now}` : `${routeName(route)} · ${routeDetail(route)}`,
-          onClick: () => route === "hermes-remote" && onRemote ? onRemote() : go(route === "native" || route === "hermes-remote" ? { step: "models", route } : { step: "agents", route })
+          onClick: () => setup ? onRemote() : go(route === "native" || route === "hermes-remote" ? { step: "models", route } : { step: "agents", route })
         },
         (0, import_react16.createElement)(RouteMark, { route }),
         (0, import_react16.createElement)("span", { className: "bt-menu-label" }, routeName(route)),
@@ -6363,6 +6380,8 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
   live.current = isOpen;
   const shown = modelOf(bot, roster);
   const current = bot.model ?? bot.appliedModel;
+  const currentRef = (0, import_react16.useRef)(current);
+  currentRef.current = current;
   const currentRoute = current === void 0 ? void 0 : modelRoute(roster, current);
   const shownRunning = running2 && bar && current !== void 0 && typeof bot.runningModel === "string" && bot.runningModel !== current ? modelOf({ model: bot.runningModel }, roster) : void 0;
   const triggerRoute = shownRunning === void 0 ? currentRoute : modelRoute(roster, bot.runningModel);
@@ -6558,6 +6577,10 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
     remote.current.active = false;
     remote.current.generation++;
     setHermes(false);
+    if (currentRef.current !== void 0) {
+      finish();
+      return;
+    }
     if (crossing(next.modelRef)) {
       keys.current = true;
       setView(MENU_ROOT);
