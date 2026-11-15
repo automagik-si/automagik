@@ -90,64 +90,66 @@ def inside(folder, home):
         return False
 
 def same_home(record, launch_home):
+    """Strict: the record names THIS existing home. A nameless or unknown path is none."""
     recorded = record.get("home")
-    if not isinstance(recorded, str) or not recorded or not launch_home:
-        return True
-    if not recorded.startswith("/") or not launch_home.startswith("/"):
-        return True
-    # A sandbox names its own home inside the sandbox; only a home that exists on this
-    # side can be compared. The explicit record folder already scoped the read to the
-    # chosen serve, so an internal name is not another serve's home.
+    if not isinstance(recorded, str) or not recorded.startswith("/") or not launch_home:
+        return False
+    if not isinstance(launch_home, str) or not launch_home.startswith("/"):
+        return False
+    # A sandbox names a path inside itself; it cannot be compared to a host home, so a
+    # record that does not name this host path is never used without a picked folder.
     if not os.path.isdir(recorded) or not os.path.isdir(launch_home):
-        return True
+        return False
     return os.path.realpath(recorded) == os.path.realpath(launch_home)
 
 def state_folder(explicit, launch_home):
     """The chosen serve's own record folder.
 
-    An explicit folder comes from detection and is the only one read. Without one, this
-    home's own state folders are tried before the account-level default, so two homes'
-    serves are never confused; a record that names another home is skipped, never used.
+    An explicit folder comes from detection and is the only one read. Without one, the
+    home's OWN state folders always win; a shared account or gateway folder is consulted
+    only when the home has no own record, and then only a record that names this exact
+    existing home. A nameless or sandbox-only home is never another home's fallback.
     """
-    folders = []
-    def add(path):
-        if isinstance(path, str) and path.startswith("/") and path not in folders:
-            folders.append(path)
     if explicit:
         if not isinstance(explicit, str) or not explicit.startswith("/"):
             raise Fault("serve-record")
-        add(explicit)
-        if len(folders) == 1:
-            # The folder came from detection, which tied it to the picked home's own tree.
-            # The record's home is the serve's own report (a sandbox may name a path that
-            # also exists on the host), never a reason to refuse the picked serve.
-            record, why = records_of(folders[0])
-            if record is None and why == "gateway":
-                raise Fault("serve-gateway")
-            if record is None:
-                raise Fault("serve-not-running")
-            return folders[0], record
+        # The folder came from detection, which tied it to the picked home's own tree.
+        # The record's home is the serve's own report, never a reason to refuse it.
+        record, why = records_of(explicit)
+        if record is None and why == "gateway":
+            raise Fault("serve-gateway")
+        if record is None:
+            raise Fault("serve-not-running")
+        return explicit, record
+    own, shared = [], []
+    def add(folder, target):
+        if isinstance(folder, str) and folder.startswith("/") and folder not in target:
+            target.append(folder)
+    if isinstance(launch_home, str) and launch_home.startswith("/"):
+        add(os.path.join(launch_home, "gateway-locks"), own)
+        add(os.path.join(launch_home, ".local", "state", "hermes", "gateway-locks"), own)
+        add(os.path.join(launch_home, "state", "hermes", "gateway-locks"), own)
+        add(os.path.join(launch_home, ".state", "hermes", "gateway-locks"), own)
     root = os.environ.get("HERMES_GATEWAY_LOCK_DIR", "").strip()
     if root:
-        add(root)
-    if isinstance(launch_home, str) and launch_home.startswith("/"):
-        add(os.path.join(launch_home, "gateway-locks"))
-        state = os.environ.get("XDG_STATE_HOME", "").strip()
-        if state.startswith("/"):
-            add(os.path.join(state, "hermes", "gateway-locks"))
-        add(os.path.join(launch_home, ".local", "state", "hermes", "gateway-locks"))
+        add(root, own if inside(root, launch_home) else shared)
     home = os.path.expanduser("~")
     state = os.environ.get("XDG_STATE_HOME", "").strip()
     if not state.startswith("/"):
         state = os.path.join(home, ".local", "state")
-    add(os.path.join(state, "hermes", "gateway-locks"))
+    account = os.path.join(state, "hermes", "gateway-locks")
+    add(account, own if inside(account, launch_home) else shared)
     gateway = False
-    for folder in folders:
+    # The home's own valid record always wins, even if a shared folder is listed first.
+    for folder in own:
         record, why = records_of(folder)
         gateway = gateway or why == "gateway"
-        # A folder inside the chosen home is that home's own serve, whatever its record
-        # reports. A shared account folder may hold another home's serve and is compared.
-        if record is not None and (inside(folder, launch_home) or same_home(record, launch_home)):
+        if record is not None:
+            return folder, record
+    for folder in shared:
+        record, why = records_of(folder)
+        gateway = gateway or why == "gateway"
+        if record is not None and (not launch_home or same_home(record, launch_home)):
             return folder, record
     raise Fault("serve-gateway" if gateway else "serve-not-running")
 

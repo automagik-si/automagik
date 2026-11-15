@@ -378,7 +378,6 @@ try:
                                           "provider": provider, "gateway": False}}
     emit("stage", name="detect-serves")
     attributed = dict((home, []) for home in homes)
-    unattached = []
     for record in record_dirs:
         target = record.get("owner") or ""
         if target and target not in attributed:
@@ -400,11 +399,10 @@ try:
                 matches = [home for home in homes if served and served <= set(profiles[home].keys())]
                 if len(matches) == 1:
                     target = matches[0]
-        if target:
-            if not any(item["recordDir"] == record["recordDir"] for item in attributed[target]):
-                attributed[target].append(record)
-        else:
-            unattached.append(record)
+        # A record no home owns is not shown as a bot: a row under someone else's home
+        # path or id could replace that home's own bot and take another serve's token.
+        if target and not any(item["recordDir"] == record["recordDir"] for item in attributed[target]):
+            attributed[target].append(record)
     emitted = 0
     for home in homes:
         budget = min(20.0, control, max(0.2, deadline - time.monotonic()))
@@ -438,17 +436,7 @@ try:
                  port=served_by[0]["port"] if running else 0,
                  start=start_command(home, ident, bool(attributed[home])))
             emitted += 1
-    # A record that named no home the account can read is still shown, never hidden.
-    for record in unattached:
-        home = record.get("home") or record["recordDir"]
-        emit("home", home=home, state="running", sandbox=True,
-             serve={"port": record["port"], "recordDir": record["recordDir"],
-                    "served": record.get("profiles") or []})
-        for ident in (record.get("profiles") or [])[:50]:
-            emit("bot", home=home, id=ident, name=ident, model="", provider="", running=True,
-                 recordDir=record["recordDir"], port=record["port"], start="")
-            emitted += 1
-    emit("ready", homes=len(homes) + len(unattached), bots=emitted, hermes=bool(hermes))
+    emit("ready", homes=len(homes), bots=emitted, hermes=bool(hermes))
 except Fault as error:
     emit("error", code=error.code, **error.detail)
 except Exception as error:
@@ -571,13 +559,15 @@ export async function detectHermesBots(ssh, {
             ? { port: frame.serve.port, recordDir: frame.serve.recordDir,
               served: Array.isArray(frame.serve.served) ? frame.serve.served.filter(item => typeof item === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(item)).slice(0, 50) : [] }
             : undefined
-          homes.set(frame.home, { home: frame.home, state: frame.state === 'running' ? 'running' : 'stopped', sandbox: frame.sandbox === true, serve })
+          if (!homes.has(frame.home)) homes.set(frame.home, { home: frame.home, state: frame.state === 'running' ? 'running' : 'stopped', sandbox: frame.sandbox === true, serve })
           continue
         }
         if (frame.type === 'bot') {
           const bot = botOf(frame)
           if (!bot || !homes.has(bot.home) || bots.size >= BOT_LIMIT) { fail(hermesSshFailure('handshake')); return }
-          bots.set(`${bot.home}\n${bot.id}`, bot)
+          // First row wins: a refused record appended later can never replace a home's bot.
+          const key = `${bot.home}\n${bot.id}`
+          if (!bots.has(key)) bots.set(key, bot)
           continue
         }
         if (frame.type === 'ready') { stage = 'ready'; expected = true; ready.resolve(); continue }
