@@ -13,6 +13,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -37,18 +38,29 @@ object TodayTiles {
     const val GAP_DP = 8
     const val COUNT = 4
     const val PAD_DP = 10
+    /** Two 24sp body lines, the 10dp top/bottom padding and 4dp of slack; grows with the font setting. */
+    fun heightDp(fontScale: Float) = (48f * fontScale + 24f).dp
     const val MAX_SP = 22
     const val MIN_SP = 12
     fun textWidthDp(screenDp: Int): Double = (screenDp - 2.0 * GUTTER_DP - (COUNT - 1) * GAP_DP) / COUNT - 2 * PAD_DP
 }
 
+/** A tile's second line: one line that shrinks rather than ellipsize at a large font setting. */
+@Composable fun TileLabel(text: String, modifier: Modifier = Modifier) {
+    BasicText(text, modifier = modifier, style = LocalTextStyle.current.copy(color = Muted, fontSize = 12.sp),
+        maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(7.sp, 12.sp, 1.sp))
+}
+
 /** Today's "spent today" count, beside needs you / working / connected; the caller shows it only when a meter reports. */
 @Composable fun SpendCount(view: Spend.View, modifier: Modifier = Modifier) {
+    val numberBox = with(LocalDensity.current) { 24.sp.toDp() }
     Column(modifier.clip(RoundedCornerShape(12.dp)).background(Surface).border(1.dp, Border, RoundedCornerShape(12.dp)).padding(TodayTiles.PAD_DP.dp, 10.dp)) {
-        // One word that never wraps, shrinking to fit the tile; the theme's fixed line height (as CountCard's) keeps the row level.
-        BasicText(Spend.compact(view.today()), style = LocalTextStyle.current.copy(color = Ink, fontSize = TodayTiles.MAX_SP.sp, fontWeight = FontWeight.SemiBold),
-            maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(TodayTiles.MIN_SP.sp, TodayTiles.MAX_SP.sp, 1.sp))
-        Text("spent today", color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // The same fixed line box as CountCard, so the label below starts at the same height.
+        Box(Modifier.height(numberBox), contentAlignment = Alignment.CenterStart) {
+            BasicText(Spend.compact(view.today()), style = LocalTextStyle.current.copy(color = Ink, fontSize = TodayTiles.MAX_SP.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),
+                maxLines = 1, softWrap = false, autoSize = TextAutoSize.StepBased(TodayTiles.MIN_SP.sp, TodayTiles.MAX_SP.sp, 1.sp))
+        }
+        TileLabel("spent today")
     }
 }
 
