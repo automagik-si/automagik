@@ -97,6 +97,8 @@ async function startProvider(t, overrides = {}) {
       calls.token += 1
       const body = Object.fromEntries(new URLSearchParams(await textOf(request)))
       requests.tokens.push(body)
+      // A slow exchange, so a test can try the loopback port while it is still held.
+      if (overrides.tokenDelayMs) await new Promise(resolve => setTimeout(resolve, overrides.tokenDelayMs))
       if (overrides.token) {
         const answer = overrides.token({ body, codes, refreshTokens, key, origin, clientId: CLIENT_ID, jwt })
         return json(response, answer.status ?? 200, answer.body)
@@ -290,6 +292,40 @@ test('a second loopback request is refused: the port closes after the first', as
   const redirect = provider.requests.authorize[0].redirect_uri
   await assert.rejects(fetch(`${redirect}?code=again&state=x`), () => true)
 })
+
+test('a second request while the code is still being exchanged is refused: the port closes with its first request', async t => {
+  // The exchange is held open, so only the callback's own close can refuse the second request.
+  const provider = await startProvider(t, { tokenDelayMs: 250 })
+  let second = null
+  const flow = await flowFor(t, provider, {
+    openExternal: async (authorizeUrl) => {
+      const redirect = new URL(authorizeUrl).searchParams.get('redirect_uri')
+      const first = await fetch(authorizeUrl, { redirect: 'manual' })
+      await fetch(first.headers.get('location'))
+      second = probeLoopback(Number(new URL(redirect).port))
+    },
+  })
+  const result = await flow.signIn()
+  assert.equal(result.claims.sub, 'person-1')
+  assert.equal(await second, 'refused')
+})
+
+/**
+ * What a second request finds on the callback port while the exchange is still running:
+ * `connected` if the listener is still accepting (the flow must not allow that), `refused` if
+ * the port is already closed.
+ */
+function probeLoopback(port) {
+  return new Promise(resolve => {
+    const request = httpRequest({ host: '127.0.0.1', port, path: '/callback?code=again&state=x', timeout: 500 }, response => {
+      response.resume()
+      resolve('connected')
+    })
+    request.on('timeout', () => { request.destroy(); resolve('connected') })
+    request.on('error', () => resolve('refused'))
+    request.end()
+  })
+}
 
 test('the flow refuses a wrong state and never trades the code', async t => {
   const provider = await startProvider(t, { state: 'not-the-state' })

@@ -47,7 +47,7 @@ const readBody = request => new Promise((resolve, reject) => {
  * its JWKS. `broken` changes one answer at a time; `authorizeWith` lets a test return its own
  * redirect (a wrong state, an error) and `mint` its own ID token claims.
  */
-async function provider(t, { broken = {}, mint = null, authorizeWith = null } = {}) {
+async function provider(t, { broken = {}, mint = null, authorizeWith = null, tokenDelayMs = 0 } = {}) {
   const signing = key()
   const codes = new Map()
   const refresh = new Set()
@@ -87,6 +87,8 @@ async function provider(t, { broken = {}, mint = null, authorizeWith = null } = 
     if (url.pathname === '/token') {
       const body = Object.fromEntries(new URLSearchParams(await readBody(request)))
       seen.token.push(body)
+      // A held exchange lets a test try the loopback port while the flow still owns it.
+      if (tokenDelayMs) await new Promise(resolve => setTimeout(resolve, tokenDelayMs))
       if (body.grant_type === 'refresh_token') {
         if (!refresh.has(body.refresh_token)) return send(400, { error: 'invalid_grant' })
         refresh.delete(body.refresh_token)
@@ -239,12 +241,41 @@ test('acceptance 3: a second loopback request is refused and the port closes', a
   }
   // Nothing listening on that port any more.
   const port = Number(new URL(redirect).port)
-  await assert.rejects(new Promise((resolve, reject) => {
-    const request = httpRequest({ host: '127.0.0.1', port, path: '/callback' }, resolve)
-    request.on('error', reject)
-    request.end()
-  }), () => true)
+  assert.equal(await probe(port), 'refused')
 })
+
+// A request made while the code is still being exchanged: it must find the port already closed,
+// not a listener that is merely done answering.
+test('acceptance 3b: the port closes with the callback request, before the code exchange ends', async t => {
+  const server = await provider(t, { tokenDelayMs: 250 })
+  let second = null
+  const flow = createSignInFlow({
+    settings: { enabled: true, issuer: server.origin, clientId: CLIENT, problem: null },
+    fetch: globalThis.fetch,
+    timeoutMs: 5000,
+    openExternal: async (authorizeUrl) => {
+      const redirect = new URL(authorizeUrl).searchParams.get('redirect_uri')
+      const first = await fetch(authorizeUrl, { redirect: 'manual' })
+      await fetch(first.headers.get('location'))
+      second = probe(Number(new URL(redirect).port))
+    },
+  })
+  t.after(() => flow.close())
+  await flow.signIn()
+  assert.equal(await second, 'refused')
+})
+
+function probe(port) {
+  return new Promise(resolve => {
+    const request = httpRequest({ host: '127.0.0.1', port, path: '/callback?code=again&state=x', timeout: 500 }, response => {
+      response.resume()
+      resolve('connected')
+    })
+    request.on('timeout', () => { request.destroy(); resolve('connected') })
+    request.on('error', () => resolve('refused'))
+    request.end()
+  })
+}
 
 test('acceptance 4: automagik:// still only opens, and never carries a code or a token', () => {
   assert.deepEqual(parseDeepLink('automagik://open'), { action: 'open' })
