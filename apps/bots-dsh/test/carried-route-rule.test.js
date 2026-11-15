@@ -21,7 +21,6 @@ import { RemoteChatAdapter } from '../src/host/remote-chat-adapter.js'
 const SessionPersistence = typeof Jsonl.apply === 'function' ? Jsonl : Jsonl.default
 const ATTACH = 'hermes-remote/attach'
 const OLD = 'hermes-remote/nous:openai/gpt-6-astra'
-const ADDRESS = 'hermes-remote/sample:model-a'
 const DEEPSEEK = { provider: 'deepseek', model: 'saved' }
 const CARRIED = { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' }
 const ROW = Object.freeze({ id: 'attach', name: 'gpt-6-astra (openai-codex)', provider: 'hermes-remote', model: 'gpt-6-astra', providerId: 'openai-codex', contextWindow: 200_000 })
