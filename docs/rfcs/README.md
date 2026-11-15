@@ -65,6 +65,7 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0030](0030-code-mode-in-the-app.md) | Code mode inside the Automagik app | Proposed (owner not yet read; owner's direction 2026-11-10, #1007: the app draws the coding team and its herdr-core terminals, the pack's mods become DSH plugins; replaces 0013's D27; amends 0003's live switching at a harness change; Decided 10, the selector's route, 2026-11-10; Q1-Q14 open) | none (ships outside the five milestones) |
 | [0031](0031-auto-permission-level.md) | Auto, a permission level where a model decides each step | Queued (amends RFC 0003 with its delivery 2; numbers 0028 to 0030 are taken by open pull requests) | none (ships outside the five milestones) |
 | [0032](0032-automagik-id.md) | Automagik ID | In delivery (delivery 1 authorized by the owner; replaces RFC 0024's identity-provider sections) | none (independent Worker deployment) |
+| [0033](0033-attachments-from-pocket.md) | Attachments from Pocket | Queued (amends RFC 0015's chat route: attachments; owner not yet read) | none (ships outside the five milestones) |
 
 Milestones, in the owner's order:
 

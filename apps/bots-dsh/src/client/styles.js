@@ -114,12 +114,6 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 [data-tint=aurora]{animation:bt-genie-aurora 9s ease-in-out infinite}
 @keyframes bt-genie-aurora{0%,100%{filter:hue-rotate(-190deg) saturate(1.2)}50%{filter:hue-rotate(-110deg) saturate(1.3) brightness(1.1)}}
 @media (prefers-reduced-motion:reduce){[data-tint=aurora]{animation:none;filter:hue-rotate(-150deg) saturate(1.25)}}
-/* A small mark frames Genie's head (the whole figure would be a speck): the plume and the
-   ear tips rise out of the frame, with room above for a state's hop. Two masks, added, keep
-   the head: everything down to the earrings, and the disc of the face below that, so the chin
-   stays whole and the arms beside it, with the body under it, are gone. */
-.bt-mark[data-frame=head]{clip-path:inset(-60% -30% 0 -30%)}
-.bt-mark[data-frame=head] .bt-clay{position:absolute;left:50%;bottom:-46%;height:163%;margin-left:-73.6%;-webkit-mask-image:linear-gradient(#000 57%,transparent 61%),radial-gradient(ellipse 29% 27% at 49.5% 41.5%,#000 92%,transparent 100%);mask-image:linear-gradient(#000 57%,transparent 61%),radial-gradient(ellipse 29% 27% at 49.5% 41.5%,#000 92%,transparent 100%)}
 :is(.bt-row,.bt-tile)>.bt-mark:hover .bt-mark[data-shape^=clay-][data-state=idle] .bt-clay{--bt-face-at:1}
 .bt-badge{position:absolute;right:0;bottom:0;width:12px;height:12px;border-radius:50%;corner-shape:round;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1.5px var(--bt-sidebar)}
 .bt-badge-admin{background:color-mix(in srgb,var(--bt-star) 82%,var(--bt-sidebar))}

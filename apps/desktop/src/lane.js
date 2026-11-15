@@ -107,16 +107,32 @@ const line = version => /^(\d+)\.(\d+)\./.exec(String(version))?.slice(1, 3).joi
  * sequence of the lane it took last (an older one is a rollback and refused); `bad` lists versions
  * a trial failed.
  */
-export function laneUpdate(lane, { publisher, appVersion, dshVersion, installed, last = 0, bad = [] }) {
-  if (!lane || lane.publisher !== publisher.publisher || !Number.isInteger(lane.sequence) || lane.sequence < last) return null
-  if ((publisher.sameLine !== false && line(lane.base) !== line(appVersion)) || !(compareVersions(appVersion, lane.base) >= 0)) return null
-  if (bad.includes(lane.version)) return null
-  const listed = [lane.plugins, lane.addons].flatMap(entries => (Array.isArray(entries) ? entries : []))
-  const plugins = listed.filter(plugin => publisher.plugins.includes(plugin?.name)
+export function laneUpdate(lane, context) {
+  return laneDecision(lane, context).update
+}
+
+/** The same eligibility decision, with the published versions and a fixed reason. */
+export function laneDecision(lane, { publisher, appVersion, dshVersion, installed, last = 0, bad = [] }) {
+  const listed = [lane?.plugins, lane?.addons].flatMap(entries => (Array.isArray(entries) ? entries : []))
+  const newest = new Map()
+  for (const plugin of listed) {
+    if (!publisher.plugins.includes(plugin?.name) || compareVersions(plugin.version, plugin.version) !== 0) continue
+    if (!newest.has(plugin.name) || compareVersions(plugin.version, newest.get(plugin.name)) > 0) newest.set(plugin.name, plugin.version)
+  }
+  const decision = (reason, update = null) => ({ update, reason, line: line(lane?.base), base: lane?.base,
+    plugins: [...newest].map(([name, version]) => ({ name, version })) })
+  if (!lane || lane.publisher !== publisher.publisher || !Number.isInteger(lane.sequence)) return decision('invalid-lane')
+  if (lane.sequence < last) return decision('older-sequence')
+  if (publisher.sameLine !== false && line(lane.base) !== line(appVersion)) return decision('app-line')
+  if (!(compareVersions(appVersion, lane.base) >= 0)) return decision('app-minimum')
+  if (bad.includes(lane.version)) return decision('trial-failed')
+  const candidates = listed.filter(plugin => publisher.plugins.includes(plugin?.name)
     && typeof plugin.url === 'string' && plugin.url.startsWith('https://github.com/')
-    && typeof installed[plugin.name] === 'string' && compareVersions(plugin.version, installed[plugin.name]) > 0
-    && satisfies(dshVersion, plugin.engines?.dsh))
-  return plugins.length > 0 ? { publisher: publisher.publisher, version: lane.version, sequence: lane.sequence, plugins } : null
+    && typeof installed[plugin.name] === 'string' && compareVersions(plugin.version, installed[plugin.name]) > 0)
+  const plugins = candidates.filter(plugin => satisfies(dshVersion, plugin.engines?.dsh))
+  return plugins.length > 0
+    ? decision(null, { publisher: publisher.publisher, version: lane.version, sequence: lane.sequence, plugins })
+    : decision(candidates.length > 0 ? 'dsh-range' : 'up-to-date')
 }
 
 /** The version each plugin of `names` has in the profile at `target`. */
@@ -181,15 +197,17 @@ export const stagedOf = home => readJson(files(home).staged, null)
  * Before DSH starts: put the staged plugins in the profile at `target`, keeping each one they
  * replace beside it, and begin a trial; or, after a start whose trial never passed (a crash, a
  * page that never drew), put the previous ones back. Returns what it did: 'applied', 'restored',
- * 'trial' (a trial still runs this start) or null.
+ * 'trial' (a trial still runs this start) or null. onRollback reports a restoration without
+ * changing that answer, including a failed swap that returns null.
  */
-export function beforeStart({ home, target, log = () => {}, link = symlinkSync }) {
+export function beforeStart({ home, target, log = () => {}, link = symlinkSync, onRollback = () => {} }) {
   const { applied: appliedFile, staged: stagedFile, bad: badFile } = files(home)
   const applied = readJson(appliedFile, null)
   if (applied?.pending) {
     // The start after a trial began is its second chance at most.
     if ((applied.starts ?? 0) >= 1) {
       restore(applied, log)
+      onRollback()
       const failed = Object.entries(lanesOf(applied)).map(([publisher, { version }]) => `${publisher}@${version}`)
       writeJson(badFile, [...new Set([...readJson(badFile, []), ...failed])])
       writeJson(appliedFile, { ...applied, pending: false, restored: true })
@@ -232,6 +250,7 @@ export function beforeStart({ home, target, log = () => {}, link = symlinkSync }
     if (lost.length > 0) throw fail(lost.join(', '))
   } catch (error) {
     restore({ plugins: moved, metadata }, log)
+    onRollback()
     // Not downloaded and tried again at every look: only once the app has started again.
     for (const [publisher, { version }] of Object.entries(lanesOf(staged))) refused.add(refusalOf(home, publisher, version))
     log(`lane: ${staged.version} could not be put in place (${error.message}); nothing changed, and it waits for the app's next start`)
@@ -431,12 +450,15 @@ export function laneMemory(home, publisher = 'automagik') {
 export const stagedVersion = (home, publisher) => lanesOf(stagedOf(home))[publisher]?.version
 
 /** One look at a publisher's lane: fetch, verify, decide. */
-export async function checkLane({ publisher, fetch = globalThis.fetch, ...context }) {
+export async function checkLane({ publisher, fetch = globalThis.fetch, onDecision = () => {}, ...context }) {
   const get = async (url) => {
     const response = await fetch(url, { headers: { 'user-agent': 'automagik-desktop' }, signal: AbortSignal.timeout(TIMEOUT_MS) })
     if (!response.ok) throw fail(`${url}: HTTP ${response.status}`)
     return Buffer.from(await response.arrayBuffer())
   }
   const [bytes, signature] = await Promise.all([get(publisher.url), get(`${publisher.url}.sig`)])
-  return laneUpdate(verifyLane(bytes, signature.toString('utf8'), publisher.keys), { publisher, ...context })
+  const lane = verifyLane(bytes, signature.toString('utf8'), publisher.keys)
+  const decision = laneDecision(lane, { publisher, ...context })
+  onDecision(decision, lane.version)
+  return decision.update
 }

@@ -1,14 +1,6 @@
-// Whether any of dsh's agents is at work, for the Automagik desktop app: it installs an update
-// while the person is away only when none is (apps/desktop src/idle.js). The app names the file
-// in AUTOMAGIK_BUSY_FILE and reads it; without that name this does nothing. The file holds
-// { running, at }: how many agents run, and when that last changed.
-//
-// A Claude Code or Codex sign-in that is starting or waiting for the person (acp-dsh's
-// login.js) counts as running too: a restart would kill the CLI holding the link or code the
-// person is using on another device. acp-dsh announces the number at work
-// (`acp-dsh/login-active`); a welcome that reloads mid-attempt reads it from the service. So
-// the plugin lane's automatic apply and the app's update while away wait for the attempt to end
-// or expire. The desktop app reads only `running`, so nothing changes there.
+// The desktop's plugin eligibility reads actual agent activity here. Protocol 2 is enabled
+// only by a supporting parent plus ACP's structured getter and restart preparation. Older
+// combinations retain literal { running: agents + logins, at }. No account data is written.
 import { renameSync, writeFileSync } from 'node:fs'
 
 function writeAtomic(file, text) {
@@ -23,11 +15,33 @@ export function watchBusy(ctx, { env = process.env, write = writeAtomic, now = D
   // The agents already at work when the welcome (re)loads, as DSH's agent registry lists them.
   const running = new Set((ctx.get?.('agents')?.list?.() ?? []).filter(agent => agent?.status === 'running').map(agent => agent.id))
   const count = value => (Number.isInteger(value) && value > 0 ? Math.min(value, 100) : 0)
+  const service = ctx.get?.('acpAgents')
+  const modern = env.AUTOMAGIK_BUSY_PROTOCOL === '2'
+    && typeof service?.loginActivity === 'function' && typeof service?.prepareRestart === 'function'
+  const activity = () => {
+    const value = service.loginActivity()
+    if (!Number.isInteger(value?.active) || value.active < 0
+      || !Number.isInteger(value.confirming) || value.confirming < 0 || value.confirming > value.active
+      || (value.confirming > 0 && !Number.isFinite(value.confirmingUntil))) throw new Error('Untrusted login activity')
+    return value
+  }
   let logins = 0
+  let lastModern
   try { logins = count(ctx.get?.('acpAgents')?.loginActive?.()) } catch {}
   const save = () => {
     try {
-      write(file, `${JSON.stringify({ running: running.size + logins, at: now() })}\n`)
+      let value = { running: running.size + logins }
+      if (modern) {
+        try {
+          const current = activity()
+          value = { running: running.size, logins: current.active, confirming: current.confirming,
+            ...(current.confirming > 0 ? { confirmingUntil: current.confirmingUntil } : {}) }
+        } catch { value = { untrusted: true } }
+        const signature = JSON.stringify(value)
+        if (signature === lastModern) return
+      }
+      write(file, `${JSON.stringify({ ...value, at: now() })}\n`)
+      if (modern) lastModern = JSON.stringify(value)
     } catch (error) {
       ctx.logger?.warn?.('omni-ai: the busy file was not written: %s', error?.message ?? error)
     }
@@ -41,7 +55,8 @@ export function watchBusy(ctx, { env = process.env, write = writeAtomic, now = D
   ctx.on('agent/disposed', ({ agent }) => {
     if (running.delete(agent.id)) save()
   })
-  ctx.on('acp-dsh/login-active', (payload) => {
+  if (modern) ctx.on('acp-dsh/login-activity', save)
+  else ctx.on('acp-dsh/login-active', (payload) => {
     const next = count(payload?.active)
     if (next === logins) return
     logins = next

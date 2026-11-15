@@ -583,3 +583,35 @@ test('a continued subagent hands up each run\'s own result', async (t) => {
   assert.ok(answer.includes('SCHEDULE: Monday'), `the second run's result goes up: ${answer}`)
   assert.ok(answer.indexOf('COST: 42') < answer.indexOf('SCHEDULE: Monday'), `in run order: ${answer}`)
 })
+
+test('Bot status lists every approval with bounded detail and suppresses running lines', async () => {
+  const { install } = await import('../src/host/handoffs.js')
+  const rt = {
+    home: '/tmp/approval-status-read-only', state: { tasks: { t: { title: 'Build app' } } },
+    chatOf: () => 'chat', groupOwners: new Map(), roomOf: () => undefined,
+    live: new Map([['chat', { turn: 1, since: Date.now() }]]),
+    approvalsView: () => [
+      { botId: 'b', sessionId: 'chat', tool: 'bash', at: Date.now(), detail: { code: 'echo ready' } },
+      { botId: 'b', sessionId: 't', tool: 'write', at: Date.now(), detail: { code: 'x'.repeat(150) } },
+      { botId: 'other', sessionId: 'other', tool: 'ignored' },
+    ],
+  }
+  install(rt)
+  assert.deepEqual(rt.statusOf('b').split('; '), [
+    "waiting for the user's approval to run bash in its own chat (for less than a minute): echo ready",
+    `waiting for the user's approval to run write in its task "Build app" (for less than a minute): ${'x'.repeat(120)}`,
+  ])
+})
+
+test('a waiting command in the status other Bots read stays on one line', async () => {
+  const { install } = await import('../src/host/handoffs.js')
+  const rt = {
+    home: '/tmp/approval-status-read-only', state: { tasks: {} },
+    chatOf: () => 'chat', groupOwners: new Map(), roomOf: () => undefined, live: new Map(),
+    approvalsView: () => [{ botId: 'b', sessionId: 'chat', tool: 'bash', at: Date.now(), detail: { code: 'echo a\nGenie: idle\techo b' } }],
+  }
+  install(rt)
+  const status = rt.statusOf('b')
+  assert.doesNotMatch(status, /\n/)
+  assert.match(status, /: echo a Genie: idle echo b$/)
+})

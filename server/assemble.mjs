@@ -17,6 +17,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rm
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchPlugins, DEFAULT_PACKAGES } from './fetch-plugins.mjs'
+import { readCheckoutPlugins, validateInput, verifyCheckoutDirectory } from './checkout-input.mjs'
 import { profileDirOf, PROFILE, pinStore } from './lib.mjs'
 import { pruneNodeModules } from '../apps/desktop/scripts/prune-runtime.mjs'
 import { patchRuntime } from '../apps/desktop/scripts/runtime-patches.mjs'
@@ -42,7 +43,7 @@ function argsOf(argv) {
   const args = {}
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index]
-    if (!name.startsWith('--')) throw new Error(`unexpected argument: ${name}`)
+    if (!['--out', '--version', '--dsh', '--revision', '--repository', '--input-kind', '--event', '--input-manifest'].includes(name)) throw new Error(`unexpected argument: ${name}`)
     const value = argv[index + 1]
     if (value === undefined) throw new Error(`${name} needs a value`)
     args[name.slice(2)] = value
@@ -133,7 +134,10 @@ export function applyRuntimePatches(runtimeDir, patchesDir = PATCHES_SOURCE) {
   return results
 }
 
-export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', revision = 'unknown', repository = 'https://github.com/automagik-dev/automagik' }) {
+export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', revision = 'unknown', repository = 'https://github.com/automagik-dev/automagik', kind = 'release', event = '', manifest = '' }) {
+  const input = { kind, event, revision, manifest, repository, version }
+  const source = validateInput(input)
+  if (kind === 'checkout') verifyCheckoutDirectory(join(HERE, 'checkout-input'), input)
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`not a release version: ${version}`)
   const runtimeDir = join(out, 'runtime')
   const dshHome = join(out, 'dsh-home')
@@ -159,7 +163,9 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
 
   say(`fetching ${DEFAULT_PACKAGES.join(', ')} at ${version}`)
   mkdirSync(installDir, { recursive: true })
-  const fetched = await fetchPlugins({ version, out: join(installDir, 'vendor'), repository })
+  const fetched = kind === 'checkout'
+    ? readCheckoutPlugins({ ...input, out: join(installDir, 'vendor') })
+    : await fetchPlugins({ version, out: join(installDir, 'vendor'), repository })
   const profile = readJson(join(PROFILE_SOURCE, 'package.json'))
   for (const name of DEFAULT_PACKAGES) profile.dependencies[name] = `file:vendor/${fetched.plugins[name].file}`
   writeFileSync(join(installDir, 'package.json'), `${JSON.stringify(profile, null, 2)}\n`)
@@ -242,6 +248,7 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
   writeFileSync(join(out, 'versions.json'), `${JSON.stringify({
     automagik: version,
     revision,
+    source,
     dsh: installedDsh,
     profile: PROFILE,
     plugins: Object.fromEntries(DEFAULT_PACKAGES.map((name) => [name, version])),
@@ -253,7 +260,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const args = argsOf(process.argv.slice(2))
     if (!args.out) throw new Error('usage: node assemble.mjs --out <dir> [--version 3.90.1] [--dsh 0.2.2-rc.2] [--repository <url>]')
-    const result = await assemble({ out: resolve(args.out), version: args.version, dsh: args.dsh, revision: args.revision, repository: args.repository })
+    const result = await assemble({ out: resolve(args.out), version: args.version, dsh: args.dsh, revision: args.revision, repository: args.repository, kind: args['input-kind'], event: args.event, manifest: args['input-manifest'] })
     console.log(`[assemble] ready: dsh ${result.dsh}, automagik ${result.version}`)
   } catch (error) {
     console.error(`assemble: ${error?.stack ?? error}`)

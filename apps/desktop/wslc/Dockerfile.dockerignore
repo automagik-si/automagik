@@ -5,6 +5,9 @@
 !build/profile
 !build/versions.json
 !src/dsh.js
+!src/child-paths.js
+!src/close-inherited.cjs
+!src/close-inherited-preload.cjs
 !src/lane.js
 !src/lane-keys.js
 !src/privacy.js

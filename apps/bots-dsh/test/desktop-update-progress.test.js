@@ -154,3 +154,141 @@ test('against an app that sends none of the new fields, every state reads and dr
   assert.equal(row.type(row.props).children.filter(Boolean)[1].children[0], 'Updating · 42%')
   shown.state = null
 })
+
+// #1240: the pills are the second way into the same `open`/`applyPlugins` About's Check for
+// updates holds. The rule is shared (update-hold.js), so the hold, the labels and the ordinary
+// behaviour are read here through the pill as the sidebar draws it.
+const CHANGES = [{ name: '@automagik/bots-dsh', from: '3.117.4', to: '3.117.5' }]
+const pump = { phase: 'ready', changes: CHANGES, auto: true }
+const plugLabel = 'Bot team 3.117.4 → 3.117.5 · updates when no agent is at work'
+const downloadingPlug = 'Downloading Bot team 3.117.4 → 3.117.5 · 40%'
+
+// The pills as the sidebar draws them, rendered to their buttons (the app's first, the plugins').
+function drawnPills(state) {
+  shown.state = state
+  try {
+    const tree = DesktopUpdate()
+    assert.equal(tree?.type, 'div')
+    return tree.children.filter(Boolean).map(row => row.type(row.props))
+  } finally {
+    shown.state = null
+  }
+}
+const labelOf = button => button.children.filter(Boolean).find(child => child.props.className === 'bt-desk-update-label').children[0]
+
+test('#1240: on an app from before the check, every pill is held while plugins are staged', () => {
+  const staged = (app, plugins = pump) => ({ ...app, app, plugins })
+  const appStates = [
+    ['checking', staged({ phase: 'checking' }), ['Checking for updates…', plugLabel]],
+    ['downloading', staged({ phase: 'downloading', version: '3.96.0', percent: 30 }), ['Updating · 30%', plugLabel]],
+    ['installing', staged({ phase: 'installing', version: '3.96.0' }), ['Installing the update…']],
+    // The Retry states: a failed check, download or verification.
+    ['a failed check', staged({ phase: 'error', failure: 'check' }), ['Update check failed · Retry', plugLabel]],
+    ['a failed download', staged({ phase: 'error', failure: 'download', version: '3.96.0' }), ['Update download failed · Retry', plugLabel]],
+    ['a failed verify', staged({ phase: 'error', failure: 'verify', version: '3.96.0' }), ['Update could not be verified · Retry', plugLabel]],
+    // Still coming: they are staged a moment later, perhaps before the click is heard.
+    ['a failed check while plugins download', staged({ phase: 'error', failure: 'check' }, { phase: 'downloading', changes: CHANGES, percent: 40, auto: true }), ['Update check failed · Retry', downloadingPlug]],
+    // Staged only as the whole says it, with no change named in the plugins' part.
+    ['staged at the top only', { phase: 'ready', kind: 'plugins', app: { phase: 'error', failure: 'check' }, plugins: { phase: 'idle', changes: [], auto: true } }, ['Update check failed · Retry']],
+  ]
+  for (const [why, state, labels] of appStates) {
+    opened.length = 0
+    const buttons = drawnPills(state)
+    assert.deepEqual(buttons.map(labelOf), labels, why)
+    for (const button of buttons) {
+      assert.equal(button.props.disabled, true, why)
+      // The handler refuses by itself too: no click reaches the app, busy pill or not.
+      button.props.onClick()
+    }
+    assert.deepEqual(opened, [], why)
+  }
+})
+
+test('#1240: on an app from before the check, the plugins\' pill is held in each of its states', () => {
+  const plugins = [
+    ['downloading', { phase: 'downloading', changes: CHANGES, percent: 30, auto: true }, 'Downloading Bot team 3.117.4 → 3.117.5 · 30%'],
+    ['ready, auto-apply on', { phase: 'ready', changes: CHANGES, auto: true }, plugLabel],
+    ['ready, auto-apply off', { phase: 'ready', changes: CHANGES, auto: false }, 'Update Bot team 3.117.4 → 3.117.5 now'],
+    ['installing', { phase: 'installing', changes: CHANGES, auto: true }, 'Updating Bot team 3.117.4 → 3.117.5…'],
+  ]
+  for (const [why, lane, label] of plugins) {
+    opened.length = 0
+    const [button] = drawnPills({ ...lane, app: { phase: 'idle' }, plugins: lane })
+    assert.equal(labelOf(button), label, why)
+    assert.equal(button.props.disabled, true, why)
+    button.props.onClick()
+    assert.deepEqual(opened, [], why)
+  }
+})
+
+test('#1240: a modern app keeps every pill\'s ordinary behaviour', () => {
+  // `check` is what makes an app modern (v3.120.0+): the hold never applies to it.
+  omniDesktop.updates.check = async () => { opened.push('check') }
+  try {
+    // The plugins' own pill still applies them when asked, auto-apply off included.
+    opened.length = 0
+    let [button] = drawnPills({ app: { phase: 'idle' }, plugins: { phase: 'ready', changes: CHANGES, auto: false } })
+    assert.equal(labelOf(button), 'Update Bot team 3.117.4 → 3.117.5 now')
+    assert.equal(button.props.disabled, false)
+    button.props.onClick()
+    assert.deepEqual(opened, ['plugins'])
+    // Restart, open and Retry still ask the app's `open`.
+    for (const app of [{ phase: 'ready', version: '3.96.0' }, { phase: 'available', version: '3.96.0' }, { phase: 'error', failure: 'check' }]) {
+      opened.length = 0
+      ;[button] = drawnPills({ ...app, app, plugins: pump })
+      assert.equal(button.props.disabled, false, app.phase)
+      button.props.onClick()
+      assert.deepEqual(opened, ['open'], app.phase)
+    }
+    // The plugins' pill beside a Retry is not held either.
+    opened.length = 0
+    const buttons = drawnPills({ phase: 'error', failure: 'check', app: { phase: 'error', failure: 'check' }, plugins: pump })
+    assert.deepEqual(buttons.map(labelOf), ['Update check failed · Retry', plugLabel])
+    for (const each of buttons) {
+      each.props.onClick()
+    }
+    assert.deepEqual(opened, ['open', 'plugins'])
+  } finally {
+    delete omniDesktop.updates.check
+  }
+})
+
+test('#1240: on an app from before the check, the labelled app pill stays live with plugins staged', () => {
+  const staged = (app, plugins = pump) => ({ ...app, app, plugins })
+  for (const [why, app, label, count] of [
+    ['an update is out', { phase: 'available', version: '3.96.0' }, 'Automagik 3.96.0 is out', 2],
+    ['an update is ready', { phase: 'ready', version: '3.96.0' }, 'Restart to update to 3.96.0', 1],
+  ]) {
+    opened.length = 0
+    const buttons = drawnPills(staged(app))
+    assert.equal(buttons.length, count, why)
+    // The app's labelled pill is not the plugin path, and About keeps it live: its click restarts
+    // into the app update or opens its release page, with staged plugins untouched.
+    assert.equal(labelOf(buttons[0]), label, why)
+    assert.equal(buttons[0].props.className, 'bt-desk-update bt-desk-update-go', why)
+    assert.equal(buttons[0].props.disabled, false, why)
+    buttons[0].props.onClick()
+    assert.deepEqual(opened, ['open'], why)
+    // The plugins' pill beside it (shown while the app update is out) is still held.
+    if (count === 2) {
+      assert.equal(labelOf(buttons[1]), plugLabel, why)
+      assert.equal(buttons[1].props.disabled, true, why)
+      buttons[1].props.onClick()
+      assert.deepEqual(opened, ['open'], why)
+    }
+  }
+})
+
+test('#1240: with nothing staged, an old app\'s pills are not held, and no pill exists before it says', () => {
+  const idle = { phase: 'idle', changes: [], auto: true }
+  for (const [why, app] of [['a failed check', { phase: 'error', failure: 'check' }], ['a restart', { phase: 'ready', version: '3.96.0' }]]) {
+    opened.length = 0
+    const [button] = drawnPills({ ...app, app, plugins: idle })
+    assert.equal(button.props.disabled, false, why)
+    button.props.onClick()
+    assert.deepEqual(opened, ['open'], why)
+  }
+  // Before the app has said anything there is no pill at all, so nothing can ask it to update.
+  shown.state = null
+  assert.equal(DesktopUpdate(), null)
+})

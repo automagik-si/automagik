@@ -1,0 +1,187 @@
+{
+  "about": [
+    "The knowledge pack's own placeholder list (scripts/knowledge-pack.ts): privacy hits it lets pass in",
+    "the pack only, never in this repository (never add these to herdr/scripts/privacy-list.json). Each is",
+    "an exact match or an anchored pattern for the email or home-path rule; never a person's name, home",
+    "or address. Only these kinds: example addresses, example WhatsApp JIDs, the generic homes \/home\/user,",
+    "\/home\/genie and \/home\/automagik, omni\u0040<version> strings, the org's role contacts",
+    "(privacidade\u0040, dpo\u0040, security\u0040), and three public service and tool addresses (exact",
+    "matches only; a new one needs Chat's word); knowledge-pack.test.ts fails on any other entry. A pattern",
+    "that matches empty text, has no literal part, does not carry an address's whole local part and at",
+    "sign (or a home's whole name) as literal text, or matches unrelated text is refused at load.",
+    "Written with JSON escapes (\\u0040 for the at sign, \\/ for a slash) so the repository's own privacy",
+    "scan, which reads raw text, does not read them as addresses or paths."
+  ],
+  "placeholders": [
+    {
+      "rule": "email",
+      "match": "you\u0040gmail.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "you\u0040yourdomain.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "a\u0040b.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "c\u0040d.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "j\u0040x.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "seu\u0040email.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "your\u0040email.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "me\u0040gmail.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "personal\u0040gmail.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "work\u0040company.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "you\u0040company.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "user\u0040company.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "alice\u0040company.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "bob\u0040company.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "engineering\u0040company.com",
+      "why": "an example address in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "5511999999999\u0040s.whatsapp.net",
+      "why": "an example WhatsApp JID in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "5511999\u0040s.whatsapp.net",
+      "why": "an example WhatsApp JID in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "1234567890\u0040s.whatsapp.net",
+      "why": "an example WhatsApp JID in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "1\u0040s.whatsapp.net",
+      "why": "an example WhatsApp JID in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "120363123456789\u0040g.us",
+      "why": "an example WhatsApp JID in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "123456789-1234567890\u0040g.us",
+      "why": "an example WhatsApp JID in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "120363012345678901\u0040g.us",
+      "why": "an example WhatsApp JID in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "120363...\u0040g.us",
+      "why": "an example WhatsApp JID in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "xxx\u0040g.us",
+      "why": "an example WhatsApp JID in documentation"
+    },
+    {
+      "rule": "email",
+      "match": "git\u0040github.com",
+      "why": "a public service or tool address, not a person"
+    },
+    {
+      "rule": "email",
+      "match": "actions\u0040github.com",
+      "why": "a public service or tool address, not a person"
+    },
+    {
+      "rule": "email",
+      "match": "security\u0040npmjs.com",
+      "why": "a public service or tool address, not a person"
+    },
+    {
+      "rule": "email",
+      "match": "privacidade\u0040namastex.ai",
+      "why": "the org's public role contact (privacy, data protection, security), public by design"
+    },
+    {
+      "rule": "email",
+      "match": "dpo\u0040namastex.ai",
+      "why": "the org's public role contact (privacy, data protection, security), public by design"
+    },
+    {
+      "rule": "email",
+      "match": "security\u0040namastex.io",
+      "why": "the org's public role contact (privacy, data protection, security), public by design"
+    },
+    {
+      "rule": "home-path",
+      "match": "\/home\/user",
+      "why": "a generic or service account home in documentation, not a person"
+    },
+    {
+      "rule": "home-path",
+      "match": "\/home\/genie",
+      "why": "a generic or service account home in documentation, not a person"
+    },
+    {
+      "rule": "home-path",
+      "match": "\/home\/automagik",
+      "why": "a generic or service account home in documentation, not a person"
+    },
+    {
+      "rule": "email",
+      "pattern": "^omni\u0040[0-9]+\\.[0-9A-Za-z]+$",
+      "why": "an omni\u0040<version> string, not an address"
+    }
+  ]
+}

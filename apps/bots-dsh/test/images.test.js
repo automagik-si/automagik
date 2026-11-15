@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { install as imagesInstall, offloadTargets } from '../src/host/images.js'
 import { assembleLlmStream } from '../src/host/models.js'
 
@@ -35,6 +36,76 @@ test('offloadTargets selects live images from prior user and tool messages', () 
     { seq: 0, imageIndexes: [0, 2] },
     { seq: 2, imageIndexes: [0] },
   ])
+})
+
+test('image rewrites preserve only existing agent loop marks on a text-only route', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'dsb-images-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const attachment = { attachmentId: 'sha256:abcdef1234567890', name: 'shot.png' }
+  writeFileSync(join(home, 'ocr.json'), JSON.stringify({
+    [attachment.attachmentId]: { text: 'A welcome banner.', model: 'Vision' },
+  }))
+  const listeners = {}
+  const streamed = []
+  const ctx = {
+    on: (name, listener) => { listeners[name] = listener },
+    llm: {
+      resolveModelInfo: async () => ({ inputModalities: ['text', 'image'] }),
+      async *stream(options) {
+        streamed.push(options)
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    },
+  }
+  imagesInstall({
+    ctx, home,
+    config: { textOnlyModels: ['acp/agent'] },
+    ownRequest: () => false,
+    load: async () => {},
+    roomOf: () => undefined,
+  })
+  const marked = markAgentLoopRequest({
+    provider: 'acp', model: 'agent', sessionId: 'b2',
+    system: [{ type: 'text', text: 'Describe the image.' }],
+    messages: [{ role: 'user', content: [{ type: 'image', attachment }] }],
+  })
+  const freeze = (node) => {
+    if (node === null || typeof node !== 'object') return
+    for (const child of Object.values(node)) freeze(child)
+    Object.freeze(node)
+  }
+  const assertFrozen = (node) => {
+    if (node === null || typeof node !== 'object') return
+    assert.ok(Object.isFrozen(node))
+    for (const child of Object.values(node)) assertFrozen(child)
+  }
+  freeze(marked)
+  const unmarked = structuredClone(marked)
+  for (const [original, expected] of [[marked, true], [unmarked, false]]) {
+    const before = structuredClone(original)
+    const events = []
+    const next = () => assert.fail('a text-only route must convert the image before dispatch')
+    for await (const event of listeners['llm/stream'](original, next)) events.push(event)
+    assert.deepEqual(events, [{ type: 'finish', reason: { kind: 'stop' } }])
+    const sent = streamed.at(-1)
+    assert.notEqual(sent, original)
+    assert.equal(isAgentLoopRequest(sent), expected)
+    assert.equal(Object.isFrozen(sent), expected)
+    if (expected) {
+      assertFrozen(sent)
+      assert.throws(() => { sent.model = 'changed' }, TypeError)
+    }
+    assert.deepEqual(sent.messages, [{ role: 'user', content: [{
+      type: 'text',
+      text: '[Image "shot.png". You cannot see images, so Vision read it for you:]\n'
+        + 'A welcome banner.\n[End of image "shot.png"]',
+    }] }])
+    assert.equal(sent.provider, original.provider)
+    assert.equal(sent.model, original.model)
+    assert.equal(sent.sessionId, original.sessionId)
+    assert.deepEqual(original, before)
+  }
+  assert.equal(streamed.length, 2)
 })
 
 test('image OCR retries transient TRANSPORT failures instead of caching a 2-minute failure', async (t) => {

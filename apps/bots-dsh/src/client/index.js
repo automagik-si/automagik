@@ -1,3 +1,4 @@
+import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
@@ -743,7 +744,8 @@ export function apply(ctx) {
   }
   // The sign-in rows of the Bots' chats (cli-login.js): this page's views of the attempts the
   // host holds. Disposing them never cancels an attempt.
-  cliLogin = createCliLogin({ actions, modelOf: botId => work.getSnapshot().models?.[botId]?.selected })
+  cliLogin = createCliLogin({ actions, modelOf: botId => work.getSnapshot().models?.[botId]?.selected,
+    botOf: botId => cliLoginBotOf(roster.getSnapshot(), botId) })
   actions.cliLogin = cliLogin
   // A sign-in row about a provider its Bot has left closes by itself (cli-login-state.js).
   ctx.effect(() => work.subscribe(() => cliLogin.followModels()), 'ds-bot: CLI sign-in rows follow the Bots\' models')
@@ -1323,6 +1325,12 @@ export function apply(ctx) {
       inject: face,
       select: owner => (isTeamApproval(owner.pendingInteraction) ? owner.pendingInteraction : null),
     }, TeamApproval),
+    // shadow's freePriority places each later entry below the earlier ones. Keep this
+    // strict selector last so it runs before the generic question and team cards.
+    () => shadow('conversation.composer', {
+      priority: BOT_PRIORITY - 1,
+      select: owner => selectSessionFileApproval(owner.pendingInteraction),
+    }, SessionFileApproval),
     () => shadow('conversation.input.dock', { id: 'bot-members', order: -120, inject: face }, MemberDock),
     () => shadow('conversation.input.dock', { id: 'bot-model', order: -110, inject: face }, ModelChoiceDock),
     // The person's own choice of a Bot's level (permission-card.js): raised by this window alone.

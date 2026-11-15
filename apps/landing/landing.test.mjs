@@ -5,7 +5,8 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fileText, scan } from '../../herdr/scripts/privacy-check.mjs'
-import { htmlPage, supportPrivacy } from './waitlist/lib/ui.js'
+import { htmlPage, privacyNote, supportPrivacy, waitlistForm, waitlistIntro } from './waitlist/lib/ui.js'
+import { WHATSAPP_SIGNUPS_OPEN } from './waitlist/lib/shared.js'
 import { themeCss, titleFace, brandFonts, statusNames } from './scripts/sync-theme.mjs'
 import { pages, routes, rootFiles, weUnfold, arca, arcaLogo, arcaArk, oiTag, platforms, offered, used, usedCredit, trademarks, brand as siteLogo, icons, manifest as webManifest, family, familyArt, familyButton, familyHost, familyLinks } from './scripts/build-pages.mjs'
 import { BOX, GEOMETRY, LOGO, TONES, logoInner, tagInner } from './scripts/build-lockup.mjs'
@@ -1084,11 +1085,27 @@ test('root discovery files allow every crawler including training and preserve A
   assert.doesNotMatch(read('llms.txt'), /noindex/i)
 })
 
-test('WhatsApp remains visible with the English and Portuguese delay notice', () => {
+test('the Cloud form offers email only while WhatsApp sign-ups are paused; removal keeps WhatsApp', async () => {
+  assert.equal(WHATSAPP_SIGNUPS_OPEN, false)
   const html = htmlAt('/cloud/')
-  assert.match(html, /<option value="whatsapp">WhatsApp/)
-  assert.match(html, /WhatsApp confirmation may take a little while/)
-  assert.match(html, /lang="pt-BR">A confirmação pelo WhatsApp pode demorar um pouco/)
+  const { onRequest } = await import('./functions/api/waitlist.js')
+  const served = await (await onRequest({ request: new Request('https://automagik.si/api/waitlist'), env: {} })).text()
+  for (const [where, page] of [['/cloud/', html], ['/api/waitlist', served]]) {
+    const add = page.match(/<form class="waitlist-form"[\s\S]*?<\/form>/)[0]
+    assert.match(add, /<input type="hidden" name="channel" value="email">/, where)
+    assert.match(add, /type="email" name="email" [^>]*required/, where)
+    assert.doesNotMatch(add, /whatsapp|wa\.me|AMG-/i, where)
+    const removal = page.match(/<form class="removal-form"[\s\S]*?<\/form>/)[0]
+    assert.match(removal, /<option value="whatsapp">WhatsApp sender ID or number<\/option><option value="code">WhatsApp confirmation code<\/option>/, where)
+    // No sentence on confirming by WhatsApp anywhere the person reads, in either language.
+    for (const text of ['WhatsApp shows a code', 'WhatsApp confirmation may take a little while', 'pode demorar um pouco', 'wa.me', 'Choose email or WhatsApp', 'Send a WhatsApp code', 'Use email if you prefer']) assert.ok(!page.includes(text), `${where}: ${text}`)
+  }
+  assert.match(html, /<p>Confirm your interest by email\./)
+  // Earlier WhatsApp sign-ups: what they store, who processes them and for how long.
+  for (const text of ['For an earlier sign-up that chose WhatsApp, its confirmation stores the sender ID or number', 'an earlier sign-up that chose WhatsApp involves WhatsApp/Meta and our Omni', 'An earlier WhatsApp code counts if it was sent within half an hour', 'Pending WhatsApp entries are kept for that backlog window']) assert.ok(html.includes(text), text)
+  // The switch turned on: the same source offers WhatsApp again, with its notice and wording.
+  const open = waitlistIntro({ whatsapp: true }) + waitlistForm({ whatsapp: true }) + privacyNote({ whatsapp: true })
+  for (const text of ['Choose email or WhatsApp', '<option value="whatsapp">WhatsApp — you send the first message</option>', 'lang="pt-BR">A confirmação pelo WhatsApp pode demorar um pouco', 'WhatsApp shows a code', 'Send a WhatsApp code within half an hour', 'Use email if you prefer']) assert.ok(open.includes(text), text)
 })
 
 

@@ -1368,8 +1368,9 @@ export function checkMods({ modsDir, mods, log = () => {}, herdrApp = "herdr-app
  * through bin/run.sh, which finds node 22.7+ or bun where PATH has none) or, in a pack from before
  * it (a rollback), bin/automagik-herdr.mjs. Only a link to one of those two in this pack, or in
  * the sidebar's folder from before the rename (OLD_PACK_NAME: a v0.4.x link the migration didn't
- * move), is ours; one from the old folder moves only onto an entry that is there. A file, a
- * missing link or one pointing elsewhere is left alone. Cheap (an lstat, a readlink)
+ * move), is ours; one from the old folder moves only onto an entry that is there. A file or a link
+ * pointing elsewhere is left alone. A missing link is left alone too, except am's: made at any
+ * start while the install record lists the pack (a pack with no record gets none; a link the person removed comes back, by design: the pack owns it while am is absent). Cheap (an lstat, a readlink)
  * and idempotent: the CLI runs it on every start. Returns `{ link, from, to }` when it
  * repointed the link, else null; throws only when the swap itself fails.
  */
@@ -1387,8 +1388,10 @@ function relinkNamed({ modsDir, name, binDir, linkName }) {
   const [wrapper, mjs] = entries(name);
   if (!exists(link)) {
     // am's link, missing on an install from before it: made here, never over a file or a link of
-    // the person's (that is the isLink / readlink rule below), and never for a pack with no command.
+    // the person's (that is the isLink / readlink rule below), never for a pack with no command,
+    // and only for a pack the install record lists (as the rollback's relink): no record, no link.
     if (linkName !== AM_LINK || !(isFile(wrapper) || isFile(mjs))) return null;
+    if (!(readMarker(modsDir)?.mods ?? []).includes(name)) return null;
     const made = isFile(wrapper) ? wrapper : mjs;
     mkdirSync(binDir, { recursive: true });
     const tmp = join(binDir, `.${linkName}.relink-${process.pid}`);

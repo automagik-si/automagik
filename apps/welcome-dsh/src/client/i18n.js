@@ -293,6 +293,7 @@ export const PT_BR = {
   'Installing its connector in the background. This takes a minute or two.': 'Instalando o conector em segundo plano. Leva um ou dois minutos.',
   'The connector did not install: {error}': 'O conector não foi instalado: {error}',
   'The connector did not install.': 'O conector não foi instalado.',
+  'The connector did not start: {error}': 'O conector não iniciou: {error}',
   'Install details': 'Detalhes da instalação',
   'Log: {path}': 'Registro: {path}',
   'Connector ready (version {version}).': 'Conector pronto (versão {version}).',

@@ -92,9 +92,12 @@ change.
 - Proposed id `automagik.am`, kind `binary`, `set: ["code", "work"]`. It provides `bots.cli@1`,
   `bots.attach-ledger@1` and `bots.whois-json@1`, and owns the `am` and `automagik-herdr` links.
   Rule 8 ("the CLI is its own part", swapped apart from the sidebar) now holds through it.
-  While am is not installed, the pack's installer and updater create the `am` command link to the
-  pack's own CLI copy, never over a file or a link that is not theirs; once am is installed, am owns
-  the link (am takes it from the pack, and hands it back on uninstall).
+  While am is not installed, the pack's installer, its updater and any start of the pack's CLI
+  create a missing `am` command link to the pack's own CLI copy, never over a file or a link that is
+  not theirs and only for a pack the install record lists (a pack with no record gets none); a link
+  the person removed comes back at the next start, by design, since the pack owns it while am is
+  absent; once am is installed, am owns the link (am takes it from the pack, and hands it back on
+  uninstall).
 - Every `vX.Y.Z` release attaches `automagik-am-<v>.tgz`, whatever its lane kind. This amends
   RFC 0011, where a release attaches only the parts whose paths changed: am is the one part every
   release carries, and delivery 1 changes `release.yml` and `lane.ts` to match. Its code is the

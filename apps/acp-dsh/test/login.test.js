@@ -207,7 +207,7 @@ test('Claude accepts only its complete code and sends it directly to the origina
   assert.equal(existsSync(browserDirectory), false)
 })
 
-test('H4: a CLI that stays silent after the code is checked after the answer timeout, never left waiting', async t => {
+test('H4: a CLI that stays silent after the code fails at the absolute confirmation deadline', async t => {
   for (const signedIn of [false, true]) {
     const h = harness()
     t.after(() => h.logins.dispose())
@@ -224,9 +224,9 @@ test('H4: a CLI that stays silent after the code is checked after the answer tim
     h.clock.advance(ANSWER_TIMEOUT_MS - 5000)
     await settle()
     const view = h.logins.status(CLAUDE, started.attemptId)
-    assert.equal(view.status, signedIn ? 'ready' : 'failed')
+    assert.equal(view.status, 'failed')
     assert.ok(child.kills.includes('SIGTERM'))
-    assert.equal(h.ready.length, signedIn ? 1 : 0)
+    assert.equal(h.ready.length, 0)
   }
   assert.ok(ANSWER_TIMEOUT_MS >= 60_000 && ANSWER_TIMEOUT_MS <= 90_000)
 })
@@ -580,3 +580,66 @@ test('loginTextMatches: a megabyte of text costs one hash per distinct candidate
   // A token that only starts like the repeated one is its own candidate.
   assert.equal(counted(`#${other} #${other.slice(0, -1)}Z #${other}`).hashes, 2)
 })
+
+test('confirmation succeeds before the absolute deadline without renewing it at CLI exit', async t => {
+  const activity = []
+  const h = harness({ onActivity: value => activity.push(value) })
+  t.after(() => h.logins.dispose())
+  const start = h.logins.start(CLAUDE)
+  await settle()
+  const child = h.children[0].child
+  showClaudeLink(child)
+  assert.deepEqual(h.logins.activity(), { active: 1, confirming: 0 })
+  h.logins.answer(CLAUDE, start.attemptId, `code#${STATE}`)
+  const until = h.logins.activity().confirmingUntil
+  h.clock.advance(ANSWER_TIMEOUT_MS - 1)
+  h.authenticated(true)
+  child.close(0)
+  await settle()
+  assert.equal(h.logins.status(CLAUDE, start.attemptId).status, 'ready')
+  assert.equal(h.ready.length, 1)
+  assert.equal(activity.filter(value => value.confirming > 0).every(value => value.confirmingUntil === until), true)
+  assert.deepEqual(h.logins.activity(), { active: 0, confirming: 0 })
+})
+
+for (const late of ['signedIn', 'onReady']) {
+  test(`absolute confirmation expiry fences deferred ${late}, including a replacement attempt`, async t => {
+    const gate = deferred()
+    let checking = false
+    let commits = 0
+    let guard
+    const h = harness({
+      signedIn: async () => checking ? (late === 'signedIn' ? gate.promise : true) : false,
+      onReady: async (_id, _selected, { valid }) => {
+        guard = valid
+        await gate.promise
+        if (valid()) commits++
+      },
+    })
+    t.after(() => h.logins.dispose())
+    const start = h.logins.start(CLAUDE)
+    await settle()
+    const child = h.children[0].child
+    showClaudeLink(child)
+    h.logins.answer(CLAUDE, start.attemptId, `code#${STATE}`)
+    const deadline = h.logins.activity().confirmingUntil
+    h.clock.advance(20_000)
+    checking = true
+    child.close(0)
+    await settle()
+    assert.equal(h.logins.activity().confirmingUntil, deadline)
+    h.clock.advance(ANSWER_TIMEOUT_MS - 20_000)
+    assert.equal(h.logins.status(CLAUDE, start.attemptId).status, 'failed')
+    assert.deepEqual(h.logins.activity(), { active: 0, confirming: 0 })
+    if (guard) assert.equal(guard(), false)
+    checking = false
+    const replacement = h.logins.start(CLAUDE)
+    await settle()
+    gate.resolve(true)
+    await settle()
+    assert.equal(commits, 0)
+    assert.notEqual(replacement.attemptId, start.attemptId)
+    assert.equal(h.logins.current(CLAUDE).attemptId, replacement.attemptId)
+    assert.equal(h.logins.current(CLAUDE).status, 'starting')
+  })
+}

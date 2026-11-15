@@ -82,6 +82,7 @@ class WriteGuard {
     this.original = original
     this.own = own
     this.holders = 0
+    this.listeners = new Set()
     this.active = false
     this.log = () => {}
     this.append = (type, data, ...options) => Array.isArray(type) ? this.writeBatch(type) : this.write(type, data, options)
@@ -149,12 +150,21 @@ class WriteGuard {
     return this.turn !== undefined && this.step !== undefined ? { turn: this.turn, step: this.step } : undefined
   }
 
+  /** Wake bridge calls only after the Session has committed its rows. */
+  notify(events) {
+    for (const listener of this.listeners) {
+      try { listener(events) } catch {}
+    }
+  }
+
   /** Write through to the Session and keep the books. */
   commit(type, data, options = []) {
     const event = this.original.call(this.session, type, data, ...options)
     // A Session returns the committed event; anything else that stands in for one (a host that
     // answers only a seq) is read as the row that was asked for.
-    this.observe(typeof event?.type === 'string' ? event : { type, data, seq: event?.seq, ...options[0] })
+    const committed = typeof event?.type === 'string' ? event : { type, data, seq: event?.seq, ...options[0] }
+    this.observe(committed)
+    this.notify([committed])
     return event
   }
 
@@ -214,6 +224,7 @@ class WriteGuard {
     // both its log and this guard's books untouched; repair reports follow only a commit.
     const committed = this.original.call(this.session, rows)
     for (const event of committed) this.observe(event)
+    this.notify(committed)
     for (const [kind, detail] of reports) this.report(kind, detail)
     for (const message of logs) { try { this.log(message) } catch {} }
     return selected.map(event => event?.dropped === true ? event : committed[event.seq - start])
@@ -393,7 +404,7 @@ class WriteGuard {
  * Guard one Session's writes for as long as something holds it (one hold per live bridge).
  * @param {any} session the DSH Session a bridge writes on
  * @param {{ log?: (message: string) => void }} [options]
- * @returns {{ release(): void } | undefined} the hold; undefined when the Session cannot be guarded
+ * @returns {{ release(): void, subscribe(listener: Function): Function } | undefined} the hold; undefined when the Session cannot be guarded
  */
 export function guardSession(session, { log } = {}) {
   if (session === undefined || session === null || typeof session.append !== 'function') return undefined
@@ -406,6 +417,13 @@ export function guardSession(session, { log } = {}) {
     guard.hold(log)
     let released = false
     return {
+      // A guard an older copy of this module left on the Session (a plugin reload with a call
+      // in flight) has no listeners: the caller then polls instead.
+      subscribe(listener) {
+        if (!(guard.listeners instanceof Set) || typeof guard.notify !== 'function') return undefined
+        guard.listeners.add(listener)
+        return () => guard.listeners.delete(listener)
+      },
       release() {
         if (released) return
         released = true

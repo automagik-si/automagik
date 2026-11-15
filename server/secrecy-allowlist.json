@@ -63,6 +63,13 @@
     "fileSha256": "0bea03629341de18dc90bdfc1e67a2f3b791e31ef9fe22888c288226e8bd5b15"
   },
   {
+    "file": "opt/automagik/runtime/node_modules/@img/sharp-wasm32/lib/sharp-wasm32-0.35.5.node.js",
+    "rule": "home-path",
+    "match": "/home/web_user",
+    "reason": "The locked @img/sharp-wasm32 0.35.5 Emscripten runtime's default directory and HOME, not a host account; exact path, matched bytes and complete-file digest verified against the upstream tarball",
+    "fileSha256": "1904293fc3f6b0d2abfec1fce156e43f2c309ee13f79498d4efdf0a931b52e5f"
+  },
+  {
     "file": "opt/automagik/runtime/node_modules/@opentelemetry/semantic-conventions/dist/experimental_attributes.cjs",
     "rule": "home-path",
     "match": "/home/user",

@@ -41,6 +41,22 @@ const MAIN_RULES = [
 
 export function install(rt) {
   const { ctx } = rt
+  const attachIdentity = (sub) => {
+    const off = sub.acpAgents?.botIdentity?.(sessionId => {
+      const owner = rt.selfOf(sessionId)
+      const bot = owner === undefined ? undefined : rt.botOf(owner)
+      if (bot === undefined) return undefined
+      const { name, role, instructions } = bot
+      return { name, role, instructions }
+    })
+    if (typeof off === 'function') sub.effect(() => off, 'ds-bot: ACP identity')
+  }
+  if (typeof ctx.inject === 'function') ctx.inject(['acpAgents'], attachIdentity)
+  else if (ctx.get?.('acpAgents') !== undefined) {
+    attachIdentity({
+      acpAgents: ctx.get('acpAgents'), effect: (execute, label) => ctx.effect(execute, label),
+    })
+  }
 
   // A group Session renders exactly its Bot's text, so both share one cached prefix.
   const promptFor = (id) => {

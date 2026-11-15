@@ -431,6 +431,10 @@ test('a Bot cut off at the output limit with nothing written moves on to a fresh
   }
   await until(() => host.state().bots.b.sessionId === 's1')
 
+  // The archive lands after the move and its task move; wait for it before checking
+  // the rest of the switch.
+  await until(() => host.archived.length === 1)
+
   // The diagnostics name the route and the input size, so a wrong window is findable.
   const entries = (await host.rt.diagnostics.entries()).filter(entry => entry.code === 'MAX_TOKENS')
   assert.equal(entries.length, 2)
@@ -492,6 +496,9 @@ test('a group conversation cut off with nothing written moves on too', async (t)
     await settle()
   }
   await until(() => host.state().rooms.r1.sessions.b === 's1')
+  // The archive lands after the room move and its task move; wait for it before
+  // checking the fresh part's segment.
+  await until(() => host.archived.length === 1)
   assert.equal(host.state().rooms.r1.segments.b[0].fallback, 'cutoff')
   // The old part is archived just after the switch is saved.
   await until(() => host.archived.length > 0)

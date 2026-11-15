@@ -19,8 +19,9 @@ name: Server image
 #
 # A release event uses the release's own version as the content when it carries plugins.json,
 # with the same composite tag and labels; a release without it builds and pushes nothing. A
-# pull_request or push only builds and scans, pinning the plugins from the newest release that
-# has them.
+# pull_request packs the committed checkout for a nonpublishing test image. A push retains
+# release inputs: the current version when it has plugins, otherwise the newest stable plugin
+# release. Its path filter and release resolution are unchanged; old release bytes may fail.
 #
 # A run that pushes also records the pushed manifest digest on the content release itself: the
 # asset server-image.json (server/image-record.mjs), on a release event and on a dispatch alike,
@@ -67,6 +68,15 @@ name: Server image
 on:
   pull_request:
     paths:
+      - apps/*-dsh/**
+      - package.json
+      - bun.lock
+      - scripts/server-checkout.ts
+      - scripts/server-checkout.test.ts
+      - scripts/server-checkout-workflow.test.ts
+      - scripts/release-plugins.ts
+      - scripts/marketplace.ts
+      - scripts/version.ts
       - server/**
       - apps/desktop/runtime/package.json
       - apps/desktop/runtime/package-lock.json
@@ -119,6 +129,7 @@ jobs:
       revision: ${{ steps.gate.outputs.revision }}
       publish: ${{ steps.gate.outputs.publish }}
       latest: ${{ steps.gate.outputs.latest }}
+      source: ${{ steps.gate.outputs.source }}
     env:
       DO_NOT_TRACK: '1'
     steps:
@@ -158,6 +169,8 @@ jobs:
           build=true
           publish=false
           latest=false
+          source=release
+          if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then exit 1; fi
           has_plugins() {
             gh release view "$1" --repo "${REPOSITORY}" --json assets --jq '.assets[].name' | grep -qx plugins.json
           }
@@ -175,6 +188,10 @@ jobs:
             if has_plugins "v${version}"; then echo "${version}"; else newest_plugins; fi
           }
           case "${EVENT}" in
+            pull_request)
+              content="${version}"
+              source=checkout
+              ;;
             workflow_dispatch)
               case "${REF}" in
                 refs/heads/dev) ;;
@@ -226,8 +243,8 @@ jobs:
                 build=false
               fi
               ;;
-            *)
-              # pull_request and push: build and scan only. A version without plugins (a patch
+            push)
+              # Push: build and scan only. A version without plugins (a patch
               # merged into dev) still builds, pinned to the newest release that has them.
               content="$(resolve_content)"
               if [[ -z "${content}" ]]; then
@@ -235,9 +252,14 @@ jobs:
                 exit 1
               fi
               ;;
+            *)
+              echo "::error::unsupported event ${EVENT}"
+              exit 1
+              ;;
           esac
           if [[ -n "${content}" ]]; then
             tag="${content}-${short}"
+            if [[ "${source}" == checkout ]]; then tag="checkout-${revision}"; fi
             if [[ ! "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
               echo "::error::cannot form a Docker tag from content ${content} and commit ${revision}"
               exit 1
@@ -254,11 +276,29 @@ jobs:
             echo "build=${build}"
             echo "publish=${publish}"
             echo "latest=${latest}"
+            echo "source=${source}"
           } >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
+
+      # releasePlugins imports the locked root marketplace tooling. No plugin installs/hooks.
+      - name: Install locked checkout tooling
+        if: github.event_name == 'pull_request'
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Pack committed checkout inputs
+        id: checkout-input
+        if: github.event_name == 'pull_request'
+        env:
+          EVENT: ${{ github.event_name }}
+          REVISION: ${{ github.sha }}
+        run: bun scripts/server-checkout.ts "${EVENT}" "${REVISION}"
+
+      - name: Checkout input tests
+        if: github.event_name == 'pull_request'
+        run: bun test scripts/server-checkout.test.ts scripts/server-checkout-workflow.test.ts
 
       - name: Install locked gate dependencies
         run: bun install --cwd server --frozen-lockfile --ignore-scripts --linker hoisted
@@ -297,9 +337,37 @@ jobs:
           CONTENT: ${{ steps.gate.outputs.content }}
           TAG: ${{ steps.gate.outputs.tag }}
           REVISION: ${{ steps.gate.outputs.revision }}
+          EVENT: ${{ github.event_name }}
+          INPUT_KIND: ${{ steps.gate.outputs.source }}
+          INPUT_MANIFEST: ${{ steps.checkout-input.outputs.manifest }}
         run: |
+          set -euo pipefail
+          image_version="${CONTENT}"
+          if [[ "${INPUT_KIND}" == checkout ]]; then image_version="checkout-${REVISION}"; fi
           node server/build.mjs --tag "automagik-server:${TAG}" \
-            --version "${CONTENT}" --image-version "${CONTENT}" --revision "${REVISION}"
+            --version "${CONTENT}" --image-version "${image_version}" --revision "${REVISION}" \
+            --input-kind "${INPUT_KIND}" --event "${EVENT}" --input-manifest "${INPUT_MANIFEST}"
+
+      - name: Prove the installed checkout child and image identity
+        if: github.event_name == 'pull_request'
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_KIND: ${{ steps.gate.outputs.source }}
+          TAG: ${{ steps.gate.outputs.tag }}
+          CONTENT: ${{ steps.gate.outputs.content }}
+          REVISION: ${{ github.sha }}
+          INPUT_MANIFEST: ${{ steps.checkout-input.outputs.manifest }}
+          CHILD_SHA: ${{ steps.checkout-input.outputs.child }}
+        run: node server/image-source.mjs checkout
+
+      - name: Keep the checkout image proof
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: server-checkout-proof-${{ github.sha }}
+          path: checkout-image-proof.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Smoke
         if: steps.gate.outputs.build == 'true'
@@ -340,13 +408,13 @@ jobs:
           retention-days: 7
 
       - name: Save the scanned image for the publish job
-        if: steps.gate.outputs.publish == 'true'
+        if: steps.gate.outputs.publish == 'true' && steps.gate.outputs.source == 'release' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         env:
           TAG: ${{ steps.gate.outputs.tag }}
         run: docker save "automagik-server:${TAG}" | gzip -1 > server-image.tar.gz
 
       - name: Keep the image
-        if: steps.gate.outputs.publish == 'true'
+        if: steps.gate.outputs.publish == 'true' && steps.gate.outputs.source == 'release' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: server-image-${{ steps.gate.outputs.tag }}
@@ -364,6 +432,8 @@ jobs:
       packages: write
     env:
       DO_NOT_TRACK: '1'
+      EVENT: ${{ github.event_name }}
+      INPUT_KIND: ${{ needs.image.outputs.source }}
       VERSION: ${{ needs.image.outputs.version }}
       CONTENT: ${{ needs.image.outputs.content }}
       TAG: ${{ needs.image.outputs.tag }}
@@ -381,6 +451,9 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Refuse non-release publication before loading artifacts
+        run: node server/image-source.mjs check-publish
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: server-image-${{ needs.image.outputs.tag }}
@@ -388,6 +461,9 @@ jobs:
 
       - name: Load the scanned image
         run: gunzip -c server-image.tar.gz | docker load
+
+      - name: Verify the loaded candidate source before login
+        run: node server/image-source.mjs release
 
       # The bytes that will be pushed, scanned again after the round trip: a hit here still
       # precedes the login and the push below.

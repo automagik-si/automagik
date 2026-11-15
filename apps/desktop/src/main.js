@@ -38,9 +38,11 @@ import { LOOK_EVERY_MS, readBusy } from './idle.js'
 import { appMenuTemplate } from './menu.js'
 import { sendPaneClose } from './pane-close.js'
 import { closeAfterFade, createQuitGuard, liveBusy, quitPrompt, requestQuit, surfaceWindow } from './quit-guard.js'
-import { applyNow, applyStaged, appStopped, causeOf, changesOf, stillIdle, readAutoApply, settingsFileOf, writeAutoApply } from './auto-apply.js'
+import { applyNow, applyStaged, appStopped, causeOf, changesOf, confirmationBudget, readAutoApply, settingsFileOf, writeAutoApply } from './auto-apply.js'
 import { readChoices, writeOverlay } from './privacy.js'
 import { draftsFileOf, PAGE_DRAFTS, saveDrafts, takeDrafts } from './drafts.js'
+import { prepareRestart } from './prepare-restart.js'
+import { forceUpdate } from './force-update.js'
 import { CHECK_EVERY_MS, compareVersions, isReleasePage, startUpdates, updateMode } from './update.js'
 import {
   DSH_TUI_LABEL, DSH_TUI_LOG, dshTuiModuleDir, dshTuiRunnerOf, dshTuiSupported, ensurePathLine,
@@ -92,6 +94,10 @@ let checkFailed = false
 // The last look at the lanes could not read the lane of a publisher whose plugins are installed
 // (lookOnce).
 let laneFailed = false
+const laneDecisions = new Map(PUBLISHERS.map(publisher => [publisher.publisher, { reason: 'not-checked', plugins: [] }]))
+let forceState
+let forcing = null
+let laneOutcome
 // logs/start.log (timeline.js): a start's steps from the process's own start, and the way out
 // (a quit, or a restart into an update) from the moment it was asked for.
 const startLog = (line) => { try { appendFileSync(join(home, 'logs', 'start.log'), line) } catch {} }
@@ -340,6 +346,7 @@ function spawnDsh(port, steps) {
     run: dshProcess, portFile: portFileOf(home), node: process.execPath, bin: resources.bin, env,
     urlFile, port, onPort, onUnkept, cwd: home, log, privacy: overlay,
     onSpawn: (child) => {
+      laneConfirmation.reset()
       child.on('message', message => answerDsh(child, message))
       steps.mark('dsh spawned')
     },
@@ -464,6 +471,7 @@ async function teamDrawn() {
 // What the lane has waiting, and what it changes in the profile as it is now.
 function readStaged() {
   laneReady = stagedOf(home)
+  laneConfirmation.sync({ child: dshProcess.child, since: dshProcess.since, staged: laneReady })
   laneWaiting = laneReady && laneProfile ? changesOf(laneReady.plugins, installedVersions(laneProfile, laneReady.plugins.map(plugin => plugin.name))) : []
 }
 
@@ -492,7 +500,8 @@ async function lookOnce() {
   if (!app.isPackaged || !laneProfile || !laneDsh || laneTrial === 'applied' || laneTrial === 'trial' || laneApplying) return Boolean(laneReady)
   for (const publisher of PUBLISHERS) {
     try {
-      const found = await checkLane({ publisher, appVersion: app.getVersion(), dshVersion: laneDsh, installed: installedVersions(laneProfile, publisher.plugins), ...laneMemory(home, publisher.publisher) })
+      const found = await checkLane({ publisher, onDecision: (decision, version) => laneDecisions.set(publisher.publisher, { ...decision, version }), appVersion: app.getVersion(), dshVersion: laneDsh, installed: installedVersions(laneProfile, publisher.plugins), ...laneMemory(home, publisher.publisher) })
+      publishUpdate()
       if (!found || stagedVersion(home, publisher.publisher) === found.version) continue
       laneLog(`lane: ${publisher.publisher} ${found.version} is out; downloading ${found.plugins.map(plugin => `${plugin.name} ${plugin.version}`).join(', ')}`)
       const changes = changesOf(found.plugins, installedVersions(laneProfile, publisher.plugins))
@@ -507,6 +516,7 @@ async function lookOnce() {
       laneLog(`lane: ${found.version} is ready${readAutoApply(settingsFileOf(home)) ? ', and goes in by itself once no agent is at work' : ' and goes in at the next start'}`)
       publishUpdate()
     } catch (error) {
+      laneDecisions.set(publisher.publisher, { ...laneDecisions.get(publisher.publisher), reason: 'check-failed' })
       // A lane nothing here is installed from has no update to miss.
       if (Object.keys(installedVersions(laneProfile, publisher.plugins)).length > 0) laneFailed = true
       laneLog(`lane: ${publisher.publisher}: ${error.message}`)
@@ -524,7 +534,7 @@ function restartForLane({ away = false, why } = {}) {
   update = { ...update, state: 'restarting', version: laneReady?.version ?? update?.version }
   publishUpdate()
   void fade(window, { to: 0, reduced: lessMotion() })
-    .then(async () => { out.mark('window gone'); await keepPageDrafts(); return dshProcess.stop() })
+    .then(async () => { out.mark('window gone'); return prepareAndStop('restart') })
     .finally(() => {
       out.mark('dsh stopped')
       app.relaunch()
@@ -539,6 +549,24 @@ const changeText = changes => changes.map(({ name, from, to }) => `${PLUGIN_NAME
 // Put the staged plugins in now, with DSH restarted alone (auto-apply.js): the window stays, the
 // frame says what is updating while DSH is down, and the page loads again into the new plugins.
 let applyingLane = null
+const laneConfirmation = confirmationBudget({ wake: () => lookForAutoApply() })
+function autoApplyReason({ recheck = false } = {}) {
+  if (quitting || !window || !page) return 'app stopping'
+  return applyNow({
+    staged: laneReady, auto: readAutoApply(settingsFileOf(home)),
+    busy: laneConfirmation.read(readBusy(busyFileOf(home)), {
+      child: dshProcess.child, since: dshProcess.since, staged: laneReady,
+    }),
+    trial: laneTrial, fetching: laneFetching,
+    appUpdate: Boolean(updates?.ready) || update?.state === 'restarting',
+    applying: (!recheck && Boolean(laneApplying)) || Boolean(forcing),
+    idleMs: powerMonitor.getSystemIdleTime() * 1000,
+    focused: window.isFocused() === true,
+  })
+}
+function lookForAutoApply() {
+  if (autoApplyReason() === 'apply') void applyLaneNow({ auto: true })
+}
 // `auto`: the minute's look found a safe moment, and the moment is checked again before DSH stops.
 const applyLaneNow = ({ auto = false } = {}) => (applyingLane ??= applyLane({ auto }).finally(() => { applyingLane = null }))
 async function applyLane({ auto }) {
@@ -548,19 +576,24 @@ async function applyLane({ auto }) {
   laneLog(`lane: ${laneReady.version} goes in now (${text}); DSH restarts, the window stays`)
   publishUpdate()
   let outcome = 'down'
+  let rolledBack = false
   try {
     // The sidebar says it first.
     await new Promise(resolve => setTimeout(resolve, RESTART_NOTICE_MS))
     // An agent started meanwhile: the update waits for the next safe moment.
-    if (auto && !stillIdle(readBusy(busyFileOf(home)))) {
+    if (auto && autoApplyReason({ recheck: true }) !== 'apply') {
       laneLog('lane: an agent started meanwhile; the plugins wait for the next moment no agent is at work')
       outcome = 'waiting'
     } else {
+      laneConfirmation.reset()
       outcome = await applyStaged({
         cycle: prepare => cycleDsh(prepare, `Updating ${text}…`),
-        beforeStart: () => (laneTrial = beforeStart({ home, target: laneProfile, log: laneLog })),
+        beforeStart: () => {
+          laneTrial = beforeStart({ home, target: laneProfile, log: laneLog, onRollback: () => { rolledBack = true } })
+          return laneTrial
+        },
         confirm: () => { confirmLane(home); laneTrial = 'good' },
-        trialFailed: () => trialFailed(home),
+        trialFailed: () => { rolledBack = true; trialFailed(home) },
         // A quit while the page draws is no verdict on the plugins.
         judge: async () => { if (await teamDrawn()) return true; if (quitting) throw appStopped('the app is quitting'); return false },
         log: laneLog,
@@ -571,6 +604,7 @@ async function applyLane({ auto }) {
   } finally {
     laneApplying = null
   }
+  laneOutcome = rolledBack ? 'restored' : outcome
   if (outcome === 'waiting') return void publishUpdate()
   laneLog(`lane: the restart of DSH for the plugins ended: ${outcome}`)
   if (outcome === 'down') return restartForLane({ why: 'lane, DSH down' })
@@ -581,7 +615,7 @@ async function applyLane({ auto }) {
 
 // Stop DSH, run `prepare` while it is down, start it again on its port and load the page into it.
 // The frame shows `status` meanwhile. Answers what `prepare` answered.
-async function cycleDsh(prepare, status) {
+async function cycleDsh(prepare, status, reason = forcing ? 'force' : 'lane') {
   const out = steps('dsh restart', { write: startLog, since: Date.now() })
   restartingDsh = true
   try {
@@ -591,8 +625,7 @@ async function cycleDsh(prepare, status) {
     sendState({ ready: false, status })
     // The Bot team opens the same chat again once the page is back (bots-dsh reopen.js).
     await page?.webContents.executeJavaScript("try { sessionStorage.setItem('omni-ui:reopen', '1') } catch {}").catch(() => {})
-    await keepPageDrafts()
-    await dshProcess.stop()
+    await prepareAndStop(reason)
     out.mark('dsh stopped')
     if (quitting) throw appStopped('the app is quitting')
     dshProcess = dshRun()
@@ -644,20 +677,7 @@ function watchUpdates() {
   setInterval(() => void lookAtLanes(), CHECK_EVERY_MS).unref?.()
   // Plugins the lane staged go in by themselves once no agent is at work (auto-apply.js), with
   // DSH restarted alone; switched off, they wait for a Restart, a quit or the next start.
-  setInterval(() => {
-    const why = applyNow({
-      staged: laneReady,
-      auto: readAutoApply(settingsFileOf(home)),
-      busy: readBusy(busyFileOf(home)),
-      trial: laneTrial,
-      fetching: laneFetching,
-      appUpdate: Boolean(updates?.ready) || update?.state === 'restarting',
-      applying: Boolean(laneApplying),
-      idleMs: powerMonitor.getSystemIdleTime() * 1000,
-      focused: window?.isFocused() === true,
-    })
-    if (why === 'apply') void applyLaneNow({ auto: true })
-  }, LOOK_EVERY_MS).unref?.()
+  setInterval(lookForAutoApply, LOOK_EVERY_MS).unref?.()
   // A downloaded app update never goes in by itself (#859): the app keeps running the version it
   // has, the sidebar says "Restart to update", and it installs when the person presses that or
   // quits the app.
@@ -665,10 +685,10 @@ function watchUpdates() {
 
 // The update shows in the page's sidebar (the Bot team's, bottom left, as in DSH's own app),
 // through the page's preload (preload.cjs `omniDesktop.updates`).
-const presentUpdate = () => updatePresentation(update, {
+const presentUpdate = () => ({ ...updatePresentation(update, {
   checking, failed: checkFailed, plugins: laneReady?.version, fetching: laneFetching,
   lane: { changes: laneApplying ?? laneWaiting, auto: readAutoApply(settingsFileOf(home)), applying: Boolean(laneApplying) },
-})
+}), ...(forceState ? { force: forceState } : {}) })
 function publishUpdate() {
   if (page && !page.webContents.isDestroyed()) page.webContents.send('automagik-updates', presentUpdate())
 }
@@ -708,11 +728,58 @@ async function keepPageDrafts() {
   } catch {}
 }
 
+// Before DSH stops for an update, a lane, a restart or a quit: the drafts are kept, then DSH's
+// plugins get a bounded moment to end sign-ins and conversations cleanly (prepare-restart.js).
+// A plugin that does not answer in time changes nothing: the stop goes on.
+async function prepareAndStop(reason, stop = () => dshProcess.stop()) {
+  await keepPageDrafts()
+  const outcome = await prepareRestart(dshProcess.child ?? dsh?.child, { reason })
+  laneLog(`prepare restart: ${outcome.ok ? 'prepared' : outcome.why}`)
+  return stop()
+}
+
+// About's Force update (force-update.js): conversations stop, everything available goes in, and
+// DSH (or the whole app, for an app update) restarts.
+const forceDeps = {
+  appReady: () => Boolean(updates?.ready),
+  appMode: () => updateMode({ packaged: app.isPackaged, platform: process.platform, env: process.env }),
+  check: async () => updates?.check(),
+  waitAppReady: options => updates?.whenReady(options) ?? false,
+  installApp: installUpdate,
+  lookLanes: async () => { await lookAtLanes(); return versionsAnswer({ reason: pluginReason() }).reason },
+  laneStaged: () => Boolean(laneReady),
+  applyLane: async () => { laneOutcome = 'down'; await applyLaneNow({ auto: false }); return laneOutcome },
+  restartDsh: async () => {
+    try { await cycleDsh(() => null, 'Restarting…', 'force') } catch (error) {
+      restartForLane({ why: 'force, DSH down' })
+      throw error
+    }
+  },
+  publish: state => { forceState = state; publishUpdate() },
+  log: laneLog,
+}
+
+ipcMain.handle('automagik-updates-force', (event) => {
+  if (!draftsFrom(event) || quitting) return null
+  return (forcing ??= Promise.resolve(applyingLane).then(() => forceUpdate(forceDeps)).finally(() => { forcing = null }))
+})
+
+// The profile can carry plugins outside the publishers followed by the lane.
+function profilePlugins() {
+  try { return Object.keys(JSON.parse(readFileSync(join(laneProfile, 'package.json'), 'utf8')).dependencies ?? {}) } catch { return [] }
+}
+function pluginReason() {
+  const decisions = PUBLISHERS.filter(publisher => laneProfile && Object.keys(installedVersions(laneProfile, publisher.plugins)).length > 0)
+    .map(publisher => laneDecisions.get(publisher.publisher))
+  const decision = decisions.find(value => value.reason && value.reason !== 'up-to-date')
+  return decision ? { code: decision.reason, params: { line: decision.line, base: decision.base, version: decision.version, app: app.getVersion() } } : null
+}
+
 ipcMain.handle('automagik-updates-status', event => (fromPage(event) ? presentUpdate() : null))
 // The sidebar's update button: restart into a downloaded update, open the release page of one
 // this copy cannot install itself (a deb), or check.
 ipcMain.handle('automagik-updates-open', async (event) => {
-  if (!fromPage(event)) return
+  if (!fromPage(event) || forcing) return
   if (updates?.ready) return installUpdate()
   if (laneReady && update?.state !== 'available') return void applyLaneNow()
   if (update?.state === 'available' && isReleasePage(update.page)) return void shell.openExternal(update.page)
@@ -727,12 +794,16 @@ ipcMain.handle('automagik-updates-check', async (event) => {
 ipcMain.handle('automagik-updates-versions', event => (fromPage(event) ? versionsAnswer({
   app: app.getVersion(),
   dsh: laneDsh,
-  plugins: laneProfile ? installedVersions(laneProfile, PUBLISHERS.flatMap(publisher => publisher.plugins)) : {},
+  plugins: laneProfile ? { ...installedVersions(laneProfile, PUBLISHERS.flatMap(publisher => publisher.plugins)), ...installedVersions(laneProfile, profilePlugins()) } : {},
+  latest: Object.fromEntries([...laneDecisions.values()].flatMap(decision => decision.plugins.map(plugin => [plugin.name, plugin.version]))),
+  reason: pluginReason(),
+  appUpdate: updates?.appUpdate ?? null,
+  force: forceState,
   mode: updateMode({ packaged: app.isPackaged, platform: process.platform, env: process.env }),
 }) : null))
 // The plugins' own notice: put the staged plugins in now, with DSH restarted alone.
 ipcMain.handle('automagik-updates-apply-plugins', (event) => {
-  if (fromPage(event) && laneReady) void applyLaneNow()
+  if (fromPage(event) && laneReady && !forcing) void applyLaneNow()
 })
 // The setting "Apply plugin updates automatically" (About → Updates).
 ipcMain.handle('automagik-updates-auto-apply', (event, on) => {
@@ -936,7 +1007,7 @@ function installUpdate() {
   }
   setTimeout(() => {
     void fade(window, { to: 0, reduced: lessMotion() })
-      .then(async () => { out.mark('window gone'); await keepPageDrafts(); return dshProcess.stop() })
+      .then(async () => { out.mark('window gone'); return prepareAndStop('app-update') })
       .finally(() => {
         out.mark('dsh stopped')
         noteRestart(RESTART_NOTE(), { from: app.getVersion(), to: update?.version })
@@ -1106,6 +1177,6 @@ function stopAndQuit() {
   const out = leave('quit')
   // The window goes at once; dsh stops behind it, so a quit never looks stuck.
   return fade(window, { to: 0, reduced: lessMotion() })
-    .then(async () => { out.mark('window gone'); await keepPageDrafts(); return dshProcess.stop() })
+    .then(async () => { out.mark('window gone'); return prepareAndStop('quit', () => dshProcess.stop()) })
     .finally(() => { out.mark('dsh stopped'); app.quit() })
 }

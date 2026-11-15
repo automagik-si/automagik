@@ -1,9 +1,10 @@
+import { answerGroup, approvalDetail, approvalWhere, groupApprovals, nativeAsk } from './approvals.js'
 import { openStops, stopLine } from './stops.js'
 import { createElement as h, useEffect, useState } from 'react'
 import { BotMark } from './mark.js'
 import { workPhrase } from './cells.js'
 import { endLabel, endOf, railEnded } from './task-card.js'
-import { t } from './i18n.js'
+import { hostText, t } from './i18n.js'
 
 // -------------------------------------------------------------------------
 // Live content belongs to the native tab: the sidebar owns all geometry and focus.
@@ -17,20 +18,27 @@ export function liveOf(work, roster, now = Date.now()) {
   const byId = roster?.byId ?? {}
   const roomsById = roster?.roomsById ?? {}
   const tasks = roster?.tasks ?? {}
-  const needs = (work?.approvals ?? [])
-    .filter(entry => byId[entry.botId])
-    .map((entry) => {
-      // An approval a task raised names the task: the parent Bot alone would hide which
-      // of its tasks is blocked.
-      const task = entry.taskId === undefined ? undefined : tasks[entry.taskId]
-      return {
+  const needs = groupApprovals((work?.approvals ?? []).filter(entry => byId[entry.botId]))
+    .map(({ entries }) => {
+      const entry = entries[0]
+      const detail = approvalDetail(entry)
+      const item = {
         key: `ask:${entry.id}`,
         bot: byId[entry.botId],
-        place: entry.roomId ? roomsById[entry.roomId]?.name : task?.title ?? entry.label,
+        place: entry.roomId ? roomsById[entry.roomId]?.name : tasks[entry.taskId]?.title ?? entry.label,
         tool: entry.tool,
-        ...(entry.child ? { line: t('A subagent wants to use {tool}', { tool: entry.tool }) } : {}),
+        ...(entry.child ? { line: t('A subagent wants to use {tool}', { tool: entry.tool }) }
+          : detail && entry.tool !== 'keep_working' ? { line: `${t('Wants to use {tool}', { tool: entry.tool })} · ${detail}` } : {}),
         open: entry.taskId ?? entry.roomId ?? entry.botId,
+        count: entries.length,
+        entries,
+        detail,
       }
+      if (entries.length === 1) return item
+      const places = [...new Set(entries.map(entry => approvalWhere(entry, roster)).filter(Boolean))]
+      // Merged asks share their reason and target (approvals.js), so the card shows all of both.
+      return { ...item, places, place: places.join(', '), reason: entry.reason ?? '',
+        line: t('{count} requests to use {tool}', { count: entries.length, tool: entry.tool }) }
     })
   for (const entry of openStops(work)) {
     if (!byId[entry.botId]) continue
@@ -63,7 +71,8 @@ export function liveOf(work, roster, now = Date.now()) {
 /** The line under the rail's title: "1 needs you · 2 working", "nothing working". */
 export function liveSummary({ needs, working }) {
   const parts = []
-  if (needs.length > 0) parts.push(t('{count} needs you', { count: needs.length }))
+  const count = needs.reduce((sum, item) => sum + (item.count ?? 1), 0)
+  if (count > 0) parts.push(t('{count} needs you', { count }))
   parts.push(working.length > 0 ? t('{count} working', { count: working.length }) : t('nothing working'))
   return parts.join(' · ')
 }
@@ -82,13 +91,39 @@ function Entry({ item, tone, line, actions }) {
     h('span', { className: 'bt-live-go' }, t('Open')))
 }
 
+function GroupEntry({ item, actions, statusMap }) {
+  const [answering, setAnswering] = useState(false)
+  // All or nothing: a decision on the card is a decision on every ask it counts. When one of
+  // them cannot be answered from this window, the card only opens.
+  const canAnswer = item.entries.every(entry => entry.answerable || nativeAsk(statusMap, entry))
+  const answer = async choice => {
+    if (answering) return
+    setAnswering(true)
+    try { await answerGroup(item.entries, choice, { actions, statusMap }) }
+    finally { setAnswering(false) }
+  }
+  const what = [item.line, item.detail].filter(Boolean).join(' · ')
+  return h('div', { className: 'bt-live-card bt-live-need', role: 'group', 'aria-label': `${item.bot.name} · ${what}`, 'aria-busy': answering || undefined },
+    h('span', { className: 'bt-live-face' }, h(BotMark, { bot: item.bot, size: 28, state: 'alert' })),
+    h('span', { className: 'bt-live-text' },
+      h('span', { className: 'bt-live-name' }, item.bot.name, item.place ? h('span', { className: 'bt-live-place' }, ` · ${item.place}`) : null),
+      h('span', { className: 'bt-live-line' }, item.line),
+      item.reason && item.reason !== item.detail ? h('span', { className: 'bt-live-line' }, hostText(item.reason)) : null,
+      item.detail ? h('span', { className: 'bt-live-line' }, item.detail) : null),
+    h('div', { className: 'bt-q-foot' },
+      canAnswer ? h('button', { type: 'button', className: 'bt-q-btn', disabled: answering, 'aria-label': `${t('Reject')} · ${what}`, onClick: () => answer('reject') }, t('Reject')) : null,
+      canAnswer ? h('button', { type: 'button', className: 'bt-q-submit', disabled: answering, 'aria-label': `${t('Allow once')} · ${what}`, onClick: () => answer('allow') }, t('Allow once')) : null,
+      h('button', { type: 'button', className: 'bt-live-go', onClick: () => actions.openSession(item.open) }, t('Open'))))
+}
+
 function Section({ label, dot, children, empty }) {
   return h('section', { className: 'bt-live-sec' },
     h('h3', { className: `bt-live-label bt-live-dot-${dot}` }, h('i', { 'aria-hidden': true }), label),
     children.length > 0 ? children : h('p', { className: 'bt-live-empty' }, empty))
 }
 
-export function LiveRail({ roster, actions, useWork }) {
+export function LiveRail({ roster, actions, useWork, useSessionStatus }) {
+  const statusMap = useSessionStatus?.(map => map) ?? new Map()
   const work = useWork(value => value)
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -101,7 +136,7 @@ export function LiveRail({ roster, actions, useWork }) {
       h('h2', { className: 'bt-live-title' }, t('Live')),
       h('span', { className: 'bt-live-sum' }, liveSummary(live))),
     h(Section, { label: t('Needs you'), dot: 'need', empty: t('Nothing waiting for you.') },
-      live.needs.map(item => h(Entry, { key: item.key, item, tone: 'need', actions, line: item.line ?? (item.tool ? t('Wants to use {tool}', { tool: item.tool }) : t('Waiting for your answer')) }))),
+      live.needs.map(item => item.count > 1 ? h(GroupEntry, { key: item.key, item, actions, statusMap }) : h(Entry, { key: item.key, item, tone: 'need', actions, line: item.line ?? (item.tool ? t('Wants to use {tool}', { tool: item.tool }) : t('Waiting for your answer')) }))),
     h(Section, { label: t('Working'), dot: 'work', empty: t('Nothing running right now.') },
       live.working.map(item => h(Entry, { key: item.key, item, tone: 'work', actions, line: item.task && item.at ? `${item.phrase} · ${since(item.at, now)}` : item.phrase }))),
     live.ended.length > 0
@@ -130,6 +165,11 @@ export const LIVE_CSS = `
 .bt-live-dot-done i{display:block;background:var(--st-okdot,var(--bt-green))}
 .bt-live-empty{margin:0;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-live-card{display:flex;align-items:center;gap:10px;width:100%;padding:12px 14px;border:1px solid var(--bt-line-2);border-radius:16px;background:var(--bt-sidebar);color:inherit;font:inherit;text-align:left;cursor:pointer}
+div.bt-live-card.bt-live-need{flex-wrap:wrap;cursor:default}
+div.bt-live-card.bt-live-need>.bt-q-foot{flex-basis:100%;align-items:center}
+div.bt-live-card .bt-live-name{white-space:normal}
+div.bt-live-card .bt-live-line{display:block;overflow:visible;overflow-wrap:anywhere;white-space:pre-wrap}
+div.bt-live-card .bt-live-go{padding:0 4px;border:0;background:none;font:inherit;font-weight:600;cursor:pointer}
 .bt-live-card:hover{background:var(--bt-card)}
 .bt-live-need{border-color:color-mix(in srgb,var(--st-warndot,var(--bt-accent)) 60%,transparent);background:var(--bt-card)}
 .bt-live-bad .bt-live-line{color:var(--st-bad-strong,var(--bt-danger))}

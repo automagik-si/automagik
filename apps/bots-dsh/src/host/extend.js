@@ -20,6 +20,7 @@ export function install(rt) {
   const views = []
   const lives = []
   const sessionOwners = []
+  const senders = []
   const rules = []
   const botModels = new Map()
   const add = (list, item) => {
@@ -63,6 +64,15 @@ export function install(rt) {
       return () => { if (botModels.get(kind) === source) botModels.delete(kind) }
     },
   }
+
+  // Apart from rt.hooks, on its own surface: rt.stepHooks.sendsOutside(fn), where fn({ tool, args })
+  // is true for a step that sends to people outside the team (an Omni channel send). Such a step is
+  // hard to undo: Auto never allows it by itself and every asking level asks the person (RFC 0031,
+  // #1092). A hook that throws counts as true. The Bot team names no sender of its own.
+  rt.stepHooks = { sendsOutside: fn => add(senders, fn) }
+  rt.sendsOutside = step => senders.some(fn => {
+    try { return fn({ tool: step.tool, args: step.args }) === true } catch { return true }
+  })
 
   // What channel.js and prompt.js read.
   rt.extended = {
