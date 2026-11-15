@@ -2,12 +2,15 @@
 // (dev/fake-image-agent.mjs) that reports Codex's image tool the way the real adapter does. No
 // real Codex runs, nothing reaches a network, and no Codex home or config is read or written.
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import childProcess from 'node:child_process'
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { chatProfilesConfig, ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import { apply } from '../index.js'
-import { checkFeatures, checkOffered, configArgs, drawImage, FAILED, IMAGE_CHECKS_TIMEOUT_MS, IMAGE_CONFIG, IMAGE_FEATURES_ALSO_OFF, IMAGE_FEATURES_OFF, IMAGE_NESTED_ALLOWED, IMAGE_TITLE, IMAGE_TOOLS_ALLOWED, imageConfig, imageOf, imageOverrides, imageProfile, imagePrompt, imageSetup, imageSupport, isPng, mcpServerNames, nestedTools, readFeatures, readOffered, REFUSED, SIGNED_OUT, STOPPED, TIMED_OUT, toToml, UNAVAILABLE, USAGE_LIMIT } from '../src/host/image.js'
+import { checkFeatures, checkOffered, configArgs, drawImage, FAILED, IMAGE_CHECKS_TIMEOUT_MS, IMAGE_CONFIG, IMAGE_FEATURES_ALSO_OFF, IMAGE_FEATURES_OFF, IMAGE_NESTED_ALLOWED, IMAGE_TITLE, IMAGE_TOOLS_ALLOWED, imageConfig, imageOf, imageOverrides, IMAGE_PROFILE_GRANTS, imageProfileFor, imagePrompt, imageSetup, imageSupport, isPng, mcpServerNames, nestedTools, readFeatures, readOffered, REFUSED, SIGNED_OUT, STOPPED, TIMED_OUT, toToml, UNAVAILABLE, USAGE_LIMIT } from '../src/host/image.js'
 
 const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-image-agent.mjs')
 // The also-off features the fake Codex lists and has not removed (dev/fake-image-agent.mjs).
@@ -598,22 +601,38 @@ test('generateImage draws through the installed connector with the run\'s own co
 })
 
 
-test('the image profile contains only its default, description and two escaped filesystem roots', () => {
-  const profile = imageProfile('image-"quoted"')
-  assert.equal(profile.mode, 'permission-profile:image-"quoted"')
-  assert.equal(profile.config, [
-    'default_permissions = "image-\\"quoted\\""',
-    '[permissions."image-\\"quoted\\""]',
-    "description = 'Draw one image in the scratch folder'",
-    '[permissions."image-\\"quoted\\"".filesystem]',
-    "':root' = 'deny'",
-    "':workspace_roots' = 'read'",
-    '',
-  ].join('\n'))
+test('the home image table holds exactly the two filesystem grants', () => {
+  const hex = 'a'.repeat(32)
+  const config = chatProfilesConfig('/h', hex)
+  assert.equal(config.split(`[permissions.automagik-image-${hex}.filesystem]\n`)[1], "':root' = 'deny'\n':workspace_roots' = 'read'\n")
+  assert.deepEqual(IMAGE_PROFILE_GRANTS, { ':root': 'deny', ':workspace_roots': 'read' })
 })
 
-test('each draw writes a private profile before checks and waits for its mode acknowledgement', async (t) => {
+function homeProfile(run) {
+  const profileModes = ensureChatProfiles(run.home, { platform: 'linux' })
+  const spawn = run.spawn
+  run.spawn = () => { const launch = spawn(); return { ...launch, profileModes, env: { ...launch.env, CODEX_HOME: run.home } } }
+  return imageProfileFor(profileModes)
+}
+
+function observeScratchConfigs(t) {
+  const observations = []
+  const execFile = childProcess.execFile
+  const mock = t.mock.method(childProcess, 'execFile', (command, args, options, callback) => {
+    if (args[0] === FAKE && args[1] === 'cli') {
+      observations.push({ cwd: options.cwd, scratch: existsSync(options.cwd), project: lstatSync(join(options.cwd, '.codex'), { throwIfNoEntry: false }) !== undefined })
+    }
+    return execFile(command, args, options, callback)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { mock.mock.restore(); syncBuiltinESMExports() })
+  return observations
+}
+
+test('each draw uses the home profile before checks and waits for its mode acknowledgement', async (t) => {
+  const observations = observeScratchConfigs(t)
   const run = setup('ok', { FAKE_IMAGE_PROFILE: 'delay' })
+  const profile = homeProfile(run)
   t.after(run.cleanup)
   const logged = []
   const made = await drawImage({ spawn: run.spawn, prompt: 'a fox', scratch: run.scratch, log: line => logged.push(line) })
@@ -622,14 +641,15 @@ test('each draw writes a private profile before checks and waits for its mode ac
   const trace = run.trace()
   const session = trace.find(entry => entry.event === 'new-session')
   assert.match(session.profileId, /^automagik-image-[a-f0-9]{32}$/)
-  assert.equal(session.config, imageProfile(session.profileId).config)
-  if (process.platform !== 'win32') {
-    assert.equal(session.configMode, 0o600)
-    assert.equal(session.directoryMode, 0o700)
-  }
+  assert.equal(session.profileId, profile.id)
+  const config = JSON.parse(session.codexConfig)
+  assert.equal(config.default_permissions, profile.id)
+  assert.deepEqual(config.permissions[profile.id].filesystem, IMAGE_PROFILE_GRANTS)
+  assert.ok(observations.length > 0)
+  assert.deepEqual(observations, trace.filter(entry => entry.event === 'cli').map(entry => ({ cwd: entry.cwd, scratch: true, project: false })))
   for (const check of trace.filter(entry => entry.event === 'cli')) {
     assert.equal(check.cwd, session.cwd)
-    assert.equal(check.config, session.config)
+    if (check.args[0] === 'debug') assert.deepEqual(check.args, ['debug', 'prompt-input', ...configArgs(config)])
   }
   const mode = `permission-profile:${session.profileId}`
   assert.deepEqual(trace.filter(entry => entry.event === 'mode').map(entry => entry.modeId), [mode])
@@ -642,15 +662,16 @@ test('each draw writes a private profile before checks and waits for its mode ac
   assert.equal(existsSync(session.cwd), false)
 })
 
-test('sequential and concurrent draws have fresh profile ids and scratch folders', async (t) => {
+test('sequential and concurrent draws share the home id and have fresh scratch folders', async (t) => {
   const run = setup('ok', { FAKE_IMAGE_PROFILE: 'offer' })
+  homeProfile(run)
   t.after(run.cleanup)
   const draw = () => drawImage({ spawn: run.spawn, prompt: 'a fox', scratch: run.scratch })
   await draw()
   await Promise.all([draw(), draw()])
   const sessions = run.trace().filter(entry => entry.event === 'new-session')
   assert.equal(sessions.length, 3)
-  assert.equal(new Set(sessions.map(entry => entry.profileId)).size, 3)
+  assert.equal(new Set(sessions.map(entry => entry.profileId)).size, 1)
   assert.equal(new Set(sessions.map(entry => entry.cwd)).size, 3)
   for (const session of sessions) assert.equal(existsSync(session.cwd), false)
 })
@@ -658,6 +679,7 @@ test('sequential and concurrent draws have fresh profile ids and scratch folders
 test('a missing or rejected profile falls back to read-only with one private warning and internal status', async (t) => {
   for (const [profile, reason] of [['', 'not offered'], ['reject', 'selection rejected']]) {
     const run = setup('ok', { FAKE_IMAGE_PROFILE: profile })
+    homeProfile(run)
     t.after(run.cleanup)
     const logged = []
     const made = await drawImage({ spawn: run.spawn, prompt: 'private prompt', scratch: run.scratch, log: line => logged.push(line) })
@@ -675,11 +697,14 @@ test('a missing or rejected profile falls back to read-only with one private war
 })
 
 test('Invalid configuration on any successful check refuses the draw and removes its profile', async (t) => {
+  const observations = observeScratchConfigs(t)
   for (const command of ['mcp', 'features', 'debug']) {
+    observations.length = 0
     const run = setup('ok', { FAKE_INVALID_CONFIG: command })
     t.after(run.cleanup)
     await assert.rejects(drawImage({ spawn: run.spawn, prompt: 'a fox', scratch: run.scratch }), error => error.code === UNAVAILABLE && /configuration/.test(error.message))
-    assert.ok(run.trace().some(entry => entry.event === 'cli' && entry.config))
+    assert.ok(observations.length > 0)
+    assert.deepEqual(observations, run.trace().filter(entry => entry.event === 'cli').map(entry => ({ cwd: entry.cwd, scratch: true, project: false })))
     assert.equal(run.trace().some(entry => entry.event === 'start'), false)
     assert.equal(existsSync(join(run.scratches[0], '.codex')), false)
     assert.equal(existsSync(run.scratches[0]), false)
@@ -689,6 +714,7 @@ test('Invalid configuration on any successful check refuses the draw and removes
 test('a failed or aborted profile draw removes the scratch config', async (t) => {
   for (const mode of ['failed', 'hang']) {
     const run = setup(mode, { FAKE_IMAGE_PROFILE: 'offer' })
+    homeProfile(run)
     t.after(run.cleanup)
     const controller = new AbortController()
     const drawing = drawImage({ spawn: run.spawn, prompt: 'a fox', scratch: run.scratch, signal: controller.signal })
@@ -699,7 +725,7 @@ test('a failed or aborted profile draw removes the scratch config', async (t) =>
     try {
       await assert.rejects(drawing, error => error.code === (mode === 'hang' ? STOPPED : FAILED))
     } finally { clearInterval(timer) }
-    assert.ok(run.trace().find(entry => entry.event === 'new-session').config)
+    assert.ok(JSON.parse(run.trace().find(entry => entry.event === 'new-session').codexConfig).default_permissions)
     assert.equal(existsSync(join(run.scratches[0], '.codex')), false)
     assert.equal(existsSync(run.scratches[0]), false)
   }

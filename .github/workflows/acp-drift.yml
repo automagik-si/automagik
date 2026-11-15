@@ -174,6 +174,22 @@ jobs:
             echo "AUTOMAGIK_TEST_CODEX=${RUNNER_TEMP}/acp-clis/node_modules/.bin/codex"
           } >> "$GITHUB_ENV"
 
+      - name: Allow Codex's bundled bwrap user namespace
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          set -euo pipefail
+          bwrap="${RUNNER_TEMP}/acp-clis/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
+          test -x "${bwrap}"
+          # Ubuntu restricts unprofiled user namespaces. Allow this runner's bwrap only;
+          # its mount/network sandbox and the tested Codex read policy still apply.
+          cat > "${RUNNER_TEMP}/acp-clis/bwrap.apparmor" <<EOF
+          abi <abi/4.0>,
+          profile acp-drift-bwrap "${bwrap}" flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r "${RUNNER_TEMP}/acp-clis/bwrap.apparmor"
+
       - name: The suite, the fuzz and the real adapters
         id: run
         env:
@@ -196,6 +212,13 @@ jobs:
             if ! grep -q "^✔ real ${agent}: the adapter answers initialize" "${RUNNER_TEMP}/acp-daily.log"; then
               echo "::error::the real-adapter tests did not run for ${agent}"
               echo "code=3" >> "$GITHUB_OUTPUT"
+            fi
+          done
+          for name in 'the resolved profile is exactly the image grants' 'a wider home table is caught' 'a project layer that widens it is caught' "today's project file is never offered"; do
+            if ! grep -q "^✔ real image lock: ${name}" "${RUNNER_TEMP}/acp-daily.log"; then
+              echo "::error::the real image lock test did not run: ${name}"
+              code=3
+              echo "code=${code}" >> "$GITHUB_OUTPUT"
             fi
           done
 

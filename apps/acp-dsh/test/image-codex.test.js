@@ -12,7 +12,8 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { createInterface } from 'node:readline'
 import { AgentRun } from '../src/host/acp.js'
-import { checkFeatures, checkOffered, configArgs, IMAGE_FEATURES_ALSO_OFF, IMAGE_FEATURES_OFF, imageOverrides, imageProfile, imageSetup, readFeatures, readOffered } from '../src/host/image.js'
+import { checkFeatures, checkOffered, configArgs, IMAGE_FEATURES_ALSO_OFF, IMAGE_FEATURES_OFF, imageProfileFor, imageSetup, readFeatures, readOffered } from '../src/host/image.js'
+import { ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import { isAuthRequired } from '../src/host/names.js'
 
 const ADAPTER = process.env.AUTOMAGIK_TEST_CODEX_ACP
@@ -104,10 +105,9 @@ test('real codex-acp: starts with the run\'s CODEX_CONFIG and stops at the sign-
 test('real Codex: the scratch permission profile is listed and allowed without config warnings', { skip, timeout: 30_000 }, async (t) => {
   const { root, env } = home(t)
   const cwd = realpathSync(join(root, 'cwd'))
-  const profile = imageProfile()
-  mkdirSync(join(cwd, '.codex'), { mode: 0o700 })
-  writeFileSync(join(cwd, '.codex', 'config.toml'), profile.config, { mode: 0o600 })
-  const child = spawn(CODEX, ['app-server', ...configArgs({ projects: imageOverrides({ project: cwd }).projects })], {
+  const profile = imageProfileFor(ensureChatProfiles(env.CODEX_HOME, { codexPath: CODEX }))
+  assert.match(profile.id, /^automagik-image-[a-f0-9]{32}$/)
+  const child = spawn(CODEX, ['app-server'], {
     cwd, env: { PATH: process.env.PATH, ...env, NO_COLOR: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
   })
   const lines = createInterface({ input: child.stdout })
@@ -145,7 +145,7 @@ test('real Codex: the scratch permission profile is listed and allowed without c
   child.stdin.write(`${JSON.stringify({ method: 'initialized', params: {} })}\n`)
   const listed = await request('permissionProfile/list', { cwd })
   const found = listed.data.find(entry => entry.id === profile.id)
-  assert.ok(found, 'the project profile is listed')
+  assert.ok(found, 'the home profile is listed')
   assert.equal(found.allowed, true)
   assert.doesNotMatch(stderr, /Invalid configuration/i)
 })

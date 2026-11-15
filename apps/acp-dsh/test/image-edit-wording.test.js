@@ -5,7 +5,9 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { drawImage, imageProfile, UNAVAILABLE } from '../src/host/image.js'
+import { drawImage, IMAGE_PROFILE_GRANTS, UNAVAILABLE } from '../src/host/image.js'
+import { chatProfilesConfig, ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
+import { realpathSync } from 'node:fs'
 import { AcpAdapter } from '../src/host/adapter.js'
 import { AgentRun } from '../src/host/acp.js'
 
@@ -14,6 +16,7 @@ const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
 for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its locked profile ${mode} retains UNAVAILABLE and a reason and sends no prompt`, async t => {
   const home = await mkdtemp(join(tmpdir(), 'edit-wording-'))
   t.after(() => rm(home, { recursive: true, force: true }))
+  const profileModes = ensureChatProfiles(home, { platform: 'linux' })
   let prompts = 0
   // Keep this refusal test at the CLI boundary: no child transport is needed to
   // exercise the real preflight and the later profile acknowledgement check.
@@ -23,7 +26,7 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
     const answer = args.includes('features')
       ? 'shell_tool stable false\nview_image stable false\nimage_generation stable true\n'
       : args.includes('debug')
-        ? JSON.stringify([{ type: 'additional_tools', role: 'developer', tools: [{ type: 'namespace', name: 'image_gen', description: '', tools: [{ type: 'function', name: 'imagegen', description: '', parameters: { type: 'object' } }] }] }])
+        ? JSON.stringify([{ type: 'additional_tools', role: 'developer', tools: [{ type: 'namespace', name: 'image_gen', description: '', tools: [{ type: 'function', name: 'imagegen', description: '', parameters: { type: 'object' } }] }] }, { type: 'message', content: [{ type: 'input_text', text: `<permission_profile type="managed"><file_system type="restricted"><entry access="deny" escalatable="false"><special>:root</special></entry><entry access="read"><path>${_opts.cwd}</path></entry><entry access="read"><path>${realpathSync(home)}/tmp/arg0-linux/codex-arg0hEg6rp</path></entry></file_system></permission_profile>` }] }])
         : '[]'
     queueMicrotask(() => callback(null, answer, ''))
     return { kill() {} }
@@ -34,8 +37,7 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
   class Run {
     constructor(spec) { this.spec = spec }
     async start() {
-      const config = await readFile(join(this.spec.cwd, '.codex/config.toml'), 'utf8')
-      const id = config.match(/^default_permissions = '([^']+)'/)[1]
+      const id = JSON.parse(this.spec.env.CODEX_CONFIG).default_permissions
       this.modes = { availableModes: [{ id: 'read-only' }, ...(mode === 'selection-rejected' ? [{ id: `permission-profile:${id}` }] : [])] }
     }
     async setMode(id) {
@@ -46,7 +48,7 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
     dispose() {}
   }
   await assert.rejects(drawImage({
-    spawn: () => ({ command: 'test-codex', args: [] }),
+    spawn: () => ({ command: 'test-codex', args: [], profileModes, env: { CODEX_HOME: home } }),
     scratch: () => mkdtemp(join(home, 'scratch-')), Run, log: line => t.diagnostic(line),
     input: { data: PNG, mimeType: 'image/png' }, prompt: 'Make the background blue',
   }), error => {
@@ -62,17 +64,9 @@ for (const mode of ['not-offered', 'selection-rejected']) test(`an edit with its
 })
 
 test('the per-image profile still denies the filesystem root and reads only its scratch workspace', () => {
-  const profile = imageProfile('test-image-profile')
-  assert.equal(profile.mode, 'permission-profile:test-image-profile')
-  assert.equal(profile.config, [
-    "default_permissions = 'test-image-profile'",
-    "[permissions.'test-image-profile']",
-    "description = 'Draw one image in the scratch folder'",
-    "[permissions.'test-image-profile'.filesystem]",
-    "':root' = 'deny'",
-    "':workspace_roots' = 'read'",
-    '',
-  ].join('\n'))
+  const hex = 'a'.repeat(32)
+  assert.deepEqual(IMAGE_PROFILE_GRANTS, { ':root': 'deny', ':workspace_roots': 'read' })
+  assert.equal(chatProfilesConfig('/h', hex).split(`[permissions.automagik-image-${hex}.filesystem]\n`)[1], "':root' = 'deny'\n':workspace_roots' = 'read'\n")
 })
 
 test('all image refusals retain Codex guidance without OpenAI suggestions; isolation stays enabled', async () => {

@@ -36,12 +36,14 @@
 //   the switches say, `ns.name` or a bare name], nested: [names `exec` reaches], hosted: [types
 //   of nameless tools], missing: true (no tool block), item: 'a kind of item', skills: [the
 //   person's skills], sticky: true (a skill turned off by name stays listed) }.
-// FAKE_IMAGE_PROFILE=offer|reject|delay|hang offers the scratch profile; default: old adapter.
-// FAKE_INVALID_CONFIG=mcp|features|debug emits a config warning on that successful check.
+// FAKE_IMAGE_PROFILE=offer|reject|delay|hang offers the selected image profile only from the home.
+// FAKE_PROFILE_RESOLVED=wider|write|missing|odd changes the resolved profile in prompt-input.
+// FAKE_INVALID_CONFIG=mcp|features|debug emits a config warning on that successful check;
+// `profile` warns only when default_permissions is passed in the check arguments.
 // FAKE_IMAGE_HOLD=1 keeps the turn open after the image, until it is cancelled.
 // FAKE_IMAGE_TRACE names a file the agent appends what it was asked to (cli arguments, cwd,
 // servers, mode, CODEX_CONFIG, CODEX_HOME, permission answers, cancel, close) as JSON lines.
-import { appendFileSync, readFileSync, statSync } from 'node:fs'
+import { appendFileSync, readFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, RequestError, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
@@ -114,21 +116,27 @@ function promptInput(args) {
     ...(changes.item === undefined ? [] : [{ type: changes.item }]),
     message('developer', 'You are Codex.'),
     ...(skills.length === 0 ? [] : [message('developer', `<skills_instructions>\n## Skills\n### Skill roots\n- \`r0\` = \`/fake-codex-home/skills\`\n### Available skills\n${skills.map(name => `- ${name}: A skill to read. (file: r0/${name}/SKILL.md)`).join('\n')}\n</skills_instructions>`)]),
-    message('user', '<environment_context>\n  <cwd>/fake</cwd>\n</environment_context>'),
+    message('user', `<environment_context>\n  <cwd>/fake</cwd>\n${resolvedProfile(args)}</environment_context>`),
   ])
 }
-function profileAt(cwd) {
-  const file = join(cwd, '.codex', 'config.toml')
+const xml = value => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
+const profileArg = args => args.find((arg, index) => args[index - 1] === '-c' && arg.startsWith('default_permissions='))
+function resolvedProfile(args) {
+  const how = process.env.FAKE_PROFILE_RESOLVED
+  if (!profileArg(args) || !args.some((arg, index) => args[index - 1] === '-c' && arg.startsWith('permissions=')) || how === 'missing') return ''
+  const scratch = xml(realpathSync(process.cwd()))
+  const home = xml(realpathSync(process.env.CODEX_HOME))
+  return `<permission_profile type="managed"><file_system type="restricted"><entry access="deny" escalatable="false"><special>:root</special></entry><entry access="${how === 'write' ? 'write' : 'read'}"><path>${scratch}</path></entry><entry access="read"><path>${home}/tmp/arg0-linux/codex-arg0FAKE01</path></entry>${how === 'wider' ? '<entry access="read"><path>/fake-outside</path></entry>' : ''}${how === 'odd' ? '<unknown />' : ''}</file_system></permission_profile>`
+}
+function homeProfiles() {
   try {
-    const config = readFileSync(file, 'utf8')
-    const id = /default_permissions = ['"]([^'"]+)['"]/.exec(config)?.[1]
-    return { config, profileId: id, configMode: statSync(file).mode & 0o777, directoryMode: statSync(join(cwd, '.codex')).mode & 0o777 }
-  } catch { return {} }
+    return [...readFileSync(join(process.env.CODEX_HOME, 'config.toml'), 'utf8').matchAll(/^\[permissions\.(automagik-image-[a-f0-9]{32})\]$/gm)].map(match => match[1])
+  } catch { return [] }
 }
 if (process.argv[2] === 'cli') {
   const args = process.argv.slice(3)
-  trace({ event: 'cli', args, cwd: process.cwd(), ...profileAt(process.cwd()) })
-  if (process.env.FAKE_INVALID_CONFIG === args[0]) process.stderr.write('Invalid configuration; using defaults\n')
+  trace({ event: 'cli', args, cwd: process.cwd(), homeProfiles: homeProfiles() })
+  if (process.env.FAKE_INVALID_CONFIG === args[0] || (process.env.FAKE_INVALID_CONFIG === 'profile' && profileArg(args))) process.stderr.write('Invalid configuration; using defaults\n')
   if (args[0] === 'features' && args[1] === 'list') {
     const how = process.env.FAKE_FEATURES
     if (how === 'fail') process.exit(1)
@@ -166,10 +174,11 @@ const implementation = {
   async newSession(params) {
     if (MODE === 'auth') throw RequestError.authRequired(undefined, 'run codex login first')
     const sessionId = `img-${++created}`
-    const profile = profileAt(params.cwd)
-    const mode = profile.profileId && process.env.FAKE_IMAGE_PROFILE ? { id: `permission-profile:${profile.profileId}`, name: 'Image scratch' } : undefined
+    const profileId = json(process.env.CODEX_CONFIG, {})?.default_permissions
+    const profiles = homeProfiles()
+    const mode = profiles.includes(profileId) && process.env.FAKE_IMAGE_PROFILE ? { id: `permission-profile:${profileId}`, name: 'Image scratch' } : undefined
     sessions.set(sessionId, { cancelled: false, wake: undefined, modeId: MODES.currentModeId })
-    trace({ event: 'new-session', cwd: params.cwd, servers: (params.mcpServers ?? []).length, ...profile })
+    trace({ event: 'new-session', cwd: params.cwd, servers: (params.mcpServers ?? []).length, profileId, homeProfiles: profiles, codexConfig: process.env.CODEX_CONFIG ?? null })
     return { sessionId, modes: { ...MODES, availableModes: [...MODES.availableModes, ...(mode ? [mode] : [])] } }
   },
   async setSessionMode({ sessionId, modeId }) {
@@ -198,7 +207,7 @@ const implementation = {
   async prompt({ sessionId, prompt }) {
     const session = sessions.get(sessionId)
     const text = prompt.map(block => block.text ?? '').join('')
-    trace({ event: 'prompt', modeId: session.modeId, mentionsTool: /image generation tool/i.test(text), text })
+    trace({ event: 'prompt', modeId: session.modeId, mentionsTool: /image generation tool/i.test(text) })
     const update = body => conn.sessionUpdate({ sessionId, update: body })
     if (MODE === 'nothing') {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'I would rather not.' } })
