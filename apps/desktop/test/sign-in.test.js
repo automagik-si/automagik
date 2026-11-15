@@ -104,6 +104,10 @@ async function startProvider(t, overrides = {}) {
       requests.tokens.push(body)
       // A slow exchange, so a test can try the loopback port while it is still held.
       if (overrides.tokenDelayMs) await new Promise(resolve => setTimeout(resolve, overrides.tokenDelayMs))
+      if (overrides.tokenRedirect) {
+        response.writeHead(302, { location: overrides.tokenRedirect })
+        return response.end()
+      }
       if (overrides.token) {
         const answer = overrides.token({ body, codes, refreshTokens, key, origin, clientId: CLIENT_ID, jwt })
         return json(response, answer.status ?? 200, answer.body)
@@ -314,6 +318,12 @@ test('a browser that cannot be opened is refused as such, with no URL in the rea
 
 test('a discovery redirect is not followed', async t => {
   const provider = await startProvider(t, { discoveryRedirect: `${'https://evil.example'}/.well-known/openid-configuration` })
+  const flow = await flowFor(t, provider)
+  assert.equal((await refusalOf(flow.signIn())).code, 'network')
+})
+
+test('a token endpoint redirect is not followed', async t => {
+  const provider = await startProvider(t, { tokenRedirect: 'https://evil.example/token' })
   const flow = await flowFor(t, provider)
   assert.equal((await refusalOf(flow.signIn())).code, 'network')
 })
