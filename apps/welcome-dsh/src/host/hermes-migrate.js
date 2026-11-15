@@ -44,10 +44,28 @@ const text = value => (typeof value === 'string' ? value.trim() : '')
 // A key may arrive split by a space or a line break after the colon. Masking runs first, over
 // the raw text, so turning control characters into spaces can never separate a key first.
 export function redactKey(value) {
-  return String(value ?? '').replace(/\d{6,12}:(?:\s*[A-Za-z0-9_-]+)+/g, (match) => {
-    const body = match.slice(match.indexOf(':') + 1).replace(/\s/g, '')
-    return body.length >= 30 ? '[hidden]' : match
-  })
+  const text = String(value ?? '')
+  let out = ''
+  let copied = 0
+  for (const head of text.matchAll(/\d{6,12}:/g)) {
+    const start = head.index
+    if (start < copied) continue
+    // A key's suffix is 35 characters, and a split may put a space or a line break anywhere
+    // in it. Take token characters across whitespace up to 35, then leave the text after it.
+    let at = start + head[0].length
+    let taken = 0
+    let end = at
+    while (at < text.length && taken < 35) {
+      const ch = text[at]
+      if (/^[A-Za-z0-9_-]$/.test(ch)) { taken += 1; at += 1; end = at; continue }
+      if (/^\s$/.test(ch)) { at += 1; continue }
+      break
+    }
+    if (taken < 30) continue
+    out += text.slice(copied, start) + '[hidden]'
+    copied = end
+  }
+  return out + text.slice(copied)
 }
 // Nothing a Hermes child printed, and no key, ever comes back to the page.
 const visible = value => Array.from(String(value ?? ''), ch => (ch.codePointAt(0) < 0x20 || ch.codePointAt(0) === 0x7f ? ' ' : ch)).join('')
