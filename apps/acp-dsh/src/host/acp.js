@@ -11,6 +11,9 @@ import { PROTOCOL_VERSION, client, methods, ndJsonStream } from '@agentclientpro
 import { batchSafe } from './batch-spawn.js'
 import { HOME_ENV, releaseRun, trackRun } from './cli-homes.js'
 import { BRIDGE_NAME, isBridgeName } from './names.js'
+import { processBirth } from './process-identity.js'
+import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
+  from './process-tree.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
@@ -114,7 +117,10 @@ function stopped(what) {
 
 export class AgentRun {
   /**
-   * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string, name: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void, startMs?: number, requestMs?: number, timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
+   * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string,
+   *   name: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
+   *   onWarn?: (message: string) => void, startMs?: number, requestMs?: number,
+   *   timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
    *   startMs, requestMs: the deadlines, START_MS and REQUEST_MS unless a test sets shorter ones.
    *   timers: the clock the deadlines run on, for a test that moves it by hand.
    */
@@ -153,6 +159,7 @@ export class AgentRun {
     }))
     this.child = child
     this.grouped = process.platform !== 'win32'
+    if (supportsTree(process.platform)) this.birth = processBirth(child.pid)
     // An idle agent never keeps DSH running: only a prompt in flight holds the event loop.
     child.unref()
     for (const pipe of [child.stdin, child.stdout, child.stderr]) pipe.unref?.()
@@ -478,21 +485,35 @@ export class AgentRun {
   dispose() {
     if (this.disposed === true) return
     this.disposed = true
+    const child = this.child
+    const deps = snapshotBudget(this.treeDeps)
+    if (this.grouped && supportsTree(deps.platform ?? process.platform)
+      && child?.exitCode === null && child?.signalCode === null) {
+      if (!this.birth) this.birth = processBirth(child.pid, deps)
+      const snapshot = descendants(child.pid, this.birth, deps)
+      this.detached = snapshot.records.filter(record => record.pgid !== child.pid)
+      if (!snapshot.complete) {
+        try {
+          this.spec.onWarn?.('Could not read the whole Bot process tree; '
+            + 'stopping known tools and checking the agent group for the rest.')
+        } catch {}
+      }
+    }
     this.letGo(true)
     for (const tool of this.tools.values()) tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
     try { this.child?.stdin.end() } catch {}
-    const child = this.child
     if (child && child.exitCode === null && child.signalCode === null) this.endTree()
     void releaseRun(this)
   }
 
-  // Account changes wait for the entire process group, including children left behind by an
-  // adapter. Sending SIGTERM alone is not proof that the old account stopped doing work.
+  // Account changes wait for the group and the detached tools in the snapshot. Sending
+  // SIGTERM alone is not proof that the old account stopped doing work.
   async stop() {
     this.dispose()
     const child = this.child
     if (!Number.isInteger(child?.pid) || child.pid <= 1) return
-    const until = Date.now() + 5000
+    const now = this.treeDeps?.now ?? Date.now
+    const until = now() + 5000
     while (true) {
       let running = child.exitCode === null && child.signalCode === null
       if (this.grouped) {
@@ -501,8 +522,10 @@ export class AgentRun {
           running = false
         }
       }
-      if (!running) return
-      if (Date.now() >= until) throw new Error('The Bot process has not stopped. Try again.')
+      const states = this.grouped ? await treeStates(this.detached ?? [], this.treeDeps) : []
+      const detachedGone = states.every(state => state === 'dead')
+      if (!running && detachedGone) return
+      if (now() >= until) throw new Error('The Bot process has not stopped. Try again.')
       await new Promise(resolve => setTimeout(resolve, 25))
     }
   }
@@ -514,7 +537,10 @@ export class AgentRun {
    * working in the person's folder beside the next session. The whole process group is asked
    * to end, and what is left of it after KILL_AFTER_MS is killed; the agent's own exit does not
    * end that wait while any of the group is alive. Windows has no groups: the process tree is
-   * killed there, at once. A process the agent put in a group of its own is not reached.
+   * killed there, at once. Detached tools found before disposal get the same signals, with
+   * their births checked again. Tools reparented before that snapshot, including those left
+   * by an agent that exits by itself, are not found. Birth checks cannot make a numeric kill
+   * atomic against pid reuse; macOS births have only whole seconds.
    */
   endTree() {
     if (this.ending === true) return
@@ -551,13 +577,22 @@ export class AgentRun {
     if (!signal('SIGTERM')) {
       // No group to signal while the agent runs: it is ended alone rather than not at all.
       if (running) try { child.kill('SIGTERM') } catch {}
-      return
+    } else {
+      const timer = this.timers.setTimeout(() => signal('SIGKILL'), KILL_AFTER_MS)
+      timer.unref?.()
+      // Nothing left in the group: its id is free again.
+      const settled = () => { if (!signal(0)) this.timers.clearTimeout(timer) }
+      if (running) child.once('exit', settled)
     }
-    const timer = this.timers.setTimeout(() => signal('SIGKILL'), KILL_AFTER_MS)
-    timer.unref?.()
-    // The agent gone with all of its group: nothing is left to kill, and the id is free again.
-    const settled = () => { if (!signal(0)) this.timers.clearTimeout(timer) }
-    if (running) child.once('exit', settled)
+    // Each detached pass checks births asynchronously on macOS, with its own timeout.
+    if (this.detached?.length) {
+      const deps = { ...this.treeDeps, agentPgid: child.pid }
+      const detachedTimer = this.timers.setTimeout(() => {
+        void signalTree(this.detached, 'SIGKILL', deps)
+      }, KILL_AFTER_MS)
+      detachedTimer.unref?.()
+      void signalTree(this.detached, 'SIGTERM', deps)
+    }
   }
 
   // --- the agent's side of the conversation ---------------------------------------------
