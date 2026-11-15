@@ -414,6 +414,45 @@ No `part.json` comes with this import. The names it adds are the lane kind `pock
 `parts.json` field or an `am` verb, so `apps/pocket/part.json` can take its own id and name this
 artifact later.
 
+## Follow Arca
+
+Added 2026-11-15, on the owner's direction: the same pattern as Omni, whose public repository owns
+Omni's Automagik app.
+
+Arca's Automagik app, a DSH plugin set, is not a part of this repository. Arca's public
+repository (`automagik-si/arca`) owns it, in its own top-level folder, the way Omni's repository
+owns Omni's channels and canvases. Arca's side mirrors Omni's: one folder per plugin under
+`apps/*-dsh`, each `package.json` version the Arca release of that folder's last change (a plugin
+may be behind the release, never ahead of it), its oldest working Arca in `engines`, and a peer
+dependency on the Bot team plugin; its own market index, `marketplace/automagik.json` at its root
+(entries pinned to a repository path at a commit, refreshed after each release); releases tagged
+`v<version>`; and a release workflow that sends this repository an `arca-release`
+`repository_dispatch` when it publishes. The token that sends it lives in Arca, as Omni's does.
+
+This repository's side is only two things:
+
+- `apps/desktop/arca.json` pins one Arca release, `{version, repository, commit}`, as
+  `apps/desktop/omni.json` pins one Omni release.
+- Follow Arca (`.github/workflows/follow-arca.yml`) mirrors Follow Omni (`follow-omni.yml`).
+  Arca's `arca-release` dispatch is the fast path; Release completing on `dev` and a schedule are
+  the fallbacks, and a dispatch by hand also checks. The dispatch's payload is a hint only: the run
+  reads Arca's releases itself and follows what it finds. It takes the newest Arca release above
+  the one `arca.json` pins; when Arca's plugins are at or below that release and admit the desktop
+  runtime's DSH in the same patch series as their harness, it boots that Arca with dev's plugins
+  through the same boot gate (`boot-check.yml`, which then boots the `arca.json` pin beside
+  Omni's on every push and pull request too), and only when it boots does it move `arca.json` on
+  `dev` and cut an Automagik release. The bump is built on exactly the dev commit that booted and
+  pushed without force: when dev moved during the boot, nothing is carried and the next run boots
+  the new dev. An Arca that fails the boot is not followed and the run fails; the next run tries it
+  again. It carries at most one Arca a UTC day (#371), measured on `arca.json`'s own history: a
+  newer Arca the same day still boots but waits for the first run after 00:00 UTC. Downgrades and
+  a different patch series wait for a coordinated harness move. `dry_run` and `skip_daily_hold`
+  work as Follow Omni's.
+
+Nothing is built until this section merges and Arca has published a first plugin release worth
+carrying: until then there is no `arca.json`, no `follow-arca.yml` and no change to
+`boot-check.yml`.
+
 ## Open questions
 
 1. `herdr/catalog/repos.json` lists Pocket Link as an external entry at `automagik-dev/automagik-pocket`,
