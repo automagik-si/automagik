@@ -1,8 +1,9 @@
 // Independent acceptance tests for RFC 0024, Delivery 1 / C1.1 (#905): the desktop's secure token
 // store. These are written from the RFC and the issue, not from the module's own unit test: they
 // have their own fake for Electron's injected safeStorage and their own temporary folders, and
-// they import only the public API of src/secure-tokens.js. The store is inert in the app today:
-// C1.2 wires it behind its setting.
+// they import only the public API of src/secure-tokens.js. C1.2 (#906) wires the store behind
+// <home>/signin.json: account.js holds the session, main.js hands it safeStorage, and acceptance
+// 9 keeps every other desktop flow out.
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -529,7 +530,7 @@ test('acceptance 8: rotation replaces the token in one write, clear removes it, 
   assert.deepEqual(readdirSync(dir), [])
 })
 
-test('acceptance 9: the store is inert outside its module and never opts into plaintext or the sync API', () => {
+test('acceptance 9: the store is reached only by its wiring and never opts into plaintext or the sync API', () => {
   const sourceRoot = fileURLToPath(new URL('../src/', import.meta.url))
   const walk = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
     const path = join(dir, entry.name)
@@ -539,16 +540,29 @@ test('acceptance 9: the store is inert outside its module and never opts into pl
   const modulePath = join(sourceRoot, 'secure-tokens.js')
   assert.ok(sources.includes(modulePath), 'the scan must include the store module')
 
-  // No desktop flow outside the store imports or calls it, reaches safeStorage, or names its file.
+  // C1.2 (#906) wires the store behind <home>/signin.json: account.js holds the session and
+  // main.js hands it Electron's safeStorage and the app's data folder. No other desktop flow
+  // imports or calls it, reaches safeStorage, or names its file.
+  const wiring = new Set(['account.js', 'main.js'])
   for (const path of sources) {
     if (path === modulePath) continue
-    const name = path.slice(sourceRoot.length)
+    const name = path.slice(sourceRoot.length).replace(/^\//, '')
+    if (wiring.has(name)) continue
     const source = readFileSync(path, 'utf8')
-    assert.doesNotMatch(source, /secure-tokens/, `${name} imports or names the unused store`)
-    assert.doesNotMatch(source, /createTokenStore|detectSecureStore/, `${name} calls the unused store`)
+    assert.doesNotMatch(source, /secure-tokens/, `${name} imports or names the store`)
+    assert.doesNotMatch(source, /createTokenStore|detectSecureStore/, `${name} calls the store`)
     assert.doesNotMatch(source, /TOKEN_FILE|cloud-refresh-tokens/, `${name} touches the token file`)
-    assert.doesNotMatch(source, /safeStorage/, `${name} reaches safeStorage outside the store`)
+    assert.doesNotMatch(source, /safeStorage/, `${name} reaches safeStorage outside the store or its wiring`)
   }
+
+  // The wiring takes safeStorage as an argument and keeps the refresh token in one place: main.js
+  // creates the store, account.js loads/saves/rotates/clears it, and the flow never sees it.
+  const main = readFileSync(join(sourceRoot, 'main.js'), 'utf8')
+  assert.match(main, /createTokenStore\(\{ safeStorage, userData: app\.getPath\('userData'\) \}\)/)
+  const account = readFileSync(join(sourceRoot, 'account.js'), 'utf8')
+  assert.doesNotMatch(account, /from\s+['"]electron['"]|require\s*\(\s*['"]electron['"]/)
+  assert.match(account, /store\.(load|rotate|clear)\(/)
+  assert.doesNotMatch(readFileSync(join(sourceRoot, 'sign-in.js'), 'utf8'), /secure-tokens|safeStorage|createTokenStore/)
 
   // The module takes safeStorage as an argument (no Electron import of its own) and uses only the
   // async API; it never opts into the fixed-key fallback.
