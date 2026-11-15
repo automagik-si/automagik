@@ -126,6 +126,7 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
       t("This model uses its Hermes profile's own instructions.")) : null,
     permission == null ? null : h('div', { className: 'bt-note' },
       t('New Bots start at {level}.', { level: presetName(permission, roster.permissions) })),
+    permission == null ? null : h('div', { className: 'bt-note' }, t('After the Bot is created, Auto can be turned on in its chat or Details, when its model offers it.')),
     error ? h('div', { className: 'bt-error', role: 'alert', style: { padding: 0 } }, error) : null,
     h('div', { className: 'bt-create-foot' },
       h('button', { type: 'button', className: 'bt-soft', onClick: onBack }, canGoBack ? t('Back') : t('Cancel')),

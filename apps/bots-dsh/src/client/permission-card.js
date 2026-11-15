@@ -3,7 +3,7 @@ import { AUTO, AUTO_ROW } from '../shared/permission-levels.js'
 import { CloseIcon } from './icons.js'
 import { t } from './i18n.js'
 import { needsModelPick } from './model-menu.js'
-import { autoConfirmText, remoteConfirmText, remoteOfBot, RemotePermissionNote, autoQuestion, savedLevelOf, levelsOf, pickLevel, PermissionFallback, cliAuto, cliConfirmText, cliOfBot, PermissionOptions, presetDanger, presetName } from './permission-picker.js'
+import { AutoMissingNote, autoConfirmText, remoteConfirmText, remoteOfBot, RemotePermissionNote, autoQuestion, savedLevelOf, levelsOf, pickLevel, PermissionFallback, cliAuto, cliConfirmText, cliOfBot, PermissionOptions, presetDanger, presetName } from './permission-picker.js'
 import { setEntry, sharedMap } from './shared-map.js'
 import { createSource } from './sources.js'
 import { STORAGE } from './storage.js'
@@ -29,7 +29,7 @@ const closeReopened = id => reopened.set(map => setEntry(map, id, undefined))
 
 const FOOTNOTE = 'You can change this any time in Details.'
 
-function PermissionCard({ bot, catalog, actions, onClose, onSaved }) {
+function PermissionCard({ bot, catalog, roster, actions, onClose, onSaved }) {
   catalog = levelsOf(catalog, bot)
   const saved = savedLevelOf(bot, catalog)
   const askedAtOpen = useRef()
@@ -103,6 +103,7 @@ function PermissionCard({ bot, catalog, actions, onClose, onSaved }) {
     h(PermissionOptions, { catalog, current: draft, onPick: (value) => { setError(''); setPicked(value) }, disabled: busy, cli, remote }),
     errorLine,
     bot.permissionAuto ? h(PermissionFallback, { fallback: bot.permissionFallback, owner: bot, catalog }) : null,
+    h(AutoMissingNote, { bot, roster }),
     note,
     h('div', { className: 'bt-q-foot' },
       h('button', { type: 'button', className: 'bt-q-btn', onClick: onClose, disabled: busy }, t('Not now')),
@@ -125,5 +126,5 @@ export function PermissionChoiceDock({ sessionId, useRoster, actions }) {
   if (!wanted && (bot.permission !== undefined || askedNow()[bot.id] === true)) return null
   // Put off, dismissed or saved, the card does not come back on its own for this Bot.
   const close = () => { markAsked(bot.id); closeReopened(bot.id) }
-  return h('div', { className: 'bt-q-dock' }, h(PermissionCard, { key: bot.id, bot, catalog, actions, onClose: close, onSaved: close }))
+  return h('div', { className: 'bt-q-dock' }, h(PermissionCard, { key: bot.id, bot, catalog, roster, actions, onClose: close, onSaved: close }))
 }

@@ -1,6 +1,6 @@
 import { createElement as h, Fragment, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AUTO, AUTO_ROW, MARK_LEVEL } from '../shared/permission-levels.js'
+import { AUTO, AUTO_ROW, MARK_LEVEL, markOf, judgeOf } from '../shared/permission-levels.js'
 import { Segmented } from './motion.js'
 import { CheckIcon } from './icons.js'
 import { CLI_NAMES, cliProviderOf } from './cli-login-model.js'
@@ -298,6 +298,26 @@ export function levelsOf(catalog, bot) {
   if (bot?.autoOffered !== true && typeof bot?.permissionAuto !== 'string') return catalog
   return { ...catalog, options: catalog.options.flatMap(option => option.value === MARK_LEVEL ? [option, { value: AUTO_ROW, name: 'Auto', description: autoRowText(bot.autoJudge) }] : [option]) }
 }
+// Why a Bot's pickers show no Auto row, from what the window already knows (RFC 0031). Nothing
+// when the row is there (offered, or saved), when this window cannot change levels, or while a
+// saved level DeepSeek Harness no longer offers is being told (PermissionFallback has that space).
+export function autoMissingText(bot, roster) {
+  if (!bot || bot.autoOffered === true || typeof bot.permissionAuto === 'string') return undefined
+  if (roster?.readOnly || bot.permissionNotOffered === true) return undefined
+  if (roster?.hostModels?.[bot.id] !== undefined) return t("This Bot runs on its plugin's own engine, so Auto is not offered.")
+  if (typeof bot.model !== 'string' || bot.model === '') return t('Auto needs a model chosen for this Bot.')
+  if (bot.model.startsWith('hermes-remote/')) return t('Auto is not offered on Remote Hermes.')
+  const mark = markOf(bot.model)
+  if (mark === undefined) return t("Auto is not offered for this Bot's model.")
+  if (markOf(bot.appliedModel) !== mark) return t("Auto is offered once this Bot's chat runs on the model saved for it.")
+  if (judgeOf(mark) === 'team' && !roster?.backgroundModel) return t('On this model, Auto needs a background model, and no connected model can be one. Connect a model with an API key to turn it on.')
+  return t('Auto is not available for this Bot right now.')
+}
+export function AutoMissingNote({ bot, roster }) {
+  const text = autoMissingText(bot, roster)
+  return text ? h('div', { className: 'bt-note' }, text) : null
+}
+
 export const pickLevel = (actions, bot, value, asked) => value === AUTO_ROW ? actions.setBotAuto(asked.id, asked.rev) : actions.updateBot(bot.id, { permission: value })
 export function autoRowText(judge) {
   const text = {"claude": "Works as Workspace. Where Workspace would ask you, Claude Code decides first, with its auto mode: it runs the step, refuses it, or asks you.", "own": "Works as Workspace. Where Workspace would ask you, {model}, this Bot's own model, decides first: it runs the step, refuses it, or asks you.", "team": "Works as Workspace. Where Workspace would ask you, {model}, the team's background model, decides first: it runs the step, refuses it, or asks you."}
