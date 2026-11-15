@@ -117,9 +117,22 @@ def is_default_home(home):
         return home == default_home()
 
 def is_hermes_home(path):
-    return os.path.isdir(path) and (
-        os.path.isfile(os.path.join(path, "config.yaml"))
-        or os.path.isdir(os.path.join(path, "gateway-locks")))
+    # A Hermes home by its own marks, never by a generic folder alone:
+    # (i) SOUL.md, seeded by initialize_home -> _ensure_default_soul_md on every load;
+    # (ii) config.yaml plus at least two of Hermes's skeleton folders (sessions, memories,
+    #      cron, logs), which initialize_home creates even for a fresh home;
+    # (iii) config.yaml plus state.db, Hermes's own state file (_HERMES_HOME_MARKERS).
+    # A bare config.yaml, a bare gateway-locks, or config.yaml plus one generic folder is an
+    # unrelated tool and never makes a beside folder ambiguous.
+    if not os.path.isdir(path):
+        return False
+    if os.path.isfile(os.path.join(path, "SOUL.md")):
+        return True
+    if not os.path.isfile(os.path.join(path, "config.yaml")):
+        return False
+    skeleton = sum(1 for name in ("sessions", "memories", "cron", "logs")
+                   if os.path.isdir(os.path.join(path, name)))
+    return skeleton >= 2 or os.path.isfile(os.path.join(path, "state.db"))
 
 def has_hermes_sibling(home):
     """Any other Hermes home in the same parent, following links.
@@ -157,14 +170,31 @@ def home_spellings(launch_home):
         homes.append(real)
     return homes
 
-def beside_spelling(folder, launch_home):
+def beside_spellings(folder, launch_home):
+    """The spellings of this home whose own parent holds this beside folder."""
     folder = os.path.normpath(folder)
     if os.path.basename(folder) != "gateway-locks":
-        return False
+        return []
+    matches = []
+    try:
+        own = os.path.realpath(launch_home)
+    except OSError:
+        own = ""
     for home in home_spellings(launch_home):
-        if os.path.dirname(folder) == os.path.dirname(home):
-            return True
-    return False
+        if os.path.dirname(folder) == os.path.dirname(home) and home not in matches:
+            matches.append(home)
+    # A hand-made call may name the real path while the folder is beside a LINK to it.
+    try:
+        for entry in os.scandir(os.path.dirname(folder)):
+            try:
+                if entry.is_symlink() and own and os.path.realpath(entry.path) == own:
+                    if entry.path not in matches:
+                        matches.append(entry.path)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return matches
 
 
 def state_folder(explicit, launch_home):
@@ -185,10 +215,12 @@ def state_folder(explicit, launch_home):
             raise Fault("serve-gateway")
         if record is None:
             raise Fault("serve-not-running")
-        # A beside folder is ambiguous when the chosen home shares its parent with
-        # another Hermes home: never let an explicit pick take that record.
-        if isinstance(launch_home, str) and launch_home.startswith("/") and beside_spelling(explicit, launch_home):
-            if any(has_hermes_sibling(home) for home in home_spellings(launch_home)):
+        # A beside folder is ambiguous when any spelling whose parent holds it shares
+        # that parent with another Hermes home, including a link spelling found beside
+        # the folder. Decide on the resolved home, whatever spelling the call used.
+        if isinstance(launch_home, str) and launch_home.startswith("/"):
+            spellings = beside_spellings(explicit, launch_home)
+            if spellings and any(has_hermes_sibling(home) for home in spellings):
                 raise Fault("serve-record")
         return explicit, record
     own, shared = [], []

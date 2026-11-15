@@ -279,7 +279,8 @@ test('a bot in a shared serve-record folder says plainly why it cannot be picked
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   const row = document.querySelector('.bt-hw-bot')
-  assert.match(row.textContent, /Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here\. Start its serve from its own folder, or add that folder with Add another Hermes\./)
+  assert.match(row.textContent, /Another folder beside this Hermes looks like a Hermes home\. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes\./)
+  assert.match(row.textContent, /move it, or move the other folder/, 'the advice names moving, not only adding')
   const use = [...document.querySelectorAll('.bt-hw-foot button')].find(button => button.textContent.includes('Use this bot'))
   assert.equal(use.disabled, true)
   assert.ok(!calls.some(call => call.endpoint === 'hermes-remote-test'), 'nothing tests or starts it')

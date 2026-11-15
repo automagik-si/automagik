@@ -575,7 +575,7 @@ export function HermesRemoteConnect({ onClose, onConnected, edit = false, more =
         }, h('span', { className: 'bt-hw-radio' }),
         h('span', { className: 'bt-hw-bot-copy' }, h('strong', null, item.name),
           item.model ? h('small', { className: 'bt-hw-bot-model' }, `${t('Model')}: ${botModelLine(item)}`) : null,
-          item.blocked === 'shared-beside' ? h('small', { className: 'bt-hw-bot-blocked' }, t('Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Start its serve from its own folder, or add that folder with Add another Hermes.')) : null,
+          item.blocked === 'shared-beside' ? h('small', { className: 'bt-hw-bot-blocked' }, t('Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.')) : null,
           !item.running && item.start ? h('small', { className: 'bt-hw-bot-start' }, t('Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.', { command: item.start, host })) : null),
         h('span', { className: `bt-hw-bot-state${item.running ? ' bt-hw-bot-ok' : ''}` }, item.running ? t('Running') : t('Not running'))))),
       h('div', { className: 'bt-hw-profile-tools' }, h('span', null, t('{count} bots on {host}', { count: bots.length, host })),

@@ -287,9 +287,22 @@ def beside_dir(home):
     return os.path.join(os.path.dirname(os.path.normpath(home)), "gateway-locks")
 
 def is_hermes_home(path):
-    return os.path.isdir(path) and (
-        os.path.isfile(os.path.join(path, "config.yaml"))
-        or os.path.isdir(os.path.join(path, "gateway-locks")))
+    # A Hermes home by its own marks, never by a generic folder alone:
+    # (i) SOUL.md, seeded by initialize_home -> _ensure_default_soul_md on every load;
+    # (ii) config.yaml plus at least two of Hermes's skeleton folders (sessions, memories,
+    #      cron, logs), which initialize_home creates even for a fresh home;
+    # (iii) config.yaml plus state.db, Hermes's own state file (_HERMES_HOME_MARKERS).
+    # A bare config.yaml, a bare gateway-locks, or config.yaml plus one generic folder is an
+    # unrelated tool and never makes a beside folder ambiguous.
+    if not os.path.isdir(path):
+        return False
+    if os.path.isfile(os.path.join(path, "SOUL.md")):
+        return True
+    if not os.path.isfile(os.path.join(path, "config.yaml")):
+        return False
+    skeleton = sum(1 for name in ("sessions", "memories", "cron", "logs")
+                   if os.path.isdir(os.path.join(path, name)))
+    return skeleton >= 2 or os.path.isfile(os.path.join(path, "state.db"))
 
 def has_hermes_sibling(home):
     """Any other Hermes home in the same parent, following links.
@@ -418,41 +431,55 @@ try:
     # A beside folder is the same path for every home under one parent. It belongs to
     # the only home with that parent; with two homes there it is ambiguous and no home
     # takes it, so the answer never depends on the order the homes were found.
-    beside_owners, beside_of = {}, {}
+    beside_owners, beside_entries = {}, {}
     for home in list(homes):
-        folders = []
+        entries = []
         for spelled in (spellings.get(home) or [home]):
-            for folder in (beside_dir(spelled), beside_dir(home)):
-                try:
-                    key = os.path.realpath(folder)
-                except OSError:
-                    key = folder
-                beside_owners.setdefault(key, set()).add(home)
-                if folder not in folders:
-                    folders.append(folder)
-        beside_of[home] = folders
-    ambiguous = set()
-    for owners in beside_owners.values():
+            folder = beside_dir(spelled)
+            if (folder, spelled) not in entries:
+                entries.append((folder, spelled))
+        if not any(spelled == home for _, spelled in entries):
+            entries.append((beside_dir(home), home))
+        for folder, _ in entries:
+            try:
+                key = os.path.realpath(folder)
+            except OSError:
+                key = folder
+            beside_owners.setdefault(key, set()).add(home)
+        beside_entries[home] = entries
+    # Per FOLDER, not per home: the folder beside the link is judged by the link's
+    # parent, the folder beside the real path by that parent. A sibling next to the
+    # real folder never hides a record beside a link whose own parent is unique.
+    ambiguous_folders = set()
+    for key, owners in beside_owners.items():
         if len(owners) > 1:
-            ambiguous.update(owners)
-    # An on-disk Hermes sibling counts even when it is not one of the candidates (an
-    # added folder next to a running home the scan did not list).
-    for home in homes:
-        for spelled in (spellings.get(home) or [home]):
+            ambiguous_folders.add(key)
+    for home, entries in beside_entries.items():
+        for folder, spelled in entries:
             if has_hermes_sibling(spelled):
+                try:
+                    ambiguous_folders.add(os.path.realpath(folder))
+                except OSError:
+                    ambiguous_folders.add(folder)
+    ambiguous = set()
+    for home, entries in beside_entries.items():
+        for folder, _ in entries:
+            try:
+                key = os.path.realpath(folder)
+            except OSError:
+                key = folder
+            if key in ambiguous_folders:
                 ambiguous.add(home)
                 break
     for home in list(homes):
         for folder in home_lock_dirs(home):
             remember(folder, home)
-        for folder in beside_of.get(home, []):
-            if home in ambiguous:
-                continue
+        for folder, _ in beside_entries.get(home, []):
             try:
                 key = os.path.realpath(folder)
             except OSError:
                 key = folder
-            if len(beside_owners.get(key, set())) == 1:
+            if key not in ambiguous_folders:
                 remember(folder, home)
         for folder in walk_records(home, min(3.0, control)):
             remember(folder, home)
