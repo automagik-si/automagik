@@ -411,19 +411,78 @@ test('one page with no next is the whole list, and a failed later page fails the
   )
 })
 
-test('the list stops at MAX_RELEASE_PAGES, not at the first page', async () => {
+test('the list stops at MAX_RELEASE_PAGES, and says so instead of hiding the rest', async () => {
+  const original = console.warn
+  const warnings = []
+  console.warn = message => warnings.push(message)
+  try {
+    let calls = 0
+    const list = await fetchReleases(async () => {
+      calls += 1
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => `<${RELEASES_URL}&page=${calls + 1}>; rel="next"` },
+        json: async () => [release(`v3.${1000 - calls}.0`)],
+      }
+    })
+    assert.equal(calls, MAX_RELEASE_PAGES)
+    assert.equal(list.length, MAX_RELEASE_PAGES)
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0], /older feed may be hidden/)
+  } finally {
+    console.warn = original
+  }
+})
+
+test('a later page that is not a release list fails the check, never hides the pages before it', async () => {
+  const calls = []
+  await assert.rejects(
+    fetchReleases(async url => {
+      calls.push(url)
+      if (calls.length === 1) {
+        return { ok: true, status: 200, headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` }, json: async () => [release('v3.1.0')] }
+      }
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ message: 'rate limited' }) }
+    }),
+    /other than a release list/,
+  )
+  assert.equal(calls.length, 2)
+})
+
+test('paging stops once the running release and a usable feed are in hand', async () => {
+  const calls = []
+  const page = async url => {
+    calls.push(url)
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` },
+      json: async () => [release('v3.102.0', ['latest-mac.yml']), release('v3.101.0')],
+    }
+  }
+  const enough = list => pickUpdate(list, { current: '3.101.0', platform: 'darwin', channel: channelOf(list, { current: '3.101.0' }) }) !== null
+  const list = await fetchReleases(page, enough)
+  assert.equal(calls.length, 1)
+  assert.equal(list.length, 2)
+})
+
+test('a check reads one page when that page already holds the update', async (t) => {
   let calls = 0
-  const list = await fetchReleases(async () => {
+  stubFetch(t, () => {
     calls += 1
     return {
       ok: true,
       status: 200,
-      headers: { get: () => `<${RELEASES_URL}&page=${calls + 1}>; rel="next"` },
-      json: async () => [release(`v3.${1000 - calls}.0`)],
+      headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` },
+      json: async () => [release('v3.102.0', ['latest-mac.yml']), release('v3.101.0')],
     }
   })
-  assert.equal(calls, MAX_RELEASE_PAGES)
-  assert.equal(list.length, MAX_RELEASE_PAGES)
+  const { timers } = recordingTimers()
+  const updates = startUpdates({ updater: fakeUpdater(), current: '3.101.0', platform: 'darwin', env: {}, timers, log: quiet, onState() {} })
+  t.after(() => updates.stop())
+  assert.deepEqual(await updates.check(), { result: 'found', version: '3.102.0' })
+  assert.equal(calls, 1)
 })
 
 async function quickRetryEvidence(t, status) {

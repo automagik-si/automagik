@@ -16,7 +16,8 @@ export const RELEASES_URL = 'https://api.github.com/repos/automagik-si/automagik
 // The updater reads the release list newest first. A plugin, herdr or Pocket patch is a release
 // too, and only a full release carries a desktop feed: a quiet stretch puts the newest feed past
 // the first page. Follow GitHub's Link next page until the list ends or this cap, so an older
-// feed is never invisible. Ten pages is 1,000 releases, weeks at this repository's rate.
+// feed is never invisible. A normal check stops at the first page with the update; the cap keeps
+// a pathological list from walking forever (ten pages is 1,000 releases).
 export const MAX_RELEASE_PAGES = 10
 export const DESKTOP_TAG_PREFIX = 'v'
 const DOWNLOADS = 'https://github.com/automagik-si/automagik/releases/download/'
@@ -312,9 +313,16 @@ export function nextPage(link) {
   return match ? match[1] : null
 }
 
-export async function fetchReleases(fetchImpl = fetch) {
+/**
+ * The release list, following GitHub's next-page link. `enough` says when the caller has what it
+ * needs: the list is newest first, so older pages cannot change the newest usable update. The
+ * first page's answer is returned whole, as it always was; a later page that is not a release
+ * list fails the check instead of hiding the pages before it.
+ */
+export async function fetchReleases(fetchImpl = fetch, enough = () => false) {
   const releases = []
   let url = RELEASES_URL
+  let truncated = false
   for (let page = 1; url && page <= MAX_RELEASE_PAGES; page++) {
     const response = await fetchImpl(url, {
       headers: { accept: 'application/vnd.github+json', 'user-agent': 'omni-desktop' },
@@ -322,15 +330,16 @@ export async function fetchReleases(fetchImpl = fetch) {
     })
     if (!response.ok) throw new Error(`GitHub answered ${response.status} for the desktop releases`)
     const list = await response.json()
-    // A page that is not a list (an API error body) is not a release: keep the pages before it.
-    // The first page's answer is returned whole, as it always was.
     if (!Array.isArray(list)) {
       if (releases.length === 0) return list
-      break
+      throw new Error('GitHub answered with something other than a release list for the desktop releases')
     }
     releases.push(...list)
+    if (enough(releases)) break
     url = nextPage(response.headers?.get?.('link'))
+    truncated = Boolean(url) && page === MAX_RELEASE_PAGES
   }
+  if (truncated) console.warn(`update check: read ${MAX_RELEASE_PAGES} pages of releases; an older feed may be hidden`)
   return releases
 }
 
@@ -527,7 +536,12 @@ export function startUpdates({ updater, current, platform, env, log, onState, mo
       let update
       if (override) update = { version: null, url: override }
       else {
-        const list = await releases()
+        const list = await releases(undefined, found => {
+          const own = found.some(release => release?.tag_name === `${DESKTOP_TAG_PREFIX}${current}`)
+          const fixed = env.OMNI_DESKTOP_UPDATE_CHANNEL?.trim()
+          if (!own && fixed !== 'stable' && fixed !== 'prerelease') return false
+          return pickUpdate(found, { current, platform, channel: channelOf(found, { current, env }) }) !== null
+        })
         const channel = channelOf(list, { current, env })
         update = pickUpdate(list, { current, platform, channel })
         if (!update) {
