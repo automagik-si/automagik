@@ -68,6 +68,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on tools/result',
     'on session/event',
     'effect omni-ui: lost hand-offs',
+    'effect ds-bot: folder access context',
+    'prompt context ds-bot:folder-access 650',
     'effect ds-bot: agent tool restrict retry',
     'on agent/created',
     'on session/event',
@@ -138,6 +140,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     // A CLI sign-in's chosen model, dropped by a turn on another, applied on ready (cli-login.js).
     'on session/event',
     'on acp-dsh/login-ready',
+    'on tools/execute',
     'on llm/stream',
     'on agent/status',
     'on tools/execute',

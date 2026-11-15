@@ -1,4 +1,5 @@
 {
+  "The operating system blocked read or write access to {folder}. Allow Automagik to use this folder: on macOS, open System Settings > Privacy & Security > Files and Folders (or Full Disk Access); elsewhere, allow your user to read and write the folder. Your folder choice has been kept.": "O sistema operacional bloqueou a leitura ou a escrita em {folder}. Permita que o Automagik use esta pasta: no macOS, abra Ajustes do Sistema > Privacidade e Segurança > Arquivos e Pastas (ou Acesso Total ao Disco); em outros sistemas, permita a leitura e a escrita na pasta pela sua conta. A pasta escolhida foi mantida.",
   "What will it do?": "O que vai fazer?",
   "Add instructions": "Adicionar instruções",
   "Part of the Bot's system prompt. You can change it later in its details.":
@@ -1255,7 +1256,7 @@
   "Not connected": "Não conectado",
   "Your ChatGPT account": "Sua conta do ChatGPT",
   "Your OpenAI key": "Sua chave da OpenAI",
-  "Sign in to Codex from a Bot's chat, or add an OpenAI key in Settings → Models, and every Bot can draw images in its chats.": "Entre no Codex pelo chat de um Bot, ou adicione uma chave da OpenAI em Configurações → Modelos, e cada Bot pode desenhar imagens nos chats.",
+  "Sign in to Codex from a Bot's chat, and every Bot can draw images in its chats.": "Entre no Codex pelo chat de um Bot, e cada Bot pode desenhar imagens nos chats.",
   "Codex, on your ChatGPT plan": "Codex, no seu plano do ChatGPT",
   "Every Bot can draw images in its chats. They are saved in the team workspace's images folder.": "Cada Bot pode desenhar imagens nos chats. As imagens são salvas na pasta images da área de trabalho da equipe.",
   "Pets": "Pets",

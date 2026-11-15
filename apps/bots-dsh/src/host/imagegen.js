@@ -16,6 +16,8 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createEditInput } from './image-input.js'
+import { uploadOsText } from './shared-uploads.js'
 
 // Where DSH keeps each sign-in (dsh-llm-pi-ai's recordKeyFor): a ChatGPT grant, or a key.
 export const CODEX_RECORD = 'llm-pi-ai/openai-codex'
@@ -25,6 +27,8 @@ export const CODEX_IMAGES = 'https://chatgpt.com/backend-api/codex/images/genera
 export const CODEX_IMAGE_MODEL = 'gpt-image-2'
 export const OPENAI_IMAGES = 'https://api.openai.com/v1/images/generations'
 export const OPENAI_IMAGE_MODEL = 'gpt-image-1'
+export const OPENAI_EDITS = 'https://api.openai.com/v1/images/edits'
+export const OPENAI_EDIT_MODEL = 'gpt-image-2.5-sunburst'
 // The sign-in's own token endpoint and client (pi-ai's openai-codex OAuth).
 const TOKEN_URL = 'https://auth.openai.com/oauth/token'
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
@@ -180,6 +184,16 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
       .catch((error) => { throw signal?.aborted ? error : refused('The image service could not be reached. Check the connection and try again.') })
   }
 
+  async function requestEdit(found, fields, input, signal) {
+    const body = new FormData()
+    for (const [key, value] of Object.entries({ ...fields, model: OPENAI_EDIT_MODEL })) body.set(key, String(value))
+    const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[input.mediaType]
+    body.set('image[]', new Blob([input.data], { type: input.mediaType }), `input.${ext}`)
+    return fetch(OPENAI_EDITS, { method: 'POST', signal,
+      headers: { authorization: `Bearer ${found.token}`, accept: 'text/event-stream, application/json' }, body })
+      .catch((error) => { throw signal?.aborted ? error : refused('The image service could not be reached. Check the connection and try again.') })
+  }
+
   const failure = async (response) => {
     const body = await response.json().catch(() => ({}))
     const detail = typeof body?.error?.message === 'string' ? body.error.message.slice(0, 240) : typeof body?.detail === 'string' ? body.detail.slice(0, 240) : `HTTP ${response.status}`
@@ -212,24 +226,29 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
    * Draws one image and keeps it. Returns { id, file, via, bytes }. `callId` names the card
    * that follows its progress.
    */
-  async function generate({ prompt, size = 'auto', quality = 'auto', background = 'auto', callId, signal }) {
+  async function generate({ prompt, size = 'auto', quality = 'auto', background = 'auto', callId, signal, input }) {
     const text = String(prompt ?? '').trim().slice(0, PROMPT_MAX)
     if (text === '') throw Object.assign(new Error('Say what to draw.'), { code: 'bot/invalid' })
-    const found = await source()
+    const found = await source(input ? { refresh: false } : undefined)
     if (!found) {
       // A signed-in Codex that acp-dsh does not let draw (a safety check of its image run did
       // not hold) is not a missing sign-in: say what helps.
       const codex = await codexService()?.imageAccess().catch(() => undefined)
-      if (codex?.reason === 'account') throw refused('Codex is signed in on this computer, but the user has not confirmed its account for Bots. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there), or to add an OpenAI key in Settings → Models; then generate_image can draw.')
-      if (codex?.unsupported === true) throw refused('Codex is signed in, but this Codex version is not supported for drawing yet. Ask the user to update Automagik, or to add an OpenAI key in Settings → Models; then generate_image can draw.')
-      if (codex?.reason === 'config') throw refused('Codex is signed in, but it could not load its own configuration, so it cannot draw. Ask the user to fix Codex\'s config file, or to add an OpenAI key in Settings → Models; then generate_image can draw.')
-      if (codex?.reason === 'unreadable') throw refused('Codex is signed in, but it could not be checked for safe drawing, so it cannot draw now. Ask the user to try again later, or to add an OpenAI key in Settings → Models; then generate_image can draw.')
-      throw refused('No image service is connected. Ask the user to sign in to Codex (from a Bot\'s chat or Connect AI) or add an OpenAI key in Settings → Models; then generate_image can draw.')
+      if (codex?.reason === 'account') throw refused('Codex is signed in on this computer, but the user has not confirmed its account for Bots. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there); then generate_image can draw.')
+      if (codex?.unsupported === true) throw refused('Codex is signed in, but this Codex version is not supported for drawing yet. Ask the user to update Automagik; then generate_image can draw.')
+      if (codex?.reason === 'config') throw refused('Codex is signed in, but it could not load its own configuration, so it cannot draw. Ask the user to fix Codex\'s config file; then generate_image can draw.')
+      if (codex?.reason === 'unreadable') throw refused('Codex is signed in, but it could not be checked for safe drawing, so it cannot draw now. Ask the user to try again later.')
+      throw refused('No image service is connected. Ask the user to sign in to Codex (from a Bot\'s chat or Connect AI); then generate_image can draw.')
     }
     const chatgpt = found.kind === 'chatgpt'
     note(callId, { phase: 'generating', via: found.kind, partials: [], started: now(), error: undefined })
+    if (input && chatgpt) {
+      const error = refused('Editing a picture needs Codex signed in. Ask the user to sign in to Codex from a Bot\'s chat.')
+      note(callId, { phase: 'failed', error: error.message })
+      throw error
+    }
     if (found.kind === 'codex') return drawWithCodex(found.service, {
-      text, size, quality, background, callId, signal, accountGeneration: found.accountGeneration,
+      text, size, quality, background, callId, signal, input, accountGeneration: found.accountGeneration,
     })
     const base = {
       model: chatgpt ? CODEX_IMAGE_MODEL : OPENAI_IMAGE_MODEL,
@@ -248,7 +267,8 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
       note(callId, { partials })
     }
     try {
-      let response = await request(found, chatgpt && !chatgptStreams ? base : streamed, signal)
+      let response = input ? await requestEdit(found, streamed, input, signal)
+        : await request(found, chatgpt && !chatgptStreams ? base : streamed, signal)
       // A backend that does not take a streamed request answers 400 naming it: asked again whole.
       if (chatgpt && chatgptStreams && response.status === 400) {
         const said = await response.clone().text().catch(() => '')
@@ -285,17 +305,22 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
   // Codex draws in one piece: the card shows its drawing frame until the image is kept, with no
   // partial images. Its refusals (signed out, usage limit, timeout) are shown as they are.
   async function drawWithCodex(service, {
-    text, size, quality, background, callId, signal, accountGeneration,
+    text, size, quality, background, callId, signal, input, accountGeneration,
   }) {
     try {
-      const made = await service.generateImage({
+      if (input && typeof service.editImage !== 'function') throw refused('Editing a picture with Codex needs a newer Automagik. Ask the user to update.')
+      const fields = {
         prompt: text,
         size: SIZES.includes(size) ? size : 'auto',
         quality: QUALITIES.includes(quality) ? quality : 'auto',
         background: BACKGROUNDS.includes(background) ? background : 'auto',
         signal,
         ...(accountGeneration === undefined ? {} : { accountGeneration }),
-      }).catch((error) => { throw signal?.aborted ? error : refused(String(error?.message ?? error).slice(0, 300)) })
+      }
+      const made = await (input
+        ? service.editImage({ ...fields, image: { base64: Buffer.from(input.data).toString('base64'), mimeType: input.mediaType } })
+        : service.generateImage(fields))
+        .catch((error) => { throw signal?.aborted ? error : Object.assign(refused(String(error?.message ?? error).slice(0, 300)), typeof error?.reason === 'string' ? { reason: error.reason } : {}) })
       if (typeof made?.base64 !== 'string' || made.base64 === '') throw refused('Codex answered without an image. Try again.')
       return await keep(made.base64, { callId, via: 'codex', size: SIZES.includes(size) ? size : 'auto' })
     } catch (error) {
@@ -347,6 +372,7 @@ export function install(rt) {
     folder: () => rt.teamFolder?.(),
     warn: (...args) => rt.warn?.(...args),
   })
+  const editInput = createEditInput({ rt, ctx })
   rt.images = images
   // acp-dsh keeps an agent's own images (a Bot on Codex asked for a picture) through this keeper,
   // so they show in the chat's image card and stay in the team workspace like generate_image's.
@@ -358,8 +384,9 @@ export function install(rt) {
   else if (ctx.get?.('acpAgents') !== undefined) attachKeeper({ acpAgents: ctx.get('acpAgents'), effect: (execute, label) => ctx.effect(execute, label) })
   rt.teamTools.push(defineTool({
     name: 'generate_image',
-    description: 'Draw a new image from a description, with the user\'s OpenAI key or Codex on their ChatGPT plan. The user watches it being drawn in the chat, and the finished image is saved in the team workspace (its path comes back). Write the prompt as a full visual brief: the subject, the composition, the style or medium, the colors and the light; put any words that must appear in the image in quotes. One image per call; it takes up to two minutes.',
+    description: 'Draw a new image from a description, with the image service the user connected (Codex on their ChatGPT plan). The user watches it being drawn in the chat, and the finished image is saved in the team workspace (its path comes back). Write the prompt as a full visual brief: the subject, the composition, the style or medium, the colors and the light; put any words that must appear in the image in quotes. One image per call; it takes up to two minutes. It also edits a picture you were given in this chat (one the user attached, or one another Bot sent you): pass its name, sha256 or saved path as image and say the change in prompt; the result is a new image and the original stays as it was. Each such picture is also saved as a read-only file of yours; its path is shown beside it. Edit the user\'s pictures yourself here; do not send them to another Bot unless the user asks.',
     parameters: {
+      image: { type: 'string', description: 'To edit a picture the user attached in this chat: its name as the chat shows it, its sha256, or its saved path. Leave out to draw a new image.' },
       prompt: { type: 'string', required: true, description: 'What to draw, as a full visual brief' },
       size: { type: 'string', enum: SIZES, description: 'Square 1024x1024, landscape 1536x1024, portrait 1024x1536, or auto (the default) to let the model choose' },
       quality: { type: 'string', enum: QUALITIES, description: 'auto (the default); low is fastest, high is most detailed' },
@@ -368,12 +395,31 @@ export function install(rt) {
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
     timeoutMs: 180_000,
     async execute(args, exec) {
+      let input
       try {
-        const made = await images.generate({ prompt: args.prompt, size: args.size, quality: args.quality, background: args.background, callId: exec.callId, signal: exec.signal })
+        input = typeof args.image === 'string' && args.image.trim()
+          ? await editInput.resolve(exec, args.image, exec.signal) : undefined
+        const made = await images.generate({ input, prompt: args.prompt, size: args.size, quality: args.quality, background: args.background, callId: exec.callId, signal: exec.signal })
         const via = made.via === 'codex' ? 'Codex on the user\'s ChatGPT plan' : made.via === 'chatgpt' ? 'the user\'s ChatGPT account' : 'the user\'s OpenAI key'
+        if (input) return `Edited the image with ${via} and saved it as ${made.file}. It is on screen in the chat, so do not describe it back; the original picture is unchanged.`
         return `Drew the image with ${via} and saved it as ${made.file}. It is on screen in the chat, so do not describe it back; give its path to send or use it elsewhere.`
       } catch (error) {
         if (exec.signal?.aborted) return 'The image was stopped before it was finished.'
+        if (error?.reason === 'edit-not-isolated' && input) {
+          const sessionId = exec.agent?.session?.id ?? exec.agent?.id
+          const saved = await rt.sharedUploads?.save(input.ref, { sessionId, name: input.name, data: input.data, signal: exec.signal })
+          let readOnly = false
+          try { readOnly = ctx.get?.('sandboxPolicy')?.resolve?.({ session: exec.agent?.session })?.mode === 'read-only' } catch {}
+          const first = 'Codex could not edit the picture here: its locked image run could not be set up on this computer, so no edited image was made.'
+          if (saved?.path) {
+            const copy = `${first} Your copy of the picture is at ${JSON.stringify(saved.path)} (read-only).`
+            return readOnly
+              ? `${copy} At your current permission level you cannot write files: tell the user the picture could not be edited here, and that raising your level to Workspace in your Details lets you edit it as a file.`
+              : `${copy} If your own tools can make this change, make it on a new file in your working folder, check the result and give the user its path; never say the picture was edited unless you made that file. Otherwise tell the user the picture could not be edited here.`
+          }
+          if (saved?.error === 'os') return `${first} ${uploadOsText(typeof input.name === 'string' && input.name.replace(/\p{Cc}/gu, '').slice(0, 120) || 'unnamed picture', saved.folder)} Tell the user the picture could not be edited here.`
+          return `${first} Tell the user the picture could not be edited here.`
+        }
         return String(error?.message ?? error)
       }
     },

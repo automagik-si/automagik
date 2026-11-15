@@ -65,6 +65,7 @@ function SessionFileApproval({ matched: { pending, item }, renderFactorySlot }) 
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
+  "The operating system blocked read or write access to {folder}. Allow Automagik to use this folder: on macOS, open System Settings > Privacy & Security > Files and Folders (or Full Disk Access); elsewhere, allow your user to read and write the folder. Your folder choice has been kept.": "操作系统阻止了对 {folder} 的读取或写入。请允许 Automagik 使用此文件夹：在 macOS 上，打开系统设置 > 隐私与安全性 > 文件与文件夹（或完全磁盘访问权限）；在其他系统上，允许你的用户读取和写入该文件夹。你选择的文件夹已保留。",
   "What will it do?": "它会做什么？",
   "Add instructions": "添加说明",
   "Part of the Bot's system prompt. You can change it later in its details.": "这是 Bot 系统提示词的一部分。你可以稍后在详情中更改。",
@@ -2390,7 +2391,7 @@ var ZH = {
   "Drawn with": "绘制方式",
   "Your ChatGPT account": "你的 ChatGPT 账户",
   "Your OpenAI key": "你的 OpenAI 密钥",
-  "Sign in to Codex from a Bot's chat, or add an OpenAI key in Settings → Models, and every Bot can draw images in its chats.": "在 Bot 的聊天中登录 Codex，或在“设置 → 模型”中添加 OpenAI 密钥后，每个 Bot 都能在聊天中绘制图片。",
+  "Sign in to Codex from a Bot's chat, and every Bot can draw images in its chats.": "在 Bot 的聊天中登录 Codex 后，每个 Bot 都能在聊天中绘制图片。",
   "Codex, on your ChatGPT plan": "Codex，使用你的 ChatGPT 套餐",
   "Every Bot can draw images in its chats. They are saved in the team workspace's images folder.": "每个 Bot 都能在聊天中绘制图片，图片保存在团队工作区的 images 文件夹中。",
   "Pets": "宠物",
@@ -12277,7 +12278,7 @@ function ImagesSection({ Section: Section3, Row: Row3 }) {
     void call("image-access").then(setAccess, () => setAccess(null));
   }, []);
   const label = access === void 0 ? t("Loading…") : access === null ? t("Not connected") : access.kind === "codex" ? t("Codex, on your ChatGPT plan") : access.kind === "chatgpt" ? t("Your ChatGPT account") : t("Your OpenAI key");
-  const hint = access === null ? t("Sign in to Codex from a Bot's chat, or add an OpenAI key in Settings → Models, and every Bot can draw images in its chats.") : t("Every Bot can draw images in its chats. They are saved in the team workspace's images folder.");
+  const hint = access === null ? t("Sign in to Codex from a Bot's chat, and every Bot can draw images in its chats.") : t("Every Bot can draw images in its chats. They are saved in the team workspace's images folder.");
   return (0, import_react30.createElement)(
     Section3,
     { title: t("Images") },
@@ -12846,6 +12847,10 @@ function settingsModelPicker({ bot, roster, actions, run: run2, onFailure = () =
   return { bot, roster, actions, run: run2, saved: true, onPick: pick2 };
 }
 
+// src/shared/folder-access.js
+var FOLDER_ACCESS_NOTE = "The operating system blocked read or write access to {folder}. Allow Automagik to use this folder: on macOS, open System Settings > Privacy & Security > Files and Folders (or Full Disk Access); elsewhere, allow your user to read and write the folder. Your folder choice has been kept.";
+var folderAccessNote = (folder) => FOLDER_ACCESS_NOTE.replace("{folder}", JSON.stringify(folder));
+
 // src/client/folder-menu.js
 var import_react33 = require("react");
 var import_react_dom6 = require("react-dom");
@@ -12853,6 +12858,22 @@ var folderName = (path2) => String(path2).replace(/[\\/]+$/, "").split(/[\\/]/).
 var Tick2 = ({ on }) => (0, import_react33.createElement)("span", { className: "bt-model-tick", "aria-hidden": true }, on ? (0, import_react33.createElement)(CheckIcon) : null);
 function FolderMenu({ value, group = false, team = false, actions, run: run2, onPick, wide = false, disabled = false }) {
   const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu();
+  const [warning, setWarning] = (0, import_react33.useState)(null);
+  (0, import_react33.useEffect)(() => {
+    let active = true;
+    if (group && !value) {
+      setWarning(null);
+      return;
+    }
+    Promise.resolve(actions.folderProbe?.(value)).then((note) => {
+      if (active) setWarning(note);
+    }, () => {
+      if (active) setWarning(null);
+    });
+    return () => {
+      active = false;
+    };
+  }, [value, group, actions.folderProbe]);
   const [info, setInfo] = (0, import_react33.useState)(null);
   const [view, setView] = (0, import_react33.useState)("list");
   const [draft, setDraft] = (0, import_react33.useState)("");
@@ -12978,6 +12999,7 @@ function FolderMenu({ value, group = false, team = false, actions, run: run2, on
       ),
       (0, import_react33.createElement)(Caret)
     ),
+    warning ? (0, import_react33.createElement)("div", { className: "bt-note", role: "status" }, t(FOLDER_ACCESS_NOTE, { folder: JSON.stringify(warning.folder) })) : null,
     shownPlace ? (0, import_react_dom6.createPortal)((0, import_react33.createElement)(
       "div",
       { ref: menu, className: `bt-menu bt-model-menu bt-folder-menu${shownPlace.bottom !== void 0 ? " bt-menu-up" : ""}`, role: "menu", "aria-label": team ? t("Team workspace") : t("Working folder"), style: shownPlace, "data-leaving": leaving || void 0 },
@@ -19077,6 +19099,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     // After a failed turn: the Bot answers the user's last unanswered message, which is never sent again.
     resume: (botId) => after(call2("resume", { botId })),
     folders: () => call2("folders"),
+    folderProbe: (path2) => call2("folder-probe", { path: path2 ?? "" }),
     folderPick: () => call2("folder-pick"),
     folderList: (path2) => call2("folder-list", { path: path2 ?? "" }),
     setTeamWorkspace: (path2) => after(call2("team-workspace", { path: path2 })),
@@ -25747,6 +25770,17 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const [showInstructions, setShowInstructions] = (0, import_react64.useState)(false);
   const [model, setModel] = (0, import_react64.useState)(() => startModel(roster));
   const [effort, setEffort] = (0, import_react64.useState)(void 0);
+  const [folderWarning, setFolderWarning] = (0, import_react64.useState)(null);
+  (0, import_react64.useEffect)(() => {
+    let active = true;
+    Promise.resolve(actions.folderProbe?.()).then((note) => {
+      if (active) setFolderWarning(note);
+    }, () => {
+    });
+    return () => {
+      active = false;
+    };
+  }, [actions.folderProbe]);
   const [busy, setBusy] = (0, import_react64.useState)(false);
   const [error, setError] = (0, import_react64.useState)("");
   const fileRef = (0, import_react64.useRef)(null);
@@ -25759,7 +25793,7 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const finalName = name.trim() || fallbackName;
   const clash = roster.bots.some((bot) => bot.name.toLowerCase() === finalName.toLowerCase());
   const problem = nameProblem(finalName);
-  const permission = roster.prefs?.permission ?? roster.permissions?.defaultPreset;
+  const permission = roster.newBotPermission ?? roster.prefs?.permission ?? roster.permissions?.defaultPreset;
   const create = async () => {
     if (busy || clash || problem) return;
     setError("");
@@ -25916,6 +25950,7 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
       { className: "bt-note" },
       t("This model uses its Hermes profile's own instructions.")
     ) : null,
+    folderWarning ? (0, import_react64.createElement)("div", { className: "bt-note", role: "status" }, t(FOLDER_ACCESS_NOTE, { folder: JSON.stringify(folderWarning.folder) })) : null,
     permission == null ? null : (0, import_react64.createElement)(
       "div",
       { className: "bt-note" },
@@ -30024,7 +30059,7 @@ function PermissionsSection({ roster, actions, run: run2 }) {
     (0, import_react79.createElement)(
       "div",
       { className: "bt-set-row bt-bs-row bt-bs-stack bt-drawer-permission" },
-      (0, import_react79.createElement)(PermissionPicker, { catalog, saved: saved ?? catalog.defaultPreset, repick: saved === void 0, confirmFull: true, onPick: (permission) => run2(actions.setPrefs({ permission })) }),
+      (0, import_react79.createElement)(PermissionPicker, { catalog, saved: saved ?? roster.newBotPermission ?? catalog.defaultPreset, repick: saved === void 0, confirmFull: true, onPick: (permission) => run2(actions.setPrefs({ permission })) }),
       (0, import_react79.createElement)(PermissionFallback, { fallback: saved === AUTO && !offered ? AUTO_FALLBACK : void 0 }),
       (0, import_react79.createElement)(PermissionExplanations, { catalog }),
       (0, import_react79.createElement)("div", { className: "bt-note" }, t("Auto is not a choice here: it is turned on for one Bot at a time, in its chat or Details, when its model offers it."))

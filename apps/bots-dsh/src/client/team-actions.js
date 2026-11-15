@@ -188,6 +188,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     // After a failed turn: the Bot answers the user's last unanswered message, which is never sent again.
     resume: botId => after(call('resume', { botId })),
     folders: () => call('folders'),
+    folderProbe: path => call('folder-probe', { path: path ?? '' }),
     folderPick: () => call('folder-pick'),
     folderList: path => call('folder-list', { path: path ?? '' }),
     setTeamWorkspace: path => after(call('team-workspace', { path })),

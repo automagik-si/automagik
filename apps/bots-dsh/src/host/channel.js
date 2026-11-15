@@ -190,6 +190,7 @@ export function install(rt) {
     defaultModel: rt.cachedDefault() ?? null,
     backgroundModel: rt.cachedBackground?.() ?? null,
     permissions: rt.permissionCatalog?.() ?? null,
+    newBotPermission: rt.newBotPermission?.() ?? null,
     modelsKey: modelsKey(),
     prefs: state.prefs,
     // Whether a Desktop window should serve Bot browser reads (see browser.js).
@@ -681,6 +682,7 @@ export function install(rt) {
           return ok({ room: view().rooms.find(entry => entry.id === room.id), changes })
         }
         case 'folders':
+        case 'folder-probe':
         case 'folder-pick':
         case 'folder-list':
           await rt.load()

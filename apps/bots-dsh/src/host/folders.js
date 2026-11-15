@@ -2,6 +2,8 @@
 // there, else a Bot works in its own folder, else in the team workspace. A Session's
 // folder is fixed when it is made, so a change moves the conversation on to a fresh
 // part (parts.js).
+import { probeFolder, osBlocked } from './folder-access.js'
+import { folderAccessNote } from '../shared/folder-access.js'
 import { approvalPolicyOf } from './approval-policy.js'
 import { mkdir, realpath, stat } from 'node:fs/promises'
 import { refusal } from './refusal.js'
@@ -29,6 +31,30 @@ export const expandPath = value => resolve(expandHome(String(value)))
 
 export function install(rt) {
   const { ctx, state } = rt
+  const folderWarnings = new Map()
+  const folderChecks = new Map()
+  const sessionFolderWarnings = new Map()
+  const checkFolderAccess = (folder, blocked, { cached = false } = {}) => {
+    if (cached && !blocked && !folderWarnings.has(folder) && folderChecks.has(folder)) return folderChecks.get(folder)
+    const check = (async () => {
+      const warning = osBlocked(blocked) ? { folder, code: blocked.code }
+        : await probeFolder(folder).catch(() => folderWarnings.get(folder))
+      if (warning) folderWarnings.set(folder, warning)
+      else folderWarnings.delete(folder)
+      return warning
+    })()
+    folderChecks.set(folder, check)
+    return check
+  }
+  const folderWarning = folder => folderWarnings.get(folder)
+  ctx.effect?.(() => ctx.systemPrompt?.context?.({
+    name: 'ds-bot:folder-access', order: 650, interpolate: false,
+    text: context => {
+      const session = context?.agent?.session ?? context?.agent
+      const folder = sessionFolderWarnings.get(session?.id) ?? sessionFolder(session)
+      return folderWarnings.has(folder) ? folderAccessNote(folder) : ''
+    },
+  }), 'ds-bot: folder access context')
 
   const teamFolder = () => ctx.workspaceRegistry.get?.(state.workspaceId)?.path
   // The desktop app names the folder the user chose for the Bots' files.
@@ -61,7 +87,7 @@ export function install(rt) {
   }
   // Where `input` leads from `base`, as a real path, the way DSH's working_directory resolves
   // a change; undefined when nothing is there.
-  const folderAt = (base, input) => realpath(resolve(base, input)).catch(() => undefined)
+  const folderAt = (base, input) => realpath(resolve(base, input)).catch(error => osBlocked(error) ? resolve(base, input) : undefined)
   // Where a Session works: the folder DSH has for it, else the one DS Bot made it for.
   const sessionFolder = (session) => {
     const reported = session?.header === undefined ? undefined : ctx.get?.('workingDirectory')?.get?.(session) ?? session.header.cwd
@@ -103,22 +129,29 @@ export function install(rt) {
   // team workspace.
   async function cleanWorkDir(input) {
     const text = unquote(input)
-    if (text === '') return undefined
+    if (text === '') { await checkFolderAccess(teamFolder()); return undefined }
     const expanded = expandHome(text)
     if (!isAbsolute(expanded)) throw refusal(`Give the full path of the folder, not ${text}`)
-    let path
+    let path, blocked
     try {
       path = await realpath(expanded)
-    } catch {
-      throw refusal(`There is no folder at ${text}`)
+    } catch (error) {
+      if (!osBlocked(error)) throw refusal(`There is no folder at ${text}`)
+      path = resolve(expanded)
+      blocked = error
     }
-    if (!(await isFolder(path))) throw refusal(`${text} is a file, not a folder`)
-    return workFolder(path)
+    const info = await stat(path).catch(error => {
+      if (!osBlocked(error)) throw refusal(`There is no folder at ${text}`)
+      blocked = error
+    })
+    if (info && !info.isDirectory()) throw refusal(`${text} is a file, not a folder`)
+    return workFolder(path, blocked)
   }
 
   // A folder, as a real path, as a working folder: undefined for the team workspace.
-  async function workFolder(path) {
+  async function workFolder(path, blocked) {
     if (await guarded(path)) throw refusal(`${path} holds DeepSeek Harness data, so Bots cannot work there`)
+    await checkFolderAccess(path, blocked)
     return path === await realTeam() ? undefined : path
   }
 
@@ -141,10 +174,16 @@ export function install(rt) {
     }
     // A folder to be made counts where it would be made: a link above it can lead into the data.
     if (await holdsData(await realBeyond(resolve(expanded)))) throw refusal(`${text} holds DeepSeek Harness data, so it cannot be the team workspace`)
-    await mkdir(expanded, { recursive: true })
-    const path = await realpath(expanded)
-    if (!(await isFolder(path))) throw refusal(`${text} is a file, not a folder`)
+    let blocked
+    await mkdir(expanded, { recursive: true }).catch(error => { if (!osBlocked(error)) throw error; blocked = error })
+    const path = await realpath(expanded).catch(error => { if (!osBlocked(error) && !blocked) throw error; return resolve(expanded) })
+    const info = await stat(path).catch(error => {
+      if (!blocked && !osBlocked(error)) throw error
+      blocked ??= error
+    })
+    if (info && !info.isDirectory()) throw refusal(`${text} is a file, not a folder`)
     if (await holdsData(path)) throw refusal(`${text} holds DeepSeek Harness data, so it cannot be the team workspace`)
+    await checkFolderAccess(path, blocked)
     if (path === await realTeam()) return path
     const clash = await rt.privateClash(path)
     if (clash) throw new Error(`${text} is in or around the folder of ${clash.name}, a private Bot, so it cannot be the team workspace`)
@@ -220,6 +259,10 @@ export function install(rt) {
           folders: present.filter(Boolean),
         }
       }
+      case 'folder-probe': {
+        const path = await cleanWorkDir(body.path ?? '')
+        return folderWarning(path ?? teamFolder()) ?? null
+      }
       case 'folder-pick': {
         const native = picker()
         if (native?.kind !== 'native') throw refusal('This DeepSeek Harness has no folder chooser')
@@ -236,5 +279,5 @@ export function install(rt) {
     }
   }
 
-  Object.assign(rt, { teamFolder, defaultTeamFolder, workDirOf, sessionFolder, isFolder, real, realBeyond, folderAt, cleanWorkDir, workFolder, inData, setTeamWorkspace, sessionsOfBot, approveFolder, folderEndpoint })
+  Object.assign(rt, { checkFolderAccess, folderWarning, sessionFolderWarnings, teamFolder, defaultTeamFolder, workDirOf, sessionFolder, isFolder, real, realBeyond, folderAt, cleanWorkDir, workFolder, inData, setTeamWorkspace, sessionsOfBot, approveFolder, folderEndpoint })
 }

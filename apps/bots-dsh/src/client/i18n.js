@@ -5,6 +5,7 @@
 export const NAMESPACE = 'omni-ui'
 
 const ZH = {
+  "The operating system blocked read or write access to {folder}. Allow Automagik to use this folder: on macOS, open System Settings > Privacy & Security > Files and Folders (or Full Disk Access); elsewhere, allow your user to read and write the folder. Your folder choice has been kept.": "操作系统阻止了对 {folder} 的读取或写入。请允许 Automagik 使用此文件夹：在 macOS 上，打开系统设置 > 隐私与安全性 > 文件与文件夹（或完全磁盘访问权限）；在其他系统上，允许你的用户读取和写入该文件夹。你选择的文件夹已保留。",
   "What will it do?": "它会做什么？",
   "Add instructions": "添加说明",
   "Part of the Bot's system prompt. You can change it later in its details.":
@@ -2332,7 +2333,7 @@ const ZH = {
   'Drawn with': '绘制方式',
   'Your ChatGPT account': '你的 ChatGPT 账户',
   'Your OpenAI key': '你的 OpenAI 密钥',
-  'Sign in to Codex from a Bot\'s chat, or add an OpenAI key in Settings → Models, and every Bot can draw images in its chats.': '在 Bot 的聊天中登录 Codex，或在“设置 → 模型”中添加 OpenAI 密钥后，每个 Bot 都能在聊天中绘制图片。',
+  'Sign in to Codex from a Bot\'s chat, and every Bot can draw images in its chats.': '在 Bot 的聊天中登录 Codex 后，每个 Bot 都能在聊天中绘制图片。',
   'Codex, on your ChatGPT plan': 'Codex，使用你的 ChatGPT 套餐',
   "Every Bot can draw images in its chats. They are saved in the team workspace's images folder.": '每个 Bot 都能在聊天中绘制图片，图片保存在团队工作区的 images 文件夹中。',
   'Pets': '宠物',

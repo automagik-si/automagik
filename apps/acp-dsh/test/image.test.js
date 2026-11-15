@@ -226,7 +226,7 @@ async function refusedBeforeStart(t, env, message, label, options = {}) {
 }
 
 test('a feature the run relies on that Codex does not list, or leaves on, stops the draw before Codex starts', async (t) => {
-  const unsupported = /could not turn off.*Update Automagik, or add an OpenAI key/
+  const unsupported = /could not turn off.*Update Automagik and try again/
   const renamed = await refusedBeforeStart(t, { FAKE_FEATURES: JSON.stringify({ drop: ['view_image'] }) }, unsupported, 'a renamed feature')
   assert.match(renamed.logged[0], /unsupported.*view_image/, 'one log line names the feature')
   assert.doesNotMatch(renamed.message, /view_image/, 'the refusal shown does not')

@@ -404,14 +404,19 @@ not isolated. There is no UI change. A passing `imageAccess()` check means drawi
 it does not establish that this draw can select a profile. The internal `isolated=true` flag
 means the adapter acknowledged the profile, not that image reads are scratch-only.
 
-**Input ownership.** `drawImage` sends only prompt text. It accepts no local image-input path,
-registers no ACP filesystem-read callback, and receives no pre-read image-tool arguments.
-Codex selects and reads `referenced_image_paths` inside its own helper. There is therefore no
-adapter-controlled input path on which to enforce realpath containment or reject symlink
-components. `imageOf` consumes inline output bytes only; it never opens `savedPath` or resource
-links. Checking reported output paths after a tool runs would not prevent its input reads.
-A future path-input API must check realpath containment within the per-draw scratch and reject
-symlink components before reading. That API does not exist here. **#870 remains open.**
+**Input ownership.** Drawing sends only prompt text. An edit takes the person's uploaded
+PNG, JPEG or WebP from DSH's verified attachment store: bots-dsh resolves it in that Bot's own
+chat, and acp-dsh validates the bytes, writes a 0400 copy inside the per-draw scratch and sends
+an inline image block when the agent advertises image prompts. No read root is added. Edits
+run only when the adapter acknowledged the per-draw profile; the read-only fallback refuses
+an edit. The scratch, including the input copy, is removed afterwards.
+
+`drawImage` accepts no user-selected local image-input path, registers no ACP filesystem-read
+callback, and receives no pre-read image-tool arguments. Codex selects and reads
+`referenced_image_paths` inside its own helper. The verified scratch copy does not intercept
+other paths that helper might select. `imageOf` consumes inline output bytes only; it never
+opens `savedPath` or resource links. Checking reported output paths after a tool runs would
+not prevent its input reads. **#870 remains open.**
 
 **Uploaded chat files and images.** The ACP adapter copies this turn's genuine user uploads
 from DSH's verified attachment store into the chat working folder. Every ACP agent gets file
@@ -420,7 +425,7 @@ with `*` on its own line. New folders use mode 0700; completed copies use mode 0
 copies are reused. Conflicting files, symlinks below the chat folder and invalid working
 folders are refused (the chat folder itself may be a link). Copies stay until the person
 deletes them. Chats sharing a working folder can see one another's copies. No filesystem read
-root is added.
+root is added. The Bot team fences these per-chat picture copies to the Bots the picture was sent to, for every DSH tool.
 Node has no openat, so a directory or file swap between a check and its call (containment,
 publication, cleanup) remains a risk inside the private upload folder.
 
@@ -559,7 +564,7 @@ when a check does not hold; Codex's profile plus runtime grants supply filesyste
   it, or 120 seconds pass. Neither the prompt nor what the agent says is logged or kept.
 
 A check that does not hold answers `acp/image-unavailable`, with what the person can do: update
-Automagik or add an OpenAI key (this Codex does not take the lockdown), fix Codex's config file
+Automagik (this Codex does not take the lockdown), fix Codex's config file
 (Codex could not load it), or try again (the check itself broke). One `warn` log line names the
 feature or tool; the message shown does not. `imageAccess` makes the same check, remembered per
 Codex and adapter for five minutes, and answers `{ ready: false, signedIn: true, reason }` when
