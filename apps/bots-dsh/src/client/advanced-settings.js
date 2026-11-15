@@ -82,7 +82,7 @@ export function AdvancedSettings({ bot, roster, actions, save, Card, Row, Switch
     else read()
     const timer = setInterval(read, 5000)
     return () => { current = false; clearInterval(timer) }
-  }, [key, bot.advanced, bot.contextCheckRatio, bot.contextRecentTokens, bot.memoryReview, refresh])
+  }, [key, bot.advanced, bot.contextCheckRatio, bot.contextRecentTokens, bot.memoryReview, bot.memoryTidy, refresh])
   const shown = snapshot?.key === key ? snapshot : null
   const context = shown?.context
   const memory = shown?.memory
@@ -113,6 +113,9 @@ export function AdvancedSettings({ bot, roster, actions, save, Card, Row, Switch
       h(Card, { title: t('Memory review') },
         h(SwitchRow, { label: t('Automatic memory review'), hint: t('Reviews this Bot’s own chat after idle turns. Independent of context compaction; no fixed ordering is promised.'), on: memory?.enabled === true, disabled: disabled || !memory?.allowed, onChange: memoryReview => save({ memoryReview }) }),
         h('p', { className: 'bt-set-hint bt-advanced-note', role: 'status' }, !memory ? t('Loading…') : !memory.allowed ? t('Automatic memory review is disabled by the host configuration.') : memory.running ? t('Memory review running. Disabling review prevents future passes; this pass may finish.') : memory.pending ? t('Memory review pending.') : memory.enabled ? t('Memory review idle.') : t('Automatic memory review is off for this Bot.'))),
+      h(Card, { title: t('Memory tidy') },
+        h(SwitchRow, { label: t('Daily memory tidy'), hint: t('Once a day, when this Bot’s own memory has changed, its model merges repeats, retires what is over and moves details into topics. It uses tokens every day, so it is off until you turn it on. The memory panel can undo the latest tidy.'), on: memory?.tidy?.enabled === true, disabled: disabled || !memory?.tidy?.allowed || memory.tidy.always === true, onChange: memoryTidy => save({ memoryTidy }) }),
+        h('p', { className: 'bt-set-hint bt-advanced-note', role: 'status' }, !memory?.tidy ? t('Loading…') : !memory.tidy.allowed ? t('The daily memory tidy is disabled by the host configuration.') : memory.tidy.always ? t('The host configuration runs the daily memory tidy for every memory.') : memory.tidy.enabled ? t('The daily memory tidy is on for this Bot.') : t('The daily memory tidy is off for this Bot.'))),
       h(Card, { title: t('Stats') }, h('div', { className: 'bt-set-row bt-bs-row bt-bs-stack' }, h(Statistics, { stats: shown?.stats }), h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setRefresh(value => value + 1), disabled: pending }, t('Refresh stats'))))))
 }
 

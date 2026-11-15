@@ -84,7 +84,7 @@ async function start(t, provider) {
     await round
     return delivered
   }
-  return { relay, rt: ctx.get('omniTeam'), agentOf }
+  return { relay, rt: ctx.get('omniTeam'), agentOf, emit, tool }
 }
 
 test('group TXT and PNG pointers reach an ACP-route member in block order', async t => {
@@ -95,7 +95,9 @@ test('group TXT and PNG pointers reach an ACP-route member in block order', asyn
   assert.deepEqual(message.source.uploads, { v: 1, roomId: 'r1', items })
   assert.deepEqual(h.rt.roomOf('r1').log[0].uploads, items)
   assert.equal(h.agentOf('ga').model.current().provider, 'acp-codex')
-  assert.deepEqual(message.content.map(block => block.type), ['text', 'file'])
+  // A member's relay also holds the picture itself (v0.3.6 sends it beside its reading); the
+  // ACP adapter keeps the text and takes the pointers.
+  assert.deepEqual(message.content.map(block => block.type), ['text', 'image', 'file'])
   assert.match(message.content[0].text, /PNG OCR marker/)
 })
 
@@ -105,7 +107,7 @@ test('native group content stays byte-equal to the relay without provenance', as
   const message = await h.relay({ id: 'person-row', source: { kind: 'user' }, content })
   const before = await baseline.relay({ source: { kind: 'user' }, content })
   assert.equal(JSON.stringify(message.content), JSON.stringify(before.content))
-  assert.deepEqual(message.content.map(block => block.type), ['text', 'file'])
+  assert.deepEqual(message.content.map(block => block.type), ['text', 'image', 'file'])
   assert.equal(before.source.uploads, undefined)
 })
 
@@ -139,4 +141,34 @@ test('an offloaded group image is not listed or read', async t => {
     { messageId: 'person-row', blockIndex: 1, attachmentId: file.attachmentId, kind: 'file' },
   ] })
   assert.doesNotMatch(message.content[0].text, /PNG OCR marker/)
+})
+
+// A message that comes in while a round runs joins that round (groups.js joinRound) and is
+// written by another line of code than the round's first message.
+test('a file sent while a round runs keeps its pointer and reaches the member', async t => {
+  const h = await start(t, 'acp-codex')
+  const stop = new AbortController()
+  t.after(() => stop.abort())
+  const member = h.agentOf('ga')
+  h.emit('r1', 'user/message', { id: 'first-row', source: { kind: 'user' }, content: [content[0]] })
+  const round = h.tool('group_relay', { agent: { id: 'r1' }, callId: 'c1', signal: stop.signal })
+  await settle(() => member.calls.length === 1)
+  h.emit('ga', 'turn/start', { turn: 1 })
+  h.emit('ga', 'user/message', member.calls[0])
+  // The person writes again before the member has answered.
+  h.emit('r1', 'user/message', { id: 'second-row', source: { kind: 'user' },
+    content: [{ type: 'text', text: 'And this file' }, { type: 'file', attachment: file }] })
+  const joined = h.tool('group_relay', { agent: { id: 'r1' }, callId: 'c2', signal: stop.signal })
+  const items = [{ messageId: 'second-row', blockIndex: 1, attachmentId: file.attachmentId, kind: 'file' }]
+  await settle(() => h.rt.roomOf('r1').log.some(line => line.text?.includes('And this file')))
+  assert.deepEqual(h.rt.roomOf('r1').log.find(line => line.text?.includes('And this file')).uploads, items)
+  h.emit('ga', 'assistant/message', { message: { content: [{ type: 'text', text: '[PASS]' }] } })
+  h.emit('ga', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await settle(() => member.calls.length === 2)
+  assert.deepEqual(member.calls[1].source.uploads, { v: 1, roomId: 'r1', items })
+  h.emit('ga', 'turn/start', { turn: 2 })
+  h.emit('ga', 'user/message', member.calls[1])
+  h.emit('ga', 'assistant/message', { message: { content: [{ type: 'text', text: '[PASS]' }] } })
+  h.emit('ga', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+  await Promise.all([round, joined])
 })

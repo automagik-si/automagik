@@ -72,3 +72,9 @@ octopus, the palette, every "Omni" in the copy and in the Bots' prompts), the ex
 other Omni plugins use (`extend.js`: tool cards, row badges, header buttons, endpoints), canvases,
 the Tasks agent, "New conversation", Connect AI in the model menu, and the channels footer seat.
 The desktop app counts as "the app" for updates and the Bot browser through `OMNI_CLIENT_ID`.
+
+## Merged from upstream v0.3.6
+
+This merge incorporates upstream commit `a66cc737cfb6c3d8a2597e748cded6cab1206dd3`.
+Automagik names, routes, storage prefixes, service defaults and the `omni-ui:` namespace remain
+as documented above; generated client and Office bundles are rebuilt by the lead after assembly.

@@ -129,7 +129,9 @@ function team(t) {
   t.after(() => rmSync(home, { recursive: true, force: true }))
   const ctx = fakeContext()
   const rt = createRuntime(ctx, { home })
-  const browserTools = [...ctx.registeredTools.keys()].filter(name => name.startsWith('browser_') || name === 'read_browser')
+  // The browser tools are a Bot Session's own since v0.3.6: the names the browser part mounted, with
+  // whatever a global registration still holds.
+  const browserTools = [...new Set([...(rt.browserToolNames ?? []), ...ctx.registeredTools.keys()])].filter(name => name.startsWith('browser_') || name === 'read_browser')
   return { rt, browserTools }
 }
 

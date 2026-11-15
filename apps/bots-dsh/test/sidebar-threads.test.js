@@ -22,6 +22,8 @@ let stateSets = []
 const react = {
   createElement: (type, props, ...children) => ({ type, props: { ...props, children } }), Fragment: Symbol('Fragment'),
   useEffect() {}, useLayoutEffect() {}, useMemo: make => make(), useRef: current => ({ current }), useId: () => 'id', useCallback: fn => fn,
+  // The bundled Deep View widgets make a React context when their module loads.
+  createContext: value => ({ Provider: 'Provider', value }), useContext: context => context.value,
   useState: (initial) => {
     const set = value => stateSets.push(value)
     return [typeof initial === 'function' ? initial() : initial, set]

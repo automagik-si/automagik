@@ -33,6 +33,7 @@ const { outputFiles } = await build({
     "export { BotPanel } from './src/client/browser-pane.js'; export { useEscape } from './src/client/overlay-hooks.js'",
     "export { HeaderPill } from './src/client/header.js'; export { teamActions } from './src/client/team-actions.js'",
     "export { createSource, indexRoster } from './src/client/sources.js'",
+    "export { frameLayout } from './src/client/frame-layout.js'",
   ].join('\n'), resolveDir: plugin },
   bundle: true, format: 'cjs', platform: 'browser', write: false, logLevel: 'silent',
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
@@ -41,6 +42,20 @@ const { outputFiles } = await build({
     build.onLoad({ filter: /src\/client\/browser-pane\.js$/ }, args => ({ contents: readFileSync(join(process.env.ISSUE89_BASELINE, 'browser-pane.js'), 'utf8'), resolveDir: dirname(args.path), loader: 'js' }))
   } }] : [],
 })
+
+// overlays.js gives the panel the room it shares with the conversation and says when
+// it covers the chat (frameLayout). This stands in for it: no left column, the
+// window's width, measured again when the window resizes.
+const framed = (window, { BotPanel, frameLayout }) => function Framed(props) {
+  const [viewport, setViewport] = React.useState(window.innerWidth)
+  React.useEffect(() => {
+    const measure = () => setViewport(window.innerWidth)
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [])
+  const layout = frameLayout({ viewport, sidebarWidth: 0, pref: 'hidden', panel: { view: props.pane.view, yielded: true } })
+  return React.createElement(BotPanel, { ...props, room: layout.room, overlay: layout.panel === 'overlay' })
+}
 
 function mount(t) {
   const dom = new JSDOM('<body><button data-details-subject="group">Details</button><button data-details-subject="other">Other Details</button><button id="composer">Composer</button><div id="mount"></div></body>', { url: 'http://localhost', pretendToBeVisual: true })
@@ -60,7 +75,7 @@ function mount(t) {
   t.after(async () => { try { await act(() => root.unmount()) } catch {} dom.window.close() })
   const key = (name, shiftKey = false) => window.document.activeElement.dispatchEvent(new window.KeyboardEvent('keydown', { key: name, shiftKey, bubbles: true, cancelable: true }))
   const focused = (node, message) => assert.ok(window.document.activeElement === node, message)
-  return { window, document: window.document, root, key, focused, ...module.exports }
+  return { window, document: window.document, root, key, focused, ...module.exports, BotPanel: framed(window, module.exports) }
 }
 
 const hook = value => select => select(value)
@@ -121,7 +136,8 @@ test('over a narrow window Details is a modal that contains Tab and focus, and n
   assert.equal(panel.getAttribute('role'), 'dialog')
   assert.equal(panel.getAttribute('aria-modal'), 'true')
   focused(panel, 'becoming a full-window overlay takes focus at once')
-  const buttons = [...panel.querySelectorAll('button')]
+  // A group with no admin shows its goal button disabled, and Tab passes over it.
+  const buttons = [...panel.querySelectorAll('button')].filter(node => !node.disabled)
   assert.ok(buttons.length > 1)
   await act(() => key('Tab'))
   focused(buttons[0], 'Tab from the panel goes to its first control')

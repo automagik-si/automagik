@@ -335,7 +335,7 @@ test('an active token resumes the loopback listener after restart', async t => {
 
 
 test('internal Bot tool edits wait outside the external agent audit', async t => {
-  const { rt, ctx, tool, view } = await fixture(t)
+  const { rt, tool, view } = await fixture(t)
   let release
   let entered
   const blocked = new Promise(resolve => { release = resolve })
@@ -347,7 +347,8 @@ test('internal Bot tool edits wait outside the external agent audit', async t =>
   }
   const agentEdit = tool('update_bot', { id: 'a', instructions: 'External edit' })
   await ready
-  const internalEdit = ctx.registeredTools.get('update_bot').execute({
+  // The team tools sit in each Bot Session's own scope since v0.3.6 (rt.teamTools).
+  const internalEdit = rt.teamTools.find(entry => entry.name === 'update_bot').execute({
     bot: 'Beta', instructions: 'Internal edit',
   }, { agent: { id: 'a' } })
   await new Promise(resolve => setImmediate(resolve))

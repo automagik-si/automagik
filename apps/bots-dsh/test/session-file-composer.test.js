@@ -71,7 +71,7 @@ function start(t, { externalPriority, delayed = false } = {}) {
   const module = { exports: {} }
   runInNewContext(outputFiles[0].text, {
     module, exports: module.exports,
-    require: name => name.startsWith('react') ? new Proxy({}, { get: () => () => null }) : {},
+    require: name => name.startsWith('react') ? new Proxy({ Component: class {} }, { get: (target, key) => (key in target ? target[key] : () => null) }) : {},
     window: dom.window, document: dom.window.document, localStorage: dom.window.localStorage,
     navigator: dom.window.navigator, Element: dom.window.Element, MutationObserver: dom.window.MutationObserver,
     HTMLLinkElement: dom.window.HTMLLinkElement,

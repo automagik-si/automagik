@@ -171,7 +171,7 @@ test('a non-object root is copied byte for byte before any rewrite', async (t) =
     assert.equal(typeof rt.state, 'object')
     assert.notEqual(rt.state, null)
     assert.equal(Object.hasOwn(rt.state, '0'), false, `${original} is not merged into the team`)
-    assert.equal(rt.state.version, 1, `${original} is replaced by the current format`)
+    assert.equal(rt.state.version, 2, `${original} is replaced by the current format`)
   }
 })
 
@@ -378,19 +378,30 @@ test('older timestamp backups are left untouched', async (t) => {
   assert.deepEqual(backupsIn(home), ['state.json.broken-1700000000000', hashName(original)].sort())
 })
 
-test('a real file saved before the version stamp is read, migrated, and written with version 1', async (t) => {
+test('a real file saved before the version stamp is read, migrated, and written with the current version', async (t) => {
   // The bytes an older Omni wrote: no version key at all.
   const older = '{"revision":7,"mainBotId":"chief","bots":{"chief":{"id":"chief","name":"Omni"}},"rooms":{},"exchanges":[],"exchangeTurns":{},"questions":{}}'
   const { rt, statePath } = runtime(t, older)
   assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).version, undefined, 'the fixture predates the stamp')
   await rt.load()
   assert.equal(rt.readOnly(), undefined)
-  assert.equal(rt.state.version, 1)
+  assert.equal(rt.state.version, 2)
   assert.equal(rt.state.bots.chief.name, 'Omni')
   await rt.save()
   const written = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-  assert.equal(written.version, 1, 'the write stamps the current format')
+  assert.equal(written.version, 2, 'the write stamps the current format')
   assert.equal(written.bots.chief.name, 'Omni', 'the migrated team is kept')
+})
+
+// The format before the merge of upstream 0.3.6: its files are read as they are and move on.
+test('a file saved with version 1 is read and written with the current version', async (t) => {
+  const { rt, statePath } = runtime(t, { version: 1, revision: 7, mainBotId: 'chief', bots: { chief: { id: 'chief', name: 'Omni' } }, rooms: {} })
+  await rt.load()
+  assert.equal(rt.readOnly(), undefined)
+  assert.equal(rt.state.version, 2)
+  assert.equal(rt.state.bots.chief.name, 'Omni')
+  await rt.save()
+  assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).version, 2)
 })
 
 test('a stamp that is not an exact integer is refused and left byte-identical', async (t) => {
@@ -866,4 +877,26 @@ test('a permission copy queued behind adoption cannot change the replacement tea
   assert.equal(fs.readFileSync(statePath, 'utf8'), edited)
   assert.equal(rt.state.prefs.marker, 'outside edit')
   assert.equal(rt.state.prefs.permission, undefined)
+})
+
+// #715: a model that quotes the Bot's name must find it, like findRooms does.
+test('findBot unquotes a Bot ref before matching the name', async (t) => {
+  const { rt } = runtime(t, {
+    version: 1,
+    mainBotIds: [],
+    bots: {
+      a1: { id: 'a1', name: 'Ada' },
+      s2: { id: 's2', name: 'Sun Tzu' },
+    },
+    rooms: {},
+  })
+  await rt.load()
+  for (const ref of ['Ada', 'ada', ' @Ada ', '"Ada"', "'Ada'", '“Ada”', '「Ada」']) {
+    assert.equal(rt.findBot(ref)?.id, 'a1', ref)
+  }
+  assert.equal(rt.findBot('“Sun Tzu”')?.id, 's2')
+  // An id still resolves itself; an unknown name still misses.
+  assert.equal(rt.findBot('a1')?.id, 'a1')
+  assert.equal(rt.findBot('"Nobody"'), undefined)
+  assert.equal(rt.findBot(undefined), undefined)
 })

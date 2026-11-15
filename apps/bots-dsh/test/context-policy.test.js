@@ -16,6 +16,10 @@ test('context patches are strict, optional, and support override reset', () => {
   assert.deepEqual(contextPatch({ instructions: 'ignore' }), {})
   for (const advanced of [null, 0, 1, '', 'false', [], {}]) assert.throws(() => contextPatch({ advanced }), { code: 'bot/invalid' })
   for (const memoryReview of [0, 'true', [], {}]) assert.throws(() => contextPatch({ memoryReview }), { code: 'bot/invalid' })
+  // The daily tidy switch is the same kind of override: a boolean, or null to reset.
+  assert.deepEqual(contextPatch({ memoryTidy: true }), { memoryTidy: true })
+  assert.deepEqual(contextPatch({ memoryTidy: null }), { memoryTidy: null })
+  for (const memoryTidy of [0, 'true', [], {}]) assert.throws(() => contextPatch({ memoryTidy }), { code: 'bot/invalid' })
   for (const contextCheckRatio of [0, -.1, .95, 1, NaN, Infinity, '0.8']) assert.throws(() => contextPatch({ contextCheckRatio }), { code: 'bot/invalid' })
   for (const contextRecentTokens of [0, -1, .5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '5']) assert.throws(() => contextPatch({ contextRecentTokens }), { code: 'bot/invalid' })
 })

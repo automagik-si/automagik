@@ -78,7 +78,7 @@ test('Advanced default, single-flight polling, late read isolation and separate 
   const actions = {
     contextStatus: id => { contextReads += 1; return id === 'a' ? slow : Promise.resolve(context(id, 22)) },
     usageStats: async () => ({ scopes: {}, coverage: { status: 'complete' } }),
-    memoryReviewStatus: async () => ({ enabled: true, allowed: true, pending: false, running: false }),
+    memoryReviewStatus: async () => ({ enabled: true, allowed: true, pending: false, running: false, tidy: { enabled: false, allowed: true, always: false } }),
     checkpointBot: async (...args) => { mutations.push(['checkpoint', ...args]) },
     freshConversation: async id => { mutations.push(['fresh', id]) },
   }
@@ -106,6 +106,11 @@ test('Advanced default, single-flight polling, late read isolation and separate 
     tree = render({ id: 'b', sessionId: 'b-part', advanced: true })
     assert.equal(contextReads, 2, 'only one current replacement read starts')
     assert.equal(find(tree, node => node.props['data-context-usage']).children[0], '22 tokens · measured')
+    // The daily tidy is off until the person turns it on, here, for this Bot.
+    const tidy = find(tree, node => node.props.label === 'Daily memory tidy')
+    assert.deepEqual([tidy.props.on, tidy.props.disabled], [false, false])
+    tidy.props.onChange(true)
+    assert.equal(JSON.stringify(mutations.at(-1)), JSON.stringify(['save', 'b', { memoryTidy: true }]))
     await button(tree, 'Checkpoint now').props.onClick(); await flush()
     assert.deepEqual(mutations.at(-1), ['checkpoint', 'b', 'b-part'])
     tree = render({ id: 'b', sessionId: 'b-part', advanced: true }); await flush()

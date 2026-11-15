@@ -13,7 +13,8 @@ const call = (id, name = 'read') => ({ type: 'tool-call', id, name, arguments: '
 const result = (id, text = 'ok') => ({ role: 'tool', toolCallId: id, content: [{ type: 'text', text }] })
 
 const team = (extra = {}) => ({
-  version: 1,
+  // The state version v0.3.6 writes: an older one is brought up on the first load, which is a save.
+  version: 2,
   mainBotIds: ['b1'],
   whaleStored: true,
   // Omni's whale-to-octopus migration already ran, so loading saves nothing.
@@ -156,7 +157,7 @@ async function setup({ state = team(), messages, seq = 4, events, foreignLock = 
   rt.stateSaved = () => { notices += 1; saved?.() }
   await rt.load()
   const callEndpoint = async (endpoint, payload) => {
-    const response = await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
+    const response = await route.fetch(new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
     return response.json()
   }
   const stopRuntime = async () => {

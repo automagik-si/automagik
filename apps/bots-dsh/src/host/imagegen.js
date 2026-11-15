@@ -356,7 +356,7 @@ export function install(rt) {
   }
   if (typeof ctx.inject === 'function') ctx.inject(['acpAgents'], attachKeeper)
   else if (ctx.get?.('acpAgents') !== undefined) attachKeeper({ acpAgents: ctx.get('acpAgents'), effect: (execute, label) => ctx.effect(execute, label) })
-  ctx.tools.register(defineTool({
+  rt.teamTools.push(defineTool({
     name: 'generate_image',
     description: 'Draw a new image from a description, with the user\'s OpenAI key or Codex on their ChatGPT plan. The user watches it being drawn in the chat, and the finished image is saved in the team workspace (its path comes back). Write the prompt as a full visual brief: the subject, the composition, the style or medium, the colors and the light; put any words that must appear in the image in quotes. One image per call; it takes up to two minutes.',
     parameters: {

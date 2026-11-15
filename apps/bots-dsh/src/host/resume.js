@@ -3,11 +3,11 @@
 // from their Sessions, healCutSessions). DSH closes
 // a turn it never finished as interrupted when the Session next opens, and a clean
 // shutdown also cancels the messages still waiting in a Session's inbox; nothing would
-// ever run either again, and whoever waited for them was not told. DS Bot notes each
+// ever run either again, and whoever waited for them was not told. Omni notes each
 // running Bot turn and each message it delivers until a turn takes it up, in
 // inflight.json; what is still noted at the next start is picked up once.
 //
-// A turn that ends while DS Bot is not watching it (the plugin reloaded, DSH went on)
+// A turn that ends while Omni is not watching it (the plugin reloaded, DSH went on)
 // is settled from the Session's durable log: an answer that was produced goes to the Bot
 // that waits for it, and an outcome that cannot be read is said to be unknown. The
 // request itself is never sent again there.
@@ -16,15 +16,12 @@ import { readFileSync } from 'node:fs'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND } from './constants.js'
+import { HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT } from './constants.js'
 import { answerSender, cutOffText, failureLine, turnFailure } from './turns.js'
 import { textOf } from './text.js'
 
 // Long enough for DSH to finish opening its workspaces after a start.
 export const RESUME_DELAY_MS = 3000
-// A delivery waiting longer than this was not lost to a restart.
-const QUEUED_KEPT_MS = 24 * 60 * 60 * 1000
-const QUEUED_MAX = 50
 // A Session edited longer ago than this was not cut off by the last restart.
 const CUT_KEPT_MS = 24 * 60 * 60 * 1000
 // A Session picked up this often in a day stays stopped: a restart loop must not run it forever.
@@ -59,6 +56,10 @@ export function turnsOf(events) {
       continue
     }
     if (current === undefined) continue
+    if (event.type === 'step/start') {
+      current.stepFrom = current.texts.length
+      continue
+    }
     if (event.type === 'user/message') {
       const source = event.data?.source
       if (source?.exchangeId !== undefined) current.took.push(source)
@@ -74,11 +75,29 @@ export function turnsOf(events) {
   return turns
 }
 
-// The last turn that took up an exchange: what it said and how it ended.
+// The last turn that took up an exchange: what it said and how it ended. A turn cut
+// by a user steer keeps going in the turn that starts right after it, so the reason
+// that counts is the continuation's.
 export function turnOf(events, exchangeId) {
   const turns = turnsOf(events)
+  const steerCut = turn => turn?.reason?.kind === 'aborted'
+    && turn.reason.reason?.kind === 'hook'
+    && turn.reason.reason?.reason === STEER_CUT
   for (let at = turns.length - 1; at >= 0; at -= 1) {
-    if (turns[at].took.some(source => source.exchangeId === exchangeId)) return turns[at]
+    if (!turns[at].took.some(source => source.exchangeId === exchangeId)) continue
+    let found = turns[at]
+    let next = at + 1
+    // A steer cut lands inside a step's model call, so the cut turn's last step left
+    // an interrupted draft: texts before the last step/start stay, the rest is a
+    // fragment the continuation replaces.
+    const finished = turn => turn.texts.slice(0, turn.stepFrom ?? turn.texts.length)
+    while (steerCut(found) && next < turns.length) {
+      const follow = turns[next]
+      const kept = finished(found)
+      found = { ...follow, took: [...found.took, ...follow.took], texts: [...kept, ...follow.texts], stepFrom: kept.length + (follow.stepFrom ?? follow.texts.length) }
+      next += 1
+    }
+    return steerCut(found) ? { ...found, texts: finished(found), reason: undefined } : found
   }
   return undefined
 }
@@ -179,8 +198,9 @@ export function install(rt) {
 
   /** @type {Record<string, {botId:string, roomId?:string, since:number, trigger?:any, approval?:{tool:string, reason:string}, resumed?:boolean}>} */
   let turns = {}
+  // A new delivery can persist before recovery runs; it must keep the old queue.
   /** @type {Record<string, {at:number, args:any}[]>} deliveries no turn has taken up, by Session */
-  let queued = {}
+  let queued = interrupted.queued
   let writing = Promise.resolve()
   let stopped = false
   let latest
@@ -200,7 +220,7 @@ export function install(rt) {
       const snapshot = latest
       await mkdir(home, { recursive: true })
       await writeFile(file, snapshot, 'utf8')
-    }).catch(error => rt.warn('ds-bot: noting running turns failed: %s', error))
+    }).catch(error => rt.warn('omni-ui: noting running turns failed: %s', error))
   }
   const update = (id, change) => {
     const next = change(turns[id])
@@ -227,13 +247,16 @@ export function install(rt) {
   rt.deliver = async (args) => {
     const noted = { ...args, exchangeId: args.exchangeId ?? randomUUID() }
     const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
-    // Noted before it is sent: a turn may take it up before the send returns.
-    queued = { ...queued, [sessionId]: [...(queued[sessionId] ?? []), { at: Date.now(), args: noted }].slice(-QUEUED_MAX) }
+    // Noted before it is sent: a turn may take it up before the send returns. Notes
+    // are kept whole; nothing waits out a delivery silently.
+    queued = { ...queued, [sessionId]: [...(queued[sessionId] ?? []), { at: Date.now(), args: noted }] }
     persist()
     try {
       return await deliver(noted)
     } catch (error) {
-      forgetQueued(noted.exchangeId)
+      // A delivery that never reached the inbox stays noted: the next start sends
+      // it again. One whose Bot is gone is dropped, since it can never be sent.
+      if (rt.botOf(noted.toId) === undefined) forgetQueued(noted.exchangeId)
       throw error
     }
   }
@@ -243,7 +266,7 @@ export function install(rt) {
   rt.forgetDelivery = forgetQueued
 
   // A message is done with once a turn takes it up, or once it leaves the inbox untaken
-  // while DS Bot runs: the user stopped the Bot, or DS Bot moved or withdrew it.
+  // while Omni runs: the user stopped the Bot, or Omni moved or withdrew it.
   ctx.on('agent/inbox/discarded', ({ message } = {}) => {
     if (message?.source?.kind === SOURCE_KIND && message.source.exchangeId) forgetQueued(message.source.exchangeId)
   })
@@ -252,7 +275,7 @@ export function install(rt) {
   let taken = Object.keys(interrupted.queued).length > 0 ? new Set() : undefined
   // The first turn event of each Session since this start, until the noted turns are
   // picked up. A turn that ends, or still runs, before one starts here outlived the
-  // last run: only DS Bot restarted (the plugin reloaded) and DSH went on.
+  // last run: only Omni restarted (the plugin reloaded) and DSH went on.
   let firstTurn = Object.keys(interrupted.turns).length > 0 ? new Map() : undefined
   ctx.on('session/event', (session, event) => {
     const id = session?.id
@@ -273,7 +296,9 @@ export function install(rt) {
       case 'turn/start': {
         const owner = rt.groupOwners.get(id)
         const botId = owner?.botId ?? rt.chatOwners.get(id)
-        update(id, () => ({ botId, ...(owner ? { roomId: owner.roomId } : {}), since: event.time ?? Date.now() }))
+        // turns.js runs first and has already claimed or restored the trigger.
+        const info = rt.live.get(id)?.info
+        update(id, () => ({ botId, ...(owner ? { roomId: owner.roomId } : {}), since: event.time ?? Date.now(), ...(info !== undefined ? { trigger: triggerOf(info) } : {}) }))
         break
       }
       case 'user/message': {
@@ -323,26 +348,37 @@ export function install(rt) {
     await resume(sessionId, () => rt.deliver({ toId: bot.id, role: 'resume', resumed: true, text, ...(trigger?.work ? { work: trigger.work } : {}) }))
   }
 
+  // Where a queued note goes now: its Session if it still is one, else the
+  // current Session of its Bot, or of its group when the message went to one.
+  // One no Bot owns any more (a run whose record is gone) has nowhere to go: it is dropped,
+  // not sent to the Bot's chat.
+  const sessionFor = (sessionId, args) => (rt.isBotSession(sessionId) ? sessionId
+    : !rt.pastOwners.has(sessionId) ? undefined
+      : args?.roomId === undefined ? rt.chatOf(args?.toId) : rt.roomOf(args.roomId)?.sessions?.[args.toId])
+
   // A hard stop keeps the inbox, which the Session runs once it wakes; only what DSH
-  // cancelled is sent again.
+  // cancelled is sent again. The notes stay queued until a turn takes the messages
+  // up, so a send that fails here, or a Session that cannot be opened, leaves them
+  // for the next start instead of losing them.
   async function resendQueued(sessionId, list) {
-    // A Session that moved on to a new part since is reached at its current one. One no
-    // Bot owns any more (a run whose record is gone) is dropped, not sent to the Bot's chat.
-    const current = (args) => {
-      if (rt.isBotSession(sessionId)) return sessionId
-      if (!rt.pastOwners.has(sessionId)) return undefined
-      return args.roomId === undefined ? rt.chatOf(args.toId) : rt.roomOf(args.roomId)?.sessions?.[args.toId]
-    }
-    const fresh = list.filter(item => Date.now() - item.at < QUEUED_KEPT_MS && rt.botOf(item.args?.toId) !== undefined
-      && current(item.args) !== undefined && taken?.has(item.args.exchangeId) !== true)
+    const fresh = list.filter(item => rt.botOf(item.args?.toId) !== undefined
+      && sessionFor(sessionId, item.args) !== undefined && taken?.has(item.args.exchangeId) !== true)
     if (fresh.length === 0) return
-    const target = current(fresh[0].args)
+    const target = sessionFor(sessionId, fresh[0].args)
     const agent = await rt.resolveAgent(target)
     const waiting = new Set([...(agent.inbox?.nextStep ?? []), ...(agent.inbox?.nextTurn ?? [])].map(message => message.source?.exchangeId))
     for (const { args } of fresh) {
-      if (waiting.has(args.exchangeId) || taken?.has(args.exchangeId) === true) continue
-      await rt.deliver({ ...args, sessionId: current(args), steer: false, resent: true })
-      resent.add(current(args))
+      if (waiting.has(args.exchangeId)) continue
+      if (taken?.has(args.exchangeId) === true) {
+        forgetQueued(args.exchangeId)
+        continue
+      }
+      // A request that waited through a restart reaches its target late: the work
+      // it is for is marked, so the answer that comes back says so.
+      if (args.role === 'request' || args.role === 'stopped') rt.lateWork?.(args.exchangeId)
+      await deliver({ ...args, sessionId: sessionFor(sessionId, args), steer: false, resent: true })
+        .catch(error => rt.warn('omni-ui: sending again what %s was sent failed: %s', sessionId, error))
+      resent.add(sessionFor(sessionId, args))
     }
   }
 
@@ -415,7 +451,7 @@ export function install(rt) {
     return Array.isArray(seen?.events) ? seen.events : undefined
   }
 
-  // A turn that ended while DS Bot was not watching it: its answer may exist and never
+  // A turn that ended while Omni was not watching it: its answer may exist and never
   // have gone to the Bot that waits for it. The Session's durable log says what it did;
   // the work it was for is settled once, the way a finished turn settles it.
   async function reconcileEnded(sessionId, record) {
@@ -475,7 +511,7 @@ export function install(rt) {
     }
     if (reason.kind === 'aborted') {
       // The turn was stopped before it could answer: the sender is told, as it is told
-      // when DS Bot watches the turn end.
+      // when Omni watches the turn end.
       answerSender(rt, sessionId, asker, `${name} was stopped before it could answer your message.`)
       return
     }
@@ -522,7 +558,20 @@ export function install(rt) {
     }
     const { turns: noted, queued: dropped } = interrupted
     interrupted = { turns: {}, queued: {} }
-    // Taken up now, so another restart does not pick them up twice.
+    // What the last run still had on the way is noted again first, under the
+    // Session it would go to now: nothing is cleared before it is handed over.
+    // A Bot that is gone takes its notes with it; what a turn already read here
+    // is done with.
+    const pending = queued
+    queued = {}
+    for (const [oldId, list] of Object.entries(pending)) {
+      if (!Array.isArray(list)) continue
+      for (const item of list) {
+        if (item?.args?.exchangeId === undefined || taken?.has(item.args.exchangeId) === true || rt.botOf(item.args.toId) === undefined) continue
+        const key = sessionFor(oldId, item.args) ?? oldId
+        queued = { ...queued, [key]: [...(queued[key] ?? []), item] }
+      }
+    }
     persist()
     // Read once, before any resume, so every post can tell its owners.
     owners = ownersOf()
@@ -531,7 +580,7 @@ export function install(rt) {
     for (const [sessionId, record] of Object.entries(noted)) {
       const first = firstTurn.get(sessionId)
       if (first?.type === 'turn/end') {
-        // The turn ended while DS Bot was not watching it: what it did is settled from
+        // The turn ended while Omni was not watching it: what it did is settled from
         // the Session's durable log.
         await reconcileEnded(sessionId, record).catch(error => rt.warn('ds-bot: settling the work of %s failed: %s', sessionId, error))
         continue
@@ -543,12 +592,14 @@ export function install(rt) {
     firstTurn = undefined
     for (const [sessionId, list] of Object.entries(dropped)) {
       if (!Array.isArray(list)) continue
-      await resendQueued(sessionId, list).catch(error => rt.warn('ds-bot: sending again what %s was sent failed: %s', sessionId, error))
+      await resendQueued(sessionId, list).catch(error => rt.warn('omni-ui: sending again what %s was sent failed: %s', sessionId, error))
     }
     taken = undefined
     for (const [sessionId, record] of cut) {
-      await resumeTurn(sessionId, record).catch(error => rt.warn('ds-bot: picking up the turn of %s failed: %s', sessionId, error))
+      await resumeTurn(sessionId, record).catch(error => rt.warn('omni-ui: picking up the turn of %s failed: %s', sessionId, error))
     }
+    // What a group's members were asked for and will not pick up is settled now.
+    await rt.settleRoomBatches?.()
     await healCutSessions(new Set(Object.keys(noted)))
     finish({})
   }
@@ -567,5 +618,5 @@ export function install(rt) {
       finish({ failed: 'DS Bot stopped before the restart pass ended' })
       return writing
     }
-  }, 'ds-bot: resume interrupted turns')
+  }, 'omni-ui: resume interrupted turns')
 }

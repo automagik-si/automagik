@@ -282,7 +282,9 @@ test('a group\'s shared level asks before Full access and explains every level',
 
 // --- Details --------------------------------------------------------------------------
 
-const panelProps = { useSessions: hook({ byId: {} }), useSessionStatus: hook(new Map()), useActivity: hook({}), useWork: hook({}), useBrowserTabs: hook({}), useBrowserPages: hook({}) }
+// `room` is the width the layout gives the panel and the conversation (overlays.js
+// measures it); the window here is 1200 wide.
+const panelProps = { room: 1200, useSessions: hook({ byId: {} }), useSessionStatus: hook(new Map()), useActivity: hook({}), useWork: hook({}), useBrowserTabs: hook({}), useBrowserPages: hook({}) }
 
 function details(t, options = {}) {
   const page = mount(t)

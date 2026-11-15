@@ -3,7 +3,7 @@
 // Inside the Automagik app the page is the app's: its version, its update and its plugins come
 // from the app (desktop-update.js); in a plain DSH the Bot team's own update (Omni's) shows.
 import { createElement as h, useEffect, useRef, useState } from 'react'
-import { GitHubMark } from './connectors.js'
+import { GitHubMark } from './connector-marks.js'
 import { whenText } from './feedback.js'
 import { dateLocale, hostText, t } from './i18n.js'
 import { StarLineIcon } from './icons.js'

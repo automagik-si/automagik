@@ -80,8 +80,10 @@ function inspectWriteTarget(el, { url, mode, active = false }) {
   return kind ? action(kind, label) : null
 }
 
+// playwright-core ships with Omni and drives the desktop app's own browser; a
+// full playwright the user installed also brings its own Chromium build.
 async function loadChromium(playwrightUrl) {
-  const loaded = playwrightUrl ? await import(playwrightUrl) : await import('playwright')
+  const loaded = playwrightUrl ? await import(playwrightUrl) : await import('playwright').catch(() => import('playwright-core'))
   const chromium = loaded.chromium ?? loaded.default?.chromium
   if (!chromium) throw new Error('Playwright has no chromium export. Install playwright and its Chromium build before using a browser plugin.')
   return chromium
@@ -822,6 +824,12 @@ export function createSession({
       return finishAction(() => target.goBack({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}), target)
     },
     shot,
+    async frame() {
+      const target = activePage()
+      if (!target) return undefined
+      const image = await target.screenshot({ type: 'jpeg', quality: 40 })
+      return { mime: 'image/jpeg', data: image.toString('base64'), url: target.url(), title: await target.title().catch(() => '') }
+    },
     // `origin` names the call and Session that asked, so a card can answer them.
     handoff(reason, note, origin) {
       ready()

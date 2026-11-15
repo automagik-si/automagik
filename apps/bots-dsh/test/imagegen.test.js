@@ -299,7 +299,7 @@ test('the plugin hands acp-dsh its image keeper once the agents service is there
     },
     tools: { register: () => () => {} },
   }
-  const rt = { ctx, teamFolder: () => undefined }
+  const rt = { ctx, teamFolder: () => undefined, teamTools: [] }
   install(rt)
   assert.equal(registered.length, 1)
   assert.equal(registered[0], rt.images.agentImages)

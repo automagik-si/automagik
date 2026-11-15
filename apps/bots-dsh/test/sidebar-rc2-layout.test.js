@@ -15,7 +15,8 @@ assert.ok(native, 'the real rc.2 sidebar sheet must be present')
 const prefix = native.match(/\.([\w-]+)_scrollRegion\{/)[1]
 const compiled = await build({ stdin: { contents: "export { SHELL_CSS } from './src/client/styles.js'; export { SIDEBAR_CSS } from './src/client/sidebar.js'", resolveDir: new URL('..', import.meta.url).pathname }, bundle: true, format: 'cjs', platform: 'browser', write: false, external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'] })
 const module = { exports: {} }
-runInNewContext(compiled.outputFiles[0].text, { module, exports: module.exports, require: () => ({}) })
+// The bundled modules make a React context, extend React.Component and draw icons as they load.
+runInNewContext(compiled.outputFiles[0].text, { module, exports: module.exports, require: () => ({ createContext: value => ({ value }), Component: class {}, createElement: (type, props, ...children) => ({ type, props: { ...props, children } }) }) })
 const { SHELL_CSS, SIDEBAR_CSS } = module.exports
 
 for (const width of [1440, 390]) for (const dark of [false, true]) {

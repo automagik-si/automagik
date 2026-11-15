@@ -210,7 +210,7 @@ async function fixture(t, { home: existing, logs = {}, state: statePatch = {}, l
   const listeners = new Map()
   const disposers = []
   const state = { bots: { b: { id: 'b', sessionId: 's', name: 'Bot' }, other: { id: 'other', sessionId: 'private', name: 'Private' } }, rooms: {}, agents: {}, ...statePatch }
-  const rt = { home, state, load: async () => {}, warn() {}, botOf: id => state.bots[id], roomOf: () => undefined, chatOf: id => state.bots[id]?.sessionId, cachedCatalog: () => [], own: (object, key) => object?.[key], ctx: { effect: fn => disposers.push(fn()), on: (name, fn) => listeners.set(name, fn), sessionController: { list: async () => ({ items: listed }), projections: async ({ sessionId }) => logs[sessionId] ? { asOfSeq: logs[sessionId].length - 1 } : null, page: async ({ address, beforeSeq, throughSeq }) => { const log = logs[address.sessionId ?? address.childSessionId]; if (!log) throw new Error('unreadable'); const eligible = log.map((event, seq) => ({ event: { ...event, seq } })).filter(({ event }) => event.seq <= throughSeq && (beforeSeq === undefined || event.seq < beforeSeq)); return { records: eligible.slice(-2), hasMore: eligible.length > 2 } } } } }
+  const rt = { home, state, load: async () => {}, warn() {}, botOf: id => state.bots[id], roomOf: () => undefined, sessionOfRoom: room => (room === undefined ? undefined : room.sessionId ?? room.id), chatOf: id => state.bots[id]?.sessionId, cachedCatalog: () => [], own: (object, key) => object?.[key], ctx: { effect: fn => disposers.push(fn()), on: (name, fn) => listeners.set(name, fn), sessionController: { list: async () => ({ items: listed }), projections: async ({ sessionId }) => logs[sessionId] ? { asOfSeq: logs[sessionId].length - 1 } : null, page: async ({ address, beforeSeq, throughSeq }) => { const log = logs[address.sessionId ?? address.childSessionId]; if (!log) throw new Error('unreadable'); const eligible = log.map((event, seq) => ({ event: { ...event, seq } })).filter(({ event }) => event.seq <= throughSeq && (beforeSeq === undefined || event.seq < beforeSeq)); return { records: eligible.slice(-2), hasMore: eligible.length > 2 } } } } }
   install(rt)
   const close = () => { for (const dispose of disposers) dispose?.() }
   t.after(close)
@@ -253,7 +253,8 @@ test('additive v2 migration preserves auxiliary history/owners/kinds with legacy
   const after = new DatabaseSync(join(home, 'usage.sqlite'))
   assert.equal(after.prepare('SELECT COUNT(*) AS n FROM calls').get().n, 1)
   assert.equal(after.prepare('SELECT kind FROM kinds WHERE session = ?').get('s').kind, 'group')
-  assert.equal(after.prepare('PRAGMA user_version').get().user_version, 3)
+  // The store version after the merge: Automagik's and v0.3.6's additions together.
+  assert.equal(after.prepare('PRAGMA user_version').get().user_version, 4)
   after.close()
 })
 

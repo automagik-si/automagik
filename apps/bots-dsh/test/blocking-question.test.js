@@ -25,14 +25,17 @@ const team = () => ({
 })
 
 // dsh keeps one Agent per Session and fires agent/created, waiting for its listeners,
-// the first time a Session resolves one. restrict() calls are recorded per Session.
-async function setup({ served = ['read', 'ask_user', QUESTION], goals } = {}) {
+// the first time a Session resolves one. restrict() calls are recorded per Session and
+// throw when deny holds throwOn (a name in the Agent's own scope fails the whole list);
+// ctx.on() listeners are recorded per Session too, with their disposal.
+async function setup({ served = ['read', 'ask_user', QUESTION], goals, throwOn } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-blocking-question-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify(team()))
   const ctx = fakeContext({ services: goals === undefined ? {} : { goals } })
   const agents = new Map()
   const hidden = []
   const sent = []
+  const scopedListeners = []
   let sessions = 0
   const created = agent => Promise.all((ctx.listeners.get('agent/created') ?? []).map(listener => listener({ agent })))
   const agentFor = async (id) => {
@@ -41,7 +44,19 @@ async function setup({ served = ['read', 'ask_user', QUESTION], goals } = {}) {
       id,
       session: { id },
       ctx: {
-        tools: { restrict: (filter) => { hidden.push([id, [...filter.deny]]); return () => {} } },
+        tools: {
+          register: () => () => {},
+          restrict: (filter) => {
+            if (throwOn !== undefined && filter.deny.includes(throwOn)) throw new Error(`"${throwOn}" is registered in this scope`)
+            hidden.push([id, [...filter.deny]])
+            return () => {}
+          },
+        },
+        on: (event, listener) => {
+          const record = { sessionId: id, event, listener, disposed: false }
+          scopedListeners.push(record)
+          return () => { record.disposed = true }
+        },
         effect: execute => execute(),
       },
       followup: message => sent.push({ sessionId: id, message }),
@@ -79,7 +94,7 @@ async function setup({ served = ['read', 'ask_user', QUESTION], goals } = {}) {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { ctx, rt, agentFor, hidden, hiddenIn, guard, sent, stop }
+  return { ctx, rt, agentFor, hidden, hiddenIn, guard, sent, scopedListeners, stop }
 }
 
 // DSH's goal service, holding one goal per Session; block() records what was asked.
@@ -155,8 +170,8 @@ test('an adopted DSH Bot retains native question and goal tools alongside team t
   await new Promise(resolve => setTimeout(resolve, 20))
   for (const id of ['writer', 'fresh-writer', 'room-writer']) assert.equal(goals.current.get(id).phase, 'active')
   assert.deepEqual(goals.blocked, [])
-  assert.ok(ctx.registeredTools.has('message_bot'))
-  assert.ok(ctx.registeredTools.has('list_bots'))
+  assert.ok(rt.teamTools.some(tool => tool.name === 'message_bot'))
+  assert.ok(rt.teamTools.some(tool => tool.name === 'list_bots'))
 })
 
 test('the guard refuses the blocking question tool in Bot Sessions only', async (t) => {
@@ -168,7 +183,7 @@ test('the guard refuses the blocking question tool in Bot Sessions only', async 
   assert.equal(guard('read', 'writer'), undefined)
 })
 
-// FeiZhuLulu/DeepSeek-Bot#77: a new Bot told never to use a question tool was opened
+// FeiZhuLulu/DS-Bot#77: a new Bot told never to use a question tool was opened
 // with "use ask_user", and a model that picked dsh's ask_user_question for it held the
 // Bot until the card was answered, with other Bots' messages queued behind it.
 test('a new Bot that rules out question tools opens without one and cannot block on dsh\'s', async (t) => {
@@ -209,7 +224,7 @@ test('a goal started in a Bot chat or a group is blocked; one elsewhere runs', a
   await until(() => goals.blocked.length === 3, { label: 'the three Bot and group goals are blocked', t })
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.deepEqual(goals.blocked.map(entry => entry.sessionId), ['writer', 'room', 'room-writer'])
-  for (const entry of goals.blocked) assert.deepEqual([entry.code, entry.message], ['not-supported', 'Omni does not run goals. Ask the Bot in a message instead.'])
+  for (const entry of goals.blocked) assert.deepEqual([entry.code, entry.message], ['not-supported', 'Bot chats do not run /goal. To give a group a goal, use Set a goal in its + menu.'])
   assert.equal(goals.current.get('plain').phase, 'active')
 })
 
@@ -222,4 +237,62 @@ test('without DSH\'s goal service a goal change is left alone', async (t) => {
   startGoal(ctx, undefined, 'writer')
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.deepEqual(warnings, [])
+})
+
+// The standard preset registers its tools in the Agent's own scope, which restrict() and a
+// same-name section cannot reach, so Bot Sessions filter the hidden tools and their
+// guidance out of the assembled prompt instead. A Bot keeps DSH's delegation tools (its
+// subagents are the team's own): only the blocking question and the Session goal go.
+test('Bot Sessions filter the hidden tools and their guidance out of the prompt assembly', async (t) => {
+  const { rt, agentFor, scopedListeners, stop } = await setup({ served: ['read'] })
+  t.after(stop)
+  for (const id of ['chief', 'room-writer', 'plain']) await agentFor(id)
+  const filters = scopedListeners.filter(record => record.event === 'system-prompt/assemble')
+  // Bot Sessions get the hidden-tools filter and the computer-use filter. The room's own
+  // Session and a plain Agent get neither while Omni has mounted no provider.
+  assert.deepEqual(filters.map(record => record.sessionId), ['chief', 'chief', 'room-writer', 'room-writer'])
+  // Resolving the same Agent again adds no listener.
+  await rt.resolveAgent('chief')
+  assert.equal(scopedListeners.length, 4)
+  const filtered = await filters[0].listener({}, {}, async () => ({
+    sections: [{ name: 'bot-identity' }, { name: 'tool:goal' }, { name: 'tool:ask_user_question' }, { name: 'tool:workflow' }, { name: 'tool:subagent' }, { name: 'tool:bash' }],
+    contexts: [{ name: 'x' }],
+    tools: [{ name: 'read' }, { name: 'subagent' }, { name: 'workflow' }, { name: 'send_message' }, { name: 'message_bot' }, { name: 'ask_user_question' }, { name: 'create_goal' }],
+    variables: { a: 1 },
+  }))
+  assert.deepEqual(filtered.sections.map(section => section.name), ['bot-identity', 'tool:workflow', 'tool:subagent', 'tool:bash'])
+  assert.deepEqual(filtered.tools.map(tool => tool.name), ['read', 'subagent', 'workflow', 'send_message', 'message_bot'])
+  assert.deepEqual(filtered.contexts, [{ name: 'x' }])
+  assert.deepEqual(filtered.variables, { a: 1 })
+  // DSH 0.2.2 adds the tool list after this waterfall, so the assembly it passes has
+  // none; the guidance is still filtered and no tools appear.
+  const current = await filters[0].listener({}, {}, async () => ({
+    sections: [{ name: 'bot-identity' }, { name: 'tool:goal' }],
+    contexts: [],
+    variables: {},
+  }))
+  assert.deepEqual(current, { sections: [{ name: 'bot-identity' }], contexts: [], variables: {} })
+  // The computer-use filter keeps everything but the provider's own sections.
+  const computer = await filters[1].listener({}, {}, async () => ({
+    sections: [{ name: 'bot-identity' }, { name: 'computer-use:dsh-cua' }],
+    contexts: [],
+    variables: {},
+  }))
+  assert.deepEqual(computer, { sections: [{ name: 'bot-identity' }], contexts: [], variables: {} })
+  await stop()
+  for (const record of scopedListeners) assert.equal(record.disposed, true)
+})
+
+// DSH 0.2.2's schedule tools can deliver to a new Session, outside the team.
+test('a Bot schedules only into its own chat', async (t) => {
+  const { ctx, stop } = await setup()
+  t.after(stop)
+  const guard = (name, sessionId, args) => ctx.guards.map(check => check({ name, arguments: args, agent: { id: sessionId } })).find(reason => reason !== undefined)
+  for (const target of ['new_once', 'new']) {
+    assert.match(guard('schedule_create', 'writer', { target }), /this_session/)
+    assert.match(guard('schedule_edit', 'room-writer', { id: 's1', action: 'update', target }), /this_session/)
+    assert.equal(guard('schedule_create', 'plain', { target }), undefined)
+  }
+  assert.equal(guard('schedule_create', 'writer', { target: 'this_session' }), undefined)
+  assert.equal(guard('schedule_edit', 'writer', { id: 's1', action: 'delete' }), undefined)
 })

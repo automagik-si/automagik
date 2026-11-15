@@ -4,7 +4,7 @@ import { currentPart } from './text.js'
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, ConnectorIcon, SlidersIcon } from './icons.js'
 import { BotMark } from './mark.js'
 import { KeyIcon, MaskedInput } from './secret-card.js'
-import { SPRING_POP, SPRING_SHAPE, spring, useLinger, useViewport, viewBottom } from './motion.js'
+import { SPRING_POP, SPRING_SHAPE, spring, stepMenuFocus, useLinger, useViewport, viewBottom } from './motion.js'
 import { hostText, t } from './i18n.js'
 import { HostModelMenu } from './host-model-menu.js'
 import { AgentMark, DshMarkIcon, HerdrMarkIcon } from './marks.js'
@@ -325,12 +325,47 @@ const RouteMark = ({ route }) => h('span', { className: 'bt-route-icon', 'aria-h
 const stepBack = (label, onClick) => h('button', { type: 'button', role: 'menuitem', className: 'bt-model-back', 'aria-label': label, onClick },
   h(ChevronLeftIcon), h('span', { className: 'bt-menu-label' }, label))
 
+// The stable id of a provider group: the models' provider, never the display name,
+// which repeats when two providers carry the same name.
+const groupIdOf = list => list[0]?.provider ?? (typeof list[0]?.ref === 'string' ? list[0].ref.split('/')[0] : '')
+
+// The group that holds the Bot's model, by that id; undefined when the model is no
+// longer served, or the Bot has none.
+function currentGroupId(groups, current) {
+  if (current === undefined || current === null) return undefined
+  const found = groups.find(([, list]) => list.some(model => model.ref === current))
+  return found === undefined ? undefined : groupIdOf(found[1])
+}
+
+// A group is open when the user opened or closed it during this opening of the menu.
+// Otherwise the current model's provider is open, or the first provider when the model
+// is not in the catalog. A search opens every group it matched, so a result is never
+// hidden behind a heading, and the manual state applies again once the search clears.
+export function groupOpen({ id, index, currentId, filtering, manual }) {
+  if (filtering) return true
+  const chosen = manual[id]
+  if (chosen !== undefined) return chosen
+  return currentId === undefined ? index === 0 : id === currentId
+}
+
+// The manual state after a heading is clicked, `open` being what the heading showed.
+export const toggledGroup = (manual, id, open) => ({ ...manual, [id]: !open })
+
+const NO_MANUAL = {}
+// The manual state belongs to one opening of the menu. The leaving menu lives through
+// its 120ms exit animation, so a reopen can land on the same mounted rows; asking with
+// the new opening number then reads the default again instead of the old choices.
+export const manualFor = (state, opening) => (state.opening === opening ? state.manual : NO_MANUAL)
+
 // The rows a step shows (model-menu cascade). The first step is the route, then (ACP and
 // Herdr) the agent, then the route's and agent's models, then a model's thinking levels.
 // `current` is the Bot's model, `picked` its level when that model serves it, `levelName`
 // that level's name. `go(view)` opens another step; `onModel(model, route)` and
 // `onLevel(model, effort)` pick; the menu offers the provider's API key where it can.
-export function ModelSteps({ roster, bot, view, current, picked, levelName, go, onModel, onLevel, onManage, onRemote }) {
+// `folds` (`{manual, onToggle, filtering?}`): the Native route's providers fold, each under a
+// heading that opens and closes it; without it every provider's models show. `levels: false`
+// leaves the level step out, for a pick that has no level of its own.
+export function ModelSteps({ roster, bot, view, current, picked, levelName, go, onModel, onLevel, onManage, onRemote, folds, levels: withLevels = true }) {
   const models = roster.models ?? []
   const remote = roster.prefs?.hermesRemote
   // A saved Remote Hermes profile lists its models directly; setup is for a first
@@ -365,6 +400,10 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
     const back = direct ? { label: t('Back to routes'), view: MENU_ROOT } : { label: t('Back to agents'), view: { step: 'agents', route } }
     const backLabel = direct ? back.label : t('Back to {agent}', { agent: agent?.name ?? routeName(route) })
     const groups = route === 'native' ? groupModels(list) : list.length === 0 ? [] : [[agent?.name ?? routeName(route), list]]
+    // One provider has nothing to fold away.
+    const folding = route === 'native' && folds !== undefined && groups.length > 1
+    const filtering = folds?.filtering === true
+    const currentId = folding ? currentGroupId(groups, current) : undefined
     return h('div', { key: `models:${route}:${view.provider ?? view.agent ?? ''}`, className: 'bt-model-step', role: 'group', 'aria-label': t('Models') },
       stepBack(backLabel, () => go(back.view)),
       route === 'hermes-remote' ? h('div', { className: 'bt-model-none' }, t("Your bots’ team tools (messages to other bots, secrets, memory, schedules) are not available in these chats.")) : null,
@@ -373,15 +412,25 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
         : null,
       h('div', { className: 'bt-menu-sep', role: 'separator' }),
       groups.length === 0 ? h('div', { className: 'bt-model-none' }, t('No models are set up for this route yet.')) : null,
-      groups.map(([label, entries]) => h(Fragment, { key: label },
-        h('div', { className: 'bt-model-group', role: 'presentation' }, label),
-        entries.map((entry) => {
+      groups.map(([label, entries], index) => {
+        const id = groupIdOf(entries)
+        const open = !folding || groupOpen({ id, index, currentId, filtering, manual: folds.manual })
+        return h(Fragment, { key: folding ? `group:${id || label}` : label },
+        !folding || filtering
+          ? h('div', { className: 'bt-model-group', role: 'presentation' }, label)
+          : h('button', {
+              type: 'button', role: 'menuitem', className: 'bt-model-group bt-model-group-toggle',
+              'aria-expanded': open, 'data-open': open ? '' : undefined,
+              onClick: () => folds.onToggle(id, open),
+            },
+            h(Caret), h('span', { className: 'bt-menu-label' }, label)),
+        open ? entries.map((entry) => {
           const herdr = route === 'herdr'
           const pending = entry.pending === true
           const off = herdr || pending || offModel(entry)
           const why = herdr || pending ? t('Not available yet') : modelUnavailableText(entry)
           const name = herdr ? herdrModelLabel(entry) : modelLabel(entry)
-          const more = !off && effortRows(knownEfforts(entry)).length > 0
+          const more = withLevels && !off && effortRows(knownEfforts(entry)).length > 0
           return h('button', {
             key: entry.ref ?? entry.id, type: 'button', role: 'menuitemradio', 'aria-checked': !herdr && !pending && entry.ref === current,
             title: entry.ref, 'aria-haspopup': more ? 'menu' : undefined,
@@ -394,7 +443,8 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
             : entry.ref === roster.defaultModel ? h('span', { className: 'bt-menu-hint' }, t('Default')) : null,
           h(Tick, { on: !herdr && !pending && entry.ref === current }),
           more ? h(ChevronRightIcon) : null)
-        }))),
+        }) : null)
+      }),
       // An explicit way back to the wizard once the connection is saved: a model row never
       // opens it on its own.
       route === 'hermes-remote' && onRemote
@@ -487,6 +537,7 @@ export function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
       close()
     }
     const onKey = (event) => {
+      if (stepMenuFocus(menu.current, event, button.current)) return
       if (event.key !== 'Escape') return
       event.stopPropagation()
       if (escape.current?.() === true) return
@@ -525,6 +576,8 @@ export function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
 // Arrow keys move through a step, Right opens the next, Left and Escape go back one.
 // `onPick`/`onPickEffort` replace saving to the Bot, for a Bot that does not exist yet.
 // `link`: the trigger is a small "change" link, as in the line under a Bot's greeting.
+// `withEfforts: false` keeps the thinking levels out, for a pick that has no level of its own
+// (the model new Bots start on).
 // A Bot whose model menu its plugin owns gets that menu instead (host-model-menu.js).
 export function ModelMenu(props) {
   return h(props.roster?.hostModels?.[props.bot?.id] === undefined ? DshModelMenu : HostModelMenu, props)
@@ -558,7 +611,7 @@ export function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm
       h('button', { type: 'button', className: 'bt-model-confirm-go', onClick: onConfirm }, routeChanged ? t('Change route') : t('Change agent'))))
 }
 
-function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, chat = false, bar = false, running = false, onPick, onPickEffort, saved = onPick === undefined }) {
+function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, chat = false, bar = false, running = false, onPick, onPickEffort, saved = onPick === undefined, withEfforts = true }) {
   const [view, setView] = useState(MENU_ROOT)
   const [hermes, setHermes] = useState(false)
   const remote = useRef({ generation: 0, active: false, mounted: true })
@@ -601,19 +654,27 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   const triggerRoute = shownRunning === undefined ? currentRoute : modelRoute(roster, bot.runningModel)
   const runningTitle = shownRunning === undefined ? undefined : t('Running instead of {model}', { model: shown?.name ?? current })
   const served = servedOf(roster, current)
-  const reasoning = useEfforts(served, current, actions)
+  const reasoning = useEfforts(served, withEfforts ? current : undefined, actions)
   // The level the Bot runs on: its pick when the model serves it, else the model's own.
   const picked = reasoning?.efforts?.some(effort => effort.id === bot.effort) ? bot.effort : undefined
   const currentEffort = picked ?? reasoning?.defaultEffort
-  const effortLabel = currentEffort === undefined
+  const effortLabel = !withEfforts ? undefined : currentEffort === undefined
     ? (reasoning?.efforts?.length > 0 ? t('Default') : undefined)
     : reasoning.efforts.find(effort => effort.id === currentEffort)?.name ?? currentEffort
   const triggerEffort = shownRunning === undefined ? effortLabel
     : servedOf(roster, bot.runningModel)?.reasoning?.efforts?.find(effort => effort.id === bot.runningEffort)?.name
+  // Each opening is a new number, so the provider groups start from the current model again
+  // even when the previous menu is still playing its exit animation under a quick reopen.
+  const [opening, setOpening] = useState(0)
+  const [folded, setFolded] = useState({ opening, manual: NO_MANUAL })
+  const folds = {
+    manual: manualFor(folded, opening),
+    onToggle: (id, open) => setFolded(previous => ({ opening, manual: toggledGroup(manualFor(previous, opening), id, open) })),
+  }
   // A route's models whose levels the catalog does not carry are asked for as it opens,
   // so each row can say whether a level step follows.
   useEffect(() => {
-    if (!isOpen || view.step !== 'models') return undefined
+    if (!withEfforts || !isOpen || view.step !== 'models') return undefined
     let on = true
     const route = view.route ?? routeOfProvider(view.provider)
     const list = route === 'native' ? nativeModels(roster.models, current)
@@ -645,6 +706,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     setKeyFor(undefined)
     // DSH settings can change the list at any time, so opening asks again.
     void actions?.refreshModels?.()
+    setOpening(count => count + 1)
     open()
   }
   const finish = () => {
@@ -708,6 +770,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       return
     }
     if (offModel(model)) return
+    if (!withEfforts) { commit(model, undefined); return }
     const decide = (levels) => {
       if (!live.current) return
       if (effortRows(levels).length > 0) go({ step: 'levels', route, ref: model.ref, ...(model.provider ? { provider: model.provider } : {}) })
@@ -815,7 +878,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     h(Caret)),
     shownPlace ? createPortal(h('div', { ref: menu, className: `bt-menu bt-model-menu${shownPlace.bottom !== undefined ? ' bt-menu-up' : ''}`, role: 'menu', 'aria-label': t('Model for {name}', { name: bot.name }), style: shownPlace, 'data-leaving': leaving || undefined, onKeyDown },
       confirmView ?? h(ModelSteps, {
-        roster, bot, view, current, picked, levelName: effortLabel, go, onModel, onLevel,
+        roster, bot, view, current, picked, levelName: effortLabel, go, onModel, onLevel, folds, levels: withEfforts,
         onRemote: openRemote,
         onManage: manage ? () => { finish(); manage() } : undefined,
       }),
@@ -986,9 +1049,11 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
     error ? h('div', { className: 'bt-secret-error bt-model-error', role: 'alert' }, error) : null)
 }
 
+const DEEPSEEK_KEYS_URL = 'https://platform.deepseek.com/api_keys'
+
 // The provider's API key, saved through the host; once it is set, the provider's
-// models become the choices.
-function ModelKeyCard({ model, actions }) {
+// models become the choices. `onSaved` runs once the host took the key.
+export function ModelKeyCard({ model, actions, onSaved }) {
   const [value, setValue] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -999,12 +1064,16 @@ function ModelKeyCard({ model, actions }) {
     setBusy(true)
     setError('')
     void Promise.resolve(actions.setProviderKey(model.provider, value))
-      .then(() => setValue(''), failure => setError(hostText(failure?.message ?? String(failure))))
+      .then(() => { setValue(''); onSaved?.() }, failure => setError(hostText(failure?.message ?? String(failure))))
       .finally(() => setBusy(false))
   }
+  const official = model.provider === 'deepseek-official'
   return h('div', { className: 'bt-q bt-model-key', role: 'group', 'aria-label': label },
     h('div', { className: 'bt-model-key-title' }, h(KeyIcon), label),
     h('label', { className: 'bt-q-field bt-secret-field' }, h(MaskedInput, { value, onChange: setValue, onEnter: save, label, autoFocus: true })),
+    official ? h('div', { className: 'bt-model-key-help' },
+      h('a', { className: 'bt-model-key-link', href: DEEPSEEK_KEYS_URL, target: '_blank', rel: 'noopener noreferrer' }, t('Create a key on the DeepSeek platform ↗')),
+      h('span', { className: 'bt-model-key-note' }, t('The API is billed by usage; the account needs a balance first.'))) : null,
     error ? h('div', { className: 'bt-secret-error', role: 'alert' }, error) : null,
     h('div', { className: 'bt-q-foot' },
       actions.openModels ? h('button', { type: 'button', className: 'bt-q-btn bt-model-key-other', onClick: actions.openModels }, t('Another provider')) : null,
@@ -1012,7 +1081,7 @@ function ModelKeyCard({ model, actions }) {
 }
 
 // Where the providers are set up: the window's own Models page, else DSH's settings.
-const manageModels = actions => actions.openModels ?? actions.openHarnessSettings
+export const manageModels = actions => actions.openModels ?? actions.openHarnessSettings
 
 // Ways to get a first model. Connect an AI is the welcome plugin's step (@automagik/welcome-dsh:
 // a subscription sign-in, an API key or a gateway); the DeepSeek sign-in exists only where
@@ -1065,6 +1134,13 @@ export const MODEL_CSS = `${HERMES_MARK_CSS}
 .bt-model-menu{overflow-y:auto;scrollbar-width:thin}
 .bt-model-group{flex:none;padding:8px 8px 2px;font-size:11px;line-height:14px;font-weight:500;color:var(--bt-ink-3);text-transform:none}
 .bt-model-group:first-child{padding-top:2px}
+/* A heading that opens and closes its group: the same type as the plain headings other
+menus use, with the menu item's hover, focus ring and a caret that points at the state. */
+.bt-model-group-toggle{display:flex;align-items:center;gap:6px;width:100%;box-sizing:border-box;margin:0;padding:6px 8px;border:0;border-radius:6px;background:transparent;color:var(--bt-ink-3);font:inherit;font-size:11px;line-height:14px;font-weight:500;text-align:left;cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.bt-model-group-toggle:hover{background:var(--bt-hover);color:var(--bt-ink-2)}
+.bt-model-group-toggle:focus-visible{outline:2px solid var(--bt-accent);outline-offset:1px}
+.bt-model-group-toggle .bt-model-caret{color:inherit}
+.bt-model-group-toggle[aria-expanded=false] .bt-model-caret{transform:rotate(-90deg)}
 .bt-model-tick{flex:none;width:16px;height:16px;display:inline-flex;color:var(--bt-ink-2)}
 .bt-model-tick svg{animation:bt-check-pop ${SPRING_POP.duration}ms ${SPRING_POP.easing} 60ms backwards}
 .bt-model-none{padding:8px;font-size:13px;line-height:18px;color:var(--bt-ink-2)}
@@ -1077,12 +1153,14 @@ export const MODEL_CSS = `${HERMES_MARK_CSS}
 .bt-host-model-detail{font-size:11px;line-height:14px;color:var(--bt-ink-3);white-space:normal}
 .bt-host-model-status{padding:2px 8px 6px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-host-model-confirm{flex:none;color:var(--bt-accent);font-size:12px;font-weight:600}
-.bt-model-dock{width:100%;max-width:var(--dsh-chat-content-width,748px);margin:0 auto;display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:0 0 10px;box-sizing:border-box;animation:bt-model-in ${SPRING_POP.duration}ms ${SPRING_POP.easing} backwards}
+/* DSH centers the message column inside its scroll padding, which can sit a few px off this dock's center; the side shadows keep the band over the column's edges. */
+.bt-model-dock{width:100%;max-width:var(--dsh-chat-content-width,748px);margin:0 auto;display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:0 0 10px;box-sizing:border-box;background:var(--bt-main);box-shadow:-12px 0 0 var(--bt-main),12px 0 0 var(--bt-main);animation:bt-model-in ${SPRING_POP.duration}ms ${SPRING_POP.easing} backwards}
 /* After the last turn of a transcript the card is one more message: the column's width, and
    the room a message has above it. */
 .bt-model-seat{margin:6px 0 4px}
 .bt-model-seat>.bt-model-dock{max-width:none;margin:0;padding:0}
-.bt-model-chips{display:flex;flex-wrap:wrap;gap:6px;margin-left:30px;max-width:min(560px,calc(100% - 30px));max-height:min(240px,36vh);max-height:min(240px,36dvh);overflow-y:auto;scrollbar-width:thin}
+/* The scroll box clips at its padding edge, so 3px of padding keeps the chips' focus rings visible; the negative margins cancel it so the chips stay in place. */
+.bt-model-chips{display:flex;flex-wrap:wrap;gap:6px;box-sizing:border-box;padding:3px;margin:-3px 0 -3px 27px;max-width:min(566px,calc(100% - 27px));max-height:min(246px,calc(36vh + 6px));max-height:min(246px,calc(36dvh + 6px));overflow-y:auto;scrollbar-width:thin}
 .bt-model-choice-group{display:flex;flex-direction:column;gap:6px;width:100%;min-width:0}
 .bt-model-choice-provider{padding-top:4px;font-size:12px;line-height:16px;font-weight:500;color:var(--bt-ink-2);overflow-wrap:anywhere}
 .bt-model-choice-chips{display:flex;flex-wrap:wrap;gap:6px}
@@ -1107,6 +1185,10 @@ export const MODEL_CSS = `${HERMES_MARK_CSS}
 .bt-model-key-title{display:flex;align-items:center;gap:6px;font-size:13px;line-height:18px;font-weight:500;color:var(--bt-ink-2)}
 .bt-model-key-title svg{flex:none;width:16px;height:16px}
 .bt-model-key .bt-q-foot{margin-top:2px}
+.bt-model-key-help{display:flex;flex-direction:column;gap:2px;font-size:12px;line-height:17px;color:var(--bt-ink-2)}
+.bt-model-key-link{align-self:flex-start;color:var(--bt-ink);text-decoration:underline;text-decoration-color:var(--bt-line-2);text-underline-offset:2px}
+.bt-model-key-link:hover{text-decoration-color:currentColor}
+.bt-model-key-link:focus-visible{outline:2px solid var(--bt-accent);outline-offset:1px;border-radius:4px}
 .bt-model-key-other{margin-right:auto}
 .bt-route-icon{flex:none;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;color:var(--bt-ink-2)}
 .bt-route-icon svg{width:16px;height:16px}

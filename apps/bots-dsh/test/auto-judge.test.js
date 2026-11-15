@@ -164,7 +164,9 @@ async function world(t, model = 'deepseek/v4') {
   w.rt.noteFailure = row => failures.push(row)
   w.rt.noteStop = (...args) => stops.push(args)
   const exec = { name: 'bash', callId: 'x', agent: { session }, arguments: { command: 'ls', sandbox_permissions: FULL, justification: 'needed' } }
-  const pre = w.ctx.listeners.get('tools/pre-execute').at(-1)
+  // The judge's gate is the last unnamed tools/pre-execute listener: the two installed after it (the schedule tools'
+  // ownTasksGate, computer use's computerGate) came with v0.3.6 and are named.
+  const pre = w.ctx.listeners.get('tools/pre-execute').filter(listener => listener.name === '').at(-1)
   const request = () => ({ agent: exec.agent, toolName: 'bash', callId: exec.callId, reason: `escalate sandbox to ${FULL}: needed` })
   // The team's approval/request listeners as cordis runs them: all are prepended, so the newest runs first (Auto's judge, then
   // approvals.js; Pocket's is not installed here). `last` stands for DSH's own dialog: the person.

@@ -11,6 +11,7 @@ import { MEMBER_CSS } from '../../src/client/member-status.js'
 import { allThemes, themeCss } from '../../src/client/themes.js'
 import { createSource, indexRoster } from '../../src/client/sources.js'
 import { BotPanel, BROWSER_CSS } from '../../src/client/browser-pane.js'
+import { frameLayout } from '../../src/client/frame-layout.js'
 import { SettingsDialog } from '../../src/client/settings.js'
 import { PermissionChoiceDock } from '../../src/client/permission-card.js'
 
@@ -53,13 +54,16 @@ function Page({ view }) {
     return h(SettingsDialog, { page: view === 'group' ? 'groups' : 'bots', id: view === 'group' ? 'group' : undefined, roster: team, actions, useUpdate: constant({}) })
   }
   // Beside the chat the shell leaves the panel its 320 px; in a narrower window the panel covers the chat.
-  const beside = view === 'panel' && window.innerWidth >= 740 ? 320 : 0
+  // The room and the cover come from the app's own frame rule, as overlays.js reads it
+  // (no left column on this page).
+  const layout = frameLayout({ viewport: window.innerWidth, sidebarWidth: 0, pref: 'hidden', panel: view === 'panel' ? { view: 'details', yielded: true } : null })
+  const beside = layout.panel === 'shown' ? 320 : 0
   return h('div', { 'data-chat': '', style: { height: '100%', marginRight: beside, display: 'flex', flexDirection: 'column', color: 'var(--bt-ink)', font: '400 15px/22px var(--bt-font)' } },
     h('div', { style: { flex: 1, minHeight: 0, width: '100%', maxWidth: 748, margin: '0 auto', padding: '24px 16px', boxSizing: 'border-box' } },
       h('p', null, 'Hi! Before I start, choose what I may do on my own.')),
     h('div', { 'data-dock': '', style: { width: '100%', maxWidth: 748, margin: '0 auto', padding: '0 16px 16px', boxSizing: 'border-box' } },
       h(PermissionChoiceDock, { sessionId: 'omni', useRoster, actions })),
-    view === 'panel' ? h(BotPanel, { pane: { id: 'omni', view: 'details' }, leaving: false, roster: team, actions, ...panelProps }) : null)
+    view === 'panel' ? h(BotPanel, { pane: { id: 'omni', view: 'details' }, leaving: false, room: layout.room, overlay: layout.panel === 'overlay', roster: team, actions, ...panelProps }) : null)
 }
 
 let root = null

@@ -249,7 +249,7 @@ test('save_capability answers verified, unverified, or the refusal', async t => 
   t.after(() => server.close())
   const env = await setup()
   t.after(() => env.dispose())
-  const tool = env.ctx.registeredTools.get('save_capability')
+  const tool = env.rt.teamTools.find(tool => tool.name === 'save_capability')
   const ask = args => tool.execute(args, { agent: { id: 'chief' } })
 
   const verified = await ask(capability('good', server.url))
@@ -360,7 +360,7 @@ test('a 302 probe makes exactly one POST and its answer carries no header value'
   const env = await setup()
   t.after(() => env.dispose())
 
-  const answer = await env.ctx.registeredTools.get('save_capability').execute(
+  const answer = await env.rt.teamTools.find(tool => tool.name === 'save_capability').execute(
     capability('moved', source.url, {
       'X-Api-Key': '$DSH_SECRET_TOKEN', 'X-Probe-Header': HEADER_VALUE,
     }),

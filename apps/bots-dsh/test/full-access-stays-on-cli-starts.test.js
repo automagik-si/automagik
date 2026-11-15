@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
+import { afterRound } from './relay-rows.js'
 
 const FULL = 'danger-full-access'
 const WRITE = 'workspace-write'
@@ -143,7 +144,9 @@ function team(t, { bots = {}, room = {}, prefs, codex = false, failSelect = () =
     for (const listener of ctx.listeners.get('session/event') ?? []) await listener({ id: sessionId }, event)
   }
   const tool = (name, args, sessionId) => ctx.registeredTools.get(name).execute(args, { agent: { id: sessionId, session: { id: sessionId } }, callId: randomUUID(), signal: new AbortController().signal })
+  // The relay's own result names where its rows start; the round runs on, and its rows are read as the chat does.
   const relay = (roomId, callId) => ctx.registeredTools.get('group_relay').execute({}, { agent: { id: roomId, inbox: inboxOf(roomId) }, callId, signal: new AbortController().signal })
+    .then(async value => JSON.stringify(await afterRound(rt, roomId, value)))
   const answer = async (sessionId, exchangeId, text, turn) => {
     await emit(sessionId, { type: 'turn/start', data: { turn } })
     await emit(sessionId, { type: 'user/message', data: { source: { kind: 'bot', role: 'room', exchangeId }, content: [{ type: 'text', text: 'your turn' }] } })

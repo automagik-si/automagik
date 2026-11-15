@@ -24,26 +24,30 @@ const { outputFiles } = await build({
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
 const react = {
+  createContext: (initial) => { const ctx = { value: initial }; ctx.Provider = ({ value, children }) => { ctx.value = value; return children }; return ctx },
+  useContext: ctx => ctx.value,
+  useCallback: fn => fn,
+  useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
   createElement: (type, props, ...children) => ({ type, props: { ...props, children } }), Fragment: Symbol('Fragment'),
   useEffect() {}, useLayoutEffect() {}, useState: initial => [initial, () => {}],
   useMemo: make => make(), useRef: current => ({ current }), useId: () => 'id',
 }
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
-// DS Bot's style tags in a document, all of them or those of one group.
+// Omni's style tags in a document, all of them or those of one group.
 const tagged = (document, tag) => [...document.head.querySelectorAll('style')]
   .filter(style => style.dataset.dshBot !== undefined && (tag === undefined || style.dataset.dshBot === tag))
 
 // The client-modules bundle registers itself through the page's __ModuleLoader__
 // facade when it loads; capture that registration once to reach its exports.
-const clientModules = (() => {
+const clientModules = await (async () => {
   const { window } = new JSDOM('<!doctype html><html><head></head><body></body></html>')
   let registration
   const previousWindow = globalThis.window
   globalThis.window = window
   window.__ModuleLoader__ = { load: (record) => { registration = record } }
   try {
-    requireHarness('@deepseek-ai/dsh-client-modules/client')
+    await import('@deepseek-ai/dsh-client-modules/client')
   } finally {
     globalThis.window = previousWindow
   }
@@ -92,7 +96,7 @@ const bench = (rows) => {
 
 // #228: our style tags carry the client module id, so another module's materialization
 // cannot claim them and its teardown cannot delete them.
-test('every DS Bot style is owned by the ds-bot client module', async () => {
+test('every Omni style is owned by the ds-bot client module', async () => {
   const { window, module, register, materialize, update } = bench(['other'])
   const { installStyles, installCompiledStyles } = module.exports
   const { document } = window
@@ -161,7 +165,7 @@ test('mounting and unmounting compiled styles twice leaves no extra nodes', asyn
 })
 
 test('the chat-room rule is installed through installStyles, so it is owned too', () => {
-  const pane = readFileSync(new URL('../src/client/browser-pane.js', import.meta.url), 'utf8')
+  const pane = readFileSync(new URL('../src/client/frame-watch.js', import.meta.url), 'utf8')
   assert.match(pane, /installStyles\(.*'chat-room'/)
   assert.equal(pane.includes("dataset.dshBot = 'chat-room'"), false)
 })
@@ -212,4 +216,25 @@ test('every compiled style shares one scan of each shell sheet, and a later shee
   assert.equal(lateReads.count, 1)
   assert.equal(first.count, 1)
   for (const dispose of disposers) dispose()
+})
+
+test('message tools anchor to the bottom of a long reply in both layouts', () => {
+  const css = readFileSync(new URL('../src/client/styles.js', import.meta.url), 'utf8')
+  assert.match(css, /\.bt-tools\{position:absolute;bottom:0;/)
+  assert.match(css, /body\[data-bt-layout=flat\] \.bt-tools\{bottom:-14px;/)
+  assert.doesNotMatch(css, /\.bt-tools\{position:absolute;top:50%;/)
+})
+
+test('the tools toolbar keeps its own stacking context for the hover bridge', () => {
+  const css = readFileSync(new URL('../src/client/styles.js', import.meta.url), 'utf8')
+  // Without a stacking context on .bt-tools, the ::after bridge's z-index:-1
+  // sinks behind the full-width .bt-astack and the toolbar flickers when the
+  // pointer crosses the gap.
+  assert.match(css, /\.bt-tools\{position:absolute;bottom:0;z-index:0;/)
+  assert.match(css, /\.bt-tools::after\{[^}]*z-index:-1/)
+})
+
+test('the flat toolbar does not cover reactions below the message', () => {
+  const css = readFileSync(new URL('../src/client/styles.js', import.meta.url), 'utf8')
+  assert.match(css, /body\[data-bt-layout=flat\] \.bt-msg:has\(>\.bt-reacts\) \.bt-tools\{bottom:0\}/)
 })

@@ -59,6 +59,8 @@ function page({ dark = false, links = [] } = {}) {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
     useSyncExternalStore: (subscribe, snapshot, server) => { stores.push({ subscribe, snapshot, server }); return snapshot() },
     useState: initial => [initial, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: current => ({ current }), useMemo: make => make(), useCallback: fn => fn, Fragment: 'fragment',
+    // The bundled Deep View widgets make a React context when their module loads.
+    createContext: value => ({ Provider: 'Provider', value }), useContext: context => context.value,
   }
   const module = { exports: {} }
   runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, document, MutationObserver, URLSearchParams, require: name => (name === 'react' ? react : {}) })

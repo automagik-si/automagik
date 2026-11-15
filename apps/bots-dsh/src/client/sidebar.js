@@ -6,11 +6,13 @@ import { isMainOf } from './sources.js'
 import { currentPart, previewOf, relativeShort } from './text.js'
 import { PlusIcon, SearchIcon, SidebarIcon, GaugeIcon, PlugIcon, GearIcon, PinMarkIcon, ConnectorIcon, SwitchIcon, CloudDownloadIcon, TasksIcon, SignOutIcon } from './icons.js'
 import { botState, BotAvatar, BotMark, RoomAvatar } from './mark.js'
+import { AgentBadge } from './agent-badge.js'
 import { DSH_LOOK } from './characters.js'
 import { reducedMotion } from './activity-row.js'
 import { Shimmer, workPhrase } from './cells.js'
 import { springEasing, SPRING_SHAPE, useViewport, viewBottom } from './motion.js'
 import { hostText, t } from './i18n.js'
+import { clientErrors } from './diagnostics.js'
 import { showsDshRow } from './dsh-offer.js'
 import { badges, botChildren, nav, sidebarTools, useEntries } from './extend.js'
 import { agentRowSessions, approvalFor, endLabel, runningTasksOf, taskState, waitsForUser } from './task-card.js'
@@ -29,6 +31,15 @@ function useMarkedUnread(id, active, marked, actions) {
 }
 
 const PinMark = () => h('span', { className: 'bt-pin', 'aria-hidden': true }, h(PinMarkIcon))
+
+// The narrow bar shows a row's name only on hover; the wide list does so when the name is
+// cut, which only the laid-out row can tell, so it is measured as the pointer enters.
+const nameIfCut = (event) => {
+  const row = event.currentTarget
+  const name = row.querySelector('.bt-row-title')
+  if (name && name.scrollWidth > name.clientWidth) row.title = name.textContent
+  else row.removeAttribute('title')
+}
 
 // Work running in group Sessions, as "botId|tool" keys so a row redraws only when it
 // changes: the groups one Bot works in, or the members at work in one group.
@@ -94,12 +105,13 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const label = [bot.name, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: crowned ? 'bt-row bt-row-crowned' : 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
-    'data-bot-id': id, title: wide ? undefined : bot.name, onClick: () => actions.openSession(id), onContextMenu,
+    'data-bot-id': id, title: wide ? undefined : bot.name,
+    onMouseEnter: wide ? nameIfCut : undefined, onClick: () => actions.openSession(id), onContextMenu,
   },
   h(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
   pinned && !wide ? h(PinMark) : null,
   wide ? h('span', { className: 'bt-row-body' },
-    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
+    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), bot.engine ? h(AgentBadge, { engine: bot.engine }) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
     // What to ask this Bot for, on a line of its own: the name line has no room for it.
     h(BotPills, { roster, bot, className: 'bt-row-caps' }),
     blockedLine || stoppedLine ? h('span', { className: 'bt-row-preview bt-row-preview-ask' }, blockedLine || stoppedLine)
@@ -191,14 +203,16 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
 
 function RoomRow({ room, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useWork, wide, marked }) {
   const id = room.id
-  const fallback = useSessions(list => previewOf(list, id))
+  // The group's own Session is a chain of parts; the row shows the current one.
+  const sessionId = room.sessionId ?? id
+  const fallback = useSessions(list => previewOf(list, sessionId))
   const preview = room.preview?.replace(/\s+/g, ' ').trim() || fallback
-  const active = useSessionRetainInfo(id, info => (info?.retainedBy?.mainView ?? 0) > 0)
-  const unread = useSessionStatus(map => map.get(id)?.completionUnread === true) || (marked && !active)
+  const active = useSessionRetainInfo(sessionId, info => (info?.retainedBy?.mainView ?? 0) > 0)
+  const unread = useSessionStatus(map => map.get(sessionId)?.completionUnread === true) || (marked && !active)
   useMarkedUnread(id, active, marked, actions)
   const approval = useApproval(useWork, entry => entry.roomId === id)
   const waitingCount = useWork ? useWork(work => approvalCount(work, entry => entry.roomId === id)) : 0
-  const members = workKeys(useGroupWork(useWork, rooms => (rooms[id] ?? []).map(entry => ({ id: entry.botId, ...doingOf(entry) }))))
+  const members = workKeys(useGroupWork(useWork, rooms => (rooms[id] ?? []).filter(entry => entry.botId !== undefined).map(entry => ({ id: entry.botId, ...doingOf(entry) }))))
   const first = roster.byId[members[0]?.id]
   const workingLine = first ? workLine(first.name, members[0], members.length - 1) : null
   if (room.hidden && !active) return null
@@ -206,7 +220,8 @@ function RoomRow({ room, roster, actions, useSessions, useSessionStatus, useSess
   const label = [room.name, pinned ? t('Pinned') : '', members.length > 0 ? t('Working') : '', approval ? waitingLabel(waitingCount) : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
-    'data-room-id': id, onClick: () => actions.openSession(id),
+    'data-room-id': id, title: wide ? undefined : room.name,
+    onMouseEnter: wide ? nameIfCut : undefined, onClick: () => actions.openSession(id),
     onContextMenu: (event) => { event.preventDefault(); actions.openMenu({ kind: 'room', id, x: event.clientX, y: event.clientY }) },
   },
   h(RoomAvatar, { room, roster, size: 36 }),
@@ -354,6 +369,17 @@ function useListGlide(listRef, layout, key) {
   }, [layout, key])
 }
 
+// The Bot-API-down hint cannot send the user to Settings → Feedback: its
+// diagnostics request needs the same API. What still works in this state is
+// the last error this window recorded, and the engine's own startup output —
+// its console, or the app's startup error box (#516).
+const bootHint = () => {
+  const last = clientErrors().at(-1)?.text
+  return last === undefined
+    ? t('The Bot team could not start. The engine’s startup output — its console, or the app’s startup error box — has the cause.')
+    : t('The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.', { error: last })
+}
+
 export function TeamSidebar(props) {
   const { wide, expandSidebar, useRoster, useUi, useSessions, actions } = props
   const listRef = useRef(null)
@@ -361,6 +387,7 @@ export function TeamSidebar(props) {
   useLayoutEffect(() => { closing.current = false })
   const roster = useRoster(value => value)
   const markedUnread = useUi(value => value.unread)
+  const bootFailed = useUi(value => value.bootFailed === true)
   props.useRegistry(value => value)
   const updated = useSessions(list => {
     const stamps = {}
@@ -431,7 +458,7 @@ export function TeamSidebar(props) {
       main ? h(Fragment, { key: main.id },
         h(BotRow, { ...rowProps, bot: main, marked: markedUnread[main.id] === true }),
         h(BotThreads, { ...rowProps, bot: main }),
-        h(BotChildren, { ...rowProps, bot: main })) : roster.ready ? null : h('div', { className: 'bt-hint' }, t('Setting up your Main Bot…')),
+        h(BotChildren, { ...rowProps, bot: main })) : roster.ready ? null : h('div', { className: 'bt-hint' }, bootFailed ? bootHint() : t('Setting up your Main Bot…')),
       order.map(entry => (entry.kind === 'bot'
         ? h(Fragment, { key: entry.item.id },
             h(BotRow, { ...rowProps, bot: entry.item, marked: markedUnread[entry.item.id] === true }),
@@ -779,6 +806,14 @@ function useLandOnMainBot(roster, useSessions, actions) {
       if (currentPart(bot) !== id && actions.ownershipPending?.(id) !== true) actions.landOn(bot.id, undefined, id)
       return undefined
     }
+    // The group's own Session moves on like a Bot's chat does: the part it archived
+    // is cleared, and the view goes on in the fresh one.
+    const room = id === '' ? undefined : roster.roomsById[id]
+    if (room !== undefined) {
+      lastBot.current = null
+      if ((room.sessionId ?? room.id) !== id) actions.openSession(room.id)
+      return undefined
+    }
     if (staysInView(id, blank === '1', roster, actions)) {
       lastBot.current = null
       return undefined
@@ -958,6 +993,8 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
 .bt-agent-sub-row{display:flex;align-items:center;gap:8px;width:100%;padding:5px 10px 5px 8px;border:0;border-radius:8px;background:none;color:var(--bt-ink-2);font:inherit;font-size:13px;line-height:20px;text-align:left;cursor:pointer}
 .bt-agent-sub-row:hover{background:var(--bt-hover);color:var(--bt-ink)}
 .bt-agent-sub-row[aria-current=page]{background:var(--bt-hover);color:var(--bt-ink);font-weight:500}
+/* .bt-agent-sub-in clips for the expand animation and the rows touch its edges, so the ring goes inside. */
+.bt-agent-sub-row:focus-visible{outline:2px solid var(--bt-accent);outline-offset:-2px}
 .bt-agent-sub-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bt-agent-sub-time{flex:none;font-size:11px;color:var(--bt-ink-3)}
 .bt-agent-new{color:var(--bt-ink-3)}
@@ -967,4 +1004,12 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
 .bt-agent-sub[data-open] .bt-agent-sub-row{animation:bt-agent-row-in .24s ease both;animation-delay:calc(var(--i, 0)*30ms)}
 @keyframes bt-agent-row-in{from{opacity:0;filter:blur(4px)}to{opacity:1;filter:blur(0)}}
 @media (prefers-reduced-motion:reduce){.bt-agent-sub{transition:none}.bt-agent-sub .bt-agent-sub-row{animation:none}}
+
+/* The context menus' own parts (context-menu.js): a group's heading, a checked item, a colour row. */
+.bt-menu-sub-head{padding:4px 8px 2px;font-size:11px;line-height:16px;font-weight:600;color:var(--bt-ink-3);user-select:none}
+.bt-menu-check{margin-left:auto;color:var(--bt-accent);display:inline-flex;flex:none}
+.bt-menu-colors{display:flex;align-items:center;gap:6px;padding:4px 8px 6px}
+.bt-menu-color-dot{width:16px;height:16px;border-radius:50%;corner-shape:round;border:0;padding:0;cursor:pointer;box-shadow:inset 0 0 0 1px var(--bt-line-2)}
+.bt-menu-color-dot[aria-pressed=true]{outline:2px solid var(--bt-ink);outline-offset:1.5px}
+.bt-menu-color-dot:focus-visible{outline:2px solid var(--bt-accent);outline-offset:2px}
 `

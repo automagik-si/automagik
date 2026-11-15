@@ -201,9 +201,11 @@ test('the Session\'s key resolves for no Bot, not for Support\'s own Session and
   for (const botId of ['support', 'chief']) {
     assert.equal(Object.hasOwn(shell.resolve({ agent: { id: botId }, arguments: { command: 'echo $DSH_SECRET_PERSON_KEY' } }), 'DSH_SECRET_PERSON_KEY'), false)
   }
-  const listed = await env.ctx.registeredTools.get('list_secrets').execute({}, { agent: { id: 'support' } })
+  // The team's tools are kept in the runtime's own list here and joined to each Bot Session.
+  const teamTool = name => env.rt.teamTools.find(tool => tool.name === name)
+  const listed = await teamTool('list_secrets').execute({}, { agent: { id: 'support' } })
   assert.doesNotMatch(listed, /PERSON_KEY/)
-  const asked = await env.ctx.registeredTools.get('request_secret').execute({ name: 'PERSON_KEY', purpose: 'x' }, { agent: { id: 'support' } })
+  const asked = await teamTool('request_secret').execute({ name: 'PERSON_KEY', purpose: 'x' }, { agent: { id: 'support' } })
   assert.match(asked, /scoped to one Session's capability, and no Bot may use it/)
   // Settings keeps the Session scope on a new value and never hands the key to Bots from Add.
   await assert.rejects(env.rt.secretEndpoint('secret-set', { name: 'PERSON_KEY', value: KEY, scope: 'all' }), /scoped to one Session/)

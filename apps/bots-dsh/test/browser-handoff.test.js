@@ -51,7 +51,7 @@ function start() {
   return {
     rt, sent, ensured,
     failFlush(error) { flushError = error },
-    call: async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/bot', {
+    call: async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/omni-ui', {
       method: 'POST', body: JSON.stringify({ endpoint, payload }),
     }))).json(),
     stop: async () => {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -13,6 +13,8 @@ import { install as installTurns } from '../src/host/turns.js'
 import { install as installParts } from '../src/host/parts.js'
 import { HANDOFF_ACK, SOURCE_KIND } from '../src/host/constants.js'
 import { estimateTokens } from '../src/host/text.js'
+
+let rt
 
 // A two-Bot team, optionally with b in a group Session 'gb' of room 'Ops'.
 function team({ group = false } = {}) {
@@ -105,6 +107,7 @@ async function start(seed) {
     return register(options)
   }
   apply(ctx, { home })
+  rt = ctx.provided.get('omniTeam')
   let seq = 0
   const emit = (id, type, data, extra) => {
     if (type === 'user/message') agentOf(id).session.deriveMessages().push({ role: 'user', content: data.content, source: data.source })
@@ -115,8 +118,8 @@ async function start(seed) {
   }
   // Runs every registered waterfall listener; `next` settles the chain.
   const fire = (name, payload) => Promise.all((ctx.listeners.get(name) ?? []).map(listener => listener(payload, () => Promise.resolve(undefined))))
-  const tool = (name, args, sessionId) => ctx.registeredTools.get(name).execute(args, { agent: { id: sessionId } })
-  const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/bot', {
+  const tool = (name, args, sessionId) => rt.teamTools.find(d => d.name === name).execute(args, { agent: { id: sessionId } })
+  const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/omni-ui', {
     method: 'POST', body: JSON.stringify({ endpoint, payload }),
   }))).json()
   const exchanges = async () => (await call('exchange', { a: 'a', b: 'b' })).value ?? []
@@ -372,7 +375,7 @@ function turnsHost() {
     noteFailure() {},
     warn() {},
     switchJobs: () => [],
-    dropKickoff() {},
+    userWrote() {},
   }
   installTurns(rt)
   let seq = 0
@@ -591,8 +594,14 @@ test('a Bot\'s answer waits for the work it handed on, and carries what came bac
   assert.match(await tool('list_bots', {}, 'a'), /- Writer \(Write\)\n {2}now: waiting for Tester to hand back work, for Omni\n/)
   assert.deepEqual(Object.values(await worksIn(team)).map(work => [work.from, work.to, work.open.length, work.held]), [['a', 'b', 1, 'handed it to Tester'], ['b', 'c', 0, undefined]])
   assert.deepEqual(callsOf(agents, 'a'), [])
-  // Its mark shows it waits, and its row whom for.
-  assert.deepEqual(await shown(), [true, { b: { bots: ['c'], rooms: [], for: ['a'] } }])
+  // Its mark shows it waits, its row whom for, and the menu names the wait to give up.
+  const [, waitingWork] = await shown()
+  const waits = waitingWork.b.waits
+  assert.equal(waits.length, 1)
+  assert.equal(typeof waits[0].id, 'string')
+  assert.deepEqual([waits[0].to, waits[0].name], ['c', 'Tester'])
+  delete waitingWork.b.waits
+  assert.deepEqual(waitingWork, { b: { bots: ['c'], rooms: [], for: ['a'] } })
 
   take('c')
   end('c', 'two things to fix')
@@ -879,11 +888,12 @@ test('one turn keeps its identity across two earlier pages', async (t) => {
   const register = ctx.connection.fetch.register
   ctx.connection.fetch.register = (options) => { route = options; return register(options) }
   apply(ctx, { home })
+  rt = ctx.provided.get('omniTeam')
   t.after(async () => {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   })
-  const call = async (payload) => (await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint: 'chat', payload }) }))).json()
+  const call = async (payload) => (await route.fetch(new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint: 'chat', payload }) }))).json()
   const newer = (await call({ botId: 'b' })).value
   const older = (await call({ botId: 'b', cursor: newer.cursor })).value
   assert.equal(newer.items.length, 60)
@@ -1132,7 +1142,7 @@ for (const id of ['b', 'gb']) {
 
       if (pending) {
         const decision = await ctx.listeners.get('agent/pre-step').find(listener => listener.toString().includes('switchBeforeStep'))({ agent, messages: [input], step: 1, signal: AbortSignal.timeout(60_000) }, async () => 'next')
-        assert.deepEqual(decision, { kind: 'reject' })
+        assert.deepEqual(decision, { kind: 'enter', messages: [] })
       } else {
         record('user/message', input)
         await fire('agent/request-error', { agent, failure: { code: 'CONTEXT_WINDOW_EXCEEDED' }, signal: AbortSignal.timeout(60_000) })
@@ -1158,8 +1168,9 @@ test('message_bot turns down an empty message', async (t) => {
   assert.deepEqual(await exchanges(), [])
 })
 
-test('a long message between Bots keeps its start in state.json and is read back whole from the Session', async (t) => {
-  const { ctx, agentOf, tool, call, exchanges, home, stop } = await start(team())
+// A message between Bots is in the book of the pair, whole; state.json does not hold it.
+test('a long message between Bots is kept whole in the book of the pair, not in state.json', async (t) => {
+  const { agentOf, tool, call, exchanges, home, stop } = await start(team())
   t.after(stop)
   const long = `${'长'.repeat(15_000)}结尾`
   await tool('message_bot', { to: 'Writer', message: long }, 'a')
@@ -1168,23 +1179,17 @@ test('a long message between Bots keeps its start in state.json and is read back
   const [entry] = await exchanges()
   assert.equal(entry.text.length, 2000)
   assert.equal(entry.length, long.length)
-  assert.equal(entry.sessionId, 'b')
   const file = join(home, 'state.json')
-  for (let at = 0; at < 100 && !readFileSync(file, 'utf8').includes(entry.id); at += 1) await delay(20)
+  await delay(100)
   const saved = readFileSync(file, 'utf8')
-  assert.ok(saved.length < 10_000, `state.json is ${saved.length} characters`)
+  assert.ok(!saved.includes('长'.repeat(100)), 'state.json does not hold the message')
   assert.ok(!saved.includes('\n'), 'state.json is written without indentation')
+  const book = readFileSync(join(home, 'ledger', 'pair-a-b.jsonl'), 'utf8').trim().split('\n').map(row => JSON.parse(row))
+  assert.deepEqual(book.map(record => [record.event ?? record.role, record.id]), [['request', entry.id], ['delivered', entry.id]])
+  assert.equal(book[0].text, long)
 
-  // The dialog reads the whole text back from the Session it was delivered to.
-  agentOf('b').session.seq = 2
-  ctx.sessionController.page = async ({ address }) => ({
-    records: agentOf(address.sessionId).calls.map(([, message], index) => ({ event: { type: 'user/message', seq: index + 1, data: { content: message.content, source: message.source } } })),
-    hasMore: false,
-  })
-  assert.deepEqual((await call('exchange-text', { id: entry.id })).value, { text: long, whole: true })
-  // A Session that cannot be read leaves the start, said to be only that.
-  ctx.sessionController.page = async () => { throw new Error('gone') }
-  assert.deepEqual((await call('exchange-text', { id: entry.id })).value, { text: entry.text, whole: false })
+  // The dialog reads it whole from the book, with no Session to read back.
+  assert.deepEqual((await call('exchange-text', { id: entry.id, a: 'a', b: 'b' })).value, { text: long, whole: true })
 })
 
 test('a team saved with long messages whole keeps only their start after it loads', async (t) => {
@@ -1221,7 +1226,7 @@ test('a message past 20,000 characters goes as a file, which the exchange dialog
   const [entry] = await exchanges()
   assert.equal(entry.length, long.length)
   assert.deepEqual(entry.files, [file.attachment])
-  assert.deepEqual((await call('exchange-text', { id: entry.id })).value, { text: long, whole: true })
+  assert.deepEqual((await call('exchange-text', { id: entry.id, a: entry.from, b: entry.to })).value, { text: long, whole: true })
   assert.deepEqual((await call('file-text', { file: file.attachment })).value, { text: long, whole: true })
 })
 
@@ -1263,4 +1268,32 @@ test('a fresh part gets its Bot\'s deny list before the handoff turn', async (t)
   const applied = restricted.filter(entry => entry.sessionId === 's1')
   assert.ok(applied.length > 0, 'the fresh part was restricted before its handoff turn')
   assert.deepEqual(applied.at(-1).deny, ['bash'])
+})
+
+// A request merged with another the recipient had not read goes out under the same id. If
+// the merged text never reaches the recipient, the dialog keeps the text that did.
+test('a merged request that does not go out leaves the delivered text in the dialog', async (t) => {
+  const { ctx, exchanges, stop } = await start(team())
+  t.after(stop)
+  await rt.deliver({ fromId: 'a', toId: 'b', role: 'request', text: 'Draft the plan', exchangeId: 'x-merge' })
+  const flush = ctx.sessions.flush
+  ctx.sessions.flush = async () => { throw new Error('Session is gone') }
+  await assert.rejects(rt.deliver({ fromId: 'a', toId: 'b', role: 'request', text: 'Draft the plan\n\nAnd the budget', exchangeId: 'x-merge', merged: true }), /Session is gone/)
+  ctx.sessions.flush = flush
+  assert.deepEqual((await exchanges()).map(entry => [entry.id, entry.text]), [['x-merge', 'Draft the plan']])
+})
+
+// The book is written before the message goes out: one it cannot keep is not sent.
+test('a message between Bots that the book cannot keep is not sent', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, async (t) => {
+  const { agentOf, tool, exchanges, home, stop } = await start(team())
+  t.after(stop)
+  mkdirSync(join(home, 'ledger'), { recursive: true })
+  chmodSync(join(home, 'ledger'), 0o500)
+  try {
+    await assert.rejects(tool('message_bot', { to: 'Writer', message: 'Hello' }, 'a'))
+    assert.equal(agentOf('b').calls.filter(([kind]) => kind === 'steer' || kind === 'followup').length, 0)
+  } finally {
+    chmodSync(join(home, 'ledger'), 0o700)
+  }
+  assert.deepEqual(await exchanges(), [])
 })

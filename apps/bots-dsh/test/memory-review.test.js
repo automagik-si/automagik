@@ -15,6 +15,8 @@ async function fixture(t, config = {}) {
     chatOwners: new Map([['a', 'a'], ['b', 'b']]), groupOwners: new Map(), pastOwners: new Map(), chatOf: id => id,
     partsOf: id => [{ sessionId: id }], isBotSession: id => id in bots, readOnly: () => undefined, load: async () => {}, warn() {},
     async* partLines(id) { reads.push(id); yield* [] },
+    // The memory tools are team tools, served to each Bot Session's own scope.
+    teamTools: [],
   }
   install(rt)
   t.after(async () => { await ctx.dispose(); await rm(home, { recursive: true, force: true }) })

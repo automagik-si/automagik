@@ -645,8 +645,8 @@ export function install(rt) {
     if (loaded !== null && (loadedReadOnly || rt.readOnly() !== undefined || blocked !== undefined)) loaded = null
     return loaded ??= readSecrets()
   }
-  // Shell environments resolve synchronously, so loading must fill the map and
-  // register its variables before the first shell call after startup.
+  // Synchronous on purpose: a shell resolves its environment without an await, so the
+  // map must be full before the first resolve after a start reads it.
   const readSecrets = async () => {
     loadedReadOnly = rt.readOnly() !== undefined
     let contents
@@ -1044,7 +1044,7 @@ export function install(rt) {
 
   const callerOf = exec => rt.selfOf(exec.agent?.session?.header?.id ?? exec.agent?.id)
 
-  ctx.tools.register(defineTool({
+  rt.teamTools.push(defineTool({
     name: 'request_secret',
     description: 'Ask the user for a key, token, or password through a secure card in your own chat. The user types it into the card; you never see the value. It reaches your shell as an environment variable. When the key is already saved for you, this only tells you its variable. Showing a card ends your turn; a note arrives when the user saves or cancels.',
     parameters: {
@@ -1105,7 +1105,7 @@ export function install(rt) {
     },
   }))
 
-  ctx.tools.register(defineTool({
+  rt.teamTools.push(defineTool({
     name: 'list_secrets',
     description: 'List the keys the user saved for the team: name, purpose, which Bots may use them, and whether you may. Values are never shown.',
     parameters: {},
@@ -1132,8 +1132,10 @@ export function install(rt) {
     },
   }))
 
-  // Keep the whole result for wrappers that read content before the registry
-  // re-renders it. Auxiliary fields must lose secrets before they can be saved too.
+  // Tool results lose the values before the registry renders and saves them. Every
+  // field is redacted — a wrapper further out in the pipeline still sees a whole
+  // result (its `content`, `meta`, and `additionalContexts` too), and the registry
+  // re-renders a changed success result from its redacted value.
   ctx.on('tools/execute', async function redactToolResult(exec, next) {
     const result = await next()
     if (secrets.size === 0 || result === null || typeof result !== 'object') return result

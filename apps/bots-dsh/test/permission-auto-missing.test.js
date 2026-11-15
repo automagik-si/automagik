@@ -41,6 +41,11 @@ function load() {
     useCallback: f => f,
     useId: () => 'id',
     useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+    // v0.3.6's view strings come through a context (view-ui.js).
+    createContext: (initial) => { const ctx = { value: initial }; ctx.Provider = ({ value, children }) => { ctx.value = value; return children }; return ctx },
+    useContext: ctx => ctx.value,
+    // A page boundary (v0.3.6) extends this class; nothing here mounts one.
+    Component: class {},
     Fragment: Symbol('Fragment'),
   }
   const store = new Map()

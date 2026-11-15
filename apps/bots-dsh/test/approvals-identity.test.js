@@ -41,7 +41,9 @@ test('a task approval carries the task id and title, and clears when the task ch
   assert.equal(entry.label, 'Clone the automagik repo')
   assert.equal(entry.botId, 'genie')
   assert.equal(entry.tool, 'bash')
-  assert.equal(entry.answerable, false)
+  // Since v0.3.6 an approval outside a group races DSH's own card: it can be answered from the team's card
+  // too, and whichever answers first settles both.
+  assert.equal(entry.answerable, true)
   assert.deepEqual(noted.at(-1), ['task1', { tool: 'bash', reason: 'run the tests' }])
   // Answered in the task's chat: the note goes, so the parent card and the Live rail follow.
   settle('allowed-once')
@@ -78,12 +80,12 @@ test('an approval nobody on the team owns goes on to the next answerer', async (
   assert.deepEqual(rt.approvalsView(), [])
 })
 
-test('a run ask is noted without answering, and a run whose Bot left passes unnoted', async () => {
+test('a run ask is noted and DSH still answers it, and a run whose Bot left passes unnoted', async () => {
   const { rt, handlers, noted } = bench({ runs: [['x', { kind: 'run', run: true, botId: 'ada', taskId: 'x', label: 'someone' }]] })
   let settle
   const outcome = handlers[0].handler(request('x'), () => new Promise(resolve => { settle = resolve }))
   const [entry] = rt.approvalsView()
-  assert.deepEqual([entry.botId, entry.sessionId, entry.taskId, entry.label, entry.answerable], ['ada', 'x', 'x', 'someone', false])
+  assert.deepEqual([entry.botId, entry.sessionId, entry.taskId, entry.label, entry.answerable], ['ada', 'x', 'x', 'someone', true])
   settle('rejected')
   assert.equal(await outcome, 'rejected')
   assert.deepEqual(rt.approvalsView(), [])

@@ -34,6 +34,8 @@ test('Advanced read routes work read-only while checkpoint remains a mutation', 
   assert.equal((await call('context-status', { botId: 'b' })).value.sessionId, 'part')
   assert.equal((await call('usage-stats', { botId: 'b', sessionId: 'part' })).value.botId, 'b')
   assert.equal((await call('memory-review-status', { botId: 'b' })).value.allowed, false)
+  // The same call carries the Bot's daily tidy switch.
+  assert.deepEqual((await call('memory-review-status', { botId: 'b' })).value.tidy, { enabled: false, allowed: false, always: false })
   assert.equal((await call('checkpoint-bot', { botId: 'b', sessionId: 'part' })).error.code, 'bot/read-only')
   assert.equal(seen.some(entry => entry[0] === 'checkpoint'), false)
 })

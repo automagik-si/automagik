@@ -1,19 +1,21 @@
-import { createElement as h, useCallback, useEffect, useRef, useState } from 'react'
+import { Component, createElement as h, useCallback, useEffect, useRef, useState } from 'react'
 import { ACCENT_INKS, INKS } from './inks.js'
 import { isMainOf } from './sources.js'
 import { MESSAGE_WIDTH, allThemes, flatWidthOf, layoutOf, thinkingShown, widthOf } from './themes.js'
-import { CloseIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, ConnectorIcon, InfoIcon, PlugIcon, PlusIcon, ShieldIcon, SlidersIcon, SETTINGS_ICONS } from './icons.js'
+import { CloseIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, ConnectorIcon, GlobeIcon, InfoIcon, MonitorIcon, PlugIcon, PlusIcon, ShieldIcon, SlidersIcon, SETTINGS_ICONS } from './icons.js'
 import { AdminStar, BotAvatar, RoomAvatar } from './mark.js'
 import { useEscape } from './overlay-hooks.js'
 import { BotSettingsForm, Switch } from './bot-settings.js'
 import { Segmented, useGlide } from './motion.js'
 import { GroupSettingsForm, NewGroupForm } from './group-settings.js'
 import { CreateBot } from './create-bot.js'
+import { KeptPrivateSection } from './kept-private.js'
 import { KeyIcon, SecretsPage } from './secret-card.js'
 import { UsagePage } from './usage-page.js'
-import { ConnectorsPage } from './connectors.js'
+import { ConnectorsPage } from './connectors-page.js'
 import { CapabilitiesPage } from './capability-settings.js'
 import { BrowserPage } from './browser-settings.js'
+import { ComputerPage } from './computer.js'
 import { SchedulesPage } from './schedules.js'
 import { FeedbackIcon, FeedbackPage } from './feedback.js'
 import { AgentAccessPage } from './agent-access.js'
@@ -25,6 +27,7 @@ import { ProvidersPage } from './providers-page.js'
 import { HermesRemoteSettings } from './hermes-remote.js'
 import { HermesMark } from './hermes-mark.js'
 import { FolderMenu } from './folder-menu.js'
+import { ModelMenu } from './model-menu.js'
 import { PermissionExplanations, PermissionFallback, PermissionPicker } from './permission-picker.js'
 import { AUTO, AUTO_FALLBACK } from '../shared/permission-levels.js'
 import { routeOf } from '../shared/routes.js'
@@ -38,14 +41,31 @@ const capitalize = word => word[0].toUpperCase() + word.slice(1)
 const SETTINGS_PAGES = [
   ['general', 'General'], ['models', 'Models'], ['bots', 'Bots'], ['groups', 'Group chats'],
   ['connectors', 'Connectors'], ['capabilities', 'Capabilities'], ['browser', 'Browser'],
-  ['schedules', 'Scheduled tasks'], ['usage', 'Usage'], ['secrets', 'Secrets'],
+  ['computer', 'Computer use'], ['schedules', 'Scheduled tasks'], ['usage', 'Usage'], ['secrets', 'Secrets'],
   ['agent-access', 'Agent access'], ['privacy', 'Privacy'], ['feedback', 'Feedback'],
   ['about', 'About Automagik'],
 ]
 const PAGE_ICONS = {
   ...SETTINGS_ICONS, models: SlidersIcon, 'hermes-remote': HermesMark, connectors: ConnectorIcon, capabilities: PlugIcon,
-  browser: ConnectorIcon, schedules: ClockIcon, secrets: KeyIcon, 'agent-access': KeyIcon,
+  browser: GlobeIcon, computer: MonitorIcon, schedules: ClockIcon, secrets: KeyIcon, 'agent-access': KeyIcon,
   privacy: ShieldIcon, feedback: FeedbackIcon, about: InfoIcon,
+}
+
+// What each MEMORY.md holds by default, in characters of entry text.
+const MEMORY_SIZES = [
+  { scope: 'group', label: 'Group memory size', size: 12_000 },
+  { scope: 'bot', label: 'Bot memory size', size: 8_000 },
+  { scope: 'team', label: 'Team memory size', size: 4_000 },
+]
+function MemorySize({ label, value, save }) {
+  const [text, setText] = useState(String(value))
+  useEffect(() => setText(String(value)), [value])
+  const commit = () => {
+    const number = Number(text)
+    if (Number.isInteger(number) && number >= 1_000 && number <= 200_000 && number !== value) save(number)
+    else setText(String(value))
+  }
+  return h('input', { className: 'bt-input bt-set-number', type: 'number', min: 1_000, max: 200_000, step: 1_000, 'aria-label': label, value: text, onChange: event => setText(event.target.value), onBlur: commit, onKeyDown: event => { if (event.key === 'Enter') event.target.blur() } })
 }
 
 function SetSection({ title, className = '', children }) {
@@ -124,10 +144,29 @@ function GeneralPage({ roster, actions, run }) {
       layoutOf(prefs) === 'flat' ? h(SetRow, { label: t('Text width') }, h(WidthSlider, { label: t('Text width'), value: flatWidthOf(prefs), save: flatWidth => run(actions.setPrefs({ flatWidth })) })) : null,
       h(SetRow, { label: t('Bubble width') }, h(WidthSlider, { label: t('Bubble width'), value: widthOf(prefs), save: width => run(actions.setPrefs({ width })) })),
       h(SetRow, { label: t('Show thinking') }, h(Switch, { label: t('Show thinking'), on: thinkingShown(prefs), onChange: thinking => run(actions.setPrefs({ thinking })) }))),
+    // The model a new Bot starts on, picked route first like a Bot's own. It has no thinking
+    // level of its own: a new Bot takes its model's.
+    h(SetSection, { key: 'new', title: t('New Bots') },
+      h(SetRow, { label: t('Default model'), className: 'bt-set-model' },
+        h(ModelMenu, {
+          bot: { id: 'new-bots', name: t('New Bots'), model: prefs.defaultBotModel },
+          roster, actions, run, wide: true, withEfforts: false,
+          onPick: ref => run(actions.setPrefs({ defaultBotModel: ref })),
+        }),
+        prefs.defaultBotModel ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => run(actions.setPrefs({ defaultBotModel: null })) }, t('Reset')) : null)),
+    h(SetSection, { key: 'input', title: t('Input') },
+      h(SetRow, { label: t('Enter sends message') },
+        h(Switch, { label: t('Enter sends message'), on: prefs.enterToSend !== false, onChange: enterToSend => run(actions.setPrefs({ enterToSend })) }))),
+    roster.memory === false ? null : h(SetSection, { key: 'memory', title: t('Memory') },
+      h(SetRow, { label: t('Bring up related memory') },
+        h(Switch, { label: t('Bring up related memory'), on: prefs.memoryAutoRecall !== false, onChange: memoryAutoRecall => run(actions.setPrefs({ memoryAutoRecall })) })),
+      MEMORY_SIZES.map(({ scope, label, size }) => h(SetRow, { key: scope, label: t(label) },
+        h(MemorySize, { label: t(label), value: prefs.memoryLimits?.[scope] ?? size, save: value => run(actions.setPrefs({ memoryLimits: { [scope]: value } })) })))),
     actions.setSurface ? h(SetSection, { key: 'mode', title: t('Mode') },
       h(SetRow, { label: t('Classic Agent mode') },
         h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => actions.setSurface('agent') }, t('Switch')))) : null,
     h(LocationsSection, { key: 'places', actions, run }),
+    h(KeptPrivateSection, { key: 'kept', roster, actions, run, Section: SetSection, Row: SetRow }),
   ]
 }
 
@@ -287,6 +326,18 @@ function GroupsPage({ roster, actions, run }) {
   ]
 }
 
+// A page that throws while it renders shows a line in its place. Uncaught, the
+// error takes down the plugin's whole overlay, and no dialog opens again until
+// the window reloads. The page's key resets it; Usage stays mounted, so its
+// boundary resets when the shown page changes.
+class PageBoundary extends Component {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidUpdate(previous) { if (this.state.failed && previous.reset !== this.props.reset) this.setState({ failed: false }) }
+  componentDidCatch(error) { console.error('omni-ui: a settings page failed', error) }
+  render() { return this.state.failed ? h('div', { className: 'bt-error', role: 'alert' }, t('This page could not be shown.')) : this.props.children }
+}
+
 // While `leaving`, the dialog plays its exit and takes no input.
 export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving = false }) {
   const [error, setError] = useState('')
@@ -346,6 +397,7 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
           pluginPage ? null : h('h2', { key: bot?.id ?? room?.id ?? shown }, bot?.name ?? room?.name ?? label)),
         shown === 'usage' ? null : h('div', { key: pageKey, className: 'bt-settings-scroll bt-settings-page', 'data-move': last.current.move },
           errorLine,
+          h(PageBoundary, null,
           shown === 'general' ? h(GeneralPage, { roster, actions, run }) : null,
           shown === 'models' ? h(ProvidersPage, { actions, run, Section: SetSection }) : null,
           shown === 'hermes-remote' ? h(HermesRemoteSettings, { run, Section: SetSection, actions }) : null,
@@ -356,6 +408,7 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
           shown === 'connectors' ? h(ConnectorsPage, { roster, actions }) : null,
           shown === 'capabilities' ? h(CapabilitiesPage, { roster, actions, run }) : null,
           shown === 'browser' ? h(BrowserPage, { roster, actions, run, Section: SetSection, Row: SetRow }) : null,
+          shown === 'computer' ? h(ComputerPage, { roster, actions, run, Section: SetSection, Row: SetRow, Switch }) : null,
           shown === 'schedules' ? h(SchedulesPage, { roster, actions, start: id ?? undefined }) : null,
           shown === 'secrets' ? h(SecretsPage, { roster, actions, run, Section: SetSection }) : null,
           shown === 'agent-access' ? h(AgentAccessPage, { roster, actions, run, Section: SetSection }) : null,
@@ -363,9 +416,9 @@ export function SettingsDialog({ page, id, roster, actions, useUpdate, leaving =
           shown === 'feedback' ? h(FeedbackPage, { actions, run, roster, Section: SetSection, Row: SetRow }) : null,
           shown === 'about' ? h(AboutPage, { useUpdate, actions, run, Section: SetSection, Row: SetRow }) : null,
           // A page another plugin added, drawn as DSH's settings draws it (with `close`).
-          pluginPage ? h('div', { className: 'bt-settings-plugin' }, h(pluginPage.Component, { close })) : null),
+          pluginPage ? h('div', { className: 'bt-settings-plugin' }, h(pluginPage.Component, { close })) : null)),
         usageOpened ? h('div', { key: 'usage', className: 'bt-settings-scroll bt-settings-usage', 'data-off': shown === 'usage' ? undefined : '', 'aria-hidden': shown === 'usage' ? undefined : true },
           shown === 'usage' ? errorLine : null,
-          h(UsagePage, { roster, actions, focusId: usageFocus })) : null),
+          h(PageBoundary, { reset: shown }, h(UsagePage, { roster, actions, focusId: usageFocus }))) : null),
       h('button', { type: 'button', className: 'bt-settings-close', 'aria-label': t('Close settings'), onClick: close }, h(CloseIcon))))
 }

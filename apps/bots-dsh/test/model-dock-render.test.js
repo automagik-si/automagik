@@ -107,7 +107,12 @@ test('a Bot with no model renders its dock in React: the offered model, Start an
   await tick()
   const own = [...document.body.querySelectorAll('.bt-model-menu [role="menuitemradio"]')]
   assert.deepEqual(own.filter(row => row.getAttribute('aria-checked') === 'true').map(row => row.title), ['deepseek-official/deepseek-flash'])
-  flushSync(() => own.find(row => row.title === 'local/flash').click())
+  // Since v0.3.6 only the provider of the current model is open; the others fold behind their name.
+  const fold = [...document.body.querySelectorAll('.bt-model-menu .bt-model-group-toggle')].find(row => row.textContent === 'Ollama')
+  assert.equal(fold.getAttribute('aria-expanded'), 'false')
+  flushSync(() => fold.click())
+  await tick()
+  flushSync(() => document.body.querySelector('.bt-model-menu [role="menuitemradio"][title="local/flash"]').click())
   await tick()
   // A closed menu lingers only for its exit (useLinger), marked as leaving.
   const gone = () => document.body.querySelector('.bt-model-menu:not([data-leaving])') === null
@@ -152,7 +157,8 @@ test('the model menu works from the keyboard: arrows move, Right opens a step, E
   // Escape goes back one step at a time, then closes.
   key(document.activeElement, 'Escape')
   await tick()
-  assert.ok(document.querySelector('.bt-model-menu [title="local/flash"]') && document.querySelector('.bt-model-menu [title="deepseek-official/deepseek-flash"]'), 'back on Native\'s models')
+  // The other provider's models stay folded behind its name.
+  assert.ok([...document.querySelectorAll('.bt-model-menu .bt-model-group-toggle')].some(row => row.textContent === 'Ollama') && document.querySelector('.bt-model-menu [title="deepseek-official/deepseek-flash"]'), 'back on Native\'s models')
   key(document.activeElement, 'Escape')
   await tick()
   assert.ok(document.querySelector('.bt-model-menu [data-current]'), 'back on the routes')

@@ -88,7 +88,9 @@ const BOT = { id: 'omni', name: 'Omni', sessionId: 'omni', model: 'deepseek/v3',
 const teamOf = (indexRoster, { bot = BOT, catalog = THREE, rooms = [] } = {}) => ({
   ...indexRoster({ bots: [bot], rooms }), permissions: catalog, models: [{ ref: 'deepseek/v3', id: 'v3' }], exchangeTurns: {}, questions: {}, sideChats: {}, memory: false, prefs: {},
 })
-const panelProps = { useSessions: hook({ byId: {} }), useSessionStatus: hook(new Map()), useActivity: hook({}), useWork: hook({}), useBrowserTabs: hook({}), useBrowserPages: hook({}) }
+// `room` is the width the layout gives the panel and the conversation (overlays.js
+// measures it); the window here is 1200 wide.
+const panelProps = { room: 1200, useSessions: hook({ byId: {} }), useSessionStatus: hook(new Map()), useActivity: hook({}), useWork: hook({}), useBrowserTabs: hook({}), useBrowserPages: hook({}) }
 
 const S3 = "Auto does not count in group chats. A member on Auto works here as Workspace, or at the group's shared level when one is set."
 const R1 = "This Bot runs on its plugin's own engine, so Auto is not offered."

@@ -59,13 +59,17 @@ function fakeSource(menu = MENU) {
 
 // The state answer without its live clock fields, which change between two reads.
 const stable = (value) => {
-  const { activity: _activity, work: _work, ...rest } = value
+  const { activity: _activity, work: _work, liveKey: _liveKey, ...rest } = value
   return JSON.stringify(rest)
 }
 
 test('without a registration the state answer is the same bytes, and a registration that goes leaves none', async (t) => {
   const { rt, call, stop } = start()
   t.after(stop)
+  // The first read starts the chat index, which then gives each row its last time and preview: the answer
+  // compared is the one after that has settled.
+  await call('state')
+  await new Promise(resolve => setTimeout(resolve, 20))
   const before = (await call('state')).value
   assert.equal('hostModels' in before, false)
   // A registration for a kind no Bot has adds nothing either.

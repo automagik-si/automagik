@@ -7,8 +7,10 @@ import { NewGenie } from './genie-new.js'
 import { DshBotForm } from './dsh-bot-form.js'
 import { QUICK_EDGES, useFlip, useGlide, useMorph } from './motion.js'
 import { t } from './i18n.js'
+import { sendsOnEnter } from './enter-key.js'
 
-export function NewChat({ mode, roster, actions }) {
+export function NewChat({ mode, sectionId = null, roster, actions }) {
+  const paneLeft = usePaneLeft()
   const [query, setQuery] = useState('')
   const [picked, setPicked] = useState([])
   const [group, setGroup] = useState(mode === 'group')
@@ -19,7 +21,7 @@ export function NewChat({ mode, roster, actions }) {
   const [error, setError] = useState('')
   const [cursor, setCursor] = useState(0)
   // The Create Bot form, opened straight from 'create' mode or from the list.
-  const [draft, setDraft] = useState(mode === 'create' ? { name: '', fromList: false } : null)
+  const [draft, setDraft] = useState(mode === 'create' ? { name: '', fromList: false, sectionId } : null)
   // A new Genie, while Genie runs here (genie-dsh adds genie to the team view).
   const [genieDraft, setGenieDraft] = useState(false)
   // A DSH bot: 'dsh-bot' makes one, 'dsh-bot:<id>' edits that one, and the list can open the form.
@@ -28,7 +30,6 @@ export function NewChat({ mode, roster, actions }) {
   const inputRef = useRef(null)
   const close = () => actions.closeOverlay()
   useEscape(close)
-  const paneLeft = usePaneLeft()
   const wanted = query.trim().toLowerCase()
   const matches = roster.bots.filter(bot => !picked.includes(bot.id) && bot.id !== admin && (wanted === '' || bot.name.toLowerCase().includes(wanted) || (bot.role ?? '').toLowerCase().includes(wanted)))
   const choosingAdmin = group && admin === null
@@ -55,7 +56,9 @@ export function NewChat({ mode, roster, actions }) {
   const openBot = bot => run(async () => {
     if (choosingAdmin) { chooseAdmin(bot); return }
     if (group || picked.length > 0) { pick(bot); return }
-    if (bot.hidden) await actions.setFlags(bot.id, { hidden: false })
+    if (bot.hidden || (sectionId && bot.sectionId !== sectionId)) {
+      await actions.setFlags(bot.id, { ...(bot.hidden ? { hidden: false } : {}), ...(sectionId ? { sectionId } : {}) })
+    }
     if (message.trim()) await actions.send(bot.id, message.trim())
     actions.openSession(bot.id)
     close()
@@ -63,7 +66,7 @@ export function NewChat({ mode, roster, actions }) {
   const createBot = () => {
     if (busy) return
     setError('')
-    setDraft({ name: query.trim() !== '' && !exact ? query.trim() : '', fromList: true })
+    setDraft({ name: query.trim() !== '' && !exact ? query.trim() : '', fromList: true, sectionId })
   }
   // Close first: closing the new-chat pane keeps the details panel, while closing
   // nothing would clear it.
@@ -77,7 +80,7 @@ export function NewChat({ mode, roster, actions }) {
   const makeGroup = async () => {
     if (admin === null || picked.length === 0) return
     const text = message.trim()
-    const room = await actions.createRoom([admin, ...picked], { admin, ...(text ? {} : { greet: true }) })
+    const room = await actions.createRoom([admin, ...picked], { admin, ...(sectionId ? { sectionId } : {}), ...(text ? {} : { greet: true }) })
     if (text) await actions.send(room.id, text)
     actions.openSession(room.id)
     close()
@@ -88,12 +91,13 @@ export function NewChat({ mode, roster, actions }) {
     if (group && admin !== null) { await makeGroup(); return }
     if (text === '' || picked.length === 0) return
     if (picked.length === 1) {
+      if (sectionId) await actions.setFlags(picked[0], { sectionId })
       await actions.send(picked[0], text)
       actions.openSession(picked[0])
       close()
       return
     }
-    const room = await actions.createRoom(picked)
+    const room = await actions.createRoom(picked, sectionId ? { sectionId } : {})
     await actions.send(room.id, text)
     actions.openSession(room.id)
     close()
@@ -195,7 +199,7 @@ export function NewChat({ mode, roster, actions }) {
             rows: 1, value: message, placeholder, 'aria-label': placeholder,
             onChange: event => setMessage(event.target.value),
             onKeyDown: (event) => {
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendMessage() }
+              if (event.key === 'Enter' && sendsOnEnter(roster.prefs) && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendMessage() }
             },
           }),
           h('button', { type: 'button', className: 'bt-nc-send', 'aria-label': t('Send message'), disabled: busy || message.trim() === '' || picked.length === 0, onClick: sendMessage }, h(ArrowUpIcon))))))
