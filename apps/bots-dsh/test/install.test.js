@@ -146,6 +146,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on tools/change',
     'effect omni-ui: connectors',
     'on agent/created',
+    'on session/disposed',
     'effect ds-bot: capabilities',
     'on agent/status',
     'effect omni-ui: learning',

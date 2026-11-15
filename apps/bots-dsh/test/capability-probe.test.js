@@ -608,7 +608,9 @@ test('a hand-edited 3-character secret in the URL is held, and the probe refuses
   const env = await setup([shortSecret(value)])
   t.after(() => env.dispose())
 
-  const saved = await env.rt.capabilitySave(capability('held-url', `${server.url}?k=$DSH_SECRET_TOKEN`), { botId: 'chief' })
+  // A Bot cannot save it at all (a held key is no Bot's); the person's save is probed.
+  await assert.rejects(env.rt.capabilitySave(capability('held-url', `${server.url}?k=$DSH_SECRET_TOKEN`), { botId: 'chief' }), /not saved for you/)
+  const saved = await env.rt.capabilitySave(capability('held-url', `${server.url}?k=$DSH_SECRET_TOKEN`), { ui: true })
   assert.equal(hits.length, 0, 'a held secret must not reach the wire')
   assert.equal(saved.verification.status, 'unverified')
   assert.match(saved.verification.reason, /^Secret TOKEN is held: its saved value is shorter than 4 characters/)
@@ -627,9 +629,9 @@ test('a hand-edited 1-character secret in a header is held, and no request is se
   const env = await setup([shortSecret(value)])
   t.after(() => env.dispose())
 
-  const saved = await env.rt.capabilitySave(capability('held-header', server.url, {
-    Authorization: 'Bearer $DSH_SECRET_TOKEN',
-  }), { botId: 'chief' })
+  const held = capability('held-header', server.url, { Authorization: 'Bearer $DSH_SECRET_TOKEN' })
+  await assert.rejects(env.rt.capabilitySave(held, { botId: 'chief' }), /not saved for you/)
+  const saved = await env.rt.capabilitySave(held, { ui: true })
   assert.equal(hits.length, 0, 'a held secret must not reach the wire')
   assert.equal(saved.verification.status, 'unverified')
   assert.match(saved.verification.reason, /^Secret TOKEN is held: its saved value is shorter than 4 characters/)
