@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (process in use; delivery unverified: open work #207 and #215; #250 Play flavor deferred to Pocket; #190, #203 and #210 merged 2026-11-03; the owner OKd one version and the jump) |
+| Status | Accepted (process in use; delivery unverified: open work #207 and #215; #250 Play flavor deferred to Pocket; #190, #203 and #210 merged 2026-11-03; the owner OKd one version and the jump; amendment proposed 2026-11-15: the member runner's carrier, direction review) |
 | Delivered | |
 | Milestone | n/a (process) |
 | Lanes | herdr (3.N.P), added here; pocket (3.N.P), added by Pocket's import |
@@ -518,3 +518,80 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
 - Open issues: #207, #215.
 - Deferred to Pocket: #250 (Play distribution) - RFC 0011 Open question 2.
 - Merged changes that cite this RFC: #190, #203, #210, #278, #791, #806 (last merged 2026-11-09).
+
+## Amendment: the member runner's carrier (2026-11-15, proposed)
+
+**Proposed, not in force.** This proposes where the member wall's privileged runner
+([RFC 0024](0024-automagik-cloud.md), (f)) ships when members are allowed. It turns nothing on:
+members stay off until the whole wall, its three safeguards and the isolation review hold
+(Decided 26 and (f)), and this adds no setting. Review is on direction only; this amendment
+carries no code and no delivery.
+
+**Effect, if accepted.** The runner is plain JavaScript on am's Node floor (22.7), so it ships
+inside `automagik-am-<v>.tgz` and rides the signed `am-lane` pointer every release already
+carries: no new artifact, key, lane or release kind. Arca's template installs am as the runner's
+own user, verifies the pointer against am's public keys, records its sequence, and starts the
+runner from that user's store. No other install starts it; am's installer never enables it.
+
+**Options.** am's tarball, recommended: every release already signs and carries am, and am
+installs per user, so its bytes can sit under the runner's user, out of DSH's write reach. A DSH
+plugin's tarball: rejected, because plugin bytes live in DSH's profile, writable by the user the
+runner guards. Its own artifact and lane: the fallback only, since a separate pointer and update
+path serve a file that is inert until started.
+
+**What the lean needs.**
+
+1. **Who installs am, and as which user (the mount).** Arca's template, as the runner's own
+   user on the space's machine (outside DSH's container), from the signed pointer — not DSH's
+   user. The runner's am store, state folder and unit are out of DSH's write reach; DSH reaches
+   the runner only through the socket's folder, and the socket's file mode, set by the template,
+   is the gate.
+   If the template can only install as DSH's user, the lean breaks and the fallback is the
+   shape. One gap to close: am has no first install through the pointer today (`am self install`
+   takes a local extract and records the version's own sequence, unsigned); the delivery adds
+   that path.
+2. **Update, restart and rollback.** am's update stages beside the current version, verifies the
+   pointer and sequence, and swaps; the template's unit restarts the runner, and member shells
+   end with the old process. With no socket they fail closed: no fallback uid. The pointer never
+   goes down; the only downgrade is explicit — `am rollback automagik.am` restores the kept
+   previous signed version, and the unit restarts it; the recorded sequence stays the highest
+   taken.
+3. **What the template pins (the signature).** The pointer's location, am's public keys (a copy
+   of `am/am-keys.json`) and the recorded sequence; the pointer is verified as
+   `am.json`/`am.json.sig` (ed25519, am's key), and the tarball against its sha256 and size —
+   never a hand-copied hash or a version's URL, never `member-runner.mjs` from a spike. Keys
+   rotate in two phases: the template trusts both before a release signs with the new one.
+4. **Is a meter-style held lane safer while members stay off?** No. The meter is held because
+   its binaries are a new artifact that must never ship unsigned; here there is no new artifact
+   and no new key, and the file does nothing unless started. A held lane would hold all of am
+   or create the lane the lean avoids. The equivalent is a held start: the bytes ship inert,
+   nothing but the template's unit starts them, and only after the wall and its review. If any
+   other path can start it, this answer flips and the runner needs its own lane.
+
+**Gate and tests.** The runner sits at `am/runner/member-runner.mjs`, its test at
+`am/test/member-runner.test.mjs`. `am/**` already makes it an am patch, so `part.json` needs no new
+id, path, artifact or `writes` entry and `lane.ts` no new kind; `scripts/lane.test.ts` gains a case
+pinning `am/runner/**` alone as an am patch. The am job's test glob picks the test up; add
+`runner/*.mjs` to its syntax step (CI and `AGENTS.md`). The test covers protocol frames and
+refusals, uid mapping from a supplied subordinate-id range, socket-mode checks and timeout/exit
+codes. CI keeps the privileged proof out: it stays the VM test with a real second user, on the same
+tarball; the Pack am step asserts the tarball carries the runner and no runner test.
+
+**The honest test story.** The spike proved the shape, not the shipment. On the spike's test VM the
+subuid path passed: the member's uid in range and not DSH's, its read of the owner-only canary
+denied while DSH's user read it, no effective capability, DSH's side not root and holding no
+docker socket. Docker mode and a real
+headless DSH turn (faked model) passed locally, refusals and exit codes included. Not proved: first
+install through the pointer, update/restart/rollback of a running runner, a real member session,
+client/runner skew, per-member homes and resource limits (subuid mode has none), the template's
+socket mount and mode, multi-member isolation. Docker mode is root-equivalent, only where subuid
+cannot run. The setting stays off; the spike's hash is test-only; a green unit run is not proof.
+
+**What the runner needs from the member-wall pieces.** It is not the boundary: whoever can open the
+socket can ask to run as any member, so the wall's authorization and the socket's mode are the gate.
+It needs the DSH-side client and provider at a shared protocol version, refusing a mismatch, since
+the two update on different lanes; the member's identity from the unforgeable principal channel,
+never a name the client invents (the runner maps a member to a uid, not the reverse); the template's
+runner user, Node, subordinate-id range, workspace root and socket mount; and the isolation review's
+mount rules for DSH's container. Until those and the three safeguards hold, the unit is not
+installed.
