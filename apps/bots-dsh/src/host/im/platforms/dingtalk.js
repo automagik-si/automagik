@@ -8,11 +8,11 @@
 import { chunkMarkdown } from '../format.js'
 import { retryDelay, retryWait } from './retry.js'
 
-const GATEWAY = 'https://api.dingtalk.com'
+const OPEN_API = 'https://api.dingtalk.com'
 const OAPI = 'https://oapi.dingtalk.com'
 const TEXT_LIMIT = 5000
 
-const gatewayBase = env => String(env.config?.gateway ?? env.config?.api ?? GATEWAY).replace(/\/+$/, '')
+const gatewayBase = env => String(env.config?.gateway ?? env.config?.api ?? OPEN_API).replace(/\/+$/, '')
 const oapiBase = env => String(env.config?.oapi ?? env.config?.api ?? OAPI).replace(/\/+$/, '')
 
 export default {

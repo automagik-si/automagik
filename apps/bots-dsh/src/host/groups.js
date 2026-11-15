@@ -29,7 +29,7 @@ import { viaOf } from '../shared/im-platforms.js'
 import { mentionSpans, speakerOf } from '../shared/mentions.js'
 import { GROUP_REF, output } from './tools.js'
 import { failureLine } from './turns.js'
-import { parseBook } from './ledger.js'
+import { parseBook } from './books.js'
 
 const ROOM_LOG_MAX = 60
 const ROOM_FIRST_LOOK = 12
@@ -197,7 +197,7 @@ const fileLine = file => `[File "${file.name}" (${file.bytes} bytes) attached]`
 export function install(rt) {
   const { ctx } = rt
 
-  // Everything said in a group is in the group's book of the ledger (ledger.js), whole,
+  // Everything said in a group is in the group's book of the ledger (books.js), whole,
   // before anything reads it. The room's own log in state.json keeps the latest lines,
   // each cut to its start, for the members' turns; a member reads a long line whole from
   // the book. The group chat draws its rows from the book too (groupRows).

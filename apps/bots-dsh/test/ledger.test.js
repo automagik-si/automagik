@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { install, bookFile, parseBook } from '../src/host/ledger.js'
+import { install, bookFile, parseBook } from '../src/host/books.js'
 import { relayRange } from '../src/shared/group-replies.js'
 
 const host = (t, { home = mkdtempSync(join(tmpdir(), 'ds-bot-ledger-')), readOnly } = {}) => {

@@ -50,7 +50,7 @@ export function install(rt) {
   // Roles recorded as team exchanges.
   const EXCHANGE_ROLES = new Set(['request', 'reply', 'stopped'])
 
-  // What two Bots say to each other is in the book of the pair (ledger.js), whole, written
+  // What two Bots say to each other is in the book of the pair (books.js), whole, written
   // before the message goes out. A message is shown once a record says it was delivered.
   const pairBook = (a, b) => `pair-${[String(a), String(b)].sort().join('-')}`
   // A pair's book starts from the exchanges a team kept in state.json before the ledger.

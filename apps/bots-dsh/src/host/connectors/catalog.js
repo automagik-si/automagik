@@ -30,7 +30,6 @@ export const CATALOG = [
   { id: 'linear', name: 'Linear', category: 'work', about: 'Issues, projects, and cycles', ...oauth('https://mcp.linear.app/mcp') },
   { id: 'atlassian', name: 'Atlassian', category: 'work', about: 'Jira issues and Confluence pages', ...oauth('https://mcp.atlassian.com/v1/mcp') },
   { id: 'sentry', name: 'Sentry', category: 'dev', about: 'Errors, traces, and releases', ...oauth('https://mcp.sentry.dev/mcp') },
-  { id: 'stripe', name: 'Stripe', category: 'commerce', about: 'Payments, invoices, and customers', ...oauth('https://mcp.stripe.com') },
   { id: 'paypal', name: 'PayPal', category: 'commerce', about: 'Orders, payments, and invoices', ...oauth('https://mcp.paypal.com/mcp') },
   { id: 'square', name: 'Square', category: 'commerce', about: 'Payments, orders, and catalog', ...oauth('https://mcp.squareup.com/mcp') },
   { id: 'cloudflare', name: 'Cloudflare', category: 'dev', about: 'Workers, DNS, and account resources', ...oauth('https://bindings.mcp.cloudflare.com/mcp') },

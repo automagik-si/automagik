@@ -6,13 +6,13 @@
 import { chunkMarkdown, toPlain } from '../format.js'
 
 const API = 'https://discord.com/api/v10'
-const GATEWAY = 'wss://gateway.discord.gg/?v=10&encoding=json'
+const SOCKET = 'wss://gateway.discord.gg/?v=10&encoding=json'
 // guilds | guild messages | direct messages | message content
 const INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15)
 const TEXT_LIMIT = 2000
 
 const apiBase = env => String(env.config?.api ?? API).replace(/\/+$/, '')
-const wsBase = env => String(env.config?.gateway ?? GATEWAY)
+const wsBase = env => String(env.config?.gateway ?? SOCKET)
 
 const errorOf = (body, status) => {
   const error = new Error(String(body?.message ?? `Discord answered ${status}`))
