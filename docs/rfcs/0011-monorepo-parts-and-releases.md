@@ -422,31 +422,33 @@ reaches installed apps as a plugin patch, with no desktop release, no app downlo
 restart.
 
 Arca's Automagik app, a DSH plugin set, is not a part of this repository. Arca's public
-repository (`automagik-si/arca`) owns it, the way Omni's repository owns Omni's channels and
-canvases: one folder per plugin under `apps/*-dsh` (each `package.json` version the Arca release
-of that folder's last change), its own market index at `marketplace/automagik.json`, releases
-tagged `v<version>`, and a release workflow that dispatches to this repository when it publishes.
+repository (`automagik-si/arca`) will own it, the way Omni's repository owns Omni's channels and
+canvases. Arca already tags its releases `v<version>`. The rest is planned on Arca's side and not
+on its `dev` today: one folder per plugin under `apps/*-dsh` (each `package.json` version the
+Arca release of that folder's last change), its own market index at `marketplace/automagik.json`,
+and a release workflow that dispatches to this repository when it publishes.
 
 ### The path
 
-- Arca's release dispatches this repository. The run reads Arca's releases itself; the dispatch's
+- Arca's release will dispatch this repository. The run reads Arca's releases itself; the dispatch's
   payload is a hint only.
 - The boot gate boots the exact bytes the lane would carry, not dev's newest plugins.
 - Only when it boots does a plugin-only patch go out on the existing plugin lane, signed with
   this repository's plugin key. There is no new key, publisher or rotation.
-- `scripts/lane.ts` still sends install-field, dependency and DSH changes to a full release, as it
-  does for this repository's own plugins: such an Arca release is carried by a full release, never
-  by a lane patch.
+- The same rule as `scripts/lane.ts` applies: an Arca release with install-field, dependency or
+  DSH changes is carried by a full release, never by a lane patch. `lane.ts` does not classify
+  Arca's releases yet; the bootstrap adds that.
 - A failing gate moves no pointer. A bad plugin is fixed forward by a new Arca release.
 - The once-a-UTC-day hold (#371) belongs to Follow Omni's full-release carries. Arca's lane
   patches are plugin-only and are not held, the two-week test included: a held patch would leave T
-  unmeasured.
+  unmeasured. The hold stays on Follow Omni's carries for now.
 
 ### Bootstrap
 
 The lane reader is compiled into the app: the plugin names a lane may replace are fixed in the
 build. So one desktop release comes first. It carries Arca's plugins in the desktop profile and
-allows their names on the lane, and it changes three app policies:
+allows their names on the lane, teaches `scripts/lane.ts` to classify an Arca release by the
+rule above, and changes three app policies:
 
 - An app update keeps a newer lane plugin over the build's pin: a new build never copies its own
   older Arca plugin back over the lane's newer one.
@@ -462,6 +464,17 @@ Arca releases. The path ships when T is at most 10 minutes, the pass rate is at 
 and no pointer ever moved without a green gate. Installed apps poll the lane every 15 minutes, so
 a person's wait (T plus that poll) is reported beside T, not as the target.
 
+### Repairs
+
+Beside the lane path, three repairs make Follow Omni's carries more reliable while they stay as
+they are. They ship now, as their own small PR, not with the bootstrap:
+
+- After a failed publish, the desktop build and its feed are retried, so a release is never left
+  without a feed.
+- The daily cut is triggered from a clock this repository controls, so a held carry does not slip
+  for hours.
+- The app's release lookups read past the newest 50 releases.
+
 ### Order
 
 1. The bootstrap desktop release, with the three app policies above.
@@ -470,8 +483,8 @@ a person's wait (T plus that poll) is reported beside T, not as the target.
 4. Only then is the once-a-UTC-day hold (#371) dropped for Omni's carries, once they ride the
    lane.
 
-Nothing is built until this section merges and Arca has published a first plugin release worth
-carrying.
+Apart from the repairs, nothing is built until this section merges and Arca has published a
+first plugin release worth carrying.
 
 ## Open questions
 
