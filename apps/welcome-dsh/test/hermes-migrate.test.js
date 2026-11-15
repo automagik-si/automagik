@@ -17,6 +17,8 @@ const SCRIPT = readFileSync(join(PLUGIN, 'src/host/hermes-migrate.py'), 'utf8')
 const FIXTURE_KEY = ['123456789', `${'A'.repeat(20)}${'B'.repeat(15)}`].join(':')
 const CHANNEL = '0f0f0f0f-1111-4222-8333-444444444444'
 const OTHER_CHANNEL = 'e0e0e0e0-4444-4555-8666-777777777777'
+const KEY_PREFIX = FIXTURE_KEY.slice(0, FIXTURE_KEY.indexOf(':'))
+const OTHER_BOT = '987654321'
 const BOT = 'b0b0b0b0-2222-4333-8444-555555555555'
 const GENIE = 'd0d0d0d0-3333-4444-8555-666666666666'
 
@@ -212,7 +214,15 @@ const fakeChannels = ({ attach, instances = [], pairing = { state: 'connected', 
   const channels = {
     config: { omni: { url: 'http://omni.test' } },
     omniNamed: () => true,
-    omniRequest: async () => ({ ok: true, json: async () => ({ items: instances }) }),
+    omniRequest: async (_method, path) => {
+      if (path === '/instances') return { ok: true, json: async () => ({ items: instances }) }
+      const status = /^\/instances\/([^/]+)\/status$/.exec(path)
+      if (status !== null) {
+        const item = instances.find(row => row.id === status[1])
+        return { ok: true, json: async () => ({ data: { state: item?.state ?? 'connected', isConnected: item?.state !== 'connecting', botId: item?.botId ?? null } }) }
+      }
+      return { ok: true, json: async () => ({ items: instances }) }
+    },
     omniChannelEndpoint: async (name, body) => {
       calls.push([name, body])
       if (name === 'omni-channel-create') return { id: CHANNEL, type: 'telegram', name: body.name }
@@ -463,14 +473,14 @@ test('a gateway that does not come back still counts as off, and the page says s
 })
 
 test('a channel Omni already has is finished or reconnected, never made twice', async () => {
-  const connected = fakeChannels({ instances: [{ id: CHANNEL, channel: 'telegram', name: 'Telegram' }] })
+  const connected = fakeChannels({ instances: [{ id: CHANNEL, channel: 'telegram', name: 'Telegram', botId: KEY_PREFIX }] })
   const actions = install({ script: fakeScript(), team: fakeTeam(), channels: connected })
   const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
   assert.equal(done.phase, 'done')
   assert.equal(done.result.existing, true)
   assert.deepEqual(connected.calls.map(([name]) => name), ['omni-channel-pairing'])
 
-  const waiting = fakeChannels({ instances: [{ id: CHANNEL, channel: 'telegram', name: 'Telegram' }], pairing: { state: 'connecting', connected: false, detail: null } })
+  const waiting = fakeChannels({ instances: [{ id: CHANNEL, channel: 'telegram', name: 'Telegram', botId: KEY_PREFIX }], pairing: { state: 'connecting', connected: false, detail: null } })
   const actionsWaiting = install({ script: fakeScript(), team: fakeTeam(), channels: waiting })
   const doneWaiting = await settled(actionsWaiting, (await actionsWaiting['migrate-start']({ confirm: true })).jobId)
   assert.equal(doneWaiting.phase, 'done')
@@ -533,10 +543,10 @@ test('a refusal on a stopped Hermes restores its settings without starting it', 
   assert.equal(restarts, 0)
 })
 
-test('a different Telegram channel on Omni is not the moved bot, and a refusal puts Hermes back', async () => {
+test('another bot named Telegram is never taken for the move, and a refusal puts Hermes back', async () => {
   const script = fakeScript()
   const team = fakeTeam()
-  const channels = fakeChannels({ attach: async () => { throw new Error('bad request') }, instances: [{ id: OTHER_CHANNEL, channel: 'telegram', name: 'Support' }] })
+  const channels = fakeChannels({ attach: async () => { throw new Error('bad request') }, instances: [{ id: OTHER_CHANNEL, channel: 'telegram', name: 'Telegram', botId: OTHER_BOT }] })
   const actions = install({ script, team, channels })
   const probe = await actions['migrate-probe']()
   assert.equal(probe.omni.telegram, null)
@@ -544,21 +554,28 @@ test('a different Telegram channel on Omni is not the moved bot, and a refusal p
   assert.equal(done.phase, 'failed')
   assert.equal(done.error.restored, true)
   assert.deepEqual(done.error.changed, { hermesOff: false, omniCreated: false })
-  assert.ok(script.modes.includes('restore'), 'Hermes was left off for another channel')
+  assert.equal(channels.calls.some(([name]) => name === 'omni-channel-act'), false, 'the key was handed to another bot')
+  assert.ok(script.modes.includes('restore'), 'Hermes was left off for another bot')
 })
 
-test('the channel Omni made before a refusal is the move\'s channel, and Hermes stays off', async () => {
+test('Omni refusing while holding the move\'s own channel keeps Hermes off', async () => {
   const script = fakeScript()
   const team = fakeTeam()
   let listings = 0
   const channels = fakeChannels({ attach: async () => { throw new Error('bad request') } })
-  channels.channels.omniRequest = async () => ({ ok: true, json: async () => ({ items: ++listings === 1 ? [] : [{ id: CHANNEL, channel: 'telegram', name: 'Telegram' }] }) })
+  channels.channels.omniRequest = async (_method, path) => {
+    if (path === '/instances') return { ok: true, json: async () => ({ items: ++listings === 1 ? [] : [{ id: CHANNEL, channel: 'telegram', name: 'Telegram', botId: KEY_PREFIX }] }) }
+    const status = /^\/instances\/([^/]+)\/status$/.exec(path)
+    if (status !== null) return { ok: true, json: async () => ({ data: { state: 'connected', botId: KEY_PREFIX } }) }
+    return { ok: true, json: async () => ({ items: [] }) }
+  }
   const actions = install({ script, team, channels })
   const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
   assert.equal(done.phase, 'done')
   assert.equal(done.result.channelId, CHANNEL)
   assert.equal(done.result.existing, true)
-  assert.ok(!script.modes.includes('restore'), 'Hermes was put back while Omni had the channel')
+  assert.equal(done.result.hermesOff, true)
+  assert.ok(!script.modes.includes('restore'), 'Hermes was put back while Omni had the move channel')
 })
 
 test('when Hermes cannot be put back, the page still says it is off', async () => {
