@@ -12,7 +12,12 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { basename, join } from 'node:path'
 
-export const RELEASES_URL = 'https://api.github.com/repos/automagik-si/automagik/releases?per_page=50'
+export const RELEASES_URL = 'https://api.github.com/repos/automagik-si/automagik/releases?per_page=100'
+// The updater reads the release list newest first. A plugin, herdr or Pocket patch is a release
+// too, and only a full release carries a desktop feed: a quiet stretch puts the newest feed past
+// the first page. Follow GitHub's Link next page until the list ends or this cap, so an older
+// feed is never invisible. Ten pages is 1,000 releases, weeks at this repository's rate.
+export const MAX_RELEASE_PAGES = 10
 export const DESKTOP_TAG_PREFIX = 'v'
 const DOWNLOADS = 'https://github.com/automagik-si/automagik/releases/download/'
 const RELEASE_PAGE = 'https://github.com/automagik-si/automagik/releases/tag/'
@@ -301,13 +306,32 @@ export function pickUpdate(releases, { current, platform, channel = 'prerelease'
   return best
 }
 
+/** The rel="next" address of GitHub's Link header, or null when this is the last page. */
+export function nextPage(link) {
+  const match = /<([^>]+)>;\s*rel="next"/.exec(String(link ?? ''))
+  return match ? match[1] : null
+}
+
 export async function fetchReleases(fetchImpl = fetch) {
-  const response = await fetchImpl(RELEASES_URL, {
-    headers: { accept: 'application/vnd.github+json', 'user-agent': 'omni-desktop' },
-    signal: AbortSignal.timeout(15_000),
-  })
-  if (!response.ok) throw new Error(`GitHub answered ${response.status} for the desktop releases`)
-  return response.json()
+  const releases = []
+  let url = RELEASES_URL
+  for (let page = 1; url && page <= MAX_RELEASE_PAGES; page++) {
+    const response = await fetchImpl(url, {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': 'omni-desktop' },
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!response.ok) throw new Error(`GitHub answered ${response.status} for the desktop releases`)
+    const list = await response.json()
+    // A page that is not a list (an API error body) is not a release: keep the pages before it.
+    // The first page's answer is returned whole, as it always was.
+    if (!Array.isArray(list)) {
+      if (releases.length === 0) return list
+      break
+    }
+    releases.push(...list)
+    url = nextPage(response.headers?.get?.('link'))
+  }
+  return releases
 }
 
 /**
