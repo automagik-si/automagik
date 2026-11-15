@@ -73,15 +73,20 @@ const oauthError = (oauthError, code = 'token') => Object.assign(new Error('refu
 const flowError = code => Object.assign(new Error(code), { code })
 
 test('the setting off: no flow, no store, no listener, and the status says so', async () => {
+  // A flow and a store are supplied on purpose: the off setting, not their absence, must keep
+  // this module from using them.
+  const flow = fakeFlow()
   const store = fakeStore()
-  const account = createAccount({ settings: OFF, flow: null, store: null })
+  const account = createAccount({ settings: OFF, flow, store })
   assert.deepEqual(account.status(), {
     enabled: false, signedIn: false, name: null, email: null, reason: DISABLED_REASON, secureStore: null,
   })
   assert.deepEqual(await account.signIn(), { ok: false, reason: DISABLED_REASON, status: account.status() })
   await account.start()
   await account.signOut()
+  assert.equal(account.status().reason, DISABLED_REASON)
   assert.deepEqual(store.calls, { load: 0, rotate: 0, clear: 0 })
+  assert.deepEqual(flow.calls, { signIn: 0, refresh: 0, cancel: 0, close: 0 })
   assert.equal(await account.accessToken(), null)
 })
 
@@ -130,6 +135,13 @@ test('a sign-in without a refresh token is remembered for this launch only, and 
   assert.equal(store.calls.rotate, 0)
 })
 
+test('an expired access token with no refresh token is not a session', async () => {
+  const flow = fakeFlow({ result: tokensOf({ expiresAt: Date.now() - 1000, refresh: null }) })
+  const account = createAccount({ settings: ON, flow, store: fakeStore() })
+  assert.equal((await account.signIn()).ok, true)
+  assert.equal(account.status().signedIn, false)
+})
+
 test('a desktop with no secure store keeps the sign-in in memory and carries the store reason', async () => {
   const flow = fakeFlow()
   const store = fakeStore({ secure: false, backend: 'basic_text', reason: NO_SECURE_STORE_REASON })
@@ -161,6 +173,64 @@ test('a sign-out the store cannot complete is not hidden', async () => {
   const signedOut = await account.signOut()
   assert.equal(signedOut.status.signedIn, false)
   assert.equal(signedOut.status.reason, STORAGE_FAILED_REASON)
+})
+
+test('a launch refresh without an ID token still shows the person signed in', async () => {
+  const store = fakeStore({ saved: 'refresh-old' })
+  const flow = fakeFlow({ refreshResult: { accessToken: 'access-kept', expiresAt: Date.now() + 3600 * 1000, refreshToken: 'refresh-2', claims: null } })
+  const account = createAccount({ settings: ON, flow, store })
+  await account.start()
+  const status = account.status()
+  assert.equal(status.signedIn, true)
+  assert.equal(status.name, null)
+  assert.equal(status.email, null)
+  assert.deepEqual([...store.memory.values()], ['refresh-2'])
+})
+
+test('a sign-out during the launch refresh wins: the refreshed session is dropped', async () => {
+  let settle
+  const store = fakeStore({ saved: 'refresh-old' })
+  const flow = fakeFlow()
+  flow.refresh = async () => {
+    flow.calls.refresh += 1
+    await new Promise(resolve => { settle = resolve })
+    return tokensOf({ refresh: 'refresh-new' })
+  }
+  const account = createAccount({ settings: ON, flow, store })
+  const starting = account.start()
+  await new Promise(resolve => setImmediate(resolve))
+  const signedOut = await account.signOut()
+  settle()
+  await starting
+  assert.equal(signedOut.ok, true)
+  assert.equal(account.status().signedIn, false)
+  assert.equal(store.calls.rotate, 0)
+  assert.deepEqual([...store.memory.values()], [])
+})
+
+test('a sign-out during a sign-in wins: the exchange landing afterwards is dropped', async () => {
+  let settle
+  const flow = fakeFlow()
+  flow.signIn = async () => {
+    flow.calls.signIn += 1
+    await new Promise(resolve => { settle = resolve })
+    return tokensOf()
+  }
+  // The real flow's cancel() cannot stop a code exchange that already came back; this fake
+  // models that: cancel() is a no-op and the exchange still resolves.
+  const store = fakeStore()
+  const account = createAccount({ settings: ON, flow, store })
+  const pending = account.signIn()
+  await new Promise(resolve => setImmediate(resolve))
+  const signedOut = await account.signOut()
+  settle()
+  const answered = await pending
+  assert.equal(signedOut.ok, true)
+  assert.equal(answered.ok, false)
+  assert.equal(answered.cancelled, true)
+  assert.equal(account.status().signedIn, false)
+  assert.equal(store.calls.rotate, 0)
+  assert.deepEqual([...store.memory.values()], [])
 })
 
 test('a launch uses a saved refresh token, rotates it, and shows the sign-in', async () => {

@@ -43,7 +43,24 @@ export const CLOCK_SKEW_SECONDS = 60
 /** The largest discovery document, JWKS or token response this module will read. */
 export const MAX_DOCUMENT_BYTES = 1024 * 1024
 
-/** A JWS signature algorithm this flow verifies, by its JWT name. */
+/** The JWK key each JWS algorithm must use: an RSA key, a named EC curve, or an EdDSA OKP key. */
+const KEY_SHAPES = Object.freeze({
+  RS256: { kty: 'RSA' }, RS384: { kty: 'RSA' }, RS512: { kty: 'RSA' },
+  PS256: { kty: 'RSA' }, PS384: { kty: 'RSA' }, PS512: { kty: 'RSA' },
+  ES256: { kty: 'EC', crv: 'P-256' }, ES384: { kty: 'EC', crv: 'P-384' }, ES512: { kty: 'EC', crv: 'P-521' },
+  EdDSA: { kty: 'OKP' },
+})
+
+/** Whether `jwk` is a key of the shape `alg` names (kty, and the curve for EC and EdDSA). */
+function keyShapeMatches(jwk, alg) {
+  const shape = KEY_SHAPES[alg]
+  if (!shape || jwk?.kty !== shape.kty) return false
+  if (shape.crv && jwk?.crv !== shape.crv) return false
+  if (alg === 'EdDSA' && jwk.crv !== 'Ed25519' && jwk.crv !== 'Ed448') return false
+  return true
+}
+
+/** A JWS signature algorithm this flow verifies, by its JWT name. Only own keys are algorithms. */
 export const ALGORITHMS = Object.freeze({
   RS256: { hash: 'sha256', padding: cryptoConstants.RSA_PKCS1_PADDING },
   RS384: { hash: 'sha384', padding: cryptoConstants.RSA_PKCS1_PADDING },
@@ -160,8 +177,8 @@ function decodePart(part, what) {
 }
 
 function signatureOk(jwk, alg, signed, signature) {
+  if (!Object.hasOwn(ALGORITHMS, alg) || !keyShapeMatches(jwk, alg)) return false
   const algorithm = ALGORITHMS[alg]
-  if (!algorithm) return false
   let key
   try {
     key = createPublicKey({ key: jwk, format: 'jwk' })
@@ -258,7 +275,7 @@ export function createSignInFlow({
     if (parts.length !== 3 || parts.some(part => part === '')) throw refusal('token', 'the ID token is not a signed JWT')
     const header = decodePart(parts[0], 'header')
     const payload = decodePart(parts[1], 'payload')
-    if (typeof header.alg !== 'string' || !ALGORITHMS[header.alg]) throw refusal('alg', 'the ID token uses an algorithm this app does not accept')
+    if (typeof header.alg !== 'string' || !Object.hasOwn(ALGORITHMS, header.alg)) throw refusal('alg', 'the ID token uses an algorithm this app does not accept')
     if (header.crit !== undefined) throw refusal('token', 'the ID token names a critical header')
     const signed = Buffer.from(`${parts[0]}.${parts[1]}`, 'utf8')
     let signature
@@ -377,7 +394,9 @@ export function createSignInFlow({
           timer.unref?.()
         })
         // The browser opener resolving is not the sign-in coming back: only the callback is.
-        const opening = Promise.resolve().then(() => openExternal(url.toString()))
+        const opening = Promise.resolve().then(() => openExternal(url.toString())).catch((error) => {
+          throw error instanceof SignInError ? error : refusal('browser', 'the system browser could not be opened')
+        })
         opening.catch(() => {})
         try {
           await Promise.race([callback.answer, opening.then(() => callback.answer), timeout])

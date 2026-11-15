@@ -34,9 +34,11 @@ export const REFRESH_EARLY_MS = 30 * 1000
 const text = value => (typeof value === 'string' ? value : null)
 
 /** The sign-in status the page may see. It never carries a token, a code or a verifier. */
-const statusOf = ({ enabled, claims, reason, store }) => ({
+const statusOf = ({ enabled, hasSession, claims, reason, store }) => ({
   enabled,
-  signedIn: Boolean(claims),
+  // A session is a live access token, not the ID token's display claims: a provider may answer a
+  // refresh without an ID token, and the person is still signed in.
+  signedIn: hasSession === true,
   name: text(claims?.name),
   email: text(claims?.email),
   reason: reason ?? null,
@@ -92,8 +94,15 @@ export function createAccount({ settings, flow = null, store = null, now = Date.
   let started = false
   let signingIn = null
   let refreshing = null
+  // One epoch for the session: every sign-in, sign-out and forget moves it on, and an operation
+  // that adopts tokens checks it first. A sign-out during a code exchange cannot be undone by
+  // that exchange landing afterwards.
+  let generation = 0
 
-  const status = () => statusOf({ enabled, claims, reason, store })
+  // Signed in while the access token works, or while a refresh token can renew it. An expired
+  // access token with no refresh token is not a session.
+  const signedInNow = () => access !== null && (access.expiresAt > now() || (typeof refreshToken === 'string' && refreshToken !== ''))
+  const status = () => statusOf({ enabled, hasSession: signedInNow(), claims, reason, store: enabled ? store : null })
   const dirty = () => { try { onDirty(status()) } catch (error) { log(`account: a status listener failed (${error?.code ?? 'error'})`) } }
 
   /** The tokens just issued become this session; the refresh token alone is persisted. */
@@ -118,6 +127,7 @@ export function createAccount({ settings, flow = null, store = null, now = Date.
 
   /** Forget the session locally, and the stored token if there is a store. */
   async function forget() {
+    generation += 1
     access = null
     refreshToken = null
     claims = null
@@ -135,6 +145,7 @@ export function createAccount({ settings, flow = null, store = null, now = Date.
     if (started) return status()
     started = true
     if (!enabled || !store) return status()
+    const attempt = generation
     let loaded
     try {
       loaded = await store.load(issuer)
@@ -154,16 +165,22 @@ export function createAccount({ settings, flow = null, store = null, now = Date.
       dirty()
       return status()
     }
-    if (loaded.status !== 'ok') {
+    if (loaded.status !== 'ok' || attempt !== generation) {
       dirty()
       return status()
     }
     refreshToken = loaded.token
     try {
-      adopt(await flow.refresh(refreshToken))
+      const renewed = await flow.refresh(refreshToken)
+      if (attempt !== generation) {
+        dirty()
+        return status()
+      }
+      adopt(renewed)
       reason = null
       // The server rotated the refresh token: the new one replaces the old in one write.
       await persist()
+      if (attempt !== generation) return status()
       log('account: signed in from the saved refresh token')
     } catch (error) {
       if (error?.code === 'token' && error.oauthError === 'invalid_grant') {
@@ -183,20 +200,25 @@ export function createAccount({ settings, flow = null, store = null, now = Date.
   async function signIn() {
     if (!enabled) return { ok: false, reason: settings?.problem ?? DISABLED_REASON, status: status() }
     if (signingIn) return { ok: false, reason: BUSY_REASON, status: status() }
+    const attempt = (generation += 1)
+    const cancelled = () => {
+      dirty()
+      return { ok: false, cancelled: true, reason: null, status: status() }
+    }
     const run = (async () => {
       try {
         const tokens = await flow.signIn()
+        // A Sign out while the code was being exchanged wins: the tokens are dropped, not saved.
+        if (attempt !== generation) return cancelled()
         adopt(tokens)
-        reason = tokens.refreshToken ? null : NO_REFRESH_REASON
         if (tokens.refreshToken) await persist()
+        if (attempt !== generation) return cancelled()
+        reason = tokens.refreshToken ? null : NO_REFRESH_REASON
         dirty()
         log('account: signed in')
         return { ok: true, status: status() }
       } catch (error) {
-        if (error?.code === 'cancelled') {
-          dirty()
-          return { ok: false, cancelled: true, reason: null, status: status() }
-        }
+        if (error?.code === 'cancelled' || attempt !== generation) return cancelled()
         reason = reasonFor(error)
         log(`account: sign-in did not finish (${error?.code ?? 'error'})`)
         dirty()
@@ -231,11 +253,15 @@ export function createAccount({ settings, flow = null, store = null, now = Date.
     if (access.expiresAt - REFRESH_EARLY_MS > now()) return access.token
     if (!refreshToken) return null
     if (refreshing) return refreshing
+    const attempt = generation
     const run = (async () => {
       try {
-        adopt(await flow.refresh(refreshToken))
+        const renewed = await flow.refresh(refreshToken)
+        if (attempt !== generation) return null
+        adopt(renewed)
         reason = null
         await persist()
+        if (attempt !== generation) return null
         dirty()
         return access?.token ?? null
       } catch (error) {

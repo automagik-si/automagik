@@ -543,7 +543,7 @@ test('acceptance 9: the store is reached only by its wiring and never opts into 
   // C1.2 (#906) wires the store behind <home>/signin.json: account.js holds the session and
   // main.js hands it Electron's safeStorage and the app's data folder. No other desktop flow
   // imports or calls it, reaches safeStorage, or names its file.
-  const wiring = new Set(['account.js', 'main.js'])
+  const wiring = new Set(['account.js', 'account-wiring.js', 'main.js'])
   for (const path of sources) {
     if (path === modulePath) continue
     const name = path.slice(sourceRoot.length).replace(/^\//, '')
@@ -557,8 +557,10 @@ test('acceptance 9: the store is reached only by its wiring and never opts into 
 
   // The wiring takes safeStorage as an argument and keeps the refresh token in one place: main.js
   // creates the store, account.js loads/saves/rotates/clears it, and the flow never sees it.
+  const wiringSource = readFileSync(join(sourceRoot, 'account-wiring.js'), 'utf8')
+  assert.match(wiringSource, /createTokenStore\(\{ safeStorage, userData \}\)/)
   const main = readFileSync(join(sourceRoot, 'main.js'), 'utf8')
-  assert.match(main, /createTokenStore\(\{ safeStorage, userData: app\.getPath\('userData'\) \}\)/)
+  assert.match(main, /beginAccount\(\{[\s\S]*?safeStorage,[\s\S]*?userData: app\.getPath\('userData'\)/)
   const account = readFileSync(join(sourceRoot, 'account.js'), 'utf8')
   assert.doesNotMatch(account, /from\s+['"]electron['"]|require\s*\(\s*['"]electron['"]/)
   assert.match(account, /store\.(load|rotate|clear)\(/)

@@ -23,7 +23,7 @@ const CLIENT_ID = 'test-desktop-client'
 // An Ed25519 key, the shape the identity service's JWKS exposes. Each provider makes its own.
 function makeKey() {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519')
-  return { privateKey, jwk: { ...publicKey.export({ format: 'jwk' }), kid: 'test-key-1', alg: 'EdDSA', use: 'sig' } }
+  return { privateKey, jwk: { ...publicKey.export({ format: 'jwk' }), kid: `test-key-${randomUUID()}`, alg: 'EdDSA', use: 'sig' } }
 }
 
 function jwt(header, payload, privateKey) {
@@ -49,7 +49,7 @@ const listen = server => new Promise((resolve, reject) => {
  * redirect URL), `token` (a function returning the response body) or `tokenStatus`.
  */
 async function startProvider(t, overrides = {}) {
-  const key = makeKey()
+  let key = makeKey()
   const calls = { discovery: 0, authorize: 0, token: 0, jwks: 0 }
   const codes = new Map()
   const refreshTokens = new Map()
@@ -59,6 +59,10 @@ async function startProvider(t, overrides = {}) {
     const url = new URL(request.url ?? '/', origin)
     if (request.method === 'GET' && url.pathname === '/.well-known/openid-configuration') {
       calls.discovery += 1
+      if (overrides.discoveryRedirect) {
+        response.writeHead(302, { location: overrides.discoveryRedirect })
+        return response.end()
+      }
       const document = {
         issuer: origin,
         authorization_endpoint: `${origin}/authorize`,
@@ -75,7 +79,8 @@ async function startProvider(t, overrides = {}) {
     }
     if (request.method === 'GET' && url.pathname === '/jwks') {
       calls.jwks += 1
-      return json(response, 200, { keys: [key.jwk] })
+      const jwk = overrides.jwkWithoutAlg ? (() => { const { alg, ...rest } = key.jwk; return rest })() : key.jwk
+      return json(response, 200, { keys: [jwk] })
     }
     if (request.method === 'GET' && url.pathname === '/authorize') {
       calls.authorize += 1
@@ -122,7 +127,7 @@ async function startProvider(t, overrides = {}) {
 
   function tokensFor({ sub, nonce = undefined, refresh = false }) {
     const now = Math.floor(Date.now() / 1000)
-    const idToken = jwt({ alg: 'EdDSA', kid: key.jwk.kid, typ: 'JWT' }, {
+    const idToken = jwt({ alg: 'EdDSA', kid: key.jwk.kid, typ: 'JWT', ...(overrides.header ?? {}) }, {
       iss: origin,
       sub,
       aud: CLIENT_ID,
@@ -147,7 +152,11 @@ async function startProvider(t, overrides = {}) {
   await listen(server)
   origin = `http://127.0.0.1:${server.address().port}`
   t.after(() => new Promise(resolve => { server.closeAllConnections?.(); server.close(resolve) }))
-  return { origin, server, key, calls, codes, refreshTokens, requests }
+  return {
+    origin, server, calls, codes, refreshTokens, requests,
+    // The server's signing key changes; its JWKS follows at once, a client's cached copy does not.
+    rotateKey() { key = makeKey(); return key.jwk },
+  }
 }
 
 function textOf(request) {
@@ -291,6 +300,53 @@ test('a second loopback request is refused: the port closes after the first', as
   await flow.signIn()
   const redirect = provider.requests.authorize[0].redirect_uri
   await assert.rejects(fetch(`${redirect}?code=again&state=x`), () => true)
+})
+
+test('a browser that cannot be opened is refused as such, with no URL in the reason', async t => {
+  const provider = await startProvider(t)
+  const flow = await flowFor(t, provider, {
+    openExternal: async (url) => { throw new Error(`no browser for ${url}`) },
+  })
+  const error = await refusalOf(flow.signIn())
+  assert.equal(error.code, 'browser')
+  assert.doesNotMatch(error.message, /127\.0\.0\.1|https?:/)
+})
+
+test('a discovery redirect is not followed', async t => {
+  const provider = await startProvider(t, { discoveryRedirect: `${'https://evil.example'}/.well-known/openid-configuration` })
+  const flow = await flowFor(t, provider)
+  assert.equal((await refusalOf(flow.signIn())).code, 'network')
+})
+
+test('a key set without alg cannot pass an inherited algorithm name', async t => {
+  // A JWKS key without `alg`, and a header that names an inherited Object property: the
+  // allowlist is own keys only, so this is refused before any signature is tried.
+  const provider = await startProvider(t, { jwkWithoutAlg: true, header: { alg: 'constructor' } })
+  const flow = await flowFor(t, provider)
+  assert.equal((await refusalOf(flow.signIn())).code, 'alg')
+})
+
+test('a rotated signing key is fetched once more, and the sign-in completes', async t => {
+  const provider = await startProvider(t)
+  const flow = await flowFor(t, provider)
+  const first = await flow.signIn()
+  assert.equal(first.claims.sub, 'person-1')
+  const kids = provider.calls.jwks
+  provider.rotateKey()
+  const second = await flow.signIn()
+  assert.equal(second.claims.sub, 'person-1')
+  assert.equal(provider.calls.jwks, kids + 1)
+})
+
+test('a timeout closes the loopback port too', async t => {
+  const provider = await startProvider(t)
+  let redirect = null
+  const flow = await flowFor(t, provider, {
+    timeoutMs: 60,
+    openExternal: async (url) => { redirect = new URL(url).searchParams.get('redirect_uri') },
+  })
+  assert.equal((await refusalOf(flow.signIn())).code, 'timeout')
+  assert.equal(await probeLoopback(Number(new URL(redirect).port)), 'refused')
 })
 
 test('a second request while the code is still being exchanged is refused: the port closes with its first request', async t => {

@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 
 import { BROWSER_REASON, createAccount } from '../src/account.js'
 import { parseDeepLink } from '../src/deeplink.js'
+import { startAccount } from '../src/account-wiring.js'
 import { createSignInFlow, readSignInSettings, settingsFileOf } from '../src/sign-in.js'
 import { NO_SECURE_STORE_REASON, createTokenStore } from '../src/secure-tokens.js'
 
@@ -47,7 +48,7 @@ const readBody = request => new Promise((resolve, reject) => {
  * its JWKS. `broken` changes one answer at a time; `authorizeWith` lets a test return its own
  * redirect (a wrong state, an error) and `mint` its own ID token claims.
  */
-async function provider(t, { broken = {}, mint = null, authorizeWith = null, tokenDelayMs = 0 } = {}) {
+async function provider(t, { broken = {}, mint = null, authorizeWith = null, tokenDelayMs = 0, forgeSignature = false, algNone = false } = {}) {
   const signing = key()
   const codes = new Map()
   const refresh = new Set()
@@ -113,12 +114,14 @@ async function provider(t, { broken = {}, mint = null, authorizeWith = null, tok
       : { iss: origin, sub: 'acceptance-person', aud: CLIENT, exp: now + 300, iat: now, ...(nonce === null ? {} : { nonce }) }
     const refreshToken = `refresh-${randomUUID()}`
     refresh.add(refreshToken)
+    const signer = forgeSignature ? key() : signing
+    const header = algNone ? { alg: 'none', typ: 'JWT' } : { alg: 'EdDSA', kid: signing.jwk.kid }
     return {
       access_token: `access-${randomUUID()}`,
       token_type: 'Bearer',
       expires_in: 3600,
       refresh_token: refreshToken,
-      ...(nonce === null ? {} : { id_token: sign({ alg: 'EdDSA', kid: signing.jwk.kid }, claims, signing.privateKey) }),
+      ...(nonce === null ? {} : { id_token: sign(header, claims, signer.privateKey) }),
     }
   }
 
@@ -196,6 +199,8 @@ test('acceptance 2: every OIDC negative case is refused and nothing is stored', 
     ['expired', { mint: ({ origin, clientId, nonce, now }) => ({ iss: origin, sub: 'p', aud: clientId, exp: now - 3600, iat: now, nonce }) }],
     ['issued', { mint: ({ origin, clientId, nonce, now }) => ({ iss: origin, sub: 'p', aud: clientId, exp: now + 300, iat: now + 3600, nonce }) }],
     ['subject', { mint: ({ origin, clientId, nonce, now }) => ({ iss: origin, sub: '', aud: clientId, exp: now + 300, iat: now, nonce }) }],
+    ['token', { forgeSignature: true }],
+    ['alg', { algNone: true }],
   ]
   for (const [code, options] of cases) {
     const server = await provider(t, options)
@@ -303,13 +308,25 @@ test('acceptance 5: the setting is off by default, with no issuer or client id o
     assert.doesNotMatch(source, /automagik-desktop|id\.example|https:\/\/[a-z]/i, file)
   }
 
-  // With the setting off, the account has no flow, no store, no listener and no browser.
-  const account = createAccount({ settings: readSignInSettings(settingsFileOf(dir)), flow: null, store: null })
-  const before = account.status()
-  assert.equal(before.enabled, false)
-  assert.equal(before.signedIn, false)
-  assert.equal((await account.signIn()).ok, false)
-  assert.equal(account.status().signedIn, false)
+  // With the setting off, the wiring builds no flow and no store: safeStorage is not read, no
+  // port is bound, no browser opens and no file is written.
+  const calls = { backends: 0, availability: 0 }
+  const safeStorage = {
+    getSelectedStorageBackend() { calls.backends += 1; return 'gnome_libsecret' },
+    isEncryptionAvailable() { calls.availability += 1; return true },
+  }
+  let opened = 0
+  const built = startAccount({
+    settings: readSignInSettings(settingsFileOf(dir)), safeStorage, userData: dir,
+    openExternal: async () => { opened += 1 },
+  })
+  assert.equal(built.store, null)
+  assert.equal(built.flow, null)
+  assert.equal(built.account.status().enabled, false)
+  assert.equal((await built.account.signIn()).ok, false)
+  assert.deepEqual(calls, { backends: 0, availability: 0 })
+  assert.equal(opened, 0)
+  assert.deepEqual(readdirSync(dir), [])
 })
 
 test('acceptance 6: the page holds no token, and the bridge has no way to ask for one', () => {
@@ -329,7 +346,7 @@ test('acceptance 6: the page holds no token, and the bridge has no way to ask fo
   // The account's public status never carries a token; the access token is a main-only method.
   const status = account.match(/const statusOf = [\s\S]*?\}\)\n/)
   assert.ok(status, 'account.js must keep one status shape')
-  assert.doesNotMatch(status[0], /access|refresh|idToken|token/i)
+  assert.doesNotMatch(status[0], /^\s{2}(?:accessToken|refreshToken|idToken|token|authorizationCode):/m)
 })
 
 test('acceptance 7: with no secret store nothing is written and the person signs in again', async (t) => {

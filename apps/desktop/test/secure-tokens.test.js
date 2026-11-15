@@ -679,7 +679,7 @@ test('the store is reached only by its wiring: no other desktop flow imports or 
   const read = name => readFileSync(new URL(name, src), 'utf8')
   // C1.2 (#906) wires the store behind <home>/signin.json: account.js keeps the session and
   // main.js hands it Electron's safeStorage and the app's data folder. Nothing else may.
-  const wiring = new Set(['account.js', 'main.js'])
+  const wiring = new Set(['account.js', 'account-wiring.js', 'main.js'])
   for (const name of readdirSync(src)) {
     if (!name.endsWith('.js') || name === 'secure-tokens.js' || wiring.has(name)) continue
     const source = read(name)
@@ -689,8 +689,10 @@ test('the store is reached only by its wiring: no other desktop flow imports or 
   }
   // The wiring is exactly the two files above: Electron's safeStorage is passed in there, never
   // imported by the flow or the store; only account.js touches the refresh token.
+  const wiringSource = read('account-wiring.js')
+  assert.match(wiringSource, /createTokenStore\(\{ safeStorage, userData \}\)/)
   const main = read('main.js')
-  assert.match(main, /createTokenStore\(\{ safeStorage, userData: app\.getPath\('userData'\) \}\)/)
+  assert.match(main, /beginAccount\(\{[\s\S]*?safeStorage,[\s\S]*?userData: app\.getPath\('userData'\)/)
   const account = read('account.js')
   assert.doesNotMatch(account, /safeStorage|from 'electron'/)
   assert.match(account, /store\.(load|rotate|clear)\(/)

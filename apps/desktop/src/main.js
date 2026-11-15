@@ -15,9 +15,8 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { linkInArgs, parseDeepLink, registerSchemes } from './deeplink.js'
-import { createAccount } from './account.js'
-import { createSignInFlow, readSignInSettings, settingsFileOf as signInFileOf } from './sign-in.js'
-import { createTokenStore } from './secure-tokens.js'
+import { startAccount as beginAccount } from './account-wiring.js'
+import { readSignInSettings, settingsFileOf as signInFileOf } from './sign-in.js'
 import { fade, PAGE_IN_CSS } from './motion.js'
 import { noteRestart, restartLine, steps } from './timeline.js'
 import { startUp } from './startup.js'
@@ -331,21 +330,17 @@ function startAccount() {
   } catch {
     settings = { enabled: false, issuer: null, clientId: null, problem: null }
   }
-  let store = null
-  let flow = null
-  if (settings.enabled === true && !settings.problem) {
-    try {
-      store = createTokenStore({ safeStorage, userData: app.getPath('userData') })
-      flow = createSignInFlow({ settings, fetch: globalThis.fetch, openExternal: url => shell.openExternal(url), log: signInLog })
-    } catch (error) {
-      // The setting is on but the app cannot sign in (a desktop without safeStorage's API, a
-      // bad issuer): fail closed, and say so in the status and the log, never with a token.
-      signInLog(`account: not started (${error?.message ?? error})`)
-      store = null
-      flow = null
-    }
-  }
-  account = createAccount({ settings, flow, store, log: signInLog, onDirty: publishAccount })
+  // account-wiring.js makes the store and the flow only when the setting is on and complete, so
+  // with the default (off) nothing here reads safeStorage, binds a port or opens a browser.
+  account = beginAccount({
+    settings,
+    safeStorage,
+    userData: app.getPath('userData'),
+    fetch: globalThis.fetch,
+    openExternal: url => shell.openExternal(url),
+    log: signInLog,
+    onDirty: publishAccount,
+  }).account
   void account.start().catch(error => signInLog(`account: start failed (${error?.message ?? error})`))
 }
 
