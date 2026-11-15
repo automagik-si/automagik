@@ -6185,7 +6185,7 @@ function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2,
         (0, import_react16.createElement)("div", { className: "bt-menu-sep", role: "separator" }),
         (0, import_react16.createElement)(
           "button",
-          { type: "button", role: "menuitem", "data-manage-connection": "", onClick: onRemote },
+          { type: "button", role: "menuitem", "data-manage-connection": "", onClick: () => onRemote(true) },
           (0, import_react16.createElement)(SlidersIcon),
           (0, import_react16.createElement)("span", { className: "bt-menu-label" }, t("Manage connection…"))
         )
@@ -6555,9 +6555,10 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
       });
     }
   });
-  const openRemote = () => {
+  const openRemote = (manage2 = false) => {
     const generation = ++remote.current.generation;
     remote.current.active = true;
+    remote.current.edit = manage2 === true;
     close();
     setHermes(generation);
   };
@@ -6577,7 +6578,8 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
     remote.current.active = false;
     remote.current.generation++;
     setHermes(false);
-    if (currentRef.current !== void 0) {
+    const onRemoteRoute = currentRef.current !== void 0 && modelRoute(roster, currentRef.current).route === "hermes-remote";
+    if (onRemoteRoute) {
       finish();
       return;
     }
@@ -6595,7 +6597,7 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
   return (0, import_react16.createElement)(
     import_react16.Fragment,
     null,
-    hermes ? (0, import_react16.createElement)(HermesRemoteConnect, { key: hermes, onClose: () => closeRemote(hermes), onConnected: (next) => remoteConnected(next, hermes) }) : null,
+    hermes ? (0, import_react16.createElement)(HermesRemoteConnect, { key: hermes, edit: remote.current.edit === true, more: remote.current.edit === true, onClose: () => closeRemote(hermes), onConnected: (next) => remoteConnected(next, hermes) }) : null,
     link ? (0, import_react16.createElement)("button", {
       ref: button,
       type: "button",

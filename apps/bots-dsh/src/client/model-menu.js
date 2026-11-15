@@ -400,7 +400,7 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
       route === 'hermes-remote' && onRemote
         ? h(Fragment, { key: 'manage' },
           h('div', { className: 'bt-menu-sep', role: 'separator' }),
-          h('button', { type: 'button', role: 'menuitem', 'data-manage-connection': '', onClick: onRemote },
+          h('button', { type: 'button', role: 'menuitem', 'data-manage-connection': '', onClick: () => onRemote(true) },
             h(SlidersIcon), h('span', { className: 'bt-menu-label' }, t('Manage connection…'))))
         : null)
   }
@@ -754,9 +754,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     bot, roster, current, target: confirm, onCancel: () => setConfirm(undefined),
     onConfirm: () => { const next = confirm; setConfirm(undefined); finish(); void Promise.resolve(pickModel(next.ref, next.effort, { routeChange: true })).catch(() => {}) },
   })
-  const openRemote = () => {
+  const openRemote = (manage = false) => {
     const generation = ++remote.current.generation
     remote.current.active = true
+    remote.current.edit = manage === true
     close()
     setHermes(generation)
   }
@@ -775,10 +776,11 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     remote.current.active = false
     remote.current.generation++
     setHermes(false)
-    // A saved connection comes back naming the model the Bot already runs on. Only a Bot
-    // without one takes the connection's first model at first setup: a completed connect
-    // never replaces a pick the person made.
-    if (currentRef.current !== undefined) { finish(); return }
+    // A saved connection comes back naming the model the Bot already runs on: a completed
+    // connect never replaces a pick the person already made on this route. A Bot on another
+    // route still gets the crossing question, and one without a model the first served model.
+    const onRemoteRoute = currentRef.current !== undefined && modelRoute(roster, currentRef.current).route === 'hermes-remote'
+    if (onRemoteRoute) { finish(); return }
     if (crossing(next.modelRef)) {
       keys.current = true
       setView(MENU_ROOT)
@@ -790,7 +792,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     }
   }
   return h(Fragment, null,
-    hermes ? h(HermesRemoteConnect, { key: hermes, onClose: () => closeRemote(hermes), onConnected: next => remoteConnected(next, hermes) }) : null,
+    hermes ? h(HermesRemoteConnect, { key: hermes, edit: remote.current.edit === true, more: remote.current.edit === true, onClose: () => closeRemote(hermes), onConnected: next => remoteConnected(next, hermes) }) : null,
     link ? h('button', {
       ref: button, type: 'button', className: 'bt-model-change', 'aria-haspopup': 'menu', 'aria-expanded': isOpen,
       'aria-label': t('Change the model of {name}', { name: bot.name }), onClick: toggle,
