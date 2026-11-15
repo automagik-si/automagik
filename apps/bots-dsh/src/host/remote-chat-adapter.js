@@ -1,6 +1,6 @@
 // A transport-neutral row adapter: a native transport supplies text/tool/done rows and
 // receives individual approval answers. DSH owns the visible tool cards and level policy.
-import { LlmAdapter, isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, isAgentLoopRequest, projectFilesToText } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { LOST } from './hermes-transport.js'
 
@@ -101,14 +101,14 @@ export class RemoteChatAdapter extends LlmAdapter {
   async listModels(provider) { return this.enabled() ? this.models().map(model => ({ id: model.id, name: model.name, provider })) : [] }
   async resolveModel(provider, id) { return { provider, id, name: this.models().find(model => model.id === id)?.name ?? id } }
 
-  // DSH dispatches a loop request as itself unless it must project it: the one projection
-  // that matters here strips the developer notes (tool-set changes) from the history and
-  // hands the adapter a new deep-frozen envelope, and the loop's marker is a WeakSet
-  // identity a copy cannot carry. What still proves the call is the Bot's own turn is the
-  // exact sequence the loop would build now: frozen, on the Session's route, with the
-  // Session's own message objects in order, developer notes aside. Anything rebuilt, a
-  // subset, a reordering, or a new text under an old id is not that turn and is refused.
-  static ownTurn(options, agent) {
+  // DSH dispatches a loop request as itself unless it must project it: the projections here
+  // strip developer notes (tool-set changes) and turn file blocks into text handles, and the
+  // dispatch hands the adapter a new deep-frozen envelope. The loop's marker is a WeakSet
+  // identity a copy cannot carry, so the adapter rebuilds the same projection from the live
+  // Session and accepts only that exact sequence, in order, on the Session's own route.
+  // A subset, a reordering, a rebuilt message with new text, or a new text under an old id
+  // is not that turn and is refused.
+  static ownTurn(options, agent, filePath = () => undefined) {
     if (isAgentLoopRequest(options)) return true
     if (!Object.isFrozen(options) || options.purpose !== undefined || !Array.isArray(options.messages) || options.messages.length === 0) return false
     const header = agent?.session?.requestHeader?.()
@@ -116,14 +116,30 @@ export class RemoteChatAdapter extends LlmAdapter {
     let derived
     try { derived = agent.session.deriveMessages?.() } catch { return false }
     if (!Array.isArray(derived)) return false
-    const expected = derived.filter(message => message?.role !== 'developer')
-    return expected.length === options.messages.length && expected.length > 0 && expected.every((message, index) => message === options.messages[index])
+    const expected = projectFilesToText(derived.filter(message => message?.role !== 'developer'), filePath)
+    if (expected.length !== options.messages.length || expected.length === 0) return false
+    return expected.every((message, index) => {
+      const got = options.messages[index]
+      if (got === message) return true
+      // The runtime rebuilt this one for a file projection: same message, same projected content.
+      return typeof message?.id === 'string' && got?.id === message.id && got?.role === message.role
+        && JSON.stringify(got.content) === JSON.stringify(message.content)
+    })
+  }
+
+  // The runtime's own read path for a durable file reference, so the same projection can be
+  // rebuilt here from the live Session.
+  filePath(ref) {
+    let hostPath
+    try { hostPath = service(this.rt.ctx, 'attachments')?.fileHostPath?.(ref) } catch { return undefined }
+    if (hostPath === undefined) return undefined
+    return service(this.rt.ctx, 'fs')?.processPathFromHostPath?.(hostPath)
   }
 
   async *stream(options) {
     if (!this.enabled() || !options.sessionId) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
     const agent = service(this.rt.ctx, 'agents')?.get?.(options.sessionId)
-    if (!RemoteChatAdapter.ownTurn(options, agent)) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
+    if (!RemoteChatAdapter.ownTurn(options, agent, ref => this.filePath(ref))) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
     if (!agent) return yield finish('error', 'Remote Hermes needs a live Automagik chat to show its tools and approvals.')
     this.register(agent)
     let entry = this.live.get(options.sessionId)
