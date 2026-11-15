@@ -34,6 +34,25 @@ object Chat {
     /** A card that was open when the phone left and is neither open nor in `settled[]` on reconnect: no outcome is claimed. */
     const val CLOSED_AWAY = "Closed while you were away"
 
+    /** A tool output preview the bridge cuts at 8 KiB (rows.js `OUTPUT_PREVIEW`), then adds one "…" and sets no flag. */
+    const val OUTPUT_PREVIEW = 8 * 1024
+    const val CUT_NOTE = "Cut here: open in the terminal for the rest."
+    /** A Bot chat has no terminal to open: its rest stays on the computer. */
+    const val CUT_NOTE_DSH = "Cut here: the rest stays in the chat on the computer."
+
+    /**
+     * The note under a row the bridge cut: a text row's own `cut` flag (64 KiB), or a tool result longer than the
+     * preview (the bridge sets no flag there: only a cut output is longer than [OUTPUT_PREVIEW]); null otherwise.
+     */
+    fun cutNote(row: Row, dsh: Boolean = false): String? {
+        val note = if (dsh) CUT_NOTE_DSH else CUT_NOTE
+        return when (row.kind) {
+            "text" -> if (row.cut) note else null
+            "tool-result" -> if (row.cut || row.output.length > OUTPUT_PREVIEW) note else null
+            else -> null
+        }
+    }
+
     /** An Automagik Bot's chat: no terminal pane, approvals answered as DSH raised them. */
     fun isDsh(terminal: String) = terminal.startsWith(DSH_PREFIX)
 

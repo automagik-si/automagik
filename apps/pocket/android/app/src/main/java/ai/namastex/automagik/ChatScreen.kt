@@ -315,7 +315,8 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
 }
 
 /** A tool's input or output: one 48dp line until tapped; its open state lives in [expanded], so scrolling cannot close it. */
-@Composable private fun Collapsed(id: String, label: String, body: String, expanded: MutableMap<String, Boolean>, result: Boolean = false) {
+@Composable private fun Collapsed(id: String, label: String, body: String, expanded: MutableMap<String, Boolean>, result: Boolean = false,
+                                  note: String? = null) {
     val open = expanded[id] == true
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
@@ -323,7 +324,10 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
             Text(collapsedLabel(open, ChatText.clean(label), result), fontSize = 12.sp, color = Muted,
                 maxLines = if (open) Int.MAX_VALUE else 1, overflow = TextOverflow.Ellipsis)
         }
-        if (open && body.isNotBlank()) { Spacer(Modifier.height(4.dp)); Mono(body) }
+        if (open && body.isNotBlank()) {
+            Spacer(Modifier.height(4.dp)); Mono(body)
+            note?.let { Text(it, fontSize = 11.sp, color = Muted, modifier = Modifier.padding(top = 4.dp)) }
+        }
     }
 }
 
@@ -337,14 +341,14 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                     modifier = Modifier.widthIn(max = 560.dp)) {
                     Column(Modifier.padding(10.dp, 8.dp)) {
                         ChatTextView(row.text, openLink)
-                        if (row.cut) Text("Cut here: open in the terminal for the rest.", fontSize = 11.sp, color = Muted)
+                        Chat.cutNote(row, s.dsh)?.let { Text(it, fontSize = 11.sp, color = Muted) }
                         if (row.interrupted) Text(Chat.STOPPED, fontSize = 11.sp, color = Muted)
                     }
                 }
             }
         }
         "tool-call" -> Collapsed(row.id + ":call", row.tool + row.summary.takeIf { it.isNotBlank() && it != row.tool }?.let { ": $it" }.orEmpty(), row.input, expanded)
-        "tool-result" -> Collapsed(row.id + ":result", if (row.ok) "result" else "failed", row.output, expanded, result = true)
+        "tool-result" -> Collapsed(row.id + ":result", if (row.ok) "result" else "failed", row.output, expanded, result = true, note = Chat.cutNote(row, s.dsh))
         "status" -> Hint(ChatText.clean(row.msg.ifBlank { row.state }))
         "tokens" -> {}
         "approval", "question" -> PendingCard(row, s, vm)
