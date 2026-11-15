@@ -36,7 +36,8 @@ export function CliAccounts({ bot, actions }) {
     setError(null)
     try {
       const { provider, action } = pending
-      if (action === 'switch') await actions.cliLoginSwitch(bot.id, provider)
+      if (action === 'recover') await actions.recoverCliLogin(bot.id, provider)
+      else if (action === 'switch') await actions.cliLoginSwitch(bot.id, provider)
       else if (action === 'reset') await actions.cliLoginReset(bot.id, provider)
       else await actions.cliLoginSignOut(bot.id, provider)
       await actions.refreshModels?.()
@@ -76,7 +77,7 @@ export function CliAccounts({ bot, actions }) {
     entry.recoveryRequired ? h('p', { role: 'alert' }, t(ACCOUNT_RECOVERY_HINT)) : null,
     pending?.provider === provider ? h('div', null,
       h('p', null, t('This stops running Bot work for this account. Continue?')),
-      pending.action === 'reset' ? h('div', null,
+      ['reset', 'recover'].includes(pending.action) ? h('div', null,
         h('p', null, t('This signs {vendor} out for Bots. Sign in again in the app.', {
           vendor: CLI_NAMES[provider],
         })),
@@ -90,10 +91,13 @@ export function CliAccounts({ bot, actions }) {
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: busy,
         onClick: () => setPending(null) }, t('Cancel')),
       error ? h('p', { role: 'alert' }, error) : null) : h('div', null,
-      entry.recoveryRequired ? h('button', {
+      entry.recoveryRequired ? h('div', null, h('button', {
         type: 'button', className: 'bt-soft bt-soft-sm',
         onClick: () => setPending({ provider, action: 'reset' }),
-      }, t('Reset Bot sign-in')) : h('div', null,
+      }, t('Reset Bot sign-in')), h('button', {
+        type: 'button', className: 'bt-soft bt-soft-sm',
+        onClick: () => setPending({ provider, action: 'recover' }),
+      }, t('Sign in again'))) : h('div', null,
       !entry.signedIn ? h('button', {
         type: 'button', className: 'bt-soft bt-soft-sm',
         onClick: () => actions.openCliLogin(bot.id, provider),

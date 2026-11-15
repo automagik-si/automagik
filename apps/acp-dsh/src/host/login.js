@@ -147,16 +147,20 @@ function blockBrowser() {
  * onReady(id, selected, { existing }) is told a confirmed sign-in; `existing` says the CLI was
  * already signed in when the attempt started (no one signed in through it).
  * onFail({ id, cause, phase, exit? }) is told an attempt that failed, as a class for the log.
+ * record lets tests exercise ownership proof with a fake process.
  */
 export class CliLogins {
-  constructor({ resolve, signedIn = signedInOf, onReady = () => {}, onChange = () => {}, onFail = () => {}, spawn = spawnProcess, now = Date.now, linkTtlMs = LINK_TTL_MS, startupMs = STARTUP_MS, answerMs = ANSWER_TIMEOUT_MS, retainMs = RETAIN_MS, stateTtlMs = STATE_TTL_MS, timers = globalThis } = {}) {
+  constructor({ resolve, signedIn = signedInOf, onReady = () => {}, onChange = () => {}, onActivity = () => {}, onFail = () => {}, spawn = spawnProcess, record = spawn === spawnProcess ? recordLogin : () => undefined, now = Date.now, linkTtlMs = LINK_TTL_MS, startupMs = STARTUP_MS, answerMs = ANSWER_TIMEOUT_MS, retainMs = RETAIN_MS, stateTtlMs = STATE_TTL_MS, timers = globalThis } = {}) {
     this.resolve = resolve
     this.signedIn = signedIn
     this.onReady = onReady
     this.onChange = onChange
+    this.onActivity = onActivity
     this.onFail = onFail
     this.spawn = spawn
+    this.record = record
     this.now = now
+    this.monotonic = now === Date.now ? () => performance.now() : now
     this.linkTtlMs = linkTtlMs
     this.startupMs = startupMs
     this.answerMs = answerMs
@@ -195,6 +199,38 @@ export class CliLogins {
 
   active(flow) { return !this.disposed && this.flows.get(flow.id) === flow && ACTIVE.has(flow.status) }
 
+  valid(flow) {
+    if (this.active(flow) && flow.confirmingUntil !== undefined
+      && (this.now() >= flow.confirmingUntil || this.monotonic() >= flow.confirmationEnd)) {
+      this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
+    }
+    return this.active(flow) && (flow.selected?.valid?.() ?? true)
+  }
+
+  confirmationDeadline(flow) {
+    if (flow.confirmingUntil !== undefined) return
+    flow.confirmingUntil = this.now() + Math.min(this.answerMs, ANSWER_TIMEOUT_MS)
+    flow.confirmationEnd = this.monotonic() + Math.min(this.answerMs, ANSWER_TIMEOUT_MS)
+    this.timers.clearTimeout(flow.timeout)
+    const expire = () => {
+      if (!this.active(flow)) return
+      if (this.now() >= flow.confirmingUntil || this.monotonic() >= flow.confirmationEnd) {
+        this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
+        return
+      }
+      flow.timeout = this.timer(expire, Math.max(0, Math.min(flow.confirmingUntil - this.now(), flow.confirmationEnd - this.monotonic())))
+    }
+    flow.timeout = this.timer(expire, Math.max(0, flow.confirmingUntil - this.now()))
+    this.changed()
+  }
+
+  activity() {
+    const active = [...this.flows.values()].filter(flow => this.active(flow))
+    const confirming = active.filter(flow => flow.confirmingUntil !== undefined)
+    return { active: active.length, confirming: confirming.length,
+      ...(confirming.length ? { confirmingUntil: Math.min(...confirming.map(flow => flow.confirmingUntil)) } : {}) }
+  }
+
   /** How many attempts are starting or waiting: the Automagik app does not restart DSH under one. */
   activeAttempts() {
     let count = 0
@@ -203,10 +239,15 @@ export class CliLogins {
   }
 
   changed() {
-    const count = this.activeAttempts()
-    if (count === this.activeCount) return
-    this.activeCount = count
-    try { this.onChange(count) } catch {}
+    const activity = this.activity()
+    const signature = JSON.stringify(activity)
+    if (signature === this.activitySignature) return
+    this.activitySignature = signature
+    if (this.activeCount !== activity.active) {
+      this.activeCount = activity.active
+      try { this.onChange(activity.active) } catch {}
+    }
+    try { this.onActivity(activity) } catch {}
   }
 
   view(flow) {
@@ -231,6 +272,7 @@ export class CliLogins {
   }
 
   lapse(flow) {
+    if (!this.valid(flow) || flow.confirmingUntil !== undefined) return
     if (this.active(flow) && !flow.answering && flow.deadline !== undefined && this.now() >= flow.deadline) {
       this.finish(flow, flow.status === 'starting' ? 'failed' : 'expired', flow.status === 'starting' ? 'The CLI did not start sign-in. Try again.' : expiredMessage)
     }
@@ -275,8 +317,7 @@ export class CliLogins {
     flow.answering = true
     flow.prompt = undefined
     // The link expiry no longer applies: the CLI has ANSWER_TIMEOUT_MS to confirm the code.
-    this.timers.clearTimeout(flow.timeout)
-    flow.timeout = this.timer(() => { void this.confirm(flow) }, this.answerMs)
+    this.confirmationDeadline(flow)
     try {
       flow.child.stdin.write(`${value}\n`, error => { if (error) this.finish(flow, 'failed', failedMessage) })
     } catch { this.finish(flow, 'failed', failedMessage) }
@@ -342,6 +383,7 @@ export class CliLogins {
     if (!this.active(flow)) return
     if (typeof selected?.cli !== 'string' || selected.cli === '') { this.finish(flow, 'failed', unavailableMessage); return }
     flow.selected = { cli: selected.cli, env: { ...selected.env } }
+    if (selected.valid) flow.selected.valid = selected.valid
     // `existing`: the CLI was signed in before this attempt, so nobody signed in here (#869).
     if (await this.check(flow)) { flow.existing = true; await this.ready(flow); return }
     if (!this.active(flow)) return
@@ -362,7 +404,7 @@ export class CliLogins {
     }
     // Write the pending record before spawning: a crash before PID persistence cannot let
     // recovery assume that no vendor started. Only verified full-tree exit clears it.
-    const ownership = this.spawn === spawnProcess ? recordLogin(env) : undefined
+    const ownership = this.record(env)
     let owned
     try {
       owned = process.platform === 'win32' && this.spawn === spawnProcess
@@ -404,22 +446,23 @@ export class CliLogins {
   }
 
   async ready(flow) {
-    if (!this.active(flow)) return
+    if (!this.valid(flow)) return
+    this.confirmationDeadline(flow)
     // A notification or an exit alone is not proof: check() asked the same CLI and env. The
     // sign-in is recorded before any view can read `ready`.
-    try { await this.onReady(flow.id, flow.selected, { existing: flow.existing === true }) } catch {}
-    this.finish(flow, 'ready')
+    try { await this.onReady(flow.id, flow.selected, { existing: flow.existing === true, valid: () => this.valid(flow) }) } catch {}
+    if (this.valid(flow)) this.finish(flow, 'ready')
   }
 
   async confirm(flow) {
-    if (!this.active(flow) || flow.confirming) return
+    if (!this.valid(flow) || flow.confirming) return
     flow.confirming = true
-    this.timers.clearTimeout(flow.timeout)
+    this.confirmationDeadline(flow)
     flow.url = undefined
     flow.userCode = undefined
     flow.prompt = undefined
     if (await this.check(flow)) await this.ready(flow)
-    else this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
+    else if (this.valid(flow)) this.finish(flow, 'failed', 'The CLI did not confirm sign-in. Try again.')
   }
 
   // The link is shown: the expiry starts now, the provider's own when reported.

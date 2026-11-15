@@ -23,6 +23,9 @@ ARG AUTOMAGIK_VERSION=3.90.1
 ARG DSH_VERSION=0.2.2-rc.2
 ARG IMAGE_REVISION=unknown
 ARG AUTOMAGIK_REPOSITORY=https://github.com/automagik-dev/automagik
+ARG INPUT_KIND=release
+ARG INPUT_EVENT=
+ARG INPUT_MANIFEST=
 
 ENV DO_NOT_TRACK=1 \
     npm_config_fund=false \
@@ -43,7 +46,8 @@ RUN node /build/server/assemble.mjs \
       --version "$AUTOMAGIK_VERSION" \
       --dsh "$DSH_VERSION" \
       --revision "$IMAGE_REVISION" \
-      --repository "$AUTOMAGIK_REPOSITORY"
+      --repository "$AUTOMAGIK_REPOSITORY" \
+      --input-kind "$INPUT_KIND" --event "$INPUT_EVENT" --input-manifest "$INPUT_MANIFEST"
 
 # The shell tools Bots need, prepared for the distroless base: the binaries, the shared-library
 # closure ldd names for them, and the /data ownership. Git core only: perl-based git
@@ -95,13 +99,17 @@ FROM scratch AS runtime
 # workflow commit. `AUTOMAGIK_VERSION` in the builder is that plugin release.
 ARG IMAGE_VERSION=3.90.1
 ARG IMAGE_REVISION=unknown
+ARG INPUT_KIND=release
+ARG INPUT_MANIFEST=
 
 LABEL org.opencontainers.image.title="Automagik server" \
       org.opencontainers.image.description="The automagik-web DeepSeek Harness profile for a host: the Bot team, the welcome and ACP agents" \
       org.opencontainers.image.source="https://github.com/automagik-dev/automagik" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
-      org.opencontainers.image.revision="${IMAGE_REVISION}"
+      org.opencontainers.image.revision="${IMAGE_REVISION}" \
+      ai.automagik.input.kind="${INPUT_KIND}" \
+      ai.automagik.input.manifest="${INPUT_MANIFEST}"
 
 # The cleaned distroless rootfs (node, glibc and its account records) and the tools Bots need.
 COPY --from=tools /out/rootfs/ /

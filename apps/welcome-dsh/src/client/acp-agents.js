@@ -47,6 +47,8 @@ export function stateOf(agent) {
   if (!agent.cli.found) return 'no-cli'
   if (!agent.on) return 'off'
   if (agent.connector.state !== 'ready') return agent.connector.state
+  // Installed, but its last start failed: it needs a retry.
+  if (typeof agent.connector.startError === 'string') return 'failed'
   if (agent.restartNeeded) return 'restart'
   if (agent.signedIn !== true) return agent.signedIn === false ? 'login-required' : 'sign-in-unknown'
   // Signed in on this computer, to an account that waits for the person's word (#869).
@@ -130,6 +132,11 @@ export function agentLines(agent) {
       // diagnostic that arrived unredacted still draws masked.
       ...(diagnostic ? { details: { diagnostic: redactText(diagnostic), ...(logPath ? { logPath } : {}) } } : {}),
     })
+  }
+  if (state === 'ready' && typeof agent.connector.startError === 'string') {
+    // Installed, but it did not start: Retry reinstalls the same release (acp-dsh).
+    lines.push({ tone: 'bad', text: t('The connector did not start: {error}', { error: redactText(agent.connector.startError) }), action: 'retry' })
+    return lines
   }
   if (state === 'ready') {
     if (!isNative(agent)) lines.push({ tone: 'ok', text: version ? t('Connector ready (version {version}).', { version }) : t('Connector ready.') })

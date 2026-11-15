@@ -161,6 +161,9 @@ jobs:
       - name: Prepare the runtime and the plugins
         run: node scripts/prepare-runtime.mjs
 
+      - name: Sharp wasm in Electron (assembled runtime)
+        run: node scripts/smoke-sharp.mjs
+
       - name: Build Linux AppImage and deb
         if: matrix.target == 'linux'
         run: npx --no-install electron-builder --linux AppImage deb --publish never

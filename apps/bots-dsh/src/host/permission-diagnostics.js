@@ -39,7 +39,7 @@ const AGENTS = new Set(['acp-claude', 'acp-codex'])
 const BUILT_IN = { provider: 'deepseek-official', model: 'deepseek-flash' }
 const BRIDGE_WHY = new Set(['no-backchannel', 'agent-no-bridge', 'agent-default', 'setting'])
 const PATHS = new Set(['dsh-bridge', 'mcp', 'cli', 'loader', 'drift'])
-const MODES = new Set(['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions', 'auto', 'read-only', 'workspace-write', 'agent', 'agent-full-access'])
+const MODES = new Set(['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions', 'auto', 'read-only', 'workspace-write', 'agent', 'agent-full-access', 'permission-profile:automagik-read', 'permission-profile:automagik-workspace'])
 const REVIEW_CODES = new Set(['AUTO_REVIEW_NO_STEP', 'AUTO_REVIEW_NO_ROUTE', 'AUTO_REVIEW_NO_SCHEMA', 'AUTO_REVIEW_FAILED', 'AUTO_REVIEW_LEVEL_CHANGED', 'AUTO_REVIEW_TIMEOUT', 'AUTO_REVIEW_DENIED'])
 const FAILURE_CODES = new Set([
   'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'NO_ADAPTER', 'EMPTY_RESPONSE', 'UNSUPPORTED', 'ABORTED',

@@ -38,5 +38,6 @@ Monorepo RFCs that change Pocket's contract, privacy or permissions (they live i
 |---|---|---|---|
 | [0015](../../../../docs/rfcs/0015-live-chat-projection.md) | Live chat projection: an agent terminal as a chat, Pocket Link's chat route | Accepted | Delivery 5: the Chat tab; transcripts reach the phone, in memory only ([privacy](../privacy.md)) |
 | [0015, amendment](../../../../docs/rfcs/0015-live-chat-projection.md#amendments) | Writes on DSH chats: send, interrupt and approve from the phone | Accepted (2026-11-07) | `dshWrite` in the chat `hello`; first answer wins, the other card closes with a receipt; the per-project yes still gates project Bots; global Bots (Main Bot included) writable under the same limits; allow for session stays on the computer; privacy.md changes with the pocket PR |
+| [0033](../../../../docs/rfcs/0033-attachments-from-pocket.md) | Attachments from Pocket | Queued | Picker, upload, attachment rows; privacy.md changes with the pocket delivery |
 
 Back to the [docs home](../_index.md).

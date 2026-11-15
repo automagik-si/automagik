@@ -46,14 +46,17 @@ const messageOf = error => (typeof error?.message === 'string' && error.message 
  * @param {(botId: string) => (string | null | undefined)} [options.modelOf] the Bot's selected model, as the
  *   last state answer carried it; followModels() closes a row whose Bot moved to another provider.
  */
-export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf }) {
+export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf, botOf }) {
   const listeners = new Set()
   let snapshot = Object.freeze({ rows: Object.freeze({}) })
   let disposed = false
   let sequence = 0
+  let intent = 0
+  const recoveries = new Set()
   // The last view of each agent's attempt, shared by every row that shows it.
   const attempts = {}
   const polls = {}
+  const providerEpochs = new Map()
   const rowTimers = new Map()
   const restored = new Set()
   // Bot id -> the row (by seq) and the model its Bot was on when the row first showed.
@@ -76,6 +79,22 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
     }
     snapshot = Object.freeze({ rows: Object.freeze(rows) })
     emit()
+  }
+  // Retire only the pending view owned by this recovery, never the host attempt or a
+  // replacement row. An ordinary entry can then read/join whatever the host completed.
+  function retireRecovery(owner) {
+    const row = rowOf(owner.botId)
+    const seq = owner.seq
+    owner.seq = undefined // A newer intent may reuse a settled row with this same sequence.
+    if (row?.seq === seq && row?.busy) setRow(owner.botId, null)
+  }
+  function retireInvalidRecoveries() {
+    for (const owner of recoveries) if (!owner.current()) retireRecovery(owner)
+  }
+  function nextIntent() {
+    ++intent
+    retireInvalidRecoveries()
+    return intent
   }
   const patchRow = (botId, seq, patch) => { if (live(botId, seq)) setRow(botId, { ...rowOf(botId), ...patch }) }
   const attemptRows = provider => Object.values(snapshot.rows).filter(row => row.provider === provider && row.stage === 'attempt')
@@ -188,6 +207,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
   // The attempt is gone from the host (its 60 s retention passed, or DSH restarted). The agent's
   // own sign-in decides what the row says, before anything else is shown (rule 4).
   async function ended(provider) {
+    const epoch = providerEpochs.get(provider)
     stopPoll(provider)
     let signedIn
     let connection
@@ -195,7 +215,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       connection = (await actions.cliLoginConnections())?.connections?.[provider]
       signedIn = connection?.signedIn
     } catch { signedIn = undefined }
-    if (disposed) return
+    if (disposed || providerEpochs.get(provider) !== epoch) return
     // Signed in, but to an account that waits for the person: the account step, never "done".
     if (signedIn === true && connection?.consent === 'needed') {
       for (const row of attemptRows(provider)) void readAccount(row.botId, provider, row.seq, null)
@@ -241,8 +261,9 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
      * or the Sign in button in Settings or Welcome. A live attempt of that agent is joined, never
      * started again; `ref` (the model the person chose) is kept by the host for this Bot.
      */
-    async open({ botId, provider, ref }) {
-      if (disposed || typeof botId !== 'string' || botId === '' || !known(provider)) return false
+    async open({ botId, provider, ref }, valid = () => true, owner) {
+      nextIntent()
+      if (disposed || !valid() || typeof botId !== 'string' || botId === '' || !known(provider)) return false
       const model = typeof ref === 'string' && ref.startsWith(`${provider}/`) ? ref : undefined
       const existing = rowOf(botId)
       if (existing?.provider === provider && ['offer', 'attempt', 'account'].includes(existing.stage)) {
@@ -262,15 +283,16 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
         return true
       }
       const seq = ++sequence
+      if (owner) owner.seq = seq
       setRow(botId, { botId, provider, ref: model, stage: 'offer', busy: true, reveal: seq, seq, attempt: null, error: null, confirm: false })
       try {
         const current = await actions.cliLoginCurrent(botId, provider)
-        if (!live(botId, seq)) return true
+        if (!live(botId, seq) || !valid()) return false
         if (current?.attempt && ACTIVE.has(current.attempt.status)) {
           // Joining with a model chosen here keeps that choice for this Bot (start returns the
           // live attempt, it never opens a second one).
           const view = model ? await actions.cliLoginStart(botId, provider, model) : current.attempt
-          if (!live(botId, seq)) return true
+          if (!live(botId, seq) || !valid()) return false
           setRow(botId, { ...rowOf(botId), stage: 'attempt', busy: false })
           applyView(provider, view)
           return true
@@ -283,23 +305,58 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       } catch {
         // The offer stays: its own Sign in reports what failed.
       }
+      if (!valid()) return false
       patchRow(botId, seq, { busy: false })
       return true
     },
 
+    // Settings' confirmed recovery composes the existing owner RPCs. Each RPC retains its
+    // own host admission checks; Reset and start are deliberately not an atomic transaction.
+    async recover({ botId, provider, ref }) {
+      if (disposed || !known(provider) || !botOf?.(botId)) return false
+      const model = modelOf?.(botId)
+      let operation = nextIntent()
+      const current = () => !disposed && intent === operation && Boolean(botOf(botId))
+        && modelOf?.(botId) === model
+      await actions.cliLoginReset(botId, provider)
+      if (!current()) return false
+      // Abort old polls and invalidate every provider row before ordinary open can join it.
+      stopPoll(provider)
+      providerEpochs.set(provider, (providerEpochs.get(provider) ?? 0) + 1)
+      delete attempts[provider]
+      for (const row of Object.values(snapshot.rows)) if (row.provider === provider) setRow(row.botId, null)
+      const owner = { botId, current, seq: undefined }
+      recoveries.add(owner)
+      try {
+        operation = intent + 1
+        if (!await api.open({ botId, provider, ref }, current, owner) || !current()) return false
+        const row = rowOf(botId)
+        if (row?.provider !== provider || row.seq !== owner.seq || row.busy) return false
+        // Existing accounts and attempts remain on their ordinary confirmation/join route.
+        if (row.stage !== 'offer') return ['account', 'attempt'].includes(row.stage)
+        operation = intent + 1
+        return await api.start(botId, current)
+      } finally {
+        if (!current()) retireRecovery(owner)
+        recoveries.delete(owner)
+      }
+    },
+
     /** Sign in (or Try again): starts the attempt, or joins the one at work. */
-    async start(botId) {
+    async start(botId, valid = () => true) {
+      nextIntent()
       const row = rowOf(botId)
-      if (disposed || row === undefined || row.busy || !['offer', 'failed', 'interrupted'].includes(row.stage)) return false
+      if (disposed || !valid() || row === undefined || row.busy || !['offer', 'failed', 'interrupted'].includes(row.stage)) return false
       const seq = row.seq
       patchRow(botId, seq, { busy: true, error: null })
       try {
         const view = await actions.cliLoginStart(botId, row.provider, row.ref)
-        if (!live(botId, seq)) return false
+        if (!live(botId, seq) || !valid()) return false
         setRow(botId, { ...rowOf(botId), stage: 'attempt', busy: false, message: undefined })
         applyView(row.provider, view)
         return true
       } catch (error) {
+        if (!live(botId, seq) || !valid()) return false
         patchRow(botId, seq, { busy: false, error: messageOf(error) })
         return false
       }
@@ -307,6 +364,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
 
     /** The Claude code, sent once to the host; it is never kept here. */
     async answer(botId, value) {
+      nextIntent()
       const row = rowOf(botId)
       const attempt = row?.attempt
       if (disposed || row?.stage !== 'attempt' || row.provider !== 'acp-claude' || row.busy || attempt?.prompt === undefined
@@ -333,13 +391,14 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
      * shown instead, and nothing is taken for it.
      */
     async confirm(botId) {
+      nextIntent()
       const row = rowOf(botId)
       if (disposed || row?.stage !== 'account' || row.busy) return false
       const seq = row.seq
       patchRow(botId, seq, { busy: true, error: null })
       try {
         const view = await actions.cliLoginConfirm(botId, row.provider, row.account?.ref, row.ref)
-        if (disposed) return false
+        if (!live(botId, seq)) return false
         accountTaken(row.provider, botId, view)
         return true
       } catch (error) {
@@ -365,9 +424,10 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
         offered.set(botId, failure.at)
         if (rowOf(botId) !== undefined) continue
         void (async () => {
+          const epoch = providerEpochs.get(provider)
           let current
           try { current = await actions.cliLoginCurrent(botId, provider) } catch { return }
-          if (disposed || rowOf(botId) !== undefined || !current?.account) return
+          if (disposed || providerEpochs.get(provider) !== epoch || rowOf(botId) !== undefined || !current?.account) return
           const seq = ++sequence
           setRow(botId, { botId, provider, ref: undefined, stage: 'account', busy: false, reveal: seq, seq, attempt: null, error: null, confirm: false, account: Object.freeze({ ...current.account }) })
         })()
@@ -379,6 +439,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
 
     /** The person's explicit cancel: the only way a row ends an attempt. */
     async cancel(botId) {
+      nextIntent()
       const row = rowOf(botId)
       const attempt = row?.attempt
       if (disposed || row?.stage !== 'attempt' || row.busy || attempt === null || attempt === undefined) return false
@@ -386,7 +447,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       patchRow(botId, seq, { busy: true, error: null })
       try {
         const view = await actions.cliLoginCancel(botId, row.provider, attempt.attemptId)
-        if (disposed) return false
+        if (!live(botId, seq)) return false
         applyView(row.provider, view?.status === 'cancelled' ? view : { ...attempt, status: 'cancelled' })
         if (live(botId, seq)) setRow(botId, null)
         return true
@@ -399,7 +460,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
     },
 
     /** Not now, or Close: the row goes; an attempt at work goes on in the host. */
-    dismiss(botId) { if (rowOf(botId)) setRow(botId, null) },
+    dismiss(botId) { nextIntent(); if (rowOf(botId)) setRow(botId, null) },
 
     /**
      * The Bots' selected models moved (a new state answer): a row about a provider its Bot left
@@ -407,6 +468,7 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
      */
     followModels() {
       if (disposed || typeof modelOf !== 'function') return
+      retireInvalidRecoveries()
       for (const row of Object.values(snapshot.rows)) {
         const baseline = baselines.get(row.botId)
         const model = modelOf(row.botId)
@@ -431,9 +493,10 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
       if (disposed || typeof botId !== 'string' || rowOf(botId) !== undefined || restored.has(botId)) return
       restored.add(botId)
       for (const provider of Object.keys(CLI_NAMES)) {
+        const epoch = providerEpochs.get(provider)
         let current
         try { current = await actions.cliLoginCurrent(botId, provider) } catch { continue }
-        if (disposed || rowOf(botId) !== undefined) return
+        if (disposed || providerEpochs.get(provider) !== epoch || rowOf(botId) !== undefined) return
         const attempt = current?.attempt
         if (attempt && ACTIVE.has(attempt.status) && attempt.openedBy === botId) {
           setRow(botId, { botId, provider, stage: 'attempt', busy: false, seq: ++sequence, attempt, error: null, confirm: false })
@@ -445,6 +508,8 @@ export function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers 
 
     dispose() {
       if (disposed) return
+      for (const owner of recoveries) retireRecovery(owner)
+      recoveries.clear()
       for (const provider of Object.keys(polls)) stopPoll(provider)
       for (const timer of rowTimers.values()) timers.clearTimeout(timer)
       rowTimers.clear()

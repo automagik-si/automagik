@@ -194,3 +194,21 @@ test('Read only refuses Office outputs; only Full access may read user terminals
   w.rt.sessionWide = () => true
   for (const name of ['user_terminal_list', 'user_terminal_read']) assert.equal(await w.pre(w.exec({ name, arguments: {} })), allow, name)
 })
+
+import * as extensions1092 from '../src/host/extend.js'
+for (const full of [false, true]) test(`#1092 the new hard categories ${full ? 'pass at Full access' : 'ask at Workspace'}`, async () => {
+  const w = world({ full })
+  w.rt.sessionFolder = session => { assert.equal(session.id, 'ada'); return '/w/repo' }
+  for (const command of ['cat .env', 'sendmail a@b', 'git push origin main', 'rm ../x']) {
+    const result = await w.pre(w.exec({ arguments: { command } }))
+    assert.deepEqual(result, full ? allow : { kind: 'ask', reason: askText(`bash: ${command}`) })
+  }
+  extensions1092.install(w.rt)
+  w.rt.stepHooks.sendsOutside(({ tool }) => tool === 'team_send')
+  assert.deepEqual(await w.pre(w.exec({ name: 'team_send', arguments: {} })), full ? allow : { kind: 'ask', reason: askText('team_send') })
+})
+test('#1092 a missing folder does not hide an absolute delete', async () => {
+  const w = world()
+  w.rt.sessionFolder = () => { throw new Error('missing folder') }
+  assert.deepEqual(await w.pre(w.exec({ arguments: { command: 'rm /tmp/x' } })), { kind: 'ask', reason: askText('bash: rm /tmp/x') })
+})

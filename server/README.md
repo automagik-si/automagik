@@ -2,7 +2,7 @@
 
 The `automagik-web` DeepSeek Harness profile on a host: dsh's base and web app, the Bot team
 (`@automagik/bots-dsh`), the welcome (`@automagik/welcome-dsh`) and ACP agents
-(`@automagik/acp-dsh`), from one chosen release. Built by CI only
+(`@automagik/acp-dsh`), from one chosen release (or the committed checkout in PR tests). Built by CI only
 (`.github/workflows/server-image.yml`): every change builds, smokes and scans it, and a dispatch
 or a published release pushes it to `ghcr.io/automagik-si/automagik-server` as
 `:<content>-<short sha>` and, when allowed, `:latest`. There is no laptop push. Tracked in #620.
@@ -20,6 +20,32 @@ content version, and `org.opencontainers.image.revision` = the full workflow com
 `versions.json` inside the image names the plugin release it installed. Each tarball is checked
 against the release's `plugins.json` (sha512 integrity, size) and `PLUGINS.SHA256SUMS` (sha256)
 before dsh installs it.
+
+Pull requests use a separate, nonpublishing checkout input. The runner installs only the
+frozen root tooling, then normally packs all four owned plugins with `bun pm pack
+--ignore-scripts`; it neither installs plugin dependencies nor regenerates bundles. Every
+packed file must match a regular file at the actual checkout HEAD (normally GitHub's merge
+commit); packable untracked/ignored files and dirty source fail. The fixed package set, normal
+`plugins.json`, size/SRI/SHA chain and independently passed checkout SHA and manifest digest
+are checked again before assembly. DSH installs the same three profile plugins normally.
+There is no release fallback, arbitrary source directory or URL in checkout mode.
+
+The PR tag and OCI version are `checkout-<full SHA>`; `versions.json.automagik` and plugin
+versions remain the root version, with separate source kind, revision and manifest metadata.
+CI copies the installed Bots child and versions metadata from an owned stopped container of
+the inspected candidate image ID, verifies the child against the committed checkout, and
+keeps `checkout-image-proof.json` even if a later smoke or scan fails. Both existing smokes
+and the complete secrecy scan still apply. No PR image is saved for publication. Publication
+requires release/dispatch and release input, then checks the loaded candidate's labels and
+rootfs source metadata before registry login. Deployment, digest records and attestations
+continue to describe verified release assets only.
+
+A push to `dev` retains its existing path filter and release resolution: use the current
+version's release when it has plugins, otherwise the newest stable release with plugins.
+It never publishes and can still fail on old immutable release content. Release and dispatch
+selection, prerelease/latest rules and default standalone/companion builds remain release
+based. Unknown events and contradictory source arguments fail closed. Image builds and the
+actual rootfs proof run in GitHub Actions only.
 
 The builder also applies the desktop app's DSH runtime patches
 (`apps/desktop/runtime/patches` via `apps/desktop/scripts/runtime-patches.mjs`) to the same

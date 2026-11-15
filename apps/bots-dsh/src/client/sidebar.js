@@ -14,7 +14,7 @@ import { hostText, t } from './i18n.js'
 import { showsDshRow } from './dsh-offer.js'
 import { badges, botChildren, nav, sidebarTools, useEntries } from './extend.js'
 import { agentRowSessions, approvalFor, endLabel, runningTasksOf, taskState, waitsForUser } from './task-card.js'
-import { useApproval } from './approvals.js'
+import { approvalCount, approvalDetail, useApproval } from './approvals.js'
 import { WorkCodeSwitch } from './work-code-switch.js'
 import { BotPills, pillLabels } from './capability-pills.js'
 
@@ -45,6 +45,10 @@ const waitingFor = (roster, waits) => {
   return names.length === 0 ? '' : t('Waiting for {names}', { names: names.join(t(' and ')) })
 }
 
+const waitingLabel = count => count === 1
+  ? `${t('Waiting for your approval')} · ${t('1 approval waiting')}`
+  : count > 0 ? t('{count} approvals waiting', { count }) : t('Waiting for your approval')
+
 function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useActivity, useWork, wide, marked }) {
   const id = bot.id
   const part = currentPart(bot)
@@ -57,6 +61,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   // The team's first Main Bot is pinned first and wears the crown, with its role beside its name.
   const crowned = roster.mainBotId === id
   const approval = useApproval(useWork, entry => entry.botId === id)
+  const waitingCount = useWork ? useWork(work => approvalCount(work, e => e.botId === id)) : 0
   // A task this Bot started waits on the user: the row says so from the top level, even
   // while the Bot itself runs and would otherwise only preview its own turn.
   const blockedTask = useWork ? useWork(work => (work.approvals ?? []).some(entry => entry.taskId !== undefined && entry.botId === id)) : false
@@ -86,12 +91,12 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   }
   const pinned = bot.pinned === true && !crowned
   const role = crowned ? bot.role : ''
-  const label = [bot.name, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? t('Waiting for your approval') : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
+  const label = [bot.name, role, main ? t('Main Bot') : '', ...pillLabels(roster, bot), pinned ? t('Pinned') : '', running || away ? t('Working') : '', waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t('Waiting for your answer') : '', unread ? t('Unread activity') : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: crowned ? 'bt-row bt-row-crowned' : 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
     'data-bot-id': id, title: wide ? undefined : bot.name, onClick: () => actions.openSession(id), onContextMenu,
   },
-  h(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, main, crown: crowned }),
+  h(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
   pinned && !wide ? h(PinMark) : null,
   wide ? h('span', { className: 'bt-row-body' },
     h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
@@ -156,6 +161,7 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
   const ids = tasks.map(task => task.sessionId)
   const askedKey = useSessionStatus(map => ids.filter(id => waitsForUser(map, id)).join(','))
   const approvalKey = useWork ? useWork(work => ids.filter(id => approvalFor(work, id)).join(',')) : ''
+  const approvals = useWork ? useWork(work => work.approvals) : undefined
   const waitingKey = `${askedKey},${approvalKey}`
   const shownId = useSessions(list => ids.find(id => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? '')
   const [open, setOpen] = useState(false)
@@ -168,9 +174,11 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
   return h('div', { className: 'bt-threads', role: 'group', 'aria-label': t('Tasks {name} started', { name: bot.name }) },
     shown.map((task) => {
       const state = taskState(task, waiting.has(task.sessionId))
-      const label = [task.title, state === 'waiting' ? t('Waiting for you') : t('Working')].join(', ')
+      const asks = state === 'waiting' ? (approvals ?? []).filter(entry => entry.taskId === task.sessionId) : []
+      const detail = asks.length === 1 ? approvalDetail(asks[0]) : ''
+      const label = [task.title, state === 'waiting' ? t('Waiting for you') : t('Working'), detail].filter(Boolean).join(', ')
       return h('button', {
-        key: task.sessionId, type: 'button', className: 'bt-thread', 'data-state': state, 'aria-label': label, title: task.title,
+        key: task.sessionId, type: 'button', className: 'bt-thread', 'data-state': state, 'aria-label': label, title: detail ? `${task.title} · ${detail}` : task.title,
         'aria-current': shownId === task.sessionId ? 'page' : undefined,
         onClick: () => actions.openSession(task.sessionId),
       },
@@ -189,12 +197,13 @@ function RoomRow({ room, roster, actions, useSessions, useSessionStatus, useSess
   const unread = useSessionStatus(map => map.get(id)?.completionUnread === true) || (marked && !active)
   useMarkedUnread(id, active, marked, actions)
   const approval = useApproval(useWork, entry => entry.roomId === id)
+  const waitingCount = useWork ? useWork(work => approvalCount(work, entry => entry.roomId === id)) : 0
   const members = workKeys(useGroupWork(useWork, rooms => (rooms[id] ?? []).map(entry => ({ id: entry.botId, ...doingOf(entry) }))))
   const first = roster.byId[members[0]?.id]
   const workingLine = first ? workLine(first.name, members[0], members.length - 1) : null
   if (room.hidden && !active) return null
   const pinned = room.pinned === true
-  const label = [room.name, pinned ? t('Pinned') : '', members.length > 0 ? t('Working') : '', approval ? t('Waiting for your approval') : ''].filter(Boolean).join(', ')
+  const label = [room.name, pinned ? t('Pinned') : '', members.length > 0 ? t('Working') : '', approval ? waitingLabel(waitingCount) : ''].filter(Boolean).join(', ')
   return h('button', {
     type: 'button', className: 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
     'data-room-id': id, onClick: () => actions.openSession(id),
@@ -203,7 +212,7 @@ function RoomRow({ room, roster, actions, useSessions, useSessionStatus, useSess
   h(RoomAvatar, { room, roster, size: 36 }),
   pinned && !wide ? h(PinMark) : null,
   wide ? h('span', { className: 'bt-row-body' },
-    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, room.name), pinned ? h(PinMark) : null),
+    h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, room.name), waitingCount > 0 ? h('span', { className: 'bt-tag' }, String(waitingCount)) : null, pinned ? h(PinMark) : null),
     workingLine ? h('span', { className: 'bt-row-preview' }, workingLine) : preview ? h('span', { className: 'bt-row-preview' }, preview) : null) : null,
   wide && approval && !active ? h('span', { className: 'bt-unread bt-unread-wait', 'aria-hidden': true })
     : wide && unread && !active ? h('span', { className: 'bt-unread', 'aria-hidden': true }) : null)

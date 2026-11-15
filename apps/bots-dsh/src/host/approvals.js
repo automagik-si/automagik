@@ -6,7 +6,7 @@
 // (`taskId`) and title (`label`), so the Bot shows it needs the user, the parent's chat
 // can say which task waits, and the task's thread waits in amber. A subagent child's
 // ask is held under its Bot, where the person can answer it.
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 const OUTCOMES = { allow: 'allowed-once', reject: 'rejected' }
 
@@ -52,10 +52,20 @@ export function install(rt) {
       ...(owner ? { roomId: owner.roomId } : {}),
       ...(owner === undefined && task !== undefined ? { taskId: sessionId, label: String(task.title ?? '').trim() } : {}),
       ...(runOwner ? { taskId: sessionId, label: runOwner.label ?? '' } : {}),
+      ...(request.callId !== undefined ? { callId: request.callId } : {}),
       tool: String(request.toolName ?? ''),
       reason: String(request.reason ?? '').slice(0, 500),
       detail: rt.callDetail?.(sessionId, request.callId) ?? {},
       at: Date.now(),
+    }
+    // Asks that do the same thing share one card (live-rail.js): the same Bot, working folder,
+    // tool, reason and fully shown target. Each one is still answered on its own.
+    // A reason past what the entry keeps could differ unseen: such an ask stays on its own.
+    const whole = String(request.reason ?? '').length <= 500 && !/[\u0000-\u001f\u007f]/.test(String(request.reason ?? ''))
+    const target = entry.tool === 'keep_working' || !whole ? undefined : rt.callCapability?.(sessionId, request.callId, entry.tool)
+    const folder = target === undefined ? undefined : rt.sessionFolder?.(request.agent?.session ?? request.agent)
+    if (typeof folder === 'string' && folder !== '') {
+      entry.capabilityKey = createHash('sha256').update(JSON.stringify(['v1', entry.botId, folder, entry.tool, entry.reason, target])).digest('hex')
     }
     pending.set(id, entry)
     rt.noteApproval?.(sessionId, { tool: entry.tool, reason: entry.reason.slice(0, 200) })
@@ -92,6 +102,7 @@ export function install(rt) {
       id, sessionId, botId: owner.botId, child: true, ownerSessionId: owner.sessionId,
       ...(owner.kind === 'group' ? { roomId: owner.roomId } : {}),
       ...(owner.kind === 'task' ? { taskId: owner.taskId, label: String(owner.label ?? '').trim() } : {}),
+      ...(request.callId !== undefined ? { callId: request.callId } : {}),
       tool: String(request.toolName ?? ''),
       reason: String(request.reason ?? '').slice(0, 500),
       detail: rt.callDetail?.(sessionId, request.callId) ?? {},

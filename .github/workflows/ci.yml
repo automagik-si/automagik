@@ -1424,9 +1424,9 @@ jobs:
 
   desktop:
     # The desktop app's main-process logic in plain Node (home layout, profile install and the
-    # move from the old package names, the preload, dsh supervision, navigation, updates), so
-    # the Electron binary itself is not downloaded here. On Linux and on Windows, which the app
-    # ships on too (desktop-build.yml).
+    # move from the old package names, the preload, dsh supervision, navigation, updates);
+    # a minimal sharp fixture also checks the real Electron wasm pipeline. On Linux and on
+    # Windows, which the app ships on too (desktop-build.yml).
     name: Desktop (main-process tests${{ matrix.os == 'windows-latest' && ', windows' || '' }})
     strategy:
       fail-fast: false
@@ -1439,7 +1439,6 @@ jobs:
         working-directory: apps/desktop
         shell: bash
     env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       DO_NOT_TRACK: '1'
     steps:
       # As the Windows build checks out (desktop-build.yml): the files as the commit holds them.
@@ -1461,6 +1460,9 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Sharp wasm in Electron (minimal runtime fixture)
+        run: node scripts/smoke-sharp.mjs --fixture
 
   acp-windows:
     # acp-dsh runs the app's pnpm.cmd and the agents' CLIs (codex.cmd) on Windows through cmd.exe
@@ -1486,7 +1488,7 @@ jobs:
           node-version: 24.9
 
       - name: Test
-        run: node --test test/batch-spawn.test.js
+        run: node --test test/batch-spawn.test.js test/process-identity.test.js
 
   boot:
     # The plugins booted for real with Omni's channels and canvases (the release omni.json

@@ -1245,7 +1245,7 @@ test("Claude logins (#453 review M2): a check that never answers lands as didn't
   const { view, cx, draw } = await panel({ record: { use: "default", logins: [{ id: "2", dir: TWO }] }, settle: false,
     claude: { status: { default: signedIn("cy@example.com", DEFAULT_DIR), [TWO]: () => held.then(() => signedIn("dee@example.com", TWO)) } } });
   const asks = () => state.calls.filter((c) => c[0] === "/usr/bin/env" && c.at(-1) === "status").length;
-  for (let i = 0; i < 20 && asks() < 2; i += 1) await new Promise((go) => setTimeout(go, 1));
+  for (const until = Date.now() + 5000; asks() < 2 && Date.now() < until;) await new Promise((go) => setTimeout(go, 1));
   assert.equal(asks(), 2, "the first round: both logins, side by side");
   view.forceLogins = true;
   view.reload(cx);
