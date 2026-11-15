@@ -1225,7 +1225,7 @@ test('redactDeep walks 20000 levels without recursion or repeated redaction', ()
 
 function secretForms(value) {
   const json = JSON.stringify(value).slice(1, -1)
-  return [...new Set([value, json, json.replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`), encodeURIComponent(value), encodeUrlComponent(value)])]
+  return [...new Set([value, json, json.replace(/[^\u0000-\u007f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`), encodeURIComponent(value), encodeUrlComponent(value)])]
 }
 
 function hexCase(form, choose) {

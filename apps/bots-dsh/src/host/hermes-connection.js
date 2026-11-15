@@ -270,6 +270,16 @@ export async function refreshHermesProfiles(connection, options = {}) {
       if (!Array.isArray(owned.profiles) || !owned.profiles.length) throw fail('Hermes is running there, but its profiles could not be read.', 'profiles')
       connection.profiles = owned.profiles
       connection.ssh = owned.ssh ?? connection.ssh
+      connection.defaultProfile = owned.defaultProfile ?? connection.defaultProfile
+      // Keep the fresh host token from this read. The caller's test connection is the one
+      // that will be saved; dropping it here would leave the save on a token that a
+      // restarted serve no longer accepts.
+      if (owned.credential) {
+        connection.credential = owned.credential
+        connection.authHeaders = owned.authHeaders ?? { Authorization: `Bearer ${owned.credential}` }
+        connection.redactionSecrets = [...new Set([...(connection.redactionSecrets ?? []), ...(owned.redactionSecrets ?? []), owned.credential])]
+        connection.secret = owned.secret ?? { kind: 'attach', credential: owned.credential }
+      }
       return connection.profiles
     } finally { try { await owned.close?.() } catch {} }
   }

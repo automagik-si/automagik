@@ -5,6 +5,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { LOST } from './hermes-transport.js'
 
 export const REMOTE_TOOL = 'remote_hermes_tool'
+// A carried-over attached chat has no visible row until its first open normalizes the
+// record. The attached transport joins Bot Chat without using this model, so a placeholder
+// lets that first open happen instead of refusing the turn; the record's real row is
+// published by the normalization and is the only row ever listed.
+const ATTACHED_PLACEHOLDER = Object.freeze({ id: 'attach', name: 'Hermes', model: '', provider: '' })
 export const MISSING_TOOLS = 'Remote Hermes has no Automagik team tools: message_bot, list_bots, create_bot, request_secret, or Automagik memory and schedules. Its tools run remotely under the remote profile’s rules.'
 const finish = (kind, message) => ({ type: 'finish', reason: { kind, ...(message ? { failure: { code: 'REMOTE_HERMES', message } } : {}) } })
 const service = (ctx, name) => { try { return ctx.get?.(name) } catch { return undefined } }
@@ -138,8 +143,11 @@ export class RemoteChatAdapter extends LlmAdapter {
           }
         } else {
         // An attached connection has one row: the bot's own model. A carried-over
-        // old ref is replaced by that row, never sent as a model or a provider.
-        const model = this.models().find(model => model.id === options.model) ?? (this.attached() ? this.models()[0] : undefined)
+        // old ref is replaced by that row, never sent as a model or a provider. Before
+        // the first connect there is no visible row yet; a placeholder lets that first
+        // open normalize the record, and the attached transport ignores the model.
+        const rows = this.models()
+        const model = rows.find(model => model.id === options.model) ?? (this.attached() ? rows[0] ?? ATTACHED_PLACEHOLDER : undefined)
         if (!model) { complete = true; return yield finish('error', 'Discover this remote model again before using it.') }
         let start = options.messages.length
         while (start > 0 && options.messages[start - 1].role === 'user') start--
@@ -171,7 +179,7 @@ export class RemoteChatAdapter extends LlmAdapter {
         if (row.kind === 'done') { complete = true; return yield finish('stop') }
       }
     } catch (error) {
-      yield finish('error', error?.code === 'bot/hermes-busy' ? 'A chat is still running on this connection; stop it or wait.' : ['bot/hermes', 'bot/hermes-pairing'].includes(error?.code) ? error.message : 'Remote Hermes could not complete this turn. Reconcile the remote session before sending again.')
+      yield finish('error', error?.code === 'bot/hermes-busy' ? 'A chat is still running on this connection; stop it or wait.' : ['bot/hermes', 'bot/hermes-pairing', 'bot/hermes-attach-profile'].includes(error?.code) ? error.message : 'Remote Hermes could not complete this turn. Reconcile the remote session before sending again.')
     } finally {
       options.signal?.removeEventListener('abort', stop)
       if (entry && !yieldedTool) {

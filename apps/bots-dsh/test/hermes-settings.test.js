@@ -109,6 +109,19 @@ test('Settings names the saved computer and profile, shows no key, and More open
   assert.deepEqual(failures, [])
 })
 
+test('Settings clears a stuck carried-over remote turn in one click', async t => {
+  const stuck = { ...connectedView(), sessions: [{ sessionId: 'chat-1', pendingSubmit: true, uncertain: true }] }
+  const calls = []
+  const { document, click } = await renderSettings(t, async call => {
+    calls.push(call)
+    return call.endpoint === 'hermes-remote-recover' ? { ...stuck, sessions: [] } : stuck
+  })
+  assert.match(document.body.textContent, /An unfinished turn from an earlier connection can block changes/)
+  await click('Clear old remote turns')
+  await waitFor(() => calls.some(call => call.endpoint === 'hermes-remote-recover'), 'the recovery request')
+  await waitFor(() => !document.body.textContent.includes('Clear old remote turns'), 'the recovery row to clear')
+})
+
 test('Settings names an attached connection by its profile display name and shows its own model', async t => {
   const model = { id: 'attach', name: 'acme/llama-9:70b-q4 (acme)' }
   const { document } = await renderSettings(t, async () => ({ ...connectedView(), attached: true, profileName: 'Made-Up Display', models: [model], model }))
@@ -423,7 +436,7 @@ test('several profiles open the picker on the one Hermes calls its default', asy
   await waitFor(() => render.document.querySelector('[data-step=profile]'), 'profile choice')
   assert.equal(render.document.querySelectorAll('[role=radio]').length, 3)
   assert.deepEqual(checked(render.document), ['other-profile'])
-  assert.equal(render.document.querySelector('[role=radio][aria-checked=true] small').textContent, 'Hermes’s default')
+  assert.equal(render.document.querySelector('[role=radio][aria-checked=true] small').textContent, 'No model set · Hermes’s default')
   assert.ok(!render.calls.some(call => call.endpoint === 'hermes-remote-save'), 'nothing is kept before the person chooses')
   await render.click('Use this profile')
   await waitFor(() => render.opened.length === 1, 'the chat to open')
@@ -1122,6 +1135,8 @@ const fingerprint = 'SHA256:sampleSampleSampleSampleSampleSampleSample1'
 
 test('every SSH failure kind has its own screen, naming the host and the next step', async t => {
   const cases = [
+    ['bot/hermes-attach-profile', { kind: 'attach-profile', stage: 'attach-profiles' },
+      'The saved profile is not served there', 'Choose this Hermes profile again', 'This connection’s saved Hermes profile is not served on that machine.', 'Open the connection setup and choose a profile that Hermes serves there.'],
     ['bot/hermes-attach-not-running', { kind: 'serve-not-running', stage: 'attach-record' },
       'Hermes is not running there', 'Start Hermes on sample-box', 'Hermes is not running on sample-box. Start it there with “hermes serve”, then try again.', 'Run “hermes serve” on sample-box in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.'],
     ['bot/hermes-ssh-exited', { kind: 'hermes-exited', stage: 'hermes-start', exit: 3, hermes: ['sample start failure', 'could not read ~/.hermes/config.yaml'] },

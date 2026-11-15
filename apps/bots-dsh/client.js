@@ -222,6 +222,15 @@ var ZH = {
   "SSH signed in, but the small script that reads Hermes stopped with an error.": "SSH 登录成功，但读取 Hermes 的小脚本出错停止了。",
   "Reading the Hermes connection record": "正在读取 Hermes 的连接记录",
   "Reading the Hermes profiles": "正在读取 Hermes 的配置",
+  "Running": "运行中",
+  "Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.": "请在 {host} 的终端里运行“hermes serve”。Automagik 从不启动或重启 Hermes。如果那里的 Hermes 以网关方式运行，请为此聊天启动“hermes serve”。",
+  "Clear old remote turns": "清除旧的远程回合",
+  "An unfinished turn from an earlier connection can block changes.": "早期连接未完成的回合可能会阻止更改。",
+  "Clear it to join the Bot Chat; the old turn cannot be resumed.": "清除后即可加入 Bot Chat；旧回合无法恢复。",
+  "The saved profile is not served there": "保存的配置在该机器上不可用",
+  "Choose this Hermes profile again": "请重新选择 Hermes 配置",
+  "This connection’s saved Hermes profile is not served on that machine.": "此连接保存的 Hermes 配置在该机器上不可用。",
+  "Open the connection setup and choose a profile that Hermes serves there.": "打开连接设置，选择 Hermes 在该机器上提供的配置。",
   "Hermes is not running there": "Hermes 在那里没有运行",
   "Start Hermes on {host}": "在 {host} 上启动 Hermes",
   "Hermes is not running on {host}. Start it there with “hermes serve”, then try again.": "{host} 上的 Hermes 没有运行。请在那里用“hermes serve”启动它，然后重试。",
@@ -6003,8 +6012,15 @@ function screenFor(code, draft, facts) {
       ssh: true
     };
   }
-  if (code === "bot/hermes-attach-not-running" || code === "bot/hermes-attach-record") return { heading: t("Hermes is not running there"), title: t("Start Hermes on {host}", { host }), text: t("Hermes is not running on {host}. Start it there with “hermes serve”, then try again.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes.", { host }), ssh: true };
-  if (code === "bot/hermes-attach-gateway") return { heading: t("Hermes is running there as a gateway"), title: t("Start “hermes serve” on {host}", { host }), text: t("The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes.", { host }), ssh: true };
+  if (code === "bot/hermes-attach-profile") return {
+    heading: t("The saved profile is not served there"),
+    title: t("Choose this Hermes profile again"),
+    text: t("This connection’s saved Hermes profile is not served on that machine."),
+    hint: t("Open the connection setup and choose a profile that Hermes serves there."),
+    ssh: true
+  };
+  if (code === "bot/hermes-attach-not-running" || code === "bot/hermes-attach-record") return { heading: t("Hermes is not running there"), title: t("Start Hermes on {host}", { host }), text: t("Hermes is not running on {host}. Start it there with “hermes serve”, then try again.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.", { host }), ssh: true };
+  if (code === "bot/hermes-attach-gateway") return { heading: t("Hermes is running there as a gateway"), title: t("Start “hermes serve” on {host}", { host }), text: t("The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.", { host }), ssh: true };
   if (code === "bot/hermes-attach-profiles") return { heading: t("Hermes’s profiles could not be read"), title: t("Hermes on {host} did not list its profiles", { host }), text: t("Hermes is running on {host}, but its own profile list could not be read.", { host }), hint: t("Run “hermes profile list” on {host}, then try again.", { host }), ssh: true };
   if (code === "bot/hermes-ssh-platform") return { heading: t("This computer cannot run the SSH connection yet"), title: t("Check the remote system and Python"), text: t("The remote computer needs Linux or macOS, Python 3, and a supported Hermes installation."), hint: t("Check Python and the supported system on the other computer, then try again."), ssh: true };
   if (code === "bot/hermes-ssh-exited") return { heading: t("Hermes stopped while starting"), title: t("Hermes on {host} stopped before it was ready", { host }), text: facts.exit !== void 0 ? t("SSH signed in and started Hermes, but Hermes exited with code {code}.", { code: facts.exit }) : t("SSH signed in and started Hermes, but Hermes stopped right away."), hint: t("Run “hermes serve” on {host} to see the full error, fix it there, then try again.", { host }), ssh: true };
@@ -6347,7 +6363,11 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       (0, import_react15.createElement)("p", { className: "bt-hw-lead" }, t("The Hermes on {address} has more than one profile.", { address: label })),
       profiles.length === 0 ? (0, import_react15.createElement)(Note, { error: true }, t("No profiles are available. Check the connection and try again.")) : (0, import_react15.createElement)("div", { className: "bt-hw-profiles", role: "radiogroup", "aria-label": t("Profile") }, profiles.map((item) => (0, import_react15.createElement)("button", { key: item.id, type: "button", className: "bt-hw-profile", role: "radio", "aria-checked": profile === item.id, disabled: status === "saving", onClick: () => {
         if (!saving.current) setProfile(item.id);
-      } }, (0, import_react15.createElement)("span", { className: "bt-hw-radio" }), (0, import_react15.createElement)("span", null, (0, import_react15.createElement)("strong", null, item.name), item.id === test?.defaultProfile ? (0, import_react15.createElement)("small", null, t("Hermes’s default")) : null), profile === item.id ? (0, import_react15.createElement)("span", { className: "bt-hw-tag" }, t("Selected")) : null))),
+      } }, (0, import_react15.createElement)("span", { className: "bt-hw-radio" }), (0, import_react15.createElement)("span", null, (0, import_react15.createElement)("strong", null, item.name), (0, import_react15.createElement)("small", null, [
+        item.model ? item.provider ? `${item.model} · ${item.provider}` : item.model : t("No model set"),
+        item.running === false ? t("Not running") : item.running === true ? t("Running") : null,
+        item.id === test?.defaultProfile ? t("Hermes’s default") : null
+      ].filter(Boolean).join(" · "))), profile === item.id ? (0, import_react15.createElement)("span", { className: "bt-hw-tag" }, t("Selected")) : null))),
       (0, import_react15.createElement)("div", { className: "bt-hw-profile-tools" }, (0, import_react15.createElement)("span", null, t("{count} profiles available", { count: profiles.length })), (0, import_react15.createElement)("button", { type: "button", disabled: status === "refreshing" || status === "saving", onClick: refreshProfiles }, t("Refresh list")))
     );
     footer = (0, import_react15.createElement)(import_react15.Fragment, null, (0, import_react15.createElement)(Button, { disabled: status === "saving", onClick: () => {
@@ -6404,6 +6424,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
 function HermesRemoteSettings({ run: run2, Section: Section3, actions }) {
   const [view, setView] = (0, import_react15.useState)(null);
   const [pairing, setPairing] = (0, import_react15.useState)(false);
+  const [recovering, setRecovering] = (0, import_react15.useState)(false);
   const [editing, setEditing] = (0, import_react15.useState)(null);
   const [reconciliation, setReconciliation] = (0, import_react15.useState)(null);
   (0, import_react15.useEffect)(() => {
@@ -6432,12 +6453,21 @@ function HermesRemoteSettings({ run: run2, Section: Section3, actions }) {
           "div",
           { className: "bt-set-copy" },
           (0, import_react15.createElement)("span", null, configured(view) ? where : t("No connection saved")),
-          configured(view) ? (0, import_react15.createElement)("span", { className: "bt-set-hint" }, t("Profile: {profile}", { profile: view.profile })) : null,
+          configured(view) ? (0, import_react15.createElement)("span", { className: "bt-set-hint" }, t("Profile: {profile}", { profile: view.profileName || view.profile })) : null,
           view.attached === true && view.model ? (0, import_react15.createElement)("span", { className: "bt-set-hint" }, `${t("Model")}: ${view.model.name}`) : null
         ),
         (0, import_react15.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setEditing("host") }, configured(view) ? t("Change computer") : t("Set up connection")),
         (0, import_react15.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setEditing("more") }, t("More"))
       ),
+      configured(view) && (view.sessions ?? []).some((info) => info.pendingSubmit || info.uncertain) ? (0, import_react15.createElement)(
+        "div",
+        { className: "bt-set-row" },
+        (0, import_react15.createElement)("div", { className: "bt-set-copy" }, (0, import_react15.createElement)("span", null, t("An unfinished turn from an earlier connection can block changes.")), (0, import_react15.createElement)("span", { className: "bt-set-hint" }, t("Clear it to join the Bot Chat; the old turn cannot be resumed."))),
+        (0, import_react15.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: recovering, onClick: () => {
+          setRecovering(true);
+          void run2(call("hermes-remote-recover").then((next) => setView(next)).finally(() => setRecovering(false)));
+        } }, t("Clear old remote turns"))
+      ) : null,
       configured(view) ? (0, import_react15.createElement)(
         "div",
         { className: "bt-set-row" },

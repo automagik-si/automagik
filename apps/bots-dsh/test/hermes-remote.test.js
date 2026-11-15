@@ -1136,3 +1136,25 @@ test('a zero-or-two Bot Chat refusal reaches the chat with its own sentence, not
   assert.equal(finish.reason.kind, 'error')
   assert.match(finish.reason.failure.message, /exactly one existing Bot Chat/)
 })
+
+test('an attached chat with no visible row still opens so the first open can normalize', async t => {
+  const agent = { session: { id: 'first-open' }, ctx: { tools: { register: () => () => {} } } }
+  const ctx = fakeContext({ services: { agents: { get: () => agent, list: () => [agent] } } })
+  let submitted
+  const run = {
+    transport: { redact: text => text }, identity: {},
+    async submit(text, model) { submitted = { text, model } },
+    async next() { return { kind: 'done' } },
+    async close() {}, async stop() {},
+  }
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [], identity: () => ({}), save: async () => {}, attached: () => true, open: async () => run,
+  })
+  t.after(() => adapter.dispose())
+  const chunks = []
+  for await (const chunk of adapter.stream(markAgentLoopRequest({ provider: 'hermes-remote', model: 'old-ref', sessionId: 'first-open', messages: [{ role: 'user', content: 'Sample' }] }))) chunks.push(chunk)
+  assert.equal(submitted.text, 'Sample')
+  assert.equal(submitted.model.id, 'attach', 'the placeholder lets the open happen; the attached transport never sends it')
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
