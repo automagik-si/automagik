@@ -386,6 +386,21 @@ export function install(rt, { transport = options => new HermesTransport(options
       throw error?.code === 'bot/refused' && error.cleanupUnknown !== true ? error : connectionFailure(error)
     }
   }
+  // The model the connected view names: the one a Bot on this connection already saved,
+  // when the connection serves it. The first served model seeds a Bot that has none yet
+  // (first setup), never a Bot that already picked one.
+  const currentModelRef = () => {
+    const models = record().models ?? []
+    const served = new Set(models.map(model => `${HERMES_PROVIDER}/${model.id}`))
+    const bots = Object.values(state.bots ?? {})
+    const paired = record().pairedBotId ? state.bots?.[record().pairedBotId] : undefined
+    const candidates = paired === undefined ? bots : [paired, ...bots.filter(bot => bot !== paired)]
+    for (const bot of candidates) {
+      const ref = [bot?.model, bot?.appliedModel].find(ref => typeof ref === 'string' && served.has(ref))
+      if (ref !== undefined) return ref
+    }
+    return models[0] ? `${HERMES_PROVIDER}/${models[0].id}` : undefined
+  }
   const view = () => ({
     enabled: enabled(), mode: record().mode ?? 'remote', authMode: record().authMode ?? 'token',
     address: record().address ?? '', profile: record().profile ?? '', ssh: record().mode === 'ssh' ? sshFields(record().ssh) : undefined,
@@ -393,7 +408,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     bots: Object.values(state.bots ?? {}).map(bot => ({ id: bot.id, name: bot.name })),
     credentialRef: record().credentialRef ?? '', credentialSet: record().mode === 'ssh' ? Boolean(record().enabled) : Boolean(rt.secretValue?.(record().credentialRef)),
     models: record().models ?? [], limitations: MISSING_TOOLS, minimum: HERMES_MINIMUM,
-    modelRef: record().models?.[0] ? `${HERMES_PROVIDER}/${record().models[0].id}` : undefined,
+    modelRef: currentModelRef(),
     sessions: Object.entries(state.hermesSessions ?? {}).map(([sessionId, info]) => ({ sessionId, ...info })),
   })
   const publish = () => {
@@ -654,9 +669,13 @@ export function install(rt, { transport = options => new HermesTransport(options
       await drain()
     }
   }
-  async function connect(signal, startup) {
+  async function connect(body, signal, startup) {
     await rt.load(); await rt.loadSecrets()
     if (!enabled()) throw fail('Set up Remote Hermes before connecting.')
+    // Opening a configured connection shows the models it already saved: a throwaway
+    // session just to list them again is not opened. Only a first setup, or an explicit
+    // connect/refresh without `cached`, discovers.
+    if (body?.cached === true && (record().models?.length ?? 0) > 0) return view()
     return discover(signal, startup)
   }
   async function savePair(botId, signal) {
@@ -731,7 +750,7 @@ export function install(rt, { transport = options => new HermesTransport(options
       return action(startup => configure(body, startup.signal), signal, {}, deadlines.control)
     },
     discover: signal => action(startup => discover(startup.signal, startup), signal),
-    connect: signal => action(startup => connect(startup.signal, startup), signal),
+    connect: (body, signal) => action(startup => connect(body, startup.signal, startup), signal),
     refreshProfiles: (body, signal) => action(startup => refreshProfiles(body, startup.signal, startup), signal, { test: true, testId: body?.testId }),
     disconnect: body => {
       const filter = body?.testsOnly ? body : {}
@@ -779,7 +798,7 @@ export function install(rt, { transport = options => new HermesTransport(options
   rt.hooks.endpoint('hermes-remote-ssh-trust', (body, signal) => trustHostKey(body, signal))
   rt.hooks.endpoint('hermes-remote-test-profiles', (body, signal) => api.refreshProfiles(body, signal))
   rt.hooks.endpoint('hermes-remote-save', (body, signal) => api.save(body, signal))
-  rt.hooks.endpoint('hermes-remote-connect', (_body, signal) => api.connect(signal))
+  rt.hooks.endpoint('hermes-remote-connect', (body, signal) => api.connect(body, signal))
   rt.hooks.endpoint('hermes-remote-pair', (body, signal) => action(startup => pairBot(body, startup.signal), signal))
   rt.hooks.endpoint('hermes-remote-disconnect', api.disconnect)
   rt.hooks.endpoint('hermes-remote-configure', api.configure)

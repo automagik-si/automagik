@@ -83,6 +83,12 @@ object Pets {
     }
 
     /** The atlas for [id], else Genie's. Blocking: call it off the main thread. */
+    /** The atlas already in memory for [id], so a new pet view does not start blank for a frame. */
+    fun peek(context: Context, id: String?): Atlas? {
+        val want = Teams.petId(id)?.takeIf { cached(context, it) } ?: Teams.GENIE
+        return synchronized(cache) { cache.get(want) }
+    }
+
     fun load(context: Context, id: String?): Atlas? {
         val want = Teams.petId(id)?.takeIf { cached(context, it) } ?: Teams.GENIE
         synchronized(cache) { cache.get(want) }?.let { return it }
@@ -107,7 +113,9 @@ object Pets {
 @Composable fun PetView(pet: String?, pose: String, size: Dp, modifier: Modifier = Modifier, celebrate: Any? = null, still: Boolean = false) {
     val context = LocalContext.current
     val version = LocalIconsVersion.current
-    val atlas by produceState<Pets.Atlas?>(null, pet, version) { value = withContext(Dispatchers.IO) { Pets.load(context, pet) } }
+    val atlas by produceState<Pets.Atlas?>(Pets.peek(context, pet), pet, version) {
+        value = withContext(Dispatchers.IO) { Pets.load(context, pet) }
+    }
     var row by remember { mutableStateOf("idle") }
     var frame by remember { mutableIntStateOf(0) }
     val a = atlas

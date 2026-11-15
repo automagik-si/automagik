@@ -264,7 +264,9 @@ export function HermesRemoteConnect({ onClose, onConnected, edit = false, more =
       setView(next); setDraft(loadedDraft)
       if (!edit && configured(next)) {
         setStep('working'); setStatus('connecting')
-        const connected = await run('hermes-remote-connect')
+        // A saved profile already lists its models: reopening it must not open a throwaway
+        // remote session (or replace the Bot's model). First setup has no models and discovers.
+        const connected = await run('hermes-remote-connect', { cached: (next.models?.length ?? 0) > 0 })
         if (!live.current || generation !== epoch.current) return
         await callbacks.current.onConnected?.(connected)
       } else setStatus('idle')
