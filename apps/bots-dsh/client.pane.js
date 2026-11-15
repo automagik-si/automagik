@@ -30,7 +30,7 @@ var __copyProps = (to2, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// node_modules/@xterm/xterm/lib/xterm.mjs
+// ../../../../apps/bots-dsh/node_modules/@xterm/xterm/lib/xterm.mjs
 var xterm_exports = {};
 __export(xterm_exports, {
   Terminal: () => Dl
@@ -764,7 +764,7 @@ function Tc(s15) {
 }
 var zs, Rl, Ll, M, S, Gs, mi, $s, _i, er, tr, ir, we, De, rt, q, js, Hn, Fn, F, rr, ge, Zs, xt, nr, H, sr, Js, Be, wt, nt, ae, Dt, ce, Qs, or, Re, lr, Wn, Bl, Un, bi, ar, Rt, cr, to, ro, so, At, io, lo, ao, oo, ur, zn, Wl, dt, hr, uo, dr, Ee, D, ye, fe, kt, G, Ct, zl, mr, Gl, fo, $l, $, Mt, $n, po, br, Vn, gi, qn, Yn, Vl, Pt, ql, Yl, _r, v, jn, gr, Si, Eu, Tu, Ot, Ei, Bt, Ti, Sr, Iu, yu, vr, Nt, yr, xr, Ii, Zl, vo, go, Jl, Ql, ea, ta, Tr, Ir, bo, ia, $e, Ve, xe, So, ra, Xn, wr, Te, Zn, Dr, na, xu, Fe, st, sa, oa, Eo, la, wu, Du, Ru, Lu, ot, aa, yi, Jn, To, Io, yo, Qn, Rr, es, ua, ha, da, fa, ft, wo, Lr, qe, xi, Do, ma, ts, _a, Ye, kr, ba, Ar, va, _e, Ro, Cr, Co, Bh, be, Nh, Fh, Hh, Oo, Wh, Uh, No, Kh, zh, ss, os, wa, mt, Mr, Di, pt, Bo, Gh, Y, Da, ls, Wt, He, Q, Pr, lt, Uo, Or, cs, Ri, Br, Nr, Fr, Ca, Ut, Kt, Wr, Ur, Ma, Ko, zo, us, zr, hs, ds, Kr, zt, Gt, Gr, We, at, Li, bt, b, Ai, fs, $t, ue, he, de, J, ps, j, U, z, ve, $r, Vr, ct, Vt, Yr, ms, _s, Le, jr, jo, ki, Xr, Na, Yt, jt, Zr, bs, vs, Jr, gs, Qr, Xt, en, tn, Mi, Pi, Oi, Ss, Fa, Zo, Zt, Wa, Ua, Es, Bi, Ts, rn, Is, ys, Jt, nn, Qt, xs, on, Ds, Ya, ja, Xa, Za, Ja, ei, Hi, Wi, re, St, Ki, tl, il, Ui, Qa, ti, Rs, ln, ec, tc, ii, ic, zi, B, X, an, Ls, Ze, un, cn, ne, Je, cl, $i, hn, ks, Cs, ni, si, nc, dn, ul, hl, li, dl, Ps, fl, ai, Os, ac, se, fn, Ae, pn, Vi, uc, ci, qi, mn, pe, Yi, _n, ji, Xi, Fs, ke, hc, bn, dc, fc, mc, ut, _l, vl, gl, vn, Zi, _c, El, bc, gn, ui, Tl, Sn, gc, ee, En, Us, yl, Tn, Ks, Sc, In, xl, wl, Tt, hi, yn, xn, wn, Ji, Dn, Rn, Ln, Ic, Ue, Dl;
 var init_xterm = __esm({
-  "node_modules/@xterm/xterm/lib/xterm.mjs"() {
+  "../../../../apps/bots-dsh/node_modules/@xterm/xterm/lib/xterm.mjs"() {
     zs = Object.defineProperty;
     Rl = Object.getOwnPropertyDescriptor;
     Ll = (s15, t2) => {
@@ -8955,14 +8955,14 @@ ${h4.join(`
   }
 });
 
-// node_modules/@xterm/addon-fit/lib/addon-fit.mjs
+// ../../../../apps/bots-dsh/node_modules/@xterm/addon-fit/lib/addon-fit.mjs
 var addon_fit_exports = {};
 __export(addon_fit_exports, {
   FitAddon: () => o
 });
 var h, _, o;
 var init_addon_fit = __esm({
-  "node_modules/@xterm/addon-fit/lib/addon-fit.mjs"() {
+  "../../../../apps/bots-dsh/node_modules/@xterm/addon-fit/lib/addon-fit.mjs"() {
     h = 2, _ = 1, o = class {
       activate(e) {
         this._terminal = e;
@@ -11811,6 +11811,11 @@ var HOST_ZH = {
   "No project has a Bot on this computer yet.": "本机还没有任何项目包含 Bot。",
   "Reading this computer’s team…": "正在读取本机的团队…",
   "The Code side could not load here.": "代码端无法在此加载。",
+  "View only · click to type": "只读 · 点击输入",
+  "Typing · Esc to stop": "输入中 · 按 Esc 停止",
+  "Taking the pane…": "正在接管终端…",
+  "Typing is open in another window · view only": "另一个窗口正在输入 · 只读",
+  "Your session ended · view only": "你的会话已结束 · 只读",
   "Operating": "在操作",
   "You have the computer": "你在操作",
   "Latest screenshot": "最新截图",
@@ -14257,7 +14262,7 @@ function stillThere(selected, tree) {
 var STATUS_WORDS = Object.freeze(["working", "needs-you", "idle", "not-running"]);
 var statusKey = (status) => STATUS_WORDS.includes(status) ? status : "idle";
 
-// node_modules/@xterm/xterm/css/xterm.css
+// ../../../../apps/bots-dsh/node_modules/@xterm/xterm/css/xterm.css
 var xterm_default = `/**
  * Copyright (c) 2014 The xterm.js authors. All rights reserved.
  * Copyright (c) 2012-2013, Christopher Jeffrey (MIT License)
@@ -14563,10 +14568,49 @@ function groundOf(element) {
   }
   return getComputedStyle(document.body).backgroundColor || "Canvas";
 }
+var VIEWER = (() => {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `viewer-${Math.random().toString(36).slice(2)}`;
+  }
+})();
+var base64Of = (bytes) => {
+  let binary = "";
+  for (let at2 = 0; at2 < bytes.length; at2 += 32768) binary += String.fromCharCode(...bytes.subarray(at2, at2 + 32768));
+  return btoa(binary);
+};
+async function post(path, payload) {
+  const answer = await fetch(`api/omni-ui/code/${path}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  let body = null;
+  try {
+    body = await answer.json();
+  } catch {
+    body = null;
+  }
+  return { status: answer.status, body };
+}
 function TerminalPane({ botId, worker, title }) {
   const host = (0, import_react2.useRef)(null);
   const [phase, setPhase] = (0, import_react2.useState)({ kind: "connecting" });
   const [attempt, setAttempt] = (0, import_react2.useState)(0);
+  const [mode, setMode] = (0, import_react2.useState)("view");
+  const modeRef = (0, import_react2.useRef)("view");
+  const sessionRef = (0, import_react2.useRef)(null);
+  const termRef = (0, import_react2.useRef)(null);
+  const takeRef = (0, import_react2.useRef)(null);
+  const queueRef = (0, import_react2.useRef)([]);
+  const timerRef = (0, import_react2.useRef)(0);
+  const flushingRef = (0, import_react2.useRef)(null);
+  const setModeNow = (next) => {
+    modeRef.current = next;
+    setMode(next);
+  };
   (0, import_react2.useEffect)(() => {
     const element = host.current;
     if (!element) return void 0;
@@ -14576,6 +14620,7 @@ function TerminalPane({ botId, worker, title }) {
     let source = null;
     let observer = null;
     let fitFrame = 0;
+    let outside = null;
     const fitNow = () => {
       if (!fit || disposed) return;
       cancelAnimationFrame(fitFrame);
@@ -14586,6 +14631,80 @@ function TerminalPane({ botId, worker, title }) {
         }
       });
     };
+    const encodeQueue = () => {
+      const queued = queueRef.current;
+      queueRef.current = [];
+      let size = 0;
+      for (const chunk of queued) size += chunk.length;
+      if (size === 0) return null;
+      const bytes = new Uint8Array(size);
+      let at2 = 0;
+      for (const chunk of queued) {
+        bytes.set(chunk, at2);
+        at2 += chunk.length;
+      }
+      return base64Of(bytes);
+    };
+    const sendQueue = async () => {
+      const data = encodeQueue();
+      if (!data) return true;
+      const session = sessionRef.current;
+      if (!session) return false;
+      const answer = await post("input", { session, data }).catch(() => ({ status: 0 }));
+      if (answer.status === 204) return true;
+      if (answer.status === 401) {
+        sessionRef.current = null;
+        setModeNow("ended");
+        return false;
+      }
+      if (answer.status === 409) {
+        sessionRef.current = null;
+        setModeNow("ended");
+        return false;
+      }
+      return true;
+    };
+    const flush = () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = 0;
+      }
+      flushingRef.current = (flushingRef.current ?? Promise.resolve(true)).then(sendQueue, sendQueue);
+      return flushingRef.current;
+    };
+    const stopTyping = (reason = "released") => {
+      const session = sessionRef.current;
+      sessionRef.current = null;
+      if (modeRef.current === "typing") setModeNow(reason === "ended" ? "ended" : "view");
+      if (term) term.options.disableStdin = true;
+      if (outside) {
+        document.removeEventListener("pointerdown", outside, true);
+        outside = null;
+      }
+      return flush().then(() => session ? post("release", { session }).catch(() => {
+      }) : void 0);
+    };
+    const take = async () => {
+      if (modeRef.current === "typing") return;
+      setModeNow("taking");
+      const answer = await post("take", { bot: botId, worker: worker ?? null, viewer: VIEWER }).catch(() => ({ status: 0 }));
+      if (disposed) return;
+      if (answer.status === 200 && answer.body?.session) {
+        sessionRef.current = answer.body.session;
+        setModeNow("typing");
+        if (term) {
+          term.options.disableStdin = false;
+          term.focus();
+        }
+        outside = (event) => {
+          if (!element.contains(event.target)) void stopTyping("left");
+        };
+        document.addEventListener("pointerdown", outside, true);
+        return;
+      }
+      setModeNow(answer.status === 409 ? "elsewhere" : "view");
+    };
+    takeRef.current = take;
     const start = async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([Promise.resolve().then(() => (init_xterm(), xterm_exports)), Promise.resolve().then(() => (init_addon_fit(), addon_fit_exports))]);
       if (disposed) return;
@@ -14601,12 +14720,29 @@ function TerminalPane({ botId, worker, title }) {
         scrollback: 5e3,
         theme: { background, foreground }
       });
+      termRef.current = term;
       fit = new FitAddon();
       term.loadAddon(fit);
       term.open(element);
       fitNow();
       observer = new ResizeObserver(fitNow);
       observer.observe(element);
+      term.attachCustomKeyEventHandler((event) => {
+        if (event.type === "keydown" && event.key === "Escape" && modeRef.current === "typing") {
+          event.preventDefault();
+          void stopTyping("escape");
+          return false;
+        }
+        return true;
+      });
+      term.onData((data) => {
+        if (modeRef.current !== "typing" || !sessionRef.current) return;
+        queueRef.current.push(new TextEncoder().encode(data));
+        if (!timerRef.current) timerRef.current = setTimeout(() => {
+          timerRef.current = 0;
+          void flush();
+        }, 20);
+      });
       setPhase({ kind: "connecting" });
       const query = `api/omni-ui/code/stream?bot=${encodeURIComponent(botId)}${worker ? `&worker=${encodeURIComponent(worker)}` : ""}`;
       source = new EventSource(query);
@@ -14622,6 +14758,7 @@ function TerminalPane({ botId, worker, title }) {
           source.close();
           source = null;
         }
+        if (modeRef.current === "typing") void stopTyping("ended");
         setPhase({ kind: "ended" });
       });
       source.onerror = () => {
@@ -14629,12 +14766,14 @@ function TerminalPane({ botId, worker, title }) {
           source.close();
           source = null;
         }
+        if (modeRef.current === "typing") void stopTyping("ended");
         setPhase({ kind: "failed" });
       };
     };
     void start();
     return () => {
       disposed = true;
+      void stopTyping("left");
       cancelAnimationFrame(fitFrame);
       observer?.disconnect();
       source?.close();
@@ -14645,7 +14784,9 @@ function TerminalPane({ botId, worker, title }) {
       element.replaceChildren();
     };
   }, [botId, worker, attempt]);
-  const label = phase.kind === "open" ? t("Watching · view only") : phase.kind === "ended" ? t("This terminal ended") : phase.kind === "failed" ? t("The terminal could not be reached") : t("Opening the terminal…");
+  const watching = phase.kind === "open" ? t("Watching · view only") : phase.kind === "ended" ? t("This terminal ended") : phase.kind === "failed" ? t("The terminal could not be reached") : t("Opening the terminal…");
+  const stateWord = mode === "typing" ? t("Typing · Esc to stop") : mode === "taking" ? t("Taking the pane…") : mode === "elsewhere" ? t("Typing is open in another window · view only") : mode === "ended" ? t("Your session ended · view only") : phase.kind === "open" ? t("View only · click to type") : watching;
+  const retryable = phase.kind === "ended" || phase.kind === "failed";
   return (0, import_react2.createElement)(
     "div",
     { className: "cs-pane" },
@@ -14653,13 +14794,15 @@ function TerminalPane({ botId, worker, title }) {
       "div",
       { className: "cs-pane-head" },
       (0, import_react2.createElement)("span", { className: "cs-pane-title", title }, title),
-      (0, import_react2.createElement)("span", { className: "cs-pane-note", role: "status" }, label),
-      phase.kind === "ended" || phase.kind === "failed" ? (0, import_react2.createElement)("button", { type: "button", className: "cs-btn", onClick: () => {
+      (0, import_react2.createElement)("span", { className: "cs-pane-note", role: "status", "data-mode": mode }, stateWord),
+      retryable ? (0, import_react2.createElement)("button", { type: "button", className: "cs-btn", onClick: () => {
         setPhase({ kind: "connecting" });
         setAttempt((value) => value + 1);
       } }, t("Reconnect")) : null
     ),
-    (0, import_react2.createElement)("div", { ref: host, className: "cs-screen", "data-code-screen": phase.kind })
+    (0, import_react2.createElement)("div", { ref: host, className: "cs-screen", role: "button", tabIndex: 0, "aria-label": stateWord, "data-code-mode": mode, onClick: () => {
+      if (modeRef.current === "view" || modeRef.current === "elsewhere") void takeRef.current?.();
+    } })
   );
 }
 var TreeRow = ({ label, status, depth = 0, current, note, title, onClick }) => (0, import_react2.createElement)(
@@ -14797,7 +14940,9 @@ var CODE_SIDE_CSS = `
 .cs-pane-head{display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--lb-line,var(--bt-line));flex:none}
 .cs-pane-title{font:var(--bt-weight-title,600) 13.5px/1.3 var(--bt-head-font,var(--bt-font));min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cs-pane-note{margin-left:auto;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 12.5px/1.3 var(--bt-font);white-space:nowrap}
-.cs-screen{flex:1;min-height:0;padding:6px 8px 0;background:var(--bt-card);contain:strict}
+.cs-screen{flex:1;min-height:0;padding:6px 8px 0;background:var(--bt-card);contain:strict;cursor:text}
+.cs-screen[data-code-mode='typing']{cursor:text}
+.cs-screen[data-code-mode='view']{cursor:pointer}
 .cs-screen .xterm{height:100%}
 .cs-screen .xterm-viewport{background:transparent!important}
 .cs-empty{margin:0;padding:14px 12px;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 68%,transparent));font:400 13px/1.45 var(--bt-font)}

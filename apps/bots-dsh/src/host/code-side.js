@@ -13,6 +13,7 @@
 import { isBotId } from '../shared/registry.js'
 import { connectCore } from './code-core.js'
 import { readCodeTree, resolvePane } from './code-tree.js'
+import { createTypingService, typingRecordPath, typingRoutes } from './code-typing.js'
 
 /** The one terminal stream: exact GET under the shared API channel, so only the owner Peer reaches it. */
 export const CODE_STREAM_ROUTE = '/api/omni-ui/code/stream'
@@ -185,6 +186,21 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
   // registry: the tree still answers, and the pane simply has nowhere to stream to.
   const fetchRoutes = rt.ctx?.connection?.fetch
   if (typeof fetchRoutes?.register !== 'function') return () => {}
+  // Typing: its own exact routes, owner-only and re-admitted per batch (code-typing.js).
+  const typing = createTypingService({
+    env, connect, readFile, warn,
+    recordPath: typingRecordPath(rt.home ?? process.cwd()),
+    admit: request => rt.ctx.connection.admit(request),
+  })
+  rt.ctx.effect(() => () => { void typing.dispose() }, 'omni-ui: code typing releases')
+  for (const [path, handler] of typingRoutes(typing)) {
+    rt.ctx.effect(() => fetchRoutes.register({
+      path,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: request => handler(request),
+    }), `omni-ui: code typing ${path}`)
+  }
   rt.ctx.effect(() => fetchRoutes.register({
     path: CODE_STREAM_ROUTE,
     methods: ['GET'],

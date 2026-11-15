@@ -34,14 +34,49 @@ function groundOf(element) {
   return getComputedStyle(document.body).backgroundColor || 'Canvas'
 }
 
+// One viewer per window: the id that says which window holds a pane's typing.
+const VIEWER = (() => {
+  try { return crypto.randomUUID() } catch { return `viewer-${Math.random().toString(36).slice(2)}` }
+})()
+
+const base64Of = (bytes) => {
+  let binary = ''
+  for (let at = 0; at < bytes.length; at += 0x8000) binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000))
+  return btoa(binary)
+}
+
+/** JSON over the plugin's own exact routes; resolves { status, body }, never the request. */
+async function post(path, payload) {
+  const answer = await fetch(`api/omni-ui/code/${path}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  let body = null
+  try { body = await answer.json() } catch { body = null }
+  return { status: answer.status, body }
+}
+
 /**
  * The terminal pane: one EventSource of the host's `pane`/`data`/`close` events, drawn by
- * xterm.js. It is a watcher: no stdin, no resize frame, no second connection per render.
+ * xterm.js. It watches by default; a click into it takes the pane, and then its keys go to the
+ * host in small batches until Escape, a click outside, another Bot or an ended session lets go.
+ * No key, batch or paste is ever written to a log or a record here.
  */
 function TerminalPane({ botId, worker, title }) {
   const host = useRef(null)
   const [phase, setPhase] = useState({ kind: 'connecting' })
   const [attempt, setAttempt] = useState(0)
+  const [mode, setMode] = useState('view')
+  const modeRef = useRef('view')
+  const sessionRef = useRef(null)
+  const termRef = useRef(null)
+  const takeRef = useRef(null)
+  const queueRef = useRef([])
+  const timerRef = useRef(0)
+  const flushingRef = useRef(null)
+  const setModeNow = (next) => { modeRef.current = next; setMode(next) }
   useEffect(() => {
     const element = host.current
     if (!element) return undefined
@@ -51,12 +86,72 @@ function TerminalPane({ botId, worker, title }) {
     let source = null
     let observer = null
     let fitFrame = 0
+    let outside = null
 
     const fitNow = () => {
       if (!fit || disposed) return
       cancelAnimationFrame(fitFrame)
       fitFrame = requestAnimationFrame(() => { try { fit.fit() } catch { /* the pane is between layouts */ } })
     }
+    const encodeQueue = () => {
+      const queued = queueRef.current
+      queueRef.current = []
+      let size = 0
+      for (const chunk of queued) size += chunk.length
+      if (size === 0) return null
+      const bytes = new Uint8Array(size)
+      let at = 0
+      for (const chunk of queued) { bytes.set(chunk, at); at += chunk.length }
+      return base64Of(bytes)
+    }
+    const sendQueue = async () => {
+      const data = encodeQueue()
+      if (!data) return true
+      const session = sessionRef.current
+      if (!session) return false
+      const answer = await post('input', { session, data }).catch(() => ({ status: 0 }))
+      if (answer.status === 204) return true
+      if (answer.status === 401) {
+        sessionRef.current = null
+        setModeNow('ended')
+        return false
+      }
+      if (answer.status === 409) {
+        sessionRef.current = null
+        setModeNow('ended')
+        return false
+      }
+      return true
+    }
+    const flush = () => {
+      if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = 0 }
+      flushingRef.current = (flushingRef.current ?? Promise.resolve(true)).then(sendQueue, sendQueue)
+      return flushingRef.current
+    }
+    const stopTyping = (reason = 'released') => {
+      const session = sessionRef.current
+      sessionRef.current = null
+      if (modeRef.current === 'typing') setModeNow(reason === 'ended' ? 'ended' : 'view')
+      if (term) term.options.disableStdin = true
+      if (outside) { document.removeEventListener('pointerdown', outside, true); outside = null }
+      return flush().then(() => (session ? post('release', { session }).catch(() => {}) : undefined))
+    }
+    const take = async () => {
+      if (modeRef.current === 'typing') return
+      setModeNow('taking')
+      const answer = await post('take', { bot: botId, worker: worker ?? null, viewer: VIEWER }).catch(() => ({ status: 0 }))
+      if (disposed) return
+      if (answer.status === 200 && answer.body?.session) {
+        sessionRef.current = answer.body.session
+        setModeNow('typing')
+        if (term) { term.options.disableStdin = false; term.focus() }
+        outside = (event) => { if (!element.contains(event.target)) void stopTyping('left') }
+        document.addEventListener('pointerdown', outside, true)
+        return
+      }
+      setModeNow(answer.status === 409 ? 'elsewhere' : 'view')
+    }
+    takeRef.current = take
     const start = async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')])
       if (disposed) return
@@ -72,12 +167,27 @@ function TerminalPane({ botId, worker, title }) {
         scrollback: 5000,
         theme: { background, foreground },
       })
+      termRef.current = term
       fit = new FitAddon()
       term.loadAddon(fit)
       term.open(element)
       fitNow()
       observer = new ResizeObserver(fitNow)
       observer.observe(element)
+      // Escape ends typing and is never sent; every other key is one batch.
+      term.attachCustomKeyEventHandler((event) => {
+        if (event.type === 'keydown' && event.key === 'Escape' && modeRef.current === 'typing') {
+          event.preventDefault()
+          void stopTyping('escape')
+          return false
+        }
+        return true
+      })
+      term.onData((data) => {
+        if (modeRef.current !== 'typing' || !sessionRef.current) return
+        queueRef.current.push(new TextEncoder().encode(data))
+        if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
+      })
       setPhase({ kind: 'connecting' })
       const query = `api/omni-ui/code/stream?bot=${encodeURIComponent(botId)}${worker ? `&worker=${encodeURIComponent(worker)}` : ''}`
       source = new EventSource(query)
@@ -90,17 +200,20 @@ function TerminalPane({ botId, worker, title }) {
       })
       source.addEventListener('close', () => {
         if (source) { source.close(); source = null }
+        if (modeRef.current === 'typing') void stopTyping('ended')
         setPhase({ kind: 'ended' })
       })
       source.onerror = () => {
         // EventSource would retry by itself and attach a second stream: let the person ask.
         if (source) { source.close(); source = null }
+        if (modeRef.current === 'typing') void stopTyping('ended')
         setPhase({ kind: 'failed' })
       }
     }
     void start()
     return () => {
       disposed = true
+      void stopTyping('left')
       cancelAnimationFrame(fitFrame)
       observer?.disconnect()
       source?.close()
@@ -108,13 +221,19 @@ function TerminalPane({ botId, worker, title }) {
       element.replaceChildren()
     }
   }, [botId, worker, attempt])
-  const label = phase.kind === 'open' ? t('Watching · view only') : phase.kind === 'ended' ? t('This terminal ended') : phase.kind === 'failed' ? t('The terminal could not be reached') : t('Opening the terminal…')
+  const watching = phase.kind === 'open' ? t('Watching · view only') : phase.kind === 'ended' ? t('This terminal ended') : phase.kind === 'failed' ? t('The terminal could not be reached') : t('Opening the terminal…')
+  const stateWord = mode === 'typing' ? t('Typing · Esc to stop')
+    : mode === 'taking' ? t('Taking the pane…')
+      : mode === 'elsewhere' ? t('Typing is open in another window · view only')
+        : mode === 'ended' ? t('Your session ended · view only')
+          : phase.kind === 'open' ? t('View only · click to type') : watching
+  const retryable = phase.kind === 'ended' || phase.kind === 'failed'
   return h('div', { className: 'cs-pane' },
     h('div', { className: 'cs-pane-head' },
       h('span', { className: 'cs-pane-title', title }, title),
-      h('span', { className: 'cs-pane-note', role: 'status' }, label),
-      phase.kind === 'ended' || phase.kind === 'failed' ? h('button', { type: 'button', className: 'cs-btn', onClick: () => { setPhase({ kind: 'connecting' }); setAttempt(value => value + 1) } }, t('Reconnect')) : null),
-    h('div', { ref: host, className: 'cs-screen', 'data-code-screen': phase.kind }))
+      h('span', { className: 'cs-pane-note', role: 'status', 'data-mode': mode }, stateWord),
+      retryable ? h('button', { type: 'button', className: 'cs-btn', onClick: () => { setPhase({ kind: 'connecting' }); setAttempt(value => value + 1) } }, t('Reconnect')) : null),
+    h('div', { ref: host, className: 'cs-screen', role: 'button', tabIndex: 0, 'aria-label': stateWord, 'data-code-mode': mode, onClick: () => { if (modeRef.current === 'view' || modeRef.current === 'elsewhere') void takeRef.current?.() } }))
 }
 
 const TreeRow = ({ label, status, depth = 0, current, note, title, onClick }) => h('button', {
@@ -235,7 +354,9 @@ export const CODE_SIDE_CSS = `
 .cs-pane-head{display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--lb-line,var(--bt-line));flex:none}
 .cs-pane-title{font:var(--bt-weight-title,600) 13.5px/1.3 var(--bt-head-font,var(--bt-font));min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cs-pane-note{margin-left:auto;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 12.5px/1.3 var(--bt-font);white-space:nowrap}
-.cs-screen{flex:1;min-height:0;padding:6px 8px 0;background:var(--bt-card);contain:strict}
+.cs-screen{flex:1;min-height:0;padding:6px 8px 0;background:var(--bt-card);contain:strict;cursor:text}
+.cs-screen[data-code-mode='typing']{cursor:text}
+.cs-screen[data-code-mode='view']{cursor:pointer}
 .cs-screen .xterm{height:100%}
 .cs-screen .xterm-viewport{background:transparent!important}
 .cs-empty{margin:0;padding:14px 12px;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 68%,transparent));font:400 13px/1.45 var(--bt-font)}
