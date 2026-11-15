@@ -533,11 +533,18 @@ carries: no new artifact, key, lane or release kind. Arca's template installs am
 own user, verifies the pointer against am's public keys, records its sequence, and starts the
 runner from that user's store. No other install starts it; am's installer never enables it.
 
+**The key's weight.** This is the lean's price. am's lane key would also sign the member wall's
+runner, which runs members' shells under other host uids: a stolen am key would reach the wall, not
+only each person's own am. The fallback's separate key is the shape that keeps the two signing
+authorities apart. Rotation stays RFC 0011's two phases, but the template must trust the new key
+before the first am release signed with it: a space still pinning only the old key keeps its old
+runner and takes no am update, so the wait between the phases covers the spaces too.
+
 **Options.** am's tarball, recommended: every release already signs and carries am, and am
 installs per user, so its bytes can sit under the runner's user, out of DSH's write reach. A DSH
 plugin's tarball: rejected, because plugin bytes live in DSH's profile, writable by the user the
-runner guards. Its own artifact and lane: the fallback only, since a separate pointer and update
-path serve a file that is inert until started.
+runner guards. Its own artifact and lane: the fallback only, since a separate signing key and
+update path keep the two authorities apart for a file that is inert until started.
 
 **What the lean needs.**
 
@@ -565,8 +572,10 @@ path serve a file that is inert until started.
    its binaries are a new artifact that must never ship unsigned; here there is no new artifact
    and no new key, and the file does nothing unless started. A held lane would hold all of am
    or create the lane the lean avoids. The equivalent is a held start: the bytes ship inert,
-   nothing but the template's unit starts them, and only after the wall and its review. If any
-   other path can start it, this answer flips and the runner needs its own lane.
+   nothing but the template's unit starts them, and only after the wall and its review. As a
+   requirement, no am verb, installer, pack path, hook or boot path may start the runner or
+   write its unit; am's verbs are tested for it. If any other path can start it, this answer
+   flips and the runner needs its own lane.
 
 **Gate and tests.** The runner sits at `am/runner/member-runner.mjs`, its test at
 `am/test/member-runner.test.mjs`. `am/**` already makes it an am patch, so `part.json` needs no new
@@ -574,18 +583,20 @@ id, path, artifact or `writes` entry and `lane.ts` no new kind; `scripts/lane.te
 pinning `am/runner/**` alone as an am patch. The am job's test glob picks the test up; add
 `runner/*.mjs` to its syntax step (CI and `AGENTS.md`). The test covers protocol frames and
 refusals, uid mapping from a supplied subordinate-id range, socket-mode checks and timeout/exit
-codes. CI keeps the privileged proof out: it stays the VM test with a real second user, on the same
-tarball; the Pack am step asserts the tarball carries the runner and no runner test.
+codes. A second test pins that for am's verbs: each run in a scratch home writes no runner unit
+and starts no runner process; only the template writes its unit and starts it. CI keeps the
+privileged proof out: it stays the VM test with a real second user, on the same tarball; the Pack am
+step asserts the tarball carries the runner and no runner test.
 
 **The honest test story.** The spike proved the shape, not the shipment. On the spike's test VM the
 subuid path passed: the member's uid in range and not DSH's, its read of the owner-only canary
-denied while DSH's user read it, no effective capability, DSH's side not root and holding no
-docker socket. Docker mode and a real
-headless DSH turn (faked model) passed locally, refusals and exit codes included. Not proved: first
-install through the pointer, update/restart/rollback of a running runner, a real member session,
-client/runner skew, per-member homes and resource limits (subuid mode has none), the template's
-socket mount and mode, multi-member isolation. Docker mode is root-equivalent, only where subuid
-cannot run. The setting stays off; the spike's hash is test-only; a green unit run is not proof.
+denied while DSH's user read it, no effective capability, DSH's side not root and holding no docker
+socket. Docker mode and a real headless DSH turn (faked model) passed locally, refusals and exit
+codes included. Not proved: first install through the pointer, update/restart/rollback of a running
+runner, a real member session, client/runner skew, per-member homes and resource limits (subuid mode
+has none), the template's socket mount and mode, multi-member isolation. Docker mode is
+root-equivalent, only where subuid cannot run. The setting stays off; the spike's hash is test-only;
+a green unit run is not proof.
 
 **What the runner needs from the member-wall pieces.** It is not the boundary: whoever can open the
 socket can ask to run as any member, so the wall's authorization and the socket's mode are the gate.
