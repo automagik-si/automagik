@@ -7,22 +7,25 @@
 //   made for it knows the session (read, read_image, the editor's view, Office, present and
 //   skills all read through `ctx.fs`);
 // - a member session may only touch paths under its own area (`membersRoot/<name>`) or a
-//   shared root, and never under a denied root; the check runs on the path as given and on its
-//   real path, so a link out of the area is refused too. To a member, any other path looks
+//   shared root, and never under a denied root. The decision is the one rule in paths.js, on
+//   the folder a path really reaches on disk, never on its spelling. To a member, any other path looks
 //   absent: a probe finds nothing and a read or a listing fails as not found, so it learns
 //   nothing of what is there, and DSH's own probes (a workspace's parents) go on as for a path
 //   that does not exist. Writing there is refused;
 // - grep and glob search with ripgrep, which never reads through `ctx.fs`, so their search
-//   root (real path, against the session's working directory) is checked before they run, and
-//   a root with a denied root below it is refused. ripgrep does not follow links below its root.
+//   root (as spelled, against the session's working directory) goes through the same rule before
+//   they run, and a root with a denied root below it is refused. ripgrep walks the folder the
+//   rule decided on and does not follow links below it, so what it finds is inside it;
+// - DSH also reads files for a session after a tool's result and at a step's end (instruction
+//   files), outside the tool call itself; those reads carry the session's scope too.
 // Work outside any session (the owner's own interface) and owner sessions are unchanged.
-import { realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
+import { isAbsolute } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { FsError } from '@deepseek-ai/dsh-fs'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
 import { currentSession, principalOf, sessionScope } from './principals.js'
+import { memberMay, memberMaySearch } from './paths.js'
 
 export const SEARCH_TOOLS = Object.freeze(['grep', 'glob'])
 
@@ -35,49 +38,6 @@ const WallConfig = z.object({
   sharedReadRoots: z.array(absolute).default([]).description('Roots every member may read.'),
   denyReadRoots: z.array(absolute).default([]).description('Roots no member may read; wins over the rest.'),
 })
-
-// The real path of a path that may not exist yet: the nearest existing ancestor's real path
-// plus the missing rest.
-function realish(path) {
-  const rest = []
-  for (let at = path; ; at = dirname(at)) {
-    try {
-      return [realpathSync(at), ...rest].join(sep).replace(/\/+/g, '/')
-    } catch {
-      if (dirname(at) === at) return path
-      rest.unshift(basename(at))
-    }
-  }
-}
-
-const under = (path, root) => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep)
-
-// Both spellings of each root: as configured and as its real path.
-const spellings = roots => [...new Set(roots.flatMap(root => [resolve(root), realish(resolve(root))]))]
-
-export function readRule(config) {
-  const deny = spellings(config.denyReadRoots)
-  const shared = spellings(config.sharedReadRoots)
-  return (principal, path) => {
-    const area = principal.name !== undefined && config.membersRoot !== ''
-      ? spellings([resolve(config.membersRoot, principal.name)])
-      : []
-    const allowed = [...area, ...shared]
-    const fits = candidate => !deny.some(root => under(candidate, root)) && allowed.some(root => under(candidate, root))
-    return fits(path) && fits(realish(path))
-  }
-}
-
-// A search reads a whole tree, so its root must fit and must hold no denied root below it.
-export function searchRule(config) {
-  const allows = readRule(config)
-  const deny = spellings(config.denyReadRoots)
-  return (principal, root) => {
-    if (!allows(principal, root)) return false
-    const real = realish(root)
-    return !deny.some(held => under(held, root) || under(held, real))
-  }
-}
 
 // An Agent's id is its session's id (dsh-agent); its session carries the same id.
 export const sessionOfAgent = agent => agent?.id ?? agent?.session?.id
@@ -95,36 +55,40 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
     if (!config.members) return
     if (!isAbsolute(config.principalsFile)) throw new Error('member wall: members on needs an absolute principalsFile')
     if (!isAbsolute(config.membersRoot)) throw new Error('member wall: members on needs an absolute membersRoot')
-    this.allows = readRule(config)
-    this.searchable = searchRule(config)
     const inScope = (sessionId, next) => sessionId === undefined ? next() : sessionScope.run({ sessionId }, next)
     // First in each waterfall, so every later listener and the tool body run in the scope.
     ctx.on('tools/execute', (exec, next) => inScope(sessionOfAgent(exec.agent), next), { prepend: true })
     ctx.on('agent/pre-step', (step, next) => inScope(sessionOfAgent(step?.agent), next), { prepend: true })
+    // DSH reads instruction files for a session from these two events, after the tool call and
+    // the step have left their scope. The first listener puts the rest of the event, and the
+    // work it starts, in the session's scope.
+    const enter = sessionId => { if (sessionId !== undefined) sessionScope.enterWith({ sessionId }) }
+    ctx.on('tools/result', exec => enter(sessionOfAgent(exec?.agent)), { prepend: true })
+    ctx.on('session/event', (session, event) => { if (event?.type === 'step/end') enter(session?.id) }, { prepend: true })
     ctx.on('tools/pre-execute', async (exec, next) => {
       if (!SEARCH_TOOLS.includes(exec.name)) return next()
       const sessionId = sessionOfAgent(exec.agent) ?? currentSession()
       if (sessionId === undefined) return next()
       const principal = principalOf(config.principalsFile, sessionId)
       if (principal.kind === 'owner') return next()
-      const root = await this.searchRoot(exec)
-      if (root === undefined || !this.searchable(principal, root)) {
+      const where = await this.searchRoot(exec)
+      if (where === undefined || !memberMaySearch(config, principal, where.path, where.cwd)) {
         return { kind: 'deny', reason: `${exec.name}: outside the files this member may search` }
       }
       return next()
     }, { prepend: true })
   }
 
-  // The search root a grep or glob call would use, or undefined when it cannot be known.
+  // The search root a grep or glob call would use, as spelled, with the session's working
+  // directory it resolves against; undefined when it cannot be known.
   async searchRoot(exec) {
-    const path = exec.arguments?.path
-    if (path !== undefined && typeof path !== 'string') return undefined
-    if (typeof path === 'string' && isAbsolute(path)) return resolve(path)
+    const path = exec.arguments?.path ?? '.'
+    if (typeof path !== 'string') return undefined
+    if (isAbsolute(path)) return { path, cwd: '/' }
     const directories = this.ctx.get('workingDirectory')
     if (exec.agent === undefined || directories === undefined) return undefined
     try {
-      const cwd = await directories.ensure(exec.agent, exec.signal)
-      return resolve(cwd, path ?? '.')
+      return { path, cwd: await directories.ensure(exec.agent, exec.signal) }
     } catch {
       return undefined
     }
@@ -132,13 +96,13 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
 
   // Whether the current work may touch a path: always outside a session, for the owner, and
   // with members off; for a member, only when the path fits its rule.
-  open(path) {
+  open(path, cwd = '/') {
     if (!this.wall.members) return true
     const sessionId = currentSession()
     if (sessionId === undefined) return true
     const principal = principalOf(this.wall.principalsFile, sessionId)
     if (principal.kind === 'owner') return true
-    return this.allows(principal, path)
+    return memberMay(this.wall, principal, path, cwd)
   }
 
   // The target key is the target's real path: what is read is decided by it.
@@ -146,6 +110,7 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
     return this.open(String(target.targetKey))
   }
 
+  // The fenced methods are async, so a refusal is a rejection, as DSH's own errors are.
   hide(what, target) {
     if (!this.visible(target)) throw absent(what, target.displayPath)
   }
@@ -156,8 +121,9 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
 
   async lstat(path, opts, signal) {
     if (this.wall.members && typeof path === 'string') {
-      const spelled = path.startsWith('~') ? (await super.resolve(path, opts)).displayPath : resolve(opts?.cwd ?? this.config.cwd, path)
-      if (!this.open(spelled)) return undefined
+      // As spelled: DSH's own display path keeps `..` for the disk to walk.
+      const spelled = path.startsWith('~') ? (await super.resolve(path, opts)).displayPath : path
+      if (!this.open(spelled, opts?.cwd ?? this.config.cwd)) return undefined
     }
     return super.lstat(path, opts, signal)
   }
@@ -167,57 +133,57 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
     return super.stat(target, signal)
   }
 
-  watch(target, changed, signal) {
+  async watch(target, changed, signal) {
     this.hide('watch', target)
     return super.watch(target, changed, signal)
   }
 
-  readText(target, signal) {
+  async readText(target, signal) {
     this.hide('read', target)
     return super.readText(target, signal)
   }
 
-  streamText(target, signal) {
+  async streamText(target, signal) {
     this.hide('read', target)
     return super.streamText(target, signal)
   }
 
-  readBytes(target, signal, maxBytes) {
+  async readBytes(target, signal, maxBytes) {
     this.hide('read', target)
     return super.readBytes(target, signal, maxBytes)
   }
 
-  readByteRange(target, range, signal) {
+  async readByteRange(target, range, signal) {
     this.hide('read', target)
     return super.readByteRange(target, range, signal)
   }
 
-  listDir(target, signal) {
+  async listDir(target, signal) {
     this.hide('list', target)
     return super.listDir(target, signal)
   }
 
-  writeText(target, content, expected, signal, sandboxPolicy) {
+  async writeText(target, content, expected, signal, sandboxPolicy) {
     this.deny('write', target)
     return super.writeText(target, content, expected, signal, sandboxPolicy)
   }
 
-  editText(target, edit, expected, signal, sandboxPolicy) {
+  async editText(target, edit, expected, signal, sandboxPolicy) {
     this.deny('edit', target)
     return super.editText(target, edit, expected, signal, sandboxPolicy)
   }
 
-  patchText(target, hunks, expected, signal, sandboxPolicy) {
+  async patchText(target, hunks, expected, signal, sandboxPolicy) {
     this.deny('edit', target)
     return super.patchText(target, hunks, expected, signal, sandboxPolicy)
   }
 
-  deleteFile(target, expected, signal, sandboxPolicy) {
+  async deleteFile(target, expected, signal, sandboxPolicy) {
     this.deny('delete', target)
     return super.deleteFile(target, expected, signal, sandboxPolicy)
   }
 
-  moveFile(source, destination, options, signal, sandboxPolicy) {
+  async moveFile(source, destination, options, signal, sandboxPolicy) {
     this.deny('move', source)
     this.deny('move', destination)
     return super.moveFile(source, destination, options, signal, sandboxPolicy)

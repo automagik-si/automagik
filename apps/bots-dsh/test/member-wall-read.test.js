@@ -43,6 +43,8 @@ function layout() {
   writeFileSync(join(ana, 'pic.png'), PNG)
   skill(join(ana, 'skills'), 'ana-notes')
   writeFileSync(join(members, 'bo', 'bo.txt'), 'bo canary\n')
+  mkdirSync(join(members, 'anabel'))
+  writeFileSync(join(members, 'anabel', 'anabel.txt'), `${CANARY}\n`)
   writeFileSync(join(shared, 'team.txt'), 'shared canary\n')
   mkdirSync(join(shared, 'held'))
   writeFileSync(join(shared, 'held', 'held.txt'), `${CANARY}\n`)
@@ -57,7 +59,7 @@ function layout() {
   return { root, owner, members, ana, shared, dshHome, principals, record }
 }
 
-async function world(t, places, { members = true, skillTool = true } = {}) {
+async function world(t, places, { members = true, skillTool = true, cwd = places.ana } = {}) {
   const ctx = new Context()
   t.after(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
@@ -69,7 +71,7 @@ async function world(t, places, { members = true, skillTool = true } = {}) {
   })
   provideWorkingDirectoryFixture(ctx, places.ana)
   await ctx.plugin(MemberWallFileSystem, {
-    cwd: places.ana,
+    cwd,
     members,
     principalsFile: places.principals,
     membersRoot: places.members,
@@ -269,4 +271,61 @@ test("an agent step runs in its session's scope, so a member's skill catalog is 
   })
   assert.deepEqual(await step('session-ana'), { kind: 'refused', code: 'FS_NOT_FOUND' })
   assert.equal((await step('session-owner')).kind, 'read')
+})
+
+test("DSH's reads for a session after a tool's result or at a step's end are fenced too", async t => {
+  const places = layout(); t.after(() => rmSync(places.root, { recursive: true, force: true }))
+  const ctx = await world(t, places)
+  // Resolved outside any session, as DSH's instruction files are found.
+  const target = await ctx.fs.resolve(join(places.owner, 'secret.txt'))
+  const reads = []
+  const readLater = () => reads.push(ctx.fs.readText(target).then(() => 'read', error => error.code))
+  ctx.on('tools/result', readLater)
+  ctx.on('session/event', (_session, event) => { if (event.type === 'step/end') readLater() })
+  // Each emit runs in a scope of its own, as DSH's tool pipeline and agent loop do.
+  const signal = new AbortController().signal
+  sessionScope.run(undefined, () => ctx.emit('tools/result', { agent: agentFor('session-ana', places.ana), signal }, { isError: false }))
+  sessionScope.run(undefined, () => ctx.emit('session/event', { id: 'session-ana' }, { type: 'step/end' }))
+  sessionScope.run(undefined, () => ctx.emit('tools/result', { agent: agentFor('session-owner', places.owner), signal }, { isError: false }))
+  sessionScope.run(undefined, () => ctx.emit('session/event', { id: 'session-owner' }, { type: 'step/end' }))
+  assert.deepEqual(await Promise.all(reads), ['FS_NOT_FOUND', 'FS_NOT_FOUND', 'read', 'read'])
+})
+
+test('a record owned by another user counts for nothing', async t => {
+  const places = layout(); t.after(() => rmSync(places.root, { recursive: true, force: true }))
+  const ctx = await world(t, places)
+  const uid = process.getuid()
+  t.mock.method(process, 'getuid', () => uid + 1)
+  refused(await call(ctx, 'session-owner', places.owner, 'read', { file_path: join(places.owner, 'secret.txt') }), 'the owner, while the record is not ours')
+})
+
+test("grep and glob search from the session's own working folder, not the configured one", async t => {
+  const places = layout(); t.after(() => rmSync(places.root, { recursive: true, force: true }))
+  // The deployment folder is the owner's; the member's session works in its own area.
+  const ctx = await world(t, places, { cwd: places.owner })
+  allowed(await call(ctx, 'session-ana', places.ana, 'grep', { pattern: 'canary' }), 'grep, no path', /ana canary/)
+  allowed(await call(ctx, 'session-ana', places.ana, 'grep', { pattern: 'canary', path: '.' }), 'grep .', /ana canary/)
+  allowed(await call(ctx, 'session-ana', places.ana, 'glob', { pattern: '*.txt' }), 'glob, no path', /notes\.txt/)
+})
+
+test('a member whose name starts like another reaches only its own area (ana, not anabel)', async t => {
+  const places = layout(); t.after(() => rmSync(places.root, { recursive: true, force: true }))
+  const ctx = await world(t, places)
+  refused(await call(ctx, 'session-ana', places.ana, 'read', { file_path: join(places.members, 'anabel', 'anabel.txt') }), 'read anabel')
+  refused(await call(ctx, 'session-ana', places.ana, 'grep', { pattern: 'canary', path: join(places.members, 'anabel') }), 'grep anabel')
+})
+
+test('a folder link followed by .. is decided where it really lands', async t => {
+  const places = layout(); t.after(() => rmSync(places.root, { recursive: true, force: true }))
+  const ctx = await world(t, places)
+  const ana = (tool, args) => call(ctx, 'session-ana', places.ana, tool, args)
+  // owner-dir is a link to the owner folder: owner-dir/.. is the owner folder's parent on disk.
+  // Spelled by hand: path.join would fold the .. away before DSH ever sees it.
+  const out = `${places.ana}/owner-dir/../owner`
+  refused(await ana('grep', { pattern: 'canary', path: out }), 'grep through a link and ..')
+  refused(await ana('glob', { pattern: '*.txt', path: out }), 'glob through a link and ..')
+  refused(await ana('read', { file_path: `${out}/secret.txt` }), 'read through a link and ..')
+  await sessionScope.run({ sessionId: 'session-ana' }, async () => {
+    assert.equal(await ctx.fs.lstat(`${out}/secret.txt`), undefined, 'lstat through a link and ..')
+  })
 })
