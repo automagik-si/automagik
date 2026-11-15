@@ -47,6 +47,8 @@ export async function bundleClient() {
     'window.__ModuleLoader__.load({',
     `  id: '${PACKAGE_NAME}',`,
     '  factory: (require) => {',
+    // The renderer's chunk is fetched only when the Code face first renders (code-side.js).
+    'globalThis.__dshChunk = (name) => require.async(name)',
     'const module = { exports: {} }',
     result.outputFiles[0].text.trimEnd(),
     // The loader gets a plain exports object tagged as a module, as the tsdown preset
@@ -57,6 +59,46 @@ export async function bundleClient() {
     // A second registration of the same name (the bundle run again, a reload) is DSH's to
     // refuse; the first one stays and keeps answering.
     `try { window.__ModuleLoader__.load({ id: '${FORMER_NAME}', factory: (require) => require('${PACKAGE_NAME}/client') }) } catch {}`,
+    '',
+  ].join('\n')
+}
+
+const PANE_OUTPUT = join(PLUGIN, 'client.pane.js')
+const PANE_NAME = 'client.pane.js'
+
+/**
+ * The Code side's renderer as its own package-local chunk: the DSH module loader keeps it out
+ * of client.js and fetches it the first time the view's Terminal face renders. The chunk
+ * registers under the same package id with `chunk`, as DSH's own sidebar terminal does.
+ */
+export async function bundlePane() {
+  const result = await build({
+    absWorkingDir: PLUGIN,
+    entryPoints: ['src/client/code-side-pane.js'],
+    bundle: true,
+    format: 'cjs',
+    platform: 'browser',
+    target: 'es2022',
+    external: PLATFORM_MODULES,
+    // xterm's stylesheet joins the chunk as text, so it loads with the renderer, not before.
+    loader: { '.css': 'text' },
+    treeShaking: false,
+    charset: 'utf8',
+    write: false,
+    logLevel: 'silent',
+  })
+  if (result.warnings.length > 0) throw new Error(`esbuild warnings:\n${result.warnings.map(warning => warning.text).join('\n')}`)
+  return [
+    '// Generated from src/client/code-side-pane.js by `npm run build` (scripts/build-client.mjs). Do not edit by hand.',
+    'window.__ModuleLoader__.load({',
+    `  id: '${PACKAGE_NAME}',`,
+    `  chunk: '${PANE_NAME}',`,
+    '  factory: (require) => {',
+    'const module = { exports: {} }',
+    result.outputFiles[0].text.trimEnd(),
+    'return Object.defineProperty({ ...module.exports }, Symbol.toStringTag, { value: \'Module\' })',
+    '  },',
+    '})',
     '',
   ].join('\n')
 }
@@ -84,17 +126,20 @@ export async function bundleOffice() {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const next = await bundleClient()
+  const pane = await bundlePane()
   const office = await bundleOffice()
   if (process.argv.includes('--check')) {
-    let current = null, currentOffice = null
+    let current = null, currentPane = null, currentOffice = null
     try { current = readFileSync(OUTPUT, 'utf8') } catch { /* missing counts as stale */ }
+    try { currentPane = readFileSync(PANE_OUTPUT, 'utf8') } catch { /* missing counts as stale */ }
     try { currentOffice = readFileSync(OFFICE_OUTPUT, 'utf8') } catch { /* missing counts as stale */ }
-    if (current !== next || currentOffice !== office) {
-      console.error('client.js or office.js is stale: run `bun run build` in apps/bots-dsh and commit the result')
+    if (current !== next || currentPane !== pane || currentOffice !== office) {
+      console.error('client.js, client.pane.js or office.js is stale: run `bun run build` in apps/bots-dsh and commit the result')
       process.exit(1)
     }
   } else {
     writeFileSync(OUTPUT, next)
+    writeFileSync(PANE_OUTPUT, pane)
     writeFileSync(OFFICE_OUTPUT, office)
   }
 }
