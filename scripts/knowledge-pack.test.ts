@@ -400,6 +400,11 @@ describe('the knowledge pack', () => {
     }
     // Each branch is checked on its own, and must be anchored at both ends.
     expect(load(`^omni${at}1\\.0$|^b.*$`)).toThrow(LOCAL);
+    // Only the anchoring check stops this one: its open branch pins a local part and passes every
+    // probe, yet would pass another address that ends the same way.
+    const open = `^zz9$|you${at}x\\.com$`;
+    expect(new RegExp(open).test(`me.you${at}x.com`)).toBe(true);
+    expect(load(open)).toThrow(/each branch must be anchored/);
     expect(load(`^x$|you${at}.*$`)).toThrow(/each branch must be anchored/);
     expect(load(`^you${at}x\\.com|^me${at}x\\.com$`)).toThrow(/each branch must be anchored/);
     // The branches a pattern is read by, escapes as their character.
