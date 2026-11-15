@@ -16,8 +16,9 @@ export const RELEASES_URL = 'https://api.github.com/repos/automagik-si/automagik
 // The updater reads the release list newest first. A plugin, herdr or Pocket patch is a release
 // too, and only a full release carries a desktop feed: a quiet stretch puts the newest feed past
 // the first page. Follow GitHub's Link next page until the list ends or this cap, so an older
-// feed is never invisible. A normal check stops at the first page with the update; the cap keeps
-// a pathological list from walking forever (ten pages is 1,000 releases).
+// feed is never invisible. A normal check stops at the page that holds the running release
+// (nothing after it can be newer); the cap keeps a list without it from walking forever (ten
+// pages is 1,000 releases).
 export const MAX_RELEASE_PAGES = 10
 export const DESKTOP_TAG_PREFIX = 'v'
 const DOWNLOADS = 'https://github.com/automagik-si/automagik/releases/download/'
@@ -307,10 +308,21 @@ export function pickUpdate(releases, { current, platform, channel = 'prerelease'
   return best
 }
 
-/** The rel="next" address of GitHub's Link header, or null when this is the last page. */
-export function nextPage(link) {
+/**
+ * The rel="next" address of GitHub's Link header, or null when there is none or it leaves the
+ * API host: only the answer this check already trusts may send it somewhere else.
+ */
+export function nextPage(link, base = RELEASES_URL) {
   const match = /<([^>]+)>;\s*rel="next"/.exec(String(link ?? ''))
-  return match ? match[1] : null
+  if (!match) return null
+  try {
+    const next = new URL(match[1], base)
+    const api = new URL(base)
+    if (next.protocol !== api.protocol || next.host !== api.host) return null
+    return next.href
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -537,10 +549,13 @@ export function startUpdates({ updater, current, platform, env, log, onState, mo
       if (override) update = { version: null, url: override }
       else {
         const list = await releases(undefined, found => {
-          const own = found.some(release => release?.tag_name === `${DESKTOP_TAG_PREFIX}${current}`)
+          // The list is newest first: once the running release is in hand, nothing after it can
+          // be newer. Without it, a fixed channel can still stop at an update; the cap bounds
+          // the search for a running release the list does not name.
+          if (found.some(release => release?.tag_name === `${DESKTOP_TAG_PREFIX}${current}`)) return true
           const fixed = env.OMNI_DESKTOP_UPDATE_CHANNEL?.trim()
-          if (!own && fixed !== 'stable' && fixed !== 'prerelease') return false
-          return pickUpdate(found, { current, platform, channel: channelOf(found, { current, env }) }) !== null
+          if (fixed !== 'stable' && fixed !== 'prerelease') return false
+          return pickUpdate(found, { current, platform, channel: fixed }) !== null
         })
         const channel = channelOf(list, { current, env })
         update = pickUpdate(list, { current, platform, channel })

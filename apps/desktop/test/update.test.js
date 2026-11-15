@@ -364,9 +364,11 @@ test('a releases API 5xx or 429 is transient; other 4xx are not; the network pat
   assert.equal(isTransient(undefined), false)
 })
 
-test("GitHub's Link header names the next page, and nothing when there is none", () => {
+test("GitHub's Link header names the next page, and nothing when there is none or another host", () => {
   assert.equal(nextPage(`<${RELEASES_URL}&page=2>; rel="next", <${RELEASES_URL}&page=9>; rel="last"`), `${RELEASES_URL}&page=2`)
   assert.equal(nextPage(`<${RELEASES_URL}&page=1>; rel="prev"`), null)
+  assert.equal(nextPage('<https://evil.example/repos/x/releases?page=2>; rel="next"'), null)
+  assert.equal(nextPage('<http://api.github.com/repos/x/releases?page=2>; rel="next"'), null)
   assert.equal(nextPage(''), null)
   assert.equal(nextPage(undefined), null)
 })
@@ -450,6 +452,16 @@ test('a later page that is not a release list fails the check, never hides the p
   assert.equal(calls.length, 2)
 })
 
+test('a next page on another host ends the list instead of being followed', async () => {
+  const calls = []
+  const list = await fetchReleases(async url => {
+    calls.push(url)
+    return { ok: true, status: 200, headers: { get: () => '<https://evil.example/releases?page=2>; rel="next"' }, json: async () => [release('v3.1.0')] }
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(list.length, 1)
+})
+
 test('paging stops once the running release and a usable feed are in hand', async () => {
   const calls = []
   const page = async url => {
@@ -465,6 +477,24 @@ test('paging stops once the running release and a usable feed are in hand', asyn
   const list = await fetchReleases(page, enough)
   assert.equal(calls.length, 1)
   assert.equal(list.length, 2)
+})
+
+test('an up-to-date app reads one page, not the whole list', async (t) => {
+  let calls = 0
+  stubFetch(t, () => {
+    calls += 1
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => `<${RELEASES_URL}&page=2>; rel="next"` },
+      json: async () => [release('v3.101.0'), release('v3.100.0')],
+    }
+  })
+  const { timers } = recordingTimers()
+  const updates = startUpdates({ updater: fakeUpdater(), current: '3.101.0', platform: 'darwin', env: {}, timers, log: quiet, onState() {} })
+  t.after(() => updates.stop())
+  assert.deepEqual(await updates.check(), { result: 'latest' })
+  assert.equal(calls, 1)
 })
 
 test('a check reads one page when that page already holds the update', async (t) => {
