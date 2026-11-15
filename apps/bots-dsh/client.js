@@ -1131,6 +1131,7 @@ var ZH = {
   "Model: {model}": "模型：{model}",
   "instead of {model}": "替代 {model}",
   "Running instead of {model}": "正在运行，替代 {model}",
+  "This chat is running on {running} instead of {saved}.": "此对话正在使用 {running}，而不是 {saved}。",
   none: "无",
   "Choose a model": "选择模型",
   "{provider} · not available": "{provider} · 不可用",
@@ -3543,10 +3544,10 @@ function bodyOf(def, paint, flat = false) {
   }
 }
 var PUPIL = "#0a0f1f";
-var pupilMarkup = ([cx, cy, w, h75, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h75 / 2}" width="${w}" height="${h75}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h75 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h75 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
-var blushMarkup = ([cx, cy, w, h75, tilt]) => `<ellipse cx="${cx}" cy="${cy + h75 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
-var eyeMarkup = ([cx, cy, w, h75, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h75 / 2}" width="${w}" height="${h75}" rx="${w / 2}"/></g>`;
-var happyEyeMarkup = ([cx, cy, w, h75, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h75 * 0.14}Q0 ${-h75 * 0.42} ${w * 0.62} ${h75 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
+var pupilMarkup = ([cx, cy, w, h76, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h76 / 2}" width="${w}" height="${h76}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h76 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h76 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
+var blushMarkup = ([cx, cy, w, h76, tilt]) => `<ellipse cx="${cx}" cy="${cy + h76 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
+var eyeMarkup = ([cx, cy, w, h76, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h76 / 2}" width="${w}" height="${h76}" rx="${w / 2}"/></g>`;
+var happyEyeMarkup = ([cx, cy, w, h76, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h76 * 0.14}Q0 ${-h76 * 0.42} ${w * 0.62} ${h76 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
 var maskBox = (size) => `maskUnits="userSpaceOnUse" x="${-size}" y="${-size}" width="${size * 3}" height="${size * 3}"`;
 var holes = (def, eyes) => `<rect x="${-def.size}" y="${-def.size}" width="${def.size * 3}" height="${def.size * 3}" fill="#fff"/>${eyes}`;
 var MASK_ID = "%MASK%";
@@ -4220,12 +4221,12 @@ function liveSprings(apply2) {
     const dt = Math.min(0.5, Math.max(1e-3, (now - last) / 1e3));
     last = now;
     const steps = Math.ceil(dt * 240);
-    const h75 = dt / steps;
+    const h76 = dt / steps;
     let moving = false;
     for (const value of values.values()) {
       for (let index = 0; index < steps; index += 1) {
-        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h75;
-        value.x += value.v * h75;
+        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h76;
+        value.x += value.v * h76;
       }
       if (Math.abs(value.x - value.to) < 0.05 && Math.abs(value.v) < 1) {
         value.x = value.to;
@@ -28318,8 +28319,75 @@ function serveBrowserReads({ browsers, post, clientId = globalThis.crypto.random
   };
 }
 
-// src/client/cli-login.js
+// src/client/model-switch.js
 var import_react75 = require("react");
+var botOf = (roster, sessionId) => {
+  const bot = roster?.byId?.[sessionId];
+  if (!bot || sessionId !== bot.sessionId || roster.hostModels?.[bot.id] !== void 0) return void 0;
+  return bot;
+};
+function modelSwitchOf(roster, sessionId) {
+  const bot = botOf(roster, sessionId);
+  const savedRef = bot?.model ?? bot?.appliedModel;
+  if (savedRef === void 0 || typeof bot.runningModel !== "string" || bot.runningModel === savedRef) return void 0;
+  const running2 = modelOf({ model: bot.runningModel }, roster);
+  const saved = modelOf(bot, roster);
+  let runningName = running2?.name || bot.runningModel;
+  let savedName = saved?.name || savedRef;
+  if (runningName === savedName && running2?.provider && saved?.provider && running2.provider !== saved.provider) {
+    runningName = `${runningName} (${running2.provider})`;
+    savedName = `${savedName} (${saved.provider})`;
+  }
+  return { key: `${bot.id}|${bot.runningModel}|${savedRef}`, running: runningName, saved: savedName };
+}
+function switchSeen(memo, botId, key) {
+  return {
+    memo: { botId, key },
+    fresh: memo !== void 0 && memo.botId === botId && key !== void 0 && key !== memo.key
+  };
+}
+function ModelSwitchNotice({ sessionId, useRoster }) {
+  const roster = useRoster((value) => value);
+  const bot = botOf(roster, sessionId);
+  const mismatch = modelSwitchOf(roster, sessionId);
+  const key = mismatch?.key;
+  const known2 = typeof bot?.runningModel === "string";
+  const memo = (0, import_react75.useRef)();
+  const [pulse, setPulse] = (0, import_react75.useState)(0);
+  const [fresh, setFresh] = (0, import_react75.useState)(false);
+  const [said, setSaid] = (0, import_react75.useState)("");
+  const line = mismatch === void 0 ? "" : t("This chat is running on {running} instead of {saved}.", { running: mismatch.running, saved: mismatch.saved });
+  (0, import_react75.useEffect)(() => {
+    if (!known2) return;
+    const next = switchSeen(memo.current, bot.id, key);
+    memo.current = next.memo;
+    if (next.fresh) {
+      setPulse((value) => value + 1);
+      setFresh(true);
+      setSaid(line);
+    } else if (key === void 0) setSaid("");
+  }, [bot?.id, key, known2]);
+  if (bot === void 0) return null;
+  return (0, import_react75.createElement)(
+    "div",
+    { className: "bt-model-switch-dock" },
+    (0, import_react75.createElement)("span", { className: "bt-sr", role: "status", "aria-live": "polite" }, said),
+    mismatch === void 0 ? null : (0, import_react75.createElement)("div", {
+      key: pulse,
+      className: "bt-native-note bt-model-switch",
+      "data-fresh": fresh ? "" : void 0,
+      onAnimationEnd: () => setFresh(false)
+    }, (0, import_react75.createElement)("p", null, line))
+  );
+}
+var MODEL_SWITCH_CSS = `
+.bt-model-switch{justify-content:center;text-align:center;padding:0 4px 6px}
+body:not([data-bt-motion=quiet]) .bt-model-switch[data-fresh]{animation:bt-secret-in .24s ease-out}
+@media (prefers-reduced-motion:reduce){.bt-model-switch[data-fresh]{animation:none}}
+`;
+
+// src/client/cli-login.js
+var import_react76 = require("react");
 var import_react_dom16 = require("react-dom");
 var CLI_LOGIN_BRIDGE = /* @__PURE__ */ Symbol.for("automagik.cli-login");
 var noSubscribe3 = () => () => {
@@ -28459,9 +28527,9 @@ var FIELD_EVENTS = [
 ];
 var BLOCKED2 = /* @__PURE__ */ new Set(["copy", "cut", "drop", "dragover"]);
 function CodeField({ disabled, busy, onSubmit, fieldRef }) {
-  const wrap = (0, import_react75.useRef)(null);
-  const input = (0, import_react75.useRef)(null);
-  const [filled, setFilled] = (0, import_react75.useState)(false);
+  const wrap = (0, import_react76.useRef)(null);
+  const input = (0, import_react76.useRef)(null);
+  const [filled, setFilled] = (0, import_react76.useState)(false);
   const submit = () => {
     const node = input.current;
     if (!node || disabled || busy || node.value.trim() === "") return;
@@ -28470,9 +28538,9 @@ function CodeField({ disabled, busy, onSubmit, fieldRef }) {
     setFilled(false);
     onSubmit(value);
   };
-  const submitRef = (0, import_react75.useRef)(submit);
+  const submitRef = (0, import_react76.useRef)(submit);
   submitRef.current = submit;
-  (0, import_react75.useLayoutEffect)(() => {
+  (0, import_react76.useLayoutEffect)(() => {
     const node = wrap.current;
     const field = input.current;
     fieldRef.current = field;
@@ -28494,13 +28562,13 @@ function CodeField({ disabled, busy, onSubmit, fieldRef }) {
       if (fieldRef.current === field) fieldRef.current = null;
     };
   }, []);
-  return (0, import_react75.createElement)(
+  return (0, import_react76.createElement)(
     "div",
     { className: "bt-cli-code" },
-    (0, import_react75.createElement)(
+    (0, import_react76.createElement)(
       "span",
       { ref: wrap, className: "bt-cli-code-wrap", "data-cli-login-field": "" },
-      (0, import_react75.createElement)("input", {
+      (0, import_react76.createElement)("input", {
         ref: input,
         type: "password",
         className: "bt-input bt-cli-code-input",
@@ -28516,23 +28584,23 @@ function CodeField({ disabled, busy, onSubmit, fieldRef }) {
         "aria-label": t("Authorization code")
       })
     ),
-    (0, import_react75.createElement)("button", { type: "button", className: "bt-q-submit", disabled: disabled || busy || !filled, onClick: submit }, t("Send"))
+    (0, import_react76.createElement)("button", { type: "button", className: "bt-q-submit", disabled: disabled || busy || !filled, onClick: submit }, t("Send"))
   );
 }
 var timeOf = (at) => new Date(at).toLocaleTimeString(dateLocale(), { hour: "numeric", minute: "2-digit" });
 function CopyLink({ url }) {
-  const [copied, setCopied] = (0, import_react75.useState)(false);
-  (0, import_react75.useEffect)(() => {
+  const [copied, setCopied] = (0, import_react76.useState)(false);
+  (0, import_react76.useEffect)(() => {
     setCopied(false);
   }, [url]);
   const copy2 = () => {
     void navigator.clipboard?.writeText(url).then(() => setCopied(true), () => setCopied(false));
   };
-  return (0, import_react75.createElement)(
-    import_react75.Fragment,
+  return (0, import_react76.createElement)(
+    import_react76.Fragment,
     null,
-    (0, import_react75.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: copy2 }, t("Copy link")),
-    copied ? (0, import_react75.createElement)("span", { className: "bt-cli-subtle", role: "status" }, t("Copied")) : null
+    (0, import_react76.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: copy2 }, t("Copy link")),
+    copied ? (0, import_react76.createElement)("span", { className: "bt-cli-subtle", role: "status" }, t("Copied")) : null
   );
 }
 function Attempt({ bot, row, roster, manager, secretPending, fieldRef }) {
@@ -28542,52 +28610,52 @@ function Attempt({ bot, row, roster, manager, secretPending, fieldRef }) {
   const opener = attempt?.openedBy && attempt.openedBy !== bot.id ? roster.byId?.[attempt.openedBy]?.name : void 0;
   const step2 = codeStep(row);
   if (row.confirm) {
-    return (0, import_react75.createElement)(
-      import_react75.Fragment,
+    return (0, import_react76.createElement)(
+      import_react76.Fragment,
       null,
-      (0, import_react75.createElement)("p", null, opener ? t("Cancel the {name} sign-in opened in {bot}?", { name, bot: opener }) : t("Cancel the {name} sign-in?", { name })),
-      (0, import_react75.createElement)(
+      (0, import_react76.createElement)("p", null, opener ? t("Cancel the {name} sign-in opened in {bot}?", { name, bot: opener }) : t("Cancel the {name} sign-in?", { name })),
+      (0, import_react76.createElement)(
         "div",
         { className: "bt-cli-actions" },
-        (0, import_react75.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => void manager.cancel(bot.id) }, t("Yes, cancel")),
-        (0, import_react75.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.keepAttempt(bot.id) }, t("Keep it"))
+        (0, import_react76.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => void manager.cancel(bot.id) }, t("Yes, cancel")),
+        (0, import_react76.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.keepAttempt(bot.id) }, t("Keep it"))
       )
     );
   }
-  return (0, import_react75.createElement)(
-    import_react75.Fragment,
+  return (0, import_react76.createElement)(
+    import_react76.Fragment,
     null,
-    url ? (0, import_react75.createElement)(
-      import_react75.Fragment,
+    url ? (0, import_react76.createElement)(
+      import_react76.Fragment,
       null,
-      (0, import_react75.createElement)("p", null, t("Open this link on any device:")),
-      (0, import_react75.createElement)("p", { className: "bt-cli-link-line" }, (0, import_react75.createElement)("a", { href: url, target: "_blank", rel: "noopener noreferrer", className: "bt-cli-link" }, url))
-    ) : (0, import_react75.createElement)("p", null, t("Preparing your sign-in…")),
-    url ? (0, import_react75.createElement)(
+      (0, import_react76.createElement)("p", null, t("Open this link on any device:")),
+      (0, import_react76.createElement)("p", { className: "bt-cli-link-line" }, (0, import_react76.createElement)("a", { href: url, target: "_blank", rel: "noopener noreferrer", className: "bt-cli-link" }, url))
+    ) : (0, import_react76.createElement)("p", null, t("Preparing your sign-in…")),
+    url ? (0, import_react76.createElement)(
       "div",
       { className: "bt-cli-actions" },
-      (0, import_react75.createElement)(CopyLink, { url }),
-      attempt?.expiresAt ? (0, import_react75.createElement)("span", { className: "bt-cli-subtle" }, t("Expires at {time}", { time: timeOf(attempt.expiresAt) })) : null
+      (0, import_react76.createElement)(CopyLink, { url }),
+      attempt?.expiresAt ? (0, import_react76.createElement)("span", { className: "bt-cli-subtle" }, t("Expires at {time}", { time: timeOf(attempt.expiresAt) })) : null
     ) : null,
-    row.provider === "acp-codex" && attempt?.userCode ? (0, import_react75.createElement)(
-      import_react75.Fragment,
+    row.provider === "acp-codex" && attempt?.userCode ? (0, import_react76.createElement)(
+      import_react76.Fragment,
       null,
-      (0, import_react75.createElement)("p", null, t("Enter this code on that page:"), " ", (0, import_react75.createElement)("code", { className: "bt-cli-code-text" }, attempt.userCode)),
-      (0, import_react75.createElement)("p", { className: "bt-cli-subtle" }, t("Waiting for {name} to confirm…", { name }))
+      (0, import_react76.createElement)("p", null, t("Enter this code on that page:"), " ", (0, import_react76.createElement)("code", { className: "bt-cli-code-text" }, attempt.userCode)),
+      (0, import_react76.createElement)("p", { className: "bt-cli-subtle" }, t("Waiting for {name} to confirm…", { name }))
     ) : null,
-    row.provider === "acp-claude" && attempt?.checking ? (0, import_react75.createElement)("p", { className: "bt-cli-subtle" }, t("Checking the code…")) : null,
-    step2 ? (0, import_react75.createElement)(
-      import_react75.Fragment,
+    row.provider === "acp-claude" && attempt?.checking ? (0, import_react76.createElement)("p", { className: "bt-cli-subtle" }, t("Checking the code…")) : null,
+    step2 ? (0, import_react76.createElement)(
+      import_react76.Fragment,
       null,
-      (0, import_react75.createElement)("p", null, t("Paste here the code shown after you authorize:")),
-      (0, import_react75.createElement)(CodeField, { disabled: secretPending, busy: row.busy, fieldRef, onSubmit: (value) => void manager.answer(bot.id, value) }),
-      (0, import_react75.createElement)("p", { className: "bt-cli-subtle" }, secretPending ? t("Finish the secret requested first.") : t("The message field comes back as soon as you send the code or cancel."))
+      (0, import_react76.createElement)("p", null, t("Paste here the code shown after you authorize:")),
+      (0, import_react76.createElement)(CodeField, { disabled: secretPending, busy: row.busy, fieldRef, onSubmit: (value) => void manager.answer(bot.id, value) }),
+      (0, import_react76.createElement)("p", { className: "bt-cli-subtle" }, secretPending ? t("Finish the secret requested first.") : t("The message field comes back as soon as you send the code or cancel."))
     ) : null,
-    row.error ? (0, import_react75.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
-    (0, import_react75.createElement)(
+    row.error ? (0, import_react76.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
+    (0, import_react76.createElement)(
       "div",
       { className: "bt-cli-actions" },
-      (0, import_react75.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.askCancel(bot.id) }, t("Cancel sign-in"))
+      (0, import_react76.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.askCancel(bot.id) }, t("Cancel sign-in"))
     )
   );
 }
@@ -28622,7 +28690,7 @@ async function announceCarried({ actions }) {
 var modelName = (roster, ref) => typeof ref === "string" ? roster.models?.find((model) => model.ref === ref)?.name ?? (ref.split("/").slice(1).join("/") || ref) : "";
 function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef }) {
   const name = CLI_NAMES[row.provider];
-  (0, import_react75.useLayoutEffect)(() => {
+  (0, import_react76.useLayoutEffect)(() => {
     if (row.reveal === void 0) return;
     seat.scrollIntoView?.({ block: "nearest" });
     manager.revealed(bot.id, row.reveal);
@@ -28630,65 +28698,65 @@ function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef 
   const body = (() => {
     switch (row.stage) {
       case "offer":
-        return (0, import_react75.createElement)(
-          import_react75.Fragment,
+        return (0, import_react76.createElement)(
+          import_react76.Fragment,
           null,
-          (0, import_react75.createElement)("p", null, t("To use {name} in this Bot, sign in to your account.", { name })),
-          row.error ? (0, import_react75.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
-          (0, import_react75.createElement)(
+          (0, import_react76.createElement)("p", null, t("To use {name} in this Bot, sign in to your account.", { name })),
+          row.error ? (0, import_react76.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
+          (0, import_react76.createElement)(
             "div",
             { className: "bt-cli-actions" },
-            (0, import_react75.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.start(bot.id) }, t("Sign in")),
-            (0, import_react75.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Not now"))
+            (0, import_react76.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.start(bot.id) }, t("Sign in")),
+            (0, import_react76.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Not now"))
           )
         );
       case "account":
-        return (0, import_react75.createElement)(
-          import_react75.Fragment,
+        return (0, import_react76.createElement)(
+          import_react76.Fragment,
           null,
-          (0, import_react75.createElement)("p", null, accountLine(name, row.account)),
-          (0, import_react75.createElement)("p", null, row.account?.authScope === "isolated" ? t("Bots will use and bill this account. Your terminal login is separate.") : t("Bots will use and bill this account. It is the same sign-in your terminal uses.")),
-          row.error ? (0, import_react75.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
-          (0, import_react75.createElement)(
+          (0, import_react76.createElement)("p", null, accountLine(name, row.account)),
+          (0, import_react76.createElement)("p", null, row.account?.authScope === "isolated" ? t("Bots will use and bill this account. Your terminal login is separate.") : t("Bots will use and bill this account. It is the same sign-in your terminal uses.")),
+          row.error ? (0, import_react76.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
+          (0, import_react76.createElement)(
             "div",
             { className: "bt-cli-actions" },
-            (0, import_react75.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.confirm(bot.id) }, t("Use this account")),
-            (0, import_react75.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Not now"))
+            (0, import_react76.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.confirm(bot.id) }, t("Use this account")),
+            (0, import_react76.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Not now"))
           )
         );
       case "attempt":
-        return (0, import_react75.createElement)(Attempt, { bot, row, roster, manager, secretPending, fieldRef });
+        return (0, import_react76.createElement)(Attempt, { bot, row, roster, manager, secretPending, fieldRef });
       case "done":
-        return (0, import_react75.createElement)("p", null, row.taken ? t("Done: Bots will use this {name} account.", { name }) : t("Done: signed in to {name}.", { name }));
+        return (0, import_react76.createElement)("p", null, row.taken ? t("Done: Bots will use this {name} account.", { name }) : t("Done: signed in to {name}.", { name }));
       case "applyFailed":
-        return (0, import_react75.createElement)("p", null, t("Signed in, but {model} could not be used: {reason} This Bot stays on {kept}.", {
+        return (0, import_react76.createElement)("p", null, t("Signed in, but {model} could not be used: {reason} This Bot stays on {kept}.", {
           model: modelName(roster, row.outcome?.ref) || name,
           reason: hostText(row.outcome?.message ?? ""),
           kept: modelName(roster, row.outcome?.kept) || t("its model")
         }));
       case "failed":
       case "interrupted":
-        return (0, import_react75.createElement)(
-          import_react75.Fragment,
+        return (0, import_react76.createElement)(
+          import_react76.Fragment,
           null,
-          (0, import_react75.createElement)("p", { className: "bt-cli-error" }, row.stage === "interrupted" ? t("The sign-in was interrupted by a restart. Get a new link.") : hostText(row.message ?? "Sign-in did not finish. Try again.")),
-          row.error ? (0, import_react75.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
-          (0, import_react75.createElement)(
+          (0, import_react76.createElement)("p", { className: "bt-cli-error" }, row.stage === "interrupted" ? t("The sign-in was interrupted by a restart. Get a new link.") : hostText(row.message ?? "Sign-in did not finish. Try again.")),
+          row.error ? (0, import_react76.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
+          (0, import_react76.createElement)(
             "div",
             { className: "bt-cli-actions" },
-            (0, import_react75.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.start(bot.id) }, t("Try again")),
-            (0, import_react75.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Close"))
+            (0, import_react76.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.start(bot.id) }, t("Try again")),
+            (0, import_react76.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Close"))
           )
         );
       default:
         return null;
     }
   })();
-  return (0, import_react75.createElement)(
+  return (0, import_react76.createElement)(
     "div",
     { className: "bt-cli-row", "data-cli-login": row.provider, "data-stage": row.stage, role: "group", "aria-label": t("Sign in to {name}", { name }) },
-    (0, import_react75.createElement)("div", { className: "bt-cli-row-title" }, name),
-    (0, import_react75.createElement)("div", { "aria-live": "polite" }, body)
+    (0, import_react76.createElement)("div", { className: "bt-cli-row-title" }, name),
+    (0, import_react76.createElement)("div", { "aria-live": "polite" }, body)
   );
 }
 function CliLoginConversation({ sessionId, useRoster, useSession, inputActions, actions }) {
@@ -28697,17 +28765,17 @@ function CliLoginConversation({ sessionId, useRoster, useSession, inputActions, 
   const manager = actions.cliLogin;
   const bot = cliLoginBotOf(roster, sessionId);
   const eligible = Boolean(bot) && roster.ready !== false && currentPart(bot) === sessionId && manager !== void 0;
-  const row = (0, import_react75.useSyncExternalStore)(manager?.subscribe ?? noSubscribe3, () => eligible ? manager.getSnapshot().rows[bot.id] : void 0);
+  const row = (0, import_react76.useSyncExternalStore)(manager?.subscribe ?? noSubscribe3, () => eligible ? manager.getSnapshot().rows[bot.id] : void 0);
   const secretPending = eligible && (roster.secretRequests?.[bot.id] ?? []).some((entry) => entry.status === "pending");
-  const anchor = (0, import_react75.useRef)(null);
-  const fieldRef = (0, import_react75.useRef)(null);
-  const [seat, setSeat] = (0, import_react75.useState)(null);
+  const anchor = (0, import_react76.useRef)(null);
+  const fieldRef = (0, import_react76.useRef)(null);
+  const [seat, setSeat] = (0, import_react76.useState)(null);
   const locked = codeStep(row);
-  const wasCode = (0, import_react75.useRef)(false);
-  (0, import_react75.useEffect)(() => {
+  const wasCode = (0, import_react76.useRef)(false);
+  (0, import_react76.useEffect)(() => {
     if (eligible) void manager.restore(bot.id);
   }, [eligible, bot?.id]);
-  (0, import_react75.useEffect)(() => {
+  (0, import_react76.useEffect)(() => {
     if (!locked) {
       if (wasCode.current) {
         wasCode.current = false;
@@ -28722,7 +28790,7 @@ function CliLoginConversation({ sessionId, useRoster, useSession, inputActions, 
     if (!occurrence) return void 0;
     return lockEditor(occurrence, { onFocus: () => fieldRef.current?.focus() });
   }, [locked, sessionId]);
-  (0, import_react75.useLayoutEffect)(() => {
+  (0, import_react76.useLayoutEffect)(() => {
     if (!eligible || row === void 0 || !anchor.current) return void 0;
     const occurrence = anchor.current.closest("[data-conversation-content][data-conversation-session]");
     if (!occurrence || occurrence.dataset.conversationSession !== sessionId) return void 0;
@@ -28760,10 +28828,10 @@ function CliLoginConversation({ sessionId, useRoster, useSession, inputActions, 
     };
   }, [eligible, row === void 0, sessionId, blank3]);
   if (!eligible || row === void 0) return null;
-  return (0, import_react75.createElement)(
+  return (0, import_react76.createElement)(
     "span",
     { ref: anchor, hidden: true, "data-cli-login-anchor": sessionId },
-    seat ? (0, import_react_dom16.createPortal)((0, import_react75.createElement)(CliLoginRow, { bot, row, roster, manager, secretPending, seat, fieldRef }), seat) : null
+    seat ? (0, import_react_dom16.createPortal)((0, import_react76.createElement)(CliLoginRow, { bot, row, roster, manager, secretPending, seat, fieldRef }), seat) : null
   );
 }
 var CLI_LOGIN_CSS = `
@@ -28796,7 +28864,7 @@ var ACCOUNT_CHANGED = "bot/account-changed";
 var ACCOUNT_SIGNED_OUT = "bot/account-signed-out";
 var providerOf2 = (ref) => typeof ref === "string" && ref.includes("/") ? ref.slice(0, ref.indexOf("/")) : void 0;
 var messageOf = (error) => typeof error?.message === "string" && error.message !== "" ? error.message : "Could not continue this sign-in. Try again.";
-function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf: modelOf2, botOf }) {
+function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf: modelOf2, botOf: botOf2 }) {
   const listeners2 = /* @__PURE__ */ new Set();
   let snapshot = Object.freeze({ rows: Object.freeze({}) });
   let disposed = false;
@@ -29061,10 +29129,10 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     // Settings' confirmed recovery composes the existing owner RPCs. Each RPC retains its
     // own host admission checks; Reset and start are deliberately not an atomic transaction.
     async recover({ botId, provider, ref }) {
-      if (disposed || !known(provider) || !botOf?.(botId)) return false;
+      if (disposed || !known(provider) || !botOf2?.(botId)) return false;
       const model = modelOf2?.(botId);
       let operation = nextIntent();
-      const current = () => !disposed && intent === operation && Boolean(botOf(botId)) && modelOf2?.(botId) === model;
+      const current = () => !disposed && intent === operation && Boolean(botOf2(botId)) && modelOf2?.(botId) === model;
       await actions.cliLoginReset(botId, provider);
       if (!current()) return false;
       stopPoll(provider);
@@ -29331,7 +29399,7 @@ function createSwitchWindow(settle) {
 }
 
 // src/client/suggestions.js
-var import_react76 = require("react");
+var import_react77 = require("react");
 var MAX_SUGGESTIONS = 3;
 var IMAGE_ACCESS_TTL_MS = 6e4;
 var imagesReady;
@@ -29379,21 +29447,21 @@ function SuggestionDock({ sessionId, input, session, useRoster, useSessions }) {
   const outline = (list) => list.projectionsBySession?.[part]?.values?.turnOutline ?? list.byId?.[part]?.projectionValues?.turnOutline;
   const wrote = useSessions ? useSessions((list) => personWrote(outline(list), roster.exchangeTurns?.[part] ?? [])) : true;
   const entries2 = useEntries(chatSuggestions);
-  const [images, setImages] = (0, import_react76.useState)(false);
-  (0, import_react76.useEffect)(() => {
+  const [images, setImages] = (0, import_react77.useState)(false);
+  (0, import_react77.useEffect)(() => {
     void imageAccess().then(setImages);
   }, [sessionId]);
   if (!bot || wrote || session?.running || (input?.draft ?? "").trim() !== "") return null;
   const items = suggestionsFor(entries2, { bot, roster, images });
   if (items.length === 0) return null;
-  return (0, import_react76.createElement)(
+  return (0, import_react77.createElement)(
     "div",
     { className: "bt-suggest", role: "group", "aria-label": t("Suggestions") },
-    items.map((item) => (0, import_react76.createElement)(
+    items.map((item) => (0, import_react77.createElement)(
       "button",
       { key: item.key, type: "button", className: "bt-suggest-chip", onClick: () => fillComposer(item.text) },
-      icons_exports[item.icon] ? (0, import_react76.createElement)("span", { className: "bt-suggest-icon", "aria-hidden": true }, (0, import_react76.createElement)(icons_exports[item.icon])) : null,
-      (0, import_react76.createElement)("span", null, item.label)
+      icons_exports[item.icon] ? (0, import_react77.createElement)("span", { className: "bt-suggest-icon", "aria-hidden": true }, (0, import_react77.createElement)(icons_exports[item.icon])) : null,
+      (0, import_react77.createElement)("span", null, item.label)
     ))
   );
 }
@@ -29409,7 +29477,7 @@ var SUGGEST_CSS = `
 `;
 
 // src/client/user-message.js
-var import_react77 = require("react");
+var import_react78 = require("react");
 var ui = __toESM(require("@deepseek-ai/dsh-client-ui-primitives"), 1);
 var canDrawUserMessages = () => typeof ui.projectUserText === "function";
 function contentParts(content) {
@@ -29441,38 +29509,38 @@ function userTextParts(text2, bots, referenceLabels = []) {
   return parts;
 }
 function UserText({ text: text2, bots, referenceLabels, skillNames, references, actions }) {
-  return userTextParts(text2, bots, referenceLabels).map((part, index) => part.bot ? (0, import_react77.createElement)(
+  return userTextParts(text2, bots, referenceLabels).map((part, index) => part.bot ? (0, import_react78.createElement)(
     "button",
     { key: index, type: "button", className: "bt-umention", title: `@${part.bot.name}`, onClick: () => actions.openSession(part.bot.id) },
-    (0, import_react77.createElement)(BotMark, { bot: part.bot, size: 16 }),
+    (0, import_react78.createElement)(BotMark, { bot: part.bot, size: 16 }),
     part.label
-  ) : (0, import_react77.createElement)(import_react77.Fragment, { key: index }, ui.projectUserText(part.text, referenceLabels, skillNames, "skill", references)));
+  ) : (0, import_react78.createElement)(import_react78.Fragment, { key: index }, ui.projectUserText(part.text, referenceLabels, skillNames, "skill", references)));
 }
 function Attachments({ attachments, renderMessageImages }) {
   const compact2 = attachments.length > 1;
-  return (0, import_react77.createElement)("div", { className: "bt-uattach" }, attachments.map((block, index) => {
+  return (0, import_react78.createElement)("div", { className: "bt-uattach" }, attachments.map((block, index) => {
     if (block.type === "image") {
-      return renderMessageImages ? (0, import_react77.createElement)(import_react77.Fragment, { key: index }, renderMessageImages({ images: [{ attachment: block.attachment }], align: "end", compact: compact2 })) : null;
+      return renderMessageImages ? (0, import_react78.createElement)(import_react78.Fragment, { key: index }, renderMessageImages({ images: [{ attachment: block.attachment }], align: "end", compact: compact2 })) : null;
     }
     const file = block.attachment;
     const meta = [ui.fileExtension?.(file.name)?.toUpperCase().slice(0, 8), ui.fileSizeText?.(file.bytes)].filter(Boolean).join(" · ");
-    return (0, import_react77.createElement)(
+    return (0, import_react78.createElement)(
       "span",
       { key: index, className: "bt-ufile", title: file.name },
-      ui.FileTypeIcon ? (0, import_react77.createElement)(ui.FileTypeIcon, { path: file.name, className: "bt-ufile-icon" }) : null,
-      (0, import_react77.createElement)("span", { className: "bt-ufile-text" }, (0, import_react77.createElement)("span", { className: "bt-ufile-name" }, file.name), meta ? (0, import_react77.createElement)("span", { className: "bt-ufile-meta" }, meta) : null)
+      ui.FileTypeIcon ? (0, import_react78.createElement)(ui.FileTypeIcon, { path: file.name, className: "bt-ufile-icon" }) : null,
+      (0, import_react78.createElement)("span", { className: "bt-ufile-text" }, (0, import_react78.createElement)("span", { className: "bt-ufile-name" }, file.name), meta ? (0, import_react78.createElement)("span", { className: "bt-ufile-meta" }, meta) : null)
     );
   }));
 }
 function CopyButton2({ text: text2 }) {
-  const [copied, setCopied] = (0, import_react77.useState)(false);
+  const [copied, setCopied] = (0, import_react78.useState)(false);
   const copy2 = () => {
     void navigator.clipboard?.writeText(text2).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1e3);
     });
   };
-  return (0, import_react77.createElement)("button", { type: "button", className: "bt-tool", "aria-label": copied ? t("Copied") : t("Copy"), title: copied ? t("Copied") : t("Copy"), onClick: copy2 }, copied ? (0, import_react77.createElement)(CheckIcon) : (0, import_react77.createElement)(CopyIcon));
+  return (0, import_react78.createElement)("button", { type: "button", className: "bt-tool", "aria-label": copied ? t("Copied") : t("Copy"), title: copied ? t("Copied") : t("Copy"), onClick: copy2 }, copied ? (0, import_react78.createElement)(CheckIcon) : (0, import_react78.createElement)(CopyIcon));
 }
 var clock3 = (time) => typeof time === "number" ? new Date(time).toLocaleTimeString(dateLocale(), { hour: "numeric", minute: "2-digit" }) : void 0;
 function UserMessageCell({ node, sessionId, useRoster, actions, renderMessageImages, openFile, openSkill }) {
@@ -29484,10 +29552,10 @@ function UserMessageCell({ node, sessionId, useRoster, actions, renderMessageIma
   const steering = node.kind === "steering";
   const groupTime = roster.roomsById?.[sessionId] && Number.isFinite(data.time) ? messageClock(data.time) : void 0;
   const { shown, folded, control } = useFold(text2, { markdown: false });
-  const body = (0, import_react77.createElement)(UserText, { text: shown, bots: mentionableBots(roster, sessionId), referenceLabels, skillNames: data.skillNames ?? [], references, actions });
-  const row = (0, import_react77.useRef)(null);
-  const [toolsOpen, setToolsOpen] = (0, import_react77.useState)(false);
-  (0, import_react77.useEffect)(() => {
+  const body = (0, import_react78.createElement)(UserText, { text: shown, bots: mentionableBots(roster, sessionId), referenceLabels, skillNames: data.skillNames ?? [], references, actions });
+  const row = (0, import_react78.useRef)(null);
+  const [toolsOpen, setToolsOpen] = (0, import_react78.useState)(false);
+  (0, import_react78.useEffect)(() => {
     if (!toolsOpen) return void 0;
     const onDown = (event) => {
       if (!row.current?.contains(event.target)) setToolsOpen(false);
@@ -29503,24 +29571,24 @@ function UserMessageCell({ node, sessionId, useRoster, actions, renderMessageIma
     if (!noHover() || event.target instanceof Element && event.target.closest("a,button,input,textarea,select,pre,code,[role=button],[role=link]")) return;
     setToolsOpen((value) => !value);
   };
-  return (0, import_react77.createElement)(
+  return (0, import_react78.createElement)(
     "div",
     { ref: row, className: "bt-umsg", "data-steering": steering || void 0 },
-    (0, import_react77.createElement)(
+    (0, import_react78.createElement)(
       "div",
       { className: "bt-ustack" },
-      attachments.length > 0 ? (0, import_react77.createElement)(Attachments, { attachments, renderMessageImages }) : null,
-      text2 !== "" || rest2.length > 0 ? (0, import_react77.createElement)(
+      attachments.length > 0 ? (0, import_react78.createElement)(Attachments, { attachments, renderMessageImages }) : null,
+      text2 !== "" || rest2.length > 0 ? (0, import_react78.createElement)(
         "div",
         { className: "bt-ubody", title: clock3(data.time), "data-folded": folded || void 0, onClick: tapTools },
-        control ? (0, import_react77.createElement)("div", { className: "bt-fold-body" }, body) : body,
+        control ? (0, import_react78.createElement)("div", { className: "bt-fold-body" }, body) : body,
         control,
-        rest2.map((block, index) => ui.JsonBlock ? (0, import_react77.createElement)(ui.JsonBlock, { key: index, label: t("Content"), payload: block }) : null)
+        rest2.map((block, index) => ui.JsonBlock ? (0, import_react78.createElement)(ui.JsonBlock, { key: index, label: t("Content"), payload: block }) : null)
       ) : null,
-      referenceLabels.length > 0 ? (0, import_react77.createElement)("div", { className: "bt-urefs" }, t("Referenced {labels}", { labels: referenceLabels.join(t(", ")) })) : null,
-      typeof data.time === "number" ? (0, import_react77.createElement)("time", { className: "bt-utime", dateTime: new Date(data.time).toISOString(), title: clockLabel(data.time) }, groupTime ?? clock3(data.time)) : null
+      referenceLabels.length > 0 ? (0, import_react78.createElement)("div", { className: "bt-urefs" }, t("Referenced {labels}", { labels: referenceLabels.join(t(", ")) })) : null,
+      typeof data.time === "number" ? (0, import_react78.createElement)("time", { className: "bt-utime", dateTime: new Date(data.time).toISOString(), title: clockLabel(data.time) }, groupTime ?? clock3(data.time)) : null
     ),
-    text2 === "" ? null : (0, import_react77.createElement)("div", { className: "bt-utools", "data-open": toolsOpen || void 0 }, (0, import_react77.createElement)(CopyButton2, { text: text2 }))
+    text2 === "" ? null : (0, import_react78.createElement)("div", { className: "bt-utools", "data-open": toolsOpen || void 0 }, (0, import_react78.createElement)(CopyButton2, { text: text2 }))
   );
 }
 var USER_MESSAGE_CSS = `
@@ -30650,7 +30718,10 @@ function apply(ctx) {
     () => shadow("conversation.input.dock", { id: "bot-view", order: -95, inject: face }, WidgetDock),
     () => shadow("conversation.input.dock", { id: "bot-secret", order: -90, inject: face }, SecretDock),
     () => shadow("conversation.input.dock", { id: "bot-suggest", order: -80, inject: face }, SuggestionDock),
-    () => shadow("conversation.input.dock", { id: "bot-handoff", order: -85, inject: face }, HandoffDock)
+    () => shadow("conversation.input.dock", { id: "bot-handoff", order: -85, inject: face }, HandoffDock),
+    // Keep the running-model mismatch visible just above the composer while it lasts.
+    () => installCompiledStyles(MODEL_SWITCH_CSS, "model-switch"),
+    () => shadow("conversation.input.dock", { id: "bot-model-switch", order: -70, inject: face }, ModelSwitchNotice)
   ];
   ctx.effect(() => installCompiledStyles(RETURN_CSS, "return"), "ds-bot: return styles");
   shadow("sidebar.footer.action", { id: "bot-return", order: -300, inject: face }, BotReturn);
