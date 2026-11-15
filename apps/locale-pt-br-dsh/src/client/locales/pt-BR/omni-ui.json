@@ -1861,7 +1861,7 @@
   "The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.": "O Hermes em execução em {host} gerencia as sessões como gateway. Este chat precisa de um Hermes iniciado com “hermes serve”.",
   "Hermes’s profiles could not be read": "Não foi possível ler os perfis do Hermes",
   "Hermes on {host} did not list its profiles": "O Hermes em {host} não listou seus perfis",
-  "Hermes is running on {host}, but its own profile list could not be read.": "O Hermes está em execução em {host}, mas não foi possível ler a lista de perfis dele.",
+  "Hermes is running on {host}, but its own profile list could not be read.": "O Hermes está em execução em {host}, mas não foi possível ler a própria lista de perfis.",
   "Run “hermes profile list” on {host}, then try again.": "Execute “hermes profile list” em {host} e tente novamente.",
   "SSH couldn’t find Hermes": "O SSH não encontrou o Hermes",
   "Automagik looks for Hermes through the other computer’s login shell (bash -lc “command -v hermes”) and its usual folders, and found none. Install or update Hermes there, or enter its executable path.": "O Automagik procura o Hermes pelo shell de login da outra máquina (bash -lc “command -v hermes”) e por suas pastas habituais, e não encontrou. Instale ou atualize o Hermes lá, ou informe o caminho do executável.",
