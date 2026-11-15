@@ -174,7 +174,8 @@ jobs:
     # Only when herdr/ changed, or the workflows and lane tooling that test and pack it.
     name: herdr pack (Node ${{ matrix.node }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The full CLI/worker suites plus the local/linked start matrix exceed ten minutes.
+    timeout-minutes: 15
     env:
       HERDR_CHANGED_PATHS: '^(herdr/|herdr-layout/|\.github/workflows/(ci|release)\.yml$|\.github/scripts/herdr-app-check\.mjs$|scripts/(lane|version)\.ts$)'
     strategy:
@@ -1294,6 +1295,22 @@ jobs:
         if: matrix.app == 'bots-dsh'
         run: echo "CHROME_BIN=/usr/bin/google-chrome" >> "$GITHUB_ENV"
 
+      - name: Electron for the Bot team's script wall check
+        # browser_exec's process wall is checked on both runtimes the Bot team ships on. The
+        # desktop app's is Electron as Node: the Electron apps/desktop pins, from its lock.
+        # Under CI that half fails, rather than skips, when it finds no Electron.
+        if: matrix.app == 'bots-dsh'
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          npm ci --no-fund --no-audit
+          # The package fetches its binary on first use, checked against its own checksums,
+          # and says so on stdout: fetch first, then ask for the path alone.
+          node node_modules/electron/install.js
+          bin="$(node -p "require('electron')")"
+          test -x "${bin}"
+          echo "ELECTRON_BIN=${bin}" >> "$GITHUB_ENV"
+
       - name: Generated files are current
         # A package with no browser half has no client to build.
         run: '[ ! -f scripts/build-client.mjs ] || node scripts/build-client.mjs --check'
@@ -1407,9 +1424,9 @@ jobs:
 
   desktop:
     # The desktop app's main-process logic in plain Node (home layout, profile install and the
-    # move from the old package names, the preload, dsh supervision, navigation, updates), so
-    # the Electron binary itself is not downloaded here. On Linux and on Windows, which the app
-    # ships on too (desktop-build.yml).
+    # move from the old package names, the preload, dsh supervision, navigation, updates);
+    # a minimal sharp fixture also checks the real Electron wasm pipeline. On Linux and on
+    # Windows, which the app ships on too (desktop-build.yml).
     name: Desktop (main-process tests${{ matrix.os == 'windows-latest' && ', windows' || '' }})
     strategy:
       fail-fast: false
@@ -1422,7 +1439,6 @@ jobs:
         working-directory: apps/desktop
         shell: bash
     env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       DO_NOT_TRACK: '1'
     steps:
       # As the Windows build checks out (desktop-build.yml): the files as the commit holds them.
@@ -1444,6 +1460,9 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Sharp wasm in Electron (minimal runtime fixture)
+        run: node scripts/smoke-sharp.mjs --fixture
 
   acp-windows:
     # acp-dsh runs the app's pnpm.cmd and the agents' CLIs (codex.cmd) on Windows through cmd.exe
@@ -1469,7 +1488,7 @@ jobs:
           node-version: 24.9
 
       - name: Test
-        run: node --test test/batch-spawn.test.js
+        run: node --test test/batch-spawn.test.js test/process-identity.test.js
 
   boot:
     # The plugins booted for real with Omni's channels and canvases (the release omni.json

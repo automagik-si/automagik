@@ -104,12 +104,12 @@ CLI never repairs or rewrites the record.
 
 | Route | Where its argv is built | How the login words go on |
 |---|---|---|
-| `automagik-herdr start` | `startArgs` (`launchArgs.js`) | its `env` words, after `-u` when A |
+| `am start` (`automagik-herdr` is an alias) | `startArgs` (`launchArgs.js`) | its `env` words, after `-u` when A |
 | `restart` of a bot (and the panel's Restart, below) | `startArgs`, after `paneCommand` (`restart.js`) strips the old prefix | the same |
 | `restart --tree`: each helper run again | `helperArgs` (`restart.js`), also printed by `byHand` | the same words before the helper's argv, or before `sh -c` for a template helper |
-| a worker (`automagik-herdr worker`) | `workerArgs` (`workers.js`) | the same words, after `PATH=` |
+| a worker (`am worker`) | `workerArgs` (`workers.js`) | the same words, after `PATH=` |
 | a **template** worker | `workerArgs` with `template`: today `hc run … <template> <task>`, which takes no environment | see below |
-| the Accounts panel's background Restart | `cliRun` (`am-quota/main.js`) runs `automagik-herdr restart` in an hc terminal | none of its own: the CLI it runs reads the record. `CLI_ENV` never carries `CLAUDE_CONFIG_DIR` |
+| the Accounts panel's background Restart | `cliRun` (`am-quota/main.js`) runs `am restart` in an hc terminal | none of its own: the CLI it runs reads the record. `CLI_ENV` never carries `CLAUDE_CONFIG_DIR` |
 
 **Template workers.** `hc run <template>` takes no environment, so a template's pane would get
 herdr-core's environment, whatever login that names. When `templateAgent` says a template runs
@@ -253,7 +253,7 @@ The choice of folder can be beaten in two ways:
 **How the build detects it:** per login, the panel runs `claude auth status` in that login's own
 launch environment, through exec, with the same `-u` or assignment words a launch would get. It
 runs the claude a launch would run, with the PATH a launch gives its pane: the CLI says where
-(`automagik-herdr launch-path claude`). Each check is bounded at 10 s, and the logins are looked
+(`am launch-path claude`). Each check is bounded at 10 s, and the logins are looked
 at side by side, one round at a time. A login whose check didn't answer says so and gets no **Use**. That
 the CLI applies every settings layer before it answers is **inferred**, not documented. The
 build's scratch-folder checks (section 4) confirm it. Its JSON carries `configDirectory` and

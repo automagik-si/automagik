@@ -332,6 +332,9 @@ export async function fetchReleases(fetchImpl = fetch) {
  * `{ result: 'latest' | 'found' | 'ready' | 'error' | 'busy', version?, retrying? }`.
  */
 export function startUpdates({ updater, current, platform, env, log, onState, mode = 'auto', releases = fetchReleases, timers = globalThis }) {
+  const readyWaiters = new Set()
+  let lastCheck = null
+  let latestVersion = null
   let busy = false
   let pending = null
   let ready = null
@@ -369,6 +372,8 @@ export function startUpdates({ updater, current, platform, env, log, onState, mo
   function report(state) {
     retrying = state?.state === 'retrying'
     failed = state?.state === 'failed'
+    if (state?.version) latestVersion = state.version
+    if (state?.state === 'ready' || failed) for (const done of readyWaiters) done(!failed)
     onState(state)
   }
   // Only a failure's mark goes: a check that runs while a download is under way leaves its
@@ -478,6 +483,13 @@ export function startUpdates({ updater, current, platform, env, log, onState, mo
   }
 
   async function check() {
+    const answer = await checkOnce()
+    if (answer.result !== 'busy') lastCheck = answer.result
+    if (answer.version) latestVersion = answer.version
+    return answer
+  }
+
+  async function checkOnce() {
     if (ready !== null) {
       if (newer(ready)) return { result: 'ready', version: ready }
       discardStale(ready)
@@ -526,8 +538,19 @@ export function startUpdates({ updater, current, platform, env, log, onState, mo
   return {
     check,
     get ready() { return ready },
+    get appUpdate() { return { version: latestVersion, latest: lastCheck === 'latest' } },
+    whenReady({ timeoutMs = 5 * 60_000 } = {}) {
+      if (ready !== null) return Promise.resolve(true)
+      if (failed) return Promise.resolve(false)
+      return new Promise(resolve => {
+        const done = value => { timers.clearTimeout(timer); readyWaiters.delete(done); resolve(value) }
+        const timer = timers.setTimeout(() => done(false), timeoutMs)
+        readyWaiters.add(done)
+      })
+    },
     install: () => { if (ready !== null && newer(ready)) updater.quitAndInstall(false, true) },
     stop: () => {
+      for (const done of readyWaiters) done(false)
       timers.clearTimeout(first)
       timers.clearInterval(every)
       if (retry !== null) timers.clearTimeout(retry)

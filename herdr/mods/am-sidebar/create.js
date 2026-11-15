@@ -534,21 +534,30 @@ export class BotForm {
   // Restart (the CLI's `restart`, through runCli): the bot's agent again in its pane's
   // place, the old pane ended once the new one is up; `agent` swaps it (Restart on…). A
   // refusal --force overrides (a turn in progress) is offered once more as "Restart anyway".
-  restart(project, bot, cx, { agent = null, force = false, fresh = false } = {}) {
+  restart(project, bot, cx, { agent = null, force = false, fresh = false, tree = false } = {}) {
     if (this.busy) return;
     this.busy = restartKey({ agent, force, fresh });
     this.error = null;
     this.forceable = null;
     this.freshable = null;
+    this.helperRestart = null;
     cx.spawn(async (cx) => {
       // On a linked machine: past Herdr's 30 s exec limit, or refused where Herdr has only that (#444).
-      const args = restartArgs({ botId: bot.id, projectKey: project.key, agent, force, fresh, machine: project.machine ?? null });
-      const r = restartAnswer(await (project.machine ? machineCli(args, "restart") : runCli(args)));
+      const args = restartArgs({ botId: bot.id, projectKey: project.key, agent, force, fresh, tree, machine: project.machine ?? null });
+      let result;
+      try { result = await (project.machine || tree ? machineCli(args, "restart") : runCli(args)); }
+      catch (e) {
+        console.error(e?.stack ?? e);
+        result = { code: 1, err: String(e?.message ?? e) };
+      }
+      if (result.code !== 0) console.error(`am restart: ${result.err}`);
+      const r = restartAnswer(result);
       this.busy = false;
       if (r.refused) {
         this.error = r.refused;
         this.forceable = r.forceable ? { project, bot, agent } : null;
         this.freshable = r.freshable ? { project, bot } : null;
+        this.helperRestart = r.helpers ? { project, bot, agent, fresh } : null;
       } else {
         if (r.queued) {
           notify({ title: "Bots", level: "info", timeout: 15000,
@@ -595,7 +604,7 @@ export class BotForm {
     if (section === "inspect" && !this.history) {
       cx.spawn(async (cx) => {
         const r = await runCli(["history", this.p.bot, "--project", this.p.project]);
-        this.history = r.code === 0 && r.out ? r.out : { error: r.err || `automagik-herdr history failed (exit ${r.code}).` };
+        this.history = r.code === 0 && r.out ? r.out : { error: r.err || `am history failed (exit ${r.code}).` };
         cx.notify();
       });
     }
@@ -688,7 +697,7 @@ export class BotForm {
     cx.spawn(async (cx) => {
       const r = await runCli(["detach", this.p.bot, "--project", this.p.project, ...(this.machine ? ["--machine", this.machine] : [])]);
       this.busy = false;
-      if (r.code !== 0) this.error = r.err || `automagik-herdr detach failed (exit ${r.code}).`;
+      if (r.code !== 0) this.error = r.err || `am detach failed (exit ${r.code}).`;
       else { run("am-sidebar.refresh"); closeOverlay(this.p.overlay); }
       cx.notify();
     });
@@ -756,7 +765,21 @@ export class BotForm {
       .when(items.has("start"), (el) => el.child(item("menu-start", this.busy === "start" ? "Starting…" : "Start", (cx) => this.start(project, bot, cx))))
       .when(items.has("restart"), (el) => el.child(item("menu-restart", this.busy === "restart" ? "Restarting…" : "Restart", (cx) => this.restart(project, bot, cx))))
       .when(Boolean(this.forceable), (el) => el.child(item("menu-restart-force", this.busy === "restart-force" ? "Restarting…" : "Restart anyway (ends what it is doing)",
-        (cx) => this.restart(this.forceable.project, this.forceable.bot, cx, { agent: this.forceable.agent, force: true }))))
+        (cx) => {
+          const next = this.forceable;
+          if (next) this.restart(next.project, next.bot, cx, { agent: next.agent, force: true });
+        })))
+      .when(Boolean(this.helperRestart), (el) => el
+        .child(item("menu-restart-helpers", "Restart with its helpers", (cx) => {
+          const next = this.helperRestart;
+          if (!next) return;
+          this.restart(next.project, next.bot, cx, { agent: next.agent, fresh: next.fresh, tree: true, force: true });
+        }))
+        .child(item("menu-end-helpers-restart", "End helpers and restart", (cx) => {
+          const next = this.helperRestart;
+          if (!next) return;
+          this.restart(next.project, next.bot, cx, { agent: next.agent, fresh: next.fresh, force: true });
+        })))
       .when(Boolean(fresh), (el) => el.child(item("menu-restart-fresh", this.busy === "restart-fresh" ? "Restarting…" : "Restart with a new conversation",
         (cx) => this.restart(project, bot, cx, { fresh: true }))))
       .when(items.has("restart-on"), (el) => el.child(item("menu-restart-on", this.busy === "restart-on" ? "Restarting…" : `Restart on… ${this.swapOpen ? "▾" : "▸"}`, (cx) => this.toggleSwap(cx))))
@@ -1167,14 +1190,18 @@ export class BotForm {
           .child("Optional; the pane's role= label. The main bot is role=main, and a bot others report to is captain, automatically.")));
   }
 
+  booleanToggle(t, id, on, label, field) {
+    return h_flex().id(id).w(34).h(20).flex_none().p(2).rounded_full().cursor_pointer()
+      .bg(on ? t.accent : t.raised).border_1().border_color(on ? t.accent : t.input)
+      .when(on, (el) => el.justify_end()).accessibility_label(label)
+      .on_click((_e, cx) => this.set({ [field]: !on }, cx))
+      .child(div().size(14).rounded_full().bg(on ? t.accent_foreground ?? "#ffffff" : t.muted));
+  }
+
   codeBlock(v) {
     const { t, state } = v;
-    const on = state.code !== false;
-    const toggle = h_flex().id("bot-code").w(34).h(20).flex_none().p(2).rounded_full().cursor_pointer()
-      .bg(on ? t.accent : t.raised).border_1().border_color(on ? t.accent : t.input)
-      .when(on, (el) => el.justify_end()).accessibility_label("Code bot (worker instruction in Git projects)")
-      .on_click((_e, cx) => this.set({ code: !on }, cx))
-      .child(div().size(14).rounded_full().bg(on ? t.accent_foreground ?? "#ffffff" : t.muted));
+    const toggle = this.booleanToggle(t, "bot-code", state.code !== false,
+      "Code bot (worker instruction in Git projects)", "code");
     return v_flex().gap(10).px(12).py(10).rounded(10).border_1().border_color(t.border)
       .bg(t.surface ?? t.background)
       .child(h_flex().gap(10).items_center()
@@ -1192,11 +1219,7 @@ export class BotForm {
     const step = (id, text, label, d) => h_flex().id(id).w(28).h(30).items_center().justify_center().cursor_pointer()
       .text_color(t.foreground).hover((s) => s.bg(t.hover)).accessibility_label(label)
       .on_click((_e, cx) => this.set({ wave: Math.min(top, Math.max(1, state.wave + d)) }, cx)).child(text);
-    const toggle = h_flex().id("bot-planned").w(34).h(20).flex_none().p(2).rounded_full().cursor_pointer()
-      .bg(on ? t.accent : t.raised).border_1().border_color(on ? t.accent : t.input)
-      .when(on, (el) => el.justify_end()).accessibility_label("Planned for a later wave")
-      .on_click((_e, cx) => this.set({ planned: !on }, cx))
-      .child(div().size(14).rounded_full().bg(on ? t.accent_foreground ?? "#ffffff" : t.muted));
+    const toggle = this.booleanToggle(t, "bot-planned", on, "Planned for a later wave", "planned");
     return v_flex().gap(10).px(12).py(10).rounded(10).border_1().when(on, (el) => el.border_dashed()).border_color(t.border)
       .bg(on ? t.background : t.surface ?? t.background)
       .child(h_flex().gap(10).items_center()

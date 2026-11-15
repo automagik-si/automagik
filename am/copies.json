@@ -2,6 +2,10 @@
   "note": "Written by node scripts/am-copies.mjs --write; do not edit. Each is a byte-equal copy (RFC 0012).",
   "files": [
     {
+      "from": "herdr/mods/am-sidebar/actionError.js",
+      "to": "am/actionError.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/agentPath.mjs",
       "to": "am/agentPath.mjs"
     },

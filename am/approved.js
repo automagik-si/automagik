@@ -80,7 +80,7 @@ export const recordText = (record) => `${JSON.stringify(record, null, 2)}\n`;
 
 function missingRecord(project) {
   const error = new Error(`no approved roster for ${project}: run `
-    + `\`automagik-herdr proxy approve --project ${project}\` from an unsandboxed terminal, `
+    + `\`am proxy approve --project ${project}\` from an unsandboxed terminal, `
     + "then restart the pane");
   error.code = "ENOENT";
   return error;
@@ -130,7 +130,7 @@ export function readApprovedRecord({ project, env = process.env, path = undefine
     if (!info.isFile()) throw new Error(`the approved record ${file} is not a regular file`);
     if ((info.mode & 0o077) !== 0) {
       throw new Error(`the approved record ${file} is not 0600; run `
-        + `\`automagik-herdr proxy approve --project ${main}\` again`);
+        + `\`am proxy approve --project ${main}\` again`);
     }
     text = readFileSync(file, "utf8");
   } catch (e) {
@@ -178,13 +178,13 @@ export function approvedProxyEnabled(state, platform = process.platform) {
   if (platform !== "linux") return false;
   if (state.error) {
     if (state.working) {
-      throw new Error(`hc proxy: ${state.error}; run automagik-herdr proxy approve first`);
+      throw new Error(`hc proxy: ${state.error}; run am proxy approve first`);
     }
     return false;
   }
   if (state.working && state.approved !== true) {
     throw new Error("hc proxy: working switch is on but approval is off or missing; "
-      + "run automagik-herdr proxy approve first");
+      + "run am proxy approve first");
   }
   return state.approved === true;
 }

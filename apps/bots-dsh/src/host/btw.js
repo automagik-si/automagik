@@ -5,10 +5,10 @@
 // Cards live in a file per Bot and part (<home>/btw/<botId>/<partId>.json), not
 // in state.json, so a save never rewrites them; only the host that owns the
 // team writes them.
+import { assembleLlmStream } from './models.js'
 import { mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { refusal } from './refusal.js'
 import { dirname, join } from 'node:path'
-import { BlockAssembler } from '@deepseek-ai/dsh-llm'
 import { replaceFile } from './files.js'
 
 export const RESTART_ERROR = 'Omni restarted before this answer finished.'
@@ -181,16 +181,16 @@ export async function callAside(ctx, rt, snapshot, { extra = [], question, promp
     ...extra,
     { role: 'user', content: [{ type: 'text', text: promptFor(question, retry) }] },
   ], { sessionId: snapshot.sessionId, kind })
-  const assembler = new BlockAssembler()
   const tools = snapshot.header?.tools
-  for await (const chunk of ctx.llm.stream({
+  const callOptions = {
     ...snapshot.header?.config,
     messages,
     toolHistory: snapshot.toolHistory,
     ...(tools ? { tools: [...tools] } : {}),
     sessionId: snapshot.sessionId,
     signal,
-  })) assembler.push(chunk)
+  }
+  const assembler = await (rt?.assembleLlm ? rt.assembleLlm(callOptions) : assembleLlmStream(ctx, callOptions, { backoff: rt?.config?.llmRetryBackoff }))
   const finish = assembler.finish
   if (finish.kind === 'error' || finish.kind === 'aborted') {
     const kind = finish.kind === 'aborted' ? 'aborted' : failureKind(finish.failure)

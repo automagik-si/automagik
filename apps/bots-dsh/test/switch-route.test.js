@@ -177,3 +177,22 @@ test('the switch trigger is true for a route change and false for a plain new co
   await waitFor(() => fresh.bot.sessionId === 's2')
   assert.equal(fresh.rt.switchingChat('b1'), false)
 })
+
+test('handoff notes retry transient transport failures without changing route or budget', async t => {
+  const b = bench(); t.after(() => b.ctx.dispose())
+  let attempts = 0
+  const stream = b.ctx.llm.stream
+  const requests = []
+  b.ctx.llm.providerRetryPolicy = () => ({ mode: 'normal', maxRetries: 1, retryableCodes: ['TRANSPORT'], initialDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 })
+  b.ctx.llm.stream = async function* (options) {
+    requests.push(options)
+    if (++attempts === 1) {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'temporary failure' } } }
+    } else yield* stream(options)
+  }
+  await b.rt.switchRoute('b1', 'acp-claude/default')
+  await waitFor(() => b.bot.sessionId === 's2' && b.calls.archived.length > 0)
+  assert.equal(attempts, 2)
+  assert.equal(requests[0], requests[1])
+  assert.match(b.bot.segments.at(-1).note, /## Goals/)
+})

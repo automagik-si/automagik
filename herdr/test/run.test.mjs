@@ -125,7 +125,7 @@ test("the CLI wrapper, through an absolute or a relative link, runs the CLI with
   symlinkSync(relative(rel, WRAPPER), join(rel, "automagik-herdr"));
   for (const link of [join(abs, "automagik-herdr"), join(rel, "automagik-herdr")]) {
     const r = spawnSync(link, ["--version"], { encoding: "utf8", env: nodeOnlyFromDirs(s.home) });
-    assert.equal(r.stdout.trim(), `automagik-herdr ${VERSION}`, `${link}: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), `am ${VERSION}`, `${link}: ${r.stderr}`);
   }
 });
 
@@ -138,11 +138,11 @@ const BUN = [spawnSync("/bin/sh", ["-c", "command -v bun"], { encoding: "utf8" }
 test("under bun (skipped without it): the CLI's --version, directly and as run.sh's only runtime", { skip: !BUN && "bun is not installed" }, (t) => {
   const s = scratch(t);
   const direct = spawnSync(BUN, [CLI, "--version"], { encoding: "utf8", env: { HOME: s.home, PATH: "/usr/bin:/bin" } });
-  assert.equal(direct.stdout.trim(), `automagik-herdr ${VERSION}`, direct.stderr);
+  assert.equal(direct.stdout.trim(), `am ${VERSION}`, direct.stderr);
   symlinkSync(BUN, join(s.path, "bun"));
   const viaRun = s.run([CLI, "--version"]);
   assert.equal(viaRun.code, 0, viaRun.err);
-  assert.equal(viaRun.out.trim(), `automagik-herdr ${VERSION}`);
+  assert.equal(viaRun.out.trim(), `am ${VERSION}`);
   // A project's .env stays out: run from a folder holding one, the CLI never sees its keys.
   const project = join(s.root, "project");
   mkdirSync(project);

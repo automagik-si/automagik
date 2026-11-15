@@ -129,3 +129,13 @@ test('D client: a refusal-ladder notification asks whether to keep working', () 
   page.work.set({ approvals: [{ id: 'x', botId: 'ada', sessionId: 'someone', tool: 'keep_working', at: 200 }] })
   assert.equal(page.shown[0].body, 'Let it keep working?')
 })
+
+test('task notifications include the roster title and bounded command detail', () => {
+  const page = windowWith()
+  const roster = { getSnapshot: () => ({ ...page.roster.getSnapshot(), tasks: { t1: { title: 'Check API' } } }) }
+  page.noticeApprovals({ work: page.work, roster, shownSession: () => 'elsewhere', openSession: page.openSession, since: 100 })
+  page.work.set({ approvals: [{ id: 'detail', botId: 'b', taskId: 't1', label: 'Old title', sessionId: 't1', tool: 'bash', detail: { code: 'x'.repeat(150) }, at: 200 }] })
+  assert.equal(page.shown[0].body, `Check API · bash · ${'x'.repeat(120)}`)
+  page.shown[0].onclick()
+  assert.deepEqual(page.opened, ['t1'])
+})

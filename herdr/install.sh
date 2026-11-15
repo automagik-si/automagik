@@ -85,6 +85,7 @@ main() {
   HINT=no
   BIN_DIR=$HOME/.local/bin
   LINK=$BIN_DIR/automagik-herdr
+  AM_LINK=$BIN_DIR/am
   NODE_MIN=22.7
   # How long `herdr-app status` may take: a Herdr that does not answer never holds up a run.
   STATUS_SECONDS=10
@@ -247,11 +248,22 @@ mark_get() { sed -n "s/^$1=//p" "$MARK" 2>/dev/null | head -n 1; }
 # or its am-* name), the only kind this script replaces or removes: a link the person pointed
 # anywhere else stays theirs.
 link_ours() {
-  [ -L "$LINK" ] || return 1
-  to=$(readlink "$LINK" 2>/dev/null) || return 1
+  l=${1:-$LINK}
+  [ -L "$l" ] || return 1
+  to=$(readlink "$l" 2>/dev/null) || return 1
   case $to in
     "$MODS/$OLD/bin/automagik-herdr"|"$MODS/$OLD/bin/automagik-herdr.mjs") return 0 ;;
     "$PACK/bin/automagik-herdr"|"$PACK/bin/automagik-herdr.mjs") return 0 ;;
+  esac
+  return 1
+}
+
+# Whether $AM_LINK is a link into am's own store (am self install took it from the pack): am's,
+# so this script leaves it as it is and says nothing about removing it.
+am_link_is_am() {
+  [ -L "$AM_LINK" ] || return 1
+  case $(readlink "$AM_LINK" 2>/dev/null) in
+    */parts/automagik.am/*) return 0 ;;
   esac
   return 1
 }
@@ -666,6 +678,9 @@ uninstall() {
   set +f
   if link_ours; then rm -f "$LINK"; say "Removed $LINK."
   elif [ -L "$LINK" ]; then say "Left $LINK: it points at $(readlink "$LINK"), not this install."; fi
+  if link_ours "$AM_LINK"; then rm -f "$AM_LINK"; say "Removed $AM_LINK."
+  elif am_link_is_am; then say "Left $AM_LINK: am's own link; am self uninstall hands it back."
+  elif [ -L "$AM_LINK" ]; then say "Left $AM_LINK: it points at $(readlink "$AM_LINK"), not this install."; fi
   uninstall_meter
   uninstall_scheduler
   # The fleet coverage record the sidebar's meter run writes beside the record (meter.js).
@@ -1573,6 +1588,7 @@ install() {
   if [ -n "$target" ] && { [ ! -f "$target" ] || [ -L "$target" ]; }; then
     gone=
     if link_ours && [ ! -e "$LINK" ]; then rm -f "$LINK" && gone=" Removed $LINK, which pointed at nothing now."; fi
+    if link_ours "$AM_LINK" && [ ! -e "$AM_LINK" ]; then rm -f "$AM_LINK"; fi
     fail "the pack is installed, but ${target%/*} has neither automagik-herdr nor automagik-herdr.mjs, so automagik-herdr is not linked.$gone"
   fi
   if [ -n "$target" ]; then chmod +x "$target"; fi
@@ -1588,6 +1604,21 @@ install() {
     ln -sfn "$target" "$LINK"
     say "Linked $LINK."
     changed=yes
+  fi
+  # am, the same command under its own name: the same wrapper, replaced or removed on the same
+  # ownership rule as the old link (a file or another link there is the person's and stays).
+  if [ -n "$target" ] && [ "$(readlink "$AM_LINK" 2>/dev/null || true)" != "$target" ]; then
+    if [ -e "$AM_LINK" ] && [ ! -L "$AM_LINK" ]; then
+      say "Left $AM_LINK alone: it is a file, not a link. Remove it and run this again to link am."
+    elif am_link_is_am; then
+      :
+    elif [ -L "$AM_LINK" ] && ! link_ours "$AM_LINK"; then
+      say "Left $AM_LINK alone: it points at $(readlink "$AM_LINK"), not this install. Remove it and run this again to link am."
+    else
+      ln -sfn "$target" "$AM_LINK"
+      say "Linked $AM_LINK."
+      changed=yes
+    fi
   fi
   fleet_step
   case ":${PATH}:" in

@@ -38,7 +38,10 @@ function entrySummary(entry) {
   return entry.text
 }
 
-const SOURCES = { turn: 'Model call', host: 'Omni', api: 'Omni', browser: 'This window' }
+// Where a recorded problem came from. The plugin's own host and its endpoint are the app,
+// Automagik (#1160): Omni is one of its Bots.
+const SOURCES = { turn: 'Model call', host: 'Automagik', api: 'Automagik', browser: 'This window' }
+export const sourceName = source => SOURCES[source] ?? 'Automagik'
 
 // Where the new issue opens; `go(url)` tells whether it did. In a browser the window is
 // reserved inside the click gesture and addressed once the diagnostics are gathered:
@@ -127,7 +130,7 @@ export function FeedbackPage({ actions, run, Section, Row, roster }) {
             h('span', { className: 'bt-fb-dot', 'data-level': entry.level, 'aria-hidden': true }),
             h('div', { className: 'bt-set-copy' },
               h('span', { className: 'bt-fb-text' }, entrySummary(entry)),
-              h('span', { className: 'bt-set-hint' }, [whenText(entry.time), entry.bot, entry.where, t(SOURCES[entry.source] ?? 'Omni')].filter(Boolean).join(' · '))),
+              h('span', { className: 'bt-set-hint' }, [whenText(entry.time), entry.bot, entry.where, t(sourceName(entry.source))].filter(Boolean).join(' · '))),
             entry.code ? h('span', { className: 'bt-tag bt-fb-code' }, entry.status ? `${entry.code} ${entry.status}` : entry.code) : null)),
       h(Row, { label: t('Error log'), hint: t('Kept on this computer across restarts, up to about 1 MB.') },
         h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: downloadLog }, t('Download')),
@@ -170,7 +173,7 @@ export const FEEDBACK_CSS = `
 .bt-fb-dot[data-level=warn]{background:#e3a008}
 .bt-fb-text{overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
 .bt-fb-code{flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px}
-.bt-event-error{color:var(--bt-danger,#e02135)}
+.bt-event-error{color:var(--st-bad-strong,var(--bt-danger,#e02135))}
 .bt-toast{position:fixed;left:50%;bottom:28px;z-index:1000;display:flex;align-items:center;gap:8px;max-width:min(560px,calc(100vw - 32px));padding:8px 8px 8px 14px;border-radius:12px;background:var(--bt-card,#fff);color:var(--bt-ink,#141414);border:1px solid var(--bt-line-2,rgba(0,0,0,.15));box-shadow:0 8px 28px rgba(0,0,0,.14);font-size:13px;line-height:18px;transform:translateX(-50%);animation:bt-toast-in ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing},bt-veil-in .2s ease-out}
 .bt-toast{bottom:calc(28px + env(safe-area-inset-bottom,0px))}
 .bt-toast[data-leaving]{opacity:0;transform:translate(-50%,6px) scale(.98);filter:blur(3px);transition:opacity .18s ease-in,transform .18s ease-in,filter .18s ease-in}

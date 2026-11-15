@@ -46,6 +46,9 @@ export function install(rt) {
   let stopped = false
   // mtime and size of the state.json this host last read or wrote.
   let seen = ''
+  // Bumped each time the in-memory state is replaced from the file, so a queued
+  // save cannot write a snapshot taken of the state it replaced.
+  let lockEpoch = 0
   const stamp = () => {
     try {
       const { mtimeMs, size } = statSync(statePath)
@@ -173,6 +176,7 @@ export function install(rt) {
   // Fill `state` from the saved file and bring an older team up to date. Returns the
   // groups whose Session titles still need the new name.
   const adopt = (parsed) => {
+    lockEpoch += 1
     // Until the end of this: a file that could not be read, or was set aside as corrupt,
     // leaves an empty team in memory that is not the saved one.
     teamRead = false
@@ -376,6 +380,41 @@ export function install(rt) {
     for (const room of stale) void rt.retitleRoom(room)
   })()
 
+  // An outside edit of state.json while this host held the lock, found at a
+  // reclaim or by a queued write that saw the file change: this host's in-memory
+  // state goes aside first, then the file on disk is adopted. Queued behind
+  // `writing` — and behind any adopt already queued — so no save or second
+  // refresh slips between finding the change and the adopt.
+  let adopting
+  const adoptAfterReclaim = () => {
+    const run = (adopting ?? writing).then(async () => {
+      if (stamp() !== seen) {
+        const aside = `${statePath}.replaced-${Date.now()}`
+        try {
+          await writeFile(aside, JSON.stringify(state))
+          warn('ds-bot: %s changed while no host held the team; it is adopted and this host\'s state is kept as %s', statePath, aside)
+        } catch (error) {
+          warn('ds-bot: %s changed while no host held the team; it is adopted, and this host\'s state is lost because it could not be kept aside: %s', statePath, error)
+        }
+      }
+      adopt(readFileState())
+    })
+    writing = run.catch(() => {})
+    const tracked = run.finally(() => { if (adopting === tracked) adopting = undefined })
+    adopting = tracked
+    return tracked
+  }
+
+  // The lock was this host's and is its own again. An adopt still queued is
+  // awaited; otherwise the file is compared with what this host last saw:
+  // unchanged means nothing external happened and the in-memory state stays,
+  // changed means an outside edit is adopted the usual way.
+  const reclaimHeld = () => {
+    warnedReadOnly = false
+    if (adopting !== undefined) return adopting
+    return stamp() === seen ? undefined : adoptAfterReclaim()
+  }
+
   // A reading host follows the file and takes over once the other host has gone.
   const refresh = async () => {
     await load()
@@ -395,14 +434,12 @@ export function install(rt) {
       claimLock()
       if (lockBroken) return
       if (holder === undefined) {
-        // The lock was free: still the writer, but the file may carry changes
-        // written while no host held it.
-        warnedReadOnly = false
-        adopt(readFileState())
+        await reclaimHeld()
         return
       }
       warn('ds-bot: %s', readOnly())
     }
+    if (adopting !== undefined) return adopting
     if ((stuck !== undefined || holder !== undefined) && stamp() !== seen) adopt(readFileState())
   }
 
@@ -422,7 +459,12 @@ export function install(rt) {
     // another host took it over and this one stops writing.
     if (holder === undefined) {
       claimLock()
-      if (holder === undefined) return true
+      if (holder === undefined) {
+        // A changed file is adopted first; the save queues behind that adopt.
+        const pending = reclaimHeld()
+        if (pending !== undefined) void pending.catch(() => {})
+        return true
+      }
     }
     return warnReadOnly()
   }
@@ -448,7 +490,10 @@ export function install(rt) {
     state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
     const copy = JSON.parse(JSON.stringify(state))
     change(copy)
-    return writeSnapshot(JSON.stringify(copy))
+    // Permission copies belong to the state the caller inspected. Never apply one
+    // to a replacement team adopted while this write waited.
+    const snapshot = JSON.stringify(copy)
+    return writeSnapshot(() => snapshot, { required: true, epoch: lockEpoch })
   }
 
   const save = ({ required = false } = {}) => {
@@ -456,24 +501,39 @@ export function install(rt) {
     indexSessions()
     // A reading host keeps the file's revision, so its window does not skip the next change.
     if (!writable()) return required ? Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`)) : writing
-    rt.sweepAuto?.()
-    state.revision += 1
-    state.autoStamp = state.revision
-    state.version = STATE_VERSION
-    state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
-    const snapshot = JSON.stringify(state)
-    return writeSnapshot(snapshot)
+    return writeSnapshot(() => {
+      rt.sweepAuto?.()
+      state.revision += 1
+      state.autoStamp = state.revision
+      state.version = STATE_VERSION
+      state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
+      return JSON.stringify(state)
+    }, { required })
   }
 
-  const writeSnapshot = (snapshot) => {
+  const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch } = {}) => {
     const run = writing.then(async () => {
+      // An adopt ahead of this save may have made the team read-only.
+      if (stuck !== undefined || holder !== undefined) {
+        if (required) throw new Error(`This host cannot save the Bot team: ${readOnly()}`)
+        warnReadOnly()
+        return
+      }
+      const epoch = copyEpoch ?? lockEpoch
+      // Ordinary saves use the adopted state, not a snapshot of the replaced team.
+      const snapshot = snapshotOf()
       const temp = `${statePath}.${process.pid}.tmp`
       try {
         await mkdir(home, { recursive: true })
         const ensureLock = () => {
           if (lockBroken) return
-          if (!lock.owns()) {
-            const error = new Error('ds-bot lost the state lock to another dsh')
+          const owned = lock.owns()
+          const current = stamp()
+          // An outside edit is adopted instead of overwritten; deletion can be saved again.
+          const changed = owned && current !== '' && current !== seen
+          if (changed) void adoptAfterReclaim().catch(() => {})
+          if (!owned || changed || lockEpoch !== epoch) {
+            const error = new Error(changed ? 'ds-bot: the Bot team file changed under this host\'s lock' : 'ds-bot lost the state lock to another dsh')
             error.code = 'ELOCKLOST'
             throw error
           }
@@ -527,6 +587,30 @@ export function install(rt) {
   /** @type {Map<string, {botId:string, roomId?:string}>} */
   const pastOwners = new Map()
   const chatOf = botId => botOf(botId)?.sessionId ?? botId
+  // DSH turns away every step of an archived Session and every task aimed at it, so a
+  // Session the team speaks from now leaves the archive: an earlier open of an old part
+  // could leave one there, and DSH's own Session list can archive one. Earlier parts
+  // stay archived.
+  let restoring
+  const restoreCurrent = () => {
+    const registry = ctx.workspaceRegistry
+    if (restoring !== undefined || readOnly() !== undefined || typeof registry?.unarchiveSession !== 'function') return
+    let archived
+    try {
+      archived = new Set(registry.archivedSessionIds ?? [])
+    } catch {
+      return
+    }
+    const held = [...chatOwners.keys(), ...groupOwners.keys(), ...Object.keys(state.rooms)].filter(id => archived.has(id))
+    if (held.length === 0) return
+    restoring = (async () => {
+      for (const sessionId of held) {
+        await registry.unarchiveSession(sessionId)
+          .then(() => warn('ds-bot: current Session %s was archived in DSH; taken back out', sessionId))
+          .catch(error => warn('ds-bot: current Session %s is archived in DSH and could not be taken out: %s', sessionId, error))
+      }
+    })().finally(() => { restoring = undefined })
+  }
   const indexSessions = () => {
     chatOwners.clear()
     groupOwners.clear()
@@ -545,6 +629,7 @@ export function install(rt) {
     }
     // The agents module owns the DSH Agent session index; it installs after this.
     rt.indexAgents?.()
+    restoreCurrent()
   }
   // The Bot a Session speaks for: its own chat, one of its group Sessions, or an
   // earlier segment of either.

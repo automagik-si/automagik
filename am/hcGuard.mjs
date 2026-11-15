@@ -643,7 +643,7 @@ function labelProblem(real, args, env, terminal, on) {
 function killProblem(real, env, terminal) {
   const caller = callerOf(real, env, terminal);
   if (typeof caller === "string") return caller;
-  const own = "end a worker you started with automagik-herdr worker kill <pane>";
+  const own = "end a worker you started with am worker kill <pane>";
   if (caller.worker) return `hc kill is for a project's main bot only, never a worker; ${own}`;
   const file = readBots(caller.project);
   const bot = file?.bots?.find((row) => row.id === caller.bot) ?? null;

@@ -193,9 +193,9 @@ export function reviveOrder(targets, { leadOf = () => null, isMain = () => false
 // ---- the report ----
 
 /** The command that brings `botId` back by hand. No session id: restart finds it itself. */
-export const byHandCommand = (botId, project) => `automagik-herdr restart ${botId} --project ${project} --tree`;
+export const byHandCommand = (botId, project) => `am restart ${botId} --project ${project} --tree`;
 /** How a bot is kept down across restarts of the computer: said in every report. */
-export const KEEP_DOWN = "To keep a bot down across restarts of this computer: automagik-herdr detach <bot>.";
+export const KEEP_DOWN = "To keep a bot down across restarts of this computer: am detach <bot>.";
 
 /** The boot pass's own line (its output goes to the user journal): counts only, never a path or a name. */
 export function countsLine(projects) {

@@ -43,3 +43,19 @@ test("sidebar render cases: aliases, a renamed machine, sibling sub-agents, help
   assert.ok(ids.includes("machine-loading-boot") && ids.includes("machine-new-away"));
   assert.equal(new Set(Object.values(golden).map((c) => c.sha256)).size, Object.keys(golden).length, "each case draws its own tree");
 });
+
+test("sidebar row Start logs unexpected failures and shows an actionable sentence", async (t) => {
+  const { state } = await import("./sidebar-tree.mjs");
+  const Sidebar = await load();
+  const sidebar = Object.create(Sidebar.prototype);
+  sidebar.botCommand = async () => { throw new Error("launch failed\n    at launchRun (models.js:508:3)"); };
+  const logs = [];
+  t.mock.method(console, "error", (line) => logs.push(line));
+  state.notes = [];
+  const pending = [];
+  sidebar.startFromRow("b-aaaaaaaaaa", { spawn: (fn) => pending.push(fn({})) });
+  await Promise.all(pending);
+  assert.equal(state.notes.length, 1);
+  assert.equal(state.notes[0].body, "launch failed; check the log and try again.");
+  assert.ok(logs.some((line) => line.includes("at launchRun")));
+});

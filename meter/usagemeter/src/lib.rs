@@ -14,6 +14,7 @@ pub mod outcomes;
 pub mod paths;
 pub mod prices;
 pub mod query;
+pub mod repair;
 pub mod repo;
 pub mod scan;
 pub mod sources;

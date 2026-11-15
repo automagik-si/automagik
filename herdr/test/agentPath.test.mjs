@@ -15,6 +15,8 @@ import { readJsonLines } from "./log-lines.mjs";
 // the tests on the rest of the command compare it with those words out.
 const strip = (words) => withoutBriefing("codex", withoutBriefing("claude", words));
 const plain = (argv) => { const i = argv.indexOf("--"); return i < 0 ? strip(argv) : [...argv.slice(0, i + 1), ...strip(argv.slice(i + 1))]; };
+// #1125: a Codex run's words without its --add-dir grants (those follow the runner's environment).
+const noGrants = (words) => words.filter((w, i) => w !== "--add-dir" && words[i - 1] !== "--add-dir");
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
 const FAKE_HC = new URL("./fake-hc.mjs", import.meta.url).pathname;
@@ -282,7 +284,7 @@ test("worker CLI: a codex the pane reaches without node starts under env PATH=<n
   assert.equal(r.status, 0, r.stderr);
   const run = runCall();
   assert.deepEqual(run.slice(run.indexOf("--") + 1, run.indexOf("--") + 4), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, "codex"]);
-  assert.match(r.stderr, new RegExp(`automagik-herdr: codex runs under node, which isn't on its PATH: ${join(prefix, "bin")} put first on it\\.`));
+  assert.match(r.stderr, new RegExp(`am: codex runs under node, which isn't on its PATH: ${join(prefix, "bin")} put first on it\\.`));
 });
 
 test("start CLI (#56): a codex bot whose node is only in nvm starts under env PATH=<nvm bin>:<PATH>, and the command runs", (t) => {
@@ -291,11 +293,11 @@ test("start CLI (#56): a codex bot whose node is only in nvm starts under env PA
   assert.equal(r.status, 0, r.stderr);
   const run = runCall();
   const argv = run.slice(run.indexOf("--") + 1);
-  assert.deepEqual(plain(argv), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks"]);
+  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"]);
   assert.match(argv[4], /^-c$/);
   assert.match(argv[5], /^developer_instructions="<herdr-bot>\\nAutomagik Herdr briefing/, "codex takes it as a TOML string");
-  assert.deepEqual(plain(JSON.parse(r.stdout).argv), ["codex", "--approve-for-me", "--disable", "hooks"]);
-  assert.match(r.stderr, new RegExp(`automagik-herdr: codex runs under node, which isn't on its PATH: ${join(prefix, "bin")} put first on it\\.`));
+  assert.deepEqual(noGrants(plain(JSON.parse(r.stdout).argv)), ["codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"]);
+  assert.match(r.stderr, new RegExp(`am: codex runs under node, which isn't on its PATH: ${join(prefix, "bin")} put first on it\\.`));
   // The seat's command as hc would run it: with the caller's PATH alone, env finds no node (127); as started, it runs.
   const bare = spawnSync("codex", [], { env: { PATH: path }, encoding: "utf8" });
   assert.equal(bare.status, 127, bare.stderr);
@@ -313,7 +315,7 @@ test("restart CLI (#56): restarting a codex bot whose node is only in nvm runs u
   assert.equal(JSON.parse(r.stdout).replaced, "t7");
   const run = runCall();
   const argv = run.slice(run.indexOf("--") + 1);
-  assert.deepEqual(plain(argv), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "resume", "--last"]);
+  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "resume", "--last"]);
   assert.ok(argv.findIndex((w) => w.startsWith("developer_instructions=")) < argv.indexOf("resume"), "its -c before the subcommand");
   assert.equal(argv.filter((w) => w.startsWith("developer_instructions=")).length, 1, "never twice after a restart");
   const seat = spawnSync(argv[0], argv.slice(1), { env: {}, encoding: "utf8" });

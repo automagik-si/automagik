@@ -119,7 +119,7 @@ export function AdvancedSettings({ bot, roster, actions, save, Card, Row, Switch
 export const ADVANCED_SETTINGS_CSS = `
 .bt-advanced,.bt-advanced-body{display:flex;flex-direction:column;gap:18px;min-width:0}
 .bt-advanced-actions{gap:8px;flex-wrap:wrap}.bt-advanced-note{margin:0;padding:10px 14px}
-.bt-advanced-error{color:var(--bt-danger);font-size:13px}.bt-advanced-stats{width:100%;min-width:0}
+.bt-advanced-error{color:var(--st-bad-strong,var(--bt-danger));font-size:13px}.bt-advanced-stats{width:100%;min-width:0}
 .bt-advanced-select{display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:10px}
 .bt-advanced-select select{max-width:100%;background:var(--bt-main);color:var(--bt-ink);border:1px solid var(--bt-line);border-radius:6px;padding:4px}
 .bt-advanced-table{max-width:100%;overflow-x:auto}.bt-advanced-table table{width:100%;border-collapse:collapse;font-size:11px;font-variant-numeric:tabular-nums}

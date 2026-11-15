@@ -827,7 +827,7 @@ export async function startProxy(options = {}) {
       log({ ev: "roster_unapproved",
         message: `the working-tree roster ${botsPath} differs from the approved one; `
           + "the approved roster is in force. Run "
-          + `\`automagik-herdr proxy approve --project ${caller.project}\` to approve it.` });
+          + `\`am proxy approve --project ${caller.project}\` to approve it.` });
     }
   } else {
     try {
@@ -839,7 +839,7 @@ export async function startProxy(options = {}) {
   }
   if (!file.bots.some((bot) => bot.id === caller.bot)) {
     const hint = explicit
-      ? `; run \`automagik-herdr proxy approve --project ${caller.project}\`` : "";
+      ? `; run \`am proxy approve --project ${caller.project}\`` : "";
     throw new Error(`the caller ${terminal}'s bot ${caller.bot} `
       + `is not in the roster ${rosterPath}${hint}`);
   }

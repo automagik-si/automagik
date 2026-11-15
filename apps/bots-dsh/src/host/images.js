@@ -2,12 +2,14 @@
 // reaches a model that cannot read them, each image becomes text from a vision model.
 // Texts are kept per attachment, so later requests repeat the same words and the
 // prompt cache still hits.
+import { assembleLlmStream } from './models.js'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { BlockAssembler } from '@deepseek-ai/dsh-llm'
+import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { OCR_CACHE_MAX, OCR_PROMPT, OCR_RETRY_MS, OCR_TIMEOUT_MS } from './constants.js'
 import { replaceFile } from './files.js'
 import { splitRef } from './text.js'
+import { freezeLoopRequest } from './secrets.js'
 
 export function offloadTargets(session, beforeSeq) {
   const targets = []
@@ -91,15 +93,15 @@ export function install(rt) {
   async function readImage(attachment, sessionId) {
     const route = await ocrRoute()
     if (route === undefined) throw new Error('no vision model is available')
-    const assembler = new BlockAssembler()
-    for await (const chunk of ctx.llm.stream({
+    const callOptions = {
       provider: route.provider,
       model: route.model,
       sessionId,
       messages: rt.tagUsage([{ role: 'user', content: [{ type: 'image', attachment }, { type: 'text', text: OCR_PROMPT }] }], { sessionId, kind: 'image' }),
       maxTokens: 8192,
       signal: AbortSignal.timeout(OCR_TIMEOUT_MS),
-    })) assembler.push(chunk)
+    }
+    const assembler = await (rt.assembleLlm ? rt.assembleLlm(callOptions) : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff }))
     const finish = assembler.finish
     if (finish.kind === 'error' || finish.kind === 'aborted') throw new Error(finish.failure?.message ?? finish.kind)
     const text = assembler.blocks().filter(block => block.type === 'text').map(block => block.text).join('\n').trim()
@@ -186,7 +188,12 @@ export function install(rt) {
       }
       // `next` cannot take new messages, so the rewritten request starts over; it
       // carries no image, so this listener lets it through.
-      yield* ctx.llm.stream({ ...options, messages: await withImagesAsText(options.messages, options.sessionId) })
+      const request = {
+        ...options,
+        messages: await withImagesAsText(options.messages, options.sessionId),
+      }
+      if (isAgentLoopRequest(options)) markAgentLoopRequest(freezeLoopRequest(request))
+      yield* ctx.llm.stream(request)
     })()
   })
 

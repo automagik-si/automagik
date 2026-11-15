@@ -97,7 +97,7 @@ const exists = async (path) => { try { await access(path); return true; } catch 
  * The briefing of `bot` in `file`, gathered through `ask` (launchArgs.js paneOf's contract:
  * parsed `hc … --json`, null on failure, UNANSWERED when out of time). `address` is the bot's
  * own live terminal, whose unlabelled children are its helpers (null: no helpers counted).
- * Shared with the CLI's `automagik-herdr brief`.
+ * Shared with the CLI's `am brief`.
  */
 export async function gatherBriefing({ file, bot, address, ask, locate = (id) => paneOf(id, ask), guard = null, isGit = true, project = null, projects = null }) {
   const team = directMembers(file, bot.id, { project, projects });
@@ -439,7 +439,7 @@ if (import.meta.url === invoked) {
   } catch (e) {
     // Fail open: no briefing this turn and exit 0, with one line on stderr as a trace.
     clearTimeout(guard);
-    process.stderr.write(`automagik-herdr briefing: ${String(e?.message ?? e).split("\n")[0]}\n`);
+    process.stderr.write(`am briefing: ${String(e?.message ?? e).split("\n")[0]}\n`);
   }
   await joined;
   process.exitCode = 0;

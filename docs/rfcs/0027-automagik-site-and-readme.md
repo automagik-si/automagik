@@ -58,7 +58,7 @@ No extra product pages are introduced. Nothing goes live before the owner's OKs.
 | `/omni/` | Omni connects chat apps to Automagik, with channels and canvases in the same window. |
 | `/genie/` | A wish becomes a branch, test run and report the person approves; `genie desktop` opens it on the team. |
 | `/cloud/` | Coming soon, private and paid, not live. The intent form, confirmation choices, consent, privacy note and removal form. |
-| `/arca` and `/arca/*` | Owned and served by Arca’s Worker, not Pages. The home card links to `/arca/` in the same tab. Until Arca’s site is deployed, Pages carries one stand-in page at `/arca/` (see “Arca boundary and root discovery”). |
+| `/arca` and `/arca/*` | Owned and served by Arca’s Worker, not Pages. The home card links to `/arca/` in the same tab. Arca’s page is live since 2026-11-13 and Pages carries no page there; the stand-in it kept until then is removed (see “Arca boundary and root discovery”). |
 | `/mykes/` | Coming soon. No invented features, download or licence claim. |
 
 There is no meter page or meter product card. A page that uses usagemeter may describe it
@@ -312,6 +312,12 @@ answers with a shell script, so it is never a link), and the way back to all pro
 the site's menus, the home blocks and the footer. The root `robots.txt`, `sitemap.xml` and
 `llms.txt` keep Arca's supplied lines unchanged. When Arca's Worker takes the routes above,
 the stand-in page is removed; nothing else changes.
+
+**Removed, 2026-11-13.** Arca's own page is live at this address. The stand-in page is
+removed: Pages carries no file at `/arca/` and nothing under it, and its builder no longer
+makes one. The Products menu, the home card, the family drawer's row, the footer and the
+product pages' links to the next and the earlier product still open `/arca/` in the same tab,
+and the root `robots.txt`, `sitemap.xml` and `llms.txt` keep Arca's supplied lines unchanged.
 
 ### A website's navigation, and we unfold, 2026-11-12
 

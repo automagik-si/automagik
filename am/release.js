@@ -284,7 +284,7 @@ export function parseSums(text) {
 
 /** The mod's notice for `update` (from pickUpdate). */
 export const noticeText = (update) =>
-  `Automagik Herdr ${update.version} is out. Run \`automagik-herdr update\` to install it (${update.page}).`;
+  `Automagik Herdr ${update.version} is out. Run \`am update\` to install it (${update.page}).`;
 
 // ---- Installing updates on their own (auto-update) ----
 

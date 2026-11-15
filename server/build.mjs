@@ -12,6 +12,7 @@
 import { execFileSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CHECKOUT_REPOSITORY, validateInput, verifyCheckoutDirectory } from './checkout-input.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -23,7 +24,7 @@ function argsOf(argv) {
       args.cache = false
       continue
     }
-    if (!name.startsWith('--')) throw new Error(`unexpected argument: ${name}`)
+    if (!['--tag', '--version', '--image-version', '--revision', '--dsh', '--repository', '--input-kind', '--event', '--input-manifest'].includes(name)) throw new Error(`unexpected argument: ${name}`)
     const value = argv[index + 1]
     if (value === undefined) throw new Error(`${name} needs a value`)
     args[name.slice(2)] = value
@@ -35,17 +36,31 @@ function argsOf(argv) {
 const args = argsOf(process.argv.slice(2))
 const tag = args.tag || 'automagik-server:local'
 const version = args.version || '3.90.1'
-const imageVersion = args['image-version'] || version
+const kind = args['input-kind'] || 'release'
+const event = args.event || ''
+const manifest = args['input-manifest'] || ''
+const imageVersion = args['image-version'] || (kind === 'checkout' ? `checkout-${args.revision}` : version)
 const revision = args.revision || 'unknown'
 const dsh = args.dsh || '0.2.2-rc.2'
-const repository = args.repository || 'https://github.com/automagik-dev/automagik'
+const repository = args.repository || (kind === 'checkout' ? CHECKOUT_REPOSITORY : 'https://github.com/automagik-dev/automagik')
+const input = { kind, event, revision, manifest, repository, version }
+validateInput(input)
+if (kind === 'checkout') {
+  if (imageVersion !== `checkout-${revision}`) throw new Error('checkout image version must identify the checkout')
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
+  if (revision !== head) throw new Error('checkout revision differs from HEAD')
+  verifyCheckoutDirectory(resolve(ROOT, 'server/checkout-input'), input)
+}
 // The context is explicit: GitHub aliases `docker build` to buildx, which requires it.
 const command = ['build', '--file', 'server/Dockerfile', '--tag', tag,
   '--build-arg', `AUTOMAGIK_VERSION=${version}`,
   '--build-arg', `IMAGE_VERSION=${imageVersion}`,
   '--build-arg', `IMAGE_REVISION=${revision}`,
   '--build-arg', `DSH_VERSION=${dsh}`,
-  '--build-arg', `AUTOMAGIK_REPOSITORY=${repository}`]
+  '--build-arg', `AUTOMAGIK_REPOSITORY=${repository}`,
+  '--build-arg', `INPUT_KIND=${kind}`,
+  '--build-arg', `INPUT_EVENT=${event}`,
+  '--build-arg', `INPUT_MANIFEST=${manifest}`]
 if (!args.cache) command.push('--no-cache')
 command.push('.')
 

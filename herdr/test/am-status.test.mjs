@@ -157,7 +157,7 @@ test("the confirm dialog names both versions and the rollback", () => {
   const c = confirmText("0.8.0", "0.8.1");
   assert.equal(c.title, "Update Automagik Herdr to 0.8.1?");
   assert.match(c.detail, /0\.8\.1 in place of 0\.8\.0/);
-  assert.match(c.detail, /automagik-herdr update --rollback/);
+  assert.match(c.detail, /am update --rollback/);
 });
 
 test("ago: minutes, hours, days", () => {

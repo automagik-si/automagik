@@ -1,4 +1,5 @@
 import { markOf } from '../shared/permission-levels.js'
+import { ROLE_MAX } from '../shared/bot-profile.js'
 // Roster: creating, changing, and deleting Bots and group chats, the Main Bot role, and
 // the first Main Bot of a new team.
 import { mkdir } from 'node:fs/promises'
@@ -14,7 +15,7 @@ import { cleanDenyTools } from './tool-deny.js'
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
 // characters become spaces.
-export const ROLE_MAX = 24
+export { ROLE_MAX }
 export function cleanRole(value) {
   if (value === undefined || value === null) return ''
   if (typeof value !== 'string') throw refusal('A role is a few words of text')
@@ -455,9 +456,10 @@ export function install(rt) {
     // the record. A selection DSH turns down refuses the whole update, with nothing written.
     const markBefore = markOf(bot.model)
     const revBefore = bot.permissionRev
-    if (patch.permission !== undefined || patch.denyTools !== undefined || (patch.model !== undefined && (bot.permissionAuto
+    if (patch.permission !== undefined || (patch.model !== undefined && (bot.permissionAuto
       ? markOf(String(patch.model)) !== bot.permissionAuto
       : String(patch.model).split('/')[0] !== 'acp-codex'))) await rt.clearAuto?.(bot)
+    if (patch.denyTools !== undefined && bot.permissionRev === revBefore) rt.movePermissionRev(bot)
     const modelChanged = patch.model !== undefined || patch.effort !== undefined
     const modelBefore = modelChanged ? modelFields(bot) : undefined
     if (modelChanged) await switchModel(bot, patch, modelRef, effortId)
@@ -519,6 +521,7 @@ export function install(rt) {
     // a name added now disappears at once and a name removed comes back.
     if (denyTools !== undefined) {
       await rt.applyToolDeny(bot)
+      if (bot.permissionAuto) rt.endAuto(bot)
       // The list changed either way: a restricted Bot's already-armed fresh-Session tasks
       // would keep opening Sessions no deny layer can bind (#584, L5), and a Bot that just
       // became unrestricted releases a task whose pause had been stuck.

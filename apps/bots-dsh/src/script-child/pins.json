@@ -1,0 +1,27 @@
+{
+  "@jitl/quickjs-ffi-types": {
+    "version": "0.32.0",
+    "files": {
+      "dist/index.mjs": "5b6ccfe50a0d0066411135c66964b0c15c05167f5324df2e8066493da807efbe"
+    }
+  },
+  "@jitl/quickjs-singlefile-mjs-release-sync": {
+    "version": "0.32.0",
+    "files": {
+      "dist/chunk-FGV2HSCH.mjs": "6dd70060dcfcda101ba8d51cb4b341cc66fef2a58c07ea524b8ef508fd359e32",
+      "dist/emscripten-module-Q67P5WYC.mjs": "931aa7ba3694b7a0469c8e6df620e25692302c13b87d758d427203a2ebdad192",
+      "dist/ffi.mjs": "3678ed1b43d0751000dad1cda02dc2c7b558677bb2a9fac9c8f49d3b68f0c3a3",
+      "dist/index.mjs": "df829fac8836b902e55c79fc3763b7f55d9fa901ce3b385ec09acdbc0f8d7bbd"
+    }
+  },
+  "quickjs-emscripten-core": {
+    "version": "0.32.0",
+    "files": {
+      "dist/chunk-TAV5CUKK.mjs": "b423c720a9deef215b404e4ee212533bcef9de785a11f44aacf1ad8266ae6769",
+      "dist/chunk-V2S4ZYJR.mjs": "9601ad84160a56f1321e1ed67910a3b79a4e29312f11de129e6f94a5b3e17b9a",
+      "dist/index.mjs": "5f7a507ca71ffbff0ec0bad88a9c38f717d34fd8ab9222b58deacc9de5644a3e",
+      "dist/module-ES6BEMUI.mjs": "289a200ab91f855ed79f75147eb674b81cea7adf032f9344bd8b29ff5e7a7d43",
+      "dist/module-asyncify-2EFITU5U.mjs": "c8cec04532f68af9aa436ad117defdc686d36a1670691d98cea9263345ba7b2b"
+    }
+  }
+}

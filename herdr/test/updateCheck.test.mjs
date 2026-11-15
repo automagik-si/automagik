@@ -111,7 +111,7 @@ test("nextCheckIn and noticeFor: retry after RETRY_MS, then every CHECK_EVERY_MS
   assert.equal(nextCheckIn("off"), null);
   const n = noticeFor({ kind: "update", update: UP });
   assert.equal(n.level, "info");
-  assert.match(n.body, /0\.2\.0 is out\. Run `automagik-herdr update`/);
+  assert.match(n.body, /0\.2\.0 is out\. Run `am update`/);
   assert.equal(noticeFor({ kind: "update", update: UP }, "0.2.0"), null);
   assert.equal(noticeFor({ kind: "retry" }), null);
 });
@@ -138,13 +138,13 @@ function mods(t, version = "0.1.0") {
   return { root, dir };
 }
 
-test("automagik-herdr update --check reports current and latest", async (t) => {
+test("am update --check reports current and latest", async (t) => {
   const { dir } = mods(t);
   const io = { modsDir: dir, env: {}, keys };
   assert.equal(await cmdUpdate({ check: true }, [], { ...io, fetch: fetchOf(served("0.1.0")) }),
     "Automagik Herdr 0.1.0 is installed; the latest release is 0.1.0. Up to date.");
   assert.match(await cmdUpdate({ check: true }, [], { ...io, fetch: fetchOf(served("0.2.0")) }),
-    /^Automagik Herdr 0\.1\.0 is installed; 0\.2\.0 is out \(https:\/\/github\.com\/automagik-dev\/automagik\/releases\/tag\/v0\.2\.0\)\. Run `automagik-herdr update` to install it\.$/);
+    /^Automagik Herdr 0\.1\.0 is installed; 0\.2\.0 is out \(https:\/\/github\.com\/automagik-dev\/automagik\/releases\/tag\/v0\.2\.0\)\. Run `am update` to install it\.$/);
   const json = await cmdUpdate({ check: true, json: true }, [], { ...io, fetch: fetchOf(served("0.2.0")) });
   assert.deepEqual([json.current, json.latest, json.update.version], ["0.1.0", "0.2.0", "0.2.0"]);
   await assert.rejects(cmdUpdate({ check: true }, [], { ...io, fetch: fetchOf(served("0.2.0", { untrusted: true })) }),
@@ -154,7 +154,7 @@ test("automagik-herdr update --check reports current and latest", async (t) => {
   assert.match(await cmdUpdate({ check: true }, [], { modsDir: dir, env: { AUTOMAGIK_HERDR_NO_UPDATE: "1" }, fetch: fetchOf({}) }), /Updates are off \(AUTOMAGIK_HERDR_NO_UPDATE=1\)/);
 });
 
-test("automagik-herdr update: the network down is one clear line, exit 1; flag misuse exit 2", async (t) => {
+test("am update: the network down is one clear line, exit 1; flag misuse exit 2", async (t) => {
   const { dir } = mods(t);
   const down = fetchOf({ [POINTER_URL]: new TypeError("fetch failed") });
   await assert.rejects(cmdUpdate({ check: true }, [], { modsDir: dir, env: {}, keys, fetch: down }),

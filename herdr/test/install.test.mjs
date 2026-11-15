@@ -253,7 +253,7 @@ test("a fresh install puts the pack and the command in place; a second run chang
   assert.match(readFileSync(join(s.appHome, "data", "am-mods", "catalog.json"), "utf8"), /automagik-dev\/automagik\/dev\/herdr\/catalog\/index\.json/);
   assert.match(r.out, /Add ~\/\.local\/bin to your PATH/);
   const version = spawnSync(s.link, ["--version"], { encoding: "utf8", env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin` } });
-  assert.equal(version.stdout.trim(), "automagik-herdr 9.9.0", version.stderr);
+  assert.equal(version.stdout.trim(), "am 9.9.0", version.stderr);
   // No node on PATH (a pane Herdr started): bin/run.sh finds one anyway.
   // Linux may install node in /usr/bin: expose only the wrapper's shell utilities.
   const bareBin = join(s.root, "bare-bin");
@@ -266,7 +266,7 @@ test("a fresh install puts the pack and the command in place; a second run chang
   const which = spawnSync("/bin/sh", ["-c", "command -v node"], { encoding: "utf8", env: bare });
   assert.notEqual(which.status, 0, `node must be absent from the test PATH, found ${which.stdout.trim()}`);
   const noNode = spawnSync(s.link, ["--version"], { encoding: "utf8", env: bare });
-  assert.equal(noNode.stdout.trim(), "automagik-herdr 9.9.0", noNode.stderr);
+  assert.equal(noNode.stdout.trim(), "am 9.9.0", noNode.stderr);
   assert.deepEqual(s.brewCalls(), []);
   const before = lstatSync(s.pack).ino;
   const again = s.run();
@@ -295,6 +295,82 @@ test("a link to the .mjs (installed before bin/run.sh) is repointed at the wrapp
   assert.equal(readlinkSync(s.link), join(s.pack, "bin", "automagik-herdr.mjs"));
   const again = s.run("--yes", "--version", "9.8.0");
   assert.match(again.out, /already up to date/);
+});
+
+test("am is linked beside automagik-herdr: same wrapper, followed on update, removed on uninstall", (t) => {
+  const s = scratch(t);
+  const am = join(dirname(s.link), "am");
+  s.publish("9.9.0");
+  const first = s.run("--yes");
+  assert.equal(first.code, 0, first.err);
+  assert.match(first.out, /Linked .*\/am\./);
+  assert.equal(readlinkSync(am), cliTarget(s));
+  assert.equal(readlinkSync(am), readlinkSync(s.link));
+  // A link to the .mjs (an older install) is repointed at the wrapper, like the old name's.
+  rmSync(am);
+  symlinkSync(join(s.pack, "bin", "automagik-herdr.mjs"), am);
+  assert.equal(s.run("--yes").code, 0);
+  assert.equal(readlinkSync(am), cliTarget(s));
+  // The link gone, the pack intact: linked again.
+  rmSync(am);
+  const again = s.run("--yes");
+  assert.match(again.out, /Linked .*\/am\./);
+  assert.equal(readlinkSync(am), cliTarget(s));
+  // The command is the pack's own: it runs under the name am.
+  const v = spawnSync(am, ["--version"], { encoding: "utf8", env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin` } });
+  assert.equal(v.status, 0, v.stderr);
+  const gone = s.run("--uninstall");
+  assert.equal(gone.code, 0, gone.err);
+  assert.equal(lstatSync(s.link, { throwIfNoEntry: false }), undefined);
+  assert.equal(lstatSync(am, { throwIfNoEntry: false }), undefined);
+  assert.match(gone.out, /Removed .*\/am\./);
+});
+
+test("am's own link (am self install first) stays am's: no advice to remove it, uninstall leaves it", (t) => {
+  const s = scratch(t);
+  const am = join(dirname(s.link), "am");
+  const store = join(s.home, ".automagik", "parts", "automagik.am", "3.0.0", "bin");
+  mkdirSync(store, { recursive: true });
+  writeFileSync(join(store, "am"), "#!/bin/sh\n");
+  mkdirSync(dirname(am), { recursive: true });
+  symlinkSync(join(store, "am"), am);
+  s.publish("9.9.0");
+  const r = s.run("--yes");
+  assert.equal(r.code, 0, r.err);
+  assert.doesNotMatch(r.out, /\/am alone|Remove it and run this again to link am/);
+  assert.equal(readlinkSync(am), join(store, "am"));
+  assert.equal(readlinkSync(s.link), cliTarget(s));
+  const gone = s.run("--uninstall");
+  assert.equal(gone.code, 0, gone.err);
+  assert.match(gone.out, /Left .*\/am: am's own link/);
+  assert.equal(readlinkSync(am), join(store, "am"));
+});
+
+test("an am link or file that is not the pack's stays the person's, on install and uninstall", (t) => {
+  const s = scratch(t);
+  const am = join(dirname(s.link), "am");
+  s.publish("9.9.0");
+  mkdirSync(dirname(am), { recursive: true });
+  symlinkSync("/somewhere/else/am", am);
+  const r = s.run("--yes");
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /Left .*\/am alone: it points at \/somewhere\/else\/am, not this install/);
+  assert.equal(readlinkSync(am), "/somewhere/else/am");
+  assert.equal(readlinkSync(s.link), cliTarget(s));
+  const gone = s.run("--uninstall");
+  assert.equal(gone.code, 0, gone.err);
+  assert.match(gone.out, /Left .*\/am: it points at \/somewhere\/else\/am, not this install/);
+  assert.equal(readlinkSync(am), "/somewhere/else/am");
+  unlinkSync(am);
+  writeFileSync(am, "mine\n");
+  s.publish("9.9.1");
+  const file = s.run("--yes");
+  assert.equal(file.code, 0, file.err);
+  assert.match(file.out, /Left .*\/am alone: it is a file, not a link/);
+  assert.equal(readFileSync(am, "utf8"), "mine\n");
+  const goneAgain = s.run("--uninstall");
+  assert.equal(goneAgain.code, 0, goneAgain.err);
+  assert.equal(readFileSync(am, "utf8"), "mine\n", "uninstall leaves the person's file");
 });
 
 test("a newer release replaces the installed one; --version pins one", (t) => {

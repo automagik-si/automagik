@@ -76,6 +76,8 @@ On another Linux, use the [AppImage](https://github.com/automagik-si/automagik/r
 
 The app has two things to connect when you are ready: an Omni and an AI account. Both can wait. The full guide, updates, your data and uninstall are in [apps/desktop](apps/desktop/README.md). Code mode installs separately: [herdr](herdr/README.md#install). Pocket: [apps/pocket](apps/pocket/README.md#install).
 
+**For your code agent**: `npx skills add automagik-si/automagik --skill am` adds the skill that teaches it `am`, Automagik's one command.
+
 ## This repository
 
 Automagik's plugins for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH), and the Automagik desktop app that runs them, with the Herdr pack (`herdr/`), Pocket (`apps/pocket/`) and the meter (`meter/`).

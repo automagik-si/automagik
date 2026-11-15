@@ -18,10 +18,12 @@ export function startModel(roster) {
 }
 
 // The model is always sent: the host fixes it on the Bot at creation.
-export function createPayload({ name, look, image, model, effort, brief }) {
+export function createPayload({ name, look, image, model, effort, brief, role, instructions }) {
   const payload = { name, color: look.color, avatar: image ? { shape: look.shape, image } : { shape: look.shape } }
   if (model) payload.model = model
   if (effort !== undefined) payload.effort = effort
   if (brief) payload.brief = brief
+  if (role?.trim()) payload.role = role.trim()
+  if (instructions?.trim()) payload.instructions = instructions.trim()
   return payload
 }

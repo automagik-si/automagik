@@ -206,7 +206,6 @@ test('alone on an app from before the check and the versions, the page is as tha
   const staged = { phase: 'ready', kind: 'plugins', version: '3.117.5', app: { phase: 'idle' }, plugins: { phase: 'ready', auto: false, changes: [{ name: '@automagik/bots-dsh', from: '3.117.4', to: '3.117.5' }] } }
   for (const [state, label, hint] of [
     [{ phase: 'idle' }, 'Check for updates', 'Updates come with the Automagik app.'],
-    [staged, 'Check for updates', 'Updates come with the Automagik app.'],
     [{ phase: 'error', failure: 'check' }, 'Check for updates', 'Update check failed · Retry'],
     [{ phase: 'ready', version: '3.118.0' }, 'Restart to update to 3.118.0', 'Restart to update to 3.118.0'],
     [{ phase: 'available', version: '3.118.0' }, 'Automagik 3.118.0 is out', 'Automagik 3.118.0 is out'],
@@ -230,6 +229,19 @@ test('alone on an app from before the check and the versions, the page is as tha
       assert.notEqual(page.rows.Automagik, 'Update checks are off.')
     }
   }
+  // Staged with auto-apply off is held all the same: that app's `open` restarts DSH whatever the
+  // setting says (#1029). The button keeps its plain words and asks nothing.
+  for (const source of ['app', 'unknown']) {
+    const bridge = bridgeOf({ check: false })
+    const page = draw({ update: { ...HOST_IN_APP, source }, bridge, state: staged })
+    assert.equal(page.rows.Automagik, 'Updates come with the Automagik app.')
+    const [button] = page.buttons.Automagik
+    assert.equal(textOf(button), 'Check for updates')
+    assert.equal(button.props.disabled, true)
+    button.props.onClick()
+    assert.deepEqual(bridge.asked, [])
+    assert.deepEqual(page.calls, [])
+  }
   // The plugins that app staged still have their own row and button.
   const bridge = bridgeOf({ check: false })
   const page = draw({ update: HOST_IN_APP, bridge, state: staged })
@@ -242,22 +254,28 @@ test('alone on an app from before the check and the versions, the page is as tha
 })
 
 // #1029: an app from before `check` has only `open`, and its `open` puts staged plugins in at once,
-// restarting DSH without asking whether an agent is at work.
+// restarting DSH without asking whether an agent is at work, whatever auto-apply says.
 const CHANGES = [{ name: '@automagik/bots-dsh', from: '3.117.4', to: '3.117.5' }]
 const stagedFor = plugins => ({ phase: 'ready', kind: 'plugins', version: '3.117.5', app: { phase: 'idle' }, plugins: { phase: 'ready', changes: CHANGES, ...plugins } })
 
-test('#1029: on an app from before the check, plugins it applies by itself are never put in by Check for updates', () => {
+test('#1029: on an app from before the check, staged plugins are never put in by Check for updates', () => {
   for (const [why, state] of [
     ['auto-apply on', stagedFor({ auto: true })],
     ['an app that does not say the setting', stagedFor({})],
+    // Auto-apply says only who starts it: `open` restarts DSH all the same.
+    ['auto-apply off', stagedFor({ auto: false })],
     // Staged as the whole says it, with no change named in the plugins' part.
     ['staged at the top only', { phase: 'ready', kind: 'plugins', version: '3.117.5', app: { phase: 'idle' }, plugins: { phase: 'idle', changes: [], auto: true } }],
+    ['staged at the top only, auto-apply off', { phase: 'ready', kind: 'plugins', version: '3.117.5', app: { phase: 'idle' }, plugins: { phase: 'idle', changes: [], auto: false } }],
     // Still coming: they are staged a moment later, perhaps before the app hears the click.
     ['plugins downloading', { phase: 'downloading', kind: 'plugins', version: '3.117.5', percent: 40, app: { phase: 'idle' }, plugins: { phase: 'downloading', changes: CHANGES, percent: 40, auto: true } }],
+    ['plugins downloading, auto-apply off', { phase: 'downloading', kind: 'plugins', version: '3.117.5', percent: 40, app: { phase: 'idle' }, plugins: { phase: 'downloading', changes: CHANGES, percent: 40, auto: false } }],
     ['downloading at the top only', { phase: 'downloading', kind: 'plugins', version: '3.117.5', percent: 40, app: { phase: 'idle' }, plugins: { phase: 'idle', changes: [], auto: true } }],
+    ['downloading at the top only, auto-apply off', { phase: 'downloading', kind: 'plugins', version: '3.117.5', percent: 40, app: { phase: 'idle' }, plugins: { phase: 'idle', changes: [], auto: false } }],
     // The app has not said anything yet: what its `open` would do is not known.
     ['no presentation yet', null],
     ['a failed check beside them', { phase: 'ready', kind: 'plugins', version: '3.117.5', app: { phase: 'error', failure: 'check' }, plugins: { phase: 'ready', changes: CHANGES, auto: true } }],
+    ['a failed check beside them, auto-apply off', { phase: 'ready', kind: 'plugins', version: '3.117.5', app: { phase: 'error', failure: 'check' }, plugins: { phase: 'ready', changes: CHANGES, auto: false } }],
   ]) {
     for (const source of ['app', 'unknown']) {
       const bridge = bridgeOf({ check: false })
@@ -279,8 +297,9 @@ test('#1029: with nothing staged, an app from before the check is still asked th
     ['a failed check', { phase: 'error', failure: 'check', app: { phase: 'error', failure: 'check' }, plugins: { phase: 'idle', changes: [], auto: true } }],
     ['an app that does not split its plugins', { phase: 'idle' }],
     ['plugins going in', { phase: 'installing', kind: 'plugins', version: '3.117.5', app: { phase: 'idle' }, plugins: { phase: 'installing', changes: CHANGES, auto: true } }],
-    // With auto-apply off nothing is staged behind the person's back: downloading is not held.
+    // With nothing staged there is nothing `open` could put in, auto-apply off included.
     ['plugins idle, auto-apply off', { phase: 'idle', app: { phase: 'idle' }, plugins: { phase: 'idle', changes: [], auto: false } }],
+    ['a failed check, auto-apply off', { phase: 'error', failure: 'check', app: { phase: 'error', failure: 'check' }, plugins: { phase: 'idle', changes: [], auto: false } }],
   ]) {
     const bridge = bridgeOf({ check: false })
     const page = draw({ update: HOST_IN_APP, bridge, state })

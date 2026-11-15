@@ -32,11 +32,17 @@ function bench({ meter = true, loaded = true, native = false } = {}) {
 
 // Real installed compaction transaction + real Session surface/event projection.
 // Only the agent admission boundary, persistence sink and LLM are test doubles.
-function backendBench() {
+function backendBench({ priorNote } = {}) {
   const b = bench()
   const session = new Session('s1')
   session.append('request/header', { reason: 'initial', header: { config: { provider: 'p', model: 'm', maxTokens: 1000 } } })
-  for (const value of ['first '.repeat(200), 'second '.repeat(200), 'latest input']) session.append('user/message', createUserMessage({ content: [{ type: 'text', text: value }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+  const messages = priorNote === undefined
+    ? ['first '.repeat(200), 'second '.repeat(200), 'latest input']
+    : [priorNote, 'Work still in progress. '.repeat(100), 'latest input']
+  for (const [index, value] of messages.entries()) {
+    const source = priorNote !== undefined && index === 0 ? { kind: 'ds-bot', handoff: true } : { kind: 'user' }
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: value }], source }), { surfaceOp: 'append' })
+  }
   b.agent.session = session
   b.ctx.sessions.list = () => [session]
   const meter = { measure: target => ({ totalTokens: target.surface.nodes.length * 10000, nodes: target.surface.nodes.map(seq => ({ seq, tokens: 10000, heuristicTokens: 10000 })) }), estimateMessage: () => 100 }
@@ -1158,3 +1164,89 @@ test('an rc.2 retry keeps its next-turn boundary and rpcId through a failed part
   assert.deepEqual(b.calls.archived, ['fresh1'])
   assert.deepEqual(b.streams(), [])
 })
+
+test('checkpoint retries a transient stream failure before persisting its complete summary', async t => {
+  const b = backendBench(); t.after(b.stop)
+  let attempts = 0
+  const stream = b.ctx.llm.stream
+  b.ctx.llm.providerRetryPolicy = () => ({ mode: 'normal', maxRetries: 1, retryableCodes: ['TRANSPORT'], initialDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 })
+  b.ctx.llm.stream = async function* (options) {
+    if (++attempts === 1) {
+      yield { type: 'text-delta', index: 0, text: 'broken partial' }
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'temporary failure' } } }
+    } else yield* stream(options)
+  }
+  await b.rt.checkpointBot('b1', { sessionId: 's1' })
+  assert.equal(attempts, 2)
+  const summary = b.calls.persisted.find(event => event.type === 'compaction/summary').data.summary[0].text
+  assert.match(summary, /A summary/)
+  assert.doesNotMatch(summary, /broken partial/)
+})
+
+test('the context steward retries a transient failure before choosing compaction', async t => {
+  const b = backendBench(); t.after(b.stop)
+  b.bot.contextCheckRatio = .1
+  let attempts = 0
+  const stream = b.ctx.llm.stream
+  b.ctx.llm.providerRetryPolicy = () => ({ mode: 'normal', maxRetries: 1, retryableCodes: ['TRANSPORT'], initialDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 })
+  b.ctx.llm.stream = async function* (options) {
+    if (options.system === undefined) return yield* stream(options)
+    if (++attempts === 1) {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'TRANSPORT', message: 'temporary failure' } } }
+    } else {
+      yield { type: 'text-delta', index: 0, text: '{"action":"compact","reason":"work remains"}' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  b.ctx.emit('agent/status', { agent: b.agent, status: 'idle' })
+  await until(() => b.calls.persisted?.some(event => event.type === 'compaction/summary'), 2000)
+  assert.equal(attempts, 2)
+})
+
+// A carried note can make a replacement handoff too large while an in-place
+// checkpoint can still shrink it. Switch feasibility must not suppress compaction.
+for (const trigger of ['idle', 'pre-step']) {
+  test(`${trigger} compacts a large carried note before checking whether another handoff fits`, async t => {
+    const priorNote = 'Prior decisions and unfinished work. '.repeat(880)
+    const b = backendBench({ priorNote }); t.after(b.stop)
+    b.bot.segments = [{ sessionId: 'old', number: 1, note: priorNote, noteFrom: 1, endedAt: 1 }]
+    const size = message => Math.ceil(message.content.filter(block => block.type === 'text').map(block => block.text).join('').length / 4)
+    b.ctx.llm.resolveModelInfo = async () => ({ context: { contextWindow: 10000 } })
+    b.ctx.tokenMeter.estimateMessage = size
+    b.ctx.tokenMeter.measure = target => {
+      const nodes = target.surface.nodes.map(seq => {
+        const event = target.eventAt(seq)
+        const tokens = size(event.data.message ?? event.data)
+        return { seq, tokens, heuristicTokens: tokens }
+      })
+      return { totalTokens: nodes.reduce((sum, node) => sum + node.tokens, 0), nodes }
+    }
+    b.ctx.llm.stream = async function* (options) {
+      b.calls.streams.push(options)
+      yield { type: 'text-delta', index: 0, text: options.messages.tag?.kind === 'steward' ? '{"action":"compact"}' : 'A summary of the prior decisions.' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const before = b.ctx.tokenMeter.measure(b.session).totalTokens
+    assert.equal(before, 8743)
+    assert.ok(before < 9000 && before > 8550, 'current input fits the usable window but crosses the hard line')
+    if (trigger === 'idle') {
+      b.ctx.emit('agent/status', { agent: b.agent, status: 'idle' })
+      await until(() => b.calls.persisted?.some(event => event.type === 'compaction/summary'), 2000)
+    } else {
+      // The step path uses the backend's overflow entry point inside an active turn.
+      const original = b.compaction[Symbol.for('ds-bot/compaction')]
+      original.compactIfNeeded = BasicCompactionEngine.prototype.compactIfNeeded
+      original.compactRegion = BasicCompactionEngine.prototype.compactRegion
+      b.session.append('turn/start', { turn: 1 })
+      const decision = await b.preStep({ agent: b.agent, messages: [], step: 1, signal: new AbortController().signal }, async () => 'next')
+      assert.equal(decision, 'next')
+      // Turn-owned compaction is persisted by the turn, rather than an idle flush.
+      b.calls.persisted = b.session.snapshotEvents()
+    }
+    assert.ok(b.calls.persisted?.some(event => event.type === 'compaction/summary'), 'automatic compaction must run before the switch-size guard')
+    assert.deepEqual(b.calls.streams.map(options => options.messages.tag.kind), ['steward', 'checkpoint'])
+    assert.equal(b.ctx.tokenMeter.measure(b.session).totalTokens, 755)
+    assert.equal(b.bot.sessionId, 's1', 'compaction keeps the current part')
+    assert.deepEqual([...b.rt.switchJobs()], [])
+  })
+}

@@ -1,13 +1,14 @@
 // Materialize local install inputs from the image's scanned, unpacked plugin files.
-// Archives exist only in the writable staging profile, never in the image being scanned.
+// Archives stay in the writable profile for later installs, never in the image being scanned.
 import { createHash } from 'node:crypto'
-import { lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
+import { parse, stringify } from 'yaml'
+import { PLUGINS } from './profile-state.mjs'
 
-export const PLUGINS = ['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/welcome-dsh']
+export { PLUGINS }
 const sha512 = bytes => `sha512-${createHash('sha512').update(bytes).digest('base64')}`
-const escaped = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /** USTAR files, ordered deterministically, with no owner, build path or timestamp metadata. */
 export function packPlugin(dir) {
@@ -44,18 +45,31 @@ export function packPlugin(dir) {
   return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]))
 }
 
-export function materializePlugins({ source, target }) {
+/**
+ * After an update, remove earlier images' archives of the three plugins (about 10 MB a
+ * release); the backup keeps the old profile's. Any archive the manifest names is kept, and
+ * nothing in vendor/ that is not one of the image's plugin archives is touched.
+ */
+export function pruneImageArchives(profile) {
+  const named = new Set(Object.values(JSON.parse(readFileSync(join(profile, 'package.json'), 'utf8')).dependencies ?? {})
+    .filter(spec => typeof spec === 'string' && spec.startsWith('file:vendor/')).map(spec => spec.slice('file:vendor/'.length)))
+  const ours = new RegExp(`^automagik-(?:${PLUGINS.map(name => name.split('/')[1]).join('|')})-\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?\\.tgz$`)
+  for (const file of readdirSync(join(profile, 'vendor'))) {
+    if (ours.test(file) && !named.has(file)) rmSync(join(profile, 'vendor', file))
+  }
+}
+
+export function materializePlugins({ source, target, lock = parse(readFileSync(join(source, 'pnpm-lock.yaml'), 'utf8')) }) {
   const manifest = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8'))
-  let lock = readFileSync(join(source, 'pnpm-lock.yaml'), 'utf8')
   mkdirSync(join(target, 'vendor'), { recursive: true })
   for (const name of PLUGINS) {
     const match = /^file:vendor\/([A-Za-z0-9._-]+\.tgz)$/.exec(manifest.dependencies?.[name] ?? '')
     if (!match) throw new Error('Unsupported image plugin source')
     const file = match[1], bytes = packPlugin(join(source, 'node_modules', ...name.split('/')))
-    const pattern = new RegExp(`^(\\s+resolution: \\{integrity: )sha512-[A-Za-z0-9+/=]+(, tarball: file:vendor/${escaped(file)}\\})$`, 'gm')
-    if ([...lock.matchAll(pattern)].length !== 1) throw new Error('Unsupported image plugin lock')
-    lock = lock.replace(pattern, (_, before, after) => `${before}${sha512(bytes)}${after}`)
+    const entry = lock.packages?.[`${name}@file:vendor/${file}`]
+    if (entry?.resolution?.tarball !== `file:vendor/${file}`) throw new Error('Unsupported image plugin lock')
+    entry.resolution.integrity = sha512(bytes)
     writeFileSync(join(target, 'vendor', file), bytes)
   }
-  writeFileSync(join(target, 'pnpm-lock.yaml'), lock)
+  writeFileSync(join(target, 'pnpm-lock.yaml'), stringify(lock, { lineWidth: 0 }))
 }

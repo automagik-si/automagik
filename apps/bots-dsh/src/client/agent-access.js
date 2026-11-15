@@ -387,7 +387,7 @@ export const AGENT_ACCESS_CSS = `
 .bt-aa-create{display:flex;align-items:center;gap:8px}
 .bt-aa-create .bt-input{flex:1;min-width:0;height:34px}
 .bt-aa-create .bt-fb-primary{height:34px;padding:0 16px;font-size:13px}
-.bt-aa-problem{font-size:12px;line-height:16px;color:color-mix(in srgb,var(--bt-danger) 72%,var(--bt-ink))}
+.bt-aa-problem{font-size:12px;line-height:16px;color:color-mix(in srgb,var(--st-bad-strong,var(--bt-danger)) 72%,var(--bt-ink))}
 .bt-aa-new{display:flex;flex-direction:column;gap:10px;padding:12px;background:color-mix(in srgb,var(--bt-accent) 6%,transparent)}
 .bt-aa-new-head{display:flex;align-items:center;gap:6px;font-size:13px;line-height:18px;font-weight:600}
 .bt-aa-new-head svg{flex:none;color:color-mix(in srgb,var(--bt-green) 70%,var(--bt-ink))}
@@ -404,7 +404,7 @@ export const AGENT_ACCESS_CSS = `
 .bt-aa-key[data-revoked] .bt-aa-name{font-weight:400;color:var(--bt-ink-2)}
 .bt-aa-key[data-revoked] .bt-aa-name svg{color:var(--bt-ink-3)}
 .bt-aa-ask{font-size:12px;line-height:16px;color:var(--bt-ink)}
-.bt-aa-danger{color:color-mix(in srgb,var(--bt-danger) 72%,var(--bt-ink))}
+.bt-aa-danger{color:color-mix(in srgb,var(--st-bad-strong,var(--bt-danger)) 72%,var(--bt-ink))}
 .bt-aa-danger[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 14%,transparent)}
 .bt-aa-danger[data-confirm]:hover{background:color-mix(in srgb,var(--bt-danger) 22%,transparent)}
 .bt-aa-more{justify-content:center;font-size:12px;color:var(--bt-ink-2)}
@@ -423,7 +423,7 @@ export const AGENT_ACCESS_CSS = `
 .bt-aa-reason{font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-aa-changes{margin:4px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px;font-size:12px;line-height:17px;color:var(--bt-ink);overflow-wrap:anywhere}
 .bt-aa-changes li{padding-left:10px;border-left:2px solid var(--bt-line-2)}
-.bt-aa-pill{flex:none;margin-top:1px;padding:1px 8px;border-radius:999px;font-size:11.5px;line-height:16px;font-weight:500;white-space:nowrap;background:color-mix(in srgb,var(--bt-danger) 12%,transparent);color:color-mix(in srgb,var(--bt-danger) 72%,var(--bt-ink))}
+.bt-aa-pill{flex:none;margin-top:1px;padding:1px 8px;border-radius:999px;font-size:11.5px;line-height:16px;font-weight:500;white-space:nowrap;background:color-mix(in srgb,var(--bt-danger) 12%,transparent);color:color-mix(in srgb,var(--st-bad-strong,var(--bt-danger)) 72%,var(--bt-ink))}
 .bt-aa-pill[data-outcome=allowed]{background:color-mix(in srgb,var(--bt-green) 14%,transparent);color:color-mix(in srgb,var(--bt-green) 50%,var(--bt-ink))}
 .bt-aa-pill[data-outcome=started]{background:color-mix(in srgb,var(--bt-star) 16%,transparent);color:color-mix(in srgb,var(--bt-star) 58%,var(--bt-ink))}
 @media (max-width:640px){

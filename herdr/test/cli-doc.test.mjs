@@ -101,7 +101,7 @@ test("doc: a usage mistake exits 2, hc failing 1, each with a plain message", (t
     const r = s.cli(args);
     assert.equal(r.code, 2, `${args.join(" ")}: ${r.err}`);
     assert.equal(r.out, "");
-    assert.match(r.err, /^automagik-herdr: doc/);
+    assert.match(r.err, /^am: doc/);
   }
   assert.deepEqual(s.calls(), []);
   const down = s.cli(["doc", "get", "herdr-meter"]);
@@ -126,7 +126,7 @@ test("doc get: malformed JSON from hc, or an answer with no value, exits 1 with 
     const r = s.cli(["doc", "get", "herdr-meter"]);
     assert.equal(r.code, 1, `${answer}: ${r.err}`);
     assert.equal(r.out, "");
-    assert.match(r.err, /^automagik-herdr: hc/);
+    assert.match(r.err, /^am: hc/);
   }
 });
 

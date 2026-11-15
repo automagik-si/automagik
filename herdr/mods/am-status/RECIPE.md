@@ -25,8 +25,8 @@ it couldn't (offline, GitHub refusing, no node, no sidebar answering).
 - **Up to date**: click the version to check now ("checking…", then the answer).
 - **Update available**: click **update** to open Herdr's `confirm` dialog naming both versions.
   Confirm runs `am-status.update`, and the sidebar installs the release with `node
-  <pack>/update.mjs apply`, the path `automagik-herdr update` takes: the tarball checked against
-  the release's `SHA256SUMS`, the replaced pack kept for `automagik-herdr update --rollback`. A
+  <pack>/update.mjs apply`, the path `am update` takes (`automagik-herdr` still works as an alias): the tarball checked against
+  the release's `SHA256SUMS`, the replaced pack kept for `am update --rollback`. A
   swap reloads the mods (Herdr reloads a mod whose files change), and the new build posts
   "Automagik Herdr updated to X"; if no reload came within 30 s, the old build's notice says to
   quit and reopen Herdr.
@@ -40,7 +40,7 @@ it couldn't (offline, GitHub refusing, no node, no sidebar answering).
   release moved on by the time of the download, nothing is installed and the bar offers the new
   version with the reason in the tooltip; confirm again.
 - **The layout follows**: the update places the release's `layouts/automagik.json` as install.sh
-  does (D8: a layout you edited is kept), and `automagik-herdr update --rollback` puts the
+  does (D8: a layout you edited is kept), and `am update --rollback` puts the
   rolled-to pack's layout back, so a rollback never leaves the bar naming a missing `am-status`.
 - **Couldn't check**: no sidebar answered, the look really failed (offline, GitHub refusing, no
   node), or a queued request's run died before answering (the tooltip says the run did not

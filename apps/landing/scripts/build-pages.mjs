@@ -3,9 +3,11 @@ import assert from 'node:assert/strict'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { waitlistForm, privacyNote } from '../waitlist/lib/ui.js'
+import { waitlistForm, waitlistIntro, privacyNote } from '../waitlist/lib/ui.js'
 
-export const routes = ['/', '/desktop/', '/mobile/', '/omni/', '/genie/', '/cloud/', '/arca/', '/mykes/']
+// The pages this site builds. /arca/ is not one of them: that address is Arca's own page,
+// served by Arca's Worker (RFC 0027). This site links to it and carries no file there.
+export const routes = ['/', '/desktop/', '/mobile/', '/omni/', '/genie/', '/cloud/', '/mykes/']
 const repo = 'https://github.com/automagik-si/automagik'
 const mac = `${repo}/releases/latest/download/Automagik-Mac.dmg`
 const linux = `${repo}/releases/latest/download/Automagik-Linux.deb`
@@ -25,20 +27,18 @@ export const weUnfold = {
   partOf: 'Automagik is part of we unfold, the home of the Open Intelligence movement.',
   openIntelligence: 'Open Intelligence: a future more people can understand, question, and shape.',
 }
-// ARCA: a stand-in page until Arca's own site is served at /arca/. Its one line is the
-// owner's own (2026-11-12), used exactly as given wherever Arca is described. Get Arca opens
-// this page, where the install command is text to copy: the installer's address answers
-// with a shell script, so nothing links to it.
-export const arca = {
-  line: 'Be your own cloud. Infrastructure for AI agents.',
-  install: 'curl -fsSL https://get.automagik.si/arca | sh',
-  needs: 'Today it needs a Linux machine (x86_64) with Incus, and a person comfortable with a terminal.',
-}
-// ARCA'S LOGO: Arca's own mark stands wherever Arca does, from Arca's kit, copied unchanged
-// into assets/brand/arca/svg/ under the kit's own file names (a newer kit replaces the files
-// at the same paths). Arca's rules: one colour (ink on its sand ground in light, ivory on
-// its night ground in dark), never redrawn, tinted, animated or locked up with another mark.
-const arcaMark = place => `<span class="arca-mark at-${place}"><picture><source media="(prefers-color-scheme: dark)" srcset="/assets/brand/arca/svg/arca-icon-ivory.svg"><img src="/assets/brand/arca/svg/arca-icon-ink.svg" width="64" height="64" alt="" aria-hidden="true" decoding="async"></picture></span>`
+// ARCA: its page at /arca/ is Arca's own, not built here. Its one line is the owner's own
+// (2026-11-12), used exactly as given wherever Arca is described. Get Arca opens Arca's
+// page; the installer's address answers with a shell script, so nothing here links to it.
+export const arca = { line: 'Be your own cloud. Infrastructure for AI agents.' }
+// ARCA'S LOGO is the ark, in one colour, the text colour, never coloured (the owner's decision;
+// the family package's issue 11c). With its word it is Arca's row in the family drawer
+// (arcaLogo, below). Alone it is the small picture beside
+// the name "Arca" in the Products menu and on the home card: the package's
+// arca-ark-icon.svg, written into the page as it is, so it takes the text colour. The name
+// stands beside it, so the picture is hidden from assistive technology. The arch was Arca's
+// earlier logo: no page shows it, and its files are not in this site.
+export const arcaArk = `<span class="arca-ark" aria-hidden="true">${readFileSync(new URL('../assets/family/arca-ark-icon.svg', import.meta.url), 'utf8').trim()}</span>`
 // THE OFFICIAL LOCKUP: shown once, on the home page's brand block, never in the header,
 // the hero, the favicon or a share picture.
 const lockup = '/assets/brand/automagik/automagik-lockup-oi'
@@ -107,9 +107,21 @@ function art(name, alt, { cls = '', eager = false, dark = false, sizes = '', nar
   ].join('')
   return sources ? `<picture>${sources}${img}</picture>` : img
 }
-// The mark alone: the logo kit's triskle in three colours, the drawing made for the size
-// shown (the 32 px drawing in a menu, the large one from about 100 px up).
+// Automagik's mark alone: the logo kit's triskle in three colours, the drawing made for the
+// size shown (the 32 px drawing in a menu, the large one from about 100 px up). The triskle
+// is Automagik's alone (the brand's rule 1): it stands for Automagik's own Cloud, and never
+// beside Omni, Genie or Mykes.
 const triskle = (cls, alt = '', { small = false } = {}) => `<img class="${cls}" src="/assets/brand/triskle-three-colours${small ? '-32' : ''}.svg" width="${small ? 32 : 300}" height="${small ? 32 : 300}" ${alt ? `alt="${alt}"` : 'alt="" aria-hidden="true"'}${small ? ' loading="lazy"' : ' fetchpriority="high"'} decoding="async">`
+// A product's own mark alone, for the Products menu: the brand folder's flat drawing,
+// unchanged, in ink on the light page and in cream on the dark one (the brand's rules 9 and
+// 10: never the triskle, never a pet). The menu's picture is a mark's place, so no
+// character stands there: Cloud, Automagik's own, shows the triskle. Omni's is the vortex drawn for about 32 px; the lamp
+// and the cords have one drawing each. [file stem, size suffix, frame width, frame height].
+export const PRODUCT_MARKS = { omni: ['omni-mark', '-32', 120, 120], genie: ['genie-lamp', '', 392, 200], mykes: ['mykes-clean', '', 220, 222] }
+const productMark = slug => {
+  const [stem, size, width, height] = PRODUCT_MARKS[slug], file = tone => `/assets/brand/${stem}-${tone}${size}.svg`
+  return `<picture><source media="(prefers-color-scheme: dark)" srcset="${file('cream')}"><img class="menu-art" src="${file('ink')}" width="${width}" height="${height}" alt="" aria-hidden="true" loading="lazy" decoding="async"></picture>`
+}
 // The clay dots and threads of the app's install art, drawn once per page behind a stage.
 function constellation() {
   const nodes = [[60, 120, 9, 'p'], [150, 70, 6, 'c'], [250, 150, 12, 'v'], [120, 260, 7, 'c'], [40, 380, 10, 'v'], [180, 470, 6, 'p'], [330, 540, 9, 'c'],
@@ -122,15 +134,16 @@ function constellation() {
 }
 
 // The site's navigation: three groups, the same in the header menus, the phone menu and the
-// footer. Products keep one order everywhere, which is also the previous/next order.
+// footer. Products keep one order everywhere, which is also the previous/next order (the
+// pager walks the pages this site builds, so it passes Arca by: see more()).
 const products = [
   { href: '/desktop/', name: 'Desktop', image: 'app-icon', line: 'Your agent team, in your chats.' },
   { href: '/mobile/', name: 'Mobile', image: 'app-icon', line: 'Your agents on your Android phone.' },
-  { href: '/omni/', name: 'Omni', image: 'omni', line: 'Your chat apps, connected.' },
-  { href: '/genie/', name: 'Genie', image: 'genie', line: 'A wish, a branch, a report.' },
-  { href: '/cloud/', name: 'Cloud', image: 'pet', line: 'Coming soon. Register your interest.' },
-  { href: '/arca/', name: 'Arca', mark: arcaMark('menu'), line: arca.line },
-  { href: '/mykes/', name: 'Mykes', mark: triskle('menu-art', '', { small: true }), line: 'Coming soon.' },
+  { href: '/omni/', name: 'Omni', image: 'omni', mark: productMark('omni'), line: 'Your chat apps, connected.' },
+  { href: '/genie/', name: 'Genie', image: 'genie', mark: productMark('genie'), line: 'A wish, a branch, a report.' },
+  { href: '/cloud/', name: 'Cloud', image: 'pet', mark: triskle('menu-art', '', { small: true }), line: 'Coming soon. Register your interest.' },
+  { href: '/arca/', name: 'Arca', mark: arcaArk, line: arca.line },
+  { href: '/mykes/', name: 'Mykes', mark: productMark('mykes'), line: 'Coming soon.' },
 ]
 const resources = [
   { href: docs, name: 'Docs', glyph: 'book', line: 'Guides for the app and its blocks.', external: true },
@@ -157,7 +170,6 @@ const icon = {
   download: '<path d="M12 4v11"/><path d="M7.5 11l4.5 4.5 4.5-4.5"/><path d="M5 19.5h14"/>',
   globe: '<circle cx="12" cy="12" r="8.6"/><path d="M3.4 12h17.2"/><path d="M12 3.4c2.7 2.5 2.7 14.7 0 17.2"/><path d="M12 3.4c-2.7 2.5-2.7 14.7 0 17.2"/>',
   chat: '<path d="M4.5 6.5A2.5 2.5 0 0 1 7 4h10a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5h-5.2L7.5 19.5v-4H7a2.5 2.5 0 0 1-2.5-2.5z"/>',
-  menu: '<path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/>',
   close: '<path d="M6 6l12 12"/><path d="M18 6L6 18"/>',
   chevron: '<path d="M6.5 9.5l5.5 5.5 5.5-5.5"/>',
   terminal: '<rect x="3.5" y="5" width="17" height="14" rx="2.6"/><path d="M7.5 10l3 2.4-3 2.4"/><path d="M13 15h3.5"/>',
@@ -238,7 +250,7 @@ export const brand = '<a class="brand" href="/" aria-label="Automagik home"><pic
 // the two large ones.
 export const icons = '<link rel="icon" href="/favicon.ico" sizes="48x48"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest">'
 export const manifest = { name: 'Automagik', short_name: 'Automagik', icons: [{ src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' }, { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }], theme_color: '#3c3049', background_color: '#3c3049', display: 'browser', start_url: '/' }
-const entry = route => ({ href, name, line, image, mark, glyph: sign, external }) => `<li><a class="menu-item" href="${href}"${href === route ? ' aria-current="page"' : ''}><span class="menu-icon">${image ? art(image, '', { cls: 'menu-art' }) : mark ?? glyph(sign)}</span><span class="menu-text"><strong>${name}${external ? ` ${out}` : ''}</strong><span>${line}</span></span></a></li>`
+const entry = route => ({ href, name, line, image, mark, glyph: sign, external }) => `<li><a class="menu-item" href="${href}"${href === route ? ' aria-current="page"' : ''}><span class="menu-icon">${mark ?? (image ? art(image, '', { cls: 'menu-art' }) : glyph(sign))}</span><span class="menu-text"><strong>${name}${external ? ` ${out}` : ''}</strong><span>${line}</span></span></a></li>`
 // OPEN INTELLIGENCE TAG: we unfold's horizontal tag, the only Open Intelligence mark this
 // site uses, applied the way Arca's site applies it. The file is pasted inline as given
 // (assets/brand/open-intelligence/, one colour, the text colour around it; its words are live
@@ -248,10 +260,93 @@ const entry = route => ({ href, name, line, image, mark, glyph: sign, external }
 // bigger than the logo it sits with. The official lockup (the logo with the tag under it) is
 // built by scripts/build-lockup.mjs into assets/brand/automagik/.
 export const oiTag = readFileSync(new URL('../assets/brand/open-intelligence/open-intelligence-tag.svg', import.meta.url), 'utf8').trim()
-// Menus without client scripting: each button opens its panel through the browser's own
-// popover. The browser keeps the button's expanded state, closes the panel on Escape or a
-// click outside, and returns focus to the button. Hover opens the same panel in CSS. On a
-// phone the Menu button opens one sheet under the header with the same three groups.
+// THE FAMILY DRAWER: the menu the whole product family shares (Arca's drawer package, issue
+// 11, approved by the owner on 2026-11-12). assets/family/ holds the piece as it was given:
+// family.html, header-button.html, family.css and family.js, and the art, all byte copies
+// (assets/family/SOURCE.md lists each one's sha256). Nothing of it is written here: the
+// markup below is the piece's own file with its comments left out, its slots filled, and
+// this site's own parts put in the places the piece gives a host:
+// - the top block is Automagik, the product whose site this is, with its lockup and line;
+// - the list under it is this site's pages that have no row in the drawer; it shows where
+//   the header has no room for its menus. A place on the page being read is written as a
+//   bare #name, so the piece closes the drawer before going there;
+// - addresses on automagik.si are written from this site's root, as every other link here;
+// - the row or link of the page being read carries aria-current="page".
+// The rows are the approved ones: Automagik's lockup with Desktop and Mobile, then omni,
+// genie and mykes, each as its word in the lettering with no mark, "Coming soon." under
+// Mykes. No pet, no Genie head, and the triskle beside nothing but Automagik.
+// THE HOST IS AUTOMAGIK (the package's issue 11b, "A case of its own"): Automagik appears
+// once, as the "You are here" block; the Automagik row is left out; Desktop and Mobile move
+// into that block, right under the link and above the list of pages; and Products lists
+// Arca first, by its own logo, then omni, genie and mykes.
+const familyFile = name => readFileSync(new URL(`../assets/family/${name}`, import.meta.url), 'utf8')
+// Arca's logo, the ark with its word: the package's file as it is, to write into a page so it
+// takes the text colour. It carries its own name ("arca") for assistive technology.
+export const arcaLogo = familyFile('arca-logo-b.svg').trim()
+const once = (text, from, to, times = 1) => {
+  assert.equal(text.split(from).length - 1, times, `the family piece holds ${from} ${times} time(s)`)
+  return text.replaceAll(from, to)
+}
+export const familyArt = {
+  __FAM_LOCKUP_CREAM_64__: 'automagik-lockup-three-colours-cream-64.png', __FAM_LOCKUP_CREAM_48__: 'automagik-lockup-three-colours-cream-48.png',
+  __FAM_LOCKUP_INK_64__: 'automagik-lockup-three-colours-ink-64.png', __FAM_LOCKUP_INK_48__: 'automagik-lockup-three-colours-ink-48.png',
+  __FAM_LOCKUP_CREAM_128__: 'automagik-lockup-three-colours-cream-128.png', __FAM_LOCKUP_INK_128__: 'automagik-lockup-three-colours-ink-128.png',
+  __FAM_WORD_OMNI_CREAM__: 'omni-wordmark-cream.svg', __FAM_WORD_OMNI_INK__: 'omni-wordmark-ink.svg',
+  __FAM_WORD_GENIE_CREAM__: 'genie-wordmark-cream.svg', __FAM_WORD_GENIE_INK__: 'genie-wordmark-ink.svg',
+  __FAM_WORD_MYKES_CREAM__: 'mykes-wordmark-cream.svg', __FAM_WORD_MYKES_INK__: 'mykes-wordmark-ink.svg',
+}
+// The host's own parts. The line is the site's own, as in the footer.
+export const familyHost = { name: 'Automagik', line: 'Open building blocks of superintelligence.', arcaLine: 'Be your own cloud. Infrastructure for AI agents.' }
+// This site's pages with no row in the drawer, for a window whose header has no room for
+// the menus. Docs is the drawer's own Support link; the phone app is on Mobile's page.
+export const familyLinks = [['/cloud/', 'Cloud'], ['/desktop/#install', 'Get the app'], ['/cloud/#privacy', 'Privacy']]
+const withoutComments = html => html.replace(/<!--[\s\S]*?-->\n?/g, '').trim()
+// The button: the piece's own markup. With script off it is a plain link, and on this site
+// that link goes to the page's own sitemap, the footer, where every page is listed.
+export const familyButton = once(withoutComments(familyFile('header-button.html')).split('\n')[0], 'href="https://automagik.si/"', 'href="#sitemap"')
+export function family(route) {
+  let html = withoutComments(familyFile('family.html'))
+  // The piece's own lockup markup, as it stands in the Automagik row, for the top block too:
+  // there the link has no name of its own, so the picture carries it.
+  const lockup = html.match(/<span class="fam-lockup"><picture class="fam-lock-cream">.*?<\/picture><picture class="fam-lock-ink">.*?<\/picture><\/span>/)[0]
+  // Arca's row in Products: the piece's own Arca item, as it stands in the piece's top block,
+  // without "You are here", as a logo row. The logo is the package's file, inline, so it
+  // takes the text colour.
+  let arcaRow = html.match(/<a class="fam-item is-here" .*?<\/a>/)[0]
+  arcaRow = once(arcaRow, 'class="fam-item is-here"', 'class="fam-item is-logo"')
+  arcaRow = once(arcaRow, ' aria-current="page"', '')
+  arcaRow = once(arcaRow, '<span class="fam-here">You are here</span>', '')
+  arcaRow = once(arcaRow, '__FAM_ARCA__', arcaLogo)
+  html = once(html, '__FAM_ARCA__', once(lockup, 'alt=""', `alt="${familyHost.name}"`, 2))
+  html = once(html, 'href="https://automagik.si/arca/" data-family-product="Arca"', `href="/" data-family-product="${familyHost.name}"`)
+  html = once(html, familyHost.arcaLine, familyHost.line, 2)
+  // "You are here" is the site. On the home page that is also the page being read.
+  html = once(html, ' aria-current="page"><span class="fam-words"><span class="fam-logo">', ` aria-current="${route === '/' ? 'page' : 'true'}"><span class="fam-words"><span class="fam-logo">`)
+  const links = familyLinks.map(([href, name]) => {
+    const [path, place] = href.split('#')
+    return `<li><a href="${place && path === route ? `#${place}` : href}"${href === route ? ' aria-current="page"' : ''}>${name}</a></li>`
+  }).join('')
+  const list = html.match(/(<ul class="fam-links" data-family-links aria-label="Sections">)(.*?)(<\/ul>)/)
+  html = once(html, list[0], list[1] + links + list[3])
+  // The host is Automagik: its row is left out, Desktop and Mobile stand in the top block
+  // right under the link, and Arca is the first of the products.
+  const apps = html.match(/<span class="fam-apps" role="group" aria-label="The Automagik app">.*?<\/span>/)[0]
+  const row = html.match(/\n  <div class="fam-top">\n    <a class="fam-home" .*<\/a>\n    (.*)\n  <\/div>/)
+  assert.equal(row[1], apps, 'the Automagik row holds the lockup and the two app buttons')
+  html = once(html, row[0], '')
+  html = once(html, '\n    <ul class="fam-links"', `\n    ${apps}\n    <ul class="fam-links"`)
+  html = once(html, '<ul class="fam-list">\n', `<ul class="fam-list">\n    <li>${arcaRow}</li>\n`)
+  for (const [slot, name] of Object.entries(familyArt)) html = html.replaceAll(slot, `/assets/family/${name}`)
+  html = once(html, 'href="https://automagik.si/', 'href="/', 6)
+  assert.doesNotMatch(html, /__FAM_|automagik\.si|fam-top|fam-home/, 'every slot is filled, every address is this site\'s own, and Automagik has no row of its own')
+  if (route !== '/' && html.includes(`href="${route}" data-family-product=`)) html = once(html, `href="${route}" data-family-product=`, `href="${route}" aria-current="page" data-family-product=`)
+  return html
+}
+// The header: the family's menu button first, at the window's left edge, then the logo, the
+// three menus and one button. The menus need no script: each button opens its panel through
+// the browser's own popover. The browser keeps the button's expanded state, closes the panel
+// on Escape or a click outside, and returns focus to the button. Hover opens the same panel
+// in CSS. Where the header has no room for the menus, the drawer carries the site's pages.
 function header(route) {
   const here = products.find(({ href }) => href === route)
   const groups = [
@@ -263,9 +358,7 @@ function header(route) {
     const current = id === 'products' && here
     return `<li class="menu"><button class="menu-button" type="button" popovertarget="menu-${id}"${current ? ' data-here' : ''}>${label}${current ? `<span class="menu-here"><span class="sr">, current page: </span>${here.name}</span>` : ''}${glyph('chevron', 'chev')}</button><div class="menu-panel" id="menu-${id}" popover><div class="menu-card"><ul class="menu-list">${items.map(entry(route)).join('')}</ul><p class="menu-foot">${foot}</p></div></div></li>`
   }).join('')
-  const sheet = groups.map(([id, label, items]) => `<section class="drawer-group" aria-labelledby="drawer-${id}"><h2 id="drawer-${id}" class="drawer-label">${label}</h2><ul class="menu-list">${items.map(entry(route)).join('')}</ul></section>`).join('')
-  return `<header class="top"><div class="wrap top-inner">${brand}<nav class="main-nav" aria-label="Main navigation"><ul class="menus">${menus}</ul></nav><a class="button primary small top-cta" href="/desktop/#install">Get the app</a><button class="menu-open" type="button" popovertarget="site-menu">${glyph('menu', 'menu-glyph bars')}${glyph('close', 'menu-glyph cross')}Menu</button><a class="menu-fallback" href="#sitemap">Menu</a></div>
-<nav class="drawer" id="site-menu" popover aria-label="All pages">${sheet}<div class="drawer-foot"><a class="button primary" href="/desktop/#install">Get the app ${arrow}</a><p class="fine">${partOf()}</p></div></nav></header>`
+  return `<header class="top topbar">${familyButton}<div class="wrap top-inner topbar-in">${brand}<nav class="main-nav" aria-label="Main navigation"><ul class="menus">${menus}</ul></nav><a class="button primary small top-cta" href="/desktop/#install">Get the app</a></div></header>`
 }
 function footer(route) {
   const column = (label, items) => `<nav aria-label="${label}"><p class="footer-head">${label}</p>${items.map(({ href, name, external }) => `<a href="${href}"${href === route ? ' aria-current="page"' : ''}>${name}${external ? ` ${out}` : ''}</a>`).join('')}</nav>`
@@ -279,28 +372,37 @@ function crumbs(route) {
 }
 function frame(route, title, body) {
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>${title} · Automagik</title><meta name="description" content="Automagik: open building blocks of superintelligence. Desktop, Mobile, Omni, Genie, Cloud, Arca and Mykes."><meta name="theme-color" content="#f6eee2" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#1e1923" media="(prefers-color-scheme: dark)"><link rel="canonical" href="https://automagik.si${route}">${icons}<link rel="preload" href="/assets/brand/fredoka-latin.woff2" as="font" type="font/woff2" crossorigin><link rel="preload" href="/assets/brand/dm-sans-latin.woff2" as="font" type="font/woff2" crossorigin><link rel="stylesheet" href="/theme.css"><link rel="stylesheet" href="/styles.css"></head>
-<body><a class="skip" href="#main">Skip to content</a>${header(route)}
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>${title} · Automagik</title><meta name="description" content="Automagik: open building blocks of superintelligence. Desktop, Mobile, Omni, Genie, Cloud, Arca and Mykes."><meta name="theme-color" content="#f6eee2" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#1e1923" media="(prefers-color-scheme: dark)"><link rel="canonical" href="https://automagik.si${route}">${icons}<link rel="preload" href="/assets/brand/fredoka-latin.woff2" as="font" type="font/woff2" crossorigin><link rel="preload" href="/assets/brand/dm-sans-latin.woff2" as="font" type="font/woff2" crossorigin><link rel="stylesheet" href="/theme.css"><link rel="stylesheet" href="/assets/family/family.css"><link rel="stylesheet" href="/styles.css"></head>
+<body><div class="page" data-family-page><a class="skip" href="#main">Skip to content</a>${header(route)}
 <main id="main">${route === '/' ? '' : crumbs(route)}${body}</main>
-${footer(route)}${getSheets(route) ? `\n${getSheets(route)}` : ''}</body></html>\n`
+${footer(route)}</div>${getSheets(route) ? `\n${getSheets(route)}` : ''}
+${family(route)}
+<script src="/assets/family/family.js" defer></script></body></html>\n`
 }
 // The other blocks, each with its own art: the way on from every page.
 function more(route) {
   const items = blocks.filter(([href]) => href !== route).map(([href, label, image, line]) => `<li><a href="${href}">${art(image, '', { cls: `more-art more-${image}` })}<span><strong>${label}</strong><span>${line}</span></span></a></li>`).join('')
-  const at = products.findIndex(({ href }) => href === route), step = by => products[(at + by + products.length) % products.length]
+  // Previous and next walk the pages this site builds, in the products' order. Arca's page is
+  // Arca's own and has no pager that leads back, so the round passes it by: after Cloud comes
+  // Mykes. The menus, the drawer, the footer and the home card still lead to Arca.
+  const round = products.filter(({ href }) => routes.includes(href))
+  const at = round.findIndex(({ href }) => href === route), step = by => round[(at + by + round.length) % round.length]
   const previous = step(-1), next = step(1)
   const pager = `<nav class="pager" aria-label="Previous and next product"><a class="pager-link" rel="prev" href="${previous.href}"><small><span aria-hidden="true">←</span> Previous</small><strong>${previous.name}</strong></a><a class="pager-all" href="/#blocks">All products</a><a class="pager-link next" rel="next" href="${next.href}"><small>Next ${arrow}</small><strong>${next.name}</strong></a></nav>`
   return `<section class="more wrap" aria-labelledby="more-title"><h2 id="more-title" class="more-title">More building blocks</h2><ul class="more-list">${items}</ul>${pager}</section>`
 }
-// A product's own logo: the logo kit's lockup for that name, unchanged (the triskle in colour,
-// the name in the kit's lettering, its sparkle in the product's colour). `size` picks the
-// kit's drawing: '' is the large one, for a page's heading; '-header' the one for small
-// sizes, for a card. The ink file shows on a light ground and the cream one on a dark
-// ground; `ground: 'dark'` is a card that stays dark in both themes.
-const LOCKUP_WIDTHS = { genie: 976, omni: 917 }
-export const productLogo = (name, size, { ground, attrs = 'loading="lazy" decoding="async"' } = {}) => {
-  const slug = name.toLowerCase(), file = tone => `/assets/brand/${slug}-lockup-three-colours-${tone}${size}.svg`
-  const image = tone => `<img class="product-logo" src="${file(tone)}" width="${LOCKUP_WIDTHS[slug]}" height="264" alt="${name}" ${attrs}>`
+// A product's own logo: the brand folder's lockup for that name, unchanged: the product's own
+// flat mark (Genie's lamp, Omni's vortex, Mykes's cords) beside its name in the brand's
+// lettering (the brand's rule 10). The triskle lockups these replaced are retired: the
+// triskle is Automagik's alone. `small` asks for the drawing made for small sizes, for a
+// card: only Omni has one (under about 56 px its large vortex's suckers turn to specks);
+// the lamp and the cords have one drawing each. The ink file shows on a light ground and the
+// cream one on a dark ground; `ground: 'dark'` is a card that stays dark in both themes.
+// [file stem, frame width (the frame is 264 high), has a drawing for small sizes].
+export const PRODUCT_LOCKUPS = { genie: ['genie-lamp-lockup', 1115, false], omni: ['omni-mark-lockup', 885, true], mykes: ['mykes-clean-lockup', 1058, false] }
+export const productLogo = (name, { small = false, ground, attrs = 'loading="lazy" decoding="async"' } = {}) => {
+  const [stem, width, header] = PRODUCT_LOCKUPS[name.toLowerCase()], file = tone => `/assets/brand/${stem}-${tone}${small && header ? '-header' : ''}.svg`
+  const image = tone => `<img class="product-logo" src="${file(tone)}" width="${width}" height="264" alt="${name}" ${attrs}>`
   return ground === 'dark' ? image('cream') : `<picture><source media="(prefers-color-scheme: dark)" srcset="${file('cream')}">${image('ink')}</picture>`
 }
 const heading = (eyebrow, title, intro) => `<p class="eyebrow">${eyebrow}</p><h1>${title}</h1><p class="intro">${intro}</p>`
@@ -318,16 +420,16 @@ export function pages() {
   const phone = (screen, cls, eager = false) => `<div class="phone ${cls}">${art(`pocket-${screen}`, phoneAlt[screen], { dark: true, sizes: '(max-width: 700px) 220px, 300px', eager })}</div>`
 
   const home = `<section class="hero home-hero">${constellation()}<div class="wrap home-hero-inner"><div class="hero-heading center">${heading('Automagik', 'Open building blocks of <span class="ink-grad">superintelligence.</span>', 'Tools that put your own agents to work. Use one, or bring them together.')}${getHook('/', 'Get Automagik for')}<p class="hero-also"><a href="#blocks">Or see every block ${down}</a></p></div>
-<div class="scene"><div class="cast">${art('genie', 'Genie, Automagik’s clay character: a dark round face with a swirl of magenta hair.', { cls: 'scene-genie', eager: true })}<p class="bubble">A team of AI helpers that lives in your chats.</p>${art('omni', 'Omni, Automagik’s clay octopus, smiling.', { cls: 'scene-omni', eager: true })}</div><figure class="window scene-window">${art('team-chat', 'The real Automagik app: a fictional team’s chat. Pip, who leads the team, passes a request for a CSV export on to Genie and reports that it is running.', { dark: true, narrow: 'team-chat-phone', sizes: '(max-width: 700px) 94vw, (max-width: 1140px) 92vw, 1040px', eager: true })}</figure></div></div></div></section>
+<div class="scene"><div class="cast">${art('genie', 'Genie, Automagik’s clay character: a dark round face with a swirl of magenta hair.', { cls: 'scene-genie', eager: true })}<p class="bubble">A team of AI helpers that lives in your chats.</p>${art('omni', 'Omni, Automagik’s clay octopus, smiling.', { cls: 'scene-omni', eager: true })}</div><figure class="window scene-window">${art('team-chat', 'The real Automagik app: a fictional team’s chat. Pip, who leads the team, passes a request for a CSV export on to Genie and reports that it is running.', { dark: true, narrow: 'team-chat-phone', sizes: '(max-width: 700px) 94vw, (max-width: 1140px) 92vw, 1040px', eager: true })}</figure></div></div></section>
 ${usedRow()}
 <section id="blocks" class="blocks wrap" aria-labelledby="blocks-title"><div class="section-heading"><p class="eyebrow">Choose a building block</p><h2 id="blocks-title">Start where your work is.</h2><p class="lede">Open a block to see what it does and how to use it.</p></div>
 <div class="bento">
 <article class="product-card" data-block="desktop"><div class="tile-copy"><p class="tile-tag">Mac and Linux</p><h3><a href="/desktop/">Automagik Desktop</a></h3><p>Your agent team, in your chats. A place to talk, hand work over and review what comes back.</p><span class="detail-link" aria-hidden="true">Download or install →</span></div><div class="tile-art window">${art('app-review-crop', 'The Automagik app: the team in the sidebar, and a finished wish’s report with the files it changed.', { dark: true, sizes: '(max-width: 700px) 640px, (max-width: 1100px) 92vw, 760px' })}</div></article>
 <article class="product-card" data-block="mobile"><div class="tile-copy"><p class="tile-tag">Android</p><h3><a href="/mobile/">Automagik Mobile</a></h3><p>Your coding agents on your Android phone, paired to your own machines.</p><span class="detail-link" aria-hidden="true">Take your team along →</span></div><div class="tile-art">${phone('chat', 'tile-phone')}</div></article>
-<article class="product-card" data-block="omni"><div class="tile-copy"><p class="tile-tag">Chat apps</p><h3><a href="/omni/">${productLogo('Omni', '-header')}</a></h3><p>Connect your chat apps to Automagik, with channels and canvases in the same window.</p><span class="detail-link" aria-hidden="true">Meet Omni →</span></div><div class="tile-art">${art('omni', 'Omni, the clay octopus.', { cls: 'tile-omni' })}</div></article>
-<article class="product-card" data-block="genie"><div class="tile-copy"><p class="tile-tag">Wishes</p><h3><a href="/genie/">${productLogo('Genie', '-header', { ground: 'dark' })}</a></h3><p>Turn a wish into a branch, a test run and a report you approve.</p><ol class="wish-steps" aria-label="What a wish becomes"><li>Wish</li><li>Branch</li><li>Test run</li><li>Report</li></ol><span class="detail-link" aria-hidden="true">Meet Genie →</span></div><div class="tile-art">${art('genie', 'Genie, the clay character with magenta hair.', { cls: 'tile-genie' })}${art('lamp', '', { cls: 'tile-lamp' })}</div></article>
+<article class="product-card" data-block="omni"><div class="tile-copy"><p class="tile-tag">Chat apps</p><h3><a href="/omni/">${productLogo('Omni', { small: true })}</a></h3><p>Connect your chat apps to Automagik, with channels and canvases in the same window.</p><span class="detail-link" aria-hidden="true">Meet Omni →</span></div><div class="tile-art">${art('omni', 'Omni, the clay octopus.', { cls: 'tile-omni' })}</div></article>
+<article class="product-card" data-block="genie"><div class="tile-copy"><p class="tile-tag">Wishes</p><h3><a href="/genie/">${productLogo('Genie', { small: true, ground: 'dark' })}</a></h3><p>Turn a wish into a branch, a test run and a report you approve.</p><ol class="wish-steps" aria-label="What a wish becomes"><li>Wish</li><li>Branch</li><li>Test run</li><li>Report</li></ol><span class="detail-link" aria-hidden="true">Meet Genie →</span></div><div class="tile-art">${art('genie', 'Genie, the clay character with magenta hair.', { cls: 'tile-genie' })}${art('lamp', '', { cls: 'tile-lamp' })}</div></article>
 <article class="product-card" data-block="cloud"><div class="tile-art">${art('pet', 'The Automagik triskelion as a clay character with a small face.', { cls: 'tile-pet' })}</div><div class="tile-copy"><p class="tile-tag soon">Coming soon</p><h3><a href="/cloud/">Cloud</a></h3><p>One sign-in, organisations and hosted workspaces. Register your interest.</p><span class="detail-link" aria-hidden="true">Explore Cloud →</span></div></article>
-<article class="product-card" data-block="arca"><div class="tile-copy">${arcaMark('card')}<h3><a href="/arca/">Arca</a></h3><p>${arca.line}</p><span class="detail-link" aria-hidden="true">Get Arca →</span></div></article>
+<article class="product-card" data-block="arca"><div class="tile-copy">${arcaArk}<h3><a href="/arca/">Arca</a></h3><p>${arca.line}</p><span class="detail-link" aria-hidden="true">Get Arca →</span></div></article>
 </div>
 <div class="also"><p class="also-label">Also on the way</p><article class="product-card"><h3><a href="/mykes/">Mykes</a></h3><p>Coming soon.</p></article></div></section>
 <section class="wrap open" aria-labelledby="open-title"><div class="open-copy"><h2 id="open-title" class="open-line">${openLine}</h2><p class="open-part">${partOf()}</p></div></section>
@@ -344,26 +446,23 @@ ${usedRow()}
 <section class="wrap close" aria-labelledby="close-title"><div class="close-copy"><p class="eyebrow">On your phone</p><h2 id="close-title">Keep your agents close.</h2><p class="lede">See which agents need you, open their terminals and answer from your phone. Teams and code spaces come from your own machines.</p></div><div class="close-phones">${phone('chat', 'close-phone')}${phone('code', 'close-phone')}</div></section>
 <section class="wrap pair" aria-labelledby="pair-title"><div class="pair-card"><div class="pair-steps"><h2 id="pair-title">Pair with Pocket Link.</h2><ol class="steps"><li>Add Pocket Link to Herdr on your computer.</li><li>Choose Pair a phone.</li><li>Scan the QR code in Automagik Mobile.</li></ol></div><div class="pair-notes"><p class="pair-free">No Cloud account is needed.</p><p class="fine">Open the APK on your phone and allow your browser to install apps when Android asks. Pocket Link needs Herdr desktop and herdr-core on macOS or Linux.</p><a class="detail-link" href="${docs}">Set up Pocket Link ${out}</a></div></div></section>${more('/mobile/')}`
 
-  const omni = `<section class="hero split-hero omni-hero"><div class="wrap split"><div class="hero-heading">${heading('Your chats, connected', productLogo('Omni', '', { attrs: 'fetchpriority="high" decoding="async"' }), 'The service that links your chat apps to Automagik, with channels and canvases in the same window.')}<div class="actions"><a class="button primary" href="/desktop/">Use it with Desktop ${arrow}</a><a class="button secondary" href="${docs}">Read the docs ${out}</a></div></div><div class="hero-visual omni-visual">${constellation()}${art('omni', 'Omni, Automagik’s clay octopus, smiling.', { cls: 'hero-omni', eager: true })}${art('omni-faces', 'Omni’s seven clay expressions, from pleased to sorry.', { cls: 'faces', eager: true })}</div></div></section>
+  const omni = `<section class="hero split-hero omni-hero"><div class="wrap split"><div class="hero-heading">${heading('Your chats, connected', productLogo('Omni', { attrs: 'fetchpriority="high" decoding="async"' }), 'The service that links your chat apps to Automagik, with channels and canvases in the same window.')}<div class="actions"><a class="button primary" href="/desktop/">Use it with Desktop ${arrow}</a><a class="button secondary" href="${docs}">Read the docs ${out}</a></div></div><div class="hero-visual omni-visual">${constellation()}${art('omni', 'Omni, Automagik’s clay octopus, smiling.', { cls: 'hero-omni', eager: true })}${art('omni-faces', 'Omni’s seven clay expressions, from pleased to sorry.', { cls: 'faces', eager: true })}</div></div></section>
 <section class="wrap omni-story" aria-labelledby="bring-title"><article class="story-copy"><p class="eyebrow">Channels</p><h2 id="bring-title">Bring your conversations.</h2><p>WhatsApp, Telegram, Slack and other channels sit beside your team. Connect an Omni when you are ready.</p><ul class="chips" aria-label="Channels named here"><li>WhatsApp</li><li>Telegram</li><li>Slack</li><li>Other channels</li></ul></article><figure class="story-art">${art('omni-card', 'The Automagik app’s team step: Omni sleeps until you press its power button.', { dark: true })}<figcaption>In the app, Omni sleeps until you bring it along.</figcaption></figure></section>
 <section class="wrap omni-canvas" aria-labelledby="canvas-title"><div class="canvas-card"><p class="eyebrow">Canvases</p><h2 id="canvas-title">Put work in the conversation.</h2><p>In a Main Bot’s canvas, lists, boards and forms can keep themselves up to date. Give Bots access to the chats where they should work.</p></div><p class="fine">No live channel or personal conversation is shown here. Permissions and their exceptions are in the <a href="${docs}">docs</a>.</p></section>${more('/omni/')}`
 
-  const genie = `<section class="hero split-hero genie-hero"><div class="wrap split"><div class="hero-heading">${heading('Wish → branch → report', productLogo('Genie', '', { attrs: 'fetchpriority="high" decoding="async"' }), 'A wish becomes a branch, a test run and a report you approve.')}<div class="actions"><a class="button primary" href="/desktop/">Open your team ${arrow}</a><a class="button secondary" href="${docs}">Read the docs ${out}</a></div><p class="fine"><code class="command">genie desktop</code> opens it on the team.</p></div><div class="hero-visual genie-visual">${constellation()}${art('genie', 'Genie, Automagik’s clay character, smiling with eyes closed.', { cls: 'hero-genie', eager: true })}${art('lamp', 'Genie’s clay lamp in plum, cyan and magenta.', { cls: 'hero-lamp', eager: true })}</div></div></section>
+  const genie = `<section class="hero split-hero genie-hero"><div class="wrap split"><div class="hero-heading">${heading('Wish → branch → report', productLogo('Genie', { attrs: 'fetchpriority="high" decoding="async"' }), 'A wish becomes a branch, a test run and a report you approve.')}<div class="actions"><a class="button primary" href="/desktop/">Open your team ${arrow}</a><a class="button secondary" href="${docs}">Read the docs ${out}</a></div><p class="fine"><code class="command">genie desktop</code> opens it on the team.</p></div><div class="hero-visual genie-visual">${constellation()}${art('genie', 'Genie, Automagik’s clay character, smiling with eyes closed.', { cls: 'hero-genie', eager: true })}${art('lamp', 'Genie’s clay lamp in plum, cyan and magenta.', { cls: 'hero-lamp', eager: true })}</div></div></section>
 <section class="wrap flow" aria-labelledby="flow-title"><div class="section-heading"><p class="eyebrow">One wish, start to finish</p><h2 id="flow-title">From a wish to a report you approve.</h2></div><ol class="flow-steps"><li><figure class="window">${art('ask', 'Recorded app capture: a fictional Northwind request for a CSV export, which Pip passes to Genie.', { dark: true })}</figure><h3>The wish</h3><p>Ask in the chat. Genie takes the project work.</p></li><li><figure class="window">${art('checks', 'Recorded app capture: the wish runs the project’s tests and the export on its own branch; both tests pass.', { dark: true })}</figure><h3>A branch and a test run</h3><p>Each wish runs in its own copy of the project, on its own branch.</p></li><li><figure class="window">${art('report', 'Recorded app capture: Genie reports the CSV export is done, with nothing pushed or merged.', { dark: true })}</figure><h3>A report you approve</h3><p>The report comes back to the chat. Merging stays your call.</p></li></ol><p class="caption">Genie reports the CSV export branch back to the fictional Northwind team. Model replies are scripted; commands, commits and file changes are real. Nothing was pushed or merged.</p>${art('genie-faces', 'Genie’s seven clay expressions, from beaming to sorry.', { cls: 'faces genie-faces' })}</section>${more('/genie/')}`
 
   const cloud = `<section class="hero split-hero cloud-hero"><div class="wrap split"><div class="hero-heading">${heading('<span class="soon-pill">Coming soon</span>', 'Automagik Cloud', 'One sign-in, organisations and hosted workspaces, with a place to open each workspace.')}<p class="lede">Cloud is not live. It will be a private, paid service, with public contracts. Register your interest and tell us what you would like your agents to do.</p><div class="actions"><a class="button primary" href="#interest">Register your interest ${down}</a></div></div><div class="hero-visual cloud-visual">${constellation()}${triskle('hero-mark', 'The Automagik triskelion: three clay strokes in cyan, magenta and violet.')}${art('pet', '', { cls: 'hero-pet', eager: true })}</div></div></section>
-<section id="interest" class="wrap form-section" aria-labelledby="build-title"><div class="form-intro"><h2 id="build-title">What would you build?</h2><p>Choose email or WhatsApp to confirm your interest. This does not create a Cloud account or promise access. We send no launch or marketing message.</p></div><div class="form-card">${waitlistForm()}${privacyNote()}</div></section>${more('/cloud/')}`
+<section id="interest" class="wrap form-section" aria-labelledby="build-title"><div class="form-intro"><h2 id="build-title">What would you build?</h2>${waitlistIntro()}</div><div class="form-card">${waitlistForm()}${privacyNote()}</div></section>${more('/cloud/')}`
 
-  const coming = name => `<section class="hero coming"><div class="wrap"><div class="coming-card">${constellation()}<div class="hero-heading center">${triskle('coming-mark')}${heading('An Automagik building block', name, 'Coming soon.')}</div></div></div></section>${more('/mykes/')}`
-
-  // Arca: one stand-in page until Arca's own site is served at this address.
-  const arcaPage = `<section class="hero coming"><div class="wrap"><div class="coming-card">${constellation()}<div class="hero-heading center">${arcaMark('hero')}${heading('An Automagik building block', 'Arca', arca.line)}<div class="install-line"><h2 id="get">Get Arca</h2><pre><code>${arca.install}</code></pre><p>${arca.needs}</p></div><div class="actions center"><a class="button secondary" href="/#blocks">All products ${arrow}</a></div></div></div></div></section>${more('/arca/')}`
+  const coming = name => `<section class="hero coming"><div class="wrap"><div class="coming-card">${constellation()}<div class="hero-heading center">${heading('An Automagik building block', productLogo(name, { attrs: 'fetchpriority="high" decoding="async"' }), 'Coming soon.')}</div></div></div></section>${more('/mykes/')}`
 
   return new Map([
     ['/', frame('/', 'Open building blocks of superintelligence', home)],
     ['/desktop/', frame('/desktop/', 'Desktop', desktop)], ['/mobile/', frame('/mobile/', 'Mobile', mobile)],
     ['/omni/', frame('/omni/', 'Omni', omni)], ['/genie/', frame('/genie/', 'Genie', genie)],
-    ['/cloud/', frame('/cloud/', 'Cloud', cloud)], ['/arca/', frame('/arca/', 'Arca', arcaPage)], ['/mykes/', frame('/mykes/', 'Mykes', coming('Mykes'))],
+    ['/cloud/', frame('/cloud/', 'Cloud', cloud)], ['/mykes/', frame('/mykes/', 'Mykes', coming('Mykes'))],
   ])
 }
 export function rootFiles() {
@@ -373,7 +472,7 @@ export function rootFiles() {
     ['robots.txt', 'User-agent: *\nAllow: /\nAllow: /arca\nSitemap: https://automagik.si/sitemap.xml\n'],
     ['sitemap.xml', `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${routes.filter(route => route !== '/arca/').map(route => `<url><loc>https://automagik.si${route}</loc></url>`).join('\n')}
+${routes.map(route => `<url><loc>https://automagik.si${route}</loc></url>`).join('\n')}
 ${arcaSitemap}
 </urlset>
 `],

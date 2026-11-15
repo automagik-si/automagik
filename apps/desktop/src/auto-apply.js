@@ -10,6 +10,7 @@
 // read and the steps that touch DSH and the window.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { liveBusy } from './quit-guard.js'
 
 // The person stopped typing or clicking this long ago, when the window is in front.
 export const APPLY_IDLE_MS = 60 * 1000
@@ -55,6 +56,63 @@ export function applyNow({ staged, auto, busy, trial, fetching, appUpdate, apply
  * automatic path, since an agent may have started since the minute's look.
  */
 export const stillIdle = busy => Boolean(busy) && busy.running === 0
+
+export const CONFIRMATION_MS = 90_000
+// Publication timestamps and object allocation are not update identity. The signed lane's
+// publisher/sequence and the staged bytes (integrity) are stable across repeated readings.
+export function stagedIdentity(staged) {
+  if (!staged) return null
+  return JSON.stringify([staged.version,
+    Object.entries(staged.lanes ?? {}).map(([publisher, lane]) => [publisher, lane.version, lane.sequence])
+      .sort(([a], [b]) => a.localeCompare(b)),
+    (staged.plugins ?? []).map(({ publisher, name, version, integrity }) => [publisher, name, version, integrity])
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))])
+}
+
+export function confirmationBudget({ now = () => performance.now(), wall = Date.now,
+  timers = globalThis, wake = () => {} } = {}) {
+  let child, since, target, until, timer
+  const cancel = () => { timers.clearTimeout(timer); timer = undefined }
+  const sync = (run) => {
+    const next = stagedIdentity(run.staged)
+    if (child !== run.child || since !== run.since || target !== next) {
+      cancel()
+      child = run.child; since = run.since; target = next; until = undefined
+    }
+  }
+  const schedule = () => {
+    cancel()
+    if (until <= now()) return
+    timer = timers.setTimeout(() => {
+      timer = undefined
+      if (until > now()) schedule()
+      else wake()
+    }, Math.max(0, until - now()))
+    timer.unref?.()
+  }
+  return {
+    sync,
+    reset() { cancel(); child = since = target = until = undefined },
+    read(busy, run) {
+      sync(run)
+      const current = liveBusy(busy, run)
+      if (!current || !target) return null
+      const modern = Object.hasOwn(current, 'logins') || Object.hasOwn(current, 'confirming')
+      if (!modern || current.confirming === 0) return current
+      // Missing/malformed confirmation metadata can hold only this same bounded budget.
+      // Never synthesize an idle base reading or erase a positive actual-agent count.
+      const clock = now()
+      let next = until ?? clock + CONFIRMATION_MS
+      const remaining = current.confirmingUntil - wall()
+      if (Number.isFinite(current.confirmingUntil) && Number.isFinite(current.at)
+        && current.confirmingUntil >= current.at && current.confirmingUntil - current.at <= CONFIRMATION_MS) {
+        next = Math.min(next, clock + Math.max(0, remaining))
+      }
+      if (next !== until) { until = next; schedule() }
+      return until > clock ? { ...current, running: Math.max(1, current.running) } : current
+    },
+  }
+}
 
 /**
  * Each plugin that changes: { name, from, to }. `plugins` are the lane's (staged, or being

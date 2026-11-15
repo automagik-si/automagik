@@ -425,7 +425,7 @@ test("create runs the non-visual fixes only: the registry pruned, a role set; ne
   const first = s.cli(["create", "--name", "Helper", "--agent", "codex", "--json"]);
   assert.equal(first.code, 0, first.err);
   // One line per entry taken off (#229); stdout is still the command's own JSON.
-  assert.equal(first.err, `automagik-herdr: tidy: ${join(s.root, "gone")} taken off the project list: its folder is gone.\n`);
+  assert.equal(first.err, `am: tidy: ${join(s.root, "gone")} taken off the project list: its folder is gone.\n`);
   JSON.parse(first.out);
   assert.deepEqual(JSON.parse(readFileSync(s.list, "utf8")), [s.beta, s.alpha], "the gone folder is off the list (alpha listed again, last)");
   assert.deepEqual(s.hcCalls().filter((c) => c[0] === "label"), [["label", "t3", "role=captain"]]);

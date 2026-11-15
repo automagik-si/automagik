@@ -267,13 +267,15 @@ export function entryOf(state, file) {
   // A16: a member's rank, "" clearing it; the main bot's entry leaves rank out, so a stored
   // one stays (the form picks ranks for members only).
   const rank = member ? { rank: state.rank ?? "" } : {};
+  // Keep an explicit setting when editing, including true; new defaults stay implicit.
+  const hadCode = file?.bots.find((b) => b.id === state.id)?.code !== undefined;
   return {
     entry: {
       ...rank,
       id: state.id, name: state.name.trim(), kind: state.kind,
       look: { character: state.character, colour: state.colour },
       role: state.role.trim(), instructions: state.instructions,
-      code: state.code === false ? false : undefined,
+      code: state.code === false ? false : hadCode ? true : undefined,
       agent: state.agent || undefined, model: state.pin || undefined,
       hermes: state.hermesHome || state.hermesProfile ? { home: state.hermesHome, profile: state.hermesProfile } : undefined,
       // Antigravity's launch mode: the default is applied at launch, so only another one is stored.
@@ -306,7 +308,7 @@ export function commandOf(state, { key = null, file = null, initial = null, mach
   let categoryId = state.category;
   if (byMain && state.category === NEW_CATEGORY) {
     categoryId = newCategoryId(state.catTitle.trim() || "category", cats);
-    pre.push(["automagik-herdr category add", opt("id", categoryId), opt("title", state.catTitle.trim()),
+    pre.push(["am category add", opt("id", categoryId), opt("title", state.catTitle.trim()),
       ...(state.catSub.trim() ? [opt("sub", state.catSub.trim())] : []), ...project].join(" "));
   }
   const parts = [];
@@ -314,7 +316,7 @@ export function commandOf(state, { key = null, file = null, initial = null, mach
   const changed = (k) => !was || was[k] !== state[k];
   const wave = String(state.wave);
   if (!was) {
-    parts.push("automagik-herdr create", opt("name", state.name.trim() || "new-bot"));
+    parts.push("am create", opt("name", state.name.trim() || "new-bot"));
     if (state.kind === "main") parts.push(opt("kind", "main"));
     if (state.agent) parts.push(opt("agent", state.agent));
     if (state.role.trim()) parts.push(opt("role", state.role.trim()));
@@ -332,7 +334,7 @@ export function commandOf(state, { key = null, file = null, initial = null, mach
     parts.push(...project);
     if (state.instructions) parts.push(opt("instructions", state.instructions));
   } else {
-    parts.push(`automagik-herdr edit ${shellQuote(state.id)}`);
+    parts.push(`am edit ${shellQuote(state.id)}`);
     if (changed("name")) parts.push(opt("name", state.name.trim()));
     if (changed("agent") && state.agent) parts.push(opt("agent", state.agent));
     if (changed("role")) parts.push(opt("role", state.role.trim()));

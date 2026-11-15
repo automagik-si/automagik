@@ -288,8 +288,8 @@ test("readUpdate: the machine's own answer, am then the pack; a refusal is that 
   assert.deepEqual(am({ am: { state: "none", from: "3.3.0", to: null, detail: "nothing is posted on am-lane yet" }, pack: { current: "3.3.0", latest: "3.3.0", update: null, installed: null } }),
     [{ part: "am", state: "current", to: "3.3.0" }, { part: "pack", state: "current", to: "3.3.0" }]);
   // The pack's own refusal: am prints null for it and the pack's line is on stderr.
-  assert.deepEqual(am({ am: { state: "current", to: "3.3.0" }, pack: null }, 1, "automagik-herdr: Not updated: the signature does not match\n")[1],
-    { part: "pack", state: "failed", why: "automagik-herdr: Not updated: the signature does not match" });
+  assert.deepEqual(am({ am: { state: "current", to: "3.3.0" }, pack: null }, 1, "am: Not updated: the signature does not match\n")[1],
+    { part: "pack", state: "failed", why: "am: Not updated: the signature does not match" });
   // A release that did not load there: its previous pack is back, and it is said.
   assert.match(am({ am: { state: "current", to: "3.3.0" }, pack: { current: "3.2.0", installed: { version: "3.3.0", restored: { version: "3.2.0", failedVersion: "3.3.0" } } } })[1].why, /^3\.3\.0 did not load there; 3\.2\.0 is back$/);
   assert.equal(am({ am: { state: "current", to: "3.3.0" }, pack: { current: "3.2.0", disabled: true } })[1].state, "off");
@@ -318,7 +318,7 @@ test("the record: a machine not connected keeps its last versions, one no longer
   assert.equal(state.machines.a.versions.am, "3.3.0");
   assert.equal(state.here.versions.am, "3.3.0");
   assert.match(entryLine(state.machines.a), /^a: am 3\.3\.0, pack none, usagemeter none\. t2: not connected: nothing was checked\.$/);
-  assert.deepEqual(stateLines(parseState(""), ["new"]), ["new: not checked yet (automagik-herdr machines update)."]);
+  assert.deepEqual(stateLines(parseState(""), ["new"]), ["new: not checked yet (am machines update)."]);
   assert.deepEqual(parseState("not json"), { at: null, here: null, machines: {} });
   // Nothing failed: nothing to say, and the signature is empty so a later failure is said.
   assert.deepEqual(failureNotice(state, "old reasons"), { sig: "", notice: null });

@@ -40,9 +40,61 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
+// src/client/session-file-approval.js
+var ALLOW = "Allow for this chat session";
+function selectSessionFileApproval(pending) {
+  if (pending?.kind !== "question" || pending.questions?.length !== 1) return null;
+  const item = pending.questions[0];
+  const intent = item.intent;
+  if (!/^acp-session-file:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(item.id) || intent?.kind !== "approval" || intent.approve !== ALLOW || intent.reject !== "Reject" || intent.always !== void 0 || item.multiSelect !== void 0 || typeof item.detail !== "string" || item.detail === "" || item.options?.length !== 2 || item.options[0]?.label !== ALLOW || item.options[1]?.label !== "Reject") return null;
+  return { pending, item };
+}
+function SessionFileApproval({ matched: { pending, item }, renderFactorySlot }) {
+  const answer = (label) => pending.answer({ answers: [{ id: item.id, selected: [label] }] });
+  return renderFactorySlot("conversation.approval.card", {
+    requestKey: pending.key,
+    title: item.question,
+    description: item.detail,
+    allowLabel: ALLOW,
+    canAnswer: () => pending.snapshot().channel !== "none" && !pending.snapshot().closed,
+    onAllow: () => answer(ALLOW),
+    onReject: () => answer("Reject")
+  });
+}
+
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
+  "What will it do?": "它会做什么？",
+  "Add instructions": "添加说明",
+  "Part of the Bot's system prompt. You can change it later in its details.": "这是 Bot 系统提示词的一部分。你可以稍后在详情中更改。",
+  "New Bots start at {level}.": "新 Bot 从 {level} 开始。",
+  "This model uses its Hermes profile's own instructions.": "此模型使用其 Hermes 配置文件自己的说明。",
+  "Force update": "强制更新",
+  "Stop and update": "停止并更新",
+  "Stops running conversations and sign-ins, installs every available update and restarts.": "停止正在进行的对话和登录，安装所有可用更新并重启。",
+  "Running conversations, tasks and Bot sign-ins stop now. Bots that were signing in ask you to sign in again.": "正在进行的对话、任务和 Bot 登录将立即停止。正在登录的 Bot 会请你重新登录。",
+  "Stopping conversations…": "正在停止对话…",
+  "Downloading the Automagik update…": "正在下载 Automagik 更新…",
+  "Installing…": "正在安装…",
+  "Restarting…": "正在重启…",
+  "Everything is up to date.": "全部已是最新版本。",
+  "Updated.": "已更新。",
+  "The plugins did not start, so the previous ones are back.": "插件未能启动，已恢复之前的版本。",
+  "The Automagik update could not be downloaded. Try again.": "未能下载 Automagik 更新。请重试。",
+  "This copy updates through your system's package manager.": "此副本通过系统的软件包管理器更新。",
+  "The restart did not finish. Try again.": "重启未完成。请重试。",
+  "Version {version} · {latest} available": "版本 {version} · {latest} 可用",
+  "Plugin updates": "插件更新",
+  "Plugins {version} need Automagik {line}; this app is {app}. Update Automagik first.": "插件 {version} 需要 Automagik {line}；此应用是 {app}。请先更新 Automagik。",
+  "Plugins {version} need Automagik {base} or newer; this app is {app}.": "插件 {version} 需要 Automagik {base} 或更新版本；此应用是 {app}。",
+  "Plugins {version} did not start here before, so the current ones are kept.": "插件 {version} 之前未能在此启动，因此保留当前版本。",
+  "Plugins {version} need a different DeepSeek Harness version.": "插件 {version} 需要不同的 DeepSeek Harness 版本。",
+  "The published plugin update was not accepted.": "发布的插件更新未被接受。",
+  "Plugin updates could not be checked. Try again.": "无法检查插件更新。请重试。",
+  "1 approval waiting": "1 项批准请求待处理",
+  "{count} approvals waiting": "{count} 项批准请求待处理",
+  "{count} requests to use {tool}": "{count} 个使用 {tool} 的请求",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",
@@ -398,6 +450,7 @@ var ZH = {
   "{name} refused its own mode": "{name} 拒绝了自己的模式",
   "Bot sign-in recovery is needed. Reset Bot sign-in to start fresh.": "需要恢复 Bot 登录。重置 Bot 登录以重新开始。",
   "Reset Bot sign-in": "重置 Bot 登录",
+  "Sign in again": "重新登录",
   "This signs {vendor} out for Bots. Sign in again in the app.": "这会使 Bot 退出 {vendor}。请在应用内重新登录。",
   "Bot models and history stay.": "Bot 的模型和历史记录会保留。",
   "Bot CLI user settings start empty.": "Bot CLI 的用户设置会从空白开始。",
@@ -768,7 +821,7 @@ var ZH = {
   "Sign in to DeepSeek": "登录 DeepSeek 账号",
   "Enter a DeepSeek API key": "填入 DeepSeek API key",
   "Open settings to set up a custom model": "打开设置配置自定义模型",
-  "Omni": "Omni",
+  "Back to Automagik": "返回 Automagik",
   // Header
   "Message {name}": "给 {name} 发消息",
   Message: "发消息",
@@ -3104,6 +3157,48 @@ function mentionSpans(text2, bots, { references = [] } = {}) {
   return spans;
 }
 
+// src/shared/plain-text.js
+var HELD = /\uE000(\d+)\uE001/;
+var HELD_ALL = new RegExp(HELD, "g");
+function plainText(markdown) {
+  if (typeof markdown !== "string" || markdown === "") return "";
+  const held = [];
+  const hold = (value) => {
+    held.push(value);
+    return `${held.length - 1}`;
+  };
+  let text2 = markdown.replace(/[\uE000\uE001]/g, "");
+  text2 = text2.replace(/(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*((?:\n(?![ \t]*\2)[^\n]*)*)(?:\n[ \t]*\2[`~]*[ \t]*(?=\n|$))?/g, (_all, start2, _fence, code) => `${start2}${hold(code.slice(1))}`);
+  text2 = text2.replace(/(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g, (_all, _ticks, code) => hold(code.replace(/^ ([\s\S]*) $/, "$1")));
+  text2 = text2.replace(/\\([!-/:-@[-`{-~])/g, (_all, mark) => hold(mark));
+  text2 = text2.replace(/!?\[((?:[^\][]|\[[^\][]*\])*)\]\((?:[^()\s]|\([^()\s]*\))*(?:[ \t]+(?:"[^"]*"|'[^']*'))?\)/g, "$1");
+  text2 = text2.replace(/!?\[((?:[^\][]|\[[^\][]*\])+)\]\[[^\]]*\]/g, "$1");
+  text2 = text2.replace(/<((?:https?:\/\/|mailto:)[^<>\s]+)>/g, (_all, address) => hold(address));
+  text2 = text2.replace(/\bhttps?:\/\/[^\s<>)\]]+/g, (address) => hold(address));
+  text2 = text2.replace(/^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, "");
+  text2 = text2.replace(/^[ \t]*={3,}[ \t]*$/gm, "");
+  text2 = text2.replace(/^[ \t]*(?:>[ \t]?)+/gm, "");
+  text2 = text2.replace(/^[ \t]*#{1,6}[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/gm, "$1");
+  text2 = text2.replace(/^[ \t]*[-*+][ \t]+(?:\[[ xX]\][ \t]+)?/gm, "");
+  text2 = text2.replace(/^([ \t]*\d+[.)][ \t]+)\[[ xX]\][ \t]+/gm, "$1");
+  for (let round = 0; round < 4; round += 1) {
+    const before = text2;
+    text2 = text2.replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, "$1");
+    text2 = text2.replace(/(?<!\w)__(?=\S)([\s\S]*?\S)__(?!\w)/g, "$1");
+    text2 = text2.replace(/~~(?=\S)([\s\S]*?\S)~~/g, "$1");
+    text2 = text2.replace(/(?<!\*)\*(?![*\s])([^*\n]*?[^*\s])\*(?!\*)/g, "$1");
+    text2 = text2.replace(/(?<![\w_])_(?![_\s])([^_\n]*?[^_\s])_(?![\w_])/g, "$1");
+    if (text2 === before) break;
+  }
+  while (HELD.test(text2)) text2 = text2.replace(HELD_ALL, (_all, index) => held[Number(index)]);
+  return text2;
+}
+var PREVIEW_SOURCE = 400;
+function previewText(text2) {
+  if (typeof text2 !== "string") return "";
+  return plainText(text2.slice(0, PREVIEW_SOURCE)).replace(/\s+/g, " ").trim();
+}
+
 // src/client/text.js
 var MENTION_ORIGIN = "https://bots.local/";
 function linkMentions(text2, bots, selfId) {
@@ -3283,7 +3378,7 @@ function previewOf(list, id, hiddenTurns = []) {
     const entry = outline[index];
     if (hiddenTurns.includes(entry.turn)) continue;
     const text2 = entry.response || entry.prompt || "";
-    if (text2 !== "") return stripHeader(text2).replace(/\s+/g, " ").trim();
+    if (text2 !== "") return previewText(stripHeader(text2));
   }
   return "";
 }
@@ -4003,7 +4098,7 @@ function Crown() {
     )
   );
 }
-function BotAvatar({ bot, size, state = "idle", main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
+function BotAvatar({ bot, size, state = "idle", count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state);
   if (bot === void 0) return (0, import_react6.createElement)(BotMark, { size });
   const badgeKind = !badge ? null : state === "alert" ? "alert" : WORK.includes(state) ? "working" : admin ? "admin" : main && !crown ? "main" : null;
@@ -4013,7 +4108,7 @@ function BotAvatar({ bot, size, state = "idle", main, admin, crown = false, badg
     (0, import_react6.createElement)(BotMark, { bot, size, state: settled ? "done" : state, live, gaze, pokeable }),
     crown ? (0, import_react6.createElement)(Crown) : null,
     badgeKind === "working" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-working", "aria-label": t("Working"), role: "img" }) : null,
-    badgeKind === "alert" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-alert", "aria-label": t("Waiting for your answer"), role: "img" }, "?") : null,
+    badgeKind === "alert" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-alert", "aria-label": count > 0 ? count === 1 ? t("1 approval waiting") : t("{count} approvals waiting", { count }) : t("Waiting for your answer"), role: "img" }, count > 0 ? count > 9 ? "9+" : String(count) : "?") : null,
     badgeKind === "admin" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-admin", "aria-label": t("Admin"), role: "img" }, (0, import_react6.createElement)(StarIcon)) : null,
     badgeKind === "main" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-main", "aria-label": t("Main Bot"), role: "img" }, (0, import_react6.createElement)(MainStar)) : null
   );
@@ -4837,7 +4932,7 @@ var SECRET_CSS = `
 .bt-secret-steps code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
 .bt-secret-note code,.bt-secret-about code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
 .bt-secret-warn{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;font-size:12px;line-height:16px;color:#b25e09;background:color-mix(in srgb,#f59e0b 12%,transparent)}
-.bt-secret-error{font-size:12px;line-height:16px;color:var(--bt-danger)}
+.bt-secret-error{font-size:12px;line-height:16px;color:var(--st-bad-strong,var(--bt-danger))}
 .bt-secret .bt-q-btn:disabled{opacity:.5;cursor:default}
 .bt-secret-done .bt-q-head{align-items:center}
 .bt-secret-done .bt-q-title{font-size:13px;line-height:18px;color:var(--bt-ink-2);font-weight:500}
@@ -4868,7 +4963,7 @@ var SECRET_CSS = `
 .bt-secret-inline .bt-input{flex:1;height:34px}
 .bt-secret-row-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 .bt-secret-row-actions .bt-set-hint{flex:1}
-.bt-secret-danger{color:var(--bt-danger);display:inline-flex;align-items:center;gap:4px}
+.bt-secret-danger{color:var(--st-bad-strong,var(--bt-danger));display:inline-flex;align-items:center;gap:4px}
 .bt-secret-danger svg{width:13px;height:13px}
 .bt-secret-add .bt-input{height:34px}
 @media (prefers-reduced-motion:reduce){.bt-secret-glide{transition:none}.bt-secret-check,.bt-secret-done,.bt-secret-ok,.bt-secret-edit{animation:none}}
@@ -5753,7 +5848,7 @@ var HERMES_REMOTE_CSS = `${HERMES_MARK_CSS}
 .bt-hermes-wizard{position:relative;width:min(736px,calc(100vw - 40px));max-height:calc(100dvh - 48px);display:flex;flex-direction:column;background:var(--st-raised,var(--bt-main));border:1px solid var(--st-line,var(--bt-line-2));border-radius:var(--st-r-dialog,24px);box-shadow:var(--st-lift,0 18px 60px rgba(0,0,0,.267));overflow:hidden}
 .bt-hw-head{padding:24px 28px 18px;border-bottom:1px solid var(--st-line,var(--bt-line));background:var(--bt-card)}.bt-hw-identity{display:flex;align-items:center;gap:12px}.bt-hw-identity>div{display:flex;flex-direction:column;gap:2px}.bt-hw-identity strong{font:var(--bt-weight-strong,700) 16px var(--bt-head-font,var(--bt-font))}.bt-hw-identity small{font-size:12px;color:var(--bt-ink-2)}.bt-hw-close{margin-left:auto;width:30px;height:30px;border:0;border-radius:8px;display:grid;place-items:center;color:var(--bt-ink-2);background:var(--st-sunk,var(--bt-hover));cursor:pointer}
 .bt-hw-content{padding:26px 28px;background:var(--bt-card);overflow:auto}.bt-hw-content h2{font:var(--bt-weight-title,700) 23px/30px var(--bt-head-font,var(--bt-font));margin:0 0 10px;letter-spacing:-.016em}.bt-hw-lead{color:var(--bt-ink-2);margin:0 0 22px;font-size:14px;line-height:21px}.bt-hw-quiet{color:var(--bt-ink-2);font-size:12px;line-height:18px;margin:18px 0 0}
-.bt-hw-field{display:flex;flex-direction:column;gap:8px;margin:0 0 18px;font-size:13px}.bt-hw-field>span:first-child{font-weight:600}.bt-hw-field small{color:var(--bt-ink-2);font-size:12px;line-height:17px}.bt-hw-field input{height:42px;width:100%;box-sizing:border-box;border:1px solid var(--st-line,var(--bt-line-2));border-radius:8px;padding:0 12px;background:var(--st-raised,var(--bt-main));color:var(--bt-ink);font:14px var(--bt-font);outline:none}.bt-hw-field input::placeholder{color:var(--bt-ink-2);opacity:1}.bt-hw-field input:focus-visible,.bt-hermes-wizard button:focus-visible{outline:2px solid var(--st-ring,var(--bt-accent));outline-offset:2px}.bt-hw-segments{display:flex;gap:4px;padding:4px;border-radius:10px;align-self:flex-start;background:var(--st-sunk,var(--bt-hover))}.bt-hw-segments button{border:0;border-radius:var(--bt-hw-choice-radius,7px);background:transparent;color:var(--bt-ink-2);padding:8px 13px;font:12px var(--bt-font);cursor:pointer}.bt-hw-segments button[aria-pressed=true]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 1px 3px rgba(0,0,0,.067);font-weight:600}.bt-hw-file-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--st-line,var(--bt-line-2));border-radius:8px;padding:8px 10px;background:var(--st-raised,var(--bt-main));color:var(--bt-ink-2);font-size:13px}.bt-hw-file-choice>span{overflow-wrap:anywhere;min-width:0}.bt-hw-file-choice .bt-hw-button{height:30px;padding:0 10px;font-size:12px}.bt-hw-key-path{border:1px solid var(--bt-line-2);padding:14px;border-radius:10px;background:var(--bt-card)}.bt-hw-key-path .bt-hw-field{margin-bottom:10px}.bt-hw-two{display:grid;grid-template-columns:1fr 1fr;gap:16px}.bt-hw-note{display:flex;gap:10px;padding:13px 14px;border:1px solid var(--st-line,var(--bt-line));border-radius:10px;background:var(--st-raised,var(--bt-main));color:var(--bt-ink-2);font-size:12px;line-height:19px}.bt-hw-note svg{flex:none;margin-top:1px}.bt-hw-error-note{background:color-mix(in srgb,var(--bt-danger) 10%,var(--bt-card));border-color:transparent;color:var(--bt-danger)}
+.bt-hw-field{display:flex;flex-direction:column;gap:8px;margin:0 0 18px;font-size:13px}.bt-hw-field>span:first-child{font-weight:600}.bt-hw-field small{color:var(--bt-ink-2);font-size:12px;line-height:17px}.bt-hw-field input{height:42px;width:100%;box-sizing:border-box;border:1px solid var(--st-line,var(--bt-line-2));border-radius:8px;padding:0 12px;background:var(--st-raised,var(--bt-main));color:var(--bt-ink);font:14px var(--bt-font);outline:none}.bt-hw-field input::placeholder{color:var(--bt-ink-2);opacity:1}.bt-hw-field input:focus-visible,.bt-hermes-wizard button:focus-visible{outline:2px solid var(--st-ring,var(--bt-accent));outline-offset:2px}.bt-hw-segments{display:flex;gap:4px;padding:4px;border-radius:10px;align-self:flex-start;background:var(--st-sunk,var(--bt-hover))}.bt-hw-segments button{border:0;border-radius:var(--bt-hw-choice-radius,7px);background:transparent;color:var(--bt-ink-2);padding:8px 13px;font:12px var(--bt-font);cursor:pointer}.bt-hw-segments button[aria-pressed=true]{background:var(--bt-card);color:var(--bt-ink);box-shadow:0 1px 3px rgba(0,0,0,.067);font-weight:600}.bt-hw-file-choice{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--st-line,var(--bt-line-2));border-radius:8px;padding:8px 10px;background:var(--st-raised,var(--bt-main));color:var(--bt-ink-2);font-size:13px}.bt-hw-file-choice>span{overflow-wrap:anywhere;min-width:0}.bt-hw-file-choice .bt-hw-button{height:30px;padding:0 10px;font-size:12px}.bt-hw-key-path{border:1px solid var(--bt-line-2);padding:14px;border-radius:10px;background:var(--bt-card)}.bt-hw-key-path .bt-hw-field{margin-bottom:10px}.bt-hw-two{display:grid;grid-template-columns:1fr 1fr;gap:16px}.bt-hw-note{display:flex;gap:10px;padding:13px 14px;border:1px solid var(--st-line,var(--bt-line));border-radius:10px;background:var(--st-raised,var(--bt-main));color:var(--bt-ink-2);font-size:12px;line-height:19px}.bt-hw-note svg{flex:none;margin-top:1px}.bt-hw-error-note{background:color-mix(in srgb,var(--bt-danger) 10%,var(--bt-card));border-color:transparent;color:var(--st-bad-strong,var(--bt-danger))}
 .bt-hw-foot{padding:18px 28px;display:flex;justify-content:space-between;gap:12px;border-top:1px solid var(--st-line,var(--bt-line));background:var(--st-raised,var(--bt-main))}.bt-hw-button{height:38px;border:1px solid transparent;border-radius:8px;font:600 13px var(--bt-font);padding:0 15px;display:inline-flex;gap:10px;align-items:center;justify-content:center;white-space:nowrap;cursor:pointer}.bt-hw-primary{background:var(--st-cyan,var(--bt-accent));color:var(--st-cyan-ink,var(--bt-accent-ink,var(--bt-card)));box-shadow:var(--st-clay,none)}.bt-hw-secondary{background:var(--bt-card);border-color:var(--st-line,var(--bt-line-2));color:var(--bt-ink)}.bt-hw-button:disabled{background:var(--st-sunk,var(--bt-hover));color:var(--bt-ink-2);box-shadow:none;cursor:default}
 .bt-hw-checks{border:1px solid var(--st-line,var(--bt-line));border-radius:12px;overflow:hidden}.bt-hw-check-row{display:flex;gap:12px;align-items:center;padding:17px;border-bottom:1px solid var(--st-line,var(--bt-line))}.bt-hw-check-row:last-child{border:0}.bt-hw-check-row>div{display:flex;flex-direction:column;gap:4px}.bt-hw-check-row strong{font-size:13px}.bt-hw-check-row small{font-size:12px;color:var(--bt-ink-2)}.bt-hw-status{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:color-mix(in srgb,var(--bt-green) 10%,var(--bt-card));color:var(--bt-green)}.bt-hw-pending{background:var(--bt-hover);color:var(--bt-ink-2)}.bt-hw-working{background:var(--st-lilac,var(--bt-active));color:var(--st-lilac-ink,var(--bt-ink))}.bt-hw-spinner{width:17px;height:17px;border-radius:50%;border:2px solid var(--bt-line-2);border-top-color:var(--st-lilac-ink,var(--bt-ink));animation:bt-hw-spin .8s linear infinite}@keyframes bt-hw-spin{to{transform:rotate(360deg)}}
 .bt-hw-result{text-align:center;padding:10px 28px 28px}.bt-hw-result-icon{display:grid;place-items:center;width:58px;height:58px;margin:8px auto 16px;border-radius:50%}.bt-hw-result-icon svg{width:30px;height:30px}.bt-hw-success .bt-hw-result-icon{background:color-mix(in srgb,var(--bt-green) 10%,var(--bt-card));color:var(--bt-green)}.bt-hw-failed .bt-hw-result-icon{background:color-mix(in srgb,var(--bt-danger) 10%,var(--bt-card));color:var(--bt-danger);font-size:30px}.bt-hw-result h3{font:var(--bt-weight-title,700) 20px var(--bt-head-font,var(--bt-font));margin:0 0 10px}.bt-hw-result p{margin:0;color:var(--bt-ink-2);font-size:14px;line-height:22px}.bt-hw-details-toggle{display:flex;align-items:center;justify-content:center;gap:8px;margin:14px auto;border:0;background:none;color:var(--bt-ink-2);font:12px var(--bt-font);padding:4px 8px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}.bt-hw-details>.bt-hw-quiet{margin:0 0 14px}.bt-hw-summary{border:1px solid var(--st-line,var(--bt-line));border-radius:var(--bt-hw-summary-radius,11px);overflow:hidden;background:var(--st-raised,var(--bt-main))}.bt-hw-pair{display:flex;justify-content:space-between;gap:20px;padding:14px 16px;border-bottom:1px solid var(--st-line,var(--bt-line));font-size:13px}.bt-hw-pair:last-child{border:0}.bt-hw-pair span{color:var(--bt-ink-2);flex:none}.bt-hw-pair strong{font-weight:500;overflow-wrap:anywhere;min-width:0;text-align:right}.bt-hw-mono{font:12px/18px ui-monospace,SFMono-Regular,Menlo,monospace}.bt-hw-facts{margin:0 0 14px}.bt-hw-result+.bt-hw-facts{margin-top:-6px}.bt-hw-ask .bt-hw-result-icon{background:var(--st-lilac,var(--bt-active));color:var(--st-lilac-ink,var(--bt-ink))}.bt-hw-lines{margin:0 0 14px;border:1px solid var(--st-line,var(--bt-line));border-radius:var(--bt-hw-summary-radius,11px);background:color-mix(in srgb,var(--st-sunk,var(--bt-hover)) 55%,var(--bt-card));overflow:hidden}.bt-hw-lines>span{display:block;padding:11px 16px 0;font-size:11px;font-weight:600;color:var(--bt-ink-2)}.bt-hw-lines pre{margin:0;padding:6px 16px 12px;max-height:126px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--bt-ink);font:12px/18px ui-monospace,SFMono-Regular,Menlo,monospace}.bt-hw-profiles{border:1px solid var(--st-cyan,var(--bt-accent));border-radius:12px;background:var(--st-raised,var(--bt-main));overflow:hidden}.bt-hw-profile{display:flex;align-items:center;gap:14px;width:100%;padding:20px;border:0;border-bottom:1px solid var(--bt-line);background:transparent;color:var(--bt-ink);text-align:left;cursor:pointer}.bt-hw-profile:last-child{border-bottom:0}.bt-hw-profile[aria-checked=true]{box-shadow:inset 0 0 0 1px var(--st-cyan,var(--bt-accent))}.bt-hw-profile>span:nth-child(2){display:flex;flex-direction:column;gap:5px}.bt-hw-profile strong{font-size:15px}.bt-hw-profile small{font-size:12px;color:var(--bt-ink-2)}.bt-hw-radio{width:18px;height:18px;box-sizing:border-box;border:1px solid var(--bt-line-2);border-radius:50%;background:var(--bt-card)}[aria-checked=true]>.bt-hw-radio{border:5px solid var(--st-cyan,var(--bt-accent))}.bt-hw-tag{margin-left:auto;padding:4px 8px;border-radius:6px;background:var(--st-lilac,var(--bt-active));color:var(--st-lilac-ink,var(--bt-ink));font-size:11px}.bt-hw-profile-tools{display:flex;justify-content:space-between;font-size:12px;color:var(--bt-ink-2);margin:14px 0 22px}.bt-hw-profile-tools button{border:0;background:none;padding:0;color:var(--bt-ink);font:inherit;text-decoration:underline;text-underline-offset:3px;cursor:pointer}.bt-hw-remember{display:flex;gap:9px;align-items:center;font-size:12px;color:var(--bt-green);margin:16px 0}.bt-hw-limits{font-size:12px;line-height:19px;color:var(--bt-ink-2);margin:18px 0 0}.bt-hw-compact{padding-top:0;padding-bottom:18px}.bt-hw-compact .bt-hw-result-icon{margin-top:0}
@@ -6577,13 +6672,28 @@ function ModelLineTail({ turn, sessionId, useRoster, useSessions, actions }) {
     error ? (0, import_react16.createElement)("div", { className: "bt-secret-error", role: "alert" }, error) : null
   );
 }
-function ModelChoiceDock({ sessionId, useRoster, actions }) {
+var lastTurnOf = (outline) => Array.isArray(outline) && outline.length > 0 ? outline.at(-1)?.turn ?? null : null;
+function ModelChoiceDock({ sessionId, useRoster, useSessions, actions }) {
+  const seated = useSessions ? useSessions((list) => lastTurnOf(outlineOf(list, sessionId)) !== null) : false;
+  const card = useModelChoice({ sessionId, useRoster, actions }, seated);
+  return seated ? null : card;
+}
+function ModelChoiceTail({ turn, sessionId, useRoster, useSessions, actions }) {
+  const last = useSessions((list) => lastTurnOf(outlineOf(list, sessionId)));
+  if (last === null || last !== turn?.turn) return null;
+  return (0, import_react16.createElement)(ModelChoiceSeat, { sessionId, useRoster, actions });
+}
+function ModelChoiceSeat(props) {
+  const card = useModelChoice(props, false);
+  return card ? (0, import_react16.createElement)("div", { className: "bt-model-seat" }, card) : null;
+}
+function useModelChoice({ sessionId, useRoster, actions }, idle) {
   const roster = useRoster((value) => value);
   const bot = roster.byId[sessionId];
   const [busy, setBusy] = (0, import_react16.useState)("");
   const [error, setError] = (0, import_react16.useState)("");
   const hosted = roster.hostModels?.[bot?.id] !== void 0;
-  const shown = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && !hosted;
+  const shown = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && !hosted && !idle;
   (0, import_react16.useEffect)(() => {
     if (shown) void actions.refreshModels?.();
   }, [shown, sessionId]);
@@ -6746,7 +6856,7 @@ var MODEL_CSS = `${HERMES_MARK_CSS}
 .bt-model-trigger{display:inline-flex;align-items:center;gap:8px;max-width:100%;min-width:0;height:auto;min-height:32px;padding:4px 8px 4px 10px;border:0;border-radius:8px;background:var(--bt-hover);color:var(--bt-ink);font:inherit;text-align:left;cursor:pointer;transition:background-color .12s ease}
 .bt-model-trigger:hover,.bt-model-trigger[aria-expanded=true]{background:var(--bt-active)}
 .bt-model-trigger:focus-visible{outline:2px solid var(--bt-accent);outline-offset:1px}
-.bt-model-trigger[data-missing] .bt-model-provider{color:var(--bt-danger)}
+.bt-model-trigger[data-missing] .bt-model-provider{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-model-trigger[data-wide]{display:flex;width:100%;min-height:48px;padding:7px 12px;justify-content:space-between;border-radius:12px;background:var(--bt-card);box-shadow:inset 0 0 0 1px var(--bt-line)}
 .bt-model-trigger[data-wide]:hover,.bt-model-trigger[data-wide][aria-expanded=true]{background:var(--bt-hover)}
 .bt-model-copy{display:flex;flex-direction:column;min-width:0}
@@ -6770,6 +6880,10 @@ var MODEL_CSS = `${HERMES_MARK_CSS}
 .bt-host-model-status{padding:2px 8px 6px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-host-model-confirm{flex:none;color:var(--bt-accent);font-size:12px;font-weight:600}
 .bt-model-dock{width:100%;max-width:var(--dsh-chat-content-width,748px);margin:0 auto;display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:0 0 10px;box-sizing:border-box;animation:bt-model-in ${SPRING_POP.duration}ms ${SPRING_POP.easing} backwards}
+/* After the last turn of a transcript the card is one more message: the column's width, and
+   the room a message has above it. */
+.bt-model-seat{margin:6px 0 4px}
+.bt-model-seat>.bt-model-dock{max-width:none;margin:0;padding:0}
 .bt-model-chips{display:flex;flex-wrap:wrap;gap:6px;margin-left:30px;max-width:min(560px,calc(100% - 30px));max-height:min(240px,36vh);max-height:min(240px,36dvh);overflow-y:auto;scrollbar-width:thin}
 .bt-model-choice-group{display:flex;flex-direction:column;gap:6px;width:100%;min-width:0}
 .bt-model-choice-provider{padding-top:4px;font-size:12px;line-height:16px;font-weight:500;color:var(--bt-ink-2);overflow-wrap:anywhere}
@@ -6814,7 +6928,7 @@ var MODEL_CSS = `${HERMES_MARK_CSS}
 .bt-model-confirm-title{font-size:13px;line-height:18px;font-weight:600;color:var(--bt-ink)}
 .bt-model-confirm-move{font-size:11px;line-height:15px;color:var(--bt-ink-3);overflow-wrap:anywhere}
 .bt-model-confirm-text{padding:2px 0 6px;font-size:12px;line-height:17px;color:var(--bt-ink-2)}
-.bt-model-confirm-access{padding:0 0 6px;font-size:12px;line-height:17px;color:var(--bt-danger)}
+.bt-model-confirm-access{padding:0 0 6px;font-size:12px;line-height:17px;color:var(--st-bad-strong,var(--bt-danger))}
 .bt-model-confirm-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 .bt-menu .bt-model-confirm-actions .bt-model-confirm-cancel,.bt-menu .bt-model-confirm-actions .bt-model-confirm-go{width:auto;min-height:30px;padding:5px 12px;border-radius:999px;font:inherit;font-size:12px;line-height:18px;cursor:pointer}
 .bt-menu .bt-model-confirm-actions .bt-model-confirm-cancel{border:.5px solid var(--bt-line-2);background:var(--bt-main);color:var(--bt-ink-2)}
@@ -6862,6 +6976,51 @@ var COMPOSER_PACK_CSS = `
 .bt-model-bar-trigger .bt-model-caret{color:var(--bt-ink-3)}
 [data-composer-card] [class*="_trailing"]:has(>[class*="_standardControls"]:not([hidden]) .bt-composer-model),[data-composer-card] [class*="_standardControls"]:has(.bt-composer-model){flex:0 1 auto!important;min-width:0!important}
 `;
+
+// src/client/approvals.js
+var useApproval = (useWork, match) => useWork ? useWork((work) => (work.approvals ?? []).some(match)) : false;
+var approvalCount = (work, match) => (work?.approvals ?? []).filter(match).length;
+function groupApprovals(entries2) {
+  const keyed = /* @__PURE__ */ new Map();
+  return entries2.slice().sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).map((entry) => {
+    const key = entry.capabilityKey;
+    const group = key === void 0 ? void 0 : keyed.get(key);
+    if (group) {
+      group.entries.push(entry);
+      return void 0;
+    }
+    const first = { key: key ?? entry.id, entries: [entry] };
+    if (key !== void 0) keyed.set(key, first);
+    return first;
+  }).filter(Boolean);
+}
+function nativeAsk(statusMap, entry) {
+  const pending = statusMap.get(entry.sessionId)?.pendingInteraction;
+  return pending?.kind === "approval" && typeof pending.answer === "function" && pending.answerable !== false && entry.callId !== void 0 && pending.callId === entry.callId && pending.toolName === entry.tool && String(pending.reason ?? "") === String(entry.reason ?? "") ? pending : void 0;
+}
+async function answerGroup(entries2, choice, { actions, statusMap }) {
+  const snapshot = [...entries2];
+  const results = await Promise.allSettled(snapshot.map(async (entry) => {
+    if (entry.answerable) await actions.answerApproval(entry.id, choice);
+    else {
+      const ask = nativeAsk(statusMap, entry);
+      if (!ask) return false;
+      await ask.answer(choice === "allow" ? "allowed-once" : "rejected");
+    }
+    return true;
+  }));
+  let answered = 0;
+  let skipped = 0;
+  for (const result of results) {
+    if (result.status === "rejected") actions.reportError?.(result.reason, "approval");
+    else if (result.value) answered += 1;
+    else skipped += 1;
+  }
+  return { answered, skipped };
+}
+var approvalPlace = (entry, roster) => roster?.roomsById?.[entry.roomId]?.name ?? (entry.taskId !== void 0 ? roster?.tasks?.[entry.taskId]?.title ?? entry.label : void 0) ?? "";
+var approvalWhere = (entry, roster) => approvalPlace(entry, roster) || (entry.roomId === void 0 && entry.taskId === void 0 ? t("in its own chat") : "");
+var approvalDetail = (entry) => entry.detail?.code || (entry.tool === "acp_tool" ? String(entry.reason ?? "") : "");
 
 // src/shared/held.js
 var HELD_NOT_SET = "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.";
@@ -6929,8 +7088,8 @@ var agentRowSessions = (agent, roster, now) => {
     return now !== void 0 && task.status !== "working" && !inRail.has(id);
   });
 };
-var waitsForUser = (status, sessionId) => status?.get(sessionId)?.pendingInteraction !== void 0;
-var approvalFor = (work, sessionId) => (work?.approvals ?? []).some((entry) => entry.taskId === sessionId);
+var waitsForUser = (status, sessionId) => sessionId != null && status?.get(sessionId)?.pendingInteraction !== void 0;
+var approvalFor = (work, sessionId) => sessionId != null && (work?.approvals ?? []).some((entry) => entry.taskId === sessionId);
 var taskState = (task, waiting) => {
   const status = task?.status ?? "working";
   return status === "working" && waiting ? "waiting" : status;
@@ -6943,12 +7102,19 @@ var endLabel = (task) => {
   return task?.status === "stopped" ? t("Stopped") : t("Task finished");
 };
 function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, useWork }) {
-  const asked2 = useSessionStatus && sessionId ? useSessionStatus((map) => waitsForUser(map, sessionId)) : false;
-  const pending = useSessionStatus && sessionId ? useSessionStatus((map) => map.get(sessionId)?.pendingInteraction) : void 0;
+  const taskId = sessionId ?? null;
+  const asked2 = useSessionStatus ? useSessionStatus((map) => waitsForUser(map, taskId)) : false;
+  const pending = useSessionStatus ? useSessionStatus((map) => map.get(taskId)?.pendingInteraction) : void 0;
   const ask = pending?.kind === "approval" && typeof pending.answer === "function" ? pending : void 0;
-  const approval = useWork && sessionId ? useWork((work) => approvalFor(work, sessionId)) : false;
-  const stop3 = useWork && sessionId ? useWork((work) => {
-    const entry = openStops(work).filter((item) => item.taskId === sessionId).sort((a, b) => b.at - a.at)[0];
+  const approval = useWork ? useWork((work) => approvalFor(work, taskId)) : false;
+  const askCall = ask?.callId;
+  const detail = useWork ? useWork((work) => {
+    const mine = (work.approvals ?? []).filter((entry2) => entry2.taskId === taskId);
+    const entry = askCall !== void 0 ? mine.find((item) => item.sessionId === taskId && item.callId === askCall) : ask === void 0 && mine.length === 1 ? mine[0] : void 0;
+    return entry ? approvalDetail(entry) : "";
+  }) : "";
+  const stop3 = useWork ? useWork((work) => {
+    const entry = taskId === null ? void 0 : openStops(work).filter((item) => item.taskId === taskId).sort((a, b) => b.at - a.at)[0];
     return entry ? stopLine(entry) : "";
   }) : "";
   const waiting = asked2 || approval;
@@ -7007,6 +7173,7 @@ function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, useWork })
         ),
         (0, import_react18.createElement)("div", { className: "op-task-bar", "aria-hidden": true }, (0, import_react18.createElement)("i"))
       ) : task?.summary ? (0, import_react18.createElement)("p", { className: "op-task-summary" }, task.summary) : null,
+      status === "waiting" && detail ? (0, import_react18.createElement)("span", { className: "op-task-said" }, detail) : null,
       sessionId ? (0, import_react18.createElement)("button", { type: "button", className: "op-task-open", onClick: onOpen }, ask ? t("Open task") : status === "waiting" ? t("Answer it") : working ? t("Watch it work") : t("Open task"), " →") : null
     )
   );
@@ -9506,7 +9673,7 @@ var WIDGET_CSS = `
 .bt-widget-metric-value{font-size:22px;line-height:28px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--bt-ink);overflow-wrap:anywhere}
 .bt-widget-metric[data-tone=good] .bt-widget-metric-value{color:var(--bt-green)}
 .bt-widget-metric[data-tone=warn] .bt-widget-metric-value{color:var(--bt-star)}
-.bt-widget-metric[data-tone=bad] .bt-widget-metric-value{color:var(--bt-danger)}
+.bt-widget-metric[data-tone=bad] .bt-widget-metric-value{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-view-caption{font-size:12px;line-height:16px;color:var(--bt-ink-2);overflow-wrap:anywhere}
 .bt-view-muted{font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-view-muted *{font-size:inherit!important;line-height:inherit!important;color:inherit!important}
@@ -9528,7 +9695,7 @@ var WIDGET_CSS = `
 .bt-widget-progress[data-tone=good] .bt-widget-progress-fill{background:var(--bt-green)}
 .bt-widget-progress[data-tone=warn] .bt-widget-progress-fill{background:var(--bt-star)}
 .bt-widget-progress[data-tone=bad] .bt-widget-progress-fill{background:var(--bt-danger)}
-.bt-widget-progress[data-tone=bad] .bt-widget-progress-label>span:last-child{color:var(--bt-danger)}
+.bt-widget-progress[data-tone=bad] .bt-widget-progress-label>span:last-child{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-view-callout{display:flex;gap:8px;padding:8px 12px;border-radius:10px;--bt-tone:var(--bt-accent);background:color-mix(in srgb,var(--bt-tone) 8%,transparent);color:var(--bt-ink)}
 .bt-view-callout[data-tone=good]{--bt-tone:var(--bt-green)}
 .bt-view-callout[data-tone=warn]{--bt-tone:var(--bt-star)}
@@ -10425,19 +10592,21 @@ var TOKENS = `
 html body{
   --bt-font:var(--dsh-font-family-text,${FONT}),${FONT};--bt-head-font:${HEAD};--bt-weight-title:536;--bt-weight-strong:469;--bt-weight-label:402;--dsh-font-family-text-default:${DSH_TEXT};
   --clay-cyan:#8fdcec;--clay-cyan-ink:#1d4753;--clay-pink:#f0bddf;--clay-pink-ink:#5a2550;--clay-lilac:#e0cff3;--clay-lilac-ink:#45305e;
-  --clay-cream:#f2e6d5;--clay-niche:#ebdecb;--clay-ok:#2f8a63;--clay-bad:#b93a32;
+  --clay-cream:#f2e6d5;--clay-niche:#ebdecb;--clay-ok:#047960;--clay-bad:#90040a;
   --clay-shine:#fff;--clay-umber:#5b3b22;--clay-hi:42%;--clay-lo:80%;--clay-ledge:72%;
   --clay-cast:rgba(111,81,53,.2);--clay-cast-far:rgba(121,91,53,.1);--clay-ring:#b4498f;
   --clay-r-xs:9px 10px 8px 10px;--clay-r-sm:12px 14px 12px 13px;--clay-r-md:16px 18px 15px 17px;--clay-r:19px 22px 18px 21px;--clay-r-lg:24px 28px 23px 27px;--clay-r-xl:28px 32px 27px 31px;
   --clay-r-you:20px 23px 8px 21px;--clay-r-bot:20px 23px 21px 8px;
-  --bt-hover:rgba(91,59,34,.07);--bt-active:rgba(91,59,34,.12);--bt-danger:#b93a32;--bt-green:#2f8a63;
+  --st-ok:#047960;--st-okdot:#04ae84;--st-bad:#90040a;--st-warn:#945e06;--st-warndot:#e39a1f;--st-work:#00859d;--st-warn-strong:#7f5105;--st-bad-strong:#90040a;
+  --bt-hover:rgba(91,59,34,.07);--bt-active:rgba(91,59,34,.12);--bt-danger:#90040a;--bt-green:#047960;
   --dsw-focus-ring-color:var(--clay-ring)}
 html body[data-ds-dark-theme]{
   --clay-cyan:#5cbdd1;--clay-cyan-ink:#0d262c;--clay-pink:#b76aa1;--clay-pink-ink:#fff2fa;--clay-lilac:#55456b;--clay-lilac-ink:#f4ecff;
-  --clay-cream:#322a39;--clay-niche:#16121a;--clay-ok:#7ad9a8;--clay-bad:#ff9a8f;
+  --clay-cream:#322a39;--clay-niche:#16121a;--clay-ok:#91f1be;--clay-bad:#e8695f;
   --clay-shine:#fff;--clay-umber:#000;--clay-hi:84%;--clay-lo:62%;--clay-ledge:50%;
   --clay-cast:rgba(0,0,0,.42);--clay-cast-far:rgba(0,0,0,.28);--clay-ring:#f2a6dc;
-  --bt-hover:rgba(255,240,225,.07);--bt-active:rgba(255,240,225,.12);--bt-danger:#ff9a8f;--bt-green:#7ad9a8}
+  --st-ok:#91f1be;--st-okdot:#71e8a8;--st-bad:#e8695f;--st-warn:#f4cc7e;--st-warndot:#f4bb43;--st-work:#3faec2;--st-warn-strong:#f4cc7e;--st-bad-strong:#ffa89e;
+  --bt-hover:rgba(255,240,225,.07);--bt-active:rgba(255,240,225,.12);--bt-danger:#e8695f;--bt-green:#91f1be}
 html body ::selection{background:var(--clay-lilac);color:var(--clay-lilac-ink)}
 `;
 var SHELL = `
@@ -10466,6 +10635,7 @@ html body .bt-row:hover,html body .bt-tile:hover{${raised("color-mix(in srgb,var
 html body .bt-row[aria-current=page],html body .bt-tile[aria-current=page]{${raised("var(--clay-lilac)", 3)};color:var(--clay-lilac-ink);transform:translateY(-1px)}
 html body .bt-row:active,html body .bt-tile:active{${pressed("var(--clay-lilac)", 3)}}
 html body .bt-row[aria-current=page] .bt-row-preview{color:color-mix(in srgb,var(--clay-lilac-ink) 72%,transparent)}
+html body .bt-row[aria-current=page] .bt-row-preview-ask{color:var(--st-warn-strong)}
 html body .bt-tile-name,html body .bt-brand{font-family:var(--bt-head-font);font-weight:var(--bt-weight-strong)}
 html body .bt-chip{background:color-mix(in srgb,var(--bt-card) 60%,transparent);border:0;border-radius:999px;padding:1px 7px}
 html body :is(.bt-round,.bt-connect){border:0;${raised("var(--bt-card)", 3)};${move}}
@@ -10580,23 +10750,23 @@ html body{
   --st-raised:#fbf6ee;--st-paper:#fffdf9;--st-sunk:#efe5d6;
   --st-r-stage:26px;--st-r-dialog:24px;--st-r-menu:14px;--st-r-seg:9px;
   --st-line:rgba(60,48,73,.13);--st-line-2:rgba(60,48,73,.24);
-  --st-ok:#10754f;--st-okdot:#16a36d;--st-bad:#a8322b;--st-warn:#8a4b00;--st-warndot:#e39a1f;--st-work:#13a3bf;
+  --st-ok:#047960;--st-okdot:#04ae84;--st-bad:#90040a;--st-warn:#945e06;--st-warndot:#e39a1f;--st-work:#00859d;--st-warn-strong:#7f5105;--st-bad-strong:#90040a;
   --st-cyan:#8fdcec;--st-cyan-ink:#1d4753;--st-lilac:#e6dcf6;--st-lilac-ink:#4b3a73;--st-ring:#a73d83;
   --st-lift:0 1px 0 rgba(91,59,34,.06),0 14px 32px -12px rgba(91,59,34,.32);
   --st-clay:inset 2px 2px 3px rgba(255,255,255,.6),inset -2px -3px 5px rgba(91,59,34,.16),0 2px 0 rgba(91,59,34,.15),0 10px 22px -8px rgba(111,81,53,.36);
   --st-hollow:inset 1px 2px 4px rgba(91,59,34,.12);--st-cast:rgba(91,59,34,.26);
-  --bt-hover:rgba(60,48,73,.06);--bt-active:rgba(60,48,73,.1);--bt-danger:#a8322b;--bt-green:#10754f;
+  --bt-hover:rgba(60,48,73,.06);--bt-active:rgba(60,48,73,.1);--bt-danger:#90040a;--bt-green:#047960;
   --dsw-focus-ring-color:var(--st-ring)}
 html body[data-ds-dark-theme]{
   --st-stage:linear-gradient(170deg,#173840 0%,#2a2440 55%,#3d2234 100%);--st-spot:rgba(255,245,235,.1);--st-tag:rgba(255,245,235,.14);
   --st-raised:#262029;--st-paper:#2b2431;--st-sunk:#18141c;
   --st-line:rgba(243,233,221,.12);--st-line-2:rgba(243,233,221,.22);
-  --st-ok:#7ad9a8;--st-okdot:#3fcf8a;--st-bad:#ff9a8f;--st-warn:#f5c27a;--st-warndot:#f0a93a;--st-work:#5cc8dc;
+  --st-ok:#91f1be;--st-okdot:#71e8a8;--st-bad:#e8695f;--st-warn:#f4cc7e;--st-warndot:#f4bb43;--st-work:#3faec2;--st-warn-strong:#f4cc7e;--st-bad-strong:#ffa89e;
   --st-cyan:#5cbdd1;--st-cyan-ink:#0d262c;--st-lilac:#4a3d61;--st-lilac-ink:#f1e9ff;--st-ring:#f2a6dc;
   --st-lift:0 1px 0 rgba(0,0,0,.3),0 14px 32px -12px rgba(0,0,0,.6);
   --st-clay:inset 2px 2px 3px rgba(255,255,255,.25),inset -2px -3px 5px rgba(0,0,0,.35),0 2px 0 rgba(0,0,0,.35),0 10px 22px -8px rgba(0,0,0,.6);
   --st-hollow:inset 1px 2px 4px rgba(0,0,0,.35);--st-cast:rgba(0,0,0,.45);
-  --bt-hover:rgba(255,240,225,.07);--bt-active:rgba(255,240,225,.12);--bt-danger:#ff9a8f;--bt-green:#7ad9a8}
+  --bt-hover:rgba(255,240,225,.07);--bt-active:rgba(255,240,225,.12);--bt-danger:#e8695f;--bt-green:#91f1be}
 html body ::selection{background:var(--st-lilac);color:var(--st-lilac-ink)}
 html body{font-family:var(--bt-font)}
 `;
@@ -10625,6 +10795,7 @@ html body .bt-row[aria-current=page],html body .bt-tile[aria-current=page]{backg
 html body .bt-row[aria-current=page] .bt-row-preview{color:var(--bt-ink-2)}
 html body .bt-row-title,html body .bt-tile-name{font-weight:600}
 html body .bt-row-preview{font-size:12px;line-height:16px;color:var(--bt-ink-2)}
+html body .bt-row .bt-row-preview-ask,html body .bt-row[aria-current=page] .bt-row-preview-ask{color:var(--st-warn-strong)}
 html body .bt-row>:is(svg,.bt-mark,.bt-cluster){position:relative;width:44px;height:44px;flex:none;filter:drop-shadow(0 4px 3px var(--st-cast))}
 html body .bt-row{min-height:64px;gap:12px;padding:8px 10px}
 html body .bt-row[aria-current=page]>:is(svg,.bt-mark,.bt-cluster){filter:drop-shadow(0 5px 4px var(--st-cast));transform:scale(1.08)}
@@ -12095,15 +12266,28 @@ function liveOf(work, roster, now = Date.now()) {
   const byId = roster?.byId ?? {};
   const roomsById = roster?.roomsById ?? {};
   const tasks = roster?.tasks ?? {};
-  const needs = (work?.approvals ?? []).filter((entry) => byId[entry.botId]).map((entry) => {
-    const task = entry.taskId === void 0 ? void 0 : tasks[entry.taskId];
-    return {
+  const needs = groupApprovals((work?.approvals ?? []).filter((entry) => byId[entry.botId])).map(({ entries: entries2 }) => {
+    const entry = entries2[0];
+    const detail = approvalDetail(entry);
+    const item = {
       key: `ask:${entry.id}`,
       bot: byId[entry.botId],
-      place: entry.roomId ? roomsById[entry.roomId]?.name : task?.title ?? entry.label,
+      place: entry.roomId ? roomsById[entry.roomId]?.name : tasks[entry.taskId]?.title ?? entry.label,
       tool: entry.tool,
-      ...entry.child ? { line: t("A subagent wants to use {tool}", { tool: entry.tool }) } : {},
-      open: entry.taskId ?? entry.roomId ?? entry.botId
+      ...entry.child ? { line: t("A subagent wants to use {tool}", { tool: entry.tool }) } : detail && entry.tool !== "keep_working" ? { line: `${t("Wants to use {tool}", { tool: entry.tool })} · ${detail}` } : {},
+      open: entry.taskId ?? entry.roomId ?? entry.botId,
+      count: entries2.length,
+      entries: entries2,
+      detail
+    };
+    if (entries2.length === 1) return item;
+    const places = [...new Set(entries2.map((entry2) => approvalWhere(entry2, roster)).filter(Boolean))];
+    return {
+      ...item,
+      places,
+      place: places.join(", "),
+      reason: entry.reason ?? "",
+      line: t("{count} requests to use {tool}", { count: entries2.length, tool: entry.tool })
     };
   });
   for (const entry of openStops(work)) {
@@ -12147,7 +12331,8 @@ function liveOf(work, roster, now = Date.now()) {
 }
 function liveSummary({ needs, working }) {
   const parts = [];
-  if (needs.length > 0) parts.push(t("{count} needs you", { count: needs.length }));
+  const count = needs.reduce((sum, item) => sum + (item.count ?? 1), 0);
+  if (count > 0) parts.push(t("{count} needs you", { count }));
   parts.push(working.length > 0 ? t("{count} working", { count: working.length }) : t("nothing working"));
   return parts.join(" · ");
 }
@@ -12169,6 +12354,40 @@ function Entry({ item, tone, line, actions }) {
     (0, import_react29.createElement)("span", { className: "bt-live-go" }, t("Open"))
   );
 }
+function GroupEntry({ item, actions, statusMap }) {
+  const [answering, setAnswering] = (0, import_react29.useState)(false);
+  const canAnswer = item.entries.every((entry) => entry.answerable || nativeAsk(statusMap, entry));
+  const answer = async (choice) => {
+    if (answering) return;
+    setAnswering(true);
+    try {
+      await answerGroup(item.entries, choice, { actions, statusMap });
+    } finally {
+      setAnswering(false);
+    }
+  };
+  const what = [item.line, item.detail].filter(Boolean).join(" · ");
+  return (0, import_react29.createElement)(
+    "div",
+    { className: "bt-live-card bt-live-need", role: "group", "aria-label": `${item.bot.name} · ${what}`, "aria-busy": answering || void 0 },
+    (0, import_react29.createElement)("span", { className: "bt-live-face" }, (0, import_react29.createElement)(BotMark, { bot: item.bot, size: 28, state: "alert" })),
+    (0, import_react29.createElement)(
+      "span",
+      { className: "bt-live-text" },
+      (0, import_react29.createElement)("span", { className: "bt-live-name" }, item.bot.name, item.place ? (0, import_react29.createElement)("span", { className: "bt-live-place" }, ` · ${item.place}`) : null),
+      (0, import_react29.createElement)("span", { className: "bt-live-line" }, item.line),
+      item.reason && item.reason !== item.detail ? (0, import_react29.createElement)("span", { className: "bt-live-line" }, hostText(item.reason)) : null,
+      item.detail ? (0, import_react29.createElement)("span", { className: "bt-live-line" }, item.detail) : null
+    ),
+    (0, import_react29.createElement)(
+      "div",
+      { className: "bt-q-foot" },
+      canAnswer ? (0, import_react29.createElement)("button", { type: "button", className: "bt-q-btn", disabled: answering, "aria-label": `${t("Reject")} · ${what}`, onClick: () => answer("reject") }, t("Reject")) : null,
+      canAnswer ? (0, import_react29.createElement)("button", { type: "button", className: "bt-q-submit", disabled: answering, "aria-label": `${t("Allow once")} · ${what}`, onClick: () => answer("allow") }, t("Allow once")) : null,
+      (0, import_react29.createElement)("button", { type: "button", className: "bt-live-go", onClick: () => actions.openSession(item.open) }, t("Open"))
+    )
+  );
+}
 function Section({ label, dot, children, empty }) {
   return (0, import_react29.createElement)(
     "section",
@@ -12177,7 +12396,8 @@ function Section({ label, dot, children, empty }) {
     children.length > 0 ? children : (0, import_react29.createElement)("p", { className: "bt-live-empty" }, empty)
   );
 }
-function LiveRail({ roster, actions, useWork }) {
+function LiveRail({ roster, actions, useWork, useSessionStatus }) {
+  const statusMap = useSessionStatus?.((map) => map) ?? /* @__PURE__ */ new Map();
   const work = useWork((value) => value);
   const [now, setNow] = (0, import_react29.useState)(Date.now());
   (0, import_react29.useEffect)(() => {
@@ -12197,7 +12417,7 @@ function LiveRail({ roster, actions, useWork }) {
     (0, import_react29.createElement)(
       Section,
       { label: t("Needs you"), dot: "need", empty: t("Nothing waiting for you.") },
-      live.needs.map((item) => (0, import_react29.createElement)(Entry, { key: item.key, item, tone: "need", actions, line: item.line ?? (item.tool ? t("Wants to use {tool}", { tool: item.tool }) : t("Waiting for your answer")) }))
+      live.needs.map((item) => item.count > 1 ? (0, import_react29.createElement)(GroupEntry, { key: item.key, item, actions, statusMap }) : (0, import_react29.createElement)(Entry, { key: item.key, item, tone: "need", actions, line: item.line ?? (item.tool ? t("Wants to use {tool}", { tool: item.tool }) : t("Waiting for your answer")) }))
     ),
     (0, import_react29.createElement)(
       Section,
@@ -12240,9 +12460,14 @@ var LIVE_CSS = `
 .bt-live-dot-done i{display:block;background:var(--st-okdot,var(--bt-green))}
 .bt-live-empty{margin:0;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-live-card{display:flex;align-items:center;gap:10px;width:100%;padding:12px 14px;border:1px solid var(--bt-line-2);border-radius:16px;background:var(--bt-sidebar);color:inherit;font:inherit;text-align:left;cursor:pointer}
+div.bt-live-card.bt-live-need{flex-wrap:wrap;cursor:default}
+div.bt-live-card.bt-live-need>.bt-q-foot{flex-basis:100%;align-items:center}
+div.bt-live-card .bt-live-name{white-space:normal}
+div.bt-live-card .bt-live-line{display:block;overflow:visible;overflow-wrap:anywhere;white-space:pre-wrap}
+div.bt-live-card .bt-live-go{padding:0 4px;border:0;background:none;font:inherit;font-weight:600;cursor:pointer}
 .bt-live-card:hover{background:var(--bt-card)}
 .bt-live-need{border-color:color-mix(in srgb,var(--st-warndot,var(--bt-accent)) 60%,transparent);background:var(--bt-card)}
-.bt-live-bad .bt-live-line{color:var(--bt-danger)}
+.bt-live-bad .bt-live-line{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-live-face{flex:none;display:grid;place-items:center;width:32px;height:32px}
 .bt-live-text{flex:1;min-width:0;display:flex;flex-direction:column}
 .bt-live-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -12536,6 +12761,14 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
       }
     },
     openCliLogin,
+    async recoverCliLogin(botId, provider) {
+      const bot = cliLoginBotOf(roster.getSnapshot(), botId);
+      const manager = loginState?.();
+      if (!bot || !manager || !Object.hasOwn(CLI_NAMES, provider)) return false;
+      const recovered = await manager.recover({ botId: bot.id, provider });
+      if (recovered && cliLoginBotOf(roster.getSnapshot(), bot.id)) openSession?.(bot.id);
+      return recovered;
+    },
     cliLoginStart: (botId, provider, model) => call2("cli-login-start", loginPayload(botId, provider, model === void 0 ? {} : { model })),
     cliLoginCurrent: (botId, provider) => call2("cli-login-current", loginPayload(botId, provider)),
     cliLoginStatus: (botId, provider, attemptId, signal) => call2("cli-login-status", loginPayload(botId, provider, { attemptId }), signal),
@@ -12772,12 +13005,6 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 [data-tint=aurora]{animation:bt-genie-aurora 9s ease-in-out infinite}
 @keyframes bt-genie-aurora{0%,100%{filter:hue-rotate(-190deg) saturate(1.2)}50%{filter:hue-rotate(-110deg) saturate(1.3) brightness(1.1)}}
 @media (prefers-reduced-motion:reduce){[data-tint=aurora]{animation:none;filter:hue-rotate(-150deg) saturate(1.25)}}
-/* A small mark frames Genie's head (the whole figure would be a speck): the plume and the
-   ear tips rise out of the frame, with room above for a state's hop. Two masks, added, keep
-   the head: everything down to the earrings, and the disc of the face below that, so the chin
-   stays whole and the arms beside it, with the body under it, are gone. */
-.bt-mark[data-frame=head]{clip-path:inset(-60% -30% 0 -30%)}
-.bt-mark[data-frame=head] .bt-clay{position:absolute;left:50%;bottom:-46%;height:163%;margin-left:-73.6%;-webkit-mask-image:linear-gradient(#000 57%,transparent 61%),radial-gradient(ellipse 29% 27% at 49.5% 41.5%,#000 92%,transparent 100%);mask-image:linear-gradient(#000 57%,transparent 61%),radial-gradient(ellipse 29% 27% at 49.5% 41.5%,#000 92%,transparent 100%)}
 :is(.bt-row,.bt-tile)>.bt-mark:hover .bt-mark[data-shape^=clay-][data-state=idle] .bt-clay{--bt-face-at:1}
 .bt-badge{position:absolute;right:0;bottom:0;width:12px;height:12px;border-radius:50%;corner-shape:round;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1.5px var(--bt-sidebar)}
 .bt-badge-admin{background:color-mix(in srgb,var(--bt-star) 82%,var(--bt-sidebar))}
@@ -12826,14 +13053,15 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .bt-row-title{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bt-tag{flex:none;max-width:96px;font-size:12px;line-height:16px;font-weight:400;padding:1px 6px;border-radius:4px;background:var(--bt-tag-bg);color:var(--bt-tag-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* A Bot's capability pills (capability-pills.js). In a sidebar row they have a line of their
-   own, and a pill that does not fit wraps out of sight whole rather than cut mid-word. */
+   own, and a pill that does not fit beside the others goes on to a line below, whole: the row
+   grows by that line, so no pill is cut or left out of sight (issue 1157). */
 .bt-caps{display:flex;align-items:center;gap:4px;min-width:0}
 .bt-cap{cursor:default}
-.bt-row-caps{flex-wrap:wrap;height:16px;overflow:hidden;margin-top:2px}
-.bt-row-caps>.bt-cap{font-size:11px;line-height:14px;padding:1px 5px}
+.bt-row-caps{flex-wrap:wrap;row-gap:2px;margin-top:2px}
+.bt-row-caps>.bt-cap{font-size:11px;line-height:14px;padding:1px 4px}
 .bt-drawer-caps{flex-wrap:wrap;justify-content:center;max-width:100%;margin-top:8px}
 .bt-row-preview{font-size:13px;line-height:18px;color:var(--bt-ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bt-row-preview-ask{color:var(--st-warn,var(--bt-ink-2));font-weight:500}
+.bt-row-preview-ask{color:var(--st-warn-strong,var(--st-warn,var(--bt-ink-2)));font-weight:500}
 .bt-unread{width:8px;height:8px;border-radius:50%;background:var(--bt-accent);flex:none;margin-right:2px;animation:bt-fade .13s cubic-bezier(.22,1,.36,1)}
 .bt-unread-wait{background:var(--bt-star)}
 .bt-rail{align-items:center;padding:0 0 8px}
@@ -13016,7 +13244,7 @@ button.bt-q-opt:active{background:var(--bt-active)}
 @media (prefers-reduced-motion:reduce){.bt-create-card,.bt-create-pop{animation:none}}
 .bt-send{height:40px;min-width:40px;border-radius:999px;border:0;background:var(--bt-accent);color:var(--bt-accent-ink,#fff);font-size:14px;padding:0 14px;cursor:pointer;flex:none;white-space:nowrap}
 .bt-send:disabled{opacity:.35;cursor:default}
-.bt-error{padding:0 14px 10px;color:var(--bt-danger);font-size:12px}
+.bt-error{padding:0 14px 10px;color:var(--st-bad-strong,var(--bt-danger));font-size:12px}
 
 /* Side panels keep their content clear of the Windows caption buttons. A host may set the
    chrome top to 0 so that dialog masks also cover the caption band; the panel then reaches
@@ -13104,13 +13332,13 @@ html[data-windows-titlebar]:not([data-fullscreen]) :is(.bt-pane,.bt-panel)::befo
 .bt-link-btn{border:0;background:none;padding:0;color:var(--bt-ink-2);font:inherit;font-size:12.5px;cursor:pointer;white-space:nowrap}
 .bt-link-btn:hover{color:var(--bt-ink);text-decoration:underline}
 .bt-paste-go{white-space:nowrap}
-.bt-paste-error{color:var(--bt-danger)}
+.bt-paste-error{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .bt-kv{display:flex;justify-content:space-between;gap:8px;font-size:12px;line-height:20px;color:var(--bt-ink-2)}
 .bt-kv span:last-child{color:var(--bt-ink);font-variant-numeric:tabular-nums}
 .bt-run-stats{display:flex;flex-wrap:wrap;justify-content:center;gap:0 6px;margin-top:-6px;font-size:12px;line-height:18px;color:var(--bt-ink-2);font-variant-numeric:tabular-nums}
 .bt-run-sep{color:var(--bt-ink-3)}
-.bt-danger{color:var(--bt-danger)}
+.bt-danger{color:var(--st-bad-strong,var(--bt-danger))}
 
 /* Bot settings: fields, the avatar editor popover, and the details-pane sub-view. */
 .bt-field{display:flex;flex-direction:column;gap:6px}
@@ -13161,7 +13389,7 @@ html[data-windows-titlebar]:not([data-fullscreen]) :is(.bt-pane,.bt-panel)::befo
 .bt-drawer-model{display:flex;flex-direction:column}
 .bt-drawer-model .bt-note{margin-top:6px}
 .bt-drawer-permission{display:flex;flex-direction:column}
-.bt-seg button.bt-perm-danger,.bt-seg button.bt-perm-danger[aria-pressed=true],.bt-kv span.bt-perm-danger{color:var(--bt-danger)}
+.bt-seg button.bt-perm-danger,.bt-seg button.bt-perm-danger[aria-pressed=true],.bt-kv span.bt-perm-danger{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-perm-exp{margin-left:6px;padding:0 5px;border-radius:999px;font-size:10px;line-height:15px;background:var(--bt-hover);color:var(--bt-ink-3)}
 .bt-perm-confirm{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-top:8px}
 .bt-perm-confirm .bt-note{flex-basis:100%;margin-top:0}
@@ -13253,12 +13481,12 @@ font:12px/17px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;overf
 .bt-connector-name{font-size:14px;line-height:20px;font-weight:500}
 .bt-connector-status{font-size:12px;line-height:16px;color:var(--bt-ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bt-connector[data-state=ready] .bt-connector-status{color:var(--bt-ink-2)}
-.bt-connector[data-state=error] .bt-connector-status{color:var(--bt-danger);white-space:normal}
+.bt-connector[data-state=error] .bt-connector-status{color:var(--st-bad-strong,var(--bt-danger));white-space:normal}
 .bt-connector-actions{flex:none;display:flex;gap:6px}
 .bt-connector-form{display:flex;flex-direction:column;gap:8px;padding-left:48px;animation:bt-q-in ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing},bt-veil-in .2s ease-out}
 .bt-connector-form-row{display:flex;align-items:center;gap:6px}
 .bt-connector-link{flex:1;font-size:12px;color:var(--bt-ink-2)}
-.bt-connector-error{padding-left:48px;font-size:12px;line-height:16px;color:var(--bt-danger)}
+.bt-connector-error{padding-left:48px;font-size:12px;line-height:16px;color:var(--st-bad-strong,var(--bt-danger))}
 
 /* Shell chrome reshaped for the team view. Selectors use stable data attributes where the
    shell offers them and CSS-module name suffixes elsewhere. */
@@ -13295,7 +13523,7 @@ html:not([data-windows-titlebar]) [class*="_footArea"],:not([class*="_collapsed"
 .bt-voice-name{font-size:16px;line-height:22px;font-weight:500}
 .bt-voice-status{font-size:13px;line-height:18px;color:var(--bt-ink-2);min-height:18px}
 .bt-voice-caption{min-height:44px;font-size:15px;line-height:22px;color:var(--bt-ink);animation:bt-blur-in .25s ease-out;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
-.bt-voice-note{font-size:12px;color:var(--bt-danger)}
+.bt-voice-note{font-size:12px;color:var(--st-bad-strong,var(--bt-danger))}
 .bt-voice-setup{height:32px;padding:0 14px;border-radius:16px;border:0;background:var(--bt-hover);color:var(--bt-ink);font:inherit;font-size:13px;cursor:pointer;transition:background-color .15s ease}
 .bt-voice-setup:hover{background:var(--bt-active)}
 .bt-voice-bar{display:flex;gap:16px;padding:0 0 32px}
@@ -13357,7 +13585,7 @@ button:hover .bt-you{background:color-mix(in srgb,var(--bt-ink) 9%,var(--bt-side
 .bt-menu button{display:flex;align-items:center;gap:4px;width:100%;min-height:30px;text-align:left;border:0;background:none;border-radius:6px;padding:6px 8px;font:inherit;font-size:13px;line-height:18px;color:var(--bt-ink);cursor:pointer;box-sizing:border-box}
 .bt-menu button:hover{background:var(--bt-hover)}
 .bt-menu button svg{flex:none;width:16px;height:16px;margin:0 1px}
-.bt-menu .bt-danger{color:var(--bt-danger)}
+.bt-menu .bt-danger{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-menu-sep{height:.5px;flex:none;background:var(--bt-line-2);margin:4px 8px}
 .bt-menu-up{--bt-origin:bottom left;animation-name:bt-pop-lift,bt-veil-in}
 .bt-menu[data-leaving]{pointer-events:none;animation:bt-pop-out .12s cubic-bezier(.4,0,1,1) forwards}
@@ -13524,7 +13752,7 @@ body[data-ds-dark-theme] .bt-theme-chip i{background:var(--da)}
 .bt-mem-remove{flex:none;height:28px;min-width:28px;border-radius:999px;border:0;background:none;color:var(--bt-ink-3);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0 6px;font:inherit;font-size:12px;opacity:0;transition:opacity .12s ease,background-color .12s ease,color .12s ease}
 .bt-mem-entry:hover .bt-mem-remove,.bt-mem-remove:focus-visible,.bt-mem-remove[data-confirm]{opacity:1}
 .bt-mem-remove:hover{background:var(--bt-hover);color:var(--bt-ink)}
-.bt-mem-remove[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 10%,transparent);color:var(--bt-danger);padding:0 10px}
+.bt-mem-remove[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 10%,transparent);color:var(--st-bad-strong,var(--bt-danger));padding:0 10px}
 @media (hover:none){.bt-mem-remove{opacity:1}}
 .bt-mem-none{font-size:13px;line-height:18px;color:var(--bt-ink-3);padding:8px 4px}
 .bt-mem-foot{flex:none;padding:8px 20px 20px;display:flex;flex-direction:column;gap:10px}
@@ -13850,6 +14078,14 @@ div:has(> nav [class*="_marks"]){display:none!important}
 [class*="_toBottomSlot"]>button svg{display:none}
 [class*="_toBottomSlot"]>button::before{content:"";width:20px;height:20px;background:currentColor;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10 4v12M5 11l5 5 5-5'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10 4v12M5 11l5 5 5-5'/%3E%3C/svg%3E") center/contain no-repeat}
 @keyframes bt-tobottom-in{from{translate:0 8px;scale:.8}}
+/* The arrow (and the "new messages" pill that takes its place) stands over the transcript. A
+   band of the page's own colour comes with it, from above the arrow down to the end of the
+   composer's seat, fading out at its top: the messages pass under the band, so the arrow is
+   never on a message's text, and none shows through the open parts of the seat below it (the
+   suggestion chips, the gaps of the stack) (issue 1138). The seat is drawn over the band, and the
+   band is there only while the arrow is: at the latest message nothing is under it. It ends
+   where the transcript's own box ends, so it adds nothing to the chat's scroll range. */
+[class*="_toBottomSlot"]::before{content:"";position:absolute;z-index:-1;left:0;right:0;bottom:calc(0px - var(--dsh-composer-height,152px));height:calc(var(--dsh-composer-height,152px) + 64px);background:linear-gradient(to bottom,transparent,var(--bt-main) 24px);pointer-events:none;animation:bt-veil-in .16s ease-out}
 [data-bt-news] [class*="_toBottomSlot"]>button{visibility:hidden!important;pointer-events:none!important}
 .bt-news{position:fixed;z-index:30;transform:translateX(-50%);display:inline-flex;align-items:center;overflow:hidden;border-radius:999px;background:var(--bt-accent);color:var(--bt-accent-ink);box-shadow:inset 0 0 0 1px rgba(20,20,20,.05),0 1px 3px 0 rgba(0,0,0,.12);font-family:var(--bt-font);animation:bt-news-in ${SPRING_TAP.duration}ms ${SPRING_TAP.easing},bt-veil-in .16s ease-out}
 @keyframes bt-news-in{from{translate:0 8px;scale:.9}}
@@ -13861,7 +14097,7 @@ div:has(> nav [class*="_marks"]){display:none!important}
 .bt-news-x{position:absolute;right:4px;top:50%;z-index:1;transform:translateY(-50%);width:20px;height:20px;padding:0;border:0;border-radius:999px;background:transparent;color:inherit;opacity:.75;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
 .bt-news-x svg{width:12px;height:12px}
 .bt-news-x:hover{opacity:1;background:rgba(20,20,20,.5)}
-@media (prefers-reduced-motion:reduce){.bt-news,[class*="_toBottomSlot"]>button{animation:none}}
+@media (prefers-reduced-motion:reduce){.bt-news,[class*="_toBottomSlot"]>button,[class*="_toBottomSlot"]::before{animation:none}}
 .bt-new-sep{display:flex;align-items:center;gap:8px;margin:14px 0 8px;padding:2px 0;font-size:11px;line-height:14px;font-weight:500;letter-spacing:.02em;text-transform:uppercase;color:var(--bt-accent);font-family:var(--bt-font)}
 .bt-new-sep::before,.bt-new-sep::after{content:"";flex:1;height:1px;background:color-mix(in srgb,var(--bt-accent) 20%,transparent)}
 .bt-open-new{display:flex;flex-direction:column}
@@ -13901,7 +14137,7 @@ div:has(> nav [class*="_marks"]){display:none!important}
 .bt-btw-body{margin-top:6px}
 .bt-btw-answer{font-size:14px;line-height:20px}
 .bt-btw-answer p{margin:0}
-.bt-btw-fail{margin:0 0 6px;color:var(--bt-danger);font-size:13px;line-height:18px}
+.bt-btw-fail{margin:0 0 6px;color:var(--st-bad-strong,var(--bt-danger));font-size:13px;line-height:18px}
 @media (prefers-reduced-motion:reduce){.bt-btw-chevron{transition:none}}
 `;
 var PLUGIN_ID = "ds-bot";
@@ -14180,9 +14416,6 @@ function showsDshRow(dsh, app) {
   return dsh.kind === "app" && APP_OFFER.has(app?.phase) && sameVersion(app.version, dsh.verified);
 }
 
-// src/client/approvals.js
-var useApproval = (useWork, match) => useWork ? useWork((work) => (work.approvals ?? []).some(match)) : false;
-
 // src/client/work-code-switch.js
 var import_react32 = require("react");
 var NOTE_PATTERNS = [
@@ -14433,6 +14666,7 @@ var waitingFor = (roster, waits) => {
   const names = [...(waits?.bots ?? []).map((id) => roster.byId[id]?.name), ...(waits?.rooms ?? []).map((id) => roster.roomsById[id]?.name)].filter(Boolean);
   return names.length === 0 ? "" : t("Waiting for {names}", { names: names.join(t(" and ")) });
 };
+var waitingLabel = (count) => count === 1 ? `${t("Waiting for your approval")} · ${t("1 approval waiting")}` : count > 0 ? t("{count} approvals waiting", { count }) : t("Waiting for your approval");
 function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useActivity, useWork, wide, marked }) {
   const id = bot.id;
   const part = currentPart(bot);
@@ -14444,6 +14678,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const main = isMainOf(roster, id);
   const crowned = roster.mainBotId === id;
   const approval = useApproval(useWork, (entry) => entry.botId === id);
+  const waitingCount = useWork ? useWork((work) => approvalCount(work, (e) => e.botId === id)) : 0;
   const blockedTask = useWork ? useWork((work) => (work.approvals ?? []).some((entry) => entry.taskId !== void 0 && entry.botId === id)) : false;
   const blockedLine = blockedTask ? t("A task needs your approval") : "";
   const stopped = useWork ? useWork((work) => openStops(work).some((entry) => entry.botId === id)) : false;
@@ -14468,7 +14703,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   };
   const pinned = bot.pinned === true && !crowned;
   const role = crowned ? bot.role : "";
-  const label = [bot.name, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", running2 || away ? t("Working") : "", waitsFor, stoppedLine, approval ? t("Waiting for your approval") : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
+  const label = [bot.name, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", running2 || away ? t("Working") : "", waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
   return (0, import_react34.createElement)(
     "button",
     {
@@ -14481,7 +14716,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
       onClick: () => actions.openSession(id),
       onContextMenu
     },
-    (0, import_react34.createElement)(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, main, crown: crowned }),
+    (0, import_react34.createElement)(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
     pinned && !wide ? (0, import_react34.createElement)(PinMark) : null,
     wide ? (0, import_react34.createElement)(
       "span",
@@ -14527,6 +14762,7 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
   const ids = tasks.map((task) => task.sessionId);
   const askedKey = useSessionStatus((map) => ids.filter((id) => waitsForUser(map, id)).join(","));
   const approvalKey = useWork ? useWork((work) => ids.filter((id) => approvalFor(work, id)).join(",")) : "";
+  const approvals = useWork ? useWork((work) => work.approvals) : void 0;
   const waitingKey = `${askedKey},${approvalKey}`;
   const shownId = useSessions((list) => ids.find((id) => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? "");
   const [open, setOpen] = (0, import_react34.useState)(false);
@@ -14541,7 +14777,9 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
     { className: "bt-threads", role: "group", "aria-label": t("Tasks {name} started", { name: bot.name }) },
     shown.map((task) => {
       const state = taskState(task, waiting.has(task.sessionId));
-      const label = [task.title, state === "waiting" ? t("Waiting for you") : t("Working")].join(", ");
+      const asks = state === "waiting" ? (approvals ?? []).filter((entry) => entry.taskId === task.sessionId) : [];
+      const detail = asks.length === 1 ? approvalDetail(asks[0]) : "";
+      const label = [task.title, state === "waiting" ? t("Waiting for you") : t("Working"), detail].filter(Boolean).join(", ");
       return (0, import_react34.createElement)(
         "button",
         {
@@ -14550,7 +14788,7 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
           className: "bt-thread",
           "data-state": state,
           "aria-label": label,
-          title: task.title,
+          title: detail ? `${task.title} · ${detail}` : task.title,
           "aria-current": shownId === task.sessionId ? "page" : void 0,
           onClick: () => actions.openSession(task.sessionId)
         },
@@ -14570,12 +14808,13 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
   const unread = useSessionStatus((map) => map.get(id)?.completionUnread === true) || marked && !active;
   useMarkedUnread(id, active, marked, actions);
   const approval = useApproval(useWork, (entry) => entry.roomId === id);
+  const waitingCount = useWork ? useWork((work) => approvalCount(work, (entry) => entry.roomId === id)) : 0;
   const members = workKeys(useGroupWork(useWork, (rooms) => (rooms[id] ?? []).map((entry) => ({ id: entry.botId, ...doingOf(entry) }))));
   const first = roster.byId[members[0]?.id];
   const workingLine = first ? workLine(first.name, members[0], members.length - 1) : null;
   if (room2.hidden && !active) return null;
   const pinned = room2.pinned === true;
-  const label = [room2.name, pinned ? t("Pinned") : "", members.length > 0 ? t("Working") : "", approval ? t("Waiting for your approval") : ""].filter(Boolean).join(", ");
+  const label = [room2.name, pinned ? t("Pinned") : "", members.length > 0 ? t("Working") : "", approval ? waitingLabel(waitingCount) : ""].filter(Boolean).join(", ");
   return (0, import_react34.createElement)(
     "button",
     {
@@ -14595,7 +14834,7 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
     wide ? (0, import_react34.createElement)(
       "span",
       { className: "bt-row-body" },
-      (0, import_react34.createElement)("span", { className: "bt-row-name" }, (0, import_react34.createElement)("span", { className: "bt-row-title" }, room2.name), pinned ? (0, import_react34.createElement)(PinMark) : null),
+      (0, import_react34.createElement)("span", { className: "bt-row-name" }, (0, import_react34.createElement)("span", { className: "bt-row-title" }, room2.name), waitingCount > 0 ? (0, import_react34.createElement)("span", { className: "bt-tag" }, String(waitingCount)) : null, pinned ? (0, import_react34.createElement)(PinMark) : null),
       workingLine ? (0, import_react34.createElement)("span", { className: "bt-row-preview" }, workingLine) : preview ? (0, import_react34.createElement)("span", { className: "bt-row-preview" }, preview) : null
     ) : null,
     wide && approval && !active ? (0, import_react34.createElement)("span", { className: "bt-unread bt-unread-wait", "aria-hidden": true }) : wide && unread && !active ? (0, import_react34.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
@@ -15268,9 +15507,9 @@ function BotReturn({ wide, useSurface, actions }) {
   if (mode !== "agent") return null;
   return (0, import_react34.createElement)(
     "button",
-    { type: "button", className: "bt-return", "aria-label": t("Omni"), title: t("Omni"), onClick: () => actions.setSurface("bot") },
+    { type: "button", className: "bt-return", "aria-label": t("Back to Automagik"), title: t("Back to Automagik"), onClick: () => actions.setSurface("bot") },
     (0, import_react34.createElement)(OmniMark, { size: 20 }),
-    wide ? (0, import_react34.createElement)("span", { className: "bt-return-name" }, t("Omni")) : null
+    wide ? (0, import_react34.createElement)("span", { className: "bt-return-name" }, t("Automagik")) : null
   );
 }
 var RETURN_CSS = `
@@ -15292,7 +15531,7 @@ function BrandName() {
 var SIDEBAR_CSS = `
 .bt-confirm{width:260px;max-width:72vw;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px}
 .bt-confirm-text{margin:0;font-size:13px;line-height:19px;color:var(--bt-ink-2)}
-.bt-confirm-error{margin:0;font-size:12px;line-height:17px;color:var(--bt-danger);overflow-wrap:anywhere}
+.bt-confirm-error{margin:0;font-size:12px;line-height:17px;color:var(--st-bad-strong,var(--bt-danger));overflow-wrap:anywhere}
 .bt-confirm-row{display:flex;justify-content:flex-end;gap:8px}
 .bt-menu .bt-confirm button{width:auto;min-height:0}
 .bt-confirm-go{height:28px;padding:0 14px;border:0;border-radius:999px;background:var(--bt-accent);color:var(--bt-accent-ink);font:inherit;font-size:13px;font-weight:500;cursor:pointer;transition:opacity .12s ease}
@@ -15382,7 +15621,7 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
 @keyframes bt-update-pop{from{opacity:0;transform:scale(.96);filter:blur(4px)}}
 .bt-update-title{font-size:14px;line-height:20px;font-weight:600}
 .bt-update-text{margin-top:2px;font-size:12.5px;line-height:18px;color:var(--bt-ink-2)}
-.bt-update-error{margin-top:8px;font-size:12px;line-height:17px;color:var(--bt-danger);overflow-wrap:anywhere;max-height:90px;overflow:auto}
+.bt-update-error{margin-top:8px;font-size:12px;line-height:17px;color:var(--st-bad-strong,var(--bt-danger));overflow-wrap:anywhere;max-height:90px;overflow:auto}
 .bt-update-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:12px}
 .bt-update-notes{margin-right:auto;font-size:12.5px;color:var(--bt-ink-2);text-decoration:none}
 .bt-update-notes:hover{color:var(--bt-ink);text-decoration:underline}
@@ -16704,7 +16943,7 @@ var SIDE_CSS = `
 .bt-side-q{max-width:85%;padding:7px 12px;border-radius:18px;background:var(--bt-user);color:var(--bt-user-ink);font-size:13px;line-height:19px;box-sizing:border-box;overflow-wrap:anywhere;white-space:pre-wrap}
 .bt-side-a{display:flex;flex-direction:column;gap:8px;align-items:flex-start;font-size:13px;line-height:19px;color:var(--bt-ink)}
 .bt-side-status{margin:0;font-size:12px;color:var(--bt-ink-3)}
-.bt-side-fail{margin:0;font-size:12px;line-height:17px;color:var(--bt-danger)}
+.bt-side-fail{margin:0;font-size:12px;line-height:17px;color:var(--st-bad-strong,var(--bt-danger))}
 .bt-side-form{flex:none;padding:10px 14px 14px;border-top:.5px solid var(--bt-line)}
 .bt-side-input{display:block;width:100%;box-sizing:border-box;min-height:36px;max-height:120px;padding:8px 12px;border:.5px solid var(--bt-line-2);border-radius:12px;background:var(--bt-main);color:var(--bt-ink);font:inherit;font-size:13px;line-height:19px;resize:none;outline:none;field-sizing:content}
 .bt-side-input::placeholder{color:var(--bt-ink-3)}
@@ -16844,6 +17083,16 @@ function turnDetector({ loud = 0.12, quiet: quiet2 = 0.06, quietMs = 1200 } = {}
   };
 }
 
+// src/client/update-hold.js
+var PLUGINS_COMING = /* @__PURE__ */ new Set(["ready", "downloading"]);
+var splitsPlugins = (state) => Boolean(state?.app && state?.plugins);
+function opensIntoPlugins(bridge, state) {
+  if (!bridge || typeof bridge.check === "function") return false;
+  if (state == null) return true;
+  if (!splitsPlugins(state)) return false;
+  return PLUGINS_COMING.has(state.plugins.phase) || state.kind === "plugins" && PLUGINS_COMING.has(state.phase);
+}
+
 // src/client/desktop-update.js
 var import_react39 = require("react");
 var BUSY = /* @__PURE__ */ new Set(["checking", "downloading", "installing"]);
@@ -16924,7 +17173,6 @@ function pluginPill(plugins) {
       return null;
   }
 }
-var splitsPlugins = (state) => Boolean(state?.app && state?.plugins);
 var appState = (state) => splitsPlugins(state) ? state.app : state;
 function useDesktopUpdate() {
   const bridge = globalThis.omniDesktop?.updates;
@@ -16948,7 +17196,7 @@ function useDesktopUpdate() {
   }, [bridge]);
   return { bridge, state };
 }
-function useDesktopVersions() {
+function useDesktopVersions(presentation) {
   const bridge = globalThis.omniDesktop?.updates;
   const [versions, setVersions] = (0, import_react39.useState)(null);
   (0, import_react39.useEffect)(() => {
@@ -16961,10 +17209,10 @@ function useDesktopVersions() {
     return () => {
       live = false;
     };
-  }, [bridge]);
+  }, [bridge, presentation]);
   return versions;
 }
-function Pill({ pill, busy, percent: percent3, onClick }) {
+function Pill({ pill, busy, held, percent: percent3, onClick }) {
   return (0, import_react39.createElement)(
     "button",
     {
@@ -16972,7 +17220,7 @@ function Pill({ pill, busy, percent: percent3, onClick }) {
       className: `bt-desk-update${pill.primary ? " bt-desk-update-go" : ""}`,
       title: pill.title,
       "aria-busy": busy || void 0,
-      disabled: busy,
+      disabled: busy || held,
       onClick
     },
     (0, import_react39.createElement)("span", { className: "bt-desk-update-dot", "aria-hidden": true }),
@@ -16988,19 +17236,23 @@ function DesktopUpdate() {
   const plugins = splitsPlugins(state) && !["ready", "installing"].includes(app.phase) ? state.plugins : null;
   const plugPill = pluginPill(plugins);
   if (!appPill && !plugPill) return null;
+  const held = opensIntoPlugins(bridge, state);
+  const appHeld = held && !appPill?.primary;
   const open = () => {
+    if (appHeld || BUSY.has(app.phase)) return;
     void bridge.open().catch(() => {
     });
   };
   const apply2 = () => {
+    if (held || BUSY.has(plugins?.phase)) return;
     void (bridge.applyPlugins ?? bridge.open)().catch(() => {
     });
   };
   return (0, import_react39.createElement)(
     "div",
     { className: "bt-desk-updates" },
-    appPill ? (0, import_react39.createElement)(Pill, { pill: appPill, busy: BUSY.has(app.phase), percent: app.phase === "downloading" ? app.percent ?? 0 : void 0, onClick: open }) : null,
-    plugPill ? (0, import_react39.createElement)(Pill, { pill: plugPill, busy: BUSY.has(plugins.phase), percent: plugins.phase === "downloading" ? plugins.percent ?? 0 : void 0, onClick: apply2 }) : null
+    appPill ? (0, import_react39.createElement)(Pill, { pill: appPill, busy: BUSY.has(app.phase), held: appHeld, percent: app.phase === "downloading" ? app.percent ?? 0 : void 0, onClick: open }) : null,
+    plugPill ? (0, import_react39.createElement)(Pill, { pill: plugPill, busy: BUSY.has(plugins.phase), held, percent: plugins.phase === "downloading" ? plugins.percent ?? 0 : void 0, onClick: apply2 }) : null
   );
 }
 var DESKTOP_UPDATE_CSS = `
@@ -17732,7 +17984,7 @@ var FOLDER_CSS = `
 .bt-menu .bt-folder-use{justify-content:center;font-weight:500;color:var(--bt-accent)}
 .bt-menu .bt-folder-use:disabled{color:var(--bt-ink-3);cursor:default;background:none}
 .bt-model-trigger:disabled{opacity:.6;cursor:default}
-.bt-folder-error{padding:4px 8px;font-size:12px;line-height:16px;color:var(--bt-danger);overflow-wrap:anywhere}
+.bt-folder-error{padding:4px 8px;font-size:12px;line-height:16px;color:var(--st-bad-strong,var(--bt-danger));overflow-wrap:anywhere}
 @media (prefers-reduced-motion:reduce){.bt-folder-view{animation:none}}
 `;
 
@@ -18038,7 +18290,7 @@ var SCHEDULE_CSS = `
 .bt-task-next{flex:none;font-size:12px;line-height:16px;color:var(--bt-ink-3);font-variant-numeric:tabular-nums;white-space:nowrap}
 .bt-task-remove{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;color:var(--bt-ink-3)}
 .bt-task-remove svg{width:14px;height:14px}
-.bt-task-remove[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 10%,transparent);color:var(--bt-danger)}
+.bt-task-remove[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 10%,transparent);color:var(--st-bad-strong,var(--bt-danger))}
 .bt-task-head{display:flex;align-items:center;gap:6px}
 .bt-task-form{animation:bt-q-in .4s cubic-bezier(.22,1,.36,1),bt-veil-in .2s ease-out}
 .bt-task-bot{width:auto;min-width:160px;max-width:58%}
@@ -18821,7 +19073,8 @@ function CliAccounts({ bot, actions }) {
     setError(null);
     try {
       const { provider, action } = pending;
-      if (action === "switch") await actions.cliLoginSwitch(bot.id, provider);
+      if (action === "recover") await actions.recoverCliLogin(bot.id, provider);
+      else if (action === "switch") await actions.cliLoginSwitch(bot.id, provider);
       else if (action === "reset") await actions.cliLoginReset(bot.id, provider);
       else await actions.cliLoginSignOut(bot.id, provider);
       await actions.refreshModels?.();
@@ -18872,7 +19125,7 @@ function CliAccounts({ bot, actions }) {
         "div",
         null,
         (0, import_react46.createElement)("p", null, t("This stops running Bot work for this account. Continue?")),
-        pending.action === "reset" ? (0, import_react46.createElement)(
+        ["reset", "recover"].includes(pending.action) ? (0, import_react46.createElement)(
           "div",
           null,
           (0, import_react46.createElement)("p", null, t("This signs {vendor} out for Bots. Sign in again in the app.", {
@@ -18903,11 +19156,15 @@ function CliAccounts({ bot, actions }) {
       ) : (0, import_react46.createElement)(
         "div",
         null,
-        entry.recoveryRequired ? (0, import_react46.createElement)("button", {
+        entry.recoveryRequired ? (0, import_react46.createElement)("div", null, (0, import_react46.createElement)("button", {
           type: "button",
           className: "bt-soft bt-soft-sm",
           onClick: () => setPending({ provider, action: "reset" })
-        }, t("Reset Bot sign-in")) : (0, import_react46.createElement)(
+        }, t("Reset Bot sign-in")), (0, import_react46.createElement)("button", {
+          type: "button",
+          className: "bt-soft bt-soft-sm",
+          onClick: () => setPending({ provider, action: "recover" })
+        }, t("Sign in again"))) : (0, import_react46.createElement)(
           "div",
           null,
           !entry.signedIn ? (0, import_react46.createElement)("button", {
@@ -19126,7 +19383,7 @@ function AdvancedSettings({ bot, roster, actions, save, Card: Card2, Row: Row3, 
 var ADVANCED_SETTINGS_CSS = `
 .bt-advanced,.bt-advanced-body{display:flex;flex-direction:column;gap:18px;min-width:0}
 .bt-advanced-actions{gap:8px;flex-wrap:wrap}.bt-advanced-note{margin:0;padding:10px 14px}
-.bt-advanced-error{color:var(--bt-danger);font-size:13px}.bt-advanced-stats{width:100%;min-width:0}
+.bt-advanced-error{color:var(--st-bad-strong,var(--bt-danger));font-size:13px}.bt-advanced-stats{width:100%;min-width:0}
 .bt-advanced-select{display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:10px}
 .bt-advanced-select select{max-width:100%;background:var(--bt-main);color:var(--bt-ink);border:1px solid var(--bt-line);border-radius:6px;padding:4px}
 .bt-advanced-table{max-width:100%;overflow-x:auto}.bt-advanced-table table{width:100%;border-collapse:collapse;font-size:11px;font-variant-numeric:tabular-nums}
@@ -19458,7 +19715,7 @@ label.bt-bs-row{cursor:text}
 .bt-bs-stack{flex-direction:column;align-items:stretch;gap:8px}
 .bt-bs-area{flex:none;width:auto;min-height:112px;height:auto;margin:0 -6px -4px;padding:8px;line-height:19px;text-align:left;resize:vertical;background:var(--bt-hover)}
 .bt-bs-area:hover{background:var(--bt-active)}
-.bt-bs-danger .bt-bs-label{color:var(--bt-danger)}
+.bt-bs-danger .bt-bs-label{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-bs-danger[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 8%,transparent)}
 .bt-bs-danger[data-confirm]:hover{background:color-mix(in srgb,var(--bt-danger) 12%,transparent)}
 .bt-switch{position:relative;flex:none;width:36px;height:20px;padding:0;border:0;border-radius:999px;background:var(--bt-line-2);cursor:pointer;transition:background-color .2s ease}
@@ -20055,7 +20312,7 @@ var AGENT_ACCESS_CSS = `
 .bt-aa-create{display:flex;align-items:center;gap:8px}
 .bt-aa-create .bt-input{flex:1;min-width:0;height:34px}
 .bt-aa-create .bt-fb-primary{height:34px;padding:0 16px;font-size:13px}
-.bt-aa-problem{font-size:12px;line-height:16px;color:color-mix(in srgb,var(--bt-danger) 72%,var(--bt-ink))}
+.bt-aa-problem{font-size:12px;line-height:16px;color:color-mix(in srgb,var(--st-bad-strong,var(--bt-danger)) 72%,var(--bt-ink))}
 .bt-aa-new{display:flex;flex-direction:column;gap:10px;padding:12px;background:color-mix(in srgb,var(--bt-accent) 6%,transparent)}
 .bt-aa-new-head{display:flex;align-items:center;gap:6px;font-size:13px;line-height:18px;font-weight:600}
 .bt-aa-new-head svg{flex:none;color:color-mix(in srgb,var(--bt-green) 70%,var(--bt-ink))}
@@ -20072,7 +20329,7 @@ var AGENT_ACCESS_CSS = `
 .bt-aa-key[data-revoked] .bt-aa-name{font-weight:400;color:var(--bt-ink-2)}
 .bt-aa-key[data-revoked] .bt-aa-name svg{color:var(--bt-ink-3)}
 .bt-aa-ask{font-size:12px;line-height:16px;color:var(--bt-ink)}
-.bt-aa-danger{color:color-mix(in srgb,var(--bt-danger) 72%,var(--bt-ink))}
+.bt-aa-danger{color:color-mix(in srgb,var(--st-bad-strong,var(--bt-danger)) 72%,var(--bt-ink))}
 .bt-aa-danger[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 14%,transparent)}
 .bt-aa-danger[data-confirm]:hover{background:color-mix(in srgb,var(--bt-danger) 22%,transparent)}
 .bt-aa-more{justify-content:center;font-size:12px;color:var(--bt-ink-2)}
@@ -20091,7 +20348,7 @@ var AGENT_ACCESS_CSS = `
 .bt-aa-reason{font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-aa-changes{margin:4px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px;font-size:12px;line-height:17px;color:var(--bt-ink);overflow-wrap:anywhere}
 .bt-aa-changes li{padding-left:10px;border-left:2px solid var(--bt-line-2)}
-.bt-aa-pill{flex:none;margin-top:1px;padding:1px 8px;border-radius:999px;font-size:11.5px;line-height:16px;font-weight:500;white-space:nowrap;background:color-mix(in srgb,var(--bt-danger) 12%,transparent);color:color-mix(in srgb,var(--bt-danger) 72%,var(--bt-ink))}
+.bt-aa-pill{flex:none;margin-top:1px;padding:1px 8px;border-radius:999px;font-size:11.5px;line-height:16px;font-weight:500;white-space:nowrap;background:color-mix(in srgb,var(--bt-danger) 12%,transparent);color:color-mix(in srgb,var(--st-bad-strong,var(--bt-danger)) 72%,var(--bt-ink))}
 .bt-aa-pill[data-outcome=allowed]{background:color-mix(in srgb,var(--bt-green) 14%,transparent);color:color-mix(in srgb,var(--bt-green) 50%,var(--bt-ink))}
 .bt-aa-pill[data-outcome=started]{background:color-mix(in srgb,var(--bt-star) 16%,transparent);color:color-mix(in srgb,var(--bt-star) 58%,var(--bt-ink))}
 @media (max-width:640px){
@@ -20773,13 +21030,18 @@ function startModel(roster) {
   const models = (roster.models ?? []).filter(setUp);
   return (models.find((model) => model.ref === roster.defaultModel) ?? models.find((model) => model.superseded !== true) ?? models[0])?.ref ?? "";
 }
-function createPayload({ name, look, image, model, effort, brief }) {
+function createPayload({ name, look, image, model, effort, brief, role, instructions }) {
   const payload = { name, color: look.color, avatar: image ? { shape: look.shape, image } : { shape: look.shape } };
   if (model) payload.model = model;
   if (effort !== void 0) payload.effort = effort;
   if (brief) payload.brief = brief;
+  if (role?.trim()) payload.role = role.trim();
+  if (instructions?.trim()) payload.instructions = instructions.trim();
   return payload;
 }
+
+// src/shared/bot-profile.js
+var ROLE_MAX = 24;
 
 // src/client/create-bot.js
 var import_react54 = require("react");
@@ -20794,6 +21056,9 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const [image, setImage] = (0, import_react54.useState)(null);
   const [library, setLibrary] = (0, import_react54.useState)(false);
   const [name, setName] = (0, import_react54.useState)(start2?.name ?? "");
+  const [role, setRole] = (0, import_react54.useState)("");
+  const [instructions, setInstructions] = (0, import_react54.useState)("");
+  const [showInstructions, setShowInstructions] = (0, import_react54.useState)(false);
   const [model, setModel] = (0, import_react54.useState)(() => startModel(roster));
   const [effort, setEffort] = (0, import_react54.useState)(void 0);
   const [busy, setBusy] = (0, import_react54.useState)(false);
@@ -20808,12 +21073,22 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const finalName = name.trim() || fallbackName;
   const clash = roster.bots.some((bot) => bot.name.toLowerCase() === finalName.toLowerCase());
   const problem = nameProblem(finalName);
+  const permission = roster.prefs?.permission ?? roster.permissions?.defaultPreset;
   const create = async () => {
     if (busy || clash || problem) return;
     setError("");
     setBusy(true);
     try {
-      const bot = await actions.createBot(createPayload({ name: finalName, look, image, model, effort, brief }));
+      const bot = await actions.createBot(createPayload({
+        name: finalName,
+        look,
+        image,
+        model,
+        effort,
+        brief,
+        role,
+        instructions
+      }));
       onCreated(bot);
     } catch (failure) {
       setError(failure?.message ?? String(failure));
@@ -20900,6 +21175,18 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
       problem ? (0, import_react54.createElement)("span", { className: "bt-note bt-danger" }, hostText(problem)) : clash ? (0, import_react54.createElement)("span", { className: "bt-note bt-danger" }, t("A Bot named {name} already exists", { name: finalName })) : null
     ),
     (0, import_react54.createElement)(
+      "label",
+      { className: "bt-field" },
+      (0, import_react54.createElement)("span", { className: "bt-field-label" }, t("Role")),
+      (0, import_react54.createElement)("input", {
+        className: "bt-input",
+        value: role,
+        maxLength: ROLE_MAX,
+        "aria-label": t("Role"),
+        onChange: (event) => setRole(event.target.value)
+      })
+    ),
+    (0, import_react54.createElement)(
       "div",
       { className: "bt-field" },
       (0, import_react54.createElement)("span", { className: "bt-field-label" }, t("Model")),
@@ -20908,6 +21195,44 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
         setEffort(void 0);
       }, onPickEffort: (picked) => setEffort(picked ?? null) }),
       (0, import_react54.createElement)("span", { className: "bt-note" }, (roster.models ?? []).length > 0 ? t("The Bot runs on this model. You can change it later in its details.") : t("Add a provider and a model in DeepSeek Harness first, or pick one in the Bot's chat later."))
+    ),
+    (0, import_react54.createElement)("div", { className: "bt-create-step" }, t("What will it do?")),
+    (0, import_react54.createElement)("button", {
+      type: "button",
+      className: "bt-soft",
+      "aria-expanded": showInstructions,
+      onClick: () => setShowInstructions((value) => !value)
+    }, t("Add instructions")),
+    // The form's own input look, as tall as the Settings instructions area.
+    showInstructions ? (0, import_react54.createElement)(
+      "div",
+      { className: "bt-field" },
+      (0, import_react54.createElement)("textarea", {
+        className: "bt-input",
+        value: instructions,
+        style: { height: "auto", minHeight: 112, padding: "8px 10px", lineHeight: "19px", resize: "vertical" },
+        "aria-label": t("What will it do?"),
+        placeholder: t("What this Bot is responsible for…"),
+        onChange: (event) => setInstructions(event.target.value),
+        onKeyDown: (event) => {
+          if (event.key === "Enter") event.stopPropagation();
+        }
+      }),
+      (0, import_react54.createElement)(
+        "div",
+        { className: "bt-note" },
+        t("Part of the Bot's system prompt. You can change it later in its details.")
+      )
+    ) : null,
+    remoteOfBot({ model }) ? (0, import_react54.createElement)(
+      "div",
+      { className: "bt-note" },
+      t("This model uses its Hermes profile's own instructions.")
+    ) : null,
+    permission == null ? null : (0, import_react54.createElement)(
+      "div",
+      { className: "bt-note" },
+      t("New Bots start at {level}.", { level: presetName(permission, roster.permissions) })
     ),
     error ? (0, import_react54.createElement)("div", { className: "bt-error", role: "alert", style: { padding: 0 } }, error) : null,
     (0, import_react54.createElement)(
@@ -23637,7 +23962,8 @@ function entrySummary(entry) {
   if (entry.source === "turn") return failureLabel(entry.code, entry.text);
   return entry.text;
 }
-var SOURCES = { turn: "Model call", host: "Omni", api: "Omni", browser: "This window" };
+var SOURCES = { turn: "Model call", host: "Automagik", api: "Automagik", browser: "This window" };
+var sourceName = (source) => SOURCES[source] ?? "Automagik";
 function issueWindow() {
   if (window.dshDesktop !== void 0) return { go: (url) => {
     window.open(url, "_blank");
@@ -23742,7 +24068,7 @@ function FeedbackPage({ actions, run: run2, Section: Section2, Row: Row3, roster
           "div",
           { className: "bt-set-copy" },
           (0, import_react65.createElement)("span", { className: "bt-fb-text" }, entrySummary(entry)),
-          (0, import_react65.createElement)("span", { className: "bt-set-hint" }, [whenText(entry.time), entry.bot, entry.where, t(SOURCES[entry.source] ?? "Omni")].filter(Boolean).join(" · "))
+          (0, import_react65.createElement)("span", { className: "bt-set-hint" }, [whenText(entry.time), entry.bot, entry.where, t(sourceName(entry.source))].filter(Boolean).join(" · "))
         ),
         entry.code ? (0, import_react65.createElement)("span", { className: "bt-tag bt-fb-code" }, entry.status ? `${entry.code} ${entry.status}` : entry.code) : null
       )),
@@ -23796,7 +24122,7 @@ var FEEDBACK_CSS = `
 .bt-fb-dot[data-level=warn]{background:#e3a008}
 .bt-fb-text{overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
 .bt-fb-code{flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px}
-.bt-event-error{color:var(--bt-danger,#e02135)}
+.bt-event-error{color:var(--st-bad-strong,var(--bt-danger,#e02135))}
 .bt-toast{position:fixed;left:50%;bottom:28px;z-index:1000;display:flex;align-items:center;gap:8px;max-width:min(560px,calc(100vw - 32px));padding:8px 8px 8px 14px;border-radius:12px;background:var(--bt-card,#fff);color:var(--bt-ink,#141414);border:1px solid var(--bt-line-2,rgba(0,0,0,.15));box-shadow:0 8px 28px rgba(0,0,0,.14);font-size:13px;line-height:18px;transform:translateX(-50%);animation:bt-toast-in ${SPRING_SHAPE.duration}ms ${SPRING_SHAPE.easing},bt-veil-in .2s ease-out}
 .bt-toast{bottom:calc(28px + env(safe-area-inset-bottom,0px))}
 .bt-toast[data-leaving]{opacity:0;transform:translate(-50%,6px) scale(.98);filter:blur(3px);transition:opacity .18s ease-in,transform .18s ease-in,filter .18s ease-in}
@@ -23848,7 +24174,7 @@ function pluginHint(change, plugins) {
 }
 function versionRows({ versions, update, Row: Row3 }) {
   const plugins = versions ? Array.isArray(versions.plugins) ? versions.plugins : [] : [{ name: update.name, version: update.current }];
-  return plugins.filter((plugin) => typeof plugin?.name === "string" && typeof plugin.version === "string").map((plugin) => (0, import_react66.createElement)(Row3, { key: `version:${plugin.name}`, label: pluginName(plugin.name), hint: t("Version {version}", { version: plugin.version }) }));
+  return plugins.filter((plugin) => typeof plugin?.name === "string" && typeof plugin.version === "string").map((plugin) => (0, import_react66.createElement)(Row3, { key: `version:${plugin.name}`, label: pluginName(plugin.name), hint: pluginVersionHint(plugin, versions?.latest?.[plugin.name]) }));
 }
 function pluginRows({ app, Row: Row3 }) {
   const plugins = splitsPlugins(app.state) ? app.state.plugins : null;
@@ -23875,18 +24201,81 @@ function pluginRows({ app, Row: Row3 }) {
   }
   return rows2;
 }
-var PLUGINS_COMING = /* @__PURE__ */ new Set(["ready", "downloading"]);
-function opensIntoPlugins(bridge, state) {
-  if (!bridge || typeof bridge.check === "function") return false;
-  if (state == null) return true;
-  if (!splitsPlugins(state) || state.plugins.auto === false) return false;
-  return PLUGINS_COMING.has(state.plugins.phase) || state.kind === "plugins" && PLUGINS_COMING.has(state.phase);
+function newerVersion(next, current) {
+  const parse2 = (value) => /^(\d+)\.(\d+)\.(\d+)(?:-([\w.]+))?(?:\+[\w.]+)?$/.exec(value ?? "");
+  const a = parse2(next), b = parse2(current);
+  if (!a || !b) return false;
+  for (let i = 1; i <= 3; i++) if (+a[i] !== +b[i]) return +a[i] > +b[i];
+  if (!a[4] || !b[4]) return !a[4] && Boolean(b[4]);
+  const x = a[4].split("."), y = b[4].split(".");
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue;
+    if (x[i] === void 0 || y[i] === void 0) return y[i] === void 0;
+    const nx = /^\d+$/.test(x[i]), ny = /^\d+$/.test(y[i]);
+    if (nx && ny) return +x[i] > +y[i];
+    return nx !== ny ? !nx : x[i] > y[i];
+  }
+  return false;
+}
+function pluginVersionHint(plugin, latest) {
+  return newerVersion(latest, plugin.version) ? t("Version {version} · {latest} available", { version: plugin.version, latest }) : t("Version {version}", { version: plugin.version });
+}
+function forceHint(force) {
+  switch (force?.phase) {
+    case "stopping":
+      return t("Stopping conversations…");
+    case "checking":
+      return t("Checking for updates…");
+    case "downloading":
+      return t("Downloading the Automagik update…");
+    case "installing":
+      return t("Installing…");
+    case "restarting":
+      return t("Restarting…");
+  }
+  switch (force?.code) {
+    case "up-to-date":
+      return t("Everything is up to date.");
+    case "updated":
+      return t("Updated.");
+    case "plugins-rolled-back":
+      return t("The plugins did not start, so the previous ones are back.");
+    case "app-download-failed":
+      return t("The Automagik update could not be downloaded. Try again.");
+    case "app-manual":
+      return t("This copy updates through your system's package manager.");
+    case "restart-failed":
+      return t("The restart did not finish. Try again.");
+    default:
+      return pluginReason({ reason: force }) ?? t("Stops running conversations and sign-ins, installs every available update and restarts.");
+  }
+}
+function pluginReason(versions) {
+  const params = versions?.reason?.params ?? {};
+  switch (versions?.reason?.code) {
+    case "app-line":
+      return t("Plugins {version} need Automagik {line}; this app is {app}. Update Automagik first.", params);
+    case "app-minimum":
+      return t("Plugins {version} need Automagik {base} or newer; this app is {app}.", params);
+    case "trial-failed":
+      return t("Plugins {version} did not start here before, so the current ones are kept.", params);
+    case "dsh-range":
+      return t("Plugins {version} need a different DeepSeek Harness version.", params);
+    case "older-sequence":
+    case "invalid-lane":
+      return t("The published plugin update was not accepted.");
+    case "not-checked":
+    case "check-failed":
+      return t("Plugin updates could not be checked. Try again.");
+    default:
+      return null;
+  }
 }
 var linkProps = (href) => ({ className: "bt-soft bt-soft-sm bt-about-link", href, target: "_blank", rel: "noopener noreferrer" });
 function AboutPage({ useUpdate, actions, run: run2, Section: Section2, Row: Row3 }) {
   const update = useUpdate((value) => value) ?? {};
   const app = useDesktopUpdate();
-  const versions = useDesktopVersions();
+  const versions = useDesktopVersions(app.state);
   const [checking, setChecking] = (0, import_react66.useState)(false);
   const [stars, setStars] = (0, import_react66.useState)(null);
   (0, import_react66.useEffect)(() => {
@@ -23924,6 +24313,27 @@ function AboutPage({ useUpdate, actions, run: run2, Section: Section2, Row: Row3
   const appPill = updatePill(appState(app.state));
   const appBusy = ["checking", "downloading", "installing"].includes(appState(app.state)?.phase);
   const ours = inApp(update, app);
+  const [confirmForce, setConfirmForce] = (0, import_react66.useState)(false);
+  const [pendingForce, setPendingForce] = (0, import_react66.useState)(null);
+  const forceSent = (0, import_react66.useRef)(false);
+  const force = pendingForce ?? app.state?.force;
+  const forceBusy = Boolean(force?.phase && !["done", "failed"].includes(force.phase));
+  const canForce = typeof app.bridge?.force === "function" && !updatesOff(versions);
+  const startForce = () => {
+    if (!canForce || forceBusy || forceSent.current) return;
+    forceSent.current = true;
+    setConfirmForce(false);
+    setPendingForce({ phase: "stopping" });
+    void Promise.resolve().then(() => app.bridge.force()).then(() => setPendingForce(null), () => {
+      setPendingForce({ phase: "failed", code: "restart-failed" });
+    }).finally(() => {
+      forceSent.current = false;
+    });
+  };
+  (0, import_react66.useEffect)(() => {
+    if (app.state?.force) setPendingForce(null);
+  }, [app.state?.force]);
+  const reason = pluginReason(versions);
   const held = opensIntoPlugins(app.bridge, app.state);
   const appCheck = () => {
     if (held) return;
@@ -23977,7 +24387,18 @@ function AboutPage({ useUpdate, actions, run: run2, Section: Section2, Row: Row3
       { key: "updates", title: t("Updates") },
       (0, import_react66.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react66.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react66.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react66.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
-      ...pluginRows({ app, Row: Row3 })
+      ...pluginRows({ app, Row: Row3 }),
+      reason ? (0, import_react66.createElement)(Row3, { label: t("Plugin updates"), hint: reason }) : null,
+      canForce ? (0, import_react66.createElement)(
+        Row3,
+        { label: t("Force update"), hint: confirmForce && !forceBusy ? t("Running conversations, tasks and Bot sign-ins stop now. Bots that were signing in ask you to sign in again.") : forceHint(force) },
+        confirmForce && !forceBusy ? [
+          (0, import_react66.createElement)("button", { key: "stop", type: "button", className: "bt-fb-primary", onClick: startForce }, t("Stop and update")),
+          (0, import_react66.createElement)("button", { key: "cancel", type: "button", className: "bt-soft bt-soft-sm", onClick: () => setConfirmForce(false) }, t("Cancel"))
+        ] : (0, import_react66.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: forceBusy, onClick: () => {
+          if (!forceBusy) setConfirmForce(true);
+        } }, t("Force update"))
+      ) : null
     ),
     plugins.length > 0 ? (0, import_react66.createElement)(Section2, { key: "plugins", title: t("Plugins") }, ...plugins) : null,
     (0, import_react66.createElement)(
@@ -24271,11 +24692,11 @@ function FormActions({ onCancel, onAdd, ready }) {
 }
 var PROVIDERS_CSS = `
 .bt-provider-id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:var(--bt-ink-3)}
-.bt-provider .bt-set-hint[data-error]{color:var(--bt-danger)}
+.bt-provider .bt-set-hint[data-error]{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-provider-state{display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:16px;color:var(--bt-ink-2);white-space:nowrap}
 .bt-provider-state::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--bt-ink-3)}
 .bt-provider-state[data-state=set]::before{background:var(--bt-green)}
-.bt-provider-state[data-state=missing]{color:var(--bt-danger)}
+.bt-provider-state[data-state=missing]{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-provider-state[data-state=missing]::before{background:var(--bt-danger)}
 .bt-provider .bt-secret-field{align-items:center;gap:8px}
 .bt-provider .bt-secret-field>svg,.bt-provider-form .bt-secret-field>svg{flex:none;color:var(--bt-ink-3)}
@@ -28335,13 +28756,16 @@ var ACCOUNT_CHANGED = "bot/account-changed";
 var ACCOUNT_SIGNED_OUT = "bot/account-signed-out";
 var providerOf2 = (ref) => typeof ref === "string" && ref.includes("/") ? ref.slice(0, ref.indexOf("/")) : void 0;
 var messageOf = (error) => typeof error?.message === "string" && error.message !== "" ? error.message : "Could not continue this sign-in. Try again.";
-function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf: modelOf2 }) {
+function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf: modelOf2, botOf }) {
   const listeners2 = /* @__PURE__ */ new Set();
   let snapshot = Object.freeze({ rows: Object.freeze({}) });
   let disposed = false;
   let sequence = 0;
+  let intent = 0;
+  const recoveries = /* @__PURE__ */ new Set();
   const attempts = {};
   const polls = {};
+  const providerEpochs = /* @__PURE__ */ new Map();
   const rowTimers = /* @__PURE__ */ new Map();
   const restored = /* @__PURE__ */ new Set();
   const baselines = /* @__PURE__ */ new Map();
@@ -28364,6 +28788,20 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     }
     snapshot = Object.freeze({ rows: Object.freeze(rows2) });
     emit();
+  }
+  function retireRecovery(owner) {
+    const row = rowOf(owner.botId);
+    const seq = owner.seq;
+    owner.seq = void 0;
+    if (row?.seq === seq && row?.busy) setRow(owner.botId, null);
+  }
+  function retireInvalidRecoveries() {
+    for (const owner of recoveries) if (!owner.current()) retireRecovery(owner);
+  }
+  function nextIntent() {
+    ++intent;
+    retireInvalidRecoveries();
+    return intent;
   }
   const patchRow = (botId, seq, patch) => {
     if (live(botId, seq)) setRow(botId, { ...rowOf(botId), ...patch });
@@ -28474,6 +28912,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     for (const row of attemptRows(provider)) setRow(row.botId, { ...row, stage: "interrupted", attempt: null, busy: false, confirm: false });
   }
   async function ended(provider) {
+    const epoch = providerEpochs.get(provider);
     stopPoll(provider);
     let signedIn;
     let connection;
@@ -28483,7 +28922,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     } catch {
       signedIn = void 0;
     }
-    if (disposed) return;
+    if (disposed || providerEpochs.get(provider) !== epoch) return;
     if (signedIn === true && connection?.consent === "needed") {
       for (const row of attemptRows(provider)) void readAccount(row.botId, provider, row.seq, null);
       return;
@@ -28538,8 +28977,9 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
      * or the Sign in button in Settings or Welcome. A live attempt of that agent is joined, never
      * started again; `ref` (the model the person chose) is kept by the host for this Bot.
      */
-    async open({ botId, provider, ref }) {
-      if (disposed || typeof botId !== "string" || botId === "" || !known(provider)) return false;
+    async open({ botId, provider, ref }, valid = () => true, owner) {
+      nextIntent();
+      if (disposed || !valid() || typeof botId !== "string" || botId === "" || !known(provider)) return false;
       const model = typeof ref === "string" && ref.startsWith(`${provider}/`) ? ref : void 0;
       const existing = rowOf(botId);
       if (existing?.provider === provider && ["offer", "attempt", "account"].includes(existing.stage)) {
@@ -28556,13 +28996,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         return true;
       }
       const seq = ++sequence;
+      if (owner) owner.seq = seq;
       setRow(botId, { botId, provider, ref: model, stage: "offer", busy: true, reveal: seq, seq, attempt: null, error: null, confirm: false });
       try {
         const current = await actions.cliLoginCurrent(botId, provider);
-        if (!live(botId, seq)) return true;
+        if (!live(botId, seq) || !valid()) return false;
         if (current?.attempt && ACTIVE.has(current.attempt.status)) {
           const view = model ? await actions.cliLoginStart(botId, provider, model) : current.attempt;
-          if (!live(botId, seq)) return true;
+          if (!live(botId, seq) || !valid()) return false;
           setRow(botId, { ...rowOf(botId), stage: "attempt", busy: false });
           applyView(provider, view);
           return true;
@@ -28573,28 +29014,60 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         }
       } catch {
       }
+      if (!valid()) return false;
       patchRow(botId, seq, { busy: false });
       return true;
     },
+    // Settings' confirmed recovery composes the existing owner RPCs. Each RPC retains its
+    // own host admission checks; Reset and start are deliberately not an atomic transaction.
+    async recover({ botId, provider, ref }) {
+      if (disposed || !known(provider) || !botOf?.(botId)) return false;
+      const model = modelOf2?.(botId);
+      let operation = nextIntent();
+      const current = () => !disposed && intent === operation && Boolean(botOf(botId)) && modelOf2?.(botId) === model;
+      await actions.cliLoginReset(botId, provider);
+      if (!current()) return false;
+      stopPoll(provider);
+      providerEpochs.set(provider, (providerEpochs.get(provider) ?? 0) + 1);
+      delete attempts[provider];
+      for (const row of Object.values(snapshot.rows)) if (row.provider === provider) setRow(row.botId, null);
+      const owner = { botId, current, seq: void 0 };
+      recoveries.add(owner);
+      try {
+        operation = intent + 1;
+        if (!await api.open({ botId, provider, ref }, current, owner) || !current()) return false;
+        const row = rowOf(botId);
+        if (row?.provider !== provider || row.seq !== owner.seq || row.busy) return false;
+        if (row.stage !== "offer") return ["account", "attempt"].includes(row.stage);
+        operation = intent + 1;
+        return await api.start(botId, current);
+      } finally {
+        if (!current()) retireRecovery(owner);
+        recoveries.delete(owner);
+      }
+    },
     /** Sign in (or Try again): starts the attempt, or joins the one at work. */
-    async start(botId) {
+    async start(botId, valid = () => true) {
+      nextIntent();
       const row = rowOf(botId);
-      if (disposed || row === void 0 || row.busy || !["offer", "failed", "interrupted"].includes(row.stage)) return false;
+      if (disposed || !valid() || row === void 0 || row.busy || !["offer", "failed", "interrupted"].includes(row.stage)) return false;
       const seq = row.seq;
       patchRow(botId, seq, { busy: true, error: null });
       try {
         const view = await actions.cliLoginStart(botId, row.provider, row.ref);
-        if (!live(botId, seq)) return false;
+        if (!live(botId, seq) || !valid()) return false;
         setRow(botId, { ...rowOf(botId), stage: "attempt", busy: false, message: void 0 });
         applyView(row.provider, view);
         return true;
       } catch (error) {
+        if (!live(botId, seq) || !valid()) return false;
         patchRow(botId, seq, { busy: false, error: messageOf(error) });
         return false;
       }
     },
     /** The Claude code, sent once to the host; it is never kept here. */
     async answer(botId, value) {
+      nextIntent();
       const row = rowOf(botId);
       const attempt = row?.attempt;
       if (disposed || row?.stage !== "attempt" || row.provider !== "acp-claude" || row.busy || attempt?.prompt === void 0 || typeof value !== "string" || value.trim() === "") return false;
@@ -28619,13 +29092,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
      * shown instead, and nothing is taken for it.
      */
     async confirm(botId) {
+      nextIntent();
       const row = rowOf(botId);
       if (disposed || row?.stage !== "account" || row.busy) return false;
       const seq = row.seq;
       patchRow(botId, seq, { busy: true, error: null });
       try {
         const view = await actions.cliLoginConfirm(botId, row.provider, row.account?.ref, row.ref);
-        if (disposed) return false;
+        if (!live(botId, seq)) return false;
         accountTaken(row.provider, botId, view);
         return true;
       } catch (error) {
@@ -28650,13 +29124,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         offered.set(botId, failure.at);
         if (rowOf(botId) !== void 0) continue;
         void (async () => {
+          const epoch = providerEpochs.get(provider);
           let current;
           try {
             current = await actions.cliLoginCurrent(botId, provider);
           } catch {
             return;
           }
-          if (disposed || rowOf(botId) !== void 0 || !current?.account) return;
+          if (disposed || providerEpochs.get(provider) !== epoch || rowOf(botId) !== void 0 || !current?.account) return;
           const seq = ++sequence;
           setRow(botId, { botId, provider, ref: void 0, stage: "account", busy: false, reveal: seq, seq, attempt: null, error: null, confirm: false, account: Object.freeze({ ...current.account }) });
         })();
@@ -28672,6 +29147,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     },
     /** The person's explicit cancel: the only way a row ends an attempt. */
     async cancel(botId) {
+      nextIntent();
       const row = rowOf(botId);
       const attempt = row?.attempt;
       if (disposed || row?.stage !== "attempt" || row.busy || attempt === null || attempt === void 0) return false;
@@ -28679,7 +29155,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       patchRow(botId, seq, { busy: true, error: null });
       try {
         const view = await actions.cliLoginCancel(botId, row.provider, attempt.attemptId);
-        if (disposed) return false;
+        if (!live(botId, seq)) return false;
         applyView(row.provider, view?.status === "cancelled" ? view : { ...attempt, status: "cancelled" });
         if (live(botId, seq)) setRow(botId, null);
         return true;
@@ -28692,6 +29168,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     },
     /** Not now, or Close: the row goes; an attempt at work goes on in the host. */
     dismiss(botId) {
+      nextIntent();
       if (rowOf(botId)) setRow(botId, null);
     },
     /**
@@ -28700,6 +29177,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
      */
     followModels() {
       if (disposed || typeof modelOf2 !== "function") return;
+      retireInvalidRecoveries();
       for (const row of Object.values(snapshot.rows)) {
         const baseline = baselines.get(row.botId);
         const model = modelOf2(row.botId);
@@ -28725,13 +29203,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       if (disposed || typeof botId !== "string" || rowOf(botId) !== void 0 || restored.has(botId)) return;
       restored.add(botId);
       for (const provider of Object.keys(CLI_NAMES)) {
+        const epoch = providerEpochs.get(provider);
         let current;
         try {
           current = await actions.cliLoginCurrent(botId, provider);
         } catch {
           continue;
         }
-        if (disposed || rowOf(botId) !== void 0) return;
+        if (disposed || providerEpochs.get(provider) !== epoch || rowOf(botId) !== void 0) return;
         const attempt = current?.attempt;
         if (attempt && ACTIVE.has(attempt.status) && attempt.openedBy === botId) {
           setRow(botId, { botId, provider, stage: "attempt", busy: false, seq: ++sequence, attempt, error: null, confirm: false });
@@ -28742,6 +29221,8 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     },
     dispose() {
       if (disposed) return;
+      for (const owner of recoveries) retireRecovery(owner);
+      recoveries.clear();
       for (const provider of Object.keys(polls)) stopPoll(provider);
       for (const timer of rowTimers.values()) timers.clearTimeout(timer);
       rowTimers.clear();
@@ -29043,10 +29524,10 @@ function noticeApprovals({ work, roster, shownSession, openSession, since: since
       if ((entry.at ?? 0) < since2) continue;
       const place = entry.roomId ?? entry.ownerSessionId ?? entry.sessionId;
       if (document.visibilityState === "visible" && shownSession() === place) continue;
-      const { byId, roomsById } = roster.getSnapshot();
-      const room2 = entry.roomId ? roomsById[entry.roomId] : void 0;
+      const team = roster.getSnapshot();
+      const { byId } = team;
       const note = new Notification(t("{name} is waiting for your approval", { name: byId[entry.botId]?.name ?? t("A Bot") }), {
-        body: [room2?.name, entry.tool === "keep_working" ? t("Let it keep working?") : entry.child ? t("A subagent wants to use {tool}", { tool: entry.tool }) : entry.tool].filter(Boolean).join(" · "),
+        body: [approvalPlace(entry, team), entry.tool === "keep_working" ? t("Let it keep working?") : entry.child ? t("A subagent wants to use {tool}", { tool: entry.tool }) : entry.tool, approvalDetail(entry).slice(0, 120)].filter(Boolean).join(" · "),
         tag: `omni-ui-approval-${entry.id}`
       });
       note.onclick = () => {
@@ -29707,7 +30188,11 @@ function apply(ctx) {
       browserGiveBack: (botId, answer = {}) => call("browser-give-back", { botId, ...answer })
     });
   }
-  cliLogin = createCliLogin({ actions, modelOf: (botId) => work.getSnapshot().models?.[botId]?.selected });
+  cliLogin = createCliLogin({
+    actions,
+    modelOf: (botId) => work.getSnapshot().models?.[botId]?.selected,
+    botOf: (botId) => cliLoginBotOf(roster.getSnapshot(), botId)
+  });
   actions.cliLogin = cliLogin;
   ctx.effect(() => work.subscribe(() => cliLogin.followModels()), "ds-bot: CLI sign-in rows follow the Bots' models");
   ctx.effect(() => work.subscribe(() => cliLogin.followFailures(work.getSnapshot().models)), "ds-bot: CLI account step follows a refused turn");
@@ -30076,6 +30561,9 @@ function apply(ctx) {
     () => shadow("conversation.chat.turnTail", { id: "bot-btw", order: 800, priority: BOT_PRIORITY, inject: face }, BtwTurnTail),
     // While a Bot's chat holds only its greeting, the line under it names its model.
     () => shadow("conversation.chat.turnTail", { id: "bot-model-line", order: 900, priority: BOT_PRIORITY, inject: face }, ModelLineTail),
+    // A Bot with no model in a chat that already holds turns asks for one after the last
+    // of them, below that turn's time; a chat with no turn yet asks in the dock (bot-model).
+    () => shadow("conversation.chat.turnTail", { id: "bot-model-choice", order: 1100, priority: BOT_PRIORITY, inject: face }, ModelChoiceTail),
     // A Bot condenses its conversation without telling anyone; the chat keeps showing
     // every message.
     () => shadow("conversation.chat.node", { key: "question-reply", priority: BOT_PRIORITY, locale: "chat" }, AnsweredReply),
@@ -30105,6 +30593,12 @@ function apply(ctx) {
       inject: face,
       select: (owner) => isTeamApproval(owner.pendingInteraction) ? owner.pendingInteraction : null
     }, TeamApproval),
+    // shadow's freePriority places each later entry below the earlier ones. Keep this
+    // strict selector last so it runs before the generic question and team cards.
+    () => shadow("conversation.composer", {
+      priority: BOT_PRIORITY - 1,
+      select: (owner) => selectSessionFileApproval(owner.pendingInteraction)
+    }, SessionFileApproval),
     () => shadow("conversation.input.dock", { id: "bot-members", order: -120, inject: face }, MemberDock),
     () => shadow("conversation.input.dock", { id: "bot-model", order: -110, inject: face }, ModelChoiceDock),
     // The person's own choice of a Bot's level (permission-card.js): raised by this window alone.

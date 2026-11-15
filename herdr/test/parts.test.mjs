@@ -170,10 +170,10 @@ test("herdr.pack links automagik-herdr as install.sh does, leaves someone else's
   assert.equal(readMarker(m.mods).sequence, 630001, "the signed pointer's sequence: install.sh's replay guard stays on");
   const link = join(m.binDir, "automagik-herdr");
   assert.equal(readlinkSync(link), join(m.mods, "am-sidebar", "bin", "automagik-herdr"));
-  assert.ok(!existsSync(join(m.binDir, "am")), "am is the am part's (D34), never the pack's");
+  assert.equal(readlinkSync(join(m.binDir, "am")), readlinkSync(link), "am beside it, the same wrapper (install.sh does both)");
   const d = doctorOf(m, "herdr.pack");
   assert.deepEqual(failed(d), [], JSON.stringify(d.checks));
-  assert.deepEqual(d.checks.map((c) => c.check).filter((c) => !c.startsWith("dsh-tui")), ["restart-path", "record", "pack-version", "pack-mods", "briefing-entry", "briefing-hook", "command", "path", "node", "agent-antigravity"]);
+  assert.deepEqual(d.checks.map((c) => c.check).filter((c) => !c.startsWith("dsh-tui")), ["restart-path", "record", "pack-version", "pack-mods", "briefing-entry", "briefing-hook", "command", "am command", "path", "node", "agent-antigravity"]);
   const noPath = doctorOf(m, "herdr.pack", { PATH: "/usr/bin" });
   assert.equal(noPath.code, 0, "not on PATH is a note, never a rollback");
   assert.match(noPath.checks.find((c) => c.check === "path").fix, /export PATH=/);
@@ -229,6 +229,55 @@ test("herdr.layout: uninstall removes the pack's copy and no update puts it back
   assert.match(r.detail, /it is yours, left as it is/);
   assert.equal(readFileSync(live, "utf8"), "{\"mine\": true}\n");
   assert.match(doctorOf(m, "herdr.layout").checks.find((c) => c.check === "layout").detail, /is yours/);
+});
+
+test("herdr.pack install links am beside the old name; the sidebar guard and doctor know it", (t) => {
+  const m = machine(t);
+  install(m.ctx(), P("herdr.pack"), packSource);
+  const old = join(m.binDir, "automagik-herdr"), am = join(m.binDir, "am");
+  assert.equal(readlinkSync(am), readlinkSync(old), "the same wrapper");
+  assert.ok(m.logs.some((l) => l === `linked ${am}`), "said");
+  assert.equal(install(m.ctx(), P("herdr.pack"), packSource).changed, false, "idempotent");
+  const check = doctorOf(m, "herdr.pack").checks.find((c) => c.check === "am command");
+  assert.equal(check.ok, true);
+  // Only am's link left on the pack: the sidebar is still in use.
+  rmSync(old);
+  assert.match(sidebarCarries(m.ctx()).join("\n"), /the command \(.*\/am runs mods\/am-sidebar\/bin\)/);
+  rmSync(am);
+  assert.doesNotMatch(sidebarCarries(m.ctx()).join("\n"), /the command/);
+  // Missing on an install from before it: a notice, not a failure.
+  const missing = doctorOf(m, "herdr.pack").checks.find((c) => c.check === "am command");
+  assert.equal(missing.ok, true);
+  assert.match(missing.detail, /is missing/);
+  // A person's own file or link is never replaced.
+  writeFileSync(am, "mine\n");
+  install(m.ctx(), P("herdr.pack"), packSource);
+  assert.equal(readFileSync(am, "utf8"), "mine\n");
+  rmSync(am);
+  symlinkSync("/somewhere/else/am", am);
+  install(m.ctx(), P("herdr.pack"), packSource);
+  assert.equal(readlinkSync(am), "/somewhere/else/am");
+});
+
+test("herdr.pack uninstall removes the am link beside the old one, and leaves a user-owned am alone", (t) => {
+  const m = machine(t);
+  install(m.ctx(), P("herdr.pack"), packSource);
+  const old = join(m.binDir, "automagik-herdr"), am = join(m.binDir, "am");
+  assert.equal(readlinkSync(am), readlinkSync(old), "install made both");
+  uninstall(m.ctx(), P("herdr.pack"));
+  assert.ok(!existsSync(old) && !lstatSync(am, { throwIfNoEntry: false }), "both links go");
+  install(m.ctx(), P("herdr.pack"), packSource);
+  rmSync(am);
+  writeFileSync(am, "mine\n");
+  const r = uninstall(m.ctx(), P("herdr.pack"));
+  assert.ok(!existsSync(old));
+  assert.equal(readFileSync(am, "utf8"), "mine\n", "a file of the person's stays");
+  assert.ok(r.ok);
+  rmSync(am);
+  symlinkSync("/somewhere/else/am", am);
+  install(m.ctx(), P("herdr.pack"), packSource);
+  uninstall(m.ctx(), P("herdr.pack"));
+  assert.equal(readlinkSync(am), "/somewhere/else/am", "a link elsewhere stays");
 });
 
 test("herdr.pack uninstall: the whole pack out; hooks, entry point, keys and links go; Herdr's and Pocket's files stay", (t) => {
@@ -372,6 +421,9 @@ test("herdr.am-sidebar switches off like any member only once the command and th
   writeFileSync(join(am, "am.mjs"), "// am\n");
   rmSync(link);
   symlinkSync(join(am, "am.mjs"), link);
+  assert.equal(sidebarCarries(m.ctx()).length, 2, "am's link still runs the sidebar's command");
+  rmSync(join(m.binDir, "am"));
+  symlinkSync(join(am, "am.mjs"), join(m.binDir, "am"));
   assert.equal(sidebarCarries(m.ctx()).length, 1, "the briefing still runs from the sidebar");
   assert.throws(() => uninstall(m.ctx(), P("herdr.am-sidebar")), /every bot's briefing/);
   // A plain file there is not positively am's: still refused (fail closed).
@@ -420,6 +472,8 @@ test("herdr.pack and herdr.layout run from am's stored extract, outside the app 
   const link = join(m.binDir, "automagik-herdr");
   rmSync(link);
   symlinkSync(join(am, "am.mjs"), link);
+  rmSync(join(m.binDir, "am"));
+  symlinkSync(join(am, "am.mjs"), join(m.binDir, "am"));
   const entry = amEntry(m);
   uninstall(m.ctx(), P("herdr.am-sidebar"));
   uninstall(m.ctx(), P("herdr.am-tabs"));
@@ -825,5 +879,5 @@ test("#805 pack doctor describes the supported restart path", (t) => {
   const note = doctorOf(m, "herdr.pack").checks.find((l) => l.check === "restart-path");
   assert.ok(note);
   assert.equal(note.ok, true);
-  assert.match(note.detail, /automagik-herdr restart <bot>.*am restart <bot>.*never \/restart/);
+  assert.match(note.detail, /with am restart <bot>, never \/restart/);
 });

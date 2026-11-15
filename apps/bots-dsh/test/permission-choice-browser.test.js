@@ -71,8 +71,9 @@ const measure = (page, scope) => page.evaluate((scope) => {
   const outer = box.getBoundingClientRect()
   const inside = (inner, frame) => inner.left >= frame.left - 0.5 && inner.right <= frame.right + 0.5 && inner.top >= frame.top - 0.5 && inner.bottom <= frame.bottom + 0.5
   const ink = node => getComputedStyle(node).color
+  // The danger ink: red text reads the theme's strong shade where it has one (dark), the token elsewhere.
   const probe = document.createElement('span')
-  probe.style.color = 'var(--bt-danger)'
+  probe.style.color = 'var(--st-bad-strong,var(--bt-danger))'
   box.append(probe)
   const danger = ink(probe)
   probe.remove()
@@ -119,7 +120,7 @@ const popupFits = page => page.locator('.bt-permission-menu').evaluate((node) =>
 
 const closedUsesNormalInk = section => section.evaluate((node) => {
   const probe = document.createElement('span')
-  probe.style.color = 'var(--bt-danger)'
+  probe.style.color = 'var(--st-bad-strong,var(--bt-danger))'
   node.append(probe)
   const danger = getComputedStyle(probe).color
   probe.remove()
@@ -236,7 +237,7 @@ for (const [count, levels] of SETS) {
       const warning = await page.evaluate(() => {
         const form = document.querySelector('form.bt-q')
         const probe = document.createElement('span')
-        probe.style.color = 'var(--bt-danger)'
+        probe.style.color = 'var(--st-bad-strong,var(--bt-danger))'
         form.append(probe)
         const danger = getComputedStyle(probe).color
         probe.remove()
@@ -318,7 +319,7 @@ for (const [count, levels] of SETS) {
         const name = node.querySelector('.bt-model-name.bt-danger')
         const text = node.querySelector('.bt-note > .bt-danger')
         const probe = document.createElement('span')
-        probe.style.color = 'var(--bt-danger)'
+        probe.style.color = 'var(--st-bad-strong,var(--bt-danger))'
         node.append(probe)
         const danger = getComputedStyle(probe).color
         probe.remove()

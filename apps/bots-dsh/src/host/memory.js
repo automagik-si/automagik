@@ -23,12 +23,13 @@
 // memory section the first time it renders, so its prompt stays byte-stable and the
 // provider's prefix cache holds; a fresh part, or a checkpoint (which breaks the cache
 // anyway), freezes it anew.
+import { assembleLlmStream } from './models.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { refusal } from './refusal.js'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { appendFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { BlockAssembler, HarnessError } from '@deepseek-ai/dsh-llm'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { replaceFile } from './files.js'
 import { inside, pendingPath, read as readPending, record as pendingRecord, relativePath, serialize as serializePending } from './memory-pending.js'
@@ -1312,8 +1313,7 @@ export function install(rt) {
     const messages = [{ role: 'user', content: [{ type: 'text', text }] }]
     if (tag !== undefined) rt.tagUsage?.(messages, tag)
     for (const maxTokens of [SUMMARY_MAX_TOKENS, SUMMARY_RETRY_MAX_TOKENS]) {
-      const assembler = new BlockAssembler()
-      for await (const chunk of ctx.llm.stream({
+      const callOptions = {
         provider: route.provider,
         model: route.model,
         ...(tag?.sessionId === undefined ? {} : { sessionId: tag.sessionId }),
@@ -1331,7 +1331,8 @@ export function install(rt) {
         messages,
         maxTokens,
         signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
-      })) assembler.push(chunk)
+      }
+      const assembler = await (rt.assembleLlm ? rt.assembleLlm(callOptions) : assembleLlmStream(ctx, callOptions, { backoff: rt.config?.llmRetryBackoff }))
       const finish = assembler.finish
       // The provider's message is not kept: it may quote the request. Its code is.
       if (finish.kind === 'error' || finish.kind === 'aborted') throw Object.assign(new Error(`The model call ended (${finish.kind})`), { code: finish.failure?.code ?? (finish.kind === 'aborted' ? 'aborted' : undefined) })

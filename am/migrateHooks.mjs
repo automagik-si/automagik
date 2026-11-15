@@ -32,6 +32,8 @@ import { OLD_PACK_NAME, PACK_NAME } from "./release.js";
 export const HOOKS_JOURNAL = "hooks-journal.json";
 export const BACKUP_SUFFIX = ".am-backup";
 export const CLI_LINK = "automagik-herdr";
+/** The same command under its own name (install.sh links both). */
+export const AM_LINK = "am";
 /** The sidebar folders, in the order the entry point tries them. */
 export const SIDEBARS = Object.freeze([PACK_NAME, OLD_PACK_NAME]);
 const MAX_BACKUPS = 100;
@@ -705,9 +707,9 @@ export function hooksNotice(hooks) {
       : forward ? `IMPORTANT: the bots' briefing hook moved to a new path in ${n}:`
         : `IMPORTANT: the bots' briefing hook went back to the older release's path in ${n}:`,
     ...files.map((f) => `  ${dirname(dirname(f))}: ${f}`),
-    forward ? `A Claude session already running in ${files.length ? "those projects" : "a bot's project"} keeps the OLD hook and gets NO briefing until it is restarted. Restart the bot: automagik-herdr restart <bot> (or the bot row's Restart).`
-      : "A Claude session already running in those projects keeps the hook it loaded until it is restarted. Restart the bot: automagik-herdr restart <bot> (or the bot row's Restart).",
-    ...(forward ? ["Projects the pack doesn't know about were not rewritten and get no briefing. In one, run `automagik-herdr start <bot>` or `automagik-herdr attach <bot>` (either writes the new hook), or open it as a space in Herdr and run the installer again."] : []),
+    forward ? `A Claude session already running in ${files.length ? "those projects" : "a bot's project"} keeps the OLD hook and gets NO briefing until it is restarted. Restart the bot: am restart <bot> (or the bot row's Restart).`
+      : "A Claude session already running in those projects keeps the hook it loaded until it is restarted. Restart the bot: am restart <bot> (or the bot row's Restart).",
+    ...(forward ? ["Projects the pack doesn't know about were not rewritten and get no briefing. In one, run `am start <bot>` or `am attach <bot>` (either writes the new hook), or open it as a space in Herdr and run the installer again."] : []),
   ];
 }
 
@@ -782,18 +784,32 @@ export function syncHooks({ modsDir, extra = [], log = () => {}, git = runGit, w
  * there: nothing. Returns the line to log, or null.
  */
 export function relink({ binDir, modsDir, owned }) {
-  const link = join(binDir, CLI_LINK);
+  const lines = [CLI_LINK, AM_LINK].map((name) => relinkOne({ binDir, modsDir, owned, name })).filter(Boolean);
+  return lines.length ? lines.join("; ") : null;
+}
+
+function relinkOne({ binDir, modsDir, owned, name }) {
+  const link = join(binDir, name);
   const st = lstat(link);
-  if (!st) return null;
-  if (!st.isSymbolicLink()) return `left ${link} alone: it is a file, not a link (remove it and run install.sh again to link automagik-herdr)`;
   const bin = (m) => join(resolve(modsDir), m, "bin");
   const entries = (m) => [join(bin(m), "automagik-herdr"), join(bin(m), "automagik-herdr.mjs")];
   const cli = (m) => entries(m).find((p) => isFile(p)) ?? null;
+  if (!st) {
+    // am's link, missing on an install from before it: made, for the sidebar folder the record lists.
+    const made = name === AM_LINK ? SIDEBARS.find((m) => owned.has(m) && cli(m)) : null;
+    if (!made) return null;
+    mkdirSync(binDir, { recursive: true });
+    const tmp = join(binDir, `.${name}.am-tmp-${process.pid}-${randomBytes(4).toString("hex")}`);
+    symlinkSync(cli(made), tmp);
+    try { renameSync(tmp, link); } catch (error) { removePath(tmp, { force: true }); throw error; }
+    return `linked ${link} to ${cli(made)}`;
+  }
+  if (!st.isSymbolicLink()) return `left ${link} alone: it is a file, not a link (remove it and run install.sh again to link ${name})`;
   const to = resolve(binDir, readlinkSync(link));
   if (!SIDEBARS.some((m) => entries(m).includes(to))) return null;
   const want = SIDEBARS.find((m) => owned.has(m) && cli(m));
   if (!want || to === cli(want)) return null;
-  const tmp = join(binDir, `.${CLI_LINK}.am-tmp-${process.pid}-${randomBytes(4).toString("hex")}`);
+  const tmp = join(binDir, `.${name}.am-tmp-${process.pid}-${randomBytes(4).toString("hex")}`);
   symlinkSync(cli(want), tmp);
   try { renameSync(tmp, link); } catch (error) { removePath(tmp, { force: true }); throw error; }
   return `linked ${link} to ${cli(want)}`;

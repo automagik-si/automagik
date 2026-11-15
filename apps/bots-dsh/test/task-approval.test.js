@@ -14,22 +14,40 @@ const bundle = await build({
 const module = { exports: {} }
 const hookState = []
 let hookAt = 0
+// React's rule, kept by the stand-in: every render reads the same hooks in the same order.
+// A hook read after the calls changed is the crash the shell would hit, so it is one here.
+let hookKinds = []
+let previousKinds = null
+const readHook = (kind, read) => {
+  const at = hookAt++
+  if (previousKinds && previousKinds[at] !== kind) throw new Error(`hook ${at} was ${previousKinds[at] ?? 'not read'}, now ${kind}`)
+  hookKinds[at] = kind
+  return read(at)
+}
 const react = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
-  useState: (initial) => {
-    const at = hookAt++
+  useState: (initial) => readHook('useState', (at) => {
     if (!(at in hookState)) hookState[at] = initial
     return [hookState[at], (value) => { hookState[at] = typeof value === 'function' ? value(hookState[at]) : value }]
-  },
-  useEffect: () => {}, useLayoutEffect: () => {}, useRef: current => ({ current }), useMemo: fn => fn(), Fragment: 'fragment',
+  }),
+  useEffect: () => readHook('useEffect', () => {}), useLayoutEffect: () => readHook('useLayoutEffect', () => {}),
+  useRef: current => readHook('useRef', () => ({ current })), useMemo: fn => readHook('useMemo', () => fn()), Fragment: 'fragment',
 }
 runInNewContext(bundle.outputFiles[0].text, {
   module, exports: module.exports, require: name => (name === 'react' ? react : {}),
   Date, Math, JSON, Intl, setTimeout, clearTimeout,
 })
 const { TaskCard, taskState, approvalFor } = module.exports
-// Every render starts hook reads from the top; state stays where the setter left it.
-const render = props => { hookAt = 0; return TaskCard(props) }
+// Every render starts hook reads from the top; state stays where the setter left it, and a
+// render that changes the hook order fails as React does.
+const render = props => {
+  hookAt = 0
+  previousKinds = hookState.length === 0 ? null : hookKinds
+  hookKinds = []
+  const tree = TaskCard(props)
+  if (previousKinds && hookKinds.length !== previousKinds.length) throw new Error(`rendered ${hookKinds.length} hooks, previously ${previousKinds.length}`)
+  return tree
+}
 const walk = (node, into = []) => {
   if (node === null || node === undefined || node === false) return into
   if (Array.isArray(node)) { node.forEach(child => walk(child, into)); return into }
@@ -152,6 +170,33 @@ test('a task child opens its task for the full ask, without inline approval butt
   assert.equal(button(tree, 'Reject'), undefined)
   button(tree, 'Answer it').props.onClick()
   assert.equal(opened, 1)
+})
+
+test('a start_task card drawn without its Session keeps its hooks when the id arrives', () => {
+  hookState.length = 0
+  const { pending } = pendingOf()
+  const status = new Map([['task1', { pendingInteraction: pending }]])
+  const work = {
+    // A Bot's own approval and stop name no task: without an id the card must not take them.
+    approvals: [{ id: 'bot', botId: 'genie', tool: 'bash' }, { id: 'task', botId: 'genie', taskId: 'task1', tool: 'bash' }],
+    stops: [{ open: true, why: 'tool', tool: 'bash', at: 1 }],
+  }
+  // The shell's hooks take a React slot, as the real ones do: calling them only once the id
+  // is there changes the card's hook order, which the stand-in fails on as React does.
+  const useSessionStatus = select => { react.useState(0); return select(status) }
+  const useWork = select => { react.useState(0); return select(work) }
+  const card = sessionId => ({ sessionId, title: 'Add a README', task: { from: 'genie', status: 'working', at: 1_000 }, onOpen: () => {}, useSessionStatus, useWork })
+
+  // The start_task call has not settled, so there is no Session id yet.
+  let tree = render(card(undefined))
+  assert.equal(tree.props['data-state'], 'working')
+  assert.equal(button(tree, 'Allow once'), undefined)
+  assert.doesNotMatch(text(tree), /did not run/)
+
+  // The result names the Session: the same card is drawn again, now waiting on its approval.
+  tree = render(card('task1'))
+  assert.equal(tree.props['data-state'], 'waiting')
+  assert.match(text(tree), /Task Add a README is waiting for approval: bash/)
 })
 
 test('D client: the task card displays the keep-working question', () => {

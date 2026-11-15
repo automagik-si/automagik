@@ -35,14 +35,36 @@ function jobOf(name: string): string[] {
 }
 const ifOf = (job: string) => jobOf(job).find(line => /^ {4}if: /.test(line))?.trim();
 
+describe('Follow Omni triggers', () => {
+  const workflow = Bun.YAML.parse(lines.join('\n')) as any;
+  const release = Bun.YAML.parse(readFileSync(join(import.meta.dir, '..', '.github', 'workflows', 'release.yml'), 'utf8')) as any;
+
+  test('checks after only completed Release runs on dev, regardless of conclusion', () => {
+    expect(release.name).toBe('Release');
+    expect(workflow.on.workflow_run).toEqual({
+      workflows: [release.name],
+      types: ['completed'],
+      branches: ['dev'],
+    });
+    expect(workflow.jobs.follow.if).toBeUndefined();
+  });
+
+  test('keeps the dispatch fast path, schedule fallback and shared concurrency', () => {
+    expect(Object.keys(workflow.on).sort()).toEqual(['repository_dispatch', 'schedule', 'workflow_dispatch', 'workflow_run']);
+    expect(workflow.on.repository_dispatch).toEqual({ types: ['omni-release'] });
+    expect(workflow.on.schedule).toEqual([{ cron: '11,41 * * * *' }]);
+    expect(workflow.concurrency).toEqual({ group: 'follow-omni', 'cancel-in-progress': false });
+  });
+});
+
 // dev's history after a first commit on 2026-10-01 that adds omni.json (`omni: false` leaves it
 // out): commits made on dev at a committer date, moving omni.json or another file, and true merges
 // (`--no-ff`) of a branch whose own commits are dated earlier. `name` keeps a commit's sha.
 type Commit = { at: string; omni?: boolean; name?: string };
 type Step = Commit | { merge: string; branch: Commit[]; name?: string };
-type Hold = { history?: Step[]; omni?: boolean; today: string; dryRun?: boolean; skip?: boolean; repo?: boolean };
+type Hold = { history?: Step[]; omni?: boolean; today: string; dryRun?: boolean; skip?: boolean; repo?: boolean; event?: string };
 
-function hold({ history = [], omni = true, today, dryRun = false, skip = false, repo = true }: Hold) {
+function hold({ history = [], omni = true, today, dryRun = false, skip = false, repo = true, event = 'schedule' }: Hold) {
   const dir = mkdtempSync(join(tmpdir(), 'follow-omni-'));
   const bin = join(dir, 'bin');
   const work = join(dir, 'dev');
@@ -93,6 +115,7 @@ function hold({ history = [], omni = true, today, dryRun = false, skip = false, 
       VERSION: '2.261105.4',
       DRY_RUN: dryRun ? 'true' : 'false',
       SKIP_HOLD: skip ? 'true' : 'false',
+      GITHUB_EVENT_NAME: event,
       GITHUB_OUTPUT: join(dir, 'output'),
       GITHUB_STEP_SUMMARY: join(dir, 'summary'),
     },
@@ -105,6 +128,16 @@ function hold({ history = [], omni = true, today, dryRun = false, skip = false, 
 const short = (sha: string) => sha.slice(0, 9);
 
 describe('Follow Omni once a UTC day', () => {
+  test('a completed release still holds today and carries after UTC midnight', () => {
+    const history = [{ at: '2026-11-05T09:12:40Z', omni: true }];
+    const today = hold({ history, today: '2026-11-05', event: 'workflow_run' });
+    expect(today.status).toBe(0);
+    expect(today.output).toBe('held=true\n');
+    const tomorrow = hold({ history, today: '2026-11-06', event: 'workflow_run' });
+    expect(tomorrow.status).toBe(0);
+    expect(tomorrow.output).toBe('held=false\n');
+  });
+
   test('is found as the workflow writes it', () => {
     expect(runOf('Once a UTC day')).toContain('held=false');
   });

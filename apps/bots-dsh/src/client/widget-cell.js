@@ -524,7 +524,7 @@ export const WIDGET_CSS = `
 .bt-widget-metric-value{font-size:22px;line-height:28px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--bt-ink);overflow-wrap:anywhere}
 .bt-widget-metric[data-tone=good] .bt-widget-metric-value{color:var(--bt-green)}
 .bt-widget-metric[data-tone=warn] .bt-widget-metric-value{color:var(--bt-star)}
-.bt-widget-metric[data-tone=bad] .bt-widget-metric-value{color:var(--bt-danger)}
+.bt-widget-metric[data-tone=bad] .bt-widget-metric-value{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-view-caption{font-size:12px;line-height:16px;color:var(--bt-ink-2);overflow-wrap:anywhere}
 .bt-view-muted{font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-view-muted *{font-size:inherit!important;line-height:inherit!important;color:inherit!important}
@@ -546,7 +546,7 @@ export const WIDGET_CSS = `
 .bt-widget-progress[data-tone=good] .bt-widget-progress-fill{background:var(--bt-green)}
 .bt-widget-progress[data-tone=warn] .bt-widget-progress-fill{background:var(--bt-star)}
 .bt-widget-progress[data-tone=bad] .bt-widget-progress-fill{background:var(--bt-danger)}
-.bt-widget-progress[data-tone=bad] .bt-widget-progress-label>span:last-child{color:var(--bt-danger)}
+.bt-widget-progress[data-tone=bad] .bt-widget-progress-label>span:last-child{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-view-callout{display:flex;gap:8px;padding:8px 12px;border-radius:10px;--bt-tone:var(--bt-accent);background:color-mix(in srgb,var(--bt-tone) 8%,transparent);color:var(--bt-ink)}
 .bt-view-callout[data-tone=good]{--bt-tone:var(--bt-green)}
 .bt-view-callout[data-tone=warn]{--bt-tone:var(--bt-star)}

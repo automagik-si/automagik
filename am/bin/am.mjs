@@ -4,6 +4,7 @@
 //
 //   am update [automagik.am | herdr.pack] [--check] [--json]   am from am-lane first, then the pack
 //                                                              (where one is installed)
+//   am update --rollback | --auto on|off|status                the pack CLI's update, as given
 //   am rollback automagik.am | herdr.pack [--json]             back to the kept previous one
 //   am self install | uninstall [--purge] | doctor [--json]    am's part entries (part.json)
 //   am help                                                    this, then the Bot verbs
@@ -28,16 +29,17 @@ Usage: am <command> [options]
 
   update [automagik.am | herdr.pack] [--check] [--json]
                                 am first, from the signed am-lane (checksum and signature
-                                checked; never an older one), then the herdr pack
-                                (automagik-herdr update) where one is installed; an id
-                                updates that part alone
+                                checked; never an older one), then the herdr pack where
+                                one is installed; an id updates that part alone
+  update --rollback | --auto on|off|status
+                                the herdr pack's own switches (update, below)
   rollback automagik.am | herdr.pack [--json]
                                 back to the version each keeps (am: its previous copy)
   self install | uninstall [--purge] | doctor [--json]
                                 am's own part: install this copy and link am and
                                 automagik-herdr; hand the links back; check them
 
-Every other command is automagik-herdr's, byte for byte:
+Every other command:
 `;
 
 class Usage extends Error {}
@@ -77,7 +79,24 @@ const lineOf = (r) => ({
   updated: `Updated am ${r.from ?? "(none)"} → ${r.to}. The replaced one is kept: am rollback automagik.am puts it back.`,
 }[r.state]);
 
+/** The pack's own update switches (its kept set, its automatic updates): the pack CLI's, as given. */
+const PACK_SWITCH = /^--(?:rollback|auto)(?:=|$)/;
+/** What may stand beside them: their own switches and the pack update's --check and --json. Any other word is a target. */
+const PACK_FLAG = /^--(?:(?:rollback|auto)(?:=.*)?|check|json)$/;
+
 async function update(args) {
+  if (args.some((a) => PACK_SWITCH.test(a))) {
+    // The pack's own switches act on the pack only: a named other part (am itself) is refused.
+    // The only word allowed besides the switches is the pack's own id (--auto's value, as in
+    // --auto status, is no word of this kind).
+    const named = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--auto") i++;
+      else if (!args[i].startsWith("-") || !PACK_FLAG.test(args[i])) named.push(args[i]);
+    }
+    if (named.some((a) => a !== PACK)) throw new Usage(`--rollback and --auto are ${PACK}'s own update, not ${named.filter((a) => a !== PACK).join(" ")}'s (am update ${PACK} --rollback)`);
+    return cli(["update", ...args]).code;
+  }
   const { words, flags } = parse(args, ["--check", "--json"]);
   const [id, extra] = words;
   if (extra || (id && id !== PART && id !== PACK)) throw new Usage(`am update takes ${PART} or ${PACK}, not ${words.join(" ")}`);

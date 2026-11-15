@@ -1,0 +1,17 @@
+<!-- The button that opens the drawer: three short rounded lines, one in each of the family's colours (the owner, 2026-11-12: "Three lines,
+     three colours"). It is DRAWN by family.css: no picture, nothing to fetch, nothing to fill. Top to bottom: Automagik, Genie, Omni.
+     It goes in the page's ONE header as the header's FIRST child, OUTSIDE the column that holds the logo and the links, because it is pinned
+     to the left edge of the window and not to the page column (the owner: "Left edge of the window"). family.css places it and keeps the
+     logo clear of it. It never moves; under the pointer, on focus and while the drawer is open a hairline ring comes up around it.
+     With script off it is a plain link to automagik.si. -->
+<a class="fam-btn" href="https://automagik.si/" data-family-open aria-label="Menu"><span class="fam-lines" aria-hidden="true"><span></span><span></span><span></span></span></a>
+
+<!-- Arca's header, whole, as on the look page (draft 20). The page's wrapper carries data-family-page; the drawer (family.html) sits OUTSIDE it.
+     The header (.topbar) must be a positioned element (Arca's is sticky), since the button is placed against it. -->
+<header class="topbar">
+  <a class="fam-btn" href="https://automagik.si/" data-family-open aria-label="Menu"><span class="fam-lines" aria-hidden="true"><span></span><span></span><span></span></span></a>
+<div class="topbar-in">
+  <a class="brand" href="#" aria-label="Arca"><canvas class="arca-motion brand-live" id="head-logo" role="img" aria-label="Arca"></canvas></a>
+  <nav class="nav-links" aria-label="Sections"><a class="nav-extra" href="#see">Product</a><a class="nav-extra" href="#usecases">Use cases</a><a class="nav-extra" href="#machines">Machines</a><a class="nav-extra" href="#os">Arca OS</a>
+    <a class="pill small" href="#first">Early access</a></nav>
+</div></header>

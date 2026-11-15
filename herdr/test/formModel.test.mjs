@@ -220,7 +220,7 @@ test("agyMode: the form defaults to auto, opens a stored mode, writes only a cho
   assert.equal(editChanged(initial, initial), false);
 });
 
-test("code: the form defaults to true, opens a stored false, writes only false and its CLI line sets/clears it", () => {
+test("code: the form defaults to true, opens a stored false and its CLI line sets/clears it", () => {
   assert.equal(formFrom({ mode: "create", file: FILE, id: "b-newaaaaaaa", agent: "claude" }).code, true);
   assert.equal(edit("b-devaaaaaaa").code, true);
   const stored = { ...FILE.bots[0], code: false };
@@ -228,14 +228,27 @@ test("code: the form defaults to true, opens a stored false, writes only false a
   assert.equal(initial.code, false);
   const file = { ...FILE, bots: [stored, ...FILE.bots.slice(1)] };
   assert.equal(entryOf(initial, file).entry.code, false);
-  assert.equal(entryOf({ ...initial, code: true }, file).entry.code, undefined, "true is the default, never stored by the form");
-  assert.equal("code" in applyBotEdit(file, entryOf({ ...initial, code: true }, file).entry).bots[0], false);
+  assert.equal(entryOf({ ...initial, code: true }, file).entry.code, true);
+  assert.equal(applyBotEdit(file, entryOf({ ...initial, code: true }, file).entry).bots[0].code, true);
   assert.match(commandOf(create({ code: false }), { key: KEY, file: FILE }), /--code=false/);
   assert.doesNotMatch(commandOf(create(), { key: KEY, file: FILE }), /--code/);
   assert.match(commandOf({ ...initial, code: true }, { key: KEY, file, initial }), /--code=true/);
   assert.match(commandOf({ ...edit("b-devaaaaaaa"), code: false }, { key: KEY, file: FILE, initial: edit("b-devaaaaaaa") }), /--code=false/);
   assert.equal(editChanged({ ...initial, code: true }, initial), true);
   assert.equal(editChanged(initial, initial), false);
+});
+
+test("code #848: unrelated sidebar edits preserve explicit true, false and an absent default", () => {
+  for (const code of [true, false, undefined]) {
+    const stored = { ...FILE.bots[0], ...(code === undefined ? {} : { code }) };
+    const file = { ...FILE, bots: [stored, ...FILE.bots.slice(1)] };
+    const initial = formFrom({ mode: "edit", bot: stored });
+    const entry = entryOf({ ...initial, role: "New role" }, file).entry;
+    const saved = applyBotEdit(file, entry).bots[0];
+    assert.equal(saved.code, code);
+    assert.equal(Object.hasOwn(saved, "code"), code !== undefined);
+    assert.equal(saved.role, "New role");
+  }
 });
 
 test("shellQuote: a leading = is quoted (zsh expands a bare =word)", () => {
@@ -256,36 +269,36 @@ test("formFrom: a stored wave that isn't a positive whole number reads as 1, nev
 test("commandOf create: the mockup's flag order, every value as --option=<quoted>, with --project", () => {
   const s = create({ name: "runtime-qa", role: "Test runner", lead: "b-capaaaaaaa", character: "hex", colour: "sky", pin: "gpt-6.1-terra", instructions: "Run the tests.\nReport." });
   assert.equal(commandOf(s, { key: KEY, file: FILE }),
-    "automagik-herdr create --name=runtime-qa --agent=codex --role='Test runner' --lead=b-capaaaaaaa --character=hex --colour=sky --model=gpt-6.1-terra --project=/Users/x/brain-v3 --instructions='Run the tests.\nReport.'");
+    "am create --name=runtime-qa --agent=codex --role='Test runner' --lead=b-capaaaaaaa --character=hex --colour=sky --model=gpt-6.1-terra --project=/Users/x/brain-v3 --instructions='Run the tests.\nReport.'");
   const byMain = create({ category: "platform", character: "hex", colour: "sky", planned: true, wave: 2, note: "after auth" });
   assert.equal(commandOf(byMain, { key: KEY, file: FILE }),
-    "automagik-herdr create --name=runtime-qa --agent=codex --lead=b-mainaaaaaa --category=platform --character=hex --colour=sky --planned-wave=2 --planned-note='after auth' --project=/Users/x/brain-v3");
+    "am create --name=runtime-qa --agent=codex --lead=b-mainaaaaaa --category=platform --character=hex --colour=sky --planned-wave=2 --planned-note='after auth' --project=/Users/x/brain-v3");
   const main = formFrom({ file: { version: 1, categories: [], bots: [] }, id: "b-aaaaaaaaaa", agent: "claude" });
-  assert.match(commandOf({ ...main, name: "" }, { key: KEY, file: { version: 1, categories: [], bots: [] } }), /^automagik-herdr create --name=new-bot --kind=main --agent=claude --character=/);
+  assert.match(commandOf({ ...main, name: "" }, { key: KEY, file: { version: 1, categories: [], bots: [] } }), /^am create --name=new-bot --kind=main --agent=claude --character=/);
 });
 
 test("commandOf create: a new category is added first, with the id the create line names", () => {
   const s = create({ category: NEW_CATEGORY, catTitle: "Quality gate", catSub: "tests" });
   assert.match(commandOf(s, { key: KEY, file: FILE }),
-    /^automagik-herdr category add --id=quality-gate --title='Quality gate' --sub=tests --project=\/Users\/x\/brain-v3 && automagik-herdr create .* --category=quality-gate /);
+    /^am category add --id=quality-gate --title='Quality gate' --sub=tests --project=\/Users\/x\/brain-v3 && am create .* --category=quality-gate /);
 });
 
 test("commandOf edit: only what changed, with the CLI's clearing spellings", () => {
   const initial = edit("b-devaaaaaaa");
-  assert.equal(commandOf(initial, { key: KEY, file: FILE, initial }), "automagik-herdr edit b-devaaaaaaa --project=/Users/x/brain-v3");
+  assert.equal(commandOf(initial, { key: KEY, file: FILE, initial }), "am edit b-devaaaaaaa --project=/Users/x/brain-v3");
   assert.equal(editChanged(initial, initial), false);
   const s = { ...initial, role: "Lead builder", pin: "", lead: "b-mainaaaaaa", category: "platform" };
   assert.equal(commandOf(s, { key: KEY, file: FILE, initial }),
-    "automagik-herdr edit b-devaaaaaaa --role='Lead builder' --lead=b-mainaaaaaa --category=platform --no-model --project=/Users/x/brain-v3");
+    "am edit b-devaaaaaaa --role='Lead builder' --lead=b-mainaaaaaa --category=platform --no-model --project=/Users/x/brain-v3");
   assert.equal(editChanged(s, initial), true);
   const plan = edit("b-planaaaaaa");
   assert.equal(commandOf({ ...plan, planned: false, agent: "claude" }, { key: KEY, file: FILE, initial: plan }),
-    "automagik-herdr edit b-planaaaaaa --agent=claude --unplanned --project=/Users/x/brain-v3");
+    "am edit b-planaaaaaa --agent=claude --unplanned --project=/Users/x/brain-v3");
   assert.equal(commandOf({ ...plan, note: "" }, { key: KEY, file: FILE, initial: plan }),
-    "automagik-herdr edit b-planaaaaaa --planned-wave=3 --planned-note='' --project=/Users/x/brain-v3");
+    "am edit b-planaaaaaa --planned-wave=3 --planned-note='' --project=/Users/x/brain-v3");
   const pm = edit("b-pmaaaaaaaa");
   assert.equal(commandOf({ ...pm, category: "" }, { key: KEY, file: FILE, initial: pm }),
-    "automagik-herdr edit b-pmaaaaaaaa --no-category --project=/Users/x/brain-v3");
+    "am edit b-pmaaaaaaaa --no-category --project=/Users/x/brain-v3");
 });
 
 // ---- A16: rank ----
@@ -317,9 +330,9 @@ test("rank: a stored rank outside the set is a problem until changed; the line n
   assert.match(commandOf(create({ rank: "tester" }), { key: KEY, file: FILE }), / --rank=tester /);
   assert.doesNotMatch(commandOf(create(), { key: KEY, file: FILE }), /--rank/);
   const initial = { ...edit("b-devaaaaaaa"), rank: "dev" };
-  assert.equal(commandOf(initial, { key: KEY, file: FILE, initial }), "automagik-herdr edit b-devaaaaaaa --project=/Users/x/brain-v3");
-  assert.equal(commandOf({ ...initial, rank: "pm" }, { key: KEY, file: FILE, initial }), "automagik-herdr edit b-devaaaaaaa --rank=pm --project=/Users/x/brain-v3");
-  assert.equal(commandOf({ ...initial, rank: "" }, { key: KEY, file: FILE, initial }), "automagik-herdr edit b-devaaaaaaa --rank= --project=/Users/x/brain-v3");
+  assert.equal(commandOf(initial, { key: KEY, file: FILE, initial }), "am edit b-devaaaaaaa --project=/Users/x/brain-v3");
+  assert.equal(commandOf({ ...initial, rank: "pm" }, { key: KEY, file: FILE, initial }), "am edit b-devaaaaaaa --rank=pm --project=/Users/x/brain-v3");
+  assert.equal(commandOf({ ...initial, rank: "" }, { key: KEY, file: FILE, initial }), "am edit b-devaaaaaaa --rank= --project=/Users/x/brain-v3");
   assert.equal(editChanged({ ...initial, rank: "pm" }, initial), true);
 });
 
@@ -344,9 +357,9 @@ function scratch(t) {
   for (const d of [project, bin, home, app, join(project, ".herdr")]) mkdirSync(d, { recursive: true });
   execFileSync("git", ["init", "-q"], { cwd: project });
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "start"], { cwd: project });
-  // `automagik-herdr` on PATH is the pack's CLI; the copied line names it so.
-  writeFileSync(join(bin, "automagik-herdr"), `#!/bin/sh\nexec "${process.execPath}" "${CLI}" "$@"\n`);
-  chmodSync(join(bin, "automagik-herdr"), 0o755);
+  // `am` on PATH runs this CLI; the copied line names it so.
+  writeFileSync(join(bin, "am"), `#!/bin/sh\nexec "${process.execPath}" "${CLI}" "$@"\n`);
+  chmodSync(join(bin, "am"), 0o755);
   const file = { version: 1, categories: [{ id: "platform", title: "Platform" }], bots: [
     { id: "b-mainaaaaaa", name: "orch", kind: "main", look: look("octopus", "deepseek"), role: "", instructions: "", agent: "claude" },
     { id: "b-capaaaaaaa", name: "cap", kind: "member", look: look("whale", "blue"), role: "Captain", instructions: "", agent: "claude", category: "platform" },

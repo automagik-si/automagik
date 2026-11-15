@@ -53,3 +53,25 @@ test("one Hermes profile cannot pair to two seats even with different session ID
   assert.equal(hermesPairConflict({ bots: [bot] }, bot), null);
   assert.equal(hermesPairConflict({ bots: [bot, { ...other, hermes: { ...pair, profile: "separate" } }] }, bot), null);
 });
+
+test("paired launch keeps overrides and merges options without deleting repeated values", () => {
+  const cases = [
+    [["hermes", "--tui"], ["hermes", "--tui", "--profile", "research", "--continue", "Bot Chat"]],
+    [["wrapper", "--profile=research", "--tui", "--continue", "Bot Chat"], ["wrapper", "--profile=research", "--tui", "--continue", "Bot Chat"]],
+    [["hermes", "--profile", "research", "--profile=research", "--tui", "--tui"], ["hermes", "--profile", "research", "--tui", "--continue", "Bot Chat"]],
+    [["hermes", "--label", "research", "--tag", "research"], ["hermes", "--label", "research", "--tag", "research", "--profile", "research", "--tui", "--continue", "Bot Chat"]],
+    [["hermes", "--", "--profile", "other"], ["hermes", "--profile", "research", "--tui", "--continue", "Bot Chat", "--", "--profile", "other"]],
+  ];
+  for (const [run, expected] of cases) {
+    const original = [...run];
+    const argv = launchRun("hermes", run, bot);
+    assert.deepEqual(argv, expected);
+    assert.deepEqual(run, original);
+    assert.deepEqual(launchRun("hermes", argv, bot), argv, "idempotent");
+    assert.deepEqual(restartPlan({ bot, run: argv }).argv, expected);
+    assert.deepEqual(restartPlan({ bot, run, agent: "hermes", model: "" }).argv, expected);
+  }
+  for (const run of [["hermes", "--profile=other"], ["hermes", "--profile", "research", "--profile", "other"]]) {
+    assert.throws(() => launchRun("hermes", run, bot), { message: "The command selects a different Hermes profile; match --profile to the bot's pairing." });
+  }
+});

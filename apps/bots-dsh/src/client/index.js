@@ -1,3 +1,4 @@
+import { SessionFileApproval, selectSessionFileApproval } from './session-file-approval.js'
 import { call } from './api.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
@@ -45,7 +46,7 @@ import { createBotBrowsers, serveBrowserReads } from './bot-browsers.js'
 import { BROWSER_CSS } from './browser-pane.js'
 import { SECRET_CSS, SecretDock } from './secret-card.js'
 import { PermissionChoiceDock } from './permission-card.js'
-import { MODEL_CSS, ModelChoiceDock, ModelLineTail, DeepSeekSignIn } from './model-menu.js'
+import { MODEL_CSS, ModelChoiceDock, ModelChoiceTail, ModelLineTail, DeepSeekSignIn } from './model-menu.js'
 import { announceCarried, CLI_LOGIN_CSS, CliLoginConversation, installCliLoginBridge, installKnownStateGuard } from './cli-login.js'
 import { createCliLogin } from './cli-login-state.js'
 import { cliLoginBotOf } from './cli-login-model.js'
@@ -664,7 +665,8 @@ export function apply(ctx) {
   }
   // The sign-in rows of the Bots' chats (cli-login.js): this page's views of the attempts the
   // host holds. Disposing them never cancels an attempt.
-  cliLogin = createCliLogin({ actions, modelOf: botId => work.getSnapshot().models?.[botId]?.selected })
+  cliLogin = createCliLogin({ actions, modelOf: botId => work.getSnapshot().models?.[botId]?.selected,
+    botOf: botId => cliLoginBotOf(roster.getSnapshot(), botId) })
   actions.cliLogin = cliLogin
   // A sign-in row about a provider its Bot has left closes by itself (cli-login-state.js).
   ctx.effect(() => work.subscribe(() => cliLogin.followModels()), 'ds-bot: CLI sign-in rows follow the Bots\' models')
@@ -1061,6 +1063,9 @@ export function apply(ctx) {
     () => shadow('conversation.chat.turnTail', { id: 'bot-btw', order: 800, priority: BOT_PRIORITY, inject: face }, BtwTurnTail),
     // While a Bot's chat holds only its greeting, the line under it names its model.
     () => shadow('conversation.chat.turnTail', { id: 'bot-model-line', order: 900, priority: BOT_PRIORITY, inject: face }, ModelLineTail),
+    // A Bot with no model in a chat that already holds turns asks for one after the last
+    // of them, below that turn's time; a chat with no turn yet asks in the dock (bot-model).
+    () => shadow('conversation.chat.turnTail', { id: 'bot-model-choice', order: 1100, priority: BOT_PRIORITY, inject: face }, ModelChoiceTail),
     // A Bot condenses its conversation without telling anyone; the chat keeps showing
     // every message.
     () => shadow('conversation.chat.node', { key: 'question-reply', priority: BOT_PRIORITY, locale: 'chat' }, AnsweredReply),
@@ -1090,6 +1095,12 @@ export function apply(ctx) {
       inject: face,
       select: owner => (isTeamApproval(owner.pendingInteraction) ? owner.pendingInteraction : null),
     }, TeamApproval),
+    // shadow's freePriority places each later entry below the earlier ones. Keep this
+    // strict selector last so it runs before the generic question and team cards.
+    () => shadow('conversation.composer', {
+      priority: BOT_PRIORITY - 1,
+      select: owner => selectSessionFileApproval(owner.pendingInteraction),
+    }, SessionFileApproval),
     () => shadow('conversation.input.dock', { id: 'bot-members', order: -120, inject: face }, MemberDock),
     () => shadow('conversation.input.dock', { id: 'bot-model', order: -110, inject: face }, ModelChoiceDock),
     // The person's own choice of a Bot's level (permission-card.js): raised by this window alone.

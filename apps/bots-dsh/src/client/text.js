@@ -2,6 +2,7 @@
 // Text helpers
 import { dateLocale, t } from './i18n.js'
 import { mentionSpans } from '../shared/mentions.js'
+import { previewText } from '../shared/plain-text.js'
 
 export const MENTION_ORIGIN = 'https://bots.local/'
 
@@ -227,7 +228,8 @@ export function commRunOf(order, peers, turn, hiddenTurns = []) {
   return { count, peerIds }
 }
 
-// Latest visible line for a sidebar row; Bot-to-Bot exchange turns stay out of it.
+// Latest visible line for a sidebar row; Bot-to-Bot exchange turns stay out of it. A Bot
+// writes markdown: the row shows its words, not its marks (#1155).
 export function previewOf(list, id, hiddenTurns = []) {
   const outline = list.projectionsBySession?.[id]?.values?.turnOutline ?? list.byId[id]?.projectionValues?.turnOutline
   if (!Array.isArray(outline)) return ''
@@ -235,7 +237,7 @@ export function previewOf(list, id, hiddenTurns = []) {
     const entry = outline[index]
     if (hiddenTurns.includes(entry.turn)) continue
     const text = entry.response || entry.prompt || ''
-    if (text !== '') return stripHeader(text).replace(/\s+/g, ' ').trim()
+    if (text !== '') return previewText(stripHeader(text))
   }
   return ''
 }

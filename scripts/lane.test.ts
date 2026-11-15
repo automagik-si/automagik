@@ -518,6 +518,23 @@ describe('the plugin lane', () => {
     expect(kindOf([...brand, 'apps/bots-dsh/client.js'], none)).toBe('plugins');
   });
 
+  test('a published skill (skills/) ships nothing: the skills CLI reads it from the repository', () => {
+    const none = () => false;
+    const skill = ['skills/am/SKILL.md', 'README.md'];
+    expect(ships(skill, none)).toBe(false);
+    expect(herdrShips(skill)).toBe(false);
+    expect(pocketShips(skill)).toBe(false);
+    // No am release either: the skill is not under am/, and am's tarball never carries it.
+    expect(skill.some(path => AM.test(path))).toBe(false);
+    // Beside a shipped file, that file's lane decides.
+    expect(ships([...skill, 'am/bin/am.mjs'], none)).toBe(true);
+    expect(kindOf([...skill, 'am/bin/am.mjs'], none, none, [...skill, 'am/bin/am.mjs'])).toBe('am');
+    expect(kindOf([...skill, 'apps/bots-dsh/client.js'], none)).toBe('plugins');
+    // Only that folder: one that merely starts with the name, or a root file of the name, still ships.
+    expect(ships(['skills-extra/am/SKILL.md'], none)).toBe(true);
+    expect(ships(['skills.json'], none)).toBe(true);
+  });
+
   test('a scheduler-only change (herdr/scheduler/, vendored) cuts no release and never reaches the pack', () => {
     const none = () => false;
     const scheduler = ['herdr/scheduler/main.go', 'herdr/scheduler/internal/daemon/daemon.go', 'herdr/scheduler/go.mod',

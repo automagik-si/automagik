@@ -73,7 +73,7 @@ import {
 } from "./migrateHome.mjs";
 import { change, removePath } from "./layoutSafe.mjs";
 import { foldAttach, readAttach } from "./attach.js";
-import { CLI_LINK, botPaneFolders, hooksNotice, openSpaces, relink, syncHooks, tightenLedgers } from "./migrateHooks.mjs";
+import { AM_LINK, CLI_LINK, botPaneFolders, hooksNotice, openSpaces, relink, syncHooks, tightenLedgers } from "./migrateHooks.mjs";
 
 export { CHECK_EVERY_MS, FIRST_CHECK_MS, LANE_RELEASE, NO_UPDATE_ENV, PACK_MODS, PACK_NAME, POINTER_SIG_URL, POINTER_URL, RETRY_MS, compareVersions,
   noticeText, packOfPointer, parseSums, pickUpdate, sumsName, tarballName, updatesOff } from "./release.js";
@@ -202,7 +202,7 @@ export function managedPack(modsDir) {
   const record = readMarker(modsDir);
   if (!record || record.v1 || !record.version) return { managed: false, why: "this pack was not installed by install.sh (no install record)" };
   if (!Number.isSafeInteger(record.sequence)) {
-    return { managed: false, why: "this pack came from before signed releases: run `automagik-herdr update` once" };
+    return { managed: false, why: "this pack came from before signed releases: run `am update` once" };
   }
   return { managed: true, why: null };
 }
@@ -1368,24 +1368,46 @@ export function checkMods({ modsDir, mods, log = () => {}, herdrApp = "herdr-app
  * through bin/run.sh, which finds node 22.7+ or bun where PATH has none) or, in a pack from before
  * it (a rollback), bin/automagik-herdr.mjs. Only a link to one of those two in this pack, or in
  * the sidebar's folder from before the rename (OLD_PACK_NAME: a v0.4.x link the migration didn't
- * move), is ours; one from the old folder moves only onto an entry that is there. A file, a
- * missing link or one pointing elsewhere is left alone. Cheap (an lstat, a readlink)
+ * move), is ours; one from the old folder moves only onto an entry that is there. A file or a link
+ * pointing elsewhere is left alone. A missing link is left alone too, except am's: made at any
+ * start while the install record lists the pack (a pack with no record gets none; a link the person removed comes back, by design: the pack owns it while am is absent). Cheap (an lstat, a readlink)
  * and idempotent: the CLI runs it on every start. Returns `{ link, from, to }` when it
  * repointed the link, else null; throws only when the swap itself fails.
  */
 export function relinkCli({ modsDir = defaultModsDir(), name = PACK_NAME, binDir = binDirOf() } = {}) {
+  const first = relinkNamed({ modsDir, name, binDir, linkName: CLI_LINK });
+  // am, the same command under its own name, follows on the same rule; the result is the old link's.
+  const am = relinkNamed({ modsDir, name, binDir, linkName: AM_LINK });
+  return first ?? am;
+}
+
+function relinkNamed({ modsDir, name, binDir, linkName }) {
   if (!binDir) return null;
-  const link = join(binDir, CLI_LINK);
-  if (!isLink(link)) return null;
-  const from = readlinkSync(link);
+  const link = join(binDir, linkName);
   const entries = (m) => ["automagik-herdr", "automagik-herdr.mjs"].map((f) => join(resolve(modsDir), m, "bin", f));
   const [wrapper, mjs] = entries(name);
+  if (!exists(link)) {
+    // am's link, missing on an install from before it: made here, never over a file or a link of
+    // the person's (that is the isLink / readlink rule below), never for a pack with no command,
+    // and only for a pack the install record lists (as the rollback's relink): no record, no link.
+    if (linkName !== AM_LINK || !(isFile(wrapper) || isFile(mjs))) return null;
+    if (!(readMarker(modsDir)?.mods ?? []).includes(name)) return null;
+    const made = isFile(wrapper) ? wrapper : mjs;
+    mkdirSync(binDir, { recursive: true });
+    const tmp = join(binDir, `.${linkName}.relink-${process.pid}`);
+    removePath(tmp, { force: true });
+    symlinkSync(made, tmp);
+    try { renameSync(tmp, link); } catch (error) { removePath(tmp, { force: true }); throw error; }
+    return null; // quiet: the report is for a link that moved
+  }
+  if (!isLink(link)) return null;
+  const from = readlinkSync(link);
   const now = resolve(dirname(link), from);
   const old = name !== OLD_PACK_NAME && entries(OLD_PACK_NAME).includes(now);
   if (now !== wrapper && now !== mjs && !old) return null;
   const to = isFile(wrapper) ? wrapper : mjs;
   if (now === to || (old && !isFile(to))) return null;
-  const tmp = join(binDir, `.${CLI_LINK}.relink-${process.pid}`);
+  const tmp = join(binDir, `.${linkName}.relink-${process.pid}`);
   // A leftover tmp link (a killed run, the same pid since) may dangle: unlinked, never followed (#550).
   removePath(tmp, { force: true });
   symlinkSync(to, tmp);

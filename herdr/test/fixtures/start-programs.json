@@ -1,0 +1,8 @@
+{
+  "programs": {
+    "omp": { "run": ["omp"], "icon": "icons/omp.svg" },
+    "codex": { "run": ["codex"], "icon": "icons/codex.svg" },
+    "hermes": { "run": ["hermes", "--tui"] },
+    "dsh-tui": { "run": ["dsh-tui-wrapper", "--profile", "tui"] }
+  }
+}

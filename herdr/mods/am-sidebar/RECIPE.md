@@ -55,7 +55,7 @@ One scrolling column, `chrome` background, 13 px text.
   popup (`props.form`: `create` | `edit` | `attach` | `pick` | `menu`), drawn to the approved
   mockup: live character preview, look, name and sidebar preview on the left; role, instructions,
   agent and model (detected, or pinned from the agent's list), place in the team and planned on
-  the right; the matching `automagik-herdr create …` / `edit …` line in the footer, with Copy.
+  the right; the matching `am create …` / `edit …` line in the footer, with Copy.
 - **Briefing** (`briefing.mjs`, `briefingText.mjs`): Claude Code runs it on `UserPromptSubmit` from
   the per-person hook Start and Attach write into the session's `.claude/settings.local.json`; it
   prints the bot's own name, kind and instructions, then the state of the team above and below it.
@@ -64,7 +64,7 @@ One scrolling column, `chrome` background, 13 px text.
 - **Updates** (`updateCheck.js`, with `update.mjs` and `release.js`): 20 seconds after load, then
   every 4 hours, `node update.mjs check --mods <app home>/mods` (node on PATH, else Homebrew's)
   asks GitHub for the latest release; a newer one gets one notice per version (shared
-  `am.sidebar.update-shown`) naming `automagik-herdr update`. A failed look is silent and
+  `am.sidebar.update-shown`) naming `am update`. A failed look is silent and
   retried in 30 minutes. `AUTOMAGIK_HERDR_NO_UPDATE=1` turns it off. **Install updates
   automatically** (`updater.js`; on unless `<app home>/automagik-herdr/auto-update.json` says
   `"auto": false`): a newer release from a check goes in through the same claim and `update.mjs

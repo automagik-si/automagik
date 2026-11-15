@@ -19,14 +19,20 @@ name: Server image
 #
 # A release event uses the release's own version as the content when it carries plugins.json,
 # with the same composite tag and labels; a release without it builds and pushes nothing. A
-# pull_request or push only builds and scans, pinning the plugins from the newest release that
-# has them.
+# pull_request packs the committed checkout for a nonpublishing test image. A push retains
+# release inputs: the current version when it has plugins, otherwise the newest stable plugin
+# release. Its path filter and release resolution are unchanged; old release bytes may fail.
 #
 # A run that pushes also records the pushed manifest digest on the content release itself: the
 # asset server-image.json (server/image-record.mjs), on a release event and on a dispatch alike,
 # because the cut's own release starts no workflow (below). That record is the release's own: a
 # workspace pins the image by its digest, never by :latest (RFC 0024 (g); issue #910). A later
 # push for the same content release replaces the record, which names its commit and tag.
+# The record job attests that digest with GitHub's keyless build provenance and pushes the
+# attestation to the registry. Stable content then advances server-lane/server-image.json in the
+# server-lane job: a rolling prerelease (never Latest), one at a time, never to an older version.
+# Prereleases never move it; an unreadable existing record fails closed. Consumers verify the
+# image with gh attestation verify before pulling by digest (server/README.md, Follow).
 #
 # The scan (server/secrecy.mjs) extracts the built rootfs and the image config before any login
 # and fails the job on a provider key, a token= or JSON token field, a private-key block with a
@@ -47,18 +53,30 @@ name: Server image
 #
 # No key is baked and no test token is in this workflow: the only credential is GITHUB_TOKEN,
 # used to log in to the registry, to read the release's assets and, in the record job alone
-# (the only one with contents: write, and with no registry access), to post server-image.json. It is not passed to docker
+# (the only one with contents: write), to post server-image.json. Only record can mint an OIDC
+# token and write attestations; it also logs in to push the attestation. The token is not passed to docker
 # build or into the image. GitHub has no REST endpoint for a Container package's visibility:
 # the job checks it and leaves the organization package-settings path in the summary.
 #
-# A release published with release.yml's GITHUB_TOKEN starts no workflow (GitHub suppresses
-# events made with that token), so the cut's own releases do not trigger this automatically:
-# dispatch it on dev with -f content=<a release that has plugins.json> (the command above), or
-# on a v<version> tag. A release published by hand (or by a PAT) triggers it.
+# A release published with release.yml's GITHUB_TOKEN starts no release-event workflow. After
+# the cut, release.yml explicitly dispatches this on the release tag with content=v<version>
+# for every stable release carrying plugins.json. That independent job only warns on failure;
+# no other lane waits for the image. Manual dispatches can retry it on dev or the release tag.
+# A release published by hand (or by a PAT) also triggers the release event above. The record
+# job's summary links server-image.json beside the pushed digest for the release's live proof.
 
 on:
   pull_request:
     paths:
+      - apps/*-dsh/**
+      - package.json
+      - bun.lock
+      - scripts/server-checkout.ts
+      - scripts/server-checkout.test.ts
+      - scripts/server-checkout-workflow.test.ts
+      - scripts/release-plugins.ts
+      - scripts/marketplace.ts
+      - scripts/version.ts
       - server/**
       - apps/desktop/runtime/package.json
       - apps/desktop/runtime/package-lock.json
@@ -111,6 +129,7 @@ jobs:
       revision: ${{ steps.gate.outputs.revision }}
       publish: ${{ steps.gate.outputs.publish }}
       latest: ${{ steps.gate.outputs.latest }}
+      source: ${{ steps.gate.outputs.source }}
     env:
       DO_NOT_TRACK: '1'
     steps:
@@ -150,6 +169,8 @@ jobs:
           build=true
           publish=false
           latest=false
+          source=release
+          if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then exit 1; fi
           has_plugins() {
             gh release view "$1" --repo "${REPOSITORY}" --json assets --jq '.assets[].name' | grep -qx plugins.json
           }
@@ -167,6 +188,10 @@ jobs:
             if has_plugins "v${version}"; then echo "${version}"; else newest_plugins; fi
           }
           case "${EVENT}" in
+            pull_request)
+              content="${version}"
+              source=checkout
+              ;;
             workflow_dispatch)
               case "${REF}" in
                 refs/heads/dev) ;;
@@ -218,8 +243,8 @@ jobs:
                 build=false
               fi
               ;;
-            *)
-              # pull_request and push: build and scan only. A version without plugins (a patch
+            push)
+              # Push: build and scan only. A version without plugins (a patch
               # merged into dev) still builds, pinned to the newest release that has them.
               content="$(resolve_content)"
               if [[ -z "${content}" ]]; then
@@ -227,9 +252,14 @@ jobs:
                 exit 1
               fi
               ;;
+            *)
+              echo "::error::unsupported event ${EVENT}"
+              exit 1
+              ;;
           esac
           if [[ -n "${content}" ]]; then
             tag="${content}-${short}"
+            if [[ "${source}" == checkout ]]; then tag="checkout-${revision}"; fi
             if [[ ! "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
               echo "::error::cannot form a Docker tag from content ${content} and commit ${revision}"
               exit 1
@@ -246,11 +276,29 @@ jobs:
             echo "build=${build}"
             echo "publish=${publish}"
             echo "latest=${latest}"
+            echo "source=${source}"
           } >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
+
+      # releasePlugins imports the locked root marketplace tooling. No plugin installs/hooks.
+      - name: Install locked checkout tooling
+        if: github.event_name == 'pull_request'
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Pack committed checkout inputs
+        id: checkout-input
+        if: github.event_name == 'pull_request'
+        env:
+          EVENT: ${{ github.event_name }}
+          REVISION: ${{ github.sha }}
+        run: bun scripts/server-checkout.ts "${EVENT}" "${REVISION}"
+
+      - name: Checkout input tests
+        if: github.event_name == 'pull_request'
+        run: bun test scripts/server-checkout.test.ts scripts/server-checkout-workflow.test.ts
 
       - name: Install locked gate dependencies
         run: bun install --cwd server --frozen-lockfile --ignore-scripts --linker hoisted
@@ -289,9 +337,37 @@ jobs:
           CONTENT: ${{ steps.gate.outputs.content }}
           TAG: ${{ steps.gate.outputs.tag }}
           REVISION: ${{ steps.gate.outputs.revision }}
+          EVENT: ${{ github.event_name }}
+          INPUT_KIND: ${{ steps.gate.outputs.source }}
+          INPUT_MANIFEST: ${{ steps.checkout-input.outputs.manifest }}
         run: |
+          set -euo pipefail
+          image_version="${CONTENT}"
+          if [[ "${INPUT_KIND}" == checkout ]]; then image_version="checkout-${REVISION}"; fi
           node server/build.mjs --tag "automagik-server:${TAG}" \
-            --version "${CONTENT}" --image-version "${CONTENT}" --revision "${REVISION}"
+            --version "${CONTENT}" --image-version "${image_version}" --revision "${REVISION}" \
+            --input-kind "${INPUT_KIND}" --event "${EVENT}" --input-manifest "${INPUT_MANIFEST}"
+
+      - name: Prove the installed checkout child and image identity
+        if: github.event_name == 'pull_request'
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_KIND: ${{ steps.gate.outputs.source }}
+          TAG: ${{ steps.gate.outputs.tag }}
+          CONTENT: ${{ steps.gate.outputs.content }}
+          REVISION: ${{ github.sha }}
+          INPUT_MANIFEST: ${{ steps.checkout-input.outputs.manifest }}
+          CHILD_SHA: ${{ steps.checkout-input.outputs.child }}
+        run: node server/image-source.mjs checkout
+
+      - name: Keep the checkout image proof
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: server-checkout-proof-${{ github.sha }}
+          path: checkout-image-proof.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Smoke
         if: steps.gate.outputs.build == 'true'
@@ -332,13 +408,13 @@ jobs:
           retention-days: 7
 
       - name: Save the scanned image for the publish job
-        if: steps.gate.outputs.publish == 'true'
+        if: steps.gate.outputs.publish == 'true' && steps.gate.outputs.source == 'release' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         env:
           TAG: ${{ steps.gate.outputs.tag }}
         run: docker save "automagik-server:${TAG}" | gzip -1 > server-image.tar.gz
 
       - name: Keep the image
-        if: steps.gate.outputs.publish == 'true'
+        if: steps.gate.outputs.publish == 'true' && steps.gate.outputs.source == 'release' && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: server-image-${{ steps.gate.outputs.tag }}
@@ -356,6 +432,8 @@ jobs:
       packages: write
     env:
       DO_NOT_TRACK: '1'
+      EVENT: ${{ github.event_name }}
+      INPUT_KIND: ${{ needs.image.outputs.source }}
       VERSION: ${{ needs.image.outputs.version }}
       CONTENT: ${{ needs.image.outputs.content }}
       TAG: ${{ needs.image.outputs.tag }}
@@ -373,6 +451,9 @@ jobs:
         with:
           node-version: '24'
 
+      - name: Refuse non-release publication before loading artifacts
+        run: node server/image-source.mjs check-publish
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: server-image-${{ needs.image.outputs.tag }}
@@ -380,6 +461,9 @@ jobs:
 
       - name: Load the scanned image
         run: gunzip -c server-image.tar.gz | docker load
+
+      - name: Verify the loaded candidate source before login
+        run: node server/image-source.mjs release
 
       # The bytes that will be pushed, scanned again after the round trip: a hit here still
       # precedes the login and the push below.
@@ -499,7 +583,7 @@ jobs:
           retention-days: 30
 
   # The release's own record of what was pushed (RFC 0024 delivery 4's acceptance; issue #910).
-  # Its own job: the only one that may write to a release, and it holds no registry access. It
+  # Its own job: the only one that may write to a release or attest the pushed digest. It
   # runs on a release event and on a dispatch, whichever pushed. The record goes on the content
   # release (v<content>): on a release event that is the release itself. It is built only from
   # the digest the push printed, and read back from the release before the job passes.
@@ -511,6 +595,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      packages: write
+      id-token: write
+      attestations: write
     env:
       DO_NOT_TRACK: '1'
       GH_TOKEN: ${{ github.token }}
@@ -527,6 +614,20 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: '24'
+
+      - name: Log in to push the provenance attestation
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "${TOKEN}" | docker login ghcr.io --username "${ACTOR}" --password-stdin
+
+      - name: Attest the pushed image digest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.GHCR }}
+          subject-digest: ${{ needs.publish.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
       - name: Write server-image.json and post it on the content release
         run: |
@@ -546,5 +647,44 @@ jobs:
             echo
             echo "### Release record"
             echo
-            echo "\`server-image.json\` on \`v${CONTENT}\` records \`${GHCR}@${DIGEST}\`. Pin a workspace by that digest, never by a tag."
+            echo "[server-image.json](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/v${CONTENT}/server-image.json) on \`v${CONTENT}\` records \`${GHCR}@${DIGEST}\`. Pin a workspace by that digest, never by a tag."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of the registry
+        if: always()
+        run: docker logout ghcr.io
+
+  # The rolling server-lane prerelease (like pocket-lane): its own small job, so a dropped waiting
+  # run never loses a content release's own record. GitHub keeps one job waiting in the group and
+  # drops an older waiting one for a newer, so the lane still ends on the newest stable content;
+  # server/server-lane.mjs refuses an older version anyway. A prerelease never enters it.
+  server-lane:
+    name: Advance the stable server lane
+    needs: [image, record]
+    if: needs.image.outputs.publish == 'true' && needs.image.outputs.latest == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: server-lane
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      DO_NOT_TRACK: '1'
+      GH_TOKEN: ${{ github.token }}
+      CONTENT: ${{ needs.image.outputs.content }}
+      GHCR: ghcr.io/automagik-si/automagik-server
+    steps:
+      - name: Check out the workflow commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '24'
+      - name: Read the content release's record and advance server-lane
+        run: |
+          set -euo pipefail
+          gh release download "v${CONTENT}" --pattern server-image.json --dir posted --repo "${GITHUB_REPOSITORY}"
+          node server/server-lane.mjs posted/server-image.json

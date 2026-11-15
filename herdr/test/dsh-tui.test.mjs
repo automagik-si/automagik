@@ -524,7 +524,7 @@ test("proxy doctor detects a stale helper and update repairs it without changing
   assert.equal(stale.code, 1);
   assert.equal(check.ok, false);
   assert.match(check.detail, /stable proxy execution copy is stale/);
-  assert.equal(check.fix, "automagik-herdr dsh-tui install");
+  assert.equal(check.fix, "am dsh-tui install");
   assert.equal(readFileSync(helper, "utf8"), "// previous version\n", "doctor only reads");
   assert.equal((await installDshTui(options)).status, "installed");
   const repaired = doctorDshTui(options);
@@ -765,7 +765,7 @@ test("a shim released before the profile fix is still ours and install replaces 
     env: s.env }).checks.find((c) => c.check === "dsh-tui-shim");
   assert.equal(stale.ok, false, "the released shim is not healthy: it still boots the tui profile");
   assert.match(stale.detail, /earlier release's shim/);
-  assert.equal(stale.fix, "automagik-herdr dsh-tui install");
+  assert.equal(stale.fix, "am dsh-tui install");
   const r = await installDshTui({ forbiddenRoots: rootsOf(s), env: s.env, publishedAt: PUBLISHED });
   assert.equal(r.status, "installed", r.detail);
   assert.equal(readFileSync(shim, "utf8"), SHIM_TEXT, "the old tui/no-profile shim is replaced");

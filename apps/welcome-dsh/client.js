@@ -9239,6 +9239,7 @@ var PT_BR = {
   "Installing its connector in the background. This takes a minute or two.": "Instalando o conector em segundo plano. Leva um ou dois minutos.",
   "The connector did not install: {error}": "O conector não foi instalado: {error}",
   "The connector did not install.": "O conector não foi instalado.",
+  "The connector did not start: {error}": "O conector não iniciou: {error}",
   "Install details": "Detalhes da instalação",
   "Log: {path}": "Registro: {path}",
   "Connector ready (version {version}).": "Conector pronto (versão {version}).",
@@ -11657,7 +11658,7 @@ var ONBOARD_CSS = `
 .oai-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
 .oai-big{padding:13px 22px;font-size:15px}
 /* Who joins: one card per Bot type. A chosen card stands up on a lilac rim. */
-.oai-select{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin-bottom:14px;align-items:start}
+.oai-select{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:20px;margin-bottom:14px;align-items:start}
 .oai-fighter{position:relative;display:grid;gap:12px;align-content:start;padding:16px;border-radius:24px 27px 23px 26px;${raised("var(--oai-clay)", 4)};transition:transform .3s cubic-bezier(.3,1.4,.5,1),box-shadow .3s ease}
 .oai-fighter.oai-chosen{${raised("color-mix(in srgb,var(--oai-lilac) 55%,var(--oai-clay))", 5)};transform:translateY(-3px)}
 .oai-fighter header{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:32px}
@@ -12026,6 +12027,7 @@ function stateOf(agent) {
   if (!agent.cli.found) return "no-cli";
   if (!agent.on) return "off";
   if (agent.connector.state !== "ready") return agent.connector.state;
+  if (typeof agent.connector.startError === "string") return "failed";
   if (agent.restartNeeded) return "restart";
   if (agent.signedIn !== true) return agent.signedIn === false ? "login-required" : "sign-in-unknown";
   if (agent.consent === "needed") return "account";
@@ -12089,6 +12091,10 @@ function agentLines(agent) {
       // diagnostic that arrived unredacted still draws masked.
       ...diagnostic ? { details: { diagnostic: redactText(diagnostic), ...logPath ? { logPath } : {} } } : {}
     });
+  }
+  if (state === "ready" && typeof agent.connector.startError === "string") {
+    lines.push({ tone: "bad", text: t("The connector did not start: {error}", { error: redactText(agent.connector.startError) }), action: "retry" });
+    return lines;
   }
   if (state === "ready") {
     if (!isNative(agent)) lines.push({ tone: "ok", text: version ? t("Connector ready (version {version}).", { version }) : t("Connector ready.") });

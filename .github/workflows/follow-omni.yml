@@ -1,11 +1,13 @@
 name: Follow Omni
 
 # The desktop app carries Omni's channels and canvases from one Omni release
-# (apps/desktop/omni.json). When Omni publishes a release (its release workflow sends an
-# `omni-release` repository_dispatch), every 30 minutes as a fallback, or when dispatched by
-# hand, this looks for the newest Omni release (`v<version>`, prereleases included) above the
-# one omni.json pins (and the welcome's package.json, which installs the same release in a
-# plain DSH). Each of Omni's
+# (apps/desktop/omni.json). Omni's `omni-release` repository_dispatch is the fast path; our
+# Release workflow (release.yml) completing on dev also checks after every Automagik merge.
+# Any release conclusion qualifies: this reads Omni's releases itself, independently of whether
+# Automagik's release succeeded. The every-30-minute schedule is the last fallback; a dispatch
+# by hand also checks. This looks for the newest Omni release (`v<version>`, prereleases
+# included) above the one omni.json pins (and the welcome's package.json, which installs the
+# same release in a plain DSH). Each of Omni's
 # plugins carries the Omni release of its own last change (omni#1356), so a plugin may be
 # behind the release but never ahead of it. When the channels and canvas plugins are at or
 # below its version and admit the desktop runtime in the same DSH patch series as their
@@ -51,6 +53,10 @@ on:
   repository_dispatch:
     # Sent by Omni's release workflow when it publishes a release.
     types: [omni-release]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+    branches: [dev]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -333,4 +339,5 @@ jobs:
     uses: ./.github/workflows/release.yml
     permissions:
       contents: write
+      actions: write # release.yml dispatches the stable release's server image.
     secrets: inherit

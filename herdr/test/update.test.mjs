@@ -661,6 +661,85 @@ test("an earlier run's leftover .prev-next-<pid> or .prev-old-<pid> (a reused pi
   }
 });
 
+test("relinkCli: the am link follows the pack's entry the same way, and a link elsewhere is left", (t) => {
+  const { home, mods } = appHome("0.4.0");
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const binDir = join(home, "local-bin");
+  mkdirSync(binDir);
+  const link = join(binDir, "am");
+  const bin = join(mods, "am-sidebar", "bin");
+  const wrapper = join(bin, "automagik-herdr"), mjs = join(bin, "automagik-herdr.mjs");
+  mkdirSync(bin);
+  writeFileSync(mjs, "#!/usr/bin/env node\n");
+  writeFileSync(wrapper, "#!/bin/sh\n");
+  symlinkSync(mjs, link);
+  assert.deepEqual(relinkCli({ modsDir: mods, binDir }), { link, from: mjs, to: wrapper });
+  assert.equal(readlinkSync(link), wrapper);
+  assert.equal(relinkCli({ modsDir: mods, binDir }), null);
+  unlinkSync(link);
+  symlinkSync("/somewhere/else/am", link);
+  assert.equal(relinkCli({ modsDir: mods, binDir }), null);
+  assert.equal(readlinkSync(link), "/somewhere/else/am");
+  // Missing: made quietly (an install from before am's link).
+  unlinkSync(link);
+  assert.equal(relinkCli({ modsDir: mods, binDir }), null);
+  assert.equal(readlinkSync(link), wrapper);
+  // A file of the person's is never replaced.
+  unlinkSync(link);
+  writeFileSync(link, "mine\n");
+  assert.equal(relinkCli({ modsDir: mods, binDir }), null);
+  assert.equal(readFileSync(link, "utf8"), "mine\n");
+});
+
+test("relinkCli: a pack the install record does not list gets no am link", (t) => {
+  const { home, mods } = appHome("0.4.0");
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const binDir = join(home, "local-bin");
+  mkdirSync(binDir);
+  const bin = join(mods, "am-sidebar", "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "automagik-herdr"), "#!/bin/sh\n");
+  rmSync(join(home, "automagik-herdr", "installed-by-install.sh"));
+  assert.equal(relinkCli({ modsDir: mods, binDir }), null);
+  assert.equal(existsSync(join(binDir, "am")), false);
+});
+
+test("relinkCli: an install record that exists but does not list the pack gets no am link (M3)", (t) => {
+  const { home, mods } = appHome("0.4.0");
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const binDir = join(home, "local-bin");
+  mkdirSync(binDir);
+  const bin = join(mods, "am-sidebar", "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "automagik-herdr"), "#!/bin/sh\n");
+  const record = join(home, "automagik-herdr", "installed-by-install.sh");
+  for (const list of ["am-quota,am-hooks", ""]) {
+    writeFileSync(record, `version=0.4.0\nmods=${list}\nbefore=none\n`);
+    assert.equal(relinkCli({ modsDir: mods, binDir }), null, `mods=${list}`);
+    assert.equal(existsSync(join(binDir, "am")), false, `mods=${list}`);
+  }
+});
+
+test("relinkCli: a record with no mods line, or a mods list that only resembles the pack, gets no am link", (t) => {
+  const { home, mods } = appHome("0.4.0");
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const binDir = join(home, "local-bin");
+  mkdirSync(binDir);
+  const bin = join(mods, "am-sidebar", "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "automagik-herdr"), "#!/bin/sh\n");
+  const record = join(home, "automagik-herdr", "installed-by-install.sh");
+  // The first row has no mods line (a v1 record: it names the old pack, never this one); the others list
+  // a different token, one that starts with the pack's name among them (an exact token match, not a prefix).
+  for (const [row, text] of [["no mods line", "version=0.4.0\nbefore=none\n"],
+    ["mods=spaces-agents", "version=0.4.0\nmods=spaces-agents\nbefore=none\n"],
+    ["mods=am-sidebar-agents", "version=0.4.0\nmods=am-sidebar-agents\nbefore=none\n"]]) {
+    writeFileSync(record, text);
+    assert.equal(relinkCli({ modsDir: mods, binDir }), null, row);
+    assert.equal(existsSync(join(binDir, "am")), false, row);
+  }
+});
+
 test("relinkCli: our link follows the pack's entry (the wrapper, or the .mjs before it); any other is left", (t) => {
   const { home, mods } = appHome("0.4.0");
   t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -1580,7 +1659,7 @@ test("#671: the CLI's restore line names the failed version and the previous one
     process.env.PATH = `${dirname(bad.bin)}:${path}`;
     const line = await cmdUpdate({}, [], { modsDir: h.mods, env: {}, keys, fetch: fakeFetch(h.table) });
     assert.match(line, /^Automagik Herdr 0\.2\.0 failed to load \(am-tabs failed herdr-app check\): the previous version 0\.1\.0 is back\./);
-    assert.match(line, /The failed pack was removed, so `automagik-herdr update --rollback` has nothing to go back to\./);
+    assert.match(line, /The failed pack was removed, so `am update --rollback` has nothing to go back to\./);
     assert.match(line, /The bad version is held back; a newer release installs on its own\./);
     await assert.rejects(cmdUpdate({ rollback: true }, [], { modsDir: h.mods, env: {} }),
       (e) => /^Nothing rolled back: no earlier pack kept: 0\.2\.0 was removed after it failed to load, so 0\.1\.0 is the installed pack$/.test(e.message));
@@ -1659,7 +1738,7 @@ test("managedPack: only a pack install.sh put in place from a signed release; ne
   try {
     assert.deepEqual(managedPack(h.mods), { managed: true, why: null });
     writeFileSync(markerOf(h.mods), "version=0.1.0\nmods=am-sidebar,am-tabs\nbefore=none\n");
-    assert.match(managedPack(h.mods).why, /before signed releases: run `automagik-herdr update` once/);
+    assert.match(managedPack(h.mods).why, /before signed releases: run `am update` once/);
     rmSync(markerOf(h.mods));
     assert.match(managedPack(h.mods).why, /not installed by install.sh/);
     // A dev checkout: mods/am-sidebar is a link.

@@ -1,5 +1,10 @@
 import { createElement as h, useEffect, useState } from 'react'
 import { language, t } from './i18n.js'
+import { opensIntoPlugins, splitsPlugins } from './update-hold.js'
+
+// `splitsPlugins` belongs to the update rule both this module and About read (update-hold.js);
+// it is re-exported here for the callers that read the presentation through this module.
+export { splitsPlugins }
 
 // -------------------------------------------------------------------------
 // The Automagik desktop app's own update, at the bottom of the sidebar above the account and
@@ -108,9 +113,6 @@ export function pluginPill(plugins) {
   }
 }
 
-/** Whether the app sends its own update apart from the plugins'. */
-export const splitsPlugins = state => Boolean(state?.app && state?.plugins)
-
 /** The app's update alone: the app's part when the app sends one, else the whole. */
 export const appState = state => (splitsPlugins(state) ? state.app : state)
 
@@ -134,7 +136,7 @@ export function useDesktopUpdate() {
  * src/frame.js versionsAnswer): { app, dsh, plugins: [{ name, version }], updates }. Null
  * outside the app, and in an app that does not say.
  */
-export function useDesktopVersions() {
+export function useDesktopVersions(presentation) {
   const bridge = globalThis.omniDesktop?.updates
   const [versions, setVersions] = useState(null)
   useEffect(() => {
@@ -142,17 +144,17 @@ export function useDesktopVersions() {
     let live = true
     bridge.versions().then((next) => { if (live && next && typeof next === 'object') setVersions(next) }, () => {})
     return () => { live = false }
-  }, [bridge])
+  }, [bridge, presentation])
   return versions
 }
 
-function Pill({ pill, busy, percent, onClick }) {
+function Pill({ pill, busy, held, percent, onClick }) {
   return h('button', {
     type: 'button',
     className: `bt-desk-update${pill.primary ? ' bt-desk-update-go' : ''}`,
     title: pill.title,
     'aria-busy': busy || undefined,
-    disabled: busy,
+    disabled: busy || held,
     onClick,
   },
   h('span', { className: 'bt-desk-update-dot', 'aria-hidden': true }),
@@ -169,11 +171,20 @@ export function DesktopUpdate() {
   const plugins = splitsPlugins(state) && !['ready', 'installing'].includes(app.phase) ? state.plugins : null
   const plugPill = pluginPill(plugins)
   if (!appPill && !plugPill) return null
-  const open = () => { void bridge.open().catch(() => {}) }
-  const apply = () => { void (bridge.applyPlugins ?? bridge.open)().catch(() => {}) }
+  // An app from before `check` (v3.120.0) has only `open`, and `applyPlugins`/`open` put staged
+  // plugins in at once, restarting DSH under the agents at work (#1029, #1240). The same rule as
+  // About's Check for updates holds the plugins' pill and the app's check/Retry pill while plugins
+  // are staged or coming, or before the app has said anything. The app's labelled pill (an update
+  // ready or out) stays live, as About keeps it: in that app `open` restarts into the app update,
+  // or opens its release page, without putting staged plugins in. The labels stay as they are, so
+  // the hold changes only what a click does.
+  const held = opensIntoPlugins(bridge, state)
+  const appHeld = held && !appPill?.primary
+  const open = () => { if (appHeld || BUSY.has(app.phase)) return; void bridge.open().catch(() => {}) }
+  const apply = () => { if (held || BUSY.has(plugins?.phase)) return; void (bridge.applyPlugins ?? bridge.open)().catch(() => {}) }
   return h('div', { className: 'bt-desk-updates' },
-    appPill ? h(Pill, { pill: appPill, busy: BUSY.has(app.phase), percent: app.phase === 'downloading' ? app.percent ?? 0 : undefined, onClick: open }) : null,
-    plugPill ? h(Pill, { pill: plugPill, busy: BUSY.has(plugins.phase), percent: plugins.phase === 'downloading' ? plugins.percent ?? 0 : undefined, onClick: apply }) : null)
+    appPill ? h(Pill, { pill: appPill, busy: BUSY.has(app.phase), held: appHeld, percent: app.phase === 'downloading' ? app.percent ?? 0 : undefined, onClick: open }) : null,
+    plugPill ? h(Pill, { pill: plugPill, busy: BUSY.has(plugins.phase), held, percent: plugins.phase === 'downloading' ? plugins.percent ?? 0 : undefined, onClick: apply }) : null)
 }
 
 export const DESKTOP_UPDATE_CSS = `

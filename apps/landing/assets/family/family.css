@@ -1,0 +1,154 @@
+/* The family drawer and the round menu button that opens it. Tokens only, in the host product's world (Arca: night and ivory, sand and ink).
+   Motion is the system's: things slide and settle on its timings and never bounce. Stone physics stays with the logo. */
+
+/* --- the button, in the page's one header ---
+   THREE LINES, THREE COLOURS, AT THE LEFT EDGE OF THE WINDOW (the owner, 2026-11-12, of the triangle beside the logo: "i dont like the
+   positoin, ta torto looks like a home icon"; his picks: "Left edge of the window" and "Three lines, three colours").
+   A classic menu icon: three short rounded lines, one in each of the family's colours. Drawn here, no picture: nothing in it can lean and
+   it cannot read as home. The triangle is no longer the button's picture; the family's lockup stays inside the drawer, in colour.
+   WHERE: pinned to the window, not to the page column. The lines start 21 px from the window's left edge (the system's gutter) and the
+   round hit area reaches 7 px from it. The product's logo stays in the page column; only where the column would run under the button
+   (a window narrower than about 1375 px) the logo steps right, just enough to clear it. On a phone the window's edge and the column's edge
+   are the same place: the lines stand ON the column's edge, where the page's own text starts, and the logo follows them.
+   When the drawer pushes the page the button moves with it and stays on screen beside the drawer.
+   The lines never move. Under the pointer, on focus and while the drawer is open, a hairline ring and a quiet ground come up; nothing else.
+   The focus ring is the design system's own (2 px, its blue). It shows for the keyboard only: after a press with a pointer the script
+   marks the button, and the ring stays away until the keyboard is used.
+   THE COLOURS are Automagik's own, not design system tokens. On night: the three colours of their wordmarks' sparkles (their final set,
+   2026-11-12: violet #b586e7, pink #ee5496, cyan #15bde0), so each line is the colour of that product's sparkle. On sand those are too
+   light to hold (pink 2.3 to 1, cyan 1.5 to 1), so there the lines take the trio Automagik's designer gave for sand (2026-11-12): the same
+   step down each colour's own ramp of the mark, each 3.06 to 1 against sand, so the three lines weigh the same. */
+.fam-btn { --fam-violet: #b586e7; --fam-pink: #ee5496; --fam-cyan: #15bde0; }
+[data-theme="day"] .fam-btn { --fam-violet: #9062be; --fam-pink: #d03f7c; --fam-cyan: #0781a4; }
+/* WHICH PRODUCT WEARS WHICH COLOUR: this one line, and nothing else. FINAL (the owner, on the pet sheet, 2026-11-12):
+   Automagik violet, Genie pink, Omni cyan. */
+.fam-btn { --fam-automagik: var(--fam-violet); --fam-genie: var(--fam-pink); --fam-omni: var(--fam-cyan); }
+.topbar { --fam-clear: 68px; }      /* the room the button takes at the window's edge: 7 + 48 + 13 */
+.fam-btn { position: absolute; z-index: 1; left: calc(var(--space-21) - 14px); top: var(--space-13); display: grid; justify-items: center; align-content: center;
+  width: 48px; height: 48px; border-radius: 50%; border: 1px solid transparent;
+  background: none; color: var(--text); cursor: pointer; text-decoration: none; -webkit-tap-highlight-color: transparent;
+  transition: border-color var(--duration-base) var(--ease), background-color var(--duration-base) var(--ease); }
+/* 20 by 17: three lines 3 px thick, 4 px apart. The box is 18 high so the lines land on whole pixels in the 48 px button. */
+.fam-lines { display: grid; align-content: start; gap: 4px; width: 20px; height: 18px; pointer-events: none; }
+.fam-lines > span { display: block; height: 3px; border-radius: 2px; }
+.fam-lines > span:nth-child(1) { background: var(--fam-automagik); }      /* top to bottom: Automagik, Genie, Omni (the order the owner says them in) */
+.fam-lines > span:nth-child(2) { background: var(--fam-genie); }
+.fam-lines > span:nth-child(3) { background: var(--fam-omni); }
+.fam-btn:hover, .fam-btn:focus-visible, .fam-btn[aria-expanded="true"] { border-color: var(--line); background: var(--card-active); }
+.fam-btn.is-pointer:focus-visible { outline: none; }
+/* the logo keeps the page column, and steps right only where the column would run under the button */
+.topbar-in { padding-left: max(var(--space-21), calc(var(--fam-clear) - max(0px, (100% - var(--max-width)) / 2))); }
+.topbar .pill { white-space: nowrap; }
+@media (max-width: 720px) { .topbar .pill { min-height: var(--tap-target, 44px); } }      /* on a phone the one button is a full thumb target, like the mark */
+@media (max-width: 480px) { .topbar-in { gap: var(--space-13); } .topbar { --fam-clear: 62px; } }
+/* the narrowest phones (360 px and under, down to 320): the logo stands right after the button's hit area, the gap closes to 8 px and
+   the one button is set a little tighter, so the header's three things fit with the page's 21 px gutter kept at the right */
+@media (max-width: 360px) { .topbar { --fam-clear: 56px; } .topbar-in { gap: var(--space-8); } .topbar .pill { padding-inline: 12px; letter-spacing: 0.08em; } }
+
+/* --- the drawer --- */
+/* The drawer PUSHES the page aside (the owner, 2026-11-12: "i really like the pushes the page"); it never lies over it.
+   The layer over the page (the scrim) catches a press outside the drawer, and it is what sets the page back: a veil of the ground
+   colour at half strength, with a round hole where the menu button stands, so the button keeps its full strength while the drawer is
+   open (it is a working control then: a press on it closes the drawer). The script says where the hole is. The page itself is not
+   made see-through any more. A browser without color-mix() shows no veil; everything else works. */
+.fam-scrim { position: fixed; inset: 0; z-index: 1190; opacity: 0; transition: opacity var(--duration-move) var(--ease);
+  background: radial-gradient(circle at var(--fam-bx, -99px) var(--fam-by, -99px), transparent 25px, color-mix(in srgb, var(--ground) 50%, transparent) 26px); }
+.is-family-open .fam-scrim { opacity: 1; }
+[data-family-page] { transition: transform var(--duration-move) var(--ease-move); }
+.is-family-open [data-family-page] { transform: translateX(min(420px, calc(100vw - 34px))); }
+.is-family-snap [data-family-page], .is-family-snap .fam, .is-family-snap .fam-scrim { transition: none !important; }      /* going to a section of this page: no slide back */
+/* the page that moved aside must not make the window wider: a phone would zoom out to fit it */
+.is-family-open body { overflow-x: clip; }
+.fam { position: fixed; inset: 0 auto 0 0; z-index: 1200; width: min(420px, calc(100vw - 34px)); display: flex; flex-direction: column; gap: var(--space-21);
+  padding: var(--space-21) max(var(--space-21), env(safe-area-inset-right, 0px)) max(var(--space-21), env(safe-area-inset-bottom, 0px)) max(var(--space-21), env(safe-area-inset-left, 0px));
+  background: var(--ground); color: var(--text); border-right: 1px solid var(--line); overflow-y: auto; overscroll-behavior: contain;
+  transform: translateX(-100%); transition: transform var(--duration-move) var(--ease-move); }
+.fam[hidden], .fam-scrim[hidden], .fam-world[hidden] { display: none; }
+.is-family-open .fam { transform: none; }
+.fam:focus { outline: none; }
+/* Automagik itself, and the two places its app runs: one row, not three */
+.fam { --lock: 30px; }
+.fam-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-13); min-height: var(--tap-target, 44px); }
+.fam-apps { flex: none; display: inline-flex; gap: var(--space-8); }
+.fam-chip { display: inline-flex; align-items: center; min-height: 34px; padding: 0 var(--space-13); border: 1px solid var(--line); border-radius: var(--radius-pill);
+  font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted); text-decoration: none; white-space: nowrap; cursor: pointer;
+  transition: color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), background-color var(--duration-fast) var(--ease); }
+.fam-chip:hover, .fam-chip:focus-visible { color: var(--text); border-color: var(--text-faint); background: var(--card-active); }
+@media (max-width: 720px), (pointer: coarse) { .fam-chip { min-height: var(--tap-target, 44px); } }
+/* The lockup gives way before the row breaks: it asks for 104px and grows to its full size where there is room, so on a narrow phone it
+   is drawn a little smaller and Desktop and Mobile stay beside it. No sum of fractions decides the row. Under about 340px of screen the
+   two buttons go below it, on purpose. */
+.fam-home { display: block; flex: 1 1 104px; min-width: 0; max-width: calc(var(--lock) * 396 / 64); color: var(--text); text-decoration: none; }
+/* The family's lockup: Automagik's own file, whole. Its frame is 264 units high: the triskle fills the top 222 and the g of the word hangs
+   42 below, so the picture is pulled up by that much and the triskle is what the row centres. Cream letters on night, ink letters on sand. */
+.fam-lockup { display: block; }
+.fam-lockup picture { display: block; }
+.fam-lockup img { display: block; width: auto; max-width: none; height: var(--lock, 30px); margin-bottom: calc(var(--lock, 30px) * -42 / 264); }
+.fam-home .fam-lockup img { width: 100%; height: auto; margin-bottom: -2.571%; }      /* 42/264 of its height, said as a share of its width (396 by 64) */
+.fam-lockup .fam-lock-ink { display: none; }
+[data-theme="day"] .fam-lockup .fam-lock-ink { display: block; } [data-theme="day"] .fam-lockup .fam-lock-cream { display: none; }
+.fam-lockup.is-large { --lock: 52px; margin-bottom: calc(52px * 42 / 264); }
+.fam-list { list-style: none; margin: 0 calc(-1 * var(--space-13)); padding: 0; display: flex; flex-direction: column; }
+.fam-list > li + li { border-top: 1px solid var(--line); }
+.fam-item { position: relative; display: flex; align-items: center; gap: var(--space-13); padding: var(--space-13); color: var(--text); text-decoration: none;
+  transition: background-color var(--duration-fast) var(--ease); }
+.fam-item::after { content: "\2192"; margin-left: auto; font-family: var(--font-mono); color: var(--text-faint); opacity: 0; transform: translateX(-8px); transition: opacity var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease); }
+.fam-item:hover, .fam-item:focus-visible { background: var(--card-active); }
+.fam-item:hover::after, .fam-item:focus-visible::after { opacity: 1; transform: none; }
+.fam-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.fam-words b { font-family: var(--font-display); font-weight: 400; font-size: var(--text-title); line-height: 1.15; }
+.fam-words span { color: var(--text-muted); font-size: 16px; line-height: 1.4; }
+/* a product is shown by its own name, drawn: Automagik's wordmark file for it, as high as the lockup above, so the letters are one size, and set
+   in from the edge so the names stand in one column under the lockup's letters (the wordmark's frame starts 299.34 units into the lockup's) */
+.fam-item.is-word { padding-left: calc(var(--space-13) + var(--lock) * 299.34 / 264); }
+.fam-word { display: block; } .fam-word img { max-width: 100%; margin-bottom: 0; }      /* the frame's own room under the letters clears the g and the y */
+.fam > .eyebrow { padding-left: calc(var(--lock) * 321.34 / 264); }      /* the label stands in the names' column */
+.fam-word.is-mykes img { height: calc(var(--lock) * 257 / 264); margin-top: calc(var(--lock) * 7 / 264); }      /* its file's frame is 257 high where the others are 264, on the same line */
+.fam-item.is-word .fam-words { gap: 0; } .fam-item.is-word .fam-words > span:last-child { padding-left: calc(var(--lock) * 22 / 264); }
+/* a host that IS Automagik: its two app buttons stand in the top block, under the link; and a product listed by its logo (Arca on another
+   host's page) has its line in the names' column */
+.fam-here-block .fam-apps { padding: var(--space-8) var(--space-13) 0; }
+.fam-item.is-logo .fam-words > span:last-child { padding-left: calc(var(--lock) * 321.34 / 264); }
+/* where you are: the host product's own logo, whole, and its line */
+.fam-words .fam-logo { display: block; margin-bottom: var(--space-8); color: var(--text); } .fam-logo svg { display: block; height: calc(var(--lock) * 0.7); width: auto; fill: currentColor; }
+/* where you are: a bar at the edge, and the words */
+.fam-item.is-here { background: var(--card-active); }
+.fam-item.is-here::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--text); }
+.fam-item.is-here::after { content: none; }
+.fam-here { position: absolute; top: var(--space-13); right: var(--space-13); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-faint); white-space: nowrap; }
+/* where you are, at the top: the product whose page this is, set (filled stone, a bar at the edge, the words), then its own sections.
+   The sections show only where the page's header has no room for them (the same width at which the header hides them). */
+.fam-here-block { margin: 0 calc(-1 * var(--space-13)); display: flex; flex-direction: column; }
+.fam-links { display: none; list-style: none; margin: 0; padding: var(--space-8) var(--space-13) 0; grid-template-columns: 1fr 1fr; column-gap: var(--space-13); }
+.fam-links a { display: flex; align-items: center; min-height: var(--tap-target, 44px); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--text-muted); text-decoration: none; border-bottom: 1px solid var(--line); transition: color var(--duration-fast) var(--ease); }
+.fam-links a:hover, .fam-links a:focus-visible { color: var(--text); }
+@media (max-width: 720px) { .fam-links { display: grid; } }
+.fam-foot { margin-top: auto; padding-top: var(--space-21); border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: var(--space-21); }
+/* a short window: the drawer closes its gaps before it has to scroll */
+@media (max-height: 760px) { .fam { gap: var(--space-13); } .fam-item { padding-block: var(--space-8); } }
+/* a phone: the lockup a little smaller and the two app buttons a little tighter, so they stay one row */
+@media (max-width: 480px) { .fam { --lock: 24px; } .fam-top { gap: var(--space-8); } .fam-chip { padding: 0 10px; letter-spacing: 0.1em; } }
+/* the rows arrive one after another and settle, once the drawer is in */
+.fam-here-block, .fam-top, .fam-list > li, .fam > .eyebrow, .fam-foot { opacity: 0; transform: translateY(13px); transition: opacity var(--duration-base) var(--ease), transform var(--duration-move) var(--ease-move); }
+.is-family-open .fam-here-block, .is-family-open .fam-top, .is-family-open .fam-list > li, .is-family-open .fam > .eyebrow, .is-family-open .fam-foot { opacity: 1; transform: none; }
+.is-family-open .fam-here-block { transition-delay: 80ms; } .is-family-open .fam-top { transition-delay: 125ms; } .is-family-open .fam > .eyebrow { transition-delay: 170ms; }
+.is-family-open .fam-list > li:nth-child(1) { transition-delay: 215ms; } .is-family-open .fam-list > li:nth-child(2) { transition-delay: 260ms; }
+.is-family-open .fam-list > li:nth-child(3) { transition-delay: 305ms; } .is-family-open .fam-list > li:nth-child(4) { transition-delay: 350ms; }
+.is-family-open .fam-foot { transition-delay: 395ms; }
+
+/* --- stepping into another product's world: its ground opens from the pressed tile and covers the window --- */
+.fam-world { position: fixed; inset: 0; z-index: 1300; display: grid; place-items: center; padding: var(--space-21); background: #1e1923; color: #f3e9dd;
+  clip-path: circle(0 at var(--fam-x, 60px) var(--fam-y, 50%)); transition: clip-path var(--duration-page) var(--ease-move); }
+[data-theme="day"].fam-world, [data-theme="day"] .fam-world { background: #f6eee2; color: #3c3049; }
+.fam-world.is-in { clip-path: circle(150vmax at var(--fam-x, 60px) var(--fam-y, 50%)); }
+.fam-world-in { display: flex; flex-direction: column; align-items: center; gap: var(--space-13); text-align: center; opacity: 0; transform: translateY(13px);
+  transition: opacity var(--duration-base) var(--ease) 300ms, transform var(--duration-move) var(--ease-move) 300ms; }
+.fam-world.is-in .fam-world-in { opacity: 1; transform: none; }
+.fam-world-in b { font-family: var(--font-display); font-weight: 300; font-size: clamp(54px, 9vw, 128px); line-height: 1; letter-spacing: -0.03em; }
+.fam-world-in > span:not(.label) { font-size: var(--text-lead); opacity: 0.8; }
+.fam-world-in .label { opacity: 0.6; color: inherit; } .fam-world .pill.ghost { color: inherit; border-color: currentColor; }
+
+@media (prefers-reduced-motion: reduce) {
+  .fam, .fam-world, .fam-world-in, .fam-here-block, .fam-top, .fam-list > li, .fam > .eyebrow, .fam-foot, .fam-btn, .fam-chip, .fam-links a, .fam-scrim, [data-family-page] { transition: none !important; }
+}

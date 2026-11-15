@@ -25,6 +25,40 @@ export function hermesPairEnv(bot) {
   return { HERMES_HOME: bot.hermes.home, HERMES_PROFILE: bot.hermes.profile };
 }
 
+/** Keep the person's command and add the binding once, comparing options with their values. */
+export function hermesPairRun(run, bot) {
+  const pair = hermesPairArgs(bot);
+  if (!pair.length) return [...run];
+  const end = run.indexOf("--");
+  const head = end < 0 ? run : run.slice(0, end);
+  const tail = end < 0 ? [] : run.slice(end);
+  const seen = new Set();
+  const words = [head[0]];
+  const add = (flag, value, original) => {
+    if (flag === "--profile" && value !== bot.hermes.profile) {
+      throw new Error("The command selects a different Hermes profile; match --profile to the bot's pairing.");
+    }
+    const key = JSON.stringify([flag, value]);
+    if (!seen.has(key)) words.push(...original);
+    seen.add(key);
+  };
+  for (let i = 1; i < head.length; i += 1) {
+    const word = head[i];
+    if (word === "--tui") add(word, null, [word]);
+    else if (["--profile", "--continue"].includes(word)) {
+      const value = head[++i];
+      add(word, value, value === undefined ? [word] : [word, value]);
+    } else if (/^--(?:profile|continue)=/.test(word)) {
+      const at = word.indexOf("=");
+      add(word.slice(0, at), word.slice(at + 1), [word]);
+    } else words.push(word);
+  }
+  add("--profile", pair[1], pair.slice(0, 2));
+  add("--tui", null, ["--tui"]);
+  add("--continue", "Bot Chat", pair.slice(3));
+  return [...words, ...tail];
+}
+
 export function hermesPairConflict(file, bot) {
   if (bot?.agent !== "hermes" || !bot.hermes || hermesPairProblem(bot.hermes)) return null;
   const other = file.bots.find((b) => b.id !== bot.id && b.agent === "hermes" && b.hermes?.home === bot.hermes.home && b.hermes?.profile === bot.hermes.profile);

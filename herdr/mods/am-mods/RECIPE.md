@@ -88,7 +88,7 @@ All of it in English (the rest of the pack is; there is no locale mechanism to s
   the mod's own `.state/`, other dot paths and `node_modules/` back into the fresh folder. A name
   the manager didn't install blocks the install until the person removes or renames it.
 - **The pack's mods** update together: `u` on one asks, then runs the pack's own
-  `mods/am-sidebar/bin/automagik-herdr update` (checksum-verified release, the replaced folders
+  `mods/am-sidebar/bin/automagik-herdr update` (the file behind `am update`; checksum-verified release, the replaced folders
   kept for `--rollback`) in this app home, never a per-mod clone; `d` on one says the pack checks
   its own files (install.sh again). The installer writes `installed=` into its record on every
   install, update and rollback.

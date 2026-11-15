@@ -230,7 +230,7 @@ test("a refused restart is named, and the others still run", async () => {
   view.switched.codex = { at: NOW, from: "ana@example.com · Pro", to: "bo@example.com · Pro",
     look: { bots: [{ id: "a", name: "A", project: "/p" }, { id: "b", name: "B", project: "/p" }], reliable: true } };
   state.exec = (_c, args) => (args.includes("a")
-    ? { code: 1, stdout: "", stderr: "automagik-herdr: A is working; restart it when it is idle, or pass --force" }
+    ? { code: 1, stdout: "", stderr: "am: A is working; restart it when it is idle, or pass --force" }
     : { code: 0, stdout: "{}", stderr: "" });
   draw();
   nodes.get("restart-codex").click(null, cx);
@@ -259,7 +259,7 @@ test("a restart whose new pane exited names its agent's own cause, not the CLI's
   const cause = "Error: model provider example-proxy is no longer configured (modelProviderNotConfigured)";
   const error = `t100 exited before its agent was up; its agent said: "${cause}" (hc read t100 shows the rest); t5 still runs A, untouched.`;
   state.exec = () => ({ code: 1, stdout: JSON.stringify({ error, terminal: "t100", cause }),
-    stderr: `automagik-herdr: A's pane moved to tab tb3.\nautomagik-herdr: ${error}\n` });
+    stderr: `am: A's pane moved to tab tb3.\nam: ${error}\n` });
   draw();
   nodes.get("restart-codex").click(null, cx);
   nodes.get("restart-codex").click(null, cx);
@@ -277,8 +277,9 @@ test("a refusal is shown in the CLI's words, past its warnings, without the clau
     look: { bots: [{ id: "a", name: "A", project: "/p" }, { id: "b", name: "B", project: "/p" }], reliable: true } };
   const working = "A is working in t5; restarting now would cut its turn in half. Wait until it is idle.";
   const noId = "t6 carries no session id, so codex would resume the latest conversation in /p. Nothing was restarted.";
+  // The CLI's own prefix goes from every line: am's, and the long one an older CLI wrote (B's).
   state.exec = (_c, args) => ({ code: 1, stdout: "",
-    stderr: args.includes("a") ? `automagik-herdr: a warning first\nautomagik-herdr: A is working in t5; restarting now would cut its turn in half. Wait until it is idle, or pass --force.\n`
+    stderr: args.includes("a") ? `am: a warning first\nam: A is working in t5; restarting now would cut its turn in half. Wait until it is idle, or pass --force.\n`
       : `automagik-herdr: ${noId} Restart with --fresh for a new conversation, or pass --force to resume the latest one.\n` });
   draw();
   nodes.get("restart-codex").click(null, cx);
@@ -294,7 +295,7 @@ test("a refusal is shown in the CLI's words, past its warnings, without the clau
 test("plain: every clause that names a flag goes; what an agent said, in quotes, stays as it said it (#413)", () => {
   assert.equal(plain("Let it finish, pass --tree to restart it too (resumed, under the new pane), or pass --force to end it."), "Let it finish.");
   assert.equal(plain("A is working; restart it when it is idle, or pass --force"), "A is working; restart it when it is idle.");
-  assert.equal(plain("t100 exited; t5 still runs A, untouched. Try automagik-herdr restart b-a --fresh."), "t100 exited; t5 still runs A, untouched.");
+  assert.equal(plain("t100 exited; t5 still runs A, untouched. Try am restart b-a --fresh."), "t100 exited; t5 still runs A, untouched.");
   assert.equal(plain(`its agent said: "Error: unknown option --foo. See help" (hc read t1 shows the rest). Pass --force.`),
     `its agent said: "Error: unknown option --foo. See help" (hc read t1 shows the rest).`);
   assert.equal(plain("Restart with --fresh (or --tree)."), "");
@@ -304,7 +305,7 @@ test("plain: every clause that names a flag goes; what an agent said, in quotes,
 // #413: the CLI's --json refusals of a busy bot, as cmdRestart prints them.
 const WORKING = "A is working in t5; restarting now would cut its turn in half. Wait until it is idle, or pass --force.";
 const HELPERS = "t5 has a helper that ends with it: t7. Let it finish, pass --tree to restart it too (resumed, under the new pane), or pass --force to end it with the pane.";
-const busyAnswer = (refused = "working", error = WORKING) => ({ code: 1, stdout: JSON.stringify({ error, refused, terminal: "t5" }), stderr: `automagik-herdr: ${error}\n` });
+const busyAnswer = (refused = "working", error = WORKING) => ({ code: 1, stdout: JSON.stringify({ error, refused, terminal: "t5" }), stderr: `am: ${error}\n` });
 const OK = { code: 0, stdout: JSON.stringify({ terminal: "t100", mode: "resume" }), stderr: "" };
 const ticks = async () => { for (let i = 0; i < 20; i += 1) await new Promise((go) => setImmediate(go)); };
 // The hc a busy panel sees: `panes` (address → status, "gone", "broken" when hc get fails with no
@@ -454,7 +455,7 @@ test("a helper reporting no status doesn't hold the panel up: --tree runs, and t
   await busyPanel({ answer: busyAnswer("helpers", HELPERS), panes: { t5: "idle", t7: null } });
   assert.ok(secondRestart().includes("--tree"), "a plain program such as a dev server passes");
   const said = "t7 doesn't tell hc whether it is busy, so --tree can't tell whether it has finished. Nothing was started. Look at it first, then pass --force to restart anyway.";
-  const { draw } = await busyPanel({ answer: busyAnswer("helpers", HELPERS), panes: { t5: "idle", t7: null }, then: { code: 1, stdout: "", stderr: `automagik-herdr: ${said}\n` } });
+  const { draw } = await busyPanel({ answer: busyAnswer("helpers", HELPERS), panes: { t5: "idle", t7: null }, then: { code: 1, stdout: "", stderr: `am: ${said}\n` } });
   const shown = text(draw());
   assert.ok(shown.includes("A: t7 doesn't tell hc whether it is busy. Nothing was started. Look at it first."), shown);
   assert.doesNotMatch(shown, /--[a-z]/);
@@ -464,7 +465,7 @@ test("a helper reporting no status doesn't hold the panel up: --tree runs, and t
 test("--tree refused though its JSON names a terminal is no restart: a new pane that exited, a turn started again; the bot stays listed (#413)", async () => {
   const cause = "Error: not logged in";
   const error = `t100 exited before its agent was up; its agent said: "${cause}" (hc read t100 shows the rest); t5 still runs A, untouched.`;
-  let p = await busyPanel({ answer: busyAnswer("helpers", HELPERS), panes: { t5: "idle", t7: "done" }, then: { code: 1, stdout: JSON.stringify({ error, terminal: "t100", cause }), stderr: `automagik-herdr: ${error}\n` } });
+  let p = await busyPanel({ answer: busyAnswer("helpers", HELPERS), panes: { t5: "idle", t7: "done" }, then: { code: 1, stdout: JSON.stringify({ error, terminal: "t100", cause }), stderr: `am: ${error}\n` } });
   let shown = text(p.draw());
   assert.doesNotMatch(shown, /every Codex bot is on the new account/);
   assert.ok(shown.includes(`A: ${error}`), shown);
@@ -482,7 +483,7 @@ test("a bot on a linked machine that needs --tree: the CLI's refusal (#437) keep
     + "as they were, on the account they started with. By hand: wait for a helper still working to finish, end each helper's pane "
     + "(hc kill vm/tN for one), then restart A there without --tree. A helper that still had work to do, start again yourself with hc run "
     + "on vm once A is back.";
-  const p = await busyPanel({ answer: busyAnswer("helpers", HELPERS), panes: { t5: "idle", t7: "done" }, then: { code: 2, stdout: "", stderr: `automagik-herdr: ${said}\n` } });
+  const p = await busyPanel({ answer: busyAnswer("helpers", HELPERS), panes: { t5: "idle", t7: "done" }, then: { code: 2, stdout: "", stderr: `am: ${said}\n` } });
   assert.ok(secondRestart().includes("--tree"));
   const shown = text(p.draw());
   assert.ok(shown.includes("A: Restarting a bot's helpers on a linked machine isn't built yet, so nothing was read or restarted: A and its helpers on vm "
@@ -663,7 +664,7 @@ test("a restart's terminal is followed: hc wait under 30 s through exec, then it
   assert.deepEqual(optionsOf(waits()[0]), { timeout: 28000 }, "ends by itself on any Herdr");
   assert.match(shown, /Restarted 1: every Codex bot is on the new account/);
   const error = "t100 exited before its agent was up; t5 still runs A, untouched.";
-  p = await runPanel({ runAs: "live", hc: hcFn, answer: { code: 1, stdout: JSON.stringify({ error, terminal: "t100" }), stderr: `automagik-herdr: a warning\nautomagik-herdr: ${error}\n` },
+  p = await runPanel({ runAs: "live", hc: hcFn, answer: { code: 1, stdout: JSON.stringify({ error, terminal: "t100" }), stderr: `am: a warning\nam: ${error}\n` },
     wait: () => { finishRun(state.runs[0]); return { code: 0, stdout: "{}", stderr: "" }; } });
   shown = await p.press();
   assert.ok(shown.includes(`Restarted 0 of 1. Not restarted: A: ${error}`), shown);
@@ -784,11 +785,11 @@ test("the restart terminal's script and the prepare, under a real sh: the CLI's 
     const twoDays = (Date.now() - 2 * 24 * H) / 1000;
     utimesSync(stale, twoDays, twoDays);
     const files = ["a.out", "a.err", "a.code"].map((f) => join(runs, f));
-    const cli = 'printf "{\\"in\\":\\"%s\\"}" "${HC_TERMINAL_ID-none}"; echo "automagik-herdr: refused." >&2; exit 3';
+    const cli = 'printf "{\\"in\\":\\"%s\\"}" "${HC_TERMINAL_ID-none}"; echo "am: refused." >&2; exit 3';
     const r = spawnSync("sh", ["-c", script, "sh", ...files, "sh", "-c", cli], { env: { ...process.env, HC_TERMINAL_ID: "t42" }, encoding: "utf8" });
     assert.equal(r.status, 0);
     assert.equal(readFileSync(files[0], "utf8"), '{"in":"none"}', "the CLI runs as under exec: not inside a pane of its own");
-    assert.equal(readFileSync(files[1], "utf8"), "automagik-herdr: refused.\n");
+    assert.equal(readFileSync(files[1], "utf8"), "am: refused.\n");
     assert.equal(readFileSync(files[2], "utf8"), "3\n");
     assert.match(r.stderr, /refused\./, "its screen shows what the CLI said");
     assert.equal(existsSync(`${files[2]}.tmp`), false);
@@ -889,7 +890,7 @@ test("no sidebar mod: the banner says how to restart, with no button", async () 
   nodes.get("primary-codex").click(null, cx);
   await cx.settle();
   const root = draw();
-  assert.match(text(root), /automagik-herdr restart <bot>/);
+  assert.match(text(root), /am restart <bot>/);
   assert.equal(nodes.has("restart-codex"), false);
 });
 
@@ -1244,7 +1245,7 @@ test("Claude logins (#453 review M2): a check that never answers lands as didn't
   const { view, cx, draw } = await panel({ record: { use: "default", logins: [{ id: "2", dir: TWO }] }, settle: false,
     claude: { status: { default: signedIn("cy@example.com", DEFAULT_DIR), [TWO]: () => held.then(() => signedIn("dee@example.com", TWO)) } } });
   const asks = () => state.calls.filter((c) => c[0] === "/usr/bin/env" && c.at(-1) === "status").length;
-  for (let i = 0; i < 20 && asks() < 2; i += 1) await new Promise((go) => setTimeout(go, 1));
+  for (const until = Date.now() + 5000; asks() < 2 && Date.now() < until;) await new Promise((go) => setTimeout(go, 1));
   assert.equal(asks(), 2, "the first round: both logins, side by side");
   view.forceLogins = true;
   view.reload(cx);

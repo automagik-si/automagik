@@ -2,9 +2,9 @@
 
 The `automagik-web` DeepSeek Harness profile on a host: dsh's base and web app, the Bot team
 (`@automagik/bots-dsh`), the welcome (`@automagik/welcome-dsh`) and ACP agents
-(`@automagik/acp-dsh`), from one chosen release. Built by CI only
+(`@automagik/acp-dsh`), from one chosen release (or the committed checkout in PR tests). Built by CI only
 (`.github/workflows/server-image.yml`): every change builds, smokes and scans it, and a dispatch
-or a published release pushes it to `ghcr.io/automagik-dev/automagik-server` as
+or a published release pushes it to `ghcr.io/automagik-si/automagik-server` as
 `:<content>-<short sha>` and, when allowed, `:latest`. There is no laptop push. Tracked in #620.
 
 Pins: dsh `0.2.2-rc.2` (the desktop runtime's own lock) and the plugins at one release, the
@@ -21,6 +21,32 @@ content version, and `org.opencontainers.image.revision` = the full workflow com
 against the release's `plugins.json` (sha512 integrity, size) and `PLUGINS.SHA256SUMS` (sha256)
 before dsh installs it.
 
+Pull requests use a separate, nonpublishing checkout input. The runner installs only the
+frozen root tooling, then normally packs all four owned plugins with `bun pm pack
+--ignore-scripts`; it neither installs plugin dependencies nor regenerates bundles. Every
+packed file must match a regular file at the actual checkout HEAD (normally GitHub's merge
+commit); packable untracked/ignored files and dirty source fail. The fixed package set, normal
+`plugins.json`, size/SRI/SHA chain and independently passed checkout SHA and manifest digest
+are checked again before assembly. DSH installs the same three profile plugins normally.
+There is no release fallback, arbitrary source directory or URL in checkout mode.
+
+The PR tag and OCI version are `checkout-<full SHA>`; `versions.json.automagik` and plugin
+versions remain the root version, with separate source kind, revision and manifest metadata.
+CI copies the installed Bots child and versions metadata from an owned stopped container of
+the inspected candidate image ID, verifies the child against the committed checkout, and
+keeps `checkout-image-proof.json` even if a later smoke or scan fails. Both existing smokes
+and the complete secrecy scan still apply. No PR image is saved for publication. Publication
+requires release/dispatch and release input, then checks the loaded candidate's labels and
+rootfs source metadata before registry login. Deployment, digest records and attestations
+continue to describe verified release assets only.
+
+A push to `dev` retains its existing path filter and release resolution: use the current
+version's release when it has plugins, otherwise the newest stable release with plugins.
+It never publishes and can still fail on old immutable release content. Release and dispatch
+selection, prerelease/latest rules and default standalone/companion builds remain release
+based. Unknown events and contradictory source arguments fail closed. Image builds and the
+actual rootfs proof run in GitHub Actions only.
+
 The builder also applies the desktop app's DSH runtime patches
 (`apps/desktop/runtime/patches` via `apps/desktop/scripts/runtime-patches.mjs`) to the same
 pinned packages, and fails the build on any version or hash mismatch. Today that includes
@@ -31,7 +57,7 @@ a plugin update cannot keep a stale manifest.
 ## Pull
 
 ```sh
-docker pull ghcr.io/automagik-dev/automagik-server@sha256:…
+docker pull ghcr.io/automagik-si/automagik-server@sha256:…
 ```
 
 Every run that pushes writes the manifest digest into the release's own record: the asset
@@ -46,7 +72,7 @@ gh release download v3.93.0 --pattern server-image.json --output - | jq -r .ref
 The record holds `image`, `digest`, `ref` (`image@digest`), `version` (the content release),
 `revision` (the workflow commit) and `tag`. The `record` job builds it only from the digest the
 push printed, refuses anything that is not a `sha256:` manifest digest, reads the asset back from
-the release, and is the only job that may write to a release (it has no registry access). A
+the release, and is the only job that may write to a release or attest the pushed digest. A
 later push for the same content release replaces the record; a desktop rebuild keeps it. The
 publish job also prints the digest in its summary and saves it as `image-digest.txt`. `:<content>-<short sha>` identifies one build of one content release from
 one commit; the version label is the content release and the revision label the commit. `:latest`
@@ -54,11 +80,47 @@ moves only when the content release is not a prerelease and its version is not o
 published `:latest` (compared by that label). GitHub creates a new package private, so the first
 publish needs the one-time visibility flip below before an anonymous pull works.
 
+## Follow
+
+Arca and other consumers discover the newest stable image at one URL:
+
+<https://github.com/automagik-si/automagik/releases/download/server-lane/server-image.json>
+
+After the `record` job attests the pushed digest and records it on its content release, the
+`server-lane` job replaces that same record on `server-lane`. This rolling release is created as a prerelease,
+never marked Latest and never edited by hand. The lane job takes turns in a concurrency group (one waiting, an older waiting run dropped for a
+newer, as `pocket-lane`), compares all three version components numerically, and refuses an older content
+version. A rebuild of the same version may replace its digest. Prereleases never advance the
+lane. An unreadable or malformed existing pointer stops the update; only a confirmed missing
+release creates the lane.
+
+Each pushed image receives a GitHub build-provenance attestation through
+`actions/attest-build-provenance`, published to GHCR with `push-to-registry`. Signing is keyless:
+only the `record` job gets `id-token: write` and `attestations: write`; it uses the workflow token
+for registry access, with no new secret. Verify the digest before pulling or deploying it:
+
+```sh
+curl -fsSL https://github.com/automagik-si/automagik/releases/download/server-lane/server-image.json \
+  -o server-image.json
+ref=$(jq -er 'select(.schema == 1 and .image == "ghcr.io/automagik-si/automagik-server"
+  and (.digest | test("^sha256:[0-9a-f]{64}$")) and .ref == (.image + "@" + .digest)) | .ref' server-image.json)
+gh attestation verify "oci://${ref}" --repo automagik-si/automagik
+docker pull "${ref}"
+```
+
+Consumers must stop on a failed validation or verification, retain their highest accepted
+content version, and refuse a downgrade. Provenance verifies the image digest and repository;
+the JSON record itself is not signed and the attestation does not prove its freshness. Pin
+the verified digest and update on the same volumes as described below. GitHub documents the
+[attestation action](https://github.com/actions/attest-build-provenance) and
+[verification command](https://cli.github.com/manual/gh_attestation_verify).
+
 ## Publish
 
 A published release for a version that carries `plugins.json` publishes the image. A cut's own
-release starts no workflow (GitHub suppresses events made with `GITHUB_TOKEN`), so dispatch it
-after merge:
+release event starts no workflow, so `release.yml` explicitly dispatches every stable plugin
+release on its tag with `content=v<version>`. This independent job only warns on dispatch failure.
+To retry manually after merge:
 
 ```sh
 gh workflow run server-image.yml --ref dev -f content=v3.93.0
@@ -74,12 +136,12 @@ Four preparation/runtime stages, every base digest-pinned (plus the distroless b
 
 | Stage | What it does |
 |---|---|
-| `builder` | `node:24.22.2-trixie-slim`: installs the pinned harness and pnpm, verifies the release tarballs, installs/prunes the profile, prepares its inspected offline dependency store, writes version/revision metadata |
-| `tools` | `debian:bookworm-slim`: `bash`, `dash` as `/bin/sh`, git core, `ripgrep`, their `ldd` closure, and the empty `/data` tree owned by uid 1000. No perl: git's perl subcommands are not shipped |
+| `builder` | `node:24.22.3-trixie-slim`: installs the pinned harness and pnpm, verifies the release tarballs, installs/prunes the profile, prepares its inspected offline dependency store, writes version/revision metadata |
+| `tools` | `debian:bookworm-slim`: `bash`, `dash` as `/bin/sh`, git core, `ripgrep`, `flock`, `tar`, `gzip`, `find`, their `ldd` closure, and the empty `/data` tree owned by uid 1000. No perl: git's perl subcommands are not shipped |
 | `gate-deps` | Bun 1.4.4 installs the exact WebAuthn dependency and `server/bun.lock`, with lifecycle scripts disabled, then prunes development files. Bun stays in this stage |
 | `runtime` | `scratch` holding the distroless nodejs24 rootfs (node and glibc), cleaned in the `tools` stage (man pages and changelogs stripped there with coreutils), plus the tools above, the code, nothing else — no apt, npm, curl or build toolchain |
 
-The distroless tag ships Node 24.14.0 (above dsh's 24.9 floor); the builder is 24.22.2. The
+The distroless tag ships Node 24.14.0 (above dsh's 24.9 floor); the builder is 24.22.3. The
 pruned payload keeps everything the composed tree names — office-to-pdf and its
 `libreoffice-kit-wasm` included — and drops the inspector, the voice engine, the musl sharp
 variants, the win32/darwin node-pty prebuilds and the experimental bundles the profile never
@@ -117,7 +179,7 @@ docker volume create automagik-data
 docker run -d --name automagik --network host \
   --volume automagik-data:/data \
   --env DEEPSEEK_API_KEY=sk-… \
-  ghcr.io/automagik-dev/automagik-server@sha256:…
+  ghcr.io/automagik-si/automagik-server@sha256:…
 ```
 
 Use `automagik-server:local` here after `node server/build.mjs --tag automagik-server:local` to
@@ -168,14 +230,21 @@ For the single-container form, read the same report with:
 docker exec automagik /nodejs/bin/node /opt/automagik/healthcheck.mjs --json
 ```
 
-At seeding, `automagik-server-profile` records the image release and a SHA-256 of the exact seeded
-`package.json`. A newer image updates the Bot team, welcome and ACP only while that hash still
-matches. Old volumes without the structured marker are adopted only when the entire canonical
-package manifest matches the known image seed shape. The manifest identifies that seed even
-when installed plugins are missing or mixed; corruption never becomes an owner-managed exception.
-Extra fields, changed dependencies or other manifest edits opt out. Owner-managed profiles are
-left alone and identified in both startup logs and the report. Settings such as
-`cordis.patch.yml` survive an automatic update.
+At seeding, `automagik-server-profile` records the image release, the image's own manifest and a
+SHA-256 of the exact `package.json`. Plugins added later through the welcome (Power Omni on) or
+DSH's Plugins page keep the profile following the image: their dependencies and bundles are the
+workspace's, and a newer image still updates the Bot team, welcome and ACP. An update keeps each
+added plugin's locked resolution and installed version, with its peer references moved to the
+new Bot team. If one cannot be reinstalled from the volume's cache, or comes out at another
+version, the update rolls back. A restart on the same image keeps the workspace's lock.
+
+Markers written before this held only the hash: their base is the image's manifest with the
+recorded release's three tarball names. Volumes without a structured marker are adopted only when
+the entire canonical package manifest matches the known image seed shape. Missing or mixed
+installed plugins never become an owner-managed exception. Changing one of the image's three
+dependencies, removing or reordering a base bundle, or editing any other manifest field opts out.
+Owner-managed profiles are left alone and identified in startup logs and the report. Settings
+such as `cordis.patch.yml` survive an automatic update.
 
 Image preparation holds a kernel file lock on the DSH volume across recovery, first seeding
 and the complete update. Concurrent starts sharing that volume wait up to 180 seconds, then
@@ -188,11 +257,27 @@ Before installing, the image saves the complete old profile, including its packa
 lock and installed dependencies, under `/data/dsh/backups/<UTC>/automagik-web`. Installation runs
 in a separate staging profile through `dsh plugin install --offline --frozen-lockfile --prod
 --ignore-scripts`. Its local tarballs are materialized from the image's inspected, unpacked
-plugin files, and transitive dependencies come from its pruned offline store. No runtime release
+plugin files; their dependencies come from its pruned offline store, and added plugins from the
+volume's own pnpm store, where DSH put them when it installed them. The frozen lock is the
+workspace's with the image's three resolutions swapped in: it never picks new versions of added
+plugins. pnpm indexes a git-hosted plugin (Omni's) by whether its scripts ran, so the update
+reuses the index of the files DSH installed instead of fetching them again. No runtime release
 download or registry access is needed; the image still ships no archive that bypasses the
-secrecy scan. All three installed versions must verify before the staged profile replaces the
-old one. A failed attempt leaves the old profile running and reports `update-rolled-back` with
-an unhealthy result, so a keeper can distinguish rollback from a successful update.
+secrecy scan. All three installed versions, and every added plugin's, must verify before the
+staged profile replaces the old one. A failed attempt leaves the old profile running and reports
+`update-rolled-back` with an unhealthy result, so a keeper can distinguish rollback from a
+successful update.
+
+Fresh seeds also materialize those three tarballs on the data volume. Both seeds and upgrades
+retain them in the profile's `vendor/`, with matching lockfile integrity: any later
+`dsh plugin install` re-resolves the profile's direct dependencies. Once an update's install has
+verified, the previous image's three archives leave `vendor/` (the backup keeps them); any other
+file there stays. A matching image repairs an older image-managed seed whose tarballs are
+missing, in the workspace's own lock (a lock it cannot read is replaced by the image's).
+Owner-managed profiles are left alone.
+The image itself stays archive-free and carries no Omni installation. Omni's plugin downloads
+and verifies its own Bun runtime using Node; its sandbox installer uses the image's `tar`,
+`gzip` and `find` to unpack its verified Postgres and NATS downloads.
 
 Equal or older releases never downgrade installed plugins. **Going back requires restoring the
 host snapshot**, including matching image/data state: plugin migrations are forward only.
@@ -253,7 +338,7 @@ GitHub creates a new Container package private even when the repository is publi
 API has no endpoint for a Container package's visibility (as of 2026-11). Make it public once, as
 an organization owner:
 
-1. Open <https://github.com/orgs/automagik-dev/packages/container/automagik-server>.
+1. Open <https://github.com/orgs/automagik-si/packages/container/automagik-server>.
 2. **Package settings → Danger Zone → Change visibility → Public**.
 
 The publish job checks the package with `GITHUB_TOKEN` and, when it is not public (or the token
@@ -262,7 +347,7 @@ but anonymous pulls fail until the flip; the login-less pull is the verification
 
 ```sh
 docker logout ghcr.io 2>/dev/null || true
-docker pull ghcr.io/automagik-dev/automagik-server@sha256:…
+docker pull ghcr.io/automagik-si/automagik-server@sha256:…
 ```
 
 ## Measured
@@ -400,7 +485,7 @@ workflow lists the entries used and reports a stale entry.
 The image is shrunk before the scan: third-party test, example and docs folders, non-Linux
 prebuilds and the profile's `vendor/*.tgz` install inputs are pruned (`assemble.mjs`). The offline
 store contains only individually hashed files retained in the inspected profile; local plugin
-archives are generated in the writable staging profile at update time. The
+archives are generated and retained in the writable profile at seed or update time. The
 `tools` stage copies the distroless rootfs, strips `usr/share/doc`, `man`, `info` and `lintian`
 there with coreutils, and the final `scratch` copies that cleaned rootfs. There is no `rm` in
 the runtime image. The `archive` rule never allows an archive that is left.
