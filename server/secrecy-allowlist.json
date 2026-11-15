@@ -319,5 +319,64 @@
     "sha256": "f6c081a569f361e865ef08e1da7e4c610ee859e6f34cb9441588531be66ac649",
     "fileSha256": "e54979d7970c09a777d9917a098ab0de8768c60dd198a97167480ffde9bc8f7c",
     "reason": "The published resource-URI grammar repeats the already-reviewed generated type-comment example; exact exported source and complete-file digest are pinned"
+  },
+  {
+    "file": "opt/automagik/profile/node_modules/deepmerge-ts/README.md",
+    "rule": "token-url",
+    "match": "https://codecov.io/gh/RebeccaStevens/deepmerge-ts/branch/main/graph/badge.svg?token=MVpR1oAbIT)](https://codecov.io/gh/RebeccaStevens/deepmerge-ts)\\",
+    "reason": "deepmerge-ts's published README coverage badge: a public badge address of that project, not a credential of ours"
+  },
+  {
+    "file": "opt/automagik/profile/node_modules/jose/dist/webapi/key/import.js",
+    "rule": "secret",
+    "match": "-----BEG…",
+    "reason": "JOSE's PEM parser source checks for this header literal; a complete private-key block is still refused outside a vendored binary"
+  },
+  {
+    "file": "opt/automagik/profile/node_modules/playwright-core/lib/coreBundle.js",
+    "rule": "git-credentials",
+    "match": "http://user:password@",
+    "reason": "Playwright's command help shows this placeholder as a proxy address example, not a credential"
+  },
+  {
+    "file": "opt/automagik/profile/node_modules/safer-buffer/Readme.md",
+    "rule": "home-path",
+    "sha256": "9d7e91c98e2b6ffe9bf6204950899de263d279d8015f49f8a86c63f62ecc9995",
+    "reason": "safer-buffer's published README shows its author's shell prompt in an example, not a host account of ours"
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/2d/8aab9f97a31b489fa8ce8f8babf76ec5a37d20b9487af640114d1d73650a7d3d056e8ba15e2893a50d0313de4b2ec22ea72ad77ccc73ddfaa2d5e1e8ea3cdd",
+    "rule": "token-url",
+    "match": "https://codecov.io/gh/RebeccaStevens/deepmerge-ts/branch/main/graph/badge.svg?token=MVpR1oAbIT)](https://codecov.io/gh/RebeccaStevens/deepmerge-ts)\\",
+    "fileSha256": "6f990e0b1abea814aba479524b89d2bf6d5e3b007871ee8c912507c3d553ed7f",
+    "reason": "Byte-identical offline cache of the already-reviewed deepmerge-ts 8.0.2 README.md coverage badge; both the content-addressed cache path and file digest are pinned."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/5d/928bd275fb2ce1a92b654bfe76e911fce260859746445d0e03210f3a049ed2c444714c2dcd84de00b73ede81415043e8f2a126b2197c335f780fdec02e81ac",
+    "rule": "secret",
+    "match": "-----BEG…",
+    "fileSha256": "ab2f57a9db99e8d48451a8d0a8adf75379381f65b0e3e28ba6c02aa5bb3ee5fa",
+    "reason": "Byte-identical offline cache of the already-reviewed jose 6.2.17 dist/webapi/key/import.js header literal; both the content-addressed cache path and module digest are pinned."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/60/6ab220d3e9002ad79374bbeaa1d8822ebcb9de9a3dd2d31d1b2c181b193cf312d0dbc25d54677fe302900dd1dd4075bb340ca50ed4dd64845fc003a4775a1d",
+    "rule": "home-path",
+    "sha256": "9d7e91c98e2b6ffe9bf6204950899de263d279d8015f49f8a86c63f62ecc9995",
+    "fileSha256": "d4331b7c5af9c02161150daf9451ee6bc7a73ece3ec0312603fae09f46a817d8",
+    "reason": "Byte-identical offline cache of the already-reviewed safer-buffer 2.1.2 Readme.md shell prompt example; both the content-addressed cache path and file digest are pinned."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/98/967f5b123f97ade58b0cbc0866bef042489da079af6d0a5c821489de5f141e82dd03352f21ae81e05a4c08e8db9d4282aa62c03cde6967311cba4066d0c7c8",
+    "rule": "home-path",
+    "match": "/home/pwuser",
+    "fileSha256": "829521b67ed7be90c7d6d6098ff39f2241562d47e4ad7ccab13710924a56001d",
+    "reason": "Byte-identical offline cache of the already-reviewed playwright-core 1.64.1 lib/coreBundle.js container-user example; both the content-addressed cache path and module digest are pinned."
+  },
+  {
+    "file": "opt/automagik/offline-store/v10/files/98/967f5b123f97ade58b0cbc0866bef042489da079af6d0a5c821489de5f141e82dd03352f21ae81e05a4c08e8db9d4282aa62c03cde6967311cba4066d0c7c8",
+    "rule": "git-credentials",
+    "match": "http://user:password@",
+    "fileSha256": "829521b67ed7be90c7d6d6098ff39f2241562d47e4ad7ccab13710924a56001d",
+    "reason": "Byte-identical offline cache of the already-reviewed playwright-core 1.64.1 lib/coreBundle.js proxy address example; both the content-addressed cache path and module digest are pinned."
   }
 ]
