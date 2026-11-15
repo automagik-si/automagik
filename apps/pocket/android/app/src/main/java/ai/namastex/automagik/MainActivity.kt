@@ -137,10 +137,16 @@ fun stateName(word: String) = when (word) { "blocked" -> "Needs you"; "working" 
         }
         deckOpen = true
     }
-    // The preview's deck session does not outlive the preview, so Exit clears its answered count.
+    // The preview's deck session does not outlive the preview, so Exit clears its answered count. The flag last seen
+    // is saved, so a rebuild (theme, font size, restore) keeps the deck and its count.
+    var deckDemo by rememberSaveable { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(state.demo) {
-        deckMemory.answered = emptySet(); deckMemory.gone = emptySet(); deckMemory.seen = 0; deckMemory.complete = false
-        if (!state.demo) deckOpen = false
+        val change = Teams.deckOnPreview(deckDemo, state.demo)
+        deckDemo = state.demo
+        if (change.reset) {
+            deckMemory.answered = emptySet(); deckMemory.gone = emptySet(); deckMemory.seen = 0; deckMemory.complete = false
+        }
+        if (change.close) deckOpen = false
     }
     /** The machine whose Automagik Bot chats are listed (read only). */
     var botChats by remember { mutableStateOf<String?>(null) }

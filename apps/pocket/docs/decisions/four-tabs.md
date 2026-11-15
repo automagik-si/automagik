@@ -25,6 +25,8 @@ placement and the progress strip do not.
   use, not the Team bubbles. It opens from the needs-you count tile and the **Review** bar. A row
   with a Bot chat and no terminal gets an "Open chat" card in this first cut. Answers go through
   the same path as the terminal's answer buttons.
+- As built: no row with a Bot chat becomes a card. Those rows stay listed on Home, and the deck
+  lists them at its end, each with an **Open chat** button (see Current state).
 - What moved, so nothing is lost:
 
   | Before | Now |
@@ -43,26 +45,30 @@ placement and the progress strip do not.
 
 - Tabs, the default and Back: `android/app/src/main/java/ai/namastex/automagik/Nav.kt`
   (`TABS`, `HOME = TEAM`, `back`, `barShown`, `badge`). Tested in `NavTest`.
-- The bar: `PocketTabs`, `android/app/src/main/java/ai/namastex/automagik/MainActivity.kt:277`.
+- The bar: `PocketTabs`, `android/app/src/main/java/ai/namastex/automagik/MainActivity.kt:334`.
   Home carries the agents that need you (Today's badge), Team the bots that need you.
-- Home is `OverviewScreen` with no space (`MainActivity.kt:404`), the spend tile `SpendCount`
-  (`MainActivity.kt:450`). `ProjectsTest.homeShowsTodaysCountsAndCarriesItsBadge` checks its counts.
-- Home's needs-you deck (`DeckScreen.kt:76`): one card per entry of Home's own Needs you list, the
+- Home is `OverviewScreen` with no space (`MainActivity.kt:410`), the spend tile `SpendCount`
+  (`MainActivity.kt:456`). `ProjectsTest.homeShowsTodaysCountsAndCarriesItsBadge` checks its counts.
+- Home's needs-you deck (`DeckScreen.kt:111`): one card per entry of Home's own Needs you list, the
   list its count tile, badge and cards use (`Teams.deckCards`, `Teams.kt:355`). Right is Yes, left is
   No, up opens the terminal; the same three buttons sit under the card, with the YES/NO stamps as the
   card leans. The header counts the cards left. Only terminal entries become cards: every chat row
-  (`c.chat != null`, `Teams.deckAnswerable`, `Teams.kt:412`) stays out. `Teams.deckView` (`Teams.kt:378`) and `Teams.swipe` (`Teams.kt:433`) hold the end state
+  (`c.chat != null`, `Teams.deckAnswerable`, `Teams.kt:412`) stays out. `Teams.deckView` (`Teams.kt:378`) and `Teams.swipe` (`Teams.kt:443`) hold the end state
   and the gesture rule; `Teams.deckAfterSelection` (`Teams.kt:425`) keeps the deck through a card's
   Back and closes it for any other selection. Home's needs-you count and badge use
   `Projects.Pulse.homeNeedsYou`, every blocked row; chat rows stay listed with "In chat" or
   "On computer" but are not deck cards. When no terminal card is left, the deck lists them with an
   **Open chat** button instead of All clear.
   `PocketApp` owns the open state
-  (`MainActivity.kt:128`), and Home's needs-you count tile and **Review** bar open it
-  (`MainActivity.kt:444`, `:473`), so a later "Answer all" button opens the same screen. A card's
+  (`MainActivity.kt:128`), and Home's needs-you count tile (`MainActivity.kt:451` and `:462`) and
+  **Review** bar (`:479`) open it, so a later "Answer all" button opens the same screen. A card's
   terminal keeps the deck's answers on the way Back, and a disconnected machine's requests
   show the offline end. The last answer shows All clear ("You answered N requests. Your bots are
-  back to work."), the bot hops once, and **Back to Home** closes the deck.
+  back to work."), the bot hops once, and **Back to Home** closes the deck. A card being sent takes
+  no drag, and a motion something else interrupts counts as finished (`DeckSend`), so the deck
+  never waits on a card; the exit window (`Teams.DECK_EXIT_MS`, 700 ms) moves it on when
+  animations are off. A theme, font or restore rebuild keeps the deck and its count; only entering
+  or leaving the preview resets them (`Teams.deckOnPreview`).
   Tested in `TeamsTest` and `HomeChatsTest`.
 - Code (wish group 3), the desktop's Herdr window made mobile:
   - The spaces and bots tree (`Sidebar.rows`, drawn by `sidebarRows`) places each project's bots under

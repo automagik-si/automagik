@@ -6,9 +6,20 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.BroadcastFrameClock
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import java.io.File
 import java.time.ZoneOffset
 
@@ -610,6 +621,66 @@ class TeamsTest {
         val normal = Teams.deckUnder(cards.drop(1), null)
         assertEquals(cards[2], normal.next)
         assertEquals(1, normal.behind)
+    }
+
+    /** The card's exit is dx.animateTo(...); a touch during it snaps dx, which interrupts that animation. */
+    @Test fun aDragDuringTheExitStillFinishesTheCard() {
+        val clock = BroadcastFrameClock()
+        val scope = CoroutineScope(Job() + Dispatchers.Unconfined + clock)
+        val dx = Animatable(0f)
+        val recorded = mutableListOf<String>()
+        var finished: Boolean? = null
+        DeckSend(scope, record = { recorded += it }, finish = { finished = it }, returnMotion = {}).send("k",
+            dispatch = { done -> done(true) }, exit = { dx.animateTo(1400f, tween(500)) })
+        clock.sendFrame(0L); clock.sendFrame(100_000_000L)
+        assertTrue("the exit animation is under way", dx.isRunning && dx.value > 0f && dx.value < 1400f)
+        assertNull("not finished while the exit runs", finished)
+        scope.launch { dx.snapTo(dx.value + 5f) }
+        clock.sendFrame(200_000_000L); clock.sendFrame(900_000_000L)
+        assertEquals(listOf("k"), recorded)
+        assertEquals("the answered card is finished, so the deck can advance", true, finished)
+        scope.cancel()
+    }
+
+    /** A refused answer returns the card with dx.animateTo(0f); a touch during that return snaps dx. */
+    @Test fun aDragDuringTheReturnStillFreesTheCard() {
+        val clock = BroadcastFrameClock()
+        val scope = CoroutineScope(Job() + Dispatchers.Unconfined + clock)
+        val dx = Animatable(0f)
+        var finished: Boolean? = null
+        DeckSend(scope, record = { }, finish = { finished = it }, returnMotion = { dx.animateTo(0f, tween(180)) })
+            .send("k", dispatch = { done -> done(false) }, exit = { dx.snapTo(600f) })
+        clock.sendFrame(0L); clock.sendFrame(50_000_000L)
+        assertTrue("the return animation is under way", dx.isRunning && dx.value > 0f && dx.value < 600f)
+        assertNull("not finished while the return runs", finished)
+        scope.launch { dx.snapTo(dx.value + 5f) }
+        clock.sendFrame(100_000_000L); clock.sendFrame(900_000_000L)
+        assertEquals("the refused card is freed, so Yes and No work again", false, finished)
+        scope.cancel()
+    }
+
+    /** With animations off an exit can never report back; the deadline still moves the deck on. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun anExitThatNeverEndsFinishesAtTheDeadline() = runTest {
+        val scope = CoroutineScope(Job() + StandardTestDispatcher(testScheduler))
+        var finished: Boolean? = null
+        DeckSend(scope, record = { }, finish = { finished = it }, returnMotion = {}).send("k",
+            dispatch = { done -> done(true) }, exit = { awaitCancellation() })
+        advanceTimeBy(Teams.DECK_EXIT_MS - 1); runCurrent()
+        assertNull("still inside the exit window", finished)
+        advanceTimeBy(2); runCurrent()
+        assertEquals("the deck advances once the exit window ends", true, finished)
+        scope.cancel()
+    }
+
+    @Test fun onlyARealPreviewChangeResetsOrClosesTheDeck() {
+        // A rebuild (theme, font size, restore) sees the saved flag again: the deck and its count stay.
+        assertEquals(Teams.PreviewChange(reset = false, close = false), Teams.deckOnPreview(last = true, demo = true))
+        assertEquals(Teams.PreviewChange(reset = false, close = false), Teams.deckOnPreview(last = false, demo = false))
+        assertEquals(Teams.PreviewChange(reset = false, close = false), Teams.deckOnPreview(last = null, demo = false))
+        // Leaving the preview resets the count and closes the deck; entering it only resets.
+        assertEquals(Teams.PreviewChange(reset = true, close = true), Teams.deckOnPreview(last = true, demo = false))
+        assertEquals(Teams.PreviewChange(reset = true, close = false), Teams.deckOnPreview(last = false, demo = true))
     }
 
     @Test fun anAnswerIsRecordedWhenTheCardMotionIsCancelled() {

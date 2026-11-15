@@ -406,8 +406,8 @@ object Teams {
         if (sending) current else incoming
 
     /**
-     * Whether the phone can answer this card: a terminal can always be opened; a Bot chat only when its bridge
-     * takes phone writes and the chat does not say to answer on the computer.
+     * Whether an entry becomes a deck card: only a terminal does. Every Bot-chat entry stays out of the deck and is
+     * listed at its end ([deckChats]), whatever its bridge accepts.
      */
     fun deckAnswerable(c: DeckCard): Boolean = c.chat == null
 
@@ -427,6 +427,16 @@ object Teams {
         fromDeck -> open to true
         else -> false to false
     }
+
+    /**
+     * What the preview flag does to the deck, given the flag [last] seen (saved across a rebuild; null before the
+     * first) and the flag now. Only a real change resets the deck's count, and leaving the preview closes the deck;
+     * a rebuild (theme, font size, restore) sees the same flag and keeps both.
+     */
+    data class PreviewChange(val reset: Boolean, val close: Boolean)
+    fun deckOnPreview(last: Boolean?, demo: Boolean): PreviewChange =
+        if (last == null || last == demo) PreviewChange(reset = false, close = false)
+        else PreviewChange(reset = true, close = !demo)
 
     /** A swipe's answer, by the axis it moved most along: up opens, right is Yes, left is No; short of [threshold], none. */
     enum class Swipe { YES, NO, OPEN, NONE }

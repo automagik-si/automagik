@@ -188,7 +188,6 @@ class HomeChatsTest {
         val rows = listOf(row("s1", "blocked", kind = "question"))
         val p = pulse(chats(rows), pane("t1", "blocked"))
         assertEquals(2, p.homeNeedsYou)
-        assertEquals(1, p.answerableNeedsYou)
         assertEquals(2, Nav.badge(Nav.HOME_TAB, p.homeNeedsYou, 0))
     }
 

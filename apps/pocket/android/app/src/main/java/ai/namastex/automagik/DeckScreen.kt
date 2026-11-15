@@ -37,8 +37,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -47,19 +50,29 @@ private data class MenuRead(val menu: Prompt.Menu?, val done: Boolean)
 
 /**
  * One answer: the view-model callback records it, while the card's scope only plays the motion. A deck closed
- * during the confirm window still counts the answer; a cancelled scope only skips the animation.
+ * during the confirm window still counts the answer; a cancelled scope only skips the animation. A motion that
+ * another animation interrupts counts as finished, so the card still leaves or is freed.
  */
 class DeckSend(private val scope: CoroutineScope, private val record: (String) -> Unit,
                private val finish: (sent: Boolean) -> Unit, private val returnMotion: suspend () -> Unit) {
     fun send(key: String, dispatch: (done: (Boolean) -> Unit) -> Unit, exit: suspend () -> Unit) {
         val result = CompletableDeferred<Boolean>()
         scope.launch {
-            withTimeoutOrNull(Teams.DECK_EXIT_MS) { exit() }
-            if (result.await()) finish(true) else { returnMotion(); finish(false) }
+            motion { withTimeoutOrNull(Teams.DECK_EXIT_MS) { exit() } }
+            if (result.await()) finish(true) else { motion(returnMotion); finish(false) }
         }
         dispatch { sent ->
             if (sent) record(key)
             result.complete(sent)
+        }
+    }
+
+    /** Runs [block]; an interrupted animation ends it, while a cancelled card scope still cancels. */
+    private suspend fun motion(block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (e: CancellationException) {
+            currentCoroutineContext().ensureActive()
         }
     }
 }
@@ -87,8 +100,9 @@ class DeckMemory {
 }
 
 /**
- * Home's needs-you deck: one card per entry of Home's own Needs you list. Swipe right for Yes, left for No, up for
- * the agent; the same three buttons sit under the card. A card with a chat and no terminal menu opens its chat instead.
+ * Home's needs-you deck: one card per terminal entry of Home's own Needs you list. Swipe right for Yes, left for No,
+ * up for the agent; the same three buttons sit under the card. Bot-chat entries are not cards: once the terminal
+ * cards are done, [ChatEnd] lists them, each a tap from its chat.
  * After the last answer, the all clear says how many requests were answered and the bot hops once.
  *
  * [cards] is Home's reachable list, [offline] the entries on machines that are not connected now. A future "Answer
@@ -230,9 +244,9 @@ class DeckMemory {
 }
 
 /**
- * One card: who asks, the project, what it asks, the pending commands read off its screen, and the three answers.
- * A permission's Yes and No go through [PocketViewModel.answer] with the dialog text, as the terminal's buttons do;
- * anything the phone can't read, and every chat card, is answered by opening it.
+ * One terminal card: who asks, the project, what it asks, the pending commands read off its screen, and the three
+ * answers. A permission's Yes and No go through [PocketViewModel.answer] with the dialog text, as the terminal's
+ * buttons do; anything the phone can't read is answered by opening it.
  */
 @Composable private fun DeckCard(vm: PocketViewModel, card: Teams.DeckCard, next: Teams.DeckCard?, behind: Int,
                                  initialMenu: Prompt.Menu?, initialMenuDone: Boolean, modifier: Modifier,
@@ -304,8 +318,9 @@ class DeckMemory {
                 Column(Modifier.fillMaxSize()
                     .clip(RoundedCornerShape(24.dp)).background(Surface).border(1.5.dp, amber.copy(alpha = .65f), RoundedCornerShape(24.dp))
                     .pointerInput(card.ref, yes, no, card.chat) {
+                        // While the card is being sent it is the motion's alone: a touch neither moves nor swipes it.
                         detectDragGestures(onDragEnd = {
-                            scope.launch {
+                            if (!sending) scope.launch {
                                 when (Teams.swipe(dx.value, dy.value, threshold, yes != null && menu != null, no != null && menu != null)) {
                                     Teams.Swipe.YES -> send(yes, 1f)
                                     Teams.Swipe.NO -> send(no, -1f)
@@ -313,7 +328,10 @@ class DeckMemory {
                                     Teams.Swipe.NONE -> { launch { dx.animateTo(0f) }; dy.animateTo(0f) }
                                 }
                             }
-                        }) { change, drag -> change.consume(); scope.launch { dx.snapTo(dx.value + drag.x); dy.snapTo(minOf(0f, dy.value + drag.y)) } }
+                        }) { change, drag ->
+                            change.consume()
+                            if (!sending) scope.launch { dx.snapTo(dx.value + drag.x); dy.snapTo(minOf(0f, dy.value + drag.y)) }
+                        }
                     }.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Dot(amber, 8); Spacer(Modifier.width(8.dp))
@@ -328,7 +346,7 @@ class DeckMemory {
                     Text(card.title, color = Ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(statusLabel("blocked", card.kind), color = amber, fontSize = 13.sp)
                     Spacer(Modifier.height(12.dp))
-                    Text(card.message.ifBlank { if (card.opensChat) "Waiting for your reply" else "Waiting for you" }, color = Ink,
+                    Text(card.message.ifBlank { "Waiting for you" }, color = Ink,
                         fontSize = 17.sp, lineHeight = 24.sp, textAlign = TextAlign.Center, maxLines = 4, overflow = TextOverflow.Ellipsis)
                     if (waitingForMenu) {
                         Spacer(Modifier.height(10.dp))
@@ -343,7 +361,6 @@ class DeckMemory {
                     }
                     Spacer(Modifier.weight(1f))
                     Text(when {
-                        card.opensChat -> "Swipe up, or tap Open chat, to answer there"
                         waitingForMenu -> "Reading the agent's menu…"
                         yes != null -> "Swipe right for Yes, left for No"
                         else -> "Answer this one in its terminal: swipe up"
@@ -360,7 +377,7 @@ class DeckMemory {
         // The same three answers as buttons, at thumb's reach.
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedButton(onClick = { send(no, -1f) }, enabled = no != null && !sending, modifier = Modifier.weight(1f).height(56.dp)) { Text("No") }
-            OutlinedButton(onClick = onOpen, modifier = Modifier.weight(1f).height(56.dp)) { Text(if (card.opensChat) "Open chat" else "Open") }
+            OutlinedButton(onClick = onOpen, modifier = Modifier.weight(1f).height(56.dp)) { Text("Open") }
             Button(onClick = { send(yes, 1f) }, enabled = yes != null && !sending, modifier = Modifier.weight(1f).height(56.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Ok)) { Text("Yes") }
         }
