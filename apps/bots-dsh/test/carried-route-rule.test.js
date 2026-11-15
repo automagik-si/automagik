@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import * as Jsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
+import Storage from '@deepseek-ai/dsh-storage'
+import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
+import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import { install as installModels } from '../src/host/models.js'
 import { install as installModelState } from '../src/host/model-state.js'
 import { RemoteChatAdapter } from '../src/host/remote-chat-adapter.js'
@@ -12,6 +20,67 @@ const ATTACH = 'hermes-remote/attach'
 const OLD = 'hermes-remote/nous:openai/gpt-6-astra'
 const ROW = Object.freeze({ id: 'attach', name: 'gpt-6-astra (openai-codex)', provider: 'hermes-remote', model: 'gpt-6-astra', providerId: 'openai-codex', contextWindow: 200_000 })
 const MESSAGES = Object.freeze(Array.from({ length: 400 }, (_, index) => Object.freeze({ role: 'user', id: `m-${index}`, content: `message ${index}` })))
+
+const SessionPersistence = typeof Jsonl.apply === 'function' ? Jsonl : Jsonl.default
+
+// The four proof rows run on DSH's real JSONL Session store: a real turn is written, the
+// store is closed, a fresh store is opened, the chat is unloaded, and the apply is forced.
+async function realStore(root) {
+  const host = new Context()
+  await host.plugin(Storage)
+  await host.plugin(StorageJson, { root: join(root, 'storage') })
+  await host.plugin(StorageDomain, { backend: 'json' })
+  await host.plugin(SessionPersistence, { root: join(root, 'sessions') })
+  return host
+}
+
+function turnEvents({ turn = 1, messages = 400, end = { kind: 'stop' }, header = true } = {}) {
+  const events = [{ type: 'turn/start', seq: 0, time: 1, data: { turn } }]
+  if (header) events.push({ type: 'request/header', seq: 1, time: 2, data: { header: { config: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } } })
+  for (let index = 0; index < messages; index += 1) {
+    events.push({
+      type: 'user/message', seq: 2 + index, time: 3 + index, surfaceOp: 'append',
+      data: { content: [{ type: 'text', text: `message ${index}` }], role: 'user', id: `m-${index}`, source: { kind: 'user' } },
+    })
+  }
+  events.push({ type: 'turn/end', seq: 2 + messages, time: 500 + turn, data: { turn, reason: end } })
+  return events
+}
+
+async function carriedStore(t, ids) {
+  const root = mkdtempSync(join(tmpdir(), 'ds-bot-carried-rule-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  let host = await realStore(root)
+  for (const id of ids) {
+    const handle = await host.sessionPersistence.create({ version: 4, id, createdAt: 1, isSeeded: false })
+    await handle.append(turnEvents())
+    await handle.flush()
+    await handle.close()
+  }
+  await host.fiber.dispose()
+  host = await realStore(root)
+  t.after(() => host.fiber.dispose())
+  return host
+}
+
+function realRuntime(host, bots, groups = []) {
+  const selected = []
+  const ctx = {
+    sessionPersistence: host.sessionPersistence,
+    sessions: { get: () => undefined, list: () => [] },
+    llm: {
+      listProviders: () => [{ id: 'hermes-remote', name: 'Remote Hermes' }],
+      listModels: async id => id === 'hermes-remote' ? [ROW] : [],
+      resolveModelInfo: async () => ({ context: { contextWindow: 200_000 }, defaultMaxTokens: 8000 }),
+    },
+    on() { return () => {} },
+    get: () => undefined,
+    sessionController: { selectModel: async ({ sessionId, provider, model }) => { selected.push(`${sessionId}:${provider}/${model}`) } },
+  }
+  const rt = { ctx, state: { bots }, chatOf: id => id, groupSessionsOf: () => groups, save: async () => {}, warn() {} }
+  installModels(rt)
+  return { rt, selected }
+}
 
 function harness({ bots, stored = {}, live = {}, groups = {}, chats = {} } = {}) {
   const listeners = new Map()
@@ -90,24 +159,26 @@ test('row a: the first turn after the update keeps the carried route and answers
   assertConfirmed(h.rt, h.rt.state.bots.b1)
 })
 
-test('row b/c: the second turn and an unload/reload keep the carried route', async () => {
-  const h = harness({ bots: { b1: carries({ previousModel: ATTACH }) }, stored: { b1: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } })
-  await h.rt.applyModel(h.rt.state.bots.b1, { force: true })
-  assert.deepEqual(h.selected, [])
+test('chat 3: unload and reload - answer first, then force before load', async () => {
+  const h = harness({ bots: { b1: carries() }, stored: { b1: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } })
   h.answer()
   assertConfirmed(h.rt, h.rt.state.bots.b1)
-  // Unloaded again: the live header is gone, the stored route is still the old ref.
+  // The chat is unloaded again; the stored route is still the old ref. Force before load.
   await h.rt.applyModel(h.rt.state.bots.b1, { force: true })
   assert.deepEqual(h.selected, [])
   assert.equal(h.accepted('b1'), true)
 })
 
-test('row d: an app restart forces an apply before the chat opens', async () => {
-  const h = harness({ bots: { b1: carries({ previousModel: ATTACH, appliedModel: ATTACH }) }, stored: { b1: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } })
+test('chat 4 / tester 2: app restart - answer, restart, force before load', async () => {
+  const first = harness({ bots: { b1: carries() }, stored: { b1: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } })
+  first.answer()
+  assertConfirmed(first.rt, first.rt.state.bots.b1)
+  // The record survives the restart; the Session is not loaded yet.
+  const persisted = structuredClone(first.rt.state.bots.b1)
+  const h = harness({ bots: { b1: persisted }, stored: { b1: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } })
   await h.rt.applyModel(h.rt.state.bots.b1, { force: true })
   assert.deepEqual(h.selected, [])
-  h.answer()
-  assertConfirmed(h.rt, h.rt.state.bots.b1)
+  assert.equal(h.accepted('b1'), true)
 })
 
 test('row e: a pick of another Bot changes nothing for the carried chat', async () => {
@@ -187,12 +258,14 @@ test('detach and re-attach: the stored carried route still decides', async () =>
   assertConfirmed(h.rt, bot)
 })
 
-test('row 4: a group room Session unloaded keeps its Hermes route under the same rule', async () => {
+test('tester 4: group room unloaded - answer first, then force', async () => {
   const h = harness({
-    bots: { b1: carries({ previousModel: ATTACH }) },
+    bots: { b1: carries() },
     stored: { b1: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' }, room: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } },
     groups: { b1: ['room'] },
   })
+  h.answer()
+  assertConfirmed(h.rt, h.rt.state.bots.b1)
   await h.rt.applyModel(h.rt.state.bots.b1, { force: true })
   assert.deepEqual(h.selected, [])
 })
@@ -248,4 +321,49 @@ test('controls: another provider still takes attach, and moving off Hermes and b
   bot.model = ATTACH
   await h.rt.applyModel(bot, { force: true })
   assert.deepEqual(h.selected, ['b1:hermes-remote/attach'])
+})
+
+test('REAL STORE chat 3: unload/reload, unloaded, forced apply keeps the carried route', async t => {
+  const host = await carriedStore(t, ['b1'])
+  const bot = { id: 'b1', model: ATTACH, appliedModel: ATTACH, previousModel: ATTACH }
+  const { rt, selected } = realRuntime(host, { b1: bot })
+  await rt.applyModel(bot, { force: true })
+  assert.deepEqual(selected, [])
+})
+
+test('REAL STORE chat 4 / tester 2: a fresh store after restart, forced apply before open, keeps the route', async t => {
+  const host = await carriedStore(t, ['b1'])
+  const bot = { id: 'b1', model: ATTACH, appliedModel: ATTACH, previousModel: ATTACH }
+  const { rt, selected } = realRuntime(host, { b1: bot })
+  await rt.applyModel(bot, { force: true })
+  assert.deepEqual(selected, [])
+})
+
+test('REAL STORE tester 4: the room Session own log keeps its carried route', async t => {
+  const host = await carriedStore(t, ['b1', 'room-b1'])
+  const bot = { id: 'b1', model: ATTACH, appliedModel: ATTACH, previousModel: ATTACH }
+  const { rt, selected } = realRuntime(host, { b1: bot }, ['room-b1'])
+  await rt.applyModel(bot, { force: true })
+  assert.deepEqual(selected, [])
+})
+
+test('REAL STORE tester 7: a real stopped turn, and a stop before the new request record', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'ds-bot-carried-rule-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  let host = await realStore(root)
+  const first = await host.sessionPersistence.create({ version: 4, id: 'b1', createdAt: 1, isSeeded: false })
+  await first.append([
+    ...turnEvents({ turn: 1, messages: 2, end: { kind: 'aborted' } }),
+    { type: 'turn/start', seq: 5, time: 600, data: { turn: 2 } },
+    { type: 'turn/end', seq: 6, time: 601, data: { turn: 2, reason: { kind: 'aborted' } } },
+  ])
+  await first.flush()
+  await first.close()
+  await host.fiber.dispose()
+  host = await realStore(root)
+  t.after(() => host.fiber.dispose())
+  const bot = { id: 'b1', model: ATTACH, appliedModel: ATTACH, previousModel: ATTACH }
+  const { rt, selected } = realRuntime(host, { b1: bot })
+  await rt.applyModel(bot, { force: true })
+  assert.deepEqual(selected, [])
 })
