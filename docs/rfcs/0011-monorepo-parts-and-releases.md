@@ -416,42 +416,58 @@ artifact later.
 
 ## Follow Arca
 
-Added 2026-11-15, on the owner's direction: the same pattern as Omni, whose public repository owns
-Omni's Automagik app.
+Added 2026-11-15, on the owner's direction. Arca's plugins test a faster release path than Follow
+Omni's desktop carry: they ride this repository's signed plugin lane, so a plugin-only Arca change
+reaches installed apps as a plugin patch, with no desktop release, no app download and no
+restart.
 
 Arca's Automagik app, a DSH plugin set, is not a part of this repository. Arca's public
-repository (`automagik-si/arca`) owns it, in its own top-level folder, the way Omni's repository
-owns Omni's channels and canvases. Arca's side mirrors Omni's: one folder per plugin under
-`apps/*-dsh`, each `package.json` version the Arca release of that folder's last change (a plugin
-may be behind the release, never ahead of it), its oldest working Arca in `engines`, and a peer
-dependency on the Bot team plugin; its own market index, `marketplace/automagik.json` at its root
-(entries pinned to a repository path at a commit, refreshed after each release); releases tagged
-`v<version>`; and a release workflow that sends this repository an `arca-release`
-`repository_dispatch` when it publishes. The token that sends it lives in Arca, as Omni's does.
+repository (`automagik-si/arca`) owns it, the way Omni's repository owns Omni's channels and
+canvases: one folder per plugin under `apps/*-dsh` (each `package.json` version the Arca release
+of that folder's last change), its own market index at `marketplace/automagik.json`, releases
+tagged `v<version>`, and a release workflow that dispatches to this repository when it publishes.
 
-This repository's side is only two things:
+### The path
 
-- `apps/desktop/arca.json` pins one Arca release, `{version, repository, commit}`, as
-  `apps/desktop/omni.json` pins one Omni release.
-- Follow Arca (`.github/workflows/follow-arca.yml`) mirrors Follow Omni (`follow-omni.yml`).
-  Arca's `arca-release` dispatch is the fast path; Release completing on `dev` and a schedule are
-  the fallbacks, and a dispatch by hand also checks. The dispatch's payload is a hint only: the run
-  reads Arca's releases itself and follows what it finds. It takes the newest Arca release above
-  the one `arca.json` pins; when Arca's plugins are at or below that release and admit the desktop
-  runtime's DSH in the same patch series as their harness, it boots that Arca with dev's plugins
-  through the same boot gate (`boot-check.yml`, which then boots the `arca.json` pin beside
-  Omni's on every push and pull request too), and only when it boots does it move `arca.json` on
-  `dev` and cut an Automagik release. The bump is built on exactly the dev commit that booted and
-  pushed without force: when dev moved during the boot, nothing is carried and the next run boots
-  the new dev. An Arca that fails the boot is not followed and the run fails; the next run tries it
-  again. It carries at most one Arca a UTC day (#371), measured on `arca.json`'s own history: a
-  newer Arca the same day still boots but waits for the first run after 00:00 UTC. Downgrades and
-  a different patch series wait for a coordinated harness move. `dry_run` and `skip_daily_hold`
-  work as Follow Omni's.
+- Arca's release dispatches this repository. The run reads Arca's releases itself; the dispatch's
+  payload is a hint only.
+- The boot gate boots the exact bytes the lane would carry, not dev's newest plugins.
+- Only when it boots does a plugin-only patch go out on the existing plugin lane, signed with
+  this repository's plugin key. There is no new key, publisher or rotation.
+- `scripts/lane.ts` still sends install-field, dependency and DSH changes to a full release, as it
+  does for this repository's own plugins: such an Arca release is carried by a full release, never
+  by a lane patch.
+- A failing gate moves no pointer. A bad plugin is fixed forward by a new Arca release.
+
+### Bootstrap
+
+The lane reader is compiled into the app: the plugin names a lane may replace are fixed in the
+build. So one desktop release comes first. It carries Arca's plugins in the desktop profile and
+allows their names on the lane, and it changes three app policies:
+
+- An app update keeps a newer lane plugin over the build's pin: a new build never copies its own
+  older Arca plugin back over the lane's newer one.
+- Before a lane plugin installs, the app checks its `engines.omni` and its peer ranges, so one
+  that needs what the app lacks is refused rather than installed and broken.
+- The app keeps a last-known-good copy of each lane plugin to go back to.
+
+### Fast, as one number
+
+T is the median minutes from Arca's release tag to a verified lane pointer that installed apps
+read, counting only releases whose boot gate passed before the pointer moved, over the last 20
+Arca releases. The path ships when T is at most 10 minutes, the pass rate is at least 95 percent,
+and no pointer ever moved without a green gate. Installed apps poll the lane every 15 minutes, so
+a person's wait (T plus that poll) is reported beside T, not as the target.
+
+### Order
+
+1. The bootstrap desktop release, with the three app policies above.
+2. Two weeks of Arca on this path, measuring T and the pass rate.
+3. Then Omni on the same path.
+4. Only then is the once-a-UTC-day hold (#371) dropped for lane-only carries.
 
 Nothing is built until this section merges and Arca has published a first plugin release worth
-carrying: until then there is no `arca.json`, no `follow-arca.yml` and no change to
-`boot-check.yml`.
+carrying.
 
 ## Open questions
 
