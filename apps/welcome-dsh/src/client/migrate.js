@@ -82,8 +82,46 @@ export const HANDOFF = {
 // ── small parts ───────────────────────────────────────────────────────────────────────────
 
 // A host sentence is shown, but a key-shaped run in it never is: the shared redactor does not
-// know a Telegram bot key's shape, so the page keeps the last line of defence.
-const hidden = value => String(value ?? '').replace(/\d{6,12}:[A-Za-z0-9_-]{30,}/g, '[hidden]')
+// know a Telegram bot key's shape, so the page keeps the last line of defence. The prefix may
+// be split before its colon or inside its digits, and a space, line break or any control
+// character may split the suffix.
+export function redactKey(value) {
+  const text = String(value ?? '')
+  let out = ''
+  let copied = 0
+  const digit = /^[0-9]$/
+  const tokenChar = /^[A-Za-z0-9_-]$/
+  const separated = ch => /^\s$/.test(ch) || ch.codePointAt(0) < 0x20 || ch.codePointAt(0) === 0x7f
+  for (let colon = text.indexOf(':'); colon !== -1; colon = text.indexOf(':', colon + 1)) {
+    if (colon < copied) continue
+    let at = colon - 1
+    let digits = 0
+    let first = colon
+    while (at >= 0) {
+      const ch = text[at]
+      if (separated(ch)) { at -= 1; continue }
+      if (digit.test(ch)) { digits += 1; first = at; at -= 1; continue }
+      break
+    }
+    if (digits < 6 || digits > 12 || first < copied) continue
+    if (first > 0 && digit.test(text[first - 1])) continue
+    let run = colon + 1
+    let taken = 0
+    let last = run
+    while (run < text.length && taken < 35) {
+      const ch = text[run]
+      if (tokenChar.test(ch)) { taken += 1; run += 1; last = run; continue }
+      if (separated(ch)) { run += 1; continue }
+      break
+    }
+    if (taken < 30) continue
+    out += text.slice(copied, first) + '[hidden]'
+    copied = last
+    colon = last - 1
+  }
+  return out + text.slice(copied)
+}
+const hidden = value => redactKey(value)
 const Check = () => h('span', { className: 'oai-mig-tick', 'aria-hidden': 'true' }, '✓')
 const Arrow = () => h('span', { className: 'oai-mig-arrow', 'aria-hidden': 'true' }, '→')
 const Lock = () => h('span', { className: 'oai-mig-lock', 'aria-hidden': 'true' }, h('i', null))
@@ -146,7 +184,7 @@ function KeyMove() {
     h(Lock, null),
     h('div', { className: 'oai-mig-keytext' },
       h('strong', null, t('The bot key passes straight from Hermes into Omni.')),
-      h('span', null, t('It never appears here, in a log or in a file.')),
+      h('span', null, t('It never appears here or in a log.')),
       h('span', { className: 'oai-mig-dots', 'aria-hidden': 'true' }, '••••••••••••••••')))
 }
 
@@ -181,7 +219,10 @@ function HandoffCard({ handoff, note, onOpenChannels, onCheckAgain, onSkip }) {
 function ConfirmCard({ probe, botId, agreed, busy, onPickBot, onAgree, onStart, onBack }) {
   const off = foundOf(probe) === 'off'
   const bots = answerBots(probe)
-  const restart = !off || probe.hermes?.pendingRestart === true
+  const gatewayRunning = probe.hermes?.gatewayRunning === true
+  const stopped = !off && !gatewayRunning
+  const pending = probe.hermes?.pendingRestart === true
+  const restart = (!off && gatewayRunning) || pending
   return h('div', { className: 'oai-mig-confirm' },
     h('div', { className: 'oai-mig-found' },
       h('span', { className: 'oai-mig-dot', 'data-on': off ? undefined : 'on', 'aria-hidden': 'true' }),
@@ -191,16 +232,18 @@ function ConfirmCard({ probe, botId, agreed, busy, onPickBot, onAgree, onStart, 
     h('ol', { className: 'oai-mig-do' },
       h('li', null, h('span', { className: 'oai-mig-do-text' }, h('b', null, t('The wizard reads Hermes\'s bot key.')), ' ', t('It stays hidden and goes straight to Omni, which keeps it private.'))),
       h('li', null, h('span', { className: 'oai-mig-do-text' }, off
-        ? (probe.hermes?.pendingRestart === true
+        ? (pending
             ? h('span', null, h('b', null, t('Hermes\'s Telegram is already off; nothing is switched.')), ' ', t('Hermes still has to let go of the old channel, so it restarts for a few seconds. Its other channels blink and come back by themselves.'))
             : t('Hermes is already off; nothing is switched. No restart is needed.'))
-        : h('span', null, h('b', null, t('Hermes\'s Telegram is switched off.')), ' ', t('Hermes keeps a copy of its settings first, then restarts for a few seconds. Its other channels blink and come back by themselves.')))),
+        : stopped
+          ? h('span', null, h('b', null, t('Hermes is not running.')), ' ', t('Its Telegram is switched off in its settings, so it stays off when you start Hermes again.'))
+          : h('span', null, h('b', null, t('Hermes\'s Telegram is switched off.')), ' ', t('Hermes keeps a copy of its settings first, then restarts for a few seconds. Its other channels blink and come back by themselves.')))),
       h('li', null, h('span', { className: 'oai-mig-do-text' }, h('b', null, t('Omni starts its Telegram channel with the same bot.')), ' ', t('One bot, one listener.')))),
     h(BotPicker, { bots, value: botId, onPick: onPickBot }),
     h('label', { className: 'oai-mig-agree' },
       h('input', { type: 'checkbox', checked: agreed === true, onChange: event => onAgree(event.target.checked) }),
       h('span', { className: 'oai-mig-box' }, Check()),
-      h('span', null, t(restart ? 'I am ready: Hermes restarts for a few seconds and its Telegram goes off.' : 'I am ready: Omni starts with Hermes\'s bot.'))),
+      h('span', null, t(stopped ? 'I am ready: Omni starts with Hermes\'s bot, and Hermes\'s Telegram stays off.' : restart ? 'I am ready: Hermes restarts for a few seconds and its Telegram goes off.' : 'I am ready: Omni starts with Hermes\'s bot.'))),
     h('div', { className: 'oai-actions' },
       h('button', { type: 'button', className: 'oai-quiet', onClick: onBack }, t('Back')),
       h('button', { type: 'button', className: 'oai-primary', disabled: agreed !== true || busy, onClick: onStart }, t(off ? 'Start Omni with it' : 'Switch it over'))))
@@ -227,6 +270,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     h('div', { className: 'oai-mig-summary' },
       result.hermesOff === true ? h('span', null, result.hermesWasOff === true ? t('Hermes: Telegram was already off') : t('Hermes: Telegram off')) : null,
       h('span', null, t('Omni: listening'))),
+    result.hermesWasStopped === true ? h('p', { className: 'oai-mig-note', role: 'status' }, t('Hermes was not running. Its Telegram stays off until you start Hermes again.')) : null,
     gatewayStopped === true ? h('p', { className: 'oai-mig-note', role: 'status' }, t('Hermes is not running right now. Start it again to bring its other channels back.')) : null,
     h('div', { className: 'oai-actions' },
       result.connected !== true && onCheckStatus ? h('button', { type: 'button', className: 'oai-quiet', onClick: onCheckStatus }, t('Check status')) : null,

@@ -16,6 +16,7 @@ const SCRIPT = readFileSync(join(PLUGIN, 'src/host/hermes-migrate.py'), 'utf8')
 // A fixture key, assembled here so no secret-shaped literal sits in the tree.
 const FIXTURE_KEY = ['123456789', `${'A'.repeat(20)}${'B'.repeat(15)}`].join(':')
 const CHANNEL = '0f0f0f0f-1111-4222-8333-444444444444'
+const OTHER_CHANNEL = 'e0e0e0e0-4444-4555-8666-777777777777'
 const BOT = 'b0b0b0b0-2222-4333-8444-555555555555'
 const GENIE = 'd0d0d0d0-3333-4444-8555-666666666666'
 
@@ -296,7 +297,7 @@ test('the release contract: the base receipt has no bot id, and detail is the pr
   assert.deepEqual(done.result, {
     channelId: CHANNEL, channelName: 'Telegram', connected: true, botName: 'Helper', chatUrl: 'https://t.me/Helper',
     answering: false, answeringOff: false, attached: true, existing: false,
-    answerBot: { id: BOT, name: 'Omni' }, hermesOff: true, hermesWasOff: false, gatewayStopped: false,
+    answerBot: { id: BOT, name: 'Omni' }, hermesOff: true, hermesWasOff: false, hermesWasStopped: false, gatewayStopped: false,
   })
   assert.equal('botId' in done.result, false)
   assert.ok(!JSON.stringify(done).includes(FIXTURE_KEY))
@@ -376,7 +377,7 @@ test('the move reads the key, switches Hermes off, then hands it to Omni, and ke
   assert.ok(!JSON.stringify(done).includes(FIXTURE_KEY), 'the status leaked the key')
   assert.deepEqual(done.result, {
     channelId: CHANNEL, channelName: 'Telegram', connected: true, botName: '@HefestoBot', chatUrl: 'https://t.me/HefestoBot',
-    answering: false, answeringOff: false, attached: false, existing: false, answerBot: { id: BOT, name: 'Omni' }, hermesOff: true, hermesWasOff: false, gatewayStopped: false,
+    answering: false, answeringOff: false, attached: false, existing: false, answerBot: { id: BOT, name: 'Omni' }, hermesOff: true, hermesWasOff: false, hermesWasStopped: false, gatewayStopped: false,
   })
 })
 
@@ -502,6 +503,48 @@ test('a refused attach is one fixed sentence, puts Hermes back on, and never ech
   assert.equal(failed.phase, 'failed')
   assert.equal(failed.error.message, 'The move did not finish.')
   assert.ok(!JSON.stringify(failed).includes(FIXTURE_KEY))
+})
+
+test('a stopped Hermes is not started to switch its channel off', async () => {
+  const script = fakeScript({ gateway: { pid: null, pidAlive: false, telegram: null } })
+  const team = fakeTeam()
+  const channels = fakeChannels()
+  let restarts = 0
+  const actions = install({ script, team, channels, restart: async () => { restarts += 1; return { ok: true } } })
+  const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
+  assert.equal(done.phase, 'done')
+  assert.equal(done.result.hermesWasStopped, true)
+  assert.deepEqual(script.modes, ['probe', 'read', 'disable'])
+  assert.equal(restarts, 0)
+})
+
+test('a refusal on a stopped Hermes restores its settings without starting it', async () => {
+  const script = fakeScript({ gateway: { pid: null, pidAlive: false, telegram: null } })
+  const team = fakeTeam()
+  const channels = fakeChannels({ attach: async () => { throw new Error('bad request') } })
+  let restarts = 0
+  const actions = install({ script, team, channels, restart: async () => { restarts += 1; return { ok: true } } })
+  const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
+  assert.equal(done.phase, 'failed')
+  assert.equal(done.error.restored, true)
+  assert.deepEqual(done.error.changed, { hermesOff: false, omniCreated: false })
+  assert.ok(script.modes.includes('restore'))
+  assert.ok(!script.modes.includes('gateway'))
+  assert.equal(restarts, 0)
+})
+
+test('a different Telegram channel on Omni is not the moved bot, and a refusal puts Hermes back', async () => {
+  const script = fakeScript()
+  const team = fakeTeam()
+  const channels = fakeChannels({ attach: async () => { throw new Error('bad request') }, instances: [{ id: OTHER_CHANNEL, channel: 'telegram', name: 'Support' }] })
+  const actions = install({ script, team, channels })
+  const probe = await actions['migrate-probe']()
+  assert.equal(probe.omni.telegram, null)
+  const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
+  assert.equal(done.phase, 'failed')
+  assert.equal(done.error.restored, true)
+  assert.deepEqual(done.error.changed, { hermesOff: false, omniCreated: false })
+  assert.ok(script.modes.includes('restore'), 'Hermes was left off for another channel')
 })
 
 test('the channel Omni made before a refusal is the move\'s channel, and Hermes stays off', async () => {

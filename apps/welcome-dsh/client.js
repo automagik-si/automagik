@@ -9313,6 +9313,9 @@ var PT_BR = {
   "Omni starts its Telegram channel with the same bot.": "O Omni liga o canal do Telegram com o mesmo bot.",
   "One bot, one listener.": "Um bot, um ouvinte.",
   "Hermes is already off; nothing is switched. No restart is needed.": "O Hermes já está desligado; nada é desligado. Não é preciso reiniciar.",
+  "Hermes is not running.": "O Hermes não está rodando.",
+  "Its Telegram is switched off in its settings, so it stays off when you start Hermes again.": "O Telegram fica desligado nas configurações, então continua desligado quando você iniciar o Hermes de novo.",
+  "I am ready: Omni starts with Hermes's bot, and Hermes's Telegram stays off.": "Confirmo: o Omni começa com o bot do Hermes, e o Telegram do Hermes continua desligado.",
   "Hermes's Telegram is already off; nothing is switched.": "O Telegram do Hermes já está desligado; nada é desligado.",
   "Hermes still has to let go of the old channel, so it restarts for a few seconds. Its other channels blink and come back by themselves.": "O Hermes ainda precisa soltar o canal antigo, então reinicia por alguns segundos. Os outros canais do Hermes piscam e voltam automaticamente.",
   "Who answers in the chats?": "Quem responde nos chats?",
@@ -9335,7 +9338,7 @@ var PT_BR = {
   "Omni takes the same bot. Nothing else changes on Hermes.": "O Omni assume o mesmo bot. Nada mais muda no Hermes.",
   "One bot, one listener. Omni is starting it.": "Um bot, um ouvinte. O Omni está iniciando.",
   "The bot key passes straight from Hermes into Omni.": "A chave do bot passa direto do Hermes para o Omni.",
-  "It never appears here, in a log or in a file.": "A chave nunca aparece aqui, em um log ou em um arquivo.",
+  "It never appears here or in a log.": "A chave nunca aparece aqui ou em um log.",
   "You can leave this open. It takes a few seconds.": "Você pode deixar isto aberto. Leva alguns segundos.",
   "Omni has your bot": "O Omni está com o seu bot",
   "There it is. Your bot answers on Omni now.": "Pronto. Seu bot responde no Omni agora.",
@@ -9352,6 +9355,7 @@ var PT_BR = {
   "Open this Bot's settings from the Bot team's sidebar and turn it on.": "Abra as configurações deste Bot na barra lateral da equipe de Bots e ligue o Bot.",
   "Omni has the channel. Its next update adds your Bot as the one who answers.": "O Omni está com o canal. A próxima atualização do Omni adiciona o seu Bot como quem responde.",
   "Hermes: Telegram off": "Hermes: Telegram desligado",
+  "Hermes was not running. Its Telegram stays off until you start Hermes again.": "O Hermes não estava rodando. O Telegram fica desligado até você iniciar o Hermes de novo.",
   "Hermes: Telegram was already off": "Hermes: o Telegram já estava desligado",
   "Omni: listening": "Omni: escutando",
   "Hermes is not running right now. Start it again to bring its other channels back.": "O Hermes não está rodando agora. Inicie o Hermes de novo para trazer os outros canais de volta.",
@@ -12850,7 +12854,59 @@ var HANDOFF = {
   "no-omni": { title: "Connect Omni first", text: "The Connect Omni step does that. Then come back here." },
   manual: { title: "Set Omni's Telegram up in Channels", text: "Omni's own Telegram setup has every step. Hermes is left exactly as it is." }
 };
-var hidden = (value) => String(value ?? "").replace(/\d{6,12}:[A-Za-z0-9_-]{30,}/g, "[hidden]");
+function redactKey(value) {
+  const text = String(value ?? "");
+  let out = "";
+  let copied = 0;
+  const digit = /^[0-9]$/;
+  const tokenChar = /^[A-Za-z0-9_-]$/;
+  const separated = (ch) => /^\s$/.test(ch) || ch.codePointAt(0) < 32 || ch.codePointAt(0) === 127;
+  for (let colon = text.indexOf(":"); colon !== -1; colon = text.indexOf(":", colon + 1)) {
+    if (colon < copied) continue;
+    let at2 = colon - 1;
+    let digits = 0;
+    let first = colon;
+    while (at2 >= 0) {
+      const ch = text[at2];
+      if (separated(ch)) {
+        at2 -= 1;
+        continue;
+      }
+      if (digit.test(ch)) {
+        digits += 1;
+        first = at2;
+        at2 -= 1;
+        continue;
+      }
+      break;
+    }
+    if (digits < 6 || digits > 12 || first < copied) continue;
+    if (first > 0 && digit.test(text[first - 1])) continue;
+    let run = colon + 1;
+    let taken = 0;
+    let last = run;
+    while (run < text.length && taken < 35) {
+      const ch = text[run];
+      if (tokenChar.test(ch)) {
+        taken += 1;
+        run += 1;
+        last = run;
+        continue;
+      }
+      if (separated(ch)) {
+        run += 1;
+        continue;
+      }
+      break;
+    }
+    if (taken < 30) continue;
+    out += text.slice(copied, first) + "[hidden]";
+    copied = last;
+    colon = last - 1;
+  }
+  return out + text.slice(copied);
+}
+var hidden = (value) => redactKey(value);
 var Check2 = () => (0, import_react11.createElement)("span", { className: "oai-mig-tick", "aria-hidden": "true" }, "✓");
 var Arrow = () => (0, import_react11.createElement)("span", { className: "oai-mig-arrow", "aria-hidden": "true" }, "→");
 var Lock = () => (0, import_react11.createElement)("span", { className: "oai-mig-lock", "aria-hidden": "true" }, (0, import_react11.createElement)("i", null));
@@ -12944,7 +13000,7 @@ function KeyMove() {
       "div",
       { className: "oai-mig-keytext" },
       (0, import_react11.createElement)("strong", null, t("The bot key passes straight from Hermes into Omni.")),
-      (0, import_react11.createElement)("span", null, t("It never appears here, in a log or in a file.")),
+      (0, import_react11.createElement)("span", null, t("It never appears here or in a log.")),
       (0, import_react11.createElement)("span", { className: "oai-mig-dots", "aria-hidden": "true" }, "••••••••••••••••")
     )
   );
@@ -12992,7 +13048,10 @@ function HandoffCard({ handoff, note, onOpenChannels, onCheckAgain, onSkip }) {
 function ConfirmCard({ probe, botId, agreed, busy, onPickBot, onAgree, onStart, onBack }) {
   const off = foundOf(probe) === "off";
   const bots = answerBots(probe);
-  const restart = !off || probe.hermes?.pendingRestart === true;
+  const gatewayRunning = probe.hermes?.gatewayRunning === true;
+  const stopped = !off && !gatewayRunning;
+  const pending = probe.hermes?.pendingRestart === true;
+  const restart = !off && gatewayRunning || pending;
   return (0, import_react11.createElement)(
     "div",
     { className: "oai-mig-confirm" },
@@ -13011,7 +13070,7 @@ function ConfirmCard({ probe, botId, agreed, busy, onPickBot, onAgree, onStart, 
       "ol",
       { className: "oai-mig-do" },
       (0, import_react11.createElement)("li", null, (0, import_react11.createElement)("span", { className: "oai-mig-do-text" }, (0, import_react11.createElement)("b", null, t("The wizard reads Hermes's bot key.")), " ", t("It stays hidden and goes straight to Omni, which keeps it private."))),
-      (0, import_react11.createElement)("li", null, (0, import_react11.createElement)("span", { className: "oai-mig-do-text" }, off ? probe.hermes?.pendingRestart === true ? (0, import_react11.createElement)("span", null, (0, import_react11.createElement)("b", null, t("Hermes's Telegram is already off; nothing is switched.")), " ", t("Hermes still has to let go of the old channel, so it restarts for a few seconds. Its other channels blink and come back by themselves.")) : t("Hermes is already off; nothing is switched. No restart is needed.") : (0, import_react11.createElement)("span", null, (0, import_react11.createElement)("b", null, t("Hermes's Telegram is switched off.")), " ", t("Hermes keeps a copy of its settings first, then restarts for a few seconds. Its other channels blink and come back by themselves.")))),
+      (0, import_react11.createElement)("li", null, (0, import_react11.createElement)("span", { className: "oai-mig-do-text" }, off ? pending ? (0, import_react11.createElement)("span", null, (0, import_react11.createElement)("b", null, t("Hermes's Telegram is already off; nothing is switched.")), " ", t("Hermes still has to let go of the old channel, so it restarts for a few seconds. Its other channels blink and come back by themselves.")) : t("Hermes is already off; nothing is switched. No restart is needed.") : stopped ? (0, import_react11.createElement)("span", null, (0, import_react11.createElement)("b", null, t("Hermes is not running.")), " ", t("Its Telegram is switched off in its settings, so it stays off when you start Hermes again.")) : (0, import_react11.createElement)("span", null, (0, import_react11.createElement)("b", null, t("Hermes's Telegram is switched off.")), " ", t("Hermes keeps a copy of its settings first, then restarts for a few seconds. Its other channels blink and come back by themselves.")))),
       (0, import_react11.createElement)("li", null, (0, import_react11.createElement)("span", { className: "oai-mig-do-text" }, (0, import_react11.createElement)("b", null, t("Omni starts its Telegram channel with the same bot.")), " ", t("One bot, one listener.")))
     ),
     (0, import_react11.createElement)(BotPicker, { bots, value: botId, onPick: onPickBot }),
@@ -13020,7 +13079,7 @@ function ConfirmCard({ probe, botId, agreed, busy, onPickBot, onAgree, onStart, 
       { className: "oai-mig-agree" },
       (0, import_react11.createElement)("input", { type: "checkbox", checked: agreed === true, onChange: (event) => onAgree(event.target.checked) }),
       (0, import_react11.createElement)("span", { className: "oai-mig-box" }, Check2()),
-      (0, import_react11.createElement)("span", null, t(restart ? "I am ready: Hermes restarts for a few seconds and its Telegram goes off." : "I am ready: Omni starts with Hermes's bot."))
+      (0, import_react11.createElement)("span", null, t(stopped ? "I am ready: Omni starts with Hermes's bot, and Hermes's Telegram stays off." : restart ? "I am ready: Hermes restarts for a few seconds and its Telegram goes off." : "I am ready: Omni starts with Hermes's bot."))
     ),
     (0, import_react11.createElement)(
       "div",
@@ -13061,6 +13120,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
       result.hermesOff === true ? (0, import_react11.createElement)("span", null, result.hermesWasOff === true ? t("Hermes: Telegram was already off") : t("Hermes: Telegram off")) : null,
       (0, import_react11.createElement)("span", null, t("Omni: listening"))
     ),
+    result.hermesWasStopped === true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("Hermes was not running. Its Telegram stays off until you start Hermes again.")) : null,
     gatewayStopped === true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("Hermes is not running right now. Start it again to bring its other channels back.")) : null,
     (0, import_react11.createElement)(
       "div",

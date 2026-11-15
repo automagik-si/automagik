@@ -123,6 +123,15 @@ test('already off or waiting for a restart reads as it is, without claiming work
   assert.match(textOf(pending), /I am ready: Hermes restarts/)
 })
 
+test('a stopped Hermes is not restarted, and the confirm says its Telegram stays off', () => {
+  const tree = view({ phase: 'confirm', probe: probe({ hermes: { gatewayRunning: false } }), agreed: false })
+  const body = textOf(tree)
+  assert.match(body, /Hermes is not running\./)
+  assert.match(body, /Its Telegram is switched off in its settings, so it stays off when you start Hermes again\./)
+  assert.match(body, /I am ready: Omni starts with Hermes's bot, and Hermes's Telegram stays off\./)
+  assert.doesNotMatch(body, /restarts for a few seconds/)
+})
+
 test('the bot who answers is picked from the team, main first, and only where Omni can bind one', () => {
   const tree = view({ phase: 'confirm', probe: probe(), botId: BOT })
   const radios = findAll(tree, node => node.props.role === 'radio')
@@ -144,7 +153,7 @@ test('the move shows the key strip and its steps, and never a key', () => {
   const tree = view({ phase: 'moving', steps })
   const body = textOf(tree)
   assert.match(body, /The bot key passes straight from Hermes into Omni/)
-  assert.match(body, /It never appears here, in a log or in a file/)
+  assert.match(body, /It never appears here or in a log/)
   for (const step of migrate.MOVE) assert.match(body, new RegExp(step.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   assert.doesNotMatch(body, new RegExp(FIXTURE_KEY))
   assert.equal(findAll(tree, byClass('oai-mig-bead')).length, 4)
@@ -168,6 +177,9 @@ test('done shows the bot, the say hi link, the live status and what happened to 
 
   const wasOff = view({ phase: 'done', result: { ...result, hermesWasOff: true } })
   assert.match(textOf(wasOff), /Hermes: Telegram was already off/)
+
+  const stopped = view({ phase: 'done', result: { ...result, hermesWasStopped: true } })
+  assert.match(textOf(stopped), /Hermes was not running\. Its Telegram stays off until you start Hermes again\./)
 })
 
 test('the one case where Omni leaves the Bot off explains it and opens that Bot\'s settings', () => {
@@ -245,6 +257,19 @@ test('Not now only ends the step: nothing is started, looked at or switched', ()
   const handoff = view({ phase: 'handoff', handoff: { reason: 'no-key' }, onSkip: () => calls.push('handoff-skip'), onCheckAgain: () => calls.push('check'), onOpenChannels: () => calls.push('channels') })
   buttons(handoff).find(node => textOf(node) === 'Not now').props.onClick()
   assert.deepEqual(calls, ['skip', 'handoff-skip'])
+})
+
+test('the page masks a key split anywhere, including by a bell or an escape', () => {
+  const suffix = FIXTURE_KEY.slice(FIXTURE_KEY.indexOf(':') + 1)
+  const variants = [
+    `${FIXTURE_KEY.slice(0, 10)} ${suffix}`,
+    `${FIXTURE_KEY.slice(0, 10)}\n${suffix}`,
+    `${FIXTURE_KEY.slice(0, 4)} ${FIXTURE_KEY.slice(4, 10)}${suffix}`,
+    `${FIXTURE_KEY.slice(0, 9)} ${FIXTURE_KEY.slice(9)}`,
+    `${FIXTURE_KEY.slice(0, 10)}\x07${suffix}`,
+    `${FIXTURE_KEY.slice(0, 10)}\x1b${suffix}`,
+  ]
+  for (const variant of variants) assert.equal(migrate.redactKey(`failed with ${variant} here`), 'failed with [hidden] here')
 })
 
 test('the step carries its own clay, in both themes', () => {

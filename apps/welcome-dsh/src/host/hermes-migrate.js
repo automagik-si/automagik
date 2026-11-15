@@ -47,23 +47,37 @@ export function redactKey(value) {
   const text = String(value ?? '')
   let out = ''
   let copied = 0
-  for (const head of text.matchAll(/\d{6,12}:/g)) {
-    const start = head.index
-    if (start < copied) continue
-    // A key's suffix is 35 characters, and a split may put a space or a line break anywhere
-    // in it. Take token characters across whitespace up to 35, then leave the text after it.
-    let at = start + head[0].length
-    let taken = 0
-    let end = at
-    while (at < text.length && taken < 35) {
+  const digit = /^[0-9]$/
+  const tokenChar = /^[A-Za-z0-9_-]$/
+  const separated = ch => /^\s$/.test(ch) || ch.codePointAt(0) < 0x20 || ch.codePointAt(0) === 0x7f
+  for (let colon = text.indexOf(':'); colon !== -1; colon = text.indexOf(':', colon + 1)) {
+    if (colon < copied) continue
+    // The 6-12 digit prefix may be split before the colon or inside the digits.
+    let at = colon - 1
+    let digits = 0
+    let first = colon
+    while (at >= 0) {
       const ch = text[at]
-      if (/^[A-Za-z0-9_-]$/.test(ch)) { taken += 1; at += 1; end = at; continue }
-      if (/^\s$/.test(ch)) { at += 1; continue }
+      if (separated(ch)) { at -= 1; continue }
+      if (digit.test(ch)) { digits += 1; first = at; at -= 1; continue }
+      break
+    }
+    if (digits < 6 || digits > 12 || first < copied) continue
+    if (first > 0 && digit.test(text[first - 1])) continue
+    // The 35-character suffix may be split by a space, a line break or any control character.
+    let run = colon + 1
+    let taken = 0
+    let last = run
+    while (run < text.length && taken < 35) {
+      const ch = text[run]
+      if (tokenChar.test(ch)) { taken += 1; run += 1; last = run; continue }
+      if (separated(ch)) { run += 1; continue }
       break
     }
     if (taken < 30) continue
-    out += text.slice(copied, start) + '[hidden]'
-    copied = end
+    out += text.slice(copied, first) + '[hidden]'
+    copied = last
+    colon = last - 1
   }
   return out + text.slice(copied)
 }
@@ -273,8 +287,9 @@ async function pairingOf(api, id, { listenMs = 0, pollMs = 1_500 } = {}, { now =
   }
 }
 
-// Reads the linked Omni's instances, to find a Telegram channel a previous try made. Kept
-// quiet: a listing this wizard cannot make never blocks a move.
+// Reads the linked Omni's instances, to find the channel this move names. A different Telegram
+// channel the person already has is never taken for the moved bot. Kept quiet: a listing this
+// wizard cannot make never blocks a move.
 async function telegramChannel(channels, times, deps) {
   if (typeof channels?.omniRequest !== 'function' || typeof channels?.omniChannelEndpoint !== 'function') return null
   try {
@@ -282,7 +297,7 @@ async function telegramChannel(channels, times, deps) {
     if (!response?.ok) return undefined
     const body = await response.json()
     const items = Array.isArray(body?.items) ? body.items : Array.isArray(body?.data) ? body.data : []
-    const found = items.find(item => item && item.channel === 'telegram' && typeof item.id === 'string' && UUID.test(item.id))
+    const found = items.find(item => item && item.channel === 'telegram' && text(item.name) === CHANNEL_NAME && typeof item.id === 'string' && UUID.test(item.id))
     if (found === undefined) return null
     const pairing = await pairingOf({ call: channels.omniChannelEndpoint }, found.id, {}, { now: deps.now, sleep: deps.sleep })
     return { id: found.id, name: text(found.name) || CHANNEL_NAME, connected: pairing.connected === true, detail: pairing.detail ?? null }
@@ -416,6 +431,8 @@ export function createMigrateActions(ctx, deps = {}) {
     let stored = false
     let hermesOff = false
     let hermesWasOff = false
+    let hermesWasStopped = false
+    let gatewayWasRunning = false
     let gatewayStopped = false
     let channelId = null
     let backup = null
@@ -445,10 +462,19 @@ export function createMigrateActions(ctx, deps = {}) {
       setStep(job, 'hermes', 'now')
       const before = read.gateway ?? { pid: null }
       const gatewayRunning = before.pidAlive === true && before.pid !== null
+      gatewayWasRunning = gatewayRunning
       const stillPolling = gatewayRunning && ACTIVE.has(text(before.telegram).toLowerCase())
       if (read.hermes.channel === 'off' && !stillPolling) {
         hermesOff = true
         hermesWasOff = true
+      } else if (read.hermes.channel !== 'off' && !gatewayRunning) {
+        // Hermes was stopped before this: switch its settings off and leave it stopped. It
+        // must not be started just to switch a channel off.
+        const off = await runHermes(target, { mode: 'disable' }, { ...deps, timeoutMs: times.probeMs })
+        backup = text(off.backup) || null
+        hermesOff = true
+        hermesWasStopped = true
+        changed = { ...changed, hermesOff: true }
       } else {
         if (read.hermes.channel === 'off') hermesWasOff = true
         if (read.hermes.channel !== 'off') {
@@ -500,7 +526,7 @@ export function createMigrateActions(ctx, deps = {}) {
           changed = { ...changed, omniCreated: true }
         } else {
           if (onOmni === null && hermesOff && backup !== null) {
-            const restored = await restoreHermes(target, backup)
+            const restored = await restoreHermes(target, backup, { startGateway: gatewayWasRunning })
             if (restored.ok === true) {
               hermesOff = false
               changed = { ...changed, hermesOff: false }
@@ -535,6 +561,7 @@ export function createMigrateActions(ctx, deps = {}) {
         answerBot: answerer.picked === null ? null : { id: answerer.picked.id, name: answerer.picked.name },
         hermesOff,
         hermesWasOff,
+        hermesWasStopped,
         gatewayStopped,
       }
       job.phase = 'done'
@@ -602,12 +629,13 @@ export function createMigrateActions(ctx, deps = {}) {
 
   // Hermes goes back on after a refusal it did not cause: settings back, gateway restarted,
   // and a moment to see the process return. It is never done while Omni has the channel.
-  async function restoreHermes(target, backup) {
+  async function restoreHermes(target, backup, { startGateway = true } = {}) {
     try {
       await runHermes(target, { mode: 'restore', backup }, { ...deps, timeoutMs: times.probeMs })
     } catch {
       return { ok: false, reason: 'copy' }
     }
+    if (!startGateway) return { ok: true }
     const restarted = await restartHermes(target, { execute: deps.restart, timeoutMs: times.restartMs, spawn: deps.spawn })
     if (restarted.ok !== true) return { ok: false, reason: 'restart' }
     const until = now() + Math.min(15_000, times.offWaitMs)

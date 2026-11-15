@@ -122,7 +122,7 @@ const probe = (overrides = {}) => ({
 })
 const RESULT = {
   channelId: OTHER, channelName: 'Telegram', connected: true, botName: '@LumenBot', chatUrl: 'https://t.me/LumenBot',
-  attached: true, answering: true, answerBot: { id: BOT, name: 'Omni' }, hermesOff: true, hermesWasOff: false, gatewayStopped: false,
+  attached: true, answering: true, answerBot: { id: BOT, name: 'Omni' }, hermesOff: true, hermesWasOff: false, hermesWasStopped: false, gatewayStopped: false,
 }
 const STEPS = ['key', 'hermes', 'omni', 'listen'].map((id, at) => ({ id, state: at < 1 ? 'done' : at === 1 ? 'now' : 'pending' }))
 const STATES = [
@@ -139,6 +139,8 @@ const STATES = [
   { name: '11-handoff-no-key', phase: 'handoff', handoff: { reason: 'no-key' }, onOpenChannels: () => {}, height: 860 },
   { name: '12-problem-still-on', phase: 'problem', error: { code: 'hermes-still-on', message: 'Hermes did not confirm that its Telegram channel stopped, so nothing was handed to Omni and its config was put back.', changed: { hermesOff: false, omniCreated: false } }, height: 820 },
   { name: '13-aside-channels', phase: 'handoff', handoff: { reason: 'no-key' }, aside: { kind: 'channels', onBack: () => {} }, height: 660 },
+  { name: '14-confirm-stopped', phase: 'confirm', probe: probe({ hermes: { gatewayRunning: false } }), botId: BOT, agreed: false, height: 1080 },
+  { name: '15-done-stopped', phase: 'done', result: { ...RESULT, hermesWasStopped: true }, height: 900 },
 ]
 
 // The rail is the welcome's own: in the app, every step that brings one has announced it.
