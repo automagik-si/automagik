@@ -1153,7 +1153,7 @@ export function apply(ctx, config = {}, {
   // and the tools it would offer: no session, no model request) and remembered per Codex. A
   // Codex that does not take it is not ready, so the caller goes on to its next image source.
   const IMAGE_AGENT = 'acp-codex'
-  const imageSupported = imageSupport({ ...(imageSetup ? { setup: imageSetup } : {}), log: line => warn(ctx, line) })
+  const imageSupported = imageSupport({ ...(imageSetup ? { setup: imageSetup } : {}), log: line => imageWarn(ctx, line) })
   const imageAccess = async () => {
     const version = authVersions.get(IMAGE_AGENT) ?? 0
     const changed = () => disposed || (authVersions.get(IMAGE_AGENT) ?? 0) !== version
@@ -1211,7 +1211,7 @@ export function apply(ctx, config = {}, {
         return agents.get(IMAGE_AGENT).spawn()
       }, prompt, size, quality, background, signal, ...(input ? { input } : {}),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
-      name: AGENTS[IMAGE_AGENT].defaultName, log: line => warn(ctx, line) })
+      name: AGENTS[IMAGE_AGENT].defaultName, log: line => imageWarn(ctx, line) })
     } catch (error) {
       // A run refused as signed out says the CLI's sign-in ended: the next check asks again.
       if (error?.code === SIGNED_OUT) { signIns.delete(IMAGE_AGENT); signInChecks.delete(IMAGE_AGENT) }
@@ -1568,6 +1568,11 @@ function warn(ctx, message) {
   try {
     ctx.logger?.warn?.(`acp-dsh: ${message}`)
   } catch {}
+}
+
+function imageWarn(ctx, line) {
+  warn(ctx, line)
+  try { console.error(`[acp-dsh] ${line}`) } catch {}
 }
 
 function info(ctx, message) {

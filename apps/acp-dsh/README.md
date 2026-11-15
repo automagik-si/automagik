@@ -385,30 +385,40 @@ identity is shown as unknown.
 
 **Images through Codex.** `generateImage` is a one-off codex-acp session that asks Codex's
 built-in image tool for one picture (owner decision D-g). Each draw gets an empty scratch
-folder, no MCP servers and no bridge. Before the checks, it writes an owner-only
-`.codex/config.toml` there with a fresh, unpredictable permission profile and that profile as
-`default_permissions`. Its filesystem rules deny `:root` and allow only `:workspace_roots`
-to be read. It has no network table, `extends` or `:minimal` roots. After `session/new`, the
-run selects `permission-profile:<id>` and waits for the adapter to acknowledge it before
-sending the prompt. This is containment, **not a scratch-only read boundary**: Codex's
-filesystem helper adds runtime read grants even though our config omits them. Images in
-those runtime directories remain readable by design; see the platform list and pinned sources
-below. The folder and its config are removed afterwards.
-`CODEX_HOME` is the Bot's isolated Codex home, supplied by `cli-homes.js`; the terminal's config
-is never written. The tool overrides still go through codex-acp's `CODEX_CONFIG`.
+folder, no MCP servers and no bridge. The Bot's isolated Codex home holds an app-owned
+`automagik-image-<hex>` permission table, with the same per-home suffix as its chat profiles.
+No project config file is created. The run's overrides repeat and select that profile. Its
+filesystem rules deny `:root` and read `:workspace_roots`; it has no network table, `extends`
+or `:minimal` roots. Before the session starts, the draw reads Codex's resolved profile from
+`debug prompt-input` and accepts only root deny, scratch read and at most Codex's own helper
+folder under that home's `tmp/arg0-…/codex-arg0…`. Other grants or unknown forms fail the check.
+After `session/new`, the run selects `permission-profile:<id>` and waits for acknowledgement
+before sending the prompt. The scratch is removed afterwards. `CODEX_HOME` comes from
+`cli-homes.js`; the terminal's config is never written. The same checked overrides go through
+codex-acp's `CODEX_CONFIG`.
 
-If the adapter does not offer the profile mode or rejects its selection, drawing continues
-in `read-only` mode under the owner's current policy (`ALLOW_IMAGE_READ_ONLY_FALLBACK`). One
-`warn` line names the reason without private details, and the result is marked internally as
-not isolated. There is no UI change. A passing `imageAccess()` check means drawing is available;
-it does not establish that this draw can select a profile. The internal `isolated=true` flag
-means the adapter acknowledged the profile, not that image reads are scratch-only.
+If the profile is unavailable, its config is refused, its resolved grants are wider, or the
+adapter does not offer or acknowledge its mode, drawing continues in `read-only` mode under
+the owner's policy (`ALLOW_IMAGE_READ_ONLY_FALLBACK`). Windows keeps this fallback and refuses
+edits. One warning names the reason without private details, in the logger and stderr, and the
+result is marked internally as not isolated. There is no UI change. A passing `imageAccess()`
+check means drawing is available; it does not establish that this draw can select a profile.
+The internal `isolated=true` flag means the resolved grants passed and the mode was acknowledged;
+it does not prove that the hosted image tool reads through that profile.
+
+The draw hashes the home's config bytes before the check and again after mode acknowledgement,
+and checks at both points that the scratch has no `.codex` entry (including a dangling symlink).
+Changed or unreadable bytes, or a scratch `.codex` entry, take the same fallback/refusal path.
+A process that can already write the Bot's Codex home can change and restore it inside that
+window, or change it after acknowledgement if Codex rereads its config mid-session. That process
+already controls this Codex's configuration; the image lock cannot defend against it.
 
 **Input ownership.** Drawing sends only prompt text. An edit takes the person's uploaded
 PNG, JPEG or WebP from DSH's verified attachment store: bots-dsh resolves it in that Bot's own
 chat, and acp-dsh validates the bytes, writes a 0400 copy inside the per-draw scratch and sends
 an inline image block when the agent advertises image prompts. No read root is added. Edits
-run only when the adapter acknowledged the per-draw profile; the read-only fallback refuses
+run only when the adapter acknowledged the Bot home's image profile and Codex's resolved
+profile matched it; the read-only fallback refuses
 an edit. The scratch, including the input copy, is removed afterwards.
 
 `drawImage` accepts no user-selected local image-input path, registers no ACP filesystem-read
@@ -450,6 +460,8 @@ Existing group OCR, remote tools and Pocket text-only input are unchanged.
 **Chat image tools.** On Linux and macOS, a Codex Bot at Read only or Workspace now prefers the
 app-owned `automagik-read-<hex>` or `automagik-workspace-<hex>` permission profile in its
 isolated home; the chat spawn writes them and keeps the person's other lines in that file.
+It also refreshes the image table described above, using the same suffix and only the image
+grants. App-owned tables are replaced by name, including a person's changes inside them.
 - **What they allow.** The chat workspace, project roots, Codex's runtime read grants, that
   home's skills and the layout of Codex's own executable (Linux's sandbox re-runs it for every
   command, and its `codex-path` holds Codex's `rg`; for npm's launcher, the native package it
@@ -578,7 +590,7 @@ of time leaves Codex ready. A draw always makes its own check.
   ask Codex to use a readable local image file as input and return its contents in chat.
   codex-acp reports the image call without its arguments. No feature switch disables that
   input. In `read-only` mode codex-acp sends a full-disk `readOnly` policy on every turn;
-  `CODEX_CONFIG` cannot narrow it. The per-draw profile mode instead sends the profile id
+  `CODEX_CONFIG` cannot narrow it. The per-home image profile mode instead sends the profile id
   on every turn. Codex's image accessor uses a sandboxed helper, whose runtime grants widen
   the profile's requested read boundary. The owner chose to keep the fallback enabled when
   that mode is unavailable or rejected; that decision does not establish scratch-only reads.

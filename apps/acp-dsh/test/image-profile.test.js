@@ -6,6 +6,7 @@ import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import { AgentRun } from '../src/host/acp.js'
 import { drawImage, mcpServerNames, STOPPED, TIMED_OUT, UNAVAILABLE } from '../src/host/image.js'
 
@@ -14,6 +15,7 @@ const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-image-agent.mjs')
 function fixture(t, profile = 'offer') {
   const home = mkdtempSync(join(tmpdir(), 'acp-image-review-'))
   t.after(() => rmSync(home, { recursive: true, force: true }))
+  const profileModes = ensureChatProfiles(home, { platform: 'linux' })
   const traceFile = join(home, 'trace.jsonl')
   const dir = join(home, 'scratch')
   const logged = []
@@ -22,7 +24,7 @@ function fixture(t, profile = 'offer') {
     logged,
     trace: () => existsSync(traceFile) ? readFileSync(traceFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [],
     request: {
-      spawn: () => ({ command: process.execPath, args: [FAKE], env: { FAKE_IMAGE_PROFILE: profile, FAKE_IMAGE_TRACE: traceFile } }),
+      spawn: () => ({ command: process.execPath, args: [FAKE], profileModes, env: { CODEX_HOME: home, FAKE_IMAGE_PROFILE: profile, FAKE_IMAGE_TRACE: traceFile } }),
       prompt: 'a fox',
       scratch: async () => { await fs.mkdir(dir); return dir },
       log: line => logged.push(line),
@@ -38,7 +40,7 @@ test('a config refusal only with the profile retries all checks without it and d
   const made = await drawImage({
     ...run.request,
     listServers: async (launch, options) => {
-      const profile = existsSync(join(options.cwd, '.codex'))
+      const profile = checks.length === 0
       checks.push({ cwd: options.cwd, profile })
       if (profile) throw configError()
       return mcpServerNames(launch, options)
@@ -62,8 +64,8 @@ test('a config refusal with and without the profile refuses after exactly two ch
   const profiles = []
   await assert.rejects(drawImage({
     ...run.request,
-    listServers: async (_launch, { cwd }) => {
-      profiles.push(existsSync(join(cwd, '.codex')))
+    listServers: async () => {
+      profiles.push(profiles.length === 0)
       throw configError()
     },
   }), error => error.code === UNAVAILABLE && /configuration/.test(error.message))
@@ -116,26 +118,23 @@ test('with fallback disabled missing and rejected profile modes give a clear iso
   }
 })
 
-test('failure to create the profile directory or write its config has its own refusal and log', async (t) => {
-  for (const operation of ['mkdir', 'writeFile']) {
-    const run = fixture(t)
-    // The scratch folder itself succeeds. Fail only the profile operation inside it.
-    const original = fs[operation]
-    const mocked = t.mock.method(fs, operation, async (file, ...args) => {
-      if (file === join(run.dir, '.codex') || file === join(run.dir, '.codex', 'config.toml')) throw new Error('private path and account')
-      return original(file, ...args)
-    })
+test('failure to write the edit input has its own refusal and log', async (t) => {
+  const run = fixture(t)
+  const original = fs.writeFile
+  const mocked = t.mock.method(fs, 'writeFile', async (file, ...args) => {
+    if (file === join(run.dir, 'input.png')) throw new Error('private path and account')
+    return original(file, ...args)
+  })
+  syncBuiltinESMExports()
+  try {
+    await assert.rejects(drawImage({ ...run.request, input: { data: Buffer.from('input'), mimeType: 'image/png' } }), error => error.code === UNAVAILABLE && /scratch folder could not be prepared/.test(error.message) && !/MCP|private/.test(error.message))
+  } finally {
+    mocked.mock.restore()
     syncBuiltinESMExports()
-    try {
-      await assert.rejects(drawImage(run.request), error => error.code === UNAVAILABLE && /scratch folder could not be prepared/.test(error.message) && !/MCP|private/.test(error.message))
-    } finally {
-      mocked.mock.restore()
-      syncBuiltinESMExports()
-    }
-    assert.deepEqual(run.trace(), [])
-    assert.deepEqual(run.logged, ['the Codex image run was not started: the scratch folder could not be prepared'])
-    assert.equal(existsSync(run.dir), false)
   }
+  assert.deepEqual(run.trace(), [])
+  assert.deepEqual(run.logged, ['the Codex image run was not started: the scratch folder could not be prepared'])
+  assert.equal(existsSync(run.dir), false)
 })
 
 test('Stop and a start timeout during profile selection do not warn or retry read-only', async (t) => {

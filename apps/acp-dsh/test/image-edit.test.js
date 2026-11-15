@@ -3,8 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { ensureChatProfiles } from '../src/host/codex-chat-profiles.js'
 import { apply } from '../index.js'
-import { drawImage, editPrompt, FAILED, IMAGE_TITLE, imageConfig, imagePrompt, MAX_IMAGE_BYTES, REFUSED, SIGNED_OUT, STOPPED, TIMED_OUT, UNAVAILABLE } from '../src/host/image.js'
+import { drawImage, editPrompt, FAILED, IMAGE_TITLE, imageOverrides, imageProfileFor, imagePrompt, MAX_IMAGE_BYTES, REFUSED, SIGNED_OUT, STOPPED, TIMED_OUT, UNAVAILABLE } from '../src/host/image.js'
 
 const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-image-agent.mjs')
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
@@ -13,6 +14,7 @@ const EXTRAS = ['unified_exec', 'code_mode', 'multi_agent', 'multi_agent_v2', 'a
 function setup(t, { mode = 'ok', profile = 'offer' } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'acp-edit-test-'))
   t.after(() => rmSync(home, { recursive: true, force: true }))
+  const profileModes = ensureChatProfiles(home, { platform: 'linux' })
   const traceFile = join(home, 'trace.jsonl')
   const scratches = []
   return {
@@ -23,8 +25,8 @@ function setup(t, { mode = 'ok', profile = 'offer' } = {}) {
       scratches.push(dir)
       return dir
     },
-    spawn: () => ({ command: process.execPath, args: [FAKE], env: {
-      CODEX_PATH: '/fake/codex', FAKE_IMAGE_MODE: mode, FAKE_IMAGE_PROFILE: profile, FAKE_IMAGE_TRACE: traceFile,
+    spawn: () => ({ command: process.execPath, args: [FAKE], profileModes, env: {
+      CODEX_HOME: home, CODEX_PATH: '/fake/codex', FAKE_IMAGE_MODE: mode, FAKE_IMAGE_PROFILE: profile, FAKE_IMAGE_TRACE: traceFile,
     } }),
     trace: () => existsSync(traceFile) ? readFileSync(traceFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [],
   }
@@ -36,8 +38,7 @@ function inspectingRun({ images = true, inspect, result = PNG } = {}) {
   return class {
     constructor(spec) { this.spec = spec }
     async start() {
-      const config = readFileSync(join(this.spec.cwd, '.codex', 'config.toml'), 'utf8')
-      const id = config.match(/automagik-image-[a-f0-9]{32}/)[0]
+      const id = JSON.parse(this.spec.env.CODEX_CONFIG).default_permissions
       this.modes = { availableModes: [{ id: `permission-profile:${id}` }] }
       this.init = images === null ? {} : { agentCapabilities: { promptCapabilities: { image: images } } }
     }
@@ -65,7 +66,7 @@ test('an edit writes a 0400 scratch copy and sends inline image first with uncha
       if (process.platform !== 'win32') assert.equal(statSync(join(spec.cwd, `input.${ext}`)).mode & 0o777, 0o400)
       assert.deepEqual(blocks, [{ type: 'image', data: data.toString('base64'), mimeType },
         { type: 'text', text: editPrompt({ ...fields, file: `input.${ext}` }) }])
-      assert.equal(spec.env.CODEX_CONFIG, imageConfig([], EXTRAS, [], spec.cwd))
+      assert.equal(spec.env.CODEX_CONFIG, JSON.stringify(imageOverrides({ extras: EXTRAS, project: spec.cwd, profile: imageProfileFor(spec.profileModes) })))
       assert.deepEqual(spec.mcpServers, [])
     } }) })
     assert.equal(inspected, true)
