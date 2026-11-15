@@ -1463,8 +1463,12 @@ flag names only (never a value): a `programs.json` Codex run naming the bypass f
 app server, outside the pane), an `--add-dir` the folder rules above refuse (by any alias, or a
 relative one; one only withheld is counted by the warning above instead), or a `-c`/`--config`
 for `sandbox_mode`, `approval_policy`, `approvals_reviewer`, `sandbox_workspace_write`,
-`default_permissions`, `permission_profile` or `permissions` (on 0.167 a
-`-c default_permissions=":danger-full-access"` overrides `--approve-for-me`). Every other word stays.
+`default_permissions`, `permission_profile` or `permissions`, or a key under one (on 0.167 a
+`-c default_permissions=":danger-full-access"` overrides `--approve-for-me`). A profile's copy goes
+too (`profiles.<name>.<key>` for one of those keys, or a key under one: `--profile <name>` applies
+it), named `-c profiles.*.<key>`, never by the profile's name; so does `profiles` or
+`profiles.<name>` set whole, named `-c profiles` (a table that can hold any of them). Every other
+word stays.
 Only a Codex run's words before its `--` are options: after it, Codex reads them as prompt text.
 
 Templates keep their command. A worker started with `--template`, or by a bot's

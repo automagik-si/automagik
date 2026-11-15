@@ -49,9 +49,14 @@ export function clientFacts() {
 
 // Short words for the provider-neutral failure codes of DSH's LLM layer.
 const FAILURES = {
+  MISSING_CREDENTIAL: 'The model has no API key',
+  INVALID_CREDENTIAL: 'The API key is not in the right format',
   AUTH: 'The API key was rejected',
   QUOTA: 'The account is out of quota',
   ACCOUNT_QUOTA: 'The account is out of quota',
+  ACCOUNT_SIGN_IN_REQUIRED: 'The DeepSeek account needs a sign-in',
+  ACCOUNT_SIGNED_OUT: 'The DeepSeek account is signed out',
+  ACCOUNT_TOKEN_INVALID: 'The DeepSeek account sign-in has expired',
   RATE_LIMIT: 'Too many requests to the model',
   CONTEXT_WINDOW_EXCEEDED: 'The conversation is too long for the model',
   INVALID_REQUEST: 'The model service refused the request',
@@ -63,9 +68,11 @@ const FAILURES = {
   PERMISSION: 'Its permission level could not be set here, so it took no turn',
 }
 
+// The short words for a known code, or undefined.
+export const knownFailure = code => (Object.hasOwn(FAILURES, code ?? '') ? t(FAILURES[code]) : undefined)
+
 export function failureLabel(code, message) {
-  if (FAILURES[code]) return t(FAILURES[code])
-  return message || code || t('Unknown error')
+  return knownFailure(code) ?? (message || code || t('Unknown error'))
 }
 
 // GitHub refuses very long addresses; past this the diagnostics go by the clipboard.

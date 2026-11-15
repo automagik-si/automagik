@@ -1,3 +1,4 @@
+import { approvalDetail } from './approvals.js'
 import { openStops, stopLine } from './stops.js'
 import { createElement as h, Fragment, useEffect, useState } from 'react'
 import { t, hostText } from './i18n.js'
@@ -87,6 +88,15 @@ export function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, use
   const pending = useSessionStatus ? useSessionStatus(map => map.get(taskId)?.pendingInteraction) : undefined
   const ask = pending?.kind === 'approval' && typeof pending.answer === 'function' ? pending : undefined
   const approval = useWork ? useWork(work => approvalFor(work, taskId)) : false
+  // What the card's buttons answer is the ask DSH shows, so the command named is that ask's own;
+  // without one, the task's single waiting ask. Two at once and none named: the card cannot say
+  // which the person would be answering.
+  const askCall = ask?.callId
+  const detail = useWork ? useWork(work => {
+    const mine = (work.approvals ?? []).filter(entry => entry.taskId === taskId)
+    const entry = askCall !== undefined ? mine.find(item => item.sessionId === taskId && item.callId === askCall) : ask === undefined && mine.length === 1 ? mine[0] : undefined
+    return entry ? approvalDetail(entry) : ''
+  }) : ''
   const stop = useWork ? useWork(work => {
     const entry = taskId === null ? undefined : openStops(work).filter(item => item.taskId === taskId).sort((a, b) => b.at - a.at)[0]
     return entry ? stopLine(entry) : ''
@@ -130,6 +140,7 @@ export function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, use
             task?.steps ? h('span', { className: 'op-task-steps' }, t('step {count}', { count: task.steps })) : null),
           h('div', { className: 'op-task-bar', 'aria-hidden': true }, h('i')))
           : task?.summary ? h('p', { className: 'op-task-summary' }, task.summary) : null,
+      status === 'waiting' && detail ? h('span', { className: 'op-task-said' }, detail) : null,
       sessionId ? h('button', { type: 'button', className: 'op-task-open', onClick: onOpen }, ask ? t('Open task') : status === 'waiting' ? t('Answer it') : working ? t('Watch it work') : t('Open task'), ' →') : null))
 }
 

@@ -720,6 +720,26 @@ test("relinkCli: an install record that exists but does not list the pack gets n
   }
 });
 
+test("relinkCli: a record with no mods line, or a mods list that only resembles the pack, gets no am link", (t) => {
+  const { home, mods } = appHome("0.4.0");
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const binDir = join(home, "local-bin");
+  mkdirSync(binDir);
+  const bin = join(mods, "am-sidebar", "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "automagik-herdr"), "#!/bin/sh\n");
+  const record = join(home, "automagik-herdr", "installed-by-install.sh");
+  // The first row has no mods line (a v1 record: it names the old pack, never this one); the others list
+  // a different token, one that starts with the pack's name among them (an exact token match, not a prefix).
+  for (const [row, text] of [["no mods line", "version=0.4.0\nbefore=none\n"],
+    ["mods=spaces-agents", "version=0.4.0\nmods=spaces-agents\nbefore=none\n"],
+    ["mods=am-sidebar-agents", "version=0.4.0\nmods=am-sidebar-agents\nbefore=none\n"]]) {
+    writeFileSync(record, text);
+    assert.equal(relinkCli({ modsDir: mods, binDir }), null, row);
+    assert.equal(existsSync(join(binDir, "am")), false, row);
+  }
+});
+
 test("relinkCli: our link follows the pack's entry (the wrapper, or the .mjs before it); any other is left", (t) => {
   const { home, mods } = appHome("0.4.0");
   t.after(() => rmSync(home, { recursive: true, force: true }));

@@ -18,6 +18,9 @@ const { outputFiles } = await build({
 const slots = []
 let cursor = 0
 const react = {
+  createContext: (initial) => { const ctx = { value: initial }; ctx.Provider = ({ value, children }) => { ctx.value = value; return children }; return ctx },
+  useContext: ctx => ctx.value,
+  useCallback: fn => fn,
   createElement: (type, props, ...children) => ({ type, props: { ...props, children } }), Fragment: Symbol('Fragment'),
   useState(initial) {
     const i = cursor++
@@ -158,6 +161,3 @@ test('cancel closes the confirm without signing out', async () => {
   assert.equal(walk(tree, node => node.props?.className === 'bt-confirm').length, 0)
   assert.deepEqual(side.calls, ['hasRunningAccountTasks'])
 })
-
-// #452: the Connect plugins button left the Bot footer; the account menu that
-// stays keeps the way into the connectors and the automation panel.

@@ -181,7 +181,7 @@ async function setup({ state = team(), scripts = [], gate = false, messages, seq
   rt.stateSaved = () => { notices += 1; saved?.() }
   await rt.load()
   const callEndpoint = async (endpoint, payload) => {
-    const response = await route.fetch(new Request('http://localhost/api/bot', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
+    const response = await route.fetch(new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
     return response.json()
   }
   const stopRuntime = async () => {

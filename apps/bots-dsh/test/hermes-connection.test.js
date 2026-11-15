@@ -260,6 +260,28 @@ test('saved one-click connect uses the saved profile/session without REST discov
   assert.equal(h.wires.at(-1).options.authHeaders.Cookie, `hermes_session_at=${f.access}; hermes_session_rt=${f.refresh}`)
   assert.equal(h.wires.at(-1).options.profile, 'sample-profile')
 })
+test('the connected view names the model the Bot saved, not the first model the connection lists', async t => {
+  const f = dashboard(), h = runtime(t, f)
+  h.rt.state.prefs.hermesRemote = { enabled: true, mode: 'remote', authMode: 'token', address: f.address, profile: 'sample-profile', credentialRef: 'SAMPLE', models: [{ id: 'sample:first', name: 'First model' }, { id: 'sample:second', name: 'Second model' }] }
+  h.rt.state.bots = { sample: { id: 'sample', name: 'Sample', model: 'hermes-remote/sample:second' } }
+  assert.equal(h.rt.hermesRemote.view().modelRef, 'hermes-remote/sample:second')
+  // A Bot without a model still gets the first served model at first setup.
+  h.rt.state.bots = {}
+  assert.equal(h.rt.hermesRemote.view().modelRef, 'hermes-remote/sample:first')
+})
+test('a configured connection with known models opens no session when the wizard reopens it', async t => {
+  const f = dashboard(), h = runtime(t, f)
+  h.secrets.set('SAMPLE', JSON.stringify({ kind: 'token', credential: f.credential }))
+  h.rt.state.prefs.hermesRemote = { enabled: true, mode: 'remote', authMode: 'token', address: f.address, profile: 'sample-profile', credentialRef: 'SAMPLE', models: [{ id: 'sample:first', name: 'First model' }, { id: 'sample:second', name: 'Second model' }] }
+  h.rt.state.bots = { sample: { id: 'sample', name: 'Sample', model: 'hermes-remote/sample:second' } }
+  const view = await h.endpoints.get('hermes-remote-connect')({ cached: true })
+  assert.equal(h.wires.length, 0, 'no throwaway remote session just to list known models')
+  assert.equal(view.modelRef, 'hermes-remote/sample:second')
+  assert.equal(f.calls.length, 0)
+  // An explicit connect or refresh still discovers the list.
+  await h.endpoints.get('hermes-remote-connect')({})
+  assert.equal(h.wires.length, 1)
+})
 test('tests-only cancellation aborts before a test ID exists and leaves the saved configuration untouched', async t => {
   const f = dashboard({ handle: () => new Promise(() => {}) }), h = runtime(t, f)
   h.rt.state.prefs.hermesRemote = { enabled: true, address: 'https://example.invalid', profile: 'sample-profile', models: [] }
@@ -683,6 +705,10 @@ for (const rollback of [false, true]) {
     // (#1210). The fixture's 100 ms control deadline would therefore race the parked
     // window on a loaded CI host; what this test proves is the serialization, and the
     // dedicated queue-deadline test below still proves that waiting counts against it.
+    // A wider budget only made the race rarer: on a starved host every phase can still
+    // outlast it. So the clock stands still here: no setup timer fires and no deadline
+    // check sees time pass, and the test waits on its barrier and its own events only.
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
     const f = dashboard(), h = await durableRuntime(t, f, { deadlines: { start: 1000, control: 1000, cancel: 50 } }), gate = barrier()
     await h.rt.hermesRemote.configure({ enabled: true, address: f.address, profile: 'sample-profile', credential: f.credential })
     const tested = await h.rt.hermesRemote.test(f.token), secretEndpoint = h.rt.secretEndpoint, compare = h.rt.deleteSecretIfUnchanged

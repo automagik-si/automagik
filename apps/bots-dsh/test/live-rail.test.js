@@ -218,3 +218,73 @@ test('a child ask names the subagent and keeps the waiting face', () => {
   assert.equal(item.face ?? 'alert', 'alert')
   assert.equal(item.open, 'ada')
 })
+
+test('the rail merges capabilities by first arrival, keeps distinct places and counts asks', () => {
+  const approvals = [
+    { id: 'later', botId: 'genie', taskId: 't3', tool: 'bash', capabilityKey: 'same', at: 3, reason: 'Run the tests', detail: { code: 'bun test' } },
+    { id: 'first', botId: 'genie', taskId: 't1', tool: 'bash', capabilityKey: 'same', at: 1, reason: 'Run the tests', detail: { code: 'bun test' } },
+    { id: 'room', botId: 'genie', roomId: 'room', tool: 'bash', capabilityKey: 'same', at: 2, reason: 'Run the tests', detail: { code: 'bun test' } },
+    { id: 'repeat', botId: 'genie', taskId: 't1', tool: 'bash', capabilityKey: 'same', at: 4, reason: 'Run the tests', detail: { code: 'bun test' } },
+    { id: 'chat', botId: 'genie', sessionId: 'genie-chat', tool: 'bash', capabilityKey: 'same', at: 4.5, reason: 'Run the tests', detail: { code: 'bun test' } },
+    { id: 'single', botId: 'writer', tool: 'read', at: 5 },
+  ]
+  const live = liveOf({ approvals }, roster)
+  const [group, single] = live.needs
+  assert.equal(group.key, 'ask:first')
+  assert.equal(group.count, 5)
+  assert.equal(group.open, 't1')
+  assert.equal(group.line, '5 requests to use bash')
+  assert.equal(group.detail, 'bun test')
+  assert.equal(group.reason, 'Run the tests')
+  // Every place is named, the Bot's own chat too.
+  assert.deepEqual(plain(group.places), ['Add a README', 'You, Writer, Genie', 'Waits on you', 'in its own chat'])
+  assert.equal(group.place, group.places.join(', '))
+  assert.deepEqual(plain(group.entries.map(entry => entry.id)), ['first', 'room', 'later', 'repeat', 'chat'])
+  assert.equal(liveSummary({ needs: live.needs, working: [] }), '6 needs you · nothing working')
+  assert.deepEqual(plain(single), { key: 'ask:single', bot: roster.byId.writer, tool: 'read', open: 'writer', count: 1, entries: [approvals[5]], detail: '' })
+})
+
+test('singleton detail extends only the default line and retains the button card', () => {
+  const approvals = [
+    { id: 'normal', botId: 'genie', tool: 'bash', detail: { code: 'echo hello' } },
+    { id: 'child', botId: 'genie', tool: 'bash', child: true, detail: { code: 'echo child' } },
+    { id: 'keep', botId: 'genie', tool: 'keep_working', detail: { code: 'keep' } },
+  ]
+  const items = liveOf({ approvals }, roster).needs
+  assert.equal(items[0].line, 'Wants to use bash · echo hello')
+  assert.equal(items[1].line, 'A subagent wants to use bash')
+  assert.equal(items[2].line, undefined)
+  const body = LiveRail({ roster, actions: {}, useWork: select => select({ approvals }) })
+  const cards = body.children.find(node => node?.props?.dot === 'need').children.map(node => node.type(node.props))
+  assert.ok(cards.every(card => card.type === 'button'))
+})
+
+test('merged cards have sibling action buttons, use native exact-call answers and stay open-only without them', async () => {
+  const approvals = [
+    { id: 'one', botId: 'genie', taskId: 't1', sessionId: 't1', callId: 'c', tool: 'bash', capabilityKey: 'same' },
+    { id: 'two', botId: 'genie', taskId: 't3', sessionId: 't3', callId: 'd', tool: 'bash', capabilityKey: 'same' },
+  ]
+  const outcomes = []
+  const opened = []
+  const actions = { openSession: id => opened.push(id) }
+  const draw = useSessionStatus => {
+    const body = LiveRail({ roster, actions, useWork: select => select({ approvals }), useSessionStatus })
+    const node = body.children.find(node => node?.props?.dot === 'need').children[0]
+    return node.type(node.props)
+  }
+  const native = (callId, id) => ({ pendingInteraction: { kind: 'approval', callId, toolName: 'bash', answer: value => outcomes.push([id, value]) } })
+  // One ask this window cannot answer: the card only opens, so no decision covers part of it.
+  const partial = draw(select => select(new Map([['t1', native('c', 'one')]]))).children.find(node => node?.props?.className === 'bt-q-foot')
+  assert.deepEqual(partial.children.filter(Boolean).map(node => node.children[0]), ['Open'])
+  const card = draw(select => select(new Map([['t1', native('c', 'one')], ['t3', native('d', 'two')]])))
+  assert.equal(card.type, 'div')
+  assert.equal(card.props.className, 'bt-live-card bt-live-need')
+  const row = card.children.find(node => node?.props?.className === 'bt-q-foot')
+  assert.deepEqual(row.children.map(node => node.children[0]), ['Reject', 'Allow once', 'Open'])
+  await row.children[1].props.onClick()
+  assert.deepEqual(outcomes, [['one', 'allowed-once'], ['two', 'allowed-once']])
+  row.children[2].props.onClick()
+  assert.deepEqual(opened, ['t1'])
+  const openOnly = draw().children.find(node => node?.props?.className === 'bt-q-foot')
+  assert.deepEqual(openOnly.children.filter(Boolean).map(node => node.children[0]), ['Open'])
+})

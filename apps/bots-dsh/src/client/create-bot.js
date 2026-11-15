@@ -8,6 +8,8 @@ import { useEscape } from './overlay-hooks.js'
 import { createPayload, freshBotName, startModel } from './bot-draft.js'
 import { ModelMenu } from './model-menu.js'
 import { hostText, t } from './i18n.js'
+import { ROLE_MAX } from '../shared/bot-profile.js'
+import { presetName, remoteOfBot } from './permission-picker.js'
 import { nameProblem } from '../shared/mentions.js'
 
 const pick = list => list[Math.floor(Math.random() * list.length)]
@@ -17,13 +19,16 @@ const randomLook = (avoid = {}) => {
   return { shape: pick(shapes), color: pick(colors) }
 }
 
-// The new-Bot form: look first, then name and model. Nothing exists until Create.
+// The new-Bot form: look first, then name, model and instructions. Nothing exists until Create.
 // `inline` drops the pane's header for a form shown inside Settings.
 export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBack, onCreated, inline = false }) {
   const [look, setLook] = useState(() => randomLook())
   const [image, setImage] = useState(null)
   const [library, setLibrary] = useState(false)
   const [name, setName] = useState(start?.name ?? '')
+  const [role, setRole] = useState('')
+  const [instructions, setInstructions] = useState('')
+  const [showInstructions, setShowInstructions] = useState(false)
   const [model, setModel] = useState(() => startModel(roster))
   const [effort, setEffort] = useState(undefined)
   const [busy, setBusy] = useState(false)
@@ -37,12 +42,15 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
   const finalName = name.trim() || fallbackName
   const clash = roster.bots.some(bot => bot.name.toLowerCase() === finalName.toLowerCase())
   const problem = nameProblem(finalName)
+  const permission = roster.prefs?.permission ?? roster.permissions?.defaultPreset
   const create = async () => {
     if (busy || clash || problem) return
     setError('')
     setBusy(true)
     try {
-      const bot = await actions.createBot(createPayload({ name: finalName, look, image, model, effort, brief }))
+      const bot = await actions.createBot(createPayload({
+        name: finalName, look, image, model, effort, brief, role, instructions, sectionId: start?.sectionId,
+      }))
       onCreated(bot)
     } catch (failure) {
       setError(failure?.message ?? String(failure))
@@ -85,12 +93,42 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
       }),
       problem ? h('span', { className: 'bt-note bt-danger' }, hostText(problem))
         : clash ? h('span', { className: 'bt-note bt-danger' }, t('A Bot named {name} already exists', { name: finalName })) : null),
+    h('label', { className: 'bt-field' },
+      h('span', { className: 'bt-field-label' }, t('Role')),
+      h('input', {
+        className: 'bt-input', value: role, maxLength: ROLE_MAX, 'aria-label': t('Role'),
+        onChange: event => setRole(event.target.value),
+      })),
     h('div', { className: 'bt-field' },
       h('span', { className: 'bt-field-label' }, t('Model')),
       h(ModelMenu, { bot: { id: 'new-bot', name: finalName, model: model || undefined, effort }, roster, actions, wide: true, onPick: ref => { setModel(ref); setEffort(undefined) }, onPickEffort: picked => setEffort(picked ?? null) }),
-      h('span', { className: 'bt-note' }, (roster.models ?? []).length > 0
+      h('span', { className: 'bt-note' }, model
         ? t('The Bot runs on this model. You can change it later in its details.')
-        : t('Add a provider and a model in DeepSeek Harness first, or pick one in the Bot\'s chat later.'))),
+        : (roster.models ?? []).length > 0
+          ? t('Pick a model here, or the Bot asks for one in its chat.')
+          : t('Add a provider and a model in DeepSeek Harness first, or pick one in the Bot\'s chat later.'))),
+    h('div', { className: 'bt-create-step' }, t('What will it do?')),
+    h('button', {
+      type: 'button', className: 'bt-soft', 'aria-expanded': showInstructions,
+      onClick: () => setShowInstructions(value => !value),
+    }, t('Add instructions')),
+    // The form's own input look, as tall as the Settings instructions area.
+    showInstructions ? h('div', { className: 'bt-field' },
+      h('textarea', {
+        className: 'bt-input', value: instructions,
+        style: { height: 'auto', minHeight: 112, padding: '8px 10px', lineHeight: '19px', resize: 'vertical' },
+        'aria-label': t('What will it do?'),
+        placeholder: t('What this Bot is responsible for…'),
+        onChange: event => setInstructions(event.target.value),
+        onKeyDown: event => { if (event.key === 'Enter') event.stopPropagation() },
+      }),
+      h('div', { className: 'bt-note' },
+        t("Part of the Bot's system prompt. You can change it later in its details."))) : null,
+    remoteOfBot({ model }) ? h('div', { className: 'bt-note' },
+      t("This model uses its Hermes profile's own instructions.")) : null,
+    permission == null ? null : h('div', { className: 'bt-note' },
+      t('New Bots start at {level}.', { level: presetName(permission, roster.permissions) })),
+    permission == null ? null : h('div', { className: 'bt-note' }, t('After the Bot is created, Auto can be turned on in its chat or Details, when its model offers it.')),
     error ? h('div', { className: 'bt-error', role: 'alert', style: { padding: 0 } }, error) : null,
     h('div', { className: 'bt-create-foot' },
       h('button', { type: 'button', className: 'bt-soft', onClick: onBack }, canGoBack ? t('Back') : t('Cancel')),

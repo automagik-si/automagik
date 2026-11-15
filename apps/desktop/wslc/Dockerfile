@@ -66,7 +66,8 @@ COPY build/profile /opt/automagik/profile
 COPY build/versions.json /opt/automagik/versions.json
 # The launcher, and the desktop's own modules it starts DSH and runs the lane with.
 COPY package.json /opt/automagik/desktop/package.json
-COPY src/dsh.js src/lane.js src/lane-keys.js src/privacy.js src/tar.js src/update.js /opt/automagik/desktop/src/
+COPY src/dsh.js src/child-paths.js src/close-inherited.cjs src/close-inherited-preload.cjs \
+     src/lane.js src/lane-keys.js src/privacy.js src/tar.js src/update.js /opt/automagik/desktop/src/
 COPY wslc/bin /opt/automagik/desktop/wslc/bin
 COPY wslc/lib /opt/automagik/desktop/wslc/lib
 

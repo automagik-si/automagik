@@ -115,10 +115,10 @@ function isSummary(body) {
 function decide(body) {
   const system = systemText(body.system) + '\n' + (body.messages ?? []).filter(m => m.role === 'system').map(m => textOf(m.content)).join('\n')
   const tools = new Set((body.tools ?? []).map(entry => entry.name))
-  // Clock snapshots are context, not a new scripted user command.
+  // Clock snapshots and a group's memory snapshot are context, not a new scripted user command.
   const messages = (body.messages ?? []).filter(m => m.role !== 'system').map(message => {
     if (message.role !== 'user') return message
-    const isClock = value => value.startsWith('Current time: ') || value.startsWith('Time sampled while preparing turn ')
+    const isClock = value => value.startsWith('Current time: ') || value.startsWith('Time sampled while preparing turn ') || value.startsWith('## Group memory, shared by the members of this group chat')
     const content = typeof message.content === 'string' ? (isClock(message.content) ? '' : message.content)
       : message.content.filter(block => block.type !== 'text' || !isClock(block.text))
     return { ...message, content }
@@ -249,6 +249,7 @@ function decide(body) {
         return [text(picked ? `好，就从「${picked}」开始。` : '好的。'), text('我先把要点理一下，稍后给你一个方案。')]
       }
       case 'list_bots': return [text(`现在的班底：\n${resultText}`)]
+      case 'cua': return [text(`cua 结果：${resultText.slice(0, 400)}`)]
       case 'create_group':
       case 'update_group':
       case 'delete_group':
@@ -429,6 +430,13 @@ function decide(body) {
   if ((order = /^插话\s*(\S+?)\s*[:：]\s*(.+)$/.exec(userText))) return [tool('message_bot', { to: order[1], message: order[2], when: 'now' })]
   if ((order = /^排队\s*(\S+?)\s*[:：]\s*(.+)$/.exec(userText))) return [tool('message_bot', { to: order[1], message: order[2], when: 'queue' })]
   if ((order = /^叫停\s*(\S+?)\s*[:：]\s*(.+)$/.exec(userText))) return [tool('stop_bot', { bot: order[1], reason: order[2] })]
+  // 调用 <tool> <json>: emit the named tool call verbatim — the generic way to
+  // drive a tool the mock has no dedicated trigger for (e.g. the cua methods).
+  if ((order = /^调用\s*(\S+)(?:\s+([\s\S]+))?$/.exec(userText))) {
+    if (!tools.has(order[1])) return [text(`The tool ${order[1]} is not in my tool list.`)]
+    try { return [tool(order[1], order[2] ? JSON.parse(order[2]) : {})] }
+    catch { return [text(`Bad JSON for ${order[1]}.`)] }
+  }
   if ((order = /^看群\s*(.+)$/.exec(userText))) return [tool('read_group_chat', { group: order[1].trim() })]
   // Memory: 记住[@话题] 事实 · 团队记住 事实 · 忘掉 事实 · 回忆 [词]
   if ((order = /^(团队)?记住(?:@(\S+))?\s*[:：]?\s*(.+)$/.exec(userText)) && tools.has('remember')) {
@@ -547,6 +555,27 @@ function decide(body) {
           { type: 'progress', label: 'Basic plan (¥100)', value: { '=': 'min(cost, 100)' }, max: 100, valueLabel: { '=': "cost > 100 ? '¥' + format(cost - 100, 0) + ' over' : '¥' + format(100 - cost, 0) + ' left'" }, tone: { '=': "cost > 100 ? 'bad' : cost > 80 ? 'warn' : 'good'" } },
           { type: 'callout', text: 'Assumes 2,000 tokens a request and list prices.', tone: 'info' },
           { type: 'submit', id: 'send', label: 'Send to Bot' },
+        ],
+      },
+    })]
+  }
+  // The calculator without the submit control: local formula recompute only.
+  if (/^\s*视图静态计算器/.test(userText) && tools.has('show_view')) {
+    return [text('拖一下滑块看看每月要花多少：'), tool('show_view', {
+      title: 'Monthly cost',
+      await_reply: false,
+      view: {
+        type: 'stack',
+        let: { tokens: 'req * 30 * 2000 / 1e6', cost: 'tokens * (1 - hit) * 2 + tokens * hit * 0.5' },
+        children: [
+          { type: 'slider', id: 'req', label: 'Requests a day', min: 100, max: 5000, step: 100, value: 1200 },
+          { type: 'choice', id: 'hit', label: 'Cache hits', options: [{ label: 'Low', value: 0.2 }, { label: 'Mid', value: 0.5 }, { label: 'High', value: 0.8 }], value: 0.5 },
+          { type: 'row', children: [
+            { type: 'metric', label: 'Cost a month', value: { '=': "'¥' + format(cost, 0)" }, tone: { '=': "cost > 100 ? 'bad' : 'good'" } },
+            { type: 'metric', label: 'Tokens a month', value: { '=': "format(tokens, 1) + ' M'" } },
+          ] },
+          { type: 'progress', label: 'Basic plan (¥100)', value: { '=': 'min(cost, 100)' }, max: 100, valueLabel: { '=': "cost > 100 ? '¥' + format(cost - 100, 0) + ' over' : '¥' + format(100 - cost, 0) + ' left'" }, tone: { '=': "cost > 100 ? 'bad' : cost > 80 ? 'warn' : 'good'" } },
+          { type: 'callout', text: 'Assumes 2,000 tokens a request and list prices.', tone: 'info' },
         ],
       },
     })]

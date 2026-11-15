@@ -20,7 +20,7 @@ export function packModelCell(env) {
       .then(() => true)
       .catch((failure) => { actions?.reportError?.(failure, 'composer-model'); return false })
     return h('span', { className: 'bt-composer-model', 'data-pack': pack.id },
-      h(ModelMenu, { key: target.bot.id, bot: target.bot, roster, actions, run, chat: true, bar: true }))
+      h(ModelMenu, { key: target.bot.id, bot: target.bot, roster, actions, run, chat: true, bar: true, running: sessionId === target.bot.sessionId }))
   }
 }
 

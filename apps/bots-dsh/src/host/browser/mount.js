@@ -93,7 +93,7 @@ async function saveShot(ctx, value) {
 export function mountBrowserPlugin(ctx, {
   toolDefs, defineTool, keyOf, profileRoot, downloadRoot, downloadRoots, uploadRoots, headless,
   playwrightUrl, executablePath, actionTimeout, authorize, completeFor, connect, getHold, onHold,
-  subscribeHolds, openSession = openBotBrowser, addressPolicy, onAddressRefused, api,
+  subscribeHolds, openSession = openBotBrowser, addressPolicy, onAddressRefused, api, register,
 }) {
   const sessions = new Map()
   // Each Bot's saved tabs (tabs.js), read once and then kept as its sessions save them.
@@ -155,8 +155,9 @@ export function mountBrowserPlugin(ctx, {
     await rm(join(profileRoot, botId), { recursive: true, force: true }).catch(() => {})
   }
 
+  const registerTool = register ?? (tool => ctx.tools.register(tool))
   for (const spec of toolDefs) {
-    ctx.tools.register(defineTool({
+    registerTool(defineTool({
       name: spec.name,
       description: spec.description,
       parameters: spec.parameters ?? {},
@@ -218,5 +219,6 @@ export function mountBrowserPlugin(ctx, {
   if (api) {
     api.drop = drop
     api.savedTabs = savedTabsOf
+    api.frame = async botId => (await sessions.get(botId))?.frame?.()
   }
 }

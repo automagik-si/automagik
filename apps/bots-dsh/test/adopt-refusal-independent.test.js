@@ -552,7 +552,8 @@ test('#844: a refused adopt reaches the toast after the native view moved on', a
   runInNewContext(outputFiles[0].text, {
     module,
     exports: module.exports,
-    require: name => name.startsWith('react') ? new Proxy({}, { get: () => () => null }) : {},
+    // A page boundary in the bundle extends React.Component, so that one name is a class.
+    require: name => name.startsWith('react') ? new Proxy({ Component: class {} }, { get: (target, key) => (key in target ? target[key] : () => null) }) : {},
     window: dom.window,
     document: dom.window.document,
     localStorage: dom.window.localStorage,

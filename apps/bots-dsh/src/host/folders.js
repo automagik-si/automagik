@@ -33,7 +33,15 @@ export function install(rt) {
   const teamFolder = () => ctx.workspaceRegistry.get?.(state.workspaceId)?.path
   // The desktop app names the folder the user chose for the Bots' files.
   const defaultTeamFolder = () => rt.config.workspace ?? (process.env.DS_BOT_WORKSPACE?.trim() || join(rt.home, 'workspace'))
-  const workDirOf = ({ botId, roomId } = {}) => rt.roomOf(roomId)?.workDir ?? rt.botOf(botId)?.workDir
+  // A member's own pick inside one group, made with working_directory there: a path,
+  // or null for the team workspace, which a missing entry would read as the Bot's
+  // folder. A group's folder outranks it; without one the Bot's folder is the default.
+  const workDirOf = ({ botId, roomId } = {}) => {
+    const room = rt.roomOf(roomId)
+    if (room?.workDir !== undefined) return room.workDir
+    if (room !== undefined && botId !== undefined && Object.hasOwn(room.memberDirs ?? {}, botId)) return room.memberDirs[botId] ?? undefined
+    return rt.botOf(botId)?.workDir
+  }
   const isFolder = path => stat(path).then(info => info.isDirectory(), () => false)
   const real = path => realpath(path).catch(() => resolve(path))
   // The real path of the deepest part that exists, with the rest after it.
@@ -59,9 +67,10 @@ export function install(rt) {
     const reported = session?.header === undefined ? undefined : ctx.get?.('workingDirectory')?.get?.(session) ?? session.header.cwd
     if (reported !== undefined) return reported
     const id = session?.id
+    const room = rt.roomOf(id)
+    if (room !== undefined) return workDirOf({ roomId: room.id }) ?? teamFolder()
     return workDirOf({ botId: rt.selfOf?.(id), roomId: rt.groupOwners?.get(id)?.roomId }) ?? teamFolder()
   }
-
   // The desktop app runs its own DSH and names the user's, which Bots must not write either.
   const dataRoots = () => [rt.dshHome, rt.home, process.env.DS_BOT_USER_DSH_HOME?.trim()].filter(Boolean)
 
@@ -137,6 +146,8 @@ export function install(rt) {
     if (!(await isFolder(path))) throw refusal(`${text} is a file, not a folder`)
     if (await holdsData(path)) throw refusal(`${text} holds DeepSeek Harness data, so it cannot be the team workspace`)
     if (path === await realTeam()) return path
+    const clash = await rt.privateClash(path)
+    if (clash) throw new Error(`${text} is in or around the folder of ${clash.name}, a private Bot, so it cannot be the team workspace`)
     const workspace = await ctx.workspaceRegistry.resolveByPath(path) ?? await ctx.workspaceRegistry.create(path, 'Omni')
     state.workspaceId = workspace.id
     await rt.save()
@@ -225,5 +236,5 @@ export function install(rt) {
     }
   }
 
-  Object.assign(rt, { teamFolder, defaultTeamFolder, workDirOf, sessionFolder, isFolder, real, folderAt, cleanWorkDir, workFolder, inData, setTeamWorkspace, sessionsOfBot, approveFolder, folderEndpoint })
+  Object.assign(rt, { teamFolder, defaultTeamFolder, workDirOf, sessionFolder, isFolder, real, realBeyond, folderAt, cleanWorkDir, workFolder, inData, setTeamWorkspace, sessionsOfBot, approveFolder, folderEndpoint })
 }

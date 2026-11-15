@@ -123,29 +123,24 @@ test('stdio MCP args resolve secret references like env does, and the child proc
 test('a missing or forbidden secret in stdio args keeps the server from starting, without leaking values', async (t) => {
   const env = await setup({ secrets: [secret('MCP_TOKEN', 'fake-dummy-secret-125', ['chief']), secret('OTHER_KEY', 'other-secret-125')] })
   t.after(() => env.dispose())
-  // MCP_TOKEN is scoped to chief, so worker's mount must fail before the process starts.
-  const denied = await mountStdio(env, {
-    name: 'denied',
-    args: [FIXTURE, '$DSH_SECRET_MCP_TOKEN'],
-    env: {},
-    botId: 'worker',
-  })
-  assert.equal(denied, undefined)
+  // MCP_TOKEN is scoped to chief, so worker cannot save a capability that uses it, and a Bot
+  // cannot name a key that is not saved: nothing is saved and no process starts.
+  for (const [botId, name, arg, key] of [['worker', 'denied', '$DSH_SECRET_MCP_TOKEN', 'MCP_TOKEN'], ['chief', 'missing', 'x$DSH_SECRET_NO_SUCH_KEY', 'NO_SUCH_KEY']]) {
+    await assert.rejects(
+      env.rt.capabilitySave({ name, kind: 'mcp', description: '', transport: 'stdio', command: process.execPath, args: [FIXTURE, arg], env: {} }, { botId }),
+      error => error.message.includes(`uses ${key}, which is not saved for you`) && !error.message.includes('fake-dummy-secret-125'),
+    )
+    assert.equal(env.rt.state.capabilities.items[name], undefined)
+  }
+  // The person may save one whose key is missing; worker's mount fails before the process starts.
+  await env.rt.capabilitySave({ name: 'denied', kind: 'mcp', description: '', transport: 'stdio', command: process.execPath, args: [FIXTURE, '$DSH_SECRET_MCP_TOKEN'], env: {} }, { ui: true })
+  await env.rt.changeCapabilityAttachment('attach', { name: 'denied' }, 'worker')
+  env.ctx.emit('agent/created', { agent: spawningAgent('worker', env.spawned) })
+  await env.rt.scheduleCapabilitiesReconcile()
+  assert.equal(env.spawned.some(mount => mount.config?.serverName === 'denied'), false)
   const deniedStatus = env.rt.capabilityStatusesView().worker.denied
   assert.equal(deniedStatus.state, 'error')
   assert.match(deniedStatus.error, /MCP_TOKEN/)
   assert.equal(deniedStatus.error.includes('fake-dummy-secret-125'), false)
   assert.equal(deniedStatus.error.includes('other-secret-125'), false)
-  // A name that is not saved at all fails the same way.
-  const missing = await mountStdio(env, {
-    name: 'missing',
-    args: [FIXTURE, 'x$DSH_SECRET_NO_SUCH_KEY'],
-    env: {},
-    botId: 'chief',
-  })
-  assert.equal(missing, undefined)
-  const missingStatus = env.rt.capabilityStatusesView().chief.missing
-  assert.equal(missingStatus.state, 'error')
-  assert.match(missingStatus.error, /NO_SUCH_KEY/)
-  assert.equal(missingStatus.error.includes('other-secret-125'), false)
 })

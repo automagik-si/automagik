@@ -80,7 +80,11 @@ async function start() {
   )
   // The offered set the bridge would list for this Bot at `level` (the ACP side filters the
   // Session's preset tools exactly so; the Bot team registers the team tools into it).
-  const offeredAt = (level) => [...ctx.registeredTools.values()]
+  // The team tools sit in each Bot Session's own scope since v0.3.6 (rt.teamTools), not in the global layer;
+  // the Session's assembled list, which the bridge reads, holds both.
+  const rt = ctx.provided.get('omniTeam')
+  const toolOf = name => ctx.registeredTools.get(name) ?? rt.teamTools.find(tool => tool.name === name)
+  const offeredAt = (level) => [...ctx.registeredTools.values(), ...rt.teamTools]
     .filter(tool => level !== 'read-only' || !MUTATING_TOOLS.has(tool.name))
     .map(tool => tool.name)
   // One Manual bridge call, in the order the ACP bridge runs it: the offer check, then the
@@ -89,7 +93,7 @@ async function start() {
     assert.ok(offeredAt(level).includes(name), `${name} is offered at ${level}`)
     const session = sessionOf(sessionId).session
     const body = async () => {
-      const tool = ctx.registeredTools.get(name)
+      const tool = toolOf(name)
       const value = await tool.execute(args, { agent: { id: sessionId, session }, callId: 'bridge-1' })
       return { isError: false, value }
     }
@@ -99,7 +103,7 @@ async function start() {
   }
   const stop = async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) }
   await call('state', {})
-  return { ctx, agents, sessionOf, call, askApproval, offeredAt, bridgeCall, stop }
+  return { ctx, agents, sessionOf, call, askApproval, offeredAt, toolOf, bridgeCall, stop }
 }
 
 // DSH's real tools service with auto-review's own pre-execute listener. The bridge's call is
@@ -182,7 +186,8 @@ test('a team tool posts to the Bot\'s group through the bridge, and the call car
   // The team view lists the call while it waits, under the Bot whose Session asked.
   const { value } = await host.call('state', {})
   const [approval] = value.work.approvals
-  assert.deepEqual([approval.botId, approval.tool, approval.answerable], ['b', 'post_to_group', false])
+  // Since v0.3.6 an approval outside a group races DSH's own card: the team's card can answer it too.
+  assert.deepEqual([approval.botId, approval.tool, approval.answerable], ['b', 'post_to_group', true])
   release('allowed-once')
   const result = await pending
   assert.equal(result.isError, false)
@@ -196,7 +201,7 @@ test('a team tool posts to the Bot\'s group through the bridge, and the call car
 test('an Auto Bot\'s team tool goes through auto-review: allow runs, deny refuses with AUTO_REVIEW_DENIED', async (t) => {
   const host = await start()
   t.after(host.stop)
-  const tool = host.ctx.registeredTools.get('post_to_group')
+  const tool = host.toolOf('post_to_group')
   const allow = await autoReviewPipeline(tool, { id: 'b', session: host.sessionOf('b').session }, 'allow')
   t.after(() => allow.dispose())
   const allowed = await allow.execute({ group: 'Ops', message: 'reviewed post' })

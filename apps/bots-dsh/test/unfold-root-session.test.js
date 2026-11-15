@@ -164,7 +164,8 @@ async function instance(t, { team = EMPTY, services = {} } = {}) {
   const disposers = []
   Object.assign(ctx, {
     // Like DSH, a callback waits until every service it names is there.
-    inject: (deps, callback) => { if (deps.every(dep => dep in ctx)) callback(ctx) },
+    // The names come as a list, or as an object's keys (office-skills.js).
+    inject: (deps, callback) => { if ((Array.isArray(deps) ? deps : Object.keys(deps)).every(dep => dep in ctx)) callback(ctx) },
     effect(execute) {
       const dispose = execute()
       if (typeof dispose === 'function') disposers.push(dispose)

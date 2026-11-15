@@ -11,6 +11,7 @@ import { test } from 'node:test'
 import { apply } from '../index.js'
 import { HELD_NOT_SET } from '../src/shared/held.js'
 import { fakeContext } from './fake-ctx.js'
+import { afterRound } from './relay-rows.js'
 
 const FULL = 'danger-full-access'
 const WRITE = 'workspace-write'
@@ -136,7 +137,8 @@ function team(t, { offered = [WRITE, FULL], bots = {}, room = {}, tasks, levels 
   // The person writes in the group, and its round runs to the end.
   const round = async (roomId, text) => {
     for (const listener of ctx.listeners.get('session/event') ?? []) await listener({ id: roomId }, { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
-    return JSON.parse(await ctx.registeredTools.get('group_relay').execute({}, { agent: { id: roomId, inbox: inboxOf(roomId) }, callId: 'round-1', signal: new AbortController().signal }))
+    // The relay's own result names where its rows start; the round runs on, and its rows are read as the chat does.
+    return afterRound(rt, roomId, await ctx.registeredTools.get('group_relay').execute({}, { agent: { id: roomId, inbox: inboxOf(roomId) }, callId: 'round-1', signal: new AbortController().signal }))
   }
   const view = async () => (await call('state', {})).value
   return { ctx, rt, home, service, call, log, sets, opens, changed, tool, turn, ended, saved, view, round, levelOf: id => presetOf.get(id), made: () => sessions }

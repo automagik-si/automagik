@@ -485,18 +485,23 @@ export const codexDirVar = (name) => CODEX_DIR_VARS.includes(name) || name === "
 const TOML_ESCAPES = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", "\"": "\"", "\\": "\\" };
 
 /**
- * A trimmed TOML key part unquoted: a basic string "…" with its escapes decoded (TOML 1.1's \xHH
- * included), a literal string '…' as it is, a bare key as written. An escape TOML lacks reads as
- * its letter (toward dropping).
+ * A basic string's text with its escapes decoded (TOML 1.1's \xHH included). An escape TOML
+ * lacks reads as its letter (toward dropping).
+ */
+const tomlBasic = (body) => body.replace(/\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[\s\S])/g, (m, e) => {
+  if (e.length === 1) return TOML_ESCAPES[e] ?? e;
+  const cp = parseInt(e.slice(1), 16);
+  return cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+});
+
+/**
+ * A trimmed TOML key part unquoted: a basic string "…" with its escapes decoded (tomlBasic), a
+ * literal string '…' as it is, a bare key as written.
  */
 function tomlKeyPart(part) {
   if (part.length >= 2 && part[0] === "'" && part.endsWith("'")) return part.slice(1, -1);
   if (!(part.length >= 2 && part[0] === "\"" && part.endsWith("\""))) return part;
-  return part.slice(1, -1).replace(/\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[\s\S])/g, (m, e) => {
-    if (e.length === 1) return TOML_ESCAPES[e] ?? e;
-    const cp = parseInt(e.slice(1), 16);
-    return cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
-  });
+  return tomlBasic(part.slice(1, -1));
 }
 
 /**
@@ -524,13 +529,40 @@ function tomlKeyParts(text) {
 }
 
 /**
- * `-c`/`--config`'s key=value at `words[i]` in any form: { heads, text, span } (span: words it
- * takes), or null. The key is matched by its meaning, never its spelling (#1125: config keys
- * written in another valid TOML spelling were kept): `heads` is its first part in two readings,
- * TOML's (tomlKeyParts) and the one before (the raw key, one outer quote off), which alone reads
- * a key whose first quote doesn't close. A head in CODEX_CONFIG_KEYS in either drops the word.
- * Codex's own reading (split on every dot, each part trimmed) needs no head: its first part is a
- * bare listed key only when no quote comes before the first dot, and TOML's reads that same part.
+ * A config text's key parts read raw, the one reading of a key whose first quote doesn't close:
+ * the text before its first `=`, trimmed, one outer quote off, split on every dot, each part
+ * trimmed. A key opening with a double quote is a basic string's text, its escapes decoded
+ * (tomlBasic) before the split; one opening with a single quote is literal, as written.
+ */
+function rawKeyParts(text) {
+  const raw = text.split("=")[0].trim();
+  const body = raw.replace(/^["']|["']$/g, "");
+  return (raw[0] === "\"" ? tomlBasic(body) : body).split(".").map((p) => p.trim());
+}
+
+/**
+ * The name a config key is left out by, from one reading's parts, or null (#1125): a key
+ * CODEX_CONFIG_KEYS lists, or any key under one, by that key; a listed key under a profile
+ * (`profiles.<name>.<key>`, which `--profile <name>` applies) as `profiles.*.<key>`, never the
+ * profile's name; `profiles` or one profile whole (a table that can hold any listed key, its
+ * narrowness unproved) as `profiles`.
+ */
+function codexConfigName(parts) {
+  if (CODEX_CONFIG_KEYS.includes(parts[0])) return parts[0];
+  if (parts[0] !== "profiles") return null;
+  if (parts.length < 3) return "profiles";
+  return CODEX_CONFIG_KEYS.includes(parts[2]) ? `profiles.*.${parts[2]}` : null;
+}
+
+/**
+ * `-c`/`--config`'s key=value at `words[i]` in any form: { name, text, span } (span: words it
+ * takes; name: what it is left out by, codexConfigName, or null), or null. The key is matched by
+ * its meaning, never its spelling (#1125: config keys written in another valid TOML spelling were
+ * kept), in two readings: TOML's (tomlKeyParts) and the raw one (rawKeyParts), which alone reads
+ * a key whose first quote doesn't close. A name from either drops the word. Codex's own reading
+ * (split on every dot, each part trimmed) needs none of its own: a key that starts with no quote
+ * is read so by the raw one too (a closing quote off), and one that starts with a quote has no
+ * bare first part for Codex.
  */
 function codexConfigAt(words, i) {
   const w = words[i];
@@ -539,9 +571,8 @@ function codexConfigAt(words, i) {
   else if (w.startsWith("--config=")) text = w.slice("--config=".length);
   else if (w.startsWith("-c")) text = w.slice(w[2] === "=" ? 3 : 2);
   if (text === null) return null;
-  const raw = text.split("=")[0];
-  const heads = [tomlKeyParts(text)?.[0], raw.trim().replace(/^["']|["']$/g, "").split(".")[0]];
-  return { heads, text, span };
+  const name = [tomlKeyParts(text), rawKeyParts(text)].map(codexConfigName).find(Boolean) ?? null;
+  return { name, text, span };
 }
 
 /** The approval or sandbox flag at `w` in any form (`-a x`, `-ax`, `-a=x`, `--sandbox=x`): { flag (as written, no value), next }, or null. */
@@ -764,15 +795,17 @@ export function codexDirsExact(args, where) {
  * A Codex source's words (`run`, Herdr's table with programs.json applied) without the ones that
  * pick its approvals or sandbox: bypass and --yolo, -a/--ask-for-approval and -s/--sandbox in
  * their separate, joined and `=` forms, -c/--config for the keys CODEX_CONFIG_KEYS names (and
- * any key under one), --remote (another app server: outside the pane, #1125), and an --add-dir
+ * any key under one, and under a profile; or a profile whole: codexConfigName), --remote
+ * (another app server: outside the pane, #1125), and an --add-dir
  * `where` doesn't allow (codexWhere, codexDirAllowed: canonical where the launch runs, so a dot,
  * parent or symlink alias of the home folder or the app home goes too, as does a relative one:
  * its narrowness can't be proved, #1142); one it allows is passed as that canonical value, the
  * one checked. `where` may also be a home folder, compared as written.
  * The pack's own --approve-for-me, --no-daemon and network word go quietly (launchRun puts them
  * back once). Every other word stays as it is, after a `--` too.
- * Returns { argv, dropped, unproved } (`dropped`: the flags left out, by name, `-c sandbox_mode`
- * style: never a value; `unproved`: the --add-dir folders withheld because an observation they
+ * Returns { argv, dropped, unproved } (`dropped`: the flags left out, by name, `-c sandbox_mode`,
+ * `-c profiles.*.sandbox_mode` or `-c profiles` style: never a value or a profile's name;
+ * `unproved`: the --add-dir folders withheld because an observation they
  * need failed, #1142, which the launch's one withheld warning counts instead).
  */
 export function codexClean(run, where = null) {
@@ -793,8 +826,7 @@ export function codexClean(run, where = null) {
       if (config.text.trim() === CODEX_NETWORK) { i += config.span - 1; continue; }
       // Any other spelling of that word is a config key like the rest: dropped and named (launchRun
       // still adds the exact one).
-      const key = CODEX_CONFIG_KEYS.find((k) => config.heads.includes(k));
-      if (key) drop(`-c ${key}`);
+      if (config.name) drop(`-c ${config.name}`);
       else argv.push(...words.slice(i, i + config.span));
       i += config.span - 1;
       continue;

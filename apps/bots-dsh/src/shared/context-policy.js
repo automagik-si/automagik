@@ -21,6 +21,7 @@ export function contextPatch(patch) {
   for (const [key, valid, description] of [
     ['advanced', value => typeof value === 'boolean', 'a boolean'],
     ['memoryReview', value => value === null || typeof value === 'boolean', 'a boolean or null'],
+    ['memoryTidy', value => value === null || typeof value === 'boolean', 'a boolean or null'],
     ['contextCheckRatio', value => value === null || ratio(value), 'a finite number greater than 0 and less than 0.95, or null'],
     ['contextRecentTokens', value => value === null || budget(value), 'a positive safe integer or null'],
   ]) {

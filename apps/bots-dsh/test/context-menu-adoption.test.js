@@ -26,6 +26,7 @@ runInNewContext(bundle.outputFiles[0].text, {
         useState: initial => [initial, () => {}],
         useEffect: () => {},
         useLayoutEffect: () => {},
+        useMemo: make => make(),
         useRef: current => ({ current }),
         useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
       },
@@ -46,6 +47,13 @@ function walk(tree, found = []) {
   return found
 }
 
+// The merged menu draws an item's label in its own span (upstream's markup, which leaves room for a
+// tick after it), so a label is read from that span, or from the item's own text where there is none.
+function labelOf(item) {
+  const span = item.children.find(child => child?.props?.className === 'bt-menu-label')
+  return (span ?? item).children.filter(child => typeof child === 'string').at(-1)
+}
+
 function menuFor(roster, id, actions = new Proxy({}, { get: () => () => {} })) {
   return ContextMenu({ menu: { kind: 'bot', id, x: 10, y: 10 }, roster, actions })
 }
@@ -60,7 +68,7 @@ const roster = {
 
 test('an adopted original offers rollback with an explanation instead of the refused delete', () => {
   const labels = walk(menuFor(roster, 'adopted')).filter(node => node.props?.role === 'menuitem')
-    .map(node => node.children.filter(child => typeof child === 'string').at(-1))
+    .map(labelOf)
   assert.equal(labels.includes('Delete'), false)
   assert.equal(labels.includes('Roll back DSH adoption…'), true)
   const note = walk(menuFor(roster, 'adopted')).filter(node => node.props?.className === 'bt-menu-note').map(node => node.children.join(''))
@@ -77,7 +85,7 @@ test('the rollback item describes itself and clicking it calls rollbackAdoption 
   actions.rollbackAdoption = agentId => { calls.push(agentId); return Promise.reject(new Error('Remove Main Bot/group roles and resolve new team history before rolling back adoption')) }
   actions.reportError = (error, where) => reported.push([error.message, where])
   const tree = menuFor(roster, 'adopted', actions)
-  const rollback = walk(tree).find(node => node.props?.role === 'menuitem' && node.children.includes('Roll back DSH adoption…'))
+  const rollback = walk(tree).find(node => node.props?.role === 'menuitem' && labelOf(node) === 'Roll back DSH adoption…')
   assert.equal(rollback.props['aria-describedby'], 'bt-menu-note')
   confirmResult = false
   rollback.props.onClick()
@@ -100,7 +108,7 @@ test('an adopted original in a group or with tasks is not offered rollback and s
   }
   const tree = menuFor(blocked, 'adopted')
   const labels = walk(tree).filter(node => node.props?.role === 'menuitem')
-    .map(node => node.children.filter(child => typeof child === 'string').at(-1))
+    .map(labelOf)
   assert.equal(labels.includes('Roll back DSH adoption…'), false)
   const note = walk(tree).filter(node => node.props?.className === 'bt-menu-note').map(node => node.children.join('')).join('')
   assert.match(note, /leaves all groups/)
@@ -108,7 +116,7 @@ test('an adopted original in a group or with tasks is not offered rollback and s
 })
 
 const labelsOf = tree => walk(tree).filter(node => node.props?.role === 'menuitem')
-  .map(node => node.children.filter(child => typeof child === 'string').at(-1))
+  .map(labelOf)
 const noteOf = tree => walk(tree).filter(node => node.props?.className === 'bt-menu-note').map(node => node.children.join('')).join('')
 const withBot = fields => ({ ...roster, byId: { ...roster.byId, adopted: { ...roster.byId.adopted, ...fields } } })
 
@@ -139,12 +147,15 @@ test('Main, group and task blocks still hide rollback when the history matches',
 test('the menu reads the host flag and never compares parts with the original Sessions', () => {
   const source = readFileSync(fileURLToPath(new URL('../src/client/context-menu.js', import.meta.url)), 'utf8')
   assert.match(source, /adoptionHistoryMatches !== true/)
-  assert.doesNotMatch(source, /\.sessions\b|\.parts\b|\.segments\b|JSON\.stringify/)
+  assert.doesNotMatch(source, /\.sessions\b|\.parts\b|\.segments\b/)
+  // The menu's one JSON.stringify is the store key of a Bot's waiting hand-offs, never a
+  // comparison of histories.
+  assert.deepEqual(source.split('\n').filter(line => line.includes('JSON.stringify')).map(line => line.includes('work.waiting')), [true])
 })
 
 test('an ordinary Bot still offers the plain delete and no rollback', () => {
   const labels = walk(menuFor(roster, 'ordinary')).filter(node => node.props?.role === 'menuitem')
-    .map(node => node.children.filter(child => typeof child === 'string').at(-1))
+    .map(labelOf)
   assert.equal(labels.includes('Delete'), true)
   assert.equal(labels.includes('Roll back DSH adoption…'), false)
 })
@@ -168,7 +179,7 @@ for (const { kind, label, action, args } of [
       actions,
     })
     const menu = tree.type(tree.props)
-    const item = walk(menu).find(node => node.props?.role === 'menuitem' && node.children.includes(label))
+    const item = walk(menu).find(node => node.props?.role === 'menuitem' && labelOf(node) === label)
     assert.ok(item)
     item.props.onClick()
     await new Promise(resolve => setTimeout(resolve, 0))

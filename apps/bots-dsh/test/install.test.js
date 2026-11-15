@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 
+let rt
 function start(state, { config = {}, services } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-install-'))
   if (state) writeFileSync(join(home, 'state.json'), JSON.stringify(state))
@@ -16,7 +17,8 @@ function start(state, { config = {}, services } = {}) {
     route = options
     return register(options)
   }
-  const applyResult = apply(ctx, { home, ...config })
+  apply(ctx, { home, ...config })
+  rt = ctx.provided.get('omniTeam')
   const call = async (endpoint, payload) => {
     const response = await route.fetch(new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
     return response.json()
@@ -25,20 +27,22 @@ function start(state, { config = {}, services } = {}) {
     await ctx.dispose()
     rmSync(home, { recursive: true, force: true, maxRetries: 5 })
   }
-  return { ctx, call, stop, applyResult }
+  return { ctx, call, stop, rt }
 }
 
-// Listeners run, and tools are listed, in the order they are registered.
-test('apply registers listeners, tools, and effects in a fixed order', (t) => {
-  const { ctx, stop, applyResult } = start()
+// Listeners run in registration order; the team tools are not in this list
+// because they are registered per Bot session scope, not globally.
+test('apply registers listeners and effects in a fixed order', (t) => {
+  const { ctx, stop } = start()
   t.after(stop)
-  assert.equal(applyResult, undefined)
   assert.deepEqual(ctx.calls, [
     'effect ds-bot: diagnostics log',
-    'effect ds-bot: state lock',
+    'effect omni-ui: state lock',
+    'effect omni-ui: ledger',
     'on tools/pre-execute',
     'on llm/adapters-updated',
     'on credentials/reference-updated',
+    'on credentials/record-updated',
     'on settings/document-updated',
     'effect ds-bot: auxiliary llm retry',
     'on llm/adapters-updated',
@@ -56,7 +60,14 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'on tools/pre-execute',
     'on tools/result',
     'on session/event',
+    'on subagent/start',
+    'on subagent/end',
     'on session/event',
+    'on subagent/start',
+    'on subagent/end',
+    'on tools/result',
+    'on session/event',
+    'effect omni-ui: lost hand-offs',
     'effect ds-bot: agent tool restrict retry',
     'on agent/created',
     'on session/event',
@@ -64,36 +75,20 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'effect ds-bot: tool deny retry',
     'on agent/created',
     'on tools/execute',
-    'effect ds-bot: identity section',
+    'on tools/execute',
+    'effect omni-ui: identity section',
     'prompt bot-identity 640',
     'on agent/pre-step (prepend)',
-    'tool list_bots',
-    'tool message_bot',
-    'tool stop_bot',
-    'tool create_bot',
-    'tool update_bot',
-    'tool delete_bot',
     'on tools/execute',
-    'tool list_bot_models',
-    'tool create_group',
-    'tool update_group',
-    'tool delete_group',
-    'tool post_to_group',
-    'tool ask_user',
-    'tool show_view',
+    'effect omni-ui: scoped team tools',
+    'on tools/change',
     'tools guard',
     'on agent/created',
+    'on system-prompt/assemble',
     'on session/event',
-    'tool list_capabilities',
-    'tool save_capability',
-    'tool delete_capability',
-    'tool attach_capability',
-    'tool detach_capability',
     'effect ds-bot: chat index',
-    'tool group_relay',
-    'tool read_own_chat',
-    'tool read_group_chat',
-    'effect ds-bot: group step lines',
+    'effect omni-ui: group rounds',
+    'effect omni-ui: group step lines',
     'on llm/stream',
     'on approval/request (prepend)',
     'effect ds-bot: cancel held subagent asks',
@@ -107,15 +102,15 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'prompt context ds-bot:subagent-asks 121',
     'on agent/inbox/discarded',
     'on session/event',
-    'effect ds-bot: resume interrupted turns',
+    'effect omni-ui: resume interrupted turns',
     'effect ds-bot: memory recovery',
     'effect ds-bot: memory section',
     'prompt bot-memory 645',
-    'tool remember',
-    'tool forget',
-    'tool recall',
+    'on agent/pre-step',
     'on agent/status',
-    'effect ds-bot: memory review',
+    'effect omni-ui: memory review',
+    // The daily tidy's clock runs so a Bot whose own switch is on gets tidied; with no switch on it does nothing.
+    'effect omni-ui: memory tidy',
     'effect ds-bot: Bot compaction',
     'on agent/created',
     // Explicit checkpoints must cancel when their agent or plugin is disposed.
@@ -127,11 +122,12 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'on system-prompt/assemble (prepend)',
     'on agent/request-error (prepend)',
     'on agent/request-error (prepend)',
-    'effect ds-bot: hand on input kept in earlier parts',
+    'effect omni-ui: hand on input kept in earlier parts',
     'on workspace/session-stop',
     'on workspace/session-activity',
     'on agent/status',
     'on llm/stream',
+    'on session/event',
     'on agent/request-error',
     'on session/event',
     // What a Bot's model really did, and a failed switch going back (model-state.js).
@@ -144,37 +140,37 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'on acp-dsh/login-ready',
     'on llm/stream',
     'on agent/status',
-    'tool generate_image',
-    'tool request_secret',
-    'tool list_secrets',
     'on tools/execute',
     'on llm/stream',
     'effect ds-bot: load secrets',
-    'effect ds-bot: connectors',
+    'on tools/change',
+    'effect omni-ui: connectors',
     'on agent/created',
+    'on session/disposed',
     'effect ds-bot: capabilities',
+    'on agent/status',
+    'effect omni-ui: learning',
     'effect ds-bot: schedule pause retry',
     'on schedule/changed',
     'on schedule/resolve-agent',
+    'on tools/pre-execute',
+    'on tools/execute',
     'effect ds-bot: browser channel',
     'effect ds-bot: browser holds',
     'on agent/pre-step (prepend)',
     'effect ds-bot: browser plugin',
-    'tool browser_open',
-    'tool browser_snapshot',
-    'tool browser_click',
-    'tool browser_upload',
-    'tool browser_type',
-    'tool browser_select',
-    'tool browser_press',
-    'tool browser_tabs',
-    'tool browser_back',
-    'tool browser_screenshot',
-    'tool browser_handoff',
-    'tool browser_resume',
-    'effect ds-bot: usage ledger',
+    'on agent/created',
+    'on agent/disposed',
+    'on user-questions/request (prepend)',
+    'on tools/pre-execute',
+    'on tools/execute',
+    'on session/event',
+    'effect omni-ui: computer use section',
+    'prompt computer-use:ds-bot 0',
+    'effect omni-ui: computer use',
+    'effect omni-ui: usage ledger',
     'on llm/stream',
-    'effect ds-bot: update check',
+    'effect omni-ui: update check',
     'effect ds-bot: dsh update install',
     'on session/event',
     'on agent/status',
@@ -192,9 +188,9 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'route PUT /api/omni-ui/pet-codex',
     'effect ds-bot: MCP route',
     'route POST,GET,DELETE,OPTIONS /api/omni-mcp',
-    'effect ds-bot: api route',
+    'effect omni-ui: api route',
     'route POST /api/omni-ui',
-    'effect ds-bot: load state',
+    'effect omni-ui: load state',
     'on agent/created',
     'effect ds-bot: remote Hermes',
     // Auto's judge, after every module, so it runs first (auto-judge.js installAhead).
@@ -257,6 +253,12 @@ test('the client channel answers from the saved state', async (t) => {
   assert.equal('thinking' in (await call('set-prefs', { thinking: false })).value, false)
   await call('set-prefs', { thinking: true })
   assert.equal('thinking' in (await call('set-prefs', { thinking: null })).value, false)
+  // Enter sends by default; false persists until the user turns it back on.
+  assert.equal((await call('set-prefs', { enterToSend: false })).value.enterToSend, false)
+  assert.equal((await call('set-prefs', { enterToSend: 'no' })).value.enterToSend, false)
+  assert.equal('enterToSend' in (await call('set-prefs', { enterToSend: true })).value, false)
+  await call('set-prefs', { enterToSend: false })
+  assert.equal('enterToSend' in (await call('set-prefs', { enterToSend: null })).value, false)
   // A refusal from the team code keeps its message for the user.
   assert.deepEqual((await call('delete-bot', { id: 'nobody' })).error, { code: 'bot/refused', message: 'Unknown Bot', details: {} })
   // Off the Desktop profile there are no Bot browsers.
@@ -280,11 +282,10 @@ const TEAM = {
 test('in the Desktop profile read_browser is the last tool and reads through the window', async (t) => {
   const { ctx, call, stop } = start(TEAM, { services: { profileContext: { name: 'desktop' } } })
   t.after(stop)
-  const tools = ctx.calls.filter(entry => entry.startsWith('tool '))
   // The Bot's own browser tools (browser-plugins.js) come after it.
-  assert.equal(tools.filter(entry => !entry.startsWith('tool browser_')).at(-1), 'tool read_browser')
-  assert.ok(ctx.calls.indexOf('effect ds-bot: browser channel') < ctx.calls.indexOf('effect ds-bot: api route'))
-  const read = args => ctx.registeredTools.get('read_browser').execute(args, { agent: { id: 'b2' } })
+  assert.equal(rt.teamTools.filter(tool => !tool.name.startsWith('browser_')).at(-1).name, 'read_browser')
+  assert.ok(ctx.calls.indexOf('effect ds-bot: browser channel') < ctx.calls.indexOf('effect omni-ui: api route'))
+  const read = args => rt.teamTools.find(tool => tool.name === 'read_browser').execute(args, { agent: { id: 'b2' } })
 
   assert.match(await read({}), /browser panel is not open/)
   // A window reports Writer's page (and drops ids that are not Bots), then answers the read.
@@ -322,11 +323,11 @@ test('the desktop app has read_browser too; DSH Web does not', (t) => {
   t.after(() => { delete process.env.DS_BOT_APP })
   const app = start(TEAM, { services: { profileContext: { name: 'ds-bot' } } })
   t.after(app.stop)
-  assert.ok(app.ctx.calls.includes('tool read_browser'))
+  assert.ok(app.rt.teamTools.some(d => d.name === 'read_browser'))
   delete process.env.DS_BOT_APP
   const web = start(TEAM, { services: { profileContext: { name: 'web' } } })
   t.after(web.stop)
-  assert.ok(!web.ctx.calls.includes('tool read_browser'))
+  assert.ok(!web.rt.teamTools.some(d => d.name === 'read_browser'))
 })
 
 test('the Automagik app shows the Bot browser panel but leaves read_browser off', async (t) => {
@@ -341,14 +342,14 @@ test('the Automagik app shows the Bot browser panel but leaves read_browser off'
     if (send === undefined) delete process.send
     else process.send = send
   })
-  const { ctx, call, stop } = start(TEAM, { services: { profileContext: { name: 'omni' } } })
+  const { call, stop } = start(TEAM, { services: { profileContext: { name: 'omni' } } })
   t.after(stop)
-  assert.ok(!ctx.calls.includes('tool read_browser'))
+  assert.ok(!rt.teamTools.some(tool => tool.name === 'read_browser'))
   assert.equal((await call('state', {})).value.browser, true)
 })
 
 test('config.browser turns Bot browsers off even in the Desktop profile', (t) => {
-  const { ctx, stop } = start(TEAM, { config: { browser: false }, services: { profileContext: { name: 'desktop' } } })
+  const { stop } = start(TEAM, { config: { browser: false }, services: { profileContext: { name: 'desktop' } } })
   t.after(stop)
-  assert.ok(!ctx.calls.includes('tool read_browser'))
+  assert.ok(!rt.teamTools.some(d => d.name === 'read_browser'))
 })

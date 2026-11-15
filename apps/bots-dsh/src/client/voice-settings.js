@@ -84,7 +84,7 @@ export function VoiceSection({ actions, Section, Row }) {
         mic === 'granted' ? null : h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => { void askMic() } }, t('Allow microphone')))),
     h(Row, { label: t('Hears you'), hint: local ? t('DSH\'s Voice Input recognizes your speech on this computer.') : t('Turn on DSH\'s Voice Input plugin to recognize speech on this computer; without it voice chat needs the browser\'s own recognizer.') },
       local ? h('span', { className: 'bt-set-hint' }, t('On this computer'))
-        : setup ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: setup }, t('Turn on Voice Input')) : null),
+        : setup?.navigate ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: setup.navigate }, t('Turn on Voice Input')) : null),
     h(Row, { label: t('Voice'), hint: t('The voices your system has, read on this computer.') },
       h('span', { className: 'bt-voice-set' },
         h('select', { className: 'bt-input', value: prefs.voice, 'aria-label': t('Voice'), onChange: event => update({ voice: event.target.value }) },

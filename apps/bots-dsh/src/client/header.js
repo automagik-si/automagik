@@ -2,11 +2,13 @@ import { createElement as h, Fragment, useEffect, useLayoutEffect, useRef, useSt
 import { headerButtons, useEntries } from './extend.js'
 import { createPortal } from 'react-dom'
 import { currentPart, latestMemoryChange } from './text.js'
-import { ArrowUpIcon, CloseIcon, ArrowDownIcon, InfoIcon, MemoryIcon } from './icons.js'
+import { ArrowUpIcon, CloseIcon, ArrowDownIcon, GoalIcon, InfoIcon, MemoryIcon } from './icons.js'
 import { botState, BotAvatar, RoomAvatar } from './mark.js'
 import { useApproval } from './approvals.js'
+import { AgentBadge } from './agent-badge.js'
 import { ActivityIndicator } from './activity-row.js'
 import { clockLabel, openingTurn, unseenSince } from './cells.js'
+import { GoalIsland, goalView } from './goal.js'
 import { viewBottom } from './motion.js'
 import { t } from './i18n.js'
 import { detailsSubject } from './sources.js'
@@ -96,6 +98,18 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
   const bot = roster.byId[sessionId]
   const room = roster.roomsById[sessionId]
   const approval = useApproval(useWork, entry => bot !== undefined && entry.botId === bot.id)
+  const goal = room?.goal
+  // Goal panels are keyed by the group, never by its current Session: `composeGoal` and
+  // `toggleGoal` store `room.id`, and a group's Session moves to a fresh part when its
+  // folder changes, so the two differ for every group whose folder was changed.
+  const goalCompose = useUi(state => room !== undefined && state.goalCompose === room.id)
+  const goalOpen = useUi(state => room !== undefined && state.goalOpen === room.id)
+  // The island's live faces: who is at work in this group right now. Non-group
+  // chats subscribe to a constant so their header does not redraw on work.
+  const roomWorkKey = useWork?.(work => (room ? JSON.stringify(work.rooms?.[sessionId] ?? []) : '')) ?? '[]'
+  const roomWork = room ? JSON.parse(roomWorkKey || '[]') : []
+  const view = goal ? goalView(goal, { roster, roomWork }) : null
+  const goalShown = room !== undefined && !away && goal !== undefined
   // Open only while the panel shows this subject's details, not its browser or side chat.
   // Rename opens a multi-part Bot by its Bot id, the header by the part's Session id.
   const detailsOpen = useUi(state => state.view === 'details' && state.details != null
@@ -125,24 +139,36 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
     return () => { delete document.body.dataset.btRoom }
   }, [Boolean(room)])
   const memoryNotice = !away && notice && changed !== null && roster.memory !== false
+  const showGoal = room !== undefined && !away && (goal !== undefined || goalCompose)
+  // The goal island pads the transcript so its pod does not cover the first message.
+  useEffect(() => {
+    if (showGoal) document.body.dataset.btGoal = ''
+    else delete document.body.dataset.btGoal
+    return () => { delete document.body.dataset.btGoal }
+  }, [showGoal])
   // The sidebar already names the open chat, so the pill shows only when it says something
-  // more: the way back from another view, or a memory that just changed. The details open
-  // from a small button beside the header's other buttons.
-  const pill = away || memoryNotice
-  return h('div', { className: native ? 'bt-native-head' : 'bt-head' },
-    // The pill's arrow reads data-expanded: aria-expanded belongs to the Details button alone,
-    // so the memory notice exposes no expanded state to assistive tech.
-    pill ? h('button', {
-      type: 'button', className: 'bt-pill', 'data-expanded': away ? undefined : detailsOpen, 'data-memory': memoryNotice ? 'updated' : undefined,
-      'aria-label': away ? t('Back to chat') : memoryNotice ? t('Memory updated. Open {name}\'s memory', { name: roster.byId[changed]?.name ?? name }) : t('View conversation details'),
-      title: away ? name : undefined,
-      onClick: () => (away ? selectView('chat') : memoryNotice ? actions.openMemory(changed) : actions.toggleDetails(sessionId)),
-    },
+  // more: the way back from another view, a memory that just changed, or a group's goal,
+  // whose island it heads. The details open from a small button beside the header's other
+  // buttons. The pill's arrow reads data-expanded: aria-expanded belongs to the Details
+  // button alone, so the memory notice exposes no expanded state to assistive tech.
+  const pill = away || memoryNotice || showGoal ? h('button', {
+    type: 'button', className: 'bt-pill', 'data-expanded': away ? undefined : detailsOpen, 'data-memory': memoryNotice ? 'updated' : undefined,
+    'aria-label': away ? t('Back to chat') : memoryNotice ? t('Memory updated. Open {name}\'s memory', { name: roster.byId[changed]?.name ?? name }) : t('View conversation details'),
+    title: away ? name : undefined,
+    onClick: () => (away ? selectView('chat') : memoryNotice ? actions.openMemory(changed) : actions.toggleDetails(sessionId)),
+  },
     bot ? h(BotAvatar, { bot, size: 24, state: botState(running, doing, roster.questions?.[currentPart(bot)] !== undefined || approval), badge: false })
       : room ? h(RoomAvatar, { room, roster, size: 24 }) : null,
-    h('span', { className: 'bt-pill-name' }, away ? t('Back to chat') : bot?.name ?? room?.name ?? (title || t('New chat'))),
+    goalShown
+      ? h('span', { className: 'bt-pill-swap' },
+        h('span', { className: 'bt-pill-goal' }, h('span', { className: 'bt-pill-ico', 'aria-hidden': true }, h(GoalIcon)), h('span', { className: 'bt-pill-title' }, view.title)),
+        h('span', { className: 'bt-pill-name' }, name))
+      : h('span', { className: 'bt-pill-name' }, away ? t('Back to chat') : bot?.name ?? room?.name ?? (title || t('New chat')), !away && bot?.engine ? h(AgentBadge, { engine: bot.engine }) : null),
+    goalShown && view?.number !== undefined ? h('span', { className: 'bt-pill-count' }, `${view.number}/${view.count}`) : null,
     h(MemoryNotice, { shown: memoryNotice }),
-    h('span', { className: 'bt-pill-go', 'aria-hidden': true }, h(GoArrow))) : null,
+    h('span', { className: 'bt-pill-go', 'aria-hidden': true }, h(GoArrow))) : null
+  return h('div', { className: native ? 'bt-native-head' : 'bt-head' },
+    showGoal ? h(GoalIsland, { room, goal, view, open: goalOpen, composing: goalCompose, roomWork, roster, actions, pill }) : pill,
     h('span', { className: 'bt-sr', role: 'status' }, memoryNotice ? t('Memory updated') : ''),
     bot ? h(HeaderButtons, { bot, roster, actions, useWork }) : null,
     native && bot ? h('button', { type: 'button', className: 'bt-head-details', 'aria-label': t('Bot settings'), title: t('Bot settings'), onClick: () => actions.openSettings('bots', bot.id) }, h(InfoIcon)) : null,

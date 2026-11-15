@@ -10,6 +10,8 @@ import { routes, rootFiles, platforms, offered, used } from './scripts/build-pag
 import { fixture } from './waitlist/d1-fixture.mjs'
 import { onRequest as waitlist } from './functions/api/waitlist.js'
 import { onRequest as emailLink } from './functions/api/waitlist/email-confirm.js'
+import { onRequest as whatsappConfirm } from './functions/api/waitlist/whatsapp-confirm.js'
+import { CONSENT_VERSION, hash, now } from './waitlist/lib/shared.js'
 
 const root = dirname(fileURLToPath(import.meta.url))
 const evidence = resolve(process.env.LANDING_EVIDENCE ?? join(root, '../../.cache/landing-evidence'))
@@ -1055,7 +1057,7 @@ try {
       await page.goto(origin + '/cloud/')
       await page.locator('[name=goal]').fill('Review the project reports')
       await page.locator('[name=expected_result]').fill('A report I can review')
-      await page.locator('.waitlist-form [name=channel]').selectOption('whatsapp')
+      await page.locator('[name=email]').fill('demo@example.com')
       await page.locator('[name=consent]').check()
     }
     await fill()
@@ -1071,19 +1073,50 @@ try {
     })
     assert.ok(Math.abs(answerLogo.height - 26 * 264 / 222) <= 0.6 && answerLogo.drawn && answerLogo.file === 'automagik-lockup-three-colours-ink-header.svg', `The answer page's logo is the header's: ${JSON.stringify(answerLogo)}`)
     assert.deepEqual(answerLogo.pictures.filter(source => /\.webp$/.test(source)), [], 'No answer page shows a retired picture')
+    // The form offers email only: no WhatsApp choice, the email field required. The removal
+    // form still takes a WhatsApp sender or code, for people who signed up that way before.
+    await page.goto(origin + '/cloud/')
+    assert.deepEqual(await page.locator('.waitlist-form [name=channel]').evaluate(input => [input.type, input.value]), ['hidden', 'email'])
+    assert.equal(await page.locator('.waitlist-form [name=email]').evaluate(input => input.required), true)
+    assert.doesNotMatch(await page.locator('.waitlist-form').innerText(), /WhatsApp/)
+    assert.equal(await page.locator('a[href*="wa.me"]').count(), 0)
+    assert.deepEqual(await page.locator('.removal-form [name=channel] option').evaluateAll(options => options.map(option => option.value)), ['email', 'whatsapp', 'code'])
+    await page.locator('.waitlist-form').screenshot({ path: join(evidence, 'email-only-form-390.png') })
+    // A stale page still sending WhatsApp, against a ready binding: refused, and no code issued.
     bindingMode = 'ready'
     await fill()
-    const success = page.waitForResponse(response => response.url() === origin + '/api/waitlist' && response.request().method() === 'POST')
+    await page.locator('.waitlist-form [name=channel]').evaluate(input => { input.value = 'whatsapp' })
+    const stale = page.waitForResponse(response => response.url() === origin + '/api/waitlist' && response.request().method() === 'POST')
     await page.getByRole('button', { name: /Register my interest/ }).click()
-    assert.equal((await success).status(), 200)
-    await page.getByRole('heading', { name: 'Send your confirmation to our support Bot' }).waitFor()
-    assert.ok(await page.locator('a[href^="https://wa.me/15555550100"]').count())
-    assert.ok(await page.locator('.qr svg').count())
+    assert.equal((await stale).status(), 503)
+    await page.getByRole('heading', { name: 'Registration is unavailable' }).waitFor()
+    assert.doesNotMatch(await page.content(), /AMG-|wa\.me/)
+    assert.equal(isolated.sqlite.prepare('SELECT count(*) AS n FROM waitlist').get().n, 0)
+    // Codes issued before the pause still confirm, and the removal form removes them by sender or code.
+    const earlier = async code => {
+      const time = now()
+      isolated.sqlite.prepare('INSERT INTO waitlist(id,channel,email,goal,platform,apps,expected_result,language,consent_version,created_at,expires_at,confirmation_hash,address_key,group_key,mail_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(crypto.randomUUID(), 'whatsapp', null, 'Review the project reports', 'both', '', 'A report I can review', 'en', CONSENT_VERSION, time, time + 1800, await hash(code), null, `earlier-${code}`, new Date(time * 1000).toISOString().slice(0, 10))
+    }
+    await earlier('AMG-7K2M9Q')
+    const confirmed = await whatsappConfirm({ env: isolated.env, request: new Request('https://automagik.si/api/waitlist/whatsapp-confirm', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${isolated.env.WAITLIST_CONFIRM_SECRET}` }, body: JSON.stringify({ type: 'message.received', timestamp: Date.now(), payload: { externalId: 'earlier-message', from: 'earlier-sender-LID@lid', content: { text: 'Confirm my Automagik waitlist: AMG-7K2M9Q' } } }) }) })
+    assert.equal(confirmed.status, 200)
+    assert.equal(isolated.sqlite.prepare('SELECT count(*) AS n FROM waitlist WHERE confirmed_at IS NOT NULL').get().n, 1)
+    await earlier('AMG-3HX8VW')
+    for (const [channel, contact, left] of [['code', 'AMG-3HX8VW', 1], ['whatsapp', 'earlier-sender-LID', 0]]) {
+      await page.goto(origin + '/cloud/')
+      await page.locator('#privacy').evaluate(details => { details.open = true })
+      await page.locator('.removal-form [name=channel]').selectOption(channel)
+      await page.locator('.removal-form [name=contact]').fill(contact)
+      const removed = page.waitForResponse(response => response.url() === origin + '/api/waitlist' && response.request().method() === 'POST')
+      await page.getByRole('button', { name: 'Remove my details' }).click()
+      assert.equal((await removed).status(), 200)
+      await page.getByRole('heading', { name: 'Removal complete' }).waitFor()
+      assert.equal(isolated.sqlite.prepare('SELECT count(*) AS n FROM waitlist').get().n, left, `removed by ${channel}`)
+    }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390)
-    await page.screenshot({ path: join(evidence, 'whatsapp-code-390.png'), fullPage: true })
     assert.deepEqual(outside, [])
-    assert.equal(isolated.sqlite.prepare('SELECT count(*) AS n FROM waitlist WHERE confirmed_at IS NOT NULL').get().n, 0)
-    console.log('PASS native form: missing binding 503; isolated WhatsApp code 200; QR rendered; no external request or false confirmation')
+    console.log('PASS native form: missing binding 503; email only; stale WhatsApp POST 503 with no code; earlier code confirms; removal by sender and code; no external request')
   } finally { await context.close() }
   await writeFile(join(evidence, 'browser-report.json'), JSON.stringify(reports, null, 2) + '\n')
 } finally {

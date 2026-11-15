@@ -25,6 +25,9 @@ let renderRefs
 let refIndex = 0
 let layoutEffects
 const react = {
+  createContext: (initial) => { const ctx = { value: initial }; ctx.Provider = ({ value, children }) => { ctx.value = value; return children }; return ctx },
+  useContext: ctx => ctx.value,
+  useCallback: fn => fn,
   createElement: (type, props, ...children) => ({ type, props: { ...props, children } }), Fragment: Symbol('Fragment'),
   useEffect() {}, useLayoutEffect: effect => layoutEffects?.push(effect), useState: initial => [initial, () => {}],
   useMemo: make => make(), useRef: current => renderRefs ? renderRefs[refIndex++] ??= { current } : { current }, useId: () => 'id',
@@ -278,6 +281,50 @@ function rulesOf(css) {
     at = end
   }
 }
+// The narrow bar shows avatars only, and a group's name can be 60 characters long: a row
+// whose name is not on screen in full shows it on hover.
+test('a sidebar row shows its name on hover when the name is hidden or cut', () => {
+  viewport.innerWidth = 1280
+  const bot = { id: 'writer', name: 'Writer', createdAt: 1 }
+  const room = { id: 'room', name: 'Launch plan for the spring release', members: ['writer'], createdAt: 2 }
+  const roster = { bots: [bot], rooms: [room], agents: [], byId: { writer: bot }, roomsById: { room }, ready: true, exchangeTurns: {} }
+  const rowsOf = (wide) => {
+    const rows = []
+    const walk = (node) => {
+      if (Array.isArray(node)) { node.forEach(walk); return }
+      if (!node || typeof node !== 'object') return
+      if (['BotRow', 'RoomRow'].includes(node.type?.name)) rows.push(node)
+      walk(node.props?.children)
+    }
+    walk(TeamSidebar({
+      wide,
+      actions: Object.fromEntries(['openSession', 'openMenu', 'openPalette', 'openNewChat', 'toggleSidebar', 'clearUnread'].map(name => [name, () => {}])),
+      useRoster: pick => pick(roster), useUi: pick => pick({ unread: {} }), useRegistry: pick => pick({}),
+      useSessions: pick => pick({ ids: [], byId: {} }), useUpdate: () => ({}),
+      useSessionStatus: pick => pick(new Map()), useSessionRetainInfo: () => null,
+      useActivity: pick => pick({}), useWork: pick => pick({ waiting: {}, rooms: {}, approvals: [] }),
+    }))
+    return Object.fromEntries(rows.map(row => [row.type.name, row.type(row.props)]))
+  }
+  const narrow = rowsOf(false)
+  assert.equal(narrow.BotRow.props.title, 'Writer')
+  assert.equal(narrow.RoomRow.props.title, 'Launch plan for the spring release')
+  const wide = rowsOf(true)
+  assert.equal(wide.RoomRow.props.title, undefined)
+  // jsdom lays nothing out, so the name's widths are set by hand.
+  const { document } = new JSDOM('<button title="stale"><span class="bt-row-title">Launch plan for the spring release</span></button>').window
+  const button = document.querySelector('button')
+  const name = button.firstChild
+  Object.defineProperty(name, 'clientWidth', { value: 120 })
+  Object.defineProperty(name, 'scrollWidth', { value: 120, configurable: true })
+  wide.RoomRow.props.onMouseEnter({ currentTarget: button })
+  assert.equal(button.hasAttribute('title'), false)
+  Object.defineProperty(name, 'scrollWidth', { value: 260 })
+  wide.RoomRow.props.onMouseEnter({ currentTarget: button })
+  assert.equal(button.title, 'Launch plan for the spring release')
+  assert.equal(wide.BotRow.props.onMouseEnter, wide.RoomRow.props.onMouseEnter)
+})
+
 const SHELL_PARTS = /_logoRow|_brand|_toggle|_newSession|_footArea|_collapsed|_topStrip|bt-side-collapse/
 const rules = [...rulesOf(SHELL_CSS), ...rulesOf(SIDEBAR_CSS)].filter(rule => SHELL_PARTS.test(rule.selector))
 const hiding = rules.filter(rule => /display:none/.test(rule.body))

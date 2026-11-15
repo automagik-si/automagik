@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
+import { afterRound } from './relay-rows.js'
 
 const FULL = 'danger-full-access'
 const WRITE = 'workspace-write'
@@ -129,7 +130,9 @@ function team(t, { bots = {}, room = {}, prefs, ...catalog } = {}) {
     for (const listener of ctx.listeners.get('session/event') ?? []) await listener({ id: sessionId }, event)
   }
   const tool = (name, args, sessionId) => ctx.registeredTools.get(name).execute(args, { agent: { id: sessionId, session: { id: sessionId } }, callId: randomUUID(), signal: new AbortController().signal })
+  // The relay's own result names where its rows start; the round runs on, and its rows are read as the chat does.
   const relay = (roomId, callId) => ctx.registeredTools.get('group_relay').execute({}, { agent: { id: roomId, inbox: inboxOf(roomId) }, callId, signal: new AbortController().signal })
+    .then(async value => JSON.stringify(await afterRound(rt, roomId, value)))
   const answer = async (sessionId, exchangeId, text, turn) => {
     await emit(sessionId, { type: 'turn/start', data: { turn } })
     await emit(sessionId, { type: 'user/message', data: { source: { kind: 'bot', role: 'room', exchangeId }, content: [{ type: 'text', text: 'your turn' }] } })
@@ -312,8 +315,10 @@ test('the first Main Bot is still made when its level cannot be set, and its hel
   const ctx = fakeContext({ services: { permissionPresets: service } })
   const sent = []
   let sessions = 0
+  // No model is served until the test says so: a held greeting goes out once its Bot's model is.
+  const served = []
   Object.assign(ctx, {
-    llm: { listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => ({}) },
+    llm: { listProviders: () => (served.length > 0 ? [{ id: 'deepseek', name: 'DeepSeek' }] : []), listModels: async () => served, resolveModelInfo: async () => ({}) },
     workspaceRegistry: { get: () => ({ id: 'w1', path: home }), resolveByPath: async path => ({ id: 'w1', path }), create: async path => ({ id: 'w1', path }), archiveSession: async () => {} },
     sessionController: {
       create: async () => ({ sessionId: `s${++sessions}` }),
@@ -347,6 +352,7 @@ test('the first Main Bot is still made when its level cannot be set, and its hel
   assert.equal(main.waiting, true)
   assert.equal(sent.length, 0)
   // The held greeting is not let go while the level does not hold.
+  served.push({ id: 'deepseek-v4-flash' })
   rt.botOf(main.id).model = 'deepseek/deepseek-v4-flash'
   await rt.updateBot(main.id, { role: 'Lead' })
   await new Promise(resolve => setTimeout(resolve, 20))

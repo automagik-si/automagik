@@ -1,3 +1,4 @@
+import { approvalDetail, approvalPlace } from './approvals.js'
 import { openStops, stopLine } from './stops.js'
 import { t } from './i18n.js'
 
@@ -25,10 +26,10 @@ export function noticeApprovals({ work, roster, shownSession, openSession, since
       if ((entry.at ?? 0) < since) continue
       const place = entry.roomId ?? entry.ownerSessionId ?? entry.sessionId
       if (document.visibilityState === 'visible' && shownSession() === place) continue
-      const { byId, roomsById } = roster.getSnapshot()
-      const room = entry.roomId ? roomsById[entry.roomId] : undefined
+      const team = roster.getSnapshot()
+      const { byId } = team
       const note = new Notification(t('{name} is waiting for your approval', { name: byId[entry.botId]?.name ?? t('A Bot') }), {
-        body: [room?.name, entry.tool === 'keep_working' ? t('Let it keep working?') : entry.child ? t('A subagent wants to use {tool}', { tool: entry.tool }) : entry.tool].filter(Boolean).join(' · '),
+        body: [approvalPlace(entry, team), entry.tool === 'keep_working' ? t('Let it keep working?') : entry.child ? t('A subagent wants to use {tool}', { tool: entry.tool }) : entry.tool, approvalDetail(entry).slice(0, 120)].filter(Boolean).join(' · '),
         tag: `omni-ui-approval-${entry.id}`,
       })
       note.onclick = () => {

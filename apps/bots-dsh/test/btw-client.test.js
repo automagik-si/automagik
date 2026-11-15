@@ -283,7 +283,7 @@ runInNewContext(btwBundle.outputFiles[0].text, {
   window: { addEventListener() {}, removeEventListener() {}, innerWidth: 1280 },
   require: (name) => {
     const platform = {
-      react: {
+      react: { createContext: (initial) => { const ctx = { value: initial }; ctx.Provider = ({ value, children }) => { ctx.value = value; return children }; return ctx }, useContext: ctx => ctx.value, useId: () => 'dv-id', 
         createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
         useState: init => [typeof init === 'function' ? init() : init, () => {}],
         useEffect: () => {}, useRef: () => ({ current: null }),

@@ -5,7 +5,10 @@ import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 
 const bundle = await build({
-  entryPoints: [fileURLToPath(new URL('../src/client/model-menu.js', import.meta.url))],
+  stdin: {
+    contents: "export * from './src/client/model-menu.js'\nexport { stepMenuFocus } from './src/client/motion.js'",
+    resolveDir: fileURLToPath(new URL('..', import.meta.url)),
+  },
   bundle: true, format: 'cjs', platform: 'node', write: false,
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
@@ -13,9 +16,9 @@ const module = { exports: {} }
 // `menuOpen`: every state that starts empty starts as an open menu's place, so a menu
 // renders its rows.
 let menuOpen = false
-runInNewContext(bundle.outputFiles[0].text, {
+const sandbox = {
   module, exports: module.exports,
-  document: { body: {} },
+  document: { body: {}, activeElement: null },
   window: { innerWidth: 1280, innerHeight: 800 },
   require: name => {
     const platform = {
@@ -34,8 +37,9 @@ runInNewContext(bundle.outputFiles[0].text, {
     if (!(name in platform)) throw new Error(`no platform module ${name}`)
     return platform[name]
   },
-})
-const { groupModels, greetingOnly, ModelChoiceDock, ModelLine, ModelLineTail, ModelMenu, RouteConfirm, effortRows, offeredModels } = module.exports
+}
+runInNewContext(bundle.outputFiles[0].text, sandbox)
+const { groupModels, greetingOnly, ModelChoiceDock, ModelKeyCard, ModelLine, ModelLineTail, ModelMenu, RouteConfirm, effortRows, offeredModels, groupOpen, toggledGroup, manualFor, stepMenuFocus } = module.exports
 
 // ModelMenu picks the menu a Bot gets (DSH's models, or its plugin's): draw the one it picked.
 const drawMenu = (props) => {
@@ -104,8 +108,9 @@ test('the model line names the model and its provider, and "change" opens the mo
     const drawn = steps.type(steps.props)
     const items = nodes(drawn, node => node.type === 'button').map(button => nodes(button, n => n.props.className === 'bt-menu-label')[0]?.children[0] ?? '')
     assert.deepEqual(items, ['Native', 'ACP', 'Herdr', 'Remote Hermes', 'Models and providers…'])
-    // Native's own models stay one list under their provider.
-    const native = steps.type({ ...steps.props, view: { step: 'models', route: 'native' } })
+    // Native's own models stay one list under their provider (drawn here without the folding
+    // of provider groups, which groupOpen's own tests cover).
+    const native = steps.type({ ...steps.props, folds: undefined, view: { step: 'models', route: 'native' } })
     assert.deepEqual(nodes(native, node => node.props.className === 'bt-model-group').map(group => group.children[0]), ['Anthropic', 'DeepSeek', 'Ollama'])
   } finally {
     menuOpen = false
@@ -425,7 +430,7 @@ test('a model that cannot run is marked in the route, the agent, the model row a
     assert.equal(rows[0].props['aria-label'], 'Default · Needs a sign-in')
     assert.equal(nodes(second, node => node.props.className === 'bt-model-back')[0].props['aria-label'], 'Back to Claude Code')
     // Native's models are one list under their provider, with a way back to the routes.
-    const native = steps.type({ ...steps.props, view: { step: 'models', route: 'native' } })
+    const native = steps.type({ ...steps.props, folds: undefined, view: { step: 'models', route: 'native' } })
     const deepseek = nodes(native, node => node.props.role === 'menuitemradio' && String(node.props.title).startsWith('deepseek/'))
     assert.deepEqual(deepseek.map(row => [row.props.title, hint(row)]), [['deepseek/flash', 'Default']])
     assert.equal(nodes(native, node => node.props.className === 'bt-model-back')[0].props['aria-label'], 'Back to routes')
@@ -681,4 +686,76 @@ test('the crossing says what Full access means on the route it moves to, only fo
   }), node => node.props.className === 'bt-model-confirm-access')[0]?.children[0], "Full access: the agent's actions run without asking.")
   assert.equal(line({ name: 'Ops', permission: 'workspace-write' }, 'deepseek/flash', 'acp-codex/default'), undefined)
   assert.equal(line({ name: 'Ops' }, 'deepseek/flash', 'acp-codex/default'), undefined)
+})
+
+// Upstream v0.3.6: the menu helpers our menu shares with theirs.
+test('menu focus stepping starts from menu items or the trigger, not other controls', () => {
+  const focused = []
+  const item = name => ({ name, focus: () => focused.push(name) })
+  const first = item('first')
+  const second = item('second')
+  const slider = item('slider')
+  const source = item('source')
+  const menu = {
+    querySelectorAll: () => [first, second],
+    contains: target => [first, second, slider].includes(target),
+  }
+  const trigger = source
+  const event = key => {
+    const out = { key, prevented: false, stopped: false }
+    out.preventDefault = () => { out.prevented = true }
+    out.stopPropagation = () => { out.stopped = true }
+    return out
+  }
+
+  sandbox.document.activeElement = slider
+  const arrow = event('ArrowDown')
+  assert.equal(stepMenuFocus(menu, arrow, trigger), false)
+  assert.equal(arrow.prevented, false)
+  assert.equal(arrow.stopped, false)
+
+  sandbox.document.activeElement = source
+  assert.equal(stepMenuFocus(menu, event('ArrowDown'), trigger), true)
+  sandbox.document.activeElement = first
+  assert.equal(stepMenuFocus(menu, event('ArrowDown'), trigger), true)
+  sandbox.document.activeElement = item('unrelated')
+  assert.equal(stepMenuFocus(menu, event('ArrowDown'), trigger), false)
+  assert.deepEqual(focused, ['first', 'second'])
+})
+
+test('the DeepSeek API key card links to the key page and says the API is billed by usage', () => {
+  const card = model => ModelKeyCard({ model, actions: { setProviderKey: () => {} } })
+  const official = card({ provider: 'deepseek-official', providerName: 'DeepSeek' })
+  const [link] = nodes(official, node => node.type === 'a')
+  assert.equal(link.props.href, 'https://platform.deepseek.com/api_keys')
+  assert.equal(link.props.target, '_blank')
+  assert.match(link.props.rel, /noopener/)
+  assert.deepEqual(link.children, ['Create a key on the DeepSeek platform ↗'])
+  assert.ok(nodes(official, node => node.children.includes('The API is billed by usage; the account needs a balance first.')).length === 1)
+  const other = card({ provider: 'router', providerName: 'Router' })
+  assert.equal(nodes(other, node => node.type === 'a').length, 0)
+  assert.equal(nodes(other, node => node.props.className === 'bt-model-key-help').length, 0)
+})
+
+test('a group opens by the search, then the manual pick, then the current model, then the first', () => {
+  const open = (options = {}) => groupOpen({ id: 'local', index: 1, currentId: 'relay', filtering: false, manual: {}, ...options })
+  // A search opens every group it matched, and the manual state only applies again without it.
+  assert.equal(open({ filtering: true, manual: { local: false } }), true)
+  assert.equal(open({ manual: { local: false } }), false)
+  assert.equal(open({ manual: { local: true } }), true)
+  // Otherwise the current model's provider is open, and the first provider without one.
+  assert.equal(open(), false)
+  assert.equal(open({ currentId: 'local' }), true)
+  assert.equal(open({ currentId: undefined, index: 0 }), true)
+  assert.equal(open({ currentId: undefined, index: 1 }), false)
+})
+
+test('a reopened menu starts from the default, not the choices of the menu still leaving', () => {
+  // The leaving menu lives through its exit animation and the reopen can land on the same
+  // rows; the new opening number must read the default instead of the old choices.
+  const previous = { opening: 1, manual: toggledGroup({}, 'local', true) }
+  assert.equal(manualFor(previous, 1).local, false)
+  assert.deepEqual({ ...manualFor(previous, 2) }, {})
+  // A click in the reopened menu builds on that empty state, not on the old one.
+  assert.deepEqual({ ...toggledGroup(manualFor(previous, 2), 'relay', false) }, { relay: true })
 })

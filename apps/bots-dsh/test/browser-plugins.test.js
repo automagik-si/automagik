@@ -38,6 +38,8 @@ function start(config, { services = {}, team = TEAM } = {}) {
     return register(options)
   }
   const rt = createRuntime(ctx, { home, ...config })
+  // The team's tools are served per Bot Session; the fake registry finds them through the runtime.
+  ctx.provide('omniTeam', rt)
   return {
     ctx,
     rt,

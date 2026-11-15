@@ -603,3 +603,23 @@ test('D16 Claude wildcard rules catch recursive delete without matching ordinary
   assert.equal(matches('rm x'), false)
   assert.equal(CLAUDE_HARD_ASK.some(rule => rule.endsWith(':*)')), false)
 })
+
+test('#1092 Claude asks about secret commands and shared pushes without matching ordinary work', () => {
+  const matches = command => CLAUDE_HARD_ASK.filter(rule => rule.startsWith('Bash(')).some(rule => {
+    const pattern = rule.slice(5, -1).split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')
+    return new RegExp(`^${pattern}$`).test(command)
+  })
+  for (const command of ['gh auth token', 'git push origin main', 'git push']) assert.equal(matches(command), true, command)
+  for (const command of ['git push origin feat/x', 'cat README.md']) assert.equal(matches(command), false, command)
+})
+
+test('#1092 narrowed Claude ask rules preserve ordinary environment and branch commands', () => {
+  const matches = command => CLAUDE_HARD_ASK.filter(rule => rule.startsWith('Bash(')).some(rule => {
+    const pattern = rule.slice(5, -1).split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')
+    return new RegExp(`^${pattern}$`).test(command)
+  })
+  for (const command of ['printenv PATH', 'git push origin maintenance', 'git push origin masterplan', 'git push origin development']) assert.equal(matches(command), false, command)
+  for (const command of ['printenv', 'printenv GITHUB_TOKEN', 'printenv APP_SECRET', 'printenv PASSWORD', 'printenv API_KEY', 'git push origin main', 'git push origin master', 'git push origin develop']) assert.equal(matches(command), true, command)
+  assert.equal(CLAUDE_HARD_ASK.includes('Read(~/.ssh/**)'), false)
+  for (const rule of ['Read(~/.ssh/id_*)', 'Read(~/.ssh/*.pem)', 'Read(~/.ssh/*.key)']) assert.equal(CLAUDE_HARD_ASK.includes(rule), true, rule)
+})

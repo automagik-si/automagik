@@ -100,7 +100,7 @@ export function install(rt) {
   // A chat event rewrites its Bot's file; the state save afterwards only bumps
   // the revision, so a window polls fresh chats.
   const persist = async (botId) => {
-    await writeBot(botId).catch(error => rt.warn('ds-bot: side chats of %s not saved: %s', botId, error))
+    await writeBot(botId).catch(error => rt.warn('omni-ui: side chats of %s not saved: %s', botId, error))
     await rt.save()
   }
 
@@ -120,7 +120,7 @@ export function install(rt) {
           const parsed = JSON.parse(await readFile(botFile(botId), 'utf8'))
           if (Array.isArray(parsed)) list = parsed.filter(chat => chat !== null && typeof chat === 'object' && !Array.isArray(chat))
         } catch (error) {
-          if (error?.code !== 'ENOENT') rt.warn('ds-bot: unreadable side chats %s: %s', botFile(botId), error?.code ?? error)
+          if (error?.code !== 'ENOENT') rt.warn('omni-ui: unreadable side chats %s: %s', botFile(botId), error?.code ?? error)
         }
       }
       for (const chat of list) if (!Array.isArray(chat.entries)) chat.entries = []
@@ -137,7 +137,7 @@ export function install(rt) {
           }
         }
         chats.set(botId, list)
-        if (touched) await writeBot(botId).catch(error => rt.warn('ds-bot: side chats of %s not saved: %s', botId, error))
+        if (touched) await writeBot(botId).catch(error => rt.warn('omni-ui: side chats of %s not saved: %s', botId, error))
       } else {
         chats.set(botId, list)
       }
@@ -390,7 +390,7 @@ export function install(rt) {
     const ids = [...(byBot.get(botId) ?? [])]
     for (const id of ids) flights.get(id)?.controller.abort()
     await drain(ids)
-    if (sideDir !== undefined && writes()) await rm(botFile(botId), { force: true }).catch(error => rt.warn('ds-bot: side chats of %s not removed: %s', botId, error))
+    if (sideDir !== undefined && writes()) await rm(botFile(botId), { force: true }).catch(error => rt.warn('omni-ui: side chats of %s not removed: %s', botId, error))
   }
 
   // Channel can be installed without the roster (the thinking route test). The

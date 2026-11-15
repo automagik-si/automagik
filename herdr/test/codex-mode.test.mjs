@@ -101,8 +101,16 @@ function sameConfigKey(text, name, value) {
     assert.deepEqual(dropped, [`-c ${name}`], `${words.join(" ")} is named -c ${name}`);
   }
   const note = codexCleanNote(["codex", "-c", text]);
-  assert.match(note, new RegExp(`names -c ${name}: left out`));
+  assert.ok(note.includes(`names -c ${name}: left out`), note);
   assert.equal(note.includes(value), false, "the note never names the value");
+}
+
+// A config word kept as written, in every word form: `text` names no listed key.
+function keptConfig(text) {
+  for (const words of [["-c", text], ["--config", text], [`--config=${text}`], [`-c${text}`]]) {
+    assert.deepEqual(codexClean(["codex", ...words, "-m", "gpt-6"], "/home/u"), { argv: ["codex", ...words, "-m", "gpt-6"], dropped: [], unproved: [] },
+      `${words.join(" ")} is kept`);
+  }
 }
 
 test("codexClean reads a config key with spaces around its dot as the same key (the network word so spelled too)", () => {
@@ -155,6 +163,64 @@ test("codexClean reads a config key written with TOML 1.1's \\xHH escape as the 
   sameConfigKey('"sandbox\\x5Fmode" . x = "read-only"', "sandbox_mode", "read-only");
   // Another key stays as written, escapes and all.
   assert.deepEqual(codexClean(["codex", "-c", '"mod\\x65l"="o3"']).argv, ["codex", "-c", '"mod\\x65l"="o3"']);
+});
+
+test("codexClean decodes the escapes of a listed key whose first (double) quote never closes", () => {
+  sameConfigKey('"sandbox\\x5fmode=read-only', "sandbox_mode", "read-only");
+  sameConfigKey('"sandbox\\x5Fmode=read-only', "sandbox_mode", "read-only");
+  sameConfigKey('"default_\\u0070ermissions=read-only', "default_permissions", "read-only");
+  sameConfigKey('"sandbox\\U0000005fmode . x=read-only', "sandbox_mode", "read-only");
+  // Its parts are trimmed, as TOML's are: spaces around its dot or inside its open quote.
+  sameConfigKey('"sandbox_mode . x=read-only', "sandbox_mode", "read-only");
+  sameConfigKey('" sandbox_mode=read-only', "sandbox_mode", "read-only");
+  // Another key so written stays as written; a key opening with a single quote is literal: nothing decoded.
+  keptConfig('"mod\\x65l=o3');
+  keptConfig('"mod\\u0065l=o3');
+  keptConfig("'sandbox\\x5fmode=read-only");
+});
+
+// A listed key under a profile (the 1142 known limit): `--profile <name>` applies it, so it goes too,
+// named `-c profiles.*.<key>`, never by the profile's name or its value.
+test("codexClean drops a listed key under a profile, in every spelling, named without the profile", () => {
+  sameConfigKey('profiles.p.sandbox_mode="read-only"', "profiles.*.sandbox_mode", "read-only");
+  sameConfigKey('profiles . p\t.  sandbox_mode = "read-only"', "profiles.*.sandbox_mode", "read-only");
+  sameConfigKey('"profiles"."p".\'sandbox_mode\'="read-only"', "profiles.*.sandbox_mode", "read-only");
+  sameConfigKey('profiles.p."sandbox\\x5fmode"="read-only"', "profiles.*.sandbox_mode", "read-only");
+  sameConfigKey('profiles.p."approval\\u005Fpolicy"="on-request"', "profiles.*.approval_policy", "on-request");
+  sameConfigKey('profiles."p\\u002Eq".default_permissions="read-only"', "profiles.*.default_permissions", "read-only");
+  sameConfigKey('profiles.p.sandbox_workspace_write.writable_roots=["/tmp/placeholder"]', "profiles.*.sandbox_workspace_write",
+    "/tmp/placeholder");
+  sameConfigKey("profiles.p.permissions.x.network.enabled=false", "profiles.*.permissions", "false");
+  sameConfigKey('profiles.p.permission_profile="read-only"', "profiles.*.permission_profile", "read-only");
+  sameConfigKey('profiles.p.approvals_reviewer="user"', "profiles.*.approvals_reviewer", "user");
+  // A later quote that never closes: the parts before it.
+  sameConfigKey('profiles.p.sandbox_mode . "x=read-only', "profiles.*.sandbox_mode", "read-only");
+  // A first quote that never closes: the raw reading, its escapes decoded.
+  sameConfigKey('"profiles.p.sandbox_mode=read-only', "profiles.*.sandbox_mode", "read-only");
+  sameConfigKey('"profiles . p . sandbox\\x5fmode=read-only', "profiles.*.sandbox_mode", "read-only");
+  // A profile name holding a quote TOML reads on past the `=`: Codex's own split (the raw reading) names the key.
+  sameConfigKey('profiles.p".sandbox_mode=read-only".x=1', "profiles.*.sandbox_mode", "read-only");
+  // The note names no profile.
+  const note = codexCleanNote(["codex", "-c", 'profiles.pq.sandbox_mode="read-only"', "-c", 'profiles."pq".approval_policy="on-request"']);
+  assert.ok(note.includes("names -c profiles.*.sandbox_mode, -c profiles.*.approval_policy: left out"), note);
+  assert.equal(note.includes("pq"), false, "the note never names the profile");
+});
+
+test("codexClean drops profiles or one profile set whole (a table that can hold any listed key), named -c profiles", () => {
+  sameConfigKey('profiles={p={model="o3"}}', "profiles", "o3");
+  sameConfigKey('profiles.p={model="o3"}', "profiles", "o3");
+  sameConfigKey(' "profiles" . \'p\' = {}', "profiles", "{}");
+  sameConfigKey("profiles . \"p.sandbox_mode=read-only", "profiles", "read-only");
+  sameConfigKey('"profiles . p={}', "profiles", "{}");
+});
+
+test("codexClean keeps a profile's other keys as written", () => {
+  keptConfig('profiles.p.model="o3"');
+  keptConfig('profiles . "p" . model = "o3"');
+  keptConfig('profiles.p.model_reasoning_effort="low"');
+  keptConfig('"profiles.p.model=o3');
+  keptConfig('profiles.p.model . "x=o3');
+  keptConfig('model="profiles.p.sandbox_mode"');
 });
 
 test("launchRun: a Codex run always ends in the launch mode, each word once, before a `--`, whatever its source or codexAuto says", () => {

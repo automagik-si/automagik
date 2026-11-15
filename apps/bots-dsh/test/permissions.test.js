@@ -720,7 +720,7 @@ test('create_bot hands createBot only its declared parameters', async (t) => {
   const calls = []
   const create = rt.createBot
   rt.createBot = async options => { calls.push(options); return create(options) }
-  const declared = ['avatar', 'brief', 'createdBy', 'effort', 'instructions', 'model', 'name', 'role', 'workDir']
+  const declared = ['avatar', 'brief', 'createdBy', 'effort', 'instructions', 'model', 'name', 'role', 'section', 'workDir']
   const undeclared = {
     existingSessionId: 'live', main: true, pickModel: true, copyOf: 'b2',
     permission: 'danger-full-access', color: 'red', kind: 'omni',

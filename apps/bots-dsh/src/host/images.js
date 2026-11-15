@@ -5,9 +5,11 @@
 import { assembleLlmStream } from './models.js'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isAgentLoopRequest, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { OCR_CACHE_MAX, OCR_PROMPT, OCR_RETRY_MS, OCR_TIMEOUT_MS } from './constants.js'
 import { replaceFile } from './files.js'
 import { splitRef } from './text.js'
+import { freezeLoopRequest } from './secrets.js'
 
 export function offloadTargets(session, beforeSeq) {
   const targets = []
@@ -53,9 +55,9 @@ export function install(rt) {
   }
 
   // The configured `ocrModel` first, then served models that declare image input, the
-  // DSH default among them first.
+  // DSH default among them first. A provider with no key set is skipped.
   async function ocrRoute() {
-    const models = await rt.catalog()
+    const models = (await rt.catalog()).filter(entry => entry.needsKey !== true && rt.isLocalAgentRef?.(entry.ref) !== true)
     const served = new Set(models.map(entry => entry.ref))
     const declared = models.filter(entry => entry.input?.includes('image')).map(entry => entry.ref)
     const fallback = rt.defaultRef()
@@ -133,26 +135,41 @@ export function install(rt) {
     ? `"${attachment.name}"`
     : `sha256:${String(attachment.attachmentId).slice('sha256:'.length, 'sha256:'.length + 8)}`)
 
+  function imagePath(attachment) {
+    try {
+      const hostPath = ctx.get?.('attachments')?.imageHostPath?.(attachment)
+      if (hostPath === undefined) return undefined
+      return ctx.get?.('fs')?.processPathFromHostPath?.(hostPath) ?? hostPath
+    } catch {
+      return undefined
+    }
+  }
+
   function imageAsText(attachment, reading) {
     const label = imageLabel(attachment)
+    const path = imagePath(attachment)
+    const saved = path === undefined ? '' : ` Read-only copy saved at ${JSON.stringify(path)}.`
     return {
       type: 'text',
       text: reading === null
-        ? `[Image ${label}: you cannot see images and it could not be read right now. Ask the user what it shows if it matters.]`
-        : `[Image ${label}. You cannot see images, so ${reading.model} read it for you:]\n${reading.text}\n[End of image ${label}]`,
+        ? `[Image ${label}: you cannot see images and it could not be read right now.${saved} Ask the user what it shows if it matters.]`
+        : `[Image ${label}.${saved} You cannot see images, so ${reading.model} read it for you:]\n${reading.text}\n[End of image ${label}]`,
     }
   }
 
   // Members read the group as text, so a picture posted there reaches every member,
-  // vision model or not, as its reading.
+  // vision model or not, as its reading; the image block itself also rides with the
+  // prompt for members whose model or tools can inspect it directly.
   async function imagesForGroup(attachments, sessionId) {
     await loadOcr()
     return Promise.all(attachments.map(async (attachment) => {
       const reading = await imageReading(attachment, sessionId)
       const label = imageLabel(attachment)
+      const path = imagePath(attachment)
+      const saved = path === undefined ? '' : ` (read-only copy saved at ${JSON.stringify(path)})`
       return reading === null
-        ? `[Image ${label}: it could not be read right now. Ask the user what it shows if it matters.]`
-        : `[Image ${label}, read by ${reading.model}:]\n${reading.text}\n[End of image ${label}]`
+        ? `[Image ${label}${saved}: it could not be read right now. Ask the user what it shows if it matters.]`
+        : `[Image ${label}${saved}, read by ${reading.model}:]\n${reading.text}\n[End of image ${label}]`
     }))
   }
 
@@ -186,7 +203,12 @@ export function install(rt) {
       }
       // `next` cannot take new messages, so the rewritten request starts over; it
       // carries no image, so this listener lets it through.
-      yield* ctx.llm.stream({ ...options, messages: await withImagesAsText(options.messages, options.sessionId) })
+      const request = {
+        ...options,
+        messages: await withImagesAsText(options.messages, options.sessionId),
+      }
+      if (isAgentLoopRequest(options)) markAgentLoopRequest(freezeLoopRequest(request))
+      yield* ctx.llm.stream(request)
     })()
   })
 

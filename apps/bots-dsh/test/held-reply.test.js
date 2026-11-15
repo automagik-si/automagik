@@ -20,6 +20,8 @@ runInNewContext(bundle.outputFiles[0].text, {
         createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
         useState: initial => [initial, () => {}], useEffect: () => {}, useRef: current => ({ current }),
         useLayoutEffect: () => {}, useMemo: make => make(), Fragment: 'fragment',
+        // The bundled Deep View widgets make a React context when their module loads.
+        createContext: value => ({ Provider: 'Provider', value }), useContext: context => context.value,
       },
       'react-dom': { createPortal: node => node },
       '@deepseek-ai/dsh-client-ui-primitives': { MarkdownText },

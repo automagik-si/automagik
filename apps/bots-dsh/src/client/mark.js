@@ -1,5 +1,6 @@
 import { createElement as h, useEffect, useRef, useState } from 'react'
 import { fnv1a, lookOf, shapeId, shapeOf, MASK_ID, nextMarkSerial, characterMarkup } from './characters.js'
+import { reducedMotion } from './motion.js'
 import { t } from './i18n.js'
 import { clayArtOf, faceAt, faceOf } from './clay-art.js'
 import { PetSprite, useDrowsy } from './pet.js'
@@ -28,7 +29,7 @@ export const toolState = name => (/^(message_bot|stop_bot|create_bot|update_bot|
 // Eyes follow the pointer on large marks.
 function useGaze(ref, enabled) {
   useEffect(() => {
-    if (!enabled) return undefined
+    if (!enabled || reducedMotion()) return undefined
     let frame = 0
     let point = null
     const place = () => {
@@ -40,7 +41,11 @@ function useGaze(ref, enabled) {
       node.style.setProperty('--bt-gx', clamp((point.x - box.left - box.width / 2) / 160).toFixed(2))
       node.style.setProperty('--bt-gy', clamp((point.y - box.top - box.height / 2) / 160).toFixed(2))
     }
-    const onMove = (event) => { point = { x: event.clientX, y: event.clientY }; if (!frame) frame = requestAnimationFrame(place) }
+    const onMove = (event) => {
+      if (document.body?.dataset.btMotion === 'quiet') return
+      point = { x: event.clientX, y: event.clientY }
+      if (!frame) frame = requestAnimationFrame(place)
+    }
     const onLeave = () => { point = null; ref.current?.style.setProperty('--bt-gx', '0'); ref.current?.style.setProperty('--bt-gy', '0') }
     window.addEventListener('pointermove', onMove, { passive: true })
     document.documentElement.addEventListener('pointerleave', onLeave)
@@ -156,7 +161,8 @@ function DrawnMark({ bot, look, size = 36, state = 'idle', live = false, gaze = 
   }
   if (image) return h('span', common, h('img', { className: 'bt-mark-img', src: image, alt: '', draggable: false, onError: () => setBroken(image) }))
   // A clay character is one picture: the body motions of its state move it whole (.bt-b),
-  // and its face follows the state. Small marks frame Genie's head.
+  // and its face follows the state. Genie is always the whole figure; the head alone is retired.
+  // data-frame stays only as a marker for small marks and has no style.
   const art = clayArtOf(bot, look)
   if (art) {
     const face = faceOf(common['data-state'], poked)
@@ -211,7 +217,7 @@ function Crown() {
 }
 
 // `crown`: the team's first Main Bot, which wears the crown in place of the Main Bot star.
-export function BotAvatar({ bot, size, state = 'idle', main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
+export function BotAvatar({ bot, size, state = 'idle', count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state)
   if (bot === undefined) return h(BotMark, { size })
   const badgeKind = !badge ? null : state === 'alert' ? 'alert' : WORK.includes(state) ? 'working' : admin ? 'admin' : main && !crown ? 'main' : null
@@ -219,7 +225,7 @@ export function BotAvatar({ bot, size, state = 'idle', main, admin, crown = fals
     h(BotMark, { bot, size, state: settled ? 'done' : state, live, gaze, pokeable }),
     crown ? h(Crown) : null,
     badgeKind === 'working' ? h('span', { className: 'bt-badge bt-badge-working', 'aria-label': t('Working'), role: 'img' }) : null,
-    badgeKind === 'alert' ? h('span', { className: 'bt-badge bt-badge-alert', 'aria-label': t('Waiting for your answer'), role: 'img' }, '?') : null,
+    badgeKind === 'alert' ? h('span', { className: 'bt-badge bt-badge-alert', 'aria-label': count > 0 ? (count === 1 ? t('1 approval waiting') : t('{count} approvals waiting', { count })) : t('Waiting for your answer'), role: 'img' }, count > 0 ? (count > 9 ? '9+' : String(count)) : '?') : null,
     badgeKind === 'admin' ? h('span', { className: 'bt-badge bt-badge-admin', 'aria-label': t('Admin'), role: 'img' }, h(StarIcon)) : null,
     badgeKind === 'main' ? h('span', { className: 'bt-badge bt-badge-main', 'aria-label': t('Main Bot'), role: 'img' }, h(MainStar)) : null)
 }

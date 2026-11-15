@@ -57,3 +57,4 @@ test('a reference takes out only its own "@label", so a typed call with the same
   assert.deepEqual(names(mentionsIn('@Kate, @K', [...members, { name: 'Kate' }], [{ labels: ['K'] }])), { all: false, found: ['Kate'] })
   assert.deepEqual(names(mentionsIn('@K notes and @K', members, [{ labels: ['K notes'] }])), { all: false, found: ['K'] })
 })
+

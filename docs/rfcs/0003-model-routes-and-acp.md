@@ -225,7 +225,9 @@ means the per-agent default (Contracts).
   first session start goes back to the release before it (`apps/acp-dsh/src/host/install.js`).
   That covers a release that cannot start, not one that starts and misbehaves. The exact names cover
   only the two adapters: their dependency tree (the agent SDKs, JSON-RPC and process helpers) is
-  resolved fresh at each install, with no lockfile. Also new: the adapter
+  resolved fresh for each new release. Since #970 the lockfile that resolution produced is kept,
+  and a reinstall of the same release (a repair from Retry, a held-back release tried again)
+  installs it frozen; a frozen install that fails resolves afresh once. Also new: the adapter
   carries its own copy of the agent's SDK (`claude-agent-acp` pins `@anthropic-ai/claude-agent-sdk`)
   and drives whatever CLI the person has, so the two can drift apart; nobody owns that pairing,
   and a mismatch shows as a failed turn, not a silent one. Turning `claude` or `codex` off in the
@@ -535,8 +537,23 @@ attempt lives in acp-dsh (`src/host/login.js`), one per agent, Claude Code and C
 any view of the DSH owner reads it back and reading never cancels it. The Bot team's
 `cli-login-*` endpoints are on its owner-only route, so a share viewer or a shared remote access
 gets 403. The expiry is the provider's when its answer reports one, otherwise the app's ten minutes
-from the link shown. While an attempt starts or waits, the welcome's busy file counts it, so the
-app's automatic restarts wait. While Claude's code step shows, the native editor takes no edit and
+from the link shown. A desktop parent sets exactly `AUTOMAGIK_BUSY_PROTOCOL=2`; Welcome splits
+actual running agents from active sign-ins only when ACP also exposes structured login activity
+and restart preparation. Older combinations retain the combined running count. An unreadable or
+malformed modern activity reading is untrusted, never idle. Waiting sign-ins alone do not hold
+modern automatic plugin updates or raise a quit warning; actual running agents still do.
+Claude's submitted answer or a CLI completion starts one absolute confirmation deadline of at
+most 90 seconds, shared by answering and confirming. A silent Claude CLI fails at that deadline,
+even if a later authentication check could succeed; no last query starts at expiry. Expiry
+invalidates completion authority before stopping its existing controller. Late account reads
+cannot grant consent, resume work, announce readiness or apply a model after expiry, replacement,
+Reset, disposal or restart. Persisted ownership still requires the existing full-tree exit proof.
+Automatic eligibility and the pre-stop recheck share one nonrenewing 90-second budget per actual
+DSH child and staged publisher/sequence/target bytes, shortened by an earlier valid writer
+deadline. New attempts, snapshots and malformed or future confirmation metadata cannot renew it.
+A deadline wake uses ordinary eligibility, including current-run busy validation, actual agents,
+focus/typing, settings, trials and downloads. Manual Force, Restart, install and quit retain the
+existing bounded preparation and gain no confirmation wait. While Claude's code step shows, the native editor takes no edit and
 keeps its draft; acp-dsh keeps keyed hashes of the Claude states it showed for a day, and the Bot
 team refuses to send, deliver or step a message that carries one. When the CLI confirms, the row
 says so and goes by itself after about three seconds, leaving nothing; a model the explicit
@@ -774,7 +791,15 @@ work, end starting/live chats, images, model probes and login attempts, and wait
 termination before the CLI changes credentials in the Bot environment. A failed or unverified
 logout leaves
 work paused until an explicit retry. Installation locks serialize authentication changes; when
-another app instance has registered the same vendor home, close it before changing accounts.
+another live or unknown app instance has registered the same vendor home, close it before changing
+accounts. Complete versioned registrations and mutation claims are staged privately and published
+atomically before admission. Synchronous bounded birth-identity checks distinguish a matching app
+from a reused PID: Linux uses boot UUID and kernel start ticks, macOS UTC `ps` lstart (whole-second
+collisions remain blocking), and Windows .NET UTC ticks as a decimal string. Errors, damaged
+metadata and matching/frozen owners stay blocked. Only fresh ESRCH or a comparable birth mismatch,
+with exact pathname identity/bytes/nonce revalidation, permits removal. No heartbeat age grants
+ownership. Live legacy registrations cannot distinguish PID reuse and remain conservative;
+legacy markers that lack login-tree evidence are retained.
 Launches capture an account generation so delayed work cannot start under a later account.
 
 **Crash recovery and owner Reset.** Automatic app-crash recovery is Unix-only and requires the
@@ -785,9 +810,20 @@ Automatic Windows recovery is deferred to
 The normal Windows sign-in and stop path still waits for its live supervisor's empty-Job proof.
 A short installation-level mutex uses unique process claims, so a claimant's own crash does not
 permanently hold recovery. Lock owner and applicable evidence are revalidated under that mutex.
+Startup and begin share the same proved-dead changing-lock recovery. Login-tree evidence is
+checked first and immediately before removal, with exact owner/claim/identity revalidation.
+Recovery durably establishes `paused` before removing the dead lock, including a crash before
+the original pause write; physical generation and version stay unchanged. Startup never resumes
+work or starts sign-in. App birth identity is not detached-login-tree exit proof.
 
 Pending-before-spawn, damaged and legacy evidence cannot supply that proof. Cold owner settings
-show recovery per vendor and offer an explicitly confirmed Reset Bot sign-in. Reset pauses
+show recovery per vendor and offer an explicitly confirmed Reset Bot sign-in. Beside that unchanged
+control, Sign in again uses the same confirmation and internally awaits Reset, invalidates old
+provider rows/polls, then awaits a fresh ordinary open and starts only a current offer. Bot,
+provider, model and operation checks fence every continuation; existing accounts still ask for
+confirmation and active attempts use ordinary joining. The public open bridge stays boolean.
+Both owner RPCs retain isolated-home, generation and restart checks; this composition is not an
+atomic transaction and promises no automatic chat-row restoration. Reset pauses
 admission and stops known work before selecting a fresh empty home generation and forgetting
 old account consent. It requires fresh in-app sign-in, preserves Bot models and history, and
 does not log out or copy the old account. Bot CLI user settings also start empty; project
@@ -859,3 +895,22 @@ Automagik's judge asks the person for hard-to-undo steps and after three consecu
 Codex's reviewer is a single CLI switch; global rules or reviewer policy would also change other Bots. No CLI home is written. Codex review counts can produce a refusal-stop notice, but the actual denial-limit ending and Claude Code auto mode still need captures. The host notice and tool result remain English like their neighbors. The permission questions explain that an allowed API escalation and native-agent tools may change files outside the Bot's folder. Existing Codex wording remains unchanged.
 
 RFC 0031 follow-up: rule 5 is per mark, with exact API models; rule 6 no longer refuses bridges. Questions 4 and 5 are answered by the own model/background model split and explicit failure-to-person behavior. The threat model's bridged-dialog statement gains “or the background model decides it”. “Not scheduled” is narrowed: any request reaching a counting chat may lead to a judged step; schedules themselves are not treated as the person's requests. RFC 0031's text remains for its owner.
+
+### Bot identity on ACP (amended 2026-11-14, #1269)
+
+Claude Code and Codex receive only the owning Bot's name, role and instructions through a
+Session-scoped reader. They never receive the native DSH system prompt through this channel.
+Delivery works with or without the DSH tools bridge. Remote Hermes gets no identity through
+this channel; it uses its own profile instructions.
+
+When the agent advertises `sessionCapabilities.systemPrompt`, a fresh session receives that
+identity in `systemPrompt` with `mode: 'append'`, after the agent's own system instructions.
+It extends those instructions and never replaces them. A tool-refresh fork carries the same
+identity snapshot. Without that capability, identity is prepended once to the first prompt,
+before replay and user content.
+That fallback has user-message precedence, not system-level precedence.
+
+Edits do not restart a running session. The existing profile-edit notice carries changes there,
+with its existing self-edit exceptions; each fresh session reads the current profile. A preserved
+unbridged Codex session returning from a native route still keeps its original identity snapshot.
+Repository-file consent in RFC 0014 is unchanged.

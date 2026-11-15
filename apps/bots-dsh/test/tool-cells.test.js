@@ -11,10 +11,10 @@ const { outputFiles } = await build({
     contents: [
       "export { ToolCell, TriggerCell, TurnProcessCell, callTree, stackReplies, CellEmpty, Bubbles, ChatRows } from './src/client/cells.js'",
       "export { toolCards } from './src/client/extend.js'",
-      "export { QuestionDock } from './src/client/questions.js'",
+      "export { QuestionDock, SettledQuestion } from './src/client/questions.js'",
       "export { SecretDock } from './src/client/secret-card.js'",
       "export { countCards } from './src/client/sources.js'",
-      "export { ViewMenuList, WidgetView } from './src/client/widget-cell.js'",
+      "export { ViewMenuList, WidgetView, WidgetDock } from './src/client/widget-cell.js'",
     ].join('\n'),
     resolveDir: fileURLToPath(new URL('..', import.meta.url)),
   },
@@ -29,6 +29,9 @@ let stateFor = initial => initial
 const Fragment = Symbol('Fragment')
 const h = (type, props, ...children) => ({ type, props: { ...props, children } })
 const react = {
+  createContext: (initial) => { const ctx = { value: initial }; ctx.Provider = ({ value, children }) => { ctx.value = value; return children }; return ctx },
+  useContext: ctx => ctx.value,
+  useCallback: fn => fn,
   createElement: h, Fragment,
   useEffect: (effect) => { effects.push(effect) },
   useLayoutEffect: (effect) => { effects.push(effect) },
@@ -72,7 +75,7 @@ const page = {
   },
 }
 runInNewContext(outputFiles[0].text, page)
-const { ToolCell, TriggerCell, TurnProcessCell, callTree, stackReplies, CellEmpty, Bubbles, ChatRows, toolCards, QuestionDock, SecretDock, countCards, ViewMenuList, WidgetView } = module.exports
+const { ToolCell, TriggerCell, TurnProcessCell, callTree, stackReplies, CellEmpty, Bubbles, ChatRows, toolCards, QuestionDock, SettledQuestion, SecretDock, countCards, ViewMenuList, WidgetView, WidgetDock } = module.exports
 
 // Runs the effects collected since the last render; returns the cleanups.
 const mount = () => {
@@ -179,29 +182,23 @@ test('a user message inside a group relay shows its time', () => {
   assert.deepEqual(times.map(node => node.props.title), [`Today ${clockOf(today)}`])
 })
 
-// A group paused at its relay limit shows the wait, with a Continue button while
-// the room still parks calls — which calls room-continue with the group's id.
-test('a paused group shows the wait, and Continue releases it while calls are parked', () => {
+// LEGACY: a round from when groups paused at a relay limit still shows the pause,
+// with nothing to press.
+test('an old paused round shows the pause as a plain line', () => {
   const replies = [{ kind: 'paused', names: ['Writer', 'Coder'], count: 6, time: at(0, 14, 5) }]
-  const relay = call('group_relay', 'direct', { content: { replies } })
-
-  // Nothing parked on the room: the line stands alone, with no button.
-  const plain = show(relay, { sessionId: 'room' })
-  const events = findAll(plain, node => node.props?.className === 'bt-event').map(text)
+  const out = show(call('group_relay', 'direct', { content: { replies } }), { sessionId: 'room' })
+  const events = findAll(out, node => node.props?.className === 'bt-event').map(text)
   assert.deepEqual(events, ['Paused after 6 Bot relays. Waiting: Writer and Coder'])
-  assert.equal(find(plain, node => node.type === 'button' && text(node) === 'Continue'), undefined)
+  assert.equal(find(out, node => node.type === 'button'), undefined)
+})
 
-  const parked = { ...room, paused: [{ id: 'writer', name: 'Writer' }] }
-  const clicked = []
-  const live = show(relay, {
-    sessionId: 'room',
-    roster: team({ rooms: [parked], roomsById: { room: parked } }),
-    actions: { continueRoom: id => clicked.push(id) },
-  })
-  const button = find(live, node => node.type === 'button' && text(node) === 'Continue')
-  assert.ok(button, 'the Continue button is drawn while the room parks calls')
-  button.props.onClick()
-  assert.deepEqual(clicked, ['room'])
+// #872: Bots that went back and forth without progress paused; the line names both
+// and says what lets them go on.
+test('a round the idle guard paused names the Bots and how they go on', () => {
+  const replies = [{ kind: 'paused', idle: true, botId: 'chief', name: 'Omni', names: ['Writer'], count: 6, limit: 6, time: at(0, 14, 5) }]
+  const out = show(call('group_relay', 'direct', { content: { replies } }), { sessionId: 'room' })
+  const events = findAll(out, node => node.props?.className === 'bt-event').map(text)
+  assert.deepEqual(events, ['Omni and Writer went back and forth 6 times without progress and paused. Write here to go on'])
 })
 
 // The admin was alone with the user's message and passed: the round shows the
@@ -674,6 +671,32 @@ test('a card whose call is not drawn waits in the dock; a drawn one shows only a
   assert.match(docks(store, roster), /Which draft\?.*Omni needs a key/)
 })
 
+// React needs the same hooks on every render: the dock reads the Enter preference
+// before its early returns, so a card arriving or moving to the transcript never
+// changes the count.
+test('the question dock calls the same hooks whether its card shows or not', () => {
+  const store = cardStore()
+  const render = (roster) => {
+    let calls = 0
+    const props = dockProps(store, roster)
+    props.useRoster = (select) => { calls += 1; return select(roster) }
+    const out = expand(QuestionDock(props))
+    return { calls, out }
+  }
+  const empty = render(team({}))
+  const roster = team({ questions: { chief: question('program:ptc:1') } })
+  const waiting = render(roster)
+  assert.equal(empty.out, null)
+  assert.notEqual(waiting.out, null)
+  assert.equal(waiting.calls, empty.calls)
+  // The transcript drew the call: the dock steps back, still on the same hooks.
+  store.state = { chief: { 'program:ptc:1': 1 } }
+  const drawn = render(roster)
+  assert.equal(drawn.out, null)
+  assert.equal(drawn.calls, empty.calls)
+  effects = []
+})
+
 test('the docks keep pending cards through history loading until their calls actually mount', () => {
   const store = cardStore()
   const roster = team({ questions: { chief: question('program:ptc:1') }, secretRequests: { chief: [request('program:ptc:2')] } })
@@ -802,13 +825,18 @@ test('a pruned group relay still draws the replies that survived', () => {
 
 // The prune marker's "]" must not end the scan, and a cut inside a string must
 // not hide the replies after it either.
-test('a group relay recovers replies after the prune marker', () => {
+test('a group relay recovers replies after the prune marker with and without a roundId', () => {
   const between = '{"replies":[{"botId":"writer","text":"First."}[... tool result middle pruned ...],{"botId":"chief","text":"Last."}]}'
   const out = show(call('group_relay', 'direct', { content: between }), { sessionId: 'room' })
   assert.match(text(out), /Writer.*First\..*Omni.*Last\./)
   const inside = '{"replies":[{"botId":"writer","text":"First."},{"botId":"chief","text":"cut[... tool result middle pruned ...]{"botId":"writer","text":"Last."}]}'
-  const out2 = show(call('group_relay', 'direct', { content: inside }), { sessionId: 'room' })
-  assert.match(text(out2), /Writer.*First\..*Last\./)
+  for (const args of [{}, { roundId: 'round-2' }]) {
+    const out = show(call('group_relay', 'direct', { args, content: between }), { sessionId: 'room' })
+    assert.match(text(out), /Writer.*First\..*Omni.*Last\./)
+    const out2 = show(call('group_relay', 'direct', { args, content: inside }), { sessionId: 'room' })
+    assert.match(text(out2), /Writer.*First\..*Last\./)
+    assert.doesNotMatch(text(out2), /round-2/)
+  }
 })
 
 // Only the compactor's own marker splits the text: a reply that quotes a
@@ -828,7 +856,7 @@ test('a PTC group relay shows its replies from the sub-call, live and after relo
   const headless = { ...finished, name: '', call: null }
   assert.equal(shown(headless, { sessionId: 'room' }), reloaded)
 
-  const progress = [{ callId: 'other', replies: [{ botId: 'chief', text: 'Not this round.' }] }, { callId: 'call-1-1:ptc:1', replies: replies.slice(0, 1), speaking: 'chief' }]
+  const progress = [{ callId: 'other', replies: [{ botId: 'chief', text: 'Not this round.' }] }, { callId: 'call-1-1:ptc:1', replies: replies.slice(0, 1), speaking: ['chief'] }]
   const asked = []
   const actions = { roomProgress: async (id) => { asked.push(id); return progress } }
   const running = program([call('group_relay', 'call-1-1:ptc:1', { running: true })], { running: true })
@@ -841,7 +869,7 @@ test('a PTC group relay shows its replies from the sub-call, live and after relo
   stop()
   timers.clear()
   assert.deepEqual(asked, ['room'])
-  assert.deepEqual(JSON.parse(JSON.stringify(sets)), [{ replies: replies.slice(0, 1), speaking: 'chief' }])
+  assert.deepEqual(JSON.parse(JSON.stringify(sets)), [{ replies: replies.slice(0, 1), speaking: ['chief'] }])
 })
 
 // #105: the secret and question cards of a PTC program showed nowhere.
@@ -929,6 +957,84 @@ test('a reaction on a group post stays on that post, also after it draws again',
   assert.deepEqual([chips(draw(first)), chips(draw(sameTurn)), chips(draw(later))], [0, 0, 1])
 })
 
+test('a question or view card closed without an answer on it stays at its call, read-only, with how it closed', () => {
+  const asked = { question: 'Which draft?', detail: 'Pick one', options: [{ label: 'Short', description: 'One page' }, 'Long'] }
+  const pick = { title: 'Pick a lane', view: { type: 'options', id: 'lane', options: [{ label: 'Ship now' }, { label: 'One more pass' }] } }
+  const roster = team({ questions: {}, views: {}, closedCards: { [chief.id]: { 'q-dismissed': 'dismissed', 'q-replied': 'replied', 'v-dismissed': 'dismissed' } } })
+  const dismissed = show(call('ask_user', 'q-dismissed', { args: asked }), { roster })
+  assert.equal(find(dismissed, node => node.props?.className === 'bt-q-gone'), undefined)
+  assert.equal(text(find(dismissed, node => node.props?.className === 'bt-q-badge')), 'Dismissed')
+  // Compact: the question and the badge, no options and nothing to press.
+  assert.equal(text(dismissed), 'Which draft?Dismissed')
+  assert.equal(find(dismissed, node => node.type === 'button'), undefined)
+  const replied = show(call('ask_user', 'q-replied', { args: asked }), { roster })
+  assert.equal(text(find(replied, node => node.props?.className === 'bt-q-badge')), 'Answered by message')
+  // Answered on the card: the reply message carries the card, the call leaves no gap.
+  const answered = show(call('ask_user', 'q-answered', { args: asked }), { roster })
+  assert.ok(find(answered, node => node.props?.className === 'bt-q-gone') !== undefined)
+  const view = show(call('show_view', 'v-dismissed', { args: pick }), { roster })
+  assert.equal(text(view), 'Pick a laneDismissed')
+  assert.equal(find(view, node => node.type === 'button'), undefined)
+  assert.ok(find(show(call('show_view', 'v-answered', { args: pick }), { roster }), node => node.props?.className === 'bt-q-gone') !== undefined)
+})
+
+test('a hidden-turn card floats in the dock while pending, then leaves the dock and settles at its turn when closed', () => {
+  const store = cardStore()
+  const asked = { question: 'Which draft?', options: [{ label: 'Short' }] }
+  const pick = { title: 'Pick a lane', view: { type: 'options', id: 'lane', options: [{ label: 'Ship now' }] } }
+  const meter = { title: 'Hidden meter', view: { type: 'metric', label: 'Done', value: '3' } }
+  const root = program([
+    call('message_bot', 'm-hidden', { args: { to: 'Writer' } }),
+    call('show_view', 'm-view', { args: meter }),
+    call('ask_user', 'q-hidden', { args: asked }),
+    call('show_view', 'v-hidden', { args: pick }),
+  ])
+  const pendingRoster = team({
+    exchangeTurns: { [chief.id]: [1] },
+    questions: { [chief.id]: { id: 'q-1', callId: 'q-hidden', ...asked } },
+    views: { [chief.id]: { id: 'v-1', callId: 'v-hidden', ...pick } },
+  })
+  // While pending, the hidden turn draws nothing and marks no cards, so the docks show both.
+  const pendingCell = draw(root, store, { roster: pendingRoster })
+  assert.equal(text(pendingCell.out), '')
+  assert.deepEqual(store.state, {})
+  const pendingViewDock = expand(WidgetDock(dockProps(store, pendingRoster)))
+  const pendingQuestionDock = expand(QuestionDock(dockProps(store, pendingRoster)))
+  assert.match(text(pendingViewDock), /Pick a lane/)
+  assert.match(text(pendingQuestionDock), /Which draft\?/)
+  pendingCell.unmount()
+
+  // Once closed by message or dismiss, both docks empty and the hidden turn draws only the settled cards.
+  const closedRoster = team({
+    exchangeTurns: { [chief.id]: [1] },
+    questions: {},
+    views: {},
+    closedCards: { [chief.id]: { 'q-hidden': 'dismissed', 'v-hidden': 'replied' } },
+  })
+  assert.equal(expand(WidgetDock(dockProps(store, closedRoster))), null)
+  assert.equal(expand(QuestionDock(dockProps(store, closedRoster))), null)
+  const settledCell = show(root, { roster: closedRoster })
+  assert.equal(text(settledCell), 'Which draft?DismissedPick a laneAnswered by message')
+  assert.equal(find(settledCell, each => each.type === 'button'), undefined)
+
+  // A card carried from an earlier part stays in the dock even if the current part drew the same call id.
+  store.noteCards(chief.id, ['same-call'], 1)
+  const carriedRoster = team({
+    views: { [chief.id]: { id: 'v-2', callId: 'same-call', callSessionId: 'chief-old', ...pick } },
+  })
+  assert.match(text(expand(WidgetDock(dockProps(store, carriedRoster)))), /Pick a lane/)
+  assert.ok(find(show(call('show_view', 'same-call', { args: pick }), { roster: carriedRoster }), each => each.props?.className === 'bt-q-gone') !== undefined)
+})
+
+test('an answered question card keeps only the chosen rows, each under its card letter, and the own answer after them', () => {
+  const question = { id: 'q', question: 'Which draft?', options: [{ label: 'Short' }, { label: 'Long' }, { label: 'None' }] }
+  const out = expand(SettledQuestion({ question, answer: { selected: ['Long'], custom: 'Both, really' } }))
+  assert.match(out.props.className, /bt-q-answered/)
+  const rows = findAll(out, node => node.props?.className === 'bt-q-opt')
+  assert.deepEqual(rows.map(row => [text(find(row, node => node.props?.className === 'bt-key')), text(find(row, node => node.props?.className === 'bt-q-label'))]), [['B', 'Long'], ['D', 'Both, really']])
+  assert.equal(find(out, node => node.props?.className === 'bt-q-badge'), undefined)
+})
+
 test('a show_view call the host refused draws nothing; a display-only card draws with the trimmed title', () => {
   const cell = (title, view, extra = {}) => show(call('show_view', 'view-call', { args: { title, view, ...extra } }), { roster: team({ views: {} }) })
   const gone = (node) => {
@@ -942,13 +1048,13 @@ test('a show_view call the host refused draws nothing; a display-only card draws
   gone(cell('Pick', { type: 'options', id: 'o', options: [{ label: 'A' }] }))
   gone(cell('Meter', { type: 'metric', label: 'Done', value: '3' }, { await_reply: true }))
   const card = cell('  Status  ', { type: 'metric', label: 'Done', value: '3' })
-  const title = find(card, node => node.props?.className === 'bt-view-title')
+  const title = find(card, node => node.props?.className === 'dv-view-title')
   assert.ok(title !== undefined)
   assert.equal(text(title), 'Status')
   // A view needs no title: it then draws without a heading.
   const bare = cell('  ', { type: 'text', text: 'hi' })
-  assert.equal(find(bare, node => node.props?.className === 'bt-view-title'), undefined)
-  assert.ok(find(bare, node => typeof node.props?.className === 'string' && node.props.className.includes('bt-view-bare')) !== undefined)
+  assert.equal(find(bare, node => node.props?.className === 'dv-view-title'), undefined)
+  assert.ok(find(bare, node => typeof node.props?.className === 'string' && node.props.className.includes('dv-view-bare')) !== undefined)
 })
 
 test('a display-only call still draws when the args come through the value accessor', () => {
@@ -961,7 +1067,7 @@ test('a display-only call still draws when the args come through the value acces
     call: { name: 'show_view', argsRaw: JSON.stringify(data) }, content: text$('The view is on screen.'), subCalls: [],
   }
   const node = show(callNode, { roster: team({ views: {} }) })
-  const title = find(node, item => item.props?.className === 'bt-view-title')
+  const title = find(node, item => item.props?.className === 'dv-view-title')
   assert.ok(title !== undefined, 'the card draws')
   assert.equal(text(title), 'Status')
 })
@@ -977,23 +1083,23 @@ test('a view works its formulas out, draws a chart, and keeps html in a sandboxe
     ],
   }
   const live = cell(calculator)
-  assert.equal(text(classed(live, 'bt-widget-metric-value')), '¥60')
-  assert.equal(classed(live, 'bt-widget-metric').props['data-tone'], 'bad')
-  assert.ok(classed(live, 'bt-q') !== undefined, 'a view with inputs wears a light frame')
+  assert.equal(text(classed(live, 'dv-widget-metric-value')), '¥60')
+  assert.equal(classed(live, 'dv-widget-metric').props['data-tone'], 'bad')
+  assert.ok(classed(live, 'dv-q') !== undefined, 'a view with inputs wears a light frame')
   assert.equal(find(live, item => item.type === 'input' && item.props.type === 'range').props.value, 30)
 
   const chart = cell({ type: 'chart', kind: 'bar', categories: ['A', 'B'], series: [{ values: [3, 5] }], unit: 'ms' })
-  assert.ok(classed(chart, 'bt-view-bare') !== undefined, 'a view that only shows has no frame')
+  assert.ok(classed(chart, 'dv-view-bare') !== undefined, 'a view that only shows has no frame')
   assert.ok(find(chart, item => item.type === 'svg') !== undefined)
   const figure = find(chart, item => item.type === 'figure')
   assert.equal(figure.props['data-kind'], 'bar')
   // The ⋯ menu sits in the card's head, not on the chart's axes (#476).
-  const head = classed(chart, 'bt-view-head')
-  assert.ok(find(head, item => typeof item.props?.className === 'string' && item.props.className.includes('bt-view-more')) !== undefined, 'the card head has the menu button')
+  const head = classed(chart, 'dv-view-head')
+  assert.ok(find(head, item => typeof item.props?.className === 'string' && item.props.className.includes('dv-view-more')) !== undefined, 'the card head has the menu button')
   assert.equal(find(figure, item => typeof item.props?.className === 'string' && (item.props.className.includes('bt-chart-more') || item.props.className.includes('bt-chart-tools'))), undefined, 'the chart itself has no menu')
   // A view without a chart has no ⋯ button.
   const metric = cell({ type: 'metric', label: 'Done', value: '3' })
-  assert.equal(find(metric, item => typeof item.props?.className === 'string' && item.props.className.includes('bt-view-more')), undefined)
+  assert.equal(find(metric, item => typeof item.props?.className === 'string' && item.props.className.includes('dv-view-more')), undefined)
   for (const kind of ['hbar', 'line', 'area', 'donut']) {
     assert.ok(find(cell({ type: 'chart', kind, categories: ['A', 'B'], series: [{ values: [3, 5] }] }), item => item.type === 'svg') !== undefined, kind)
   }
@@ -1002,12 +1108,12 @@ test('a view works its formulas out, draws a chart, and keeps html in a sandboxe
   const handle = (label, asTable = false) => ({ label, asTable, toggleTable: () => {}, copy: () => {}, save: () => {} })
   const menuItems = node => findAll(node, item => item.props?.role === 'menuitem').map(text)
   const single = expand(ViewMenuList({ charts: [handle('Revenue')], pick: run => run }))
-  assert.equal(findAll(single, item => item.props?.className === 'bt-view-menu-label').length, 0, 'one chart needs no group label')
+  assert.equal(findAll(single, item => item.props?.className === 'dv-view-menu-label').length, 0, 'one chart needs no group label')
   assert.deepEqual(menuItems(single), ['View as table', 'Copy data', 'Download image'])
   const pair = expand(ViewMenuList({ charts: [handle('Revenue'), handle(null, true), handle('Costs')], pick: run => run }))
-  const labels = findAll(pair, item => item.props?.className === 'bt-view-menu-label').map(text)
+  const labels = findAll(pair, item => item.props?.className === 'dv-view-menu-label').map(text)
   assert.deepEqual(labels, ['Revenue', 'Chart 2', 'Costs'], 'each group is named after its chart')
-  assert.equal(findAll(pair, item => item.props?.className === 'bt-menu-sep').length, 2, 'groups are separated')
+  assert.equal(findAll(pair, item => item.props?.className === 'dv-menu-sep').length, 2, 'groups are separated')
   assert.deepEqual(menuItems(pair), [
     'View as table', 'Copy data', 'Download image',
     'View as chart', 'Copy data', 'Download image',
@@ -1031,7 +1137,7 @@ test('a view works its formulas out, draws a chart, and keeps html in a sandboxe
   assert.equal(ordered.length, 3)
   ordered[0].toggleTable()
   const orderedMenu = expand(ViewMenuList({ charts: ordered, pick: run => run }))
-  assert.deepEqual(findAll(orderedMenu, item => item.props?.className === 'bt-view-menu-label').map(text), ['One', 'Two', 'Chart 3'], 'the toggled chart keeps its group position')
+  assert.deepEqual(findAll(orderedMenu, item => item.props?.className === 'dv-view-menu-label').map(text), ['One', 'Two', 'Chart 3'], 'the toggled chart keeps its group position')
   assert.deepEqual(menuItems(orderedMenu).slice(0, 3), ['View as chart', 'Copy data', 'Download image'], 'the first group shows the table state')
 
   const frame = find(cell({ type: 'html', html: '<b>hi</b>', summary: 'A greeting' }), item => item.type === 'iframe')
@@ -1463,4 +1569,16 @@ test('a message kept as a file starts the clipboard write inside its click, befo
   release({ text: full, whole: true })
   await copying
   assert.deepEqual(copiedTexts, [inner])
+})
+
+// The repair card's Retry reaches the Bot as a plugin trigger; the chat shows that it went
+// on, never the note to the Bot or the user's message again.
+test('a Retry after a failed turn shows as one event line', () => {
+  const out = expand(TriggerCell({
+    node: { key: 'trigger', kind: 'turn-trigger', location: { turn: { turn: 4 } }, data: { seq: 9, time: 1, content: text$('[Retry after a failed turn]\nYour last turn failed (AUTH) and the user has fixed it.'), source: { kind: 'bot', role: 'continue', exchangeId: 'c1' } } },
+    sessionId: chief.id, actions: {},
+    useRoster: select => select(team()), useSessions: select => select({ byId: {} }),
+    useTurnClock: select => select({}), useUi: select => select({ visits: {}, reactions: {} }),
+  }))
+  assert.equal(text(out), 'Went on after the failed turn')
 })

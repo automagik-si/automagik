@@ -14,13 +14,14 @@ const NO_WORK = { bots: {}, rooms: {}, approvals: [] }
 const FACES_MAX = 3
 const DOCK_EXIT_MS = 160
 
-// Work in this group wins over the Bot's own chat or another group.
+// Only work in this group counts here; work elsewhere shows on the Bot's own chat
+// (its 'in {group}' capsule and sidebar group tag), not in every group it is in (#473).
 export function memberWork(room, work = NO_WORK) {
   const here = work.rooms?.[room.id] ?? []
   return room.members.map((id) => {
     const approvals = (work.approvals ?? []).filter(entry => entry.botId === id)
     const local = here.find(entry => entry.botId === id)
-    const doing = local ? { ...local, roomId: room.id } : work.bots?.[id]
+    const doing = local ? { ...local, roomId: room.id } : undefined
     return { id, approvals, doing, here: local !== undefined, state: approvals.length > 0 ? 'ask' : doing ? 'work' : 'idle' }
   })
 }
@@ -142,7 +143,9 @@ function ApprovalCard({ approval, bot, actions }) {
     approval.detail?.text ? h('div', { className: 'bt-mw-text' }, approval.detail.text) : null,
     approval.reason ? h('div', { className: 'bt-mw-reason' }, approval.reason) : null,
     approval.detail?.code ? h('code', { className: 'bt-mw-code', title: approval.detail.code }, approval.detail.code) : null,
-    approval.answerable
+    // An approval in the Bot's own chat has DSH's card there, which stays the place to answer it, so the
+    // row opens that chat. A group's approval and a subagent's have no card of their own: they are answered here.
+    approval.answerable && (approval.roomId !== undefined || approval.child === true)
       ? h('div', { className: 'bt-mw-actions' },
         h('button', { type: 'button', className: 'bt-q-btn', disabled: busy, onClick: () => answer('reject') }, t('Reject')),
         h('button', { type: 'button', className: 'bt-q-submit', disabled: busy, onClick: () => answer('allow') }, t('Allow once')))
@@ -150,14 +153,11 @@ function ApprovalCard({ approval, bot, actions }) {
         h('button', { type: 'button', className: 'bt-q-btn', onClick: () => actions.openSession(bot.id) }, t("Open {name}'s chat", { name: bot.name }))))
 }
 
-// A member's second line in the group's details: what it is doing and where, or its role.
-export function MemberState({ entry, bot, room, roster }) {
+// A member's second line in the group's details: what it is doing here, or its role.
+export function MemberState({ entry, bot }) {
   if (entry?.state === 'ask') return stateLine('bt-member-state bt-mw-ask', entry.approvals[0].at, t('Waiting for your approval'))
   if (entry?.state !== 'work') return bot.role ? stateLine('bt-member-state', undefined, bot.role) : null
-  const where = entry.doing.roomId === room.id ? ''
-    : entry.doing.roomId ? t('in {name}', { name: roster.roomsById[entry.doing.roomId]?.name ?? t('a group chat') })
-      : t('in its own chat')
-  return stateLine('bt-member-state', entry.doing.since, h(Shimmer, null, `${workPhrase(entry.doing)}…`), where ? ` ${where}` : '')
+  return stateLine('bt-member-state', entry.doing.since, h(Shimmer, null, `${workPhrase(entry.doing)}…`))
 }
 
 // Work in this group can be stopped from its details, since the user cannot reach the
@@ -172,6 +172,21 @@ export function StopMemberWork({ entry, bot, room, actions }) {
       .finally(() => setStopping(false))
   }
   return h('button', { type: 'button', className: 'bt-member-stop', disabled: stopping, 'aria-label': `${t('Stop')} · ${bot.name}`, onClick: stop }, t('Stop'))
+}
+
+// The group's work stops all at once from its details: DSH's own stop reaches only the
+// round, and a member the round moved on from keeps working.
+export function StopRoomWork({ room, entries, actions }) {
+  const [stopping, setStopping] = useState(false)
+  if (!entries.some(entry => entry.here)) return null
+  const stop = () => {
+    setStopping(true)
+    void Promise.resolve(actions.stopRoomWork(room.id))
+      .catch(error => actions.reportError(error, 'stop'))
+      .finally(() => setStopping(false))
+  }
+  const label = t('Stop all work in this group')
+  return h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: stopping, 'aria-label': label, title: label, onClick: stop }, t('Stop all'))
 }
 
 export function MemberApprovals({ entry, bot, actions }) {
@@ -206,6 +221,11 @@ body[data-ds-dark-theme] .bt-mw-ask{color:#f0b84a}
 @keyframes bt-mw-seat{from{opacity:0;scale:.6}}
 @keyframes bt-mw-swap{from{opacity:0;filter:blur(4px)}}
 .bt-members{display:flex;flex-direction:column;gap:2px;margin:0 -8px}
+.bt-members-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.bt-members-head>.bt-section-title{margin:0}
+/* The button hangs over the title's line, so the list below does not move when it appears. */
+.bt-members-head>.bt-soft-sm{margin:-6px 0}
+.bt-members-head>.bt-soft-sm:disabled{opacity:.5;cursor:default}
 .bt-member{display:flex;flex-direction:column;border-radius:12px;animation:bt-rise .18s ease-out backwards}
 .bt-member-row{display:flex;align-items:center;gap:8px;min-height:48px;padding:0 8px;border-radius:12px;transition:background-color .12s ease}
 .bt-member-row:hover{background:var(--bt-hover)}
@@ -220,7 +240,7 @@ body[data-ds-dark-theme] .bt-mw-ask{color:#f0b84a}
 .bt-member-time{flex:none;margin-left:.3em;font-variant-numeric:tabular-nums}
 .bt-member-state.bt-mw-ask{color:#b7791f}
 body[data-ds-dark-theme] .bt-member-state.bt-mw-ask{color:#f0b84a}
-.bt-member-stop{flex:none;height:26px;padding:0 11px;border:0;border-radius:13px;background:var(--bt-main);box-shadow:inset 0 0 0 .5px var(--bt-line-2);color:var(--bt-ink-2);font:inherit;font-size:12px;cursor:pointer;transition:background-color .12s ease,color .12s ease,${spring(SPRING_TAP, 'scale')}}
+.bt-member-stop{flex:none;height:26px;padding:0 11px;border:0;border-radius:999px;background:var(--bt-main);box-shadow:inset 0 0 0 .5px var(--bt-line-2);color:var(--bt-ink-2);font:inherit;font-size:12px;cursor:pointer;transition:background-color .12s ease,color .12s ease,${spring(SPRING_TAP, 'scale')}}
 .bt-member-stop:hover{background:var(--bt-active);color:var(--bt-ink)}
 .bt-member-stop:active:not(:disabled){scale:.94}
 .bt-member-stop:disabled{opacity:.5;cursor:default}

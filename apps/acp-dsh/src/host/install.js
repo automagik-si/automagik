@@ -18,7 +18,7 @@
 // lags its CLI breaks first. What is checked is what npm publishes: the exact package name, the
 // registry's integrity for every tarball, no install scripts, and no bundled CLI.
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { findCommand, isExecutable } from './agents.js'
@@ -60,6 +60,19 @@ export { homeRelativeText }
 
 export const adaptersHome = (env = process.env) => join(env.AUTOMAGIK_HOME || join(homedir(), '.automagik'), 'acp', 'adapters')
 const folderOf = pkg => pkg.replace(/^@/, '').replace(/\//g, '__')
+// Old records name folders by version; a repair can select a different local folder.
+const dirOf = (current, previous = false) => {
+  const dir = current?.[previous ? 'previousDir' : 'dir']
+  return localDir(dir) ? dir : current?.[previous ? 'previous' : 'version']
+}
+// A folder name current.json may select: a plain name in the package folder, never a path.
+const localDir = dir => typeof dir === 'string' && dir !== '' && !dir.startsWith('.') && !dir.includes('/') && !dir.includes('\\') && !dir.includes('\0')
+// The folders a repair moved off (`retired`): a Session started before it may still run one, so
+// each stays as long as the release an ordinary update replaces does, one check window.
+const retiredOf = (current, now) => (Array.isArray(current?.retired) ? current.retired : [])
+  .filter(entry => localDir(entry?.dir) && Number.isFinite(entry.at) && now - entry.at < CHECK_EVERY_MS)
+const retiredField = retired => (retired.length > 0 ? { retired } : {})
+const lockfiles = { pnpm: 'pnpm-lock.yaml', npm: 'package-lock.json' }
 // An install is of one named npm package. An agent that runs natively has none (agents.js
 // `isNative`), so a caller that passes its `adapter` on passes nothing: said here in words,
 // before any folder is derived from the name.
@@ -71,8 +84,12 @@ const readJson = (file) => {
 }
 const writeJson = (file, value) => {
   const tmp = `${file}.${process.pid}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`)
-  renameSync(tmp, file)
+  try {
+    writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`)
+    renameSync(tmp, file)
+  } finally {
+    try { rmSync(tmp, { force: true }) } catch {}
+  }
 }
 
 // A version check that could not reach npm (#970): the request never got an answer. Which
@@ -224,7 +241,7 @@ export function runInstall(command, args, { cwd, env, signal: abort, timeoutMs =
   })
 }
 
-export async function defaultInstall(dir, pkg, version, env, { signal } = {}) {
+export async function defaultInstall(dir, pkg, version, env, { signal, frozen = false } = {}) {
   const manager = packageManagerOf(env)
   if (!manager) throw new Error("neither the desktop app's pnpm nor npm is here to install the ACP adapter with")
   const options = { cwd: dir, env: { ...env, npm_config_update_notifier: 'false', npm_config_fund: 'false', npm_config_audit: 'false' }, signal }
@@ -232,8 +249,8 @@ export async function defaultInstall(dir, pkg, version, env, { signal } = {}) {
   // replace. pnpm skips them through package.json's supportedArchitectures (see updateNow):
   // pnpm 10.34's --no-optional breaks on Codex's aliased platform packages
   // (ERR_PNPM_LOCKFILE_MISSING_DEPENDENCY). updateNow refuses an install that has one anyway.
-  if (manager.kind === 'pnpm') await runInstall(manager.command, ['install', '--prod', '--ignore-scripts', '--config.node-linker=hoisted', '--config.ignore-workspace=true', '--reporter=silent'], options)
-  else await runInstall(manager.command, ['install', '--omit=optional', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--loglevel=error'], options)
+  if (manager.kind === 'pnpm') await runInstall(manager.command, ['install', '--prod', '--ignore-scripts', '--config.node-linker=hoisted', '--config.ignore-workspace=true', '--reporter=silent', ...(frozen ? ['--frozen-lockfile', '--prefer-offline'] : ['--no-frozen-lockfile'])], options)
+  else await runInstall(manager.command, [frozen ? 'ci' : 'install', '--omit=optional', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--loglevel=error', ...(frozen ? ['--prefer-offline'] : [])], options)
 }
 
 export class AdapterStore {
@@ -245,6 +262,7 @@ export class AdapterStore {
   constructor({ home = adaptersHome(), env = process.env, latest = latestVersion, install = defaultInstall, now = Date.now, log = () => {}, check } = {}) {
     Object.assign(this, { home, env, latest, install, now, log, check })
     this.running = new Map()
+    this.repairing = new Set()
     this.failures = new Map()
     this.installing = new Set()
     this.quit = new AbortController()
@@ -281,7 +299,7 @@ export class AdapterStore {
     const folder = join(this.home, folderOf(pkg))
     const current = readJson(join(folder, 'current.json'))
     if (!current?.version) return undefined
-    const path = join(folder, current.version, 'node_modules', ...pkg.split('/'), bin)
+    const path = join(folder, dirOf(current), 'node_modules', ...pkg.split('/'), bin)
     return existsSync(path) ? { path, version: current.version } : undefined
   }
 
@@ -291,7 +309,7 @@ export class AdapterStore {
     if (!current?.version) return undefined
     const bad = current.bad?.version !== undefined && this.now() - current.bad.at < BAD_TTL_MS ? current.bad : undefined
     // Only a previous release still on disk is named: one the cleanup dropped is no way back.
-    const previous = current.previous && current.previous !== current.version && existsSync(join(this.home, folderOf(pkg), current.previous)) ? current.previous : undefined
+    const previous = current.previous && current.previous !== current.version && existsSync(join(this.home, folderOf(pkg), dirOf(current, true))) ? current.previous : undefined
     return {
       version: current.version,
       proven: current.proven !== false,
@@ -306,7 +324,7 @@ export class AdapterStore {
   markGood(pkg) {
     const file = join(this.home, folderOf(pkg), 'current.json')
     const current = readJson(file)
-    if (!current?.version || current.proven !== false) return
+    if (!current?.version || current.proven !== false || !existsSync(join(this.home, folderOf(pkg), dirOf(current)))) return
     try {
       writeJson(file, { ...current, proven: true })
     } catch {}
@@ -324,12 +342,14 @@ export class AdapterStore {
     const file = join(folder, 'current.json')
     const current = readJson(file)
     if (!current?.version || current.proven !== false || !current.previous || current.previous === current.version) return undefined
-    if (!existsSync(join(folder, current.previous, 'node_modules', ...pkg.split('/'), bin))) return undefined
+    if (!existsSync(join(folder, dirOf(current, true), 'node_modules', ...pkg.split('/'), bin))) return undefined
     const why = homeRelativeText(redactText(String(reason?.message ?? reason ?? 'it did not start'))).slice(0, 300)
     const at = this.now()
     try {
       writeJson(file, {
         version: current.previous,
+        ...(dirOf(current, true) !== current.previous ? { dir: dirOf(current, true) } : {}),
+        ...retiredField(retiredOf(current, at)),
         checkedAt: current.checkedAt ?? at,
         ...(current.previousProven === true ? {} : { proven: false }),
         bad: { version: current.version, at, reason: why },
@@ -349,29 +369,186 @@ export class AdapterStore {
     const busy = this.running.get(pkg)
     if (busy) return busy
     if (this.quit.signal.aborted) return Promise.reject(new Error('install stopped: DSH is quitting'))
-    const job = this.updateNow(pkg, bin, force).then(
+    return this.track(pkg, this.updateNow(pkg, bin, force))
+  }
+
+  /** Reinstall the selected release, even while its registry check is still fresh. */
+  repair(pkg, bin) {
+    const refused = noPackage(pkg)
+    if (refused) return Promise.reject(refused)
+    if (this.quit.signal.aborted) return Promise.reject(new Error('install stopped: DSH is quitting'))
+    const busy = this.running.get(pkg)
+    if (busy && this.repairing.has(pkg)) return busy
+    // An update may select a new version; repair that selection once the update ends.
+    const work = busy ? busy.catch(() => {}).then(() => this.repairNow(pkg, bin)) : this.repairNow(pkg, bin)
+    this.repairing.add(pkg)
+    return this.track(pkg, work)
+  }
+
+  track(pkg, work) {
+    const job = work.then(
       (found) => { this.failures.delete(pkg); return found },
-      (error) => {
-        const full = homeRelativeText(redactText(error?.message ?? error))
-        const message = full.split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 300)
-        const diagnostic = full.slice(-DIAGNOSTIC_MAX)
-        let logPath
-        try {
-          const dir = join(this.home, 'logs')
-          // Owner-only: the log can hold paths and installer output.
-          mkdirSync(dir, { recursive: true, mode: 0o700 })
-          logPath = join(dir, `${folderOf(pkg)}.log`)
-          writeFileSync(logPath, `${new Date(this.now()).toISOString()} install of ${pkg} failed\n\n${diagnostic}\n`, { encoding: 'utf8', mode: 0o600 })
-          chmodSync(logPath, 0o600)
-        } catch { /* the diagnostic still travels in the status */ }
-        // A check that could not reach npm says so in the record: the caller tries again sooner.
-        const reason = registryUnreachable(error)
-        this.failures.set(pkg, { message, diagnostic, ...(logPath === undefined ? {} : { logPath }), ...(reason === undefined ? {} : { unreachable: reason }) })
-        throw error
-      },
-    ).finally(() => this.running.delete(pkg))
+      (error) => { this.recordFailure(pkg, error); throw error },
+    ).finally(() => {
+      if (this.running.get(pkg) !== job) return
+      this.running.delete(pkg)
+      this.repairing.delete(pkg)
+    })
     this.running.set(pkg, job)
     return job
+  }
+
+  recordFailure(pkg, error) {
+    const full = homeRelativeText(redactText(error?.message ?? error))
+    const message = full.split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 300)
+    const diagnostic = full.slice(-DIAGNOSTIC_MAX)
+    let logPath
+    try {
+      const dir = join(this.home, 'logs')
+      // Owner-only: the log can hold paths and installer output.
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+      logPath = join(dir, `${folderOf(pkg)}.log`)
+      writeFileSync(logPath, `${new Date(this.now()).toISOString()} install of ${pkg} failed\n\n${diagnostic}\n`, { encoding: 'utf8', mode: 0o600 })
+      chmodSync(logPath, 0o600)
+    } catch { /* the diagnostic still travels in the status */ }
+    // A check that could not reach npm says so in the record: the caller tries again sooner.
+    const reason = registryUnreachable(error)
+    this.failures.set(pkg, { message, diagnostic, ...(logPath === undefined ? {} : { logPath }), ...(reason === undefined ? {} : { unreachable: reason }) })
+  }
+
+  async repairNow(pkg, bin) {
+    const { signal } = this.quit
+    if (signal.aborted) throw new Error('install stopped: DSH is quitting')
+    const folder = join(this.home, folderOf(pkg))
+    const file = join(folder, 'current.json')
+    const current = readJson(file)
+    if (!current?.version) return this.updateNow(pkg, bin, true)
+    const { version } = current
+    let tmp
+    let target
+    try {
+      tmp = await this.stage(folder, pkg, bin, version, dirOf(current))
+      await this.check?.(pkg, { path: join(tmp, 'node_modules', ...pkg.split('/'), bin), version })
+      if (signal.aborted) throw new Error('install stopped: DSH is quitting')
+      const base = `${version}_r${this.now()}`
+      let dir = base
+      for (let n = 1; existsSync(join(folder, dir)); n++) dir = `${base}_${n}`
+      const candidate = join(folder, dir)
+      try { renameSync(tmp, candidate) } catch (error) {
+        throw new Error(`${pkg}@${version}: could not move its repaired connector into place (${error?.code ?? error?.message ?? error})`)
+      }
+      target = candidate
+      // A rollback or another update may have chosen a different folder while the check ran.
+      const selected = readJson(file)
+      if (selected?.version !== version || dirOf(selected) !== dirOf(current)) {
+        rmSync(target, { recursive: true, force: true })
+        return this.binOf(pkg, bin)
+      }
+      const at = this.now()
+      const retired = [...retiredOf(selected, at).filter(entry => entry.dir !== dir), { dir: dirOf(selected), at }]
+      const next = { ...selected, dir, retired }
+      writeJson(file, next)
+      target = undefined
+      this.cleanup(folder, next, dirOf(current))
+      return this.binOf(pkg, bin)
+    } finally {
+      if (tmp !== undefined) {
+        try { rmSync(tmp, { recursive: true, force: true }) } catch {}
+        this.installing.delete(tmp)
+      }
+      if (target !== undefined) {
+        try { rmSync(target, { recursive: true, force: true }) } catch {}
+      }
+    }
+  }
+
+  async stage(folder, pkg, bin, version, installed) {
+    const { signal } = this.quit
+    const lock = lockfiles[packageManagerOf(this.env)?.kind]
+    const archive = join(this.home, '.locks', folderOf(pkg), version)
+    // The lockfile recorded for this version; else, for an install made before lockfiles were
+    // recorded, the one its package manager left in the folder of that same version.
+    const source = lock === undefined ? undefined : [join(archive, lock), ...(installed === undefined ? [] : [join(folder, installed, lock)])].find(file => existsSync(file))
+    let frozen = source !== undefined
+    const base = join(folder, `.install-${process.pid}-${this.now()}`)
+    let serial = 0
+    for (;;) {
+      let tmp = serial === 0 ? base : `${base}-${serial}`
+      while (existsSync(tmp)) tmp = `${base}-${++serial}`
+      serial++
+      mkdirSync(tmp, { recursive: true })
+      this.installing.add(tmp)
+      let complete = false
+      try {
+        // A platform nothing runs on: pnpm installs no platform-specific optional package.
+        writeJson(join(tmp, 'package.json'), { name: 'automagik-acp-adapter', private: true, dependencies: { [pkg]: version }, pnpm: { supportedArchitectures: { os: ['none'], cpu: ['none'], libc: ['none'] } } })
+        if (frozen) {
+          try { copyFileSync(source, join(tmp, lock)) } catch (error) {
+            this.log(`${pkg}@${version}: its recorded lockfile could not be read (${error?.code ?? 'error'}); resolving afresh`)
+            frozen = false
+          }
+        }
+        try {
+          await this.install(tmp, pkg, version, this.env, { signal, ...(frozen ? { frozen: true } : {}) })
+        } catch (error) {
+          if (!frozen || signal.aborted || /^install (?:stopped: DSH is quitting|timed out after \d+s)$/.test(String(error?.message ?? error))) throw error
+          // An app update can make its pnpm unable to read an old lockfile. Resolve afresh once,
+          // as installs did before lockfiles, so Retry is not stuck on that lockfile forever.
+          const why = homeRelativeText(redactText(String(error?.message ?? error))).split('\n')[0].slice(0, 300)
+          this.log(`${pkg}@${version}: its recorded lockfile could not be installed (${why}); resolving afresh`)
+          frozen = false
+          continue
+        }
+        if (signal.aborted) throw new Error('install stopped: DSH is quitting')
+        // Keep successful resolution even when the subsequent start check refuses the release.
+        if (lock !== undefined && existsSync(join(tmp, lock))) {
+          const saved = join(archive, `${lock}.${process.pid}.tmp`)
+          // A lockfile that cannot be recorded costs only the next frozen install, never this one.
+          try {
+            mkdirSync(archive, { recursive: true })
+            copyFileSync(join(tmp, lock), saved)
+            renameSync(saved, join(archive, lock))
+            for (const other of Object.values(lockfiles)) {
+              if (other !== lock) rmSync(join(archive, other), { force: true })
+            }
+          } catch (error) {
+            this.log(`${pkg}@${version}: its lockfile could not be recorded (${error?.code ?? 'error'})`)
+          } finally {
+            try { rmSync(saved, { force: true }) } catch {}
+          }
+        }
+        if (!existsSync(join(tmp, 'node_modules', ...pkg.split('/'), bin))) throw new Error(`${pkg}@${version} installed without ${bin}`)
+        const bundled = platformPackages(tmp)
+        if (bundled.length > 0) throw new Error(`${pkg}@${version} installed the CLIs it bundles (${bundled.join(', ')}); refused`)
+        complete = true
+        return tmp
+      } finally {
+        if (!complete) {
+          try { rmSync(tmp, { recursive: true, force: true }) } catch {}
+          this.installing.delete(tmp)
+        }
+      }
+    }
+  }
+
+  cleanup(folder, current, displaced) {
+    const keep = new Set([dirOf(current), displaced, dirOf(current, true), ...retiredOf(current, this.now()).map(entry => entry.dir)].filter(Boolean))
+    let names
+    try { names = readdirSync(folder) } catch { return }
+    for (const name of names) {
+      if (name === 'current.json' || name.startsWith('.') || keep.has(name)) continue
+      try { rmSync(join(folder, name), { recursive: true, force: true }) } catch {}
+    }
+  }
+
+  pruneLocks(pkg, current) {
+    const folder = join(this.home, '.locks', folderOf(pkg))
+    const keep = new Set([current.version, current.previous, current.bad?.version].filter(Boolean))
+    try {
+      for (const name of readdirSync(folder)) {
+        if (!keep.has(name)) rmSync(join(folder, name), { recursive: true, force: true })
+      }
+    } catch {}
   }
 
   async updateNow(pkg, bin, force) {
@@ -391,23 +568,13 @@ export class AdapterStore {
     const held = current?.bad?.version === version && this.now() - current.bad.at < BAD_TTL_MS
     if (held && have) {
       writeJson(join(folder, 'current.json'), { ...current, checkedAt: this.now() })
+      this.pruneLocks(pkg, current)
       return have
     }
     let installedNew = false
     if (have?.version !== version) {
-      const tmp = join(folder, `.install-${process.pid}-${this.now()}`)
-      rmSync(tmp, { recursive: true, force: true })
-      mkdirSync(tmp, { recursive: true })
-      this.installing.add(tmp)
+      const tmp = await this.stage(folder, pkg, bin, version)
       try {
-        // A platform nothing runs on: pnpm installs no platform-specific optional package.
-        writeJson(join(tmp, 'package.json'), { name: 'automagik-acp-adapter', private: true, dependencies: { [pkg]: version }, pnpm: { supportedArchitectures: { os: ['none'], cpu: ['none'], libc: ['none'] } } })
-        await this.install(tmp, pkg, version, this.env, { signal })
-        // Stopped on quit: whatever the installer left is not moved into place.
-        if (signal.aborted) throw new Error('install stopped: DSH is quitting')
-        if (!existsSync(join(tmp, 'node_modules', ...pkg.split('/'), bin))) throw new Error(`${pkg}@${version} installed without ${bin}`)
-        const bundled = platformPackages(tmp)
-        if (bundled.length > 0) throw new Error(`${pkg}@${version} installed the CLIs it bundles (${bundled.join(', ')}); refused`)
         // Start it before it replaces the one in use. With nothing in use there is no
         // last-known-good to keep: a first install is promoted either way, unproven.
         let failed
@@ -421,13 +588,15 @@ export class AdapterStore {
           const why = homeRelativeText(redactText(String(failed?.message ?? failed))).slice(0, 300)
           const at = this.now()
           rmSync(tmp, { recursive: true, force: true })
-          writeJson(join(folder, 'current.json'), {
+          const next = {
             ...current,
             version: have.version,
             checkedAt: at,
             bad: { version, at, reason: why },
             rolledBack: { from: version, to: have.version, at, reason: why },
-          })
+          }
+          writeJson(join(folder, 'current.json'), next)
+          this.pruneLocks(pkg, next)
           this.log(`${pkg}@${version} failed its start check (${why}); staying on ${have.version}`)
           return have
         }
@@ -452,26 +621,26 @@ export class AdapterStore {
     const haveProven = current?.proven !== false
     const moveOn = installedNew && have !== undefined && haveProven
     const previous = moveOn ? have.version : current?.previous
+    const previousDir = moveOn ? dirOf(current) : dirOf(current, true)
     const previousProven = moveOn ? true : current?.previousProven === true
     // Once the release in use is proven it needs no way back, and the folder goes below.
     const keepPrevious = !proven && previous !== undefined && previous !== version
     // A held-back release is remembered only while the adapter it was kept out for is in use:
     // once a newer release took its place, that rollback is over.
     const bad = !installedNew && current?.bad?.version !== undefined && current.bad.version !== version && this.now() - current.bad.at < BAD_TTL_MS ? current.bad : undefined
-    writeJson(join(folder, 'current.json'), {
+    const next = {
       version,
+      ...(!installedNew && dirOf(current) !== version ? { dir: dirOf(current) } : {}),
       checkedAt: this.now(),
-      ...(keepPrevious ? { previous, previousProven } : {}),
+      ...(keepPrevious ? { previous, previousProven, ...(previousDir !== previous ? { previousDir } : {}) } : {}),
       ...(proven ? {} : { proven: false }),
       ...(bad ? { bad, ...(current.rolledBack?.from === bad.version ? { rolledBack: current.rolledBack } : {}) } : {}),
-    })
-    // Keep the one in use, the one it replaces (a Session may still run it) and, while the one
-    // in use is unproven, its way back; drop the rest.
-    const keep = new Set([version, have?.version, keepPrevious ? previous : undefined].filter(Boolean))
-    for (const name of readdirSync(folder)) {
-      if (name === 'current.json' || name.startsWith('.') || keep.has(name)) continue
-      rmSync(join(folder, name), { recursive: true, force: true })
+      ...retiredField(retiredOf(current, this.now())),
     }
+    writeJson(join(folder, 'current.json'), next)
+    // Keep the physical folders still selected or just displaced by this update.
+    this.cleanup(folder, next, have === undefined ? undefined : dirOf(current))
+    this.pruneLocks(pkg, next)
     return this.binOf(pkg, bin)
   }
 

@@ -10,7 +10,9 @@
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { closeInheritedSockets } from './close-inherited.cjs'
 
+closeInheritedSockets()
 const action = process.argv[2]
 const answer = async () => {
   if (!['doctor', 'install', 'update', 'uninstall'].includes(action)) {

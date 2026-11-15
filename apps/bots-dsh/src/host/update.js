@@ -135,7 +135,7 @@ export function install(rt) {
     try {
       marker = JSON.parse(readFileSync(markerPath, 'utf8'))
     } catch (error) {
-      rt.warn('ds-bot: could not read the update note: %s', error?.message ?? error)
+      rt.warn('omni-ui: could not read the update note: %s', error?.message ?? error)
     }
     if (marker === null) {
       try { unlinkSync(markerPath) } catch { /* gone is what we want */ }
@@ -143,7 +143,7 @@ export function install(rt) {
       Object.assign(status, { phase: 'updated', installed: PKG.version })
       try { unlinkSync(markerPath) } catch { /* gone is what we want */ }
     } else if (typeof marker.error === 'string' || marker.from !== PKG.version) {
-      rt.warn('ds-bot: the update to %s did not finish: %s', marker.to ?? 'a newer version', typeof marker.error === 'string' ? marker.error.slice(0, 600) : 'the install did not complete')
+      rt.warn('omni-ui: the update to %s did not finish: %s', marker.to ?? 'a newer version', typeof marker.error === 'string' ? marker.error.slice(0, 600) : 'the install did not complete')
       try { unlinkSync(markerPath) } catch { /* gone is what we want */ }
     }
     // A clean note on the version that wrote it stays: a reload can still be
@@ -169,7 +169,7 @@ export function install(rt) {
     if (Date.now() - stars.at < STARS_TTL_MS) return stars.count
     starring ??= fetchJson(`https://api.github.com/repos/${repo}`, { 'user-agent': `${PKG.name}/${PKG.version}` })
       .then((info) => { if (Number.isInteger(info?.stargazers_count)) stars = { count: info.stargazers_count, at: Date.now() } })
-      .catch(error => rt.warn('ds-bot: star count failed: %s', error?.message ?? error))
+      .catch(error => rt.warn('omni-ui: star count failed: %s', error?.message ?? error))
       .finally(() => { starring = null })
     await starring
     return stars.count
@@ -207,7 +207,7 @@ export function install(rt) {
       if (source.kind === 'registry') found = await newestFromRegistry()
       else if (source.kind === 'git') found = await newestFromGitHub(source)
     } catch (error) {
-      rt.warn('ds-bot: update check failed: %s', error?.message ?? error)
+      rt.warn('omni-ui: update check failed: %s', error?.message ?? error)
     }
     status.checkedAt = Date.now()
     // Nothing found now (a linked checkout, a moved tag, an unreachable registry)
@@ -275,12 +275,12 @@ export function install(rt) {
           unmark()
           return { error: removed.error }
         }
-        // The bundle is gone now; a failed install leaves no DS Bot unless the old one goes back.
+        // The bundle is gone now; a failed install leaves no Omni unless the old one goes back.
         const restore = async (failed) => {
           if (typeof previous !== 'string' || previous === '') return failed
           const back = await Promise.resolve(service.installBundle(previous, sourceOf(previous).kind === 'registry' && chosen.registry ? { registry: chosen.registry } : {})).catch(error => ({ error: { code: error?.message ?? 'restore failed' } }))
           if (back?.error) {
-            note('ds-bot: could not reinstall %s after the failed update: %s', previous, back.error.diagnostic ?? back.error.code)
+            note('omni-ui: could not reinstall %s after the failed update: %s', previous, back.error.diagnostic ?? back.error.code)
             return failed
           }
           return `${failed}; ${previous} was reinstalled`
@@ -304,7 +304,7 @@ export function install(rt) {
         Object.assign(status, { phase: 'installed', installed: cleanVersion(result.version) ?? chosen.version })
       })
       .catch((error) => {
-        note('ds-bot: update to %s failed: %s', chosen.spec, error?.message ?? error)
+        note('omni-ui: update to %s failed: %s', chosen.spec, error?.message ?? error)
         Object.assign(status, { phase: 'failed', error: String(error?.message ?? error).slice(0, 600) })
       })
     return view()
@@ -316,7 +316,7 @@ export function install(rt) {
       // A pending first check never keeps the process alive.
       timer.unref?.()
       return () => clearTimeout(timer)
-    }, 'ds-bot: update check')
+    }, 'omni-ui: update check')
   }
 
   Object.assign(rt, { updateCheck: check, updateStart: start, updateView: view, repoStars })

@@ -53,6 +53,40 @@ export const CLAUDE_HARD_ASK = Object.freeze([
   'Bash(*flushall*)',
   'Bash(*FLUSHDB*)',
   'Bash(*flushdb*)',
+  'Bash(gh auth token*)',
+  'Bash(* .env)',
+  'Bash(*/.env)',
+  'Bash(*.git-credentials*)',
+  'Bash(*/.ssh/id_*)',
+  'Bash(*aws/credentials*)',
+  'Bash(security find-*-password*)',
+  'Bash(printenv)',
+  'Bash(printenv *TOKEN*)',
+  'Bash(printenv *SECRET*)',
+  'Bash(printenv *PASSWORD*)',
+  'Bash(printenv *KEY*)',
+  'Read(**/.env)',
+  'Read(**/.git-credentials)',
+  // Wildcards also ask for public id_*.pub keys; acceptable for this session-only rule.
+  'Read(~/.ssh/id_*)',
+  'Read(~/.ssh/*.pem)',
+  'Read(~/.ssh/*.key)',
+  'Read(~/.aws/credentials)',
+  'Bash(sendmail*)',
+  'Bash(mail *)',
+  'Bash(gh issue comment*)',
+  'Bash(gh pr comment*)',
+  'Bash(gh pr create*)',
+  'Bash(git push)',
+  'Bash(git push origin)',
+  'Bash(git push * main)',
+  'Bash(git push * master)',
+  'Bash(git push * dev)',
+  'Bash(git push * develop)',
+  'Bash(git push *:main*)',
+  'Bash(git push *:master*)',
+  'Bash(git push --all*)',
+  'Bash(git push --mirror*)',
   ...(process.platform === 'win32' ? [
     'PowerShell(Remove-Item *-Recurse*)', 'PowerShell(git push *--force*)', 'PowerShell(git push * -f*)',
     'PowerShell(git reset *--hard*)', 'PowerShell(git clean *-*f*)',
@@ -95,6 +129,9 @@ export const AGENTS = Object.freeze({
     // the built-in file tools (and Bash, read from the adapter's bundle), so a structured call
     // that is not an MCP name is drift. A changed tool list is announced, not forked.
     disableBuiltInTools: true,
+    // Claude Code reads images DSH's tools return over the bridge (read_image), so DSH must
+    // see its models as taking image input.
+    imageInput: true,
     drift: true,
     refresh: 'list',
   }),
@@ -114,7 +151,7 @@ export const AGENTS = Object.freeze({
     bin: 'dist/index.js',
     // CODEX_PATH wins over the Codex the adapter depends on (codex-acp startCodexConnection).
     env: cli => ({ CODEX_PATH: cli }),
-    // DSH's sandbox, as Codex's own: it asks (through DSH's dialog) for anything beyond it.
+    // index.js supplies the chat profile modes after writing the isolated home's profiles.
     // DSH's Auto is Codex's auto review. Most wanted first, the strict mode last (see above).
     modeFor: level => (level.full ? ['agent-full-access', 'workspace-write'] : level.auto ? ['agent', 'workspace-write'] : level.sandbox === 'read-only' ? ['read-only'] : ['workspace-write']),
     // codex-acp has no switch for its built-in tools, so they stay and are named in the turn;

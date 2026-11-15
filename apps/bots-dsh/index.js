@@ -24,11 +24,13 @@ import * as ladder from './src/host/ladder.js'
 import * as autoJudge from './src/host/auto-judge.js'
 import * as permissionDiagnostics from './src/host/permission-diagnostics.js'
 import * as turns from './src/host/turns.js'
+import * as steer from './src/host/steer.js'
 import * as handoffs from './src/host/handoffs.js'
 import * as requests from './src/host/requests.js'
 import * as delivery from './src/host/delivery.js'
 import * as roster from './src/host/roster.js'
 import * as folders from './src/host/folders.js'
+import * as privateBots from './src/host/private-bots.js'
 import * as agents from './src/host/agents.js'
 import * as toolDeny from './src/host/tool-deny.js'
 import * as prompt from './src/host/prompt.js'
@@ -36,6 +38,8 @@ import * as timeContext from './src/host/time-context.js'
 import * as tools from './src/host/tools.js'
 import * as chatIndex from './src/host/chat-index.js'
 import * as groups from './src/host/groups.js'
+import * as ledger from './src/host/books.js'
+import * as goals from './src/host/goals.js'
 import * as approvals from './src/host/approvals.js'
 import * as stops from './src/host/stops.js'
 import * as whoRefused from './src/host/who-refused.js'
@@ -48,9 +52,11 @@ import * as avatarLibrary from './src/host/avatar-library.js'
 import * as browser from './src/host/browser.js'
 import * as imagegen from './src/host/imagegen.js'
 import * as browserPlugins from './src/host/browser-plugins.js'
+import * as computer from './src/host/computer/index.js'
 import * as secrets from './src/host/secrets.js'
-import * as connectors from './src/host/connectors.js'
+import * as connectors from './src/host/connectors/index.js'
 import * as capabilities from './src/host/capabilities.js'
+import * as learning from './src/host/learning.js'
 import * as schedules from './src/host/schedules.js'
 import * as usage from './src/host/usage.js'
 import * as update from './src/host/update.js'
@@ -63,6 +69,8 @@ import * as feed from './src/host/feed.js'
 import * as appManifest from './src/host/app-manifest.js'
 import * as pocketChat from './src/host/pocket-chat.js'
 import * as hermesRemote from './src/host/hermes-remote.js'
+import * as officeSkills from './src/host/office-skills.js'
+import * as goalSkills from './src/host/goal-skills.js'
 
 export { COLORS } from './src/host/constants.js'
 
@@ -73,12 +81,14 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 // the functions other modules call; they call them through `rt` at run time, never during
 // install. Listeners run and tools are listed in registration order, so this order holds:
 // usage meters model requests after every listener that rewrites them.
+// Upstream's chat-app layer (src/host/im) and its local agents (src/host/local-agents) are carried but not
+// installed: channels are Omni's, and a local CLI runs a Bot through the ACP plugin's routes only.
 const MODULES = [
-  diagnostics, extend, store, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
-  turns, handoffs, requests, delivery, roster, folders, agents, toolDeny, prompt, timeContext,
-  tools, chatIndex, groups, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, images, imagegen,
-  avatarLibrary, secrets, connectors, capabilities, schedules, browser, browserPlugins, usage,
-  update, dshUpdate, thinking, agentSpace, feed, channel, appManifest, pocketChat, hermesRemote,
+  diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
+  turns, steer, handoffs, requests, delivery, roster, folders, agents, toolDeny, privateBots, prompt, timeContext,
+  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, images, imagegen,
+  avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
+  update, dshUpdate, thinking, agentSpace, feed, channel, appManifest, pocketChat, hermesRemote, officeSkills, goalSkills,
 ]
 
 // Other Omni plugins inject the runtime as `omniTeam` and add to it through rt.hooks
@@ -108,6 +118,9 @@ export function createRuntime(ctx, config = {}) {
     dshHome,
     home,
     statePath: join(home, 'state.json'),
+    // The Bot-only tools each module defines; tools.js registers them in each
+    // Bot Session's own scope, never globally (see shareBotTools).
+    teamTools: [],
     defaults: {
       mainName: config.mainName ?? 'Omni',
       mainRole: config.mainRole ?? 'Orchestrator',
@@ -117,6 +130,10 @@ export function createRuntime(ctx, config = {}) {
   // After every module: cordis runs prepended listeners newest first, so Auto's judge decides an approval before Pocket
   // (pocket-chat.js) or approvals.js could show it as the person's to answer (auto-judge.js installAhead).
   autoJudge.installAhead(rt)
+  // A live Agent can be scoped before the final module adds its tools; complete that scope now.
+  rt.syncScopedTools?.()
+  // Reloading the plugin while DSH is live must retain turns and child agents already running.
+  void rt.adoptLiveWork?.().catch(error => rt.warn?.('omni-ui: adopting the work still running failed: %s', error))
   if (imported) rt.warn?.('omni-ui: copied the team from %s into %s', config.importHome, home)
   return rt
 }

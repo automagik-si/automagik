@@ -191,8 +191,8 @@ private val TREE_STEP = 12.dp
                 drawArc(working, -90f, 90f, false, Offset(inset, inset), arcSize, style = Stroke(stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round))
             }
         }
-        "blocked" -> Box(Modifier.height(18.dp).background(Blocked.copy(alpha = .15f), RoundedCornerShape(5.dp)).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
-            Text("Needs you", color = Blocked, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        "blocked" -> Box(Modifier.heightIn(min = 18.dp).background(Blocked.copy(alpha = .15f), RoundedCornerShape(5.dp)).padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+            Text("Needs you", color = Ink, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
         }
         "idle" -> Box(Modifier.padding(horizontal = 3.dp).size(7.dp).border(1.5.dp, SidebarDim, CircleShape))
         "done" -> Box(Modifier.padding(horizontal = 3.dp).size(7.dp).background(Done, CircleShape))

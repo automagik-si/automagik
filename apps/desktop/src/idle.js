@@ -16,7 +16,7 @@ export const LOOK_EVERY_MS = 60 * 1000
 export function readBusy(file, read = readFileSync) {
   try {
     const busy = JSON.parse(read(file, 'utf8'))
-    return Number.isInteger(busy?.running) && busy.running >= 0 ? busy : null
+    return busy?.untrusted !== true && Number.isInteger(busy?.running) && busy.running >= 0 ? busy : null
   } catch {
     return null
   }

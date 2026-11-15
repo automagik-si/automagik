@@ -7,6 +7,8 @@ import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { until } from './until.js'
 
+let rt
+
 // #280: a switch that fails while the plugin is being unloaded must not lose the input
 // it carried — a turn's claimed messages and whatever the old part held. The old
 // part's durable inbox keeps them (the fake persists it across starts), a switch is
@@ -78,6 +80,7 @@ async function start({ fail = {}, services = {}, home: reuse, state: seed = TEAM
       agents.set(sessionId, {
         id: sessionId,
         session: { id: sessionId, header: { cwd: cwds.get(sessionId) ?? team }, requestHeader: () => undefined, deriveMessages: () => [] },
+        ctx: { tools: { register: () => () => {} } },
         calls,
         status: 'idle',
         followup(message) { calls.push(['followup', message]) },
@@ -149,11 +152,11 @@ async function start({ fail = {}, services = {}, home: reuse, state: seed = TEAM
     route = options
     return register(options)
   }
-  const rt = createRuntime(ctx, { home, browserPlugin: false })
-  const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/bot', {
+  rt = createRuntime(ctx, { home, browserPlugin: false })
+  const call = async (endpoint, payload) => (await route.fetch(new Request('http://localhost/api/omni-ui', {
     method: 'POST', body: JSON.stringify({ endpoint, payload }),
   }))).json()
-  const tool = (name, args, sessionId) => ctx.registeredTools.get(name).execute(args, { agent: agentOf(sessionId), name, callId: 'c1' })
+  const tool = (name, args, sessionId) => rt.teamTools.find(d => d.name === name).execute(args, { agent: agentOf(sessionId), name, callId: 'c1' })
   const preStep = (sessionId, messages = [], step = 1) => ctx.listeners.get('agent/pre-step').at(-1)(
     { agent: agentOf(sessionId), messages, step, signal: AbortSignal.timeout(60_000) }, async () => 'next')
   // A Session event as DSH emits it, on the Session the test's Agent holds.
@@ -497,5 +500,7 @@ test('a group conversation cut off with nothing written moves on too', async (t)
   // checking the fresh part's segment.
   await until(() => host.archived.length === 1)
   assert.equal(host.state().rooms.r1.segments.b[0].fallback, 'cutoff')
+  // The old part is archived just after the switch is saved.
+  await until(() => host.archived.length > 0)
   assert.deepEqual(host.archived, [['gb', { stopActivity: true }]])
 })

@@ -70,7 +70,7 @@ export function BtwCardView({ card, compact = false, sessionId, actions, onDelet
     answer !== '' ? h('div', { className: 'bt-btw-answer' }, h(MarkdownText, { text: answer, labels: mdLabels(), variant: 'compact' })) : null) : null)
 }
 
-function useTurnFacts(sessionId, actions) {
+export function useTurnFacts(sessionId, actions) {
   const [facts, setFacts] = useState(() => actions.turnFacts(sessionId))
   useEffect(() => {
     let live = true

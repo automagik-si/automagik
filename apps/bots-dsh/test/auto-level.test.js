@@ -175,7 +175,8 @@ test('Auto refuses unrelated Sessions, held presets, other routes, deny lists an
   w.service.current = () => FULL; assert.equal(w.answer(id), false); w.service.current = current
   const held = t.mock.method(w.rt, 'levelHeld', () => true); assert.equal(w.answer(id), false); held.mock.restore()
   bot.model = 'acp-claude/default'; assert.equal(w.answer(id), false); bot.model = codex.model
-  bot.denyTools = ['bash']; assert.equal(w.answer(id), false); delete bot.denyTools
+  // #1092: Auto and deny lists coexist; the deny is still enforced.
+  bot.denyTools = ['bash']; assert.equal(w.answer(id), true); delete bot.denyTools
   bot.permission = 'read-only'; assert.equal(w.answer(id), false); bot.permission = WRITE
   t.mock.method(w.rt, 'holdsLock', () => false); assert.equal(w.answer(id), false)
 })
@@ -208,11 +209,28 @@ test('Auto tasks inherit only from the current own-mode chat and end with its le
   assert.equal(w.answer('inherited'), false)
   assert.ok(w.ended.some(([ended]) => ended === 'inherited'))
 })
-for (const patch of [{ permission: WRITE }, { denyTools: ['bash'] }]) test(`Auto ends before saving ${JSON.stringify(patch)}`, async t => {
+for (const patch of [{ permission: WRITE }]) test(`Auto ends before saving ${JSON.stringify(patch)}`, async t => {
   const w = await enabled(t)
   await w.rt.updateBot('m1', patch)
   assert.equal(diskOf(w).bots.m1.permissionAuto, undefined)
   assert.ok(w.ended.some(([id]) => id === w.rt.chatOf('m1')))
+})
+// #1092: Auto and deny lists coexist; the deny is still enforced.
+test('Auto keeps its mark and ends the session when its deny list changes', async t => {
+  const w = await enabled(t); const bot = w.rt.botOf('m1'); const rev = bot.permissionRev
+  taskAt(w, 'inherited', { ...inheritedTask })
+  const save = w.rt.save
+  t.mock.method(w.rt, 'save', async (...args) => { assert.ok(bot.permissionRev > rev); return save(...args) })
+  const drop = t.mock.method(w.rt, 'dropAutoGrants')
+  await w.rt.updateBot('m1', { denyTools: ['bash'] })
+  assert.equal(bot.permissionAuto, 'acp-codex')
+  assert.equal(diskOf(w).bots.m1.permissionAuto, 'acp-codex')
+  assert.ok(bot.permissionRev > rev)
+  assert.equal(diskOf(w).bots.m1.permissionRev, bot.permissionRev)
+  assert.ok(w.ended.some(([id]) => id === w.rt.chatOf('m1')))
+  assert.ok(drop.mock.calls.some(call => call.arguments[0].includes(w.rt.chatOf('m1'))))
+  assert.equal(w.answer('inherited'), false)
+  await assert.rejects(w.rt.setBotAuto('m1', rev), /changed meanwhile/)
 })
 test('Auto concurrent copies and ordinary saves publish both marks with current stamps', async t => {
   const w = team(t, { bots: { m1: codex, b2: codex } }); await w.rt.load()
@@ -340,7 +358,7 @@ test('Auto: start_task from the own-mode chat records the mark; from a group or 
   assert.equal(w.answer(task), false)
   assert.ok(w.ended.some(([ended]) => ended === task))
 })
-test('Auto: create_bot from the own-mode chat marks a new Codex Bot on disk; a deny list, another model or a strict prompt does not', async t => {
+test('Auto: create_bot from the own-mode chat marks a new Codex Bot on disk; a deny list inherits too; another model or a strict prompt does not', async t => {
   const w = team(t, { bots: { m1: codex, b2: codex } })
   w.ctx.llm = codexLlm
   await w.rt.load(); await w.rt.setBotAuto('m1', 0)
@@ -352,8 +370,14 @@ test('Auto: create_bot from the own-mode chat marks a new Codex Bot on disk; a d
   assert.equal(someone.permissionAuto, 'acp-codex')
   assert.equal(someone.permissionRev, 1)
   assert.equal(diskOf(w).bots[someone.id].permissionAuto, 'acp-codex')
+  // #1092: Auto and deny lists coexist; the deny is still enforced.
+  await create(id, { name: 'X1', role: 'x', instructions: 'x', deny_tools: ['bash'] })
+  const x1 = byName('X1')
+  assert.equal(x1.permissionAuto, 'acp-codex')
+  assert.equal(diskOf(w).bots[x1.id].permissionAuto, 'acp-codex')
+  assert.deepEqual(x1.denyTools, ['bash'])
+  assert.deepEqual(diskOf(w).bots[x1.id].denyTools, ['bash'])
   for (const [name, args, setup] of [
-    ['X1', { deny_tools: ['bash'] }],
     ['X2', { model: 'deepseek/deepseek-v4-flash' }],
     // Undeclared arguments change nothing.
     ['X3', { permissionAuto: 'acp-codex', inheritAuto: { route: 'acp-codex' } }, () => { w.acpAgents.ownModeIn = () => false }],
@@ -372,7 +396,6 @@ test('Auto: create_bot from the own-mode chat marks a new Codex Bot on disk; a d
 test('Auto: set-bot-auto refuses, writing nothing, wherever Auto is not offered', async t => {
   const cases = [
     ['a retired Claude Code route', { model: 'claude-code/x', appliedModel: 'claude-code/x' }],
-    ['a deny list', { ...codex, denyTools: ['bash'] }],
     ['a bridged Codex without an answerer', codex, w => { w.acpAgents.ownModeOf = () => ({ mode: 'agent', bridged: true, answerer: false }) }],
     ['no answerer', codex, w => { w.acpAgents.ownModeOf = () => ({ mode: 'agent', bridged: false, answerer: false }) }],
     ['a lost lock', codex, w => { t.mock.method(w.rt, 'holdsLock', () => false) }],
@@ -403,4 +426,13 @@ test('Auto: a failed catch-up save from Read only puts Read only back', async t 
   t.mock.method(w.rt, 'save', async () => { throw new Error('catch-up failed') })
   await assert.rejects(w.rt.setBotAuto('m1', 0), /catch-up failed/)
   assert.equal(w.rt.botOf('m1').permission, 'read-only')
+})
+
+// #1092: Auto and deny lists coexist; the deny is still enforced.
+test('set-bot-auto accepts a Codex Bot with a deny list', async t => {
+  const w = team(t, { bots: { m1: { ...codex, denyTools: ['bash'] } } }); await w.rt.load()
+  await w.rt.setBotAuto('m1', 0)
+  assert.equal(w.rt.botOf('m1').permissionAuto, 'acp-codex')
+  assert.equal(diskOf(w).bots.m1.permissionAuto, 'acp-codex')
+  assert.deepEqual(diskOf(w).bots.m1.denyTools, ['bash'])
 })

@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { contentImages, contentText, isTerminal } from './acp.js'
 import { agentImageOf, isImageCall, isPng, KEPT_TEXT } from './agent-image.js'
+import { openStepOf } from './backchannel.js'
 
 export const TOOL_NAME = 'acp_tool'
 const DSH_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 'fetch', 'other'])
@@ -43,6 +44,7 @@ export function callArguments(tool) {
 const judgedText = tool => `Auto's judge refused ${tool.title}: ${tool.judgeReason}.`.replace(/\s+/g, ' ').slice(0, 300)
 
 function resultText(tool) {
+  if (tool.sessionFileResult !== undefined) return tool.sessionFileResult
   if (typeof tool.judgeReason === 'string') return judgedText(tool)
   const text = contentText(tool.content) || tool.output || (tool.rawOutput === undefined ? '' : typeof tool.rawOutput === 'string' ? tool.rawOutput : JSON.stringify(tool.rawOutput))
   return text.length > OUTPUT_LIMIT ? `${text.slice(0, OUTPUT_LIMIT)}…` : text
@@ -181,42 +183,63 @@ export function mirrorTool(host) {
     },
     async execute(args, exec) {
       entered.add(exec)
+      const position = openStepOf(exec.agent?.session)
       const live = host.runOf(exec.agent?.session?.id)
       const tool = live?.run.tools.get(args.id)
-      if (!tool) return { title: args.title, kind: args.kind, status: 'failed', text: 'The agent is no longer running this call.' }
+      if (!tool || tool.retired === true) return { title: args.title, kind: args.kind, status: 'failed', text: 'The agent is no longer running this call.' }
       // The card follows an image being made from its start (the keeper's progress).
       if (isImageCall(tool)) {
         try { host.images?.()?.start?.({ callId: exec.callId, sessionId: exec.agent?.session?.id, via: live.name }) } catch {}
       }
+      live.mirrorBodies = (live.mirrorBodies ?? 0) + 1
       try {
-        for (;;) {
+        try {
+          for (;;) {
+            if (exec.signal?.aborted) {
+              tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
+              // The agent may ignore the cancel: the host gives its prompt a bounded time to end.
+              host.cancelled?.(exec.agent?.session?.id, live)
+              await live.run.cancel()
+              break
+            }
+            const permission = tool.permission
+            if (permission && !permission.asked) {
+              permission.asked = true
+              if (live.sessionFileEnabled && permission.call?.structuredName === 'request_permissions') {
+                try { tool.sessionFileResult = await host.sessionFiles?.(live, tool, exec, permission) } catch {
+                  tool.sessionFileResult = 'The image was not approved for this chat session.'
+                }
+                permission.answer({ outcome: { outcome: 'cancelled' } })
+                break
+              }
+              permission.answer(optionFor(await ask(host, live, tool, exec, permission), permission.options))
+              continue
+            }
+            if (isTerminal(tool) || !live.run.busy) break
+            await changed(tool, exec.signal)
+          }
+        } finally {
+          // The card's body is done asking, however it left: a question that comes for the call
+          // now has nobody to ask it, and the agent's run answers it as cancelled (acp.js
+          // onPermission). One still stored when the body failed is withdrawn the same way.
+          tool.mirrored = true
+          tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
+        }
+        if (!exec.signal?.aborted && isTerminal(tool)) {
+          try {
+            await host.bridgeApprovals?.(exec.agent?.session?.id, position, exec.signal)
+          } catch {}
           if (exec.signal?.aborted) {
             tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
-            // The agent may ignore the cancel: the host gives its prompt a bounded time to end.
             host.cancelled?.(exec.agent?.session?.id, live)
             await live.run.cancel()
-            break
           }
-          const permission = tool.permission
-          if (permission && !permission.asked) {
-            permission.asked = true
-            permission.answer(optionFor(await ask(host, live, tool, exec, permission), permission.options))
-            continue
-          }
-          if (isTerminal(tool) || !live.run.busy) break
-          await changed(tool, exec.signal)
         }
-      } finally {
-        // The card's body is done asking, however it left: a question that comes for the call
-        // now has nobody to ask it, and the agent's run answers it as cancelled (acp.js
-        // onPermission). One still stored when the body failed is withdrawn the same way.
-        tool.mirrored = true
-        tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
-      }
-      // Only an image-generation call is answered as a kept image; any other call that answers
-      // with an image (a Read, a screenshot) keeps its own result, image blocks included.
-      if (isImageCall(tool)) return imageResult(host, live, tool, exec)
-      return resultOf(tool, host.attachments?.())
+        // Only an image-generation call is answered as a kept image; any other call that answers
+        // with an image (a Read, a screenshot) keeps its own result, image blocks included.
+        if (isImageCall(tool)) return await imageResult(host, live, tool, exec)
+        return await resultOf(tool, host.attachments?.())
+      } finally { live.mirrorBodies -= 1 }
     },
     presentCall(args) {
       const title = typeof args?.title === 'string' ? args.title : 'Tool'

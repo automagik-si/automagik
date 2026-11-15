@@ -5,7 +5,9 @@ import { build } from 'esbuild'
 
 const compiled = await build({ entryPoints: [new URL('../src/client/settings.js', import.meta.url).pathname], bundle: true, format: 'cjs', platform: 'node', write: false, external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'] })
 const module = { exports: {} }
-const react = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }), Fragment: 'Fragment', useState: v => [v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: v => ({ current: v }), useCallback: f => f, useMemo: f => f(), useSyncExternalStore: (_s, snap) => snap() }
+// createContext and Component: the bundled Deep View widgets make a React context, and a page boundary
+// extends React.Component, when their modules load.
+const react = { createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }), Fragment: 'Fragment', Component: class {}, createContext: value => ({ Provider: 'Provider', value }), useContext: context => context.value, useState: v => [v, () => {}], useEffect: () => {}, useLayoutEffect: () => {}, useRef: v => ({ current: v }), useCallback: f => f, useMemo: f => f(), useSyncExternalStore: (_s, snap) => snap() }
 runInNewContext(compiled.outputFiles[0].text, { module, exports: module.exports, document: { body: {} }, window: { innerWidth: 1280, innerHeight: 800, matchMedia: () => ({ matches: false, addEventListener() {} }) }, require: name => (name === 'react-dom' ? { createPortal: n => n } : react) })
 const { backgroundChoices } = module.exports
 

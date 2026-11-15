@@ -4,6 +4,7 @@
 // DSH's settings, credentials and plugin manager. It adds no provider code: every sign-in
 // is DSH's own (Claude: pi-ai's Pro/Max sign-in or an Anthropic key).
 import z from '@deepseek-ai/schemastery'
+import { watchRestart } from './src/host/restart.js'
 import { watchBusy } from './src/host/busy.js'
 import { install } from './src/host/endpoint.js'
 
@@ -34,4 +35,5 @@ export function apply(ctx) {
   install(ctx)
   // For the desktop app's update while the person is away (src/host/busy.js).
   watchBusy(ctx)
+  watchRestart(ctx)
 }

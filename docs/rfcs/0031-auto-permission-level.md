@@ -160,6 +160,117 @@ nothing about a Bot.
   here" when it does not count, and a pick of Workspace there always clears it. The diagnostics
   page shows the mode asked of Codex and the one it is in.
 
+## Amendment (2026-11-13, #1092)
+
+Auto and tool deny lists coexist. This replaces the "no tool deny list" condition in
+"Where the mark counts" item 2, the clearing rule's "any save that gives it a tool deny
+list", the picker row condition and the threat-model sentence excluding restricted Bots.
+Only the person changes the list. A deny-list save keeps the Auto mark, moves
+`permissionRev` before saving (pending confirmations and inherited tasks' `autoRev` become
+stale), applies the new tools and ends the agent sessions, dropping their outstanding Auto
+grants. Permission and route changes still clear Auto.
+
+Native/API and bridged calls are refused by DSH's executor guard whatever the judge says.
+Unbridged CLI built-ins and team-route agents' own tools were never covered by a deny list
+at any level, so a deny list adds no gap under Auto. On team routes under Auto, the judge,
+not the person, answers those agents' permission requests with or without a deny list;
+the judge's payload does not carry the deny list. Dependency: those tools must route their
+calls through DSH's bridge for a deny list to reach them.
+
+D6 is kept: a never-auto list sends clear cases to the person at every asking level and
+before every judge Automagik runs. This supersedes P2's "no list of ours sends a step to the
+person". Existing recursive deletes, force pushes, remote branch deletes, hard resets and
+cleans, infrastructure destroys, database drops, file-tool deletes and Bot/group deletes
+remain. Four categories are added:
+
+- **Secrets:** structured `read`, `write`, `edit`, `str_replace_editor`, `apply_patch`,
+  `grep`, `glob`, `read_file` and `write_file` paths (`file_path`, `path`, `paths`), plus
+  arguments and `locations[].path` on mirror read/edit steps, and shell references to `.env` or `.env.*`, except
+  `.env.example`, `.env.sample`, `.env.template` and `.env.dist`; `.netrc`, `.git-credentials`,
+  `.npmrc`, `.pypirc`; private keys in `~/.ssh/` (`id_*` without `.pub`, `*.pem`, `*.key`);
+  `~/.aws/credentials`, `~/.kube/config`, `~/.docker/config.json`,
+  `application_default_credentials.json`, `~/.codex/auth.json`, `~/.claude/.credentials.json`
+  and `~/.config/gh/hosts.yml`. Secret commands are `gh auth token`,
+  `gcloud auth print-access-token` / `print-identity-token`, `security find-generic-password`
+  / `find-internet-password` with `-w` or `-g`, `op read`, `vault kv get` / `vault read`,
+  `aws secretsmanager get-secret-value`, `aws ssm get-parameter... --with-decryption`,
+  `kubectl get secret`, and bare `env` / `printenv`, or those commands with a name matching
+  `TOKEN|SECRET|PASSWORD|API_KEY|KEY$`. Ordinary `printenv PATH` and public SSH keys stay out.
+- **External messages:** `rt.stepHooks.sendsOutside(fn)` registers a disposer-backed classifier
+  receiving `{ tool, args }`; true means the step sends to people outside the team. A
+  throwing hook also asks. The Bot team ships no Omni sender names; Omni registers its own.
+  Shell cases are `mail`, `mailx`, `sendmail`, `msmtp`,
+  `gh (issue|pr) (comment|create|review|close|edit|merge|reopen|delete|ready|lock)` and
+  `gh (release|repo) (create|edit|delete|upload|archive|rename)`, including a leading
+  `-R` / `--repo` option. `gh api` writes include `-X` / `--method` `POST|PATCH|PUT|DELETE`
+  and `-f` / `-F` / `--field` / `--raw-field` / `--input`, unless the method is explicitly GET.
+  Curl/wget sends include `-d`, `--data*`, `-F`, `--json`, `-T`, `--upload-file`, `-X POST`,
+  or wget's POST options to `hooks.slack.com`, `slack.com/api/`, `discord(app).com/api/webhooks`, `api.telegram.org`,
+  `graph.facebook.com` or `api.twilio.com`. Ordinary fetches and `gh pr view` stay out.
+- **Shared pushes:** non-force `git push`, with any flags and `-C dir`, asks if it has no
+  refspec (`git push`, `git push origin`), a destination of `HEAD` or an unresolvable target,
+  or `--all`, `--mirror`, `--tags` or `--follow-tags`. Destinations under `refs/` other than
+  `refs/heads/`, and version tag names starting with `v` followed by a digit, also ask.
+  It also asks if any destination is `main`, `master`,
+  `dev`, `develop`, `trunk`, `stable`, `production`, `prod`, `staging`, `release`, `release/*`
+  or `hotfix/*`. In `src:dst`, only `dst` counts; a bare ref names its destination, and
+  `refs/heads/` is stripped. `git push origin feat/x` and `git push -u origin feat/x` stay out.
+  Existing force and delete rules remain.
+- **Deletes outside the Bot's folder:** non-recursive `rm`, `unlink`, `rmdir`, `shred`,
+  `trash`, `Remove-Item` and `del` ask for absolute, `~` or `..` operands resolving outside
+  the session root. String `workdir` / `cwd` arguments seed the working directory;
+  relative folders resolve against the root. A `cd <dir> &&` prefix updates it, and `~`
+  and bare `cd` use the home directory. `cd -`, `pushd` and `popd` leave the folder
+  unresolvable, so later relative deletes ask. Unresolvable `$` or backtick operands and globs starting outside the
+  root ask. Without a root, explicit absolute, `~` and `..` operands ask; plain relative
+  `rm a` still stays out. With a root, `rm build/x.o` and absolute paths inside it stay out.
+  No filesystem or symlink resolution is performed. `apply_patch`'s `*** Delete File:` and
+  existing file-tool delete kinds remain hard everywhere.
+
+Command checks join backslash-newline continuations, unwrap leading assignments, shell
+groups and `sudo`, `env`, `command`, `exec`, `time`, `nohup`, `nice` and `xargs` prefixes.
+Shell `-c` variants are inspected recursively, bounded at three nested levels; deeper
+shell commands ask. Glob checks retain the starting folder before resolving parent components.
+
+Commands are read through `sh -c` / `bash -lc` wrappers (string or argv), `sudo`, `env`,
+`NAME=value` and similar prefixes, backslash continuations, `$(...)` and backtick bodies (each
+read as a command), `<` redirects, `env -C` and `cd` with options, and the tool's `workdir` /
+`cwd`. A heredoc's body is data: only its substitutions are read, none under a quoted delimiter.
+`gh api graphql` counts as a write only with a `mutation`. A command text over 32,000
+characters asks. Also secret: `.envrc`, `/proc/*/environ`, `export -p`, `declare -x`,
+`gh auth status -t` and `git credential fill`. Known limits, recorded rather than guessed at:
+deletes whose operands come from `xargs` or `find -exec`, and obfuscated names (`.en\v`), are
+not recognised; the list is a floor of clear cases, not a sandbox.
+
+Claude Code receives the expressible part as session-only ask rules. Outside-folder deletes
+and ambiguous push targets cannot be expressed by those wildcard rules; enforcing those
+boundaries requires a bridge or an agent policy with the tool arguments and working folder.
+Its narrowed `printenv` and branch rules leave `printenv PATH` and `git push origin maintenance`
+out; its SSH `Read` rules still ask for public `id_*.pub` keys, an accepted wildcard limitation.
+
+**Unmet dependency:** on Codex in `agent` mode this list does not hold for built-ins. Codex
+runs them on its own reviewer's word without `session/request_permission`, and no Automagik
+hook sees the step before execution (capture:
+[`permission-payloads/README.md`](../../apps/acp-dsh/test/fixtures/permission-payloads/README.md)).
+Codex/codex-acp needs a per-session mandatory ask policy evaluated before its reviewer, or a
+blocking pre-execution request carrying tool, arguments and cwd. Until then Auto on Codex
+keeps Codex's reviewer as the only check for built-ins. The confirmation text is in the
+client, so this amendment records the gap without changing the client.
+
+Delivery acceptance: the total judge deadline includes background-model lookup and model
+information lookup, and ignores a late stream even if it ignores abort. Own-model grants
+bind the cleaned arguments as well as call id, tool, reason, route and revision; when the
+request has no arguments or recorded call arguments, the existing reason check remains.
+Every decision, including allows and hard asks, enters `rt.autoAudit`, an in-memory ring of
+200 rows exposed by `rt.autoAuditRows()`: time, session/call ids, tool, decision, code, judge,
+model, route, revision, elapsed milliseconds and boolean `kept`, never argument text.
+Callers set `kept` after validity, argument-fingerprint and abort checks, distinguishing a
+discarded verdict from an applied one. Consuming a grant adds an `allow` row with code
+`grant` and its own `kept` result; caller-aborted reviews have code `cancelled`.
+Allows do not enter
+the failures list. Judge usage stays `kind: 'other'`. Auto does not change the preset's
+sandbox; any escalation still uses the existing one-step approval path.
+
 ## Contracts introduced
 
 | Contract | Rule for existing installs |

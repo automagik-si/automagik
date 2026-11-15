@@ -599,6 +599,7 @@ class ImageRun extends AgentRun {
   // every request is cancelled, and one that is not about a call already seen as the image
   // call (a title alone does not make it one) refuses the draw.
   onPermission(params) {
+    if (!this.acceptsPermission(params)) return Promise.resolve({ outcome: { outcome: 'cancelled' } })
     if (!isImageCall(this.tools.get(params?.toolCall?.toolCallId))) this.spec.onAsked?.()
     return Promise.resolve({ outcome: { outcome: 'cancelled' } })
   }
@@ -607,7 +608,7 @@ class ImageRun extends AgentRun {
   seeTool(update) {
     const fresh = !this.tools.has(update?.toolCallId)
     const tool = super.seeTool(update)
-    if (fresh) this.spec.onTool?.(tool)
+    if (fresh && tool !== undefined && tool.retired !== true) this.spec.onTool?.(tool)
     return tool
   }
 
@@ -712,6 +713,8 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
     name,
     mcpServers: [],
     onAsked: () => refuse(),
+    onRejected: () => refuse(),
+    onIgnored: log,
     // Every call the agent reports is judged, to the end of the turn: one that is not the image
     // call, or a second image call, refuses the draw whether it comes before or after the image.
     onTool: (tool) => {

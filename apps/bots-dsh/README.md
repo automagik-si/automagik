@@ -20,11 +20,12 @@ Omni for dsh is three packages. This one is the team; the other two sit on it an
 
 How they fit:
 
-- **Host**: this plugin provides its runtime as the `omniTeam` service. The channels plugin injects it, installs its modules on a runtime whose prototype is the team's, and provides that one as `omniChannels`; the canvas plugin injects both and sits on the channels runtime. Each plugin's tools, listeners and effects stay on its own fiber, and it adds to the team only through `rt.hooks` (`src/host/extend.js`): `endpoint(name, fn, { read })` for the `/api/omni-ui` route, `view(fn)` and `live(fn)` for the state answers, `sessionOwner(fn)` for the team Bot and optional label of an external run Session, and `mainRules(fn, { order })` for a part of the Main Bot's rules, which stay inside the one `bot-identity` section. A plugin that runs a Bot kind on its own engine, not on a DSH model, owns that kind's model menu with `botModels(kind, { snapshot, pick, refresh })` (`src/host/host-models.js` has the shape): the team then never selects a DSH model for those Bots (their settings and `list_bots` name what the plugin says answers), their menu lists only the plugin's entries (each with where a message goes, the one picked and the one answering now) and levels, and only you pick; a Bot's `update_bot` with a model or level is refused. Without a registration the team answers as before. Each hook returns its disposer, so turning a plugin off takes what it added with it. Four more parts of the runtime are for other plugins:
+- **Host**: this plugin provides its runtime as the `omniTeam` service. The channels plugin injects it, installs its modules on a runtime whose prototype is the team's, and provides that one as `omniChannels`; the canvas plugin injects both and sits on the channels runtime. Each plugin's tools, listeners and effects stay on its own fiber, and it adds to the team only through `rt.hooks` (`src/host/extend.js`): `endpoint(name, fn, { read })` for the `/api/omni-ui` route, `view(fn)` and `live(fn)` for the state answers, `sessionOwner(fn)` for the team Bot and optional label of an external run Session, and `mainRules(fn, { order })` for a part of the Main Bot's rules, which stay inside the one `bot-identity` section. A plugin that runs a Bot kind on its own engine, not on a DSH model, owns that kind's model menu with `botModels(kind, { snapshot, pick, refresh })` (`src/host/host-models.js` has the shape): the team then never selects a DSH model for those Bots (their settings and `list_bots` name what the plugin says answers), their menu lists only the plugin's entries (each with where a message goes, the one picked and the one answering now) and levels, and only you pick; a Bot's `update_bot` with a model or level is refused. Without a registration the team answers as before. Each hook returns its disposer, so turning a plugin off takes what it added with it. Five more parts of the runtime are for other plugins:
   - `rt.resumable.register({ id, sessions, onResume })` hands the team's one restart pass (`src/host/resume.js`) the plain Sessions a plugin owns: `sessions()` names them when the pass runs, `onResume({ sessionId })` runs right before the team posts a resume to one of them (whoever found it), and the registration returns its disposer. Every resume post carries `source.resumed === true`.
   - `rt.resumesDone` is one promise per start that never rejects: `{ resumed, resent }` after the pass, `{ readOnly, resumed: [], resent: [] }` on a host that only reads the team, `{ failed, resumed, resent }` when it threw or stopped. `resumed` lists every Session the pass resumed, `resent` every Session it sent dropped messages again.
   - `rt.noteStop(sessionId, { why, tool, callId, text })` notes a permission stop for the person; `rt.teamOwnerOf(sessionId, agent)` resolves the team Bot and place, including a subagent's parent. Plugins can feature-detect both. Reasons are `never`, `unavailable`, `tool`, `level`, `address`, `review`, `sandbox` and `rule`; external grants and guards use `rule`.
   - `rt.dshBots`: `list()` gives `[{ id, name, workDir, profile }]` (`null`: the team workspace, DSH's default preset), `createSession(botId, { title, firstMessage })` gives `{ sessionId }` in that DSH bot's folder with its preset, and `onChange(fn)` calls `fn(list)` when the list changes and returns its disposer.
+  - `rt.mountCapability(sessionId, name, grant)` and `rt.unmountCapability(sessionId, name)` mount one MCP capability into one plain Session the plugin owns, and only there ([A capability for one Session](#a-capability-for-one-session)).
 - **Browser**: this plugin's `client.js` exports `omni`: the host call, the interface copy (`t`, `addStrings`), the Bot surface's registries (`toolCards`, `nav`, `badges`, `botChildren`, `headerButtons`, `sidebarTools`, `botSettings`, `onShell`, `setCanvasRenderer`, `registerComposerPack`), the running surface (`face`) and a few UI pieces (`ui`). The other plugins name `@automagik/bots-dsh/client` in `dsh.client.external`, so dsh loads this bundle first and hands them the same module instance: one dictionary, one roster, one set of registries.
 - **Composer**: a Bot's composer changes with the model it runs on (`src/client/composer-packs.js`). Every Bot's chat shows the model that Bot runs on in its own model menu, which saves to that Bot alone: with thinking levels when the model has them, and on an agent over ACP (`acp-claude`, `acp-codex`) with the levels the agent offers for that model, or without any when it offers none. On a Bot whose plugin owns its model menu, it shows that menu. A group chat, where each member runs on its own model, and a Bot still waiting for its model show none. The plan cell and the activity and usage docks stay Omni's in every pack. Other plugins add a pack with `omni.registerComposerPack({ id, order, match(provider, target), available(env), cells: { permission, model }, hostFor })`.
 - **Data**: all three keep the team's one `state.json` and its lock (automations ride it); `omni.json` is the channels plugin's, in the same folder.
@@ -42,9 +43,13 @@ How they fit:
   **Auto** is Workspace plus a saved mark, chosen only by you after a confirmation in Details,
   the composer menu or the chat's permission card; the question names who decides for that Bot.
   Every message reaching the Bot's current chat counts, including another Bot's or a schedule's.
-  Auto needs no tool deny list, Workspace in the Session and this host holding the team;
+  Auto needs Workspace in the Session and this host holding the team;
   otherwise the saved choice says **Runs as Workspace here**. Picking any level, Workspace again
-  included, ends Auto and its agent sessions; route, model and deny-list changes clear it too.
+  included, ends Auto and its agent sessions; route and model changes clear it too.
+  Deny lists coexist with Auto: changing one keeps the mark, moves the permission revision
+  and ends agent sessions and outstanding grants. DSH refuses native/API and bridged denied
+  calls whatever the judge says. Unbridged CLI built-ins and team agents’ own tools were
+  never covered at Workspace either; they need to use DSH’s bridge for the deny to reach them.
   Tasks and Bots opened from that chat while Auto counts there inherit it; an inherited task
   counts only while the opener's mark and permission revision match. Groups, Settings and the
   team default offer no Auto row.
@@ -52,20 +57,31 @@ How they fit:
 - **Subagents**: in-process children of Read only, Workspace and Auto review Bots keep that level with approval prompts on, without changing their captured sandbox. Their asks appear above the composer of the Bot's chat or task (open it from the task card), or in the group member card; the sidebar, Live rail and notifications also show that they wait. Children keep DSH's refusal, shown as a permission stop, when their Bot runs at Full access, with approval prompts off, or at a custom or unknown level; when the Bot's level changed while the child was being created; when a resumed child has its prompts off; and when they belong to an automation run, a plugin Session, an earlier part or an ended task. An ask nothing here can answer is cancelled and noted as a stop. The phone does not show child asks.
 - **Hard steps and repeated refusals**: at Read only, Workspace and DSH Auto review,
   recursive deletes, force pushes, remote branch deletes, hard resets and cleans,
-  infrastructure destroys, database drops, file-tool deletes and deleting a Bot or group
-  ask the person when the existing tool gate allows them. Children follow the same check.
+  infrastructure destroys, database drops, file-tool deletes and deleting a Bot or group,
+  secret files/token commands, external messages, shared or ambiguous pushes, and deletes
+  outside the Bot’s folder ask the person when the existing tool gate allows them. Children follow the same check.
   Read-only team lookups such as `recall` do not ask just because their arguments mention a hard step.
   Auto also asks about these steps inside its Workspace boundary; its judge keeps its own counts.
+  Plugins classify external senders through `rt.stepHooks.sendsOutside(fn)`; a failed hook asks.
+  Ordinary example env files, public SSH keys, feature-branch pushes with an explicit
+  destination and local file deletes stay out of the added list; a bare `git push` or a
+  destination of `HEAD` asks. Exact boundaries are in RFC 0031’s #1092 amendment.
+  The judge’s deadline covers model lookup too; grants bind arguments. `rt.autoAuditRows()`
+  exposes its last 200 decisions without arguments, including allows, outside the failures list.
   After three consecutive automatic refusals or ten in a turn, the next refusal asks
   “Let it keep working?” Allow once only lets work continue: nothing refused runs.
   Reject stops the Bot for that turn. If approvals are off or no chat, group seat or working
   task can show the question, work stops with a reason and an automatic-stop notification
   when that host hook is available. Full access is unchanged.
-  Unbridged Claude Code gets session-only ask rules for destructive shell commands at every
+  Unbridged Claude Code gets session-only ask rules for expressible hard steps at every
   asking level, removed by restarting its session across Full access. Bridged Claude has no
   Bash of its own: its DSH calls use the checks above. Codex's own tools are excluded:
   prompt rules under its Full access `never` policy refuse instead of asking, rules have no
   per-session path, and its `agent` mode sends prompt rules to its reviewer, not the person.
+  This is an unmet dependency: Codex built-ins run without `session/request_permission`.
+  Enforcing the list needs a mandatory per-session ask policy before its reviewer or a blocking
+  pre-execution request with tool, arguments and cwd. Claude wildcard rules cannot express
+  outside-folder deletes or ambiguous push targets either; those need a bridge or richer policy.
 
 - **Bots work together**: `message_bot` sends a message to another Bot, `create_bot`, `update_bot` and `delete_bot` add, set up and remove Bots (including a profile photo from a local image file or a data URL), and `ask_user` asks you a question without blocking the other Bots. `show_view` draws a card in a Bot's own chat — text, metrics, tables, progress, choices, confirmations and short forms; an interactive card waits for your answer.
 - **Group chats**: members speak one at a time, and each one reads the latest messages first. A message can `@Name` a member to pass the turn on; type `@` to pick one from a list. **+ → Reference a chat** adds another Bot's chat to a message as context, and in a group the members who answer get it. A member with nothing new to add stays quiet (`[PASS]`). Each member has its own hidden Session per group, so a group never reads a Bot's private chat.
@@ -286,15 +302,20 @@ After each turn, a memory review reads what is new in the conversation and keeps
 - **Three scopes**: each Bot has its own memory; each group chat has a group memory, which its members read in that group only (not in their own chats, and not in other groups); and the team memory is read by every Bot. A Bot writes its own, and any member writes its group's memory from the group. Main Bots and group admins (of any group) also write the team memory; a Main Bot can read and change another Bot's memory when you ask.
 - **Tools**: `remember` saves an entry or replaces one (`replace`), `forget` removes one, and `recall` searches every entry, reads a topic whole, or lists what is saved. In a Bot's own chat they use its own memory by default; in a group chat, the group memory (`scope: "own"` for the Bot's own). The Bot adds the source (a part anchor such as `part 2 #1234`, which `read_own_chat` opens, or the group and the time) and the date; a Bot that writes for others is named with `by:`.
 - **Files**: `MEMORY.md` holds what every conversation needs, and details go in topic files linked from its `## Index` as `[[topic]]`.
-- **In the prompt**: the Bot's own and the team's `MEMORY.md` go into the Bot's system prompt, and in a group Session the group's after them. The section is frozen when a Session starts, so the provider's prompt cache holds; a change shows from the next part or checkpoint, and `recall` finds it at once.
-- **Fixed sizes**: an entry has at most 300 characters, a `MEMORY.md` 4,000, a topic 16,000, and a scope 40 topics. A save past a limit fails and says how to make room.
+- **In the prompt**: the Bot's own and the team's `MEMORY.md` go into the Bot's system prompt, frozen for the conversation part; in a group Session the group's `MEMORY.md` goes in as a snapshot message at the start of the Session instead. What others change later comes as a short update message before the next step, and a turn can bring up matching topic entries as a message. Both leave the prompt as it was, so the provider's prefix cache holds.
+- **Sizes**: only entry text counts. A `MEMORY.md` holds 12,000 characters in a group, 8,000 for a Bot and 4,000 for the team, changeable in Settings, and takes at most 2% of the model's usable window in the prompt. An entry has at most 300 characters and a topic 16,000. A save never fails for room: the oldest entries move to the topic `earlier`, and a full topic continues in a numbered one.
+- **Team memory**: what every Bot always reads takes only what the user says, through `always` on `remember` or the memory panel. Everything else written to the team waits in the topic `shared` for whoever needs it.
+- **Entries**: each has a short id, an optional `until` after which it no longer shows, and a pin the user sets, which automatic changes leave alone.
+- **Tidy**: once a day at most, a background pass merges repeats and archives what is over in each memory that changed, at most a fifth of its entries at a time. The memory panel shows each pass and undoes it whole.
+- **Between Bots**: a Bot can read a public Bot's memory with `recall`. Nothing of another Bot's reaches it unless it looks.
 - **Safety**: memory is data, not instructions. An entry that looks like a key or token is refused, and a Bot is told not to save what a web page, file or tool result asks it to remember.
-- **History**: files change in place, and `journal.jsonl` keeps every change with the line before and after. When a Bot or a group chat is deleted, its memory moves to `archive/`.
+- **History**: files change in place, and `journal.jsonl` keeps every change with the line before and after (a private Bot keeps its own `journal.jsonl` in its folder). When a Bot or a group chat is deleted, its memory moves to `archive/`.
 
-**The memory panel**: the details panel of a Bot, and of a group chat, has a Memory row with the entry count; Manage opens the memory panel. A Bot's panel shows its own memory and the team memory; a group's shows the group memory.
+**The memory panel**: the details panel of a Bot, and of a group chat, has a Memory row with the entry count; Manage opens the memory panel. A Bot's panel shows its own memory and the team memory; a group's shows the group memory. Each entry can be moved to the team memory, another Bot, or a group chat; it keeps its end date and pin, and in the team memory it starts as "Only when needed".
 
 - **Memory summary**: a model writes a short summary in prose from every entry, in the interface language: the Bot's, or for a group its admin's. It is written again when the entries change, and the ⋯ menu can regenerate it.
 - **All entries**: the ⋯ menu lists every entry by scope and topic, with its date and author, and the size of each `MEMORY.md`. Remove takes two clicks.
+- **Change history**: the ⋯ menu lists the changes recorded in `journal.jsonl` (newest first) and lets you undo an add, update or removal in two clicks while the entry still matches what that change left.
 - **Ask or update**: ask what the Bot remembers, or tell it what to add, correct or remove. One model call answers from the entries only, and its changes go through the same checks as the tools.
 - A line in the chat ("Memory updated") shows when a Bot changes memory and opens the panel. When memory changes in the background, the capsule at the top of the chat (the Bot's, or the group's) stretches to say "Memory updated" for a moment; clicking it opens the memory panel.
 
@@ -384,6 +405,7 @@ In dsh Desktop, a Bot's chat header also has a globe button. It opens that Bot's
   - It never reads the values of password, credit card (`autocomplete="cc-*"`) or one-time code fields.
   - Limits: 400,000 characters, 150,000 nodes, 5,000 rows per table, 3,000 links and controls, 1.5 seconds. A cut result says so.
   - It cannot read cross-origin iframes (one line with the address), closed shadow roots, canvas content (online editors, maps), or text in CSS `::before` / `::after`. On pages that render on demand, only the rendered part is read.
+  - Without a browser plugin, `read_browser` is read-only. When a browser plugin (`refs`, `script` or `task`; see [`browser-plugins/`](../browser-plugins/)) is enabled in **Settings → Browser**, Bots can open, inspect and interact with pages in their own profile (`bot/browser-profiles/<botId>/`); in the desktop app they share the panel's tabs with you, hand off sign-in or payment steps via a chat card (`browser_handoff`), and yield whenever you take over.
 - **Addresses**: http and https only. localhost and LAN addresses are allowed; cloud metadata addresses (such as `169.254.x.x`) and dsh's own ports are not.
 - The browser panel and the details drawer share the right column; opening one closes the other. Switching chats switches the panel to that Bot.
 
@@ -406,6 +428,16 @@ Limits:
 - Only exact copies of a value are masked. A Bot that encodes, splits or reverses a value can still print it. Do not give important secrets to a Bot you do not trust.
 - On a page that is not HTTPS (for example dsh Web opened over http on a LAN), the value crosses the network in clear text. The card warns you.
 - Group chats show no cards; a Bot asks in its own chat.
+
+### A capability for one Session
+
+Another plugin can mount one MCP capability from Settings → Capabilities into one plain Session it owns, such as a thread it keeps for one person, and only there. A secret that capability uses is then scoped to that one Session. The mount goes through the same path as a Bot's. It takes only a capability the person last saved in Settings → Capabilities: one a Bot made or changed is refused, and a live mount whose capability a Bot changes stops until the person saves it there again.
+
+- **`rt.mountCapability(sessionId, name, grant)`** resolves to `{ sessionId, name, state, error?, toolPrefix }`. `grant` is `{ secrets: [NAME, …] }`: exactly the secrets the capability uses as `$DSH_SECRET_<NAME>` (its args, env, URL or headers), or none. `state` is `ready`, `connecting` (still connecting after 15 seconds; it goes on in the background), `needs-approval` (a stdio server not yet approved) or `error` (with `error`, secrets masked). Every tool of the mount is named `mcp__<name>__…` (`toolPrefix`) and is registered in that Session's Agent scope only, so no other Session lists or runs it; a plugin that restricts the Session's tools adds these names to what it allows. Calling it again with the same arguments changes nothing.
+- **The secret**: save it for no Bot (Settings → Secrets, Chosen Bots with none picked). The first mount scopes it to its Session and saves that scope in `secrets.json` (`session`, beside an empty Bot list). From then on it never resolves for a Bot (shell, Bot capabilities, the capability check) or for another Session; it is never offered to a Bot: not in `list_secrets` or a shell's declared variables, a Bot that names it in `request_secret` is told it cannot have it, no card can allow or fill it, a capability a Bot saves cannot use it (a Bot's save may use only keys saved for that Bot), and Add in Settings cannot give it to Bots. A new value keeps the scope. Choosing Bots for it under Who may use it ends the scope. Its value is masked as `[secret:<NAME>]` in every tool result and model request, as any secret's is.
+- **Refused** (an error with code `bot/refused` and a message for the person): a Session that belongs to a Bot (its own chat, a group, a task or run, an earlier part, or a subagent of one); a name that is no capability or not an MCP server; a capability last saved by a Bot; a grant that leaves out a secret the capability uses, or names one it does not use; a secret that is missing, held, usable by any Bot, or scoped to another Session; a Session DSH cannot resolve; and, on a dsh that only reads the team, a secret not yet scoped to this Session.
+- **Lifetime**: a mount lives in memory until `rt.unmountCapability`, until the Session closes (DSH disposes it), until its capability is deleted, or until dsh restarts; a restart restores none. While it lives, each new Agent of the Session (a clear, a compaction) gets it before its first step. Mount again whenever you prepare the Session. The secret's scope is saved apart, so after a restart or a close it still belongs to that Session alone. A version of this plugin from before this change that rewrites `secrets.json` drops that scope: the key then reads as no Bot's, and after the next upgrade the first Session that mounts it takes it.
+- **`rt.unmountCapability(sessionId, name)`** ends the mount (its tools leave the Session; a stdio server stops) and the saved scope of the secrets the capability uses, with or without a live mount; for a capability that is gone, each secret still scoped to that Session that no saved capability and no live mount there still use. It resolves to `true` when a mount or a scope ended, `false` when there was nothing.
 
 ## Data and backups
 

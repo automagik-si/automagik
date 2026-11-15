@@ -57,7 +57,7 @@ html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]{margin:12p
 html body [data-slot="main.conversation"]>[class*="_root"]{background:var(--bt-main)!important;box-shadow:none;border:0}
 html body [class*="_rightbarCol"]{background:var(--bt-main)!important;border:0!important;border-left:1px solid var(--st-line)!important}
 html body [class*="_rightbarCol"] section[class*="_tabHost"][class*="_pane"]{background:var(--bt-main);border:0;box-shadow:none}
-html body .bt-head{min-height:64px;padding:18px 24px 12px}
+html body .bt-head{min-height:64px;padding:18px 24px 12px;--bt-island-top:18px;--bt-island-lift:-3px;--bt-island-radius:12px}
 html body header[class*="_header"]:has(.bt-head)>[class*="_headerLeading"]{padding-top:18px;padding-bottom:12px}
 html body .bt-head :is(.bt-head-title,.bt-head-name){font:var(--bt-weight-title) 20px/26px var(--bt-head-font);letter-spacing:-.01em}
 `

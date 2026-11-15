@@ -23,7 +23,7 @@ function bench({ meter = true, loaded = true, native = false } = {}) {
   ctx.sessions = { list: () => loaded ? [session] : [], flush: async () => { calls.flush++ } }
   ctx.llm = { resolveModelInfo: async () => ({ context: { contextWindow: 100000 } }), stream: options => { calls.streams.push(options); return (async function* () { yield { type: 'text-delta', index: 0, text: 'A summary' }; yield { type: 'finish', reason: { kind: 'stop' } } })() } }
   const bot = { id: 'b1', name: 'Bot', createdAt: 1, sessionId: 's1', ...(native ? { kind: 'dsh' } : {}) }
-  const rt = { ctx, config: {}, state: { switching: {}, bots: { b1: bot } }, botOf: id => rt.state.bots[id], roomOf: () => undefined, chatOf: id => rt.state.bots[id]?.sessionId, selfOf: id => id === 's1' ? 'b1' : undefined, chatOwners: new Map([['s1', 'b1']]), groupOwners: new Map(), pastOwners: new Map(), isBotSession: id => id === 's1', readOnly: () => calls.readOnly, load: async () => {}, save: async () => { calls.saved++ }, warn() {}, renewMemory: () => { calls.renewed++ }, resolveAgent: async () => { calls.resolved++; return agent }, tagUsage: (messages, tag) => Object.assign(messages, { tag }) }
+  const rt = { ctx, config: {}, state: { switching: {}, bots: { b1: bot } }, botOf: id => rt.state.bots[id], roomOf: () => undefined, chatOf: id => rt.state.bots[id]?.sessionId, selfOf: id => id === 's1' ? 'b1' : undefined, chatOwners: new Map([['s1', 'b1']]), groupOwners: new Map(), roomOwners: new Map(), pastOwners: new Map(), live: new Map(), isBotSession: id => id === 's1', readOnly: () => calls.readOnly, load: async () => {}, save: async () => { calls.saved++ }, warn() {}, renewMemory: () => { calls.renewed++ }, resolveAgent: async () => { calls.resolved++; return agent }, tagUsage: (messages, tag) => Object.assign(messages, { tag }) }
   install(rt)
   if (loaded) ctx.emit('agent/created', { agent })
   const preStep = ctx.listeners.get('agent/pre-step')[0]
@@ -560,7 +560,7 @@ async function switchBench({ perNode, routed = ['acp-codex', 'default'], reopene
   const rt = {
     config: {}, state,
     botOf: id => state.bots[id], roomOf: () => undefined, chatOf: id => state.bots[id]?.sessionId, selfOf,
-    chatOwners: { get: selfOf }, groupOwners: new Map(), pastOwners: new Map(),
+    chatOwners: { get: selfOf }, groupOwners: new Map(), roomOwners: new Map(), pastOwners: new Map(), live: new Map(),
     isBotSession: id => selfOf(id) !== undefined,
     readOnly: () => undefined, load: async () => {}, save: async () => {},
     warn: (...args) => { calls.warnings.push(args.map(String).join(' ')) },
@@ -602,8 +602,12 @@ async function switchBench({ perNode, routed = ['acp-codex', 'default'], reopene
   // (where compaction-basic's switch guard runs).
   async function step(provider, model, messages = []) {
     const signal = new AbortController().signal
-    const decision = await agent.dispatch.waterfall('agent/pre-step', { messages, turn: 1, step: 1, signal, modelSelection: { provider, model } }, () => Promise.resolve({ kind: 'enter', messages: [] }))
-    if (decision.kind === 'reject') return { decision }
+    // The Bot takes a step over by answering without passing it on: a reject, or before
+    // a turn's first step an empty batch, which ends the turn as completed rather than
+    // blocked (parts.js takeOverStep). Either way the loop prepares no request.
+    let passed = false
+    const decision = await agent.dispatch.waterfall('agent/pre-step', { messages, turn: 1, step: 1, signal, modelSelection: { provider, model } }, () => { passed = true; return Promise.resolve({ kind: 'enter', messages: [] }) })
+    if (!passed) return { decision, stopped: true }
     try {
       return { decision, config: (await proto.prepareRequest.call(agent, 1, 1, { provider, model }, signal)).config }
     } catch (error) {
@@ -664,7 +668,7 @@ test('case 3: Bot agent -> API above the threshold, explicit background model: c
   t.after(b.stop)
   const outcome = await b.step('api', 'small')
   notSwitchFailure(outcome)
-  assert.equal(outcome.decision.kind, 'enter', 'the step goes on in the same part')
+  assert.equal(outcome.stopped, undefined, 'the step goes on in the same part')
   assert.equal(outcome.config.provider, 'api')
   assert.deepEqual(b.streams().map(call => [call.messages.tag?.kind, `${call.provider}/${call.model}`]), [['checkpoint', 'api/big']], 'one checkpoint, charged to the explicit background model only')
   assert.deepEqual(b.calls.agent, [], 'nothing asked of the agent')
@@ -678,7 +682,8 @@ test('case 3, explicit background model too small for the part: a fresh part, no
   const b = await switchBench({ perNode: 400_000, background: 'api/big', explicit: true })
   t.after(b.stop)
   const outcome = await b.step('api', 'small')
-  assert.equal(outcome.decision.kind, 'reject', 'the step stops for the move')
+  assert.equal(outcome.stopped, true, 'the step stops for the move')
+  assert.deepEqual(outcome.decision, { kind: 'enter', messages: [] }, 'the turn ends as completed, not blocked')
   await until(() => b.calls.created.length > 0, 1000)
   assert.equal(b.calls.created.length, 1, 'a fresh part')
   assert.deepEqual(b.streams(), [], 'zero ctx.llm.stream')
@@ -692,7 +697,8 @@ test('case 3b: the surface fits the window but is over thresholdTokens, no expli
   t.after(b.stop)
   const outcome = await b.step('api', 'small')
   notSwitchFailure(outcome)
-  assert.equal(outcome.decision.kind, 'reject', 'the step stops for the move')
+  assert.equal(outcome.stopped, true, 'the step stops for the move')
+  assert.deepEqual(outcome.decision, { kind: 'enter', messages: [] }, 'the turn ends as completed, not blocked')
   await until(() => b.calls.created.length > 0, 1000)
   assert.deepEqual(b.streams(), [], 'zero ctx.llm.stream: no model is charged')
   assert.equal(b.calls.created.length, 1, 'a fresh part')
@@ -945,7 +951,8 @@ test('case 7: a CLI-only Bot reaching the hard line moves on without any model c
   const b = await switchBench({ perNode: 170_000 })
   t.after(b.stop)
   const outcome = await b.step('acp-codex', 'default')
-  assert.equal(outcome.decision.kind, 'reject', 'the step stops for the move')
+  assert.equal(outcome.stopped, true, 'the step stops for the move')
+  assert.deepEqual(outcome.decision, { kind: 'enter', messages: [] }, 'the turn ends as completed, not blocked')
   await until(() => b.calls.created.length > 0 || b.calls.warnings.some(line => /did not move on/.test(line)))
   assert.equal(b.calls.created.length, 1, 'a fresh part')
   assert.deepEqual(b.streams(), [], 'zero ctx.llm.stream (no steward, no note)')
