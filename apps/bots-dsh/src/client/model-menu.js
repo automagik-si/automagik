@@ -840,10 +840,14 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     remote.current.generation++
     setHermes(false)
     // A saved connection comes back naming the model the Bot already runs on: a completed
-    // connect never replaces a pick the person already made on this route. A Bot on another
-    // route still gets the crossing question, and one without a model the first served model.
+    // connect never replaces a pick the person already made on this route. An attached serve
+    // is the exception: its one model row is the bot's own model, so an older remote model
+    // ref must be replaced or the chat would carry a model the new connection cannot serve.
+    // A Bot on another route still gets the crossing question, and one without a model the
+    // first served model.
+    const attached = next.attached === true
     const onRemoteRoute = currentRef.current !== undefined && modelRoute(roster, currentRef.current).route === 'hermes-remote'
-    if (onRemoteRoute) { finish(); return }
+    if (onRemoteRoute && !attached) { finish(); return }
     if (crossing(next.modelRef)) {
       keys.current = true
       setView(MENU_ROOT)

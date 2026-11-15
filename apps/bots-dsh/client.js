@@ -7250,8 +7250,9 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
     remote.current.active = false;
     remote.current.generation++;
     setHermes(false);
+    const attached = next.attached === true;
     const onRemoteRoute = currentRef.current !== void 0 && modelRoute(roster, currentRef.current).route === "hermes-remote";
-    if (onRemoteRoute) {
+    if (onRemoteRoute && !attached) {
       finish();
       return;
     }
