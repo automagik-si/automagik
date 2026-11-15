@@ -30,8 +30,8 @@ export const TOOLS = [
 
 // The move's steps, in the order the split requires. The host reports the same ids.
 export const MOVE = [
-  { id: 'key', label: 'Read Hermes\'s bot key', doing: 'It goes straight into Omni\'s write-only field. It never shows here.' },
-  { id: 'hermes', label: 'Switch Hermes\'s Telegram off', doing: 'Hermes\'s gateway restarts for a few seconds. Its other channels come back by themselves.' },
+  { id: 'key', label: 'Read Hermes\'s bot key', doing: 'It goes straight to Omni, which keeps it private. You never see it here.' },
+  { id: 'hermes', label: 'Switch Hermes\'s Telegram off', doing: 'Hermes restarts for a few seconds. Its other channels come back by themselves.' },
   { id: 'omni', label: 'Hand the bot to Omni', doing: 'Omni takes the same bot. Nothing else changes on Hermes.' },
   { id: 'listen', label: 'Wait for Omni to answer', doing: 'One bot, one listener. Omni is starting it.' },
 ]
@@ -189,18 +189,18 @@ function ConfirmCard({ probe, botId, agreed, busy, onPickBot, onAgree, onStart, 
         h('strong', null, t(off ? 'Hermes · Telegram is already off' : 'Hermes · Telegram is on')),
         h('small', null, t(probe.hermes?.where === 'ssh' ? 'on your Hermes computer' : 'on this computer')))),
     h('ol', { className: 'oai-mig-do' },
-      h('li', null, h('span', { className: 'oai-mig-do-text' }, h('b', null, t('The wizard reads Hermes\'s bot key.')), ' ', t('It stays hidden and goes into Omni\'s write-only field.'))),
+      h('li', null, h('span', { className: 'oai-mig-do-text' }, h('b', null, t('The wizard reads Hermes\'s bot key.')), ' ', t('It stays hidden and goes straight to Omni, which keeps it private.'))),
       h('li', null, h('span', { className: 'oai-mig-do-text' }, off
         ? (probe.hermes?.pendingRestart === true
-            ? h('span', null, h('b', null, t('Hermes\'s Telegram is already off; nothing is switched.')), ' ', t('Its gateway still has to let go of the old channel, so it restarts for a few seconds: its other channels blink and come back by themselves.'))
+            ? h('span', null, h('b', null, t('Hermes\'s Telegram is already off; nothing is switched.')), ' ', t('Hermes still has to let go of the old channel, so it restarts for a few seconds. Its other channels blink and come back by themselves.'))
             : t('Hermes is already off; nothing is switched. No restart is needed.'))
-        : h('span', null, h('b', null, t('Hermes\'s Telegram channel is switched off.')), ' ', t('A copy of its config.yaml is kept first, and its gateway restarts for a few seconds: its other channels blink and come back by themselves.')))),
+        : h('span', null, h('b', null, t('Hermes\'s Telegram is switched off.')), ' ', t('Hermes keeps a copy of its settings first, then restarts for a few seconds. Its other channels blink and come back by themselves.')))),
       h('li', null, h('span', { className: 'oai-mig-do-text' }, h('b', null, t('Omni starts its Telegram channel with the same bot.')), ' ', t('One bot, one listener.')))),
     h(BotPicker, { bots, value: botId, onPick: onPickBot }),
     h('label', { className: 'oai-mig-agree' },
       h('input', { type: 'checkbox', checked: agreed === true, onChange: event => onAgree(event.target.checked) }),
       h('span', { className: 'oai-mig-box' }, Check()),
-      h('span', null, t(restart ? 'I am ready: Hermes\'s gateway restarts and its Telegram channel goes off.' : 'I am ready: Omni starts with Hermes\'s bot.'))),
+      h('span', null, t(restart ? 'I am ready: Hermes restarts for a few seconds and its Telegram goes off.' : 'I am ready: Omni starts with Hermes\'s bot.'))),
     h('div', { className: 'oai-actions' },
       h('button', { type: 'button', className: 'oai-quiet', onClick: onBack }, t('Back')),
       h('button', { type: 'button', className: 'oai-primary', disabled: agreed !== true || busy, onClick: onStart }, t(off ? 'Start Omni with it' : 'Switch it over'))))
@@ -227,7 +227,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     h('div', { className: 'oai-mig-summary' },
       result.hermesOff === true ? h('span', null, result.hermesWasOff === true ? t('Hermes: Telegram was already off') : t('Hermes: Telegram off')) : null,
       h('span', null, t('Omni: listening'))),
-    gatewayStopped === true ? h('p', { className: 'oai-mig-note', role: 'status' }, t('Hermes\'s gateway is not running. Start it again to bring its other channels back.')) : null,
+    gatewayStopped === true ? h('p', { className: 'oai-mig-note', role: 'status' }, t('Hermes is not running right now. Start it again to bring its other channels back.')) : null,
     h('div', { className: 'oai-actions' },
       result.connected !== true && onCheckStatus ? h('button', { type: 'button', className: 'oai-quiet', onClick: onCheckStatus }, t('Check status')) : null,
       h('button', { type: 'button', className: 'oai-primary', onClick: onDone }, t('Done'))))
@@ -236,7 +236,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
 function ProblemCard({ error, onRetry, onHandoff }) {
   const changed = error?.changed ?? {}
   const lines = error?.code === 'hermes-still-on'
-    ? 'Hermes still has the channel. Nothing was handed to Omni, and its config was put back.'
+    ? 'Hermes still has the channel. Nothing was handed to Omni, and its settings were put back.'
     : error?.code === 'refused'
       ? 'Hermes would not restart. It may still have a chat open; finish it and try again.'
       : changed.hermesOff === true && changed.omniCreated !== true
@@ -576,7 +576,7 @@ export const MIGRATE_CSS = `
 .oai-mig-botpick small{font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--oai-cyan-ink);background:color-mix(in srgb,var(--oai-cyan) 55%,var(--oai-card));border-radius:999px;padding:2px 6px}
 .oai-card button.oai-mig-botpick.is-on{${raised('var(--oai-lilac)', 3)};color:var(--oai-lilac-ink)}
 .oai-card button.oai-mig-botpick.is-on .oai-mig-dot{background:var(--oai-lilac-ink)}
-.oai-mig-agree{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start;padding:11px 12px;border-radius:var(--oai-r-sm);${recessed('var(--oai-niche)')};color:var(--oai-ink);font-size:13px;line-height:1.45;cursor:pointer;margin:0 0 4px}
+.oai-card label.oai-mig-agree{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start;margin:0 0 4px;font-size:13px;color:var(--oai-ink);padding:11px 12px;border-radius:var(--oai-r-sm);${recessed('var(--oai-niche)')};color:var(--oai-ink);font-size:13px;line-height:1.45;cursor:pointer;margin:0 0 4px}
 .oai-mig-agree input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
 .oai-mig-box{flex:none;display:grid;place-items:center;width:22px;height:22px;border-radius:7px 8px 7px 8px;${raised('var(--oai-card)', 2)};color:transparent;transition:background-color .15s ease,color .15s ease}
 .oai-mig-agree input:checked+.oai-mig-box{${raised('var(--oai-cyan)', 2)};color:var(--oai-cyan-ink)}

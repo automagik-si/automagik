@@ -87,13 +87,13 @@ test('Hermes moves; OpenClaw, Grok bot and Muse are labels with a Coming soon pi
   assert.deepEqual(plain(soon.map(textOf).map(body => migrate.TOOLS.find(tool => body.includes(tool.name)).name)), ['OpenClaw', 'Grok bot', 'Muse'])
 })
 
-test('the confirm card says the gateway restarts, the config is copied, and the order is Hermes then Omni', () => {
+test('the confirm card says Hermes restarts, its settings are copied, and the order is Hermes then Omni', () => {
   const tree = view({ phase: 'confirm', probe: probe(), agreed: false })
   const body = textOf(tree)
   assert.match(body, /The wizard reads Hermes's bot key/)
-  assert.match(body, /Hermes's Telegram channel is switched off/)
-  assert.match(body, /config\.yaml is kept first/)
-  assert.match(body, /gateway restarts for a few seconds/)
+  assert.match(body, /Hermes's Telegram is switched off/)
+  assert.match(body, /keeps a copy of its settings first/)
+  assert.match(body, /restarts for a few seconds/)
   assert.match(body, /other channels blink and come back by themselves/)
   assert.match(body, /Omni starts its Telegram channel with the same bot/)
   const order = ['reads Hermes', 'switched off', 'Omni starts']
@@ -114,13 +114,13 @@ test('already off or waiting for a restart reads as it is, without claiming work
   const off = view({ phase: 'confirm', probe: probe({ hermes: { channel: 'off', pendingRestart: false } }) })
   assert.match(textOf(off), /Hermes · Telegram is already off/)
   assert.match(textOf(off), /nothing is switched\. No restart is needed/)
-  assert.doesNotMatch(textOf(off), /A copy of its config\.yaml is kept first/)
+  assert.doesNotMatch(textOf(off), /keeps a copy of its settings first/)
   assert.equal(textOf(buttons(off).find(node => String(node.props.className).includes('oai-primary'))), 'Start Omni with it')
 
   const pending = view({ phase: 'confirm', probe: probe({ hermes: { channel: 'off', pendingRestart: true } }) })
-  assert.match(textOf(pending), /gateway still has to let go of the old channel/)
+  assert.match(textOf(pending), /Hermes still has to let go of the old channel/)
   assert.match(textOf(pending), /restarts for a few seconds/)
-  assert.match(textOf(pending), /I am ready: Hermes's gateway restarts/)
+  assert.match(textOf(pending), /I am ready: Hermes restarts/)
 })
 
 test('the bot who answers is picked from the team, main first, and only where Omni can bind one', () => {
@@ -206,7 +206,7 @@ test('a hand-off sends the person to Omni\'s own guide and does not rebuild it',
 
 test('a failure names what changed, offers the way out, and hides a key-shaped run', () => {
   const still = view({ phase: 'problem', error: { code: 'hermes-still-on', message: 'Hermes still has the channel.', changed: { hermesOff: false } } })
-  assert.match(textOf(still), /Hermes still has the channel\. Nothing was handed to Omni, and its config was put back\./)
+  assert.match(textOf(still), /Hermes still has the channel\. Nothing was handed to Omni, and its settings were put back\./)
   assert.deepEqual(buttonLabels(still), ['Set up Omni\'s Telegram instead', 'Try again'])
 
   const after = view({ phase: 'problem', error: { code: 'omni', message: `Omni did not take the bot key. Nothing was handed to it. ${FIXTURE_KEY}`, changed: { hermesOff: true, omniCreated: false } } })
@@ -236,6 +236,15 @@ test('the hand-off opens Channels and a Bot\'s settings through the Bot team\'s 
   assert.equal(migrate.openChannels(() => { throw new Error('no team') }), false)
   assert.equal(migrate.openBotSettings('', load), false)
   assert.equal(migrate.openBotSettings(BOT, () => { throw new Error('no team') }), false)
+})
+
+test('Not now only ends the step: nothing is started, looked at or switched', () => {
+  const calls = []
+  const choose = view({ phase: 'choosing', onSkip: () => calls.push('skip'), onPick: () => calls.push('pick') })
+  buttons(choose).find(node => textOf(node) === 'Not now').props.onClick()
+  const handoff = view({ phase: 'handoff', handoff: { reason: 'no-key' }, onSkip: () => calls.push('handoff-skip'), onCheckAgain: () => calls.push('check'), onOpenChannels: () => calls.push('channels') })
+  buttons(handoff).find(node => textOf(node) === 'Not now').props.onClick()
+  assert.deepEqual(calls, ['skip', 'handoff-skip'])
 })
 
 test('the step carries its own clay, in both themes', () => {

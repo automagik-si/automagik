@@ -212,8 +212,8 @@ test('the move from another tool renders in pt-BR, restart and all', () => {
       phase: 'confirm',
       probe: { hermes: { found: true, where: 'local', channel: 'on', key: 'available', pendingRestart: false }, omni: { linked: true, attach: true, bots: [], telegram: null } },
     }))
-    assert.match(textOf(confirm), /gateway reinicia por alguns segundos/)
-    assert.match(textOf(confirm), /Pode reiniciar: o gateway do Hermes reinicia/)
+    assert.match(textOf(confirm), /reinicia por alguns segundos/)
+    assert.match(textOf(confirm), /Confirmo: o Hermes reinicia/)
   } finally {
     locale.setLocale('en')
   }

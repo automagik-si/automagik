@@ -41,10 +41,17 @@ export const MOVE_STEPS = Object.freeze(['key', 'hermes', 'omni', 'listen'])
 
 const fail = (code, message, extra) => Object.assign(new Error(message), { code: `omni-ai/migrate-${code}`, ...extra })
 const text = value => (typeof value === 'string' ? value.trim() : '')
+// A key may arrive split by a space or a line break after the colon. Masking runs first, over
+// the raw text, so turning control characters into spaces can never separate a key first.
+export function redactKey(value) {
+  return String(value ?? '').replace(/\d{6,12}:(?:\s*[A-Za-z0-9_-]+)+/g, (match) => {
+    const body = match.slice(match.indexOf(':') + 1).replace(/\s/g, '')
+    return body.length >= 30 ? '[hidden]' : match
+  })
+}
 // Nothing a Hermes child printed, and no key, ever comes back to the page.
 const visible = value => Array.from(String(value ?? ''), ch => (ch.codePointAt(0) < 0x20 || ch.codePointAt(0) === 0x7f ? ' ' : ch)).join('')
-const clean = value => visible(value)
-  .replace(/\d{6,12}:[A-Za-z0-9_-]{30,}/g, '[hidden]')
+const clean = value => visible(redactKey(value))
   .replace(/\s+/g, ' ')
   .trim()
   .slice(0, 300)
@@ -254,7 +261,7 @@ async function telegramChannel(channels, times, deps) {
   if (typeof channels?.omniRequest !== 'function' || typeof channels?.omniChannelEndpoint !== 'function') return null
   try {
     const response = await channels.omniRequest('GET', '/instances', { signal: AbortSignal.timeout(times.omniMs) })
-    if (!response?.ok) return null
+    if (!response?.ok) return undefined
     const body = await response.json()
     const items = Array.isArray(body?.items) ? body.items : Array.isArray(body?.data) ? body.data : []
     const found = items.find(item => item && item.channel === 'telegram' && typeof item.id === 'string' && UUID.test(item.id))
@@ -262,7 +269,7 @@ async function telegramChannel(channels, times, deps) {
     const pairing = await pairingOf({ call: channels.omniChannelEndpoint }, found.id, {}, { now: deps.now, sleep: deps.sleep })
     return { id: found.id, name: text(found.name) || CHANNEL_NAME, connected: pairing.connected === true, detail: pairing.detail ?? null }
   } catch {
-    return null
+    return undefined
   }
 }
 
@@ -307,11 +314,23 @@ const setStep = (job, id, state) => {
   if (step !== undefined) step.state = state
 }
 
+// Omni's attach binds one of its channel Bots (the release refuses any other kind), so the
+// picker has exactly those.
 const cleanBots = (team) => {
   const bots = Object.values(team?.state?.bots ?? {})
-    .filter(bot => bot && typeof bot.id === 'string' && typeof bot.name === 'string' && bot.name.trim() !== '')
+    .filter(bot => bot && bot.kind === 'omni' && typeof bot.id === 'string' && typeof bot.name === 'string' && bot.name.trim() !== '')
     .map(bot => ({ id: bot.id, name: bot.name.trim().slice(0, 80), main: bot.id === team?.state?.mainBotId }))
   return bots.slice(0, 40)
+}
+
+const ANSWERER_REFUSED = 'Omni cannot use that Bot as the one who answers. Pick another; nothing was changed.'
+
+/** Who Omni will let answer: only its channel Bots; the pick must still be one of them. */
+function answererOf(team, wanted) {
+  const bots = cleanBots(team)
+  const asked = typeof wanted === 'string' && wanted !== '' ? wanted : null
+  const picked = asked === null ? bots.find(bot => bot.main === true) ?? bots[0] ?? null : bots.find(bot => bot.id === asked) ?? null
+  return { picked, valid: asked === null || picked !== null }
 }
 
 /**
@@ -332,7 +351,8 @@ export function createMigrateActions(ctx, deps = {}) {
     const channelsRt = channels()
     await Promise.resolve(team()?.load?.()).catch(() => {})
     const linked = Boolean(channelsRt?.omniNamed?.() ?? channelsRt?.config?.omni?.url)
-    const telegram = linked ? await telegramChannel(channelsRt, { ...times, listenMs: 0 }, { now, sleep }) : null
+    const listed = linked ? await telegramChannel(channelsRt, { ...times, listenMs: 0 }, { now, sleep }) : null
+    const telegram = listed === undefined ? null : listed
     const gateway = hermes.gateway ?? {}
     const running = gateway.pidAlive === true && gateway.pid !== null
     const channel = text(hermes.hermes?.channel) || 'unknown'
@@ -380,10 +400,16 @@ export function createMigrateActions(ctx, deps = {}) {
     let hermesWasOff = false
     let gatewayStopped = false
     let channelId = null
+    let backup = null
     let changed = { hermesOff: false, omniCreated: false }
     try {
       if (api === null) throw fail('no-omni', 'Omni is not connected in this DSH yet. Connect Omni, then come back to this step.')
       if (botTeam?.secretEndpoint === undefined || botTeam?.secretValue === undefined) throw fail('no-secrets', 'The Bot team\'s key store is not running here, so the key cannot be carried safely.')
+      // Who answers is settled before the key is read and before Hermes changes at all: Omni
+      // refuses a Bot it cannot bind, and that must not land after Hermes is already off.
+      await Promise.resolve(botTeam?.load?.()).catch(() => {})
+      const answerer = answererOf(botTeam, job.answerBot)
+      if (answerer.valid !== true) throw fail('answerer', ANSWERER_REFUSED)
 
       setStep(job, 'key', 'now')
       const read = await runHermes(target, { mode: 'read' }, { ...deps, timeoutMs: times.probeMs })
@@ -402,7 +428,6 @@ export function createMigrateActions(ctx, deps = {}) {
       const before = read.gateway ?? { pid: null }
       const gatewayRunning = before.pidAlive === true && before.pid !== null
       const stillPolling = gatewayRunning && ACTIVE.has(text(before.telegram).toLowerCase())
-      let backup = null
       if (read.hermes.channel === 'off' && !stillPolling) {
         hermesOff = true
         hermesWasOff = true
@@ -414,7 +439,7 @@ export function createMigrateActions(ctx, deps = {}) {
         }
         const restarted = await restartHermes(target, { execute: deps.restart, timeoutMs: times.restartMs, spawn: deps.spawn })
         if (restarted.ok !== true) {
-          // The old process still runs the channel: put its config back exactly as it was.
+          // The old process still runs the channel: put its settings back exactly as they were.
           if (backup !== null) await runHermes(target, { mode: 'restore', backup }, { ...deps, timeoutMs: times.probeMs }).catch(() => {})
           throw fail(restarted.code ?? 'restart', restarted.message ?? 'Hermes would not restart.')
         }
@@ -422,7 +447,7 @@ export function createMigrateActions(ctx, deps = {}) {
         if (waited.off !== true) {
           // Put the Hermes channel back exactly as it was: Omni does not start on a maybe.
           if (backup !== null) await runHermes(target, { mode: 'restore', backup }, { ...deps, timeoutMs: times.probeMs }).catch(() => {})
-          throw fail('hermes-still-on', 'Hermes did not confirm that its Telegram channel stopped, so nothing was handed to Omni and its config was put back.')
+          throw fail('hermes-still-on', 'Hermes did not confirm that its Telegram channel stopped, so nothing was handed to Omni and its settings were put back.')
         }
         hermesOff = true
         changed = { ...changed, hermesOff: true }
@@ -431,20 +456,43 @@ export function createMigrateActions(ctx, deps = {}) {
       setStep(job, 'hermes', 'done')
 
       setStep(job, 'omni', 'now')
-      const existing = await telegramChannel(channels(), { ...times, listenMs: 0 }, { now, sleep })
-      const picked = botsFor(job, botTeam)
       let made
-      if (existing !== null && existing.connected === true) {
-        made = { id: existing.id, name: existing.name, connected: true, detail: existing.detail, answering: null, reason: null, answerBot: null, attached: false, existing: true }
-      } else if (existing !== null && api.call !== null) {
-        try {
-          await api.call('omni-channel-act', { id: existing.id, action: 'token', token: carried })
-        } catch {
-          throw fail('omni', OMNI_REFUSED)
+      try {
+        const existing = await telegramChannel(channels(), { ...times, listenMs: 0 }, { now, sleep })
+        if (existing !== undefined && existing !== null && existing.connected === true) {
+          made = { id: existing.id, name: existing.name, connected: true, detail: existing.detail, answering: null, reason: null, answerBot: null, attached: false, existing: true }
+        } else if (existing !== undefined && existing !== null && api.call !== null) {
+          try {
+            await api.call('omni-channel-act', { id: existing.id, action: 'token', token: carried })
+          } catch {
+            throw fail('omni', OMNI_REFUSED)
+          }
+          made = { id: existing.id, name: existing.name, connected: false, detail: null, answering: null, reason: null, answerBot: null, attached: false, existing: true }
+        } else {
+          made = await attachInOmni(api, { token: carried, answerBot: answerer.picked?.id }, { name: CHANNEL_NAME })
         }
-        made = { id: existing.id, name: existing.name, connected: false, detail: null, answering: null, reason: null, answerBot: null, attached: false, existing: true }
-      } else {
-        made = await attachInOmni(api, { token: carried, answerBot: picked?.id }, { name: CHANNEL_NAME })
+      } catch (error) {
+        // What Omni holds decides what happens to Hermes. A channel there is the move's
+        // channel and stays the one listener; a confirmed empty Omni means Hermes goes back
+        // on; an unreadable Omni leaves Hermes off and says so, never two listeners.
+        const onOmni = await telegramChannel(channels(), { ...times, listenMs: 0 }, { now, sleep })
+        if (onOmni !== undefined && onOmni !== null) {
+          made = { id: onOmni.id, name: onOmni.name, connected: onOmni.connected, detail: onOmni.detail, answering: false, reason: null, answerBot: null, attached: true, existing: true }
+          channelId = onOmni.id
+          changed = { ...changed, omniCreated: true }
+        } else {
+          if (onOmni === null && hermesOff && backup !== null) {
+            const restored = await restoreHermes(target, backup)
+            if (restored.ok === true) {
+              hermesOff = false
+              changed = { ...changed, hermesOff: false }
+              error.restored = true
+            } else {
+              error.restoreFailed = restored.reason
+            }
+          }
+          throw error
+        }
       }
       channelId = made.id
       changed = { ...changed, omniCreated: true }
@@ -466,7 +514,7 @@ export function createMigrateActions(ctx, deps = {}) {
         answeringOff: made.answering === false && made.reason === 'other-channels',
         attached: made.attached === true,
         existing: made.existing === true,
-        answerBot: picked === undefined ? null : { id: picked.id, name: picked.name },
+        answerBot: answerer.picked === null ? null : { id: answerer.picked.id, name: answerer.picked.name },
         hermesOff,
         hermesWasOff,
         gatewayStopped,
@@ -482,6 +530,8 @@ export function createMigrateActions(ctx, deps = {}) {
         message: clean(known ? error.message : 'The move did not finish.'),
         changed,
         channelId,
+        ...(error?.restored === true ? { restored: true } : {}),
+        ...(typeof error?.restoreFailed === 'string' ? { restoreFailed: error.restoreFailed } : {}),
       }
       job.phase = 'failed'
       job.finishedAt = now()
@@ -497,11 +547,6 @@ export function createMigrateActions(ctx, deps = {}) {
       }
       carried = undefined
     }
-  }
-
-  const botsFor = (job, botTeam) => {
-    const bots = cleanBots(botTeam)
-    return bots.find(bot => bot.id === job.answerBot) ?? bots.find(bot => bot.main) ?? bots[0]
   }
 
   async function waitOff(target, before) {
@@ -536,6 +581,30 @@ export function createMigrateActions(ctx, deps = {}) {
     }
   }
 
+
+  // Hermes goes back on after a refusal it did not cause: settings back, gateway restarted,
+  // and a moment to see the process return. It is never done while Omni has the channel.
+  async function restoreHermes(target, backup) {
+    try {
+      await runHermes(target, { mode: 'restore', backup }, { ...deps, timeoutMs: times.probeMs })
+    } catch {
+      return { ok: false, reason: 'copy' }
+    }
+    const restarted = await restartHermes(target, { execute: deps.restart, timeoutMs: times.restartMs, spawn: deps.spawn })
+    if (restarted.ok !== true) return { ok: false, reason: 'restart' }
+    const until = now() + Math.min(15_000, times.offWaitMs)
+    for (;;) {
+      await sleep(times.pollMs)
+      try {
+        const reply = await runHermes(target, { mode: 'gateway' }, { ...deps, timeoutMs: times.probeMs })
+        if (reply.gateway?.pidAlive === true) return { ok: true }
+      } catch {
+        // The next look asks again.
+      }
+      if (now() >= until) return { ok: false, reason: 'pending' }
+    }
+  }
+
   return {
     async 'migrate-probe'() {
       return probe()
@@ -543,13 +612,17 @@ export function createMigrateActions(ctx, deps = {}) {
     async 'migrate-start'(payload) {
       if (payload?.confirm !== true) throw fail('confirm', 'Confirm the move first.')
       if (state.job?.phase === 'running') return { jobId: state.job.id, running: true }
+      const botTeam = team()
+      await Promise.resolve(botTeam?.load?.()).catch(() => {})
+      const wanted = typeof payload?.answerBot === 'string' && payload.answerBot !== '' ? payload.answerBot : undefined
+      if (wanted !== undefined && answererOf(botTeam, wanted).valid !== true) throw fail('answerer', ANSWERER_REFUSED)
       const target = hermesTargetOf(team(), deps)
       const read = await runHermes(target, { mode: 'probe' }, { ...deps, timeoutMs: times.probeMs })
       if (read.hermes?.found !== true) throw fail('no-hermes', 'Hermes was not found on the computer this DSH knows.')
       if (read.hermes.channel === 'none') throw fail('no-channel', 'Hermes has no Telegram channel to move.')
       if (read.hermes.key !== 'available') throw fail('no-key', 'Hermes keeps its bot key where this wizard cannot read it.')
       if (omniApi(channels()) === null) throw fail('no-omni', 'Omni is not connected in this DSH yet.')
-      const id = begin(payload?.answerBot)
+      const id = begin(wanted)
       return { jobId: id, running: true }
     },
     async 'migrate-status'(payload) {

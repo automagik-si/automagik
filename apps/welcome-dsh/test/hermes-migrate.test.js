@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { MOVE_STEPS, CARRIER_NAME, chatUrlOf, createMigrateActions, hermesTargetOf, omniApi, scriptCommand } from '../src/host/hermes-migrate.js'
+import { MOVE_STEPS, CARRIER_NAME, chatUrlOf, createMigrateActions, hermesTargetOf, omniApi, redactKey, scriptCommand } from '../src/host/hermes-migrate.js'
 
 const PLUGIN = fileURLToPath(new URL('..', import.meta.url))
 const SCRIPT = readFileSync(join(PLUGIN, 'src/host/hermes-migrate.py'), 'utf8')
@@ -17,6 +17,7 @@ const SCRIPT = readFileSync(join(PLUGIN, 'src/host/hermes-migrate.py'), 'utf8')
 const FIXTURE_KEY = ['123456789', `${'A'.repeat(20)}${'B'.repeat(15)}`].join(':')
 const CHANNEL = '0f0f0f0f-1111-4222-8333-444444444444'
 const BOT = 'b0b0b0b0-2222-4333-8444-555555555555'
+const GENIE = 'd0d0d0d0-3333-4444-8555-666666666666'
 
 function home(files = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'omni-migrate-'))
@@ -41,6 +42,15 @@ platforms:
     enabled: true
 `
 const STATE = JSON.stringify({ pid: 4242, updated_at: '2026-11-15T07:00:00Z', platforms: { telegram: { state: 'connected' } } })
+
+test('a key split by a space or a line break after the colon is masked before anything else', () => {
+  const suffix = FIXTURE_KEY.slice(FIXTURE_KEY.indexOf(':') + 1)
+  for (const split of [`${FIXTURE_KEY.slice(0, 10)} ${suffix}`, `${FIXTURE_KEY.slice(0, 10)}\n${suffix}`, `${FIXTURE_KEY.slice(0, 10)}${suffix.slice(0, 15)}\n${suffix.slice(15)}`]) {
+    assert.equal(redactKey(`failed with ${split} here`), 'failed with [hidden] here')
+  }
+  assert.equal(redactKey(`full ${FIXTURE_KEY} end`), 'full [hidden] end')
+  assert.equal(redactKey('nothing 123456789:short'), 'nothing 123456789:short')
+})
 
 test('Hermes\'s probe reads the channel and never the key; read hands it over only when asked', () => {
   const dir = home({ 'config.yaml': CONFIG, '.env': 'TELEGRAM_ALLOWED_USERS=42\n', 'gateway_state.json': STATE })
@@ -259,6 +269,52 @@ test('the probe answers what Hermes has, and never a key', async () => {
   assert.ok(!JSON.stringify(probe).includes(FIXTURE_KEY))
 })
 
+test('the probe offers only the Bots Omni can bind as the one who answers', async () => {
+  const team = fakeTeam({
+    bots: [
+      { id: BOT, name: 'Omni', kind: 'omni' },
+      { id: 'd0d0d0d0-3333-4444-8555-666666666666', name: 'Genie', kind: 'genie' },
+    ],
+  })
+  const actions = install({ script: fakeScript(), team, channels: fakeChannels() })
+  const probe = await actions['migrate-probe']()
+  assert.deepEqual(probe.omni.bots, [{ id: BOT, name: 'Omni', main: true }])
+})
+
+test('the release contract: the base receipt has no bot id, and detail is the profile name', async () => {
+  const seen = []
+  const channels = fakeChannels({
+    attach: async (input) => {
+      seen.push(input)
+      return { channelId: CHANNEL, channelName: 'Telegram', connected: true, detail: 'Helper' }
+    },
+  })
+  const actions = install({ script: fakeScript(), team: fakeTeam(), channels })
+  const done = await settled(actions, (await actions['migrate-start']({ confirm: true, answerBot: BOT })).jobId)
+  assert.equal(done.phase, 'done')
+  assert.deepEqual(seen, [{ token: FIXTURE_KEY, name: 'Telegram', source: 'hermes', answerBot: BOT }])
+  assert.deepEqual(done.result, {
+    channelId: CHANNEL, channelName: 'Telegram', connected: true, botName: 'Helper', chatUrl: 'https://t.me/Helper',
+    answering: false, answeringOff: false, attached: true, existing: false,
+    answerBot: { id: BOT, name: 'Omni' }, hermesOff: true, hermesWasOff: false, gatewayStopped: false,
+  })
+  assert.equal('botId' in done.result, false)
+  assert.ok(!JSON.stringify(done).includes(FIXTURE_KEY))
+})
+
+test('the release contract: a reported Telegram bot id and the answerBot echo are not used for display or routing', async () => {
+  const channels = fakeChannels({
+    attach: async (input) => ({ channelId: CHANNEL, channelName: 'Telegram', connected: true, detail: 'Helper', botId: 824600000, answerBot: input.answerBot, answering: true }),
+  })
+  const actions = install({ script: fakeScript(), team: fakeTeam(), channels })
+  const done = await settled(actions, (await actions['migrate-start']({ confirm: true, answerBot: BOT })).jobId)
+  assert.equal(done.phase, 'done')
+  assert.equal(done.result.answering, true)
+  assert.deepEqual(done.result.answerBot, { id: BOT, name: 'Omni' })
+  assert.equal('botId' in done.result, false)
+  assert.ok(!JSON.stringify(done).includes('824600000'))
+})
+
 test('a move needs the person\'s confirmation and a key this wizard can read', async () => {
   const team = fakeTeam()
   const channels = fakeChannels()
@@ -272,6 +328,35 @@ test('a move needs the person\'s confirmation and a key this wizard can read', a
 
   const noOmni = install({ script: fakeScript(), team: fakeTeam(), channels: { channels: undefined } })
   await assert.rejects(noOmni['migrate-start']({ confirm: true }), { code: 'omni-ai/migrate-no-omni' })
+})
+
+test('a Bot Omni cannot bind stops the move before the key is read or Hermes changes', async () => {
+  const script = fakeScript()
+  const team = fakeTeam({ bots: [{ id: GENIE, name: 'Genie', kind: 'genie' }, { id: BOT, name: 'Omni', kind: 'omni' }], main: GENIE })
+  const channels = fakeChannels()
+  const actions = install({ script, team, channels })
+  await assert.rejects(actions['migrate-start']({ confirm: true, answerBot: GENIE }), { code: 'omni-ai/migrate-answerer' })
+  assert.deepEqual(script.modes, [])
+  assert.deepEqual(channels.calls, [])
+  assert.equal(team.secrets.size, 0)
+})
+
+test('the default answerer is an Omni-kind Bot even when the Main Bot is another kind', async () => {
+  const script = fakeScript()
+  const seen = []
+  const channels = fakeChannels({
+    attach: async (input) => {
+      seen.push(input)
+      return { channelId: CHANNEL, channelName: 'Telegram', connected: true, detail: 'Helper' }
+    },
+  })
+  const team = fakeTeam({ bots: [{ id: GENIE, name: 'Genie', kind: 'genie' }, { id: BOT, name: 'Omni', kind: 'omni' }], main: GENIE })
+  const actions = install({ script, team, channels })
+  const probe = await actions['migrate-probe']()
+  assert.deepEqual(probe.omni.bots, [{ id: BOT, name: 'Omni', main: false }])
+  const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
+  assert.equal(done.phase, 'done')
+  assert.equal(seen[0].answerBot, BOT)
 })
 
 test('the move reads the key, switches Hermes off, then hands it to Omni, and keeps no copy', async () => {
@@ -393,15 +478,20 @@ test('a channel Omni already has is finished or reconnected, never made twice', 
   assert.equal(doneWaiting.result.connected, false)
 })
 
-test('a refused attach is one fixed sentence, never the key and never provider text', async () => {
+test('a refused attach is one fixed sentence, puts Hermes back on, and never echoes the key', async () => {
+  const script = fakeScript()
   const team = fakeTeam()
   const channels = fakeChannels({ attach: async () => { throw new Error(`bad request: ${FIXTURE_KEY}`) } })
-  const actions = install({ script: fakeScript(), team, channels })
+  let restarts = 0
+  const actions = install({ script, team, channels, restart: async () => { restarts += 1; return { ok: true } } })
   const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
   assert.equal(done.phase, 'failed')
   assert.equal(done.error.code, 'omni')
   assert.equal(done.error.message, 'Omni did not take the bot key. Nothing was handed to it.')
-  assert.deepEqual(done.error.changed, { hermesOff: true, omniCreated: false })
+  assert.equal(done.error.restored, true)
+  assert.deepEqual(done.error.changed, { hermesOff: false, omniCreated: false })
+  assert.ok(script.modes.includes('restore'), 'Hermes was not put back')
+  assert.equal(restarts, 2, 'the off restart and the restore restart')
   assert.ok(!JSON.stringify(done).includes(FIXTURE_KEY), 'the failure echoed the key')
   assert.equal(team.secrets.size, 0)
 
@@ -412,6 +502,33 @@ test('a refused attach is one fixed sentence, never the key and never provider t
   assert.equal(failed.phase, 'failed')
   assert.equal(failed.error.message, 'The move did not finish.')
   assert.ok(!JSON.stringify(failed).includes(FIXTURE_KEY))
+})
+
+test('the channel Omni made before a refusal is the move\'s channel, and Hermes stays off', async () => {
+  const script = fakeScript()
+  const team = fakeTeam()
+  let listings = 0
+  const channels = fakeChannels({ attach: async () => { throw new Error('bad request') } })
+  channels.channels.omniRequest = async () => ({ ok: true, json: async () => ({ items: ++listings === 1 ? [] : [{ id: CHANNEL, channel: 'telegram', name: 'Telegram' }] }) })
+  const actions = install({ script, team, channels })
+  const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
+  assert.equal(done.phase, 'done')
+  assert.equal(done.result.channelId, CHANNEL)
+  assert.equal(done.result.existing, true)
+  assert.ok(!script.modes.includes('restore'), 'Hermes was put back while Omni had the channel')
+})
+
+test('when Hermes cannot be put back, the page still says it is off', async () => {
+  const script = fakeScript()
+  const team = fakeTeam()
+  const channels = fakeChannels({ attach: async () => { throw new Error('bad request') } })
+  let restarts = 0
+  const actions = install({ script, team, channels, restart: async () => { restarts += 1; return restarts === 1 ? { ok: true } : { ok: false, code: 'refused' } } })
+  const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
+  assert.equal(done.phase, 'failed')
+  assert.equal(done.error.restoreFailed, 'restart')
+  assert.deepEqual(done.error.changed, { hermesOff: true, omniCreated: false })
+  assert.equal(team.secrets.size, 0)
 })
 
 test('two confirms are one move, and a finished job is readable by id only', async () => {

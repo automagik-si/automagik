@@ -122,7 +122,7 @@ function useTypewriter(text) {
 function Rail({ at }) {
   const steps = railSteps(at)
   const here = steps.findIndex(([id]) => id === at)
-  return h('ol', { className: 'oai-rail', 'aria-label': t('Setup steps') },
+  return h('ol', { className: `oai-rail${steps.length > 4 ? ' oai-rail-many' : ''}`, 'aria-label': t('Setup steps') },
     steps.map(([id, label], index) => h('li', {
       key: id,
       className: index < here ? 'oai-done' : index === here ? 'oai-on' : '',
