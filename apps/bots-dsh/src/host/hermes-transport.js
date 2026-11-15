@@ -591,8 +591,20 @@ export class RemoteChat {
       const replay = await this.transport.request('session.events.since', {
         session_id: snapshot.session_id, last_seen: this.identity.lastSeq ?? 0, replay_epoch: this.identity.epoch,
       }, this.transport.deadlines?.control)
-      if (typeof replay?.epoch === 'string') { this.identity.epoch = replay.epoch; this.transport.epoch = replay.epoch }
-      if (Number.isSafeInteger(replay?.latest_seq)) this.identity.lastSeq = Math.max(this.identity.lastSeq ?? 0, replay.latest_seq)
+      const changedEpoch = typeof replay?.epoch === 'string' && replay.epoch !== this.identity.epoch
+      if (changedEpoch) {
+        // A restarted serve has a new epoch and sequence numbers near zero. Taking the new
+        // latest_seq (not max with the old) is what reconcile does; otherwise submit sees
+        // equal epochs, never resets, and receive drops every new event.
+        this.resetStream()
+        this.identity.epoch = replay.epoch
+        this.transport.epoch = replay.epoch
+        this.identity.lastSeq = Number.isSafeInteger(replay.latest_seq) ? replay.latest_seq : 0
+      } else if (typeof replay?.epoch === 'string') {
+        this.identity.epoch = replay.epoch
+        this.transport.epoch = replay.epoch
+        if (Number.isSafeInteger(replay.latest_seq)) this.identity.lastSeq = Math.max(this.identity.lastSeq ?? 0, replay.latest_seq)
+      }
     }
     Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
     if (typeof snapshot.subscription_id === 'string' && snapshot.subscription_id) this.identity.subscriptionId = snapshot.subscription_id

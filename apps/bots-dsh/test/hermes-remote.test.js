@@ -66,7 +66,7 @@ function fixture(t, overrides = {}) {
     close() { this.dispatchEvent(new Event('close')) }
   }
   let socket
-  const wire = new HermesTransport({ address, credential, profile: 'sample', deadlines: { start: 200, control: 100, cancel: 30 },
+  const wire = new HermesTransport({ address, credential, profile: 'sample', attached: overrides.attached === true, deadlines: { start: 200, control: 100, cancel: 30 },
     fetch: async (url, init) => { headers.push({ url, init }); if (overrides.authError) throw Object.assign(Error(`${credential} ${ticket}`), { code: overrides.errorCode }); const status = overrides.status ?? (overrides.expired ? 401 : 200); return { ok: status === 200, status, json: async () => ({ ticket }) } },
     socket: (url, protocols) => { headers.push({ url, protocols }); socket = new Socket(); return socket },
   })
@@ -75,6 +75,67 @@ function fixture(t, overrides = {}) {
   t.after(() => run.dispose())
   return { wire, run, identity, identities, sent, headers, snapshot, live: source.live, info: source.info, credential, ticket, socket: () => socket }
 }
+
+async function nextTurn(run) {
+  const rows = []
+  for (;;) {
+    const row = await Promise.race([
+      run.next(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('the turn did not complete')), 1500)),
+    ])
+    rows.push(row)
+    if (['done', 'error', 'aborted'].includes(row.kind)) return rows
+  }
+}
+
+test('a serve restart between turns takes the new epoch seq and the next turn answers', async t => {
+  let replay = { events: [], latest_seq: 9, epoch: 'epoch-a', truncated: false, count: 0, open_requests: [] }
+  const f = fixture(t, {
+    attached: true,
+    handle: (frame, socket) => {
+      if (frame.method === 'session.events.since') { socket.reply(frame, replay); return true }
+      return false
+    },
+  })
+  await f.wire.connect()
+  const run = new RemoteChat(f.wire, { identity: { canonicalBot: true }, save: async () => {} })
+  t.after(() => run.dispose())
+  await run.submit('First')
+  f.socket().event('message.complete', { text: 'First done' }, 10)
+  const first = await nextTurn(run)
+  assert.ok(first.some(row => row.kind === 'done'))
+  assert.equal(run.identity.lastSeq, 10)
+
+  replay = { events: [], latest_seq: 0, epoch: 'epoch-b', truncated: false, count: 0, open_requests: [] }
+  await run.submit('Second')
+  f.socket().event('message.complete', { text: 'Second done' }, 2)
+  const second = await nextTurn(run)
+  assert.ok(second.some(row => row.kind === 'done'), 'the turn after the restart completed')
+  assert.equal(second.find(row => row.kind === 'text')?.text, 'Second done')
+  assert.equal(run.identity.epoch, 'epoch-b')
+  assert.equal(run.identity.lastSeq, 2)
+})
+
+test('a carried-over lastSeq above the new serve seq answers on the first attached turn', async t => {
+  const replay = { events: [], latest_seq: 0, epoch: 'epoch-b', truncated: false, count: 0, open_requests: [] }
+  const f = fixture(t, {
+    attached: true,
+    handle: (frame, socket) => {
+      if (frame.method === 'session.events.since') { socket.reply(frame, replay); return true }
+      return false
+    },
+  })
+  await f.wire.connect()
+  const run = new RemoteChat(f.wire, { identity: { canonicalBot: true, storedSessionId: 'stored', lastSeq: 50, epoch: 'epoch-a' }, save: async () => {} })
+  t.after(() => run.dispose())
+  await run.submit('First')
+  f.socket().event('message.complete', { text: 'First done' }, 1)
+  const rows = await nextTurn(run)
+  assert.ok(rows.some(row => row.kind === 'done'), 'the carried-over first turn completed')
+  assert.equal(rows.find(row => row.kind === 'text')?.text, 'First done')
+  assert.equal(run.identity.epoch, 'epoch-b')
+  assert.equal(run.identity.lastSeq, 1)
+})
 
 test('ticket handshake negotiates server requests first, persists IDs before submit and shows text/tool', async t => {
   const f = fixture(t, { result: { admission_id: randomUUID() } })
