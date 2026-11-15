@@ -1,25 +1,54 @@
 # Owner-run first deployment
 
 Delivery 1 deploys nothing. Run these steps only when the owner authorizes the
-first trial. Use workers.dev; do not add a route, zone, custom domain, or production
-product integration. Re-register passkeys when changing the relying-party origin;
-a later public-name move requires a separate owner decision.
+first trial.
 
-## Token and local configuration
+## The passkey site name
 
-Use an API token scoped to the deployment account, with these account permissions:
+Every Automagik and Arca sign-in uses one passkey site name (WebAuthn's
+relying-party ID): `automagik.si`. The service reads it from the `PASSKEY_RP_ID`
+setting and refuses to start, answering every request with a plain error, when
+its own host (`BETTER_AUTH_URL`) is not `automagik.si` or a subdomain of it.
 
-| Permission | Access | Purpose |
-|---|---|---|
-| Workers Scripts | Edit | Upload Worker and assets, set secrets and workers.dev publication |
-| D1 | Edit | Create the database, apply migrations and seed clients |
-| Account Settings | Read | Resolve account and workers.dev subdomain metadata |
+A browser only lets a site use a passkey site name that is its own host or a
+parent of it. A workers.dev address can therefore never carry the `automagik.si`
+name, so the trial does not run on workers.dev: it runs on a test name under
+`automagik.si`, written here as `<test-name>.automagik.si`. Passkeys made during
+the trial are bound to `automagik.si`, not to the test name, so they keep working
+when the service later moves to its public name (for example `id.automagik.si`),
+provided the move keeps the same D1 database, which holds the passkey records.
+The move itself is a separate owner decision. The Worker has no workers.dev
+address (`workers_dev = false`); its only address is the test name.
 
-No zone permissions are needed for this workers.dev-only path. There is no DNS,
-Workers Routes, KV, R2 or Cloudflare Access resource. Supply the account explicitly
-through `CLOUDFLARE_ACCOUNT_ID` and the token through `CLOUDFLARE_API_TOKEN`, using
-the operator's existing secret store. Do not put either in shell history or a
-tracked file. Do not print environment variables or run commands with shell tracing.
+## Owner steps in Cloudflare
+
+These are the owner's steps, done in the Cloudflare dashboard. Nobody else
+creates the DNS entry or makes the token; the deploy reads the token only from
+the secret store.
+
+1. **The deploy token.** Create an API token scoped to the deployment account,
+   with these account permissions, and save it straight into the operator's
+   secret store:
+
+   | Permission | Access | Purpose |
+   |---|---|---|
+   | Workers Scripts | Edit | Upload Worker and assets, set secrets |
+   | D1 | Edit | Create the database, apply migrations and seed clients |
+   | Account Settings | Read | Resolve account metadata |
+
+   The token needs no zone permission: the DNS entry is the owner's own step below.
+2. **The test name's DNS entry**, after the first upload (below), when the Worker
+   exists: in the Worker's settings, under Domains & Routes, add a Custom Domain
+   `<test-name>.automagik.si`. Cloudflare creates the DNS entry and its certificate
+   in the `automagik.si` zone. The name must not already have a DNS record. After
+   each later upload, confirm the custom domain is still listed.
+
+Supply the account through `CLOUDFLARE_ACCOUNT_ID` and the token through
+`CLOUDFLARE_API_TOKEN` from that secret store. Do not put either in shell history or a tracked
+file. Do not print environment variables or run commands with shell tracing. No
+account, zone or database identifier belongs in a tracked file.
+
+## Local configuration
 
 From `apps/id/`, install and check locally:
 
@@ -35,16 +64,19 @@ The following commands use Cloudflare only when the operator runs them:
 bun x --no-install wrangler d1 create automagik-id
 ```
 
-Set `ID_DATABASE_ID` to that result and `ID_WORKER_ORIGIN` to the intended HTTPS
-workers.dev origin, through the operator's private environment. Then:
+Set `ID_DATABASE_ID` to that result and `ID_WORKER_ORIGIN` to
+`https://<test-name>.automagik.si`, through the operator's private environment.
+Then:
 
 ```sh
 bun scripts/configure.ts
 ```
 
 This writes ignored `wrangler.local.toml` from the tracked template and the
-environment, with a `DB` D1 binding and `BETTER_AUTH_URL`. It refuses a non-workers.dev
-origin. No account, database or zone ID is tracked. Omit `WHATSAPP_RECEIVING_NUMBER` and `OMNI_INBOUND_TOKEN` to keep the inbound
+environment, with a `DB` D1 binding, `BETTER_AUTH_URL` and
+`PASSKEY_RP_ID = "automagik.si"`. It refuses an origin that is not HTTPS on
+`automagik.si` or a subdomain of it, a workers.dev origin included. No account,
+database or zone ID is tracked. Omit `WHATSAPP_RECEIVING_NUMBER` and `OMNI_INBOUND_TOKEN` to keep the inbound
 WhatsApp flow off. The receiving number is private runtime configuration; do not
 put its value into a tracked file. This service has no outbound OTP endpoint.
 
@@ -110,7 +142,8 @@ bun x --no-install wrangler deploy --config wrangler.local.toml
 ```
 
 Only run this after the owner supplies the HTML described in PAGES-CONTRACT.md,
-or explicitly approves a backend-only trial with 501 pages. Test discovery, a real
+or explicitly approves a backend-only trial with 501 pages. Then the owner adds
+the custom domain `<test-name>.automagik.si` (step 2 above). Test discovery, a real
 passkey, desktop loopback sign-in with S256 and Cloud confidential sign-in on the
 trial origin. Confirm D1 migrations and seed records, secure cookies, correct
 issuer/audience/nonce checks in each client, and WhatsApp-disabled behavior. Apply both migrations, including
@@ -118,8 +151,8 @@ issuer/audience/nonce checks in each client, and WhatsApp-disabled behavior. App
 fields remain intact; the service does not migrate or link identities automatically. Never
 share operational identifiers or current deployment details in public evidence.
 
-To undo a trial, disable its workers.dev publication or remove the trial Worker
-through the operator's deployment workflow. Preserve the database and auth secret
+To undo a trial, remove the custom domain (which removes its DNS entry) or the
+trial Worker through the operator's deployment workflow. Preserve the database and auth secret
 until issued sessions have been deliberately retired. Do not drop D1 as a routine
 rollback. This delivery neither changes a product's identity settings nor moves
 the public name.

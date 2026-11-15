@@ -8,7 +8,9 @@ import { createLocalJWKSet, jwtVerify } from 'jose';
 import { clientSeedSQL } from '../scripts/client-seed';
 import { SoftwareAuthenticator } from './authenticator';
 
-const origin = 'https://id.example.com';
+// The service runs on a subdomain of the passkey site name, as it does for real.
+const origin = 'https://id.automagik.si';
+const siteName = 'automagik.si';
 const cloudSecret = 'test-only-cloud-client-secret-never-deployed';
 const digest = (value: string) => createHash('sha256').update(value).digest('base64url');
 const verifier = 'a'.repeat(64);
@@ -57,6 +59,7 @@ async function instance(whatsapp = false, _unused?: undefined, pages = false, co
     } : undefined,
     bindings: {
       BETTER_AUTH_URL: origin,
+      PASSKEY_RP_ID: siteName,
       BETTER_AUTH_SECRET: 'test-only-auth-secret-placeholder-never-deployed',
       ...(whatsapp ? { WHATSAPP_RECEIVING_NUMBER: '15555550100', OMNI_INBOUND_TOKEN: inboundToken } : {}),
       ...config,
@@ -799,8 +802,67 @@ describe('Worker + D1 identity', () => {
     expect((await db.prepare('SELECT count(*) AS n FROM rateLimit').first<{ n: number }>())!.n)
       .toBeGreaterThan(0);
   });
+});
 
+describe('passkey site name', () => {
+  async function at(mf: Miniflare, base: string, path: string) {
+    return mf.dispatchFetch(`${base}${path}`, {
+      headers: { origin: base, accept: 'application/json', 'cf-connecting-ip': `192.0.2.${ip++}` },
+    });
+  }
 
+  test('registration and sign-in options carry the site name automagik.si, not the service host', async () => {
+    const options = await jsonOK(await request('/api/auth/passkey/generate-register-options'));
+    expect(options.rp.id).toBe('automagik.si');
+    const { authenticator } = await signup();
+    cookie = '';
+    const sign = await jsonOK(await request('/api/auth/passkey/generate-authenticate-options'));
+    expect(sign.rpId).toBe('automagik.si');
+    await jsonOK(await request('/api/auth/passkey/verify-authentication', {
+      response: authenticator.authenticate(sign, origin),
+    }));
+  });
 
+  test('the value comes from PASSKEY_RP_ID', async () => {
+    const mf = await instance(false, undefined, false, { PASSKEY_RP_ID: 'id.automagik.si' });
+    const options = await (await at(mf, origin, '/api/auth/passkey/generate-register-options')).json() as {
+      rp: { id: string };
+    };
+    expect(options.rp.id).toBe('id.automagik.si');
+  });
 
+  test('the site name itself and a subdomain of it are accepted', async () => {
+    for (const base of ['https://automagik.si', 'https://id.automagik.si']) {
+      const mf = await instance(false, undefined, false, { BETTER_AUTH_URL: base });
+      const response = await at(mf, base, '/api/auth/passkey/generate-register-options');
+      expect(response.status, base).toBe(200);
+      expect((await response.json() as { rp: { id: string } }).rp.id).toBe('automagik.si');
+    }
+  });
+
+  test('a host outside the site name is refused on every route with a plain error', async () => {
+    for (const base of ['https://automagik-id.placeholder.workers.dev', 'https://id.example.com',
+      'https://notautomagik.si', 'https://automagik.si.example.com']) {
+      const mf = await instance(false, undefined, true, { BETTER_AUTH_URL: base });
+      for (const path of ['/api/auth/get-session', '/api/auth/passkey/generate-register-options',
+        '/api/id/config', '/sign-in', '/.well-known/openid-configuration']) {
+        const response = await at(mf, base, path);
+        expect(response.status, `${base}${path}`).toBe(500);
+        expect(response.headers.get('content-type')).toContain('text/plain');
+        expect(await response.text()).toContain(
+          `host ${new URL(base).hostname} is not automagik.si or a subdomain of it`);
+      }
+    }
+  });
+
+  test('a missing or malformed site name is refused', async () => {
+    for (const [value, message] of [['', 'PASSKEY_RP_ID is not set'],
+      ['https://automagik.si', 'PASSKEY_RP_ID must be a lower-case domain name'],
+      ['Automagik.si', 'PASSKEY_RP_ID must be a lower-case domain name']]) {
+      const mf = await instance(false, undefined, false, { PASSKEY_RP_ID: value });
+      const response = await at(mf, origin, '/api/id/config');
+      expect(response.status, value).toBe(500);
+      expect(await response.text()).toContain(message);
+    }
+  });
 });
