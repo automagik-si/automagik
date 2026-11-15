@@ -261,7 +261,9 @@ test('an expired saved token from the real transport and host endpoint asks for 
   const ctx = fakeContext(), endpoints = new Map(), credential = randomUUID()
   ctx.llm.registerAdapter = () => () => {}
   t.after(() => ctx.dispose())
-  const rt = { ctx, state: { prefs: { hermesRemote: { ...connectedView(), credentialRef: 'SAMPLE' } }, hermesSessions: {} }, load: async () => {}, save: async () => {}, loadSecrets: async () => {}, secretValue: () => credential, hooks: { endpoint: (name, fn) => endpoints.set(name, fn) } }
+  // No listed models yet, so the first connect still opens the session that finds the
+  // refused sign-in; a saved connection with models skips that (see the host tests).
+  const rt = { ctx, state: { prefs: { hermesRemote: { ...connectedView(), credentialRef: 'SAMPLE', models: [], modelRef: undefined } }, hermesSessions: {} }, load: async () => {}, save: async () => {}, loadSecrets: async () => {}, secretValue: () => credential, hooks: { endpoint: (name, fn) => endpoints.set(name, fn) } }
   install(rt, { fetch: async () => ({ ok: true, json: async () => ({ profiles: [] }) }), transport: options => new HermesTransport({ ...options, fetch: async () => ({ ok: false, status: 401 }) }) })
   const render = await renderSettings(t, ({ endpoint, payload }) => endpoints.get(endpoint)(payload), { component: 'HermesRemoteConnect' })
   await waitFor(() => render.document.querySelector('[data-status=error]'), 'saved sign-in failure')
@@ -554,11 +556,15 @@ test('Cancel aborts a pending test and discards only test resources', async t =>
   assert.ok(!render.calls.some(call => call.endpoint === 'hermes-remote-save'))
 })
 
-test('the model route opens first-use setup and saved route changes retain the handoff confirmation', async t => {
+test('the model route opens first-use setup; a saved route lists its models and picks them directly', async t => {
+  const remote = [
+    { ref: 'hermes-remote/first-model', provider: 'hermes-remote', providerName: 'Remote Hermes', name: 'First model', reasoning: { efforts: [] } },
+    { ref: 'hermes-remote/sample-model', provider: 'hermes-remote', providerName: 'Remote Hermes', name: 'Sample model', reasoning: { efforts: [] } },
+  ]
   for (const existing of [false, true]) await t.test(existing ? 'saved route' : 'first use', async sub => {
     const picked = [], calls = []
     const bot = { id: 'sample-profile', name: 'Sample', ...(existing ? { model: 'native/sample-model' } : {}) }
-    const roster = { models: [{ ref: 'native/sample-model', provider: 'native', name: 'Sample model' }], prefs: { hermesRemote: { enabled: existing, profile: existing ? 'sample-profile' : '' } } }
+    const roster = { models: [{ ref: 'native/sample-model', provider: 'native', name: 'Sample model' }, ...remote], prefs: { hermesRemote: { enabled: existing, profile: existing ? 'sample-profile' : '' } } }
     const actions = { refreshModels: async () => {}, updateBot: (...args) => { picked.push(args); return Promise.resolve() }, switchRoute: (...args) => { picked.push(args); return Promise.resolve() } }
     const render = await renderSettings(sub, async request => {
       calls.push(request)
@@ -575,9 +581,14 @@ test('the model route opens first-use setup and saved route changes retain the h
       assert.match(render.document.body.textContent, /Choose a computer/)
       assert.doesNotMatch(render.document.body.textContent, /How would you like to connect/)
     } else {
+      // The saved profile keeps its models list: no wizard, no reconnect, and the row the
+      // person picks is the one that is applied, not the first the connection lists.
+      const model = await waitFor(() => render.document.querySelector('.bt-model-menu [title="hermes-remote/sample-model"]'), 'saved route model list')
+      assert.equal(render.document.querySelectorAll('.bt-hermes-wizard').length, 0)
+      assert.equal(calls.filter(call => call.endpoint === 'hermes-remote-connect').length, 0)
+      flushSync(() => model.click())
       await waitFor(() => render.document.querySelector('.bt-model-confirm'), 'route handoff confirmation')
       assert.equal(picked.length, 0)
-      assert.equal(calls.filter(call => call.endpoint === 'hermes-remote-connect').length, 1)
       await render.click('Change route')
       assert.equal(picked[0][1], 'hermes-remote/sample-model')
     }
@@ -735,6 +746,63 @@ test('the current Remote Hermes picker row names its remembered profile without 
   const route = await waitFor(() => render.document.querySelector('.bt-model-menu [data-route="hermes-remote"]'), 'current remote route')
   assert.equal(route.querySelector('.bt-menu-hint').textContent, 'sample-profile')
   assert.equal((route.textContent.match(/Remote Hermes/g) ?? []).length, 1)
+})
+
+const remoteModels = [
+  { ref: 'hermes-remote/first-model', provider: 'hermes-remote', providerName: 'Remote Hermes', name: 'First model', reasoning: { efforts: [] } },
+  { ref: 'hermes-remote/second-model', provider: 'hermes-remote', providerName: 'Remote Hermes', name: 'Second model', reasoning: { efforts: [] } },
+  { ref: 'hermes-remote/third-model', provider: 'hermes-remote', providerName: 'Remote Hermes', name: 'Third model', reasoning: { efforts: [] } },
+]
+const configuredRoster = () => ({ models: remoteModels, prefs: { hermesRemote: { enabled: true, profile: 'sample-profile', models: remoteModels.map(model => ({ id: model.ref.split('/')[1], name: model.name })) } } })
+
+test('a configured Remote Hermes Bot picks from its model list without reconnecting or taking the first model', async t => {
+  const bot = { id: 'sample-profile', name: 'Sample', model: 'hermes-remote/second-model' }
+  const picked = [], calls = []
+  const actions = {
+    refreshModels: async () => {},
+    updateBot: (...args) => { picked.push(args); return Promise.resolve() },
+    switchRoute: (...args) => { picked.push(args); return Promise.resolve() },
+  }
+  const render = await renderSettings(t, async request => { calls.push(request); return connectedView() }, { component: 'ModelMenu', menu: true, props: { bot, roster: configuredRoster(), actions } })
+  flushSync(() => render.document.querySelector('.bt-model-trigger').click())
+  const route = await waitFor(() => render.document.querySelector('.bt-model-menu [data-route="hermes-remote"]'), 'saved route row')
+  assert.equal(route.getAttribute('aria-haspopup'), 'menu', 'a saved profile opens its models, not the wizard')
+  flushSync(() => route.click())
+  const third = await waitFor(() => render.document.querySelector('.bt-model-menu [title="hermes-remote/third-model"]'), 'the connection model list')
+  assert.equal(render.document.querySelectorAll('.bt-hermes-wizard').length, 0)
+  assert.equal(calls.filter(call => call.endpoint === 'hermes-remote-connect').length, 0, 'opening the list connects nothing')
+  flushSync(() => third.click())
+  await waitFor(() => picked.length === 1, 'the picked model to be saved')
+  assert.deepEqual(JSON.parse(JSON.stringify(picked)), [['sample-profile', { model: 'hermes-remote/third-model' }]])
+  assert.ok(!picked.some(([, patch]) => patch.model === 'hermes-remote/first-model'), 'the first model the connection lists never wins')
+  assert.equal(calls.filter(call => call.endpoint === 'hermes-remote-connect').length, 0, 'picking connects nothing')
+})
+
+test('a completed Remote Hermes connect never overwrites the model the Bot already has', async t => {
+  const bot = { id: 'sample-profile', name: 'Sample', model: 'hermes-remote/second-model' }
+  const picked = [], calls = []
+  const actions = {
+    refreshModels: async () => {},
+    updateBot: (...args) => { picked.push(args); return Promise.resolve() },
+    switchRoute: (...args) => { picked.push(args); return Promise.resolve() },
+  }
+  const render = await renderSettings(t, async request => {
+    calls.push(request)
+    // The host's view still advertises the first model; the client must keep the Bot's pick.
+    return request.endpoint === 'hermes-remote-connect'
+      ? { ...connectedView(), modelRef: 'hermes-remote/first-model', models: remoteModels.map(model => ({ id: model.ref.split('/')[1], name: model.name })) }
+      : connectedView()
+  }, { component: 'ModelMenu', menu: true, props: { bot, roster: configuredRoster(), actions } })
+  flushSync(() => render.document.querySelector('.bt-model-trigger').click())
+  const route = await waitFor(() => render.document.querySelector('.bt-model-menu [data-route="hermes-remote"]'), 'saved route row')
+  flushSync(() => route.click())
+  const manage = await waitFor(() => render.document.querySelector('.bt-model-menu [data-manage-connection]'), 'explicit manage connection row')
+  flushSync(() => manage.click())
+  await waitFor(() => render.document.querySelector('.bt-hermes-wizard'), 'connection dialog')
+  await waitFor(() => calls.some(call => call.endpoint === 'hermes-remote-connect'), 'the explicit connect')
+  await waitFor(() => !render.document.querySelector('.bt-hermes-wizard'), 'connection dialog to close')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(picked.length, 0, 'the completed connect leaves the saved model alone')
 })
 
 test('a Hermes that answers wrongly over SSH is reported as Hermes, never as an SSH key failure or a setting to change', async t => {
