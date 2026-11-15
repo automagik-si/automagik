@@ -25,6 +25,8 @@ export const Config = z.object({
   teamOmniAbilities: z.string().volatile(),
   welcomeDone: z.boolean().volatile(),
   connectAiDone: z.boolean().volatile(),
+  // "From another tool" finished: a bot moved (or the person said not now).
+  migrateDone: z.boolean().volatile(),
   connectOmniSkipped: z.boolean().volatile(),
   // LEGACY: written once by builds that hid Oh My Claude's starter hint; read by nothing now,
   // kept so a saved entry that has it still validates.

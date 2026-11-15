@@ -1,4 +1,5 @@
-import { CliproxyPayload, DonePayload, RequestBody, Secret, parse } from './payloads.js'
+import { CliproxyPayload, DonePayload, MigrateOmniPayload, MigrateStartPayload, MigrateStatusPayload, RequestBody, Secret, parse } from './payloads.js'
+import { createMigrateActions } from './hermes-migrate.js'
 import { createAiActions } from './ais.js'
 import { createProviderActions, saveRoute, unsetRoute } from './providers.js'
 import { createCompanionActions } from './companion.js'
@@ -36,6 +37,9 @@ import { UNFOLD_BOT } from './companion.js'
 //   acp, acp-switch, acp-retry
 //                      Claude Code and Codex through @automagik/acp-dsh: its acpAgents
 //                      service's status, and its claude/codex settings (src/host/acp.js)
+//   migrate-probe, migrate-start, migrate-status, migrate-omni-status
+//                      the "From another tool" step: Hermes's Telegram channel and its key
+//                      (src/host/hermes-migrate.js). The key never enters an answer.
 //
 // The key never enters settings, a reply or a log line: the route names it by the
 // env-shaped reference OMNI_AI_CLIPROXY_API_KEY, which DSH resolves per request.
@@ -47,7 +51,7 @@ export const ROUTE_ID = 'cliproxy'
 export const KEY_REF = 'OMNI_AI_CLIPROXY_API_KEY'
 // Which flag keeps each step finished. omni-connect is the Omni plugin's step; its skip
 // is kept here so a skipped connect stays skipped.
-export const FLAGS = { 'omni-companion': 'companionDone', 'omni-team': 'teamDone', 'omni-welcome': 'welcomeDone', 'omni-connect-ai': 'connectAiDone', 'omni-connect': 'connectOmniSkipped' }
+export const FLAGS = { 'omni-companion': 'companionDone', 'omni-team': 'teamDone', 'omni-welcome': 'welcomeDone', 'omni-migrate': 'migrateDone', 'omni-connect-ai': 'connectAiDone', 'omni-connect': 'connectOmniSkipped' }
 // Where DSH keeps a DeepSeek API key, and a DeepSeek account sign-in.
 const DEEPSEEK_REF = 'DEEPSEEK_API_KEY'
 const DEEPSEEK_ACCOUNT = 'deepseek-account-platform/default'
@@ -172,6 +176,7 @@ export function createActions(ctx, { fetch: fetchImpl = globalThis.fetch, anyOn,
         companionImage: typeof own.companionImage === 'string',
         teamOmni: unfold ? own.teamOmni === true : own.teamOmni !== false,
         teamGenie: own.teamGenie === true,
+        migrateDone: own.migrateDone === true,
         connectAiDone: own.connectAiDone === true,
         connectOmniSkipped: own.connectOmniSkipped === true,
         deepseek,
@@ -240,6 +245,12 @@ export function install(ctx, deps = {}) {
     })
   }
   const actions = { ...createActions(ctx, { ...deps, anyOn }), ...createProviderActions(ctx), ...aiEndpoints, ...createAcpActions(ctx), ...companion, ...createBotTypeActions(ctx, { team, omniProjectOf, env: deps.env ?? process.env, ...(deps.checkGit ? { checkGit: deps.checkGit } : {}), ...(deps.genieSkills ? { genieSkills: deps.genieSkills } : {}), ...(deps.genieCli ? { genieCli: deps.genieCli } : {}), ...(deps.release ? { release: deps.release } : {}), ...(deps.offersUnfold !== undefined ? { offersUnfold: deps.offersUnfold } : {}) }) }
+  const migrate = createMigrateActions(ctx, deps.migrate ?? {})
+  // The move's own payloads are parsed here, as every other endpoint's are.
+  actions['migrate-start'] = (payload, signal) => migrate['migrate-start'](parse(MigrateStartPayload, payload) ?? {}, signal)
+  actions['migrate-status'] = (payload, signal) => migrate['migrate-status'](parse(MigrateStatusPayload, payload) ?? {}, signal)
+  actions['migrate-omni-status'] = (payload, signal) => migrate['migrate-omni-status'](parse(MigrateOmniPayload, payload) ?? {}, signal)
+  actions['migrate-probe'] = migrate['migrate-probe']
   // Connect AI finished with an AI on: the companion, the Omni Bot and the Genie Bot get their model, and
   // their held greetings go out. The step waits for that a little (ASSIGN_HOLD_MS), so the
   // chat opens on the greeting rather than on the model card; a provider that registers
