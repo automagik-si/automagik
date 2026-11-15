@@ -70,23 +70,8 @@ def read_record(folder):
     except (OSError, ValueError, TypeError):
         record = None
     if not isinstance(record, dict):
-        try:
-            with open(os.path.join(folder, "host-gateway.json"), "r", encoding="utf-8-sig") as handle:
-                other = json.load(handle)
-        except (OSError, ValueError, TypeError):
-            other = None
-        # A gateway record only names a live owner when its process and port answer;
-        # a stale one must not claim a gateway is running there.
-        if isinstance(other, dict) and other.get("role") == "gateway":
-            port, pid = other.get("port"), other.get("pid")
-            if isinstance(port, int) and 0 < port < 65536 and isinstance(pid, int) and pid > 0:
-                try:
-                    os.kill(pid, 0)
-                    with socket.create_connection(("127.0.0.1", port), timeout=1):
-                        pass
-                    raise Fault("serve-gateway")
-                except OSError:
-                    pass
+        # Only a running serve publishes this record. A gateway's record is not read: this
+        # app opens host-serve.json and host-serve.token, and nothing else in that folder.
         raise Fault("serve-not-running")
     if record.get("role") != "serve":
         raise Fault("serve-gateway" if record.get("role") == "gateway" else "serve-not-running")

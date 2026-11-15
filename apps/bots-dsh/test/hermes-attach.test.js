@@ -166,9 +166,9 @@ test('the attach reader contains no start, stop, signal or kill path', () => {
   for (const forbidden of ['Popen', 'killpg', 'terminate', 'SIGTERM', 'SIGKILL', 'serve --isolated', '--isolated']) {
     assert.ok(!attachSupervisor.includes(forbidden), forbidden)
   }
-  // The only process probe is signal 0 (liveness); no signal is ever sent to Hermes.
+  // No process is signalled or probed with a signal at all.
   const probes = [...attachSupervisor.matchAll(/os\.kill\([^)]*\)/g)].map(match => match[0])
-  assert.deepEqual(probes, ['os.kill(pid, 0)'])
+  assert.deepEqual(probes, [])
   // It reads exactly the host rendezvous record and its private token, and runs the CLI
   // read-only: profile list/show and config get model.
   assert.match(attachSupervisor, /host-serve\.json/)
@@ -183,7 +183,7 @@ test('the attach reader contains no start, stop, signal or kill path', () => {
 // The reader itself, run against a scratch state folder and a fake Hermes CLI: the 0600
 // token file is the only credential, its fingerprint must match, and the recorded owner
 // must answer as itself.
-async function readerHome(t, { mode = 0o600, fingerprint = true, record = true, gateway = false, gatewayStale = false, servePid } = {}) {
+async function readerHome(t, { mode = 0o600, fingerprint = true, record = true, servePid } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'hermes-attach-'))
   const lock = join(home, 'locks')
   await writeFile(join(home, '.keep'), '')
@@ -232,7 +232,6 @@ else:
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const port = server.address().port
   t.after(async () => { await new Promise(resolve => server.close(resolve)); await rm(home, { recursive: true, force: true, maxRetries: 5 }) })
-  if (gateway) await writeFile(join(lock, 'host-gateway.json'), JSON.stringify({ role: 'gateway', port: gatewayStale ? 1 : port, pid: gatewayStale ? 1 : process.pid }))
   if (record) await writeFile(join(lock, 'host-serve.json'), JSON.stringify({ role: 'serve', port, pid: process.pid, protocolVersion: 1, tokenFingerprint: fingerprint ? createHash('sha256').update(token).digest('hex').slice(0, 16) : 'f'.repeat(16), profiles: ['default', 'second'] }))
   await writeFile(join(lock, 'host-serve.token'), token, { mode })
   await chmod(join(lock, 'host-serve.token'), mode)
@@ -291,14 +290,12 @@ test('a token file another user could read, or a stale fingerprint, is refused',
   }
 })
 
-test('the reader says not running when no serve record exists, and gateway when only a gateway does', async t => {
+test('the reader says not running when no serve record exists, without reading a gateway record', async t => {
   if (!await hasPython()) { t.skip('python3 is not available'); return }
   const missing = await readerHome(t, { record: false })
   assert.equal((await runReader(t, missing)).find(frame => frame.type === 'error')?.code, 'serve-not-running')
-  const gateway = await readerHome(t, { record: false, gateway: true })
-  assert.equal((await runReader(t, gateway)).find(frame => frame.type === 'error')?.code, 'serve-gateway')
-  const stale = await readerHome(t, { record: false, gateway: true, gatewayStale: true })
-  assert.equal((await runReader(t, stale)).find(frame => frame.type === 'error')?.code, 'serve-not-running', 'a stale gateway record is not a running gateway')
+  // The reader opens host-serve.json and host-serve.token only; a gateway record is not its business.
+  assert.doesNotMatch(attachSupervisor, /host-gateway\.json/)
 })
 
 test('a recorded port answered by another process is not attached', async t => {
