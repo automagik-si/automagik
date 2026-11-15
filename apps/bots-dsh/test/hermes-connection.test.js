@@ -260,6 +260,28 @@ test('saved one-click connect uses the saved profile/session without REST discov
   assert.equal(h.wires.at(-1).options.authHeaders.Cookie, `hermes_session_at=${f.access}; hermes_session_rt=${f.refresh}`)
   assert.equal(h.wires.at(-1).options.profile, 'sample-profile')
 })
+test('the connected view names the model the Bot saved, not the first model the connection lists', async t => {
+  const f = dashboard(), h = runtime(t, f)
+  h.rt.state.prefs.hermesRemote = { enabled: true, mode: 'remote', authMode: 'token', address: f.address, profile: 'sample-profile', credentialRef: 'SAMPLE', models: [{ id: 'sample:first', name: 'First model' }, { id: 'sample:second', name: 'Second model' }] }
+  h.rt.state.bots = { sample: { id: 'sample', name: 'Sample', model: 'hermes-remote/sample:second' } }
+  assert.equal(h.rt.hermesRemote.view().modelRef, 'hermes-remote/sample:second')
+  // A Bot without a model still gets the first served model at first setup.
+  h.rt.state.bots = {}
+  assert.equal(h.rt.hermesRemote.view().modelRef, 'hermes-remote/sample:first')
+})
+test('a configured connection with known models opens no session when the wizard reopens it', async t => {
+  const f = dashboard(), h = runtime(t, f)
+  h.secrets.set('SAMPLE', JSON.stringify({ kind: 'token', credential: f.credential }))
+  h.rt.state.prefs.hermesRemote = { enabled: true, mode: 'remote', authMode: 'token', address: f.address, profile: 'sample-profile', credentialRef: 'SAMPLE', models: [{ id: 'sample:first', name: 'First model' }, { id: 'sample:second', name: 'Second model' }] }
+  h.rt.state.bots = { sample: { id: 'sample', name: 'Sample', model: 'hermes-remote/sample:second' } }
+  const view = await h.endpoints.get('hermes-remote-connect')({ cached: true })
+  assert.equal(h.wires.length, 0, 'no throwaway remote session just to list known models')
+  assert.equal(view.modelRef, 'hermes-remote/sample:second')
+  assert.equal(f.calls.length, 0)
+  // An explicit connect or refresh still discovers the list.
+  await h.endpoints.get('hermes-remote-connect')({})
+  assert.equal(h.wires.length, 1)
+})
 test('tests-only cancellation aborts before a test ID exists and leaves the saved configuration untouched', async t => {
   const f = dashboard({ handle: () => new Promise(() => {}) }), h = runtime(t, f)
   h.rt.state.prefs.hermesRemote = { enabled: true, address: 'https://example.invalid', profile: 'sample-profile', models: [] }

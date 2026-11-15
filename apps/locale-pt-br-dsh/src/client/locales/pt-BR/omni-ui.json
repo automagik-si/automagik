@@ -1745,6 +1745,8 @@
   "Your bots’ team tools (messages to other bots, secrets, memory, schedules) are not available in these chats.": "As ferramentas da equipe dos seus Bots (mensagens para outros Bots, segredos, memória e agendamentos) não estão disponíveis nestas conversas.",
   "Enable Remote Hermes": "Ativar Hermes remoto",
   "Off by default. Set up Remote Hermes in Bot settings.": "Desativado por padrão. Configure o Hermes remoto nas configurações dos Bots.",
+  "No models are known for this connection yet. Manage the connection to list them.": "Ainda não há modelos conhecidos para esta conexão. Gerencie a conexão para listá-los.",
+  "Manage connection…": "Gerenciar conexão…",
   "SSH couldn’t sign in": "O SSH não conseguiu entrar",
   "SSH couldn’t open Hermes": "O SSH não conseguiu abrir o Hermes",
   "Check the Hermes installation": "Confira a instalação do Hermes",
