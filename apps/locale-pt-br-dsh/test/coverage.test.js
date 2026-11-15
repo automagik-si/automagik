@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { omniKeys } from '../scripts/copy-check.mjs'
 import { loadDictionaries } from '../scripts/dictionaries.mjs'
 
-// What the pack translates today: 2644 keys, 2578 translated and 66 left in English on purpose
+// What the pack translates today: 2645 keys, 2579 translated and 66 left in English on purpose
 // (the brand and code-like strings the README lists). A release may not drop far below that.
 export const MIN_TRANSLATED = 0.95
 

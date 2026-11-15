@@ -1325,6 +1325,7 @@ var ZH = {
   "Model: {model}": "模型：{model}",
   "instead of {model}": "替代 {model}",
   "Running instead of {model}": "正在运行，替代 {model}",
+  "This chat is running on {running} instead of {saved}.": "此对话正在使用 {running}，而不是 {saved}。",
   none: "无",
   "Choose a model": "选择模型",
   "{provider} · not available": "{provider} · 不可用",
@@ -4103,10 +4104,10 @@ function bodyOf(def, paint, flat = false) {
   }
 }
 var PUPIL = "#0a0f1f";
-var pupilMarkup = ([cx, cy, w, h86, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h86 / 2}" width="${w}" height="${h86}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h86 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h86 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
-var blushMarkup = ([cx, cy, w, h86, tilt]) => `<ellipse cx="${cx}" cy="${cy + h86 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
-var eyeMarkup = ([cx, cy, w, h86, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h86 / 2}" width="${w}" height="${h86}" rx="${w / 2}"/></g>`;
-var happyEyeMarkup = ([cx, cy, w, h86, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h86 * 0.14}Q0 ${-h86 * 0.42} ${w * 0.62} ${h86 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
+var pupilMarkup = ([cx, cy, w, h87, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h87 / 2}" width="${w}" height="${h87}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h87 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h87 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
+var blushMarkup = ([cx, cy, w, h87, tilt]) => `<ellipse cx="${cx}" cy="${cy + h87 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
+var eyeMarkup = ([cx, cy, w, h87, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h87 / 2}" width="${w}" height="${h87}" rx="${w / 2}"/></g>`;
+var happyEyeMarkup = ([cx, cy, w, h87, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h87 * 0.14}Q0 ${-h87 * 0.42} ${w * 0.62} ${h87 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
 var maskBox = (size) => `maskUnits="userSpaceOnUse" x="${-size}" y="${-size}" width="${size * 3}" height="${size * 3}"`;
 var holes = (def, eyes) => `<rect x="${-def.size}" y="${-def.size}" width="${def.size * 3}" height="${def.size * 3}" fill="#fff"/>${eyes}`;
 var MASK_ID = "%MASK%";
@@ -4221,12 +4222,12 @@ function liveSprings(apply2) {
     const dt = Math.min(0.5, Math.max(1e-3, (now - last) / 1e3));
     last = now;
     const steps = Math.ceil(dt * 240);
-    const h86 = dt / steps;
+    const h87 = dt / steps;
     let moving = false;
     for (const [key, value] of values) {
       for (let index = 0; index < steps; index += 1) {
-        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h86;
-        value.x += value.v * h86;
+        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h87;
+        value.x += value.v * h87;
       }
       if (Math.abs(value.x - value.to) < 0.05 && Math.abs(value.v) < 1) {
         value.x = value.to;
@@ -9157,10 +9158,10 @@ function ComputerIndicator({ useComputer, useRoster, actions }) {
   const leases = live.leases ?? [];
   const waiting = Object.entries(live.bots ?? {}).filter(([, entry]) => entry.waitingFor === "user-idle");
   if (leases.length === 0 && waiting.length === 0) return null;
-  const botOf = (id) => roster.byId[id];
-  const nameOf3 = (id) => botOf(id)?.name ?? t("a Bot");
+  const botOf2 = (id) => roster.byId[id];
+  const nameOf3 = (id) => botOf2(id)?.name ?? t("a Bot");
   const avatarOf = (id) => {
-    const look = lookOf(botOf(id));
+    const look = lookOf(botOf2(id));
     if (typeof look.image === "string" && look.image.startsWith("data:image/")) return (0, import_react22.createElement)("img", { className: "bt-cbar-ava", src: look.image, alt: "" });
     return (0, import_react22.createElement)("span", { className: "bt-cbar-ava bt-cbar-ava-dot", style: { background: look.color } }, String(nameOf3(id)).slice(0, 1));
   };
@@ -33617,8 +33618,75 @@ function serveBrowserReads({ browsers, post, clientId = globalThis.crypto.random
   };
 }
 
-// src/client/cli-login.js
+// src/client/model-switch.js
 var import_react86 = require("react");
+var botOf = (roster, sessionId) => {
+  const bot = roster?.byId?.[sessionId];
+  if (!bot || sessionId !== bot.sessionId || roster.hostModels?.[bot.id] !== void 0) return void 0;
+  return bot;
+};
+function modelSwitchOf(roster, sessionId) {
+  const bot = botOf(roster, sessionId);
+  const savedRef = bot?.model ?? bot?.appliedModel;
+  if (savedRef === void 0 || typeof bot.runningModel !== "string" || bot.runningModel === savedRef) return void 0;
+  const running2 = modelOf({ model: bot.runningModel }, roster);
+  const saved = modelOf(bot, roster);
+  let runningName = running2?.name || bot.runningModel;
+  let savedName = saved?.name || savedRef;
+  if (runningName === savedName && running2?.provider && saved?.provider && running2.provider !== saved.provider) {
+    runningName = `${runningName} (${running2.provider})`;
+    savedName = `${savedName} (${saved.provider})`;
+  }
+  return { key: `${bot.id}|${bot.runningModel}|${savedRef}`, running: runningName, saved: savedName };
+}
+function switchSeen(memo, botId, key) {
+  return {
+    memo: { botId, key },
+    fresh: memo !== void 0 && memo.botId === botId && key !== void 0 && key !== memo.key
+  };
+}
+function ModelSwitchNotice({ sessionId, useRoster }) {
+  const roster = useRoster((value) => value);
+  const bot = botOf(roster, sessionId);
+  const mismatch = modelSwitchOf(roster, sessionId);
+  const key = mismatch?.key;
+  const known2 = typeof bot?.runningModel === "string";
+  const memo = (0, import_react86.useRef)();
+  const [pulse, setPulse] = (0, import_react86.useState)(0);
+  const [fresh, setFresh] = (0, import_react86.useState)(false);
+  const [said, setSaid] = (0, import_react86.useState)("");
+  const line = mismatch === void 0 ? "" : t("This chat is running on {running} instead of {saved}.", { running: mismatch.running, saved: mismatch.saved });
+  (0, import_react86.useEffect)(() => {
+    if (!known2) return;
+    const next = switchSeen(memo.current, bot.id, key);
+    memo.current = next.memo;
+    if (next.fresh) {
+      setPulse((value) => value + 1);
+      setFresh(true);
+      setSaid(line);
+    } else if (key === void 0) setSaid("");
+  }, [bot?.id, key, known2]);
+  if (bot === void 0) return null;
+  return (0, import_react86.createElement)(
+    "div",
+    { className: "bt-model-switch-dock" },
+    (0, import_react86.createElement)("span", { className: "bt-sr", role: "status", "aria-live": "polite" }, said),
+    mismatch === void 0 ? null : (0, import_react86.createElement)("div", {
+      key: pulse,
+      className: "bt-native-note bt-model-switch",
+      "data-fresh": fresh ? "" : void 0,
+      onAnimationEnd: () => setFresh(false)
+    }, (0, import_react86.createElement)("p", null, line))
+  );
+}
+var MODEL_SWITCH_CSS = `
+.bt-model-switch{justify-content:center;text-align:center;padding:0 4px 6px}
+body:not([data-bt-motion=quiet]) .bt-model-switch[data-fresh]{animation:bt-secret-in .24s ease-out}
+@media (prefers-reduced-motion:reduce){.bt-model-switch[data-fresh]{animation:none}}
+`;
+
+// src/client/cli-login.js
+var import_react87 = require("react");
 var import_react_dom16 = require("react-dom");
 var CLI_LOGIN_BRIDGE = /* @__PURE__ */ Symbol.for("automagik.cli-login");
 var noSubscribe3 = () => () => {
@@ -33758,9 +33826,9 @@ var FIELD_EVENTS = [
 ];
 var BLOCKED2 = /* @__PURE__ */ new Set(["copy", "cut", "drop", "dragover"]);
 function CodeField({ disabled, busy, onSubmit, fieldRef }) {
-  const wrap = (0, import_react86.useRef)(null);
-  const input = (0, import_react86.useRef)(null);
-  const [filled, setFilled] = (0, import_react86.useState)(false);
+  const wrap = (0, import_react87.useRef)(null);
+  const input = (0, import_react87.useRef)(null);
+  const [filled, setFilled] = (0, import_react87.useState)(false);
   const submit = () => {
     const node = input.current;
     if (!node || disabled || busy || node.value.trim() === "") return;
@@ -33769,9 +33837,9 @@ function CodeField({ disabled, busy, onSubmit, fieldRef }) {
     setFilled(false);
     onSubmit(value);
   };
-  const submitRef = (0, import_react86.useRef)(submit);
+  const submitRef = (0, import_react87.useRef)(submit);
   submitRef.current = submit;
-  (0, import_react86.useLayoutEffect)(() => {
+  (0, import_react87.useLayoutEffect)(() => {
     const node = wrap.current;
     const field = input.current;
     fieldRef.current = field;
@@ -33793,13 +33861,13 @@ function CodeField({ disabled, busy, onSubmit, fieldRef }) {
       if (fieldRef.current === field) fieldRef.current = null;
     };
   }, []);
-  return (0, import_react86.createElement)(
+  return (0, import_react87.createElement)(
     "div",
     { className: "bt-cli-code" },
-    (0, import_react86.createElement)(
+    (0, import_react87.createElement)(
       "span",
       { ref: wrap, className: "bt-cli-code-wrap", "data-cli-login-field": "" },
-      (0, import_react86.createElement)("input", {
+      (0, import_react87.createElement)("input", {
         ref: input,
         type: "password",
         className: "bt-input bt-cli-code-input",
@@ -33815,23 +33883,23 @@ function CodeField({ disabled, busy, onSubmit, fieldRef }) {
         "aria-label": t("Authorization code")
       })
     ),
-    (0, import_react86.createElement)("button", { type: "button", className: "bt-q-submit", disabled: disabled || busy || !filled, onClick: submit }, t("Send"))
+    (0, import_react87.createElement)("button", { type: "button", className: "bt-q-submit", disabled: disabled || busy || !filled, onClick: submit }, t("Send"))
   );
 }
 var timeOf = (at) => new Date(at).toLocaleTimeString(dateLocale(), { hour: "numeric", minute: "2-digit" });
 function CopyLink({ url }) {
-  const [copied, setCopied] = (0, import_react86.useState)(false);
-  (0, import_react86.useEffect)(() => {
+  const [copied, setCopied] = (0, import_react87.useState)(false);
+  (0, import_react87.useEffect)(() => {
     setCopied(false);
   }, [url]);
   const copy2 = () => {
     void navigator.clipboard?.writeText(url).then(() => setCopied(true), () => setCopied(false));
   };
-  return (0, import_react86.createElement)(
-    import_react86.Fragment,
+  return (0, import_react87.createElement)(
+    import_react87.Fragment,
     null,
-    (0, import_react86.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: copy2 }, t("Copy link")),
-    copied ? (0, import_react86.createElement)("span", { className: "bt-cli-subtle", role: "status" }, t("Copied")) : null
+    (0, import_react87.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: copy2 }, t("Copy link")),
+    copied ? (0, import_react87.createElement)("span", { className: "bt-cli-subtle", role: "status" }, t("Copied")) : null
   );
 }
 function Attempt({ bot, row, roster, manager, secretPending, fieldRef }) {
@@ -33841,52 +33909,52 @@ function Attempt({ bot, row, roster, manager, secretPending, fieldRef }) {
   const opener = attempt?.openedBy && attempt.openedBy !== bot.id ? roster.byId?.[attempt.openedBy]?.name : void 0;
   const step2 = codeStep(row);
   if (row.confirm) {
-    return (0, import_react86.createElement)(
-      import_react86.Fragment,
+    return (0, import_react87.createElement)(
+      import_react87.Fragment,
       null,
-      (0, import_react86.createElement)("p", null, opener ? t("Cancel the {name} sign-in opened in {bot}?", { name, bot: opener }) : t("Cancel the {name} sign-in?", { name })),
-      (0, import_react86.createElement)(
+      (0, import_react87.createElement)("p", null, opener ? t("Cancel the {name} sign-in opened in {bot}?", { name, bot: opener }) : t("Cancel the {name} sign-in?", { name })),
+      (0, import_react87.createElement)(
         "div",
         { className: "bt-cli-actions" },
-        (0, import_react86.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => void manager.cancel(bot.id) }, t("Yes, cancel")),
-        (0, import_react86.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.keepAttempt(bot.id) }, t("Keep it"))
+        (0, import_react87.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => void manager.cancel(bot.id) }, t("Yes, cancel")),
+        (0, import_react87.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.keepAttempt(bot.id) }, t("Keep it"))
       )
     );
   }
-  return (0, import_react86.createElement)(
-    import_react86.Fragment,
+  return (0, import_react87.createElement)(
+    import_react87.Fragment,
     null,
-    url ? (0, import_react86.createElement)(
-      import_react86.Fragment,
+    url ? (0, import_react87.createElement)(
+      import_react87.Fragment,
       null,
-      (0, import_react86.createElement)("p", null, t("Open this link on any device:")),
-      (0, import_react86.createElement)("p", { className: "bt-cli-link-line" }, (0, import_react86.createElement)("a", { href: url, target: "_blank", rel: "noopener noreferrer", className: "bt-cli-link" }, url))
-    ) : (0, import_react86.createElement)("p", null, t("Preparing your sign-in…")),
-    url ? (0, import_react86.createElement)(
+      (0, import_react87.createElement)("p", null, t("Open this link on any device:")),
+      (0, import_react87.createElement)("p", { className: "bt-cli-link-line" }, (0, import_react87.createElement)("a", { href: url, target: "_blank", rel: "noopener noreferrer", className: "bt-cli-link" }, url))
+    ) : (0, import_react87.createElement)("p", null, t("Preparing your sign-in…")),
+    url ? (0, import_react87.createElement)(
       "div",
       { className: "bt-cli-actions" },
-      (0, import_react86.createElement)(CopyLink, { url }),
-      attempt?.expiresAt ? (0, import_react86.createElement)("span", { className: "bt-cli-subtle" }, t("Expires at {time}", { time: timeOf(attempt.expiresAt) })) : null
+      (0, import_react87.createElement)(CopyLink, { url }),
+      attempt?.expiresAt ? (0, import_react87.createElement)("span", { className: "bt-cli-subtle" }, t("Expires at {time}", { time: timeOf(attempt.expiresAt) })) : null
     ) : null,
-    row.provider === "acp-codex" && attempt?.userCode ? (0, import_react86.createElement)(
-      import_react86.Fragment,
+    row.provider === "acp-codex" && attempt?.userCode ? (0, import_react87.createElement)(
+      import_react87.Fragment,
       null,
-      (0, import_react86.createElement)("p", null, t("Enter this code on that page:"), " ", (0, import_react86.createElement)("code", { className: "bt-cli-code-text" }, attempt.userCode)),
-      (0, import_react86.createElement)("p", { className: "bt-cli-subtle" }, t("Waiting for {name} to confirm…", { name }))
+      (0, import_react87.createElement)("p", null, t("Enter this code on that page:"), " ", (0, import_react87.createElement)("code", { className: "bt-cli-code-text" }, attempt.userCode)),
+      (0, import_react87.createElement)("p", { className: "bt-cli-subtle" }, t("Waiting for {name} to confirm…", { name }))
     ) : null,
-    row.provider === "acp-claude" && attempt?.checking ? (0, import_react86.createElement)("p", { className: "bt-cli-subtle" }, t("Checking the code…")) : null,
-    step2 ? (0, import_react86.createElement)(
-      import_react86.Fragment,
+    row.provider === "acp-claude" && attempt?.checking ? (0, import_react87.createElement)("p", { className: "bt-cli-subtle" }, t("Checking the code…")) : null,
+    step2 ? (0, import_react87.createElement)(
+      import_react87.Fragment,
       null,
-      (0, import_react86.createElement)("p", null, t("Paste here the code shown after you authorize:")),
-      (0, import_react86.createElement)(CodeField, { disabled: secretPending, busy: row.busy, fieldRef, onSubmit: (value) => void manager.answer(bot.id, value) }),
-      (0, import_react86.createElement)("p", { className: "bt-cli-subtle" }, secretPending ? t("Finish the secret requested first.") : t("The message field comes back as soon as you send the code or cancel."))
+      (0, import_react87.createElement)("p", null, t("Paste here the code shown after you authorize:")),
+      (0, import_react87.createElement)(CodeField, { disabled: secretPending, busy: row.busy, fieldRef, onSubmit: (value) => void manager.answer(bot.id, value) }),
+      (0, import_react87.createElement)("p", { className: "bt-cli-subtle" }, secretPending ? t("Finish the secret requested first.") : t("The message field comes back as soon as you send the code or cancel."))
     ) : null,
-    row.error ? (0, import_react86.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
-    (0, import_react86.createElement)(
+    row.error ? (0, import_react87.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
+    (0, import_react87.createElement)(
       "div",
       { className: "bt-cli-actions" },
-      (0, import_react86.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.askCancel(bot.id) }, t("Cancel sign-in"))
+      (0, import_react87.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.askCancel(bot.id) }, t("Cancel sign-in"))
     )
   );
 }
@@ -33921,7 +33989,7 @@ async function announceCarried({ actions }) {
 var modelName = (roster, ref) => typeof ref === "string" ? roster.models?.find((model) => model.ref === ref)?.name ?? (ref.split("/").slice(1).join("/") || ref) : "";
 function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef }) {
   const name = CLI_NAMES[row.provider];
-  (0, import_react86.useLayoutEffect)(() => {
+  (0, import_react87.useLayoutEffect)(() => {
     if (row.reveal === void 0) return;
     seat.scrollIntoView?.({ block: "nearest" });
     manager.revealed(bot.id, row.reveal);
@@ -33929,65 +33997,65 @@ function CliLoginRow({ bot, row, roster, manager, secretPending, seat, fieldRef 
   const body = (() => {
     switch (row.stage) {
       case "offer":
-        return (0, import_react86.createElement)(
-          import_react86.Fragment,
+        return (0, import_react87.createElement)(
+          import_react87.Fragment,
           null,
-          (0, import_react86.createElement)("p", null, t("To use {name} in this Bot, sign in to your account.", { name })),
-          row.error ? (0, import_react86.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
-          (0, import_react86.createElement)(
+          (0, import_react87.createElement)("p", null, t("To use {name} in this Bot, sign in to your account.", { name })),
+          row.error ? (0, import_react87.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
+          (0, import_react87.createElement)(
             "div",
             { className: "bt-cli-actions" },
-            (0, import_react86.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.start(bot.id) }, t("Sign in")),
-            (0, import_react86.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Not now"))
+            (0, import_react87.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.start(bot.id) }, t("Sign in")),
+            (0, import_react87.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Not now"))
           )
         );
       case "account":
-        return (0, import_react86.createElement)(
-          import_react86.Fragment,
+        return (0, import_react87.createElement)(
+          import_react87.Fragment,
           null,
-          (0, import_react86.createElement)("p", null, accountLine(name, row.account)),
-          (0, import_react86.createElement)("p", null, row.account?.authScope === "isolated" ? t("Bots will use and bill this account. Your terminal login is separate.") : t("Bots will use and bill this account. It is the same sign-in your terminal uses.")),
-          row.error ? (0, import_react86.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
-          (0, import_react86.createElement)(
+          (0, import_react87.createElement)("p", null, accountLine(name, row.account)),
+          (0, import_react87.createElement)("p", null, row.account?.authScope === "isolated" ? t("Bots will use and bill this account. Your terminal login is separate.") : t("Bots will use and bill this account. It is the same sign-in your terminal uses.")),
+          row.error ? (0, import_react87.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
+          (0, import_react87.createElement)(
             "div",
             { className: "bt-cli-actions" },
-            (0, import_react86.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.confirm(bot.id) }, t("Use this account")),
-            (0, import_react86.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Not now"))
+            (0, import_react87.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.confirm(bot.id) }, t("Use this account")),
+            (0, import_react87.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Not now"))
           )
         );
       case "attempt":
-        return (0, import_react86.createElement)(Attempt, { bot, row, roster, manager, secretPending, fieldRef });
+        return (0, import_react87.createElement)(Attempt, { bot, row, roster, manager, secretPending, fieldRef });
       case "done":
-        return (0, import_react86.createElement)("p", null, row.taken ? t("Done: Bots will use this {name} account.", { name }) : t("Done: signed in to {name}.", { name }));
+        return (0, import_react87.createElement)("p", null, row.taken ? t("Done: Bots will use this {name} account.", { name }) : t("Done: signed in to {name}.", { name }));
       case "applyFailed":
-        return (0, import_react86.createElement)("p", null, t("Signed in, but {model} could not be used: {reason} This Bot stays on {kept}.", {
+        return (0, import_react87.createElement)("p", null, t("Signed in, but {model} could not be used: {reason} This Bot stays on {kept}.", {
           model: modelName(roster, row.outcome?.ref) || name,
           reason: hostText(row.outcome?.message ?? ""),
           kept: modelName(roster, row.outcome?.kept) || t("its model")
         }));
       case "failed":
       case "interrupted":
-        return (0, import_react86.createElement)(
-          import_react86.Fragment,
+        return (0, import_react87.createElement)(
+          import_react87.Fragment,
           null,
-          (0, import_react86.createElement)("p", { className: "bt-cli-error" }, row.stage === "interrupted" ? t("The sign-in was interrupted by a restart. Get a new link.") : hostText(row.message ?? "Sign-in did not finish. Try again.")),
-          row.error ? (0, import_react86.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
-          (0, import_react86.createElement)(
+          (0, import_react87.createElement)("p", { className: "bt-cli-error" }, row.stage === "interrupted" ? t("The sign-in was interrupted by a restart. Get a new link.") : hostText(row.message ?? "Sign-in did not finish. Try again.")),
+          row.error ? (0, import_react87.createElement)("p", { className: "bt-cli-error", role: "alert" }, hostText(row.error)) : null,
+          (0, import_react87.createElement)(
             "div",
             { className: "bt-cli-actions" },
-            (0, import_react86.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.start(bot.id) }, t("Try again")),
-            (0, import_react86.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Close"))
+            (0, import_react87.createElement)("button", { type: "button", className: "bt-q-submit", disabled: row.busy, onClick: () => void manager.start(bot.id) }, t("Try again")),
+            (0, import_react87.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: row.busy, onClick: () => manager.dismiss(bot.id) }, t("Close"))
           )
         );
       default:
         return null;
     }
   })();
-  return (0, import_react86.createElement)(
+  return (0, import_react87.createElement)(
     "div",
     { className: "bt-cli-row", "data-cli-login": row.provider, "data-stage": row.stage, role: "group", "aria-label": t("Sign in to {name}", { name }) },
-    (0, import_react86.createElement)("div", { className: "bt-cli-row-title" }, name),
-    (0, import_react86.createElement)("div", { "aria-live": "polite" }, body)
+    (0, import_react87.createElement)("div", { className: "bt-cli-row-title" }, name),
+    (0, import_react87.createElement)("div", { "aria-live": "polite" }, body)
   );
 }
 function CliLoginConversation({ sessionId, useRoster, useSession, inputActions, actions }) {
@@ -33996,17 +34064,17 @@ function CliLoginConversation({ sessionId, useRoster, useSession, inputActions, 
   const manager = actions.cliLogin;
   const bot = cliLoginBotOf(roster, sessionId);
   const eligible = Boolean(bot) && roster.ready !== false && currentPart(bot) === sessionId && manager !== void 0;
-  const row = (0, import_react86.useSyncExternalStore)(manager?.subscribe ?? noSubscribe3, () => eligible ? manager.getSnapshot().rows[bot.id] : void 0);
+  const row = (0, import_react87.useSyncExternalStore)(manager?.subscribe ?? noSubscribe3, () => eligible ? manager.getSnapshot().rows[bot.id] : void 0);
   const secretPending = eligible && (roster.secretRequests?.[bot.id] ?? []).some((entry) => entry.status === "pending");
-  const anchor = (0, import_react86.useRef)(null);
-  const fieldRef = (0, import_react86.useRef)(null);
-  const [seat, setSeat] = (0, import_react86.useState)(null);
+  const anchor = (0, import_react87.useRef)(null);
+  const fieldRef = (0, import_react87.useRef)(null);
+  const [seat, setSeat] = (0, import_react87.useState)(null);
   const locked = codeStep(row);
-  const wasCode = (0, import_react86.useRef)(false);
-  (0, import_react86.useEffect)(() => {
+  const wasCode = (0, import_react87.useRef)(false);
+  (0, import_react87.useEffect)(() => {
     if (eligible) void manager.restore(bot.id);
   }, [eligible, bot?.id]);
-  (0, import_react86.useEffect)(() => {
+  (0, import_react87.useEffect)(() => {
     if (!locked) {
       if (wasCode.current) {
         wasCode.current = false;
@@ -34021,7 +34089,7 @@ function CliLoginConversation({ sessionId, useRoster, useSession, inputActions, 
     if (!occurrence) return void 0;
     return lockEditor(occurrence, { onFocus: () => fieldRef.current?.focus() });
   }, [locked, sessionId]);
-  (0, import_react86.useLayoutEffect)(() => {
+  (0, import_react87.useLayoutEffect)(() => {
     if (!eligible || row === void 0 || !anchor.current) return void 0;
     const occurrence = anchor.current.closest("[data-conversation-content][data-conversation-session]");
     if (!occurrence || occurrence.dataset.conversationSession !== sessionId) return void 0;
@@ -34059,10 +34127,10 @@ function CliLoginConversation({ sessionId, useRoster, useSession, inputActions, 
     };
   }, [eligible, row === void 0, sessionId, blank3]);
   if (!eligible || row === void 0) return null;
-  return (0, import_react86.createElement)(
+  return (0, import_react87.createElement)(
     "span",
     { ref: anchor, hidden: true, "data-cli-login-anchor": sessionId },
-    seat ? (0, import_react_dom16.createPortal)((0, import_react86.createElement)(CliLoginRow, { bot, row, roster, manager, secretPending, seat, fieldRef }), seat) : null
+    seat ? (0, import_react_dom16.createPortal)((0, import_react87.createElement)(CliLoginRow, { bot, row, roster, manager, secretPending, seat, fieldRef }), seat) : null
   );
 }
 var CLI_LOGIN_CSS = `
@@ -34095,7 +34163,7 @@ var ACCOUNT_CHANGED = "bot/account-changed";
 var ACCOUNT_SIGNED_OUT = "bot/account-signed-out";
 var providerOf3 = (ref) => typeof ref === "string" && ref.includes("/") ? ref.slice(0, ref.indexOf("/")) : void 0;
 var messageOf = (error) => typeof error?.message === "string" && error.message !== "" ? error.message : "Could not continue this sign-in. Try again.";
-function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf: modelOf2, botOf }) {
+function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf: modelOf2, botOf: botOf2 }) {
   const listeners2 = /* @__PURE__ */ new Set();
   let snapshot = Object.freeze({ rows: Object.freeze({}) });
   let disposed = false;
@@ -34360,10 +34428,10 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     // Settings' confirmed recovery composes the existing owner RPCs. Each RPC retains its
     // own host admission checks; Reset and start are deliberately not an atomic transaction.
     async recover({ botId, provider, ref }) {
-      if (disposed || !known(provider) || !botOf?.(botId)) return false;
+      if (disposed || !known(provider) || !botOf2?.(botId)) return false;
       const model = modelOf2?.(botId);
       let operation = nextIntent();
-      const current = () => !disposed && intent === operation && Boolean(botOf(botId)) && modelOf2?.(botId) === model;
+      const current = () => !disposed && intent === operation && Boolean(botOf2(botId)) && modelOf2?.(botId) === model;
       await actions.cliLoginReset(botId, provider);
       if (!current()) return false;
       stopPoll(provider);
@@ -34639,15 +34707,15 @@ function lineDiff(before, after) {
 }
 
 // src/client/learning-card.js
-var import_react87 = require("react");
+var import_react88 = require("react");
 var failedAnswers = /* @__PURE__ */ new Map();
 function ProposalCard({ proposal, initialError = "", onFailure, onResolved, actions }) {
   const outcome = proposal.outcome;
-  const [busy, setBusy] = (0, import_react87.useState)(false);
-  const [error, setError] = (0, import_react87.useState)(initialError);
-  const [open, setOpen] = (0, import_react87.useState)(false);
-  const busyRef = (0, import_react87.useRef)(false);
-  const titleId = (0, import_react87.useId)();
+  const [busy, setBusy] = (0, import_react88.useState)(false);
+  const [error, setError] = (0, import_react88.useState)(initialError);
+  const [open, setOpen] = (0, import_react88.useState)(false);
+  const busyRef = (0, import_react88.useRef)(false);
+  const titleId = (0, import_react88.useId)();
   const answer = (approve) => {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -34664,68 +34732,68 @@ function ProposalCard({ proposal, initialError = "", onFailure, onResolved, acti
   };
   const update = proposal.action === "update";
   const agents = proposal.kind === "agents";
-  const rows2 = (0, import_react87.useMemo)(() => lineDiff(update ? proposal.previous?.content : "", proposal.content), [update, proposal.previous?.content, proposal.content]);
+  const rows2 = (0, import_react88.useMemo)(() => lineDiff(update ? proposal.previous?.content : "", proposal.content), [update, proposal.previous?.content, proposal.content]);
   const change = agents ? [
-    (0, import_react87.createElement)(FileBox, { key: "file", name: "AGENTS.md", path: proposal.folder, state: proposal.exists === false ? "Added" : "Modified", blocks: proposal.edits.map((edit) => [
+    (0, import_react88.createElement)(FileBox, { key: "file", name: "AGENTS.md", path: proposal.folder, state: proposal.exists === false ? "Added" : "Modified", blocks: proposal.edits.map((edit) => [
       ...(edit.op === "add" ? [] : editLines(edit.old)).map((line) => ({ kind: "removed", line })),
       ...(edit.op === "remove" ? [] : editLines(edit.text)).map((line) => ({ kind: "added", line }))
     ]) }),
-    ...proposal.edits.map((edit, index) => edit.why ? (0, import_react87.createElement)("p", { className: "bt-learning-why", key: `why-${index}` }, edit.why) : null)
+    ...proposal.edits.map((edit, index) => edit.why ? (0, import_react88.createElement)("p", { className: "bt-learning-why", key: `why-${index}` }, edit.why) : null)
   ] : [
-    (0, import_react87.createElement)(FileBox, { key: "file", name: "SKILL.md", path: `skills/${proposal.name}`, state: update ? "Updated" : "Added", blocks: [rows2] }),
-    proposal.why ? (0, import_react87.createElement)("p", { className: "bt-learning-why", key: "why" }, proposal.why) : null
+    (0, import_react88.createElement)(FileBox, { key: "file", name: "SKILL.md", path: `skills/${proposal.name}`, state: update ? "Updated" : "Added", blocks: [rows2] }),
+    proposal.why ? (0, import_react88.createElement)("p", { className: "bt-learning-why", key: "why" }, proposal.why) : null
   ];
   const kind = t(agents ? "AGENTS.md update" : update ? "Skill update" : "New skill");
   if (outcome) {
     const what = agents ? proposal.folder : proposal.name;
-    return (0, import_react87.createElement)(
+    return (0, import_react88.createElement)(
       "section",
       { className: "bt-q bt-q-settled bt-learning-card bt-learning-settled", role: "group", "aria-label": `${kind} · ${what}`, "data-outcome": outcome },
-      (0, import_react87.createElement)(
+      (0, import_react88.createElement)(
         "button",
         { type: "button", className: "bt-learning-fold", "aria-expanded": open, onClick: () => setOpen(!open) },
-        (0, import_react87.createElement)("span", { className: "bt-learning-icon", "aria-hidden": true }, (0, import_react87.createElement)(agents ? PencilIcon : MemoryIcon)),
-        (0, import_react87.createElement)("span", { className: "bt-learning-kind" }, kind),
-        (0, import_react87.createElement)("span", { className: "bt-learning-sum" }, `${t(outcome === "approved" ? "Approved" : "Declined")} · ${what}`)
+        (0, import_react88.createElement)("span", { className: "bt-learning-icon", "aria-hidden": true }, (0, import_react88.createElement)(agents ? PencilIcon : MemoryIcon)),
+        (0, import_react88.createElement)("span", { className: "bt-learning-kind" }, kind),
+        (0, import_react88.createElement)("span", { className: "bt-learning-sum" }, `${t(outcome === "approved" ? "Approved" : "Declined")} · ${what}`)
       ),
       open ? change : null
     );
   }
   const oldDetail = update && typeof proposal.previous?.description === "string" && proposal.previous.description !== proposal.description ? proposal.previous.description : void 0;
-  return (0, import_react87.createElement)(
+  return (0, import_react88.createElement)(
     "section",
     { className: "bt-q bt-learning-card", role: "group", "aria-labelledby": titleId, "aria-busy": busy },
-    agents ? (0, import_react87.createElement)(ProposalHead, { titleId, icon: PencilIcon, title: kind }) : (0, import_react87.createElement)(ProposalHead, { titleId, title: proposal.name, kind, detail: proposal.description, oldDetail }),
+    agents ? (0, import_react88.createElement)(ProposalHead, { titleId, icon: PencilIcon, title: kind }) : (0, import_react88.createElement)(ProposalHead, { titleId, title: proposal.name, kind, detail: proposal.description, oldDetail }),
     change,
-    error ? (0, import_react87.createElement)("div", { className: "bt-learning-error", role: "alert" }, error) : null,
-    (0, import_react87.createElement)(ProposalFoot, { busy, answer })
+    error ? (0, import_react88.createElement)("div", { className: "bt-learning-error", role: "alert" }, error) : null,
+    (0, import_react88.createElement)(ProposalFoot, { busy, answer })
   );
 }
 function ProposalHead({ titleId, icon: icon2 = MemoryIcon, title, kind, detail, oldDetail }) {
-  return (0, import_react87.createElement)(
+  return (0, import_react88.createElement)(
     "div",
     { className: "bt-q-head" },
-    (0, import_react87.createElement)("span", { className: "bt-learning-icon", "aria-hidden": true }, (0, import_react87.createElement)(icon2)),
-    (0, import_react87.createElement)(
+    (0, import_react88.createElement)("span", { className: "bt-learning-icon", "aria-hidden": true }, (0, import_react88.createElement)(icon2)),
+    (0, import_react88.createElement)(
       "div",
       { className: "bt-q-text" },
-      (0, import_react87.createElement)("p", { className: "bt-q-title", id: titleId }, title),
-      kind ? (0, import_react87.createElement)("div", { className: "bt-q-detail" }, kind) : null,
-      oldDetail ? (0, import_react87.createElement)("p", { className: "bt-learning-description bt-learning-old" }, (0, import_react87.createElement)("del", null, oldDetail)) : null,
-      detail ? (0, import_react87.createElement)("p", { className: "bt-learning-description" }, detail) : null
+      (0, import_react88.createElement)("p", { className: "bt-q-title", id: titleId }, title),
+      kind ? (0, import_react88.createElement)("div", { className: "bt-q-detail" }, kind) : null,
+      oldDetail ? (0, import_react88.createElement)("p", { className: "bt-learning-description bt-learning-old" }, (0, import_react88.createElement)("del", null, oldDetail)) : null,
+      detail ? (0, import_react88.createElement)("p", { className: "bt-learning-description" }, detail) : null
     ),
-    (0, import_react87.createElement)("span", { className: "bt-q-badge bt-learning-status" }, (0, import_react87.createElement)("span", { className: "bt-learning-dot", "aria-hidden": true }), t("Awaiting approval"))
+    (0, import_react88.createElement)("span", { className: "bt-q-badge bt-learning-status" }, (0, import_react88.createElement)("span", { className: "bt-learning-dot", "aria-hidden": true }), t("Awaiting approval"))
   );
 }
 function ProposalFoot({ busy, answer }) {
-  return (0, import_react87.createElement)(
+  return (0, import_react88.createElement)(
     "div",
     { className: "bt-q-foot bt-learning-foot" },
-    (0, import_react87.createElement)("button", { type: "button", className: "bt-learning-btn bt-learning-decline", disabled: busy, onClick: () => answer(false) }, t("Decline")),
-    (0, import_react87.createElement)(
+    (0, import_react88.createElement)("button", { type: "button", className: "bt-learning-btn bt-learning-decline", disabled: busy, onClick: () => answer(false) }, t("Decline")),
+    (0, import_react88.createElement)(
       "button",
       { type: "button", className: "bt-learning-btn bt-learning-approve", disabled: busy, onClick: () => answer(true) },
-      (0, import_react87.createElement)(CheckIcon),
+      (0, import_react88.createElement)(CheckIcon),
       t("Approve")
     )
   );
@@ -34733,43 +34801,43 @@ function ProposalFoot({ busy, answer }) {
 var COLLAPSE_ROWS = 8;
 var SIGNS = { added: "+", removed: "−", same: "" };
 function FileBox({ name, path: path2, state, blocks }) {
-  const [open, setOpen] = (0, import_react87.useState)(false);
+  const [open, setOpen] = (0, import_react88.useState)(false);
   const all = blocks.flat();
   const added = all.filter((row) => row.kind === "added").length;
   const removed = all.filter((row) => row.kind === "removed").length;
   const folds = all.length > COLLAPSE_ROWS;
   const shut = folds && !open;
-  return (0, import_react87.createElement)(
+  return (0, import_react88.createElement)(
     "div",
     { className: "bt-learning-file" },
-    (0, import_react87.createElement)(
+    (0, import_react88.createElement)(
       "div",
       { className: "bt-learning-filehead" },
-      (0, import_react87.createElement)("span", { className: "bt-learning-name" }, name),
-      path2 ? (0, import_react87.createElement)("span", { className: "bt-learning-path" }, path2) : null,
-      (0, import_react87.createElement)("span", { className: "bt-learning-spacer" }),
-      added > 0 ? (0, import_react87.createElement)("span", { className: "bt-learning-plus" }, `+${added}`) : null,
-      removed > 0 ? (0, import_react87.createElement)("span", { className: "bt-learning-minus" }, `−${removed}`) : null,
-      (0, import_react87.createElement)("span", { className: `bt-learning-state bt-learning-state-${state.toLowerCase()}` }, t(state))
+      (0, import_react88.createElement)("span", { className: "bt-learning-name" }, name),
+      path2 ? (0, import_react88.createElement)("span", { className: "bt-learning-path" }, path2) : null,
+      (0, import_react88.createElement)("span", { className: "bt-learning-spacer" }),
+      added > 0 ? (0, import_react88.createElement)("span", { className: "bt-learning-plus" }, `+${added}`) : null,
+      removed > 0 ? (0, import_react88.createElement)("span", { className: "bt-learning-minus" }, `−${removed}`) : null,
+      (0, import_react88.createElement)("span", { className: `bt-learning-state bt-learning-state-${state.toLowerCase()}` }, t(state))
     ),
-    (0, import_react87.createElement)(
+    (0, import_react88.createElement)(
       "div",
       { className: shut ? "bt-learning-code bt-learning-shut" : "bt-learning-code" },
       blocks.map((rows2, blockIndex) => [
-        blockIndex > 0 ? (0, import_react87.createElement)("div", { className: "bt-learning-gap", key: `gap-${blockIndex}` }) : null,
-        ...rows2.map((row, rowIndex) => (0, import_react87.createElement)(
+        blockIndex > 0 ? (0, import_react88.createElement)("div", { className: "bt-learning-gap", key: `gap-${blockIndex}` }) : null,
+        ...rows2.map((row, rowIndex) => (0, import_react88.createElement)(
           "div",
           { className: `bt-learning-row bt-learning-${row.kind}`, key: `${blockIndex}-${rowIndex}` },
-          (0, import_react87.createElement)("span", { className: "bt-learning-num", "aria-hidden": true }, row.number ?? ""),
-          (0, import_react87.createElement)("span", { className: "bt-learning-sign", "aria-hidden": true }, SIGNS[row.kind]),
-          (0, import_react87.createElement)("span", { className: "bt-learning-text" }, row.line || " ")
+          (0, import_react88.createElement)("span", { className: "bt-learning-num", "aria-hidden": true }, row.number ?? ""),
+          (0, import_react88.createElement)("span", { className: "bt-learning-sign", "aria-hidden": true }, SIGNS[row.kind]),
+          (0, import_react88.createElement)("span", { className: "bt-learning-text" }, row.line || " ")
         ))
       ])
     ),
-    folds ? (0, import_react87.createElement)(
+    folds ? (0, import_react88.createElement)(
       "div",
       { className: shut ? "bt-learning-morebar bt-learning-morebar-shut" : "bt-learning-morebar" },
-      (0, import_react87.createElement)(
+      (0, import_react88.createElement)(
         "button",
         { type: "button", className: "bt-learning-more", "aria-expanded": open, onClick: () => setOpen(!open) },
         t(open ? "Show less" : "Show all {count} lines", { count: all.length })
@@ -34780,7 +34848,7 @@ function FileBox({ name, path: path2, state, blocks }) {
 function LearningProposals({ turn, dock, sessionId, useRoster, actions }) {
   const roster = useRoster((value) => value);
   const facts = useTurnFacts(sessionId, actions);
-  const [failed, setFailed] = (0, import_react87.useState)({});
+  const [failed, setFailed] = (0, import_react88.useState)({});
   const bot = roster.byId?.[sessionId];
   if (!bot || currentPart(bot) !== sessionId) return null;
   const proposals = roster.learning?.[bot.id] ?? [];
@@ -34809,10 +34877,10 @@ function LearningProposals({ turn, dock, sessionId, useRoster, actions }) {
     delete next[id];
     return next;
   });
-  return (0, import_react87.createElement)("div", { className: dock ? "bt-learning-stack bt-learning-dock" : "bt-learning-stack" }, cards2.map((proposal) => (0, import_react87.createElement)(
+  return (0, import_react88.createElement)("div", { className: dock ? "bt-learning-stack bt-learning-dock" : "bt-learning-stack" }, cards2.map((proposal) => (0, import_react88.createElement)(
     "div",
     { className: "bt-q-inline", key: proposal.id },
-    (0, import_react87.createElement)(ProposalCard, {
+    (0, import_react88.createElement)(ProposalCard, {
       proposal,
       initialError: failed[proposal.id]?.error ?? failedAnswers.get(proposal.id)?.error,
       onFailure,
@@ -34822,10 +34890,10 @@ function LearningProposals({ turn, dock, sessionId, useRoster, actions }) {
   )));
 }
 function LearningTurnTail(props) {
-  return (0, import_react87.createElement)(LearningProposals, { ...props, dock: false });
+  return (0, import_react88.createElement)(LearningProposals, { ...props, dock: false });
 }
 function LearningDock(props) {
-  return (0, import_react87.createElement)(LearningProposals, { ...props, dock: true });
+  return (0, import_react88.createElement)(LearningProposals, { ...props, dock: true });
 }
 var LEARNING_CSS = `
 .bt-learning-stack{display:flex;flex-direction:column;gap:4px}
@@ -34943,7 +35011,7 @@ function createSwitchWindow(settle) {
 }
 
 // src/client/suggestions.js
-var import_react88 = require("react");
+var import_react89 = require("react");
 var MAX_SUGGESTIONS = 3;
 var IMAGE_ACCESS_TTL_MS = 6e4;
 var imagesReady;
@@ -34991,21 +35059,21 @@ function SuggestionDock({ sessionId, input, session, useRoster, useSessions }) {
   const outline = (list) => list.projectionsBySession?.[part]?.values?.turnOutline ?? list.byId?.[part]?.projectionValues?.turnOutline;
   const wrote = useSessions ? useSessions((list) => personWrote(outline(list), roster.exchangeTurns?.[part] ?? [])) : true;
   const entries2 = useEntries(chatSuggestions);
-  const [images, setImages] = (0, import_react88.useState)(false);
-  (0, import_react88.useEffect)(() => {
+  const [images, setImages] = (0, import_react89.useState)(false);
+  (0, import_react89.useEffect)(() => {
     void imageAccess().then(setImages);
   }, [sessionId]);
   if (!bot || wrote || session?.running || (input?.draft ?? "").trim() !== "") return null;
   const items = suggestionsFor(entries2, { bot, roster, images });
   if (items.length === 0) return null;
-  return (0, import_react88.createElement)(
+  return (0, import_react89.createElement)(
     "div",
     { className: "bt-suggest", role: "group", "aria-label": t("Suggestions") },
-    items.map((item) => (0, import_react88.createElement)(
+    items.map((item) => (0, import_react89.createElement)(
       "button",
       { key: item.key, type: "button", className: "bt-suggest-chip", onClick: () => fillComposer(item.text) },
-      icons_exports[item.icon] ? (0, import_react88.createElement)("span", { className: "bt-suggest-icon", "aria-hidden": true }, (0, import_react88.createElement)(icons_exports[item.icon])) : null,
-      (0, import_react88.createElement)("span", null, item.label)
+      icons_exports[item.icon] ? (0, import_react89.createElement)("span", { className: "bt-suggest-icon", "aria-hidden": true }, (0, import_react89.createElement)(icons_exports[item.icon])) : null,
+      (0, import_react89.createElement)("span", null, item.label)
     ))
   );
 }
@@ -35021,7 +35089,7 @@ var SUGGEST_CSS = `
 `;
 
 // src/client/queue-dock.js
-var import_react89 = require("react");
+var import_react90 = require("react");
 var OWN_QUEUE_KINDS = /* @__PURE__ */ new Set(["user", "schedule", "user-question-reply"]);
 var EMPTY_QUEUE = [];
 var QUEUE_TEXT_FACTS = { collapseWhitespace: true, trimWhitespace: true };
@@ -35038,17 +35106,17 @@ function queueAttachments(content) {
 var fileSizeText2 = (bytes) => typeof bytes !== "number" || !Number.isFinite(bytes) ? "" : bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
 function QueueFile({ attachment, label }) {
   const size = fileSizeText2(attachment.bytes);
-  return (0, import_react89.createElement)(
+  return (0, import_react90.createElement)(
     "span",
     { className: "bt-queue-file", "aria-label": label, title: attachment.name },
-    (0, import_react89.createElement)("span", { className: "bt-queue-fileicon", "aria-hidden": true }, (0, import_react89.createElement)(PaperclipIcon)),
-    (0, import_react89.createElement)("span", { className: "bt-queue-filename" }, attachment.name),
-    size !== "" ? (0, import_react89.createElement)("span", { className: "bt-queue-filesize" }, size) : null
+    (0, import_react90.createElement)("span", { className: "bt-queue-fileicon", "aria-hidden": true }, (0, import_react90.createElement)(PaperclipIcon)),
+    (0, import_react90.createElement)("span", { className: "bt-queue-filename" }, attachment.name),
+    size !== "" ? (0, import_react90.createElement)("span", { className: "bt-queue-filesize" }, size) : null
   );
 }
 function QueueThumb({ attachment, loadImage: loadImage2, label }) {
-  const [url, setUrl] = (0, import_react89.useState)(null);
-  (0, import_react89.useEffect)(() => {
+  const [url, setUrl] = (0, import_react90.useState)(null);
+  (0, import_react90.useEffect)(() => {
     let alive = true;
     loadImage2(attachment).then((resolved) => {
       if (alive) setUrl(resolved);
@@ -35058,22 +35126,22 @@ function QueueThumb({ attachment, loadImage: loadImage2, label }) {
       alive = false;
     };
   }, [attachment, loadImage2]);
-  return url === null ? (0, import_react89.createElement)("span", { className: "bt-queue-thumb", "aria-hidden": true }) : (0, import_react89.createElement)("img", { className: "bt-queue-thumb", src: url, alt: label });
+  return url === null ? (0, import_react90.createElement)("span", { className: "bt-queue-thumb", "aria-hidden": true }) : (0, import_react90.createElement)("img", { className: "bt-queue-thumb", src: url, alt: label });
 }
 function Preview({ text: text2, renderFactorySlot }) {
   const rendered = renderFactorySlot?.("conversation.user.text", { text: text2, facts: QUEUE_TEXT_FACTS, interactive: false, ellipsis: true });
-  return (0, import_react89.createElement)("span", { className: "bt-queue-preview" }, rendered ?? text2);
+  return (0, import_react90.createElement)("span", { className: "bt-queue-preview" }, rendered ?? text2);
 }
 function EditField({ text: text2, onChange, onSave, onCancel }) {
-  const field = (0, import_react89.useRef)(null);
-  (0, import_react89.useEffect)(() => {
+  const field = (0, import_react90.useRef)(null);
+  (0, import_react90.useEffect)(() => {
     const node = field.current;
     if (node === null) return;
     node.focus();
     node.style.height = "auto";
     node.style.height = `${node.scrollHeight}px`;
   }, [text2]);
-  return (0, import_react89.createElement)("textarea", {
+  return (0, import_react90.createElement)("textarea", {
     ref: field,
     className: "bt-queue-edit",
     value: text2,
@@ -35092,28 +35160,28 @@ function EditField({ text: text2, onChange, onSave, onCancel }) {
   });
 }
 function RowButton({ label, title, disabled, onClick, children }) {
-  return (0, import_react89.createElement)("button", { type: "button", className: "bt-queue-action", "aria-label": label, title: title ?? label, disabled, onClick }, children);
+  return (0, import_react90.createElement)("button", { type: "button", className: "bt-queue-action", "aria-label": label, title: title ?? label, disabled, onClick }, children);
 }
 function QueueDock({ useSession, useProjection, updateQueue, loadImage: loadImage2, renderFactorySlot, actions }) {
   const inbox = useProjection?.("inbox");
   const pendingSubmissions = useSession?.((s) => s.pendingSubmissions) ?? EMPTY_QUEUE;
-  const queue = (0, import_react89.useMemo)(() => {
+  const queue = (0, import_react90.useMemo)(() => {
     const rows2 = (inbox?.["next-turn"] ?? EMPTY_QUEUE).filter((row) => OWN_QUEUE_KINDS.has(row.source?.kind));
     const inChat = new Set(pendingSubmissions.filter((item) => item.placement === "transcript").map((item) => item.requestId));
     return inChat.size === 0 ? rows2 : rows2.filter(({ source }) => source === null || typeof source !== "object" || !("rpcId" in source) || !inChat.has(source.rpcId));
   }, [inbox, pendingSubmissions]);
-  const pendingQueue = (0, import_react89.useMemo)(() => {
+  const pendingQueue = (0, import_react90.useMemo)(() => {
     const admitted = new Set(queue.flatMap(({ source }) => source !== null && typeof source === "object" && "rpcId" in source ? [source.rpcId] : []));
     return pendingSubmissions.filter((submission) => submission.placement === "queued" && !admitted.has(submission.requestId));
   }, [pendingSubmissions, queue]);
   const rowCount = queue.length + pendingQueue.length;
   const running2 = useSession?.((s) => s.running) === true;
   const queueMutable = useSession?.((s) => s.subagent === null || s.subagent === void 0 || s.subagent.address?.mode === "continuable") ?? true;
-  const [editing, setEditing] = (0, import_react89.useState)(null);
-  const [busy, setBusy] = (0, import_react89.useState)(null);
-  const [collapsed, setCollapsed] = (0, import_react89.useState)(true);
-  const listId = (0, import_react89.useId)();
-  (0, import_react89.useEffect)(() => {
+  const [editing, setEditing] = (0, import_react90.useState)(null);
+  const [busy, setBusy] = (0, import_react90.useState)(null);
+  const [collapsed, setCollapsed] = (0, import_react90.useState)(true);
+  const listId = (0, import_react90.useId)();
+  (0, import_react90.useEffect)(() => {
     if (rowCount === 0 && !collapsed) setCollapsed(true);
     if (editing !== null && (!queueMutable || !queue.some((row) => row.id === editing.id))) setEditing(null);
   }, [collapsed, editing, queue, queueMutable, rowCount]);
@@ -35141,77 +35209,77 @@ function QueueDock({ useSession, useProjection, updateQueue, loadImage: loadImag
     if (editing === null || editing.text.trim() === "") return;
     if (await applyAction(editing.id, { kind: "edit", content: [{ type: "text", text: editing.text }] }, t("Couldn’t edit the queued message — it may have started already."))) setEditing(null);
   };
-  return (0, import_react89.createElement)(
+  return (0, import_react90.createElement)(
     "div",
     { className: "bt-queue-dock", "data-queue-dock": "" },
-    (0, import_react89.createElement)(
+    (0, import_react90.createElement)(
       "div",
       { className: "bt-queue-panel" },
-      rowCount > 1 && (0, import_react89.createElement)(
+      rowCount > 1 && (0, import_react90.createElement)(
         "button",
         { type: "button", className: "bt-queue-head", "aria-controls": listId, "aria-expanded": expanded, disabled: interactionActive, onClick: () => setCollapsed((value) => !value) },
-        (0, import_react89.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react89.createElement)(QueueIcon)),
-        (0, import_react89.createElement)("span", { className: "bt-queue-count" }, t("{n} queued messages", { n: rowCount })),
-        !listVisible && pendingQueue.length > 0 && (0, import_react89.createElement)("span", { className: "bt-queue-status", role: "status" }, t("Sending…")),
-        (0, import_react89.createElement)("span", { className: "bt-queue-chev", "aria-hidden": true }, expanded ? (0, import_react89.createElement)(ChevronDownIcon) : (0, import_react89.createElement)(ChevronUpIcon))
+        (0, import_react90.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react90.createElement)(QueueIcon)),
+        (0, import_react90.createElement)("span", { className: "bt-queue-count" }, t("{n} queued messages", { n: rowCount })),
+        !listVisible && pendingQueue.length > 0 && (0, import_react90.createElement)("span", { className: "bt-queue-status", role: "status" }, t("Sending…")),
+        (0, import_react90.createElement)("span", { className: "bt-queue-chev", "aria-hidden": true }, expanded ? (0, import_react90.createElement)(ChevronDownIcon) : (0, import_react90.createElement)(ChevronUpIcon))
       ),
-      (0, import_react89.createElement)(
+      (0, import_react90.createElement)(
         "ul",
         { id: listId, className: "bt-queue-list", hidden: !listVisible },
         listVisible && queue.map((row) => {
           const attachments = queueAttachments(row.content);
           const text2 = textOf(row.content);
-          return (0, import_react89.createElement)(
+          return (0, import_react90.createElement)(
             "li",
             { key: row.id, className: "bt-queue-row" },
-            rowCount === 1 && (0, import_react89.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react89.createElement)(QueueIcon)),
-            editing?.id === row.id ? (0, import_react89.createElement)(EditField, { text: editing.text, onChange: (text3) => setEditing({ id: row.id, text: text3 }), onSave: saveEdit, onCancel: () => setEditing(null) }) : (0, import_react89.createElement)(
-              import_react89.Fragment,
+            rowCount === 1 && (0, import_react90.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react90.createElement)(QueueIcon)),
+            editing?.id === row.id ? (0, import_react90.createElement)(EditField, { text: editing.text, onChange: (text3) => setEditing({ id: row.id, text: text3 }), onSave: saveEdit, onCancel: () => setEditing(null) }) : (0, import_react90.createElement)(
+              import_react90.Fragment,
               null,
-              attachments.length > 0 && (0, import_react89.createElement)(
+              attachments.length > 0 && (0, import_react90.createElement)(
                 "span",
                 { className: "bt-queue-attachments" },
-                attachments.map((item, index) => item.type === "image" ? (0, import_react89.createElement)(QueueThumb, { key: `${item.attachment.attachmentId}:${index}`, attachment: item.attachment, loadImage: loadImage2, label: t("Queued image") }) : (0, import_react89.createElement)(QueueFile, { key: `${item.attachment.attachmentId}:${item.attachment.name}:${index}`, attachment: item.attachment, label: t("Queued file {name}", { name: item.attachment.name }) }))
+                attachments.map((item, index) => item.type === "image" ? (0, import_react90.createElement)(QueueThumb, { key: `${item.attachment.attachmentId}:${index}`, attachment: item.attachment, loadImage: loadImage2, label: t("Queued image") }) : (0, import_react90.createElement)(QueueFile, { key: `${item.attachment.attachmentId}:${item.attachment.name}:${index}`, attachment: item.attachment, label: t("Queued file {name}", { name: item.attachment.name }) }))
               ),
-              (0, import_react89.createElement)(Preview, { text: row.content.filter((block) => block.type === "text").map((block) => block.text).join(""), renderFactorySlot })
+              (0, import_react90.createElement)(Preview, { text: row.content.filter((block) => block.type === "text").map((block) => block.text).join(""), renderFactorySlot })
             ),
-            queueMutable && (0, import_react89.createElement)(
+            queueMutable && (0, import_react90.createElement)(
               "div",
               { className: "bt-queue-actions" },
-              editing?.id === row.id ? (0, import_react89.createElement)(
-                import_react89.Fragment,
+              editing?.id === row.id ? (0, import_react90.createElement)(
+                import_react90.Fragment,
                 null,
-                (0, import_react89.createElement)(RowButton, { label: t("Save queued message"), disabled: busy !== null || editing.text.trim() === "", onClick: saveEdit }, (0, import_react89.createElement)(CheckIcon)),
-                (0, import_react89.createElement)(RowButton, { label: t("Cancel editing"), disabled: busy !== null, onClick: () => setEditing(null) }, (0, import_react89.createElement)(CloseIcon))
-              ) : (0, import_react89.createElement)(
-                import_react89.Fragment,
+                (0, import_react90.createElement)(RowButton, { label: t("Save queued message"), disabled: busy !== null || editing.text.trim() === "", onClick: saveEdit }, (0, import_react90.createElement)(CheckIcon)),
+                (0, import_react90.createElement)(RowButton, { label: t("Cancel editing"), disabled: busy !== null, onClick: () => setEditing(null) }, (0, import_react90.createElement)(CloseIcon))
+              ) : (0, import_react90.createElement)(
+                import_react90.Fragment,
                 null,
-                (0, import_react89.createElement)(RowButton, { label: t("Edit queued message"), title: text2 === null ? t("Contains non-text content, so editing is not supported yet") : void 0, disabled: busy !== null || text2 === null, onClick: () => {
+                (0, import_react90.createElement)(RowButton, { label: t("Edit queued message"), title: text2 === null ? t("Contains non-text content, so editing is not supported yet") : void 0, disabled: busy !== null || text2 === null, onClick: () => {
                   if (text2 !== null) setEditing({ id: row.id, text: text2 });
-                } }, (0, import_react89.createElement)(PencilIcon)),
-                (0, import_react89.createElement)(RowButton, { label: t("Delete queued message"), disabled: busy !== null, onClick: () => applyAction(row.id, { kind: "remove" }, t("Couldn’t delete the queued message — it may have started already.")) }, (0, import_react89.createElement)(TrashIcon)),
-                (0, import_react89.createElement)(RowButton, { label: t("Steer queued message"), title: running2 ? void 0 : t("Only while a turn is running"), disabled: busy !== null || !running2, onClick: () => applyAction(row.id, { kind: "steer" }, t("Couldn’t steer the queued message. Try again.")) }, (0, import_react89.createElement)(ArrowUpIcon))
+                } }, (0, import_react90.createElement)(PencilIcon)),
+                (0, import_react90.createElement)(RowButton, { label: t("Delete queued message"), disabled: busy !== null, onClick: () => applyAction(row.id, { kind: "remove" }, t("Couldn’t delete the queued message — it may have started already.")) }, (0, import_react90.createElement)(TrashIcon)),
+                (0, import_react90.createElement)(RowButton, { label: t("Steer queued message"), title: running2 ? void 0 : t("Only while a turn is running"), disabled: busy !== null || !running2, onClick: () => applyAction(row.id, { kind: "steer" }, t("Couldn’t steer the queued message. Try again.")) }, (0, import_react90.createElement)(ArrowUpIcon))
               )
             )
           );
         }),
-        listVisible && pendingQueue.map((submission) => (0, import_react89.createElement)(
+        listVisible && pendingQueue.map((submission) => (0, import_react90.createElement)(
           "li",
           { key: submission.requestId, className: "bt-queue-row bt-queue-pending" },
-          rowCount === 1 && (0, import_react89.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react89.createElement)(QueueIcon)),
-          submission.attachments.length > 0 && (0, import_react89.createElement)(
+          rowCount === 1 && (0, import_react90.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react90.createElement)(QueueIcon)),
+          submission.attachments.length > 0 && (0, import_react90.createElement)(
             "span",
             { className: "bt-queue-attachments" },
-            submission.attachments.map((attachment, index) => attachment.type === "image" ? (0, import_react89.createElement)("img", { key: `${attachment.value.previewUrl}:${index}`, className: "bt-queue-thumb", src: attachment.value.previewUrl, alt: t("Queued image") }) : (0, import_react89.createElement)(QueueFile, { key: `${attachment.value.attachmentId}:${attachment.value.name}:${index}`, attachment: attachment.value, label: t("Queued file {name}", { name: attachment.value.name }) }))
+            submission.attachments.map((attachment, index) => attachment.type === "image" ? (0, import_react90.createElement)("img", { key: `${attachment.value.previewUrl}:${index}`, className: "bt-queue-thumb", src: attachment.value.previewUrl, alt: t("Queued image") }) : (0, import_react90.createElement)(QueueFile, { key: `${attachment.value.attachmentId}:${attachment.value.name}:${index}`, attachment: attachment.value, label: t("Queued file {name}", { name: attachment.value.name }) }))
           ),
-          (0, import_react89.createElement)(Preview, { text: submission.text, renderFactorySlot }),
-          (0, import_react89.createElement)("span", { className: "bt-queue-status", role: "status" }, t("Sending…")),
-          queueMutable && (0, import_react89.createElement)(
+          (0, import_react90.createElement)(Preview, { text: submission.text, renderFactorySlot }),
+          (0, import_react90.createElement)("span", { className: "bt-queue-status", role: "status" }, t("Sending…")),
+          queueMutable && (0, import_react90.createElement)(
             "div",
             { className: "bt-queue-actions" },
-            (0, import_react89.createElement)(RowButton, { label: t("Edit queued message"), title: t("Sending…"), disabled: true }, (0, import_react89.createElement)(PencilIcon)),
-            (0, import_react89.createElement)(RowButton, { label: t("Delete queued message"), title: t("Sending…"), disabled: true }, (0, import_react89.createElement)(TrashIcon)),
-            (0, import_react89.createElement)(RowButton, { label: t("Steer queued message"), title: t("Sending…"), disabled: true }, (0, import_react89.createElement)(ArrowUpIcon))
+            (0, import_react90.createElement)(RowButton, { label: t("Edit queued message"), title: t("Sending…"), disabled: true }, (0, import_react90.createElement)(PencilIcon)),
+            (0, import_react90.createElement)(RowButton, { label: t("Delete queued message"), title: t("Sending…"), disabled: true }, (0, import_react90.createElement)(TrashIcon)),
+            (0, import_react90.createElement)(RowButton, { label: t("Steer queued message"), title: t("Sending…"), disabled: true }, (0, import_react90.createElement)(ArrowUpIcon))
           )
         ))
       )
@@ -36571,7 +36639,10 @@ function apply(ctx) {
     // The shell's own queue dock lists every queued inbox row as the user's
     // drafts — including the team's relayed mail. Reusing its id puts ours in
     // its cell; it lists only the sends the user authored (#663).
-    () => shadow("conversation.input.dock", { id: "queue", order: 20, priority: BOT_PRIORITY, inject: queueFace }, QueueDock)
+    () => shadow("conversation.input.dock", { id: "queue", order: 20, priority: BOT_PRIORITY, inject: queueFace }, QueueDock),
+    // Keep the running-model mismatch visible just above the composer while it lasts.
+    () => installCompiledStyles(MODEL_SWITCH_CSS, "model-switch"),
+    () => shadow("conversation.input.dock", { id: "bot-model-switch", order: -70, inject: face }, ModelSwitchNotice)
   ];
   ctx.effect(() => installCompiledStyles(RETURN_CSS, "return"), "ds-bot: return styles");
   ctx.effect(() => installCompiledStyles(COMPUTER_CSS, "computer"), "omni-ui: computer styles");

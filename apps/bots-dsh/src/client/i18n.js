@@ -1286,6 +1286,7 @@ const ZH = {
   'Model: {model}': '模型：{model}',
   'instead of {model}': '替代 {model}',
   'Running instead of {model}': '正在运行，替代 {model}',
+  'This chat is running on {running} instead of {saved}.': '此对话正在使用 {running}，而不是 {saved}。',
   none: '无',
   'Choose a model': '选择模型',
   '{provider} · not available': '{provider} · 不可用',

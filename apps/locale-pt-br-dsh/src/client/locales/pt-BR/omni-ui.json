@@ -210,6 +210,7 @@
   "Model: {model}": "Modelo: {model}",
   "instead of {model}": "no lugar de {model}",
   "Running instead of {model}": "Rodando no lugar de {model}",
+  "This chat is running on {running} instead of {saved}.": "Esta conversa está no {running} em vez de {saved}.",
   "none": "nenhum",
   "Choose a model": "Escolha um modelo",
   "{provider} · not available": "{provider} · indisponível",
