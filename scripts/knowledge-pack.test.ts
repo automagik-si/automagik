@@ -305,12 +305,12 @@ describe('the knowledge pack', () => {
     const home = (name: string) => `/${'home'}/${name}`;
     const withGuide = (text: string) => [{ ...GENIE, files: { ...GENIE.files, 'docs/guide.md': text } }, DOCS, OMNI];
     const placeholders = [at('you', 'gmail.com'), at('5511999999999', 's.whatsapp.net'), at('120363123456789', 'g.us'),
-      at('omni', '2.YYMMDD'), at('dpo', 'namastex.ai'), `${home('user')}/x`, `${home('genie')}/.claude`, home('automagik')];
+      at('omni', '2.YYMMDD'), at('git', 'github.com'), at('dpo', 'namastex.ai'), `${home('user')}/x`, `${home('genie')}/.claude`, home('automagik')];
     gh.set(withGuide(`# Guide\n\n${placeholders.join('\n')}\n`));
     try {
       await build({ ...gh.opts, out: freshOut() });
-      // A tool address is no ruled kind, so it is a hit too.
-      const personal = [at('ana.souza', 'gmail.com'), at('xyou', 'gmail.com'), at('5511987654321', 's.whatsapp.net'), at('git', 'github.com'),
+      // A tool address outside the three listed ones is a hit too.
+      const personal = [at('ana.souza', 'gmail.com'), at('xyou', 'gmail.com'), at('5511987654321', 's.whatsapp.net'), at('support', 'github.com'),
         home('username'), home('ana')];
       gh.set(withGuide(`# Guide\n\n${personal.join('\n')}\n`));
       const error = await build({ ...gh.opts, out: freshOut() }).then(() => null, (e) => e);
@@ -384,14 +384,18 @@ describe('the knowledge pack', () => {
     const ROLE = /^(?:privacidade|dpo|security)$/;
     const ORG = /^namastex\.(?:ai|io)$/;
     const HOMES = ['user', 'genie', 'automagik'].map((n) => ['', 'home', n].join('/'));
+    // Public service and tool addresses: exactly these three, exact matches only. A new one needs Chat's word.
+    const TOOLS = [['git', 'github.com'], ['actions', 'github.com'], ['security', 'npmjs.com']].map(([l, d]) => `${l}${at}${d}`);
     const kind = (e: Placeholder): string | null => {
       if (e.rule === 'home-path') return e.match !== undefined && HOMES.includes(e.match) ? 'generic home' : null;
       if (e.rule !== 'email') return null;
       if (e.pattern !== undefined) {
+        // Only omni@<version> may be a pattern: a pattern of any other kind (a tool address included) is refused.
         const re = new RegExp(e.pattern);
         const omni = e.pattern.startsWith(`^omni${at}`) && re.test(`omni${at}2.251115`) && !re.test(`omni${at}rk4t.io`);
         return omni ? 'omni version' : null;
       }
+      if (e.match !== undefined && TOOLS.includes(e.match)) return 'public service or tool address';
       const [local, domain] = split(e.match ?? '');
       if (EXAMPLE_LOCAL.test(local) && EXAMPLE_DOMAIN.test(domain)) return 'example address';
       if (exampleJid(local, domain)) return 'example WhatsApp JID';
@@ -400,13 +404,20 @@ describe('the knowledge pack', () => {
     };
     expect(shipped.length).toBeGreaterThan(0);
     expect(shipped.map((e) => [e.match ?? e.pattern, kind(e)]).filter(([, k]) => k === null)).toEqual([]);
-    expect(new Set(shipped.map(kind))).toEqual(new Set(['example address', 'example WhatsApp JID', 'generic home', 'omni version', 'org role contact']));
+    expect(new Set(shipped.map(kind))).toEqual(
+      new Set(['example address', 'example WhatsApp JID', 'generic home', 'omni version', 'org role contact', 'public service or tool address']),
+    );
+    expect(shipped.filter((e) => kind(e) === 'public service or tool address').map((e) => e.match).sort()).toEqual([...TOOLS].sort());
     // The kinds' own edges: a real-looking number, another home, a personal or tool address fail.
     const no = (e: Partial<Placeholder>) => expect([e, kind({ why: 'w', ...e } as Placeholder)]).toEqual([e, null]);
     no({ rule: 'email', match: `5511987654321${at}s.whatsapp.net` });
     no({ rule: 'email', match: `ana.souza${at}gmail.com` });
-    no({ rule: 'email', match: `git${at}github.com` });
-    no({ rule: 'email', match: `security${at}npmjs.com` });
+    no({ rule: 'email', match: `support${at}github.com` });
+    no({ rule: 'email', match: `security${at}github.com` });
+    // A tool address is an exact match bound to the email rule: as a pattern, or under another rule, it is refused.
+    no({ rule: 'email', pattern: `^git${at}github\\.com$` });
+    no({ rule: 'email', pattern: `^actions${at}github\\.com$` });
+    no({ rule: 'home-path', match: `git${at}github.com` });
     no({ rule: 'home-path', match: ['', 'home', 'ana'].join('/') });
     no({ rule: 'email', pattern: `^omni${at}.+$` });
     no({ rule: 'email', pattern: `^you${at}gmail\\.com$` });
