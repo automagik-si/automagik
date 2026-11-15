@@ -274,6 +274,7 @@ const ZH = {
   'Remote Hermes': '远程 Hermes',
   'Off by default. Set up Remote Hermes in Bot settings.': '默认关闭。请在 Bot 设置中设置远程 Hermes。',
   'No models are known for this connection yet. Manage the connection to list them.': '此连接尚不清楚有哪些模型。请管理连接以列出模型。',
+  'This bot runs {model}': '此 Bot 运行 {model}',
   'Manage connection…': '管理连接…',
   'Credential': '凭据',
   'Save a credential to connect.': '请先保存连接凭据。',

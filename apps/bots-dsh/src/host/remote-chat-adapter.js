@@ -137,15 +137,14 @@ export class RemoteChatAdapter extends LlmAdapter {
             return yield finish('stop')
           }
         } else {
-        const model = this.models().find(model => model.id === options.model)
-        if (!model) { complete = true; return yield finish('error', 'Discover this remote model again before using it.') }
         let start = options.messages.length
         while (start > 0 && options.messages[start - 1].role === 'user') start--
         const text = options.messages.slice(start).filter(message => message.source?.kind !== 'acp-session').map(message =>
           typeof message.content === 'string' ? message.content : (message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')).join('\n\n')
         if (!text) return yield finish('error', 'Remote Hermes accepts text in this delivery.')
-        // Prompts never contain the standing credential or a transient ticket.
-        await run.submit(run.transport.redact(text), model)
+        // Prompts never contain the standing credential or a transient ticket. The Bot's own
+        // model applies: no model or provider is sent with the turn, whatever the app shows.
+        await run.submit(run.transport.redact(text))
         }
       }
       for (;;) {

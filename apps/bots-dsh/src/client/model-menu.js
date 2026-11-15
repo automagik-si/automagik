@@ -396,7 +396,30 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
       : route === 'hermes-remote' ? models.filter(model => providerOf(model) === 'hermes-remote')
       : route === 'acp' ? (agent?.models ?? [])
         : herdrAgents().find(entry => entry.id === view.agent)?.models ?? []
-    const direct = route === 'native' || route === 'hermes-remote'
+    // A Remote Hermes Bot runs one model: the one its own Hermes is set to run. The picker
+    // names it in one line and offers no other model or provider to choose from.
+    if (route === 'hermes-remote') {
+      // The connection's own model comes first from its one-entry list; a Bot saved on an
+      // older name does not turn that name into a second choice.
+      const own = list[0]
+      return h('div', { key: 'models:hermes-remote', className: 'bt-model-step', role: 'group', 'aria-label': t('Models') },
+        stepBack(t('Back to routes'), () => go(MENU_ROOT)),
+        own === undefined
+          ? h('div', { className: 'bt-model-none' }, remoteConfigured
+            ? t('No models are known for this connection yet. Manage the connection to list them.')
+            : t('Off by default. Set up Remote Hermes in Bot settings.'))
+          : h('button', {
+              type: 'button', role: 'menuitemradio', 'aria-checked': own.ref === current, 'data-own-model': '',
+              onClick: () => onModel(own, route),
+            },
+            h('span', { className: 'bt-menu-label' }, t('This bot runs {model}', { model: modelLabel(own) })),
+            h(Tick, { on: own.ref === current })),
+        onRemote ? h(Fragment, { key: 'manage' },
+          h('div', { className: 'bt-menu-sep', role: 'separator' }),
+          h('button', { type: 'button', role: 'menuitem', 'data-manage-connection': '', onClick: () => onRemote(true) },
+            h(SlidersIcon), h('span', { className: 'bt-menu-label' }, t('Manage connection…')))) : null)
+    }
+    const direct = route === 'native'
     const back = direct ? { label: t('Back to routes'), view: MENU_ROOT } : { label: t('Back to agents'), view: { step: 'agents', route } }
     const backLabel = direct ? back.label : t('Back to {agent}', { agent: agent?.name ?? routeName(route) })
     const groups = route === 'native' ? groupModels(list) : list.length === 0 ? [] : [[agent?.name ?? routeName(route), list]]
@@ -406,10 +429,6 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
     const currentId = folding ? currentGroupId(groups, current) : undefined
     return h('div', { key: `models:${route}:${view.provider ?? view.agent ?? ''}`, className: 'bt-model-step', role: 'group', 'aria-label': t('Models') },
       stepBack(backLabel, () => go(back.view)),
-      route === 'hermes-remote' ? h('div', { className: 'bt-model-none' }, t("Your bots’ team tools (messages to other bots, secrets, memory, schedules) are not available in these chats.")) : null,
-      route === 'hermes-remote' && list.length === 0
-        ? h('div', { className: 'bt-model-none' }, remoteConfigured ? t('No models are known for this connection yet. Manage the connection to list them.') : t('Off by default. Set up Remote Hermes in Bot settings.'))
-        : null,
       h('div', { className: 'bt-menu-sep', role: 'separator' }),
       groups.length === 0 ? h('div', { className: 'bt-model-none' }, t('No models are set up for this route yet.')) : null,
       groups.map(([label, entries], index) => {
@@ -839,11 +858,9 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     remote.current.active = false
     remote.current.generation++
     setHermes(false)
-    // A saved connection comes back naming the model the Bot already runs on: a completed
-    // connect never replaces a pick the person already made on this route. A Bot on another
-    // route still gets the crossing question, and one without a model the first served model.
-    const onRemoteRoute = currentRef.current !== undefined && modelRoute(roster, currentRef.current).route === 'hermes-remote'
-    if (onRemoteRoute) { finish(); return }
+    // A saved connection comes back naming the one model it runs: a Bot on this route takes
+    // that name (there is nothing else to pick), and a Bot on another route gets the crossing
+    // question. A Bot without a model gets the connection's own model.
     if (crossing(next.modelRef)) {
       keys.current = true
       setView(MENU_ROOT)

@@ -125,6 +125,9 @@ if (role === 'tunnel') {
         if (scenario !== 'timeout') {
           // A login banner may be valid JSON without being a record: a number, a word.
           process.stdout.write('A sample login banner\n42\n"sample"\n[1]\n')
+          // What the real start script reads from the remote's own settings before serve.
+          // `HERMES_SSH_MODEL=none` is a Hermes that cannot say its model.
+          if (process.env.HERMES_SSH_MODEL !== 'none') emit({ type: 'model', ...JSON.parse(process.env.HERMES_SSH_MODEL ?? '{"provider":"openai-codex","model":"gpt-6-astra"}') })
           emit({ type: 'ready', port: Number(process.env.HERMES_SSH_REMOTE_PORT) })
           if (scenario === 'drop') setTimeout(() => process.exit(255), 150)
         }

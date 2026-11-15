@@ -56,8 +56,9 @@ function runtime(t, fixture, overrides = {}) {
       await overrides.onConnect?.(this)
       return this
     }
-    async session() { await overrides.beforeSession?.(this); return { session_id: randomUUID(), stored_session_id: randomUUID(), info: { desktop_contract: 8, approval_mode: 'manual', yolo: false } } }
-    async models() { await overrides.beforeModels?.(this); return overrides.models ?? [{ id: 'sample:model', model: 'model', provider: 'sample', name: 'Sample model' }] }
+    async session() { await overrides.beforeSession?.(this); return { session_id: randomUUID(), stored_session_id: randomUUID(), info: { desktop_contract: 8, approval_mode: 'manual', yolo: false, model: 'model', provider: 'sample', ...overrides.sessionInfo } } }
+    // A Remote Hermes connection is never a list of models: any call here fails the test.
+    async models() { throw Error('Remote Hermes must not list models') }
     async request(method, params) { this.sent.push({ method, params }); await overrides.onRequest?.(method, params, this); return {} }
     close() { if (this.closed) return; this.closed = true; this.cancelConnect?.(); for (const listener of this.listeners) listener({ kind: 'lost' }) }
   }
@@ -260,27 +261,57 @@ test('saved one-click connect uses the saved profile/session without REST discov
   assert.equal(h.wires.at(-1).options.authHeaders.Cookie, `hermes_session_at=${f.access}; hermes_session_rt=${f.refresh}`)
   assert.equal(h.wires.at(-1).options.profile, 'sample-profile')
 })
-test('the connected view names the model the Bot saved, not the first model the connection lists', async t => {
+test('the connected view names the one model the connection runs, never a list', async t => {
   const f = dashboard(), h = runtime(t, f)
-  h.rt.state.prefs.hermesRemote = { enabled: true, mode: 'remote', authMode: 'token', address: f.address, profile: 'sample-profile', credentialRef: 'SAMPLE', models: [{ id: 'sample:first', name: 'First model' }, { id: 'sample:second', name: 'Second model' }] }
-  h.rt.state.bots = { sample: { id: 'sample', name: 'Sample', model: 'hermes-remote/sample:second' } }
-  assert.equal(h.rt.hermesRemote.view().modelRef, 'hermes-remote/sample:second')
-  // A Bot without a model still gets the first served model at first setup.
+  const model = { id: 'openai-codex:gpt-6-astra', name: 'gpt-6-astra', provider: 'openai-codex', model: 'gpt-6-astra' }
+  h.rt.state.prefs.hermesRemote = { enabled: true, mode: 'remote', authMode: 'token', address: f.address, profile: 'sample-profile', credentialRef: 'SAMPLE', models: [model], model }
+  h.rt.state.bots = { sample: { id: 'sample', name: 'Sample', model: 'hermes-remote/openai-codex:gpt-6-astra' } }
+  assert.equal(h.rt.hermesRemote.view().modelRef, 'hermes-remote/openai-codex:gpt-6-astra')
+  assert.deepEqual(h.rt.hermesRemote.view().models, [model])
+  // A Bot that saved another model still names the connection's own model: there is no
+  // other model for this connection, so the saved name cannot win over it.
+  h.rt.state.bots = { sample: { id: 'sample', name: 'Sample', model: 'hermes-remote/sample:old' } }
+  assert.equal(h.rt.hermesRemote.view().modelRef, 'hermes-remote/openai-codex:gpt-6-astra')
+  // A Bot without a model gets the connection's own model at first setup.
   h.rt.state.bots = {}
-  assert.equal(h.rt.hermesRemote.view().modelRef, 'hermes-remote/sample:first')
+  assert.equal(h.rt.hermesRemote.view().modelRef, 'hermes-remote/openai-codex:gpt-6-astra')
+})
+test('an address connection names the one model its session reports, even when Hermes gives no provider', async t => {
+  // Hermes resolves a profile default's provider when it builds the agent and its session
+  // info names the model alone. One model still shows: nothing is listed or guessed.
+  const f = dashboard(), h = runtime(t, f, { sessionInfo: { model: 'gpt-6-astra', provider: undefined } })
+  const tested = await h.rt.hermesRemote.test(f.token)
+  const view = await h.rt.hermesRemote.save({ testId: tested.testId, profile: 'sample-profile' })
+  assert.deepEqual(view.models, [{ id: 'gpt-6-astra', name: 'gpt-6-astra', model: 'gpt-6-astra' }])
+  assert.equal(view.modelRef, 'hermes-remote/gpt-6-astra')
+})
+test('an SSH start probe makes the model the connection runs, with no list from the profile', async t => {
+  const f = dashboard(), h = runtime(t, { ...f, fetch: sshFetch }, {
+    startSsh: async () => ({ address: 'http://127.0.0.1:12345', credential: f.credential, model: { provider: 'openai-codex', model: 'gpt-6-astra' }, close: async () => {} }),
+  })
+  const tested = await h.rt.hermesRemote.test({ mode: 'ssh', ssh: { host: 'example.invalid' } })
+  const view = await h.rt.hermesRemote.save({ testId: tested.testId, profile: 'sample-profile' })
+  const model = { id: 'openai-codex:gpt-6-astra', name: 'gpt-6-astra', provider: 'openai-codex', model: 'gpt-6-astra' }
+  assert.deepEqual(view.models, [model])
+  assert.deepEqual(view.model, model)
+  assert.equal(view.modelRef, 'hermes-remote/openai-codex:gpt-6-astra')
+  assert.ok(h.wires.every(wire => !wire.sent.some(frame => frame.method === 'model.options')), 'the profile’s model list is never asked for')
+  assert.ok(h.wires.every(wire => !wire.sent.some(frame => frame.method === 'config.set')), 'the remote settings are never changed')
 })
 test('a configured connection with known models opens no session when the wizard reopens it', async t => {
   const f = dashboard(), h = runtime(t, f)
   h.secrets.set('SAMPLE', JSON.stringify({ kind: 'token', credential: f.credential }))
-  h.rt.state.prefs.hermesRemote = { enabled: true, mode: 'remote', authMode: 'token', address: f.address, profile: 'sample-profile', credentialRef: 'SAMPLE', models: [{ id: 'sample:first', name: 'First model' }, { id: 'sample:second', name: 'Second model' }] }
-  h.rt.state.bots = { sample: { id: 'sample', name: 'Sample', model: 'hermes-remote/sample:second' } }
+  const model = { id: 'openai-codex:gpt-6-astra', name: 'gpt-6-astra', provider: 'openai-codex', model: 'gpt-6-astra' }
+  h.rt.state.prefs.hermesRemote = { enabled: true, mode: 'remote', authMode: 'token', address: f.address, profile: 'sample-profile', credentialRef: 'SAMPLE', models: [model], model }
+  h.rt.state.bots = { sample: { id: 'sample', name: 'Sample', model: 'hermes-remote/openai-codex:gpt-6-astra' } }
   const view = await h.endpoints.get('hermes-remote-connect')({ cached: true })
-  assert.equal(h.wires.length, 0, 'no throwaway remote session just to list known models')
-  assert.equal(view.modelRef, 'hermes-remote/sample:second')
+  assert.equal(h.wires.length, 0, 'no throwaway remote session just to name a known model')
+  assert.equal(view.modelRef, 'hermes-remote/openai-codex:gpt-6-astra')
   assert.equal(f.calls.length, 0)
-  // An explicit connect or refresh still discovers the list.
+  // An explicit connect or refresh still reads the model from the session.
   await h.endpoints.get('hermes-remote-connect')({})
   assert.equal(h.wires.length, 1)
+  assert.equal(h.rt.state.prefs.hermesRemote.model.id, 'sample:model')
 })
 test('tests-only cancellation aborts before a test ID exists and leaves the saved configuration untouched', async t => {
   const f = dashboard({ handle: () => new Promise(() => {}) }), h = runtime(t, f)
@@ -327,7 +358,7 @@ test('saved SSH connects serialize and tests-only cancellation preserves the act
   const h = runtime(t, { ...f, fetch: sshFetch }, {
     deadlines: { start: 1000, control: 500, cancel: 300 },
     startSsh: async () => { started++; return { address: 'http://127.0.0.1:12345', credential: f.credential, close: async () => { closed++ } } },
-    beforeModels: async () => { if (h.rt.hermesRemote.view().enabled) { const gate = gates[models++]; gate.reach(); await gate.held } },
+    beforeSession: async () => { if (h.rt.hermesRemote.view().enabled) { const gate = gates[models++]; gate.reach(); await gate.held } },
   })
   const tested = await h.rt.hermesRemote.test({ mode: 'ssh', ssh: { host: 'example.invalid' } })
   await h.rt.hermesRemote.save({ testId: tested.testId, profile: 'sample-profile' })
@@ -511,7 +542,7 @@ test('saved-token re-test rejects expired authentication through the real REST h
 test('saved-token source binding is rechecked after wire probing before a test ID can be returned', async t => {
   const f = dashboard(); let reached, resume
   const started = new Promise(resolve => { reached = resolve })
-  const h = runtime(t, f, { beforeModels: async () => { reached(); await new Promise(resolve => { resume = resolve }) } }), draft = savedToken(h, f)
+  const h = runtime(t, f, { beforeSession: async () => { reached(); await new Promise(resolve => { resume = resolve }) } }), draft = savedToken(h, f)
   const pending = h.rt.hermesRemote.test(draft), rejected = assert.rejects(pending, { code: 'bot/hermes-auth' })
   await started
   h.secrets.set(draft.credentialRef, JSON.stringify({ kind: 'token', credential: randomUUID() }))
@@ -744,7 +775,7 @@ for (const rollback of [false, true]) {
 test('hermes-mutation-lock-dropped: simultaneous saves serialize and the second cannot reuse the consumed test', async t => {
   const f = dashboard(), gate = barrier()
   let probes = 0
-  const h = await durableRuntime(t, f, { beforeModels: async () => { probes++; if (probes === 2) { gate.reach(); await gate.held } } })
+  const h = await durableRuntime(t, f, { beforeSession: async () => { probes++; if (probes === 2) { gate.reach(); await gate.held } } })
   const tested = await h.rt.hermesRemote.test(f.token)
   const first = h.endpoints.get('hermes-remote-save')({ testId: tested.testId, profile: 'sample-profile' })
   void first.catch(() => {})

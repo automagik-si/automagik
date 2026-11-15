@@ -556,7 +556,11 @@ Setup is three things: **choose a computer, Connect, chat.**
   A paired chat opens the same way: no approval setting is read or waited for.
 
 Remote Hermes connects to whatever profile and approval setting that Hermes has, and never
-changes a Hermes setting. The only refusals are real failures, each with what went wrong and
+changes a Hermes setting. **The Bot runs the model its Hermes profile is set to run.** Automagik
+sends no model choice on any turn: the remote's own default applies. The SSH start probe reads
+it once, read only (`hermes config get model`: its default and provider), and the picker names
+that one model ("This bot runs …"): there is no list of other models or providers to pick from.
+The only refusals are real failures, each with what went wrong and
 its one fix in one line; the step that stopped, the exit code and the last lines are behind
 **Details**:
 
@@ -590,9 +594,10 @@ both when the connection ends or the plugin/app quits, with the same bounded dea
 chat. This does not prove unrelated remote children were killed. Missing Hermes is an error;
 setup never installs software on the remote computer.
 
-The connection record stores mode, address or SSH overrides, chosen profile, discovered models,
-and a credential reference. Tokens and authenticated session credentials live only in the
-existing mode-0600 Bot secret store, with no Bot scope; saved values are never echoed. An SSH
+The connection record stores mode, address or SSH overrides, the chosen profile, the one model
+its Hermes runs, and a credential reference. Tokens and authenticated session credentials live
+only in the existing mode-0600 Bot secret store, with no Bot scope; saved values are never
+echoed. An SSH
 identity path is a reference to the user's file, not a copy of its contents. Passwords and key
 bytes are never persisted. Test credentials stay in a bounded transient draft until save/cancel.
 The chat socket opens the way Hermes itself accepts each sign-in. A session token (a saved

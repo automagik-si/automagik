@@ -408,7 +408,7 @@ export class HermesTransport {
     return snapshot
   }
 
-  async session(identity, model) {
+  async session(identity) {
     const remaining = () => {
       const ms = this.startUntil - Date.now()
       if (ms <= 0) throw failure('Remote Hermes did not start within 60 seconds.', 'bot/hermes-timeout')
@@ -425,14 +425,12 @@ export class HermesTransport {
       // A paired bot owns its model. The Automagik provider selection is transport only.
       return snapshot
     }
+    // The profile's own model applies. No model or provider is sent at creation, a resumed
+    // session is never re-pointed, and Hermes's model setting is never changed: a Bot here
+    // runs whatever the profile it connects to is set to run.
     const snapshot = this.check(await this.request(identity?.storedSessionId ? 'session.resume' : 'session.create', identity?.storedSessionId
       ? { session_id: identity.storedSessionId, inline_images: false, close_on_disconnect: false }
-      : { model: model?.model, provider: model?.provider, idempotency_key: identity?.createKey, close_on_disconnect: false, source: 'automagik' }, remaining()))
-    if (identity?.storedSessionId && model && (snapshot.info.model !== model.model || snapshot.info.provider !== model.provider)) {
-      if (!safeModel(model.model) || !safeModel(model.provider)) throw failure('Hermes returned an unsupported model identifier.')
-      const result = await this.request('config.set', { session_id: snapshot.session_id, key: 'model', value: `${model.model} --provider ${model.provider} --session` }, remaining())
-      if (result.scope !== 'session' || result.confirm_required || result.deferred) throw failure('Hermes has not applied this session model. Confirm it in Hermes before sending again.')
-    }
+      : { idempotency_key: identity?.createKey, close_on_disconnect: false, source: 'automagik' }, remaining()))
     return snapshot
   }
 
@@ -568,9 +566,9 @@ export class RemoteChat {
     this.transport.answer(event.id, { choice: choice === 'once' ? 'once' : 'deny' })
   }
 
-  async prepare(model) {
+  async prepare() {
     await this.save()
-    const snapshot = await this.transport.session(this.identity, model)
+    const snapshot = await this.transport.session(this.identity)
     Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
     if (snapshot.admission_id) this.identity.admissionId = snapshot.admission_id
     await this.save()
@@ -637,9 +635,9 @@ export class RemoteChat {
     } finally { this.reconciling = undefined }
   }
 
-  async submit(text, model) {
+  async submit(text) {
     if (this.identity.pendingSubmit || this.identity.uncertain) throw failure('Reconcile the existing remote session before sending again; its outcome is unknown.')
-    await this.prepare(model)
+    await this.prepare()
     // A completed turn may resume on a newly owned SSH backend. Its sequence numbers
     // start again; only uncertain turns take the reconciliation path above.
     if (this.identity.epoch !== this.transport.epoch) {

@@ -1742,6 +1742,7 @@
   "Enable Remote Hermes": "Ativar Hermes remoto",
   "Off by default. Set up Remote Hermes in Bot settings.": "Desativado por padrão. Configure o Hermes remoto nas configurações dos Bots.",
   "No models are known for this connection yet. Manage the connection to list them.": "Ainda não há modelos conhecidos para esta conexão. Gerencie a conexão para listá-los.",
+  "This bot runs {model}": "Este Bot roda {model}",
   "Manage connection…": "Gerenciar conexão…",
   "SSH couldn’t sign in": "O SSH não conseguiu entrar",
   "SSH couldn’t open Hermes": "O SSH não conseguiu abrir o Hermes",

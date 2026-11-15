@@ -397,6 +397,25 @@ test('DSH adapter produces a real mirror tool card then continues the same remot
   assert.equal(f.sent.filter(frame => frame.method === 'prompt.submit').length, 1)
 })
 
+test('a remote turn sends no model choice: the profile default is what runs', async t => {
+  const f = fixture(t)
+  const agent = { session: { id: 'sample-model' }, ctx: { tools: { register: () => () => {} } } }
+  const rt = { ctx: { get: name => name === 'agents' ? { get: () => agent, list: () => [agent] } : undefined, on() {} } }
+  const adapter = new RemoteChatAdapter(rt, { enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }], identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run } })
+  t.after(() => adapter.dispose())
+  const stream = adapter.stream(markAgentLoopRequest({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-model', messages: [{ role: 'user', content: 'say OK' }] }))
+  const first = stream.next()
+  await until(() => f.sent.some(frame => frame.method === 'prompt.submit'), 'the prompt to be submitted', first)
+  // The app still knows a model for this Bot, but the wire never carries it: the remote's
+  // own profile default runs the turn.
+  const create = f.sent.find(frame => frame.method === 'session.create')
+  assert.ok(create)
+  assert.ok(!Object.hasOwn(create.params, 'model') && !Object.hasOwn(create.params, 'provider'), 'no model or provider is sent')
+  assert.ok(!f.sent.some(frame => frame.method === 'config.set'), 'Hermes’s own model setting is never changed')
+  f.socket().event('message.complete', { text: 'OK', status: 'complete' })
+  for await (const chunk of stream) if (chunk.type === 'finish') break
+})
+
 test('connection is off by default, record stores a reference and credential stays mode 0600', async t => {
   const home = await mkdtemp(join(tmpdir(), 'hermes-fixture-'))
   t.after(() => rm(home, { recursive: true, force: true }))
@@ -640,14 +659,25 @@ test('pairing binds one Bot own-chat across segments without remote creation', a
   assert.deepEqual(saved, [undefined, 'owner'])
 })
 
-test('resumed model changes explicitly opt out of profile persistence', async t => {
+test('a first remote session is created with no model override: the profile default applies', async t => {
+  const f = fixture(t)
+  await f.wire.connect()
+  await f.run.prepare()
+  const create = f.sent.find(frame => frame.method === 'session.create')
+  assert.ok(create)
+  assert.ok(!Object.hasOwn(create.params, 'model') && !Object.hasOwn(create.params, 'provider'), 'no model or provider is sent')
+  assert.deepEqual(Object.keys(create.params).sort(), ['close_on_disconnect', 'idempotency_key', 'profile', 'source'])
+  assert.ok(!f.sent.some(frame => frame.method === 'config.set'), 'Hermes’s own model setting is never changed')
+})
+
+test('a resumed remote session is never re-pointed to another model', async t => {
   const f = fixture(t, { result: { scope: 'session' } })
   f.identity.storedSessionId = f.snapshot.stored_session_id
   await f.wire.connect()
-  await f.run.prepare({ model: 'other-model', provider: 'sample' })
-  const change = f.sent.find(frame => frame.method === 'config.set')
-  assert.equal(change.params.key, 'model')
-  assert.equal(change.params.value, 'other-model --provider sample --session')
+  await f.run.prepare()
+  assert.ok(!f.sent.some(frame => frame.method === 'config.set'), 'Hermes’s own model setting is never changed')
+  const resume = f.sent.find(frame => frame.method === 'session.resume')
+  assert.ok(!Object.hasOwn(resume.params, 'model') && !Object.hasOwn(resume.params, 'provider'))
 })
 
 test('streaming redaction carries credential and one-use ticket prefixes across frames', async t => {

@@ -304,9 +304,46 @@ test('the minimum release itself is accepted, and so is a build past it', async 
     const f = await fixture(t, 'runtime-ready')
     const hermesPath = await fakeRuntime(f)
     const connection = await f.open({ ...f.config, hermesPath }, versioned(f, values))
-    assert.deepEqual((await f.records()).filter(record => record.role === 'runtime').map(record => record.event), ['version', 'probe', 'runtime-start'], JSON.stringify(values))
+    assert.deepEqual((await f.records()).filter(record => record.role === 'runtime').map(record => record.event), ['version', 'probe', 'model', 'runtime-start'], JSON.stringify(values))
     await connection.close()
   }
+})
+
+test('our supervisor reads the model the remote runs from its own settings, before serve, and carries it', async t => {
+  const f = await fixture(t, 'runtime-ready')
+  const hermesPath = await fakeRuntime(f)
+  const connection = await f.open({ ...f.config, hermesPath })
+  try {
+    assert.deepEqual(connection.model, { provider: 'openai-codex', model: 'gpt-6-astra' })
+    const probe = (await f.records()).find(record => record.event === 'model')
+    // Read only, in the one way Hermes names its default and provider: never a model set.
+    assert.deepEqual(probe.args, ['config', 'get', 'model', '--json'])
+    assert.ok(!probe.args.includes('set'))
+  } finally { await connection.close() }
+  // A build without --json answers the same value as plain "default: <model>" lines.
+  const plain = await fixture(t, 'runtime-ready')
+  const plainPath = await fakeRuntime(plain)
+  const fromPlain = await plain.open({ ...plain.config, hermesPath: plainPath }, versioned(plain, { HERMES_FAKE_MODEL_PLAIN: '1' }))
+  try { assert.deepEqual(fromPlain.model, { provider: 'openai-codex', model: 'gpt-6-astra' }) } finally { await fromPlain.close() }
+  // A Hermes that cannot name its model is still connected: the app shows the session's.
+  const silent = await fixture(t, 'runtime-ready')
+  const silentPath = await fakeRuntime(silent)
+  const without = await silent.open({ ...silent.config, hermesPath: silentPath }, versioned(silent, { HERMES_FAKE_MODEL: 'none' }))
+  try {
+    assert.equal(without.model, undefined)
+    assert.ok((await silent.records()).some(record => record.event === 'runtime-start'), 'serve still starts')
+  } finally { await without.close() }
+})
+
+test('the fake ssh start frame carries a model only in the transport’s own shape', async t => {
+  const f = await fixture(t)
+  const connection = await f.open()
+  try { assert.deepEqual(connection.model, { provider: 'openai-codex', model: 'gpt-6-astra' }) } finally { await connection.close() }
+  const silent = await fixture(t)
+  const bare = await silent.open(undefined, { env: { ...silent.options.env, HERMES_SSH_MODEL: 'none' } })
+  try { assert.equal(bare.model, undefined) } finally { await bare.close() }
+  const bad = await fixture(t)
+  await assert.rejects(bad.open(undefined, { env: { ...bad.options.env, HERMES_SSH_MODEL: '{"provider":"sample","model":{"id":"x"}}' } }), error => error.code === 'bot/hermes-ssh-handshake' && error.sshError === 'handshake')
 })
 
 test('a version that names no release is reported as it is, not guessed', async t => {

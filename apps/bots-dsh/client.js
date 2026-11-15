@@ -333,6 +333,7 @@ var ZH = {
   "Remote Hermes": "远程 Hermes",
   "Off by default. Set up Remote Hermes in Bot settings.": "默认关闭。请在 Bot 设置中设置远程 Hermes。",
   "No models are known for this connection yet. Manage the connection to list them.": "此连接尚不清楚有哪些模型。请管理连接以列出模型。",
+  "This bot runs {model}": "此 Bot 运行 {model}",
   "Manage connection…": "管理连接…",
   "Credential": "凭据",
   "Save a credential to connect.": "请先保存连接凭据。",
@@ -6741,7 +6742,38 @@ function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2,
     const route = view.route ?? routeOfProvider(view.provider);
     const agent = route === "acp" ? acpAgents(models).find((entry) => entry.provider === view.provider) : void 0;
     const list = route === "native" ? nativeModels(models, current) : route === "hermes-remote" ? models.filter((model) => providerOf(model) === "hermes-remote") : route === "acp" ? agent?.models ?? [] : herdrAgents().find((entry) => entry.id === view.agent)?.models ?? [];
-    const direct = route === "native" || route === "hermes-remote";
+    if (route === "hermes-remote") {
+      const own = list[0];
+      return (0, import_react16.createElement)(
+        "div",
+        { key: "models:hermes-remote", className: "bt-model-step", role: "group", "aria-label": t("Models") },
+        stepBack(t("Back to routes"), () => go(MENU_ROOT)),
+        own === void 0 ? (0, import_react16.createElement)("div", { className: "bt-model-none" }, remoteConfigured ? t("No models are known for this connection yet. Manage the connection to list them.") : t("Off by default. Set up Remote Hermes in Bot settings.")) : (0, import_react16.createElement)(
+          "button",
+          {
+            type: "button",
+            role: "menuitemradio",
+            "aria-checked": own.ref === current,
+            "data-own-model": "",
+            onClick: () => onModel(own, route)
+          },
+          (0, import_react16.createElement)("span", { className: "bt-menu-label" }, t("This bot runs {model}", { model: modelLabel(own) })),
+          (0, import_react16.createElement)(Tick, { on: own.ref === current })
+        ),
+        onRemote ? (0, import_react16.createElement)(
+          import_react16.Fragment,
+          { key: "manage" },
+          (0, import_react16.createElement)("div", { className: "bt-menu-sep", role: "separator" }),
+          (0, import_react16.createElement)(
+            "button",
+            { type: "button", role: "menuitem", "data-manage-connection": "", onClick: () => onRemote(true) },
+            (0, import_react16.createElement)(SlidersIcon),
+            (0, import_react16.createElement)("span", { className: "bt-menu-label" }, t("Manage connection…"))
+          )
+        ) : null
+      );
+    }
+    const direct = route === "native";
     const back = direct ? { label: t("Back to routes"), view: MENU_ROOT } : { label: t("Back to agents"), view: { step: "agents", route } };
     const backLabel = direct ? back.label : t("Back to {agent}", { agent: agent?.name ?? routeName(route) });
     const groups = route === "native" ? groupModels(list) : list.length === 0 ? [] : [[agent?.name ?? routeName(route), list]];
@@ -6752,8 +6784,6 @@ function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2,
       "div",
       { key: `models:${route}:${view.provider ?? view.agent ?? ""}`, className: "bt-model-step", role: "group", "aria-label": t("Models") },
       stepBack(backLabel, () => go(back.view)),
-      route === "hermes-remote" ? (0, import_react16.createElement)("div", { className: "bt-model-none" }, t("Your bots’ team tools (messages to other bots, secrets, memory, schedules) are not available in these chats.")) : null,
-      route === "hermes-remote" && list.length === 0 ? (0, import_react16.createElement)("div", { className: "bt-model-none" }, remoteConfigured ? t("No models are known for this connection yet. Manage the connection to list them.") : t("Off by default. Set up Remote Hermes in Bot settings.")) : null,
       (0, import_react16.createElement)("div", { className: "bt-menu-sep", role: "separator" }),
       groups.length === 0 ? (0, import_react16.createElement)("div", { className: "bt-model-none" }, t("No models are set up for this route yet.")) : null,
       groups.map(([label, entries2], index) => {
@@ -7216,11 +7246,6 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
     remote.current.active = false;
     remote.current.generation++;
     setHermes(false);
-    const onRemoteRoute = currentRef.current !== void 0 && modelRoute(roster, currentRef.current).route === "hermes-remote";
-    if (onRemoteRoute) {
-      finish();
-      return;
-    }
     if (crossing(next.modelRef)) {
       keys.current = true;
       setView(MENU_ROOT);

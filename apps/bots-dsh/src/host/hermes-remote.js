@@ -49,6 +49,31 @@ const CONNECTION_ERRORS = Object.freeze({
 })
 const FAILURE_LIFETIME = 10 * 60_000
 const text = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value) ? value : undefined
+// A model id as the remote transport already bounds it. An SSH start probe carries one model,
+// read from the remote's own settings; the app never offers another.
+const MODEL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:/[\]@-]{0,200}$/
+const SESSION_MODEL = 'Hermes did not say which model its profile runs. Check its model setting and try again.'
+function modelOf(provider, model) {
+  if (!MODEL_ID.test(model ?? '')) return undefined
+  let bare = model
+  if (provider) {
+    if (!MODEL_ID.test(provider)) return undefined
+    for (const separator of [':', '/']) if (bare.startsWith(`${provider}${separator}`)) bare = bare.slice(provider.length + 1)
+  }
+  if (!MODEL_ID.test(bare)) return undefined
+  // A profile's default route may name only its model: Hermes resolves the provider when it
+  // builds the agent, so the app shows that one model without inventing a provider.
+  return { id: provider ? `${provider}:${bare}` : bare, name: bare, ...(provider ? { provider } : {}), model: bare }
+}
+// The one model a connection runs: what its SSH start probe read from the remote's own
+// settings, else what the session Hermes created for this profile reports. Never a list.
+function connectionModels(connection, snapshot) {
+  const probed = connection?.model ? modelOf(connection.model.provider, connection.model.model) : undefined
+  if (probed) return [probed]
+  const info = snapshot?.info ?? {}
+  const reported = modelOf(info.provider, info.model)
+  return reported ? [reported] : []
+}
 const NO_ALIAS = '(none)'
 const strings = value => Array.isArray(value) ? value.filter(name => typeof name === 'string' && name.length > 0 && name.length <= 255).slice(0, 16) : []
 const lines = value => Array.isArray(value) ? value.filter(line => typeof line === 'string').slice(-8).map(line => line.slice(0, 240)) : []
@@ -357,6 +382,9 @@ export function install(rt, { transport = options => new HermesTransport(options
         await wire.connect()
         if (startup.signal.aborted) throw fail('Connection setup was cancelled or timed out.')
         const run = new RemoteChat(wire, options)
+        // What the SSH start probe read of the remote's own settings travels with the run,
+        // so a discovery names the same one model the connection runs.
+        run.connection = connection
         const submit = run.submit.bind(run)
         run.submit = (...args) => action(async admission => {
           // Admit the turn on the same owner that replaces its connection. A
@@ -386,11 +414,13 @@ export function install(rt, { transport = options => new HermesTransport(options
       throw error?.code === 'bot/refused' && error.cleanupUnknown !== true ? error : connectionFailure(error)
     }
   }
-  // The model the connected view names: the one a Bot on this connection already saved,
-  // when the connection serves it. The first served model seeds a Bot that has none yet
-  // (first setup), never a Bot that already picked one.
+  // The model the connected view names: the one the connection runs. A connection that
+  // already saved it names that; otherwise a Bot on this connection that saved it, else
+  // the first (and only) served model at first setup.
   const currentModelRef = () => {
     const models = record().models ?? []
+    const own = record().model
+    if (own && models.some(model => model.id === own.id)) return `${HERMES_PROVIDER}/${own.id}`
     const served = new Set(models.map(model => `${HERMES_PROVIDER}/${model.id}`))
     const bots = Object.values(state.bots ?? {})
     const paired = record().pairedBotId ? state.bots?.[record().pairedBotId] : undefined
@@ -407,7 +437,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     pairedBotId: record().pairedBotId ?? '',
     bots: Object.values(state.bots ?? {}).map(bot => ({ id: bot.id, name: bot.name })),
     credentialRef: record().credentialRef ?? '', credentialSet: record().mode === 'ssh' ? Boolean(record().enabled) : Boolean(rt.secretValue?.(record().credentialRef)),
-    models: record().models ?? [], limitations: MISSING_TOOLS, minimum: HERMES_MINIMUM,
+    models: record().models ?? [], model: record().model, limitations: MISSING_TOOLS, minimum: HERMES_MINIMUM,
     modelRef: currentModelRef(),
     sessions: Object.entries(state.hermesSessions ?? {}).map(([sessionId, info]) => ({ sessionId, ...info })),
   })
@@ -540,11 +570,12 @@ export function install(rt, { transport = options => new HermesTransport(options
       await wire.connect()
       if (signal?.aborted) throw fail('Connection setup was cancelled or timed out.')
       run = new RemoteChat(wire)
-      await run.prepare()
+      const snapshot = await run.prepare()
       if (signal?.aborted) throw fail('Connection setup was cancelled or timed out.')
-      const models = await wire.models()
-      if (signal?.aborted) throw fail('Connection setup was cancelled or timed out.')
-      if (!models.length) throw fail('This profile has no available models. Configure a model in Hermes and try again.', 'profiles')
+      // The connection's own model, never the profile's list of choices: what the SSH start
+      // probe read, else what this session reports it runs on.
+      const models = connectionModels(owned.connection, snapshot)
+      if (!models.length) throw fail(SESSION_MODEL, 'profiles')
       return models
     } finally {
       signal?.removeEventListener('abort', abort)
@@ -596,7 +627,7 @@ export function install(rt, { transport = options => new HermesTransport(options
       if (tested !== entry || disposed || signal?.aborted || generation !== saveGeneration) throw fail('Connection setup was cancelled.')
       entry.checkSavedSource?.()
       state.prefs ??= {}
-      installed = { ...next, models, ...(name ? { credentialRef: name } : {}) }
+      installed = { ...next, models, model: models[0], ...(name ? { credentialRef: name } : {}) }
       state.prefs.hermesRemote = installed
       if (changed) state.hermesSessions = installedSessions = {}
       await saveState()
@@ -647,7 +678,7 @@ export function install(rt, { transport = options => new HermesTransport(options
       if (credential !== undefined) await rt.secretEndpoint('secret-set', { name: CREDENTIAL_REF, value: credential, purpose: 'Remote Hermes connection credential', scope: [] })
       if (signal?.aborted) throw fail('Connection setup was cancelled or timed out.', 'timeout')
       state.prefs ??= {}
-      state.prefs.hermesRemote = { ...next, models: changed ? [] : record().models ?? [] }
+      state.prefs.hermesRemote = { ...next, models: changed ? [] : record().models ?? [], model: changed ? undefined : record().model }
       if (changed) state.hermesSessions = {}
       await saveState()
     } finally { disconnecting = false }
@@ -658,8 +689,13 @@ export function install(rt, { transport = options => new HermesTransport(options
     let run
     try {
       run = await open({ signal: startup.signal, startup })
-      await run.prepare()
-      record().models = await run.transport.models()
+      const snapshot = await run.prepare()
+      // The one model this connection runs, read from the remote itself; there is no list
+      // to choose from, so a Hermes that cannot name it fails instead of guessing one.
+      const models = connectionModels(run.connection, snapshot)
+      if (!models.length) throw fail(SESSION_MODEL, 'profiles')
+      record().models = models
+      record().model = models[0]
       await saveState(); publish()
       return view()
     } finally {

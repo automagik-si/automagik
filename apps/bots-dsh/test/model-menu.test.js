@@ -39,7 +39,7 @@ const sandbox = {
   },
 }
 runInNewContext(bundle.outputFiles[0].text, sandbox)
-const { groupModels, greetingOnly, ModelChoiceDock, ModelKeyCard, ModelLine, ModelLineTail, ModelMenu, RouteConfirm, effortRows, offeredModels, groupOpen, toggledGroup, manualFor, stepMenuFocus } = module.exports
+const { groupModels, greetingOnly, ModelChoiceDock, ModelKeyCard, ModelLine, ModelLineTail, ModelMenu, ModelSteps, RouteConfirm, effortRows, offeredModels, groupOpen, toggledGroup, manualFor, stepMenuFocus } = module.exports
 
 // ModelMenu picks the menu a Bot gets (DSH's models, or its plugin's): draw the one it picked.
 const drawMenu = (props) => {
@@ -115,6 +115,39 @@ test('the model line names the model and its provider, and "change" opens the mo
   } finally {
     menuOpen = false
   }
+})
+
+test('a Remote Hermes Bot gets one line naming the model its own Hermes runs, and nothing else', () => {
+  // The whole catalog a team could have: the connection runs one model, and the menu must
+  // offer no other remote model, provider group or dead provider row.
+  const own = { ref: 'hermes-remote/openai-codex:gpt-6-astra', provider: 'hermes-remote', providerName: 'Remote Hermes', id: 'openai-codex:gpt-6-astra', name: 'gpt-6-astra' }
+  const stale = { ref: 'hermes-remote/sample:old', provider: 'hermes-remote', providerName: 'Remote Hermes', id: 'sample:old', name: 'Old remote model' }
+  const roster = { models: [own, stale, ...models], prefs: { hermesRemote: { enabled: true, profile: 'default', models: [own] } } }
+  const bot = { id: 'chief', name: 'Astra', model: own.ref }
+  const picked = []
+  const steps = ModelSteps({
+    roster, bot, view: { step: 'models', route: 'hermes-remote' }, current: own.ref, picked: undefined, levelName: undefined,
+    go: () => {}, onModel: (model, route) => picked.push([model.ref, route]), onLevel: () => {}, onRemote: () => {},
+  })
+  const rows = nodes(steps, node => node.type === 'button' && node.props.role === 'menuitemradio')
+  assert.equal(rows.length, 1, 'exactly one model entry')
+  assert.equal(nodes(rows[0], node => node.props.className === 'bt-menu-label')[0].children[0], 'This bot runs gpt-6-astra')
+  assert.equal(rows[0].props['aria-checked'], true)
+  assert.equal(nodes(steps, node => node.props.className === 'bt-model-group').length, 0, 'no provider groups')
+  assert.equal(nodes(steps, node => node.type === 'button' && node.props['data-own-model'] !== undefined).length, 1)
+  rows[0].props.onClick()
+  assert.deepEqual(picked, [[own.ref, 'hermes-remote']])
+  // A Bot saved on another ref still sees the connection’s one model, and taking it is the
+  // only move there is.
+  const moved = ModelSteps({
+    roster, bot, view: { step: 'models', route: 'hermes-remote' }, current: stale.ref, picked: undefined, levelName: undefined,
+    go: () => {}, onModel: (model, route) => picked.push([model.ref, route]), onLevel: () => {}, onRemote: () => {},
+  })
+  const movedRows = nodes(moved, node => node.type === 'button' && node.props.role === 'menuitemradio')
+  assert.equal(movedRows.length, 1)
+  assert.equal(movedRows[0].props['aria-checked'], false)
+  movedRows[0].props.onClick()
+  assert.deepEqual(picked.at(-1), [own.ref, 'hermes-remote'])
 })
 
 test('while the chat holds only the greeting, the line under it names the model; then it goes', () => {

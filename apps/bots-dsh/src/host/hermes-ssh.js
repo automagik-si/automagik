@@ -55,6 +55,8 @@ const failure = (kind, text = messages[kind] ?? messages.unknown, detail) => Obj
 
 const LINE_MAX = 240
 const RELEASE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/
+// A model id as the transport's own boundary allows it; the remote also names its provider.
+const MODEL_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:/[\]@-]{0,200}$/
 export { redactSshText }
 const lineList = (value, secrets, max) => (Array.isArray(value) ? value : String(value ?? '').split(/\r?\n/))
   .filter(line => typeof line === 'string').map(line => redactSshText(line, secrets).trim().slice(0, LINE_MAX)).filter(Boolean).slice(-max)
@@ -174,15 +176,46 @@ def group_exists(pid):
     except ProcessLookupError:
         return False
 
-def probe(argv):
+def probe(argv, env=None):
     check_input()
     try:
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, timeout=control, check=False)
+                                stderr=subprocess.DEVNULL, timeout=control, check=False, env=env)
     except subprocess.TimeoutExpired:
         raise Fault("timeout")
     check_input()
     return result.stdout[:65536].decode("utf-8", "replace").strip() if result.returncode == 0 else ""
+
+MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]@-]{0,200}\Z")
+
+def config_model():
+    # The model this Hermes runs its profile on, read only: "hermes config get model" names
+    # its default and provider. --json is asked for first; a build without it answers the same
+    # value as plain "default: <model>" lines. A Hermes that cannot say is still connected.
+    shown = probe([hermes, "config", "get", "model", "--json"], env)
+    if not shown: shown = probe([hermes, "config", "get", "model"], env)
+    if not shown: return None
+    try:
+        value = json.loads(shown)
+    except ValueError:
+        value = {}
+        for line in shown.splitlines():
+            key, found, rest = line.partition(":")
+            if found and key.strip() in ("default", "provider"):
+                value[key.strip()] = rest.strip().strip("'\"")
+    if isinstance(value, str):
+        provider, found, name = value.partition(":")
+        value = {"provider": provider, "default": name} if found else {"default": value}
+    if not isinstance(value, dict): return None
+    provider, name = value.get("provider"), value.get("default")
+    if not (isinstance(provider, str) and MODEL_ID.match(provider)): return None
+    if not (isinstance(name, str) and MODEL_ID.match(name)): return None
+    # A config may name the model already qualified; the provider is carried once.
+    for separator in (":", "/"):
+        prefix = provider + separator
+        if name.startswith(prefix): name = name[len(prefix):]
+    if not name or not MODEL_ID.match(name): return None
+    return (provider, name)
 
 try:
     initial = bytearray()
@@ -237,6 +270,20 @@ try:
     home = options.get("hermesHome") or os.path.expanduser("~/.hermes")
     if not isinstance(home, str) or not os.path.isabs(home): raise Fault("handshake")
     if options.get("hermesHome") and not os.path.isfile(os.path.join(home, "config.yaml")): raise Fault("hermes-not-found")
+    env = os.environ.copy()
+    env["HERMES_HOME"] = home
+    env.pop("HERMES_PROFILE", None)
+    env["HERMES_DESKTOP"] = "1"
+    env.pop("HERMES_DESKTOP_DEV_SERVER", None)
+    check_input()
+    # What this profile runs before anything starts: the app shows only this model, and
+    # never sends one of its own. Reading it changes nothing, and a Hermes that cannot
+    # say it is still connected (the app then shows the model the session reports).
+    owned_model = config_model()
+    if owned_model: emit("model", provider=owned_model[0], model=owned_model[1])
+    # Hermes reads its one-shot token only from its own runtime folder, and refuses any
+    # other path: ~/.hermes/desktop-ssh/<32 hex>/<16 hex>.token, the folder this user's
+    # alone (0700). Hermes removes the token once read; the folder goes with this script.
     root = os.path.join(home, "desktop-ssh")
     os.makedirs(root, mode=0o700, exist_ok=True)
     made = os.path.join(root, os.urandom(16).hex())
@@ -246,11 +293,6 @@ try:
     token_path = os.path.join(folder, nonce + ".token")
     fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w") as handle: handle.write(token)
-    env = os.environ.copy()
-    env["HERMES_HOME"] = home
-    env.pop("HERMES_PROFILE", None)
-    env["HERMES_DESKTOP"] = "1"
-    env.pop("HERMES_DESKTOP_DEV_SERVER", None)
     check_input()
     emit("stage", name="hermes-start")
     child = subprocess.Popen([hermes, "--profile", "default", "serve", "--isolated", "--host", "127.0.0.1", "--port", "0", "--ssh-session-token-file", token_path, "--ssh-owner-nonce", nonce], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, env=env)
@@ -387,7 +429,7 @@ export async function startHermesSsh(ssh, {
   const credential = randomBytes(32).toString('hex'), nonce = randomBytes(8).toString('hex')
   const ready = deferred(), forwarded = deferred(), cancelled = deferred()
   const children = []
-  let remote, tunnel, heartbeat, closing, stopping = false, clean = false, sawProtocol = false, noRemote = false
+  let remote, tunnel, heartbeat, closing, stopping = false, clean = false, sawProtocol = false, noRemote = false, model
   let inputSent = false, readySeen = false, stage = 'ssh-sign-in', remoteEntry, tunnelEntry
   const secrets = [credential, nonce]
   // The stage a failure stopped at is fixed when it happens: closing moves nothing.
@@ -488,6 +530,9 @@ export async function startHermesSsh(ssh, {
         if (frame.type === 'ready' && !readySeen && Number.isSafeInteger(frame.port) && frame.port > 0 && frame.port < 65536) { readySeen = true; stage = 'tunnel'; ready.resolve(frame.port) }
         else if (frame.type === 'stage' && REMOTE_STAGES.has(frame.name)) { if (!readySeen) stage = frame.name }
         else if (frame.type === 'closed' && typeof frame.clean === 'boolean') clean = frame.clean
+        // The model this Hermes runs on, read by the start probe before serve: one value,
+        // never a list. Only an id that passes the transport's own shape is carried.
+        else if (frame.type === 'model' && !readySeen && model === undefined && MODEL_ID.test(frame.provider ?? '') && MODEL_ID.test(frame.model ?? '')) model = { provider: frame.provider, model: frame.model }
         else if (frame.type === 'error' && REMOTE_KINDS.has(frame.code)) {
           // Only bounded, shaped facts: an exit code, the fault's class, and Hermes's last
           // lines with this connection's secrets, credential shapes and home paths removed.
@@ -522,7 +567,7 @@ export async function startHermesSsh(ssh, {
     // The forward is proven by SSH's own listening line: no line in time is no tunnel.
     await bounded(forwarded.promise, Math.min(limits.control, until - Date.now())).catch(error => { throw error?.sshError === 'timeout' && !stopping ? failure('tunnel') : error })
     if (stopping || remote.exitCode !== null || tunnel.exitCode !== null) throw failure(remote.exitCode !== null ? 'unknown' : 'tunnel')
-    return { address: `http://127.0.0.1:${localPort}`, credential, close }
+    return { address: `http://127.0.0.1:${localPort}`, credential, model, close }
   } catch (error) {
     at(error)
     let cleanupError

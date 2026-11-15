@@ -211,6 +211,9 @@ export async function prepareHermesConnection(draft, {
     let closePromise
     return {
       mode: draft.mode, authMode, address, credential, authHeaders, redactionSecrets, profiles, defaultProfile,
+      // The model an SSH start probe read from the remote's own settings, if it could: the
+      // one model this connection runs, never a list to choose from.
+      model: owned?.model,
       ssh: draft.mode === 'ssh' ? Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome'].filter(name => draft.ssh[name] !== undefined).map(name => [name, draft.ssh[name]])) : undefined,
       secret: persisted,
       allowLoopback: draft.mode === 'ssh',

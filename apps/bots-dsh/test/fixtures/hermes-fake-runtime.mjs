@@ -15,6 +15,18 @@ if (args.includes('--version')) {
   console.log(`Install directory: ${homedir()}/.hermes/hermes-agent`)
   if (process.env.HERMES_FAKE_INSTALL !== '') console.log(`Install method: ${process.env.HERMES_FAKE_INSTALL ?? 'git'}`)
   console.log('Python: 3.14.9')
+} else if (args[0] === 'config') {
+  // The model probe the real supervisor runs before serve: read only, in the JSON shape
+  // `hermes config get model --json` prints. `HERMES_FAKE_MODEL=none` is a config with no
+  // model; `HERMES_FAKE_MODEL_PLAIN=1` is a build without --json, which answers the same
+  // value as plain "default: <model>" lines.
+  record({ event: 'model', args })
+  if (process.env.HERMES_FAKE_MODEL === 'none') process.exit(1)
+  if (process.env.HERMES_FAKE_MODEL_PLAIN === '1' && args.includes('--json')) process.exit(1)
+  const model = process.env.HERMES_FAKE_MODEL ?? 'gpt-6-astra', provider = process.env.HERMES_FAKE_PROVIDER ?? 'openai-codex'
+  console.log(process.env.HERMES_FAKE_MODEL_PLAIN === '1'
+    ? `default: ${model}\nprovider: ${provider}`
+    : JSON.stringify({ default: model, provider }))
 } else if (args.includes('--help')) {
   record({ event: 'probe', args })
   console.log(scenario === 'runtime-old' ? 'serve' : 'serve --ssh-session-token-file --ssh-owner-nonce')
