@@ -286,15 +286,29 @@ def beside_dir(home):
     """The record folder next to the home: <parent>/gateway-locks, a sibling."""
     return os.path.join(os.path.dirname(os.path.normpath(home)), "gateway-locks")
 
+def normalized_home(path):
+    """One spelling per home: resolve, drop trailing/double/dot segments, follow symlinks."""
+    if not isinstance(path, str) or not path.startswith("/"):
+        return ""
+    value = os.path.normpath(path)
+    try:
+        if os.path.exists(value):
+            value = os.path.realpath(value)
+    except OSError:
+        pass
+    return value
+
 def candidate_homes(explicit, extra=()):
-    homes = []
+    homes, seen = [], set()
     def add(path):
-        if not isinstance(path, str) or not path.startswith("/") or path in homes:
+        home = normalized_home(path)
+        if not home or home in seen:
             return
-        if not os.path.isdir(path):
+        if not os.path.isdir(home):
             return
-        if os.path.isfile(os.path.join(path, "config.yaml")) or walk_records(path, 2.0):
-            homes.append(path)
+        seen.add(home)
+        if os.path.isfile(os.path.join(home, "config.yaml")) or walk_records(home, 2.0):
+            homes.append(home)
     add(explicit)
     for path in extra:
         add(path)
@@ -389,9 +403,9 @@ try:
     # another existing home is left for attribution (a home owning a different serve
     # keeps it). The default home is the one Hermes uses with no HERMES_HOME override.
     # Only the login environment decides the default home: a saved pick must never change it.
-    default_home = os.environ.get("HERMES_HOME", "").strip()
-    if not isinstance(default_home, str) or not default_home.startswith("/"):
-        default_home = os.path.join(os.path.expanduser("~"), ".hermes")
+    default_home = normalized_home(os.environ.get("HERMES_HOME", "").strip())
+    if not default_home:
+        default_home = normalized_home(os.path.join(os.path.expanduser("~"), ".hermes"))
     shared_keys = set()
     for folder in user_lock_dirs():
         try:
@@ -414,8 +428,8 @@ try:
     for record in record_dirs:
         if record.get("owner"):
             continue
-        named = record.get("home") or ""
-        if named.startswith("/") and os.path.isdir(named) and named not in homes and len(homes) < 12:
+        named = normalized_home(record.get("home") or "")
+        if named and os.path.isdir(named) and named not in homes and len(homes) < 12:
             homes.append(named)
     if len(homes) > 12:
         homes = homes[:12]
@@ -437,8 +451,8 @@ try:
         if not target:
             # The record lives in the shared account folder; its own report may name the
             # home that wrote it. A home already served by a distinct record is not re-owned.
-            named = record.get("home") or ""
-            if named.startswith("/") and os.path.isdir(named):
+            named = normalized_home(record.get("home") or "")
+            if named and os.path.isdir(named):
                 if named not in attributed and len(homes) < 12:
                     homes.append(named)
                     attributed[named] = []

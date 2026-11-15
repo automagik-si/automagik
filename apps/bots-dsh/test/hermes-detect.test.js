@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { spawn as spawnChild } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { createServer as createHttpServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -496,6 +496,59 @@ test('after picking the clone once, a restart shows both homes right and both pi
     assert.equal(cloneBot.running, true, `clone is pickable (saved=${saved ?? 'none'})`)
     assert.equal(cloneBot.recordDir, fixture.cloneLock)
   }
+})
+
+test('a home written with a trailing slash is listed once and keeps its beside record', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const beside = join(fixture.root, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const { frames } = await runReader(fixture, { hermesHome: `${fixture.primary}/` })
+  assert.equal(frames.filter(frame => frame.type === 'home' && frame.home === fixture.primary).length, 1, 'one home, not two')
+  const bot = botsOf(frames).find(row => row.home === fixture.primary && row.id === 'default')
+  assert.equal(bot.running, true, 'the beside record is still found')
+  assert.equal(bot.recordDir, beside)
+})
+
+test('a home written with a double slash and a dot segment is listed once', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const beside = join(fixture.root, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const spelled = `${dirname(fixture.primary)}//./${fixture.primary.split('/').at(-1)}`
+  const { frames } = await runReader(fixture, { hermesHome: spelled })
+  assert.equal(frames.filter(frame => frame.type === 'home' && frame.home === fixture.primary).length, 1)
+  assert.equal(botsOf(frames).find(row => row.home === fixture.primary).running, true)
+})
+
+test('a symlinked spelling of a home is the same home', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const beside = join(fixture.root, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const link = join(fixture.root, 'hermes-link')
+  await symlink(fixture.primary, link)
+  const { frames } = await runReader(fixture, { hermesHome: link })
+  assert.equal(frames.filter(frame => frame.type === 'home' && frame.home === fixture.primary).length, 1)
+  const bot = botsOf(frames).find(row => row.home === fixture.primary && row.id === 'default')
+  assert.equal(bot.running, true, 'the real home owns the beside record')
+})
+
+test('a clone home written with a trailing slash still finds its beside serve', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { cloneRecord: false, primaryRecord: false, cloneProfilesFail: true })
+  const beside = join(dirname(fixture.clone), 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const { frames } = await runReader(fixture, { hermesHome: `${fixture.clone}/` })
+  assert.equal(frames.filter(frame => frame.type === 'home').length, 2, 'default and clone only')
+  const bot = botsOf(frames).find(row => row.home === fixture.clone && row.id === 'default')
+  assert.ok(bot)
+  assert.equal(bot.running, true, 'the clone beside serve is not hidden')
+  assert.equal(bot.recordDir, beside)
 })
 
 test('a record folder beside two homes under one parent belongs to neither', async t => {
