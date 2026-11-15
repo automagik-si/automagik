@@ -32,9 +32,13 @@ async function fixture(t, scenario = 'ready') {
   // The handoff is per start script: every real-start open gets it, and handed() is the
   // last one while handoffs() counts them. A test that keeps a cancel of its own only
   // moves this computer's wait; the start script is still handed the short cancel.
+  // The handshake's own cancelMs is checked numeric before the fixture replaces it, and
+  // originalCancelMs()/originalCancels() keep what the product sent: a product-side
+  // rename or removal turns these tests red, where the rewritten line alone would not.
   const realStart = scenario.startsWith('runtime-'), scriptCancelMs = 300
   const deadlines = { start: 5000, control: 3000, cancel: realStart ? 2000 : 250 }
-  let handed, handoffs = 0
+  let handed, handoffs = 0, originalCancelMs
+  const originalCancels = []
   const handShortCancel = spawn => (...args) => {
     const child = spawn(...args)
     if (!realStart) return child
@@ -43,9 +47,13 @@ async function fixture(t, scenario = 'ready') {
     child.stdin.write = (data, ...rest) => {
       if (childHanded || typeof data !== 'string' || !data.startsWith('{')) return write(data, ...rest)
       childHanded = true
+      const handshake = JSON.parse(data)
+      assert.ok(Number.isFinite(handshake.cancelMs), 'the start script handshake carries the numeric cancelMs this fixture replaces')
+      originalCancelMs = handshake.cancelMs
+      originalCancels.push(originalCancelMs)
       handed = scriptCancelMs
       handoffs++
-      return write(`${JSON.stringify({ ...JSON.parse(data), cancelMs: scriptCancelMs })}\n`, ...rest)
+      return write(`${JSON.stringify({ ...handshake, cancelMs: scriptCancelMs })}\n`, ...rest)
     }
     return child
   }
@@ -68,7 +76,7 @@ async function fixture(t, scenario = 'ready') {
   const open = async (ssh = config, overrides = {}) => { const connection = await startHermesSsh(ssh, { ...options, ...overrides, spawn: handShortCancel(overrides.spawn ?? spawnChild) }); connections.push(connection); return connection }
   t.after(async () => { for (const connection of connections) await connection.close().catch(error => error.localClosed); await rm(home, { recursive: true, force: true }) })
   const trust = (expected, overrides = {}) => trustHermesSshHostKey(config, expected, { env: options.env, home, temp: home, deadlines: options.deadlines, ...overrides })
-  return { home, config, options, open, trust, credential, localPort, remotePort, records, untilRecord, hostKey, knownHosts, scriptCancelMs, handed: () => handed, handoffs: () => handoffs }
+  return { home, config, options, open, trust, credential, localPort, remotePort, records, untilRecord, hostKey, knownHosts, scriptCancelMs, handed: () => handed, handoffs: () => handoffs, originalCancelMs: () => originalCancelMs, originalCancels: () => originalCancels }
 }
 
 test('system ssh respects config/key arguments, enforces known-host key-only auth and tunnels numeric loopback', async t => {
@@ -343,10 +351,12 @@ test('the remote supervisor force-stops only its owned fake child when graceful 
   // deadline, and the fixture still hands the start script its own short cancel.
   const deadlines = { start: 10000, control: 3000, cancel: 1000 }
   const connection = await f.open({ ...f.config, hermesPath }, { deadlines })
-  // The 1000 ms kept here is this computer's wait (800 ms); the script's stop budget
-  // comes from the 300 ms the fixture hands it (grace 120, cancel 210).
-  assert.equal(f.handed(), f.scriptCancelMs, 'the start script was handed the short cancel in place of the one kept here')
-  assert.ok(f.scriptCancelMs < deadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
+  // The 1000 ms kept here is this computer's 800 ms wait; the script's own stop is the
+  // 300 ms handed it (grace 120, cancel 210), so its clock ends inside. That comparison
+  // stays a comment: both values are test constants, and the product's 0.8 copied by
+  // hand could not go red on a product-side change.
+  assert.equal(f.originalCancelMs(), deadlines.cancel, 'the handshake carried this computer’s own cancel before the fixture replaced it')
+  assert.equal(f.handed(), f.scriptCancelMs, 'the fixture handed the start script the short cancel in place of the one kept here')
   const runtime = (await f.records()).find(record => record.event === 'runtime-start')
   await connection.close()
   assert.throws(() => process.kill(runtime.pid, 0), { code: 'ESRCH' })
@@ -383,9 +393,10 @@ for (const [exitsFirst, withoutWaitid] of [[false, false], [true, false], [true,
     const deadlines = { start: 10000, control: 3000, cancel: 1000 }
     const connection = await f.open({ ...f.config, hermesPath }, { deadlines })
     // The fixture hands this start script 300 ms; the 1000 ms here is only this
-    // computer's 800 ms wait for the group to end.
-    assert.equal(f.handed(), f.scriptCancelMs, 'the start script was handed the short cancel in place of the one kept here')
-    assert.ok(f.scriptCancelMs < deadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
+    // computer's 800 ms wait for the group to end, so the script's stop ends inside.
+    // Kept as a comment: two test constants cannot turn red on a product change.
+    assert.equal(f.originalCancelMs(), deadlines.cancel, 'the handshake carried this computer’s own cancel before the fixture replaced it')
+    assert.equal(f.handed(), f.scriptCancelMs, 'the fixture handed the start script the short cancel in place of the one kept here')
     const records = await f.records()
     const leader = records.find(record => record.event === 'runtime-start')
     const descendant = records.find(record => record.event === 'descendant-start')
@@ -484,8 +495,11 @@ test('a Hermes that exits early is its own kind, with its exit code and last lin
   assert.match(nonce, /^[0-9a-f]{16}$/)
   assert.ok(!JSON.stringify(failure.sshDetail).includes(nonce), 'the owner nonce is not kept either')
   assert.equal((await f.records()).filter(record => record.event === 'spawn').length, 1, 'no tunnel is opened to a Hermes that stopped')
-  assert.equal(f.handed(), f.scriptCancelMs, 'the script was handed the short cancel in place of the one kept here')
-  assert.ok(f.scriptCancelMs < f.options.deadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
+  // This computer waits 1600 ms (0.8 of the long stop window) and the script stops inside
+  // the 300 ms handed it; the comparison is a comment because both values are test
+  // constants, so it could not go red on a product change.
+  assert.equal(f.originalCancelMs(), f.options.deadlines.cancel, 'the handshake carried this computer’s own cancel before the fixture replaced it')
+  assert.equal(f.handed(), f.scriptCancelMs, 'the fixture handed the script the short cancel in place of the one kept here')
   assert.equal((await f.records()).at(-1).event, 'closed', 'the start script ended by itself, after its closed frame')
 })
 
@@ -525,9 +539,12 @@ test('a Hermes that never says ready, or reports no usable port, is named by the
   // What was really handed over: a deadline for the script that ends before this computer's.
   assert.equal(startClock.handed(), scriptStartMs, 'the start script was handed the short deadline')
   assert.ok(scriptStartMs < deadlines.start, "the script's deadline ends inside this computer's")
+  // This computer's 1600 ms wait ends after the script's own 300 ms stop; the comparison
+  // is a comment because both values are test constants, so it could not go red on a
+  // product change. The stop window is the fixture's long one (deadlines.cancel is set
+  // from slow.options.deadlines.cancel above), not an own shorter cancel.
+  assert.equal(slow.originalCancelMs(), deadlines.cancel, 'the handshake carried the stop window this computer keeps before the fixture replaced it')
   assert.equal(slow.handed(), slow.scriptCancelMs, 'the fixture handed the short cancel through this test’s own wrapper')
-  assert.ok(slow.scriptCancelMs < deadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
-  assert.equal(deadlines.cancel, slow.options.deadlines.cancel, "the stop window is the fixture's long one, not an own shorter cancel")
   assert.match(failure.sshDetail.hermes.join('\n'), /sample server still loading/)
   assert.ok(!JSON.stringify(failure.sshDetail).includes(slow.credential))
   const started = (await slow.records()).find(record => record.event === 'runtime-start')
@@ -554,8 +571,11 @@ test('a Hermes that never says ready, or reports no usable port, is named by the
   assert.equal((await port.records()).filter(record => record.event === 'spawn').length, 1)
   assert.ok(portHandshake.startMs > 5000, `the start script keeps a start clock wider than the fixture default (${portHandshake.startMs} ms)`)
   assert.equal(portHandshake.controlMs, portDeadlines.control, 'the start script keeps the restored control window')
-  assert.equal(port.handed(), port.scriptCancelMs, 'the script was handed the short cancel in place of the one kept here')
-  assert.ok(port.scriptCancelMs < portDeadlines.cancel * 0.8, "the script's clock ends inside the wait this computer keeps")
+  // The 2000 ms stop window here is this computer's 1600 ms wait; the script's own stop is
+  // the 300 ms handed it, so its clock ends inside. A comment: two test constants cannot
+  // go red on a product change.
+  assert.equal(port.originalCancelMs(), portDeadlines.cancel, 'the handshake carried the stop window this computer keeps before the fixture replaced it')
+  assert.equal(port.handed(), port.scriptCancelMs, 'the fixture handed the script the short cancel in place of the one kept here')
   assert.equal((await port.records()).at(-1).event, 'closed', 'the start script ended by itself, after its closed frame')
 })
 
@@ -576,8 +596,11 @@ test('a second real-start open on one fixture hands each start script the short 
   const first = await f.open({ ...f.config, hermesPath }, { spawn: capture })
   const second = await f.open({ ...f.config, hermesPath }, { spawn: capture })
   assert.equal(handshakes.length, 2, 'both start scripts reached their handshake')
-  assert.deepEqual(handshakes.map(handshake => handshake.cancelMs), [f.scriptCancelMs, f.scriptCancelMs], 'each start script was handed the short cancel, not the one kept here')
   assert.equal(f.handoffs(), 2, 'the fixture recorded one handoff per start script')
+  // Both handshakes carried this computer's own cancel before the fixture replaced it: a
+  // product rename or removal is caught here, not only in the rewritten lines below.
+  assert.deepEqual(f.originalCancels(), [f.options.deadlines.cancel, f.options.deadlines.cancel], 'each handshake carried this computer’s own cancel before the fixture replaced it')
+  assert.deepEqual(handshakes.map(handshake => handshake.cancelMs), [f.scriptCancelMs, f.scriptCancelMs], 'the fixture handed each start script the short cancel, not the one kept here')
   await Promise.all([first.close(), second.close()])
 })
 
