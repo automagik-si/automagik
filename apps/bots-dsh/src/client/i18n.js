@@ -2633,6 +2633,20 @@ const ZH = {
   'Harness settings': 'Harness 设置',
   'Switch on Automation tasks on the Plugins page in Harness settings.': '在 Harness 设置的插件页启用「自动化任务」。',
   'Open Harness settings': '打开 Harness 设置',
+
+  // The rendered face of a seat on this computer (RFC 0022 delivery 1L, seat-chat.js).
+  'This seat holds the chat already open in another window.': '这个席位已在另一个窗口打开了聊天。',
+  'A step needs your answer': '有一个步骤在等你回答',
+  'Allow always': '总是允许',
+  'Answer in the terminal. This view shows the card and never answers it.': '在终端里回答。这个视图只显示卡片，绝不代你回答。',
+  'Error output': '错误输出',
+  'Screen only: this agent has no transcript reader, so these are its last screens.': '只有屏幕：这个 agent 没有对话记录读取器，所以这里显示的是它最近的屏幕。',
+  'Read from this seat’s own transcript. This view never runs or types into it.': '读取自这个席位自己的对话记录。这个视图绝不运行它，也不向它输入。',
+  'Choose a seat in the team bar to read its chat.': '在团队栏里选一个席位，读它的聊天。',
+  'Back to the team': '返回团队',
+  'Reading the seat…': '正在读取席位…',
+  'No transcript rows yet. The seat is quiet.': '还没有对话记录。这个席位很安静。',
+  'Latest': '最新',
 }
 
 // Host errors stay English, since Bots read them too; they are translated where the
