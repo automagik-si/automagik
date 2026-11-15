@@ -660,9 +660,28 @@ export function install(rt) {
     const effort = await desiredEffort(bot, ref)
     const ownChanged = force || staying.size > 0 || bot.appliedModel !== ref || (bot.appliedEffort ?? undefined) !== effort
     const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
-    if (ownChanged && !staying.has(chat)) await selectSessionModel(chat, route)
+    // An attached serve answers on its one row whatever ref a request names
+    // (remote-chat-adapter.js stream): a Session already on a hermes-remote route is
+    // served by that row without an in-place DSH model switch. Selecting attach there
+    // would ask DSH to compact the carried-over chat onto the attach row, which fails as
+    // MODEL_SWITCH_COMPACTION_FAILED before the turn; keeping the Session's own route
+    // leaves the header and the request on the same ref, so #1334's exact-route guard
+    // accepts the turn and the attached transport submits it.
+    const carriedHermes = typeof bot.previousModel === 'string' && bot.previousModel.startsWith('hermes-remote/')
+      && bot.previousModel !== 'hermes-remote/attach'
+    const onAttachedTransport = sessionId => {
+      if (ref !== 'hermes-remote/attach') return false
+      let config
+      try { config = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config } catch { return false }
+      if (config?.provider === 'hermes-remote') return true
+      // The Bot's chat is not loaded yet: its record's last answered ref is the carried
+      // route. A Bot that never answered on Hermes has no such ref, so a new chat on
+      // another provider still takes the switch.
+      return config === undefined && sessionId === chat && carriedHermes
+    }
+    if (ownChanged && !staying.has(chat) && !onAttachedTransport(chat)) await selectSessionModel(chat, route)
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
-      if (staying.has(sessionId)) continue
+      if (staying.has(sessionId) || onAttachedTransport(sessionId)) continue
       const applied = sessionSelections.get(sessionId)
       if (!force && applied !== undefined && sameSelection(applied, route)) continue
       await selectSessionModel(sessionId, route)

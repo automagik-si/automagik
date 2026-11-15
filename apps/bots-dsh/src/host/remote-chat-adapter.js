@@ -151,7 +151,20 @@ export class RemoteChatAdapter extends LlmAdapter {
 
   providerInfo(provider) { return { id: provider, name: 'Remote Hermes' } }
   async listModels(provider) { return this.enabled() ? this.models().map(model => ({ id: model.id, name: model.name, provider })) : [] }
-  async resolveModel(provider, id) { return { provider, id, name: this.models().find(model => model.id === id)?.name ?? id } }
+  // DSH's compaction guard prices a model switch through this exact-model result. The
+  // attached row's own window must reach it, or the guard throws before it can measure
+  // the carried-over chat. A carried-over ref is served by that same one row, so it is
+  // priced there too.
+  async resolveModel(provider, id) {
+    const rows = this.models()
+    const row = rows.find(model => model.id === id) ?? (this.attached() ? rows[0] : undefined)
+    return {
+      provider,
+      id,
+      name: row?.name ?? id,
+      ...(Number.isInteger(row?.contextWindow) && row.contextWindow > 0 ? { context: { contextWindow: row.contextWindow } } : {}),
+    }
+  }
 
   // DSH dispatches a loop request as itself unless it must project it: the projections here
   // strip developer notes (tool-set changes) and turn file blocks into text handles, and the

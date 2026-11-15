@@ -545,6 +545,65 @@ test('a projected agent-loop request still answers, and a hand-built call is sti
   assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', purpose: 'compaction', messages: Object.freeze(projected) }), agent, filePath), false)
 })
 
+test('a carried-over chat keeps its old Hermes ref and the attach row answers through the guard', async t => {
+  // The Bot moved to the attached serve's one row, but its Session still names the old
+  // nous ref. Because it is kept (models.js applyModel), the request and the header agree;
+  // #1334's exact-route guard accepts it, and the attach transport serves its one row
+  // whatever the ref. Both a short and a long carried-over history dispatch.
+  for (const count of [1, 400]) {
+    const f = fixture(t, { attached: true })
+    const messages = Object.freeze(Array.from({ length: count }, (_, index) => Object.freeze({ role: 'user', id: `m-${index}`, content: `message ${index}` })))
+    const session = { id: 'sample-chat', deriveMessages: () => [...messages], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } }) }
+    const agent = { id: 'sample-chat', session }
+    const ctx = new Context()
+    ctx.provide('agents'); ctx.set('agents', { get: id => (id === agent.id ? agent : undefined), list: () => [agent] })
+    const adapter = new RemoteChatAdapter({ ctx }, {
+      enabled: () => true,
+      models: () => [{ id: 'attach', name: 'gpt-6-astra (openai-codex)', provider: 'hermes-remote', model: 'gpt-6-astra', providerId: 'openai-codex', contextWindow: 200_000 }],
+      identity: () => ({ ...f.identity, canonicalBot: true }),
+      save: async () => {},
+      attached: () => true,
+      open: async () => {
+        await f.wire.connect()
+        return new RemoteChat(f.wire, { identity: { canonicalBot: true }, save: async () => {} })
+      },
+    })
+    t.after(() => adapter.dispose())
+    const runtime = new LlmRuntime(ctx)
+    runtime.registerAdapter(['hermes-remote'], adapter)
+    const request = Object.freeze({ provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra', sessionId: 'sample-chat', messages })
+    assert.equal(RemoteChatAdapter.ownTurn(request, agent), true, `the exact-route guard accepts the carried-over header (${count} messages)`)
+    const stream = runtime.stream(markAgentLoopRequest(Object.freeze({ ...request, tools: Object.freeze([]), signal: new AbortController().signal })))
+    const first = stream.next()
+    await until(() => f.sent.some(frame => frame.method === 'prompt.submit'), 'the carried-over prompt to be submitted', first)
+    f.socket().event('message.complete', { text: 'OK' })
+    const chunks = [(await first).value]
+    for await (const chunk of stream) chunks.push(chunk)
+    assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'OK')
+    assert.equal(chunks.at(-1).reason.kind, 'stop')
+  }
+})
+
+test('the attach row prices a model switch through resolveModel, also for a carried ref', async () => {
+  const attached = new RemoteChatAdapter({ ctx: new Context() }, {
+    enabled: () => true,
+    models: () => [{ id: 'attach', name: 'gpt-6-astra (openai-codex)', provider: 'hermes-remote', model: 'gpt-6-astra', providerId: 'openai-codex', contextWindow: 200_000 }],
+    attached: () => true,
+    identity: () => ({}), save: async () => {}, open: async () => { throw new Error('not opened') },
+  })
+  const row = await attached.resolveModel('hermes-remote', 'attach')
+  assert.equal(row.context.contextWindow, 200_000)
+  // A carried-over ref is served by that one row, so the guard can price it too.
+  const carried = await attached.resolveModel('hermes-remote', 'nous:openai/gpt-6-astra')
+  assert.equal(carried.context.contextWindow, 200_000)
+  // A non-attached adapter has no row for a ref it was not given.
+  const remote = new RemoteChatAdapter({ ctx: new Context() }, {
+    enabled: () => true, models: () => [{ id: 'model', name: 'Model', provider: 'hermes-remote', model: 'model', contextWindow: 1000 }],
+    attached: () => false, identity: () => ({}), save: async () => {}, open: async () => { throw new Error('not opened') },
+  })
+  assert.equal((await remote.resolveModel('hermes-remote', 'other')).context, undefined)
+})
+
 test('the guard refuses an unfrozen, misrouted or extra-message envelope, and accepts a rebuilt foreign answer', async t => {
   const f = fixture(t)
   const ctx = new Context(), runtime = new LlmRuntime(ctx)

@@ -31,6 +31,20 @@ export function connectionRedactor(values) {
   }
 }
 
+// The capacity DSH's compaction guard prices a model switch on. An attached serve reports
+// the profile's model and provider, not its window; without a positive window the guard
+// throws before it measures the chat (MODEL_SWITCH_COMPACTION_FAILED), so the row always
+// carries one. The default is a conservative floor: a carried-over chat on this route does
+// not take an in-place switch at all (models.js applyModel), and a route change to it opens
+// a fresh part; this value only keeps any other switch priceable.
+export const ATTACHED_CONTEXT_WINDOW = 200_000
+
+// The profile's own window when a serve ever reports one, else the row's safe default.
+function attachedContextWindow(profile) {
+  const window = profile?.contextWindow ?? profile?.context_window
+  return Number.isInteger(window) && window > 0 ? window : ATTACHED_CONTEXT_WINDOW
+}
+
 // What the attached connection offers DSH: one model row, the bot's own. The id is stable
 // across profile changes so a paired Bot keeps its model reference; the name is the model
 // and provider the CLI reported, never parsed out of a joined provider:model string.
@@ -43,6 +57,7 @@ export function attachedModelOf(profile) {
     provider: 'hermes-remote',
     model,
     providerId: provider,
+    contextWindow: attachedContextWindow(profile),
   }
 }
 

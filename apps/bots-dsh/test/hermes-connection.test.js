@@ -4,13 +4,28 @@ import { test } from 'node:test'
 import { mkdtemp, writeFile, readFile, rm, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { prepareHermesConnection, refreshHermesProfiles } from '../src/host/hermes-connection.js'
+import { ATTACHED_CONTEXT_WINDOW, attachedModelOf, prepareHermesConnection, refreshHermesProfiles } from '../src/host/hermes-connection.js'
 import { install } from '../src/host/hermes-remote.js'
 import { HermesTransport, RemoteChat } from '../src/host/hermes-transport.js'
 import { fakeContext } from './fake-ctx.js'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 
 const deadlines = { start: 300, control: 100, cancel: 10 }
+
+test('the attached model row always carries a positive contextWindow', () => {
+  const plain = attachedModelOf({ id: 'default', model: 'gpt-6-astra', provider: 'openai-codex' })
+  assert.equal(plain.id, 'attach')
+  assert.equal(plain.name, 'gpt-6-astra (openai-codex)')
+  assert.equal(plain.contextWindow, ATTACHED_CONTEXT_WINDOW)
+  assert.ok(Number.isInteger(plain.contextWindow) && plain.contextWindow > 0)
+  // A serve that reports the profile model's own capacity wins over the floor.
+  assert.equal(attachedModelOf({ model: 'gpt-6-astra', provider: 'openai-codex', contextWindow: 400_000 }).contextWindow, 400_000)
+  assert.equal(attachedModelOf({ model: 'gpt-6-astra', provider: 'openai-codex', context_window: 800_000 }).contextWindow, 800_000)
+  // A broken value is never forwarded: the row still has a usable window.
+  for (const broken of [0, -1, 1.5, '400000', null]) {
+    assert.equal(attachedModelOf({ model: 'gpt-6-astra', provider: 'openai-codex', contextWindow: broken }).contextWindow, ATTACHED_CONTEXT_WINDOW)
+  }
+})
 async function until(predicate, what) {
   const deadline = Date.now() + 3000
   while (!predicate()) {
