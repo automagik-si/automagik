@@ -55,7 +55,7 @@ const reach = (config, principal) => [
 ]
 
 // Whether a member may use a path: in its reach, and in no denied root.
-export function memberMay(config, principal, spelling, cwd) {
+function memberMay(config, principal, spelling, cwd) {
   const path = physical(spelling, cwd)
   if (path === undefined) return false
   if (config.denyReadRoots.some(root => within(path, root))) return false
@@ -63,11 +63,18 @@ export function memberMay(config, principal, spelling, cwd) {
 }
 
 // A search reads a whole tree: its root must be usable and hold no denied root below it.
-export function memberMaySearch(config, principal, spelling, cwd) {
+function memberMaySearch(config, principal, spelling, cwd) {
   if (!memberMay(config, principal, spelling, cwd)) return false
   const root = physical(spelling, cwd)
   return !config.denyReadRoots.some(denied => {
     const held = physical(denied)
     return held !== undefined && within(held, root)
   })
+}
+
+// Whether work acting for these principals may use a path (or search from it): the owner
+// always; each member only by its own rule. Work for several sessions needs every one of them.
+export function mayUse(config, principals, spelling, cwd, { search = false } = {}) {
+  const rule = search ? memberMaySearch : memberMay
+  return principals.every(principal => principal.kind === 'owner' || rule(config, principal, spelling, cwd))
 }

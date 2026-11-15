@@ -1301,6 +1301,25 @@ jobs:
         if: matrix.app == 'bots-dsh'
         run: echo "CHROME_BIN=/usr/bin/google-chrome" >> "$GITHUB_ENV"
 
+      - name: A case-insensitive folder for the member wall's spelling check
+        # The member wall decides by folder identity, which only a disk that folds case and
+        # accents (the Mac's default) proves. The runner's kernel has no casefold tmpfs, so a
+        # small casefold ext4 image in the job's own temp. Under CI the test fails, rather than
+        # skips, when it finds no such folder.
+        if: matrix.app == 'bots-dsh'
+        run: |
+          set -euo pipefail
+          img="${RUNNER_TEMP}/casefold.img"
+          dir="${RUNNER_TEMP}/casefold"
+          truncate -s 64M "${img}"
+          mkfs.ext4 -q -O casefold "${img}"
+          mkdir -p "${dir}"
+          sudo mount -o loop "${img}" "${dir}"
+          sudo mkdir "${dir}/w"
+          sudo chattr +F "${dir}/w"
+          sudo chown "$(id -u):$(id -g)" "${dir}/w"
+          echo "MEMBER_WALL_CASEFOLD_DIR=${dir}/w" >> "$GITHUB_ENV"
+
       - name: Electron for the Bot team's script wall check
         # browser_exec's process wall is checked on both runtimes the Bot team ships on. The
         # desktop app's is Electron as Node: the Electron apps/desktop pins, from its lock.

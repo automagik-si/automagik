@@ -24,8 +24,8 @@ import z from '@deepseek-ai/schemastery'
 import { FsError } from '@deepseek-ai/dsh-fs'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
-import { currentSession, principalOf, sessionScope } from './principals.js'
-import { memberMay, memberMaySearch } from './paths.js'
+import { principalOf, scopeSessions, scopeWith, sessionScope } from './principals.js'
+import { mayUse } from './paths.js'
 
 export const SEARCH_TOOLS = Object.freeze(['grep', 'glob'])
 
@@ -55,24 +55,27 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
     if (!config.members) return
     if (!isAbsolute(config.principalsFile)) throw new Error('member wall: members on needs an absolute principalsFile')
     if (!isAbsolute(config.membersRoot)) throw new Error('member wall: members on needs an absolute membersRoot')
-    const inScope = (sessionId, next) => sessionId === undefined ? next() : sessionScope.run({ sessionId }, next)
+    const inScope = (sessionId, next) => sessionId === undefined ? next() : sessionScope.run(scopeWith(sessionId), next)
     // First in each waterfall, so every later listener and the tool body run in the scope.
     ctx.on('tools/execute', (exec, next) => inScope(sessionOfAgent(exec.agent), next), { prepend: true })
     ctx.on('agent/pre-step', (step, next) => inScope(sessionOfAgent(step?.agent), next), { prepend: true })
     // DSH reads instruction files for a session from these two events, after the tool call and
-    // the step have left their scope. The first listener puts the rest of the event, and the
-    // work it starts, in the session's scope.
-    const enter = sessionId => { if (sessionId !== undefined) sessionScope.enterWith({ sessionId }) }
+    // the step have left their scope. The first listener adds the event's session to the scope of
+    // the rest of the event and the work it starts. It can only add: the emitting work keeps the
+    // sessions it had, so one session's event inside another's work holds that work to both
+    // sessions' rules and never widens it.
+    const enter = sessionId => {
+      if (sessionId !== undefined && !scopeSessions().includes(sessionId)) sessionScope.enterWith(scopeWith(sessionId))
+    }
     ctx.on('tools/result', exec => enter(sessionOfAgent(exec?.agent)), { prepend: true })
     ctx.on('session/event', (session, event) => { if (event?.type === 'step/end') enter(session?.id) }, { prepend: true })
     ctx.on('tools/pre-execute', async (exec, next) => {
       if (!SEARCH_TOOLS.includes(exec.name)) return next()
-      const sessionId = sessionOfAgent(exec.agent) ?? currentSession()
-      if (sessionId === undefined) return next()
-      const principal = principalOf(config.principalsFile, sessionId)
-      if (principal.kind === 'owner') return next()
+      const sessionId = sessionOfAgent(exec.agent)
+      const principals = this.principals(sessionId === undefined ? scopeSessions() : scopeWith(sessionId).sessions)
+      if (principals.every(principal => principal.kind === 'owner')) return next()
       const where = await this.searchRoot(exec)
-      if (where === undefined || !memberMaySearch(config, principal, where.path, where.cwd)) {
+      if (where === undefined || !mayUse(config, principals, where.path, where.cwd, { search: true })) {
         return { kind: 'deny', reason: `${exec.name}: outside the files this member may search` }
       }
       return next()
@@ -94,15 +97,16 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
     }
   }
 
-  // Whether the current work may touch a path: always outside a session, for the owner, and
-  // with members off; for a member, only when the path fits its rule.
+  // The principal of each session in a scope.
+  principals(sessions) {
+    return sessions.map(sessionId => principalOf(this.wall.principalsFile, sessionId))
+  }
+
+  // Whether the current work may touch a path: always outside a session and with members off;
+  // otherwise only when every session it acts for may (the owner always may).
   open(path, cwd = '/') {
     if (!this.wall.members) return true
-    const sessionId = currentSession()
-    if (sessionId === undefined) return true
-    const principal = principalOf(this.wall.principalsFile, sessionId)
-    if (principal.kind === 'owner') return true
-    return memberMay(this.wall, principal, path, cwd)
+    return mayUse(this.wall, this.principals(scopeSessions()), path, cwd)
   }
 
   // The target key is the target's real path: what is read is decided by it.

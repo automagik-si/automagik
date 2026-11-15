@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cells } from './member-wall-spelling-cells.mjs'
@@ -40,8 +40,22 @@ test('every spelling of a denied folder looks absent; the same spelling of its o
   check(await cells(root), true)
 })
 
-// A user namespace may mount a casefold tmpfs; where the host forbids it, the test says so.
-const casefold = () => {
+// Whether names in a folder fold: made as `a`, found as `A`.
+const folds = dir => {
+  let probe
+  try {
+    probe = mkdtempSync(join(dir, 'fold-'))
+    mkdirSync(join(probe, 'a'))
+    return existsSync(join(probe, 'A'))
+  } catch {
+    return false
+  } finally {
+    if (probe !== undefined) rmSync(probe, { recursive: true, force: true })
+  }
+}
+
+// A user namespace may mount a casefold tmpfs (Linux 6.13 or later, where it is allowed).
+const casefoldTmpfs = () => {
   try {
     execFileSync('unshare', ['-Urm', 'sh', '-c', 'd=$(mktemp -d) && mount -t tmpfs -o casefold none "$d" && chattr +F "$d"'], { stdio: 'ignore' })
     return true
@@ -50,7 +64,22 @@ const casefold = () => {
   }
 }
 
-test('on a case-insensitive disk, another case or accent form of a denied folder still looks absent', { skip: !casefold() && 'no casefold tmpfs in a user namespace here' }, () => {
+// A case-folding folder: the one CI prepares (MEMBER_WALL_CASEFOLD_DIR), the temp folder where
+// the disk already folds (a Mac), or a casefold tmpfs. Under CI on Linux the test fails, rather
+// than skips, when it finds none: the identity rule is only proved on such a disk.
+const prepared = process.env.MEMBER_WALL_CASEFOLD_DIR
+const folding = prepared !== undefined && folds(prepared) ? prepared
+  : folds(tmpdir()) ? tmpdir()
+  : casefoldTmpfs() ? 'tmpfs' : undefined
+const mustRun = process.env.CI !== undefined && process.platform === 'linux'
+
+test('on a case-insensitive disk, another case or accent form of a denied folder still looks absent', { skip: folding === undefined && !mustRun && 'no case-insensitive disk here' }, async t => {
+  assert.ok(folding !== undefined, 'under CI on Linux a case-folding folder is required (MEMBER_WALL_CASEFOLD_DIR)')
+  if (folding !== 'tmpfs') {
+    const root = mkdtempSync(join(folding, 'member-spelling-'))
+    t.after(() => rmSync(root, { recursive: true, force: true }))
+    return check(await cells(root), false)
+  }
   const script = [
     'set -e', 'd=$(mktemp -d)', 'mount -t tmpfs -o casefold none "$d"', 'mkdir "$d/w"', 'chattr +F "$d/w"',
     'exec "$0" --import ./test/harness-resolve.mjs ./test/member-wall-spelling-cells.mjs "$d/w"',

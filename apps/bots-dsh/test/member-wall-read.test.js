@@ -329,3 +329,76 @@ test('a folder link followed by .. is decided where it really lands', async t =>
     assert.equal(await ctx.fs.lstat(`${out}/secret.txt`), undefined, 'lstat through a link and ..')
   })
 })
+
+// One session's event inside another session's work (the shapes of the review, E1 to E6): the
+// work keeps every session it acted for, so it is held to all their rules and never widened.
+async function crossWorld(t) {
+  const places = layout(); t.after(() => rmSync(places.root, { recursive: true, force: true }))
+  places.record({ 'session-owner': 'owner', 'session-ana': 'member:ana', 'session-bo': 'member:bo' })
+  const ctx = await world(t, places)
+  const signal = new AbortController().signal
+  const files = {
+    owner: join(places.owner, 'secret.txt'), ana: join(places.ana, 'notes.txt'),
+    bo: join(places.members, 'bo', 'bo.txt'), shared: join(places.shared, 'team.txt'),
+  }
+  // What the current work may read: 'read', or the error it gets.
+  const reads = async () => Object.fromEntries(await Promise.all(Object.entries(files).map(async ([who, path]) => {
+    const target = await ctx.fs.resolve(path)
+    return [who, await ctx.fs.readText(target).then(() => 'read', error => error.code)]
+  })))
+  const result = id => ctx.emit('tools/result', { agent: agentFor(id, places.ana), signal }, { isError: false })
+  const stepEnd = id => ctx.emit('session/event', { id }, { type: 'step/end' })
+  const as = (id, work) => sessionScope.run({ sessionId: id }, work)
+  return { ctx, places, reads, result, stepEnd, as }
+}
+
+const HIDDEN = 'FS_NOT_FOUND'
+const tick = () => new Promise(resolve => setImmediate(resolve))
+
+test("E1: an owner's event inside a member's work never makes that work the owner's", async t => {
+  const { reads, result, stepEnd, as } = await crossWorld(t)
+  const member = { owner: HIDDEN, ana: 'read', bo: HIDDEN, shared: 'read' }
+  assert.deepEqual(await as('session-ana', () => { result('session-owner'); return reads() }), member, 'after a tool result')
+  assert.deepEqual(await as('session-ana', () => { stepEnd('session-owner'); return reads() }), member, "after a step's end")
+  // E1c: still so after further awaits.
+  assert.deepEqual(await as('session-ana', async () => {
+    result('session-owner'); await tick(); await null; stepEnd('session-owner'); await tick()
+    return reads()
+  }), member, 'after further awaits')
+})
+
+test('E2: a member\'s event inside the owner\'s work holds that work to the member\'s rules too', async t => {
+  // Entering nothing here would read the member's instruction files as the owner's.
+  const { reads, result, stepEnd, as } = await crossWorld(t)
+  const both = { owner: HIDDEN, ana: 'read', bo: HIDDEN, shared: 'read' }
+  assert.deepEqual(await as('session-owner', () => { result('session-ana'); return reads() }), both, 'after a tool result')
+  assert.deepEqual(await as('session-owner', () => { stepEnd('session-ana'); return reads() }), both, "after a step's end")
+})
+
+test("E3: an event in the synchronous start of an awaited helper never widens the caller", async t => {
+  const { reads, result, stepEnd, as } = await crossWorld(t)
+  const helper = async emit => { emit('session-owner'); await null }
+  const member = { owner: HIDDEN, ana: 'read', bo: HIDDEN, shared: 'read' }
+  assert.deepEqual(await as('session-ana', async () => { await helper(result); return reads() }), member, 'tool result')
+  assert.deepEqual(await as('session-ana', async () => { await helper(stepEnd); await tick(); return reads() }), member, "step's end")
+})
+
+test("E4: another member's event inside a member's work reaches neither member's area", async t => {
+  const { reads, result, as } = await crossWorld(t)
+  assert.deepEqual(await as('session-ana', () => { result('session-bo'); return reads() }),
+    { owner: HIDDEN, ana: HIDDEN, bo: HIDDEN, shared: 'read' })
+})
+
+test("E5: an event outside any session acts for its session; a session's own event changes nothing", async t => {
+  const { reads, result, as } = await crossWorld(t)
+  assert.deepEqual(await sessionScope.run(undefined, () => { result('session-ana'); return reads() }),
+    { owner: HIDDEN, ana: 'read', bo: HIDDEN, shared: 'read' }, 'outside any session')
+  assert.deepEqual(await as('session-owner', () => { result('session-owner'); return reads() }),
+    { owner: 'read', ana: 'read', bo: 'read', shared: 'read' }, "the owner's own event")
+})
+
+test("E6: an owner's tool call inside a member's work reads as the member", async t => {
+  const { ctx, places, as } = await crossWorld(t)
+  refused(await as('session-ana', () => call(ctx, 'session-owner', places.owner, 'read', { file_path: join(places.owner, 'secret.txt') })), 'read')
+  refused(await as('session-ana', () => call(ctx, 'session-owner', places.owner, 'grep', { pattern: 'canary', path: places.owner })), 'grep')
+})

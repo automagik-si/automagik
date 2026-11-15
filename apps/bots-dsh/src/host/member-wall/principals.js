@@ -10,8 +10,9 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
-// The session a piece of work runs for. Set around each tool call and each agent step; a call
-// with no session (the owner's own interface) reads no store.
+// The sessions a piece of work runs for. Set around each tool call and each agent step; a call
+// with no session (the owner's own interface) reads no store. The store is
+// { sessionId: the newest, sessions: every session it acts for }.
 export const sessionScope = new AsyncLocalStorage()
 
 export const OWNER = Object.freeze({ kind: 'owner' })
@@ -47,5 +48,21 @@ export function principalOf(file, sessionId) {
   return member(undefined)
 }
 
-// The session the current work runs for, or undefined for work outside any session.
+// The session the current work last entered, or undefined for work outside any session.
 export const currentSession = () => sessionScope.getStore()?.sessionId
+
+// Every session the current work acts for; empty outside any session. A store set with a
+// session alone acts for that session.
+export function scopeSessions() {
+  const store = sessionScope.getStore()
+  if (Array.isArray(store?.sessions)) return store.sessions
+  return store?.sessionId === undefined ? [] : [store.sessionId]
+}
+
+// The scope for the current work plus one more session. A scope only ever gains sessions, so
+// work that runs for one session and is handed another's never stops acting for the first:
+// it is held to every rule at once, and no event can widen what it may do.
+export function scopeWith(sessionId) {
+  const sessions = scopeSessions()
+  return { sessionId, sessions: sessions.includes(sessionId) ? sessions : [...sessions, sessionId] }
+}
