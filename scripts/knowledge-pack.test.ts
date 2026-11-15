@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import {
-  allowed, build, EXCLUDED_FOLDERS, EXCLUDED_WORDS, hasLiteral, KIND, literalEnds, PLACEHOLDERS_PATH, placeholderTest, privacyHits, readTar, sourceUrl, stamp, stem,
+  allowed, build, EXCLUDED_FOLDERS, EXCLUDED_WORDS, hasLiteral, KIND, branches, PLACEHOLDERS_PATH, placeholderTest, privacyHits, readTar, sourceUrl, stamp, stem,
   type Manifest, type Placeholder,
 } from './knowledge-pack';
 
@@ -337,13 +337,14 @@ describe('the knowledge pack', () => {
     expect(() => placeholderTest([{ rule: 'email', match: 'x', why: '' }])).toThrow(/needs a why/);
     expect(() => placeholderTest([{ rule: 'email', match: 'x', pattern: '^x$', why: 'w' }])).toThrow(/one of match or pattern/);
     expect(() => placeholderTest([{ rule: 'email', pattern: 'x', why: 'w' }])).toThrow(/anchored/);
-    const pass = placeholderTest([{ rule: 'email', pattern: '^a[0-9]$', why: 'w' }, { rule: 'home-path', match: 'h', why: 'w' }]);
-    expect(pass({ rule: 'email', match: 'a1' })).toBe(true);
-    expect(pass({ rule: 'email', match: 'a12' })).toBe(false);
+    const at = String.fromCharCode(64);
+    const pass = placeholderTest([{ rule: 'email', pattern: `^a${at}[0-9]$`, why: 'w' }, { rule: 'home-path', match: 'h', why: 'w' }]);
+    expect(pass({ rule: 'email', match: `a${at}1` })).toBe(true);
+    expect(pass({ rule: 'email', match: `a${at}12` })).toBe(false);
     expect(pass({ rule: 'email', match: 'h' })).toBe(false);
     expect(pass({ rule: 'home-path', match: 'h' })).toBe(true);
-    expect(pass({ rule: 'home-path', match: 'a1' })).toBe(false);
-    expect(pass({ rule: 'secret', match: 'a1' })).toBe(false);
+    expect(pass({ rule: 'home-path', match: `a${at}1` })).toBe(false);
+    expect(pass({ rule: 'secret', match: `a${at}1` })).toBe(false);
   });
 
   test('a placeholder pattern that matches empty text, has no literal part or matches unrelated text is refused', () => {
@@ -352,13 +353,11 @@ describe('the knowledge pack', () => {
     for (const pattern of ['^.+$', '^[\\s\\S]+$', '^\\S+$', '^(?:.)+$', '^\\w+\\s?\\d*$', '^[a-z0-9@./]+$', '^.{1,}$']) {
       expect(load(pattern)).toThrow(/has no literal part/);
     }
-    // A literal part is not enough: the pattern must not match unrelated text.
+    // A pinned local part or home name is not enough: the rest must not take a plain word.
     const at = String.fromCharCode(64);
     const home = ['', 'home', ''].join('/');
-    for (const pattern of [`^.*${at}.*$`, `^[^${at}]+${at}.+$`, '^.+\\..+$', '^(?:omni|.+)$', `^omni${at}.*$|^.+$`, `^(?:omni${at}.+)$`]) {
-      expect(load(pattern)).toThrow(/matches unrelated text/);
-    }
-    for (const pattern of [`^${home}.+$`, `^(?:/Users|/home)/[a-z0-9]+$`, `^${home}[^/]+$`]) expect(load(pattern, 'home-path')).toThrow(/matches unrelated text/);
+    for (const pattern of [`^omni${at}.*$`, `^you${at}[a-z]+$`, `^you${at}.+\\.com$`]) expect(load(pattern)).toThrow(/matches unrelated text/);
+    for (const pattern of [`^${home}user/.*$`, `^${home}user/[a-z]+$`]) expect(load(pattern, 'home-path')).toThrow(/matches unrelated text/);
     // What counts as a literal part.
     expect(['^x$', '^\\.$', '^\\u0040$', '^a{2}$', '^[0-9]+b$'].map(hasLiteral)).toEqual([true, true, true, true, true]);
     expect(['^.*$', '^[abc]+$', '^\\d{2,4}$', '^(?:\\s|\\S)+$', '^(?<n>.)\\b$'].map(hasLiteral)).toEqual([false, false, false, false, false]);
@@ -368,25 +367,57 @@ describe('the knowledge pack', () => {
     expect(omni({ rule: 'email', match: `omni${at}example.io` })).toBe(false);
   });
 
-  test('a pattern that takes letters-only text, or a wildcard beside a short literal, is refused', () => {
+  test('a pattern must carry an address\'s whole local part and at sign, or a home\'s whole name, as literal text', () => {
     const load = (pattern: string, rule = 'email') => () => placeholderTest([{ rule, pattern, why: 'w' }]);
     const at = String.fromCharCode(64);
     const home = ['', 'home', ''].join('/');
-    // No digit in any text these match: a probe with digits alone would let each one load.
-    const email = ['^a.*$', '^.*.net$', '^.+z$', `^[a-z]+${at}[a-z]+\\.[a-z]+$`, `^[a-z]+${at}company\\.com$`, `^.+${at}s\\.whatsapp\\.net$`];
-    for (const pattern of email) expect(load(pattern)).toThrow(/matches unrelated text/);
-    for (const pattern of [`^${home}[a-z]+$`, `^${home}[a-z]+/.*$`]) expect(load(pattern, 'home-path')).toThrow(/matches unrelated text/);
-    // A branch is checked on its own: one narrow branch does not carry a loose one.
-    expect(load(`^omni${at}1\\.0$|^b.*$`)).toThrow(/matches unrelated text/);
-    // The literal ends each branch is read by, escapes as their character.
-    expect(literalEnds(`^omni\\u0040[0-9]+\\.[0-9A-Za-z]+$`)).toEqual([{ prefix: `omni${at}`, suffix: '' }]);
-    expect(literalEnds('^.*\\.net$')).toEqual([{ prefix: '', suffix: '.net' }]);
-    expect(literalEnds('^ab{2}c$|^xyz$')).toEqual([{ prefix: 'a', suffix: 'c' }]);
-    // The real list still loads, and a narrow pattern still passes its own text.
+    const LOCAL = /must carry its whole local part and the at sign as literal text/;
+    const NAME = /must carry its whole home name as literal text/;
+    const email = [
+      // The brief's cases: one letter and a wildcard, any .net text, any lowercase address, any
+      // local part at a fixed domain.
+      '^a.*$', '^.*.net$', `^[a-z]+${at}[a-z]+\\.[a-z]+$`, `^[a-z]+${at}company\\.com$`, `^.+${at}s\\.whatsapp\\.net$`,
+      // Any first.last at a fixed domain, and any hyphenated address.
+      `^[a-z]+\\.[a-z]+${at}gmail\\.com$`, `^.+-.+${at}.+$`,
+      // One letter, a digit and a wildcard; a wildcard around a literal, on both sides or in a group.
+      '^a[0-9].*$', '^.*omni.*$', `^(?:.*${at}gmail\\.com)$`, `^(?:omni|you)${at}x\\.com$`,
+      // A local part that demands a digit, a dot, a dash, an underscore or a capital.
+      `^[a-z]+[0-9]+${at}gmail\\.com$`, `^.*[0-9]${at}gmail\\.com$`, `^[a-z]+\\.[a-z]+${at}x\\.com$`,
+      `^[a-z]+-[a-z]+${at}x\\.com$`, `^[a-z]+_[a-z]+${at}[a-z]+\\.com$`, `^[A-Z][a-z]+${at}x\\.com$`,
+      // A pinned prefix that stops short of the at sign, or an at sign under a quantifier.
+      `^you[a-z]*${at}x\\.com$`, `^you${at}?x\\.com$`, `^you[${at}]x\\.com$`,
+      // Each letter alone or beside a word: the rule needs no probe of that letter.
+      ...[...'abcdefghijklmnopqrstuvwxyz'].flatMap((c) => [`^${c}.+$`, `^.+${c}$`, `^(?:x|${c}.*)$`]),
+    ];
+    const homes = [
+      `^${home}[a-z]+$`, `^${home}[a-z]+/.*$`, `^${home}[a-z]+\\.[a-z]+$`, `^${home}[a-z]+_[a-z]+$`, `^${home}[a-z]+[0-9]+$`,
+      `^${home}user[0-9]*$`, `^${home}(?:user|genie)$`, `^(?:/Users|/home)/user$`, `^.*${home}user$`,
+    ];
+    // The same answer on every load: no probe is random.
+    for (let run = 0; run < 20; run++) {
+      for (const pattern of email) expect(load(pattern)).toThrow(LOCAL);
+      for (const pattern of homes) expect(load(pattern, 'home-path')).toThrow(NAME);
+    }
+    // Each branch is checked on its own, and must be anchored at both ends.
+    expect(load(`^omni${at}1\\.0$|^b.*$`)).toThrow(LOCAL);
+    expect(load(`^x$|you${at}.*$`)).toThrow(/each branch must be anchored/);
+    expect(load(`^you${at}x\\.com|^me${at}x\\.com$`)).toThrow(/each branch must be anchored/);
+    // The branches a pattern is read by, escapes as their character.
+    expect(branches(`^omni\\u0040[0-9]+\\.[0-9A-Za-z]+$`)).toEqual([{ anchored: true, exact: false, prefix: `omni${at}`, suffix: '' }]);
+    expect(branches('^.*\\.net$')).toEqual([{ anchored: true, exact: false, prefix: '', suffix: '.net' }]);
+    expect(branches(`^ab{2}c$|^x\\u0040y$`)).toEqual([
+      { anchored: true, exact: false, prefix: 'a', suffix: 'c' },
+      { anchored: true, exact: true, prefix: `x${at}y`, suffix: '' },
+    ]);
+    // The real list still loads, and narrow patterns still load and pass only their own text.
     const shipped: Placeholder[] = JSON.parse(readFileSync(PLACEHOLDERS_PATH, 'utf8')).placeholders;
     expect(() => placeholderTest(shipped)).not.toThrow();
     expect(placeholderTest(shipped)({ rule: 'email', match: `omni${at}2.251115` })).toBe(true);
-    for (const pattern of ['^a[0-9]$', '^ab{2}c$', `^120363[0-9]+${at}g\\.us$`]) expect(load(pattern)).not.toThrow();
+    const narrow = [`^a${at}[0-9]$`, `^you${at}x\\.com$|^me${at}x\\.com$`, `^omni${at}v[0-9]+$`];
+    for (const pattern of narrow) expect(load(pattern)).not.toThrow();
+    expect(load(`^${home}user$`, 'home-path')).not.toThrow();
+    const two = placeholderTest([{ rule: 'email', pattern: narrow[1], why: 'w' }]);
+    expect([`you${at}x.com`, `me${at}x.com`, `them${at}x.com`].map((match) => two({ rule: 'email', match }))).toEqual([true, true, false]);
   });
 
   test('every shipped placeholder is one of the ruled kinds, and none names a person, a home or a personal address', () => {
@@ -452,7 +483,7 @@ describe('the knowledge pack', () => {
     const hits = ['a.md:3: home-path', 'a.md:4: secret'];
     expect(privacyHits(dir, [])).toEqual(hits);
     // Email-rule patterns whose text covers each hit's match let neither through.
-    const broad = [{ rule: 'email', pattern: `^${['', 'home', 'ana'].join('/')}$`, why: 'w' }, { rule: 'email', pattern: '^ghp_(?:A1){18}$', why: 'w' }];
+    const broad = [{ rule: 'email', pattern: `^${['', 'home', 'ana'].join('/')}$`, why: 'w' }, { rule: 'email', pattern: `^${token}$`, why: 'w' }];
     expect(privacyHits(dir, broad)).toEqual(hits);
     // The same patterns under the hit's own rule do pass it.
     expect(privacyHits(dir, [{ ...broad[0], rule: 'home-path' }])).toEqual(['a.md:4: secret']);
