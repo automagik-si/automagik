@@ -183,6 +183,11 @@ export function createAccount({ settings, flow = null, store = null, now = Date.
       if (attempt !== generation) return status()
       log('account: signed in from the saved refresh token')
     } catch (error) {
+      // A sign-in or sign-out made while this launch refresh was out wins; its error is stale.
+      if (attempt !== generation) {
+        dirty()
+        return status()
+      }
       if (error?.code === 'token' && error.oauthError === 'invalid_grant') {
         await forget()
         reason = EXPIRED_REASON
@@ -265,6 +270,8 @@ export function createAccount({ settings, flow = null, store = null, now = Date.
         dirty()
         return access?.token ?? null
       } catch (error) {
+        // A newer sign-in or a sign-out moved the session on: this refresh's failure is stale.
+        if (attempt !== generation) return null
         if (error?.code === 'token' && error.oauthError === 'invalid_grant') {
           await forget()
           reason = EXPIRED_REASON

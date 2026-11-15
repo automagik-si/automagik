@@ -233,6 +233,46 @@ test('a sign-out during a sign-in wins: the exchange landing afterwards is dropp
   assert.deepEqual([...store.memory.values()], [])
 })
 
+test('a stale launch refresh error does not clear a newer sign-in', async () => {
+  let release
+  const store = fakeStore({ saved: 'refresh-old' })
+  const flow = fakeFlow({ result: tokensOf({ refresh: 'refresh-new' }) })
+  flow.refresh = async () => {
+    flow.calls.refresh += 1
+    await new Promise(resolve => { release = resolve })
+    throw oauthError('invalid_grant')
+  }
+  const account = createAccount({ settings: ON, flow, store })
+  const starting = account.start()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal((await account.signIn()).ok, true)
+  release()
+  await starting
+  assert.equal(account.status().signedIn, true)
+  assert.deepEqual([...store.memory.values()], ['refresh-new'])
+  assert.equal(store.calls.clear, 0)
+})
+
+test('a stale access-token refresh error does not clear a newer sign-in', async () => {
+  let release
+  const store = fakeStore()
+  const flow = fakeFlow({ result: tokensOf({ expiresAt: Date.now() + 1000, refresh: 'refresh-old' }) })
+  const account = createAccount({ settings: ON, flow, store })
+  await account.signIn()
+  flow.refresh = async () => {
+    flow.calls.refresh += 1
+    await new Promise(resolve => { release = resolve })
+    throw oauthError('invalid_grant')
+  }
+  const refreshing = account.accessToken()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal((await account.signIn()).ok, true)
+  release()
+  assert.equal(await refreshing, null)
+  assert.equal(account.status().signedIn, true)
+  assert.equal(store.calls.clear, 0)
+})
+
 test('a launch uses a saved refresh token, rotates it, and shows the sign-in', async () => {
   const store = fakeStore({ saved: 'refresh-old' })
   const flow = fakeFlow({ refreshResult: tokensOf({ refresh: 'refresh-new' }) })

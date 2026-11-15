@@ -687,10 +687,10 @@ test('the store is reached only by its wiring: no other desktop flow imports or 
     assert.doesNotMatch(source, /createTokenStore|detectSecureStore/, `${name} calls the store`)
     assert.doesNotMatch(source, /safeStorage/, `${name} reaches safeStorage outside the store or its wiring`)
   }
-  // The wiring is exactly the two files above: Electron's safeStorage is passed in there, never
+  // The wiring is exactly the three files above: Electron's safeStorage is passed in there, never
   // imported by the flow or the store; only account.js touches the refresh token.
   const wiringSource = read('account-wiring.js')
-  assert.match(wiringSource, /createTokenStore\(\{ safeStorage, userData \}\)/)
+  assert.match(wiringSource, /createTokenStore\(\{ safeStorage, platform, userData \}\)/)
   const main = read('main.js')
   assert.match(main, /beginAccount\(\{[\s\S]*?safeStorage,[\s\S]*?userData: app\.getPath\('userData'\)/)
   const account = read('account.js')

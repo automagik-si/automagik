@@ -558,7 +558,7 @@ test('acceptance 9: the store is reached only by its wiring and never opts into 
   // The wiring takes safeStorage as an argument and keeps the refresh token in one place: main.js
   // creates the store, account.js loads/saves/rotates/clears it, and the flow never sees it.
   const wiringSource = readFileSync(join(sourceRoot, 'account-wiring.js'), 'utf8')
-  assert.match(wiringSource, /createTokenStore\(\{ safeStorage, userData \}\)/)
+  assert.match(wiringSource, /createTokenStore\(\{ safeStorage, platform, userData \}\)/)
   const main = readFileSync(join(sourceRoot, 'main.js'), 'utf8')
   assert.match(main, /beginAccount\(\{[\s\S]*?safeStorage,[\s\S]*?userData: app\.getPath\('userData'\)/)
   const account = readFileSync(join(sourceRoot, 'account.js'), 'utf8')

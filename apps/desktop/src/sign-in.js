@@ -368,14 +368,20 @@ export function createSignInFlow({
     if (!enabled) throw refusal('disabled', 'sign-in is switched off')
     if (stopped) throw refusal('cancelled', 'the sign-in was stopped')
     if (running) throw refusal('busy', 'a sign-in is already running')
-    running = (async () => {
+    // A cancel is honoured at every step before the browser opens, not only once the callback
+    // listener exists: a sign-out during discovery must not open a browser afterwards.
+    const run = { cancelled: false }
+    running = run
+    const promise = (async () => {
       await discover()
+      if (run.cancelled) throw refusal('cancelled', 'the sign-in was stopped')
       const state = base64url(random(32))
       const nonce = base64url(random(32))
       const verifier = base64url(random(32))
       const challenge = base64url(createHash('sha256').update(verifier).digest())
       const callback = await openCallback(state)
       try {
+        if (run.cancelled) throw refusal('cancelled', 'the sign-in was stopped')
         const url = new URL(metadata.authorization_endpoint)
         url.search = new URLSearchParams({
           response_type: 'code',
@@ -417,7 +423,7 @@ export function createSignInFlow({
       }
     })()
     try {
-      return await running
+      return await promise
     } finally {
       running = null
     }
@@ -539,11 +545,13 @@ export function createSignInFlow({
     refresh,
     /** Stop this sign-in only (a Sign out, or a page that started another): the flow stays usable. */
     cancel() {
+      if (running) running.cancelled = true
       active?.close()
     },
     /** Stop watching for the callback for good (the app is quitting). */
     close() {
       stopped = true
+      if (running) running.cancelled = true
       active?.close()
     },
   })

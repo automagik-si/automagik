@@ -477,13 +477,15 @@ test('the ID token is checked: nonce, issuer, audience, expiry, issued-at, subje
   const provider = await startProvider(t)
   const other = makeKey()
   const forged = {
-    token: ({ body, codes, key: ignored, origin, clientId, jwt }) => {
+    token: ({ body, codes, key, origin, clientId, jwt }) => {
       const stored = codes.get(body.code)
       const now = Math.floor(Date.now() / 1000)
       return {
         body: {
           access_token: 'access-forged', token_type: 'Bearer', expires_in: 3600, refresh_token: 'refresh-forged',
-          id_token: jwt({ alg: 'EdDSA', kid: other.jwk.kid }, {
+          // The provider's key id, another key's signature: the kid finds a key and the
+          // signature check is what refuses it.
+          id_token: jwt({ alg: 'EdDSA', kid: key.jwk.kid }, {
             iss: origin, sub: 'person-1', aud: clientId, exp: now + 300, iat: now, nonce: stored.nonce,
           }, other.privateKey),
         },
@@ -562,6 +564,36 @@ test('a sign-in can be cancelled, and the flow is usable again afterwards', asyn
   assert.equal((await refusalOf(flow.signIn())).code, 'cancelled')
   const result = await flow.signIn()
   assert.equal(result.claims.sub, 'person-1')
+})
+
+test('a cancel during discovery opens no browser afterwards', async t => {
+  const provider = await startProvider(t)
+  let releaseDiscovery
+  const discoverySeen = new Promise(resolve => { releaseDiscovery = resolve })
+  let opened = 0
+  const delayingFetch = async (url, options) => {
+    if (String(url).includes('/.well-known/openid-configuration')) {
+      releaseDiscovery()
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    return fetch(url, options)
+  }
+  const flow = createSignInFlow({
+    settings: settingsFor(provider),
+    fetch: delayingFetch,
+    openExternal: async () => { opened += 1 },
+    timeoutMs: 5000,
+  })
+  t.after(() => flow.close())
+  const pending = flow.signIn()
+  await discoverySeen
+  flow.cancel()
+  assert.equal((await refusalOf(pending)).code, 'cancelled')
+  assert.equal(opened, 0)
+  // The flow is still usable after the cancel.
+  const again = createSignInFlow({ settings: settingsFor(provider), fetch: globalThis.fetch, openExternal: browse, timeoutMs: 5000 })
+  t.after(() => again.close())
+  assert.equal((await again.signIn()).claims.sub, 'person-1')
 })
 
 test('a closed flow stops signing in for good', async t => {

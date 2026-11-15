@@ -13,18 +13,18 @@ import { createTokenStore } from './secure-tokens.js'
  * Build the account for `settings` (sign-in.js readSignInSettings' answer). Returns
  * `{ account, store, flow }`; `store` and `flow` are null unless the setting is on, complete,
  * and both the store and the flow could be made. `account.start()` is the caller's, after app
- * ready. A construction failure is logged (no token, no URL) and fails closed: the status still
- * says the setting is on, and says the app could not set it up.
+ * ready. A construction failure is logged (no token, no URL) and fails closed: the status says
+ * it could not be set up, not that it is on.
  */
 export function startAccount({
-  settings, safeStorage, userData, fetch = globalThis.fetch, openExternal, log = () => {},
-  onDirty = () => {}, now = Date.now,
+  settings, safeStorage, userData, platform = process.platform, fetch = globalThis.fetch,
+  openExternal, log = () => {}, onDirty = () => {}, now = Date.now,
 } = {}) {
   let store = null
   let flow = null
   if (settings?.enabled === true && !settings.problem) {
     try {
-      store = createTokenStore({ safeStorage, userData })
+      store = createTokenStore({ safeStorage, platform, userData })
       flow = createSignInFlow({ settings, fetch, openExternal, log })
     } catch (error) {
       log(`account: not started (${error?.message ?? error})`)

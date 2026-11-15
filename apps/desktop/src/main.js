@@ -336,6 +336,7 @@ function startAccount() {
     settings,
     safeStorage,
     userData: app.getPath('userData'),
+    platform: process.platform,
     fetch: globalThis.fetch,
     openExternal: url => shell.openExternal(url),
     log: signInLog,

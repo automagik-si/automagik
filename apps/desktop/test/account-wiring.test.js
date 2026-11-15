@@ -47,7 +47,7 @@ test('the setting off builds no store and no flow, and never reads safeStorage',
   const safeStorage = fakeSafeStorage()
   let opened = 0
   const { account, store, flow } = startAccount({
-    settings: OFF, safeStorage, userData: dir, openExternal: async () => { opened += 1 },
+    settings: OFF, safeStorage, userData: dir, platform: 'linux', openExternal: async () => { opened += 1 },
   })
   assert.equal(store, null)
   assert.equal(flow, null)
@@ -64,7 +64,7 @@ test('an on-but-incomplete setting builds nothing either', async (t) => {
   const dir = temporaryFolder(t)
   const safeStorage = fakeSafeStorage()
   const settings = { enabled: true, issuer: null, clientId: null, problem: 'Sign-in is switched on, but the setting names no issuer and client id.' }
-  const { account, store, flow } = startAccount({ settings, safeStorage, userData: dir, openExternal })
+  const { account, store, flow } = startAccount({ settings, safeStorage, userData: dir, platform: 'linux', openExternal })
   assert.equal(store, null)
   assert.equal(flow, null)
   assert.equal(account.enabled, false)
@@ -76,7 +76,7 @@ test('an on-but-incomplete setting builds nothing either', async (t) => {
 test('the setting on and complete builds the store and the flow', async (t) => {
   const dir = temporaryFolder(t)
   const safeStorage = fakeSafeStorage()
-  const { account, store, flow } = startAccount({ settings: ON, safeStorage, userData: dir, openExternal })
+  const { account, store, flow } = startAccount({ settings: ON, safeStorage, userData: dir, platform: 'linux', openExternal })
   assert.ok(store)
   assert.equal(store.secure, true)
   assert.ok(flow)
@@ -95,7 +95,7 @@ test('a desktop whose safeStorage probe throws keeps the store in memory only', 
   const safeStorage = fakeSafeStorage({ throws: true })
   const logged = []
   const { account, store, flow } = startAccount({
-    settings: ON, safeStorage, userData: dir, openExternal, log: line => logged.push(line),
+    settings: ON, safeStorage, userData: dir, platform: 'linux', openExternal, log: line => logged.push(line),
   })
   // A throwing backend probe is Electron's "unknown": C1.1 keeps nothing, and the store is real
   // but memory-only, so the person is told why. The flow still exists; nothing was written.
@@ -107,12 +107,25 @@ test('a desktop whose safeStorage probe throws keeps the store in memory only', 
   assert.equal(account.status().secureStore.reason, store.reason)
 })
 
+test('macOS Keychain and Windows DPAPI are the store there, without a Linux backend probe', (t) => {
+  for (const platform of ['darwin', 'win32']) {
+    const dir = temporaryFolder(t)
+    const safeStorage = fakeSafeStorage({ backend: 'unknown' })
+    const { store, flow } = startAccount({ settings: ON, safeStorage, userData: dir, platform, openExternal })
+    assert.equal(store.secure, true, platform)
+    assert.ok(flow)
+    assert.deepEqual(safeStorage.calls, { backends: 0, availability: 0, encrypts: 0 }, platform)
+    assert.deepEqual(readdirSync(dir), [], platform)
+  }
+})
+
+
 test('a sign-in that cannot be built fails closed: no store, no flow, one log line', async (t) => {
   const dir = temporaryFolder(t)
   const safeStorage = fakeSafeStorage()
   const logged = []
   const { account, store, flow } = startAccount({
-    settings: ON, safeStorage, userData: dir, openExternal: undefined, log: line => logged.push(line),
+    settings: ON, safeStorage, userData: dir, platform: 'linux', openExternal: undefined, log: line => logged.push(line),
   })
   assert.equal(store, null)
   assert.equal(flow, null)
