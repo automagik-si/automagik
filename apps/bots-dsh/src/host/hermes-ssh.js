@@ -6,7 +6,7 @@ import net from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { HERMES_DEADLINES } from './hermes-transport.js'
-import { redactText } from './redact.js'
+import { redactSshText } from './hermes-redact.js'
 import { sshNames } from './hermes-ssh-names.js'
 
 // The oldest Hermes release this adapter speaks to, proven by real runs and kept in one
@@ -55,25 +55,7 @@ const failure = (kind, text = messages[kind] ?? messages.unknown, detail) => Obj
 
 const LINE_MAX = 240
 const RELEASE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/
-// What may be kept of SSH's or Hermes's own words: no token or nonce of this connection,
-// no credential shape, no key material, and no path that names a home folder (its user)
-// or a file in the SSH folder (a key's name).
-export function redactSshText(text, secrets = []) {
-  let out = String(text ?? '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ' ')
-  for (const secret of secrets) if (typeof secret === 'string' && secret.length >= 8) out = out.split(secret).join('[hidden]')
-  out = redactText(out)
-    .replace(/-----BEGIN [A-Z0-9 ]+-----[\s\S]*?(?:-----END [A-Z0-9 ]+-----|$)/g, '[key]')
-    .replace(/\b(?:ssh-(?:ed25519|rsa|dss)|ecdsa-sha2-[a-z0-9-]+|sk-[a-z0-9-]+@openssh\.com)\s+AAAA[A-Za-z0-9+/=]+/g, '[key]')
-    // A socket address names its credential in the query; `token=` is already gone above.
-    .replace(/([?&](?:ticket|internal)=)[^&#\s"'<>]+/gi, '$1[hidden]')
-    .replace(/\b(SHA256|MD5):[A-Za-z0-9+/:=_-]{16,}/g, '$1:[hidden]')
-    .replace(/\b[0-9a-fA-F]{32,}\b/g, '[hidden]')
-    .replace(/[A-Za-z0-9+/_=-]{40,}/g, '[hidden]')
-    .replace(/(?:\/home|\/Users|\/export\/home)\/[^/\s'":;,)]+|\/root(?=[/\s'":;,)]|$)|\b[A-Za-z]:\\Users\\[^\\\s'":;,)]+/g, '~')
-    // Under ~/.ssh only the two standard names stay: a key file's name can say whose it is.
-    .replace(/~[/\\]\.ssh[/\\](?!(?:known_hosts2?|config)(?=[\s'":;,)]|$))[^\s'":;,)]+/g, '~/.ssh/[hidden]')
-  return out
-}
+export { redactSshText }
 const lineList = (value, secrets, max) => (Array.isArray(value) ? value : String(value ?? '').split(/\r?\n/))
   .filter(line => typeof line === 'string').map(line => redactSshText(line, secrets).trim().slice(0, LINE_MAX)).filter(Boolean).slice(-max)
 // SSH's own verdict lines, never its debug trace (which repeats the start script).

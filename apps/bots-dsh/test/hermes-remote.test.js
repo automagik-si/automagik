@@ -466,17 +466,59 @@ test('a remote error reason never carries the connection secrets or a provider k
   assert.ok(!row.text.includes(f.credential) && !row.text.includes(f.ticket) && !row.text.includes(key))
 })
 
+test('a remote reason masks key material, long tokens and home-folder paths on both failure paths', async t => {
+  const shapes = [
+    {
+      what: 'a private key block',
+      // Made-up material: a marker pair and a base64 body, not a real key.
+      text: 'The remote key is -----BEGIN OPENSSH PRIVATE KEY-----\nAAAAb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n-----END OPENSSH PRIVATE KEY----- and it failed.',
+      gone: ['OPENSSH PRIVATE KEY', 'AAAAb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ=='],
+      kept: '[key]',
+    },
+    {
+      what: 'a long opaque token',
+      text: 'The provider rejected wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY for this turn.',
+      gone: ['wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'],
+      kept: '[hidden]',
+    },
+    {
+      what: 'a home-folder path naming the remote user',
+      text: 'The remote could not read /home/sample-person/.hermes/config.yaml for this session.',
+      gone: ['sample-person', '/home/'],
+      kept: '~/.hermes/config.yaml',
+    },
+  ]
+  for (const shape of shapes) {
+    for (const failed of ['error', 'complete']) {
+      const f = fixture(t)
+      await f.wire.connect(); await f.run.submit('Sample')
+      if (failed === 'error') f.socket().event('error', { message: shape.text }, 1)
+      else f.socket().event('message.complete', { status: 'error', text: '', failure_reason: shape.text }, 1)
+      const shown = (await f.run.next()).text
+      assert.ok(shown.includes(shape.kept), `${failed}: ${shape.what} is masked: ${shown}`)
+      for (const secret of shape.gone) assert.ok(!shown.includes(secret), `${failed}: ${shape.what} keeps ${secret}: ${shown}`)
+      assert.ok(!shown.includes('\n'), `${failed}: ${shape.what} is one line`)
+    }
+  }
+})
+
 test('a remote error reason is one line of at most 500 characters', async t => {
-  const f = fixture(t)
-  await f.wire.connect(); await f.run.submit('Sample')
-  const reason = `${'sign in again '.repeat(60)}\nsecond line ${'x'.repeat(800)}`
-  f.socket().event('error', { message: reason }, 1)
-  const row = await f.run.next()
-  const detail = row.text.slice('Remote Hermes reported a turn failure: '.length)
-  assert.equal(row.kind, 'error')
-  assert.ok(detail.length <= 500)
-  assert.ok(detail.endsWith('…'))
-  assert.ok(!detail.includes('\n'))
+  for (const [reason, prefix] of [
+    [`${'sign in again '.repeat(60)}\nsecond line ${'x'.repeat(800)}`, 'sign in again '],
+    // The newline is inside the first 500 characters: only the whitespace collapse removes it.
+    [`The remote said it could not sign in.\n${'word '.repeat(200)}`, 'The remote said it could not sign in. word'],
+  ]) {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    f.socket().event('error', { message: reason }, 1)
+    const row = await f.run.next()
+    const detail = row.text.slice('Remote Hermes reported a turn failure: '.length)
+    assert.equal(row.kind, 'error')
+    assert.ok(detail.length <= 500)
+    assert.ok(detail.endsWith('…'))
+    assert.ok(!detail.includes('\n'))
+    assert.ok(detail.startsWith(prefix))
+  }
 })
 
 test('a remote error with no usable reason keeps the fixed sentence', async t => {

@@ -1,5 +1,5 @@
 // Native Hermes wire. Its public boundary is rows, questions and durable identities; no ACP SDK.
-import { credentialShapes } from './redact.js'
+import { redactSshText } from './hermes-redact.js'
 export const HERMES_DEADLINES = Object.freeze({ start: 60_000, control: 15_000, cancel: 5000 })
 export const LOST = 'Connection lost; remote outcome unknown'
 // The oldest Desktop contract this wire speaks. A newer one that still answers is not an error.
@@ -12,13 +12,14 @@ const REASON_LIMIT = 500
 
 // The remote's own words for a failed turn: its `error` frame carries `payload.message`, a
 // failed `message.complete` carries `payload.error` and sometimes `failure_reason`. The wire
-// redacts a frame before a chat sees it, and the shapes here also mask a provider key the
-// remote might quote back. This only makes it one bounded line. A detail that is blank after
+// redacts a frame before a chat sees it; this also runs the SSH path's rule for Hermes's own
+// words, so a reason that quotes a key block, an opaque token, a `ticket=` query or a home
+// folder is masked too. This only makes it one bounded line. A detail that is blank after
 // that is no detail: the fixed sentence says more than an empty reason.
 function remoteReason(...values) {
   for (const value of values) {
     if (typeof value !== 'string') continue
-    const line = credentialShapes(value).replace(/\s+/g, ' ').trim()
+    const line = redactSshText(value).replace(/\s+/g, ' ').trim()
     if (!line) continue
     return line.length > REASON_LIMIT ? `${line.slice(0, REASON_LIMIT - 1)}…` : line
   }
