@@ -441,6 +441,68 @@ test('final-only text is visible and terminal failure and interruption never bec
   }
 })
 
+test('a remote error event shows the remote reason, redacted, instead of the fixed sentence', async t => {
+  for (const reason of ['Provider nous is not signed in on the remote. Sign in there, then try again.', 'The saved provider session expired.']) {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    f.socket().event('error', { message: reason }, 1)
+    assert.deepEqual(await f.run.next(), { kind: 'error', text: `Remote Hermes reported a turn failure: ${reason}` })
+  }
+  // The contract's one field is `message`; a detail under that name is shown the same way.
+  const f = fixture(t)
+  await f.wire.connect(); await f.run.submit('Sample')
+  f.socket().event('error', { detail: 'The remote could not start the assistant for this model.' }, 1)
+  assert.equal((await f.run.next()).text, 'Remote Hermes reported a turn failure: The remote could not start the assistant for this model.')
+})
+
+test('a remote error reason never carries the connection secrets or a provider key', async t => {
+  const f = fixture(t)
+  const key = 'sk-live-A1b2C3d4E5f6G7h8'
+  await f.wire.connect(); await f.run.submit('Sample')
+  f.socket().event('error', { message: `Provider refused ${f.credential}, ticket ${f.ticket}, key ${key}.` }, 1)
+  const row = await f.run.next()
+  assert.equal(row.kind, 'error')
+  assert.ok(row.text.includes('[redacted]') && row.text.includes('sk-[hidden]'))
+  assert.ok(!row.text.includes(f.credential) && !row.text.includes(f.ticket) && !row.text.includes(key))
+})
+
+test('a remote error reason is one line of at most 500 characters', async t => {
+  const f = fixture(t)
+  await f.wire.connect(); await f.run.submit('Sample')
+  const reason = `${'sign in again '.repeat(60)}\nsecond line ${'x'.repeat(800)}`
+  f.socket().event('error', { message: reason }, 1)
+  const row = await f.run.next()
+  const detail = row.text.slice('Remote Hermes reported a turn failure: '.length)
+  assert.equal(row.kind, 'error')
+  assert.ok(detail.length <= 500)
+  assert.ok(detail.endsWith('…'))
+  assert.ok(!detail.includes('\n'))
+})
+
+test('a remote error with no usable reason keeps the fixed sentence', async t => {
+  const fixed = 'Remote Hermes reported a turn failure. Inspect the remote session before sending again.'
+  for (const payload of [{}, { message: '' }, { message: ' \n\t ' }, { message: 42 }, { detail: null }]) {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    f.socket().event('error', payload, 1)
+    assert.deepEqual(await f.run.next(), { kind: 'error', text: fixed })
+  }
+})
+
+test('a failed final message shows its reason and falls back to the fixed sentence', async t => {
+  const fixed = 'Remote Hermes reported a failed turn. Review the remote session.'
+  for (const [payload, text] of [
+    [{ status: 'error', text: '', error: 'Provider sign-in expired on the remote.' }, 'Remote Hermes reported a failed turn: Provider sign-in expired on the remote.'],
+    [{ status: 'error', text: '', failure_reason: 'billing_wall' }, 'Remote Hermes reported a failed turn: billing_wall'],
+    [{ status: 'error', text: '' }, fixed],
+  ]) {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    f.socket().event('message.complete', payload, 1)
+    assert.deepEqual(await f.run.next(), { kind: 'error', text })
+  }
+})
+
 test('Settings reconciliation observes pending approvals without answering them', async t => {
   const f = fixture(t, { snapshot: { running: true, open_requests: [{ id: 'srq-pending', method: 'approval', params: { session_id: 'sample-runtime', request_id: 'pending' } }] } })
   f.identity.storedSessionId = f.snapshot.stored_session_id
