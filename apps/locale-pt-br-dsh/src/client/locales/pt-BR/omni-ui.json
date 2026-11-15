@@ -2700,5 +2700,10 @@
   "This terminal ended": "Este terminal terminou",
   "Watching · view only": "Assistindo · somente leitura",
   "lead": "líder",
-  "{n} projects": "{n} projetos"
+  "{n} projects": "{n} projetos",
+  "View only · click to type": "Somente leitura · clique para digitar",
+  "Typing · Esc to stop": "Digitando · Esc para parar",
+  "Taking the pane…": "Assumindo o painel…",
+  "Typing is open in another window · view only": "Digitação aberta em outra janela · somente leitura",
+  "Your session ended · view only": "Sua sessão encerrada · somente leitura"
 }

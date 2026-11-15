@@ -142,6 +142,16 @@ test('an expired or signed-out session is refused at the next batch and the atta
   assert.equal((await typing.input({ request: request(), session: taken.body.session, data: 'aA==' })).status, 401)
 })
 
+test('disposing the typing service lets every attach go', async (t) => {
+  const f = fixture(t)
+  const typing = service(f)
+  const taken = await typing.take({ request: request(), bot: LEAD, viewer: 'viewer-1' })
+  assert.equal(taken.status, 200)
+  await typing.dispose()
+  assert.equal(typing.sessions().length, 0)
+  assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2)), 'the core gets its CLOSE when the host lets go')
+})
+
 test('the same refusals as the watch route: a foreign worker, an unregistered Bot, no viewer', async (t) => {
   const f = fixture(t)
   const typing = service(f)

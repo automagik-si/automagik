@@ -190,6 +190,7 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
     for (const close of [...live]) { try { close() } catch { /* going */ } }
     live.clear()
     streams.clear()
+    void typing.dispose()
   }
   // A host without a browser carrier (a test's bare context, a headless run) has no route
   // registry: the tree still answers, and the pane simply has nowhere to stream to.
