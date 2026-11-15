@@ -33,7 +33,7 @@ import { findHerdr, herdrStatus } from './herdr.js'
 import { openRequest, pickSpace } from './herdr-space.js'
 import { openLatest } from './herdr-update.js'
 import { laneMissedOf, tableColor, updatePresentation, versionsAnswer, WINDOW_ACTIONS, windowChrome, windowPageLayout } from './frame.js'
-import { dataPathsOf, PRODUCT } from './identity.js'
+import { PRODUCT, setDataPaths } from './identity.js'
 import { LOOK_EVERY_MS, readBusy } from './idle.js'
 import { appMenuTemplate } from './menu.js'
 import { sendPaneClose } from './pane-close.js'
@@ -51,8 +51,11 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 // Before anything reads it (the single-instance lock does): the window's data is filed under
-// the app's own name (identity.js), whatever Electron derives from the running binary.
-for (const [name, path] of Object.entries(dataPathsOf(app.getPath('appData')))) app.setPath(name, path)
+// the app's own name (identity.js), whatever Electron derives from the running binary — or, when
+// the launch sets AUTOMAGIK_USER_DATA, in the team's own folder: appData, userData, sessionData
+// and the lock Electron keeps in userData all move, so a second copy runs beside the person's
+// app with storage of its own. Without the setting the paths are exactly the ones they were.
+setDataPaths(app, process.env.AUTOMAGIK_USER_DATA)
 const root = automagikHome()
 const home = appHome()
 let dsh = null
