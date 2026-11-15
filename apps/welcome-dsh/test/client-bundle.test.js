@@ -45,14 +45,15 @@ test('client.js registers its three onboarding steps on settings.onboarding, in 
       register: (options, component) => { registered.push({ ...options, component: typeof component }); return () => {} },
     },
   })
-  assert.deepEqual(effects, ['omni-ai: stage styles', 'omni-ai: team step copy', "omni-ai: the table over DSH's first frame", 'omni-ai: omni-companion on the rail', 'omni-ai: omni-team on the rail', 'omni-ai: omni-connect-ai on the rail', 'omni-ai: Claude Code and Codex in Settings', 'omni-ai: power shortcut in the Bot team sidebar'])
+  assert.deepEqual(effects, ['omni-ai: stage styles', 'omni-ai: team step copy', "omni-ai: the table over DSH's first frame", 'omni-ai: omni-companion on the rail', 'omni-ai: omni-team on the rail', 'omni-ai: omni-migrate on the rail', 'omni-ai: omni-connect-ai on the rail', 'omni-ai: Claude Code and Codex in Settings', 'omni-ai: power shortcut in the Bot team sidebar'])
   // The team step's copy goes to DSH's locale service as welcome.team.
   runs.get('omni-ai: team step copy')()
   assert.deepEqual(registers, [['welcome.team', ['en', 'pt', 'pt-BR']]])
-  assert.deepEqual(injected, ['settings.onboarding', 'settings.onboarding', 'settings.onboarding'])
+  assert.deepEqual(injected, ['settings.onboarding', 'settings.onboarding', 'settings.onboarding', 'settings.onboarding'])
   assert.deepEqual(registered, [
     { name: 'settings.onboarding', id: 'omni-companion', order: -300, component: 'function' },
     { name: 'settings.onboarding', id: 'omni-team', order: -270, component: 'function' },
+    { name: 'settings.onboarding', id: 'omni-migrate', order: -230, component: 'function' },
     { name: 'settings.onboarding', id: 'omni-connect-ai', order: -200, component: 'function' },
   ])
 })

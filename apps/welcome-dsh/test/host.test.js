@@ -21,7 +21,7 @@ test('the plugin declares its entry, its services, and its live onboarding field
   assert.deepEqual(plugin.inject, ['settings', 'credentials', 'connection'])
   const { uid, refs } = plugin.Config.toJSON()
   const fields = refs[uid].dict
-  const flags = ['companionDone', 'connectAiDone', 'connectOmniSkipped', 'starterSeeded', 'teamDone', 'teamGenie', 'teamOmni', 'welcomeDone']
+  const flags = ['companionDone', 'connectAiDone', 'connectOmniSkipped', 'migrateDone', 'starterSeeded', 'teamDone', 'teamGenie', 'teamOmni', 'welcomeDone']
   const texts = ['companionColor', 'companionImage', 'companionName', 'companionShape', 'teamOmniAbilities']
   assert.deepEqual(Object.keys(fields).sort(), [...flags, ...texts].sort())
   for (const name of flags) assert.deepEqual(refs[fields[name]], { type: 'boolean', meta: { volatile: true } })
@@ -169,7 +169,7 @@ test('done writes the step flag in the plugin entry', async () => {
 test('state reports the flags and whether an AI is already connected', async () => {
   const fresh = await host({ deps: { platform: 'linux', env: {} } }).handle('state')
   assert.deepEqual(JSON.parse(JSON.stringify(fresh.value)), {
-    companionDone: false, teamDone: false, welcomeDone: false, connectAiDone: false, connectOmniSkipped: false,
+    companionDone: false, teamDone: false, welcomeDone: false, migrateDone: false, connectAiDone: false, connectOmniSkipped: false,
     companionImage: false, teamOmni: true, teamGenie: false, deepseek: false, piAiRoutes: [], aiConnected: false, preload: null,
     machine: { os: 'linux' },
   })

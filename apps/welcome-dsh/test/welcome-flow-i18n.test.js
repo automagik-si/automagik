@@ -13,7 +13,7 @@ import { fakeLocale } from './fake-locale.js'
 
 const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
 // The flow files whose copy this test covers (team.js and acp-agents.js: team-i18n.test.js).
-const FLOW = ['connect-ai.js', 'subscriptions.js', 'companion.js', 'companion-art.js', 'stage.js', 'api.js']
+const FLOW = ['connect-ai.js', 'subscriptions.js', 'companion.js', 'companion-art.js', 'stage.js', 'api.js', 'migrate.js']
 
 const bundle = await build({
   stdin: {
@@ -22,12 +22,13 @@ const bundle = await build({
       "export { SUBSCRIPTION_TILES, SubscriptionSignIn } from './src/client/subscriptions.js'",
       "export * from './src/client/companion.js'",
       "export { announceStep } from './src/client/stage.js'",
+      "export { MigrateView, TOOLS, MOVE, handoffOf, canMove, answerBots, MIGRATE_CSS } from './src/client/migrate.js'",
       "export { installLocale, PT_BR, t } from './src/client/i18n.js'",
     ].join('\n'),
     resolveDir: PLUGIN,
   },
   bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
-  external: ['react', 'react-dom'],
+  external: ['react', 'react-dom', '@automagik/bots-dsh/client'],
   loader: { '.css': 'text' },
 })
 const client = { exports: {} }
@@ -39,7 +40,7 @@ const react = {
   useState: initial => [typeof initial === 'function' ? initial() : initial === undefined ? {} : initial, () => {}],
   useEffect: () => {}, useRef: current => ({ current }), useCallback: fn => fn, useMemo: fn => fn(),
 }
-runInNewContext(bundle.outputFiles[0].text, { module: client, exports: client.exports, URL, setTimeout, clearTimeout, document: { body: null }, require: name => ({ react, 'react-dom': { createPortal: node => node } })[name] })
+runInNewContext(bundle.outputFiles[0].text, { module: client, exports: client.exports, URL, setTimeout, clearTimeout, document: { body: null }, require: name => ({ react, 'react-dom': { createPortal: node => node }, '@automagik/bots-dsh/client': {} })[name] })
 const flow = client.exports
 // Every step on the rail, as the plugins that bring them announce them.
 for (const id of ['omni-companion', 'omni-team', 'omni-connect', 'omni-connect-ai']) flow.announceStep?.(id)
@@ -200,6 +201,24 @@ function cliSetup(id) {
   return findAll(tree, node => node.type === 'button' && node.props.role !== 'switch').map(textOf)
 }
 
+test('the move from another tool renders in pt-BR, restart and all', () => {
+  locale.setLocale('pt-BR')
+  try {
+    const choosing = render(flow.MigrateView({ phase: 'choosing' }))
+    assert.match(textOf(choosing), /De outra ferramenta/)
+    assert.match(textOf(choosing), /Em breve/)
+    assert.match(textOf(choosing), /Mova para o Omni o bot do Telegram/)
+    const confirm = render(flow.MigrateView({
+      phase: 'confirm',
+      probe: { hermes: { found: true, where: 'local', channel: 'on', key: 'available', pendingRestart: false }, omni: { linked: true, attach: true, bots: [], telegram: null } },
+    }))
+    assert.match(textOf(confirm), /reinicia por alguns segundos/)
+    assert.match(textOf(confirm), /Confirmo: o Hermes reinicia/)
+  } finally {
+    locale.setLocale('en')
+  }
+})
+
 test('Claude and ChatGPT set up through their CLIs, in English and in pt-BR, and the duplicate reads in the DSH language', () => {
   locale.setLocale('en')
   assert.deepEqual(cliSetup('claude'), ['Sign in to Claude CodeWith your plan, in a Bot\'s chat', 'Use an API keyBilled per use', 'Cancel'])
@@ -227,6 +246,8 @@ const ENGLISH_ON_PURPOSE = new Set([
   '{} · dsh-subscriptions',
   // The companion's name ideas: names, not words.
   'Pip', 'Nova', 'Mochi', 'Echo', 'Biscuit',
+  // The tools a person can come from, and their card tags.
+  'Hermes', 'OpenClaw', 'Grok bot', 'Muse', 'Meta', 'Telegram', 'TG', 'OC',
   // Code, not copy: a key name, an HTTP method, a status line the subscriptions plugin never words.
   'Enter', 'POST', 'NETWORK', 'HTTP_{}', 'HTTP {}',
 ])

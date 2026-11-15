@@ -3,6 +3,7 @@ import { TeamStep } from './team.js'
 import { INK_CSS } from './companion-art.js'
 import { ONBOARD_CSS } from './onboard-css.js'
 import { ConnectAiStep } from './connect-ai.js'
+import { MIGRATE_CSS, MigrateStep } from './migrate.js'
 import { STAGE_CSS } from './octopus.js'
 import { announceStep } from './stage.js'
 import { TERMINAL_CSS } from './terminal.js'
@@ -16,10 +17,12 @@ import { installPowerShortcut } from './power-shortcut.js'
 // Automagik's onboarding on DSH's settings.onboarding slot. The shell mounts one step at a
 // time, in order; these come ahead of DSH's own welcome-notice (-100) and deepseek-official
 // (0): create your companion, grow your team, then (with the Omni plugins and Omni on the
-// team) the channels plugin's omni-connect (-250), then Connect AI.
+// team) the channels plugin's omni-connect (-250), the move from another tool (-230), then
+// Connect AI.
 const STEPS = [
   { id: 'omni-companion', order: -300, component: CompanionStep },
   { id: 'omni-team', order: -270, component: TeamStep },
+  { id: 'omni-migrate', order: -230, component: MigrateStep },
   { id: 'omni-connect-ai', order: -200, component: ConnectAiStep },
 ]
 
@@ -31,7 +34,7 @@ export const inject = ['slots', 'locale']
 function installStyles() {
   const style = document.createElement('style')
   style.dataset.omniAi = ''
-  style.textContent = STAGE_CSS + ONBOARD_CSS + INK_CSS + CLAY_ART_CSS + PRODUCT_LOCKUP_CSS + TERMINAL_CSS + ACP_CSS
+  style.textContent = STAGE_CSS + ONBOARD_CSS + INK_CSS + CLAY_ART_CSS + PRODUCT_LOCKUP_CSS + TERMINAL_CSS + ACP_CSS + MIGRATE_CSS
   document.head.append(style)
   return () => style.remove()
 }

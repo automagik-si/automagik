@@ -16,6 +16,11 @@ export const Answer = z.string().trim().min(1).max(MAX_ANSWER)
 
 // `connected`: Connect AI finished with an AI on (its Continue), not skipped.
 export const DonePayload = z.object({ stepId: name, connected: z.boolean().optional() })
+// The move from another tool: the person's confirmation, the bot they picked, and the
+// channel a status poll asks about. None of these carries a key.
+export const MigrateStartPayload = z.object({ confirm: z.literal(true), answerBot: z.string().trim().max(120).optional() })
+export const MigrateStatusPayload = z.object({ jobId: z.string().trim().min(1).max(64) })
+export const MigrateOmniPayload = z.object({ channelId: z.string().trim().min(1).max(64) })
 export const CliproxyPayload = z.object({ baseURL: text.optional(), apiKey: text.optional() })
 export const ProviderPayload = z.object({ provider: name })
 export const KeyPayload = ProviderPayload.extend({ apiKey: text.optional() })

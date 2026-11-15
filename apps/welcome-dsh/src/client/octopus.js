@@ -61,6 +61,8 @@ body[data-ds-dark-theme] .oai-overlay::before{background:radial-gradient(1100px 
 .oai-rail li{padding:8px 12px;border-radius:var(--oai-r-sm);${recessed('var(--oai-niche)')}}
 .oai-rail li.oai-on{color:var(--oai-lilac-ink);${raised('var(--oai-lilac)', 3)};transform:translateY(-2px)}
 .oai-rail li.oai-done{color:var(--oai-cyan-ink);${raised('color-mix(in srgb,var(--oai-cyan) 55%,var(--oai-clay))', 2)}}
+.oai-rail.oai-rail-many{gap:6px;font-size:10px;letter-spacing:.03em}
+.oai-rail.oai-rail-many li{padding:6px 9px;border-radius:10px}
 /* The card: a thick slab of cream clay resting on the table. */
 .oai-card{width:100%;border-radius:26px 30px 25px 29px;padding:26px;${raised('var(--oai-card)', 6)}}
 .oai-card h1{font:var(--bt-weight-title,800) 24px/1.2 var(--oai-head);letter-spacing:-.02em;margin:0 0 8px;outline:none}.oai-card p{margin:0 0 14px;color:var(--oai-ink2)}

@@ -1289,6 +1289,12 @@ jobs:
           git -C "${dir}" checkout -q FETCH_HEAD
           echo "OMNI_CHECKOUT=${dir}" >> "$GITHUB_ENV"
 
+      - name: Python's YAML reader for the Hermes migration helper
+        # src/host/hermes-migrate.py runs on the person's Hermes host, where Hermes's own
+        # config reader brings PyYAML. The test runner needs it for the same reason.
+        if: matrix.app == 'welcome-dsh'
+        run: python3 -c 'import yaml' || (sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml)
+
       - name: Chrome for the Bot team's layout check
         # The Ubuntu image ships Google Chrome at this path. Under CI the composer layout test
         # fails, rather than skips, when it finds no browser (#323).
