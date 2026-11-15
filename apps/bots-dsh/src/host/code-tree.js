@@ -5,9 +5,9 @@
 //   - the shared Bot registry (`src/shared/registry.js`): the home file's projects and Bots
 //     (with a folder), then each project's repo file's Bots; a Bot on another machine is not
 //     this computer's and never appears;
-//   - the attach ledger (`src/shared/attach-ledger.js`, a byte-equal copy of the pack's
+//   - the attach record (`src/shared/attach-record.js`, a byte-equal copy of the pack's
 //     `herdr/mods/am-sidebar/attach.js`): which terminal plays which Bot here;
-//   - the workers ledger (`src/shared/workers-ledger.js`): the workers a Bot started;
+//   - the workers journal (`src/shared/workers-journal.js`): the workers a Bot started;
 //   - herdr-core itself (`terminal.list`): the terminal's state, size and status, and the
 //     `created_ms` that proves an id was not reused after a core restart.
 //
@@ -20,8 +20,8 @@
 import { readFileSync, statSync } from 'node:fs'
 import { basename, isAbsolute, join, resolve } from 'node:path'
 import { HOME_PATH, REPO_PATH, parseRegistry } from '../shared/registry.js'
-import { attachPath, foldAttach, heldIn, readAttach } from '../shared/attach-ledger.js'
-import { foldWorkers, readWorkers, workersOf, workersPath } from '../shared/workers-ledger.js'
+import { attachPath, foldAttach, heldIn, readAttach } from '../shared/attach-record.js'
+import { foldWorkers, readWorkers, workersOf, workersPath } from '../shared/workers-journal.js'
 import { connectCore } from './code-core.js'
 
 export const TREE_VERSION = 1

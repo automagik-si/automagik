@@ -1,4 +1,4 @@
-// The workers ledger's read-only fold (RFC 0030 delivery 1): which workers a Bot started,
+// The workers journal's read-only fold (RFC 0030 delivery 1): which workers a Bot started,
 // under it. `<app home>/automagik-herdr/workers.jsonl`, beside the attach ledger and in the
 // same format: one JSON object per line, one O_APPEND write each, the owner's file.
 //
@@ -12,7 +12,7 @@
 //
 // Pure: no `node:` import, no herdr runtime, so the host and its tests share it. Anything it
 // cannot use is skipped, never guessed.
-import { attachKey } from './attach-ledger.js'
+import { attachKey } from './attach-record.js'
 
 export const WORKERS_FILE = 'automagik-herdr/workers.jsonl'
 /** The largest ledger this reader takes: a runaway file is refused, never read into memory. */

@@ -2,11 +2,9 @@
   "The operating system blocked read or write access to {folder}. Allow Automagik to use this folder: on macOS, open System Settings > Privacy & Security > Files and Folders (or Full Disk Access); elsewhere, allow your user to read and write the folder. Your folder choice has been kept.": "O sistema operacional bloqueou a leitura ou a escrita em {folder}. Permita que o Automagik use esta pasta: no macOS, abra Ajustes do Sistema > Privacidade e Segurança > Arquivos e Pastas (ou Acesso Total ao Disco); em outros sistemas, permita a leitura e a escrita na pasta pela sua conta. A pasta escolhida foi mantida.",
   "What will it do?": "O que vai fazer?",
   "Add instructions": "Adicionar instruções",
-  "Part of the Bot's system prompt. You can change it later in its details.":
-    "Parte do prompt de sistema do Bot. Você pode mudar depois nos detalhes.",
+  "Part of the Bot's system prompt. You can change it later in its details.": "Parte do prompt de sistema do Bot. Você pode mudar depois nos detalhes.",
   "New Bots start at {level}.": "Novos Bots começam em {level}.",
-  "This model uses its Hermes profile's own instructions.":
-    "Este modelo usa as instruções do próprio perfil do Hermes.",
+  "This model uses its Hermes profile's own instructions.": "Este modelo usa as instruções do próprio perfil do Hermes.",
   "1 approval waiting": "1 aprovação pendente",
   "{count} approvals waiting": "{count} aprovações pendentes",
   "{count} requests to use {tool}": "{count} pedidos para usar {tool}",
@@ -2687,5 +2685,20 @@
   "Create or join a space": "Criar ou entrar em um espaço",
   "Creating or joining a space comes with Automagik Cloud. Nothing is made from here yet.": "Criar ou entrar em um espaço chega com o Automagik Cloud. Nada é criado daqui ainda.",
   "This Bot as": "Ver este Bot como",
-  "No terminal for this Bot yet": "Este Bot ainda não tem terminal"
+  "No terminal for this Bot yet": "Este Bot ainda não tem terminal",
+  "1 project": "1 projeto",
+  "Code team": "Equipe de código",
+  "No project has a Bot on this computer yet.": "Nenhum projeto tem um Bot neste computador ainda.",
+  "No terminal chosen": "Nenhum terminal escolhido",
+  "Opening the terminal…": "Abrindo o terminal…",
+  "Reading this computer’s team…": "Lendo a equipe deste computador…",
+  "Reading…": "Lendo…",
+  "Reconnect": "Reconectar",
+  "The Code side could not load here.": "O lado de código não pôde carregar aqui.",
+  "The Code side could not read this computer’s team.": "O lado de código não pôde ler a equipe deste computador.",
+  "The terminal could not be reached": "Não foi possível alcançar o terminal",
+  "This terminal ended": "Este terminal terminou",
+  "Watching · view only": "Assistindo · somente leitura",
+  "lead": "líder",
+  "{n} projects": "{n} projetos"
 }

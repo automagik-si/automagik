@@ -2756,7 +2756,22 @@ const pack = createPack({
     "Create or join a space": "Criar ou entrar em um espaço",
     "Creating or joining a space comes with Automagik Cloud. Nothing is made from here yet.": "Criar ou entrar em um espaço chega com o Automagik Cloud. Nada é criado daqui ainda.",
     "This Bot as": "Ver este Bot como",
-    "No terminal for this Bot yet": "Este Bot ainda não tem terminal"
+    "No terminal for this Bot yet": "Este Bot ainda não tem terminal",
+    "1 project": "1 projeto",
+    "Code team": "Equipe de código",
+    "No project has a Bot on this computer yet.": "Nenhum projeto tem um Bot neste computador ainda.",
+    "No terminal chosen": "Nenhum terminal escolhido",
+    "Opening the terminal…": "Abrindo o terminal…",
+    "Reading this computer’s team…": "Lendo a equipe deste computador…",
+    "Reading…": "Lendo…",
+    "Reconnect": "Reconectar",
+    "The Code side could not load here.": "O lado de código não pôde carregar aqui.",
+    "The Code side could not read this computer’s team.": "O lado de código não pôde ler a equipe deste computador.",
+    "The terminal could not be reached": "Não foi possível alcançar o terminal",
+    "This terminal ended": "Este terminal terminou",
+    "Watching · view only": "Assistindo · somente leitura",
+    "lead": "líder",
+    "{n} projects": "{n} projetos"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

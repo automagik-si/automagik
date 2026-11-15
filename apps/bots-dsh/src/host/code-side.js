@@ -59,9 +59,10 @@ export function streamAdmission(request) {
  * bytes), `close`. Credits the core only as the pane pulls, so a slow reader cannot make the
  * host hold an unbounded stream.
  * @param {{ url: string, signal?: AbortSignal, env?: NodeJS.ProcessEnv, warn?: Function,
- *   connect?: typeof connectCore, readFile?: Function, onEnd?: () => void }} options
+ *   connect?: typeof connectCore, readFile?: Function, onEnd?: () => void,
+ *   onStop?: (close: () => void) => void }} options
  */
-export function openPaneStream({ url, signal, env = process.env, warn = () => {}, connect = connectCore, readFile, onEnd = () => {} }) {
+export function openPaneStream({ url, signal, env = process.env, warn = () => {}, connect = connectCore, readFile, onEnd = () => {}, onStop = () => {} }) {
   return (async () => {
     const target = streamTarget(url)
     if (target.error) return jsonError(404, target.error)
@@ -164,6 +165,8 @@ export function openPaneStream({ url, signal, env = process.env, warn = () => {}
       try { controller.enqueue(new TextEncoder().encode(': keep-alive\n\n')) } catch { stop('closed') }
     }, HEARTBEAT_MS)
     heartbeat.unref?.()
+    // The host keeps a way to end this stream when its own scope ends (plugin or Connection).
+    onStop(() => stop('stopped'))
     return new Response(body, { status: 200, headers: { ...noStore, 'content-type': 'text/event-stream; charset=utf-8', 'x-accel-buffering': 'no' } })
   })()
 }
@@ -181,6 +184,12 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
     return { v: 1, machine: null, projects: [], reason: answer.reason ?? 'unavailable' }
   }, { read: true })
   const streams = new Set()
+  const live = new Set()
+  const closeAll = () => {
+    for (const close of [...live]) { try { close() } catch { /* going */ } }
+    live.clear()
+    streams.clear()
+  }
   // A host without a browser carrier (a test's bare context, a headless run) has no route
   // registry: the tree still answers, and the pane simply has nowhere to stream to.
   const fetchRoutes = rt.ctx?.connection?.fetch
@@ -199,10 +208,15 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
       if (streams.size >= MAX_STREAMS) return jsonError(429, 'busy')
       streams.add(tag)
       try {
-        return await openPaneStream({
+        const response = await openPaneStream({
           url: request.url, signal: request.signal, env, warn, connect, readFile,
           onEnd: () => streams.delete(tag),
+          onStop: (close) => { const stop = () => { live.delete(stop); close() }; live.add(stop) },
         })
+        // A refusal owns no stream: its slot goes back at once, or refusals would spend the
+        // pane budget and every later open would read busy.
+        if (response.status !== 200) streams.delete(tag)
+        return response
       } catch (error) {
         streams.delete(tag)
         warn(`the Code pane failed: ${error?.message ?? error}`)
@@ -210,5 +224,13 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
       }
     },
   }), 'omni-ui: code pane stream')
-  return () => { for (const id of [...streams]) streams.delete(id) }
+  // The only scope ends of a browser stream are the plugin and its Connection: close every
+  // stream (and typing attach) when either goes. A stopped Connection has no `fetch` service
+  // to hear from, so this watches for it while a stream is live.
+  const scopeWatch = setInterval(() => {
+    if (live.size === 0) return
+    if (typeof rt.ctx.get === 'function' && rt.ctx.get('connection') === undefined) closeAll()
+  }, 250)
+  scopeWatch.unref?.()
+  return () => { clearInterval(scopeWatch); closeAll() }
 }

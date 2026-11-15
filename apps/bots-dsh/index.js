@@ -128,7 +128,16 @@ export function createRuntime(ctx, config = {}) {
       mainRole: config.mainRole ?? 'Orchestrator',
     },
   }
-  for (const module of MODULES) module.install(rt)
+  const disposers = []
+  for (const module of MODULES) {
+    const dispose = module.install(rt)
+    if (typeof dispose === 'function') disposers.push(dispose)
+  }
+  rt.dispose = () => {
+    for (const dispose of disposers.reverse()) {
+      try { dispose() } catch (error) { rt.warn?.('omni-ui: a module did not stop cleanly: %s', error?.message ?? error) }
+    }
+  }
   // After every module: cordis runs prepended listeners newest first, so Auto's judge decides an approval before Pocket
   // (pocket-chat.js) or approvals.js could show it as the person's to answer (auto-judge.js installAhead).
   autoJudge.installAhead(rt)
