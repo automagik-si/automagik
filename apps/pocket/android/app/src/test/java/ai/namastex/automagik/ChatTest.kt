@@ -293,6 +293,61 @@ class ChatTest {
         assertEquals(listOf("b" to "dialog", "c" to ""), after.messages.map { it.id to it.why })
     }
 
+    // ---- limits (RFC 0015, Limits): what the phone says when the bridge cuts a row or refuses a long send
+
+    private fun rowOf(json: String) = Chat.Row.parse(j(json))!!
+
+    @Test fun aTextRowCutAt64KiBSaysOpenInTheTerminal() {
+        val text = "a".repeat(64 * 1024) + "…"
+        val row = rowOf(JSONObject().put("id", "r1").put("kind", "text").put("role", "assistant").put("text", text).put("cut", true).toString())
+        assertEquals(Chat.CUT_NOTE, Chat.cutNote(row))
+        assertNull(Chat.cutNote(rowOf("""{"id":"r2","kind":"text","role":"assistant","text":"short"}""")))
+    }
+
+    @Test fun aToolOutputCutAt8KiBSaysOpenInTheTerminalWithoutAFlag() {
+        val cut = rowOf(JSONObject().put("id", "o1").put("kind", "tool-result").put("output", "x".repeat(Chat.OUTPUT_PREVIEW) + "…").toString())
+        assertEquals(Chat.CUT_NOTE, Chat.cutNote(cut))
+        val whole = rowOf(JSONObject().put("id", "o2").put("kind", "tool-result").put("output", "x".repeat(Chat.OUTPUT_PREVIEW)).toString())
+        assertNull(Chat.cutNote(whole))
+        assertNull(Chat.cutNote(rowOf("""{"id":"c1","kind":"tool-call","tool":"Bash","input":"ls"}""")))
+    }
+
+    @Test fun aCutRowOnABotChatDoesNotPointAtATerminal() {
+        val text = rowOf(JSONObject().put("id", "r1").put("kind", "text").put("text", "a…").put("cut", true).toString())
+        val out = rowOf(JSONObject().put("id", "o1").put("kind", "tool-result").put("output", "x".repeat(Chat.OUTPUT_PREVIEW) + "…").toString())
+        for (r in listOf(text, out)) {
+            assertEquals(Chat.CUT_NOTE_DSH, Chat.cutNote(r, dsh = true))
+            assertFalse(Chat.cutNote(r, dsh = true)!!.contains("terminal"))
+        }
+        assertNull(Chat.cutNote(rowOf("""{"id":"r2","kind":"text","text":"short"}"""), dsh = true))
+    }
+
+    @Test fun aSendOver32KiBRefusedByTheBridgeStaysRefusedWithItsReason() {
+        val text = "é".repeat(17 * 1024)
+        val refused = Chat.answered(state(), "m", text, j("""{"state":"refused","id":"m","reason":"too-long"}"""))
+        val m = refused.messages.single()
+        assertEquals("refused", m.state)
+        assertEquals("too-long", m.reason)
+        assertEquals(text, m.text)
+        assertEquals("That answer is too long.", Chat.answerNotice(j("""{"state":"refused","ok":false,"reason":"too-long"}"""), dsh = true))
+    }
+
+    /** Rows hold the person's agent's text, tool output and answers: the chat code never logs or stores them (docs/privacy.md). */
+    @Test fun chatCodeNeverLogsOrStoresRows() {
+        val dir = java.io.File("src/main/java/ai/namastex/automagik")
+        val files = dir.listFiles { f -> f.name.startsWith("Chat") && f.name.endsWith(".kt") }.orEmpty()
+        assertTrue("chat sources not found from ${java.io.File(".").absoluteFile.name}", files.any { it.name == "Chat.kt" })
+        // The view model's live-chat section, from its banner to the next unrelated function.
+        val vm = java.io.File(dir, "PocketViewModel.kt").readText()
+        val from = vm.indexOf("// ---- The live chat (RFC 0015 delivery 5)")
+        val to = vm.indexOf("fun startTerminal(")
+        assertTrue("live-chat section not found", from in 0 until to)
+        val banned = Regex("""android\.util\.Log|\bLog\.[a-z]\(|\bprintln\(|\bprint\(|printStackTrace|Timber|SharedPreferences|getSharedPreferences|DataStore|openFileOutput|FileOutputStream|FileWriter|writeText|writeBytes|@Dao|@Entity|SQLiteDatabase|\.edit\(\)|\bprefs\b""")
+        val sources = files.map { it.name to it.readText() } + ("PocketViewModel.kt (live chat)" to vm.substring(from, to))
+        val hits = sources.flatMap { (name, text) -> text.lines().mapIndexedNotNull { i, l -> if (banned.containsMatchIn(l)) "$name:${i + 1}: ${l.trim()}" else null } }
+        assertEquals(emptyList<String>(), hits)
+    }
+
     @Test fun refusedAndUnansweredSends() {
         val refused = Chat.answered(state(), "m", "x", j("""{"state":"refused","id":"m","reason":"empty"}"""))
         assertEquals("refused", refused.messages.single().state)
