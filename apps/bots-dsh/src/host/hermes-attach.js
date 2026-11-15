@@ -1,0 +1,528 @@
+import { spawn as spawnChild } from 'node:child_process'
+import { randomBytes as cryptoRandomBytes } from 'node:crypto'
+import { HERMES_DEADLINES } from './hermes-transport.js'
+import {
+  HERMES_MINIMUM, redactSshText, hermesSshAllocatePort, hermesSshDestination, hermesSshFailure,
+  hermesSshFailureFromStderr, hermesSshNamed, hermesSshQuote, hermesSshTail,
+} from './hermes-ssh.js'
+
+// Attach never starts, restarts or stops Hermes. Its one remote command reads the record
+// and private token a running `hermes serve` wrote for this OS user's clients, proves the
+// recorded owner answers with that token, reads the profiles, and exits. The only live
+// process afterwards is this computer's SSH tunnel. Closing it speaks to no Hermes process.
+const supervisor = String.raw`
+import hashlib, json, os, re, socket, stat, subprocess, sys, time, urllib.request
+class Fault(Exception):
+    def __init__(self, code, **detail):
+        self.code = code
+        self.detail = detail
+nonce = ""
+
+def emit(kind, **values):
+    try:
+        print(json.dumps(dict(type=kind, nonce=nonce, **values)), flush=True)
+    except (BrokenPipeError, OSError):
+        pass
+
+def run(argv, timeout, env=None):
+    try:
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=max(0.2, timeout), check=False, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, "", ""
+    return (result.returncode,
+            result.stdout[:131072].decode("utf-8", "replace"),
+            result.stderr[-8192:].decode("utf-8", "replace"))
+
+def tail(text):
+    lines = [re.sub(r"[\x00-\x1f\x7f]", " ", line).strip()[:240] for line in text.splitlines()]
+    return [line for line in lines if line][-3:]
+
+def locate(hermes_path, timeout):
+    if hermes_path:
+        candidates = [os.path.expanduser(hermes_path)]
+    else:
+        code, out, _ = run(["bash", "-lc", "command -v hermes"], timeout)
+        located = out.strip().splitlines()[-1] if code == 0 and out.strip() else ""
+        home = os.path.expanduser("~")
+        candidates = ([located] if located else []) + [
+            os.path.join(home, ".local", "bin", "hermes"),
+            "/usr/local/bin/hermes",
+            os.path.join(home, ".hermes", "hermes-agent", "venv", "bin", "hermes"),
+        ]
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    raise Fault("hermes-not-found")
+
+def state_folder():
+    home = os.path.expanduser("~")
+    root = os.environ.get("HERMES_GATEWAY_LOCK_DIR", "").strip()
+    if root:
+        return root
+    state = os.environ.get("XDG_STATE_HOME", "").strip() or os.path.join(home, ".local", "state")
+    return os.path.join(state, "hermes", "gateway-locks")
+
+def read_record(folder):
+    try:
+        with open(os.path.join(folder, "host-serve.json"), "r", encoding="utf-8-sig") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        record = None
+    if not isinstance(record, dict):
+        try:
+            with open(os.path.join(folder, "host-gateway.json"), "r", encoding="utf-8-sig") as handle:
+                other = json.load(handle)
+        except (OSError, ValueError, TypeError):
+            other = None
+        # A gateway record only names a live owner when its process and port answer;
+        # a stale one must not claim a gateway is running there.
+        if isinstance(other, dict) and other.get("role") == "gateway":
+            port, pid = other.get("port"), other.get("pid")
+            if isinstance(port, int) and 0 < port < 65536 and isinstance(pid, int) and pid > 0:
+                try:
+                    os.kill(pid, 0)
+                    with socket.create_connection(("127.0.0.1", port), timeout=1):
+                        pass
+                    raise Fault("serve-gateway")
+                except OSError:
+                    pass
+        raise Fault("serve-not-running")
+    if record.get("role") != "serve":
+        raise Fault("serve-gateway" if record.get("role") == "gateway" else "serve-not-running")
+    port = record.get("port")
+    pid = record.get("pid")
+    if not isinstance(port, int) or port <= 0 or port >= 65536 or not isinstance(pid, int) or pid <= 0:
+        raise Fault("serve-not-running")
+    return record
+
+def read_token(folder, record):
+    path = os.path.join(folder, "host-serve.token")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        raise Fault("serve-record")
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or (info.st_mode & 0o077) != 0:
+            raise Fault("serve-record")
+        token = os.read(fd, 4096).decode("utf-8-sig", "replace").strip()
+    except (OSError, UnicodeDecodeError):
+        raise Fault("serve-record")
+    finally:
+        os.close(fd)
+    # The whole host's token, printable and bounded: never a path, never a control byte.
+    if not re.fullmatch(r"[!-~]{16,512}", token):
+        raise Fault("serve-record")
+    expected = record.get("tokenFingerprint")
+    # Hermes publishes the first 16 hex characters of the token's SHA-256; accept a full
+    # digest too, so a record from either shape is checked rather than guessed.
+    if isinstance(expected, str) and expected:
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        if digest[:len(expected)] != expected.lower():
+            raise Fault("serve-record")
+    return token
+
+def prove_owner(port, pid, token):
+    """Dial the recorded port and require the recorded owner to answer as itself."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2):
+            pass
+    except OSError:
+        raise Fault("serve-not-running")
+    request = urllib.request.Request(
+        "http://127.0.0.1:%d/api/host/identity" % port,
+        headers={"Authorization": "Bearer " + token, "X-Hermes-Token": token})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=2) as response:
+            if response.status != 200:
+                raise Fault("serve-not-running")
+            payload = json.loads(response.read(65536).decode("utf-8", "replace"))
+    except Fault:
+        raise
+    except Exception:
+        raise Fault("serve-not-running")
+    if not isinstance(payload, dict):
+        raise Fault("serve-not-running")
+    if payload.get("role") != "serve":
+        raise Fault("serve-gateway")
+    if payload.get("pid") != pid:
+        raise Fault("serve-record")
+
+def parse_list(text):
+    rows = []
+    for line in text.splitlines():
+        raw = line.rstrip()
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("No profiles found"):
+            continue
+        if "Model" in stripped and stripped.startswith("Profile"):
+            continue
+        if stripped and set(stripped) <= set("-─ "):
+            continue
+        found = re.match(
+            r"^\s*(?P<marker>◆)?\s*(?P<label>.+?)\s+(?P<model>\S+)\s+(?P<gateway>running|stopped)\s+(?P<alias>\S+)\s+(?P<dist>\S.*?)\s*$",
+            raw)
+        if not found:
+            continue
+        label = found.group("label").strip()
+        named = re.match(r"^(?P<display>.+?)\s+\((?P<id>[^()]+)\)$", label)
+        if named:
+            ident, display = named.group("id").strip(), named.group("display").strip()
+        else:
+            ident, display = label, label
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", ident):
+            continue
+        rows.append({"id": ident, "name": display or ident, "active": bool(found.group("marker")),
+                     "running": found.group("gateway") == "running", "model": "" if found.group("model") == "—" else found.group("model"),
+                     "provider": ""})
+    return rows
+
+def config_model(hermes, ident, timeout, env=None):
+    code, out, _ = run([hermes, "-p", ident, "config", "get", "model", "--json"], timeout, env)
+    if code == 0 and out.strip():
+        try:
+            value = json.loads(out.strip())
+        except ValueError:
+            value = None
+        if isinstance(value, dict):
+            model = value.get("default") or value.get("model")
+            provider = value.get("provider")
+            return (model if isinstance(model, str) else "", provider if isinstance(provider, str) else "")
+        if isinstance(value, str):
+            return value, ""
+    # A release without --json prints the same fields as YAML (or one scalar). Read the
+    # fields, never a joined provider:model string (colons and slashes occur inside ids).
+    code, out, _ = run([hermes, "-p", ident, "config", "get", "model"], timeout, env)
+    model = provider = ""
+    lines = [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
+    for line in lines:
+        found = re.match(r"^(default|model|provider)\s*:\s*(.+?)\s*$", line)
+        if not found:
+            continue
+        value = found.group(2).strip().strip("\"'")
+        if found.group(1) == "provider":
+            provider = value
+        elif not model:
+            model = value
+    if not model and len(lines) == 1 and ":" not in lines[0]:
+        model = lines[0].strip("\"'")
+    return model, provider
+
+def show_profile(hermes, ident, timeout, env=None):
+    """Display name and running state from the CLI's own profile show."""
+    code, out, _ = run([hermes, "profile", "show", ident], timeout, env)
+    if code != 0:
+        return None
+    display, running = "", None
+    for line in out.splitlines():
+        profile = re.match(r"^\s*Profile:\s*(.+?)\s*$", line)
+        if profile:
+            label = profile.group(1).strip()
+            named = re.match(r"^(?P<display>.+?)\s+\((?P<id>[^()]+)\)$", label)
+            display = named.group("display").strip() if named else label
+        gateway = re.match(r"^\s*Gateway:\s*(running|stopped)\s*$", line)
+        if gateway:
+            running = gateway.group(1) == "running"
+    return {"name": display, "running": running}
+
+try:
+    initial = bytearray()
+    while not initial.endswith(b"\n"):
+        part = os.read(0, 1)
+        if not part:
+            raise Fault("handshake")
+        initial.extend(part)
+        if len(initial) > 16384:
+            raise Fault("handshake")
+    try:
+        options = json.loads(bytes(initial))
+        nonce = options["nonce"]
+        hermes_path = options.get("hermesPath", "")
+        control = max(0.05, float(options["controlMs"]) / 1000)
+        start_until = time.monotonic() + max(0.05, float(options["startMs"]) / 1000)
+        wanted = options["minVersion"]
+        shaped = isinstance(nonce, str) and re.fullmatch(r"[0-9a-f]{16}", nonce)
+    except (ValueError, KeyError, TypeError):
+        shaped = False
+    if not shaped:
+        raise Fault("handshake")
+    if sys.platform not in ("linux", "darwin"):
+        raise Fault("unsupported-platform")
+    if not isinstance(hermes_path, str):
+        raise Fault("handshake")
+    if not isinstance(wanted, str) or not re.fullmatch(r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}", wanted):
+        raise Fault("handshake")
+    minimum = tuple(int(part) for part in wanted.split("."))
+    emit("stage", name="attach-record")
+    hermes = locate(hermes_path, control)
+    shown_code, shown, _ = run([hermes, "--version"], min(control, max(0.2, start_until - time.monotonic())))
+    if shown_code != 0:
+        raise Fault("version-unknown")
+    release = re.search(r"^Hermes Agent v([0-9]{1,4})\.([0-9]{1,4})\.([0-9]{1,4})(?![0-9.])", shown, re.M)
+    if not release:
+        raise Fault("version-unknown", tail=tail(shown.split("\n", 1)[0]))
+    version = ".".join(str(int(part)) for part in release.groups())
+    if tuple(int(part) for part in release.groups()) < minimum:
+        raise Fault("update-required", version=version, minimum=wanted)
+    folder = state_folder()
+    record = read_record(folder)
+    token = read_token(folder, record)
+    # The CLI must read the same data root the owner was launched from: the record says
+    # which HERMES_HOME that is, and every read below is scoped to it.
+    cli_env = os.environ.copy()
+    launch_home = options.get("hermesHome") or record.get("home")
+    if isinstance(launch_home, str) and launch_home.startswith("/") and os.path.isdir(launch_home):
+        cli_env["HERMES_HOME"] = launch_home
+    prove_owner(record["port"], record["pid"], token)
+    emit("stage", name="attach-profiles")
+    profile_budget = min(30.0, max(control, start_until - time.monotonic()))
+    listed_code, listing, listing_err = run([hermes, "profile", "list"], profile_budget, cli_env)
+    if listed_code != 0:
+        raise Fault("serve-profiles", tail=tail(listing_err or listing))
+    profiles = parse_list(listing)
+    if not profiles:
+        raise Fault("serve-profiles")
+    kept = []
+    for row in profiles[:50]:
+        if time.monotonic() >= start_until:
+            break
+        budget = min(30.0, max(control, start_until - time.monotonic()))
+        shown_profile = show_profile(hermes, row["id"], budget, cli_env)
+        model, provider = config_model(hermes, row["id"], budget, cli_env)
+        kept.append({
+            "id": row["id"],
+            "name": (shown_profile or {}).get("name") or row["name"],
+            "model": model or row["model"],
+            "provider": provider or row["provider"],
+            "running": bool((shown_profile or {}).get("running", row["running"])),
+            "active": row["active"],
+        })
+    if not kept:
+        raise Fault("serve-profiles")
+    active = next((row["id"] for row in kept if row["active"]), kept[0]["id"])
+    emit("record", port=record["port"], pid=record["pid"], version=version, host=record.get("host") or "",
+         profiles=[{key: row[key] for key in ("id", "name", "model", "provider", "running")} for row in kept],
+         active=active)
+    emit("token", value=token)
+    emit("ready", port=record["port"])
+except Fault as error:
+    emit("error", code=error.code, **error.detail)
+except Exception as error:
+    step = error.__traceback__
+    while step.tb_next is not None and step.tb_next.tb_frame.f_code.co_filename == step.tb_frame.f_code.co_filename:
+        step = step.tb_next
+    emit("error", code="remote-script", name=type(error).__name__, line=step.tb_lineno)
+`
+
+const ATTACH_KINDS = new Set(['hermes-not-found', 'update-required', 'version-unknown', 'unsupported-platform', 'serve-not-running', 'serve-gateway', 'serve-record', 'serve-profiles', 'handshake', 'timeout', 'remote-script', 'unknown'])
+const PROFILE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
+const LINE = 240
+const text = value => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value)
+
+function profilesOf(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) return []
+  const rows = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || !PROFILE_ID.test(item.id ?? '')) continue
+    const model = text(item.model) ? item.model.trim().slice(0, 200) : ''
+    const provider = text(item.provider) ? item.provider.trim().slice(0, 100) : ''
+    if (model && (!/^[\x20-\x7e]+$/.test(model) || /[/:]\s*$/.test(model))) continue
+    rows.push({
+      id: item.id,
+      name: text(item.name) && item.name.trim() ? item.name.trim().slice(0, 100) : item.id,
+      model, provider, running: item.running === true,
+    })
+  }
+  return rows
+}
+
+/**
+ * Attach to the machine-level `hermes serve` this SSH host already runs.
+ *
+ * The remote command only reads: the host rendezvous record and its 0600 token, the
+ * recorded owner's own identity answer, and its profiles through `hermes profile list`,
+ * `profile show` and `config get model`. It never starts, restarts, stops or cleans
+ * Hermes, and leaves no remote process behind: closing this connection only ends the
+ * local SSH tunnel. The token lives in memory here and in the app's secret store, never
+ * in a URL path, a message, a detail line or a log.
+ */
+export async function startHermesAttach(ssh, {
+  signal, deadlines = HERMES_DEADLINES, spawn = undefined, allocatePort = hermesSshAllocatePort,
+  sshCommand = 'ssh', env = process.env, randomBytes, minimum = HERMES_MINIMUM, onProgress = () => {},
+} = {}) {
+  randomBytes ??= cryptoRandomBytes
+  spawn ??= spawnChild
+  let config
+  try { config = hermesSshDestination(ssh) } catch (error) { throw Object.assign(error, { sshStage: 'details' }) }
+  const limits = { ...HERMES_DEADLINES, ...deadlines }
+  const until = Date.now() + limits.start
+  const nonce = randomBytes(8).toString('hex')
+  const ready = deferred(), forwarded = deferred(), cancelled = deferred()
+  const children = []
+  let remote, tunnel, closing, stopping = false
+  let credential, remotePort, profiles = [], active, version
+  let stage = 'ssh-sign-in', remoteEntry, tunnelEntry
+  const secrets = [nonce]
+  const at = error => { if (error && typeof error === 'object') error.sshStage ??= stage; return error }
+  const common = ['-T', '-v', '-o', 'BatchMode=yes', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no', '-o', 'PreferredAuthentications=publickey', '-o', 'StrictHostKeyChecking=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ControlPersist=no', '-o', 'ConnectionAttempts=1', '-o', `ConnectTimeout=${Math.max(1, Math.ceil(limits.control / 1000))}`, '-o', `ServerAliveInterval=${Math.max(1, Math.floor(limits.control / 3000))}`, '-o', 'ServerAliveCountMax=2', ...config.args]
+  const bounded = async (promise, ms, interruptible = true) => {
+    let timer
+    try { return await Promise.race([promise, ...(interruptible ? [cancelled.promise] : []), new Promise((_, reject) => { timer = setTimeout(() => reject(hermesSshFailure('timeout')), Math.max(1, ms)) })]) }
+    finally { clearTimeout(timer) }
+  }
+  const fail = error => {
+    at(error)
+    cancelled.reject(error); ready.reject(error); forwarded.reject(error)
+    if (!stopping) void close().catch(() => {})
+  }
+  const launch = args => {
+    const child = spawn(sshCommand, args, { env: { ...env, LC_ALL: 'C' }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    const ended = deferred()
+    const entry = { child, ended: ended.promise, stderr: '', edge: '', expected: false, commandSent: false }
+    children.push(entry)
+    child.on('error', () => { if (!child.pid) ended.resolve(); fail(hermesSshFailure('unreachable')) })
+    child.on('close', code => {
+      ended.resolve()
+      if (stopping || entry.expected) return
+      const error = hermesSshFailureFromStderr(entry.stderr, { role: child === tunnel ? 'tunnel' : 'supervisor', exit: code, started: entry.commandSent, localPort: entry.localPort })
+      fail(error)
+    })
+    child.stdin.on('error', () => {})
+    child.stderr.on('data', data => {
+      const chunk = String(data)
+      entry.commandSent ||= /Sending command:/.test(entry.edge + chunk)
+      entry.edge = chunk.slice(-32)
+      entry.stderr = (entry.stderr + chunk).slice(-65536)
+      if (child === tunnel && /Local forwarding listening on 127\.0\.0\.1 port (\d+)\./.test(entry.stderr)) {
+        const port = Number(/Local forwarding listening on 127\.0\.0\.1 port (\d+)\./.exec(entry.stderr)[1])
+        if (port === entry.localPort) forwarded.resolve()
+      }
+    })
+    return entry
+  }
+  const exit = () => { try { remote?.stdin.destroy(); remote?.kill('SIGTERM'); tunnel?.kill('SIGTERM') } catch {} }
+  function close() {
+    if (closing) return closing
+    stopping = true
+    signal?.removeEventListener('abort', abort)
+    process.removeListener('exit', exit)
+    closing = (async () => {
+      try { remote?.stdin.end() } catch {}
+      try { tunnel?.kill('SIGTERM') } catch {}
+      const ended = Promise.all(children.map(entry => entry.ended))
+      try { await bounded(ended, limits.cancel * 0.8, false) } catch {
+        for (const entry of children) { try { entry.child.kill('SIGKILL') } catch {} }
+        try { await bounded(ended, Math.max(1, limits.cancel * 0.2), false) } catch {}
+      }
+    })()
+    return closing
+  }
+  const abort = () => { fail(hermesSshFailure('unknown', 'SSH connection was cancelled.')) }
+  if (signal?.aborted) throw hermesSshFailure('unknown', 'SSH connection was cancelled.')
+  signal?.addEventListener('abort', abort, { once: true })
+  process.once('exit', exit)
+  try {
+    // One command, read-only on the remote: the same SSH details and host-key rules as
+    // the app-owned connection, but a script that never launches Hermes.
+    remoteEntry = launch([...common, '-o', 'ClearAllForwardings=yes', '--', config.target, `exec python3 -u -c ${hermesSshQuote(supervisor)}`])
+    remote = remoteEntry.child
+    let carry = ''
+    remote.stdout.on('data', chunk => {
+      carry += String(chunk)
+      if (Buffer.byteLength(carry) > 65536) { carry = ''; fail(hermesSshFailure('handshake')); return }
+      let newline
+      while ((newline = carry.indexOf('\n')) >= 0) {
+        const line = carry.slice(0, newline); carry = carry.slice(newline + 1)
+        let frame
+        try { frame = JSON.parse(line) } catch { continue }
+        if (!frame || typeof frame !== 'object' || Array.isArray(frame)) continue
+        if (frame.nonce !== nonce) { fail(hermesSshFailure('handshake')); return }
+        if (stage === 'ssh-sign-in') stage = 'attach-record'
+        if (frame.type === 'stage' && (frame.name === 'attach-record' || frame.name === 'attach-profiles')) {
+          stage = frame.name
+          onProgress(frame.name === 'attach-record' ? 'ssh' : 'profiles')
+          continue
+        }
+        if (frame.type === 'record') {
+          if (!Number.isSafeInteger(frame.port) || frame.port <= 0 || frame.port >= 65536) { fail(hermesSshFailure('serve-record')); return }
+          const rows = profilesOf(frame.profiles)
+          if (!rows.length) { fail(hermesSshFailure('serve-profiles')); return }
+          remotePort = frame.port
+          profiles = rows
+          active = rows.some(row => row.id === frame.active) ? frame.active : rows[0].id
+          version = typeof frame.version === 'string' && /^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(frame.version) ? frame.version : undefined
+          continue
+        }
+        if (frame.type === 'token') {
+          if (!text(frame.value) || frame.value.length < 16 || frame.value.length > 512 || !/^[!-~]+$/.test(frame.value)) { fail(hermesSshFailure('serve-record')); return }
+          credential = frame.value
+          secrets.push(credential)
+          continue
+        }
+        if (frame.type === 'ready') {
+          if (!Number.isSafeInteger(frame.port) || frame.port !== remotePort || !credential) { fail(hermesSshFailure('handshake')); return }
+          remoteEntry.expected = true
+          ready.resolve(frame.port)
+          continue
+        }
+        if (frame.type === 'error' && ATTACH_KINDS.has(frame.code)) {
+          const detail = {}
+          if (Number.isSafeInteger(frame.exit) && Math.abs(frame.exit) < 1024) detail.exit = frame.exit
+          if (Array.isArray(frame.tail)) detail.ssh = frame.tail.slice(-3).map(value => redactSshText(String(value ?? ''), secrets).slice(0, LINE)).filter(Boolean)
+          if (typeof frame.name === 'string' && /^[A-Za-z_]\w{0,40}$/.test(frame.name)) detail.fault = frame.name
+          if (Number.isSafeInteger(frame.line) && frame.line > 0 && frame.line < 10000) detail.line = frame.line
+          for (const key of ['version', 'minimum']) if (typeof frame[key] === 'string' && /^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(frame[key])) detail[key] = frame[key]
+          fail(hermesSshFailure(frame.code, undefined, detail))
+          return
+        }
+        fail(hermesSshFailure('handshake'))
+        return
+      }
+    })
+    const startMs = Math.max(1, Math.floor(limits.start - Math.min(limits.control / 2, limits.start * 0.15)))
+    remote.stdin.write(`${JSON.stringify({ nonce, hermesPath: config.hermesPath, hermesHome: config.hermesHome, minVersion: minimum, startMs, controlMs: limits.control })}\n`)
+    const port = await bounded(ready.promise, until - Date.now())
+    if (!credential || !profiles.length) throw hermesSshFailure('serve-profiles')
+    const localPort = await bounded(Promise.resolve(allocatePort()), Math.min(limits.control, until - Date.now()))
+    if (stopping || signal?.aborted) throw hermesSshFailure('unknown', 'SSH connection was cancelled.')
+    if (!Number.isSafeInteger(localPort) || localPort < 1 || localPort > 65535) throw hermesSshFailure('tunnel')
+    tunnelEntry = launch([...common, '-N', '-L', `127.0.0.1:${localPort}:127.0.0.1:${port}`, '--', config.target])
+    tunnel = tunnelEntry.child
+    tunnelEntry.localPort = localPort
+    tunnel.stdout.resume()
+    await bounded(forwarded.promise, Math.min(limits.control, until - Date.now())).catch(error => { throw error?.sshError === 'timeout' && !stopping ? hermesSshFailure('tunnel') : error })
+    if (stopping || tunnel.exitCode !== null) throw hermesSshFailure('tunnel')
+    return {
+      attached: true,
+      address: `http://127.0.0.1:${localPort}`,
+      credential,
+      authHeaders: { Authorization: `Bearer ${credential}` },
+      profiles,
+      defaultProfile: active,
+      version,
+      close,
+    }
+  } catch (error) {
+    at(error)
+    try { await close() } catch {}
+    const safe = error?.code?.startsWith('bot/hermes') ? error : at(hermesSshFailure('unknown'))
+    const said = tunnelEntry?.stderr || remoteEntry?.stderr
+    const lines = hermesSshTail(said, secrets)
+    safe.sshDetail = { ...safe.sshDetail, ...(lines.length ? { ssh: lines } : {}) }
+    hermesSshNamed(safe, { hosts: [], users: [] })
+    throw safe
+  }
+}
+
+function deferred() {
+  let resolve, reject
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no })
+  void promise.catch(() => {})
+  return { promise, resolve, reject }
+}
+
+// The read-only remote reader, exported for the token-file tests that run it against a
+// scratch state folder and a fake Hermes. It contains no start, stop or signal path.
+export { supervisor as attachSupervisor }

@@ -108,7 +108,7 @@ export class RemoteChatAdapter extends LlmAdapter {
     this.register(agent)
     let entry = this.live.get(options.sessionId)
     const continuing = options.messages.at(-1)?.role === 'tool' && entry?.calls.has(options.messages.at(-1)?.toolCallId)
-    if (!continuing && entry) { entry.run.dispose(); this.live.delete(options.sessionId); entry = undefined }
+    if (!continuing && entry) { void entry.run.close(); this.live.delete(options.sessionId); entry = undefined }
     let index = 0
     let complete = false
     let yieldedTool = false
@@ -175,7 +175,7 @@ export class RemoteChatAdapter extends LlmAdapter {
       if (entry && !yieldedTool) {
         this.live.delete(options.sessionId)
         if (!complete && entry.run.identity.pendingSubmit) await entry.run.stop()
-        else entry.run.dispose()
+        else await entry.run.close()
       }
     }
   }

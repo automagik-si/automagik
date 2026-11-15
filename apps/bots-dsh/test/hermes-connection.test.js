@@ -47,7 +47,7 @@ function runtime(t, fixture, overrides = {}) {
     },
   }
   class Wire {
-    constructor(options) { this.options = options; this.listeners = new Set(); this.secrets = new Set(options.redactionSecrets); this.sent = []; wires.push(this) }
+    constructor(options) { this.options = options; this.attached = options.attached === true; this.listeners = new Set(); this.secrets = new Set(options.redactionSecrets); this.sent = []; this.sessionIdentities = []; wires.push(this) }
     async connect() {
       if (overrides.gatewayDelay) await new Promise((resolve, reject) => {
         const timer = setTimeout(resolve, overrides.gatewayDelay)
@@ -56,7 +56,7 @@ function runtime(t, fixture, overrides = {}) {
       await overrides.onConnect?.(this)
       return this
     }
-    async session() { await overrides.beforeSession?.(this); return { session_id: randomUUID(), stored_session_id: randomUUID(), info: { desktop_contract: 8, approval_mode: 'manual', yolo: false } } }
+    async session(identity) { this.sessionIdentities.push(identity); await overrides.beforeSession?.(this); return { session_id: 'runtime-session', stored_session_id: 'stored-session', ...(this.attached ? { subscription_id: 'subscription' } : {}), info: { desktop_contract: 8, approval_mode: 'manual', yolo: false, model: 'fixture/bot-model', provider: 'fixture', stored_session_id: 'stored-session', profile_name: 'default' } } }
     async models() { await overrides.beforeModels?.(this); return overrides.models ?? [{ id: 'sample:model', model: 'model', provider: 'sample', name: 'Sample model' }] }
     async request(method, params) { this.sent.push({ method, params }); await overrides.onRequest?.(method, params, this); return {} }
     close() { if (this.closed) return; this.closed = true; this.cancelConnect?.(); for (const listener of this.listeners) listener({ kind: 'lost' }) }
@@ -1044,3 +1044,64 @@ for (const cancel of [true, false]) {
     assert.ok(h.wires.every(wire => !wire.sent.some(frame => frame.method === 'prompt.submit')), 'cancelled or expired queued work never submits later')
   })
 }
+
+test('an attached SSH connection uses the CLI-read profiles and model, stores the token, and skips the API', async () => {
+  const credential = randomUUID().replaceAll('-', ''), profiles = [
+    { id: 'default', name: 'Hefesto', model: 'anthropic/sample-model', provider: 'anthropic', running: true },
+    { id: 'second', name: 'Second', model: 'openai/other-model', provider: 'openai', running: false },
+  ]
+  let fetched = 0, closed = 0, updated
+  const connection = await prepareHermesConnection({ mode: 'ssh', ssh: { host: 'example.invalid' } }, {
+    deadlines,
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => { closed++ } }),
+    fetch: async () => { fetched++; throw Error('an attached serve is not discovered over REST') },
+    onAuthUpdate: async value => { updated = value },
+  })
+  assert.equal(fetched, 0, 'no model or profile list is requested over REST')
+  assert.equal(connection.attached, true)
+  assert.deepEqual(connection.profiles, profiles)
+  assert.equal(connection.defaultProfile, 'default')
+  assert.deepEqual(connection.authHeaders, { Authorization: `Bearer ${credential}` })
+  assert.deepEqual(connection.secret, { kind: 'attach', credential }, 'the host token is handed to the secret endpoint, never the config')
+  assert.deepEqual(updated, { kind: 'attach', credential })
+  assert.deepEqual(await refreshHermesProfiles(connection, { fetch: async () => { throw Error('no refresh request') }, deadlines }), profiles)
+  await connection.close()
+  assert.equal(closed, 1, 'closing the connection closes its tunnel')
+})
+
+test('an attached SSH test joins Bot Chat, stores the host token only through secret-set and shows the bot model', async t => {
+  const f = dashboard(), credential = randomUUID().replaceAll('-', '')
+  const profiles = [
+    { id: 'default', name: 'Hefesto', model: 'fixture/bot-model', provider: 'fixture', running: true },
+    { id: 'second', name: 'Second', model: 'fixture/other-model', provider: 'fixture', running: false },
+  ]
+  let closed = 0
+  const h = runtime(t, f, {
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => { closed++ } }),
+  })
+  const request = { mode: 'ssh', ssh: { host: 'example.invalid' }, requestId: randomUUID() }
+  const tested = await h.endpoints.get('hermes-remote-test')(request)
+  assert.deepEqual(tested.profiles, profiles)
+  assert.equal(tested.defaultProfile, 'default')
+  const view = await h.endpoints.get('hermes-remote-save')({ testId: tested.testId, profile: 'default' })
+  assert.equal(view.attached, true)
+  assert.equal(view.profile, 'default')
+  assert.equal(view.models.length, 1)
+  assert.equal(view.models[0].id, 'attach')
+  assert.match(view.models[0].name, /fixture\/bot-model/)
+  assert.equal(view.model.name, view.models[0].name)
+  const saved = h.secretCalls.filter(call => call.endpoint === 'secret-set')
+  assert.equal(saved.length >= 1, true)
+  assert.equal(saved.at(-1).name, 'HERMES_REMOTE_ATTACH_CREDENTIAL')
+  assert.deepEqual(JSON.parse(saved.at(-1).value), { kind: 'attach', credential })
+  assert.equal(saved.at(-1).purpose, 'Remote Hermes attached serve token')
+  assert.equal(JSON.stringify(h.rt.state).includes(credential), false, 'the host token never reaches the saved state')
+  assert.equal(JSON.stringify(view).includes(credential), false, 'the host token never reaches the view')
+  const wire = h.wires.find(entry => entry.attached)
+  assert.ok(wire, 'the attached wire was used')
+  assert.equal(wire.sessionIdentities[0]?.canonicalBot, true, 'the probe joins the Bot Chat and never creates one')
+  assert.ok(wire.sent.some(call => call.method === 'session.detach'), 'the probe detached its viewer')
+  assert.ok(!wire.sent.some(call => call.method === 'session.close'), 'the probe never closed the bot session')
+  await h.endpoints.get('hermes-remote-disconnect')({})
+  assert.ok(closed >= 1, 'disconnect closes the tunnel')
+})

@@ -40,15 +40,19 @@ const string = value => typeof value === 'string'
 const id = value => string(value) || Number.isSafeInteger(value)
 const optional = (value, type) => value === undefined || value === null || type(value)
 const fields = (value, names, type) => names.every(name => optional(value[name], type))
+// A live legacy session's info may omit stored_session_id (its session_key carries it);
+// the field stays optional and the snapshot normalizes it.
 const infoShape = value => object(value) && fields(value, ['approval_mode', 'stored_session_id', 'model', 'provider'], string)
   && fields(value, ['yolo', 'running', 'lazy'], value => typeof value === 'boolean')
 const requestShape = value => object(value) && id(value.id) && string(value.method) && object(value.params)
   && (value.method !== 'approval' || (string(value.params.session_id) && string(value.params.request_id)
     && fields(value.params, ['command', 'description'], string)))
 function eventShape(value) {
-  if (!object(value) || !string(value.type) || !object(value.payload) || !optional(value.session_id, string)
+  // message.start and a plain sessions.changed carry no payload at all; a known event
+  // that needs fields still fails below when its payload is missing.
+  if (!object(value) || !string(value.type) || !optional(value.payload, object) || !optional(value.session_id, string)
     || !optional(value.seq, value => Number.isSafeInteger(value) && value >= 0)) return false
-  const p = value.payload
+  const p = value.payload ?? {}
   if (['session.info', 'message.delta', 'message.interim', 'message.complete', 'tool.start', 'tool.complete', 'request.cancel'].includes(value.type) && (!string(value.session_id) || !value.session_id)) return false
   if (value.type === 'gateway.ready') return string(p.replay_epoch) && optional(p.session_authority, value => typeof value === 'boolean')
   if (value.type === 'session.info') return infoShape(p)
@@ -145,7 +149,7 @@ const UNSCOPED = new Set(['client.capabilities'])
 // and the chat shows it bounded to one line. Known transient values are also removed from model
 // names, rows, and approval descriptions.
 export class HermesTransport {
-  constructor({ address, profile, credential, authHeaders, allowLoopback = false, redactionSecrets = [], fetch: fetcher = globalThis.fetch, socket = (url, protocols) => new WebSocket(url, protocols), deadlines = HERMES_DEADLINES }) {
+  constructor({ address, profile, credential, authHeaders, allowLoopback = false, attached = false, redactionSecrets = [], fetch: fetcher = globalThis.fetch, socket = (url, protocols) => new WebSocket(url, protocols), deadlines = HERMES_DEADLINES }) {
     this.address = remoteAddress(address, { allowLoopback })
     this.profile = profile
     this.credential = credential
@@ -156,11 +160,14 @@ export class HermesTransport {
     this.pending = new Map()
     this.listeners = new Set()
     this.authHeaders = authHeaders ?? { Authorization: `Bearer ${credential}` }
+    this.attached = attached === true
     // A session token (the one-time token of an SSH connection, a saved session token)
     // opens the chat socket itself, as Hermes Desktop does: Hermes mints a socket ticket
-    // only for a signed-in session (a password sign-in's cookies, a bearer).
+    // only for a signed-in session (a password sign-in's cookies, a bearer). An attached
+    // serve's host token is the dashboard token: the socket carries it as ?token=.
     const sessionToken = Object.entries(this.authHeaders).find(([name]) => /^x-hermes-session-token$/i.test(name))?.[1]
-    this.socketToken = typeof sessionToken === 'string' && sessionToken ? sessionToken : undefined
+    this.socketToken = typeof sessionToken === 'string' && sessionToken ? sessionToken
+      : this.attached && typeof credential === 'string' && credential ? credential : undefined
     this.secrets = new Set([credential, ...redactionSecrets].filter(value => typeof value === 'string' && value))
     for (const [name, value] of Object.entries(this.authHeaders)) {
       if (typeof value !== 'string' || !value) continue
@@ -421,7 +428,13 @@ export class HermesTransport {
       if (!stored) throw failure('Hermes did not identify its Bot Chat.', 'bot/hermes-pairing')
       if ((identity.pendingSubmit || identity.uncertain) && identity.storedSessionId && ![row.id, stored].includes(identity.storedSessionId)) throw failure('Bot Chat changed while a turn was uncertain. Reconcile the original session in Hermes before pairing again.', 'bot/hermes-pairing')
       const snapshot = this.check(await this.request('session.resume', { session_id: stored, inline_images: false, close_on_disconnect: false }, remaining()))
-      if (snapshot.info.profile_name !== this.profile || ![row.id, stored].includes(snapshot.stored_session_id)) throw failure('Hermes returned a different profile or Bot Chat; nothing was submitted.', 'bot/hermes-pairing')
+      // A live legacy session may omit profile_name and report only session_key; the
+      // listing was still requested under this profile and is the id we resumed. Reject
+      // only a profile that is named and different, or an id that is neither this row
+      // nor the id this chat joined before.
+      const profileName = snapshot.info?.profile_name
+      const known = [row.id, stored, identity.storedSessionId].filter(Boolean)
+      if ((this.profile && profileName && profileName !== this.profile) || !known.includes(snapshot.stored_session_id)) throw failure('Hermes returned a different profile or Bot Chat; nothing was submitted.', 'bot/hermes-pairing')
       // A paired bot owns its model. The Automagik provider selection is transport only.
       return snapshot
     }
@@ -572,6 +585,7 @@ export class RemoteChat {
     await this.save()
     const snapshot = await this.transport.session(this.identity, model)
     Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
+    if (typeof snapshot.subscription_id === 'string' && snapshot.subscription_id) this.identity.subscriptionId = snapshot.subscription_id
     if (snapshot.admission_id) this.identity.admissionId = snapshot.admission_id
     await this.save()
     return snapshot
@@ -667,7 +681,7 @@ export class RemoteChat {
   }
 
   async stopOnce() {
-    if (!this.identity.pendingSubmit) { this.dispose(); return }
+    if (!this.identity.pendingSubmit) { await this.close(); return }
     this.identity.uncertain = true
     await this.save()
     try {
@@ -679,13 +693,40 @@ export class RemoteChat {
     } catch { this.push({ kind: 'error', text: LOST }) }
     await this.save()
     // Closing detaches this viewer; it says nothing about remote children.
+    await this.close()
+  }
+
+  /**
+   * Close an attached view: drop this viewer's subscription, then the WebSocket and its
+   * tunnel. It never asks the remote to close, stop or clean the session. A serve that
+   * does not speak `session.detach` simply loses the socket, which is still no stop.
+   */
+  async close() {
+    if (this.closed) return
+    this.closed = true
+    await this.detach()
     this.dispose()
   }
 
+  async detach() {
+    if (this.detached || this.transport.attached !== true) return
+    this.detached = true
+    const sessionId = this.identity.runtimeSessionId
+    const subscriptionId = this.identity.subscriptionId
+    if (!sessionId || !subscriptionId) return
+    try { await this.transport.request('session.detach', { session_id: sessionId, subscription_id: subscriptionId }, this.transport.deadlines?.control) } catch {}
+  }
+
   dispose() {
+    if (this.disposed) return
+    this.disposed = true
     this.transport.listeners.delete(this.off)
     for (const asking of this.questions.values()) asking.abort?.()
     for (const tool of this.tools.values()) { if (tool.status === 'running') tool.status = 'unknown'; tool.done?.() }
     this.transport.close()
   }
 }
+
+// Exported for the wire tests: the real legacy serve sends events with no payload at all
+// (message.start) and a live session's info may omit stored_session_id.
+export { eventShape as hermesEventShape, infoShape as hermesInfoShape }

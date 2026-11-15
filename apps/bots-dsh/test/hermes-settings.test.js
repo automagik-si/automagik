@@ -663,7 +663,8 @@ test('missing remote Hermes gets a path and installation action instead of raw S
   await waitFor(() => render.document.querySelector('[data-status=error]'), 'missing Hermes error')
   assert.equal(render.document.querySelector('.bt-hw-error-note').textContent, 'Install Hermes on example.invalid, or enter its path under More options, then try again.')
   await render.click('Details')
-  assert.match(render.document.body.textContent, /Install or update Hermes on the other computer/)
+  assert.match(render.document.body.textContent, /login shell \(bash -lc “command -v hermes”\)/)
+  assert.match(render.document.body.textContent, /Install or update Hermes there/)
   assert.match(render.document.body.textContent, /enter its executable path/)
 })
 
@@ -1118,13 +1119,13 @@ test('every SSH failure kind has its own screen, naming the host and the next st
     ['bot/hermes-ssh-port', { kind: 'port-missing', stage: 'hermes-start' },
       'Hermes did not report its port', 'Hermes on sample-box started without a port', 'Hermes is running there, but it never said which port it listens on, so there is nothing to connect to.', 'Update Hermes on sample-box, then try again.'],
     ['bot/hermes-ssh-handshake', { kind: 'handshake', stage: 'token' },
-      'The one-time token was not accepted', 'Automagik and sample-box could not agree on this connection', 'The start script or Hermes on sample-box did not accept the one-time token made for this connection.', 'Try again. If it keeps failing, update Hermes on sample-box and check that signing in there prints no extra text.'],
+      'The private connection check failed', 'Automagik and sample-box could not agree on this connection', 'The attach script or Hermes on sample-box did not complete the private connection check.', 'Try again. If it keeps failing, update Hermes on sample-box and check that signing in there prints no extra text.'],
     ['bot/hermes-ssh-tunnel', { kind: 'tunnel', stage: 'tunnel', ssh: ['sample tunnel line'] },
-      'The tunnel did not open', 'SSH could not open a tunnel to Hermes on sample-box', 'Hermes started, but the SSH tunnel from this computer to it did not start listening, or carried no answer.', 'Check that sample-box allows port forwarding, then try again.'],
+      'The tunnel did not open', 'SSH could not open a tunnel to Hermes on sample-box', 'The SSH tunnel from this computer to Hermes did not start listening, or carried no answer.', 'Check that sample-box allows port forwarding, then try again.'],
     ['bot/hermes-ssh-forward', { kind: 'forward-conflict', stage: 'tunnel', port: 8080 },
       'A port from your SSH config is in use', 'Port 8080 from the SSH config for sample-box is busy', 'The SSH config entry for sample-box forwards its own ports.', 'Close the other SSH session to sample-box, or remove the forward from its config entry, then try again.'],
     ['bot/hermes-ssh-script', { kind: 'remote-script', stage: 'remote-start', fault: 'PermissionError', errno: 13, line: 92 },
-      'The start script stopped', 'Automagik’s start script failed on sample-box', 'SSH signed in, but the small script that finds and starts Hermes stopped with an error.', 'Check that Python 3 works on sample-box and that this user can run Hermes, then try again.'],
+      'The attach script stopped', 'Automagik’s attach script failed on sample-box', 'SSH signed in, but the small script that reads Hermes stopped with an error.', 'Check that Python 3 works on sample-box and that this user can run Hermes, then try again.'],
     ['bot/hermes-ssh-details', { kind: 'invalid-details', stage: 'details' },
       'Check the SSH details', 'These SSH details can’t be used', 'The host, user, port, key path or Hermes path has characters SSH does not accept.', 'Edit the SSH details, then try again.'],
     ['bot/hermes-ssh-update', { kind: 'update-required', stage: 'remote-start' },
