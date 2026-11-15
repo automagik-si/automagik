@@ -434,10 +434,17 @@ test('a projected agent-loop request still answers, and a hand-built call is sti
   const forged = []
   for await (const chunk of adapter.stream(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([{ role: 'user', content: 'hand built' }]) }))) forged.push(chunk)
   assert.equal(forged.at(-1).reason.failure.code, 'REMOTE_HERMES')
-  // A projection that rebuilt a message keeps its id: still the Session's own turn.
-  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([Object.freeze({ role: 'user', id: 'm-1', content: 'say OK' })]) }), agent), true)
-  // A hand-built call beside the turn is never one, even with the Session's message ids.
-  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', purpose: 'compaction', messages: Object.freeze([Object.freeze({ role: 'user', id: 'm-1', content: 'say OK' })]) }), agent), false)
+  // The loop's own sequence, developer notes aside, is the one accepted envelope.
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([messages[0]]) }), agent), true)
+  // The same id with new text is a different message, and never the turn.
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([Object.freeze({ role: 'user', id: 'm-1', content: 'send something else' })]) }), agent), false)
+  // An old subset that ends on an earlier prompt is not the current turn either.
+  const older = Object.freeze({ role: 'user', id: 'm-0', content: 'an earlier prompt' })
+  const agent2 = { id: 'sample-chat', session: { deriveMessages: () => [older, messages[0]], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) } }
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([older]) }), agent2), false)
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([older, messages[0]]) }), agent2), true)
+  // A hand-built call beside the turn is never one.
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', purpose: 'compaction', messages: Object.freeze([messages[0]]) }), agent), false)
 })
 
 test('connection is off by default, record stores a reference and credential stays mode 0600', async t => {

@@ -101,11 +101,13 @@ export class RemoteChatAdapter extends LlmAdapter {
   async listModels(provider) { return this.enabled() ? this.models().map(model => ({ id: model.id, name: model.name, provider })) : [] }
   async resolveModel(provider, id) { return { provider, id, name: this.models().find(model => model.id === id)?.name ?? id } }
 
-  // DSH dispatches a loop request as itself unless it must project it (developer messages or
-  // a tool update): the dispatch then hands the adapter a new deep-frozen envelope, and the
-  // loop's marker is a WeakSet identity that a copy cannot carry. What still proves the call
-  // is the Bot's own turn is the envelope being frozen, on the Session's current route, over
-  // that Session's own message objects; a hand-built call beside the chat carries new ones.
+  // DSH dispatches a loop request as itself unless it must project it: the one projection
+  // that matters here strips the developer notes (tool-set changes) from the history and
+  // hands the adapter a new deep-frozen envelope, and the loop's marker is a WeakSet
+  // identity a copy cannot carry. What still proves the call is the Bot's own turn is the
+  // exact sequence the loop would build now: frozen, on the Session's route, with the
+  // Session's own message objects in order, developer notes aside. Anything rebuilt, a
+  // subset, a reordering, or a new text under an old id is not that turn and is refused.
   static ownTurn(options, agent) {
     if (isAgentLoopRequest(options)) return true
     if (!Object.isFrozen(options) || options.purpose !== undefined || !Array.isArray(options.messages) || options.messages.length === 0) return false
@@ -113,10 +115,9 @@ export class RemoteChatAdapter extends LlmAdapter {
     if (header?.config?.provider !== options.provider || header?.config?.model !== options.model) return false
     let derived
     try { derived = agent.session.deriveMessages?.() } catch { return false }
-    if (!Array.isArray(derived) || derived.length === 0) return false
-    const own = new Set(derived), ids = new Set(derived.map(message => message?.id).filter(id => typeof id === 'string'))
-    // A projection that rebuilt a message (file or image projection) keeps its id.
-    return options.messages.every(message => own.has(message) || (typeof message?.id === 'string' && ids.has(message.id)))
+    if (!Array.isArray(derived)) return false
+    const expected = derived.filter(message => message?.role !== 'developer')
+    return expected.length === options.messages.length && expected.length > 0 && expected.every((message, index) => message === options.messages[index])
   }
 
   async *stream(options) {
