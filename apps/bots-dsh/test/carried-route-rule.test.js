@@ -304,6 +304,26 @@ const ROWS = [
   },
 ]
 
+test('a new part that picked another provider then picked attach back takes attach', async t => {
+  // The old part is a real attached Hermes chat and has answered on the attach row. The
+  // person picks another provider, starts a new part, then picks Remote Hermes back before
+  // typing. The new part is live with another provider's selection but no request yet: the
+  // pick must be applied, not skipped by any last-answer fallback from the old part.
+  const host = await storedTeam(t, { b1: [{ route: CARRIED }] })
+  const bot = carries({ previousModel: ATTACH })
+  const bench = runtime(host, { bots: { b1: bot }, chats: { b1: 'part-2' } })
+  bench.rt.chatOwners.set('part-2', 'b1')
+  bench.answer('b1')
+  bench.rt.ctx.sessions = {
+    get: id => (id === 'part-2' ? { requestHeader: () => undefined } : undefined),
+    list: () => [],
+  }
+  await bench.rt.applyModel(bot, { force: true })
+  assert.deepEqual(bench.selected, ['part-2:hermes-remote/attach'])
+  // The new part's first request is the attach row, and the guard accepts it.
+  assert.equal(bench.accepted('part-2', { provider: 'hermes-remote', model: 'attach' }), true)
+})
+
 for (const row of ROWS) {
   test(row.name, async t => {
     const host = await storedTeam(t, row.sessions)
