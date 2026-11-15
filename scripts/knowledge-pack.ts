@@ -302,24 +302,88 @@ export function hasLiteral(pattern: string): boolean {
   return false;
 }
 
-/** Text a placeholder pattern must not match: unrelated words, and a hit of each rule's shape. */
-function probes(): string[] {
+/**
+ * A pattern's literal ends, per top-level branch: the literal text each branch starts and ends
+ * with (escapes read as their character; a character under a quantifier is not literal). A branch
+ * that is literal throughout is one exact text and gives none.
+ */
+export function literalEnds(pattern: string): { prefix: string; suffix: string }[] {
+  const branches: (string | null)[][] = [[]];
+  let depth = 0;
+  for (let i = 0; i < pattern.length; i++) {
+    const tokens = branches[branches.length - 1];
+    const c = pattern[i];
+    if (c === '\\') {
+      const next = pattern[++i] ?? '';
+      const width = next === 'u' ? 4 : next === 'x' ? 2 : 0;
+      const hex = width ? new RegExp(`^[0-9A-Fa-f]{${width}}`).exec(pattern.slice(i + 1)) : null;
+      if (hex) { tokens.push(String.fromCharCode(parseInt(hex[0], 16))); i += width; continue; }
+      const control: Record<string, string> = { n: '\n', r: '\r', t: '\t' };
+      tokens.push('dDwWsSbB'.includes(next) ? null : (control[next] ?? next));
+      continue;
+    }
+    if (c === '[') {
+      for (i++; i < pattern.length && pattern[i] !== ']'; i++) if (pattern[i] === '\\') i++;
+      tokens.push(null);
+      continue;
+    }
+    const brace = c === '{' ? /^\{\d*(?:,\d*)?\}/.exec(pattern.slice(i))?.[0] : undefined;
+    if ('*+?'.includes(c) || brace) {
+      // The quantified character is not literal, and neither is the quantifier.
+      if (tokens.length) tokens[tokens.length - 1] = null;
+      tokens.push(null);
+      if (brace) i += brace.length - 1;
+      continue;
+    }
+    if (c === '|' && depth === 0) { branches.push([]); continue; }
+    if (c === '(') depth++;
+    if (c === ')') depth--;
+    tokens.push('^$.|()'.includes(c) ? null : c);
+  }
+  return branches.flatMap((tokens) => {
+    // Drop the branch's own anchors, then take the literal run at each end.
+    if (tokens.length && tokens[0] === null) tokens.shift();
+    if (tokens.length && tokens[tokens.length - 1] === null) tokens.pop();
+    if (tokens.every((t) => t !== null)) return [];
+    const lead = tokens.indexOf(null);
+    const tail = tokens.lastIndexOf(null);
+    return [{ prefix: tokens.slice(0, lead).join(''), suffix: tokens.slice(tail + 1).join('') }];
+  });
+}
+
+/**
+ * Text a placeholder pattern must not match: unrelated words, letters-only words (each letter
+ * alone or beside a word, a word with a dot), a hit of each rule's shape with and without digits,
+ * and the pattern's own literal ends around a plain word, so a wildcard beside a short literal
+ * (`^a.*$`, any local part at one domain, any name under one folder) is refused.
+ */
+function probes(pattern: string): string[] {
   const word = () => Array.from(randomBytes(9), (b) => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('');
   // Addresses and homes are joined from parts, so the repository's own privacy scan reads none.
-  const address = (local: string, domain: string) => [local, domain].join('\u0040');
+  const address = (local: string, domain: string) => [local, domain].join('@');
   const home = (name: string) => ['', 'home', name].join('/');
   const users = (name: string) => ['', 'Users', name].join('/');
   const fixed = [' ', 'x', 'hello world', 'zq7#kP!', '\n', address('q8v2m', 'rk4t.io'), address('omni', 'rk4t.io'), home('q8v2m'), users('q8v2m')];
   const random = [word(), `${word()} ${word()}`, address(word(), `${word()}.com`), home(word()), users(word())];
-  return [...fixed, ...random];
+  // Letters only: no digit to lean on.
+  const letters = [...'abcdefghijklmnopqrstuvwxyz'].flatMap((c) => [c, `${c}name`, `name${c}`]);
+  const plain = [
+    'abc', 'user', 'name', 'readme.md', 'example.net', 'docs.example.org',
+    address('name', 'domain'), address('name', 'domain.com'), address('user', 'example.org'),
+    home('name'), users('name'), `${home('name')}/projects`,
+  ];
+  // The pattern's own literal ends around a plain word: its wildcard part must not take one.
+  const fillers = ['a', 'name', 'user', 'q8v2m', word()];
+  const ends = literalEnds(pattern).flatMap(({ prefix, suffix }) => fillers.map((w) => prefix + w + suffix));
+  return [...fixed, ...random, ...letters, ...plain, ...ends];
 }
 
 /**
  * The pack's placeholder list, checked: each entry names the email or home-path rule, a why, and
  * either an exact `match` or a `pattern` anchored with ^ and $. A pattern that matches empty text,
- * has no literal part, or matches unrelated text (fixed probes and random words, addresses and
- * home paths) is refused: a placeholder may pass one text, never a whole rule. Returns a test for
- * one hit.
+ * has no literal part, or matches unrelated text (fixed probes, letters-only words, random words,
+ * addresses and home paths, and its own literal ends around a plain word) is refused: a
+ * placeholder may pass one text, never a whole rule. Returns a test for one hit.
  */
 export function placeholderTest(entries: Placeholder[]): (hit: { rule: string; match: string }) => boolean {
   if (!Array.isArray(entries)) throw new Error('placeholders: the list must be an array');
@@ -338,7 +402,7 @@ export function placeholderTest(entries: Placeholder[]): (hit: { rule: string; m
     const re = new RegExp(e.pattern);
     if (re.test('')) throw new Error(`${at}: pattern ${e.pattern} matches empty text`);
     if (!hasLiteral(e.pattern)) throw new Error(`${at}: pattern ${e.pattern} has no literal part`);
-    const loose = probes().find((p) => re.test(p));
+    const loose = probes(e.pattern).find((p) => re.test(p));
     if (loose !== undefined) throw new Error(`${at}: pattern ${e.pattern} matches unrelated text (${JSON.stringify(loose)})`);
     return (h: { rule: string; match: string }) => h.rule === e.rule && re.test(h.match);
   });
