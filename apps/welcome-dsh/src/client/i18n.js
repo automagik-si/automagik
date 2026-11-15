@@ -331,7 +331,7 @@ export const PT_BR = {
   'Drawn with your ChatGPT plan (gpt-image-2)': 'Desenhado com o seu plano do ChatGPT (gpt-image-2)',
   'Drawn with Codex on your ChatGPT plan': 'Desenhado com o Codex no seu plano do ChatGPT',
   'Drawn with your OpenAI key (gpt-image-1)': 'Desenhado com a sua chave da OpenAI (gpt-image-1)',
-  'Drawing a companion needs Codex signed in or an OpenAI key. Connect one in the AI step, then come back from Settings. For now, pick one.': 'Para desenhar uma companhia, é preciso o Codex conectado ou uma chave da OpenAI. Conecte um dos dois no passo de IA e volte por Configurações. Por enquanto, escolha um personagem.',
+  'Drawing a companion needs Codex signed in. Sign in to Codex in the AI step, then come back from Settings. For now, pick one.': 'Para desenhar uma companhia, é preciso entrar no Codex. Entre no Codex no passo de IA e volte por Configurações. Por enquanto, escolha um personagem.',
   'Character': 'Personagem',
   'Color': 'Cor',
   'Its name': 'Nome',

@@ -133,6 +133,7 @@ const MCP_NAME = /^[A-Za-z0-9_.-]{1,128}$/
 export const IMAGE_MODE = 'read-only'
 // Owner policy: keep drawing on adapters that cannot select the narrow profile.
 const ALLOW_IMAGE_READ_ONLY_FALLBACK = true
+const EDIT_NEEDS_ISOLATION = true
 
 // The config omits network, inherited profiles and minimal roots. Codex's filesystem helper
 // still adds :minimal and helper-executable reads; omitting them here cannot deny those reads.
@@ -553,8 +554,8 @@ export const FAILED = 'acp/image-failed'
 export const STOPPED = 'acp/image-stopped'
 export const REFUSED = 'acp/image-refused'
 
-const signedOut = () => imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, or add an OpenAI key, then try again.')
-const usageLimit = () => imageRefusal(USAGE_LIMIT, 'Codex has reached its usage limit on this ChatGPT plan. Try again when the limit resets, or add an OpenAI key.')
+const signedOut = () => imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, then try again.')
+const usageLimit = () => imageRefusal(USAGE_LIMIT, 'Codex has reached its usage limit on this ChatGPT plan. Try again when the limit resets.')
 const USAGE_TEXT = /usage limit|usage_limit|quota/i
 
 /** What the agent is asked: one call of its image tool, the size and background in words. */
@@ -567,6 +568,19 @@ export function imagePrompt({ prompt, size, quality, background } = {}) {
   if (background === 'transparent') lines.push('Background: transparent, a cut-out with no backdrop.')
   else if (background === 'opaque') lines.push('Background: opaque, filled to the edges.')
   lines.push('', 'The image:', String(prompt ?? ''))
+  return lines.join('\n')
+}
+
+/** Ask for an edit using the verified copy inside this run's scratch folder. */
+export function editPrompt({ prompt, size, quality, background, file } = {}) {
+  const lines = [
+    `Use your image generation tool exactly once to edit the picture saved as ./${file} in the current folder (it is also attached): use it as the reference image and change only what is described below. Do not run commands, read or write any other file, or browse; do not ask questions; do not describe the image afterwards.`,
+  ]
+  if (SIZE_WORDS[size]) lines.push(`Size: ${SIZE_WORDS[size]}.`)
+  if (QUALITY_WORDS[quality]) lines.push(`Detail: ${QUALITY_WORDS[quality]}.`)
+  if (background === 'transparent') lines.push('Background: transparent, a cut-out with no backdrop.')
+  else if (background === 'opaque') lines.push('Background: opaque, filled to the edges.')
+  lines.push('', 'The change:', String(prompt ?? ''))
   return lines.join('\n')
 }
 
@@ -620,10 +634,10 @@ class ImageRun extends AgentRun {
 
 /** The refusal of a Codex that does not take the lockdown, for a caller that knew beforehand. */
 export const unsupported = () => imageRefusal(UNAVAILABLE, CHECK_TEXT.unsupported)
-const notIsolated = () => imageRefusal(UNAVAILABLE, 'The Codex image run could not be isolated, so the image was not started. Update Automagik, or add an OpenAI key.')
+const notIsolated = () => imageRefusal(UNAVAILABLE, 'The Codex image run could not be isolated, so the image was not started. Update Automagik and try again.')
 const CHECK_TEXT = {
-  unsupported: 'Codex here offers tools the image run could not turn off, so the image was not started. Update Automagik, or add an OpenAI key.',
-  config: 'Codex could not load its own configuration, so the image was not started. Fix Codex\'s config file, or add an OpenAI key.',
+  unsupported: 'Codex here offers tools the image run could not turn off, so the image was not started. Update Automagik and try again.',
+  config: 'Codex could not load its own configuration, so the image was not started. Fix Codex\'s config file and try again.',
   unreadable: 'Codex could not be checked for safe drawing, so the image was not started. Try again.',
 }
 
@@ -632,21 +646,21 @@ const CHECK_TEXT = {
  * may throw when its connector is not installed yet. Resolves { base64, mimeType }; rejects with
  * an `imageRefusal` (signed out, usage limit, timeout, stopped, failed, refused, unavailable).
  * `log` is told, in one line with no private content, why a check stopped the draw.
- * @param {{ spawn: () => { command: string, args?: string[], env?: Record<string, string> }, prompt: string, size?: string, quality?: string, background?: string, signal?: AbortSignal, timeoutMs?: number, checkTimeoutMs?: number, name?: string, scratch?: () => Promise<string>, Run?: typeof AgentRun, listServers?: typeof mcpServerNames, log?: (line: string) => void }} request
+ * @param {{ spawn: () => { command: string, args?: string[], env?: Record<string, string> }, prompt: string, size?: string, quality?: string, background?: string, input?: { data: Uint8Array, mimeType: string }, signal?: AbortSignal, timeoutMs?: number, checkTimeoutMs?: number, name?: string, scratch?: () => Promise<string>, Run?: typeof AgentRun, listServers?: typeof mcpServerNames, log?: (line: string) => void }} request
  */
-export async function drawImage({ spawn, prompt, size, quality, background, signal, timeoutMs = IMAGE_TIMEOUT_MS, checkTimeoutMs = MCP_LIST_TIMEOUT_MS, name = 'Codex', scratch = async () => realpath(await mkdtemp(join(tmpdir(), 'automagik-image-'))), Run = ImageRun, listServers = mcpServerNames, log }) {
+export async function drawImage({ spawn, prompt, size, quality, background, signal, timeoutMs = IMAGE_TIMEOUT_MS, checkTimeoutMs = MCP_LIST_TIMEOUT_MS, name = 'Codex', scratch = async () => realpath(await mkdtemp(join(tmpdir(), 'automagik-image-'))), Run = ImageRun, listServers = mcpServerNames, log, input }) {
   if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
   // The draw holds the event loop from start to cleanup: the run lets go of it once a turn ends,
   // and its close and cancel guards must not be cut short by a process with nothing else alive.
   const keepAlive = setInterval(() => {}, 1 << 30)
   try {
-    return await draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log })
+    return await draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log, input })
   } finally {
     clearInterval(keepAlive)
   }
 }
 
-async function draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log }) {
+async function draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log, input }) {
   let launch
   try {
     launch = spawn()
@@ -656,12 +670,14 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
   // The lockdown is checked against this Codex before anything of it starts, in the folder
   // the session would get: no session and no model request exist when a check does not hold.
   const dir = await scratch()
+  const file = input ? `input.${{ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[input.mimeType]}` : undefined
   let profile = imageProfile()
   let setup
   let listed = false
   try {
     await mkdir(join(dir, '.codex'), { mode: 0o700 })
     await writeFile(join(dir, '.codex', 'config.toml'), profile.config, { mode: 0o600, flag: 'wx' })
+    if (input) await writeFile(join(dir, file), input.data, { flag: 'wx', mode: 0o400 })
   } catch {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
     if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
@@ -751,9 +767,17 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
       if (error?.code === UNAVAILABLE) throw error
       throw imageRefusal(UNAVAILABLE, `Codex did not start: ${String(error?.message ?? error).slice(0, 200)}`)
     }
+    if (input && EDIT_NEEDS_ISOLATION && isolated !== true) {
+      throw Object.assign(imageRefusal(UNAVAILABLE, 'Codex can edit a picture only inside its locked image run, which could not be set up on this computer, so the picture was not edited.'), { reason: 'edit-not-isolated' })
+    }
     let said = ''
     let ended
-    const prompting = run.prompt([{ type: 'text', text: imagePrompt({ prompt, size, quality, background }) }])
+    const blocks = input ? [
+      ...(run.init?.agentCapabilities?.promptCapabilities?.image === true
+        ? [{ type: 'image', data: Buffer.from(input.data).toString('base64'), mimeType: input.mimeType }] : []),
+      { type: 'text', text: editPrompt({ prompt, size, quality, background, file }) },
+    ] : [{ type: 'text', text: imagePrompt({ prompt, size, quality, background }) }]
+    const prompting = run.prompt(blocks)
     // The agent's words are read only for a usage-limit notice; they are kept nowhere.
     const reading = (async () => {
       for (;;) {

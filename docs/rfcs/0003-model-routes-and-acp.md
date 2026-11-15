@@ -914,3 +914,27 @@ Edits do not restart a running session. The existing profile-edit notice carries
 with its existing self-edit exceptions; each fresh session reads the current profile. A preserved
 unbridged Codex session returning from a native route still keeps its original identity snapshot.
 Repository-file consent in RFC 0014 is unchanged.
+
+
+### Image edits (2026-11-15)
+
+Pending the owner's OK (D1). `generate_image` may edit one picture the person uploaded in the
+Bot's own chat, across its durable parts, including compacted and offloaded image blocks.
+Names, sha256 prefixes and paths are selectors of verified attachment references, never
+filesystem authority. Ambiguity refuses before reading; group uploads and team-generated
+pictures remain outside this phase. The original is unchanged and the result is a new image
+in the same chat card.
+
+The OpenAI-key edit uses the Images edits endpoint and its own model; drawing is unchanged.
+Codex edits use `acpAgents.editImage`, with the same account-generation and availability
+checks as drawing, strict base64, PNG/JPEG/WebP magic checks and a 12 MiB limit. Legacy
+ChatGPT grants cannot edit; older ACP services must update or use an OpenAI key.
+
+For edits, the Image read boundary's text-only-input statement gains this exception:
+bots-dsh reads the person's verified upload from DSH's store and acp-dsh passes it inline
+when image prompts are supported and writes a 0400 copy in the per-draw scratch. No read
+root is added. Only an acknowledged per-draw profile permits an edit; fallback refuses it
+(D3's recommended default). The scratch and input copy are removed afterwards. Codex still
+selects its image-tool paths without an adapter pre-read hook; acknowledgement is not proof
+of scratch-only reads, and #870 remains open. Real-app acceptance must demonstrate that
+Codex preserves the reference picture's distinctive shapes and text before this ships.

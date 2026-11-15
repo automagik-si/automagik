@@ -1,0 +1,352 @@
+// Store-backed copies belong to the Bot a picture was sent to, never to the team.
+import { createHash, randomUUID } from 'node:crypto'
+import { constants } from 'node:fs'
+import { link, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/promises'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { HISTORY_PAGES_MAX } from './constants.js'
+import { refusal } from './refusal.js'
+
+const MAX_BYTES = 64 * 1024 * 1024
+const extensions = { 'image/png': 'png', 'image/jpeg': 'jpg',
+  'image/webp': 'webp', 'image/gif': 'gif' }
+const FILE_TOOLS = { read: 'file_path', write: 'file_path', edit: 'file_path', read_image: 'file_path', str_replace_editor: 'path' }
+const SEARCH_TOOLS = ['glob', 'grep']
+const SHELL_TOOLS = ['bash', 'pwsh', 'terminal_open', 'terminal_send']
+const strings = value => (typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : [])
+const hexOf = ref => /^sha256:[a-f0-9]{64}$/.test(ref?.attachmentId) ? ref.attachmentId.slice(7) : undefined
+
+export function uploadLeaf(ref, kind) {
+  const name = ref.name ?? (kind === 'image' ? `image.${extensions[ref.mediaType]}` : 'file')
+  return typeof name === 'string' && name !== '' && name !== '.' && name !== '..' &&
+    !/[\\/]/.test(name) && !name.includes('\0') ? name : 'file'
+}
+
+// Only these durable sources convey a picture. Copies and path text convey no authority.
+export function pictureGrant(rt, message, bot) {
+  const source = message?.source
+  if (message?.role !== 'user' || source?.handoff) return undefined
+  if (source?.kind === 'user' || source?.kind === 'retry') return 'user'
+  if (source?.kind !== 'bot' || source.form !== 'relay') return undefined
+  if (source.role === 'room' && source.roomId) return bot?.private === true ? undefined : 'room'
+  const sender = rt.botOf?.(source.senderSessionId)
+  if (source.forwarded?.v === 1 && sender) return 'forward'
+  return undefined
+}
+
+export function uploadOsText(name, folder) {
+  return `${JSON.stringify(name)} could not be saved as a file for you: the operating system refused access to ${JSON.stringify(folder)}. Tell the user to allow Automagik to use that folder (on macOS: System Settings > Privacy & Security > Files and Folders, or Full Disk Access; elsewhere, make the folder writable for their user).`
+}
+const displayName = name => typeof name === 'string' && name.replace(/\p{Cc}/gu, '').slice(0, 120) || 'unnamed picture'
+
+async function bounded(work, signal) {
+  signal.throwIfAborted()
+  let stop
+  const cancelled = new Promise((_, reject) => {
+    stop = () => reject(signal.reason)
+    signal.addEventListener('abort', stop, { once: true })
+  })
+  try { return await Promise.race([Promise.resolve().then(work), cancelled]) } finally {
+    signal.removeEventListener('abort', stop)
+  }
+}
+
+async function directory(path, create = false) {
+  if (create) {
+    try { await mkdir(path, { mode: 0o700 }) } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+    }
+  }
+  const stat = await lstat(path)
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Unsafe upload directory.')
+}
+async function ignore(folder) {
+  let file
+  try {
+    file = await open(join(folder, '.gitignore'), 'wx', 0o600)
+    await file.writeFile('*\n')
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error
+    const stat = await lstat(join(folder, '.gitignore'))
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Unsafe upload ignore file.')
+  } finally { await file?.close() }
+}
+async function same(path, written) {
+  const stat = await lstat(path)
+  if (!stat.isFile() || stat.ino !== written.ino || stat.dev !== written.dev) throw new Error('Upload copy changed.')
+}
+async function removeOwn(path, created) {
+  if (!created) return
+  try {
+    const stat = await lstat(path)
+    if (stat.isFile() && stat.ino === created.ino && stat.dev === created.dev) await unlink(path)
+  } catch (error) { if (error.code !== 'ENOENT') throw error }
+}
+
+export function install(rt) {
+  const { ctx } = rt
+  const granted = new Map()
+  const historyImages = new Map()
+  const memo = new Map()
+  const pending = new Map()
+  const owner = id => rt.botOfSession(id)
+  const workingFolder = (sessionId, bot) => rt.workDirOf({ botId: bot.id, roomId: rt.groupOwners?.get(sessionId)?.roomId }) ?? rt.teamFolder()
+  async function regionFor(sessionId) {
+    const bot = owner(sessionId)
+    if (!bot || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(bot.id)) return undefined
+    const folder = workingFolder(sessionId, bot)
+    if (typeof folder !== 'string' || !isAbsolute(folder)) return undefined
+    return join(await realpath(folder), '.automagik', 'bots', bot.id, 'uploads')
+  }
+  function grantedTo(sessionId) {
+    const bot = owner(sessionId)
+    if (!bot) return undefined
+    if (!granted.has(bot.id)) granted.set(bot.id, new Set())
+    return granted.get(bot.id)
+  }
+  async function checkDirectories(region, hex, create = false) {
+    const folder = resolve(region, '../../../..')
+    await directory(folder)
+    let at = folder
+    for (const part of ['.automagik', 'bots', region.split(/[\\/]/).at(-2), 'uploads', hex]) {
+      at = join(at, part)
+      await directory(at, create)
+      if (create && (part === 'bots' || part === 'uploads')) await ignore(at)
+    }
+    if (await realpath(at) !== at) throw new Error('Unsafe upload directory.')
+  }
+  async function holds(botId, hex) {
+    if (!/^[a-f0-9]{64}$/.test(hex)) return false
+    try {
+      const region = await regionFor(rt.chatOf(botId))
+      if (!region) return false
+      await checkDirectories(region, hex)
+      for (const name of await readdir(join(region, hex))) {
+        if (name.startsWith('.upload-')) continue
+        try {
+          if (await existing(join(region, hex, name), { attachmentId: `sha256:${hex}` })) return true
+        } catch { /* A bad entry cannot hide a verified copy beside it. */ }
+      }
+      return false
+    } catch { return false }
+  }
+  async function existing(path, ref, signal) {
+    let file
+    try {
+      file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0))
+      const stat = await file.stat()
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_BYTES || (ref.bytes !== undefined && stat.size !== ref.bytes)) throw new Error('Unsafe upload copy.')
+      const dir = await realpath(dirname(path))
+      const cached = memo.get(path)
+      if (cached && cached.dir === dir && ['dev', 'ino', 'size', 'ctimeMs'].every(key => cached[key] === stat[key])) return true
+      memo.delete(path)
+      const hash = createHash('sha256')
+      for await (const chunk of file.createReadStream({ autoClose: false, signal })) hash.update(chunk)
+      if (`sha256:${hash.digest('hex')}` !== ref.attachmentId) throw new Error('Upload copy has different bytes.')
+      await same(path, stat)
+      const after = await file.stat()
+      if (after.ctimeMs !== stat.ctimeMs || after.nlink !== 1) throw new Error('Upload copy changed.')
+      memo.set(path, { dev: stat.dev, ino: stat.ino, size: stat.size, ctimeMs: stat.ctimeMs, dir })
+      return true
+    } catch (error) {
+      memo.delete(path)
+      if (error.code === 'ENOENT') return false
+      throw error
+    } finally { await file?.close() }
+  }
+  async function writeCopy(ref, opts, region, path, signal) {
+    const hex = hexOf(ref)
+    let file, temp, created, written
+    try {
+      signal.throwIfAborted()
+      await checkDirectories(region, hex, true)
+      if (await existing(path, ref, signal)) {
+        if (await regionFor(opts.sessionId) !== region) throw new Error('Upload owner moved.')
+        return { path }
+      }
+      temp = join(dirname(path), `.upload-${randomUUID()}`)
+      await checkDirectories(region, hex)
+      file = await open(temp, 'wx', 0o600)
+      created = await file.stat()
+      let data = opts.data
+      if (data === undefined) {
+        const typed = { attachmentId: ref.attachmentId, bytes: ref.bytes, mediaType: ref.mediaType, width: ref.width, height: ref.height }
+        const stored = await bounded(() => ctx.get('attachments').readImage(typed, signal), signal).catch(error => {
+          throw Object.assign(new Error('DSH image store read failed', { cause: error }), { storeCode: error.code })
+        })
+        if (!(stored?.data instanceof Uint8Array) || ['attachmentId', 'bytes', 'mediaType', 'width', 'height'].some(key => stored.ref?.[key] !== ref[key])) throw new Error('Image reference changed.')
+        data = stored.data
+      }
+      if (!(data instanceof Uint8Array) || data.byteLength !== ref.bytes || createHash('sha256').update(data).digest('hex') !== hex) throw new Error('Upload integrity verification failed.')
+      signal.throwIfAborted()
+      await file.writeFile(data)
+      await file.chmod(0o444)
+      written = await file.stat()
+      await file.close()
+      file = undefined
+      await checkDirectories(region, hex)
+      if (await regionFor(opts.sessionId) !== region) throw new Error('Upload owner moved.')
+      signal.throwIfAborted()
+      if (!await existing(path, ref, signal)) {
+        await checkDirectories(region, hex)
+        signal.throwIfAborted()
+        await same(temp, written)
+        let linked = false
+        try {
+          await link(temp, path)
+          linked = true
+          await same(path, written)
+        } catch (error) {
+          if (linked) await removeOwn(path, created)
+          if (error.code !== 'EEXIST') throw error
+          if (!await existing(path, ref, signal)) throw new Error('Upload copy changed.')
+        }
+      }
+    } finally {
+      await file?.close()
+      if (temp) await removeOwn(temp, created)
+    }
+    // The temporary hard link is gone before nlink is checked or memoized.
+    if (!await existing(path, ref, signal)) throw new Error('Upload copy disappeared.')
+    return { path }
+  }
+  async function save(ref, opts = {}) {
+    let folder, bot
+    try {
+      bot = owner(opts.sessionId)
+      if (!bot) return { error: 'other', folder }
+      folder = workingFolder(opts.sessionId, bot)
+      const hex = hexOf(ref)
+      if (!hex || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0 || ref.bytes > MAX_BYTES) return { error: 'other', folder }
+      const signal = AbortSignal.any([...(opts.signal ? [opts.signal] : []), AbortSignal.timeout(10_000)])
+      return await bounded(async () => {
+        const region = await regionFor(opts.sessionId)
+        if (!region) return { error: 'other', folder }
+        const path = join(region, hex, uploadLeaf({ ...ref, name: opts.name ?? ref.name }, 'image'))
+        if (!pending.has(path)) {
+          const work = writeCopy({ ...ref }, opts, region, path, signal).catch(error => {
+            if (error.storeCode) {
+              rt.warn('ds-bot: DSH image store read failed: %s', error.storeCode)
+              return { error: 'store', code: error.storeCode }
+            }
+            if (['EACCES', 'EPERM', 'EROFS'].includes(error?.code)) {
+              rt.warn('ds-bot: upload %s not saved for %s: the system refused access to %s', hex.slice(0, 12), bot.id, folder)
+              return { error: 'os', folder }
+            }
+            rt.warn('ds-bot: upload %s not saved for %s', hex.slice(0, 12), bot.id)
+            return { error: 'other', folder }
+          }).finally(() => pending.delete(path))
+          pending.set(path, work)
+        }
+        return pending.get(path)
+      }, signal)
+    } catch (error) {
+      if (['EACCES', 'EPERM', 'EROFS'].includes(error?.code)) {
+        rt.warn('ds-bot: upload %s not saved for %s: the system refused access to %s', hexOf(ref)?.slice(0, 12), bot?.id, folder)
+        return { error: 'os', folder }
+      }
+      return { error: 'other', folder }
+    }
+  }
+  async function withPaths(messages, sessionId, provider, signal) {
+    const bot = owner(sessionId)
+    if (!bot) return messages
+    const seen = historyImages.get(bot.id) ?? new Set()
+    historyImages.set(bot.id, seen)
+    for (const message of messages) {
+      for (const block of Array.isArray(message.content) ? message.content : []) {
+        const hex = block?.type === 'image' && hexOf(block.attachment)
+        if (hex) seen.add(hex)
+      }
+    }
+    if (provider === 'hermes-remote') return messages
+    let changed = false
+    const result = []
+    for (const message of messages) {
+      const grant = pictureGrant(rt, message, bot)
+      if (!grant || !Array.isArray(message.content)) { result.push(message); continue }
+      const content = []
+      for (let i = 0; i < message.content.length; i++) {
+        const block = message.content[i]
+        content.push(block)
+        const hex = block?.type === 'image' && hexOf(block.attachment)
+        if (!hex) continue
+        grantedTo(sessionId).add(hex)
+        const saved = await save(block.attachment, { sessionId, signal })
+        if (provider?.startsWith('local-') || (provider?.startsWith('acp-') && grant !== 'forward')) continue
+        const next = message.content[i + 1]
+        if (next?.type === 'text' && next.text.startsWith('[Saved picture sha256:')) continue
+        const name = displayName(block.attachment.name)
+        const text = saved.path ? `your read-only copy of ${JSON.stringify(name)} at ${JSON.stringify(saved.path)}. Your file tools can open it; to change it, make a new file in your working folder.`
+          : saved.error === 'os' ? uploadOsText(name, saved.folder)
+            : saved.error === 'store' ? `DSH's image store could not be read (${saved.code}).` : undefined
+        if (text) content.push({ type: 'text', text: `[Saved picture sha256:${hex.slice(0, 12)}: ${text}]` })
+      }
+      if (content.length !== message.content.length) { changed = true; result.push({ ...message, content }) }
+      else result.push(message)
+    }
+    return changed ? result : messages
+  }
+
+  // Reading a stored picture already in this Bot's history is not a new forward
+  // or edit grant. Include offloaded images and earlier parts after a restart.
+  async function inOwnHistory(botId, sessionId, hex, signal) {
+    if (historyImages.get(botId)?.has(hex)) return true
+    if (!rt.eventsBackwards) return false
+    const ids = new Set([sessionId, ...(rt.partsOf?.(botId) ?? []).map(part => part.sessionId)])
+    const deadline = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(10_000)])
+    try {
+      return await bounded(async () => {
+        for (const id of ids) {
+          for await (const event of rt.eventsBackwards(id, deadline, HISTORY_PAGES_MAX)) {
+            deadline.throwIfAborted()
+            const message = event.type === 'user/message' ? event.data
+              : event.type === 'tool/result' ? event.data?.message : undefined
+            if (message?.content?.some(block => block?.type === 'image' && hexOf(block.attachment) === hex)) return true
+          }
+        }
+        return false
+      }, deadline)
+    } catch { return false }
+  }
+
+  // This is a tool-level guard, like private Bots. It does not inspect indirect shell
+  // paths or tools a coding agent runs itself, and does not forbid parent-folder walks.
+  ctx.on('tools/execute', async (exec, next) => {
+    const caller = rt.botOfSession(exec.agent?.session?.id ?? exec.agent?.id, exec.agent)
+    if (!caller) return next()
+    const args = exec.arguments ?? {}
+    const flatten = text => text.replace(/["']/g, '').replace(/\\/g, '/').replace(/\/+/g, '/')
+      .replace(/\/(?:\.\/)+/g, '/')
+    const raw = flatten(strings(args).join('\n'))
+    const storePath = hex => {
+      try {
+        const host = ctx.get('attachments')?.imageHostPath?.({ attachmentId: `sha256:${hex}` })
+        return host && (ctx.get('fs')?.processPathFromHostPath?.(host) ?? host)
+      } catch { return undefined }
+    }
+    const storeRoot = storePath('0'.repeat(64))?.replace(/[/\\]objects[/\\].*$/, '').replace(/\\/g, '/')
+    if (!/\.automagik/i.test(raw) && !(storeRoot && raw.includes(flatten(storeRoot))) && !/[a-f0-9]{64}/i.test(raw)) return next()
+    const closed = () => { throw refusal(`That picture was not sent to ${caller.name}, so it cannot open it. Ask the user to send it here, or ask the Bot that has it to forward it.`) }
+    async function check(text) {
+      const flat = flatten(text)
+      for (const found of flat.matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) if (found[1] !== caller.id) closed()
+      for (const found of flat.matchAll(/\.automagik\/uploads\/([a-f0-9]{64})(?:\/|$)/gi)) if (!await holds(caller.id, found[1].toLowerCase())) closed()
+      for (const found of flat.matchAll(/objects\/([a-f0-9]{2})\/([a-f0-9]{62,64})(?![a-f0-9])/gi)) {
+        const hex = (found[2].length === 64 ? found[2] : found[1] + found[2]).toLowerCase()
+        if (!await holds(caller.id, hex) && !await inOwnHistory(caller.id, exec.agent?.session?.id ?? exec.agent?.id, hex, exec.signal)) closed()
+      }
+    }
+    await check(raw)
+    const paths = exec.name in FILE_TOOLS ? [args[FILE_TOOLS[exec.name]]]
+      : SEARCH_TOOLS.includes(exec.name) ? [args.path ?? '.', isAbsolute(args.pattern ?? '') ? args.pattern.replace(/[*?[{].*$/, '') : undefined]
+        : SHELL_TOOLS.includes(exec.name) ? [] : [args.cwd, args.cd]
+    for (const path of paths) {
+      if (typeof path !== 'string' || !path) continue
+      const absolute = resolve(rt.sessionFolder(exec.agent?.session ?? exec.agent) ?? '.', path)
+      await check(absolute)
+      if (rt.realBeyond) await check(await rt.realBeyond(absolute))
+    }
+    return next()
+  })
+  rt.sharedUploads = { grantedTo, regionFor, save, withPaths, holds }
+}

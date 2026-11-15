@@ -297,7 +297,7 @@ export function ImagesSection({ Section, Row }) {
       : access.kind === 'codex' ? t('Codex, on your ChatGPT plan')
         : access.kind === 'chatgpt' ? t('Your ChatGPT account') : t('Your OpenAI key')
   const hint = access === null
-    ? t('Sign in to Codex from a Bot\'s chat, or add an OpenAI key in Settings → Models, and every Bot can draw images in its chats.')
+    ? t('Sign in to Codex from a Bot\'s chat, and every Bot can draw images in its chats.')
     : t('Every Bot can draw images in its chats. They are saved in the team workspace\'s images folder.')
   return h(Section, { title: t('Images') },
     h(Row, { label: t('Drawn with'), hint }, h('span', { className: 'bt-set-hint' }, access?.model ? `${label} · ${access.model}` : label)))

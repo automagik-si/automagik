@@ -247,6 +247,54 @@ No credential is read or copied between programs. The background model is not mo
 
 **Images**: `generate_image` draws with an OpenAI API key (the Images API) exactly as before; without one, through the Codex CLI on its own ChatGPT sign-in (acp-dsh's `generateImage`, a one-off Codex session with a per-draw permission profile using Codex's image tool), so a ChatGPT plan draws with no DSH sign-in. A ChatGPT grant an earlier version stored through DSH's `openai-codex` sign-in is read last, only so a person who signed in that way keeps drawing; Automagik no longer offers that sign-in. Nothing reads or copies the CLI's sign-in. A Bot on an agent (Codex) can also make an image with the agent's own tool: acp-dsh hands its PNG, from the call's own update, to the Bot team's keeper (`acpAgents.keepImages`), the chat shows it in the same image card, it is saved in the same images folder, and the agent's link to its own local copy leaves the reply. While any image is made (either path), the card is Omni painting: Omni's clay art with no card behind it, swaying, its face changing every 0.9 s, four dabs of the theme's colours around it, and "Painting your image…" with the seconds so far; a partial image, then the finished one, fades in where Omni was. With reduced motion Omni stands still and the dabs are gone. A call that fails or is stopped says the image was not made, and why.
 
+`generate_image` also edits a picture the person uploaded in that Bot's own chat: pass its
+shown name, sha256 (full or a prefix), or upload path as `image`, and the change as `prompt`.
+The selector is never opened as a path. All chat parts are searched in the durable log, so
+compacted and offloaded uploads still count. Ambiguous names or prefixes ask which sha256;
+other chats, group chats and team-generated images are not edit inputs in this phase. Only
+verified PNG, JPEG and WebP uploads up to 12 MiB are accepted. The original stays unchanged;
+the result is a new image in the same chat card and team images folder.
+
+Edits use the person's OpenAI key through the Images edits API, or Codex on their ChatGPT
+plan through `acpAgents.editImage`. An older ACP plugin asks for an update;
+a legacy ChatGPT grant cannot edit. Codex edits require acknowledgement of the per-draw
+profile and refuse the read-only fallback. A Codex Bot keeps its own image tool unchanged.
+
+Each picture is saved only for the Bots it was sent to: the person's uploads, group lines
+shown to a member, and explicit forwards through `message_bot`'s `images` array (up to four
+names, sha256s or saved paths from the sender's own chat). A forward gives the recipient its
+own copy and allows it to edit the picture with `generate_image`. A deliberate image forward or edit request can give a private Bot exactly those pictures.
+For each forward from a private Bot, the Main Bot's (Orchestrator's) image authorisation is
+recorded automatically at that moment, with no Main Bot turn, chat message or wait. Without
+a Main Bot the forward is refused. The message text still needs the person's existing
+private outbound approval. A private recipient always answers in its own chat (`reply_to:
+"user"`); its reply never returns to the sender automatically. Plain messages to private
+Bots without images remain refused. Group lines never grant a private Bot pictures;
+channel deliveries grant no new copy or edit access.
+
+The copy lives at `<working folder>/.automagik/bots/<Bot id>/uploads/<sha256>/<leaf>`;
+the working folder follows that Bot's folder choice, including its group member folder,
+and falls back to the team workspace. New directories are 0700, temporary files 0600 and
+finished copies 0444. `.automagik/bots/` and `uploads/` each have a `*` `.gitignore`.
+Only bytes verified against DSH's stored reference are copied; a copy or a path is never
+an authority to edit. Copies are never overwritten and stay until the person deletes them.
+
+The DSH tool guard refuses another Bot's region and refuses per-chat ACP copies or DSH store
+objects unless the caller holds a verified copy or the picture is already in its own history.
+Tool-result images, channel pictures and handoff rows stay readable from that Bot's own
+history; this does not grant another Bot access or authorise an edit. Like private Bots, this is a tool-level
+check: Codex's own tools and indirect shell paths are not seen. Parent-folder walks are not
+blocked; `.gitignore` hides copies only from ignore-aware walks and is not a filesystem fence.
+No permission, Codex profile or read root is widened. If the operating system refuses the
+folder, the picture's text asks the person to allow Automagik access (Files and Folders or
+Full Disk Access on macOS, or a folder writable by their user elsewhere).
+
+When Codex refuses an edit with `edit-not-isolated`, the image card stays failed and the Bot
+gets its read-only copy's path. At Workspace it may use its own tools to make and check a new
+file, and must only claim an edit when that file exists; otherwise it says it could not edit.
+At Read only it tells the person that Workspace in Details allows editing as a file. A copy
+failure gives the OS guidance or says that the picture could not be edited here.
+
 **Codex image security (#870).** Each one-off draw requests scratch-only reads through a fresh
 permission profile. Codex's filesystem helper adds runtime read grants, so this is containment,
 not a scratch-only read boundary: images in permitted runtime directories remain readable.
@@ -749,3 +797,5 @@ keeps token name, tool, target, outcome and time for reads/writes; configuration
 record changed-field before/after values. Message bodies and read results never enter the audit.
 Settings and `read_audit` expose up to the latest 200 complete records within the last 256 KiB.
 A `started` write with no completion was interrupted; check the configuration before retrying.
+
+Bots the person creates start at Workspace unless the person chooses another team default in Settings. Bots created by another Bot keep their creator’s permission cap, including the narrowest level for an unrankable creator. Folder creation and selection probe directory reads and a temporary file write/read. An OS refusal keeps the selected folder and shows a note beside the folder choice and in the Bot’s context, naming the folder and the OS access to allow. Only when the folder cannot be read or entered do new sessions run in the team (or default) workspace until access is allowed. A write-only refusal leaves sessions in the selected folder with the warning.

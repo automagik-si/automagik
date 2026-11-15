@@ -226,10 +226,10 @@ test('a signed-in Codex that is not supported for drawing gives way to the earli
   assert.deepEqual(await createImageGen({ credentials: () => storeOf(grant), codex: () => codex, folder: () => dir }).access(), { kind: 'chatgpt', model: 'gpt-image-2' })
   const alone = createImageGen({ credentials: () => storeOf({}), codex: () => codex, folder: () => dir })
   assert.equal(await alone.access(), null)
-  await assert.rejects(alone.generate({ prompt: 'x', callId: 'u' }), /not supported for drawing yet.*update Automagik.*OpenAI key/)
+  await assert.rejects(alone.generate({ prompt: 'x', callId: 'u' }), /not supported for drawing yet.*update Automagik/)
   assert.deepEqual(codex.calls, [], 'Codex is never started')
   // A Codex whose check did not hold for another reason gives way too, and says which.
-  for (const [reason, said] of [['config', /could not load its own configuration.*OpenAI key/], ['unreadable', /could not be checked for safe drawing.*OpenAI key/]]) {
+  for (const [reason, said] of [['config', /could not load its own configuration.*fix Codex's config file/], ['unreadable', /could not be checked for safe drawing.*try again later/]]) {
     const other = codexOf({ ready: false, reason })
     assert.deepEqual(await createImageGen({ credentials: () => storeOf(grant), codex: () => other, folder: () => dir }).access(), { kind: 'chatgpt', model: 'gpt-image-2' })
     await assert.rejects(createImageGen({ credentials: () => storeOf({}), codex: () => other, folder: () => dir }).generate({ prompt: 'x', callId: reason }), said)

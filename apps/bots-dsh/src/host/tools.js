@@ -1,6 +1,7 @@
 // Team tools: the roster, bot-to-bot messages, group chat settings and posts, and the
 // question and view cards. Group rounds and reading chats are in groups.js.
 import { randomUUID } from 'node:crypto'
+import { createEditInput } from './image-input.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { readAvatar } from './avatar.js'
 import { COLORS, EXTRA_COLORS, MESSAGE_INLINE_MAX, ROOM_MODES, SOURCE_KIND } from './constants.js'
@@ -144,7 +145,7 @@ export function install(rt) {
   const bodyOf = (message) => {
     const content = Array.isArray(message.content) ? message.content : []
     const first = content.find(block => block?.type === 'text')?.text ?? ''
-    return { text: first.slice(first.indexOf('\n') + 1), files: content.filter(block => block?.type === 'file' && block.attachment !== undefined).map(block => block.attachment) }
+    return { text: first.slice(first.indexOf('\n') + 1), images: content.filter(block => block?.type === 'image' && block.attachment !== undefined).map(block => block.attachment), files: content.filter(block => block?.type === 'file' && block.attachment !== undefined).map(block => block.attachment) }
   }
 
   // A tool that throws shows as failed in the chat, instead of as sent or stopped.
@@ -183,6 +184,7 @@ export function install(rt) {
     parameters: {
       to: { type: 'string', required: true, description: 'Exact Bot name from list_bots' },
       message: { type: 'string', required: true, description: 'Self-contained message; the other Bot cannot see this conversation' },
+      images: { type: 'array', items: { type: 'string' }, description: 'Pictures to send along, each by its name, sha256 or saved path as your own chat shows it; the other Bot gets its own copy. Only pictures you were given.' },
       reply_to: {
         type: 'string',
         enum: ['me', 'user'],
@@ -201,16 +203,27 @@ export function install(rt) {
     output,
     async execute(args, exec) {
       await rt.load()
+      if (Array.isArray(args.images) && args.images.length > 4) return 'Not sent: send at most 4 pictures in one message_bot call.'
       const sender = callerBot(exec)
       if (sender === undefined) return 'Only Bots on the team can use message_bot.'
       const target = rt.findBot(args.to)
       if (target === undefined) return `No Bot named ${args.to}. Team: ${Object.values(state.bots).map(bot => bot.name).join(', ')}`
       if (target.id === sender.id) return 'You cannot message yourself.'
       if (String(args.message ?? '').trim() === '') return 'Write a message to send.'
+      const toUser = rt.isPrivate(target.id) || args.reply_to === 'user'
       const name = typeof args.request_id === 'string' ? args.request_id.trim() : ''
       if (name.length > NAME_MAX) return `The request_id is ${name.length} characters long; a request name is at most ${NAME_MAX}.`
       const text = absoluteLinks(String(args.message), rt.sessionFolder?.(exec.agent?.session ?? exec.agent))
       const room = rt.roomOf(rt.groupOwners.get(exec.agent?.id)?.roomId)
+      const images = []
+      if (Array.isArray(args.images) && args.images.length > 0) {
+        if (room !== undefined || rt.groupOwners.has(exec.agent?.session?.id ?? exec.agent?.id)) return 'Not sent: forward pictures from your own chat.'
+        for (const selector of args.images) {
+          try { images.push(await createEditInput({ rt, ctx }).findPicture(exec, selector, exec.signal)) } catch (error) {
+            return `${JSON.stringify(selector)}: ${error.message}`
+          }
+        }
+      }
       // The request the caller named: it is admitted once, and a repeat of it is not sent again.
       const request = name === '' ? undefined : rt.requestIdentity({
         caller: sender.id,
@@ -219,8 +232,9 @@ export function install(rt) {
         payload: {
           to: target.id,
           message: String(args.message ?? '').replace(/\r\n?/g, '\n').trim(),
-          reply_to: args.reply_to === 'user' ? 'user' : 'me',
+          reply_to: toUser ? 'user' : 'me',
           when: args.when === 'queue' ? 'queue' : 'now',
+          ...(images.length > 0 ? { images: images.map(ref => ref.attachmentId).sort() } : {}),
         },
       })
       // What the caller gets for a request that was admitted before.
@@ -254,7 +268,10 @@ export function install(rt) {
         return `Not sent: ${target.name} is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back. Finish the work and end your turn; to ask ${target.name} something, end your turn with the question.`
       }
       const send = async () => {
-        const toUser = args.reply_to === 'user'
+        if (images.length > 0 && rt.isPrivate(sender.id)) {
+          await rt.approvePictureForward(exec, { sender, target, images })
+          exec.signal?.throwIfAborted()
+        }
         const work = toUser ? undefined : works[0]
         const chat = rt.chatOf(target.id)
         const agent = await rt.resolveAgent(chat)
@@ -276,7 +293,7 @@ export function install(rt) {
         if (joins) rt.forgetDelivery?.(exchangeId)
         else if (!toUser) rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work })
         try {
-          await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
+          await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
         } catch (error) {
           // The delivery stays noted for the next start while its Bot exists
           // (resume.js), and the resent request still answers up the tree, so the
@@ -297,7 +314,8 @@ export function install(rt) {
           status === 'idle' ? '' : `${target.name} now: ${status}.`,
           asker ? `When you have handed on everything, end your turn: each reply brings you back to this work, and your answer goes to ${asker} once all of it is back.` : '',
         ].filter(Boolean)
-        const out = [sent, ...notes].join(' ')
+        const pictures = images.length + (joins ? before.images.length : 0)
+        const out = [sent, ...(pictures ? [`Sent with ${pictures} picture(s).`] : []), ...notes].join(' ')
         // Messages reach a Bot's own chat only; work in a group goes on without them.
         const groups = activeSessions(target.id).running.filter(sessionId => sessionId !== chat)
         if (groups.length === 0) return out

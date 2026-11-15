@@ -10,6 +10,7 @@ import { ModelMenu } from './model-menu.js'
 import { hostText, t } from './i18n.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
 import { presetName, remoteOfBot } from './permission-picker.js'
+import { FOLDER_ACCESS_NOTE } from '../shared/folder-access.js'
 import { nameProblem } from '../shared/mentions.js'
 
 const pick = list => list[Math.floor(Math.random() * list.length)]
@@ -31,6 +32,12 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
   const [showInstructions, setShowInstructions] = useState(false)
   const [model, setModel] = useState(() => startModel(roster))
   const [effort, setEffort] = useState(undefined)
+  const [folderWarning, setFolderWarning] = useState(null)
+  useEffect(() => {
+    let active = true
+    Promise.resolve(actions.folderProbe?.()).then(note => { if (active) setFolderWarning(note) }, () => {})
+    return () => { active = false }
+  }, [actions.folderProbe])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const fileRef = useRef(null)
@@ -42,7 +49,7 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
   const finalName = name.trim() || fallbackName
   const clash = roster.bots.some(bot => bot.name.toLowerCase() === finalName.toLowerCase())
   const problem = nameProblem(finalName)
-  const permission = roster.prefs?.permission ?? roster.permissions?.defaultPreset
+  const permission = roster.newBotPermission ?? roster.prefs?.permission ?? roster.permissions?.defaultPreset
   const create = async () => {
     if (busy || clash || problem) return
     setError('')
@@ -126,6 +133,7 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
         t("Part of the Bot's system prompt. You can change it later in its details."))) : null,
     remoteOfBot({ model }) ? h('div', { className: 'bt-note' },
       t("This model uses its Hermes profile's own instructions.")) : null,
+    folderWarning ? h('div', { className: 'bt-note', role: 'status' }, t(FOLDER_ACCESS_NOTE, { folder: JSON.stringify(folderWarning.folder) })) : null,
     permission == null ? null : h('div', { className: 'bt-note' },
       t('New Bots start at {level}.', { level: presetName(permission, roster.permissions) })),
     permission == null ? null : h('div', { className: 'bt-note' }, t('After the Bot is created, Auto can be turned on in its chat or Details, when its model offers it.')),

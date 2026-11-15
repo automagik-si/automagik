@@ -251,8 +251,8 @@ export function createCompanionActions(ctx, { fetch: fetchImpl = globalThis.fetc
       const fields = parse(GeneratePayload, payload)
       if (fields === undefined) throw invalid('Describe your companion in a few words.')
       const source = await imageSource(ctx, now())
-      if (source === undefined) throw refused('Sign in to Codex or add an OpenAI key first, or pick a companion instead.')
-      if (!source.fresh) throw refused('Your earlier ChatGPT sign-in has run out. Sign in to Codex or add an OpenAI key in Connect AI, or pick a companion instead.')
+      if (source === undefined) throw refused('Sign in to Codex first, or pick a companion instead.')
+      if (!source.fresh) throw refused('Your earlier ChatGPT sign-in has run out. Sign in to Codex in Connect AI, or pick a companion instead.')
       const prompt = companionPrompt(fields.description)
       if (source.kind === 'codex') {
         // Codex draws in one piece; its refusals (signed out, usage limit, timeout) read as they are.
