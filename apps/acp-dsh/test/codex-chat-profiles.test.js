@@ -57,7 +57,7 @@ test('chat config starts with the default and grants only the named roots', () =
   assert.ok(config.includes(BOTTOM))
   assert.ok(config.includes(`[permissions.automagik-read-${HEX}]\n`))
   assert.ok(config.includes(`[permissions.automagik-workspace-${HEX}]\n`))
-  assert.equal(config.split("':root' = 'deny'").length - 1, 2)
+  assert.equal(config.split("':root' = 'deny'").length - 1, 3)
   assert.equal(config.split("':minimal' = 'read'").length - 1, 2)
   assert.equal(config.split("':project_roots' = 'read'").length - 1, 2)
   const [read, write] = config.split(`[permissions.automagik-workspace-${HEX}]`)

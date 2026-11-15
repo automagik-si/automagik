@@ -169,12 +169,51 @@ jobs:
           node dev/install-adapters.mjs "${RUNNER_TEMP}/acp-adapters" | tee -a "$GITHUB_ENV"
           mkdir -p "${RUNNER_TEMP}/acp-clis"
           npm install --prefix "${RUNNER_TEMP}/acp-clis" --no-audit --no-fund --loglevel=error @anthropic-ai/claude-code @openai/codex
+          # npm's #!/usr/bin/env node shim exits 127 with tests' node-free PATH=/usr/bin:/bin.
+          case "$(uname -s)/$(uname -m)" in
+            Linux/x86_64)
+              codex_package=codex-linux-x64
+              codex_target=x86_64-unknown-linux-musl ;;
+            Linux/aarch64|Linux/arm64)
+              codex_package=codex-linux-arm64
+              codex_target=aarch64-unknown-linux-musl ;;
+            Darwin/arm64)
+              codex_package=codex-darwin-arm64
+              codex_target=aarch64-apple-darwin ;;
+            Darwin/x86_64)
+              codex_package=codex-darwin-x64
+              codex_target=x86_64-apple-darwin ;;
+            *) echo "::error::unsupported Codex runner: $(uname -s)/$(uname -m)"; exit 1 ;;
+          esac
+          codex_root="${RUNNER_TEMP}/acp-clis/node_modules/@openai/${codex_package}"
+          codex_bin="${codex_root}/vendor/${codex_target}/bin/codex"
+          if [ ! -f "$codex_bin" ] || [ ! -x "$codex_bin" ]; then
+            echo "::error::native Codex is missing or not executable: ${codex_bin}"
+            exit 1
+          fi
           {
             echo "AUTOMAGIK_TEST_CLAUDE=${RUNNER_TEMP}/acp-clis/node_modules/.bin/claude"
-            echo "AUTOMAGIK_TEST_CODEX=${RUNNER_TEMP}/acp-clis/node_modules/.bin/codex"
+            echo "AUTOMAGIK_TEST_CODEX=${codex_bin}"
           } >> "$GITHUB_ENV"
 
+      - name: Allow Codex's bundled bwrap user namespace
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          set -euo pipefail
+          bwrap="${RUNNER_TEMP}/acp-clis/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
+          test -x "${bwrap}"
+          # Ubuntu restricts unprofiled user namespaces. Allow this runner's bwrap only;
+          # its mount/network sandbox and the tested Codex read policy still apply.
+          cat > "${RUNNER_TEMP}/acp-clis/bwrap.apparmor" <<EOF
+          abi <abi/4.0>,
+          profile acp-drift-bwrap "${bwrap}" flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r "${RUNNER_TEMP}/acp-clis/bwrap.apparmor"
+
       - name: The suite, the fuzz and the real adapters
+        timeout-minutes: 22
         id: run
         env:
           FUZZ_RUNS: '2000'
@@ -196,6 +235,13 @@ jobs:
             if ! grep -q "^✔ real ${agent}: the adapter answers initialize" "${RUNNER_TEMP}/acp-daily.log"; then
               echo "::error::the real-adapter tests did not run for ${agent}"
               echo "code=3" >> "$GITHUB_OUTPUT"
+            fi
+          done
+          for name in 'the resolved profile is exactly the image grants' 'a wider home table is caught' 'a project layer that widens it is caught' "today's project file is never offered"; do
+            if ! grep -q "^✔ real image lock: ${name}" "${RUNNER_TEMP}/acp-daily.log"; then
+              echo "::error::the real image lock test did not run: ${name}"
+              code=3
+              echo "code=${code}" >> "$GITHUB_OUTPUT"
             fi
           done
 
@@ -321,12 +367,51 @@ jobs:
           node dev/install-adapters.mjs "${RUNNER_TEMP}/acp-adapters" | tee -a "$GITHUB_ENV"
           mkdir -p "${RUNNER_TEMP}/acp-clis"
           npm install --prefix "${RUNNER_TEMP}/acp-clis" --no-audit --no-fund --loglevel=error @anthropic-ai/claude-code @openai/codex
+          # npm's #!/usr/bin/env node shim exits 127 with tests' node-free PATH=/usr/bin:/bin.
+          case "$(uname -s)/$(uname -m)" in
+            Linux/x86_64)
+              codex_package=codex-linux-x64
+              codex_target=x86_64-unknown-linux-musl ;;
+            Linux/aarch64|Linux/arm64)
+              codex_package=codex-linux-arm64
+              codex_target=aarch64-unknown-linux-musl ;;
+            Darwin/arm64)
+              codex_package=codex-darwin-arm64
+              codex_target=aarch64-apple-darwin ;;
+            Darwin/x86_64)
+              codex_package=codex-darwin-x64
+              codex_target=x86_64-apple-darwin ;;
+            *) echo "::error::unsupported Codex runner: $(uname -s)/$(uname -m)"; exit 1 ;;
+          esac
+          codex_root="${RUNNER_TEMP}/acp-clis/node_modules/@openai/${codex_package}"
+          codex_bin="${codex_root}/vendor/${codex_target}/bin/codex"
+          if [ ! -f "$codex_bin" ] || [ ! -x "$codex_bin" ]; then
+            echo "::error::native Codex is missing or not executable: ${codex_bin}"
+            exit 1
+          fi
           {
             echo "AUTOMAGIK_TEST_CLAUDE=${RUNNER_TEMP}/acp-clis/node_modules/.bin/claude"
-            echo "AUTOMAGIK_TEST_CODEX=${RUNNER_TEMP}/acp-clis/node_modules/.bin/codex"
+            echo "AUTOMAGIK_TEST_CODEX=${codex_bin}"
           } >> "$GITHUB_ENV"
 
+      - name: Allow Codex's bundled bwrap user namespace
+        if: steps.latest.outputs.move == 'true'
+        run: |
+          set -euo pipefail
+          bwrap="${RUNNER_TEMP}/acp-clis/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex-resources/bwrap"
+          test -x "${bwrap}"
+          # Ubuntu restricts unprofiled user namespaces. Allow this runner's bwrap only;
+          # its mount/network sandbox and the tested Codex read policy still apply.
+          cat > "${RUNNER_TEMP}/acp-clis/bwrap.apparmor" <<EOF
+          abi <abi/4.0>,
+          profile acp-drift-bwrap "${bwrap}" flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r "${RUNNER_TEMP}/acp-clis/bwrap.apparmor"
+
       - name: The suite, the fuzz and the real adapters on the new SDK
+        timeout-minutes: 22
         if: steps.latest.outputs.move == 'true'
         id: run
         env:

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
-import { toToml } from './image.js'
+import { IMAGE_PROFILE_DESCRIPTION, IMAGE_PROFILE_GRANTS, toToml } from './image.js'
 
 export function chatProfileModesFor(hex) {
   return Object.freeze({
@@ -93,6 +93,9 @@ function profilesConfig(codexHome, hex, runtime) {
     const grants = restrictedChatGrants(codexHome, access, runtime)
     for (const [key, value] of Object.entries(grants)) lines.push(`${toToml(key)} = ${toToml(value)}`)
   }
+  const id = `automagik-image-${hex}`
+  lines.push(`[permissions.${id}]`, `description = ${toToml(IMAGE_PROFILE_DESCRIPTION)}`, `[permissions.${id}.filesystem]`)
+  for (const [key, value] of Object.entries(IMAGE_PROFILE_GRANTS)) lines.push(`${toToml(key)} = ${toToml(value)}`)
   return [...lines, ''].join('\n')
 }
 
@@ -104,7 +107,7 @@ export function chatProfilesConfig(codexHome, hex, runtime) {
 // Only the simple names we own matter here; accept quoted names after a Codex rewrite too.
 const keyOf = text => text.trim().replace(/["']([\w-]+)["']/g, '$1').replace(/\s*\.\s*/g, '.')
 const headerOf = line => line.trim().match(/^\s*\[\[?(.+?)\]\]?\s*(?:#.*)?$/)?.[1]
-const ours = key => /^permissions\.automagik-(read|workspace)-[0-9a-f]{32}(?:\.|$)/.test(key)
+const ours = key => /^permissions\.automagik-(read|workspace|image)-[0-9a-f]{32}(?:\.|$)/.test(key)
 const reserved = key => key.startsWith('permissions.automagik-')
 
 function unmanaged(text) {

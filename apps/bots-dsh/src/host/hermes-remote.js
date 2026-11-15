@@ -302,28 +302,36 @@ export function install(rt, { transport = options => new HermesTransport(options
       publish()
     }, true).finally(() => { if (attachNormalization) attachNormalization = undefined })
   }
-  // One-step recovery for a chat left pending/uncertain by an earlier connection. It first
-  // asks the attached serve which session is the Bot Chat; a chat whose stored id is the
-  // current Bot Chat is left alone (its turn belongs to this connection and must be
-  // reconciled, not discarded).
-  async function recoverSessions(signal) {
+  // Clear pending/uncertain turns only with evidence they belong to an earlier connection:
+  // attached chats must differ from the Bot Chat and any known current epoch; other chats
+  // must carry a recorded epoch that differs from the serve's known current epoch.
+  async function recoverSessions(signal, startup) {
     await rt.load()
     if (disposed) throw fail('The connection is closing.', 'busy')
     if (adapter.live.size) throw fail(CHAT_BUSY, 'busy')
-    let run, botChatId
+    const owner = generation, config = record(), attached = attachedRecord(config)
+    let run, botChatId, currentEpoch
     try {
-      run = await open({ identity: { canonicalBot: true }, signal })
-      await run.prepare()
-      botChatId = run.identity?.storedSessionId
+      if (attached) {
+        run = await open({ identity: { canonicalBot: true }, signal, startup })
+        await run.prepare()
+        botChatId = run.identity?.storedSessionId
+      } else run = await open({ signal, startup })
+      currentEpoch = run.transport?.epoch
     } finally {
       if (run) await run.close().catch(() => {})
       await drain()
     }
-    if (!botChatId) throw fail('The Bot Chat could not be identified; reconcile in Hermes before clearing old turns.', 'pairing')
+    if (attached && !botChatId) throw fail('The Bot Chat could not be identified; reconcile in Hermes before clearing old turns.', 'pairing')
+    if (!attached && typeof currentEpoch !== 'string') throw fail('The current Hermes session could not be identified; reconcile in Hermes before clearing old turns.', 'pairing')
+    if (signal.aborted) throw fail('Connection setup was cancelled or timed out.', 'timeout')
+    if (disposed || disconnecting || generation !== owner || record() !== config || adapter.live.size || active.size) throw fail(CHAT_BUSY, 'busy')
     let changed = false
     for (const info of Object.values(state.hermesSessions ?? {})) {
       if (!info || (!info.pendingSubmit && !info.uncertain) || !info.storedSessionId) continue
-      if (info.storedSessionId === botChatId) continue
+      if (attached) {
+        if (info.storedSessionId === botChatId || (typeof currentEpoch === 'string' && info.epoch === currentEpoch)) continue
+      } else if (typeof info.epoch !== 'string' || info.epoch === currentEpoch) continue
       info.pendingSubmit = false; info.uncertain = false
       delete info.storedSessionId; delete info.runtimeSessionId; delete info.epoch; delete info.lastSeq; delete info.subscriptionId
       changed = true
@@ -990,7 +998,7 @@ export function install(rt, { transport = options => new HermesTransport(options
   adapter = new RemoteChatAdapter(rt, { open: openChat, models: servedModels, identity, save: saveState, enabled, attached: () => attachedRecord(record()) })
   api.adapter = adapter
   rt.hooks.endpoint('hermes-remote', async () => { await rt.load(); await rt.loadSecrets(); return view() }, { read: true })
-  rt.hooks.endpoint('hermes-remote-recover', (_body, signal) => recoverSessions(signal))
+  rt.hooks.endpoint('hermes-remote-recover', (_body, signal) => action(startup => recoverSessions(startup.signal, startup), signal))
   rt.hooks.endpoint('hermes-remote-ssh-hosts', async (_body, signal) => {
     try {
       const found = await sshHosts({ signal })
