@@ -47,5 +47,8 @@ export function principalOf(file, sessionId) {
   return member(undefined)
 }
 
+// An Agent's id is its session's id (dsh-agent); its session carries the same id.
+export const sessionOfAgent = agent => agent?.id ?? agent?.session?.id
+
 // The session the current work runs for, or undefined for work outside any session.
 export const currentSession = () => sessionScope.getStore()?.sessionId

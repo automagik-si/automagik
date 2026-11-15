@@ -27,6 +27,7 @@
     "./client": "./client.js",
     "./web-search": "./web-search.js",
     "./member-wall/fs": "./src/host/member-wall/fs.js",
+    "./member-wall/tools": "./src/host/member-wall/tools.js",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },

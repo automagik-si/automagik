@@ -430,6 +430,14 @@ every session while the record cannot be trusted, is held to a member's rules. T
 sessions and the owner's interface read as before. A member's commands are not fenced by this
 piece.
 
+The second entry, `@automagik/bots-dsh/member-wall/tools`, is the member tool list. A member
+session may call only the tools named in its `memberTools` (exact names; by default the file,
+search and skill tools, the to-do list and questions to the person). Everything else is
+refused before it runs: the shell, web, MCP servers, Office, messages to other agents,
+subagents and the Bot team's tools. The shell stays off for members until a member's commands
+run under the member's own identity. A member's step on an ACP model route is refused, and
+until DSH's final tool guard is in place a member session gets no turn at all.
+
 ## Bot browser
 
 Every Bot has a browser of its own, on by default (`browserPlugin: false` turns it off). It is the Chrome, Edge, Chromium or Brave already on this computer, driven through `playwright-core`: nothing is downloaded. Without one, a Bot that needs a browser says so and asks you to install Chrome.
@@ -581,7 +589,7 @@ dev/check.sh                             # all checks (see below)
 | `src/script-child/` | Source of the process a `browser_exec` script runs in: a QuickJS interpreter (WebAssembly) and the two functions it is given; `pins.json` holds the interpreter's version and the sha256 of each of its files |
 | `src/host/browser/script-child.js` | Built from `src/script-child/` and the pinned interpreter by `scripts/build-script-child.mjs` (esbuild) as one file; committed |
 | `web-search.js` | The `auto` search provider; independent of the team code |
-| `src/host/member-wall/` | The member wall (off): the read fence (`fs`), the principal record (`principals`), its profile rows |
+| `src/host/member-wall/` | The member wall (off): the read fence (`fs`), the tool list (`tools`), the principal record (`principals`), its profile rows |
 | `test/` | Unit tests and fixtures |
 | `dev/characters.mjs` | Builds the characters (small 3D models traced to outlines) into the `CHARACTERS` table in `src/client/characters.js` |
 | `dev/` | Mock model, test benches, smoke test, Desktop scripts, real-model tools (steward evaluation, logging pass-through) |

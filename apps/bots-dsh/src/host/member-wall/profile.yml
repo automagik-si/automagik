@@ -16,3 +16,11 @@
         sharedReadRoots: []
         # DSH's own data folder belongs here: no member reads it, even inside a shared root.
         denyReadRoots: []
+    # The tool list: a member session may call only these exact names. The owner's profile is
+    # the only place it is set; the read fence keeps a member's writes in its own area.
+    - id: member-wall-tools
+      name: '@automagik/bots-dsh/member-wall/tools'
+      config:
+        members: false
+        principalsFile: ''
+        memberTools: [read, read_image, grep, glob, write, edit, skill, todo_write, ask_user_question]

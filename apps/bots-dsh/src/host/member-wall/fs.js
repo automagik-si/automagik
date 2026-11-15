@@ -22,7 +22,7 @@ import z from '@deepseek-ai/schemastery'
 import { FsError } from '@deepseek-ai/dsh-fs'
 import { LocalFileSystem } from '@deepseek-ai/dsh-fs-local'
 import { SandboxedFileSystem } from '@deepseek-ai/dsh-fs-sandbox'
-import { currentSession, principalOf, sessionScope } from './principals.js'
+import { currentSession, principalOf, sessionOfAgent, sessionScope } from './principals.js'
 
 export const SEARCH_TOOLS = Object.freeze(['grep', 'glob'])
 
@@ -78,9 +78,6 @@ export function searchRule(config) {
     return !deny.some(held => under(held, root) || under(held, real))
   }
 }
-
-// An Agent's id is its session's id (dsh-agent); its session carries the same id.
-export const sessionOfAgent = agent => agent?.id ?? agent?.session?.id
 
 const absent = (what, displayPath) => new FsError(`cannot ${what} "${displayPath}": not found`, 'FS_NOT_FOUND')
 const refused = (what, displayPath) => new FsError(
