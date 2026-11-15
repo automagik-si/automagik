@@ -414,6 +414,78 @@ No `part.json` comes with this import. The names it adds are the lane kind `pock
 `parts.json` field or an `am` verb, so `apps/pocket/part.json` can take its own id and name this
 artifact later.
 
+## Follow Arca
+
+Added 2026-11-15, on the owner's direction. Arca's plugins test a faster release path than Follow
+Omni's desktop carry: they ride this repository's signed plugin lane, so a plugin-only Arca change
+reaches installed apps as a plugin patch, with no desktop release, no app download and no
+restart.
+
+Arca's Automagik app, a DSH plugin set, is not a part of this repository. Arca's public
+repository (`automagik-si/arca`) will own it, the way Omni's repository owns Omni's channels and
+canvases. Arca already tags its releases `v<version>`. The rest is planned on Arca's side and not
+on its `dev` today: one folder per plugin under `apps/*-dsh` (each `package.json` version the
+Arca release of that folder's last change), its own market index at `marketplace/automagik.json`,
+and a release workflow that dispatches to this repository when it publishes.
+
+### The path
+
+- Arca's release will dispatch this repository. The run reads Arca's releases itself; the dispatch's
+  payload is a hint only.
+- The boot gate boots the exact bytes the lane would carry, not dev's newest plugins.
+- Only when it boots does a plugin-only patch go out on the existing plugin lane, signed with
+  this repository's plugin key. There is no new key, publisher or rotation.
+- The same rule as `scripts/lane.ts` applies: an Arca release with install-field, dependency or
+  DSH changes is carried by a full release, never by a lane patch. `lane.ts` does not classify
+  Arca's releases yet; the bootstrap adds that.
+- A failing gate moves no pointer. A bad plugin is fixed forward by a new Arca release.
+- The once-a-UTC-day hold (#371) belongs to Follow Omni's full-release carries. Arca's lane
+  patches are plugin-only and are not held, the two-week test included: a held patch would leave T
+  unmeasured. The hold stays on Follow Omni's carries for now.
+
+### Bootstrap
+
+The lane reader is compiled into the app: the plugin names a lane may replace are fixed in the
+build. So one desktop release comes first. It carries Arca's plugins in the desktop profile and
+allows their names on the lane, teaches `scripts/lane.ts` to classify an Arca release by the
+rule above, and changes three app policies:
+
+- An app update keeps a newer lane plugin over the build's pin: a new build never copies its own
+  older Arca plugin back over the lane's newer one.
+- Before a lane plugin installs, the app checks its `engines.omni` and its peer ranges, so one
+  that needs what the app lacks is refused rather than installed and broken.
+- The app keeps a last-known-good copy of each lane plugin to go back to.
+
+### Fast, as one number
+
+T is the median minutes from Arca's release tag to a verified lane pointer that installed apps
+read, counting only releases whose boot gate passed before the pointer moved, over the last 20
+Arca releases. The path ships when T is at most 10 minutes, the pass rate is at least 95 percent,
+and no pointer ever moved without a green gate. Installed apps poll the lane every 15 minutes, so
+a person's wait (T plus that poll) is reported beside T, not as the target.
+
+### Repairs
+
+Beside the lane path, three repairs make Follow Omni's carries more reliable while they stay as
+they are. They ship now, as their own small PR, not with the bootstrap:
+
+- After a failed publish, the desktop build and its feed are retried, so a release is never left
+  without a feed.
+- The daily cut is triggered from a clock this repository controls, so a held carry does not slip
+  for hours.
+- The app's release lookups read past the newest 50 releases.
+
+### Order
+
+1. The bootstrap desktop release, with the three app policies above.
+2. Two weeks of Arca on this path, measuring T and the pass rate.
+3. Then Omni on the same path.
+4. Only then is the once-a-UTC-day hold (#371) dropped for Omni's carries, once they ride the
+   lane.
+
+Apart from the repairs, nothing is built until this section merges and Arca has published a
+first plugin release worth carrying.
+
 ## Open questions
 
 1. `herdr/catalog/repos.json` lists Pocket Link as an external entry at `automagik-dev/automagik-pocket`,
