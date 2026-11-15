@@ -101,9 +101,28 @@ export class RemoteChatAdapter extends LlmAdapter {
   async listModels(provider) { return this.enabled() ? this.models().map(model => ({ id: model.id, name: model.name, provider })) : [] }
   async resolveModel(provider, id) { return { provider, id, name: this.models().find(model => model.id === id)?.name ?? id } }
 
+  // DSH dispatches a loop request as itself unless it must project it (developer messages or
+  // a tool update): the dispatch then hands the adapter a new deep-frozen envelope, and the
+  // loop's marker is a WeakSet identity that a copy cannot carry. What still proves the call
+  // is the Bot's own turn is the envelope being frozen, on the Session's current route, over
+  // that Session's own message objects; a hand-built call beside the chat carries new ones.
+  static ownTurn(options, agent) {
+    if (isAgentLoopRequest(options)) return true
+    if (!Object.isFrozen(options) || options.purpose !== undefined || !Array.isArray(options.messages) || options.messages.length === 0) return false
+    const header = agent?.session?.requestHeader?.()
+    if (header?.config?.provider !== options.provider || header?.config?.model !== options.model) return false
+    let derived
+    try { derived = agent.session.deriveMessages?.() } catch { return false }
+    if (!Array.isArray(derived) || derived.length === 0) return false
+    const own = new Set(derived), ids = new Set(derived.map(message => message?.id).filter(id => typeof id === 'string'))
+    // A projection that rebuilt a message (file or image projection) keeps its id.
+    return options.messages.every(message => own.has(message) || (typeof message?.id === 'string' && ids.has(message.id)))
+  }
+
   async *stream(options) {
-    if (!this.enabled() || !options.sessionId || !isAgentLoopRequest(options)) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
+    if (!this.enabled() || !options.sessionId) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
     const agent = service(this.rt.ctx, 'agents')?.get?.(options.sessionId)
+    if (!RemoteChatAdapter.ownTurn(options, agent)) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
     if (!agent) return yield finish('error', 'Remote Hermes needs a live Automagik chat to show its tools and approvals.')
     this.register(agent)
     let entry = this.live.get(options.sessionId)

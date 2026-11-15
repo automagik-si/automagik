@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { LlmRuntime, markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { HermesTransport, RemoteChat, LOST, HERMES_DEADLINES, INVALID_FRAME } from '../src/host/hermes-transport.js'
 import { remoteApproval, RemoteChatAdapter } from '../src/host/remote-chat-adapter.js'
 import { Context } from '@deepseek-ai/cordis'
@@ -395,6 +395,49 @@ test('DSH adapter produces a real mirror tool card then continues the same remot
   for await (const chunk of adapter.stream(next)) continued.push(chunk)
   assert.equal(continued.find(chunk => chunk.type === 'text-delta').text, 'After tool')
   assert.equal(f.sent.filter(frame => frame.method === 'prompt.submit').length, 1)
+})
+
+test('a projected agent-loop request still answers, and a hand-built call is still refused', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  // The Session's own messages: a person's message and the developer note DSH writes when a
+  // Bot's tool set changes between releases. This is the shape of a chat carried over.
+  const messages = Object.freeze([
+    Object.freeze({ role: 'user', id: 'm-1', content: 'say OK' }),
+    Object.freeze({ role: 'developer', id: 'dev-tools', content: Object.freeze([{ type: 'tool-addition', toolName: 'sample' }]) }),
+  ])
+  const session = { deriveMessages: () => [...messages], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const request = markAgentLoopRequest(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages, tools: Object.freeze([]), signal: new AbortController().signal }))
+  const stream = runtime.stream(request)
+  const first = stream.next()
+  await until(() => f.sent.some(frame => frame.method === 'prompt.submit'), 'the prompt to be submitted', first)
+  f.socket().event('message.complete', { text: 'OK' })
+  const chunks = [(await first).value]
+  for await (const chunk of stream) chunks.push(chunk)
+  // DSH projected the developer note away and dispatched a copy; the Bot's turn still ran.
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'OK')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  // The same chat called by hand beside the loop: new messages, not the Session's own.
+  const stray = []
+  for await (const chunk of adapter.stream({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: [{ role: 'user', content: 'hand built' }] })) stray.push(chunk)
+  assert.equal(stray.at(-1).reason.failure.code, 'REMOTE_HERMES')
+  assert.equal(stray.at(-1).reason.failure.message, 'Remote Hermes answers only enabled Bot chat sessions.')
+  // A frozen envelope with new messages is still not the Session's turn.
+  const forged = []
+  for await (const chunk of adapter.stream(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([{ role: 'user', content: 'hand built' }]) }))) forged.push(chunk)
+  assert.equal(forged.at(-1).reason.failure.code, 'REMOTE_HERMES')
+  // A projection that rebuilt a message keeps its id: still the Session's own turn.
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([Object.freeze({ role: 'user', id: 'm-1', content: 'say OK' })]) }), agent), true)
+  // A hand-built call beside the turn is never one, even with the Session's message ids.
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', purpose: 'compaction', messages: Object.freeze([Object.freeze({ role: 'user', id: 'm-1', content: 'say OK' })]) }), agent), false)
 })
 
 test('connection is off by default, record stores a reference and credential stays mode 0600', async t => {
