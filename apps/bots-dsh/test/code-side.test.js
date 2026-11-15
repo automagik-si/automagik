@@ -9,8 +9,8 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
-import { foldAttach, readAttach } from '../src/shared/attach-ledger.js'
-import { foldWorkers, readWorkers } from '../src/shared/workers-ledger.js'
+import { foldAttach, readAttach } from '../src/shared/attach-record.js'
+import { foldWorkers, readWorkers } from '../src/shared/workers-journal.js'
 import { buildCodeTree, readRegistryTree, resolvePane, statusWord } from '../src/host/code-tree.js'
 import { connectCore } from '../src/host/code-core.js'
 import { install, openPaneStream, streamAdmission, streamTarget } from '../src/host/code-side.js'
@@ -90,8 +90,8 @@ const wait = async (check, ms = 5000) => {
 
 test('the attach ledger is a byte-equal copy of the pack source, never a rewrite', () => {
   const source = readFileSync(new URL('../../../herdr/mods/am-sidebar/attach.js', import.meta.url))
-  const copy = readFileSync(new URL('../src/shared/attach-ledger.js', import.meta.url))
-  assert.ok(source.equals(copy), 'src/shared/attach-ledger.js must stay byte-equal to herdr/mods/am-sidebar/attach.js')
+  const copy = readFileSync(new URL('../src/shared/attach-record.js', import.meta.url))
+  assert.ok(source.equals(copy), 'src/shared/attach-record.js must stay byte-equal to herdr/mods/am-sidebar/attach.js')
 })
 
 test('the workers ledger folds a start, a session and an end; workers of a Bot are its own', () => {
@@ -290,4 +290,102 @@ test('owner only: the exact stream route refuses a share viewer, and an unauthen
     peers: new Map(),
   }
   assert.equal(HostConnectionService.prototype.admit.call(admission, request()).rejection, 401)
+})
+
+
+/** The stream route as install registers it, with a fake ctx whose Connection can be stopped. */
+function startHost(t, env = process.env) {
+  let route = null
+  let connectionLive = true
+  const disposers = []
+  const connection = { fetch: { register: (options) => { route = options; return () => { route = null } } } }
+  const ctx = {
+    effect: (fn) => { const off = fn(); if (typeof off === 'function') disposers.push(off); return () => {} },
+    connection,
+    get: name => (name === 'connection' ? (connectionLive ? connection : undefined) : undefined),
+  }
+  const rt = { ctx, hooks: { endpoint: () => () => {} }, warn: () => {}, home: process.cwd() }
+  const off = install(rt, { env })
+  t.after(() => { off(); for (const dispose of disposers) { try { dispose() } catch { /* gone */ } } })
+  const request = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
+  return { request, get route() { return route }, off, stopConnection: () => { connectionLive = false } }
+}
+
+const streamAsk = bot => new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${bot}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } })
+
+test('a refused open frees its stream slot, so refusals never spend the pane budget', async (t) => {
+  const f = fixture(t)
+  const host = startHost(t, f.env)
+  assert.equal((await host.route.fetch(streamAsk('b-dddddddddd'))).status, 404)
+  assert.equal((await host.route.fetch(streamAsk('b-dddddddddd'))).status, 404, 'a refused open must not leave its tag behind (409)')
+  assert.equal((await host.route.fetch(streamAsk('b-eeeeeeeeee'))).status, 404)
+  const live = await host.route.fetch(streamAsk(LEAD))
+  assert.equal(live.status, 200, 'two refusals must not keep a real pane from opening (429)')
+  await live.body.cancel()
+})
+
+test('the plugin stopping closes open streams and lets their terminals go', async (t) => {
+  const f = fixture(t)
+  const host = startHost(t, { ...f.env, FAKE_CORE_KEEP_OPEN: '1' })
+  const response = await host.route.fetch(host.request(LEAD))
+  assert.equal(response.status, 200)
+  const reader = response.body.getReader()
+  await reader.read()
+  host.off()
+  assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2)), 'the plugin stop sends CLOSE to the core')
+  let ended = false
+  const until = Date.now() + 2000
+  while (Date.now() < until) {
+    const next = await reader.read().catch(() => ({ done: true }))
+    if (next.done) { ended = true; break }
+  }
+  assert.equal(ended, true, 'and the response stream ends')
+})
+
+test('the Connection stopping closes open streams too', async (t) => {
+  const f = fixture(t)
+  const host = startHost(t, { ...f.env, FAKE_CORE_KEEP_OPEN: '1' })
+  const response = await host.route.fetch(host.request(LEAD))
+  assert.equal(response.status, 200)
+  const reader = response.body.getReader()
+  await reader.read()
+  host.stopConnection()
+  assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2), 3000), 'a stopped Connection closes the stream on the core')
+  await reader.cancel().catch(() => {})
+})
+
+test('a pane row that names another core is refused, even when the terminal is live', async (t) => {
+  const f = fixture(t)
+  const at = new Date().toISOString()
+  writeFileSync(join(f.ledgerDir, 'attach.jsonl'), `${JSON.stringify({ v: 1, event: 'attach', bot: LEAD, project: f.project, terminal: 't7', core: 'another-core', created_ms: 700, machine: null, at, by: 'start' })}\n`)
+  assert.equal(await resolvePane({ botId: LEAD, env: f.env }), null, 'a row from another core is not this computer pane')
+})
+
+test('a terminal re-created since its row is refused: the created_ms must match', async (t) => {
+  const f = fixture(t)
+  const at = new Date().toISOString()
+  writeFileSync(join(f.ledgerDir, 'attach.jsonl'), `${JSON.stringify({ v: 1, event: 'attach', bot: LEAD, project: f.project, terminal: 't7', core: CORE, created_ms: 999, machine: null, at, by: 'start' })}\n`)
+  assert.equal(await resolvePane({ botId: LEAD, env: f.env }), null, 'a reused terminal id is not the row terminal')
+  writeFileSync(join(f.ledgerDir, 'attach.jsonl'), `${JSON.stringify({ v: 1, event: 'attach', bot: LEAD, project: f.project, terminal: 't7', core: CORE, created_ms: 700, machine: null, at, by: 'start' })}\n`)
+  writeFileSync(join(f.ledgerDir, 'workers.jsonl'), `${JSON.stringify({ event: 'start', kind: 'worker', terminal: 't9', botId: LEAD, lead: LEAD, role: 'reviewer', core: CORE, created_ms: 1, at })}\n`)
+  assert.equal(await resolvePane({ botId: LEAD, worker: 't9', env: f.env }), null, 'a worker row whose created_ms is not the live terminal is refused')
+})
+
+test('installing the Code side reads no tree: the read starts with the first Terminal press', async (t) => {
+  const f = fixture(t)
+  let connects = 0
+  let endpoint = null
+  const disposers = []
+  const ctx = {
+    effect: (fn) => { const off = fn(); if (typeof off === 'function') disposers.push(off); return () => {} },
+    connection: { fetch: { register: () => () => {} } },
+  }
+  const rt = { ctx, hooks: { endpoint: (name, fn) => { endpoint = fn; return () => {} } }, warn: () => {}, home: f.root }
+  const off = install(rt, { env: f.env, connect: (...args) => { connects += 1; return connectCore(...args) } })
+  t.after(() => { off(); for (const dispose of disposers) { try { dispose() } catch { /* gone */ } } })
+  assert.equal(typeof endpoint, 'function', 'the tree endpoint is served')
+  assert.equal(connects, 0, 'install must not read the tree at install time')
+  const tree = await endpoint()
+  assert.equal(tree.machine.core, CORE)
+  assert.ok(connects > 0, 'the first endpoint call is what reads the tree')
 })
