@@ -477,21 +477,21 @@ function sl(s15, t2, e, i, r, n) {
   for (let l = 0; l < s15.length - 1; l++) {
     let a = l, u = s15.get(++a);
     if (!u.isWrapped) continue;
-    let h11 = [s15.get(l)];
-    for (; a < s15.length && u.isWrapped; ) h11.push(u), u = s15.get(++a);
+    let h12 = [s15.get(l)];
+    for (; a < s15.length && u.isWrapped; ) h12.push(u), u = s15.get(++a);
     if (!n && i >= l && i < a) {
-      l += h11.length - 1;
+      l += h12.length - 1;
       continue;
     }
-    let c = 0, d = ri(h11, c, t2), _ = 1, p = 0;
-    for (; _ < h11.length; ) {
-      let f = ri(h11, _, t2), A = f - p, R = e - d, O = Math.min(A, R);
-      h11[c].copyCellsFrom(h11[_], p, d, O, false), d += O, d === e && (c++, d = 0), p += O, p === f && (_++, p = 0), d === 0 && c !== 0 && h11[c - 1].getWidth(e - 1) === 2 && (h11[c].copyCellsFrom(h11[c - 1], e - 1, d++, 1, false), h11[c - 1].setCell(e - 1, r));
+    let c = 0, d = ri(h12, c, t2), _ = 1, p = 0;
+    for (; _ < h12.length; ) {
+      let f = ri(h12, _, t2), A = f - p, R = e - d, O = Math.min(A, R);
+      h12[c].copyCellsFrom(h12[_], p, d, O, false), d += O, d === e && (c++, d = 0), p += O, p === f && (_++, p = 0), d === 0 && c !== 0 && h12[c - 1].getWidth(e - 1) === 2 && (h12[c].copyCellsFrom(h12[c - 1], e - 1, d++, 1, false), h12[c - 1].setCell(e - 1, r));
     }
-    h11[c].replaceCells(d, e, r);
+    h12[c].replaceCells(d, e, r);
     let m = 0;
-    for (let f = h11.length - 1; f > 0 && (f > c || h11[f].getTrimmedLength() === 0); f--) m++;
-    m > 0 && (o.push(l + h11.length - m), o.push(m)), l += h11.length - 1;
+    for (let f = h12.length - 1; f > 0 && (f > c || h12[f].getTrimmedLength() === 0); f--) m++;
+    m > 0 && (o.push(l + h12.length - m), o.push(m)), l += h12.length - 1;
   }
   return o;
 }
@@ -521,8 +521,8 @@ function al(s15, t2, e) {
     n > a && (n -= a, o++);
     let u = s15[o].getWidth(n - 1) === 2;
     u && n--;
-    let h11 = u ? e - 1 : e;
-    i.push(h11), l += h11;
+    let h12 = u ? e - 1 : e;
+    i.push(h12), l += h12;
   }
   return i;
 }
@@ -811,23 +811,23 @@ var init_xterm = __esm({
       decode(t2, e) {
         let i = t2.length;
         if (!i) return 0;
-        let r = 0, n, o, l, a, u = 0, h11 = 0;
+        let r = 0, n, o, l, a, u = 0, h12 = 0;
         if (this.interim[0]) {
           let _ = false, p = this.interim[0];
           p &= (p & 224) === 192 ? 31 : (p & 240) === 224 ? 15 : 7;
           let m = 0, f;
           for (; (f = this.interim[++m] & 63) && m < 4; ) p <<= 6, p |= f;
           let A = (this.interim[0] & 224) === 192 ? 2 : (this.interim[0] & 240) === 224 ? 3 : 4, R = A - m;
-          for (; h11 < R; ) {
-            if (h11 >= i) return 0;
-            if (f = t2[h11++], (f & 192) !== 128) {
-              h11--, _ = true;
+          for (; h12 < R; ) {
+            if (h12 >= i) return 0;
+            if (f = t2[h12++], (f & 192) !== 128) {
+              h12--, _ = true;
               break;
             } else this.interim[m++] = f, p <<= 6, p |= f & 63;
           }
-          _ || (A === 2 ? p < 128 ? h11-- : e[r++] = p : A === 3 ? p < 2048 || p >= 55296 && p <= 57343 || p === 65279 || (e[r++] = p) : p < 65536 || p > 1114111 || (e[r++] = p)), this.interim.fill(0);
+          _ || (A === 2 ? p < 128 ? h12-- : e[r++] = p : A === 3 ? p < 2048 || p >= 55296 && p <= 57343 || p === 65279 || (e[r++] = p) : p < 65536 || p > 1114111 || (e[r++] = p)), this.interim.fill(0);
         }
-        let c = i - 4, d = h11;
+        let c = i - 4, d = h12;
         for (; d < i; ) {
           for (; d < c && !((n = t2[d]) & 128) && !((o = t2[d + 1]) & 128) && !((l = t2[d + 2]) & 128) && !((a = t2[d + 3]) & 128); ) e[r++] = n, e[r++] = o, e[r++] = l, e[r++] = a, d += 4;
           if (n = t2[d++], n < 128) e[r++] = n;
@@ -1112,17 +1112,17 @@ var init_xterm = __esm({
           e(void 0);
           return;
         }
-        let r = [], n = this._optionsService.rawOptions.linkHandler, o = new q(), l = i.getTrimmedLength(), a = -1, u = -1, h11 = false;
+        let r = [], n = this._optionsService.rawOptions.linkHandler, o = new q(), l = i.getTrimmedLength(), a = -1, u = -1, h12 = false;
         for (let c = 0; c < l; c++) if (!(u === -1 && !i.hasContent(c))) {
           if (i.loadCell(c, o), o.hasExtendedAttrs() && o.extended.urlId) if (u === -1) {
             u = c, a = o.extended.urlId;
             continue;
-          } else h11 = o.extended.urlId !== a;
-          else u !== -1 && (h11 = true);
-          if (h11 || u !== -1 && c === l - 1) {
+          } else h12 = o.extended.urlId !== a;
+          else u !== -1 && (h12 = true);
+          if (h12 || u !== -1 && c === l - 1) {
             let d = this._oscLinkService.getLinkData(a)?.uri;
             if (d) {
-              let _ = { start: { x: u + 1, y: t2 }, end: { x: c + (!h11 && c === l - 1 ? 1 : 0), y: t2 } }, p = false;
+              let _ = { start: { x: u + 1, y: t2 }, end: { x: c + (!h12 && c === l - 1 ? 1 : 0), y: t2 } }, p = false;
               if (!n?.allowNonHttpProtocols) try {
                 let m = new URL(d);
                 ["http:", "https:"].includes(m.protocol) || (p = true);
@@ -1131,7 +1131,7 @@ var init_xterm = __esm({
               }
               p || r.push({ text: d, range: _, activate: (m, f) => n ? n.activate(m, f, _) : Ol(m, f), hover: (m, f) => n?.hover?.(m, f, _), leave: (m, f) => n?.leave?.(m, f, _) });
             }
-            h11 = false, o.hasExtendedAttrs() && o.extended.urlId ? (u = c, a = o.extended.urlId) : (u = -1, a = -1);
+            h12 = false, o.hasExtendedAttrs() && o.extended.urlId ? (u = c, a = o.extended.urlId) : (u = -1, a = -1);
           }
         }
         e(r);
@@ -1374,10 +1374,10 @@ var init_xterm = __esm({
         return false;
       }
       O.some = u;
-      function h11(I, k) {
+      function h12(I, k) {
         for (let P of I) if (k(P)) return P;
       }
-      O.find = h11;
+      O.find = h12;
       function* c(I, k) {
         for (let P of I) k(P) && (yield P);
       }
@@ -1465,29 +1465,29 @@ var init_xterm = __esm({
         else {
           let a = /* @__PURE__ */ new Map(), u = [...this.livingDisposables.values()].filter((c) => c.source !== null && !this.getRootParent(c, a).isSingleton);
           if (u.length === 0) return;
-          let h11 = new Set(u.map((c) => c.value));
-          if (i = u.filter((c) => !(c.parent && h11.has(c.parent))), i.length === 0) throw new Error("There are cyclic diposable chains!");
+          let h12 = new Set(u.map((c) => c.value));
+          if (i = u.filter((c) => !(c.parent && h12.has(c.parent))), i.length === 0) throw new Error("There are cyclic diposable chains!");
         }
         if (!i) return;
         function r(a) {
           function u(c, d) {
             for (; c.length > 0 && d.some((_) => typeof _ == "string" ? _ === c[0] : c[0].match(_)); ) c.shift();
           }
-          let h11 = a.source.split(`
+          let h12 = a.source.split(`
 `).map((c) => c.trim().replace("at ", "")).filter((c) => c !== "");
-          return u(h11, ["Error", /^trackDisposable \(.*\)$/, /^DisposableTracker.trackDisposable \(.*\)$/]), h11.reverse();
+          return u(h12, ["Error", /^trackDisposable \(.*\)$/, /^DisposableTracker.trackDisposable \(.*\)$/]), h12.reverse();
         }
         let n = new ur();
         for (let a of i) {
           let u = r(a);
-          for (let h11 = 0; h11 <= u.length; h11++) n.add(u.slice(0, h11).join(`
+          for (let h12 = 0; h12 <= u.length; h12++) n.add(u.slice(0, h12).join(`
 `), a);
         }
         i.sort(no((a) => a.idx, so));
         let o = "", l = 0;
         for (let a of i.slice(0, t2)) {
           l++;
-          let u = r(a), h11 = [];
+          let u = r(a), h12 = [];
           for (let c = 0; c < u.length; c++) {
             let d = u[c];
             d = `(shared with ${n.get(u.slice(0, c + 1).join(`
@@ -1495,14 +1495,14 @@ var init_xterm = __esm({
             let p = n.get(u.slice(0, c).join(`
 `)), m = co([...p].map((f) => r(f)[c]), (f) => f);
             delete m[u[c]];
-            for (let [f, A] of Object.entries(m)) h11.unshift(`    - stacktraces of ${A.length} other leaks continue with ${f}`);
-            h11.unshift(d);
+            for (let [f, A] of Object.entries(m)) h12.unshift(`    - stacktraces of ${A.length} other leaks continue with ${f}`);
+            h12.unshift(d);
           }
           o += `
 
 
 ==================== Leaking disposable ${l}/${i.length}: ${a.value.constructor.name} ====================
-${h11.join(`
+${h12.join(`
 `)}
 ============================================================
 
@@ -1731,17 +1731,17 @@ ${h11.join(`
       }
       Qe.once = i;
       function r(y, T, g) {
-        return h11((w, E = null, x) => y((N) => w.call(E, T(N)), null, x), g);
+        return h12((w, E = null, x) => y((N) => w.call(E, T(N)), null, x), g);
       }
       Qe.map = r;
       function n(y, T, g) {
-        return h11((w, E = null, x) => y((N) => {
+        return h12((w, E = null, x) => y((N) => {
           T(N), w.call(E, N);
         }, null, x), g);
       }
       Qe.forEach = n;
       function o(y, T, g) {
-        return h11((w, E = null, x) => y((N) => T(N) && w.call(E, N), null, x), g);
+        return h12((w, E = null, x) => y((N) => T(N) && w.call(E, N), null, x), g);
       }
       Qe.filter = o;
       function l(y) {
@@ -1760,7 +1760,7 @@ ${h11.join(`
         return r(y, (x) => (E = T(E, x), E), w);
       }
       Qe.reduce = u;
-      function h11(y, T) {
+      function h12(y, T) {
         let g, w = { onWillAddFirstListener() {
           g = y(E.fire, E);
         }, onDidRemoveLastListener() {
@@ -2065,8 +2065,8 @@ ${h11.join(`
           if (this._leakageMon && this._size > this._leakageMon.threshold ** 2) {
             let a = `[${this._leakageMon.name}] REFUSES to accept new listeners because it exceeded its threshold by far (${this._size} vs ${this._leakageMon.threshold})`;
             console.warn(a);
-            let u = this._leakageMon.getMostFrequentStack() ?? ["UNKNOWN stack", -1], h11 = new Yn(`${a}. HINT: Stack shows most frequent listener (${u[1]}-times)`, u[0]);
-            return (this._options?.onListenerError || Lt)(h11), D.None;
+            let u = this._leakageMon.getMostFrequentStack() ?? ["UNKNOWN stack", -1], h12 = new Yn(`${a}. HINT: Stack shows most frequent listener (${u[1]}-times)`, u[0]);
+            return (this._options?.onListenerError || Lt)(h12), D.None;
           }
           if (this._disposed) return D.None;
           e && (t2 = t2.bind(e));
@@ -2686,8 +2686,8 @@ ${h11.join(`
         let t2 = Cr2._bigBlock32, e = this._buffDV;
         for (let c = 0; c < 64; c += 4) t2.setUint32(c, e.getUint32(c, false), false);
         for (let c = 64; c < 320; c += 4) t2.setUint32(c, rs(t2.getUint32(c - 12, false) ^ t2.getUint32(c - 32, false) ^ t2.getUint32(c - 56, false) ^ t2.getUint32(c - 64, false), 1), false);
-        let i = this._h0, r = this._h1, n = this._h2, o = this._h3, l = this._h4, a, u, h11;
-        for (let c = 0; c < 80; c++) c < 20 ? (a = r & n | ~r & o, u = 1518500249) : c < 40 ? (a = r ^ n ^ o, u = 1859775393) : c < 60 ? (a = r & n | r & o | n & o, u = 2400959708) : (a = r ^ n ^ o, u = 3395469782), h11 = rs(i, 5) + a + l + u + t2.getUint32(c * 4, false) & 4294967295, l = o, o = n, n = rs(r, 30), r = i, i = h11;
+        let i = this._h0, r = this._h1, n = this._h2, o = this._h3, l = this._h4, a, u, h12;
+        for (let c = 0; c < 80; c++) c < 20 ? (a = r & n | ~r & o, u = 1518500249) : c < 40 ? (a = r ^ n ^ o, u = 1859775393) : c < 60 ? (a = r & n | r & o | n & o, u = 2400959708) : (a = r ^ n ^ o, u = 3395469782), h12 = rs(i, 5) + a + l + u + t2.getUint32(c * 4, false) & 4294967295, l = o, o = n, n = rs(r, 30), r = i, i = h12;
         this._h0 = this._h0 + i & 4294967295, this._h1 = this._h1 + r & 4294967295, this._h2 = this._h2 + n & 4294967295, this._h3 = this._h3 + o & 4294967295, this._h4 = this._h4 + l & 4294967295;
       }
     };
@@ -2772,13 +2772,13 @@ ${h11.join(`
         i.set(n, false);
       };
       mt = (n, o, l = 0) => {
-        let a = Oo(n), u = new Di(o, l), h11 = s15.get(a);
-        return h11 || (h11 = [], s15.set(a, h11)), h11.push(u), e.get(a) || (e.set(a, true), n.requestAnimationFrame(() => r(a))), u;
+        let a = Oo(n), u = new Di(o, l), h12 = s15.get(a);
+        return h12 || (h12 = [], s15.set(a, h12)), h12.push(u), e.get(a) || (e.set(a, true), n.requestAnimationFrame(() => r(a))), u;
       }, wa = (n, o, l) => {
         let a = Oo(n);
         if (i.get(a)) {
-          let u = new Di(o, l), h11 = t2.get(a);
-          return h11 || (h11 = [], t2.set(a, h11)), h11.push(u), u;
+          let u = new Di(o, l), h12 = t2.get(a);
+          return h12 || (h12 = [], t2.set(a, h12)), h12.push(u), u;
         } else return mt(n, o, l);
       };
     })();
@@ -3065,11 +3065,11 @@ ${h11.join(`
             console.warn("move of an UNKNOWN touch", a);
             continue;
           }
-          let u = this.activeTouches[a.identifier], h11 = Date.now() - u.initialTimeStamp;
-          if (h11 < Q2.HOLD_DELAY && Math.abs(u.initialPageX - Se(u.rollingPageX)) < 30 && Math.abs(u.initialPageY - Se(u.rollingPageY)) < 30) {
+          let u = this.activeTouches[a.identifier], h12 = Date.now() - u.initialTimeStamp;
+          if (h12 < Q2.HOLD_DELAY && Math.abs(u.initialPageX - Se(u.rollingPageX)) < 30 && Math.abs(u.initialPageY - Se(u.rollingPageY)) < 30) {
             let c = this.newGestureEvent(He.Tap, u.initialTarget);
             c.pageX = Se(u.rollingPageX), c.pageY = Se(u.rollingPageY), this.dispatchEvent(c);
-          } else if (h11 >= Q2.HOLD_DELAY && Math.abs(u.initialPageX - Se(u.rollingPageX)) < 30 && Math.abs(u.initialPageY - Se(u.rollingPageY)) < 30) {
+          } else if (h12 >= Q2.HOLD_DELAY && Math.abs(u.initialPageX - Se(u.rollingPageX)) < 30 && Math.abs(u.initialPageY - Se(u.rollingPageY)) < 30) {
             let c = this.newGestureEvent(He.Contextmenu, u.initialTarget);
             c.pageX = Se(u.rollingPageX), c.pageY = Se(u.rollingPageY), this.dispatchEvent(c);
           } else if (n === 1) {
@@ -3101,12 +3101,12 @@ ${h11.join(`
           for (let [r, n] of i) n.dispatchEvent(e), this.dispatched = true;
         }
       }
-      inertia(e, i, r, n, o, l, a, u, h11) {
+      inertia(e, i, r, n, o, l, a, u, h12) {
         this.handle = mt(e, () => {
           let c = Date.now(), d = c - r, _ = 0, p = 0, m = true;
           n += Q2.SCROLL_FRICTION * d, a += Q2.SCROLL_FRICTION * d, n > 0 && (m = false, _ = o * n * d), a > 0 && (m = false, p = u * a * d);
           let f = this.newGestureEvent(He.Change);
-          f.translationX = _, f.translationY = p, i.forEach((A) => A.dispatchEvent(f)), m || this.inertia(e, i, c, n, o, l + _, a, u, h11 + p);
+          f.translationX = _, f.translationY = p, i.forEach((A) => A.dispatchEvent(f)), m || this.inertia(e, i, c, n, o, l + _, a, u, h12 + p);
         });
       }
       onTouchMove(e) {
@@ -3452,8 +3452,8 @@ ${h11.join(`
       static _computeValues(t2, e, i, r, n) {
         let o = Math.max(0, i - t2), l = Math.max(0, o - 2 * e), a = r > 0 && r > i;
         if (!a) return { computedAvailableSize: Math.round(o), computedIsNeeded: a, computedSliderSize: Math.round(l), computedSliderRatio: 0, computedSliderPosition: 0 };
-        let u = Math.round(Math.max(20, Math.floor(i * l / r))), h11 = (l - u) / (r - i), c = n * h11;
-        return { computedAvailableSize: Math.round(o), computedIsNeeded: a, computedSliderSize: Math.round(u), computedSliderRatio: h11, computedSliderPosition: Math.round(c) };
+        let u = Math.round(Math.max(20, Math.floor(i * l / r))), h12 = (l - u) / (r - i), c = n * h12;
+        return { computedAvailableSize: Math.round(o), computedIsNeeded: a, computedSliderSize: Math.round(u), computedSliderRatio: h12, computedSliderPosition: Math.round(c) };
       }
       _refreshComputedValues() {
         let t2 = s11._computeValues(this._oppositeScrollbarSize, this._arrowSize, this._visibleSize, this._scrollSize, this._scrollPosition);
@@ -3596,8 +3596,8 @@ ${h11.join(`
         if (Math.abs(t2.deltaX) > 0 && Math.abs(t2.deltaY) > 0) return 1;
         let i = 0.5;
         if ((!this._isAlmostInt(t2.deltaX) || !this._isAlmostInt(t2.deltaY)) && (i += 0.25), e) {
-          let r = Math.abs(t2.deltaX), n = Math.abs(t2.deltaY), o = Math.abs(e.deltaX), l = Math.abs(e.deltaY), a = Math.max(Math.min(r, o), 1), u = Math.max(Math.min(n, l), 1), h11 = Math.max(r, o), c = Math.max(n, l);
-          h11 % a === 0 && c % u === 0 && (i -= 0.5);
+          let r = Math.abs(t2.deltaX), n = Math.abs(t2.deltaY), o = Math.abs(e.deltaX), l = Math.abs(e.deltaY), a = Math.max(Math.min(r, o), 1), u = Math.max(Math.min(n, l), 1), h12 = Math.max(r, o), c = Math.max(n, l);
+          h12 % a === 0 && c % u === 0 && (i -= 0.5);
         }
         return Math.min(Math.max(i, 0), 1);
       }
@@ -3670,16 +3670,16 @@ ${h11.join(`
           this._options.scrollPredominantAxis && (this._options.scrollYToX && l + o === 0 ? l = o = 0 : Math.abs(o) >= Math.abs(l) ? l = 0 : o = 0), this._options.flipAxes && ([o, l] = [l, o]);
           let a = !Te && e.browserEvent && e.browserEvent.shiftKey;
           (this._options.scrollYToX || a) && !l && (l = o, o = 0), e.browserEvent && e.browserEvent.altKey && (l = l * this._options.fastScrollSensitivity, o = o * this._options.fastScrollSensitivity);
-          let u = this._scrollable.getFutureScrollPosition(), h11 = {};
+          let u = this._scrollable.getFutureScrollPosition(), h12 = {};
           if (o) {
             let c = Ko * o, d = u.scrollTop - (c < 0 ? Math.floor(c) : Math.ceil(c));
-            this._verticalScrollbar.writeScrollPosition(h11, d);
+            this._verticalScrollbar.writeScrollPosition(h12, d);
           }
           if (l) {
             let c = Ko * l, d = u.scrollLeft - (c < 0 ? Math.floor(c) : Math.ceil(c));
-            this._horizontalScrollbar.writeScrollPosition(h11, d);
+            this._horizontalScrollbar.writeScrollPosition(h12, d);
           }
-          h11 = this._scrollable.validateScrollPosition(h11), (u.scrollLeft !== h11.scrollLeft || u.scrollTop !== h11.scrollTop) && (zo && this._options.mouseWheelSmoothScroll && i.isPhysicalMouseWheel() ? this._scrollable.setScrollPositionSmooth(h11) : this._scrollable.setScrollPositionNow(h11), r = true);
+          h12 = this._scrollable.validateScrollPosition(h12), (u.scrollLeft !== h12.scrollLeft || u.scrollTop !== h12.scrollTop) && (zo && this._options.mouseWheelSmoothScroll && i.isPhysicalMouseWheel() ? this._scrollable.setScrollPositionSmooth(h12) : this._scrollable.setScrollPositionNow(h12), r = true);
         }
         let n = r;
         !n && this._options.alwaysConsumeMouseWheel && (n = true), !n && this._options.consumeMouseWheelIfScrollbarIsNeeded && (this._verticalScrollbar.isNeeded() || this._horizontalScrollbar.isNeeded()) && (n = true), n && (e.preventDefault(), e.stopPropagation());
@@ -3741,10 +3741,10 @@ ${h11.join(`
         this._isSyncing = false;
         this._isHandlingScroll = false;
         this._suppressOnScrollHandler = false;
-        let h11 = this._register(new Ri({ forceIntegerValues: false, smoothScrollDuration: this._optionsService.rawOptions.smoothScrollDuration, scheduleAtNextAnimationFrame: (c) => mt(n.window, c) }));
+        let h12 = this._register(new Ri({ forceIntegerValues: false, smoothScrollDuration: this._optionsService.rawOptions.smoothScrollDuration, scheduleAtNextAnimationFrame: (c) => mt(n.window, c) }));
         this._register(this._optionsService.onSpecificOptionChange("smoothScrollDuration", () => {
-          h11.setSmoothScrollDuration(this._optionsService.rawOptions.smoothScrollDuration);
-        })), this._scrollableElement = this._register(new Kr(i, { vertical: 1, horizontal: 2, useShadows: false, mouseWheelSmoothScroll: true, ...this._getChangeOptions() }, h11)), this._register(this._optionsService.onMultipleOptionChange(["scrollSensitivity", "fastScrollSensitivity", "overviewRuler"], () => this._scrollableElement.updateOptions(this._getChangeOptions()))), this._register(o.onProtocolChange((c) => {
+          h12.setSmoothScrollDuration(this._optionsService.rawOptions.smoothScrollDuration);
+        })), this._scrollableElement = this._register(new Kr(i, { vertical: 1, horizontal: 2, useShadows: false, mouseWheelSmoothScroll: true, ...this._getChangeOptions() }, h12)), this._register(this._optionsService.onMultipleOptionChange(["scrollSensitivity", "fastScrollSensitivity", "overviewRuler"], () => this._scrollableElement.updateOptions(this._getChangeOptions()))), this._register(o.onProtocolChange((c) => {
           this._scrollableElement.updateOptions({ handleMouseWheel: !(c & 16) });
         })), this._scrollableElement.setScrollDimensions({ height: 0, scrollHeight: 0 }), this._register($.runAndSubscribe(l.onChangeColors, () => {
           this._scrollableElement.getDomNode().style.backgroundColor = l.colors.background.css;
@@ -3896,8 +3896,8 @@ ${h11.join(`
         this._shouldUpdateAnchor = true;
         this._lastKnownBufferLength = 0;
         this._canvas = this._coreBrowserService.mainDocument.createElement("canvas"), this._canvas.classList.add("xterm-decoration-overview-ruler"), this._refreshCanvasDimensions(), this._viewportElement.parentElement?.insertBefore(this._canvas, this._viewportElement), this._register(C(() => this._canvas?.remove()));
-        let h11 = this._canvas.getContext("2d");
-        if (h11) this._ctx = h11;
+        let h12 = this._canvas.getContext("2d");
+        if (h12) this._ctx = h12;
         else throw new Error("Ctx cannot be null");
         this._register(this._decorationService.onDecorationRegistered(() => this._queueRefresh(void 0, true))), this._register(this._decorationService.onDecorationRemoved(() => this._queueRefresh(void 0, true))), this._register(this._renderService.onRenderedViewportChange(() => this._queueRefresh())), this._register(this._bufferService.buffers.onBufferActivate(() => {
           this._canvas.style.display = this._bufferService.buffer === this._bufferService.buffers.alt ? "none" : "block";
@@ -4038,8 +4038,8 @@ ${h11.join(`
     ((l) => {
       function s15(a, u) {
         if (J = (u.rgba & 255) / 255, J === 1) return { css: u.css, rgba: u.rgba };
-        let h11 = u.rgba >> 24 & 255, c = u.rgba >> 16 & 255, d = u.rgba >> 8 & 255, _ = a.rgba >> 24 & 255, p = a.rgba >> 16 & 255, m = a.rgba >> 8 & 255;
-        ue = _ + Math.round((h11 - _) * J), he = p + Math.round((c - p) * J), de = m + Math.round((d - m) * J);
+        let h12 = u.rgba >> 24 & 255, c = u.rgba >> 16 & 255, d = u.rgba >> 8 & 255, _ = a.rgba >> 24 & 255, p = a.rgba >> 16 & 255, m = a.rgba >> 8 & 255;
+        ue = _ + Math.round((h12 - _) * J), he = p + Math.round((c - p) * J), de = m + Math.round((d - m) * J);
         let f = j.toCss(ue, he, de), A = j.toRgba(ue, he, de);
         return { css: f, rgba: A };
       }
@@ -4048,8 +4048,8 @@ ${h11.join(`
         return (a.rgba & 255) === 255;
       }
       l.isOpaque = t2;
-      function e(a, u, h11) {
-        let c = $r.ensureContrastRatio(a.rgba, u.rgba, h11);
+      function e(a, u, h12) {
+        let c = $r.ensureContrastRatio(a.rgba, u.rgba, h12);
         if (c) return j.toColor(c >> 24 & 255, c >> 16 & 255, c >> 8 & 255);
       }
       l.ensureContrastRatio = e;
@@ -4106,22 +4106,22 @@ ${h11.join(`
       }
       e.relativeLuminance = s15;
       function t2(i, r, n) {
-        let o = i / 255, l = r / 255, a = n / 255, u = o <= 0.03928 ? o / 12.92 : Math.pow((o + 0.055) / 1.055, 2.4), h11 = l <= 0.03928 ? l / 12.92 : Math.pow((l + 0.055) / 1.055, 2.4), c = a <= 0.03928 ? a / 12.92 : Math.pow((a + 0.055) / 1.055, 2.4);
-        return u * 0.2126 + h11 * 0.7152 + c * 0.0722;
+        let o = i / 255, l = r / 255, a = n / 255, u = o <= 0.03928 ? o / 12.92 : Math.pow((o + 0.055) / 1.055, 2.4), h12 = l <= 0.03928 ? l / 12.92 : Math.pow((l + 0.055) / 1.055, 2.4), c = a <= 0.03928 ? a / 12.92 : Math.pow((a + 0.055) / 1.055, 2.4);
+        return u * 0.2126 + h12 * 0.7152 + c * 0.0722;
       }
       e.relativeLuminance2 = t2;
     })(ve ||= {});
     ((n) => {
       function s15(o, l) {
         if (J = (l & 255) / 255, J === 1) return l;
-        let a = l >> 24 & 255, u = l >> 16 & 255, h11 = l >> 8 & 255, c = o >> 24 & 255, d = o >> 16 & 255, _ = o >> 8 & 255;
-        return ue = c + Math.round((a - c) * J), he = d + Math.round((u - d) * J), de = _ + Math.round((h11 - _) * J), j.toRgba(ue, he, de);
+        let a = l >> 24 & 255, u = l >> 16 & 255, h12 = l >> 8 & 255, c = o >> 24 & 255, d = o >> 16 & 255, _ = o >> 8 & 255;
+        return ue = c + Math.round((a - c) * J), he = d + Math.round((u - d) * J), de = _ + Math.round((h12 - _) * J), j.toRgba(ue, he, de);
       }
       n.blend = s15;
       function t2(o, l, a) {
-        let u = ve.relativeLuminance(o >> 8), h11 = ve.relativeLuminance(l >> 8);
-        if (Xe(u, h11) < a) {
-          if (h11 < u) {
+        let u = ve.relativeLuminance(o >> 8), h12 = ve.relativeLuminance(l >> 8);
+        if (Xe(u, h12) < a) {
+          if (h12 < u) {
             let p = e(o, l, a), m = Xe(u, ve.relativeLuminance(p >> 8));
             if (m < a) {
               let f = i(o, l, a), A = Xe(u, ve.relativeLuminance(f >> 8));
@@ -4139,14 +4139,14 @@ ${h11.join(`
       }
       n.ensureContrastRatio = t2;
       function e(o, l, a) {
-        let u = o >> 24 & 255, h11 = o >> 16 & 255, c = o >> 8 & 255, d = l >> 24 & 255, _ = l >> 16 & 255, p = l >> 8 & 255, m = Xe(ve.relativeLuminance2(d, _, p), ve.relativeLuminance2(u, h11, c));
-        for (; m < a && (d > 0 || _ > 0 || p > 0); ) d -= Math.max(0, Math.ceil(d * 0.1)), _ -= Math.max(0, Math.ceil(_ * 0.1)), p -= Math.max(0, Math.ceil(p * 0.1)), m = Xe(ve.relativeLuminance2(d, _, p), ve.relativeLuminance2(u, h11, c));
+        let u = o >> 24 & 255, h12 = o >> 16 & 255, c = o >> 8 & 255, d = l >> 24 & 255, _ = l >> 16 & 255, p = l >> 8 & 255, m = Xe(ve.relativeLuminance2(d, _, p), ve.relativeLuminance2(u, h12, c));
+        for (; m < a && (d > 0 || _ > 0 || p > 0); ) d -= Math.max(0, Math.ceil(d * 0.1)), _ -= Math.max(0, Math.ceil(_ * 0.1)), p -= Math.max(0, Math.ceil(p * 0.1)), m = Xe(ve.relativeLuminance2(d, _, p), ve.relativeLuminance2(u, h12, c));
         return (d << 24 | _ << 16 | p << 8 | 255) >>> 0;
       }
       n.reduceLuminance = e;
       function i(o, l, a) {
-        let u = o >> 24 & 255, h11 = o >> 16 & 255, c = o >> 8 & 255, d = l >> 24 & 255, _ = l >> 16 & 255, p = l >> 8 & 255, m = Xe(ve.relativeLuminance2(d, _, p), ve.relativeLuminance2(u, h11, c));
-        for (; m < a && (d < 255 || _ < 255 || p < 255); ) d = Math.min(255, d + Math.ceil((255 - d) * 0.1)), _ = Math.min(255, _ + Math.ceil((255 - _) * 0.1)), p = Math.min(255, p + Math.ceil((255 - p) * 0.1)), m = Xe(ve.relativeLuminance2(d, _, p), ve.relativeLuminance2(u, h11, c));
+        let u = o >> 24 & 255, h12 = o >> 16 & 255, c = o >> 8 & 255, d = l >> 24 & 255, _ = l >> 16 & 255, p = l >> 8 & 255, m = Xe(ve.relativeLuminance2(d, _, p), ve.relativeLuminance2(u, h12, c));
+        for (; m < a && (d < 255 || _ < 255 || p < 255); ) d = Math.min(255, d + Math.ceil((255 - d) * 0.1)), _ = Math.min(255, _ + Math.ceil((255 - _) * 0.1)), p = Math.min(255, p + Math.ceil((255 - p) * 0.1)), m = Xe(ve.relativeLuminance2(d, _, p), ve.relativeLuminance2(u, h12, c));
         return (d << 24 | _ << 16 | p << 8 | 255) >>> 0;
       }
       n.increaseLuminance = i;
@@ -4200,19 +4200,19 @@ ${h11.join(`
         let e = this._bufferService.buffer.lines.get(t2);
         if (!e || e.length === 0) return [];
         let i = [], r = e.translateToString(true), n = 0, o = 0, l = 0, a = e.getFg(0), u = e.getBg(0);
-        for (let h11 = 0; h11 < e.getTrimmedLength(); h11++) if (e.loadCell(h11, this._workCell), this._workCell.getWidth() !== 0) {
+        for (let h12 = 0; h12 < e.getTrimmedLength(); h12++) if (e.loadCell(h12, this._workCell), this._workCell.getWidth() !== 0) {
           if (this._workCell.fg !== a || this._workCell.bg !== u) {
-            if (h11 - n > 1) {
+            if (h12 - n > 1) {
               let c = this._getJoinedRanges(r, l, o, e, n);
               for (let d = 0; d < c.length; d++) i.push(c[d]);
             }
-            n = h11, l = o, a = this._workCell.fg, u = this._workCell.bg;
+            n = h12, l = o, a = this._workCell.fg, u = this._workCell.bg;
           }
           o += this._workCell.getChars().length || we.length;
         }
         if (this._bufferService.cols - n > 1) {
-          let h11 = this._getJoinedRanges(r, l, o, e, n);
-          for (let c = 0; c < h11.length; c++) i.push(h11[c]);
+          let h12 = this._getJoinedRanges(r, l, o, e, n);
+          for (let c = 0; c < h12.length; c++) i.push(h12[c]);
         }
         return i;
       }
@@ -4225,7 +4225,7 @@ ${h11.join(`
         }
         for (let a = 1; a < this._characterJoiners.length; a++) try {
           let u = this._characterJoiners[a].handler(o);
-          for (let h11 = 0; h11 < u.length; h11++) ct._mergeRanges(l, u[h11]);
+          for (let h12 = 0; h12 < u.length; h12++) ct._mergeRanges(l, u[h12]);
         } catch (u) {
           console.error(u);
         }
@@ -4235,13 +4235,13 @@ ${h11.join(`
         let r = 0, n = false, o = 0, l = t2[r];
         if (l) {
           for (let a = i; a < this._bufferService.cols; a++) {
-            let u = e.getWidth(a), h11 = e.getString(a).length || we.length;
+            let u = e.getWidth(a), h12 = e.getString(a).length || we.length;
             if (u !== 0) {
               if (!n && l[0] <= o && (l[0] = a, n = true), l[1] <= o) {
                 if (l[1] = a, l = t2[++r], !l) break;
                 l[0] <= o ? (l[0] = a, n = true) : n = false;
               }
-              o += h11;
+              o += h12;
             }
           }
           l && (l[1] = this._bufferService.cols);
@@ -4282,10 +4282,10 @@ ${h11.join(`
       handleSelectionChanged(t2, e, i) {
         this._selectionStart = t2, this._selectionEnd = e, this._columnSelectMode = i;
       }
-      createRow(t2, e, i, r, n, o, l, a, u, h11, c) {
+      createRow(t2, e, i, r, n, o, l, a, u, h12, c) {
         let d = [], _ = this._characterJoinerService.getJoinedCharacters(e), p = this._themeService.colors, m = t2.getNoBgTrimmedLength();
         i && m < o + 1 && (m = o + 1);
-        let f, A = 0, R = "", O = 0, I = 0, k = 0, P = 0, oe = false, Me = 0, Pe = false, Ke = 0, di = 0, V = [], Qe = h11 !== -1 && c !== -1;
+        let f, A = 0, R = "", O = 0, I = 0, k = 0, P = 0, oe = false, Me = 0, Pe = false, Ke = 0, di = 0, V = [], Qe = h12 !== -1 && c !== -1;
         for (let y = 0; y < m; y++) {
           t2.loadCell(y, this._workCell);
           let T = this._workCell.getWidth();
@@ -4296,7 +4296,7 @@ ${h11.join(`
             for (O = W[0] + 1; O < W[1]; O++) w &&= An === this._isCellInSelection(O, e);
             w &&= !i || o < W[0] || o >= W[1], w ? (g = true, x = new Vr(this._workCell, t2.translateToString(true, W[0], W[1]), W[1] - W[0]), E = W[1] - 1, T = x.getWidth()) : di = W[1];
           }
-          let N = this._isCellInSelection(y, e), Z = i && y === o, te = Qe && y >= h11 && y <= c, Oe = false;
+          let N = this._isCellInSelection(y, e), Z = i && y === o, te = Qe && y >= h12 && y <= c, Oe = false;
           this._decorationService.forEachDecorationAtCell(y, e, void 0, (W) => {
             Oe = true;
           });
@@ -4465,7 +4465,7 @@ ${h11.join(`
       }
     };
     _s = "xterm-dom-renderer-owner-", Le = "xterm-rows", jr = "xterm-fg-", jo = "xterm-bg-", ki = "xterm-focus", Xr = "xterm-selection", Na = 1, Yt = class extends D {
-      constructor(e, i, r, n, o, l, a, u, h11, c, d, _, p, m) {
+      constructor(e, i, r, n, o, l, a, u, h12, c, d, _, p, m) {
         super();
         this._terminal = e;
         this._document = i;
@@ -4474,7 +4474,7 @@ ${h11.join(`
         this._viewportElement = o;
         this._helperContainer = l;
         this._linkifier2 = a;
-        this._charSizeService = h11;
+        this._charSizeService = h12;
         this._optionsService = c;
         this._bufferService = d;
         this._coreService = _;
@@ -4535,11 +4535,11 @@ ${h11.join(`
         if (this._selectionContainer.replaceChildren(), this._rowFactory.handleSelectionChanged(e, i, r), this.renderRows(0, this._bufferService.rows - 1), !e || !i || (this._selectionRenderModel.update(this._terminal, e, i, r), !this._selectionRenderModel.hasSelection)) return;
         let n = this._selectionRenderModel.viewportStartRow, o = this._selectionRenderModel.viewportEndRow, l = this._selectionRenderModel.viewportCappedStartRow, a = this._selectionRenderModel.viewportCappedEndRow, u = this._document.createDocumentFragment();
         if (r) {
-          let h11 = e[0] > i[0];
-          u.appendChild(this._createSelectionElement(l, h11 ? i[0] : e[0], h11 ? e[0] : i[0], a - l + 1));
+          let h12 = e[0] > i[0];
+          u.appendChild(this._createSelectionElement(l, h12 ? i[0] : e[0], h12 ? e[0] : i[0], a - l + 1));
         } else {
-          let h11 = n === l ? e[0] : 0, c = l === o ? i[0] : this._bufferService.cols;
-          u.appendChild(this._createSelectionElement(l, h11, c));
+          let h12 = n === l ? e[0] : 0, c = l === o ? i[0] : this._bufferService.cols;
+          u.appendChild(this._createSelectionElement(l, h12, c));
           let d = a - l - 1;
           if (u.appendChild(this._createSelectionElement(l + 1, 0, this._bufferService.cols, d)), l !== a) {
             let _ = o === a ? i[0] : this._bufferService.cols;
@@ -4562,8 +4562,8 @@ ${h11.join(`
       }
       renderRows(e, i) {
         let r = this._bufferService.buffer, n = r.ybase + r.y, o = Math.min(r.x, this._bufferService.cols - 1), l = this._coreService.decPrivateModes.cursorBlink ?? this._optionsService.rawOptions.cursorBlink, a = this._coreService.decPrivateModes.cursorStyle ?? this._optionsService.rawOptions.cursorStyle, u = this._optionsService.rawOptions.cursorInactiveStyle;
-        for (let h11 = e; h11 <= i; h11++) {
-          let c = h11 + r.ydisp, d = this._rowElements[h11], _ = r.lines.get(c);
+        for (let h12 = e; h12 <= i; h12++) {
+          let c = h12 + r.ydisp, d = this._rowElements[h12], _ = r.lines.get(c);
           if (!d || !_) break;
           d.replaceChildren(...this._rowFactory.createRow(_, c, c === n, a, u, o, l, this.dimensions.css.cell.width, this._widthCache, -1, -1));
         }
@@ -4581,11 +4581,11 @@ ${h11.join(`
         r < 0 && (e = 0), n < 0 && (i = 0);
         let a = this._bufferService.rows - 1;
         r = Math.max(Math.min(r, a), 0), n = Math.max(Math.min(n, a), 0), o = Math.min(o, this._bufferService.cols);
-        let u = this._bufferService.buffer, h11 = u.ybase + u.y, c = Math.min(u.x, o - 1), d = this._optionsService.rawOptions.cursorBlink, _ = this._optionsService.rawOptions.cursorStyle, p = this._optionsService.rawOptions.cursorInactiveStyle;
+        let u = this._bufferService.buffer, h12 = u.ybase + u.y, c = Math.min(u.x, o - 1), d = this._optionsService.rawOptions.cursorBlink, _ = this._optionsService.rawOptions.cursorStyle, p = this._optionsService.rawOptions.cursorInactiveStyle;
         for (let m = r; m <= n; ++m) {
           let f = m + u.ydisp, A = this._rowElements[m], R = u.lines.get(f);
           if (!A || !R) break;
-          A.replaceChildren(...this._rowFactory.createRow(R, f, f === h11, _, p, c, d, this.dimensions.css.cell.width, this._widthCache, l ? m === r ? e : 0 : -1, l ? (m === n ? i : o) - 1 : -1));
+          A.replaceChildren(...this._rowFactory.createRow(R, f, f === h12, _, p, c, d, this.dimensions.css.cell.width, this._widthCache, l ? m === r ? e : 0 : -1, l ? (m === n ? i : o) - 1 : -1));
         }
       }
     };
@@ -4818,7 +4818,7 @@ ${h11.join(`
       }
     };
     Qt = class extends D {
-      constructor(e, i, r, n, o, l, a, u, h11) {
+      constructor(e, i, r, n, o, l, a, u, h12) {
         super();
         this._rowCount = e;
         this._optionsService = r;
@@ -4845,7 +4845,7 @@ ${h11.join(`
         this.onRefreshRequest = this._onRefreshRequest.event;
         this._renderDebouncer = new en((c, d) => this._renderRows(c, d), this._coreBrowserService), this._register(this._renderDebouncer), this._syncOutputHandler = new xs(this._coreBrowserService, this._coreService, () => this._fullRefresh()), this._register(C(() => this._syncOutputHandler.dispose())), this._register(this._coreBrowserService.onDprChange(() => this.handleDevicePixelRatioChange())), this._register(a.onResize(() => this._fullRefresh())), this._register(a.buffers.onBufferActivate(() => this._renderer.value?.clear())), this._register(this._optionsService.onOptionChange(() => this._handleOptionsChanged())), this._register(this._charSizeService.onCharSizeChange(() => this.handleCharSizeChanged())), this._register(l.onDecorationRegistered(() => this._fullRefresh())), this._register(l.onDecorationRemoved(() => this._fullRefresh())), this._register(this._optionsService.onMultipleOptionChange(["customGlyphs", "drawBoldTextInBrightColors", "letterSpacing", "lineHeight", "fontFamily", "fontSize", "fontWeight", "fontWeightBold", "minimumContrastRatio", "rescaleOverlappingGlyphs"], () => {
           this.clear(), this.handleResize(a.cols, a.rows), this._fullRefresh();
-        })), this._register(this._optionsService.onMultipleOptionChange(["cursorBlink", "cursorStyle"], () => this.refreshRows(a.buffer.y, a.buffer.y, true))), this._register(h11.onChangeColors(() => this._fullRefresh())), this._registerIntersectionObserver(this._coreBrowserService.window, i), this._register(this._coreBrowserService.onWindowChange((c) => this._registerIntersectionObserver(c, i)));
+        })), this._register(this._optionsService.onMultipleOptionChange(["cursorBlink", "cursorStyle"], () => this.refreshRows(a.buffer.y, a.buffer.y, true))), this._register(h12.onChangeColors(() => this._fullRefresh())), this._registerIntersectionObserver(this._coreBrowserService.window, i), this._register(this._coreBrowserService.onWindowChange((c) => this._registerIntersectionObserver(c, i)));
       }
       get dimensions() {
         return this._renderer.value.dimensions;
@@ -4989,7 +4989,7 @@ ${h11.join(`
     };
     Ds = 50, Ya = 15, ja = 50, Xa = 500, Za = " ", Ja = new RegExp(Za, "g");
     ei = class extends D {
-      constructor(e, i, r, n, o, l, a, u, h11) {
+      constructor(e, i, r, n, o, l, a, u, h12) {
         super();
         this._element = e;
         this._screenElement = i;
@@ -4999,7 +4999,7 @@ ${h11.join(`
         this._mouseService = l;
         this._optionsService = a;
         this._renderService = u;
-        this._coreBrowserService = h11;
+        this._coreBrowserService = h12;
         this._dragScrollAmount = 0;
         this._enabled = true;
         this._workCell = new q();
@@ -5050,15 +5050,15 @@ ${h11.join(`
           if (e[0] === i[0]) return "";
           let l = e[0] < i[0] ? e[0] : i[0], a = e[0] < i[0] ? i[0] : e[0];
           for (let u = e[1]; u <= i[1]; u++) {
-            let h11 = r.translateBufferLineToString(u, true, l, a);
-            n.push(h11);
+            let h12 = r.translateBufferLineToString(u, true, l, a);
+            n.push(h12);
           }
         } else {
           let l = e[1] === i[1] ? i[0] : void 0;
           n.push(r.translateBufferLineToString(e[1], true, e[0], l));
           for (let a = e[1] + 1; a <= i[1] - 1; a++) {
-            let u = r.lines.get(a), h11 = r.translateBufferLineToString(a, true);
-            u?.isWrapped ? n[n.length - 1] += h11 : n.push(h11);
+            let u = r.lines.get(a), h12 = r.translateBufferLineToString(a, true);
+            u?.isWrapped ? n[n.length - 1] += h12 : n.push(h12);
           }
           if (e[1] !== i[1]) {
             let a = r.lines.get(i[1]), u = r.translateBufferLineToString(i[1], true, 0, i[0]);
@@ -5215,28 +5215,28 @@ ${h11.join(`
         if (e[0] >= this._bufferService.cols) return;
         let o = this._bufferService.buffer, l = o.lines.get(e[1]);
         if (!l) return;
-        let a = o.translateBufferLineToString(e[1], false), u = this._convertViewportColToCharacterIndex(l, e[0]), h11 = u, c = e[0] - u, d = 0, _ = 0, p = 0, m = 0;
+        let a = o.translateBufferLineToString(e[1], false), u = this._convertViewportColToCharacterIndex(l, e[0]), h12 = u, c = e[0] - u, d = 0, _ = 0, p = 0, m = 0;
         if (a.charAt(u) === " ") {
           for (; u > 0 && a.charAt(u - 1) === " "; ) u--;
-          for (; h11 < a.length && a.charAt(h11 + 1) === " "; ) h11++;
+          for (; h12 < a.length && a.charAt(h12 + 1) === " "; ) h12++;
         } else {
           let R = e[0], O = e[0];
           l.getWidth(R) === 0 && (d++, R--), l.getWidth(O) === 2 && (_++, O++);
           let I = l.getString(O).length;
-          for (I > 1 && (m += I - 1, h11 += I - 1); R > 0 && u > 0 && !this._isCharWordSeparator(l.loadCell(R - 1, this._workCell)); ) {
+          for (I > 1 && (m += I - 1, h12 += I - 1); R > 0 && u > 0 && !this._isCharWordSeparator(l.loadCell(R - 1, this._workCell)); ) {
             l.loadCell(R - 1, this._workCell);
             let k = this._workCell.getChars().length;
             this._workCell.getWidth() === 0 ? (d++, R--) : k > 1 && (p += k - 1, u -= k - 1), u--, R--;
           }
-          for (; O < l.length && h11 + 1 < a.length && !this._isCharWordSeparator(l.loadCell(O + 1, this._workCell)); ) {
+          for (; O < l.length && h12 + 1 < a.length && !this._isCharWordSeparator(l.loadCell(O + 1, this._workCell)); ) {
             l.loadCell(O + 1, this._workCell);
             let k = this._workCell.getChars().length;
-            this._workCell.getWidth() === 2 ? (_++, O++) : k > 1 && (m += k - 1, h11 += k - 1), h11++, O++;
+            this._workCell.getWidth() === 2 ? (_++, O++) : k > 1 && (m += k - 1, h12 += k - 1), h12++, O++;
           }
         }
-        h11++;
-        let f = u + c - d + p, A = Math.min(this._bufferService.cols, h11 - u + d + _ - p - m);
-        if (!(!i && a.slice(u, h11).trim() === "")) {
+        h12++;
+        let f = u + c - d + p, A = Math.min(this._bufferService.cols, h12 - u + d + _ - p - m);
+        if (!(!i && a.slice(u, h12).trim() === "")) {
           if (r && f === 0 && l.getCodePoint(0) !== 32) {
             let R = o.lines.get(e[1] - 1);
             if (R && l.isWrapped && R.getCodePoint(this._bufferService.cols - 1) !== 32) {
@@ -5847,7 +5847,7 @@ ${h11.join(`
             let I = this.ybase + this.y;
             if (I >= l && I < l + u.length) continue;
           }
-          let h11 = u[u.length - 1].getTrimmedLength(), c = al(u, this._cols, t2), d = c.length - u.length, _;
+          let h12 = u[u.length - 1].getTrimmedLength(), c = al(u, this._cols, t2), d = c.length - u.length, _;
           this.ybase === 0 && this.y !== this.lines.length - 1 ? _ = Math.max(0, this.y - this.lines.maxLength + d) : _ = Math.max(0, this.lines.length - this.lines.maxLength + d);
           let p = [];
           for (let I = 0; I < d; I++) {
@@ -5857,7 +5857,7 @@ ${h11.join(`
           p.length > 0 && (n.push({ start: l + u.length + o, newLines: p }), o += p.length), u.push(...p);
           let m = c.length - 1, f = c[m];
           f === 0 && (m--, f = c[m]);
-          let A = u.length - d - 1, R = h11;
+          let A = u.length - d - 1, R = h12;
           for (; A >= 0; ) {
             let I = Math.min(R, f);
             if (u[m] === void 0) break;
@@ -5875,13 +5875,13 @@ ${h11.join(`
         if (n.length > 0) {
           let l = [], a = [];
           for (let f = 0; f < this.lines.length; f++) a.push(this.lines.get(f));
-          let u = this.lines.length, h11 = u - 1, c = 0, d = n[c];
+          let u = this.lines.length, h12 = u - 1, c = 0, d = n[c];
           this.lines.length = Math.min(this.lines.maxLength, this.lines.length + o);
           let _ = 0;
-          for (let f = Math.min(this.lines.maxLength - 1, u + o - 1); f >= 0; f--) if (d && d.start > h11 + _) {
+          for (let f = Math.min(this.lines.maxLength - 1, u + o - 1); f >= 0; f--) if (d && d.start > h12 + _) {
             for (let A = d.newLines.length - 1; A >= 0; A--) this.lines.set(f--, d.newLines[A]);
-            f++, l.push({ index: h11 + 1, amount: d.newLines.length }), _ += d.newLines.length, d = n[++c];
-          } else this.lines.set(f, a[h11--]);
+            f++, l.push({ index: h12 + 1, amount: d.newLines.length }), _ += d.newLines.length, d = n[++c];
+          } else this.lines.set(f, a[h12--]);
           let p = 0;
           for (let f = l.length - 1; f >= 0; f--) l[f].index += p, this.lines.onInsertEmitter.fire(l[f]), p += l[f].amount;
           let m = Math.max(0, u + o - this.lines.maxLength);
@@ -6671,17 +6671,17 @@ ${h11.join(`
         if (this._parseStack.state) if (this._parseStack.state === 2) this._parseStack.state = 0, l = this._parseStack.chunkPos + 1;
         else {
           if (r === void 0 || this._parseStack.state === 1) throw this._parseStack.state = 1, new Error("improper continuation due to previous async handler, giving up parsing");
-          let u = this._parseStack.handlers, h11 = this._parseStack.handlerPos - 1;
+          let u = this._parseStack.handlers, h12 = this._parseStack.handlerPos - 1;
           switch (this._parseStack.state) {
             case 3:
-              if (r === false && h11 > -1) {
-                for (; h11 >= 0 && (a = u[h11](this._params), a !== true); h11--) if (a instanceof Promise) return this._parseStack.handlerPos = h11, a;
+              if (r === false && h12 > -1) {
+                for (; h12 >= 0 && (a = u[h12](this._params), a !== true); h12--) if (a instanceof Promise) return this._parseStack.handlerPos = h12, a;
               }
               this._parseStack.handlers = [];
               break;
             case 4:
-              if (r === false && h11 > -1) {
-                for (; h11 >= 0 && (a = u[h11](), a !== true); h11--) if (a instanceof Promise) return this._parseStack.handlerPos = h11, a;
+              if (r === false && h12 > -1) {
+                for (; h12 >= 0 && (a = u[h12](), a !== true); h12--) if (a instanceof Promise) return this._parseStack.handlerPos = h12, a;
               }
               this._parseStack.handlers = [];
               break;
@@ -6791,7 +6791,7 @@ ${h11.join(`
     dc = /^([\da-f])\/([\da-f])\/([\da-f])$|^([\da-f]{2})\/([\da-f]{2})\/([\da-f]{2})$|^([\da-f]{3})\/([\da-f]{3})\/([\da-f]{3})$|^([\da-f]{4})\/([\da-f]{4})\/([\da-f]{4})$/, fc = /^[\da-f]+$/;
     mc = { "(": 0, ")": 1, "*": 2, "+": 3, "-": 1, ".": 2 }, ut = 131072, _l = 10;
     vl = 5e3, gl = 0, vn = class extends D {
-      constructor(e, i, r, n, o, l, a, u, h11 = new bn()) {
+      constructor(e, i, r, n, o, l, a, u, h12 = new bn()) {
         super();
         this._bufferService = e;
         this._charsetService = i;
@@ -6801,7 +6801,7 @@ ${h11.join(`
         this._oscLinkService = l;
         this._coreMouseService = a;
         this._unicodeService = u;
-        this._parser = h11;
+        this._parser = h12;
         this._parseBuffer = new Uint32Array(4096);
         this._stringDecoder = new er();
         this._utf8Decoder = new tr();
@@ -6883,11 +6883,11 @@ ${h11.join(`
           if (r = this._parser.parse(this._parseBuffer, c)) return this._preserveStack(n, o, c, 0), this._logSlowResolvingAsync(r), r;
         }
         (this._activeBuffer.x !== n || this._activeBuffer.y !== o) && this._onCursorMove.fire();
-        let u = this._dirtyRowTracker.end + (this._bufferService.buffer.ybase - this._bufferService.buffer.ydisp), h11 = this._dirtyRowTracker.start + (this._bufferService.buffer.ybase - this._bufferService.buffer.ydisp);
-        h11 < this._bufferService.rows && this._onRequestRefreshRows.fire({ start: Math.min(h11, this._bufferService.rows - 1), end: Math.min(u, this._bufferService.rows - 1) });
+        let u = this._dirtyRowTracker.end + (this._bufferService.buffer.ybase - this._bufferService.buffer.ydisp), h12 = this._dirtyRowTracker.start + (this._bufferService.buffer.ybase - this._bufferService.buffer.ydisp);
+        h12 < this._bufferService.rows && this._onRequestRefreshRows.fire({ start: Math.min(h12, this._bufferService.rows - 1), end: Math.min(u, this._bufferService.rows - 1) });
       }
       print(e, i, r) {
-        let n, o, l = this._charsetService.charset, a = this._optionsService.rawOptions.screenReaderMode, u = this._bufferService.cols, h11 = this._coreService.decPrivateModes.wraparound, c = this._coreService.modes.insertMode, d = this._curAttrData, _ = this._activeBuffer.lines.get(this._activeBuffer.ybase + this._activeBuffer.y);
+        let n, o, l = this._charsetService.charset, a = this._optionsService.rawOptions.screenReaderMode, u = this._bufferService.cols, h12 = this._coreService.decPrivateModes.wraparound, c = this._coreService.modes.insertMode, d = this._curAttrData, _ = this._activeBuffer.lines.get(this._activeBuffer.ybase + this._activeBuffer.y);
         this._dirtyRowTracker.markDirty(this._activeBuffer.y), this._activeBuffer.x && r - i > 0 && _.getWidth(this._activeBuffer.x - 1) === 2 && _.setCellFromCodepoint(this._activeBuffer.x - 1, 0, 1, d);
         let p = this._parser.precedingJoinState;
         for (let m = i; m < r; ++m) {
@@ -6899,7 +6899,7 @@ ${h11.join(`
           o = Ae.extractWidth(f);
           let A = Ae.extractShouldJoin(f), R = A ? Ae.extractWidth(p) : 0;
           if (p = f, a && this._onA11yChar.fire(Ce(n)), this._getCurrentLinkId() && this._oscLinkService.addLineToLink(this._getCurrentLinkId(), this._activeBuffer.ybase + this._activeBuffer.y), this._activeBuffer.x + o - R > u) {
-            if (h11) {
+            if (h12) {
               let O = _, I = this._activeBuffer.x - R;
               for (this._activeBuffer.x = R, this._activeBuffer.y++, this._activeBuffer.y === this._activeBuffer.scrollBottom + 1 ? (this._activeBuffer.y--, this._bufferService.scroll(this._eraseAttrData(), true)) : (this._activeBuffer.y >= this._bufferService.rows && (this._activeBuffer.y = this._bufferService.rows - 1), this._activeBuffer.lines.get(this._activeBuffer.ybase + this._activeBuffer.y).isWrapped = true), _ = this._activeBuffer.lines.get(this._activeBuffer.ybase + this._activeBuffer.y), R > 0 && _ instanceof Ze && _.copyCellsFrom(O, I, 0, R, false); I < u; ) O.setCellFromCodepoint(I++, 0, 1, d);
             } else if (this._activeBuffer.x = u - 1, o === 2) continue;
@@ -7156,13 +7156,13 @@ ${h11.join(`
       repeatPrecedingCharacter(e) {
         let i = this._parser.precedingJoinState;
         if (!i) return true;
-        let r = e.params[0] || 1, n = Ae.extractWidth(i), o = this._activeBuffer.x - n, a = this._activeBuffer.lines.get(this._activeBuffer.ybase + this._activeBuffer.y).getString(o), u = new Uint32Array(a.length * r), h11 = 0;
+        let r = e.params[0] || 1, n = Ae.extractWidth(i), o = this._activeBuffer.x - n, a = this._activeBuffer.lines.get(this._activeBuffer.ybase + this._activeBuffer.y).getString(o), u = new Uint32Array(a.length * r), h12 = 0;
         for (let d = 0; d < a.length; ) {
           let _ = a.codePointAt(d) || 0;
-          u[h11++] = _, d += _ > 65535 ? 2 : 1;
+          u[h12++] = _, d += _ > 65535 ? 2 : 1;
         }
-        let c = h11;
-        for (let d = 1; d < r; ++d) u.copyWithin(c, 0, h11), c += h11;
+        let c = h12;
+        for (let d = 1; d < r; ++d) u.copyWithin(c, 0, h12), c += h12;
         return this.print(u, 0, c), true;
       }
       sendDeviceAttributesPrimary(e) {
@@ -7337,8 +7337,8 @@ ${h11.join(`
       requestMode(e, i) {
         let r;
         ((P) => (P[P.NOT_RECOGNIZED = 0] = "NOT_RECOGNIZED", P[P.SET = 1] = "SET", P[P.RESET = 2] = "RESET", P[P.PERMANENTLY_SET = 3] = "PERMANENTLY_SET", P[P.PERMANENTLY_RESET = 4] = "PERMANENTLY_RESET"))(r ||= {});
-        let n = this._coreService.decPrivateModes, { activeProtocol: o, activeEncoding: l } = this._coreMouseService, a = this._coreService, { buffers: u, cols: h11 } = this._bufferService, { active: c, alt: d } = u, _ = this._optionsService.rawOptions, p = (A, R) => (a.triggerDataEvent(`${b.ESC}[${i ? "" : "?"}${A};${R}$y`), true), m = (A) => A ? 1 : 2, f = e.params[0];
-        return i ? f === 2 ? p(f, 4) : f === 4 ? p(f, m(a.modes.insertMode)) : f === 12 ? p(f, 3) : f === 20 ? p(f, m(_.convertEol)) : p(f, 0) : f === 1 ? p(f, m(n.applicationCursorKeys)) : f === 3 ? p(f, _.windowOptions.setWinLines ? h11 === 80 ? 2 : h11 === 132 ? 1 : 0 : 0) : f === 6 ? p(f, m(n.origin)) : f === 7 ? p(f, m(n.wraparound)) : f === 8 ? p(f, 3) : f === 9 ? p(f, m(o === "X10")) : f === 12 ? p(f, m(_.cursorBlink)) : f === 25 ? p(f, m(!a.isCursorHidden)) : f === 45 ? p(f, m(n.reverseWraparound)) : f === 66 ? p(f, m(n.applicationKeypad)) : f === 67 ? p(f, 4) : f === 1e3 ? p(f, m(o === "VT200")) : f === 1002 ? p(f, m(o === "DRAG")) : f === 1003 ? p(f, m(o === "ANY")) : f === 1004 ? p(f, m(n.sendFocus)) : f === 1005 ? p(f, 4) : f === 1006 ? p(f, m(l === "SGR")) : f === 1015 ? p(f, 4) : f === 1016 ? p(f, m(l === "SGR_PIXELS")) : f === 1048 ? p(f, 1) : f === 47 || f === 1047 || f === 1049 ? p(f, m(c === d)) : f === 2004 ? p(f, m(n.bracketedPasteMode)) : f === 2026 ? p(f, m(n.synchronizedOutput)) : p(f, 0);
+        let n = this._coreService.decPrivateModes, { activeProtocol: o, activeEncoding: l } = this._coreMouseService, a = this._coreService, { buffers: u, cols: h12 } = this._bufferService, { active: c, alt: d } = u, _ = this._optionsService.rawOptions, p = (A, R) => (a.triggerDataEvent(`${b.ESC}[${i ? "" : "?"}${A};${R}$y`), true), m = (A) => A ? 1 : 2, f = e.params[0];
+        return i ? f === 2 ? p(f, 4) : f === 4 ? p(f, m(a.modes.insertMode)) : f === 12 ? p(f, 3) : f === 20 ? p(f, m(_.convertEol)) : p(f, 0) : f === 1 ? p(f, m(n.applicationCursorKeys)) : f === 3 ? p(f, _.windowOptions.setWinLines ? h12 === 80 ? 2 : h12 === 132 ? 1 : 0 : 0) : f === 6 ? p(f, m(n.origin)) : f === 7 ? p(f, m(n.wraparound)) : f === 8 ? p(f, 3) : f === 9 ? p(f, m(o === "X10")) : f === 12 ? p(f, m(_.cursorBlink)) : f === 25 ? p(f, m(!a.isCursorHidden)) : f === 45 ? p(f, m(n.reverseWraparound)) : f === 66 ? p(f, m(n.applicationKeypad)) : f === 67 ? p(f, 4) : f === 1e3 ? p(f, m(o === "VT200")) : f === 1002 ? p(f, m(o === "DRAG")) : f === 1003 ? p(f, m(o === "ANY")) : f === 1004 ? p(f, m(n.sendFocus)) : f === 1005 ? p(f, 4) : f === 1006 ? p(f, m(l === "SGR")) : f === 1015 ? p(f, 4) : f === 1016 ? p(f, m(l === "SGR_PIXELS")) : f === 1048 ? p(f, 1) : f === 47 || f === 1047 || f === 1049 ? p(f, m(c === d)) : f === 2004 ? p(f, m(n.bracketedPasteMode)) : f === 2026 ? p(f, m(n.synchronizedOutput)) : p(f, 0);
       }
       _updateAttrColor(e, i, r, n, o) {
         return i === 2 ? (e |= 50331648, e &= -16777216, e |= De.fromColorRGB([r, n, o])) : i === 5 && (e &= -50331904, e |= 33554432 | r & 255), e;
@@ -8008,8 +8008,8 @@ ${h11.join(`
       _renderRows(e, i) {
         let r = this._terminal.buffer, n = r.lines.length.toString();
         for (let o = e; o <= i; o++) {
-          let l = r.lines.get(r.ydisp + o), a = [], u = l?.translateToString(true, void 0, void 0, a) || "", h11 = (r.ydisp + o + 1).toString(), c = this._rowElements[o];
-          c && (u.length === 0 ? (c.textContent = " ", this._rowColumns.set(c, [0, 1])) : (c.textContent = u, this._rowColumns.set(c, a)), c.setAttribute("aria-posinset", h11), c.setAttribute("aria-setsize", n), this._alignRowWidth(c));
+          let l = r.lines.get(r.ydisp + o), a = [], u = l?.translateToString(true, void 0, void 0, a) || "", h12 = (r.ydisp + o + 1).toString(), c = this._rowElements[o];
+          c && (u.length === 0 ? (c.textContent = " ", this._rowColumns.set(c, [0, 1])) : (c.textContent = u, this._rowColumns.set(c, a)), c.setAttribute("aria-posinset", h12), c.setAttribute("aria-setsize", n), this._alignRowWidth(c));
         }
         this._announceCharacters();
       }
@@ -8021,11 +8021,11 @@ ${h11.join(`
         if (o === l || e.relatedTarget !== n) return;
         let a, u;
         if (i === 0 ? (a = r, u = this._rowElements.pop(), this._rowContainer.removeChild(u)) : (a = this._rowElements.shift(), u = r, this._rowContainer.removeChild(a)), a.removeEventListener("focus", this._topBoundaryFocusListener), u.removeEventListener("focus", this._bottomBoundaryFocusListener), i === 0) {
-          let h11 = this._createAccessibilityTreeNode();
-          this._rowElements.unshift(h11), this._rowContainer.insertAdjacentElement("afterbegin", h11);
+          let h12 = this._createAccessibilityTreeNode();
+          this._rowElements.unshift(h12), this._rowContainer.insertAdjacentElement("afterbegin", h12);
         } else {
-          let h11 = this._createAccessibilityTreeNode();
-          this._rowElements.push(h11), this._rowContainer.appendChild(h11);
+          let h12 = this._createAccessibilityTreeNode();
+          this._rowElements.push(h12), this._rowContainer.appendChild(h12);
         }
         this._rowElements[0].addEventListener("focus", this._topBoundaryFocusListener), this._rowElements[this._rowElements.length - 1].addEventListener("focus", this._bottomBoundaryFocusListener), this._terminal.scrollLines(i === 0 ? -1 : 1), this._rowElements[i === 0 ? 1 : this._rowElements.length - 2].focus(), e.preventDefault(), e.stopImmediatePropagation();
       }
@@ -8045,12 +8045,12 @@ ${h11.join(`
         if ((i.node.compareDocumentPosition(r.node) & Node.DOCUMENT_POSITION_PRECEDING || i.node === r.node && i.offset > r.offset) && ([i, r] = [r, i]), i.node.compareDocumentPosition(this._rowElements[0]) & (Node.DOCUMENT_POSITION_CONTAINED_BY | Node.DOCUMENT_POSITION_FOLLOWING) && (i = { node: this._rowElements[0].childNodes[0], offset: 0 }), !this._rowContainer.contains(i.node)) return;
         let n = this._rowElements.slice(-1)[0];
         if (r.node.compareDocumentPosition(n) & (Node.DOCUMENT_POSITION_CONTAINED_BY | Node.DOCUMENT_POSITION_PRECEDING) && (r = { node: n, offset: n.textContent?.length ?? 0 }), !this._rowContainer.contains(r.node)) return;
-        let o = ({ node: u, offset: h11 }) => {
+        let o = ({ node: u, offset: h12 }) => {
           let c = u instanceof Text ? u.parentNode : u, d = parseInt(c?.getAttribute("aria-posinset"), 10) - 1;
           if (isNaN(d)) return console.warn("row is invalid. Race condition?"), null;
           let _ = this._rowColumns.get(c);
           if (!_) return console.warn("columns is null. Race condition?"), null;
-          let p = h11 < _.length ? _[h11] : _.slice(-1)[0] + 1;
+          let p = h12 < _.length ? _[h12] : _.slice(-1)[0] + 1;
           return p >= this._terminal.cols && (++d, p = 0), { row: d, column: p };
         }, l = o(i), a = o(r);
         if (!(!l || !a)) {
@@ -8151,8 +8151,8 @@ ${h11.join(`
         for (let n = 0; n < i.size; n++) {
           let o = i.get(n);
           if (o) for (let l = 0; l < o.length; l++) {
-            let a = o[l], u = a.link.range.start.y < e ? 0 : a.link.range.start.x, h11 = a.link.range.end.y > e ? this._bufferService.cols : a.link.range.end.x;
-            for (let c = u; c <= h11; c++) {
+            let a = o[l], u = a.link.range.start.y < e ? 0 : a.link.range.start.x, h12 = a.link.range.end.y > e ? this._bufferService.cols : a.link.range.end.x;
+            for (let c = u; c <= h12; c++) {
               if (r.has(c)) {
                 o.splice(l--, 1);
                 break;
@@ -8393,27 +8393,27 @@ ${h11.join(`
         function r(l) {
           let a = e._mouseService.getMouseReportCoords(l, e.screenElement);
           if (!a) return false;
-          let u, h11;
+          let u, h12;
           switch (l.overrideType || l.type) {
             case "mousemove":
-              h11 = 32, l.buttons === void 0 ? (u = 3, l.button !== void 0 && (u = l.button < 3 ? l.button : 3)) : u = l.buttons & 1 ? 0 : l.buttons & 4 ? 1 : l.buttons & 2 ? 2 : 3;
+              h12 = 32, l.buttons === void 0 ? (u = 3, l.button !== void 0 && (u = l.button < 3 ? l.button : 3)) : u = l.buttons & 1 ? 0 : l.buttons & 4 ? 1 : l.buttons & 2 ? 2 : 3;
               break;
             case "mouseup":
-              h11 = 0, u = l.button < 3 ? l.button : 3;
+              h12 = 0, u = l.button < 3 ? l.button : 3;
               break;
             case "mousedown":
-              h11 = 1, u = l.button < 3 ? l.button : 3;
+              h12 = 1, u = l.button < 3 ? l.button : 3;
               break;
             case "wheel":
               if (e._customWheelEventHandler && e._customWheelEventHandler(l) === false) return false;
               let c = l.deltaY;
               if (c === 0 || e.coreMouseService.consumeWheelEvent(l, e._renderService?.dimensions?.device?.cell?.height, e._coreBrowserService?.dpr) === 0) return false;
-              h11 = c < 0 ? 0 : 1, u = 4;
+              h12 = c < 0 ? 0 : 1, u = 4;
               break;
             default:
               return false;
           }
-          return h11 === void 0 || u === void 0 || u > 4 ? false : e.coreMouseService.triggerMouseEvent({ col: a.col, row: a.row, x: a.x, y: a.y, button: u, action: h11, ctrl: l.ctrlKey, alt: l.altKey, shift: l.shiftKey });
+          return h12 === void 0 || u === void 0 || u > 4 ? false : e.coreMouseService.triggerMouseEvent({ col: a.col, row: a.row, x: a.x, y: a.y, button: u, action: h12, ctrl: l.ctrlKey, alt: l.altKey, shift: l.shiftKey });
         }
         let n = { mouseup: null, wheel: null, mousedrag: null, mousemove: null }, o = { mouseup: (l) => (r(l), l.buttons || (this._document.removeEventListener("mouseup", n.mouseup), n.mousedrag && this._document.removeEventListener("mousemove", n.mousedrag)), this.cancel(l)), wheel: (l) => (r(l), this.cancel(l, true)), mousedrag: (l) => {
           l.buttons && r(l);
@@ -8430,8 +8430,8 @@ ${h11.join(`
             if (!this.buffer.hasScrollback) {
               if (l.deltaY === 0) return false;
               if (e.coreMouseService.consumeWheelEvent(l, e._renderService?.dimensions?.device?.cell?.height, e._coreBrowserService?.dpr) === 0) return this.cancel(l, true);
-              let h11 = b.ESC + (this.coreService.decPrivateModes.applicationCursorKeys ? "O" : "[") + (l.deltaY < 0 ? "A" : "B");
-              return this.coreService.triggerDataEvent(h11, true), this.cancel(l, true);
+              let h12 = b.ESC + (this.coreService.decPrivateModes.applicationCursorKeys ? "O" : "[") + (l.deltaY < 0 ? "A" : "B");
+              return this.coreService.triggerDataEvent(h12, true), this.cancel(l, true);
             }
           }
         }, { passive: false }));
@@ -9283,6 +9283,110 @@ var PT_BR = {
   "Hatch {name}": "Fazer {name} nascer",
   "Hatch": "Fazer nascer",
   "{name}, your companion": "{name}, sua companhia",
+  // From another tool (migrate.js): the Hermes move, the coming-soon cards, the hand-off
+  "From another tool": "De outra ferramenta",
+  "Move the Telegram bot you already have into Omni, or keep your other tools exactly as they are. The bot you and your people already talk to stays the same.": "Mova para o Omni o bot do Telegram que você já tem, ou deixe suas outras ferramentas exatamente como estão. O bot com quem você e as pessoas já conversam continua o mesmo.",
+  "Telegram bot": "Bot do Telegram",
+  "Telegram": "Telegram",
+  "Move its Telegram bot to Omni, with the bot you already know.": "Mova o bot do Telegram do Hermes para o Omni, com o bot que você já conhece.",
+  "We are still mapping how it keeps its bot.": "Ainda estamos mapeando como essa ferramenta guarda o bot.",
+  "Coming soon": "Em breve",
+  "{name}: coming soon": "{name}: em breve",
+  "Move {name} to Omni": "Mover {name} para o Omni",
+  "Move it": "Mover",
+  "Tools you can come from": "Ferramentas de onde você pode vir",
+  "Not now": "Agora não",
+  "Coming from somewhere else? Pick the tool you use, and I'll bring your bot over.": "Vindo de outro lugar? Escolha a ferramenta que você usa e eu trago seu bot para cá.",
+  "Looking at your Hermes…": "Olhando seu Hermes…",
+  "Let me look at your Hermes. One moment.": "Deixe-me olhar seu Hermes. Um momento.",
+  "This only reads. Nothing is changed by looking.": "Isto só lê. Olhar não muda nada.",
+  "Move this bot to Omni?": "Mover este bot para o Omni?",
+  "One bot can only listen in one place. Hermes lets go first; then Omni picks it up.": "Um bot só pode escutar em um lugar. O Hermes solta primeiro; depois o Omni assume.",
+  "Hermes · Telegram is on": "Hermes · o Telegram está ligado",
+  "Hermes · Telegram is already off": "Hermes · o Telegram já está desligado",
+  "on this computer": "neste computador",
+  "on your Hermes computer": "no seu computador com Hermes",
+  "The wizard reads Hermes's bot key.": "O assistente lê a chave do bot do Hermes.",
+  "It stays hidden and goes straight to Omni, which keeps it private.": "A chave fica oculta e vai direto para o Omni, que a mantém privada.",
+  "Hermes's Telegram is switched off.": "O Telegram do Hermes é desligado.",
+  "Hermes keeps a copy of its settings first, then restarts for a few seconds. Its other channels blink and come back by themselves.": "O Hermes guarda uma cópia das configurações primeiro e reinicia por alguns segundos. Os outros canais do Hermes piscam e voltam automaticamente.",
+  "Omni starts its Telegram channel with the same bot.": "O Omni liga o canal do Telegram com o mesmo bot.",
+  "One bot, one listener.": "Um bot, um ouvinte.",
+  "Hermes is already off; nothing is switched. No restart is needed.": "O Hermes já está desligado; nada é desligado. Não é preciso reiniciar.",
+  "Hermes · not running": "Hermes · não está rodando",
+  "Hermes is not running.": "O Hermes não está rodando.",
+  "Its Telegram is switched off in its settings, so it stays off when you start Hermes again.": "O Telegram fica desligado nas configurações, então continua desligado quando você iniciar o Hermes de novo.",
+  "I am ready: Omni starts with Hermes's bot, and Hermes's Telegram stays off.": "Confirmo: o Omni começa com o bot do Hermes, e o Telegram do Hermes continua desligado.",
+  "Hermes's Telegram is already off; nothing is switched.": "O Telegram do Hermes já está desligado; nada é desligado.",
+  "Hermes still has to let go of the old channel, so it restarts for a few seconds. Its other channels blink and come back by themselves.": "O Hermes ainda precisa soltar o canal antigo, então reinicia por alguns segundos. Os outros canais do Hermes piscam e voltam automaticamente.",
+  "Who answers in the chats?": "Quem responde nos chats?",
+  "Who answers": "Quem responde",
+  "Main Bot": "Bot principal",
+  "You can change this later in Omni.": "Você pode mudar isso depois no Omni.",
+  "I am ready: Hermes restarts for a few seconds and its Telegram goes off.": "Confirmo: o Hermes reinicia por alguns segundos e o Telegram do Hermes é desligado.",
+  "I am ready: Omni starts with Hermes's bot.": "Estou pronto: o Omni começa com o bot do Hermes.",
+  "Back": "Voltar",
+  "Start Omni with it": "Começar o Omni com esse bot",
+  "Switch it over": "Trocar",
+  "Moving your bot…": "Movendo seu bot…",
+  "Moving your bot. The key stays with me the whole time.": "Movendo seu bot. A chave fica comigo o tempo todo.",
+  "Read Hermes's bot key": "Ler a chave do bot do Hermes",
+  "Switch Hermes's Telegram off": "Desligar o Telegram do Hermes",
+  "Hand the bot to Omni": "Entregar o bot ao Omni",
+  "Wait for Omni to answer": "Esperar o Omni responder",
+  "It goes straight to Omni, which keeps it private. You never see it here.": "A chave vai direto para o Omni, que a mantém privada. Você nunca a vê aqui.",
+  "Hermes restarts for a few seconds. Its other channels come back by themselves.": "O Hermes reinicia por alguns segundos. Os outros canais do Hermes voltam automaticamente.",
+  "Omni takes the same bot. Nothing else changes on Hermes.": "O Omni assume o mesmo bot. Nada mais muda no Hermes.",
+  "One bot, one listener. Omni is starting it.": "Um bot, um ouvinte. O Omni está iniciando.",
+  "The bot key passes straight from Hermes into Omni.": "A chave do bot passa direto do Hermes para o Omni.",
+  "It never appears here or in a log.": "A chave nunca aparece aqui ou em um log.",
+  "You can leave this open. It takes a few seconds.": "Você pode deixar isto aberto. Leva alguns segundos.",
+  "Omni has your bot": "O Omni está com o seu bot",
+  "There it is. Your bot answers on Omni now.": "Pronto. Seu bot responde no Omni agora.",
+  "Your Telegram bot": "Seu bot do Telegram",
+  "Listening on Telegram": "Escutando no Telegram",
+  "Waiting for Omni to say it is up": "Esperando o Omni dizer que está no ar",
+  "Omni has the channel. It is bringing the bot up now.": "O Omni está com o canal. Está subindo o bot agora.",
+  "Say hi to your bot": "Diga oi para o seu bot",
+  "Replies through {name}.": "Responde por {name}.",
+  "Omni added the bot, but your Bot {name} is off and already answers on other channels. Turning it on here would turn those on too.": "O Omni adicionou o bot, mas o seu Bot {name} está desligado e já responde em outros canais. Ligá-lo aqui ligaria esses canais também.",
+  "this Bot": "este Bot",
+  "Turn it on in its settings when you are ready. Omni answers here as well.": "Ligue o Bot nas configurações quando quiser. O Omni também responde aqui.",
+  "Open {name}'s settings": "Abrir as configurações de {name}",
+  "Open this Bot's settings from the Bot team's sidebar and turn it on.": "Abra as configurações deste Bot na barra lateral da equipe de Bots e ligue o Bot.",
+  "Omni has the channel. Its next update adds your Bot as the one who answers.": "O Omni está com o canal. A próxima atualização do Omni adiciona o seu Bot como quem responde.",
+  "Hermes: Telegram off": "Hermes: Telegram desligado",
+  "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key.": "O Telegram do Hermes está desligado. O Omni não confirmou qual canal é o da mudança, então verifique os Canais do Omni antes de tentar de novo. O Hermes ainda tem a chave.",
+  "Hermes was not running. Its Telegram stays off until you start Hermes again.": "O Hermes não estava rodando. O Telegram fica desligado até você iniciar o Hermes de novo.",
+  "Hermes: Telegram was already off": "Hermes: o Telegram já estava desligado",
+  "Omni: listening": "Omni: escutando",
+  "Hermes is not running right now. Start it again to bring its other channels back.": "O Hermes não está rodando agora. Inicie o Hermes de novo para trazer os outros canais de volta.",
+  "Check status": "Verificar status",
+  "Done": "Concluir",
+  "That did not finish": "Isso não terminou",
+  "That did not finish. I'll tell you exactly where it stopped.": "Isso não terminou. Eu digo exatamente onde parou.",
+  "Hermes still has the channel. Nothing was handed to Omni, and its settings were put back.": "O Hermes ainda está com o canal. Nada foi entregue ao Omni, e as configurações do Hermes foram restauradas.",
+  "Hermes would not restart. It may still have a chat open; finish it and try again.": "O Hermes não reiniciou. Pode haver um chat aberto; termine esse chat e tente de novo.",
+  "Hermes's Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key.": "O Telegram do Hermes está desligado e o Omni não assumiu o bot. Nada está escutando agora. Tente de novo; o Hermes ainda tem a chave.",
+  "Nothing was changed. Hermes is exactly as it was.": "Nada foi alterado. O Hermes está exatamente como estava.",
+  "Set up Omni's Telegram instead": "Configurar o Telegram do Omni em vez disso",
+  "Set up Omni's Telegram": "Configurar o Telegram do Omni",
+  "Hermes is not on this computer": "O Hermes não está neste computador",
+  "DSH is not connected to a Hermes here. Set up Omni's Telegram in Channels; it takes a minute.": "O DSH não está conectado a um Hermes aqui. Configure o Telegram do Omni em Canais; leva um minuto.",
+  "No Hermes Telegram bot to move": "Nenhum bot do Telegram do Hermes para mover",
+  "Hermes has no Telegram channel here, so there is nothing to move. Set up Omni's Telegram in Channels.": "O Hermes não tem um canal do Telegram aqui, então não há nada para mover. Configure o Telegram do Omni em Canais.",
+  "Hermes has no bot key this wizard can read": "O Hermes não tem uma chave de bot que este assistente consiga ler",
+  "Set Omni's Telegram up in Channels, or copy the key into Omni yourself. Hermes's channel is left alone.": "Configure o Telegram do Omni em Canais, ou copie a chave para o Omni. O canal do Hermes fica intocado.",
+  "Connect Omni first": "Conecte o Omni primeiro",
+  "The Connect Omni step does that. Then come back here.": "O passo Conectar o Omni cuida disso. Depois volte aqui.",
+  "Set Omni's Telegram up in Channels": "Configure o Telegram do Omni em Canais",
+  "Omni's own Telegram setup has every step. Hermes is left exactly as it is.": "A configuração do Telegram do próprio Omni tem todos os passos. O Hermes fica exatamente como está.",
+  "Open Omni's Channels": "Abrir os Canais do Omni",
+  "Open Channels from the Bot team's sidebar, then Add a channel → Telegram.": "Abra Canais na barra lateral da equipe de Bots e escolha Adicionar um canal → Telegram.",
+  "Not yet. Nothing changed.": "Ainda não. Nada mudou.",
+  "Set up Telegram in Omni's Channels. Add a channel, and follow Omni's steps there. Then come back here.": "Configure o Telegram nos Canais do Omni. Adicione um canal e siga os passos do Omni lá. Depois volte aqui.",
+  "Turn {name} on in its settings, then come back here.": "Ligue {name} nas configurações e volte aqui.",
+  "We will do this Omni's own way.": "Vamos fazer do jeito do próprio Omni.",
   // Connect AI (connect-ai.js)
   "Turn on your AIs": "Ligue suas IAs",
   "Turn on everything you have. More brains, more {name}.": "Ligue tudo o que você tiver. Mais cérebros, mais {name}.",
@@ -9367,8 +9471,7 @@ var PT_BR = {
   "Sign in on their page, then paste the address it ends on here.": "Faça login na página do provedor e cole aqui o endereço da página final.",
   "Copy your {what} from ": "Copie o valor “{what}” em ",
   " and paste it here. It stays in DSH's credential store on this computer.": " e cole aqui. Fica no cofre de credenciais do DSH, neste computador.",
-  "The address you landed on": "O endereço da página final",
-  "Back": "Voltar"
+  "The address you landed on": "O endereço da página final"
 };
 var EN = Object.fromEntries(Object.keys(PT_BR).map((key) => [key, key]));
 var fill = (text, params) => params ? text.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text;
@@ -9527,10 +9630,10 @@ function bodyOf(def, paint, flat = false) {
   }
 }
 var PUPIL = "#0a0f1f";
-var pupilMarkup = ([cx, cy, w, h11, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h11 / 2}" width="${w}" height="${h11}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h11 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h11 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
-var blushMarkup = ([cx, cy, w, h11, tilt]) => `<ellipse cx="${cx}" cy="${cy + h11 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
-var eyeMarkup = ([cx, cy, w, h11, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h11 / 2}" width="${w}" height="${h11}" rx="${w / 2}"/></g>`;
-var happyEyeMarkup = ([cx, cy, w, h11, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h11 * 0.14}Q0 ${-h11 * 0.42} ${w * 0.62} ${h11 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
+var pupilMarkup = ([cx, cy, w, h12, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h12 / 2}" width="${w}" height="${h12}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h12 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h12 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
+var blushMarkup = ([cx, cy, w, h12, tilt]) => `<ellipse cx="${cx}" cy="${cy + h12 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
+var eyeMarkup = ([cx, cy, w, h12, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h12 / 2}" width="${w}" height="${h12}" rx="${w / 2}"/></g>`;
+var happyEyeMarkup = ([cx, cy, w, h12, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h12 * 0.14}Q0 ${-h12 * 0.42} ${w * 0.62} ${h12 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
 var maskBox = (size) => `maskUnits="userSpaceOnUse" x="${-size}" y="${-size}" width="${size * 3}" height="${size * 3}"`;
 var holes = (def, eyes) => `<rect x="${-def.size}" y="${-def.size}" width="${def.size * 3}" height="${def.size * 3}" fill="#fff"/>${eyes}`;
 var MASK_ID = "%MASK%";
@@ -9685,6 +9788,8 @@ body[data-ds-dark-theme] .oai-overlay::before{background:radial-gradient(1100px 
 .oai-rail li{padding:8px 12px;border-radius:var(--oai-r-sm);${recessed("var(--oai-niche)")}}
 .oai-rail li.oai-on{color:var(--oai-lilac-ink);${raised("var(--oai-lilac)", 3)};transform:translateY(-2px)}
 .oai-rail li.oai-done{color:var(--oai-cyan-ink);${raised("color-mix(in srgb,var(--oai-cyan) 55%,var(--oai-clay))", 2)}}
+.oai-rail.oai-rail-many{gap:6px;font-size:10px;letter-spacing:.03em}
+.oai-rail.oai-rail-many li{padding:6px 9px;border-radius:10px}
 /* The card: a thick slab of cream clay resting on the table. */
 .oai-card{width:100%;border-radius:26px 30px 25px 29px;padding:26px;${raised("var(--oai-card)", 6)}}
 .oai-card h1{font:var(--bt-weight-title,800) 24px/1.2 var(--oai-head);letter-spacing:-.02em;margin:0 0 8px;outline:none}.oai-card p{margin:0 0 14px;color:var(--oai-ink2)}
@@ -9810,7 +9915,7 @@ function Egg() {
 // src/client/stage.js
 var import_react2 = require("react");
 var import_react_dom = require("react-dom");
-var RAIL = [["omni-companion", "Your companion"], ["omni-team", "Your team"], ["omni-connect", "Connect Omni"], ["omni-connect-ai", "Connect AI"]];
+var RAIL = [["omni-companion", "Your companion"], ["omni-team", "Your team"], ["omni-connect", "Connect Omni"], ["omni-migrate", "From another tool"], ["omni-connect-ai", "Connect AI"]];
 var ANNOUNCED = /* @__PURE__ */ Symbol.for("automagik.omni.onboarding-steps");
 function announceStep(id, scope = globalThis) {
   const steps = scope[ANNOUNCED] ??= /* @__PURE__ */ new Set();
@@ -9821,7 +9926,7 @@ function railSteps(current, scope = globalThis) {
   const steps = scope[ANNOUNCED];
   return RAIL.filter(([id]) => id === current || steps?.has(id) === true);
 }
-var FLAG_OF = { "omni-companion": "companionDone", "omni-team": "teamDone", "omni-connect-ai": "connectAiDone" };
+var FLAG_OF = { "omni-companion": "companionDone", "omni-team": "teamDone", "omni-migrate": "migrateDone", "omni-connect-ai": "connectAiDone" };
 var reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 async function gate({ stepId, explicit, complete }, request2 = call) {
   let state = {};
@@ -9906,7 +10011,7 @@ function Rail({ at: at2 }) {
   const here = steps.findIndex(([id]) => id === at2);
   return (0, import_react2.createElement)(
     "ol",
-    { className: "oai-rail", "aria-label": t("Setup steps") },
+    { className: `oai-rail${steps.length > 4 ? " oai-rail-many" : ""}`, "aria-label": t("Setup steps") },
     steps.map(([id, label], index) => (0, import_react2.createElement)("li", {
       key: id,
       className: index < here ? "oai-done" : index === here ? "oai-on" : "",
@@ -12708,6 +12813,751 @@ function ConnectAiView({ state, rows, subscriptions, open, showAll, glitching, r
   );
 }
 
+// src/client/migrate.js
+var import_react11 = require("react");
+var TOOLS = [
+  { id: "hermes", name: "Hermes", vendor: null, tag: "H", what: "Telegram bot", blurb: "Move its Telegram bot to Omni, with the bot you already know.", ready: true },
+  { id: "openclaw", name: "OpenClaw", vendor: null, tag: "OC", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false },
+  { id: "grok", name: "Grok bot", vendor: "xAI", tag: "X", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false },
+  { id: "muse", name: "Muse", vendor: "Meta", tag: "M", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false }
+];
+var MOVE = [
+  { id: "key", label: "Read Hermes's bot key", doing: "It goes straight to Omni, which keeps it private. You never see it here." },
+  { id: "hermes", label: "Switch Hermes's Telegram off", doing: "Hermes restarts for a few seconds. Its other channels come back by themselves." },
+  { id: "omni", label: "Hand the bot to Omni", doing: "Omni takes the same bot. Nothing else changes on Hermes." },
+  { id: "listen", label: "Wait for Omni to answer", doing: "One bot, one listener. Omni is starting it." }
+];
+function handoffOf(probe) {
+  if (probe === null) return null;
+  if (probe.omni?.telegram?.connected === true) return null;
+  if (probe.hermes?.found !== true) return { reason: "no-hermes" };
+  if (probe.hermes.channel === "none") return { reason: "no-channel" };
+  if (probe.hermes.key !== "available") return { reason: "no-key" };
+  if (probe.omni?.linked !== true) return { reason: "no-omni" };
+  return null;
+}
+var canMove = (probe) => probe !== null && handoffOf(probe) === null;
+function answerBots(probe) {
+  const bots = Array.isArray(probe?.omni?.bots) ? probe.omni.bots : [];
+  return probe?.omni?.attach === true ? [...bots].sort((a, b2) => Number(b2.main === true) - Number(a.main === true)) : [];
+}
+function defaultAnswerBot(probe) {
+  return answerBots(probe)[0]?.id ?? null;
+}
+var statusOf2 = (connected) => connected === true ? "connected" : "waiting";
+function foundOf(probe) {
+  const channel = probe?.hermes?.channel;
+  return channel === "off" ? "off" : channel === "on" ? "on" : "unknown";
+}
+var HANDOFF = {
+  "no-hermes": { title: "Hermes is not on this computer", text: "DSH is not connected to a Hermes here. Set up Omni's Telegram in Channels; it takes a minute." },
+  "no-channel": { title: "No Hermes Telegram bot to move", text: "Hermes has no Telegram channel here, so there is nothing to move. Set up Omni's Telegram in Channels." },
+  "no-key": { title: "Hermes has no bot key this wizard can read", text: "Set Omni's Telegram up in Channels, or copy the key into Omni yourself. Hermes's channel is left alone." },
+  "no-omni": { title: "Connect Omni first", text: "The Connect Omni step does that. Then come back here." },
+  manual: { title: "Set Omni's Telegram up in Channels", text: "Omni's own Telegram setup has every step. Hermes is left exactly as it is." }
+};
+function redactKey(value) {
+  const text = String(value ?? "");
+  let out = "";
+  let copied = 0;
+  const digit = /^[0-9]$/;
+  const tokenChar = /^[A-Za-z0-9_-]$/;
+  const separated = (ch) => /^\s$/.test(ch) || ch.codePointAt(0) < 32 || ch.codePointAt(0) === 127;
+  for (let colon = text.indexOf(":"); colon !== -1; colon = text.indexOf(":", colon + 1)) {
+    if (colon < copied) continue;
+    let at2 = colon - 1;
+    let digits = 0;
+    let first = colon;
+    while (at2 >= 0) {
+      const ch = text[at2];
+      if (separated(ch)) {
+        at2 -= 1;
+        continue;
+      }
+      if (digit.test(ch)) {
+        digits += 1;
+        first = at2;
+        at2 -= 1;
+        continue;
+      }
+      break;
+    }
+    if (digits < 6 || digits > 12 || first < copied) continue;
+    if (first > 0 && digit.test(text[first - 1])) continue;
+    let run = colon + 1;
+    let taken = 0;
+    let last = run;
+    while (run < text.length && taken < 35) {
+      const ch = text[run];
+      if (tokenChar.test(ch)) {
+        taken += 1;
+        run += 1;
+        last = run;
+        continue;
+      }
+      if (separated(ch)) {
+        run += 1;
+        continue;
+      }
+      break;
+    }
+    if (taken < 30) continue;
+    out += text.slice(copied, first) + "[hidden]";
+    copied = last;
+    colon = last - 1;
+  }
+  return out + text.slice(copied);
+}
+var hidden = (value) => redactKey(value);
+var Check2 = () => (0, import_react11.createElement)("span", { className: "oai-mig-tick", "aria-hidden": "true" }, "✓");
+var Arrow = () => (0, import_react11.createElement)("span", { className: "oai-mig-arrow", "aria-hidden": "true" }, "→");
+var Lock = () => (0, import_react11.createElement)("span", { className: "oai-mig-lock", "aria-hidden": "true" }, (0, import_react11.createElement)("i", null));
+var Spinner = () => (0, import_react11.createElement)("span", { className: "oai-mig-spin", "aria-hidden": "true" });
+var ToolMark = ({ tag }) => (0, import_react11.createElement)("span", { className: "oai-mig-mark", "aria-hidden": "true" }, tag);
+function ToolCard({ tool, onPick }) {
+  if (tool.ready !== true) {
+    return (0, import_react11.createElement)(
+      "article",
+      { className: "oai-mig-tool oai-mig-is-soon", "aria-label": t("{name}: coming soon", { name: tool.name }) },
+      (0, import_react11.createElement)(
+        "div",
+        { className: "oai-mig-top" },
+        (0, import_react11.createElement)(ToolMark, { tag: tool.tag }),
+        (0, import_react11.createElement)(
+          "div",
+          { className: "oai-mig-who" },
+          (0, import_react11.createElement)("strong", null, tool.name, tool.vendor ? (0, import_react11.createElement)("small", null, tool.vendor) : null),
+          (0, import_react11.createElement)("span", null, t(tool.what))
+        )
+      ),
+      (0, import_react11.createElement)("span", { className: "oai-soon" }, t("Coming soon")),
+      (0, import_react11.createElement)("p", { className: "oai-mig-blurb" }, t(tool.blurb))
+    );
+  }
+  return (0, import_react11.createElement)(
+    "button",
+    { type: "button", className: "oai-mig-tool oai-mig-is-ready", onClick: () => onPick(tool.id), "aria-label": t("Move {name} to Omni", { name: tool.name }) },
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-mig-top" },
+      (0, import_react11.createElement)(ToolMark, { tag: tool.tag }),
+      (0, import_react11.createElement)(
+        "div",
+        { className: "oai-mig-who" },
+        (0, import_react11.createElement)("strong", null, tool.name, tool.vendor ? (0, import_react11.createElement)("small", null, tool.vendor) : null),
+        (0, import_react11.createElement)("span", null, t(tool.what))
+      )
+    ),
+    (0, import_react11.createElement)("span", { className: "oai-mig-ready" }, Check2(), t("Ready")),
+    (0, import_react11.createElement)("p", { className: "oai-mig-blurb" }, t(tool.blurb)),
+    (0, import_react11.createElement)("span", { className: "oai-mig-go" }, t("Move it"), Arrow())
+  );
+}
+function ToolGrid({ onPick }) {
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-grid", role: "group", "aria-label": t("Tools you can come from") },
+    TOOLS.map((tool) => (0, import_react11.createElement)(ToolCard, { key: tool.id, tool, onPick }))
+  );
+}
+function BotPicker({ bots, value, onPick }) {
+  if (bots.length === 0) return null;
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-pick", role: "radiogroup", "aria-label": t("Who answers") },
+    (0, import_react11.createElement)("span", { className: "oai-mig-label" }, t("Who answers in the chats?")),
+    (0, import_react11.createElement)("div", { className: "oai-mig-bots" }, bots.map((bot) => (0, import_react11.createElement)("button", {
+      key: bot.id,
+      type: "button",
+      role: "radio",
+      "aria-checked": bot.id === value,
+      className: `oai-mig-botpick${bot.id === value ? " is-on" : ""}`,
+      onClick: () => onPick(bot.id)
+    }, (0, import_react11.createElement)("span", { className: "oai-mig-dot", "aria-hidden": "true" }), bot.name, bot.main === true ? (0, import_react11.createElement)("small", null, t("Main Bot")) : null))),
+    (0, import_react11.createElement)("p", { className: "oai-mig-fine" }, t("You can change this later in Omni."))
+  );
+}
+function StepList({ steps }) {
+  return (0, import_react11.createElement)("ol", { className: "oai-mig-steps" }, MOVE.map((step) => {
+    const state = steps?.find((entry) => entry.id === step.id)?.state ?? "pending";
+    return (0, import_react11.createElement)(
+      "li",
+      { key: step.id, "data-state": state },
+      (0, import_react11.createElement)("span", { className: "oai-mig-bead" }, state === "done" ? Check2() : state === "now" ? Spinner() : state === "failed" ? "!" : String(MOVE.indexOf(step) + 1)),
+      (0, import_react11.createElement)(
+        "span",
+        { className: "oai-mig-step" },
+        (0, import_react11.createElement)("strong", null, t(step.label)),
+        state === "now" ? (0, import_react11.createElement)("small", null, t(step.doing)) : null
+      )
+    );
+  }));
+}
+function KeyMove() {
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-key" },
+    (0, import_react11.createElement)(Lock, null),
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-mig-keytext" },
+      (0, import_react11.createElement)("strong", null, t("The bot key passes straight from Hermes into Omni.")),
+      (0, import_react11.createElement)("span", null, t("It never appears here or in a log.")),
+      (0, import_react11.createElement)("span", { className: "oai-mig-dots", "aria-hidden": "true" }, "••••••••••••••••")
+    )
+  );
+}
+function StatusPill({ connected, text }) {
+  return (0, import_react11.createElement)(
+    "span",
+    { className: "oai-mig-status", "data-state": statusOf2(connected) },
+    (0, import_react11.createElement)("span", { className: "oai-mig-statusdot", "aria-hidden": "true" }),
+    text ?? (connected ? t("Listening on Telegram") : t("Waiting for Omni to say it is up"))
+  );
+}
+function BotPanel({ result }) {
+  const name = result.botName ?? t("Your Telegram bot");
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-botbox" },
+    (0, import_react11.createElement)("span", { className: "oai-mig-bigmark", "aria-hidden": "true" }, "TG"),
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-mig-botwho" },
+      (0, import_react11.createElement)("strong", null, name),
+      (0, import_react11.createElement)("span", null, result.channelName ?? t("Telegram")),
+      (0, import_react11.createElement)(StatusPill, { connected: result.connected })
+    )
+  );
+}
+function HandoffCard({ handoff, note, onOpenChannels, onCheckAgain, onSkip }) {
+  const words = HANDOFF[handoff?.reason] ?? HANDOFF["no-key"];
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-handoff" },
+    (0, import_react11.createElement)("h2", null, t(words.title)),
+    (0, import_react11.createElement)("p", { className: "oai-mig-lede" }, t(words.text)),
+    note ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t(note)) : null,
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-actions" },
+      onOpenChannels ? (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", onClick: onCheckAgain }, t("Check again")) : null,
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onOpenChannels ?? onCheckAgain }, t(onOpenChannels ? "Open Omni's Channels" : "Check again"))
+    ),
+    (0, import_react11.createElement)("button", { type: "button", className: "oai-textlink", onClick: onSkip }, t("Not now"))
+  );
+}
+function ConfirmCard({ probe, botId, agreed, busy, onPickBot, onAgree, onStart, onBack }) {
+  const off = foundOf(probe) === "off";
+  const bots = answerBots(probe);
+  const gatewayRunning = probe.hermes?.gatewayRunning === true;
+  const stopped = !off && !gatewayRunning;
+  const pending = probe.hermes?.pendingRestart === true;
+  const restart = !off && gatewayRunning || pending;
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-confirm" },
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-mig-found" },
+      (0, import_react11.createElement)("span", { className: "oai-mig-dot", "data-on": !off && !stopped ? "on" : void 0, "aria-hidden": "true" }),
+      (0, import_react11.createElement)(
+        "span",
+        null,
+        (0, import_react11.createElement)("strong", null, t(off ? "Hermes · Telegram is already off" : stopped ? "Hermes · not running" : "Hermes · Telegram is on")),
+        (0, import_react11.createElement)("small", null, t(probe.hermes?.where === "ssh" ? "on your Hermes computer" : "on this computer"))
+      )
+    ),
+    (0, import_react11.createElement)(
+      "ol",
+      { className: "oai-mig-do" },
+      (0, import_react11.createElement)("li", null, (0, import_react11.createElement)("span", { className: "oai-mig-do-text" }, (0, import_react11.createElement)("b", null, t("The wizard reads Hermes's bot key.")), " ", t("It stays hidden and goes straight to Omni, which keeps it private."))),
+      (0, import_react11.createElement)("li", null, (0, import_react11.createElement)("span", { className: "oai-mig-do-text" }, off ? pending ? (0, import_react11.createElement)("span", null, (0, import_react11.createElement)("b", null, t("Hermes's Telegram is already off; nothing is switched.")), " ", t("Hermes still has to let go of the old channel, so it restarts for a few seconds. Its other channels blink and come back by themselves.")) : t("Hermes is already off; nothing is switched. No restart is needed.") : stopped ? (0, import_react11.createElement)("span", null, (0, import_react11.createElement)("b", null, t("Hermes is not running.")), " ", t("Its Telegram is switched off in its settings, so it stays off when you start Hermes again.")) : (0, import_react11.createElement)("span", null, (0, import_react11.createElement)("b", null, t("Hermes's Telegram is switched off.")), " ", t("Hermes keeps a copy of its settings first, then restarts for a few seconds. Its other channels blink and come back by themselves.")))),
+      (0, import_react11.createElement)("li", null, (0, import_react11.createElement)("span", { className: "oai-mig-do-text" }, (0, import_react11.createElement)("b", null, t("Omni starts its Telegram channel with the same bot.")), " ", t("One bot, one listener.")))
+    ),
+    (0, import_react11.createElement)(BotPicker, { bots, value: botId, onPick: onPickBot }),
+    (0, import_react11.createElement)(
+      "label",
+      { className: "oai-mig-agree" },
+      (0, import_react11.createElement)("input", { type: "checkbox", checked: agreed === true, onChange: (event) => onAgree(event.target.checked) }),
+      (0, import_react11.createElement)("span", { className: "oai-mig-box" }, Check2()),
+      (0, import_react11.createElement)("span", null, t(stopped ? "I am ready: Omni starts with Hermes's bot, and Hermes's Telegram stays off." : restart ? "I am ready: Hermes restarts for a few seconds and its Telegram goes off." : "I am ready: Omni starts with Hermes's bot."))
+    ),
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-actions" },
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", onClick: onBack }, t("Back")),
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", disabled: agreed !== true || busy, onClick: onStart }, t(off ? "Start Omni with it" : "Switch it over"))
+    )
+  );
+}
+function MovingCard({ steps }) {
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-moving", role: "status", "aria-live": "polite" },
+    (0, import_react11.createElement)(KeyMove, null),
+    (0, import_react11.createElement)(StepList, { steps }),
+    (0, import_react11.createElement)("p", { className: "oai-mig-fine" }, t("You can leave this open. It takes a few seconds."))
+  );
+}
+function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettings, gatewayStopped }) {
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-doneview" },
+    (0, import_react11.createElement)(BotPanel, { result }),
+    result.connected !== true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("Omni has the channel. It is bringing the bot up now.")) : null,
+    result.chatUrl ? (0, import_react11.createElement)("a", { className: "oai-pill oai-mig-sayhi", href: result.chatUrl, target: "_blank", rel: "noreferrer" }, t("Say hi to your bot"), Arrow()) : null,
+    result.answering === true && result.answerBot ? (0, import_react11.createElement)("p", { className: "oai-mig-answer" }, Check2(), t("Replies through {name}.", { name: result.answerBot.name })) : null,
+    result.answeringOff === true ? (0, import_react11.createElement)(
+      "div",
+      { className: "oai-mig-warn" },
+      (0, import_react11.createElement)("strong", null, t("Omni added the bot, but your Bot {name} is off and already answers on other channels. Turning it on here would turn those on too.", { name: result.answerBot?.name ?? t("this Bot") })),
+      (0, import_react11.createElement)("span", null, t("Turn it on in its settings when you are ready. Omni answers here as well.")),
+      canOpenSettings ? (0, import_react11.createElement)("button", { type: "button", className: "oai-mig-soft", onClick: () => onOpenSettings(result.answerBot?.id) }, t("Open {name}'s settings", { name: result.answerBot?.name ?? t("this Bot") })) : null
+    ) : null,
+    result.attached === false ? (0, import_react11.createElement)("p", { className: "oai-mig-fine" }, t("Omni has the channel. Its next update adds your Bot as the one who answers.")) : null,
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-mig-summary" },
+      result.hermesOff === true ? (0, import_react11.createElement)("span", null, result.hermesWasOff === true ? t("Hermes: Telegram was already off") : t("Hermes: Telegram off")) : null,
+      (0, import_react11.createElement)("span", null, t("Omni: listening"))
+    ),
+    result.hermesWasStopped === true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("Hermes was not running. Its Telegram stays off until you start Hermes again.")) : null,
+    gatewayStopped === true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("Hermes is not running right now. Start it again to bring its other channels back.")) : null,
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-actions" },
+      result.connected !== true && onCheckStatus ? (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", onClick: onCheckStatus }, t("Check status")) : null,
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onDone }, t("Done"))
+    )
+  );
+}
+function ProblemCard({ error, onRetry, onHandoff }) {
+  const changed = error?.changed ?? {};
+  const lines = error?.code === "hermes-still-on" ? "Hermes still has the channel. Nothing was handed to Omni, and its settings were put back." : error?.code === "refused" ? "Hermes would not restart. It may still have a chat open; finish it and try again." : changed.omniUnknown === true ? "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key." : changed.hermesOff === true && changed.omniCreated !== true ? "Hermes's Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key." : "Nothing was changed. Hermes is exactly as it was.";
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-problem" },
+    (0, import_react11.createElement)("p", { className: "oai-mig-error", role: "alert" }, t(lines)),
+    error?.message && !["hermes-still-on", "refused", "omni", "failed"].includes(error.code) ? (0, import_react11.createElement)("p", { className: "oai-mig-fine" }, hidden(error.message)) : null,
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-actions" },
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", onClick: onHandoff }, t("Set up Omni's Telegram instead")),
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onRetry }, t("Try again"))
+    )
+  );
+}
+var TITLES = {
+  choosing: "From another tool",
+  checking: "Looking at your Hermes…",
+  confirm: "Move this bot to Omni?",
+  moving: "Moving your bot…",
+  done: "Omni has your bot",
+  problem: "That did not finish",
+  handoff: "Set up Omni's Telegram"
+};
+var SPEECH = {
+  choosing: "Coming from somewhere else? Pick the tool you use, and I'll bring your bot over.",
+  checking: "Let me look at your Hermes. One moment.",
+  confirm: "One bot can only listen in one place. Hermes lets go first; then Omni picks it up.",
+  moving: "Moving your bot. The key stays with me the whole time.",
+  done: "There it is. Your bot answers on Omni now.",
+  problem: "That did not finish. I'll tell you exactly where it stopped.",
+  handoff: "We will do this Omni's own way."
+};
+function MigrateView({
+  phase = "choosing",
+  probe = null,
+  botId = null,
+  agreed = false,
+  steps = null,
+  result = null,
+  error = null,
+  handoff = null,
+  note = null,
+  busy = false,
+  canOpenSettings = false,
+  glitching = false,
+  onPick = () => {
+  },
+  onBack = () => {
+  },
+  onAgree = () => {
+  },
+  onPickBot = () => {
+  },
+  onStart = () => {
+  },
+  onRetry = () => {
+  },
+  onSkip = () => {
+  },
+  onDone = () => {
+  },
+  onCheckAgain = () => {
+  },
+  onOpenChannels = null,
+  onHandoff = () => {
+  },
+  onOpenSettings = () => {
+  },
+  onCheckStatus = null,
+  gatewayStopped = false,
+  aside = null
+}) {
+  if (aside !== null) {
+    return (0, import_react11.createElement)(StepAside, {
+      text: aside.kind === "channels" ? t("Set up Telegram in Omni's Channels. Add a channel, and follow Omni's steps there. Then come back here.") : t("Turn {name} on in its settings, then come back here.", { name: aside.name ?? t("this Bot") }),
+      back: t("Back to setup"),
+      onBack: aside.onBack
+    });
+  }
+  const title = t(TITLES[phase] ?? TITLES.choosing);
+  const speech = t(SPEECH[phase] ?? SPEECH.choosing);
+  return (0, import_react11.createElement)(
+    Stage,
+    { title, speech, at: "omni-migrate", glitching },
+    phase === "choosing" ? (0, import_react11.createElement)(
+      "div",
+      { className: "oai-mig-choose" },
+      (0, import_react11.createElement)("p", { className: "oai-lede" }, t("Move the Telegram bot you already have into Omni, or keep your other tools exactly as they are. The bot you and your people already talk to stays the same.")),
+      (0, import_react11.createElement)(ToolGrid, { onPick }),
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-textlink", onClick: onSkip }, t("Not now"))
+    ) : null,
+    phase === "checking" ? (0, import_react11.createElement)(
+      "div",
+      { className: "oai-mig-checking" },
+      (0, import_react11.createElement)(Spinner, null),
+      (0, import_react11.createElement)("p", { className: "oai-mig-lede" }, t("This only reads. Nothing is changed by looking."))
+    ) : null,
+    phase === "confirm" && probe !== null ? (0, import_react11.createElement)(ConfirmCard, { probe, botId, agreed, busy, onPickBot, onAgree, onStart, onBack }) : null,
+    phase === "moving" ? (0, import_react11.createElement)(MovingCard, { steps }) : null,
+    phase === "done" && result !== null ? (0, import_react11.createElement)(DoneCard, { result, onDone, onCheckStatus, canOpenSettings, onOpenSettings, gatewayStopped }) : null,
+    phase === "problem" ? (0, import_react11.createElement)(ProblemCard, { error, onRetry, onHandoff }) : null,
+    phase === "handoff" ? (0, import_react11.createElement)(HandoffCard, { handoff, note, onOpenChannels, onCheckAgain, onSkip }) : null
+  );
+}
+var POLL_MS3 = 900;
+var STATUS_MS = 4e3;
+var STATUS_TRIES = 6;
+function openChannels(load = () => require("@automagik/bots-dsh/client")) {
+  try {
+    const face = load()?.omni?.face?.();
+    if (face === null || face === void 0 || typeof face.actions?.selectPanel !== "function") return false;
+    face.actions.selectPanel("omni-channels");
+    return true;
+  } catch {
+    return false;
+  }
+}
+function openBotSettings(botId, load = () => require("@automagik/bots-dsh/client")) {
+  if (typeof botId !== "string" || botId === "") return false;
+  try {
+    const face = load()?.omni?.face?.();
+    if (face === null || face === void 0 || typeof face.actions?.openSettings !== "function") return false;
+    face.actions.openSettings("bots", botId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+var idle = { steps: MOVE.map((step) => ({ id: step.id, state: "pending" })) };
+var telegramUrl = (detail) => {
+  const name = typeof detail === "string" ? detail.trim().replace(/^@/, "") : "";
+  return /^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(name) ? `https://t.me/${name}` : null;
+};
+function MigrateStep(props) {
+  const state = useGate(props);
+  const finish2 = useFinish(props);
+  const [glitching, glitch] = useGlitch();
+  const [phase, setPhase] = (0, import_react11.useState)("choosing");
+  const [probe, setProbe] = (0, import_react11.useState)(null);
+  const [botId, setBotId] = (0, import_react11.useState)(null);
+  const [agreed, setAgreed] = (0, import_react11.useState)(false);
+  const [jobId, setJobId] = (0, import_react11.useState)(null);
+  const [steps, setSteps] = (0, import_react11.useState)(idle.steps);
+  const [result, setResult] = (0, import_react11.useState)(null);
+  const [error, setError] = (0, import_react11.useState)(null);
+  const [handoff, setHandoff] = (0, import_react11.useState)(null);
+  const [note, setNote] = (0, import_react11.useState)(null);
+  const [aside, setAside] = (0, import_react11.useState)(null);
+  const [busy, setBusy] = (0, import_react11.useState)(false);
+  const alive = (0, import_react11.useRef)(true);
+  (0, import_react11.useEffect)(() => () => {
+    alive.current = false;
+  }, []);
+  (0, import_react11.useEffect)(() => {
+    if (state) glitch();
+  }, [state, glitch]);
+  const doneWithProbe = (next) => {
+    setProbe(next);
+    setBotId(defaultAnswerBot(next));
+    const telegram = next.omni?.telegram;
+    if (telegram?.connected === true) {
+      setResult({ channelId: telegram.id, channelName: telegram.name, connected: true, botName: telegram.detail, chatUrl: telegramUrl(telegram.detail), attached: true, answering: null });
+      setPhase("done");
+      return;
+    }
+    const why = handoffOf(next);
+    if (why === null) {
+      setHandoff(null);
+      setPhase("confirm");
+      return;
+    }
+    setHandoff(why);
+    setPhase("handoff");
+  };
+  const look = async ({ recheck = false } = {}) => {
+    setPhase("checking");
+    setNote(null);
+    setError(null);
+    try {
+      const next = await call("migrate-probe");
+      if (!alive.current) return;
+      doneWithProbe(next);
+      if (recheck && handoffOf(next) !== null) setNote(t("Not yet. Nothing changed."));
+    } catch (problem) {
+      if (!alive.current) return;
+      setError({ code: "probe", message: problem.message, changed: {} });
+      setPhase("problem");
+    }
+  };
+  const move = async () => {
+    if (agreed !== true || busy) return;
+    setBusy(true);
+    setPhase("moving");
+    setSteps(idle.steps);
+    try {
+      const started = await call("migrate-start", { confirm: true, ...botId !== null && answerBots(probe).length > 0 ? { answerBot: botId } : {} });
+      if (!alive.current) return;
+      setJobId(started.jobId);
+      setBusy(false);
+    } catch (problem) {
+      if (!alive.current) return;
+      setBusy(false);
+      setError({ code: problem.code ?? "failed", message: problem.message, changed: {} });
+      setPhase("problem");
+    }
+  };
+  (0, import_react11.useEffect)(() => {
+    if (jobId === null) return void 0;
+    let live = true;
+    let timer = 0;
+    const tick = async () => {
+      try {
+        const next = await call("migrate-status", { jobId });
+        if (!live) return;
+        setSteps(next.steps ?? idle.steps);
+        if (next.phase === "done") {
+          setResult(next.result);
+          setError(null);
+          setPhase("done");
+          return;
+        }
+        if (next.phase === "failed") {
+          setError(next.error ?? { code: "failed", message: "", changed: {} });
+          setPhase("problem");
+          return;
+        }
+      } catch {
+      }
+      if (live) timer = setTimeout(tick, POLL_MS3);
+    };
+    void tick();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [jobId]);
+  (0, import_react11.useEffect)(() => {
+    if (phase !== "done" || result === null || result.connected === true) return void 0;
+    let live = true;
+    let timer = 0;
+    let tries = 0;
+    const tick = async () => {
+      try {
+        const next = await call("migrate-omni-status", { channelId: result.channelId });
+        if (!live) return;
+        setResult((previous) => ({ ...previous, connected: next.connected, botName: next.detail ?? previous.botName, chatUrl: next.chatUrl ?? previous.chatUrl }));
+        if (next.connected) return;
+      } catch {
+      }
+      tries += 1;
+      if (live && tries < STATUS_TRIES) timer = setTimeout(tick, STATUS_MS);
+    };
+    timer = setTimeout(tick, 2500);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [phase, result?.channelId, result?.connected]);
+  if (!state) return null;
+  const openChannelsHere = () => {
+    if (openChannels()) {
+      setAside({ kind: "channels", onBack: () => {
+        setAside(null);
+        void look({ recheck: true });
+      } });
+      return;
+    }
+    setNote(t("Open Channels from the Bot team's sidebar, then Add a channel → Telegram."));
+  };
+  const openSettingsHere = (id) => {
+    if (openBotSettings(id)) setAside({ kind: "bot", name: result?.answerBot?.name ?? t("this Bot"), onBack: () => setAside(null) });
+    else setNote(t("Open this Bot's settings from the Bot team's sidebar and turn it on."));
+  };
+  const checkStatus = async () => {
+    if (result === null) return;
+    try {
+      const next = await call("migrate-omni-status", { channelId: result.channelId });
+      if (!alive.current) return;
+      setResult((previous) => ({ ...previous, connected: next.connected, botName: next.detail ?? previous.botName, chatUrl: next.chatUrl ?? previous.chatUrl }));
+    } catch (problem) {
+      if (alive.current) setNote(problem.message);
+    }
+  };
+  return (0, import_react11.createElement)(MigrateView, {
+    phase,
+    probe,
+    botId,
+    agreed,
+    steps,
+    result,
+    error,
+    handoff,
+    note,
+    busy,
+    glitching,
+    canOpenSettings: true,
+    aside,
+    onPick: (id) => {
+      if (id === "hermes") void look();
+    },
+    onBack: () => {
+      setPhase("choosing");
+      setProbe(null);
+      setHandoff(null);
+      setNote(null);
+    },
+    onAgree: setAgreed,
+    onPickBot: setBotId,
+    onStart: () => {
+      void move();
+    },
+    onRetry: () => {
+      setAgreed(false);
+      void look();
+    },
+    onSkip: () => finish2(),
+    onDone: () => finish2(),
+    onCheckAgain: () => {
+      void look({ recheck: true });
+    },
+    onOpenChannels: openChannelsHere,
+    onHandoff: () => {
+      setError(null);
+      setHandoff({ reason: "manual" });
+      setPhase("handoff");
+    },
+    onOpenSettings: openSettingsHere,
+    onCheckStatus: checkStatus,
+    gatewayStopped: result?.gatewayStopped === true
+  });
+}
+var MIGRATE_CSS = `
+.oai-mig-choose{display:grid;gap:12px}
+.oai-mig-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:14px;margin:2px 0 4px}
+.oai-card .oai-mig-tool{display:grid;gap:9px;width:auto;min-height:0;margin:0;padding:15px 16px 14px;text-align:left;border-radius:20px 23px 19px 22px;${raised("var(--oai-card)", 4)};color:var(--oai-ink);font:inherit;font-weight:400;cursor:pointer;transition:transform .18s cubic-bezier(.3,1.4,.5,1),box-shadow .18s ease}
+.oai-card .oai-mig-tool:hover:not(:disabled){transform:translateY(-2px)}
+.oai-card .oai-mig-tool:active:not(:disabled){${pressed("var(--oai-card)", 4)}}
+.oai-card .oai-mig-tool:focus-visible{outline:3px solid var(--oai-ring);outline-offset:3px}
+.oai-card .oai-mig-tool.oai-mig-is-soon{cursor:default;${recessed("color-mix(in srgb,var(--oai-lilac) 16%,var(--oai-niche))")};box-shadow:inset 2px 3px 4px color-mix(in srgb,var(--oai-niche) var(--oai-lo),var(--oai-umber)),inset -2px -2px 3px color-mix(in srgb,var(--oai-niche) var(--oai-hi),var(--oai-shine))}
+.oai-mig-top{display:flex;align-items:center;gap:11px;min-width:0}
+.oai-mig-mark{flex:none;width:38px;height:38px;display:grid;place-items:center;border-radius:12px 14px 11px 13px;font:var(--bt-weight-title,800) 13px/1 var(--oai-head);letter-spacing:.02em;${raised("var(--oai-clay)", 2)};color:var(--oai-ink)}
+.oai-mig-tool.oai-mig-is-ready .oai-mig-mark{${raised("var(--oai-cyan)", 2)};color:var(--oai-cyan-ink)}
+.oai-mig-who{display:grid;min-width:0;line-height:1.25}
+.oai-mig-who strong{font:var(--bt-weight-strong,700) 15.5px/1.25 var(--oai-head);letter-spacing:-.01em;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
+.oai-mig-who strong small{font:600 11px/1 var(--oai-font);letter-spacing:.02em;color:var(--oai-ink2)}
+.oai-mig-who>span{font-size:11.5px;color:var(--oai-ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.oai-soon{justify-self:start;display:inline-block;padding:3px 10px;border-radius:999px;background:var(--oai-lilac);color:var(--oai-lilac-ink);font:var(--bt-weight-title,800) .66rem/1.5 var(--oai-head);letter-spacing:.12em;text-transform:uppercase;white-space:nowrap}
+.oai-mig-ready{justify-self:start;display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;${raised("var(--oai-cyan)", 1)};color:var(--oai-cyan-ink);font:var(--bt-weight-strong,700) 10.5px/1.6 var(--oai-head);letter-spacing:.08em;text-transform:uppercase}
+.oai-mig-tick{font-style:normal;font-weight:700}
+.oai-card .oai-mig-blurb{margin:0!important;color:var(--oai-ink2);font-size:12.5px;line-height:1.45}
+.oai-mig-go{display:inline-flex;align-items:center;gap:6px;justify-self:start;margin-top:2px;font:var(--bt-weight-strong,700) 12.5px/1 var(--oai-head);color:var(--oai-accent)}
+.oai-mig-arrow{transition:transform .18s ease}
+.oai-card .oai-mig-tool:hover .oai-mig-arrow{transform:translateX(3px)}
+.oai-mig-lede{color:var(--oai-ink2);margin:0}
+.oai-mig-fine{margin:0;color:var(--oai-ink2);font-size:12px}
+.oai-mig-note{margin:0;padding:9px 12px;border-radius:var(--oai-r-sm);${recessed("var(--oai-niche)")};font-size:13px;color:var(--oai-ink)}
+.oai-mig-checking{display:grid;place-items:center;gap:14px;padding:18px 0 10px;text-align:center}
+.oai-mig-spin{display:inline-block;width:16px;height:16px;border-radius:50%;border:2px solid color-mix(in srgb,var(--oai-cyan) 30%,transparent);border-top-color:var(--oai-accent);animation:oai-mig-spin .8s linear infinite}
+.oai-mig-checking .oai-mig-spin{width:30px;height:30px;border-width:3px}
+@keyframes oai-mig-spin{to{transform:rotate(360deg)}}
+.oai-mig-found{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:var(--oai-r-sm);${recessed("var(--oai-niche)")};margin-bottom:14px}
+.oai-mig-found>span:last-child{display:grid;line-height:1.3}
+.oai-mig-found strong{font:var(--bt-weight-strong,700) 13.5px/1.3 var(--oai-head)}
+.oai-mig-found small{font-size:11.5px;color:var(--oai-ink2)}
+.oai-mig-dot{flex:none;width:9px;height:9px;border-radius:50%;background:var(--oai-warn);box-shadow:inset 1px 1px 1px rgba(255,255,255,.5),0 0 0 3px color-mix(in srgb,var(--oai-warn) 18%,transparent)}
+.oai-mig-dot[data-on=on]{background:var(--oai-ok);box-shadow:inset 1px 1px 1px rgba(255,255,255,.5),0 0 0 3px color-mix(in srgb,var(--oai-ok) 20%,transparent)}
+.oai-mig-do{list-style:none;counter-reset:oai-mig-do;margin:0 0 14px;padding:0;display:grid;gap:11px}
+.oai-mig-do li{display:grid;grid-template-columns:26px 1fr;gap:10px;align-items:start;font-size:13.5px;line-height:1.5;color:var(--oai-ink2)}
+.oai-mig-do li::before{counter-increment:oai-mig-do;content:counter(oai-mig-do);display:grid;place-items:center;width:26px;height:26px;border-radius:50%;${raised("var(--oai-clay)", 2)};color:var(--oai-ink);font:var(--bt-weight-title,800) 12px/1 var(--oai-head)}
+.oai-mig-do b{color:var(--oai-ink);font-weight:600}
+.oai-mig-do-text{display:block;min-width:0}
+.oai-mig-pick{display:grid;gap:7px;margin:0 0 14px}
+.oai-mig-label{font:var(--bt-weight-title,700) 10.5px/1 var(--oai-head);letter-spacing:.14em;text-transform:uppercase;color:var(--oai-ink2)}
+.oai-mig-bots{display:flex;flex-wrap:wrap;gap:8px}
+.oai-card button.oai-mig-botpick{display:inline-flex;align-items:center;gap:7px;width:auto;min-height:34px;margin:0;padding:6px 13px;border-radius:999px;${raised("var(--oai-card)", 2)};color:var(--oai-ink);font:inherit;font-size:13px;font-weight:600}
+.oai-mig-botpick small{font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--oai-cyan-ink);background:color-mix(in srgb,var(--oai-cyan) 55%,var(--oai-card));border-radius:999px;padding:2px 6px}
+.oai-card button.oai-mig-botpick.is-on{${raised("var(--oai-lilac)", 3)};color:var(--oai-lilac-ink)}
+.oai-card button.oai-mig-botpick.is-on .oai-mig-dot{background:var(--oai-lilac-ink)}
+.oai-card label.oai-mig-agree{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:start;margin:0 0 4px;font-size:13px;color:var(--oai-ink);padding:11px 12px;border-radius:var(--oai-r-sm);${recessed("var(--oai-niche)")};color:var(--oai-ink);font-size:13px;line-height:1.45;cursor:pointer;margin:0 0 4px}
+.oai-mig-agree input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.oai-mig-box{flex:none;display:grid;place-items:center;width:22px;height:22px;border-radius:7px 8px 7px 8px;${raised("var(--oai-card)", 2)};color:transparent;transition:background-color .15s ease,color .15s ease}
+.oai-mig-agree input:checked+.oai-mig-box{${raised("var(--oai-cyan)", 2)};color:var(--oai-cyan-ink)}
+.oai-mig-agree input:focus-visible+.oai-mig-box{outline:3px solid var(--oai-ring);outline-offset:2px}
+.oai-mig-key{display:flex;align-items:center;gap:13px;padding:12px 14px;border-radius:var(--oai-r-sm);${recessed("color-mix(in srgb,var(--oai-lilac) 34%,var(--oai-niche))")};margin-bottom:15px}
+.oai-mig-lock{position:relative;flex:none;width:34px;height:30px;display:grid;place-items:end center;padding-bottom:2px}
+.oai-mig-lock i{display:block;width:26px;height:20px;border-radius:6px 7px 5px 7px;${raised("var(--oai-lilac)", 2)};position:relative}
+.oai-mig-lock::before{content:"";position:absolute;top:1px;left:50%;transform:translateX(-50%);width:16px;height:14px;border:3px solid color-mix(in srgb,var(--oai-lilac-ink) 55%,var(--oai-lilac));border-bottom:0;border-radius:9px 9px 0 0}
+.oai-mig-keytext{display:grid;gap:2px;line-height:1.35;min-width:0}
+.oai-mig-keytext strong{font:var(--bt-weight-strong,700) 13px/1.35 var(--oai-head);color:var(--oai-ink)}
+.oai-mig-keytext span{font-size:11.5px;color:var(--oai-ink2)}
+.oai-mig-dots{margin-top:5px;letter-spacing:.28em;color:color-mix(in srgb,var(--oai-lilac-ink) 55%,transparent);font-size:12px;line-height:1}
+.oai-mig-steps{list-style:none;margin:0 0 12px;padding:0;display:grid;gap:3px}
+.oai-mig-steps li{display:grid;grid-template-columns:26px 1fr;gap:10px;align-items:start;padding:7px 0}
+.oai-mig-bead{display:grid;place-items:center;width:26px;height:26px;border-radius:50%;${recessed("var(--oai-niche)")};color:var(--oai-ink2);font:var(--bt-weight-title,800) 12px/1 var(--oai-head)}
+.oai-mig-steps li[data-state=done] .oai-mig-bead{${raised("var(--oai-ok)", 1)};color:var(--oai-card)}
+.oai-mig-steps li[data-state=now] .oai-mig-bead{${raised("var(--oai-cyan)", 1)}}
+.oai-mig-steps li[data-state=failed] .oai-mig-bead{${raised("var(--oai-bad)", 1)};color:var(--oai-card)}
+.oai-mig-step{display:grid;gap:2px;line-height:1.35;padding-top:3px}
+.oai-mig-step strong{font-weight:600;color:var(--oai-ink2);font-size:13px}
+.oai-mig-steps li[data-state=now] .oai-mig-step strong,.oai-mig-steps li[data-state=done] .oai-mig-step strong{color:var(--oai-ink)}
+.oai-mig-step small{font-size:11.5px;color:var(--oai-ink2)}
+.oai-mig-botbox{display:flex;align-items:center;gap:14px;padding:14px;border-radius:20px 23px 19px 22px;${raised("var(--oai-card)", 4)};margin:2px 0 14px}
+.oai-mig-bigmark{flex:none;width:50px;height:50px;display:grid;place-items:center;border-radius:14px 16px 13px 15px;${raised("var(--oai-cyan)", 3)};color:var(--oai-cyan-ink);font:var(--bt-weight-title,800) 15px/1 var(--oai-head);letter-spacing:.04em}
+.oai-mig-botwho{display:grid;gap:3px;min-width:0}
+.oai-mig-botwho>strong{font:var(--bt-weight-title,800) 18px/1.2 var(--oai-head);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.oai-mig-botwho>span{font-size:11.5px;color:var(--oai-ink2)}
+.oai-mig-status{justify-self:start;display:inline-flex;align-items:center;gap:7px;margin-top:3px;padding:4px 10px;border-radius:999px;${recessed("var(--oai-niche)")};font-size:11.5px;font-weight:600;color:var(--oai-ink)}
+.oai-mig-statusdot{width:8px;height:8px;border-radius:50%;background:var(--oai-warn);animation:oai-mig-pulse 1.6s ease-in-out infinite}
+.oai-mig-status[data-state=connected] .oai-mig-statusdot{background:var(--oai-ok);animation:none}
+@keyframes oai-mig-pulse{0%,100%{opacity:.45}50%{opacity:1}}
+.oai-mig-sayhi{justify-self:start;margin:0 0 12px;text-decoration:none;font-size:13px;gap:7px}
+.oai-mig-answer{display:flex;align-items:center;gap:6px;margin:2px 0 12px;font-size:12.5px;color:var(--oai-ok);font-weight:600}
+.oai-mig-warn{display:grid;gap:7px;padding:12px 14px;border-radius:var(--oai-r-sm);${recessed("color-mix(in srgb,#f2c25b 30%,var(--oai-niche))")};margin:0 0 14px;font-size:12.5px;line-height:1.45;color:var(--oai-ink)}
+.oai-mig-warn strong{font-size:13px;font-weight:600}
+.oai-card button.oai-mig-soft{justify-self:start;width:auto;min-height:34px;margin:2px 0 0;padding:7px 14px;font-size:12.5px;${raised("var(--oai-card)", 2)};color:var(--oai-ink)}
+.oai-mig-summary{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--oai-ink2);margin:0 0 14px}
+.oai-mig-problem{display:grid;gap:10px}
+.oai-mig-error{margin:0;color:var(--oai-bad);font-size:13.5px;line-height:1.5}
+.oai-mig-handoff{display:grid;gap:12px}
+.oai-card .oai-mig-handoff h2{margin:0;font:var(--bt-weight-title,800) 19px/1.25 var(--oai-head);letter-spacing:-.016em}
+@media (max-width:520px){.oai-mig-grid{grid-template-columns:1fr}.oai-mig-botbox{gap:11px}}
+@media (prefers-reduced-motion:reduce){.oai-mig-tool,.oai-mig-arrow,.oai-mig-box,.oai-mig-spin,.oai-mig-statusdot{transition:none!important;animation:none!important}.oai-mig-statusdot{opacity:1}}
+`;
+
 // src/client/veil.js
 var VEIL_MS = 5e3;
 var FADE_MS = 200;
@@ -12749,7 +13599,7 @@ function installVeil({ doc = globalThis.document, scope = globalThis, request: r
 }
 
 // src/client/power-shortcut.js
-var import_react11 = require("react");
+var import_react12 = require("react");
 var import_react_dom2 = require("react-dom");
 var NAMES2 = { omni: "Omni", genie: "Genie", unfold: "Unfold" };
 var CHOOSE = /* @__PURE__ */ new Set(["found", "none"]);
@@ -12899,22 +13749,22 @@ function resumeInstall(kind, status, start = startPower) {
 var readPlugins = (ask = call) => Promise.all([ask("omni-plugins"), ask("genie-plugin")].map((request2) => Promise.resolve(request2).catch(() => null)));
 function RowMark({ Mark, row }) {
   if (typeof Mark !== "function") return null;
-  return (0, import_react11.createElement)(Mark, { bot: row.bot ?? LOOKS[row.kind], size: MARK_SIZE, live: false });
+  return (0, import_react12.createElement)(Mark, { bot: row.bot ?? LOOKS[row.kind], size: MARK_SIZE, live: false });
 }
 function PowerShortcut({ roster, actions, Mark = null }) {
   const omni = usePowerState("omni");
   const genie = usePowerState("genie");
   const unfold = usePowerState("unfold");
-  const [open, setOpen] = (0, import_react11.useState)(false);
-  const [box, setBox] = (0, import_react11.useState)(null);
-  const [read, setRead] = (0, import_react11.useState)({ host: null, preload: null, omni: null, genie: null, checked: false });
-  const [problems, setProblems] = (0, import_react11.useState)({});
-  const button = (0, import_react11.useRef)(null);
-  const card = (0, import_react11.useRef)(null);
-  const title = (0, import_react11.useRef)(null);
-  const id = (0, import_react11.useId)();
+  const [open, setOpen] = (0, import_react12.useState)(false);
+  const [box, setBox] = (0, import_react12.useState)(null);
+  const [read, setRead] = (0, import_react12.useState)({ host: null, preload: null, omni: null, genie: null, checked: false });
+  const [problems, setProblems] = (0, import_react12.useState)({});
+  const button = (0, import_react12.useRef)(null);
+  const card = (0, import_react12.useRef)(null);
+  const title = (0, import_react12.useRef)(null);
+  const id = (0, import_react12.useId)();
   const powers = { omni, genie, unfold };
-  (0, import_react11.useEffect)(() => {
+  (0, import_react12.useEffect)(() => {
     let alive = true;
     void call("state").catch(() => null).then((state) => {
       if (alive) setRead((current) => ({ ...current, host: state?.host ?? null, preload: state?.preload ?? null }));
@@ -12923,8 +13773,8 @@ function PowerShortcut({ roster, actions, Mark = null }) {
       alive = false;
     };
   }, []);
-  const mounted = (0, import_react11.useRef)(false);
-  (0, import_react11.useEffect)(() => {
+  const mounted = (0, import_react12.useRef)(false);
+  (0, import_react12.useEffect)(() => {
     if (!open && mounted.current) return void 0;
     mounted.current = true;
     let alive = true;
@@ -12938,7 +13788,7 @@ function PowerShortcut({ roster, actions, Mark = null }) {
       alive = false;
     };
   }, [open]);
-  (0, import_react11.useEffect)(() => {
+  (0, import_react12.useEffect)(() => {
     if (!open) return void 0;
     const onDown = (event) => {
       if (event.target instanceof Node && (card.current?.contains(event.target) || button.current?.contains(event.target))) return;
@@ -12957,7 +13807,7 @@ function PowerShortcut({ roster, actions, Mark = null }) {
       window.removeEventListener("keydown", onKey, true);
     };
   }, [open]);
-  (0, import_react11.useLayoutEffect)(() => {
+  (0, import_react12.useLayoutEffect)(() => {
     if (!open) return void 0;
     const place = () => {
       const rect = button.current?.getBoundingClientRect();
@@ -12968,14 +13818,14 @@ function PowerShortcut({ roster, actions, Mark = null }) {
     return () => window.removeEventListener("resize", place);
   }, [open]);
   const placed = open && box !== null;
-  (0, import_react11.useEffect)(() => {
+  (0, import_react12.useEffect)(() => {
     if (!placed) return;
     const at2 = document.activeElement;
     if (card.current?.contains(at2) && at2 !== title.current) return;
     const first = card.current?.querySelector(".bt-update-dsh button:not(:disabled)");
     (first ?? title.current)?.focus();
   }, [placed, read.checked]);
-  (0, import_react11.useEffect)(() => {
+  (0, import_react12.useEffect)(() => {
     if (placed && card.current && !card.current.contains(document.activeElement) && document.activeElement === document.body) title.current?.focus();
   });
   const kinds = kindsOf(read);
@@ -13003,10 +13853,10 @@ function PowerShortcut({ roster, actions, Mark = null }) {
     }
   };
   const heading = kinds.includes("unfold") ? t("Omni, Genie and Unfold") : t("Omni and Genie");
-  return (0, import_react11.createElement)(
-    import_react11.Fragment,
+  return (0, import_react12.createElement)(
+    import_react12.Fragment,
     null,
-    (0, import_react11.createElement)(
+    (0, import_react12.createElement)(
       "button",
       {
         ref: button,
@@ -13019,35 +13869,35 @@ function PowerShortcut({ roster, actions, Mark = null }) {
         "aria-controls": open ? id : void 0,
         onClick: () => setOpen((value) => !value)
       },
-      badge === "working" ? (0, import_react11.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : (0, import_react11.createElement)(PowerIcon, { size: 16, stroke: 2 }),
-      badge === "error" ? (0, import_react11.createElement)("span", { className: "bt-update-dot", "aria-hidden": true }) : null
+      badge === "working" ? (0, import_react12.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : (0, import_react12.createElement)(PowerIcon, { size: 16, stroke: 2 }),
+      badge === "error" ? (0, import_react12.createElement)("span", { className: "bt-update-dot", "aria-hidden": true }) : null
     ),
-    placed ? (0, import_react_dom2.createPortal)((0, import_react11.createElement)(
+    placed ? (0, import_react_dom2.createPortal)((0, import_react12.createElement)(
       "div",
       { ref: card, id, className: "bt-update-pop bt-power-pop", role: "dialog", "aria-label": heading, style: box, onKeyDown },
-      (0, import_react11.createElement)("div", { ref: title, className: "bt-update-title", tabIndex: -1 }, heading),
-      rows.map((row) => (0, import_react11.createElement)(
+      (0, import_react12.createElement)("div", { ref: title, className: "bt-update-title", tabIndex: -1 }, heading),
+      rows.map((row) => (0, import_react12.createElement)(
         "div",
         { key: row.kind, className: "bt-update-dsh", "data-power": row.kind, "data-state": row.state },
-        (0, import_react11.createElement)(
+        (0, import_react12.createElement)(
           "div",
           { className: "bt-power-who" },
-          (0, import_react11.createElement)(RowMark, { Mark, row }),
-          (0, import_react11.createElement)(
+          (0, import_react12.createElement)(RowMark, { Mark, row }),
+          (0, import_react12.createElement)(
             "div",
             { className: "bt-power-what" },
-            (0, import_react11.createElement)("div", { className: "bt-update-title" }, row.name),
-            (0, import_react11.createElement)("div", { className: "bt-update-text", role: "status", "aria-live": "polite" }, row.text)
+            (0, import_react12.createElement)("div", { className: "bt-update-title" }, row.name),
+            (0, import_react12.createElement)("div", { className: "bt-update-text", role: "status", "aria-live": "polite" }, row.text)
           )
         ),
-        row.note ? (0, import_react11.createElement)("div", { className: "bt-update-text" }, row.note) : null,
-        row.alert ? (0, import_react11.createElement)("div", { className: "bt-update-error", role: "alert" }, row.alert) : null,
-        row.working || row.action || row.secondary ? (0, import_react11.createElement)(
+        row.note ? (0, import_react12.createElement)("div", { className: "bt-update-text" }, row.note) : null,
+        row.alert ? (0, import_react12.createElement)("div", { className: "bt-update-error", role: "alert" }, row.alert) : null,
+        row.working || row.action || row.secondary ? (0, import_react12.createElement)(
           "div",
           { className: "bt-update-actions" },
-          row.secondary ? (0, import_react11.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => run(row, row.secondary) }, secondaryLabel(row)) : null,
-          row.working ? (0, import_react11.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : null,
-          row.action ? (0, import_react11.createElement)("button", {
+          row.secondary ? (0, import_react12.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => run(row, row.secondary) }, secondaryLabel(row)) : null,
+          row.working ? (0, import_react12.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : null,
+          row.action ? (0, import_react12.createElement)("button", {
             type: "button",
             className: "bt-update-go",
             disabled: row.locked,
@@ -13056,10 +13906,10 @@ function PowerShortcut({ roster, actions, Mark = null }) {
           }, actionLabel(row)) : null
         ) : null
       )),
-      readOnly || !teamSetup ? null : (0, import_react11.createElement)(
+      readOnly || !teamSetup ? null : (0, import_react12.createElement)(
         "div",
         { className: "bt-update-actions" },
-        (0, import_react11.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => openTeamSetup({ actions, close }) }, t("Open team setup"))
+        (0, import_react12.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => openTeamSetup({ actions, close }) }, t("Open team setup"))
       )
     ), document.body) : null
   );
@@ -13076,20 +13926,21 @@ function installPowerShortcut(load = () => require("@automagik/bots-dsh/client")
   if (typeof tools?.register !== "function") return () => {
   };
   const Mark = typeof bots?.omni?.ui?.BotMark === "function" ? bots.omni.ui.BotMark : null;
-  return tools.register({ id: "welcome-power", order: 0, Component: (props) => (0, import_react11.createElement)(PowerShortcut, { ...props, Mark }) });
+  return tools.register({ id: "welcome-power", order: 0, Component: (props) => (0, import_react12.createElement)(PowerShortcut, { ...props, Mark }) });
 }
 
 // src/client/index.js
 var STEPS = [
   { id: "omni-companion", order: -300, component: CompanionStep },
   { id: "omni-team", order: -270, component: TeamStep },
+  { id: "omni-migrate", order: -230, component: MigrateStep },
   { id: "omni-connect-ai", order: -200, component: ConnectAiStep }
 ];
 var inject = ["slots", "locale"];
 function installStyles() {
   const style = document.createElement("style");
   style.dataset.omniAi = "";
-  style.textContent = STAGE_CSS + ONBOARD_CSS + INK_CSS + CLAY_ART_CSS + PRODUCT_LOCKUP_CSS + TERMINAL_CSS + ACP_CSS;
+  style.textContent = STAGE_CSS + ONBOARD_CSS + INK_CSS + CLAY_ART_CSS + PRODUCT_LOCKUP_CSS + TERMINAL_CSS + ACP_CSS + MIGRATE_CSS;
   document.head.append(style);
   return () => style.remove();
 }
