@@ -536,15 +536,16 @@ runner from that user's store. No other install starts it; am's installer never 
 **Options.** am's tarball, recommended: every release already signs and carries am, and am
 installs per user, so its bytes can sit under the runner's user, out of DSH's write reach. A DSH
 plugin's tarball: rejected, because plugin bytes live in DSH's profile, writable by the user the
-runner guards. Its own artifact and lane: the fallback only, since a third key and update path
-serve a file that is inert until started.
+runner guards. Its own artifact and lane: the fallback only, since a separate pointer and update
+path serve a file that is inert until started.
 
 **What the lean needs.**
 
 1. **Who installs am, and as which user (the mount).** Arca's template, as the runner's own
    user on the space's machine (outside DSH's container), from the signed pointer — not DSH's
-   user. The runner's am store, state and unit are out of DSH's write reach; only the socket's
-   folder is mounted into DSH's container, and its file mode, set by the template, is the gate.
+   user. The runner's am store, state folder and unit are out of DSH's write reach; DSH reaches
+   the runner only through the socket's folder, and the socket's file mode, set by the template,
+   is the gate.
    If the template can only install as DSH's user, the lean breaks and the fallback is the
    shape. One gap to close: am has no first install through the pointer today (`am self install`
    takes a local extract and records the version's own sequence, unsigned); the delivery adds
