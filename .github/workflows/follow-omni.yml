@@ -28,7 +28,7 @@ name: Follow Omni
 # make the next merge's release, of any lane, a full one (scripts/lane.ts kindOf). Dispatched by
 # hand with skip_daily_hold, it carries anyway and says so in a warning. A dispatch from outside
 # this repository (`daily-carry`) is the daily clock: it runs the same lookup, boot and hold as the
-# schedule and reads nothing from its payload. The schedule stays the backstop.
+# schedule and does not use its payload. The schedule stays the backstop.
 #
 # Dispatched with dry_run, it boots and builds the bump but only rehearses the push
 # (`git push --dry-run`) and cuts no release. A dry run is never held; it reports whether a real
@@ -54,7 +54,7 @@ on:
     - cron: '11,41 * * * *'
   repository_dispatch:
     # omni-release: Omni's release workflow published a release (a hint only).
-    # daily-carry: the daily clock from outside this repository; no payload is read.
+    # daily-carry: the daily clock from outside this repository; no payload is used.
     types: [omni-release, daily-carry]
   workflow_run:
     workflows: [Release]

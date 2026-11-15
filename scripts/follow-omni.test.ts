@@ -65,6 +65,36 @@ describe('Follow Omni triggers', () => {
     expect(workflow.on.repository_dispatch.types).toContain('daily-carry');
     expect(workflow.on.workflow_dispatch.inputs.skip_daily_hold.default).toBe(false);
   });
+
+  test('a daily-carry dispatch never reads Omni\'s payload as a hint; omni-release still does', () => {
+    const newest = runOf('The newest Omni release');
+    const hint = newest.split('\n');
+    const start = hint.findIndex(line => line.includes('GITHUB_EVENT_NAME}" == repository_dispatch'));
+    expect(start).toBeGreaterThan(-1);
+    const indent = hint[start].length - hint[start].trimStart().length;
+    const end = hint.findIndex((line, i) => i > start && line.trim() === 'fi' && line.length - line.trimStart().length === indent);
+    expect(end).toBeGreaterThan(start);
+    const block = hint.slice(start, end + 1).join('\n');
+    const prelude = 'set -euo pipefail\nlookup() { :; }\nabove() { return 1; }\nnewest=2.261115.8\n';
+    const run = (action: string) => spawnSync('bash', ['-c', `${prelude}\n${block}`], {
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH ?? '',
+        GITHUB_EVENT_NAME: 'repository_dispatch',
+        EVENT_ACTION: action,
+        HINT_VERSION: '2.261115.9',
+        HINT_TAG: 'v2.261115.9',
+        HINT_SHA: '36c548a556887514c65874b385f33d3f6ef968d2',
+        GITHUB_STEP_SUMMARY: '/dev/null',
+      },
+    });
+    const daily = run('daily-carry');
+    expect(daily.status).toBe(0);
+    expect(daily.stdout).toBe('');
+    const omni = run('omni-release');
+    expect(omni.status).toBe(0);
+    expect(omni.stdout).toContain('Omni dispatched 2.261115.9');
+  });
 });
 
 // dev's history after a first commit on 2026-10-01 that adds omni.json (`omni: false` leaves it
