@@ -286,6 +286,36 @@ def beside_dir(home):
     """The record folder next to the home: <parent>/gateway-locks, a sibling."""
     return os.path.join(os.path.dirname(os.path.normpath(home)), "gateway-locks")
 
+def is_hermes_home(path):
+    return os.path.isdir(path) and (
+        os.path.isfile(os.path.join(path, "config.yaml"))
+        or os.path.isdir(os.path.join(path, "gateway-locks")))
+
+def has_hermes_sibling(home):
+    """Any other Hermes home in the same parent, following links.
+
+    This is the on-disk fact used by BOTH detection and attach: beside a home that
+    shares its parent with another Hermes home, gateway-locks is ambiguous.
+    """
+    path = os.path.normpath(home)
+    parent, name = os.path.dirname(path), os.path.basename(path)
+    try:
+        entries = list(os.scandir(parent))
+        own = os.path.realpath(path)
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.name == name:
+            continue
+        try:
+            if not is_hermes_home(entry.path):
+                continue
+            if os.path.realpath(entry.path) != own:
+                return True
+        except OSError:
+            continue
+    return False
+
 def normalized_home(path):
     """One spelling per home: resolve, drop trailing/double/dot segments, follow symlinks."""
     if not isinstance(path, str) or not path.startswith("/"):
@@ -405,10 +435,19 @@ try:
     for owners in beside_owners.values():
         if len(owners) > 1:
             ambiguous.update(owners)
+    # An on-disk Hermes sibling counts even when it is not one of the candidates (an
+    # added folder next to a running home the scan did not list).
+    for home in homes:
+        for spelled in (spellings.get(home) or [home]):
+            if has_hermes_sibling(spelled):
+                ambiguous.add(home)
+                break
     for home in list(homes):
         for folder in home_lock_dirs(home):
             remember(folder, home)
         for folder in beside_of.get(home, []):
+            if home in ambiguous:
+                continue
             try:
                 key = os.path.realpath(folder)
             except OSError:

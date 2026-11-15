@@ -621,6 +621,60 @@ test('a record naming the default home with a trailing slash is attributed to it
   assert.equal(bot.recordDir, shared)
 })
 
+test('a stopped home added beside a running sibling does not claim the shared record', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const shared = join(fixture.root, 'shared')
+  const runner = join(shared, 'runner')
+  const stopped = join(shared, 'stopped')
+  for (const home of [runner, stopped]) {
+    await mkdir(home, { recursive: true })
+    await writeFile(join(home, 'config.yaml'), 'model: shared/model\n')
+  }
+  const spec = JSON.parse(await readFile(join(fixture.root, 'spec.json'), 'utf8'))
+  spec.homes[stopped] = { profiles: [{ name: 'Stopped', id: 'default', model: 'shared/model', gateway: 'stopped' }] }
+  await writeFile(join(fixture.root, 'spec.json'), JSON.stringify(spec))
+  const beside = join(shared, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  // Add another Hermes supplies only the stopped home.
+  const { frames } = await runReader(fixture, { extraHomes: [stopped] })
+  const bot = botsOf(frames).find(row => row.home === stopped && row.id === 'default')
+  assert.ok(bot, JSON.stringify(frames))
+  assert.equal(bot.running, false, 'the stopped home is not answered by its running sibling')
+  assert.equal(bot.blocked, 'shared-beside')
+  assert.ok(!botsOf(frames).some(row => row.recordDir === beside), 'the shared record is not claimed')
+})
+
+test('a stopped linked home beside a running linked sibling does not claim the shared record', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const reals = join(fixture.root, 'reals')
+  const runner = join(reals, 'runner')
+  const stopped = join(reals, 'stopped')
+  for (const home of [runner, stopped]) {
+    await mkdir(home, { recursive: true })
+    await writeFile(join(home, 'config.yaml'), 'model: shared/model\n')
+  }
+  const spec = JSON.parse(await readFile(join(fixture.root, 'spec.json'), 'utf8'))
+  spec.homes[stopped] = { profiles: [{ name: 'Stopped', id: 'default', model: 'shared/model', gateway: 'stopped' }] }
+  await writeFile(join(fixture.root, 'spec.json'), JSON.stringify(spec))
+  const shared = join(fixture.root, 'shared')
+  await mkdir(shared, { recursive: true })
+  await symlink(runner, join(shared, 'runner-link'))
+  const stoppedLink = join(shared, 'stopped-link')
+  await symlink(stopped, stoppedLink)
+  const beside = join(shared, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const { frames } = await runReader(fixture, { extraHomes: [stoppedLink] })
+  const bot = botsOf(frames).find(row => row.home === stopped && row.id === 'default')
+  assert.ok(bot, JSON.stringify(frames))
+  assert.equal(bot.running, false)
+  assert.equal(bot.blocked, 'shared-beside')
+  assert.ok(!botsOf(frames).some(row => row.recordDir === beside))
+})
+
 test('a record folder beside two homes under one parent belongs to neither', async t => {
   if (!await hasPython()) { t.skip('python3 is not available'); return }
   const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
@@ -900,6 +954,61 @@ test('a symlinked home finds its record beside the link, as detection does', asy
   await mkdir(account, { recursive: true })
   const { frames } = await runAttach(fixture, { stateDir: '', hermesHome: link, gatewayLockDir: account })
   assert.equal(frames.find(frame => frame.type === 'token')?.value, fixture.sharedToken, 'the link beside record is used')
+})
+
+test('an explicit shared record beside a stopped home with a running sibling is refused', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await attachFixture(t)
+  const shared = join(fixture.root, 'shared')
+  const runner = join(shared, 'runner')
+  const stopped = join(shared, 'stopped')
+  for (const home of [runner, stopped]) {
+    await mkdir(home, { recursive: true })
+    await writeFile(join(home, 'config.yaml'), 'model: sample/model\n')
+  }
+  const beside = join(shared, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', port: fixture.port, pid: process.pid, protocolVersion: 1, profiles: ['default'], home: '' }))
+  await writeFile(join(beside, 'host-serve.token'), fixture.sharedToken, { mode: 0o600 })
+  await chmod(join(beside, 'host-serve.token'), 0o600)
+  const account = join(fixture.root, 'account-locks')
+  await mkdir(account, { recursive: true })
+  const explicit = await runAttach(fixture, { stateDir: beside, hermesHome: stopped, gatewayLockDir: account })
+  assert.equal(explicit.frames.find(frame => frame.type === 'error')?.code, 'serve-record')
+  assert.ok(!explicit.raw.includes(fixture.sharedToken))
+  const implicit = await runAttach(fixture, { stateDir: '', hermesHome: stopped, gatewayLockDir: account })
+  assert.equal(implicit.frames.find(frame => frame.type === 'error')?.code, 'serve-not-running')
+  assert.ok(!implicit.raw.includes(fixture.sharedToken))
+})
+
+test('an explicit linked shared record is refused for a linked stopped home', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await attachFixture(t)
+  const reals = join(fixture.root, 'reals')
+  const runner = join(reals, 'runner')
+  const stopped = join(reals, 'stopped')
+  for (const home of [runner, stopped]) {
+    await mkdir(home, { recursive: true })
+    await writeFile(join(home, 'config.yaml'), 'model: sample/model\n')
+  }
+  const shared = join(fixture.root, 'shared')
+  await mkdir(shared, { recursive: true })
+  await symlink(runner, join(shared, 'runner-link'))
+  const stoppedLink = join(shared, 'stopped-link')
+  await symlink(stopped, stoppedLink)
+  const beside = join(shared, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', port: fixture.port, pid: process.pid, protocolVersion: 1, profiles: ['default'], home: '' }))
+  await writeFile(join(beside, 'host-serve.token'), fixture.sharedToken, { mode: 0o600 })
+  await chmod(join(beside, 'host-serve.token'), 0o600)
+  const account = join(fixture.root, 'account-locks')
+  await mkdir(account, { recursive: true })
+  const explicit = await runAttach(fixture, { stateDir: beside, hermesHome: stoppedLink, gatewayLockDir: account })
+  assert.equal(explicit.frames.find(frame => frame.type === 'error')?.code, 'serve-record')
+  assert.ok(!explicit.raw.includes(fixture.sharedToken))
+  const implicit = await runAttach(fixture, { stateDir: '', hermesHome: stoppedLink, gatewayLockDir: account })
+  assert.equal(implicit.frames.find(frame => frame.type === 'error')?.code, 'serve-not-running')
+  assert.ok(!implicit.raw.includes(fixture.sharedToken))
 })
 
 test('a beside record shared by two homes is never an implicit pick for either', async t => {

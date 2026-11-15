@@ -116,32 +116,56 @@ def is_default_home(home):
     except OSError:
         return home == default_home()
 
-def only_home_in_parent(home):
-    """True when no other Hermes home shares this home's parent.
+def is_hermes_home(path):
+    return os.path.isdir(path) and (
+        os.path.isfile(os.path.join(path, "config.yaml"))
+        or os.path.isdir(os.path.join(path, "gateway-locks")))
 
-    A beside folder is <parent>/gateway-locks, the same path for every home under that
-    parent. With a second Hermes home beside it, the record there is ambiguous and this
-    home must not take it; the explicit folder from detection is the way to pick it.
+def has_hermes_sibling(home):
+    """Any other Hermes home in the same parent, following links.
+
+    The same on-disk fact detection uses: beside a home that shares its parent with
+    another Hermes home, gateway-locks is ambiguous and is never this home's record.
     """
     path = os.path.normpath(home)
     parent, name = os.path.dirname(path), os.path.basename(path)
     try:
         entries = list(os.scandir(parent))
+        own = os.path.realpath(path)
     except OSError:
         return False
     for entry in entries:
         if entry.name == name:
             continue
         try:
-            if not entry.is_dir(follow_symlinks=False):
+            if not is_hermes_home(entry.path):
                 continue
-            if os.path.isfile(os.path.join(entry.path, "config.yaml")):
-                return False
-            if os.path.isdir(os.path.join(entry.path, "gateway-locks")):
-                return False
+            if os.path.realpath(entry.path) != own:
+                return True
         except OSError:
             continue
-    return True
+    return False
+
+def home_spellings(launch_home):
+    written = os.path.normpath(launch_home)
+    homes = [written]
+    try:
+        real = os.path.realpath(written)
+    except OSError:
+        real = written
+    if real not in homes:
+        homes.append(real)
+    return homes
+
+def beside_spelling(folder, launch_home):
+    folder = os.path.normpath(folder)
+    if os.path.basename(folder) != "gateway-locks":
+        return False
+    for home in home_spellings(launch_home):
+        if os.path.dirname(folder) == os.path.dirname(home):
+            return True
+    return False
+
 
 def state_folder(explicit, launch_home):
     """The chosen serve's own record folder.
@@ -161,6 +185,11 @@ def state_folder(explicit, launch_home):
             raise Fault("serve-gateway")
         if record is None:
             raise Fault("serve-not-running")
+        # A beside folder is ambiguous when the chosen home shares its parent with
+        # another Hermes home: never let an explicit pick take that record.
+        if isinstance(launch_home, str) and launch_home.startswith("/") and beside_spelling(explicit, launch_home):
+            if any(has_hermes_sibling(home) for home in home_spellings(launch_home)):
+                raise Fault("serve-record")
         return explicit, record
     own, shared = [], []
     def add(folder, target):
@@ -171,16 +200,8 @@ def state_folder(explicit, launch_home):
         # home moved to another disk keeps its record beside the link, and a real
         # home keeps its own beside folder; each is taken only when it is the single
         # Hermes home under that parent.
-        written = os.path.normpath(launch_home)
-        homes = [written]
-        try:
-            real = os.path.realpath(written)
-        except OSError:
-            real = written
-        if real not in homes:
-            homes.append(real)
-        for home in homes:
-            if only_home_in_parent(home):
+        for home in home_spellings(launch_home):
+            if not has_hermes_sibling(home):
                 add(os.path.join(os.path.dirname(home), "gateway-locks"), own)
             add(os.path.join(home, "gateway-locks"), own)
             add(os.path.join(home, ".local", "state", "hermes", "gateway-locks"), own)
