@@ -660,28 +660,43 @@ export function install(rt) {
     const effort = await desiredEffort(bot, ref)
     const ownChanged = force || staying.size > 0 || bot.appliedModel !== ref || (bot.appliedEffort ?? undefined) !== effort
     const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
-    // An attached serve answers on its one row whatever ref a request names
-    // (remote-chat-adapter.js stream): a Session already on a hermes-remote route is
-    // served by that row without an in-place DSH model switch. Selecting attach there
-    // would ask DSH to compact the carried-over chat onto the attach row, which fails as
-    // MODEL_SWITCH_COMPACTION_FAILED before the turn; keeping the Session's own route
-    // leaves the header and the request on the same ref, so #1334's exact-route guard
-    // accepts the turn and the attached transport submits it.
-    const carriedHermes = typeof bot.previousModel === 'string' && bot.previousModel.startsWith('hermes-remote/')
-      && bot.previousModel !== 'hermes-remote/attach'
-    const onAttachedTransport = sessionId => {
+    // THE RULE: a chat already on a Remote Hermes route never takes the in-place model
+    // switch to the attach row, whatever came before. The attached serve answers on its
+    // one row whatever ref the request names (remote-chat-adapter.js stream), so the
+    // Session keeps its route and the exact-route guard accepts the turn. The decision is
+    // the chat's ACTUAL route: the live Session's request header, or, for an unloaded
+    // chat, the last request/header in its stored log. It is never the history of picks.
+    const storedRoute = async (sessionId) => {
+      if (typeof ctx.sessionPersistence?.open !== 'function') return undefined
+      let handle
+      try {
+        handle = await ctx.sessionPersistence.open(sessionId, 'read')
+        const { events } = await handle.read()
+        for (let index = events.length - 1; index >= 0; index -= 1) {
+          if (events[index]?.type === 'request/header') return events[index].data?.header?.config
+        }
+        return undefined
+      } catch { return undefined } finally {
+        try { await handle?.release?.() } catch {}
+      }
+    }
+    const lastAttachAnswer = () => {
+      try { return rt.modelStateView?.()?.[bot.id]?.lastAnswer?.ref === 'hermes-remote/attach' } catch { return false }
+    }
+    const onHermesRoute = async (sessionId) => {
       if (ref !== 'hermes-remote/attach') return false
       let config
       try { config = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config } catch { return false }
+      if (config === undefined) config = await storedRoute(sessionId)
       if (config?.provider === 'hermes-remote') return true
-      // The Bot's chat is not loaded yet: its record's last answered ref is the carried
-      // route. A Bot that never answered on Hermes has no such ref, so a new chat on
-      // another provider still takes the switch.
-      return config === undefined && sessionId === chat && carriedHermes
+      // No stored route to read (a host without persistence): an answer already
+      // attributed to the attach row still says this chat is served by it.
+      return config === undefined && sessionId === chat && lastAttachAnswer()
     }
-    if (ownChanged && !staying.has(chat) && !onAttachedTransport(chat)) await selectSessionModel(chat, route)
+    if (ownChanged && !staying.has(chat) && !(await onHermesRoute(chat))) await selectSessionModel(chat, route)
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
-      if (staying.has(sessionId) || onAttachedTransport(sessionId)) continue
+      if (staying.has(sessionId)) continue
+      if (await onHermesRoute(sessionId)) continue
       const applied = sessionSelections.get(sessionId)
       if (!force && applied !== undefined && sameSelection(applied, route)) continue
       await selectSessionModel(sessionId, route)

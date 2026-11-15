@@ -246,19 +246,28 @@ test('a carried-over chat on a Hermes route keeps its route when the Bot moves t
   }
 })
 
-test('a carried-over chat that is not loaded yet still keeps its Hermes route', async () => {
+test('a carried-over chat that is not loaded still keeps its Hermes route', async () => {
   const { rt, selected } = bench({ providers: { 'hermes-remote': ['attach'] } })
   rt.ctx.llm.listModels = async provider => provider === 'hermes-remote'
     ? [{ id: 'attach', name: 'gpt-6-astra (openai-codex)', model: 'gpt-6-astra', providerId: 'openai-codex', contextWindow: 200_000 }]
     : []
   rt.ctx.sessions = { get: () => undefined }
-  const carried = { id: 'b1', model: 'hermes-remote/attach', appliedModel: 'hermes-remote/attach', previousModel: 'hermes-remote/nous:openai/gpt-6-astra' }
+  // The stored Session's last request is what decides, not a pick's history.
+  rt.ctx.sessionPersistence = {
+    open: async id => id === 'b1'
+      ? {
+        read: async () => ({ events: [{ type: 'request/header', data: { header: { config: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } } }] }),
+        release: async () => {},
+      }
+      : undefined,
+  }
+  const carried = { id: 'b1', model: 'hermes-remote/attach', appliedModel: 'hermes-remote/attach', previousModel: 'hermes-remote/attach' }
   assert.equal(await rt.applyModel(carried, { force: true }), 'hermes-remote/attach')
   assert.deepEqual(selected, [], 'no in-place switch while the carried chat is not loaded')
-  // A Bot that never answered on Hermes has no carried route: a new chat takes attach.
-  const fresh = { id: 'b1', model: 'hermes-remote/attach' }
+  // A new chat has no stored route: it takes attach.
+  const fresh = { id: 'b2', model: 'hermes-remote/attach' }
   assert.equal(await rt.applyModel(fresh, { force: true }), 'hermes-remote/attach')
-  assert.deepEqual(selected, ['b1:hermes-remote/attach'])
+  assert.deepEqual(selected, ['b2:hermes-remote/attach'])
 })
 
 // A connection by address and token is not the attached serve: a change between two of its

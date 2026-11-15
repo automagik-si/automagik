@@ -573,6 +573,8 @@ test('a carried-over chat keeps its old Hermes ref and the attach row answers th
     runtime.registerAdapter(['hermes-remote'], adapter)
     const request = Object.freeze({ provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra', sessionId: 'sample-chat', messages })
     assert.equal(RemoteChatAdapter.ownTurn(request, agent), true, `the exact-route guard accepts the carried-over header (${count} messages)`)
+    // Same provider, another model: not this turn and never dispatched.
+    assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ ...request, model: 'nous:openai/another-model' }), agent), false)
     const stream = runtime.stream(markAgentLoopRequest(Object.freeze({ ...request, tools: Object.freeze([]), signal: new AbortController().signal })))
     const first = stream.next()
     await until(() => f.sent.some(frame => frame.method === 'prompt.submit'), 'the carried-over prompt to be submitted', first)

@@ -8,7 +8,7 @@ import { fakeContext } from './fake-ctx.js'
 // row; the answer must count for the pick or the switch never confirms.
 function bench({ model = 'hermes-remote/attach', previousModel = 'hermes-remote/nous:openai/gpt-6-astra' } = {}) {
   const ctx = fakeContext()
-  const bot = { id: 'b1', name: 'Felipe', model, ...(previousModel === undefined ? {} : { previousModel }) }
+  const bot = { id: 'b1', name: 'Sample Bot', model, ...(previousModel === undefined ? {} : { previousModel }) }
   const saved = [], applied = []
   const rt = {
     ctx,
