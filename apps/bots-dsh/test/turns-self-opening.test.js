@@ -50,3 +50,16 @@ test('only goal rounds open a turn by themselves', () => {
   assert.equal(opensByItself({ kind: 'system-prompt' }), false)
   assert.equal(opensByItself(undefined), false)
 })
+
+test('call capability reads only live raw arguments, never child display detail', () => {
+  const { rt } = host()
+  rt.live.set('b', { calls: new Map([['c', { args: '{"path":"/tmp/a","timeout":5}' }], ['m', { args: '{"path":"/tmp/a","content":"x"}' }]]) })
+  rt.childCallDetail = () => ({ code: 'child path' })
+  assert.equal(rt.callCapability('b', 'c', 'read'), '["path","/tmp/a",null]')
+  // A field the card does not show makes the ask its own.
+  assert.equal(rt.callCapability('b', 'm', 'write'), undefined)
+  assert.equal(rt.callCapability('b', 'missing', 'read'), undefined)
+  assert.equal(rt.callCapability('child', 'c', 'read'), undefined)
+  rt.live.delete('b')
+  assert.equal(rt.callCapability('b', 'c', 'read'), undefined)
+})

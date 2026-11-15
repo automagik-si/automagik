@@ -25,6 +25,39 @@ const MODULES = 'node_modules/'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 
+const ENGINE = join(PLUGIN, MODULES, '@jitl/quickjs-singlefile-mjs-release-sync', 'dist/emscripten-module-Q67P5WYC.mjs')
+const ENGINE_SHA256 = '931aa7ba3694b7a0469c8e6df620e25692302c13b87d758d427203a2ebdad192'
+const HOME_DEFAULT = `HOME:"${['', 'home', 'web_user'].join('/')}"`
+const HOME_CONTEXT = `USER:"web_user",LOGNAME:"web_user",PATH:"/",PWD:"/",${HOME_DEFAULT},LANG:`
+
+// Change only Emscripten's virtual default, never its override loop or embedded WASM.
+// Check structure as well as original bytes; a package update needs a fresh review.
+export function prepareQuickjsSource(bytes) {
+  const source = bytes.toString('utf8')
+  if (source.split(HOME_CONTEXT).length !== 2 || source.split(HOME_DEFAULT).length !== 2) {
+    throw new Error('QuickJS must contain exactly one expected virtual HOME default context')
+  }
+  if (sha256(bytes) !== ENGINE_SHA256) throw new Error('QuickJS original source SHA-256 differs from the reviewed engine')
+  return source.replace(HOME_CONTEXT, HOME_CONTEXT.replace(HOME_DEFAULT, 'HOME:"/"'))
+}
+
+export function quickjsVirtualHomePlugin() {
+  let loads = 0
+  return {
+    name: 'quickjs-virtual-home',
+    setup(builder) {
+      builder.onLoad({ filter: /emscripten-module-.*\.mjs$/, namespace: 'file' }, ({ path }) => {
+        if (path !== ENGINE) throw new Error('Unexpected QuickJS engine hook target')
+        if (++loads !== 1) throw new Error('QuickJS engine hook must run exactly once')
+        return { contents: prepareQuickjsSource(readFileSync(path)), loader: 'js', resolveDir: dirname(path) }
+      })
+      builder.onEnd(() => {
+        if (loads !== 1) return { errors: [{ text: 'QuickJS engine hook must run exactly once' }] }
+      })
+    },
+  }
+}
+
 // { text, pins }: the file's text, and what it took from node_modules as { package: {
 // version, files: { path: sha256 } } }.
 export async function bundleScriptChild() {
@@ -35,7 +68,8 @@ export async function bundleScriptChild() {
     format: 'esm',
     platform: 'node',
     target: 'node24',
-    charset: 'utf8',
+    charset: 'ascii',
+    plugins: [quickjsVirtualHomePlugin()],
     metafile: true,
     write: false,
     logLevel: 'silent',

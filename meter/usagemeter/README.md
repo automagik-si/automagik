@@ -388,6 +388,7 @@ none (dsh-tui) and the backlog while a reset's re-import is unfinished are null.
 syncs: only `sync` refreshes the store.
 `sync` keeps an index on (repo, branch, hour), made by its first run after an upgrade (no row
 changes, no new `schema_version`); a query reads the repo's rows in its window through it.
+With `--since` and `--until`, an exact-date answer also counts the hourly-only tokens of its whole hours as before-evidence.
 
 ```sh
 usagemeter query --repo example.com/acme/widgets --by bot [--branch feat/x ...] --json

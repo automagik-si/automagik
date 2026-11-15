@@ -8,16 +8,23 @@
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { LlmAdapter, boundContextSummary, createUserMessage, isAgentLoopRequest } from '@deepseek-ai/dsh-llm'
+import { isDeepStrictEqual } from 'node:util'
+import {
+  LlmAdapter, boundContextSummary, createUserMessage, fileHandleText,
+  isAgentLoopRequest, offloadedImageText,
+} from '@deepseek-ai/dsh-llm'
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
 import { recordDrift } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
+import { SessionFiles, restrictedLevel } from './session-files.js'
+import { chatProfileModes } from './codex-chat-profiles.js'
 import { BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
 import { agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
 import { callArguments, entered, levelOf, mirrorTool, reviewed, TOOL_NAME } from './tool.js'
 import { guardSession } from './write-guard.js'
+import { checkUploadSize, prepareUpload } from './upload-content.js'
 
 // How long a prompt has to end after it was asked to stop. `session/cancel` is a notification:
 // nothing says the agent took it, and one that ignores it would stay busy for good.
@@ -45,6 +52,11 @@ export const HELD_TEXT = 'This conversation is on hold while its permission leve
 // agent and its scoped tools live on, so the next adapter must find and replace the registration
 // the previous one made. A Symbol.for key is the same key in the reloaded module.
 const MIRROR_REGISTRATION = Symbol.for('@automagik/acp-dsh/mirror-registration')
+
+const bridgeRow = message => (
+  (message?.role === 'assistant' && message?.source?.synthetic === SYNTHETIC_KIND)
+  || (message?.role === 'developer' && message?.source?.kind === SYNTHETIC_KIND)
+)
 
 const detailed = tool => (tool.rawInput !== undefined && tool.rawInput !== null && Object.keys(tool.rawInput).length > 0) || tool.permission !== undefined || tool.status !== 'pending'
 function settle(tool, ms) {
@@ -170,7 +182,7 @@ export function ownPermissionsNotice(name) {
 // and the new-session notice is for the person. A Bot part's handoff package is the record the
 // part carries on from, so it stays beside the person's words (in its place) rather than being
 // dropped for them; it is a crossing of earlier text, so it passes the redactor.
-export function promptOf(messages, redact = text => text) {
+function promptRows(messages) {
   let start = messages.length
   while (start > 0 && messages[start - 1].role === 'user') start--
   // A failed request may leave no assistant row. Retry starts a new continuation even
@@ -178,10 +190,152 @@ export function promptOf(messages, redact = text => text) {
   const retry = messages.findLastIndex(message => message.role === 'user' && message.source?.kind === 'retry')
   const turn = messages.slice(Math.max(start, retry)).filter(message => message.source?.kind !== NOTICE_KIND)
   const own = turn.filter(message => message.source?.kind === 'user' || message.source?.kind === 'retry' || isHandoff(message))
-  const text = (own.length > 0 ? own : turn)
+  // Offload is a durable DSH decision, not permission to recover an omitted image. Use
+  // DSH's existing no-path placeholder for a genuine user's marked occurrence.
+  const rows = (own.length > 0 ? own : turn).map(row => row.source?.kind === 'user' && !isHandoff(row) && Array.isArray(row.content)
+    ? { ...row, content: row.content.map(block => block?.type === 'image' && block.offloaded === true
+      ? { type: 'text', text: offloadedImageText(block.attachment) } : block) } : row)
+  return { own, rows }
+}
+
+export function promptOf(messages, redact = text => text) {
+  const { own, rows } = promptRows(messages)
+  const text = rows
     .map(message => (isHandoff(message) ? redact(textOf(message.content)) : textOf(message.content)))
     .filter(Boolean).join('\n\n')
   return [{ type: 'text', text: text || (own.some(message => message.source?.kind === 'retry') ? 'Continue.' : '') }]
+}
+
+// A group relay carries pointers only. Both Sessions and the current membership must
+// agree before the person's durable row can supply a reference for a workspace copy.
+function ownsRoomUploads(ctx, session, roomId) {
+  try {
+    const team = ctx?.get?.('omniTeam')
+    const owner = team?.groupOwners?.get(session?.id)
+    if (!session?.id || owner?.roomId !== roomId || !owner.botId) return false
+    const room = team.roomOf(roomId)
+    return Array.isArray(room?.members) && room.members.includes(owner.botId) &&
+      room.sessions?.[owner.botId] === session.id
+  } catch { return false }
+}
+
+function roomUploads(row, saved, session, ctx) {
+  const fresh = message => message?.source?.kind === 'bot' &&
+    message.source.role === 'room' && !isHandoff(message) &&
+    !message.source.resumed && !message.source.retried && !message.source.resume
+  const uploads = row.source?.uploads
+  if (!fresh(row) || !fresh(saved) || uploads?.v !== 1 ||
+      typeof uploads.roomId !== 'string' || !Array.isArray(uploads.items) ||
+      !isDeepStrictEqual(saved.source.uploads, uploads)) return []
+  let group
+  try {
+    if (!ownsRoomUploads(ctx, session, uploads.roomId)) return []
+    group = ctx.agents?.get(uploads.roomId)?.session?.deriveMessages?.()
+  } catch { return [] }
+  if (!Array.isArray(group)) return []
+  return uploads.items.flatMap(item => {
+    if (!item || typeof item.messageId !== 'string' ||
+        typeof item.attachmentId !== 'string' ||
+        !Number.isInteger(item.blockIndex) || item.blockIndex < 0 ||
+        !['file', 'image'].includes(item.kind)) return []
+    const person = group.find(message => message.id === item.messageId)
+    if (person?.source?.kind !== 'user' || person.source.handoff ||
+        !Array.isArray(person.content) || item.blockIndex >= person.content.length) return []
+    const block = person.content[item.blockIndex]
+    return block?.type === item.kind &&
+      block.attachment?.attachmentId === item.attachmentId && !block.offloaded
+      ? [{ type: block.type, attachment: block.attachment, copyOnly: true }] : []
+  })
+}
+
+function isFileHandle(text, ref) {
+  if (text === fileHandleText(ref, undefined)) return true
+  if (typeof text !== 'string') return false
+  const template = fileHandleText(ref, '')
+  // DSH's quoted() uses JSON.stringify for names and paths.
+  const empty = JSON.stringify('')
+  const marker = ': verbatim read-only copy saved at '
+  const at = template.lastIndexOf(marker + empty)
+  if (at < 0) return false
+  const head = template.slice(0, at + marker.length)
+  const tail = template.slice(at + marker.length + empty.length)
+  if (!text.startsWith(head) || !text.endsWith(tail)) return false
+  const middle = text.slice(head.length, text.length - tail.length)
+  try {
+    const path = JSON.parse(middle)
+    return typeof path === 'string' && JSON.stringify(path) === middle
+  } catch { return false }
+}
+
+// Legacy fallback rows still supply text, never fresh image authority. Retry and handoff
+// rows likewise cannot replay an earlier accepted image. Undefined keeps the text path exact.
+function uploadBlocks(messages, redact, session, ctx) {
+  const selected = promptRows(messages).rows
+  const durable = session?.deriveMessages?.() ?? []
+  const files = new Set()
+  const relays = new Set()
+  const rows = selected.map(row => {
+    const saved = row.id ? durable.find(message => message.id === row.id) : undefined
+    const verified = roomUploads(row, saved, session, ctx)
+    if (verified.length > 0) {
+      const content = Array.isArray(row.content)
+        ? row.content.filter(block => block?.type === 'text') : []
+      if (!Array.isArray(row.content)) content.push({ type: 'text', text: textOf(row.content) })
+      const consumed = new Set()
+      for (const block of verified) {
+        const index = Array.isArray(saved.content) && Array.isArray(row.content) &&
+          saved.content.length === row.content.length
+          ? saved.content.findIndex((part, index) => {
+            if (consumed.has(index) || part?.type !== 'file' || block.type !== 'file' ||
+                part.attachment?.attachmentId !== block.attachment.attachmentId ||
+                part.attachment?.name !== block.attachment.name ||
+                row.content[index]?.type !== 'text') return false
+            return isFileHandle(row.content[index].text, part.attachment)
+          }) : -1
+        const projected = index < 0 ? undefined : row.content[index]
+        const at = projected === undefined ? -1 : content.indexOf(projected)
+        if (at < 0) content.push(block)
+        else {
+          content.splice(at, 1, block)
+          consumed.add(index)
+        }
+        files.add(block)
+      }
+      const relay = { ...row, content }
+      relays.add(relay)
+      return relay
+    }
+    if (row.source?.kind !== 'user' || isHandoff(row) || !row.id ||
+        !Array.isArray(row.content)) return row
+    if (!saved || saved.source?.kind !== 'user' || isHandoff(saved) ||
+        !Array.isArray(saved.content) || saved.content.length !== row.content.length) return row
+    if (saved.content.some((block, index) =>
+      block?.type === 'file' && row.content[index]?.type !== 'text')) return row
+    return { ...row, content: row.content.map((block, index) => {
+      if (saved.content[index]?.type !== 'file') return block
+      const file = saved.content[index]
+      files.add(file)
+      return file
+    }) }
+  })
+  const genuine = row => relays.has(row) ||
+    (row.source?.kind === 'user' && !isHandoff(row))
+  const upload = block => block?.type === 'image' || files.has(block)
+  if (!rows.some(row => genuine(row) && Array.isArray(row.content) &&
+      row.content.some(upload))) return undefined
+  const blocks = []
+  for (const row of rows) {
+    const parts = genuine(row) && Array.isArray(row.content)
+      ? row.content.filter(block => upload(block) || block?.type === 'text')
+      : [{ type: 'text', text: isHandoff(row) ? redact(textOf(row.content)) : textOf(row.content) }]
+    if (!parts.some(block => upload(block) || block.text)) continue
+    if (blocks.length) blocks.push({ type: 'text', text: '\n\n' })
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0 && parts[i - 1].type === 'text' && parts[i].type === 'text') blocks.push({ type: 'text', text: '\n' })
+      blocks.push({ ...parts[i] })
+    }
+  }
+  return { blocks, roomIds: [...relays].map(row => row.source.uploads.roomId) }
 }
 
 /** Where a Session title on an agent's chat goes when DSH's default model is an agent too. */
@@ -373,7 +527,12 @@ export class AcpAdapter extends LlmAdapter {
    *   replaces CANCEL_WAIT_MS; `timers` is the clock all three run on. Tests set them, so none
    *   waits a real deadline out.
    */
-  constructor(ctx, agents, { dshTools = () => false, backchannel, redactor, onSignedOut, images = () => undefined, access, holds, ownMode = () => undefined, ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS, timers = globalThis } = {}) {
+  constructor(ctx, agents, {
+    dshTools = () => false, backchannel, redactor, onSignedOut, images = () => undefined,
+    botIdentity = () => undefined, access, holds, ownMode = () => undefined,
+    ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
+    fileDrainMs = 6000, timers = globalThis,
+  } = {}) {
     super()
     this.cancelWaitMs = cancelWaitMs
     this.timers = timers
@@ -395,10 +554,31 @@ export class AcpAdapter extends LlmAdapter {
     this.ctx = ctx
     this.agents = agents
     this.dshTools = dshTools
+    this.botIdentity = botIdentity
     this.backchannel = backchannel
     this.redact = redactor ?? (text => text)
     this.live = new Map()
-    this.tool = mirrorTool({ runOf: sessionId => this.live.get(sessionId), cancelled: (sessionId, live) => this.reap(sessionId, live), approval: () => ctx.get?.('approval'), sandboxPolicy: () => ctx.get?.('sandboxPolicy'), permissionPresets: () => ctx.get?.('permissionPresets'), images, attachments: () => ctx.get?.('attachments') })
+    this.sessionFiles = new SessionFiles({
+      agent: id => this.ctx.agents?.get?.(id), live: id => this.live.get(id),
+      level: session => levelOf(ctx.get?.('approval'), session, ctx.get?.('sandboxPolicy'), ctx.get?.('permissionPresets')),
+      questions: () => ctx.get?.('userQuestions'), drainMs: fileDrainMs,
+      retire: (id, live) => this.end(id, live, { preserveFiles: true }),
+      revoke: owner => {
+        if (this.live.get(owner.session.id)?.fileOwner === owner) this.endSession(owner.session.id, 'Image session permission expired.')
+      },
+    })
+    this.tool = mirrorTool({
+      sessionFiles: (...args) => this.sessionFiles.ask(...args),
+      runOf: sessionId => this.live.get(sessionId),
+      cancelled: (sessionId, live) => this.reap(sessionId, live),
+      bridgeApprovals: (sessionId, position, signal) =>
+        this.backchannel?.awaitApprovals?.(sessionId, position, signal),
+      approval: () => ctx.get?.('approval'),
+      sandboxPolicy: () => ctx.get?.('sandboxPolicy'),
+      permissionPresets: () => ctx.get?.('permissionPresets'),
+      images,
+      attachments: () => ctx.get?.('attachments'),
+    })
     // A new chat's first model step lists its tools after `agent/created`: register the mirror
     // tool there in every agent's own scope, with the step condition that admits it only on
     // this adapter's routes. A chat is created on DSH's default route and may be picked to an
@@ -420,7 +600,8 @@ export class AcpAdapter extends LlmAdapter {
     this.ctx.on?.('agent/disposed', ({ agent } = {}) => {
       const id = agent?.session?.id
       const live = this.live.get(id)
-      if (live?.own) this.end(id, live)
+      if (live?.own || live?.fileOwner) this.end(id, live)
+      if (this.sessionFiles.owners.get(id)?.agent === agent) this.sessionFiles.clear(id)
     })
     for (const agent of this.ctx.agents?.list?.() ?? []) this.registerMirror(agent)
     // A mirror call DSH refuses before its body (a gate, a failed review, the person's no, a
@@ -457,6 +638,11 @@ export class AcpAdapter extends LlmAdapter {
    */
   refusedFirst(exec) {
     try {
+      if (exec?.name === TOOL_NAME && exec.parent === undefined) {
+        const live = this.live.get(exec.agent?.session?.id)
+        live?.pendingMirrors?.delete(exec.callId)
+        this.sessionFiles.owners.get(exec.agent?.session?.id)?.grant?.retired?.pendingMirrors?.delete(exec.callId)
+      }
       if (exec?.name !== TOOL_NAME || exec.parent !== undefined || entered.has(exec)) return
       const live = this.live.get(exec.agent?.session?.id)
       if (live?.calls?.has(exec.callId) !== true) return
@@ -536,10 +722,12 @@ export class AcpAdapter extends LlmAdapter {
    * credential minted while `dshTools` was on cannot keep reaching DSH tools.
    */
   endSessions() {
+    for (const id of this.sessionFiles.owners.keys()) this.sessionFiles.clear(id)
     for (const [sessionId, live] of this.live) this.end(sessionId, live)
   }
 
   endProvider(provider, why) {
+    for (const [id, owner] of this.sessionFiles.owners) if (owner.provider === provider) this.endSession(id, why)
     for (const [id, starting] of this.starting) {
       if (starting.provider === provider) this.endSession(id, why)
     }
@@ -553,7 +741,15 @@ export class AcpAdapter extends LlmAdapter {
    * DSH Session keeps its transcript, so the next turn starts a new agent session and the
    * replay carries the chat to it.
    */
-  end(sessionId, live) {
+  end(sessionId, live, { preserveFiles = false } = {}) {
+    const upload = this.starting.get(sessionId)?.upload
+    if (upload && upload.run === live.run) upload.controller.abort()
+    if (!preserveFiles) this.sessionFiles.clear(sessionId, { retire: false })
+    const bridge = live.bridge
+    if (bridge !== undefined && bridge.calls > 0 && bridge.drained === undefined) {
+      const hold = guardSession(live.dshAgent?.session ?? bridge.agent?.session)
+      bridge.drained = () => hold?.release()
+    }
     this.timers.clearTimeout(live.reaper)
     live.reaper = undefined
     live.reaping = undefined
@@ -570,6 +766,7 @@ export class AcpAdapter extends LlmAdapter {
    * process would go on with whatever it was doing, and every later message would fail.
    */
   reap(sessionId, live) {
+    if (live?.fileOwner) { this.end(sessionId, live); return }
     const prompt = live?.run?.prompting
     if (prompt === undefined || live.reaping === prompt) return
     this.timers.clearTimeout(live.reaper)
@@ -689,9 +886,11 @@ export class AcpAdapter extends LlmAdapter {
    * @returns {boolean} whether an agent session was live or starting there
    */
   endSession(sessionId, why) {
+    this.sessionFiles.clear(sessionId, { retire: false })
     const text = typeof why === 'string' && why.trim() !== '' ? why : HELD_TEXT
     const starting = this.starting.get(sessionId)
     if (starting !== undefined) starting.held ??= text
+    starting?.upload?.controller.abort()
     const live = this.live.get(sessionId)
     if (live === undefined) return starting !== undefined
     live.held = text
@@ -760,7 +959,7 @@ export class AcpAdapter extends LlmAdapter {
    */
   async refork(agent, live, dshAgent, signal) {
     const previous = live.bridge
-    const next = this.backchannel.mint({ sessionId: dshAgent?.session?.id, agent: dshAgent, name: agent.name })
+    const next = this.backchannel.mint({ sessionId: dshAgent?.session?.id, agent: dshAgent, name: agent.name, promptRunning: () => live.open === true && live.run?.busy === true })
     live.bridge = next
     try {
       await live.run.held(() => live.run.fork({
@@ -819,6 +1018,12 @@ export class AcpAdapter extends LlmAdapter {
    * shows; the model selection itself is DSH's.
    */
   noteEvent(session, event) {
+    // Every observed crossing invalidates this owner's epoch, including away and back and
+    // sessions kept by the ordinary bridge-off path. No transcript can recreate authority.
+    const owner = this.sessionFiles.owners.get(session?.id)
+    if (owner?.session === session && ['permission/preset', 'sandbox/mode', 'approval/policy', 'model/selection'].includes(event?.type)) {
+      this.endSession(session.id, 'Image session permission changed. Send a new message to continue.')
+    }
     if (event?.type !== 'model/selection') return
     const live = this.live.get(session?.id)
     if (live === undefined) return
@@ -841,6 +1046,7 @@ export class AcpAdapter extends LlmAdapter {
 
   // An agent whose ACP adapter is not installed yet lists no model, so nothing (a picker, a
   // Bot's model) can choose one that cannot answer.
+  // Omit modalities here so bots-dsh never picks ACP models for OCR side requests.
   async listModels(provider) {
     const agent = this.agents.get(provider)
     if (agent === undefined || agent.installed?.() === false) return []
@@ -850,9 +1056,16 @@ export class AcpAdapter extends LlmAdapter {
   // A model's efforts are the ones the agent offers for it; DSH turns down any other before the
   // agent sees it. An id the agent does not list resolves bare, as DSH's routing allows.
   async resolveModel(provider, model) {
-    const found = await this.agents.get(provider)?.catalog.model(model)
-    if (found === undefined) return { provider, id: model, name: model }
-    return { provider, id: found.id, name: found.name, ...(found.description ? { description: found.description } : {}), ...(found.reasoning ? { reasoning: found.reasoning } : {}) }
+    const agent = this.agents.get(provider)
+    const found = await agent?.catalog.model(model)
+    const imageInput = agent?.imageInput === true ? { inputModalities: ['text', 'image'] } : {}
+    if (found === undefined) return { provider, id: model, name: model, ...imageInput }
+    return {
+      provider, id: found.id, name: found.name,
+      ...(found.description ? { description: found.description } : {}),
+      ...(found.reasoning ? { reasoning: found.reasoning } : {}),
+      ...imageInput,
+    }
   }
 
   // The mirror tool lives in the agent's own scope: no other Session's model sees it. The
@@ -877,10 +1090,22 @@ export class AcpAdapter extends LlmAdapter {
   // One model step. The turn that is starting there is tracked from here to the step's last
   // exit (`starting`), whichever way it leaves: a refusal, a failure, a stop, its end.
   async *stream(options) {
+    if (this.sessionFiles.owners.get(options.sessionId)?.grant && this.starting.has(options.sessionId)) {
+      return yield finish('error', 'The image session is already starting. Wait for that message to finish.')
+    }
     const entry = { held: undefined }
+    const stopFiles = () => {
+      if (this.sessionFiles.owners.has(options.sessionId)) this.endSession(options.sessionId, 'The image session was stopped.')
+    }
+    options.signal?.addEventListener('abort', stopFiles, { once: true })
+    if (options.signal?.aborted) stopFiles()
     try {
       yield* this.step(options, entry)
     } finally {
+      options.signal?.removeEventListener('abort', stopFiles)
+      if (entry.fileStartup && this.starting.get(options.sessionId) === entry && this.sessionFiles.owners.get(options.sessionId)?.grant
+          && (entry.upload === undefined || (this.live.get(options.sessionId) === entry.upload.live
+            && entry.upload.live.run === entry.upload.run))) this.endSession(options.sessionId)
       if (this.starting.get(options.sessionId) === entry) this.starting.delete(options.sessionId)
     }
   }
@@ -930,18 +1155,21 @@ export class AcpAdapter extends LlmAdapter {
     const last = options.messages.at(-1)
     // The step after a mirror call's result continues the agent's turn. The bridge writes result
     // rows of its own (a DSH tool call's result, or the row that closes a call still open when
-    // its step ended, #957), and one of those can come after the mirror call's result: the
-    // mirror result is looked for among all the tool messages the transcript ends with.
+    // its step ended, #957). Its advertisement can also follow the mirror result (#1293).
+    // Look back through tool messages and bridge rows for the mirror result.
     const mirrorAnswered = (() => {
-      for (let i = options.messages.length - 1; i >= 0 && options.messages[i]?.role === 'tool'; i--) {
-        if (live?.calls.has(options.messages[i].toolCallId)) return true
+      for (let i = options.messages.length - 1; i >= 0; i--) {
+        const message = options.messages[i]
+        if (bridgeRow(message)) continue
+        if (message?.role !== 'tool') return false
+        if (live?.calls.has(message.toolCallId)) return true
       }
       return false
     })()
     const continuing = mirrorAnswered && live?.provider === options.provider && live.open
     if (continuing) started()
     if (!continuing) {
-      if (last?.role === 'tool') {
+      if (options.messages.findLast(message => !bridgeRow(message))?.role === 'tool') {
         // The agent may still be on the prompt this step belonged to. Nobody is reading it any
         // more, so it is asked to stop now, and its session is ended if it has not stopped in
         // the time a cancel gets (`reap`, which also answers whatever it was still asking),
@@ -954,6 +1182,44 @@ export class AcpAdapter extends LlmAdapter {
         yield* blocks.add('text', `${agent.name} was interrupted before it finished, so it is not answering this turn any more.`)
         yield* blocks.close()
         return yield finish('stop')
+      }
+      // Only a genuine user message activates staged file authority. The trailing-tool
+      // guard above remains the sole continuation rule; no approval creates a prompt.
+      let fileOwner
+      let fileContext
+      if (agent.sessionFiles === true) {
+        const level = levelOf(this.ctx.get?.('approval'), dshAgent.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
+        let strictChat = restrictedLevel(level)
+        if (strictChat && level.sandbox === 'workspace-write' && agent.ownMode !== undefined) {
+          strictChat = await this.ownAnswer(sessionId, dshAgent, options.provider) !== 'yes'
+        }
+        if (options.signal?.aborted || entry.held !== undefined) return yield* stopped(entry.held ?? 'The image session was stopped.')
+        const currentLevel = levelOf(this.ctx.get?.('approval'), dshAgent.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
+        if (strictChat && (!restrictedLevel(currentLevel) || currentLevel.sandbox !== level.sandbox)) {
+          this.endSession(sessionId)
+          return yield* stopped('Image session permission changed. Send a new message to continue.')
+        }
+        if (strictChat) {
+          fileOwner = this.sessionFiles.owner(dshAgent, options.provider)
+          entry.fileStartup = true
+          try {
+            const files = await this.sessionFiles.activate(fileOwner, last, options.signal)
+            if (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined) throw new Error('Image permission changed before startup.')
+            fileContext = { sandbox: level.sandbox, files }
+          } catch (error) {
+            this.endSession(sessionId)
+            return yield finish('error', error.message)
+          }
+        } else if (this.sessionFiles.owners.has(sessionId)) {
+          this.endSession(sessionId, 'Image session permission changed. Send a new message to continue.')
+          return yield* stopped('Image session permission changed. Send a new message to continue.')
+        }
+        // Feature configuration belongs to the process. An effective own-mode/level crossing
+        // cannot retain it, even when there is no bridge and no granted file yet.
+        if (live && (Boolean(live.fileOwner) !== Boolean(fileOwner) || (fileOwner && live.fileOwner !== fileOwner))) {
+          this.end(sessionId, live, { preserveFiles: true })
+          live = undefined
+        }
       }
       // A bridge that closed (its process ended and said so) is not coming back: the agent on
       // that session has lost DSH's tools for good, and would answer this turn without them.
@@ -1011,31 +1277,61 @@ export class AcpAdapter extends LlmAdapter {
       const replaying = this.replayOn()
       if (live === undefined) {
         crossing = replaying && prior !== undefined && prior !== options.provider
-        const state = { provider: options.provider, name: agent.name, asks, run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent, bridge: undefined, replay: undefined, owed: undefined, drifted: false }
+        const state = { fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox, provider: options.provider, name: agent.name, asks, run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent, bridge: undefined, replay: undefined, owed: undefined, drifted: false }
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
         // session start is tried once more on that one: the turn is not lost to a bad release.
         for (let attempt = 0; ; attempt += 1) {
           try {
-            const spec = await agent.spawn()
+            // The chat profile modes belong to this process's home, read once at its start: a
+            // later spawn or a replaced agent object never changes what a running session asks.
+            const { profileModes, sessionFileMode, sessionFileEnabled, ...spec } = await agent.spawn(fileContext === undefined ? undefined : { sessionFiles: fileContext })
+            state.profileModes = profileModes
+            state.sessionFileMode = sessionFileMode
+            state.sessionFileEnabled = sessionFileEnabled === true
+            if (fileContext?.files.length && (!sessionFileMode || !state.sessionFileEnabled)) throw new Error('The exact image profile is unavailable.')
+            if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined)) throw new Error('Image permission changed during startup.')
+            if (!state.sessionFileEnabled && fileOwner) {
+              this.sessionFiles.clear(sessionId, { owner: fileOwner })
+              state.fileOwner = fileOwner = undefined
+            }
             if (this.bridgeOn(agent)) {
               await this.backchannel.listen()
-              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name })
+              if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined || options.signal?.aborted)) throw new Error('Image permission changed while the bridge started.')
+              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true })
             }
             this.diagnostics?.started(sessionId, this, agent, state)
+            const takesIdentity = ['acp-claude', 'acp-codex'].includes(options.provider)
             const run = new AgentRun({
               ...spec,
               cwd: dshAgent?.session?.header?.cwd
                 ?? spec.env?.AUTOMAGIK_BOT_CLI_HOME ?? homedir(),
               name: agent.name,
+              botIdentity: () => {
+                if (!takesIdentity) return undefined
+                const identity = this.botIdentity(sessionId)
+                if (typeof identity?.name !== 'string' || !identity.name.trim()) return undefined
+                const { name, role, instructions } = identity
+                return '# Your identity\n'
+                  + `You are ${name}, a Bot on the user's team.`
+                  + (role ? ` Your role: ${role}.` : '')
+                  + (instructions ? `\n\n${instructions}` : '')
+              },
+              // Which way the Bot's identity went (never its text), for the log.
+              onIdentity: takesIdentity ? delivery => {
+                try { this.ctx.logger?.info?.(`acp-dsh: ${agent.name} Bot identity: ${delivery}`) } catch {}
+              } : undefined,
               mcpServers: state.bridge === undefined ? [] : [this.bridgeServer(state.bridge)],
               ...(this.bridgeOn(agent) && agent.disableBuiltInTools === true
                 ? { sessionMeta: { disableBuiltInTools: true } }
                 : asks ? { sessionMeta: agent.hardAsk() } : {}),
               dshTools: this.bridgeOn(agent),
+              refresh: agent.refresh,
               onReady: state.bridge === undefined ? undefined : () => this.ready(agent, state),
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
               onToolCall: tool => this.checkDrift(sessionId, agent, tool),
+              onIgnored: message => this.warn(message),
+              onRefusedMcp: tool => this.warn(`${agent.name} asked to run an MCP tool of ${typeof tool.mcpServer === 'string' ? `server "${tool.mcpServer.slice(0, 80)}"` : 'an unnamed server'}: refused, only the ${BRIDGE_NAME} bridge's tools run with DSH's tools on`),
               onMode: seen => this.diagnostics?.mode(sessionId, state, seen),
               ...(agent.startMs === undefined ? {} : { startMs: agent.startMs }),
               ...(agent.requestMs === undefined ? {} : { requestMs: agent.requestMs }),
@@ -1044,6 +1340,7 @@ export class AcpAdapter extends LlmAdapter {
             state.run = run
             this.live.set(sessionId, state)
             await run.start({ signal: options.signal })
+            if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined)) throw new Error('Image permission changed during startup.')
             try { agent.proven?.() } catch {}
             break
           } catch (error) {
@@ -1067,14 +1364,19 @@ export class AcpAdapter extends LlmAdapter {
             }
             // A missing bridge is this computer's config, not the release: no rollback for it.
             let back = false
-            if (attempt === 0 && error?.code !== 'acp_bridge_missing' && options.signal?.aborted !== true) {
+            if (!fileContext?.files.length && attempt === 0 && error?.code !== 'acp_bridge_missing' && options.signal?.aborted !== true) {
               try { back = agent.rollback?.(error) === true } catch {}
             }
             if (back) {
               try { this.ctx.logger?.warn?.(`acp-dsh: ${agent.name} did not start on its newest connector (${error?.message ?? error}); trying the one before it`) } catch {}
               continue
             }
-            return yield finish('error', `${agent.name} did not start: ${error?.message ?? error}`, error?.code === 'acp_bridge_missing' ? 'acp_bridge_missing' : undefined)
+            let repairing = false
+            if (!fileContext?.files.length && attempt === 0 && error?.code !== 'acp_bridge_missing' && options.signal?.aborted !== true) {
+              try { repairing = agent.repair?.(error) === true } catch {}
+            }
+            const repair = repairing ? ' Its connector looks damaged, so it is being reinstalled: send this again in a minute.' : ''
+            return yield finish('error', `${agent.name} did not start: ${error?.message ?? error}${repair}`, error?.code === 'acp_bridge_missing' ? 'acp_bridge_missing' : undefined)
           }
         }
         live = state
@@ -1117,6 +1419,10 @@ export class AcpAdapter extends LlmAdapter {
       if (live.bridge !== undefined && this.bridgeOn(agent)) {
         const changed = this.backchannel.refresh(live.bridge)
         if (changed && agent.refresh === 'fork') {
+          if (live.sessionFileMode) {
+            this.endSession(sessionId)
+            return yield* stopped('The image session ended when its tools changed. Ask for image permission again.')
+          }
           try {
             await this.refork(agent, live, dshAgent, options.signal)
           } catch (error) {
@@ -1144,14 +1450,20 @@ export class AcpAdapter extends LlmAdapter {
         return yield finish('error', why)
       }
       const level = levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
-      const modes = agent.modeFor?.(level)
-      const strict = modes?.at(-1)
+      const originalModes = agent.modeFor?.(level)
+      const profiles = live.profileModes
+      const modes = live.sessionFileMode ? [live.sessionFileMode] : profiles ? chatProfileModes(originalModes, profiles) : originalModes
+      const strict = live.sessionFileMode ? [live.sessionFileMode] : profiles ? chatProfileModes([originalModes?.at(-1)], profiles) : [originalModes?.at(-1)]
       const possible = agent.ownMode !== undefined && level.sandbox === 'workspace-write' && level.policy === 'ask' && !level.full && !level.auto
       const candidate = possible && live.run.modes?.availableModes?.some(mode => mode.id === agent.ownMode)
       let own = 'none'
       if (candidate) {
         own = await this.ownAnswer(sessionId, dshAgent, options.provider)
         if (live.held !== undefined) return yield* stopped(live.held)
+        if (own === 'yes' && live.sessionFileEnabled) {
+          this.endSession(sessionId)
+          return yield finish('error', 'The effective permission mode changed. Send a new message to continue.')
+        }
         if (own === 'yes') {
           live.ownSent = true
           try { await live.run.setMode([agent.ownMode], { signal: options.signal }) } catch (error) {
@@ -1165,39 +1477,77 @@ export class AcpAdapter extends LlmAdapter {
       }
       try {
         if (possible && own !== 'yes') {
-          if (live.ownSent === true) await live.run.setMode([strict], { signal: options.signal, force: true })
+          if (live.ownSent === true || live.sessionFileMode) await live.run.setMode(strict, { signal: options.signal, force: true })
           else await live.run.setMode(modes, { signal: options.signal })
-        } else if (!possible) await live.run.setMode(modes, { signal: options.signal })
+        } else if (!possible) await live.run.setMode(modes, { signal: options.signal, force: Boolean(live.sessionFileMode) })
         if (live.held !== undefined) return yield* stopped(live.held)
       } catch (error) {
         if (live.held !== undefined) return yield* stopped(live.held)
         const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
         if (left !== undefined) return yield left
-        if (live.ownSent === true) this.end(sessionId, live)
+        if (live.ownSent === true || live.fileOwner) this.end(sessionId, live)
         return yield finish('error', `${agent.name} would not take DSH's permission level: ${error?.message ?? error}`)
+      }
+      const uploads = uploadBlocks(
+        options.messages, this.redact, dshAgent?.session, this.ctx)
+      const uploadRun = live.run
+      const uploadSession = uploadRun.sessionId
+      // Only the asynchronous upload path uses this stricter ownership check. Never
+      // endSession on a failed check: the live map may already contain a replacement.
+      const uploadValid = () => uploads === undefined || (
+        !options.signal?.aborted && entry.held === undefined && live.held === undefined &&
+        this.starting.get(sessionId) === entry && this.live.get(sessionId) === live &&
+        live.run === uploadRun && uploadRun.alive && uploadRun.sessionId === uploadSession &&
+        live.dshAgent === dshAgent && this.ctx.agents?.get(sessionId) === dshAgent &&
+        this.agents.get(options.provider) === agent &&
+        uploads.roomIds.every(roomId => ownsRoomUploads(this.ctx, dshAgent?.session, roomId))
+      )
+      const uploadStopped = () => options.signal?.aborted ? STOPPED()
+        : finish('error', entry.held ?? live.held ?? 'Uploaded image turn changed before the prompt. Send again.', 'acp_upload_content')
+      let prepared
+      if (uploads !== undefined) {
+        const controller = new AbortController()
+        entry.upload = { controller, run: uploadRun, live }
+        try {
+          prepared = await prepareUpload({
+            blocks: uploads.blocks, replay: live.replay, run: uploadRun,
+            attachments: this.ctx.get?.('attachments'), cwd: dshAgent?.session?.header?.cwd,
+            warn: message => this.warn(message),
+            signal: options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal,
+            timers: this.timers,
+            valid: () => { if (!uploadValid()) throw new Error('Uploaded image turn changed before the prompt. Send again.') },
+          })
+        } catch (error) {
+          if (!uploadValid()) return yield uploadStopped()
+          return yield finish('error', `Uploaded image input failed: ${error?.message ?? error}`, 'acp_upload_content')
+        }
       }
       // Asked again right before the prompt: a Session held since the first ask (while consent,
       // the start, a fork or the mode were awaited) gets no prompt. One that was ended since
       // the step's entry is refused whatever the gate says now: its mode above was read from a
       // level that has changed, and a gate that lets go here must not let this turn through.
       const late = entry.held ?? live.held ?? await this.heldBack(sessionId, dshAgent, options.provider) ?? entry.held
-      started()
+      if (!uploadValid()) return yield uploadStopped()
+      if (uploads === undefined) started()
       if (late !== undefined) {
         this.endSession(sessionId, late)
         return yield* stopped(late)
       }
       if (own === 'yes') {
         const again = await this.ownAnswer(sessionId, dshAgent, options.provider)
+        if (!uploadValid()) return yield uploadStopped()
         if (live.held !== undefined) return yield* stopped(live.held)
         if (again !== 'yes') {
           own = 'changed'
-          try { await live.run.setMode([strict], { signal: options.signal, force: true }) } catch (error) {
+          try { await live.run.setMode(strict, { signal: options.signal, force: true }) } catch (error) {
+            if (!uploadValid()) return yield uploadStopped()
             if (live.held !== undefined) return yield* stopped(live.held)
             const left = this.abandoned(sessionId, live, agent, error, 'taking DSH\'s permission level')
             if (left !== undefined) return yield left
             this.end(sessionId, live)
             return yield finish('error', `${agent.name} would not take DSH's permission level: ${error?.message ?? error}`)
           }
+          if (!uploadValid()) return yield uploadStopped()
           if (live.held !== undefined) return yield* stopped(live.held)
         }
       }
@@ -1219,9 +1569,28 @@ export class AcpAdapter extends LlmAdapter {
           try { this.ctx.logger?.warn?.(`acp-dsh: the new-session notice was not written: ${error?.message ?? error}`) } catch {}
         }
       }
-      const prompt = live.replay !== undefined
+      if (live.fileOwner) {
+        try {
+          await this.sessionFiles.activate(live.fileOwner, last, options.signal)
+          if (!uploadValid()) return yield uploadStopped()
+          if (!this.sessionFiles.valid(live.fileOwner) || this.live.get(sessionId) !== live ||
+              (live.sessionFileMode && live.run.modes?.currentModeId !== live.sessionFileMode) || own === 'yes') throw new Error('Image permission changed before the prompt.')
+        } catch (error) {
+          if (!uploadValid()) return yield uploadStopped()
+          this.endSession(sessionId)
+          return yield finish('error', error.message)
+        }
+      }
+      if (!uploadValid()) return yield uploadStopped()
+      const prompt = prepared ?? (live.replay !== undefined
         ? [...live.replay, ...promptOf(options.messages, this.redact)]
-        : promptOf(options.messages, this.redact)
+        : promptOf(options.messages, this.redact))
+      if (prepared !== undefined) {
+        try { checkUploadSize(uploadRun.sessionId, prompt) } catch (error) {
+          return yield finish('error', error.message, 'acp_upload_content')
+        }
+      }
+      started()
       live.replay = undefined
       live.owed = undefined
       live.drifted = false
@@ -1230,6 +1599,9 @@ export class AcpAdapter extends LlmAdapter {
       // Ordinary strict sessions have no Auto record until an own-mode attempt or a late answer.
       this.diagnostics?.own(sessionId, live, live.ownSent === true || ['yes', 'late', 'changed', 'refused'].includes(own) ? { answer: own, taken: live.own } : undefined)
       if (live.bridge !== undefined) live.bridge.agentAsked = false
+      // The previous turn's mirrors are finished for DSH; continuation steps keep these above.
+      live.calls.clear()
+      live.toolIds?.clear()
       live.run.prompt(prompt).catch(() => {})
     }
     // The turn stays open until its end is drained here: the agent may finish it before DSH
@@ -1256,6 +1628,8 @@ export class AcpAdapter extends LlmAdapter {
         yield* blocks.add('reasoning', event.text)
       } else if (event.type === 'tool') {
         const tool = live.run.tools.get(event.id)
+        // Its entry went with a fork or retirement.
+        if (tool === undefined) continue
         this.diagnostics?.call(sessionId, live, tool)
         // A DSH tool call is not a mirror call: the bridge writes its rows and DSH draws the one
         // card from them. On `acp-codex` no structured name is proven, so any MCP call there is
@@ -1266,6 +1640,7 @@ export class AcpAdapter extends LlmAdapter {
           || tool.structuredName === 'ToolSearch'
           || (agent.refresh === 'fork' && tool.mcp === true)
         if (this.bridgeOn(agent) && skip) {
+          live.run.answerSkippedMcp(tool)
           if (tool.drift === true) {
             // Drift can be discovered after the nameless event was queued. No card will ask
             // its question: the built-in call already started and is being cancelled. A
@@ -1279,6 +1654,7 @@ export class AcpAdapter extends LlmAdapter {
         await settle(tool, DETAIL_WAIT_MS)
         const id = `acp_${randomUUID()}`
         live.calls.add(id)
+        live.pendingMirrors?.add(id)
         // The agent's own id for the call, for a refusal that comes before the mirror's body.
         ;(live.toolIds ??= new Map()).set(id, tool.id)
         yield* blocks.toolCall(id, TOOL_NAME, JSON.stringify(callArguments(tool)))
@@ -1344,7 +1720,9 @@ export class AcpAdapter extends LlmAdapter {
   dispose() {
     try { this.offResult?.() } catch {}
     try { this.offReviewed?.() } catch {}
+    for (const entry of this.starting.values()) entry.upload?.controller.abort()
     this.starting.clear()
+    for (const id of this.sessionFiles.owners.keys()) this.sessionFiles.clear(id)
     for (const agent of this.agents.values()) agent.catalog?.dispose()
     for (const [sessionId, live] of this.live) this.end(sessionId, live)
   }

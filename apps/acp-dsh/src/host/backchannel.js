@@ -257,6 +257,30 @@ export function openStepOf(session) {
   return undefined
 }
 
+/** Keep caller ids out of the mirror's namespace and within the Session's id shape. */
+export function bridgeCallId(callId) {
+  return typeof callId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(callId) && !callId.startsWith('acp_')
+    ? callId
+    : `bridge_${randomBytes(8).toString('hex')}`
+}
+
+// The turn waiting for another step, if its latest boundary ended a step rather than the turn.
+function betweenStepTurn(session) {
+  const events = session?.snapshotEvents?.() ?? []
+  let ended = false
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event?.type === 'turn/end') return undefined
+    if (event?.type === 'turn/start') return ended ? event.data?.turn : undefined
+    if (!ended && event?.type === 'step/start') return undefined
+    if (event?.type === 'step/end') ended = true
+  }
+  return undefined
+}
+
+/** Whether the current turn ended a step and has not ended itself. */
+export const betweenSteps = session => betweenStepTurn(session) !== undefined
+
 /**
  * What Auto review needs before it can read a bridge call: an open step, the Session's route,
  * and exactly one complete schema for the call in the request header. Missing any of them is a
@@ -381,12 +405,13 @@ export function recordDrift(session, data) {
  */
 export class Backchannel {
   /**
-   * @param {{ ctx: any, log?: (message: string) => void, reviewTimeoutMs?: number }} options
+   * @param {{ ctx: any, log?: (message: string) => void, reviewTimeoutMs?: number, stepWaitMs?: number }} options
    */
-  constructor({ ctx, log = () => {}, reviewTimeoutMs = REVIEW_TIMEOUT_MS }) {
+  constructor({ ctx, log = () => {}, reviewTimeoutMs = REVIEW_TIMEOUT_MS, stepWaitMs = 30_000 }) {
     this.ctx = ctx
     this.log = log
     this.reviewTimeoutMs = reviewTimeoutMs
+    this.stepWaitMs = stepWaitMs
     this.records = new Map()
     this.closed = false
     // A turn that ends stops the calls still in flight on it: nobody waits for them any more.
@@ -428,9 +453,9 @@ export class Backchannel {
   /**
    * Mint the credential of one ACP session's bridge. Every spawn (a new ACP session, a fork)
    * gets a fresh value; `revoke` is what ends it.
-   * @param {{ sessionId: string, agent: any, name: string }} options
+   * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean }} options
    */
-  mint({ sessionId, agent, name }) {
+  mint({ sessionId, agent, name, promptRunning }) {
     const credential = randomBytes(32).toString('hex')
     const record = {
       credential,
@@ -438,12 +463,15 @@ export class Backchannel {
       path: `/${encodeURIComponent(sessionId)}`,
       agent,
       name: name ?? 'agent',
+      promptRunning,
       generation: 0,
       signature: signatureOf(this.ctx, agent),
       announced: false,
       listed: false,
       closed: false,
       waiters: new Set(),
+      approvalCalls: new Set(),
+      approvalWaiters: new Set(),
       abort: new AbortController(),
       // The controller of every call in flight (#957): each call has its own, so Stop, the end
       // of its turn or a caller that went away ends that call without revoking the bridge.
@@ -636,6 +664,109 @@ export class Backchannel {
     return reply(400, { error: 'op' })
   }
 
+  /** Park a call between steps without writing anything on the ended step. */
+  waitForStep(record, turn, signals) {
+    const session = record.agent.session
+    return new Promise(resolve => {
+      let timer
+      let poll
+      let off
+      let done = false
+      const finish = outcome => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        clearInterval(poll)
+        off?.()
+        for (const signal of signals) signal.removeEventListener('abort', abort)
+        resolve(outcome)
+      }
+      const abort = () => finish('cancelled')
+      const check = (events = []) => {
+        // A batch may end this turn and open another before listeners run.
+        if (events.some(event => event.type === 'turn/end' && event.data?.turn === turn)) return finish('ended')
+        const open = openStepOf(session)
+        if (open !== undefined) return finish(open.turn === turn ? 'ready' : 'ended')
+        if (betweenStepTurn(session) !== turn) finish('ended')
+      }
+      timer = setTimeout(() => {
+        // A step that opened without a notice to this waiter still counts.
+        check()
+        finish('timeout')
+      }, this.stepWaitMs)
+      timer.unref?.()
+      off = record.guard?.subscribe?.(check)
+      if (off === undefined) {
+        poll = setInterval(check, 25)
+        poll.unref?.()
+      }
+      for (const signal of signals) signal.addEventListener('abort', abort, { once: true })
+      if (signals.some(signal => signal.aborted)) abort()
+      else check()
+    })
+  }
+
+  /** Keep the mirror in its step until that step's approval calls have written their results. */
+  async awaitApprovals(sessionId, position, signal) {
+    try {
+      if (position !== undefined) await this.waitForApprovalCalls(sessionId, position, signal)
+    } catch {}
+  }
+
+  /** No deadline: an unanswered approval may keep its step open for as long as it needs. */
+  waitForApprovalCalls(sessionId, { turn, step }, signal) {
+    return new Promise(resolve => {
+      let poll
+      let done = false
+      const subscriptions = new Map()
+      const unsubscribe = record => {
+        try { subscriptions.get(record)?.() } catch {}
+        record.approvalWaiters.delete(check)
+        record.abort.signal.removeEventListener('abort', check)
+        subscriptions.delete(record)
+      }
+      const finish = () => {
+        if (done) return
+        done = true
+        clearInterval(poll)
+        for (const record of subscriptions.keys()) unsubscribe(record)
+        signal?.removeEventListener('abort', finish)
+        resolve()
+      }
+      const check = () => {
+        if (done) return
+        try {
+          const records = [...this.records.values()].filter(record =>
+            record.sessionId === sessionId && !record.closed)
+          for (const record of subscriptions.keys()) {
+            if (!records.includes(record)) unsubscribe(record)
+          }
+          let pending = false
+          for (const record of records) {
+            if (!subscriptions.has(record)) {
+              subscriptions.set(record, undefined)
+              record.approvalWaiters.add(check)
+              record.abort.signal.addEventListener('abort', check, { once: true })
+              subscriptions.set(record, record.guard?.subscribe?.(() => check()))
+            }
+            const open = openStepOf(record.agent?.session)
+            if (open?.turn !== turn || open?.step !== step) return finish()
+            pending ||= record.promptRunning?.() === true && [...record.approvalCalls].some(call =>
+              call.turn === turn && call.step === step && !call.stopped.aborted)
+          }
+          if (!pending || signal?.aborted) finish()
+        } catch { finish() }
+      }
+      try {
+        // The prompt can end or another record can be minted without a Session write.
+        poll = setInterval(check, 25)
+        poll.unref?.()
+        signal?.addEventListener('abort', finish, { once: true })
+        check()
+      } catch { finish() }
+    })
+  }
+
   /**
    * Run one DSH tool call for the bridge: it must be offered, DSH must approve it, and only
    * then does it run. Rows land on the Session as DSH's own tool rows do, so the chat shows the
@@ -652,9 +783,29 @@ export class Backchannel {
     const session = record.agent?.session
     const tools = this.ctx?.get?.('tools')
     if (session === undefined || tools?.execute === undefined) return error(`DSH tools are not available to ${record.name}.`)
+    let waited
+    const waitingTurn = betweenStepTurn(session)
+    if (openStepOf(session) === undefined && betweenSteps(session) && record.promptRunning?.() === true) {
+      const waiting = new AbortController()
+      record.controllers.add(waiting)
+      try {
+        waited = await this.waitForStep(record, waitingTurn, [record.abort.signal, waiting.signal, callerGone].filter(Boolean))
+        if (record.closed || record.abort.signal.aborted) return { revoked: true }
+        // Stop can arrive after the step wakes us but before this continuation runs.
+        if (waiting.signal.aborted || callerGone?.aborted) {
+          if (openStepOf(session)?.turn === waitingTurn || betweenStepTurn(session) === waitingTurn) {
+            return { ...error(`${name} was stopped before it started.`), error: { name: 'BridgeCancelledError', code: 'BRIDGE_CANCELLED' } }
+          }
+          waited = 'ended'
+        }
+        if (waited === 'ready' && record.promptRunning?.() !== true) waited = 'ended'
+      } finally {
+        record.controllers.delete(waiting)
+        if (record.closed && record.controllers.size === 0) record.guard?.release()
+      }
+    }
     const offered = offeredTools(this.ctx, record.agent)
     if (!offered.some((tool) => tool.name === name)) return error(`Tool "${name}" is not offered to this Session.`)
-    const id = callId ?? `bridge_${randomBytes(8).toString('hex')}`
     const raw = JSON.stringify(args ?? {})
     const approval = this.ctx?.get?.('approval')
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
@@ -662,6 +813,11 @@ export class Backchannel {
     // raw arguments the tool/call row carries; Auto review reads the same block. A call with no
     // open step cannot be recorded in a loadable shape: refuse it.
     let review
+    if (waited !== undefined && (waited !== 'ready' || openStepOf(session)?.turn !== waitingTurn)) {
+      return level.auto
+        ? unavailable('AUTO_REVIEW_NO_STEP', 'Auto review cannot see this call: the Session has no open step.')
+        : recordFailed('The bridge cannot record this call: the Session has no open step.', 'BRIDGE_NO_STEP')
+    }
     if (level.auto) {
       review = reviewRouteOf(session, name)
       if (review.error !== undefined) return unavailable(review.error.code, review.error.text)
@@ -671,6 +827,14 @@ export class Backchannel {
       return review === undefined
         ? recordFailed('The bridge cannot record this call: the Session has no open step.', 'BRIDGE_NO_STEP')
         : unavailable('AUTO_REVIEW_NO_STEP', 'Auto review cannot see this call: the Session has no open step.')
+    }
+    const id = bridgeCallId(callId)
+    if (callId !== undefined && id !== callId) {
+      let caller
+      try { caller = JSON.stringify(callId) } catch { caller = thrownText(callId) }
+      // The caller's id is the agent's text, of any size: the line keeps only its start.
+      if (typeof caller === 'string' && caller.length > 160) caller = `${caller.slice(0, 160)}…`
+      this.log(`bridge call id ${caller} replaced by ${id}`)
     }
     const { turn, step } = position
     const route = review === undefined
@@ -714,6 +878,18 @@ export class Backchannel {
       return review === undefined
         ? recordFailed(`The bridge could not record ${name}: ${cause?.message ?? cause}`)
         : unavailable('AUTO_REVIEW_FAILED', `Auto review could not record this call: ${cause?.message ?? cause}`)
+    }
+    let controller
+    const approvalCall = { turn, step, stopped }
+    const releaseApproval = () => {
+      if (!record.approvalCalls.delete(approvalCall)) return
+      stopped.removeEventListener('abort', releaseApproval)
+      controller?.signal.removeEventListener('abort', releaseApproval)
+      for (const wake of record.approvalWaiters) wake()
+    }
+    if (!level.full) {
+      record.approvalCalls.add(approvalCall)
+      stopped.addEventListener('abort', releaseApproval, { once: true })
     }
     let answered = false
     const settle = async (content, isError, rawInfo) => {
@@ -759,7 +935,6 @@ export class Backchannel {
         ...(info === undefined ? {} : { error: info }),
       }
     }
-    let controller
     let unwatch
     let unwatchPre
     let timer
@@ -830,6 +1005,7 @@ export class Backchannel {
       // allowed body out of the deadline and covers a level change while the ask is pending.
       if (!levelChanged && level.auto && typeof this.ctx?.on === 'function') {
         controller = new AbortController()
+        controller.signal.addEventListener('abort', releaseApproval, { once: true })
         timer = setTimeout(() => {
           timedOut = true
           controller.abort(new Error('Auto review timed out'))
@@ -922,6 +1098,7 @@ export class Backchannel {
       unwatchPre?.()
       // After its step ended this writes nothing: the write guard hid the block there.
       hideSynthetic()
+      releaseApproval()
       leave()
     }
   }

@@ -17,6 +17,42 @@ export const detailOfArgs = raw => {
   return { ...(text ? { text: text.trim().slice(0, 300) } : {}), ...(code ? { code: code.trim().slice(0, 400) } : {}) }
 }
 
+// What one ask would do, as text, when one shown field says all of it: the command, path, url
+// or query detailOfArgs shows, in full. Words about the call (a shell's `description`, any
+// `justification`) and its timeout change nothing it does and are left out, as stops.js does;
+// its sandbox request is kept in the identity. Anything else (a write's content, a message, several targets) makes the
+// ask its own: two such asks never share a card, since the card could not show what differs.
+const SHOWN_TARGETS = ['command', 'cmd', 'file_path', 'path', 'url', 'query']
+const SHELLS = new Set(['bash', 'pwsh'])
+const SIDE_ARGS = new Set(['justification', 'sandbox_permissions', 'timeout', 'timeout_ms'])
+// A control character (a line break, a tab) would show on one line what runs as two.
+const CONTROL = /[\u0000-\u001f\u007f]/
+// An agent's own call through ACP (acp-dsh tool.js callArguments) is shown by its title, which
+// the ask's reason carries; its input is the agent's raw call. Two such asks are one capability
+// only when everything but the call's own id is the same, byte for byte, so nothing can differ
+// between them unseen.
+const AGENT_CALL = 'acp_tool'
+const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
+  : value !== null && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
+    : JSON.stringify(value)
+export function capabilityOfArgs(raw, tool) {
+  if (typeof raw !== 'string') return undefined
+  let args
+  try { args = JSON.parse(raw) } catch { return undefined }
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return undefined
+  if (tool === AGENT_CALL) {
+    const { id: _id, ...call } = args
+    return typeof call.title === 'string' && call.title.trim() !== '' && call.input !== undefined ? canonical(call) : undefined
+  }
+  const kept = Object.keys(args).filter(key => !SIDE_ARGS.has(key) && !(SHELLS.has(tool) && key === 'description'))
+  if (kept.length !== 1 || !SHOWN_TARGETS.includes(kept[0])) return undefined
+  const value = args[kept[0]]
+  // detailOfArgs shows the trimmed value up to 400 characters: past that the card would cut it.
+  if (typeof value !== 'string' || value.trim() === '' || value !== value.trim() || value.length > 400 || CONTROL.test(value)) return undefined
+  // The sandbox a step asks for is part of what it would do: asks for different ones never merge.
+  return JSON.stringify([kept[0], value, args.sandbox_permissions ?? null])
+}
+
 // Turns that open with no person or Bot asking: a goal round, which carries a reply the
 // person waits for. A Bot's request that lands inside one joins it rather than claiming it,
 // so its reply stays in the chat (issue #62).
@@ -371,6 +407,8 @@ export function install(rt) {
     ? detailOfArgs(live.get(sessionId)?.calls?.get(callId)?.args)
     : rt.childCallDetail?.(sessionId, callId) ?? {}
 
+  const callCapability = (sessionId, callId, tool) => capabilityOfArgs(live.get(sessionId)?.calls?.get(callId)?.args, tool)
+
   // The Bots whose last turn failed, for their pets (a sad face until their next turn starts):
   // per Bot, when it failed and the short reason. Process-local, like activity.
   /** @type {Record<string, { at: number, text: string, code?: string }>} */
@@ -559,7 +597,18 @@ export function install(rt) {
             const content = Array.isArray(event.data.content) ? event.data.content : []
             const images = content.filter(block => block?.type === 'image' && !block.offloaded).map(block => block.attachment)
             const files = content.filter(block => block?.type === 'file' && block.attachment !== undefined).map(block => block.attachment)
-            queueRoomMessage(id, { text: textOf(event.data.content), ...(images.length > 0 ? { images } : {}), ...(files.length > 0 ? { files } : {}) })
+            const uploads = content.flatMap((block, blockIndex) =>
+              typeof event.data.id === 'string' &&
+              block?.attachment !== undefined &&
+              (block.type === 'file' || (block.type === 'image' && !block.offloaded))
+                ? [{ messageId: event.data.id, blockIndex,
+                  attachmentId: block.attachment.attachmentId, kind: block.type }] : [])
+            queueRoomMessage(id, {
+              text: textOf(event.data.content),
+              ...(images.length > 0 ? { images } : {}),
+              ...(files.length > 0 ? { files } : {}),
+              ...(uploads.length > 0 ? { uploads } : {}),
+            })
           }
           const own = rt.chatOwners.get(id)
           if (own !== undefined) rt.dropKickoff(own)
@@ -742,5 +791,5 @@ export function install(rt) {
     }
   })
 
-  Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, doingOf, stopRoomTurn, releaseBot })
+  Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, callCapability, doingOf, stopRoomTurn, releaseBot })
 }

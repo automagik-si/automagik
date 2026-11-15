@@ -40,9 +40,61 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
+// src/client/session-file-approval.js
+var ALLOW = "Allow for this chat session";
+function selectSessionFileApproval(pending) {
+  if (pending?.kind !== "question" || pending.questions?.length !== 1) return null;
+  const item = pending.questions[0];
+  const intent = item.intent;
+  if (!/^acp-session-file:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(item.id) || intent?.kind !== "approval" || intent.approve !== ALLOW || intent.reject !== "Reject" || intent.always !== void 0 || item.multiSelect !== void 0 || typeof item.detail !== "string" || item.detail === "" || item.options?.length !== 2 || item.options[0]?.label !== ALLOW || item.options[1]?.label !== "Reject") return null;
+  return { pending, item };
+}
+function SessionFileApproval({ matched: { pending, item }, renderFactorySlot }) {
+  const answer = (label) => pending.answer({ answers: [{ id: item.id, selected: [label] }] });
+  return renderFactorySlot("conversation.approval.card", {
+    requestKey: pending.key,
+    title: item.question,
+    description: item.detail,
+    allowLabel: ALLOW,
+    canAnswer: () => pending.snapshot().channel !== "none" && !pending.snapshot().closed,
+    onAllow: () => answer(ALLOW),
+    onReject: () => answer("Reject")
+  });
+}
+
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
+  "What will it do?": "它会做什么？",
+  "Add instructions": "添加说明",
+  "Part of the Bot's system prompt. You can change it later in its details.": "这是 Bot 系统提示词的一部分。你可以稍后在详情中更改。",
+  "New Bots start at {level}.": "新 Bot 从 {level} 开始。",
+  "This model uses its Hermes profile's own instructions.": "此模型使用其 Hermes 配置文件自己的说明。",
+  "Force update": "强制更新",
+  "Stop and update": "停止并更新",
+  "Stops running conversations and sign-ins, installs every available update and restarts.": "停止正在进行的对话和登录，安装所有可用更新并重启。",
+  "Running conversations, tasks and Bot sign-ins stop now. Bots that were signing in ask you to sign in again.": "正在进行的对话、任务和 Bot 登录将立即停止。正在登录的 Bot 会请你重新登录。",
+  "Stopping conversations…": "正在停止对话…",
+  "Downloading the Automagik update…": "正在下载 Automagik 更新…",
+  "Installing…": "正在安装…",
+  "Restarting…": "正在重启…",
+  "Everything is up to date.": "全部已是最新版本。",
+  "Updated.": "已更新。",
+  "The plugins did not start, so the previous ones are back.": "插件未能启动，已恢复之前的版本。",
+  "The Automagik update could not be downloaded. Try again.": "未能下载 Automagik 更新。请重试。",
+  "This copy updates through your system's package manager.": "此副本通过系统的软件包管理器更新。",
+  "The restart did not finish. Try again.": "重启未完成。请重试。",
+  "Version {version} · {latest} available": "版本 {version} · {latest} 可用",
+  "Plugin updates": "插件更新",
+  "Plugins {version} need Automagik {line}; this app is {app}. Update Automagik first.": "插件 {version} 需要 Automagik {line}；此应用是 {app}。请先更新 Automagik。",
+  "Plugins {version} need Automagik {base} or newer; this app is {app}.": "插件 {version} 需要 Automagik {base} 或更新版本；此应用是 {app}。",
+  "Plugins {version} did not start here before, so the current ones are kept.": "插件 {version} 之前未能在此启动，因此保留当前版本。",
+  "Plugins {version} need a different DeepSeek Harness version.": "插件 {version} 需要不同的 DeepSeek Harness 版本。",
+  "The published plugin update was not accepted.": "发布的插件更新未被接受。",
+  "Plugin updates could not be checked. Try again.": "无法检查插件更新。请重试。",
+  "1 approval waiting": "1 项批准请求待处理",
+  "{count} approvals waiting": "{count} 项批准请求待处理",
+  "{count} requests to use {tool}": "{count} 个使用 {tool} 的请求",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",
@@ -398,6 +450,7 @@ var ZH = {
   "{name} refused its own mode": "{name} 拒绝了自己的模式",
   "Bot sign-in recovery is needed. Reset Bot sign-in to start fresh.": "需要恢复 Bot 登录。重置 Bot 登录以重新开始。",
   "Reset Bot sign-in": "重置 Bot 登录",
+  "Sign in again": "重新登录",
   "This signs {vendor} out for Bots. Sign in again in the app.": "这会使 Bot 退出 {vendor}。请在应用内重新登录。",
   "Bot models and history stay.": "Bot 的模型和历史记录会保留。",
   "Bot CLI user settings start empty.": "Bot CLI 的用户设置会从空白开始。",
@@ -4045,7 +4098,7 @@ function Crown() {
     )
   );
 }
-function BotAvatar({ bot, size, state = "idle", main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
+function BotAvatar({ bot, size, state = "idle", count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state);
   if (bot === void 0) return (0, import_react6.createElement)(BotMark, { size });
   const badgeKind = !badge ? null : state === "alert" ? "alert" : WORK.includes(state) ? "working" : admin ? "admin" : main && !crown ? "main" : null;
@@ -4055,7 +4108,7 @@ function BotAvatar({ bot, size, state = "idle", main, admin, crown = false, badg
     (0, import_react6.createElement)(BotMark, { bot, size, state: settled ? "done" : state, live, gaze, pokeable }),
     crown ? (0, import_react6.createElement)(Crown) : null,
     badgeKind === "working" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-working", "aria-label": t("Working"), role: "img" }) : null,
-    badgeKind === "alert" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-alert", "aria-label": t("Waiting for your answer"), role: "img" }, "?") : null,
+    badgeKind === "alert" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-alert", "aria-label": count > 0 ? count === 1 ? t("1 approval waiting") : t("{count} approvals waiting", { count }) : t("Waiting for your answer"), role: "img" }, count > 0 ? count > 9 ? "9+" : String(count) : "?") : null,
     badgeKind === "admin" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-admin", "aria-label": t("Admin"), role: "img" }, (0, import_react6.createElement)(StarIcon)) : null,
     badgeKind === "main" ? (0, import_react6.createElement)("span", { className: "bt-badge bt-badge-main", "aria-label": t("Main Bot"), role: "img" }, (0, import_react6.createElement)(MainStar)) : null
   );
@@ -6924,6 +6977,51 @@ var COMPOSER_PACK_CSS = `
 [data-composer-card] [class*="_trailing"]:has(>[class*="_standardControls"]:not([hidden]) .bt-composer-model),[data-composer-card] [class*="_standardControls"]:has(.bt-composer-model){flex:0 1 auto!important;min-width:0!important}
 `;
 
+// src/client/approvals.js
+var useApproval = (useWork, match) => useWork ? useWork((work) => (work.approvals ?? []).some(match)) : false;
+var approvalCount = (work, match) => (work?.approvals ?? []).filter(match).length;
+function groupApprovals(entries2) {
+  const keyed = /* @__PURE__ */ new Map();
+  return entries2.slice().sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).map((entry) => {
+    const key = entry.capabilityKey;
+    const group = key === void 0 ? void 0 : keyed.get(key);
+    if (group) {
+      group.entries.push(entry);
+      return void 0;
+    }
+    const first = { key: key ?? entry.id, entries: [entry] };
+    if (key !== void 0) keyed.set(key, first);
+    return first;
+  }).filter(Boolean);
+}
+function nativeAsk(statusMap, entry) {
+  const pending = statusMap.get(entry.sessionId)?.pendingInteraction;
+  return pending?.kind === "approval" && typeof pending.answer === "function" && pending.answerable !== false && entry.callId !== void 0 && pending.callId === entry.callId && pending.toolName === entry.tool && String(pending.reason ?? "") === String(entry.reason ?? "") ? pending : void 0;
+}
+async function answerGroup(entries2, choice, { actions, statusMap }) {
+  const snapshot = [...entries2];
+  const results = await Promise.allSettled(snapshot.map(async (entry) => {
+    if (entry.answerable) await actions.answerApproval(entry.id, choice);
+    else {
+      const ask = nativeAsk(statusMap, entry);
+      if (!ask) return false;
+      await ask.answer(choice === "allow" ? "allowed-once" : "rejected");
+    }
+    return true;
+  }));
+  let answered = 0;
+  let skipped = 0;
+  for (const result of results) {
+    if (result.status === "rejected") actions.reportError?.(result.reason, "approval");
+    else if (result.value) answered += 1;
+    else skipped += 1;
+  }
+  return { answered, skipped };
+}
+var approvalPlace = (entry, roster) => roster?.roomsById?.[entry.roomId]?.name ?? (entry.taskId !== void 0 ? roster?.tasks?.[entry.taskId]?.title ?? entry.label : void 0) ?? "";
+var approvalWhere = (entry, roster) => approvalPlace(entry, roster) || (entry.roomId === void 0 && entry.taskId === void 0 ? t("in its own chat") : "");
+var approvalDetail = (entry) => entry.detail?.code || (entry.tool === "acp_tool" ? String(entry.reason ?? "") : "");
+
 // src/shared/held.js
 var HELD_NOT_SET = "The permission level of this conversation could not be set, so the agent is not running here. Restarting DeepSeek Harness, or changing the permission level, tries again.";
 var HELD_UNREAD = "DeepSeek Harness could not check where this conversation comes from, so the agent is not running here. Send the message again; if this goes on, restart DeepSeek Harness.";
@@ -7009,6 +7107,12 @@ function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, useWork })
   const pending = useSessionStatus ? useSessionStatus((map) => map.get(taskId)?.pendingInteraction) : void 0;
   const ask = pending?.kind === "approval" && typeof pending.answer === "function" ? pending : void 0;
   const approval = useWork ? useWork((work) => approvalFor(work, taskId)) : false;
+  const askCall = ask?.callId;
+  const detail = useWork ? useWork((work) => {
+    const mine = (work.approvals ?? []).filter((entry2) => entry2.taskId === taskId);
+    const entry = askCall !== void 0 ? mine.find((item) => item.sessionId === taskId && item.callId === askCall) : ask === void 0 && mine.length === 1 ? mine[0] : void 0;
+    return entry ? approvalDetail(entry) : "";
+  }) : "";
   const stop3 = useWork ? useWork((work) => {
     const entry = taskId === null ? void 0 : openStops(work).filter((item) => item.taskId === taskId).sort((a, b) => b.at - a.at)[0];
     return entry ? stopLine(entry) : "";
@@ -7069,6 +7173,7 @@ function TaskCard({ sessionId, title, task, onOpen, useSessionStatus, useWork })
         ),
         (0, import_react18.createElement)("div", { className: "op-task-bar", "aria-hidden": true }, (0, import_react18.createElement)("i"))
       ) : task?.summary ? (0, import_react18.createElement)("p", { className: "op-task-summary" }, task.summary) : null,
+      status === "waiting" && detail ? (0, import_react18.createElement)("span", { className: "op-task-said" }, detail) : null,
       sessionId ? (0, import_react18.createElement)("button", { type: "button", className: "op-task-open", onClick: onOpen }, ask ? t("Open task") : status === "waiting" ? t("Answer it") : working ? t("Watch it work") : t("Open task"), " →") : null
     )
   );
@@ -12161,15 +12266,28 @@ function liveOf(work, roster, now = Date.now()) {
   const byId = roster?.byId ?? {};
   const roomsById = roster?.roomsById ?? {};
   const tasks = roster?.tasks ?? {};
-  const needs = (work?.approvals ?? []).filter((entry) => byId[entry.botId]).map((entry) => {
-    const task = entry.taskId === void 0 ? void 0 : tasks[entry.taskId];
-    return {
+  const needs = groupApprovals((work?.approvals ?? []).filter((entry) => byId[entry.botId])).map(({ entries: entries2 }) => {
+    const entry = entries2[0];
+    const detail = approvalDetail(entry);
+    const item = {
       key: `ask:${entry.id}`,
       bot: byId[entry.botId],
-      place: entry.roomId ? roomsById[entry.roomId]?.name : task?.title ?? entry.label,
+      place: entry.roomId ? roomsById[entry.roomId]?.name : tasks[entry.taskId]?.title ?? entry.label,
       tool: entry.tool,
-      ...entry.child ? { line: t("A subagent wants to use {tool}", { tool: entry.tool }) } : {},
-      open: entry.taskId ?? entry.roomId ?? entry.botId
+      ...entry.child ? { line: t("A subagent wants to use {tool}", { tool: entry.tool }) } : detail && entry.tool !== "keep_working" ? { line: `${t("Wants to use {tool}", { tool: entry.tool })} · ${detail}` } : {},
+      open: entry.taskId ?? entry.roomId ?? entry.botId,
+      count: entries2.length,
+      entries: entries2,
+      detail
+    };
+    if (entries2.length === 1) return item;
+    const places = [...new Set(entries2.map((entry2) => approvalWhere(entry2, roster)).filter(Boolean))];
+    return {
+      ...item,
+      places,
+      place: places.join(", "),
+      reason: entry.reason ?? "",
+      line: t("{count} requests to use {tool}", { count: entries2.length, tool: entry.tool })
     };
   });
   for (const entry of openStops(work)) {
@@ -12213,7 +12331,8 @@ function liveOf(work, roster, now = Date.now()) {
 }
 function liveSummary({ needs, working }) {
   const parts = [];
-  if (needs.length > 0) parts.push(t("{count} needs you", { count: needs.length }));
+  const count = needs.reduce((sum, item) => sum + (item.count ?? 1), 0);
+  if (count > 0) parts.push(t("{count} needs you", { count }));
   parts.push(working.length > 0 ? t("{count} working", { count: working.length }) : t("nothing working"));
   return parts.join(" · ");
 }
@@ -12235,6 +12354,40 @@ function Entry({ item, tone, line, actions }) {
     (0, import_react29.createElement)("span", { className: "bt-live-go" }, t("Open"))
   );
 }
+function GroupEntry({ item, actions, statusMap }) {
+  const [answering, setAnswering] = (0, import_react29.useState)(false);
+  const canAnswer = item.entries.every((entry) => entry.answerable || nativeAsk(statusMap, entry));
+  const answer = async (choice) => {
+    if (answering) return;
+    setAnswering(true);
+    try {
+      await answerGroup(item.entries, choice, { actions, statusMap });
+    } finally {
+      setAnswering(false);
+    }
+  };
+  const what = [item.line, item.detail].filter(Boolean).join(" · ");
+  return (0, import_react29.createElement)(
+    "div",
+    { className: "bt-live-card bt-live-need", role: "group", "aria-label": `${item.bot.name} · ${what}`, "aria-busy": answering || void 0 },
+    (0, import_react29.createElement)("span", { className: "bt-live-face" }, (0, import_react29.createElement)(BotMark, { bot: item.bot, size: 28, state: "alert" })),
+    (0, import_react29.createElement)(
+      "span",
+      { className: "bt-live-text" },
+      (0, import_react29.createElement)("span", { className: "bt-live-name" }, item.bot.name, item.place ? (0, import_react29.createElement)("span", { className: "bt-live-place" }, ` · ${item.place}`) : null),
+      (0, import_react29.createElement)("span", { className: "bt-live-line" }, item.line),
+      item.reason && item.reason !== item.detail ? (0, import_react29.createElement)("span", { className: "bt-live-line" }, hostText(item.reason)) : null,
+      item.detail ? (0, import_react29.createElement)("span", { className: "bt-live-line" }, item.detail) : null
+    ),
+    (0, import_react29.createElement)(
+      "div",
+      { className: "bt-q-foot" },
+      canAnswer ? (0, import_react29.createElement)("button", { type: "button", className: "bt-q-btn", disabled: answering, "aria-label": `${t("Reject")} · ${what}`, onClick: () => answer("reject") }, t("Reject")) : null,
+      canAnswer ? (0, import_react29.createElement)("button", { type: "button", className: "bt-q-submit", disabled: answering, "aria-label": `${t("Allow once")} · ${what}`, onClick: () => answer("allow") }, t("Allow once")) : null,
+      (0, import_react29.createElement)("button", { type: "button", className: "bt-live-go", onClick: () => actions.openSession(item.open) }, t("Open"))
+    )
+  );
+}
 function Section({ label, dot, children, empty }) {
   return (0, import_react29.createElement)(
     "section",
@@ -12243,7 +12396,8 @@ function Section({ label, dot, children, empty }) {
     children.length > 0 ? children : (0, import_react29.createElement)("p", { className: "bt-live-empty" }, empty)
   );
 }
-function LiveRail({ roster, actions, useWork }) {
+function LiveRail({ roster, actions, useWork, useSessionStatus }) {
+  const statusMap = useSessionStatus?.((map) => map) ?? /* @__PURE__ */ new Map();
   const work = useWork((value) => value);
   const [now, setNow] = (0, import_react29.useState)(Date.now());
   (0, import_react29.useEffect)(() => {
@@ -12263,7 +12417,7 @@ function LiveRail({ roster, actions, useWork }) {
     (0, import_react29.createElement)(
       Section,
       { label: t("Needs you"), dot: "need", empty: t("Nothing waiting for you.") },
-      live.needs.map((item) => (0, import_react29.createElement)(Entry, { key: item.key, item, tone: "need", actions, line: item.line ?? (item.tool ? t("Wants to use {tool}", { tool: item.tool }) : t("Waiting for your answer")) }))
+      live.needs.map((item) => item.count > 1 ? (0, import_react29.createElement)(GroupEntry, { key: item.key, item, actions, statusMap }) : (0, import_react29.createElement)(Entry, { key: item.key, item, tone: "need", actions, line: item.line ?? (item.tool ? t("Wants to use {tool}", { tool: item.tool }) : t("Waiting for your answer")) }))
     ),
     (0, import_react29.createElement)(
       Section,
@@ -12306,6 +12460,11 @@ var LIVE_CSS = `
 .bt-live-dot-done i{display:block;background:var(--st-okdot,var(--bt-green))}
 .bt-live-empty{margin:0;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-live-card{display:flex;align-items:center;gap:10px;width:100%;padding:12px 14px;border:1px solid var(--bt-line-2);border-radius:16px;background:var(--bt-sidebar);color:inherit;font:inherit;text-align:left;cursor:pointer}
+div.bt-live-card.bt-live-need{flex-wrap:wrap;cursor:default}
+div.bt-live-card.bt-live-need>.bt-q-foot{flex-basis:100%;align-items:center}
+div.bt-live-card .bt-live-name{white-space:normal}
+div.bt-live-card .bt-live-line{display:block;overflow:visible;overflow-wrap:anywhere;white-space:pre-wrap}
+div.bt-live-card .bt-live-go{padding:0 4px;border:0;background:none;font:inherit;font-weight:600;cursor:pointer}
 .bt-live-card:hover{background:var(--bt-card)}
 .bt-live-need{border-color:color-mix(in srgb,var(--st-warndot,var(--bt-accent)) 60%,transparent);background:var(--bt-card)}
 .bt-live-bad .bt-live-line{color:var(--st-bad-strong,var(--bt-danger))}
@@ -12602,6 +12761,14 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
       }
     },
     openCliLogin,
+    async recoverCliLogin(botId, provider) {
+      const bot = cliLoginBotOf(roster.getSnapshot(), botId);
+      const manager = loginState?.();
+      if (!bot || !manager || !Object.hasOwn(CLI_NAMES, provider)) return false;
+      const recovered = await manager.recover({ botId: bot.id, provider });
+      if (recovered && cliLoginBotOf(roster.getSnapshot(), bot.id)) openSession?.(bot.id);
+      return recovered;
+    },
     cliLoginStart: (botId, provider, model) => call2("cli-login-start", loginPayload(botId, provider, model === void 0 ? {} : { model })),
     cliLoginCurrent: (botId, provider) => call2("cli-login-current", loginPayload(botId, provider)),
     cliLoginStatus: (botId, provider, attemptId, signal) => call2("cli-login-status", loginPayload(botId, provider, { attemptId }), signal),
@@ -12838,12 +13005,6 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 [data-tint=aurora]{animation:bt-genie-aurora 9s ease-in-out infinite}
 @keyframes bt-genie-aurora{0%,100%{filter:hue-rotate(-190deg) saturate(1.2)}50%{filter:hue-rotate(-110deg) saturate(1.3) brightness(1.1)}}
 @media (prefers-reduced-motion:reduce){[data-tint=aurora]{animation:none;filter:hue-rotate(-150deg) saturate(1.25)}}
-/* A small mark frames Genie's head (the whole figure would be a speck): the plume and the
-   ear tips rise out of the frame, with room above for a state's hop. Two masks, added, keep
-   the head: everything down to the earrings, and the disc of the face below that, so the chin
-   stays whole and the arms beside it, with the body under it, are gone. */
-.bt-mark[data-frame=head]{clip-path:inset(-60% -30% 0 -30%)}
-.bt-mark[data-frame=head] .bt-clay{position:absolute;left:50%;bottom:-46%;height:163%;margin-left:-73.6%;-webkit-mask-image:linear-gradient(#000 57%,transparent 61%),radial-gradient(ellipse 29% 27% at 49.5% 41.5%,#000 92%,transparent 100%);mask-image:linear-gradient(#000 57%,transparent 61%),radial-gradient(ellipse 29% 27% at 49.5% 41.5%,#000 92%,transparent 100%)}
 :is(.bt-row,.bt-tile)>.bt-mark:hover .bt-mark[data-shape^=clay-][data-state=idle] .bt-clay{--bt-face-at:1}
 .bt-badge{position:absolute;right:0;bottom:0;width:12px;height:12px;border-radius:50%;corner-shape:round;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1.5px var(--bt-sidebar)}
 .bt-badge-admin{background:color-mix(in srgb,var(--bt-star) 82%,var(--bt-sidebar))}
@@ -14255,9 +14416,6 @@ function showsDshRow(dsh, app) {
   return dsh.kind === "app" && APP_OFFER.has(app?.phase) && sameVersion(app.version, dsh.verified);
 }
 
-// src/client/approvals.js
-var useApproval = (useWork, match) => useWork ? useWork((work) => (work.approvals ?? []).some(match)) : false;
-
 // src/client/work-code-switch.js
 var import_react32 = require("react");
 var NOTE_PATTERNS = [
@@ -14508,6 +14666,7 @@ var waitingFor = (roster, waits) => {
   const names = [...(waits?.bots ?? []).map((id) => roster.byId[id]?.name), ...(waits?.rooms ?? []).map((id) => roster.roomsById[id]?.name)].filter(Boolean);
   return names.length === 0 ? "" : t("Waiting for {names}", { names: names.join(t(" and ")) });
 };
+var waitingLabel = (count) => count === 1 ? `${t("Waiting for your approval")} · ${t("1 approval waiting")}` : count > 0 ? t("{count} approvals waiting", { count }) : t("Waiting for your approval");
 function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useActivity, useWork, wide, marked }) {
   const id = bot.id;
   const part = currentPart(bot);
@@ -14519,6 +14678,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const main = isMainOf(roster, id);
   const crowned = roster.mainBotId === id;
   const approval = useApproval(useWork, (entry) => entry.botId === id);
+  const waitingCount = useWork ? useWork((work) => approvalCount(work, (e) => e.botId === id)) : 0;
   const blockedTask = useWork ? useWork((work) => (work.approvals ?? []).some((entry) => entry.taskId !== void 0 && entry.botId === id)) : false;
   const blockedLine = blockedTask ? t("A task needs your approval") : "";
   const stopped = useWork ? useWork((work) => openStops(work).some((entry) => entry.botId === id)) : false;
@@ -14543,7 +14703,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   };
   const pinned = bot.pinned === true && !crowned;
   const role = crowned ? bot.role : "";
-  const label = [bot.name, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", running2 || away ? t("Working") : "", waitsFor, stoppedLine, approval ? t("Waiting for your approval") : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
+  const label = [bot.name, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", running2 || away ? t("Working") : "", waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
   return (0, import_react34.createElement)(
     "button",
     {
@@ -14556,7 +14716,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
       onClick: () => actions.openSession(id),
       onContextMenu
     },
-    (0, import_react34.createElement)(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, main, crown: crowned }),
+    (0, import_react34.createElement)(BotAvatar, { bot, size: crowned && wide ? 42 : 36, state, count: waitingCount, main, crown: crowned }),
     pinned && !wide ? (0, import_react34.createElement)(PinMark) : null,
     wide ? (0, import_react34.createElement)(
       "span",
@@ -14602,6 +14762,7 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
   const ids = tasks.map((task) => task.sessionId);
   const askedKey = useSessionStatus((map) => ids.filter((id) => waitsForUser(map, id)).join(","));
   const approvalKey = useWork ? useWork((work) => ids.filter((id) => approvalFor(work, id)).join(",")) : "";
+  const approvals = useWork ? useWork((work) => work.approvals) : void 0;
   const waitingKey = `${askedKey},${approvalKey}`;
   const shownId = useSessions((list) => ids.find((id) => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? "");
   const [open, setOpen] = (0, import_react34.useState)(false);
@@ -14616,7 +14777,9 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
     { className: "bt-threads", role: "group", "aria-label": t("Tasks {name} started", { name: bot.name }) },
     shown.map((task) => {
       const state = taskState(task, waiting.has(task.sessionId));
-      const label = [task.title, state === "waiting" ? t("Waiting for you") : t("Working")].join(", ");
+      const asks = state === "waiting" ? (approvals ?? []).filter((entry) => entry.taskId === task.sessionId) : [];
+      const detail = asks.length === 1 ? approvalDetail(asks[0]) : "";
+      const label = [task.title, state === "waiting" ? t("Waiting for you") : t("Working"), detail].filter(Boolean).join(", ");
       return (0, import_react34.createElement)(
         "button",
         {
@@ -14625,7 +14788,7 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
           className: "bt-thread",
           "data-state": state,
           "aria-label": label,
-          title: task.title,
+          title: detail ? `${task.title} · ${detail}` : task.title,
           "aria-current": shownId === task.sessionId ? "page" : void 0,
           onClick: () => actions.openSession(task.sessionId)
         },
@@ -14645,12 +14808,13 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
   const unread = useSessionStatus((map) => map.get(id)?.completionUnread === true) || marked && !active;
   useMarkedUnread(id, active, marked, actions);
   const approval = useApproval(useWork, (entry) => entry.roomId === id);
+  const waitingCount = useWork ? useWork((work) => approvalCount(work, (entry) => entry.roomId === id)) : 0;
   const members = workKeys(useGroupWork(useWork, (rooms) => (rooms[id] ?? []).map((entry) => ({ id: entry.botId, ...doingOf(entry) }))));
   const first = roster.byId[members[0]?.id];
   const workingLine = first ? workLine(first.name, members[0], members.length - 1) : null;
   if (room2.hidden && !active) return null;
   const pinned = room2.pinned === true;
-  const label = [room2.name, pinned ? t("Pinned") : "", members.length > 0 ? t("Working") : "", approval ? t("Waiting for your approval") : ""].filter(Boolean).join(", ");
+  const label = [room2.name, pinned ? t("Pinned") : "", members.length > 0 ? t("Working") : "", approval ? waitingLabel(waitingCount) : ""].filter(Boolean).join(", ");
   return (0, import_react34.createElement)(
     "button",
     {
@@ -14670,7 +14834,7 @@ function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, 
     wide ? (0, import_react34.createElement)(
       "span",
       { className: "bt-row-body" },
-      (0, import_react34.createElement)("span", { className: "bt-row-name" }, (0, import_react34.createElement)("span", { className: "bt-row-title" }, room2.name), pinned ? (0, import_react34.createElement)(PinMark) : null),
+      (0, import_react34.createElement)("span", { className: "bt-row-name" }, (0, import_react34.createElement)("span", { className: "bt-row-title" }, room2.name), waitingCount > 0 ? (0, import_react34.createElement)("span", { className: "bt-tag" }, String(waitingCount)) : null, pinned ? (0, import_react34.createElement)(PinMark) : null),
       workingLine ? (0, import_react34.createElement)("span", { className: "bt-row-preview" }, workingLine) : preview ? (0, import_react34.createElement)("span", { className: "bt-row-preview" }, preview) : null
     ) : null,
     wide && approval && !active ? (0, import_react34.createElement)("span", { className: "bt-unread bt-unread-wait", "aria-hidden": true }) : wide && unread && !active ? (0, import_react34.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
@@ -16919,6 +17083,16 @@ function turnDetector({ loud = 0.12, quiet: quiet2 = 0.06, quietMs = 1200 } = {}
   };
 }
 
+// src/client/update-hold.js
+var PLUGINS_COMING = /* @__PURE__ */ new Set(["ready", "downloading"]);
+var splitsPlugins = (state) => Boolean(state?.app && state?.plugins);
+function opensIntoPlugins(bridge, state) {
+  if (!bridge || typeof bridge.check === "function") return false;
+  if (state == null) return true;
+  if (!splitsPlugins(state)) return false;
+  return PLUGINS_COMING.has(state.plugins.phase) || state.kind === "plugins" && PLUGINS_COMING.has(state.phase);
+}
+
 // src/client/desktop-update.js
 var import_react39 = require("react");
 var BUSY = /* @__PURE__ */ new Set(["checking", "downloading", "installing"]);
@@ -16999,7 +17173,6 @@ function pluginPill(plugins) {
       return null;
   }
 }
-var splitsPlugins = (state) => Boolean(state?.app && state?.plugins);
 var appState = (state) => splitsPlugins(state) ? state.app : state;
 function useDesktopUpdate() {
   const bridge = globalThis.omniDesktop?.updates;
@@ -17023,7 +17196,7 @@ function useDesktopUpdate() {
   }, [bridge]);
   return { bridge, state };
 }
-function useDesktopVersions() {
+function useDesktopVersions(presentation) {
   const bridge = globalThis.omniDesktop?.updates;
   const [versions, setVersions] = (0, import_react39.useState)(null);
   (0, import_react39.useEffect)(() => {
@@ -17036,10 +17209,10 @@ function useDesktopVersions() {
     return () => {
       live = false;
     };
-  }, [bridge]);
+  }, [bridge, presentation]);
   return versions;
 }
-function Pill({ pill, busy, percent: percent3, onClick }) {
+function Pill({ pill, busy, held, percent: percent3, onClick }) {
   return (0, import_react39.createElement)(
     "button",
     {
@@ -17047,7 +17220,7 @@ function Pill({ pill, busy, percent: percent3, onClick }) {
       className: `bt-desk-update${pill.primary ? " bt-desk-update-go" : ""}`,
       title: pill.title,
       "aria-busy": busy || void 0,
-      disabled: busy,
+      disabled: busy || held,
       onClick
     },
     (0, import_react39.createElement)("span", { className: "bt-desk-update-dot", "aria-hidden": true }),
@@ -17063,19 +17236,23 @@ function DesktopUpdate() {
   const plugins = splitsPlugins(state) && !["ready", "installing"].includes(app.phase) ? state.plugins : null;
   const plugPill = pluginPill(plugins);
   if (!appPill && !plugPill) return null;
+  const held = opensIntoPlugins(bridge, state);
+  const appHeld = held && !appPill?.primary;
   const open = () => {
+    if (appHeld || BUSY.has(app.phase)) return;
     void bridge.open().catch(() => {
     });
   };
   const apply2 = () => {
+    if (held || BUSY.has(plugins?.phase)) return;
     void (bridge.applyPlugins ?? bridge.open)().catch(() => {
     });
   };
   return (0, import_react39.createElement)(
     "div",
     { className: "bt-desk-updates" },
-    appPill ? (0, import_react39.createElement)(Pill, { pill: appPill, busy: BUSY.has(app.phase), percent: app.phase === "downloading" ? app.percent ?? 0 : void 0, onClick: open }) : null,
-    plugPill ? (0, import_react39.createElement)(Pill, { pill: plugPill, busy: BUSY.has(plugins.phase), percent: plugins.phase === "downloading" ? plugins.percent ?? 0 : void 0, onClick: apply2 }) : null
+    appPill ? (0, import_react39.createElement)(Pill, { pill: appPill, busy: BUSY.has(app.phase), held: appHeld, percent: app.phase === "downloading" ? app.percent ?? 0 : void 0, onClick: open }) : null,
+    plugPill ? (0, import_react39.createElement)(Pill, { pill: plugPill, busy: BUSY.has(plugins.phase), held, percent: plugins.phase === "downloading" ? plugins.percent ?? 0 : void 0, onClick: apply2 }) : null
   );
 }
 var DESKTOP_UPDATE_CSS = `
@@ -18896,7 +19073,8 @@ function CliAccounts({ bot, actions }) {
     setError(null);
     try {
       const { provider, action } = pending;
-      if (action === "switch") await actions.cliLoginSwitch(bot.id, provider);
+      if (action === "recover") await actions.recoverCliLogin(bot.id, provider);
+      else if (action === "switch") await actions.cliLoginSwitch(bot.id, provider);
       else if (action === "reset") await actions.cliLoginReset(bot.id, provider);
       else await actions.cliLoginSignOut(bot.id, provider);
       await actions.refreshModels?.();
@@ -18947,7 +19125,7 @@ function CliAccounts({ bot, actions }) {
         "div",
         null,
         (0, import_react46.createElement)("p", null, t("This stops running Bot work for this account. Continue?")),
-        pending.action === "reset" ? (0, import_react46.createElement)(
+        ["reset", "recover"].includes(pending.action) ? (0, import_react46.createElement)(
           "div",
           null,
           (0, import_react46.createElement)("p", null, t("This signs {vendor} out for Bots. Sign in again in the app.", {
@@ -18978,11 +19156,15 @@ function CliAccounts({ bot, actions }) {
       ) : (0, import_react46.createElement)(
         "div",
         null,
-        entry.recoveryRequired ? (0, import_react46.createElement)("button", {
+        entry.recoveryRequired ? (0, import_react46.createElement)("div", null, (0, import_react46.createElement)("button", {
           type: "button",
           className: "bt-soft bt-soft-sm",
           onClick: () => setPending({ provider, action: "reset" })
-        }, t("Reset Bot sign-in")) : (0, import_react46.createElement)(
+        }, t("Reset Bot sign-in")), (0, import_react46.createElement)("button", {
+          type: "button",
+          className: "bt-soft bt-soft-sm",
+          onClick: () => setPending({ provider, action: "recover" })
+        }, t("Sign in again"))) : (0, import_react46.createElement)(
           "div",
           null,
           !entry.signedIn ? (0, import_react46.createElement)("button", {
@@ -20848,13 +21030,18 @@ function startModel(roster) {
   const models = (roster.models ?? []).filter(setUp);
   return (models.find((model) => model.ref === roster.defaultModel) ?? models.find((model) => model.superseded !== true) ?? models[0])?.ref ?? "";
 }
-function createPayload({ name, look, image, model, effort, brief }) {
+function createPayload({ name, look, image, model, effort, brief, role, instructions }) {
   const payload = { name, color: look.color, avatar: image ? { shape: look.shape, image } : { shape: look.shape } };
   if (model) payload.model = model;
   if (effort !== void 0) payload.effort = effort;
   if (brief) payload.brief = brief;
+  if (role?.trim()) payload.role = role.trim();
+  if (instructions?.trim()) payload.instructions = instructions.trim();
   return payload;
 }
+
+// src/shared/bot-profile.js
+var ROLE_MAX = 24;
 
 // src/client/create-bot.js
 var import_react54 = require("react");
@@ -20869,6 +21056,9 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const [image, setImage] = (0, import_react54.useState)(null);
   const [library, setLibrary] = (0, import_react54.useState)(false);
   const [name, setName] = (0, import_react54.useState)(start2?.name ?? "");
+  const [role, setRole] = (0, import_react54.useState)("");
+  const [instructions, setInstructions] = (0, import_react54.useState)("");
+  const [showInstructions, setShowInstructions] = (0, import_react54.useState)(false);
   const [model, setModel] = (0, import_react54.useState)(() => startModel(roster));
   const [effort, setEffort] = (0, import_react54.useState)(void 0);
   const [busy, setBusy] = (0, import_react54.useState)(false);
@@ -20883,12 +21073,22 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
   const finalName = name.trim() || fallbackName;
   const clash = roster.bots.some((bot) => bot.name.toLowerCase() === finalName.toLowerCase());
   const problem = nameProblem(finalName);
+  const permission = roster.prefs?.permission ?? roster.permissions?.defaultPreset;
   const create = async () => {
     if (busy || clash || problem) return;
     setError("");
     setBusy(true);
     try {
-      const bot = await actions.createBot(createPayload({ name: finalName, look, image, model, effort, brief }));
+      const bot = await actions.createBot(createPayload({
+        name: finalName,
+        look,
+        image,
+        model,
+        effort,
+        brief,
+        role,
+        instructions
+      }));
       onCreated(bot);
     } catch (failure) {
       setError(failure?.message ?? String(failure));
@@ -20975,6 +21175,18 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
       problem ? (0, import_react54.createElement)("span", { className: "bt-note bt-danger" }, hostText(problem)) : clash ? (0, import_react54.createElement)("span", { className: "bt-note bt-danger" }, t("A Bot named {name} already exists", { name: finalName })) : null
     ),
     (0, import_react54.createElement)(
+      "label",
+      { className: "bt-field" },
+      (0, import_react54.createElement)("span", { className: "bt-field-label" }, t("Role")),
+      (0, import_react54.createElement)("input", {
+        className: "bt-input",
+        value: role,
+        maxLength: ROLE_MAX,
+        "aria-label": t("Role"),
+        onChange: (event) => setRole(event.target.value)
+      })
+    ),
+    (0, import_react54.createElement)(
       "div",
       { className: "bt-field" },
       (0, import_react54.createElement)("span", { className: "bt-field-label" }, t("Model")),
@@ -20983,6 +21195,44 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
         setEffort(void 0);
       }, onPickEffort: (picked) => setEffort(picked ?? null) }),
       (0, import_react54.createElement)("span", { className: "bt-note" }, (roster.models ?? []).length > 0 ? t("The Bot runs on this model. You can change it later in its details.") : t("Add a provider and a model in DeepSeek Harness first, or pick one in the Bot's chat later."))
+    ),
+    (0, import_react54.createElement)("div", { className: "bt-create-step" }, t("What will it do?")),
+    (0, import_react54.createElement)("button", {
+      type: "button",
+      className: "bt-soft",
+      "aria-expanded": showInstructions,
+      onClick: () => setShowInstructions((value) => !value)
+    }, t("Add instructions")),
+    // The form's own input look, as tall as the Settings instructions area.
+    showInstructions ? (0, import_react54.createElement)(
+      "div",
+      { className: "bt-field" },
+      (0, import_react54.createElement)("textarea", {
+        className: "bt-input",
+        value: instructions,
+        style: { height: "auto", minHeight: 112, padding: "8px 10px", lineHeight: "19px", resize: "vertical" },
+        "aria-label": t("What will it do?"),
+        placeholder: t("What this Bot is responsible for…"),
+        onChange: (event) => setInstructions(event.target.value),
+        onKeyDown: (event) => {
+          if (event.key === "Enter") event.stopPropagation();
+        }
+      }),
+      (0, import_react54.createElement)(
+        "div",
+        { className: "bt-note" },
+        t("Part of the Bot's system prompt. You can change it later in its details.")
+      )
+    ) : null,
+    remoteOfBot({ model }) ? (0, import_react54.createElement)(
+      "div",
+      { className: "bt-note" },
+      t("This model uses its Hermes profile's own instructions.")
+    ) : null,
+    permission == null ? null : (0, import_react54.createElement)(
+      "div",
+      { className: "bt-note" },
+      t("New Bots start at {level}.", { level: presetName(permission, roster.permissions) })
     ),
     error ? (0, import_react54.createElement)("div", { className: "bt-error", role: "alert", style: { padding: 0 } }, error) : null,
     (0, import_react54.createElement)(
@@ -23924,7 +24174,7 @@ function pluginHint(change, plugins) {
 }
 function versionRows({ versions, update, Row: Row3 }) {
   const plugins = versions ? Array.isArray(versions.plugins) ? versions.plugins : [] : [{ name: update.name, version: update.current }];
-  return plugins.filter((plugin) => typeof plugin?.name === "string" && typeof plugin.version === "string").map((plugin) => (0, import_react66.createElement)(Row3, { key: `version:${plugin.name}`, label: pluginName(plugin.name), hint: t("Version {version}", { version: plugin.version }) }));
+  return plugins.filter((plugin) => typeof plugin?.name === "string" && typeof plugin.version === "string").map((plugin) => (0, import_react66.createElement)(Row3, { key: `version:${plugin.name}`, label: pluginName(plugin.name), hint: pluginVersionHint(plugin, versions?.latest?.[plugin.name]) }));
 }
 function pluginRows({ app, Row: Row3 }) {
   const plugins = splitsPlugins(app.state) ? app.state.plugins : null;
@@ -23951,18 +24201,81 @@ function pluginRows({ app, Row: Row3 }) {
   }
   return rows2;
 }
-var PLUGINS_COMING = /* @__PURE__ */ new Set(["ready", "downloading"]);
-function opensIntoPlugins(bridge, state) {
-  if (!bridge || typeof bridge.check === "function") return false;
-  if (state == null) return true;
-  if (!splitsPlugins(state)) return false;
-  return PLUGINS_COMING.has(state.plugins.phase) || state.kind === "plugins" && PLUGINS_COMING.has(state.phase);
+function newerVersion(next, current) {
+  const parse2 = (value) => /^(\d+)\.(\d+)\.(\d+)(?:-([\w.]+))?(?:\+[\w.]+)?$/.exec(value ?? "");
+  const a = parse2(next), b = parse2(current);
+  if (!a || !b) return false;
+  for (let i = 1; i <= 3; i++) if (+a[i] !== +b[i]) return +a[i] > +b[i];
+  if (!a[4] || !b[4]) return !a[4] && Boolean(b[4]);
+  const x = a[4].split("."), y = b[4].split(".");
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue;
+    if (x[i] === void 0 || y[i] === void 0) return y[i] === void 0;
+    const nx = /^\d+$/.test(x[i]), ny = /^\d+$/.test(y[i]);
+    if (nx && ny) return +x[i] > +y[i];
+    return nx !== ny ? !nx : x[i] > y[i];
+  }
+  return false;
+}
+function pluginVersionHint(plugin, latest) {
+  return newerVersion(latest, plugin.version) ? t("Version {version} · {latest} available", { version: plugin.version, latest }) : t("Version {version}", { version: plugin.version });
+}
+function forceHint(force) {
+  switch (force?.phase) {
+    case "stopping":
+      return t("Stopping conversations…");
+    case "checking":
+      return t("Checking for updates…");
+    case "downloading":
+      return t("Downloading the Automagik update…");
+    case "installing":
+      return t("Installing…");
+    case "restarting":
+      return t("Restarting…");
+  }
+  switch (force?.code) {
+    case "up-to-date":
+      return t("Everything is up to date.");
+    case "updated":
+      return t("Updated.");
+    case "plugins-rolled-back":
+      return t("The plugins did not start, so the previous ones are back.");
+    case "app-download-failed":
+      return t("The Automagik update could not be downloaded. Try again.");
+    case "app-manual":
+      return t("This copy updates through your system's package manager.");
+    case "restart-failed":
+      return t("The restart did not finish. Try again.");
+    default:
+      return pluginReason({ reason: force }) ?? t("Stops running conversations and sign-ins, installs every available update and restarts.");
+  }
+}
+function pluginReason(versions) {
+  const params = versions?.reason?.params ?? {};
+  switch (versions?.reason?.code) {
+    case "app-line":
+      return t("Plugins {version} need Automagik {line}; this app is {app}. Update Automagik first.", params);
+    case "app-minimum":
+      return t("Plugins {version} need Automagik {base} or newer; this app is {app}.", params);
+    case "trial-failed":
+      return t("Plugins {version} did not start here before, so the current ones are kept.", params);
+    case "dsh-range":
+      return t("Plugins {version} need a different DeepSeek Harness version.", params);
+    case "older-sequence":
+    case "invalid-lane":
+      return t("The published plugin update was not accepted.");
+    case "not-checked":
+    case "check-failed":
+      return t("Plugin updates could not be checked. Try again.");
+    default:
+      return null;
+  }
 }
 var linkProps = (href) => ({ className: "bt-soft bt-soft-sm bt-about-link", href, target: "_blank", rel: "noopener noreferrer" });
 function AboutPage({ useUpdate, actions, run: run2, Section: Section2, Row: Row3 }) {
   const update = useUpdate((value) => value) ?? {};
   const app = useDesktopUpdate();
-  const versions = useDesktopVersions();
+  const versions = useDesktopVersions(app.state);
   const [checking, setChecking] = (0, import_react66.useState)(false);
   const [stars, setStars] = (0, import_react66.useState)(null);
   (0, import_react66.useEffect)(() => {
@@ -24000,6 +24313,27 @@ function AboutPage({ useUpdate, actions, run: run2, Section: Section2, Row: Row3
   const appPill = updatePill(appState(app.state));
   const appBusy = ["checking", "downloading", "installing"].includes(appState(app.state)?.phase);
   const ours = inApp(update, app);
+  const [confirmForce, setConfirmForce] = (0, import_react66.useState)(false);
+  const [pendingForce, setPendingForce] = (0, import_react66.useState)(null);
+  const forceSent = (0, import_react66.useRef)(false);
+  const force = pendingForce ?? app.state?.force;
+  const forceBusy = Boolean(force?.phase && !["done", "failed"].includes(force.phase));
+  const canForce = typeof app.bridge?.force === "function" && !updatesOff(versions);
+  const startForce = () => {
+    if (!canForce || forceBusy || forceSent.current) return;
+    forceSent.current = true;
+    setConfirmForce(false);
+    setPendingForce({ phase: "stopping" });
+    void Promise.resolve().then(() => app.bridge.force()).then(() => setPendingForce(null), () => {
+      setPendingForce({ phase: "failed", code: "restart-failed" });
+    }).finally(() => {
+      forceSent.current = false;
+    });
+  };
+  (0, import_react66.useEffect)(() => {
+    if (app.state?.force) setPendingForce(null);
+  }, [app.state?.force]);
+  const reason = pluginReason(versions);
   const held = opensIntoPlugins(app.bridge, app.state);
   const appCheck = () => {
     if (held) return;
@@ -24053,7 +24387,18 @@ function AboutPage({ useUpdate, actions, run: run2, Section: Section2, Row: Row3
       { key: "updates", title: t("Updates") },
       (0, import_react66.createElement)(Row3, { label: ours ? "Automagik" : "Omni", hint: botHint(update, app, versions) }, botControl, update.available && update.notesUrl ? (0, import_react66.createElement)("a", linkProps(update.notesUrl), t("What's new")) : null),
       dsh?.current ? (0, import_react66.createElement)(Row3, { label: "DeepSeek Harness", hint: dshHint(dsh, dshShown) }, dshControl) : ours && typeof versions?.dsh === "string" ? (0, import_react66.createElement)(Row3, { label: "DeepSeek Harness", hint: t("Version {version}", { version: versions.dsh }) }) : null,
-      ...pluginRows({ app, Row: Row3 })
+      ...pluginRows({ app, Row: Row3 }),
+      reason ? (0, import_react66.createElement)(Row3, { label: t("Plugin updates"), hint: reason }) : null,
+      canForce ? (0, import_react66.createElement)(
+        Row3,
+        { label: t("Force update"), hint: confirmForce && !forceBusy ? t("Running conversations, tasks and Bot sign-ins stop now. Bots that were signing in ask you to sign in again.") : forceHint(force) },
+        confirmForce && !forceBusy ? [
+          (0, import_react66.createElement)("button", { key: "stop", type: "button", className: "bt-fb-primary", onClick: startForce }, t("Stop and update")),
+          (0, import_react66.createElement)("button", { key: "cancel", type: "button", className: "bt-soft bt-soft-sm", onClick: () => setConfirmForce(false) }, t("Cancel"))
+        ] : (0, import_react66.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", disabled: forceBusy, onClick: () => {
+          if (!forceBusy) setConfirmForce(true);
+        } }, t("Force update"))
+      ) : null
     ),
     plugins.length > 0 ? (0, import_react66.createElement)(Section2, { key: "plugins", title: t("Plugins") }, ...plugins) : null,
     (0, import_react66.createElement)(
@@ -28411,13 +28756,16 @@ var ACCOUNT_CHANGED = "bot/account-changed";
 var ACCOUNT_SIGNED_OUT = "bot/account-signed-out";
 var providerOf2 = (ref) => typeof ref === "string" && ref.includes("/") ? ref.slice(0, ref.indexOf("/")) : void 0;
 var messageOf = (error) => typeof error?.message === "string" && error.message !== "" ? error.message : "Could not continue this sign-in. Try again.";
-function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf: modelOf2 }) {
+function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globalThis, modelOf: modelOf2, botOf }) {
   const listeners2 = /* @__PURE__ */ new Set();
   let snapshot = Object.freeze({ rows: Object.freeze({}) });
   let disposed = false;
   let sequence = 0;
+  let intent = 0;
+  const recoveries = /* @__PURE__ */ new Set();
   const attempts = {};
   const polls = {};
+  const providerEpochs = /* @__PURE__ */ new Map();
   const rowTimers = /* @__PURE__ */ new Map();
   const restored = /* @__PURE__ */ new Set();
   const baselines = /* @__PURE__ */ new Map();
@@ -28440,6 +28788,20 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     }
     snapshot = Object.freeze({ rows: Object.freeze(rows2) });
     emit();
+  }
+  function retireRecovery(owner) {
+    const row = rowOf(owner.botId);
+    const seq = owner.seq;
+    owner.seq = void 0;
+    if (row?.seq === seq && row?.busy) setRow(owner.botId, null);
+  }
+  function retireInvalidRecoveries() {
+    for (const owner of recoveries) if (!owner.current()) retireRecovery(owner);
+  }
+  function nextIntent() {
+    ++intent;
+    retireInvalidRecoveries();
+    return intent;
   }
   const patchRow = (botId, seq, patch) => {
     if (live(botId, seq)) setRow(botId, { ...rowOf(botId), ...patch });
@@ -28550,6 +28912,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     for (const row of attemptRows(provider)) setRow(row.botId, { ...row, stage: "interrupted", attempt: null, busy: false, confirm: false });
   }
   async function ended(provider) {
+    const epoch = providerEpochs.get(provider);
     stopPoll(provider);
     let signedIn;
     let connection;
@@ -28559,7 +28922,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     } catch {
       signedIn = void 0;
     }
-    if (disposed) return;
+    if (disposed || providerEpochs.get(provider) !== epoch) return;
     if (signedIn === true && connection?.consent === "needed") {
       for (const row of attemptRows(provider)) void readAccount(row.botId, provider, row.seq, null);
       return;
@@ -28614,8 +28977,9 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
      * or the Sign in button in Settings or Welcome. A live attempt of that agent is joined, never
      * started again; `ref` (the model the person chose) is kept by the host for this Bot.
      */
-    async open({ botId, provider, ref }) {
-      if (disposed || typeof botId !== "string" || botId === "" || !known(provider)) return false;
+    async open({ botId, provider, ref }, valid = () => true, owner) {
+      nextIntent();
+      if (disposed || !valid() || typeof botId !== "string" || botId === "" || !known(provider)) return false;
       const model = typeof ref === "string" && ref.startsWith(`${provider}/`) ? ref : void 0;
       const existing = rowOf(botId);
       if (existing?.provider === provider && ["offer", "attempt", "account"].includes(existing.stage)) {
@@ -28632,13 +28996,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         return true;
       }
       const seq = ++sequence;
+      if (owner) owner.seq = seq;
       setRow(botId, { botId, provider, ref: model, stage: "offer", busy: true, reveal: seq, seq, attempt: null, error: null, confirm: false });
       try {
         const current = await actions.cliLoginCurrent(botId, provider);
-        if (!live(botId, seq)) return true;
+        if (!live(botId, seq) || !valid()) return false;
         if (current?.attempt && ACTIVE.has(current.attempt.status)) {
           const view = model ? await actions.cliLoginStart(botId, provider, model) : current.attempt;
-          if (!live(botId, seq)) return true;
+          if (!live(botId, seq) || !valid()) return false;
           setRow(botId, { ...rowOf(botId), stage: "attempt", busy: false });
           applyView(provider, view);
           return true;
@@ -28649,28 +29014,60 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         }
       } catch {
       }
+      if (!valid()) return false;
       patchRow(botId, seq, { busy: false });
       return true;
     },
+    // Settings' confirmed recovery composes the existing owner RPCs. Each RPC retains its
+    // own host admission checks; Reset and start are deliberately not an atomic transaction.
+    async recover({ botId, provider, ref }) {
+      if (disposed || !known(provider) || !botOf?.(botId)) return false;
+      const model = modelOf2?.(botId);
+      let operation = nextIntent();
+      const current = () => !disposed && intent === operation && Boolean(botOf(botId)) && modelOf2?.(botId) === model;
+      await actions.cliLoginReset(botId, provider);
+      if (!current()) return false;
+      stopPoll(provider);
+      providerEpochs.set(provider, (providerEpochs.get(provider) ?? 0) + 1);
+      delete attempts[provider];
+      for (const row of Object.values(snapshot.rows)) if (row.provider === provider) setRow(row.botId, null);
+      const owner = { botId, current, seq: void 0 };
+      recoveries.add(owner);
+      try {
+        operation = intent + 1;
+        if (!await api.open({ botId, provider, ref }, current, owner) || !current()) return false;
+        const row = rowOf(botId);
+        if (row?.provider !== provider || row.seq !== owner.seq || row.busy) return false;
+        if (row.stage !== "offer") return ["account", "attempt"].includes(row.stage);
+        operation = intent + 1;
+        return await api.start(botId, current);
+      } finally {
+        if (!current()) retireRecovery(owner);
+        recoveries.delete(owner);
+      }
+    },
     /** Sign in (or Try again): starts the attempt, or joins the one at work. */
-    async start(botId) {
+    async start(botId, valid = () => true) {
+      nextIntent();
       const row = rowOf(botId);
-      if (disposed || row === void 0 || row.busy || !["offer", "failed", "interrupted"].includes(row.stage)) return false;
+      if (disposed || !valid() || row === void 0 || row.busy || !["offer", "failed", "interrupted"].includes(row.stage)) return false;
       const seq = row.seq;
       patchRow(botId, seq, { busy: true, error: null });
       try {
         const view = await actions.cliLoginStart(botId, row.provider, row.ref);
-        if (!live(botId, seq)) return false;
+        if (!live(botId, seq) || !valid()) return false;
         setRow(botId, { ...rowOf(botId), stage: "attempt", busy: false, message: void 0 });
         applyView(row.provider, view);
         return true;
       } catch (error) {
+        if (!live(botId, seq) || !valid()) return false;
         patchRow(botId, seq, { busy: false, error: messageOf(error) });
         return false;
       }
     },
     /** The Claude code, sent once to the host; it is never kept here. */
     async answer(botId, value) {
+      nextIntent();
       const row = rowOf(botId);
       const attempt = row?.attempt;
       if (disposed || row?.stage !== "attempt" || row.provider !== "acp-claude" || row.busy || attempt?.prompt === void 0 || typeof value !== "string" || value.trim() === "") return false;
@@ -28695,13 +29092,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
      * shown instead, and nothing is taken for it.
      */
     async confirm(botId) {
+      nextIntent();
       const row = rowOf(botId);
       if (disposed || row?.stage !== "account" || row.busy) return false;
       const seq = row.seq;
       patchRow(botId, seq, { busy: true, error: null });
       try {
         const view = await actions.cliLoginConfirm(botId, row.provider, row.account?.ref, row.ref);
-        if (disposed) return false;
+        if (!live(botId, seq)) return false;
         accountTaken(row.provider, botId, view);
         return true;
       } catch (error) {
@@ -28726,13 +29124,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
         offered.set(botId, failure.at);
         if (rowOf(botId) !== void 0) continue;
         void (async () => {
+          const epoch = providerEpochs.get(provider);
           let current;
           try {
             current = await actions.cliLoginCurrent(botId, provider);
           } catch {
             return;
           }
-          if (disposed || rowOf(botId) !== void 0 || !current?.account) return;
+          if (disposed || providerEpochs.get(provider) !== epoch || rowOf(botId) !== void 0 || !current?.account) return;
           const seq = ++sequence;
           setRow(botId, { botId, provider, ref: void 0, stage: "account", busy: false, reveal: seq, seq, attempt: null, error: null, confirm: false, account: Object.freeze({ ...current.account }) });
         })();
@@ -28748,6 +29147,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     },
     /** The person's explicit cancel: the only way a row ends an attempt. */
     async cancel(botId) {
+      nextIntent();
       const row = rowOf(botId);
       const attempt = row?.attempt;
       if (disposed || row?.stage !== "attempt" || row.busy || attempt === null || attempt === void 0) return false;
@@ -28755,7 +29155,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       patchRow(botId, seq, { busy: true, error: null });
       try {
         const view = await actions.cliLoginCancel(botId, row.provider, attempt.attemptId);
-        if (disposed) return false;
+        if (!live(botId, seq)) return false;
         applyView(row.provider, view?.status === "cancelled" ? view : { ...attempt, status: "cancelled" });
         if (live(botId, seq)) setRow(botId, null);
         return true;
@@ -28768,6 +29168,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     },
     /** Not now, or Close: the row goes; an attempt at work goes on in the host. */
     dismiss(botId) {
+      nextIntent();
       if (rowOf(botId)) setRow(botId, null);
     },
     /**
@@ -28776,6 +29177,7 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
      */
     followModels() {
       if (disposed || typeof modelOf2 !== "function") return;
+      retireInvalidRecoveries();
       for (const row of Object.values(snapshot.rows)) {
         const baseline = baselines.get(row.botId);
         const model = modelOf2(row.botId);
@@ -28801,13 +29203,14 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
       if (disposed || typeof botId !== "string" || rowOf(botId) !== void 0 || restored.has(botId)) return;
       restored.add(botId);
       for (const provider of Object.keys(CLI_NAMES)) {
+        const epoch = providerEpochs.get(provider);
         let current;
         try {
           current = await actions.cliLoginCurrent(botId, provider);
         } catch {
           continue;
         }
-        if (disposed || rowOf(botId) !== void 0) return;
+        if (disposed || providerEpochs.get(provider) !== epoch || rowOf(botId) !== void 0) return;
         const attempt = current?.attempt;
         if (attempt && ACTIVE.has(attempt.status) && attempt.openedBy === botId) {
           setRow(botId, { botId, provider, stage: "attempt", busy: false, seq: ++sequence, attempt, error: null, confirm: false });
@@ -28818,6 +29221,8 @@ function createCliLogin({ actions, pollMs = 1500, now = Date.now, timers = globa
     },
     dispose() {
       if (disposed) return;
+      for (const owner of recoveries) retireRecovery(owner);
+      recoveries.clear();
       for (const provider of Object.keys(polls)) stopPoll(provider);
       for (const timer of rowTimers.values()) timers.clearTimeout(timer);
       rowTimers.clear();
@@ -29119,10 +29524,10 @@ function noticeApprovals({ work, roster, shownSession, openSession, since: since
       if ((entry.at ?? 0) < since2) continue;
       const place = entry.roomId ?? entry.ownerSessionId ?? entry.sessionId;
       if (document.visibilityState === "visible" && shownSession() === place) continue;
-      const { byId, roomsById } = roster.getSnapshot();
-      const room2 = entry.roomId ? roomsById[entry.roomId] : void 0;
+      const team = roster.getSnapshot();
+      const { byId } = team;
       const note = new Notification(t("{name} is waiting for your approval", { name: byId[entry.botId]?.name ?? t("A Bot") }), {
-        body: [room2?.name, entry.tool === "keep_working" ? t("Let it keep working?") : entry.child ? t("A subagent wants to use {tool}", { tool: entry.tool }) : entry.tool].filter(Boolean).join(" · "),
+        body: [approvalPlace(entry, team), entry.tool === "keep_working" ? t("Let it keep working?") : entry.child ? t("A subagent wants to use {tool}", { tool: entry.tool }) : entry.tool, approvalDetail(entry).slice(0, 120)].filter(Boolean).join(" · "),
         tag: `omni-ui-approval-${entry.id}`
       });
       note.onclick = () => {
@@ -29783,7 +30188,11 @@ function apply(ctx) {
       browserGiveBack: (botId, answer = {}) => call("browser-give-back", { botId, ...answer })
     });
   }
-  cliLogin = createCliLogin({ actions, modelOf: (botId) => work.getSnapshot().models?.[botId]?.selected });
+  cliLogin = createCliLogin({
+    actions,
+    modelOf: (botId) => work.getSnapshot().models?.[botId]?.selected,
+    botOf: (botId) => cliLoginBotOf(roster.getSnapshot(), botId)
+  });
   actions.cliLogin = cliLogin;
   ctx.effect(() => work.subscribe(() => cliLogin.followModels()), "ds-bot: CLI sign-in rows follow the Bots' models");
   ctx.effect(() => work.subscribe(() => cliLogin.followFailures(work.getSnapshot().models)), "ds-bot: CLI account step follows a refused turn");
@@ -30184,6 +30593,12 @@ function apply(ctx) {
       inject: face,
       select: (owner) => isTeamApproval(owner.pendingInteraction) ? owner.pendingInteraction : null
     }, TeamApproval),
+    // shadow's freePriority places each later entry below the earlier ones. Keep this
+    // strict selector last so it runs before the generic question and team cards.
+    () => shadow("conversation.composer", {
+      priority: BOT_PRIORITY - 1,
+      select: (owner) => selectSessionFileApproval(owner.pendingInteraction)
+    }, SessionFileApproval),
     () => shadow("conversation.input.dock", { id: "bot-members", order: -120, inject: face }, MemberDock),
     () => shadow("conversation.input.dock", { id: "bot-model", order: -110, inject: face }, ModelChoiceDock),
     // The person's own choice of a Bot's level (permission-card.js): raised by this window alone.

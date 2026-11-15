@@ -10,6 +10,8 @@ const updates = Object.freeze({
   open: () => ipcRenderer.invoke('automagik-updates-open'),
   // Check and nothing else: unlike `open`, it never restarts into an update or puts plugins in.
   check: () => ipcRenderer.invoke('automagik-updates-check'),
+  // About's Force update: conversations stop, every available update goes in, and it restarts.
+  force: () => ipcRenderer.invoke('automagik-updates-force'),
   // What this copy is: the app's version, its runtime's, its plugins', and whether it updates.
   versions: () => ipcRenderer.invoke('automagik-updates-versions'),
   // The plugins the lane staged: put them in now (DSH restarts, the window stays), and whether

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { onRequest as formFunction, networkPrefix } from './functions/api/waitlist.js'
 import { onRequest as confirmFunction } from './functions/api/waitlist/whatsapp-confirm.js'
 import { onRequest as emailLinkFunction } from './functions/api/waitlist/email-confirm.js'
-import { constantEqual, hash, now, WHATSAPP_BACKLOG_SECONDS } from './waitlist/lib/shared.js'
+import { codePattern, CONSENT_VERSION, constantEqual, hash, now, WHATSAPP_BACKLOG_SECONDS, WHATSAPP_SIGNUPS_OPEN } from './waitlist/lib/shared.js'
 import { fixture } from './waitlist/d1-fixture.mjs'
 
 const origin = 'https://automagik.si'
@@ -32,14 +32,15 @@ const event = (code, from = '15555550100@s.whatsapp.net', messageId = 'fixture-m
   id: 'fixture-event', type: 'message.received', timestamp: Date.now(), metadata: {},
   payload: { externalId: messageId, from, senderName: 'Fictional Sender', chatId: 'fixture-chat', content: { text: `Confirm my Automagik waitlist: ${code}` } },
 })
-async function whatsapp(env, extra = {}) {
-  const response = await post(env, { channel: 'whatsapp', email: '', ...extra })
-  assert.equal(response.status, 200)
-  const html = await response.text()
-  const code = html.match(/AMG-[0-9A-HJKMNP-TV-Z]{6}/)?.[0]
-  assert.ok(code)
-  assert.match(html, /https:\/\/wa\.me\/15555550100\?text=/)
-  assert.match(html, /<svg/)
+// A code issued before WhatsApp sign-ups were paused: the row the endpoint wrote then, with its
+// 30-minute expiry. The endpoint issues none now, and these codes must still confirm.
+const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+async function whatsapp(f, extra = {}) {
+  const code = 'AMG-' + [...crypto.getRandomValues(new Uint8Array(6))].map(byte => alphabet[byte & 31]).join('')
+  assert.match(code, codePattern)
+  const values = { ...fields, ...extra }, time = now()
+  f.sqlite.prepare('INSERT INTO waitlist(id,channel,email,goal,platform,apps,expected_result,language,consent_version,created_at,expires_at,confirmation_hash,address_key,group_key,mail_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(crypto.randomUUID(), 'whatsapp', null, values.goal, values.platform, values.apps, values.expected_result, values.language, CONSENT_VERSION, time, time + 1800, await hash(code), null, `earlier-${crypto.randomUUID()}`, new Date(time * 1000).toISOString().slice(0, 10))
   return code
 }
 
@@ -113,10 +114,44 @@ test('five joins per minute, ten per prefix per day, sixty emails per UTC day ar
   assert.equal(sends, 10)
 })
 
+test('WhatsApp sign-ups are paused: a WhatsApp POST gets the unavailable page and issues no code', async t => {
+  assert.equal(WHATSAPP_SIGNUPS_OPEN, false)
+  const f = fixture(); t.after(f.close)
+  t.mock.method(globalThis, 'fetch', () => assert.fail('A refused sign-up makes no request'))
+  // A stale page, a direct POST, with or without an email, with or without the support number.
+  for (const env of [f.env, { ...f.env, WAITLIST_WHATSAPP_NUMBER: '' }, {}]) {
+    for (const extra of [{ channel: 'whatsapp', email: '' }, { channel: 'whatsapp' }, { channel: 'whatsapp', language: 'pt-BR' }]) {
+      const response = await post(env, extra)
+      assert.equal(response.status, 503, JSON.stringify(extra))
+      const html = await response.text()
+      assert.match(html, /<h1>Registration is unavailable<\/h1>/)
+      assert.doesNotMatch(html, /AMG-|wa\.me|<svg|WhatsApp/)
+    }
+  }
+  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM waitlist').get().n, 0, 'No row and no code')
+  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM waitlist_quota').get().n, 0, 'No reservation either')
+})
+
+test('an earlier WhatsApp sign-up is removed by its sender or its original code', async t => {
+  const f = fixture(); t.after(f.close)
+  t.mock.method(globalThis, 'fetch', () => assert.fail('Removal makes no request'))
+  const pending = await whatsapp(f)
+  assert.equal((await post(f.env, { action: 'remove', channel: 'code', contact: pending.toLowerCase() })).status, 200)
+  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM waitlist').get().n, 0, 'A pending code is removed by the code')
+  const confirmed = await whatsapp(f)
+  assert.equal((await callback(f.env, event(confirmed))).status, 200)
+  assert.equal((await post(f.env, { action: 'remove', channel: 'code', contact: confirmed })).status, 200)
+  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM waitlist').get().n, 0, 'A confirmed code is removed by the code')
+  assert.equal((await callback(f.env, event(await whatsapp(f), '15555550100@s.whatsapp.net', 'second-message'))).status, 200)
+  assert.equal((await post(f.env, { action: 'remove', channel: 'whatsapp', contact: '+15555550100' })).status, 200)
+  assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM waitlist').get().n, 0, 'A confirmed sign-up is removed by the sender')
+  assert.equal((await post(f.env, { action: 'remove', channel: 'code', contact: 'AMG-12' })).status, 400)
+})
+
 test('WhatsApp event: first match, idempotent replay, new message/different sender, unknown and expired', async t => {
   const f = fixture(); t.after(f.close)
   t.mock.method(globalThis, 'fetch', () => assert.fail('WhatsApp must make no third-party request'))
-  const code = await whatsapp(f.env, { language: 'pt-BR' })
+  const code = await whatsapp(f, { language: 'pt-BR' })
   const firstEvent = event(code.toLowerCase())
   const first = await callback(f.env, firstEvent)
   assert.equal(first.status, 200)
@@ -149,7 +184,7 @@ test('WhatsApp: Bearer comparison, required event fields and every transport/sta
   assert.equal((await callback(f.env, {}, { raw: '{' })).status, 400)
   assert.equal((await callback(f.env, event('without a code'))).status, 404)
   assert.equal((await callback(f.env, {}, { raw: 'x'.repeat(33000) })).status, 400)
-  const code = await whatsapp(f.env)
+  const code = await whatsapp(f)
   const concurrent = await Promise.all(['a', 'b'].map(id => callback(f.env, event(code, '15555550100@s.whatsapp.net', id))))
   assert.deepEqual(concurrent.map(response => response.status).sort(), [200, 409])
   f.sqlite.prepare("UPDATE waitlist_quota SET count=60 WHERE key LIKE 'wa-callback:%'").run()
@@ -165,7 +200,7 @@ test('opaque LIDs are retained without inventing a phone; no event text/name/bod
   const logs = []
   for (const name of ['log', 'warn', 'error', 'info', 'debug']) t.mock.method(console, name, (...args) => logs.push(args))
   t.mock.method(globalThis, 'fetch', () => assert.fail('No callback outbound request'))
-  const code = await whatsapp(f.env)
+  const code = await whatsapp(f)
   const body = event(code, 'opaque-user-LID@lid')
   body.payload.senderName = 'PRIVATE_SENTINEL_NAME'
   body.payload.content.text = `PRIVATE_SENTINEL_MESSAGE ${code} PRIVATE_SENTINEL_END`
@@ -185,12 +220,12 @@ test('opaque LIDs are retained without inventing a phone; no event text/name/bod
 test('removal is non-enumerating, stored text stays inert, expired pending entries are excluded/deleted', async t => {
   const f = fixture(); t.after(f.close)
   t.mock.method(globalThis, 'fetch', () => assert.fail('No WhatsApp sends'))
-  const code = await whatsapp(f.env, { goal: '<script>fetch("https://example.com")</script>' })
+  const code = await whatsapp(f, { goal: '<script>fetch("https://example.com")</script>' })
   assert.equal((await callback(f.env, event(code))).status, 200)
   const a = await post(f.env, { action: 'remove', channel: 'whatsapp', contact: '+15555550100' })
   const b = await post(f.env, { action: 'remove', channel: 'whatsapp', contact: '+15555550100' })
   assert.equal(await a.text(), await b.text()); assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM waitlist').get().n, 0)
-  await whatsapp(f.env)
+  await whatsapp(f)
   f.sqlite.prepare('UPDATE waitlist SET expires_at=?').run(now() - WHATSAPP_BACKLOG_SECONDS - 1)
   await post(f.env, { action: 'remove', contact: 'missing@example.com' })
   assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM waitlist').get().n, 0)
@@ -203,7 +238,7 @@ test('removal is non-enumerating, stored text stays inert, expired pending entri
 test('WhatsApp backlog: received before expiry confirms after days', async t => {
   const f = fixture(); t.after(f.close)
   t.mock.method(globalThis, 'fetch', () => assert.fail('No callback outbound request'))
-  const code = await whatsapp(f.env)
+  const code = await whatsapp(f)
   const row = f.sqlite.prepare('SELECT * FROM waitlist').get()
   const receivedAt = (row.expires_at - 1) * 1000
   const processingAt = (row.expires_at + 3 * 86400) * 1000
@@ -223,7 +258,7 @@ test('WhatsApp backlog: received before expiry confirms after days', async t => 
 
 test('WhatsApp backlog: received after expiry is refused', async t => {
   const f = fixture(); t.after(f.close)
-  const code = await whatsapp(f.env)
+  const code = await whatsapp(f)
   const row = f.sqlite.prepare('SELECT * FROM waitlist').get()
   t.mock.method(Date, 'now', () => (row.expires_at + 86400) * 1000)
   const response = await callback(f.env, { ...event(code), timestamp: row.expires_at * 1000 + 1 })
@@ -234,7 +269,7 @@ test('WhatsApp backlog: received after expiry is refused', async t => {
 
 test('WhatsApp backlog: received timestamp more than two minutes in the future is refused', async t => {
   const f = fixture(); t.after(f.close)
-  const code = await whatsapp(f.env)
+  const code = await whatsapp(f)
   const processingAt = Date.now()
   t.mock.method(Date, 'now', () => processingAt)
   const response = await callback(f.env, { ...event(code), timestamp: processingAt + 120001 })
@@ -247,7 +282,7 @@ test('WhatsApp backlog: received timestamp more than two minutes in the future i
 
 test('WhatsApp backlog: processing after 180 days past expiry is refused', async t => {
   const f = fixture(); t.after(f.close)
-  const code = await whatsapp(f.env)
+  const code = await whatsapp(f)
   const row = f.sqlite.prepare('SELECT * FROM waitlist').get()
   t.mock.method(Date, 'now', () => (row.expires_at + WHATSAPP_BACKLOG_SECONDS + 1) * 1000)
   const response = await callback(f.env, { ...event(code), timestamp: (row.expires_at - 1) * 1000 })
@@ -266,7 +301,7 @@ test('WhatsApp backlog cutoff: first use allows the exact boundary and refuses o
     clock = start
     const f = fixture()
     try {
-      const code = await whatsapp(f.env)
+      const code = await whatsapp(f)
       const row = f.sqlite.prepare('SELECT * FROM waitlist').get()
       const body = { ...event(code), timestamp: row.expires_at * 1000 }
       clock = (row.expires_at + WHATSAPP_BACKLOG_SECONDS) * 1000 + delta
@@ -286,7 +321,7 @@ test('WhatsApp backlog cutoff: replay allows the exact boundary and refuses one 
   t.mock.method(Date, 'now', () => clock)
   t.mock.method(globalThis, 'fetch', () => assert.fail('No callback outbound request'))
   const f = fixture(); t.after(f.close)
-  const code = await whatsapp(f.env)
+  const code = await whatsapp(f)
   const row = f.sqlite.prepare('SELECT * FROM waitlist').get()
   const body = event(code)
   const original = await callback(f.env, body)

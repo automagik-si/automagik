@@ -236,12 +236,12 @@ export function install(rt) {
       return what.said ? `: "${what.said.slice(0, 100)}"` : ''
     }
     const lines = []
-    const approval = (rt.approvalsView?.() ?? []).find(entry => entry.botId === botId)
+    const approvals = (rt.approvalsView?.() ?? []).filter(entry => entry.botId === botId)
     const switching = [...(rt.switchJobs?.() ?? [])].find(job => job.botId === botId)
     const running = sessions.filter(sessionId => rt.live.get(sessionId)?.turn !== undefined)
-    if (approval !== undefined) lines.push(`waiting for the user's approval to run ${approval.tool || 'a tool'} ${place(approval.ownerSessionId ?? approval.sessionId)} (${minutes(approval.at)})`)
-    else if (switching !== undefined) lines.push(`moving on to a fresh part of its ${switching.roomId ? `conversation in group "${rt.roomOf(switching.roomId)?.name ?? '?'}"` : 'own chat'}`)
-    for (const sessionId of approval === undefined && switching === undefined ? running : []) {
+    for (const approval of approvals) lines.push(`waiting for the user's approval to run ${approval.tool || 'a tool'} ${place(approval.ownerSessionId ?? approval.sessionId)} (${minutes(approval.at)})${approval.detail?.code ? `: ${approval.detail.code.replace(/\s+/g, ' ').slice(0, 120)}` : ''}`)
+    if (approvals.length === 0 && switching !== undefined) lines.push(`moving on to a fresh part of its ${switching.roomId ? `conversation in group "${rt.roomOf(switching.roomId)?.name ?? '?'}"` : 'own chat'}`)
+    for (const sessionId of approvals.length === 0 && switching === undefined ? running : []) {
       const entry = rt.live.get(sessionId)
       lines.push(`working ${place(sessionId)} ${minutes(entry.since ?? Date.now())}${forWhom(sessionId, entry.info)}${doing(entry)}`)
     }

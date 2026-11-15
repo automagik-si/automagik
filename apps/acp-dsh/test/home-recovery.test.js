@@ -75,9 +75,9 @@ test('a crash during recovery cannot leave a permanently held recovery claim', t
     import {dirname} from 'node:path';
     import {syncBuiltinESMExports} from 'node:module';
     import {CliHomes} from ${JSON.stringify(module)};
-    const mkdir=fs.mkdirSync;
-    fs.mkdirSync=(path,...args)=>{const result=mkdir(path,...args);
-      if(dirname(String(path))===${JSON.stringify(join(root, 'mutations', 'claude'))}){
+    const link=fs.linkSync;
+    fs.linkSync=(source,destination,...args)=>{const result=link(source,destination,...args);
+      if(dirname(String(destination))===${JSON.stringify(join(root, 'mutations', 'claude'))}){
         fs.writeFileSync(${JSON.stringify(hit)},'claim-created');
         process.kill(process.pid,'SIGKILL');
       }return result;};syncBuiltinESMExports();

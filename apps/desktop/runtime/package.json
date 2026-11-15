@@ -1,9 +1,10 @@
 {
   "name": "omni-desktop-runtime",
   "private": true,
-  "description": "The DeepSeek Harness the Automagik desktop app runs, pinned to the release its plugins are tested against (apps/bots-dsh/dev/harness here, and Omni's apps/omni-channels-dsh/dev/harness at the release omni.json pins; prepare-runtime checks our harness matches and Omni admits a runtime in the same patch series), and the pnpm dsh installs plugins with. zod is pinned to the version DSH's packages pin exactly, so npm installs one copy for all of them instead of one inside each: move it with DSH (test/prune-runtime.test.js checks it).",
+  "description": "The DeepSeek Harness the Automagik desktop app runs, pinned to the release its plugins are tested against (apps/bots-dsh/dev/harness here, and Omni's apps/omni-channels-dsh/dev/harness at the release omni.json pins; prepare-runtime checks our harness matches and Omni admits a runtime in the same patch series), and the pnpm dsh installs plugins with. zod is pinned to the version DSH's packages pin exactly, so npm installs one copy for all of them instead of one inside each: move it with DSH (test/prune-runtime.test.js checks it). Desktop sharp uses only wasm to avoid Electron/native libvips conflicts; @img/sharp-wasm32 must match the locked sharp version exactly.",
   "dependencies": {
     "@deepseek-ai/dsh": "0.2.2-rc.2",
+    "@img/sharp-wasm32": "0.35.5",
     "pnpm": "10.34.6",
     "zod": "4.6.6"
   }

@@ -152,6 +152,7 @@ test('apply registers listeners, tools, and effects in a fixed order', (t) => {
     'effect ds-bot: load secrets',
     'effect ds-bot: connectors',
     'on agent/created',
+    'on session/disposed',
     'effect ds-bot: capabilities',
     'effect ds-bot: schedule pause retry',
     'on schedule/changed',
