@@ -515,6 +515,41 @@ test('the guard refuses an unfrozen, misrouted or extra-message envelope, and ac
   assert.equal(RemoteChatAdapter.ownTurn(envelope([user, Object.freeze({ ...tool, toolCallId: 'call-b' })]), agent3), false)
 })
 
+test('each hardening check is pinned by a forgery equal to the Session message', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  const real = Object.freeze([Object.freeze({ type: 'text', text: 'say OK' })])
+  const user = Object.freeze({ role: 'user', id: 'm-1', content: real })
+  const session = { deriveMessages: () => [user], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const envelope = messages => Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze(messages) })
+  // The plain Session message itself is still the turn.
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([user]), agent), true)
+  // Every forgery below is equal to `user` in every value; only its one property kind differs.
+  const toJSON = Object.freeze(Object.defineProperty([Object.freeze({ type: 'text', text: 'say OK' })], 'toJSON', { value: () => real, enumerable: false }))
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([Object.freeze({ role: 'user', id: 'm-1', content: toJSON })]), agent), false)
+  const getter = Object.freeze(Object.defineProperty({ role: 'user', id: 'm-1' }, 'content', { get: () => real, enumerable: true }))
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([getter]), agent), false)
+  // The trap answers the guard's reads with the Session's text and the adapter's read with other text.
+  let reads = 0
+  const proxy = new Proxy(user, { get(target, key, receiver) {
+    if (key !== 'content') return Reflect.get(target, key, receiver)
+    reads += 1
+    return reads <= 2 ? real : Object.freeze([Object.freeze({ type: 'text', text: 'made up' })])
+  } })
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([proxy]), agent), false)
+  // Frozen message, unfrozen content: the value could change after the guard.
+  const unfrozen = Object.freeze({ role: 'user', id: 'm-1', content: [Object.freeze({ type: 'text', text: 'say OK' })] })
+  assert.equal(RemoteChatAdapter.ownTurn(envelope([unfrozen]), agent), false)
+})
+
 test('connection is off by default, record stores a reference and credential stays mode 0600', async t => {
   const home = await mkdtemp(join(tmpdir(), 'hermes-fixture-'))
   t.after(() => rm(home, { recursive: true, force: true }))

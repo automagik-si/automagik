@@ -64,7 +64,7 @@ function plainData(value) {
   if (Array.isArray(value) ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) return false
   if (Object.hasOwn(value, 'toJSON') || !Object.isFrozen(value)) return false
   for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
-    if (descriptor.get !== undefined || descriptor.set !== undefined || !('value' in descriptor)) return false
+    if (!('value' in descriptor)) return false
     if (!plainData(descriptor.value)) return false
   }
   return true
