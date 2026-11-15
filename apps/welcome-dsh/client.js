@@ -11658,7 +11658,7 @@ var ONBOARD_CSS = `
 .oai-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:6px}
 .oai-big{padding:13px 22px;font-size:15px}
 /* Who joins: one card per Bot type. A chosen card stands up on a lilac rim. */
-.oai-select{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin-bottom:14px;align-items:start}
+.oai-select{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:20px;margin-bottom:14px;align-items:start}
 .oai-fighter{position:relative;display:grid;gap:12px;align-content:start;padding:16px;border-radius:24px 27px 23px 26px;${raised("var(--oai-clay)", 4)};transition:transform .3s cubic-bezier(.3,1.4,.5,1),box-shadow .3s ease}
 .oai-fighter.oai-chosen{${raised("color-mix(in srgb,var(--oai-lilac) 55%,var(--oai-clay))", 5)};transform:translateY(-3px)}
 .oai-fighter header{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:32px}
