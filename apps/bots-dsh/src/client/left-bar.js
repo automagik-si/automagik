@@ -126,15 +126,16 @@ const renderArt = (bot, size, state) => {
   return drawBot(bot, size, state)
 }
 
-// What the "+" says while it makes nothing: a note beside it, closed by a press anywhere else,
+// What the "+" says while it makes nothing: a note under it, closed by a press anywhere else,
 // by Escape or by the "+" again.
 function SpaceNote({ anchor, onClose }) {
   const ref = useRef(null)
   const [place, setPlace] = useState(null)
   useLayoutEffect(() => {
+    // Under the "+", from its left edge: the rows beside the rail, the open one among them, stay
+    // in sight.
     const box = anchor.getBoundingClientRect()
-    const room = window.innerWidth - box.right - 12
-    setPlace(room >= 220 ? { left: box.right + 10, top: box.top } : { left: 12, top: box.bottom + 10 })
+    setPlace({ left: Math.max(8, box.left), top: box.bottom + 8 })
   }, [anchor])
   useEffect(() => {
     const away = (event) => {
@@ -158,9 +159,10 @@ function SpaceNote({ anchor, onClose }) {
  * head's other buttons (the update button, other plugins' tools); `notice` is a line above
  * the list (a read-only team, the Main Bot being set up); `foot` sits under the list (the Work
  * and Code switch, where the app has Herdr). `open(row)` opens a row as today's rows do,
- * `menu(row, event)` its context menu, and `renderAfter(row)` draws what hangs under a row.
+ * `menu(row, event)` its context menu, `renderAfter(row)` draws what hangs under a row and
+ * `renderEnd(row)` what other plugins add at the end of a Bot's row.
  */
-export function LeftBar({ roster, order, marked, useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, tools, notice, foot, empty, collapse, onKeyDown }) {
+export function LeftBar({ roster, order, marked, useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown }) {
   const shownId = useSessions(list => list.ids.find(id => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? '')
   const current = currentKey(roster, shownId)
   const status = useTeamStatus({ roster, useSessionStatus, useWork })
@@ -190,7 +192,7 @@ export function LeftBar({ roster, order, marked, useSessions, useSessionStatus, 
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon))),
         notice,
         team.bots.length === 0 && empty ? empty
-          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, label: t('Bot list') }),
+          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, renderEnd, label: t('Bot list') }),
         foot ? h('div', { className: 'lb-foot' }, foot) : null)),
     note ? h(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null)
 }

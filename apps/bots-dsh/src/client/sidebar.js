@@ -464,6 +464,11 @@ export function TeamSidebar(props) {
     return h(LeftBar, {
       roster, order, marked: markedUnread, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
       open, menu, renderAfter, notice, onKeyDown: typeToSearch,
+      // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
+      renderEnd: (row) => {
+        const bot = row.bot.dsh ? undefined : roster.byId[row.id]
+        return bot ? h(RowBadges, { bot, roster, useWork: props.useWork }) : null
+      },
       tools: h(Fragment, null, h(UpdateButton, { useUpdate: props.useUpdate, actions }), h(SidebarTools, toolProps)),
       foot: h(WorkCodeSwitch, { roster, useSessions }),
       collapse: h('button', { type: 'button', className: 'bt-round bt-side-collapse', 'aria-label': t('Collapse sidebar'), title: t('Collapse sidebar'), onClick: () => actions.toggleSidebar() }, h(SidebarIcon)),

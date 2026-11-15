@@ -32,6 +32,7 @@ import { QuestionCard, QuestionDock } from './questions.js'
 import { DesktopUpdate, DESKTOP_UPDATE_CSS } from './desktop-update.js'
 import { WORK_CODE_SWITCH_CSS } from './work-code-switch.js'
 import { LEFT_BAR_CSS } from './left-bar-css.js'
+import { installBarWidth } from './left-bar-width.js'
 import { PRIVACY_CSS } from './privacy.js'
 import { AGENT_ACCESS_CSS } from './agent-access.js'
 import { PET_CSS } from './pet.js'
@@ -1157,6 +1158,7 @@ export function apply(ctx) {
     () => installCompiledStyles(SHELL_CSS, 'shell'),
     () => installCompiledStyles(SIDEBAR_CSS, 'sidebar'),
     () => installCompiledStyles(LEFT_BAR_CSS, 'left-bar'),
+    () => installBarWidth(),
     () => installCompiledStyles(SECRET_CSS + CONNECTOR_CSS + CONNECTORS_PAGE_CSS, 'secrets'),
     () => installCompiledStyles(LEARNING_CSS, 'learning'),
     () => installCompiledStyles(MODEL_CSS + CLI_LOGIN_CSS + FOLDER_CSS + BOT_SETTINGS_CSS + GROUP_SETTINGS_CSS + AVATAR_LIBRARY_CSS, 'models'),

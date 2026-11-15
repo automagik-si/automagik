@@ -118,10 +118,15 @@ function useScrollEdges(ref, count) {
 const OMNI_PAINTS = BODY + 16
 const PET_BOX = { body: BODY, middle: FLOOR - BODY / 2 }
 const OMNI_BOX = { body: OMNI_PAINTS * 13 / 12, middle: FLOOR + 2 - OMNI_PAINTS / 2 }
+// The design draws each character trimmed close to its own outline, so its larger side is about
+// the art's size. Fitted by its box, a character painted 25 to 26 px of a 28 px art box (measured
+// in the app), so the bar draws it a twentieth larger: about 27 px, every one still inside the
+// box (test/left-bar-browser.test.js measures them).
+export const ART_TRIM = 21 / 20
 /** How much larger than the art a baked pet is drawn, and how far it is lifted, as parts of its cell. */
 export function bakedFit(bake) {
   const { body, middle } = bake?.clay === 'omni' ? OMNI_BOX : PET_BOX
-  return { fit: CELL.height / body, lift: (middle - CELL.height / 2) / CELL.height }
+  return { fit: (CELL.height / body) * ART_TRIM, lift: (middle - CELL.height / 2) / CELL.height }
 }
 function BotArt({ bot, size, state }) {
   const wants = petOf(bot, lookOf(bot), { live: true, size })
@@ -156,9 +161,10 @@ export const nameIfCut = (event) => {
  * name of the token set in use (left-bar-css.js): when it changes, the art is measured again.
  * `onMenu(row, event)` hears a row's context menu. `renderAfter(row)` draws what hangs under a
  * row that the bar does not draw itself (a Bot's running tasks, what other plugins add under a
- * Bot, a DSH bot's Sessions); it is drawn as is, between that row and the next.
+ * Bot, a DSH bot's Sessions); it is drawn as is, between that row and the next. `renderEnd(row)`
+ * draws inside a Bot's row, between its name and its mark (the badges other plugins add).
  */
-export function TeamRows({ team, current, onOpen, onMenu, renderAfter, label, skin, renderArt = drawBot, renderGlyph, worded = WORDED, quiet = QUIET }) {
+export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label, skin, renderArt = drawBot, renderGlyph, worded = WORDED, quiet = QUIET }) {
   const ref = useRef(null)
   const rows = teamRows(team)
   const { art, duo } = useArtSizes(ref, skin, rows.length)
@@ -179,6 +185,7 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, label, sk
         h('span', { className: 'lb-art' }, renderArt(row.bot, art, state)),
         h('span', { className: 'lb-name' }, row.name),
         row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,
+        renderEnd ? renderEnd(row) : null,
         status(row))
     }
     if (row.kind === 'channel') {

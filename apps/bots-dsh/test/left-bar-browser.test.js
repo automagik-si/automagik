@@ -156,7 +156,7 @@ test('a size is a token change: taller rows and bigger art, and the art is drawn
   assert.ok(at.tiles.every(tile => tile.width === 40))
   // A baked pet's character stands in a box of its cell's 208 units, 150 tall with its middle at
   // 121; Omni's own (Juno's here) is fitted by a box of 166 and a twelfth, its middle at 115.
-  // That box is the art's box.
+  // That box is the art's box a twentieth larger, as the design trims each character close.
   const pets = await page.evaluate(() => [...document.querySelectorAll('.lb-row[data-kind=bot]')].map((row) => {
     const a = row.querySelector('.lb-art').getBoundingClientRect()
     const p = row.querySelector('.bt-pet').getBoundingClientRect()
@@ -165,7 +165,7 @@ test('a size is a token change: taller rows and bigger art, and the art is drawn
   }))
   assert.ok(pets.some(pet => pet.id === 'juno') && pets.length > 2)
   for (const pet of pets) {
-    assert.ok(Math.abs(pet.box - 32) <= 1, `${pet.id}: the character's box is ${pet.box.toFixed(1)} px in art of 32`)
+    assert.ok(Math.abs(pet.box - 32 * 21 / 20) <= 1, `${pet.id}: the character's box is ${pet.box.toFixed(1)} px in art of 32`)
     assert.ok(Math.abs(pet.centre) <= 1, `${pet.id}: the character's box is ${pet.centre.toFixed(1)} px off the art's centre`)
     assert.equal(pet.whole, true, 'the pet stands on whole pixels')
   }
@@ -217,8 +217,9 @@ test('every character stands at one size by eye: none is drawn larger than the o
   const side = pet => Math.max(pet.width, pet.height)
   for (const pet of all) {
     assert.equal(pet.art, 28)
-    // Its larger side is 24 to 26 px of the 28 px box, whatever its shape; it stays in the box, in the middle.
-    assert.ok(side(pet) >= 23.5 && side(pet) <= 26.5, said(pet))
+    // Its larger side is 25.5 to 28 px of the 28 px box, whatever its shape; it stays in the box,
+    // in the middle.
+    assert.ok(side(pet) >= 25.5 && side(pet) <= 28, said(pet))
     assert.ok(pet.over <= 0.5, said(pet))
     assert.ok(Math.abs(pet.dx) <= 1 && Math.abs(pet.dy) <= 1.5, said(pet))
   }

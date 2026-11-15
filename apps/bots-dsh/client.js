@@ -21504,9 +21504,10 @@ function useScrollEdges(ref, count) {
 var OMNI_PAINTS = BODY + 16;
 var PET_BOX = { body: BODY, middle: FLOOR - BODY / 2 };
 var OMNI_BOX = { body: OMNI_PAINTS * 13 / 12, middle: FLOOR + 2 - OMNI_PAINTS / 2 };
+var ART_TRIM = 21 / 20;
 function bakedFit(bake) {
   const { body, middle } = bake?.clay === "omni" ? OMNI_BOX : PET_BOX;
-  return { fit: CELL.height / body, lift: (middle - CELL.height / 2) / CELL.height };
+  return { fit: CELL.height / body * ART_TRIM, lift: (middle - CELL.height / 2) / CELL.height };
 }
 function BotArt({ bot, size, state }) {
   const wants = petOf(bot, lookOf(bot), { live: true, size });
@@ -21535,7 +21536,7 @@ var nameIfCut = (event) => {
   if (name && name.scrollWidth > name.clientWidth) row.title = name.textContent;
   else row.removeAttribute("title");
 };
-function TeamRows({ team, current, onOpen, onMenu, renderAfter, label, skin, renderArt: renderArt2 = drawBot, renderGlyph, worded = WORDED, quiet: quiet2 = QUIET }) {
+function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label, skin, renderArt: renderArt2 = drawBot, renderGlyph, worded = WORDED, quiet: quiet2 = QUIET }) {
   const ref = (0, import_react54.useRef)(null);
   const rows2 = teamRows(team);
   const { art, duo } = useArtSizes(ref, skin, rows2.length);
@@ -21568,6 +21569,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, label, skin, ren
         (0, import_react54.createElement)("span", { className: "lb-art" }, renderArt2(row.bot, art, state)),
         (0, import_react54.createElement)("span", { className: "lb-name" }, row.name),
         row.unread ? (0, import_react54.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
+        renderEnd ? renderEnd(row) : null,
         status(row)
       );
     }
@@ -21901,8 +21903,7 @@ function SpaceNote({ anchor, onClose }) {
   const [place, setPlace] = (0, import_react55.useState)(null);
   (0, import_react55.useLayoutEffect)(() => {
     const box = anchor.getBoundingClientRect();
-    const room2 = window.innerWidth - box.right - 12;
-    setPlace(room2 >= 220 ? { left: box.right + 10, top: box.top } : { left: 12, top: box.bottom + 10 });
+    setPlace({ left: Math.max(8, box.left), top: box.bottom + 8 });
   }, [anchor]);
   (0, import_react55.useEffect)(() => {
     const away = (event) => {
@@ -21925,7 +21926,7 @@ function SpaceNote({ anchor, onClose }) {
     t("Creating or joining a space comes with Automagik Cloud. Nothing is made from here yet.")
   ), document.body);
 }
-function LeftBar({ roster, order, marked, useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, tools, notice, foot, empty, collapse, onKeyDown }) {
+function LeftBar({ roster, order, marked, useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown }) {
   const shownId = useSessions((list) => list.ids.find((id) => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? "");
   const current = currentKey2(roster, shownId);
   const status = useTeamStatus({ roster, useSessionStatus, useWork });
@@ -21968,7 +21969,7 @@ function LeftBar({ roster, order, marked, useSessions, useSessionStatus, useWork
           (0, import_react55.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("New…"), title: t("New…"), onClick: () => actions.openNewChat("new") }, (0, import_react55.createElement)(PlusIcon))
         ),
         notice,
-        team.bots.length === 0 && empty ? empty : (0, import_react55.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, label: t("Bot list") }),
+        team.bots.length === 0 && empty ? empty : (0, import_react55.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, renderEnd, label: t("Bot list") }),
         foot ? (0, import_react55.createElement)("div", { className: "lb-foot" }, foot) : null
       )
     ),
@@ -22439,6 +22440,11 @@ function TeamSidebar(props) {
       renderAfter,
       notice,
       onKeyDown: typeToSearch,
+      // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
+      renderEnd: (row) => {
+        const bot = row.bot.dsh ? void 0 : roster.byId[row.id];
+        return bot ? (0, import_react56.createElement)(RowBadges, { bot, roster, useWork: props.useWork }) : null;
+      },
       tools: (0, import_react56.createElement)(import_react56.Fragment, null, (0, import_react56.createElement)(UpdateButton, { useUpdate: props.useUpdate, actions }), (0, import_react56.createElement)(SidebarTools, toolProps)),
       foot: (0, import_react56.createElement)(WorkCodeSwitch, { roster, useSessions }),
       collapse: (0, import_react56.createElement)("button", { type: "button", className: "bt-round bt-side-collapse", "aria-label": t("Collapse sidebar"), title: t("Collapse sidebar"), onClick: () => actions.toggleSidebar() }, (0, import_react56.createElement)(SidebarIcon)),
@@ -24980,6 +24986,97 @@ var DESKTOP_UPDATE_CSS = `
 @keyframes bt-desk-pulse{50%{opacity:.35}}
 @media (prefers-reduced-motion:reduce){.bt-desk-update[aria-busy] .bt-desk-update-dot{animation:none}}
 `;
+
+// src/client/left-bar-width.js
+var DSH_WIDTH = 280;
+var BAR_WIDTH = 336;
+var MIN = 264;
+var MAX2 = 420;
+var WIDTH_KEY = "automagik.leftBar.width";
+var COLUMN = '[class*="_sidebarCol"]';
+var FRAME2 = '[class*="_frame"]';
+var HANDLE = '[class*="_handle"][data-side="sidebar"]';
+function keptWidth(storage) {
+  try {
+    const value = Number(storage?.getItem(WIDTH_KEY));
+    return Number.isFinite(value) && value >= MIN && value <= MAX2 ? Math.round(value) : null;
+  } catch {
+    return null;
+  }
+}
+function widthMove({ width, kept, drawer, collapsed, dragging }) {
+  if (drawer || collapsed || dragging) return 0;
+  if (Math.round(width) !== DSH_WIDTH) return 0;
+  return (kept ?? BAR_WIDTH) - DSH_WIDTH;
+}
+function installBarWidth({ doc = globalThis.document, storage = globalThis.localStorage } = {}) {
+  const view = doc?.defaultView;
+  if (!doc?.body || ["PointerEvent", "MutationObserver", "requestAnimationFrame", "cancelAnimationFrame"].some((name) => typeof view?.[name] !== "function")) return () => {
+  };
+  let frame = 0;
+  let sized = null;
+  let watched = null;
+  const parts = () => {
+    const shell2 = doc.querySelector(FRAME2);
+    return { shell: shell2, column: shell2?.querySelector(COLUMN), handle: shell2?.querySelector(HANDLE) };
+  };
+  const apply2 = () => {
+    frame = 0;
+    const { shell: shell2, column, handle } = parts();
+    if (!shell2 || !column) return;
+    watch(shell2, column);
+    const move2 = widthMove({
+      width: column.getBoundingClientRect().width,
+      kept: keptWidth(storage),
+      drawer: shell2.hasAttribute("data-sidebar-drawer"),
+      collapsed: shell2.hasAttribute("data-sidebar-collapsed"),
+      dragging: shell2.hasAttribute("data-dragging") || shell2.hasAttribute("data-animating")
+    });
+    if (move2 === 0 || !handle) return;
+    const x = handle.getBoundingClientRect().left + 4;
+    const at = { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0 };
+    handle.dispatchEvent(new view.PointerEvent("pointerdown", { ...at, buttons: 1, clientX: x }));
+    handle.dispatchEvent(new view.PointerEvent("pointerup", { ...at, buttons: 0, clientX: x + move2 }));
+  };
+  const later = () => {
+    frame ||= view.requestAnimationFrame(apply2);
+  };
+  const arrival = new view.MutationObserver(later);
+  arrival.observe(doc.body, { subtree: true, childList: true });
+  const states = new view.MutationObserver(later);
+  const watch = (shell2, column) => {
+    if (watched === column) return;
+    watched = column;
+    arrival.disconnect();
+    states.disconnect();
+    states.observe(shell2, { attributes: true, attributeFilter: ["data-sidebar-collapsed", "data-sidebar-drawer", "data-dragging", "data-animating"] });
+    arrival.observe(shell2.parentNode ?? doc.body, { childList: true });
+    sized?.disconnect();
+    if (typeof view.ResizeObserver !== "function") return;
+    sized = new view.ResizeObserver(later);
+    sized.observe(column);
+  };
+  const released = (event) => {
+    if (!event.isTrusted || !(event.target instanceof view.Element) || !event.target.closest(HANDLE)) return;
+    view.requestAnimationFrame(() => {
+      const { shell: shell2, column } = parts();
+      if (!shell2 || !column || shell2.hasAttribute("data-sidebar-drawer") || shell2.hasAttribute("data-sidebar-collapsed")) return;
+      try {
+        storage?.setItem(WIDTH_KEY, String(Math.round(column.getBoundingClientRect().width)));
+      } catch {
+      }
+    });
+  };
+  doc.addEventListener("pointerup", released, true);
+  later();
+  return () => {
+    if (frame) view.cancelAnimationFrame(frame);
+    arrival.disconnect();
+    states.disconnect();
+    sized?.disconnect();
+    doc.removeEventListener("pointerup", released, true);
+  };
+}
 
 // src/client/privacy.js
 var import_react63 = require("react");
@@ -32379,7 +32476,7 @@ function rectsOverlap(a, b) {
 var import_react89 = require("react");
 var import_react_dom15 = require("react-dom");
 var PANEL_LINGER_MS = 300;
-var WIDTH_KEY = STORAGE.browserWidth;
+var WIDTH_KEY2 = STORAGE.browserWidth;
 var DEFAULT_WIDTH = 520;
 var DETAILS_WIDTH = 320;
 var DETAILS_MAX = 520;
@@ -32412,7 +32509,7 @@ function Favicon({ src, className }) {
 }
 var savedWidth = () => {
   try {
-    const value = Number(localStorage.getItem(WIDTH_KEY));
+    const value = Number(localStorage.getItem(WIDTH_KEY2));
     return Number.isFinite(value) && value >= DETAILS_WIDTH ? value : null;
   } catch {
     return null;
@@ -33268,7 +33365,7 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
       if (next === from.width) return;
       setWidth(next);
       try {
-        localStorage.setItem(WIDTH_KEY, String(next));
+        localStorage.setItem(WIDTH_KEY2, String(next));
       } catch {
       }
     };
@@ -37315,6 +37412,7 @@ function apply(ctx) {
     () => installCompiledStyles(SHELL_CSS, "shell"),
     () => installCompiledStyles(SIDEBAR_CSS, "sidebar"),
     () => installCompiledStyles(LEFT_BAR_CSS, "left-bar"),
+    () => installBarWidth(),
     () => installCompiledStyles(SECRET_CSS + CONNECTOR_CSS + CONNECTORS_PAGE_CSS, "secrets"),
     () => installCompiledStyles(LEARNING_CSS, "learning"),
     () => installCompiledStyles(MODEL_CSS + CLI_LOGIN_CSS + FOLDER_CSS + BOT_SETTINGS_CSS + GROUP_SETTINGS_CSS + AVATAR_LIBRARY_CSS, "models"),
