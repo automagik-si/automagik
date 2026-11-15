@@ -1080,6 +1080,8 @@ const ZH = {
   Default: '默认',
   'Thinking level': '思考强度',
   'Model: {model}': '模型：{model}',
+  'instead of {model}': '替代 {model}',
+  'Running instead of {model}': '正在运行，替代 {model}',
   none: '无',
   'Choose a model': '选择模型',
   '{provider} · not available': '{provider} · 不可用',

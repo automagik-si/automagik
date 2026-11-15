@@ -544,7 +544,7 @@ export function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm
       h('button', { type: 'button', className: 'bt-model-confirm-go', onClick: onConfirm }, routeChanged ? t('Change route') : t('Change agent'))))
 }
 
-function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, chat = false, bar = false, onPick, onPickEffort, saved = onPick === undefined }) {
+function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, chat = false, bar = false, running = false, onPick, onPickEffort, saved = onPick === undefined }) {
   const [view, setView] = useState(MENU_ROOT)
   const [hermes, setHermes] = useState(false)
   const remote = useRef({ generation: 0, active: false, mounted: true })
@@ -580,6 +580,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   const shown = modelOf(bot, roster)
   const current = bot.model ?? bot.appliedModel
   const currentRoute = current === undefined ? undefined : modelRoute(roster, current)
+  const shownRunning = running && bar && current !== undefined && typeof bot.runningModel === 'string' && bot.runningModel !== current
+    ? modelOf({ model: bot.runningModel }, roster) : undefined
+  const triggerRoute = shownRunning === undefined ? currentRoute : modelRoute(roster, bot.runningModel)
+  const runningTitle = shownRunning === undefined ? undefined : t('Running instead of {model}', { model: shown?.name ?? current })
   const served = servedOf(roster, current)
   const reasoning = useEfforts(served, current, actions)
   // The level the Bot runs on: its pick when the model serves it, else the model's own.
@@ -588,6 +592,8 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   const effortLabel = currentEffort === undefined
     ? (reasoning?.efforts?.length > 0 ? t('Default') : undefined)
     : reasoning.efforts.find(effort => effort.id === currentEffort)?.name ?? currentEffort
+  const triggerEffort = shownRunning === undefined ? effortLabel
+    : servedOf(roster, bot.runningModel)?.reasoning?.efforts?.find(effort => effort.id === bot.runningEffort)?.name
   // A route's models whose levels the catalog does not carry are asked for as it opens,
   // so each row can say whether a level step follows.
   useEffect(() => {
@@ -770,15 +776,17 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
       'aria-label': t('Change the model of {name}', { name: bot.name }), onClick: toggle,
     }, t('change')) : h('button', {
       ref: button, type: 'button', className: `bt-model-trigger${bar ? ' bt-model-bar-trigger' : ''}`, 'data-wide': wide || undefined,
-      'data-bar': bar || undefined, 'data-route': currentRoute?.route, 'aria-haspopup': 'menu', 'aria-expanded': isOpen,
-      'aria-label': t('Model: {model}', { model: shown?.name ?? t('none') }),
+      'data-bar': bar || undefined, 'data-route': triggerRoute?.route, 'aria-haspopup': 'menu', 'aria-expanded': isOpen,
+      'aria-label': t('Model: {model}', { model: shownRunning?.name ?? shown?.name ?? t('none') }) + (runningTitle === undefined ? '' : `. ${runningTitle}`),
+      title: runningTitle,
       'data-missing': shown !== undefined && shown.unavailable && models.length > 0 ? '' : undefined, onClick: toggle,
     },
     bar
       ? h('span', { className: 'bt-model-bar' },
-        currentRoute === undefined ? null : h('span', { className: 'bt-model-bar-route', 'aria-hidden': true }, h(ROUTE_ICON[currentRoute.route] ?? ConnectorIcon, { size: 14 })),
-        h('span', { className: 'bt-model-bar-name' }, shown?.name ?? t('Choose a model')),
-        effortLabel === undefined ? null : h('span', { className: 'bt-model-bar-effort' }, effortLabel))
+        triggerRoute === undefined ? null : h('span', { className: 'bt-model-bar-route', 'aria-hidden': true }, h(ROUTE_ICON[triggerRoute.route] ?? ConnectorIcon, { size: 14 })),
+        h('span', { className: 'bt-model-bar-name' }, shownRunning?.name ?? shown?.name ?? t('Choose a model')),
+        triggerEffort === undefined ? null : h('span', { className: 'bt-model-bar-effort' }, triggerEffort),
+        shownRunning === undefined ? null : h('span', { className: 'bt-model-bar-effort', 'data-running-instead': '' }, t('instead of {model}', { model: shown?.name ?? current })))
       : h('span', { className: 'bt-model-copy' },
         h('span', { className: 'bt-model-name' }, shown?.name ?? t('Choose a model')),
         second === null ? null : h('span', { className: 'bt-model-provider' }, second)),
