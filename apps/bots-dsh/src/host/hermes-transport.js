@@ -1,10 +1,30 @@
 // Native Hermes wire. Its public boundary is rows, questions and durable identities; no ACP SDK.
+import { redactSshText } from './hermes-redact.js'
 export const HERMES_DEADLINES = Object.freeze({ start: 60_000, control: 15_000, cancel: 5000 })
 export const LOST = 'Connection lost; remote outcome unknown'
 // The oldest Desktop contract this wire speaks. A newer one that still answers is not an error.
 export const OLDEST_CONTRACT = 8
 export const OUTDATED = 'Remote Hermes is too old for this connection. Update Hermes, then connect again.'
 export const CANONICAL = 'This Hermes is run by a gateway that owns its sessions. Connect to a Hermes started with “hermes serve”.'
+const TURN_FAILURE = 'Remote Hermes reported a turn failure. Inspect the remote session before sending again.'
+const FAILED_TURN = 'Remote Hermes reported a failed turn. Review the remote session.'
+const REASON_LIMIT = 500
+
+// The remote's own words for a failed turn: its `error` frame carries `payload.message`, a
+// failed `message.complete` carries `payload.error` and sometimes `failure_reason`. The wire
+// redacts a frame before a chat sees it; this also runs the SSH path's rule for Hermes's own
+// words, so a reason that quotes a key block, an opaque token, a `ticket=` query or a home
+// folder is masked too. This only makes it one bounded line. A detail that is blank after
+// that is no detail: the fixed sentence says more than an empty reason.
+function remoteReason(...values) {
+  for (const value of values) {
+    if (typeof value !== 'string') continue
+    const line = redactSshText(value).replace(/\s+/g, ' ').trim()
+    if (!line) continue
+    return line.length > REASON_LIMIT ? `${line.slice(0, REASON_LIMIT - 1)}…` : line
+  }
+  return undefined
+}
 const localFailures = new WeakSet()
 const failure = (message, code = 'bot/hermes') => {
   const error = Object.assign(new Error(message), { code })
@@ -121,7 +141,9 @@ const UNSCOPED = new Set(['client.capabilities'])
 
 // Errors are fixed sentences. Never forward a fetch/socket/RPC error, headers or response body
 // to the caller: those surfaces can echo credentials, tickets and private remote configuration.
-// Known transient values are also removed from model names, rows, and approval descriptions.
+// The one exception is the remote's own word on a failed turn: the wire has already redacted it,
+// and the chat shows it bounded to one line. Known transient values are also removed from model
+// names, rows, and approval descriptions.
 export class HermesTransport {
   constructor({ address, profile, credential, authHeaders, allowLoopback = false, redactionSecrets = [], fetch: fetcher = globalThis.fetch, socket = (url, protocols) => new WebSocket(url, protocols), deadlines = HERMES_DEADLINES }) {
     this.address = remoteAddress(address, { allowLoopback })
@@ -512,8 +534,9 @@ export class RemoteChat {
       this.identity.uncertain = false
       this.identity.pendingSubmit = false
       this.stopped?.()
+      const reason = remoteReason(payload.error, payload.failure_reason)
       const terminal = payload.status === 'error' || payload.error || payload.failure_reason
-        ? { kind: 'error', text: 'Remote Hermes reported a failed turn. Review the remote session.' }
+        ? { kind: 'error', text: reason ? `Remote Hermes reported a failed turn: ${reason}` : FAILED_TURN }
         : payload.status === 'interrupted' ? { kind: 'aborted', text: 'The remote turn was interrupted. Background remote work may continue.' } : { kind: 'done' }
       const generation = this.generation
       void this.save().then(() => { if (generation === this.generation) this.push(terminal) }, () => { if (generation === this.generation) this.push({ kind: 'error', text: 'Remote session identity could not be saved.' }) })
@@ -521,7 +544,8 @@ export class RemoteChat {
     if (event.type === 'error') {
       this.identity.uncertain = true
       void this.save().catch(() => {})
-      this.push({ kind: 'error', text: 'Remote Hermes reported a turn failure. Inspect the remote session before sending again.' })
+      const reason = remoteReason(payload.message, payload.detail)
+      this.push({ kind: 'error', text: reason ? `Remote Hermes reported a turn failure: ${reason}` : TURN_FAILURE })
     }
   }
 
