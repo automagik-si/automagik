@@ -213,9 +213,10 @@ export function createAccount({ settings, flow = null, store = null, now = Date.
 
   async function signOut() {
     if (signingIn) flow?.cancel?.()
-    await forget()
     // A disabled account keeps saying so after a sign-out; a signed-in one is simply signed out.
+    // If the stored token cannot be cleared, forget() puts the store's reason back in its place.
     if (enabled) reason = null
+    await forget()
     dirty()
     log('account: signed out')
     return { ok: true, status: status() }

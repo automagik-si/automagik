@@ -9,7 +9,7 @@ import {
   BROWSER_REASON, BUSY_REASON, CALLBACK_REASON, DISABLED_REASON, EXPIRED_REASON, FAILED_REASON,
   NO_REFRESH_REASON, REFUSED_REASON, TIMEOUT_REASON, UNREACHABLE_REASON, createAccount,
 } from '../src/account.js'
-import { NO_SECURE_STORE_REASON, SIGNED_OUT_REASON, TRY_LATER_REASON } from '../src/secure-tokens.js'
+import { NO_SECURE_STORE_REASON, SIGNED_OUT_REASON, STORAGE_FAILED_REASON, TRY_LATER_REASON } from '../src/secure-tokens.js'
 
 const ISSUER = 'https://id.example'
 const CLIENT_ID = 'desktop-client'
@@ -42,7 +42,7 @@ function fakeFlow({ enabled = true, result = tokensOf(), refreshResult = null, e
   }
 }
 
-function fakeStore({ secure = true, backend = 'gnome_libsecret', reason = null, saved = null, loadResult = null } = {}) {
+function fakeStore({ secure = true, backend = 'gnome_libsecret', reason = null, saved = null, loadResult = null, clearFailure = null } = {}) {
   const memory = new Map()
   if (saved !== null) memory.set(ISSUER, saved)
   const calls = { load: 0, rotate: 0, clear: 0 }
@@ -62,6 +62,7 @@ function fakeStore({ secure = true, backend = 'gnome_libsecret', reason = null, 
     },
     async clear(account) {
       calls.clear += 1
+      if (clearFailure) return clearFailure
       memory.delete(account)
       return { status: 'cleared' }
     },
@@ -150,6 +151,16 @@ test('signing out clears the stored token and the memory', async () => {
   assert.equal(store.memory.size, 0)
   assert.equal(store.calls.clear, 1)
   assert.equal(await account.accessToken(), null)
+})
+
+test('a sign-out the store cannot complete is not hidden', async () => {
+  const flow = fakeFlow()
+  const store = fakeStore({ clearFailure: { status: 'failed', reason: STORAGE_FAILED_REASON } })
+  const account = createAccount({ settings: ON, flow, store })
+  await account.signIn()
+  const signedOut = await account.signOut()
+  assert.equal(signedOut.status.signedIn, false)
+  assert.equal(signedOut.status.reason, STORAGE_FAILED_REASON)
 })
 
 test('a launch uses a saved refresh token, rotates it, and shows the sign-in', async () => {

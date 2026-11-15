@@ -54,7 +54,8 @@ downloads the build for this machine from this repository's releases, checks it 
 - Signing in to a remote Automagik service (`src/sign-in.js`, `src/account.js`) is off unless
   `~/.automagik/desktop/signin.json` turns it on: `{ "enabled": true, "issuer": "https://…",
   "clientId": "…" }`. The app ships no issuer, client id or host of its own; with the file missing,
-  `enabled` false, or either value blank, there is no listener, no browser and no token store.
+  `enabled` false, or either value blank, there is no listener, no browser and no token store;
+  the store is opened only when the setting is on and names both values.
   It uses the system browser with PKCE (S256), `state` and `nonce`, an exact
   `http://127.0.0.1:<port>/callback` bound before the browser opens and closed after one request
   or a few minutes, and checks the ID token's issuer, audience, expiry and nonce. The access token
