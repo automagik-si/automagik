@@ -81,6 +81,14 @@ def records_of(folder):
         return None, ""
     return record, ""
 
+def inside(folder, home):
+    if not isinstance(folder, str) or not folder or not isinstance(home, str) or not home:
+        return False
+    try:
+        return os.path.commonpath([os.path.realpath(folder), os.path.realpath(home)]) == os.path.realpath(home)
+    except (OSError, ValueError):
+        return False
+
 def same_home(record, launch_home):
     recorded = record.get("home")
     if not isinstance(recorded, str) or not recorded or not launch_home:
@@ -110,9 +118,10 @@ def state_folder(explicit, launch_home):
             raise Fault("serve-record")
         add(explicit)
         if len(folders) == 1:
+            # The folder came from detection, which tied it to the picked home's own tree.
+            # The record's home is the serve's own report (a sandbox may name a path that
+            # also exists on the host), never a reason to refuse the picked serve.
             record, why = records_of(folders[0])
-            if record is not None and not same_home(record, launch_home):
-                raise Fault("serve-record")
             if record is None and why == "gateway":
                 raise Fault("serve-gateway")
             if record is None:
@@ -136,7 +145,9 @@ def state_folder(explicit, launch_home):
     for folder in folders:
         record, why = records_of(folder)
         gateway = gateway or why == "gateway"
-        if record is not None and same_home(record, launch_home):
+        # A folder inside the chosen home is that home's own serve, whatever its record
+        # reports. A shared account folder may hold another home's serve and is compared.
+        if record is not None and (inside(folder, launch_home) or same_home(record, launch_home)):
             return folder, record
     raise Fault("serve-gateway" if gateway else "serve-not-running")
 

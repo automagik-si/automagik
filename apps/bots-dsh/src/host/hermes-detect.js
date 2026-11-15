@@ -327,23 +327,41 @@ try:
     emit("stage", name="detect-homes")
     hermes = locate(hermes_path, control)
     homes = candidate_homes(options.get("hermesHome", ""))
-    record_dirs, seen = [], set()
-    def remember(folder):
-        if folder in seen:
-            return
-        seen.add(folder)
+    records, seen = {}, set()
+    def remember(folder, owner=""):
+        """Read one record folder; owner is the home whose own tree holds it.
+
+        A record found in a home's own state tree BELONGS to that home. The home field
+        inside it is the serve's own report and may be a sandbox path that also exists on
+        the host; it never credits the record to that host folder.
+        """
+        try:
+            key = os.path.realpath(folder)
+        except OSError:
+            key = folder
+        if key in seen:
+            existing = records.get(key)
+            if existing is None or existing.get("owner") or not owner:
+                return
+        seen.add(key)
         record = read_record(folder)
-        if record is not None:
-            record_dirs.append(record)
+        if record is None:
+            return
+        record["owner"] = owner
+        records[key] = record
     for folder in user_lock_dirs():
         remember(folder)
     for home in list(homes):
         for folder in home_lock_dirs(home):
-            remember(folder)
+            remember(folder, home)
         for folder in walk_records(home, min(3.0, control)):
-            remember(folder)
-    # A serve record names its own home. Ask that home too, even when no config was guessed.
+            remember(folder, home)
+    record_dirs = list(records.values())
+    # Only a record in the shared account folder may name a home to ask: a structural
+    # record's reported home is its sandbox's own path and must not add a host home.
     for record in record_dirs:
+        if record.get("owner"):
+            continue
         named = record.get("home") or ""
         if named.startswith("/") and os.path.isdir(named) and named not in homes and len(homes) < 12:
             homes.append(named)
@@ -362,41 +380,31 @@ try:
     attributed = dict((home, []) for home in homes)
     unattached = []
     for record in record_dirs:
-        named = record.get("home") or ""
-        target = ""
-        if named.startswith("/") and os.path.isdir(named):
-            if named not in attributed and len(homes) < 12:
-                homes.append(named)
-                attributed[named] = []
-                profiles[named] = profiles_of(hermes, named, min(20.0, control))
-            target = named if named in attributed else ""
-        else:
-            local = [home for home in homes if inside(record["recordDir"], home)]
-            if len(local) == 1:
-                target = local[0]
-            elif len(local) > 1:
-                target = max(local, key=len)
-            else:
+        target = record.get("owner") or ""
+        if target and target not in attributed:
+            target = ""
+        if not target:
+            # The record lives in the shared account folder; its own report may name the
+            # home that wrote it. A home already served by a distinct record is not re-owned.
+            named = record.get("home") or ""
+            if named.startswith("/") and os.path.isdir(named):
+                if named not in attributed and len(homes) < 12:
+                    homes.append(named)
+                    attributed[named] = []
+                    profiles[named] = profiles_of(hermes, named, min(20.0, control))
+                owned = [item for item in record_dirs if item.get("owner") == named]
+                if named in attributed and (not owned or any(item["pid"] == record["pid"] for item in owned)):
+                    target = named
+            if not target:
                 served = set(record.get("profiles") or [])
                 matches = [home for home in homes if served and served <= set(profiles[home].keys())]
                 if len(matches) == 1:
                     target = matches[0]
         if target:
-            if not any(item["recordDir"] == record["recordDir"] for item in attributed.setdefault(target, [])):
+            if not any(item["recordDir"] == record["recordDir"] for item in attributed[target]):
                 attributed[target].append(record)
         else:
             unattached.append(record)
-    for home in homes:
-        # The home itself is asked once more, after its profiles: a record it holds is its own.
-        for folder in walk_records(home, min(2.0, control)):
-            record = read_record(folder)
-            if record is None:
-                continue
-            named = record.get("home") or ""
-            if named.startswith("/") and os.path.isdir(named) and not same(named, home):
-                continue
-            if not any(item["recordDir"] == folder for item in attributed[home]):
-                attributed[home].append(record)
     emitted = 0
     for home in homes:
         budget = min(20.0, control, max(0.2, deadline - time.monotonic()))

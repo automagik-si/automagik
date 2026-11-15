@@ -257,21 +257,40 @@ test('two homes each read their own serve record, so one never masks the other',
   assert.equal(clone.recordDir, fixture.cloneLock)
 })
 
-test('a record found under a home belongs to the home it names, never to the folder that holds it', async t => {
+test('a record in a home’s own state folder belongs to that home, even when it names another host home', async t => {
   if (!await hasPython()) { t.skip('python3 is not available'); return }
-  const other = join(tmpdir(), `hermes-detect-other-${randomBytes(4).toString('hex')}`)
-  const fixture = await readerFixture(t, { cloneRecord: false, extraHomes: [[other, [{ name: 'Other', id: 'default', model: 'other/model', gateway: 'running' }]]] })
-  // The record sits in Luna's state folder but names the other home.
-  await writeFile(join(fixture.cloneLock, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: other }))
-  t.after(() => rm(other, { recursive: true, force: true }))
+  const fixture = await readerFixture(t, { primaryRecord: false })
+  // The sandboxed serve's record reports the host home, which exists on the host. The
+  // record sits in the clone home's own state folder: the clone owns it, not that folder.
+  const record = JSON.parse(await readFile(join(fixture.cloneLock, 'host-serve.json'), 'utf8'))
+  await writeFile(join(fixture.cloneLock, 'host-serve.json'), JSON.stringify({ ...record, home: fixture.primary }))
   const { frames } = await runReader(fixture)
   const rows = botsOf(frames)
-  const otherBot = rows.find(row => row.home === other)
-  assert.ok(otherBot, 'the named home is shown')
-  assert.equal(otherBot.running, true)
-  assert.equal(otherBot.recordDir, fixture.cloneLock)
-  const cloneBots = rows.filter(row => row.home === fixture.clone)
-  assert.ok(cloneBots.every(row => row.running === false), 'Luna does not borrow the other home’s serve')
+  const cloneBot = rows.find(row => row.home === fixture.clone && row.id === 'default')
+  assert.ok(cloneBot, JSON.stringify(frames))
+  assert.equal(cloneBot.running, true, 'the sandboxed bot is Running')
+  assert.equal(cloneBot.recordDir, fixture.cloneLock, 'its own record folder, never the named host home')
+  const primaryBot = rows.find(row => row.home === fixture.primary)
+  assert.ok(primaryBot, 'the host home is still shown')
+  assert.equal(primaryBot.running, false, 'the host home is Not running')
+  assert.equal(primaryBot.recordDir, '', 'the host home cannot be picked with the clone’s serve')
+})
+
+test('a sandboxed clone and the host home each run their own serve and bot', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: true })
+  // The clone's record reports the host home too; both homes run their own serve.
+  const cloneRecord = JSON.parse(await readFile(join(fixture.cloneLock, 'host-serve.json'), 'utf8'))
+  await writeFile(join(fixture.cloneLock, 'host-serve.json'), JSON.stringify({ ...cloneRecord, home: fixture.primary }))
+  const { frames } = await runReader(fixture)
+  const rows = botsOf(frames)
+  const cloneBot = rows.find(row => row.home === fixture.clone && row.id === 'default')
+  const primaryBot = rows.find(row => row.home === fixture.primary)
+  assert.equal(cloneBot.running, true)
+  assert.equal(primaryBot.running, true)
+  assert.notEqual(cloneBot.recordDir, primaryBot.recordDir)
+  assert.equal(cloneBot.recordDir, fixture.cloneLock)
+  assert.equal(primaryBot.recordDir, fixture.primaryLock)
 })
 
 test('a sandbox record under the clone home is found where the home keeps it, and the bot is shown', async t => {
@@ -324,18 +343,23 @@ async function attachFixture(t) {
   await writeFile(join(home, 'config.yaml'), 'model: chosen/model\n')
   await writeFile(join(otherHome, 'config.yaml'), 'model: other/model\n')
   const otherToken = randomBytes(24).toString('hex')
+  const tokens = new Set([token, otherToken])
   const server = createHttpServer((request, response) => {
-    if (request.url !== '/api/host/identity' || request.headers.authorization !== `Bearer ${token}`) { response.writeHead(401); response.end(); return }
+    const offered = String(request.headers.authorization ?? '').replace(/^Bearer /, '')
+    if (request.url !== '/api/host/identity' || !tokens.has(offered)) { response.writeHead(401); response.end(); return }
     response.writeHead(200, { 'content-type': 'application/json' })
     response.end(JSON.stringify({ ok: true, role: 'serve', pid: process.pid, protocolVersion: 1 }))
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const port = server.address().port
-  await writeFile(join(chosen, 'host-serve.json'), JSON.stringify({ role: 'serve', port, pid: process.pid, protocolVersion: 1, home, tokenFingerprint: createHash('sha256').update(token).digest('hex').slice(0, 16), profiles: ['default'] }))
+  // The clone's record reports the host home, which exists; only its own folder and token
+  // make it the clone's serve.
+  await writeFile(join(chosen, 'host-serve.json'), JSON.stringify({ role: 'serve', port, pid: process.pid, protocolVersion: 1, home: otherHome, tokenFingerprint: createHash('sha256').update(token).digest('hex').slice(0, 16), profiles: ['default'] }))
   await writeFile(join(chosen, 'host-serve.token'), token, { mode: 0o600 })
   await chmod(join(chosen, 'host-serve.token'), 0o600)
-  await writeFile(join(other, 'host-serve.json'), JSON.stringify({ role: 'serve', port, pid: process.pid, protocolVersion: 1, home: otherHome, profiles: ['default'] }))
+  await writeFile(join(other, 'host-serve.json'), JSON.stringify({ role: 'serve', port, pid: process.pid, protocolVersion: 1, home: otherHome, tokenFingerprint: createHash('sha256').update(otherToken).digest('hex').slice(0, 16), profiles: ['default'] }))
   await writeFile(join(other, 'host-serve.token'), otherToken, { mode: 0o600 })
+  await chmod(join(other, 'host-serve.token'), 0o600)
   const hermes = join(root, 'hermes')
   await writeFile(hermes, `#!/usr/bin/env python3
 import json, sys
@@ -410,14 +434,27 @@ test('a sandbox-internal home name still attaches to the chosen serve’s own re
   assert.equal(frames.find(frame => frame.type === 'token')?.value, token)
 })
 
-test('a record that names another existing home is refused, not attached under the chosen home', async t => {
+test('the sandboxed clone and the host home each pick only their own token', async t => {
   if (!await hasPython()) { t.skip('python3 is not available'); return }
   const fixture = await attachFixture(t)
-  const record = JSON.parse(await readFile(join(fixture.chosen, 'host-serve.json'), 'utf8'))
-  await writeFile(join(fixture.chosen, 'host-serve.json'), JSON.stringify({ ...record, home: fixture.otherHome }))
-  const { frames } = await runAttach(fixture, { stateDir: fixture.chosen, hermesHome: fixture.home })
-  assert.equal(frames.find(frame => frame.type === 'error')?.code, 'serve-record')
-  assert.equal(frames.find(frame => frame.type === 'token'), undefined)
+  // The clone's record still names the host home. Each explicitly picked serve folder
+  // reads its own record and token: the clone never takes the host home's, and the host
+  // home never takes the clone's.
+  const clonePick = await runAttach(fixture, { stateDir: fixture.chosen, hermesHome: fixture.home })
+  assert.equal(clonePick.frames.find(frame => frame.type === 'token')?.value, token)
+  assert.ok(!clonePick.raw.includes(fixture.otherToken))
+  const hostPick = await runAttach(fixture, { stateDir: fixture.other, hermesHome: fixture.otherHome })
+  assert.equal(hostPick.frames.find(frame => frame.type === 'token')?.value, fixture.otherToken)
+  assert.ok(!hostPick.raw.includes(token))
+})
+
+test('without an explicit picked folder, a record naming another existing home is not used', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await attachFixture(t)
+  await rm(join(fixture.chosen, 'host-serve.json'))
+  const { frames } = await runAttach(fixture, { stateDir: '', hermesHome: fixture.home })
+  assert.equal(frames.find(frame => frame.type === 'error')?.code, 'serve-not-running')
+  assert.equal(frames.find(frame => frame.type === 'token'), undefined, 'the account default is never a fallback for another home')
 })
 
 test('without a chosen folder, the home’s own state folder is read before the account default', async t => {
