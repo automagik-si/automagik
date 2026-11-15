@@ -49,11 +49,21 @@ describe('Follow Omni triggers', () => {
     expect(workflow.jobs.follow.if).toBeUndefined();
   });
 
-  test('keeps the dispatch fast path, schedule fallback and shared concurrency', () => {
+  test('keeps the dispatch fast path, the outside daily clock, the schedule backstop and shared concurrency', () => {
     expect(Object.keys(workflow.on).sort()).toEqual(['repository_dispatch', 'schedule', 'workflow_dispatch', 'workflow_run']);
-    expect(workflow.on.repository_dispatch).toEqual({ types: ['omni-release'] });
+    expect(workflow.on.repository_dispatch).toEqual({ types: ['omni-release', 'daily-carry'] });
     expect(workflow.on.schedule).toEqual([{ cron: '11,41 * * * *' }]);
     expect(workflow.concurrency).toEqual({ group: 'follow-omni', 'cancel-in-progress': false });
+  });
+
+  test('a daily-carry dispatch is the clock, not an Omni hint: it looks the newest Omni up itself', () => {
+    const newest = runOf('The newest Omni release');
+    // Only Omni's own dispatch logs (and waits for) a hinted release; the daily clock has none.
+    expect(newest).toContain('"${EVENT_ACTION}" == omni-release');
+    expect(jobOf('follow').map(line => line.trim())).toContain('EVENT_ACTION: ${{ github.event.action }}');
+    // The hold still decides whether that run carries: the dispatch adds no skip input.
+    expect(workflow.on.repository_dispatch.types).toContain('daily-carry');
+    expect(workflow.on.workflow_dispatch.inputs.skip_daily_hold.default).toBe(false);
   });
 });
 
