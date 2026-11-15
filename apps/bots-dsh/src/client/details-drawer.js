@@ -17,7 +17,7 @@ import { ScheduleSummary } from './schedules.js'
 import { useGlide, useMorph } from './motion.js'
 import { MemberApprovals, MemberState, StopMemberWork, StopRoomWork, useMemberWork, workState } from './member-status.js'
 import { canSetGoal, goalView, hasGoalAdmin } from './goal.js'
-import { remoteOfBot, savedLevelOf, levelsOf, pickLevel, cliOfBot, PermissionFallback, PermissionSelect, presetDanger, presetName, presetText } from './permission-picker.js'
+import { AutoMissingNote, remoteOfBot, savedLevelOf, levelsOf, pickLevel, cliOfBot, PermissionFallback, PermissionSelect, presetDanger, presetName, presetText } from './permission-picker.js'
 import { reopenPermissionChoice } from './permission-card.js'
 import { BotConnectors } from './connectors.js'
 import { ComputerView } from './computer.js'
@@ -57,6 +57,7 @@ function PermissionRow({ bot, roster, actions, run }) {
     // The select explains the current level; its menu lets even a view-only window read every level.
     h(PermissionSelect, { judge: { ...bot.autoJudge, agent: String(bot.model ?? '').split('/')[0] }, catalog: levelsOf(catalog, bot), name: bot.name, saved: savedLevelOf(bot, catalog), askedOf: () => ({ id: bot.id, rev: bot.permissionRev ?? 0 }), replaced: presetName(bot.permission ?? catalog.defaultPreset, catalog), repick: bot.permission === undefined, disabled: Boolean(roster.readOnly), cli: cliOfBot(bot), remote: remoteOfBot(bot), onPick: (permission, asked) => run(pickLevel(actions, bot, permission, asked)) }),
     h(PermissionFallback, { fallback: bot.permissionFallback, owner: bot, catalog }),
+    h(AutoMissingNote, { bot, roster }),
     roster.readOnly ? null : h('button', { type: 'button', className: 'bt-more', style: remoteOfBot(bot) ? { textDecoration: 'underline', textUnderlineOffset: '0.2em' } : undefined, onClick: () => reopenPermissionChoice(bot.id) }, t('Choose in the chat')))
 }
 
@@ -201,7 +202,8 @@ function GroupOverview({ room, roster, actions, usage, useWork, openSettings }) 
     room.permission ? h('div', { key: 'permission' }, h('div', { className: 'bt-section-title' }, t('Permissions')),
       h('div', { className: 'bt-kv' }, h('span', { className: presetDanger(room.permission) ? 'bt-perm-danger' : undefined }, presetName(room.permission, roster.permissions))),
       presetText(room.permission, roster.permissions) ? h('div', { className: 'bt-note' }, presetText(room.permission, roster.permissions)) : null,
-      h(PermissionFallback, { fallback: room.permissionFallback, owner: room, catalog: roster.permissions })) : null,
+      h(PermissionFallback, { fallback: room.permissionFallback, owner: room, catalog: roster.permissions }),
+      h('div', { className: 'bt-note' }, t("Auto does not count in group chats. A member on Auto works here as Workspace, or at the group's shared level when one is set."))) : null,
     roster.memory === false ? null : h(MemoryRow, { key: 'memory', owner: { id: room.id, name: room.name, group: true }, actions }),
     usage ? h('div', { key: 'usage' }, h('div', { className: 'bt-section-title' }, t('Usage')),
       h('div', { className: 'bt-kv' }, h('span', null, room.name), h('span', null, usage))) : null,

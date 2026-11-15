@@ -32,6 +32,7 @@ function GroupPermission({ room, catalog, update }) {
       label: t('Same for every member'), hint: t("Replaces each member's own permissions in this group."), on: shared,
       onChange: on => update({ permission: on ? catalog.defaultPreset ?? catalog.options[0].value : null }),
     }),
+    h('div', { className: 'bt-set-row bt-bs-row bt-bs-stack' }, h('div', { className: 'bt-note' }, t("Auto does not count in group chats. A member on Auto works here as Workspace, or at the group's shared level when one is set."))),
     shared ? h('div', { className: 'bt-set-row bt-bs-row bt-bs-stack bt-gs-perm bt-veil' },
       h(PermissionPicker, { catalog, saved: room.permission, confirmFull: true, onPick: permission => update({ permission }) }),
       h(PermissionFallback, { fallback: room.permissionFallback, owner: room, catalog }),

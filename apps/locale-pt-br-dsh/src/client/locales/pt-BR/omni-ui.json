@@ -2634,5 +2634,15 @@
   "Plugins {version} did not start here before, so the current ones are kept.": "Os plugins {version} não iniciaram aqui antes, então as versões atuais serão mantidas.",
   "Plugins {version} need a different DeepSeek Harness version.": "Os plugins {version} precisam de outra versão do DeepSeek Harness.",
   "The published plugin update was not accepted.": "A atualização de plugins publicada não foi aceita.",
-  "Plugin updates could not be checked. Try again.": "Não foi possível buscar atualizações de plugins. Tente novamente."
+  "Plugin updates could not be checked. Try again.": "Não foi possível buscar atualizações de plugins. Tente novamente.",
+  "Auto is not a choice here: it is turned on for one Bot at a time, in its chat or Details, when its model offers it.": "O Automático não é uma opção aqui: é ativado para um Bot de cada vez, na conversa ou em Detalhes desse Bot, quando o modelo do Bot o oferece.",
+  "After the Bot is created, Auto can be turned on in its chat or Details, when its model offers it.": "Depois que o Bot for criado, o Automático pode ser ativado na conversa ou em Detalhes desse Bot, quando o modelo do Bot oferece essa opção.",
+  "Auto does not count in group chats. A member on Auto works here as Workspace, or at the group's shared level when one is set.": "O Automático não vale em chats em grupo. Aqui, um membro em Automático funciona como Área de trabalho, ou no nível compartilhado do grupo, quando houver um.",
+  "This Bot runs on its plugin's own engine, so Auto is not offered.": "Este Bot roda no mecanismo do próprio plugin, então o Automático não é oferecido.",
+  "Auto needs a model chosen for this Bot.": "O Automático precisa de um modelo escolhido para este Bot.",
+  "Auto is not offered on Remote Hermes.": "O Automático não é oferecido no Hermes remoto.",
+  "Auto is not offered for this Bot's model.": "O Automático não é oferecido para o modelo deste Bot.",
+  "Auto is offered once this Bot's chat runs on the model saved for it.": "O Automático passa a ser oferecido quando a conversa deste Bot rodar no modelo salvo para o Bot.",
+  "On this model, Auto needs a background model, and no connected model can be one. Connect a model with an API key to turn it on.": "Neste modelo, o Automático precisa de um modelo de segundo plano, e nenhum modelo conectado pode ser usado. Conecte um modelo com chave de API para ativá-lo.",
+  "Auto is not available for this Bot right now.": "O Automático não está disponível para este Bot agora."
 }

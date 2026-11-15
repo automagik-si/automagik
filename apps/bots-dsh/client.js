@@ -1237,6 +1237,16 @@ var ZH = {
   Experimental: "实验性",
   "Auto review runs tools without a sandbox: a model reviews each call first, and you decide on the ones it stops. It is experimental, can let through or stop the wrong call, and uses more tokens.": "自动审查不使用沙箱：每次工具调用前先由模型审查，被拦下的调用由你决定。此功能仍属实验性，可能误放行或误拦截，并会消耗更多 token。",
   "Use Auto review": "启用自动审查",
+  "Auto is not a choice here: it is turned on for one Bot at a time, in its chat or Details, when its model offers it.": "这里不能选择自动模式：只能在某个 Bot 的对话或详情中为该 Bot 单独开启，且需其模型支持。",
+  "After the Bot is created, Auto can be turned on in its chat or Details, when its model offers it.": "创建 Bot 后，如果其模型支持，可以在它的对话或详情中开启自动模式。",
+  "Auto does not count in group chats. A member on Auto works here as Workspace, or at the group's shared level when one is set.": "自动模式在群聊中不生效。使用自动模式的成员在这里按“工作区内修改”运行；如果群聊设置了统一级别，则按该级别运行。",
+  "This Bot runs on its plugin's own engine, so Auto is not offered.": "此 Bot 运行在其插件自带的引擎上，因此不提供自动模式。",
+  "Auto needs a model chosen for this Bot.": "自动模式需要先为此 Bot 选择模型。",
+  "Auto is not offered on Remote Hermes.": "远程 Hermes 不提供自动模式。",
+  "Auto is not offered for this Bot's model.": "此 Bot 的模型不提供自动模式。",
+  "Auto is offered once this Bot's chat runs on the model saved for it.": "当此 Bot 的对话在为它保存的模型上运行后，才会提供自动模式。",
+  "On this model, Auto needs a background model, and no connected model can be one. Connect a model with an API key to turn it on.": "在此模型上，自动模式需要后台模型，但目前没有可用作后台模型的已连接模型。连接一个使用 API 密钥的模型即可开启。",
+  "Auto is not available for this Bot right now.": "此 Bot 目前无法使用自动模式。",
   "Runs as Workspace here": "这里按“工作区内修改”运行",
   // The explained permission choice (permission-picker.js, permission-card.js).
   "It cannot change files unless you allow that one action. It can still run commands and use the network and its other tools.": "除非你允许某一次操作，否则不能修改文件。仍可运行命令、使用网络和其他工具。",
@@ -23016,6 +23026,22 @@ function levelsOf(catalog, bot) {
   if (bot?.autoOffered !== true && typeof bot?.permissionAuto !== "string") return catalog;
   return { ...catalog, options: catalog.options.flatMap((option) => option.value === MARK_LEVEL ? [option, { value: AUTO_ROW, name: "Auto", description: autoRowText(bot.autoJudge) }] : [option]) };
 }
+function autoMissingText(bot, roster) {
+  if (!bot || bot.autoOffered === true || typeof bot.permissionAuto === "string") return void 0;
+  if (roster?.readOnly || bot.permissionNotOffered === true) return void 0;
+  if (roster?.hostModels?.[bot.id] !== void 0) return t("This Bot runs on its plugin's own engine, so Auto is not offered.");
+  if (typeof bot.model !== "string" || bot.model === "") return t("Auto needs a model chosen for this Bot.");
+  if (bot.model.startsWith("hermes-remote/")) return t("Auto is not offered on Remote Hermes.");
+  const mark2 = markOf(bot.model);
+  if (mark2 === void 0) return t("Auto is not offered for this Bot's model.");
+  if (markOf(bot.appliedModel) !== mark2) return t("Auto is offered once this Bot's chat runs on the model saved for it.");
+  if (judgeOf(mark2) === "team" && !roster?.backgroundModel) return t("On this model, Auto needs a background model, and no connected model can be one. Connect a model with an API key to turn it on.");
+  return t("Auto is not available for this Bot right now.");
+}
+function AutoMissingNote({ bot, roster }) {
+  const text2 = autoMissingText(bot, roster);
+  return text2 ? (0, import_react54.createElement)("div", { className: "bt-note" }, text2) : null;
+}
 var pickLevel = (actions, bot, value, asked2) => value === AUTO_ROW ? actions.setBotAuto(asked2.id, asked2.rev) : actions.updateBot(bot.id, { permission: value });
 function autoRowText(judge) {
   const text2 = { "claude": "Works as Workspace. Where Workspace would ask you, Claude Code decides first, with its auto mode: it runs the step, refuses it, or asks you.", "own": "Works as Workspace. Where Workspace would ask you, {model}, this Bot's own model, decides first: it runs the step, refuses it, or asks you.", "team": "Works as Workspace. Where Workspace would ask you, {model}, the team's background model, decides first: it runs the step, refuses it, or asks you." };
@@ -23233,7 +23259,7 @@ function ComposerPermission({ sessionId, useRoster, actions }) {
       "aria-label": t("Permissions"),
       style: shownPlace,
       "data-leaving": leaving || void 0
-    }, (0, import_react55.createElement)(PermissionList, { judge: { ...bot.autoJudge, agent: String(bot.model ?? "").split("/")[0] }, catalog, saved, onPick: pick2, name: bot.name, cli, remote: remoteOfBot(bot), askedOf: () => ({ id: bot.id, rev: bot.permissionRev ?? 0 }), replaced: presetName(bot.permission ?? catalog.defaultPreset, catalog) }), bot.permissionAuto ? (0, import_react55.createElement)(PermissionFallback, { fallback: bot.permissionFallback, owner: bot, catalog }) : null), document.body) : null
+    }, (0, import_react55.createElement)(PermissionList, { judge: { ...bot.autoJudge, agent: String(bot.model ?? "").split("/")[0] }, catalog, saved, onPick: pick2, name: bot.name, cli, remote: remoteOfBot(bot), askedOf: () => ({ id: bot.id, rev: bot.permissionRev ?? 0 }), replaced: presetName(bot.permission ?? catalog.defaultPreset, catalog) }), bot.permissionAuto ? (0, import_react55.createElement)(PermissionFallback, { fallback: bot.permissionFallback, owner: bot, catalog }) : null, (0, import_react55.createElement)(AutoMissingNote, { bot, roster })), document.body) : null
   );
 }
 function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions }) {
@@ -25804,6 +25830,7 @@ function CreateBot({ roster, actions, start: start2, brief = "", onBack, canGoBa
       { className: "bt-note" },
       t("New Bots start at {level}.", { level: presetName(permission, roster.permissions) })
     ),
+    permission == null ? null : (0, import_react64.createElement)("div", { className: "bt-note" }, t("After the Bot is created, Auto can be turned on in its chat or Details, when its model offers it.")),
     error ? (0, import_react64.createElement)("div", { className: "bt-error", role: "alert", style: { padding: 0 } }, error) : null,
     (0, import_react64.createElement)(
       "div",
@@ -26795,6 +26822,7 @@ function GroupPermission({ room: room2, catalog, update }) {
       on: shared2,
       onChange: (on) => update({ permission: on ? catalog.defaultPreset ?? catalog.options[0].value : null })
     }),
+    (0, import_react70.createElement)("div", { className: "bt-set-row bt-bs-row bt-bs-stack" }, (0, import_react70.createElement)("div", { className: "bt-note" }, t("Auto does not count in group chats. A member on Auto works here as Workspace, or at the group's shared level when one is set."))),
     shared2 ? (0, import_react70.createElement)(
       "div",
       { className: "bt-set-row bt-bs-row bt-bs-stack bt-gs-perm bt-veil" },
@@ -29907,7 +29935,8 @@ function PermissionsSection({ roster, actions, run: run2 }) {
       { className: "bt-set-row bt-bs-row bt-bs-stack bt-drawer-permission" },
       (0, import_react79.createElement)(PermissionPicker, { catalog, saved: saved ?? catalog.defaultPreset, repick: saved === void 0, confirmFull: true, onPick: (permission) => run2(actions.setPrefs({ permission })) }),
       (0, import_react79.createElement)(PermissionFallback, { fallback: saved === AUTO && !offered ? AUTO_FALLBACK : void 0 }),
-      (0, import_react79.createElement)(PermissionExplanations, { catalog })
+      (0, import_react79.createElement)(PermissionExplanations, { catalog }),
+      (0, import_react79.createElement)("div", { className: "bt-note" }, t("Auto is not a choice here: it is turned on for one Bot at a time, in its chat or Details, when its model offers it."))
     )
   );
 }
@@ -30877,7 +30906,7 @@ var reopened = createSource({});
 var reopenPermissionChoice = (id) => reopened.set((map) => setEntry(map, id, true));
 var closeReopened = (id) => reopened.set((map) => setEntry(map, id, void 0));
 var FOOTNOTE = "You can change this any time in Details.";
-function PermissionCard({ bot, catalog, actions, onClose, onSaved }) {
+function PermissionCard({ bot, catalog, roster, actions, onClose, onSaved }) {
   catalog = levelsOf(catalog, bot);
   const saved = savedLevelOf(bot, catalog);
   const askedAtOpen = (0, import_react82.useRef)();
@@ -30981,6 +31010,7 @@ function PermissionCard({ bot, catalog, actions, onClose, onSaved }) {
     }, disabled: busy, cli, remote }),
     errorLine,
     bot.permissionAuto ? (0, import_react82.createElement)(PermissionFallback, { fallback: bot.permissionFallback, owner: bot, catalog }) : null,
+    (0, import_react82.createElement)(AutoMissingNote, { bot, roster }),
     note,
     (0, import_react82.createElement)(
       "div",
@@ -31005,7 +31035,7 @@ function PermissionChoiceDock({ sessionId, useRoster, actions }) {
     markAsked(bot.id);
     closeReopened(bot.id);
   };
-  return (0, import_react82.createElement)("div", { className: "bt-q-dock" }, (0, import_react82.createElement)(PermissionCard, { key: bot.id, bot, catalog, actions, onClose: close, onSaved: close }));
+  return (0, import_react82.createElement)("div", { className: "bt-q-dock" }, (0, import_react82.createElement)(PermissionCard, { key: bot.id, bot, catalog, roster, actions, onClose: close, onSaved: close }));
 }
 
 // src/client/details-drawer.js
@@ -31044,6 +31074,7 @@ function PermissionRow({ bot, roster, actions, run: run2 }) {
     // The select explains the current level; its menu lets even a view-only window read every level.
     (0, import_react83.createElement)(PermissionSelect, { judge: { ...bot.autoJudge, agent: String(bot.model ?? "").split("/")[0] }, catalog: levelsOf(catalog, bot), name: bot.name, saved: savedLevelOf(bot, catalog), askedOf: () => ({ id: bot.id, rev: bot.permissionRev ?? 0 }), replaced: presetName(bot.permission ?? catalog.defaultPreset, catalog), repick: bot.permission === void 0, disabled: Boolean(roster.readOnly), cli: cliOfBot(bot), remote: remoteOfBot(bot), onPick: (permission, asked2) => run2(pickLevel(actions, bot, permission, asked2)) }),
     (0, import_react83.createElement)(PermissionFallback, { fallback: bot.permissionFallback, owner: bot, catalog }),
+    (0, import_react83.createElement)(AutoMissingNote, { bot, roster }),
     roster.readOnly ? null : (0, import_react83.createElement)("button", { type: "button", className: "bt-more", style: remoteOfBot(bot) ? { textDecoration: "underline", textUnderlineOffset: "0.2em" } : void 0, onClick: () => reopenPermissionChoice(bot.id) }, t("Choose in the chat"))
   );
 }
@@ -31252,7 +31283,8 @@ function GroupOverview({ room: room2, roster, actions, usage, useWork, openSetti
       (0, import_react83.createElement)("div", { className: "bt-section-title" }, t("Permissions")),
       (0, import_react83.createElement)("div", { className: "bt-kv" }, (0, import_react83.createElement)("span", { className: presetDanger(room2.permission) ? "bt-perm-danger" : void 0 }, presetName(room2.permission, roster.permissions))),
       presetText(room2.permission, roster.permissions) ? (0, import_react83.createElement)("div", { className: "bt-note" }, presetText(room2.permission, roster.permissions)) : null,
-      (0, import_react83.createElement)(PermissionFallback, { fallback: room2.permissionFallback, owner: room2, catalog: roster.permissions })
+      (0, import_react83.createElement)(PermissionFallback, { fallback: room2.permissionFallback, owner: room2, catalog: roster.permissions }),
+      (0, import_react83.createElement)("div", { className: "bt-note" }, t("Auto does not count in group chats. A member on Auto works here as Workspace, or at the group's shared level when one is set."))
     ) : null,
     roster.memory === false ? null : (0, import_react83.createElement)(MemoryRow, { key: "memory", owner: { id: room2.id, name: room2.name, group: true }, actions }),
     usage ? (0, import_react83.createElement)(
