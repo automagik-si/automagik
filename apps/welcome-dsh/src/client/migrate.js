@@ -225,9 +225,9 @@ function ConfirmCard({ probe, botId, agreed, busy, onPickBot, onAgree, onStart, 
   const restart = (!off && gatewayRunning) || pending
   return h('div', { className: 'oai-mig-confirm' },
     h('div', { className: 'oai-mig-found' },
-      h('span', { className: 'oai-mig-dot', 'data-on': off ? undefined : 'on', 'aria-hidden': 'true' }),
+      h('span', { className: 'oai-mig-dot', 'data-on': !off && !stopped ? 'on' : undefined, 'aria-hidden': 'true' }),
       h('span', null,
-        h('strong', null, t(off ? 'Hermes · Telegram is already off' : 'Hermes · Telegram is on')),
+        h('strong', null, t(off ? 'Hermes · Telegram is already off' : stopped ? 'Hermes · not running' : 'Hermes · Telegram is on')),
         h('small', null, t(probe.hermes?.where === 'ssh' ? 'on your Hermes computer' : 'on this computer')))),
     h('ol', { className: 'oai-mig-do' },
       h('li', null, h('span', { className: 'oai-mig-do-text' }, h('b', null, t('The wizard reads Hermes\'s bot key.')), ' ', t('It stays hidden and goes straight to Omni, which keeps it private.'))),
@@ -283,9 +283,11 @@ function ProblemCard({ error, onRetry, onHandoff }) {
     ? 'Hermes still has the channel. Nothing was handed to Omni, and its settings were put back.'
     : error?.code === 'refused'
       ? 'Hermes would not restart. It may still have a chat open; finish it and try again.'
-      : changed.hermesOff === true && changed.omniCreated !== true
-        ? 'Hermes\'s Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key.'
-        : 'Nothing was changed. Hermes is exactly as it was.'
+      : changed.omniUnknown === true
+        ? 'Hermes\'s Telegram is off. Omni did not confirm which channel is the move\'s, so check Omni\'s Channels before trying again. Hermes still has the key.'
+        : changed.hermesOff === true && changed.omniCreated !== true
+          ? 'Hermes\'s Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key.'
+          : 'Nothing was changed. Hermes is exactly as it was.'
   return h('div', { className: 'oai-mig-problem' },
     h('p', { className: 'oai-mig-error', role: 'alert' }, t(lines)),
     error?.message && !['hermes-still-on', 'refused', 'omni', 'failed'].includes(error.code) ? h('p', { className: 'oai-mig-fine' }, hidden(error.message)) : null,

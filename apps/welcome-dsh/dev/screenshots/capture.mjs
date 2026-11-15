@@ -141,6 +141,7 @@ const STATES = [
   { name: '13-aside-channels', phase: 'handoff', handoff: { reason: 'no-key' }, aside: { kind: 'channels', onBack: () => {} }, height: 660 },
   { name: '14-confirm-stopped', phase: 'confirm', probe: probe({ hermes: { gatewayRunning: false } }), botId: BOT, agreed: false, height: 1080 },
   { name: '15-done-stopped', phase: 'done', result: { ...RESULT, hermesWasStopped: true }, height: 900 },
+  { name: '16-problem-unknown', phase: 'problem', error: { code: 'omni', message: 'Omni did not take the bot key. Nothing was handed to it.', changed: { hermesOff: true, omniCreated: false, omniUnknown: true } }, height: 760 },
 ]
 
 // The rail is the welcome's own: in the app, every step that brings one has announced it.

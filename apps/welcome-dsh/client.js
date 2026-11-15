@@ -9313,6 +9313,7 @@ var PT_BR = {
   "Omni starts its Telegram channel with the same bot.": "O Omni liga o canal do Telegram com o mesmo bot.",
   "One bot, one listener.": "Um bot, um ouvinte.",
   "Hermes is already off; nothing is switched. No restart is needed.": "O Hermes já está desligado; nada é desligado. Não é preciso reiniciar.",
+  "Hermes · not running": "Hermes · não está rodando",
   "Hermes is not running.": "O Hermes não está rodando.",
   "Its Telegram is switched off in its settings, so it stays off when you start Hermes again.": "O Telegram fica desligado nas configurações, então continua desligado quando você iniciar o Hermes de novo.",
   "I am ready: Omni starts with Hermes's bot, and Hermes's Telegram stays off.": "Confirmo: o Omni começa com o bot do Hermes, e o Telegram do Hermes continua desligado.",
@@ -9355,6 +9356,7 @@ var PT_BR = {
   "Open this Bot's settings from the Bot team's sidebar and turn it on.": "Abra as configurações deste Bot na barra lateral da equipe de Bots e ligue o Bot.",
   "Omni has the channel. Its next update adds your Bot as the one who answers.": "O Omni está com o canal. A próxima atualização do Omni adiciona o seu Bot como quem responde.",
   "Hermes: Telegram off": "Hermes: Telegram desligado",
+  "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key.": "O Telegram do Hermes está desligado. O Omni não confirmou qual canal é o da mudança, então verifique os Canais do Omni antes de tentar de novo. O Hermes ainda tem a chave.",
   "Hermes was not running. Its Telegram stays off until you start Hermes again.": "O Hermes não estava rodando. O Telegram fica desligado até você iniciar o Hermes de novo.",
   "Hermes: Telegram was already off": "Hermes: o Telegram já estava desligado",
   "Omni: listening": "Omni: escutando",
@@ -13058,11 +13060,11 @@ function ConfirmCard({ probe, botId, agreed, busy, onPickBot, onAgree, onStart, 
     (0, import_react11.createElement)(
       "div",
       { className: "oai-mig-found" },
-      (0, import_react11.createElement)("span", { className: "oai-mig-dot", "data-on": off ? void 0 : "on", "aria-hidden": "true" }),
+      (0, import_react11.createElement)("span", { className: "oai-mig-dot", "data-on": !off && !stopped ? "on" : void 0, "aria-hidden": "true" }),
       (0, import_react11.createElement)(
         "span",
         null,
-        (0, import_react11.createElement)("strong", null, t(off ? "Hermes · Telegram is already off" : "Hermes · Telegram is on")),
+        (0, import_react11.createElement)("strong", null, t(off ? "Hermes · Telegram is already off" : stopped ? "Hermes · not running" : "Hermes · Telegram is on")),
         (0, import_react11.createElement)("small", null, t(probe.hermes?.where === "ssh" ? "on your Hermes computer" : "on this computer"))
       )
     ),
@@ -13132,7 +13134,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
 }
 function ProblemCard({ error, onRetry, onHandoff }) {
   const changed = error?.changed ?? {};
-  const lines = error?.code === "hermes-still-on" ? "Hermes still has the channel. Nothing was handed to Omni, and its settings were put back." : error?.code === "refused" ? "Hermes would not restart. It may still have a chat open; finish it and try again." : changed.hermesOff === true && changed.omniCreated !== true ? "Hermes's Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key." : "Nothing was changed. Hermes is exactly as it was.";
+  const lines = error?.code === "hermes-still-on" ? "Hermes still has the channel. Nothing was handed to Omni, and its settings were put back." : error?.code === "refused" ? "Hermes would not restart. It may still have a chat open; finish it and try again." : changed.omniUnknown === true ? "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key." : changed.hermesOff === true && changed.omniCreated !== true ? "Hermes's Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key." : "Nothing was changed. Hermes is exactly as it was.";
   return (0, import_react11.createElement)(
     "div",
     { className: "oai-mig-problem" },

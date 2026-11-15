@@ -126,7 +126,8 @@ test('already off or waiting for a restart reads as it is, without claiming work
 test('a stopped Hermes is not restarted, and the confirm says its Telegram stays off', () => {
   const tree = view({ phase: 'confirm', probe: probe({ hermes: { gatewayRunning: false } }), agreed: false })
   const body = textOf(tree)
-  assert.match(body, /Hermes is not running\./)
+  assert.match(body, /Hermes · not running/)
+  assert.doesNotMatch(body, /Hermes · Telegram is on/)
   assert.match(body, /Its Telegram is switched off in its settings, so it stays off when you start Hermes again\./)
   assert.match(body, /I am ready: Omni starts with Hermes's bot, and Hermes's Telegram stays off\./)
   assert.doesNotMatch(body, /restarts for a few seconds/)
@@ -270,6 +271,14 @@ test('the page masks a key split anywhere, including by a bell or an escape', ()
     `${FIXTURE_KEY.slice(0, 10)}\x1b${suffix}`,
   ]
   for (const variant of variants) assert.equal(migrate.redactKey(`failed with ${variant} here`), 'failed with [hidden] here')
+})
+
+test('an unknown Omni channel state says Hermes is off and what to check, not that nothing listens', () => {
+  const tree = view({ phase: 'problem', error: { code: 'omni', message: '', changed: { hermesOff: true, omniCreated: false, omniUnknown: true } } })
+  const body = textOf(tree)
+  assert.match(body, /Omni did not confirm which channel is the move's/)
+  assert.match(body, /Hermes still has the key/)
+  assert.doesNotMatch(body, /Nothing is listening right now/)
 })
 
 test('the step carries its own clay, in both themes', () => {

@@ -290,37 +290,42 @@ async function pairingOf(api, id, { listenMs = 0, pollMs = 1_500 } = {}, { now =
 // Reads the linked Omni's instances, to find the channel this move names. A different Telegram
 // channel the person already has is never taken for the moved bot. Kept quiet: a listing this
 // wizard cannot make never blocks a move.
-async function telegramChannel(channels, times, deps, keyPrefix) {
-  if (typeof keyPrefix !== 'string' || !/^[0-9]{6,12}$/.test(keyPrefix)) return null
-  if (typeof channels?.omniRequest !== 'function' || typeof channels?.omniChannelEndpoint !== 'function') return null
+// Every Telegram channel Omni holds, by id. The id is the only identity that works with the
+// Omni releases there are: their status reports no bot id, only the bot's @username.
+async function telegramChannels(channels, times) {
+  if (typeof channels?.omniRequest !== 'function') return null
   try {
     const response = await channels.omniRequest('GET', '/instances', { signal: AbortSignal.timeout(times.omniMs) })
     if (!response?.ok) return undefined
     const body = await response.json()
     const items = Array.isArray(body?.items) ? body.items : Array.isArray(body?.data) ? body.data : []
-    let unknown = false
-    for (const item of items) {
-      if (!item || item.channel !== 'telegram' || typeof item.id !== 'string' || !UUID.test(item.id)) continue
-      let status
-      try {
-        const reply = await channels.omniRequest('GET', `/instances/${encodeURIComponent(item.id)}/status`, { signal: AbortSignal.timeout(times.omniMs) })
-        if (!reply?.ok) { unknown = true; continue }
-        const answer = await reply.json()
-        status = answer?.data ?? answer
-      } catch {
-        unknown = true
-        continue
-      }
-      // Omni reports the Telegram bot id; it equals the key's digit prefix. A name is only a
-      // label someone can type, so it is never the identity.
-      if (status?.botId === undefined || status?.botId === null || String(status.botId) !== keyPrefix) continue
-      const pairing = await pairingOf({ call: channels.omniChannelEndpoint }, item.id, {}, { now: deps.now, sleep: deps.sleep })
-      return { id: item.id, name: text(item.name) || CHANNEL_NAME, connected: pairing.connected === true, detail: pairing.detail ?? null }
-    }
-    return unknown ? undefined : null
+    return items
+      .filter(item => item && item.channel === 'telegram' && typeof item.id === 'string' && UUID.test(item.id))
+      .map(item => ({ id: item.id, name: text(item.name) || CHANNEL_NAME }))
   } catch {
     return undefined
   }
+}
+
+// The bot id Omni reports for a channel, when a release reports one. Today's Omni reports
+// none, which is unknown, never "this is someone else's channel".
+async function telegramBotId(channels, times, id) {
+  try {
+    const reply = await channels.omniRequest('GET', `/instances/${encodeURIComponent(id)}/status`, { signal: AbortSignal.timeout(times.omniMs) })
+    if (!reply?.ok) return undefined
+    const body = await reply.json()
+    const status = body?.data ?? body
+    const value = status?.botId
+    return value === undefined || value === null ? '' : String(value)
+  } catch {
+    return undefined
+  }
+}
+
+// A channel the failed attach left on Omni is this move's: read where it stands, keep Hermes off.
+async function recoveredChannel(api, times, row, deps) {
+  const pairing = await pairingOf(api, row.id, times, deps)
+  return { id: row.id, name: row.name, connected: pairing.connected === true, detail: pairing.detail ?? null, answering: false, reason: null, answerBot: null, attached: true, existing: false }
 }
 
 /** Hands the key to Omni: A's attach first (write-only, host to host), else the linked Omni's own create. */
@@ -479,6 +484,12 @@ export function createMigrateActions(ctx, deps = {}) {
       if (carried !== token) throw fail('no-secrets', 'The Bot team\'s key store did not take the key, so nothing was moved.')
       setStep(job, 'key', 'done')
 
+      // What Omni holds before the attach: a Telegram channel that appears after this is the
+      // one the move made, whatever its name and whatever bot id Omni does or does not report.
+      const beforeOmni = await telegramChannels(channels(), times)
+      if (beforeOmni === undefined || beforeOmni === null) throw fail('omni-list', 'Omni\'s channels could not be read, so nothing was switched off. Try again in a moment.')
+      const beforeIds = new Set(beforeOmni.map(row => row.id))
+
       setStep(job, 'hermes', 'now')
       const before = read.gateway ?? { pid: null }
       const gatewayRunning = before.pidAlive === true && before.pid !== null
@@ -522,30 +533,24 @@ export function createMigrateActions(ctx, deps = {}) {
       setStep(job, 'omni', 'now')
       let made
       try {
-        const existing = await telegramChannel(channels(), { ...times, listenMs: 0 }, { now, sleep }, keyPrefix)
-        if (existing !== undefined && existing !== null && existing.connected === true) {
-          made = { id: existing.id, name: existing.name, connected: true, detail: existing.detail, answering: null, reason: null, answerBot: null, attached: false, existing: true }
-        } else if (existing !== undefined && existing !== null && api.call !== null) {
-          try {
-            await api.call('omni-channel-act', { id: existing.id, action: 'token', token: carried })
-          } catch {
-            throw fail('omni', OMNI_REFUSED)
-          }
-          made = { id: existing.id, name: existing.name, connected: false, detail: null, answering: null, reason: null, answerBot: null, attached: false, existing: true }
-        } else {
-          made = await attachInOmni(api, { token: carried, answerBot: answerer.picked?.id }, { name: CHANNEL_NAME })
-        }
+        made = await attachInOmni(api, { token: carried, answerBot: answerer.picked?.id }, { name: CHANNEL_NAME })
       } catch (error) {
-        // What Omni holds decides what happens to Hermes. A channel there is the move's
-        // channel and stays the one listener; a confirmed empty Omni means Hermes goes back
-        // on; an unreadable Omni leaves Hermes off and says so, never two listeners.
-        const onOmni = await telegramChannel(channels(), { ...times, listenMs: 0 }, { now, sleep }, keyPrefix)
-        if (onOmni !== undefined && onOmni !== null) {
-          made = { id: onOmni.id, name: onOmni.name, connected: onOmni.connected, detail: onOmni.detail, answering: false, reason: null, answerBot: null, attached: true, existing: true }
-          channelId = onOmni.id
+        // After a refusal, what Omni holds decides. A new Telegram channel is this move's;
+        // channels that were there before are only ours if a bot id says so. No bot id today
+        // is unknown: Hermes stays off and the card says why, never two listeners.
+        const after = await telegramChannels(channels(), times)
+        if (after === undefined) {
+          changed = { ...changed, omniUnknown: true }
+          throw error
+        }
+        const fresh = after.filter(row => !beforeIds.has(row.id))
+        if (fresh.length > 0) {
+          made = await recoveredChannel(api, times, fresh[0], { now, sleep })
+          channelId = made.id
           changed = { ...changed, omniCreated: true }
-        } else {
-          if (onOmni === null && hermesOff && backup !== null) {
+        } else if (after.length === 0) {
+          // Omni holds no Telegram channel: putting Hermes back cannot make a second listener.
+          if (hermesOff && backup !== null) {
             const restored = await restoreHermes(target, backup, { startGateway: gatewayWasRunning })
             if (restored.ok === true) {
               hermesOff = false
@@ -556,6 +561,34 @@ export function createMigrateActions(ctx, deps = {}) {
             }
           }
           throw error
+        } else {
+          let unknown = false
+          let ours = null
+          for (const row of after) {
+            const botId = await telegramBotId(channels(), times, row.id)
+            if (botId === undefined || botId === '') { unknown = true; continue }
+            if (botId === keyPrefix) { ours = row; break }
+          }
+          if (ours !== null) {
+            made = await recoveredChannel(api, times, ours, { now, sleep })
+            channelId = made.id
+            changed = { ...changed, omniCreated: true }
+          } else if (unknown) {
+            changed = { ...changed, omniUnknown: true }
+            throw error
+          } else {
+            if (hermesOff && backup !== null) {
+              const restored = await restoreHermes(target, backup, { startGateway: gatewayWasRunning })
+              if (restored.ok === true) {
+                hermesOff = false
+                changed = { ...changed, hermesOff: false }
+                error.restored = true
+              } else {
+                error.restoreFailed = restored.reason
+              }
+            }
+            throw error
+          }
         }
       }
       channelId = made.id
