@@ -261,6 +261,17 @@ test('a carried-over chat that is not loaded yet still keeps its Hermes route', 
   assert.deepEqual(selected, ['b1:hermes-remote/attach'])
 })
 
+// A connection by address and token is not the attached serve: a change between two of its
+// Hermes models must still select the new model on the chat. Only the attach row keeps the
+// carried route.
+test('a change between two Hermes models on an address connection still moves the chat', async () => {
+  const { rt, selected } = bench({ providers: { 'hermes-remote': ['sample:model-a', 'sample:model-b'] } })
+  rt.ctx.sessions = { get: id => ({ requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model-a' } }) }) }
+  const bot = { id: 'b1', model: 'hermes-remote/sample:model-b', appliedModel: 'hermes-remote/sample:model-a' }
+  assert.equal(await rt.applyModel(bot, { force: true }), 'hermes-remote/sample:model-b')
+  assert.deepEqual(selected, ['b1:hermes-remote/sample:model-b'])
+})
+
 // One conversation's model is its Bot's alone: a pick moves that Bot's own Sessions (its chat
 // and its seats in groups) and nothing of another Bot, nor the default a new Bot starts on.
 test('a model picked for one Bot never moves another Bot\'s model or level', async () => {

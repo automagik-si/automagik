@@ -99,8 +99,14 @@ export function install(rt) {
         if (session !== undefined) selection = ctx.get?.('sessionProjections')?.snapshot(session, ['modelSelection']).values.modelSelection?.next
       }
       if (typeof selection?.provider !== 'string' || typeof selection?.model !== 'string') return {}
+      // The attached serve answers on its one row whatever ref the chat carries
+      // (models.js applyModel keeps a carried route; remote-chat-adapter.js serves rows[0]).
+      // Once the Bot's pick is that row, the chat runs on the row, not on the carried-over ref:
+      // reporting the old ref here would label the chat and every answer with a model the Bot
+      // is no longer on, and keep the switch notice up beside it.
+      const carried = selection.provider === 'hermes-remote' && bot.model === 'hermes-remote/attach'
       return {
-        runningModel: `${selection.provider}/${selection.model}`,
+        runningModel: carried ? 'hermes-remote/attach' : `${selection.provider}/${selection.model}`,
         ...(typeof selection.reasoningEffort === 'string' && selection.reasoningEffort !== '' ? { runningEffort: selection.reasoningEffort } : {}),
       }
     } catch { return {} }
