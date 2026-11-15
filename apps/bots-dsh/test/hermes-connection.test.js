@@ -64,8 +64,15 @@ function runtime(t, fixture, overrides = {}) {
       return this
     }
     async session(identity) { this.sessionIdentities.push(identity); await overrides.beforeSession?.(this); return { session_id: 'runtime-session', stored_session_id: 'stored-session', ...(this.attached ? { subscription_id: 'subscription' } : {}), info: { desktop_contract: 8, approval_mode: 'manual', yolo: false, model: 'fixture/bot-model', provider: 'fixture', stored_session_id: 'stored-session', profile_name: 'default' } } }
+    check(snapshot) { return snapshot }
     async models() { this.modelsCalled = true; await overrides.beforeModels?.(this); return overrides.models ?? [{ id: 'sample:model', model: 'model', provider: 'sample', name: 'Sample model' }] }
-    async request(method, params) { this.sent.push({ method, params }); await overrides.onRequest?.(method, params, this); return {} }
+    async request(method, params) {
+      this.sent.push({ method, params })
+      await overrides.onRequest?.(method, params, this)
+      if (method === 'session.activate') return { session_id: 'runtime-session', stored_session_id: 'stored-session', subscription_id: 'subscription', info: { desktop_contract: 8, approval_mode: 'manual', yolo: false, model: 'fixture/bot-model', provider: 'fixture', stored_session_id: 'stored-session', profile_name: 'default' } }
+      if (method === 'session.events.since') return { events: [], latest_seq: 0, epoch: 'epoch-a', truncated: false, count: 0, open_requests: [] }
+      return {}
+    }
     redact(text) { return text }
     close() { if (this.closed) return; this.closed = true; this.cancelConnect?.(); for (const listener of this.listeners) listener({ kind: 'lost' }) }
   }
@@ -1248,20 +1255,31 @@ test('a saved profile missing from the serve is refused, never replaced by the f
   assert.deepEqual(await h.rt.hermesRemote.adapter.listModels('hermes-remote'), [], 'the unchanged old model list is not offered')
 })
 
-test('one recovery action clears a stuck carried-over turn so saves and the Bot Chat join are unblocked', async t => {
-  const h = runtime(t, dashboard())
+test('one recovery action clears only a carried-over turn, leaving a current-connection uncertain turn alone', async t => {
+  const credential = randomUUID().replaceAll('-', '')
+  const profiles = [{ id: 'default', name: 'Default', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true }]
+  const h = runtime(t, dashboard(), {
+    startSsh: async () => ({ attached: true, address: 'http://127.0.0.1:23456', credential, authHeaders: { Authorization: `Bearer ${credential}` }, profiles, defaultProfile: 'default', close: async () => {} }),
+  })
   h.rt.state.prefs.hermesRemote = {
     enabled: true, mode: 'ssh', attached: true, address: '', ssh: { host: 'example.invalid' }, profile: 'default', setupVersion: 1,
-    profiles: [{ id: 'default', name: 'Default', model: 'acme/llama-9:70b-q4', provider: 'acme', running: true }],
+    profiles,
     models: [{ id: 'attach', name: 'acme/llama-9:70b-q4 (acme)', model: 'acme/llama-9:70b-q4', provider: 'acme', providerId: 'acme' }],
   }
-  h.rt.state.hermesSessions = { 'chat-1': { canonicalBot: true, storedSessionId: 'old-private', runtimeSessionId: 'old-runtime', pendingSubmit: true, uncertain: true, epoch: 'old', lastSeq: 12, subscriptionId: 'old-sub' } }
+  h.rt.state.hermesSessions = {
+    current: { canonicalBot: true, storedSessionId: 'stored-session', runtimeSessionId: 'runtime-current', pendingSubmit: true, uncertain: true },
+    'chat-1': { canonicalBot: true, storedSessionId: 'old-private', runtimeSessionId: 'old-runtime', pendingSubmit: true, uncertain: true, epoch: 'old', lastSeq: 12, subscriptionId: 'old-sub' },
+  }
   const view = await h.endpoints.get('hermes-remote-recover')()
-  const info = h.rt.state.hermesSessions['chat-1']
-  assert.equal(info.pendingSubmit, false)
-  assert.equal(info.uncertain, false)
-  assert.equal(info.storedSessionId, undefined)
-  assert.equal(info.subscriptionId, undefined)
-  assert.equal(view.sessions.find(session => session.sessionId === 'chat-1')?.pendingSubmit, false)
-  assert.ok(h.snapshots.length >= 1, 'the cleared state is saved')
+  const current = h.rt.state.hermesSessions.current
+  const old = h.rt.state.hermesSessions['chat-1']
+  assert.equal(current.pendingSubmit, true, 'the current connection turn is not discarded')
+  assert.equal(current.uncertain, true)
+  assert.equal(current.storedSessionId, 'stored-session')
+  assert.equal(old.pendingSubmit, false, 'the old private-serve turn is cleared')
+  assert.equal(old.uncertain, false)
+  assert.equal(old.storedSessionId, undefined)
+  const currentView = view.sessions.find(session => session.sessionId === 'current')
+  assert.equal(currentView?.pendingSubmit, true)
+  assert.ok(h.snapshots.length >= 1, 'the cleared old state is saved')
 })

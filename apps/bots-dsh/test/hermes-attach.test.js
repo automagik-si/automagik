@@ -225,6 +225,13 @@ elif args == ["profile", "list"]:
     if mode == "leak":
         print(secret)
         sys.exit(1)
+    if mode == "alias-only":
+        print("")
+        print(" Profile          Model                        Gateway      Alias        Distribution")
+        print(" ---------------- ---------------------------- ------------ ------------ --------------------")
+        print(" Hefesto anthropic/claude-sonnet-4-5 running default -")
+        print("")
+        sys.exit(0)
     print("")
     print(" Profile          Model                        Gateway      Alias        Distribution")
     print(" ---------------- ---------------------------- ------------ ------------ --------------------")
@@ -245,9 +252,12 @@ elif args in (["profile", "show", "default"], ["profile", "show", "second"], ["p
     print("Gateway: " + gateway)
     print("")
 elif args[0:1] == ["-p"] and args[-1:] == ["--json"]:
+    ident = args[1]
+    if mode == "jsonstring":
+        print(json.dumps({"default": "llama3.1:8b", "second": "a/b", "third": "a/b:free"}[ident]))
+        sys.exit(0)
     if mode == "scalar":
         sys.exit(1)
-    ident = args[1]
     model, provider = models[ident]
     print(json.dumps({"default": model, "provider": provider}))
 elif args[0:1] == ["-p"] and args[2:5] == ["config", "get", "model"]:
@@ -323,6 +333,24 @@ test('a release without --json prints the model as a whole scalar, colon and all
   const record = frames.find(frame => frame.type === 'record')
   assert.ok(record, JSON.stringify(frames))
   assert.deepEqual(record.profiles.map(row => row.model), ['acme/llama-9:70b-q4', 'openai/gpt-5.1', 'openrouter/auto'])
+})
+
+test('a JSON string model is kept whole, colons and slashes included', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const home = await readerHome(t)
+  const record = (await runReader(t, home, { mode: 'jsonstring' })).find(frame => frame.type === 'record')
+  assert.ok(record, 'the record is emitted')
+  assert.deepEqual(record.profiles.map(row => row.model), ['llama3.1:8b', 'a/b', 'a/b:free'])
+})
+
+test('the table fallback uses the profile id from the alias, not the display name', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const home = await readerHome(t, { noProfiles: true })
+  const record = (await runReader(t, home, { mode: 'alias-only' })).find(frame => frame.type === 'record')
+  assert.ok(record, 'the record is emitted')
+  assert.deepEqual(record.profiles.map(row => row.id), ['default'])
+  assert.equal(record.profiles[0].name, 'A Very Long Display Name')
+  assert.equal(record.active, 'default')
 })
 
 test('a profile missing from the human table is still read from the record', async t => {
@@ -418,12 +446,38 @@ test('attach uses the bot model and the joined view only; no model list, no over
     calls.push({ method, params })
     if (method === 'session.list') return { sessions: [{ id: 'root', resolved_id: 'tip', title: 'Bot Chat' }] }
     if (method === 'session.resume') return desktop8Session('runtime', params.session_id).live
+    if (method === 'session.activate') return { ...desktop8Session('runtime', params.session_id).live, subscription_id: 'subscription' }
+    if (method === 'session.events.since') return { events: [], latest_seq: 3, epoch: 'epoch-a', truncated: false, count: 0, open_requests: [] }
     throw Error(method)
   }
   const run = new RemoteChat(transport, { identity: { canonicalBot: true } })
   await run.prepare({ model: 'not-the-bot-model', provider: 'not-the-bot-provider' })
   assert.ok(!calls.some(call => ['model.options', 'config.set', 'session.create', 'session.close'].includes(call.method)))
+  assert.deepEqual(calls.map(call => call.method), ['session.list', 'session.resume', 'session.activate', 'session.events.since'])
   assert.equal(run.identity.runtimeSessionId, 'runtime')
+  assert.equal(run.identity.subscriptionId, 'subscription')
+})
+
+test('a resume with no subscription still joins by activate and detaches that subscription', async () => {
+  const transport = new HermesTransport({ address: 'http://127.0.0.1:40123', profile: 'sample', credential: token, authHeaders: { Authorization: `Bearer ${token}` }, allowLoopback: true, attached: true })
+  const calls = []
+  transport.request = async (method, params) => {
+    calls.push({ method, params })
+    if (method === 'session.list') return { sessions: [{ id: 'root', resolved_id: 'tip', title: 'Bot Chat' }] }
+    if (method === 'session.resume') return { ...desktop8Session('runtime', params.session_id).live, subscription_id: undefined }
+    if (method === 'session.activate') return { ...desktop8Session('runtime', params.session_id).live, subscription_id: 'activated-sub' }
+    if (method === 'session.events.since') return { events: [], latest_seq: 1, epoch: 'epoch-a', truncated: false, count: 0, open_requests: [] }
+    if (method === 'session.detach') return { detached: true }
+    throw Error(method)
+  }
+  transport.close = () => calls.push({ method: 'ws.close' })
+  const run = new RemoteChat(transport, { identity: { canonicalBot: true } })
+  await run.prepare()
+  assert.equal(run.identity.subscriptionId, 'activated-sub')
+  assert.deepEqual(calls.map(call => call.method).slice(0, 4), ['session.list', 'session.resume', 'session.activate', 'session.events.since'])
+  await run.close()
+  assert.deepEqual(calls.filter(call => call.method === 'session.detach').map(call => call.params), [{ session_id: 'runtime', subscription_id: 'activated-sub' }])
+  assert.ok(!calls.some(call => call.method === 'session.close'))
 })
 
 test('an approval is answered only for the joined session and epoch, and a cancel wins first', async () => {

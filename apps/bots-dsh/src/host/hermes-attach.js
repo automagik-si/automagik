@@ -157,9 +157,14 @@ def parse_list(text):
         if not found:
             continue
         label = found.group("label").strip()
+        alias = found.group("alias").strip()
         named = re.match(r"^(?P<display>.+?)\s+\((?P<id>[^()]+)\)$", label)
         if named:
             ident, display = named.group("id").strip(), named.group("display").strip()
+        elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", alias):
+            # A display-only label borrows its profile id from the table alias, never
+            # from the display name (which may contain spaces or be a person's label).
+            ident, display = alias, label
         else:
             ident, display = label, label
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", ident):

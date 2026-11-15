@@ -583,7 +583,17 @@ export class RemoteChat {
 
   async prepare(model) {
     await this.save()
-    const snapshot = await this.transport.session(this.identity, model)
+    let snapshot = await this.transport.session(this.identity, model)
+    if (this.transport.attached === true) {
+      // The attach JOIN is resume -> activate -> the gap: activate returns the
+      // authoritative snapshot and the viewer subscription, which detach later releases.
+      snapshot = this.transport.check(await this.transport.request('session.activate', { session_id: snapshot.session_id }, this.transport.deadlines?.control))
+      const replay = await this.transport.request('session.events.since', {
+        session_id: snapshot.session_id, last_seen: this.identity.lastSeq ?? 0, replay_epoch: this.identity.epoch,
+      }, this.transport.deadlines?.control)
+      if (typeof replay?.epoch === 'string') { this.identity.epoch = replay.epoch; this.transport.epoch = replay.epoch }
+      if (Number.isSafeInteger(replay?.latest_seq)) this.identity.lastSeq = Math.max(this.identity.lastSeq ?? 0, replay.latest_seq)
+    }
     Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
     if (typeof snapshot.subscription_id === 'string' && snapshot.subscription_id) this.identity.subscriptionId = snapshot.subscription_id
     if (snapshot.admission_id) this.identity.admissionId = snapshot.admission_id

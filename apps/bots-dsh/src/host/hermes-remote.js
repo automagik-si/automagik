@@ -301,15 +301,28 @@ export function install(rt, { transport = options => new HermesTransport(options
       publish()
     }, true).finally(() => { if (attachNormalization) attachNormalization = undefined })
   }
-  // One-step recovery for a chat left pending/uncertain by an earlier connection: clear
-  // the stale remote turn state so the chat can join the Bot Chat and saves are allowed.
-  async function recoverSessions() {
+  // One-step recovery for a chat left pending/uncertain by an earlier connection. It first
+  // asks the attached serve which session is the Bot Chat; a chat whose stored id is the
+  // current Bot Chat is left alone (its turn belongs to this connection and must be
+  // reconciled, not discarded).
+  async function recoverSessions(signal) {
     await rt.load()
     if (disposed) throw fail('The connection is closing.', 'busy')
     if (adapter.live.size) throw fail(CHAT_BUSY, 'busy')
+    let run, botChatId
+    try {
+      run = await open({ identity: { canonicalBot: true }, signal })
+      await run.prepare()
+      botChatId = run.identity?.storedSessionId
+    } finally {
+      if (run) await run.close().catch(() => {})
+      await drain()
+    }
+    if (!botChatId) throw fail('The Bot Chat could not be identified; reconcile in Hermes before clearing old turns.', 'pairing')
     let changed = false
     for (const info of Object.values(state.hermesSessions ?? {})) {
-      if (!info || (!info.pendingSubmit && !info.uncertain)) continue
+      if (!info || (!info.pendingSubmit && !info.uncertain) || !info.storedSessionId) continue
+      if (info.storedSessionId === botChatId) continue
       info.pendingSubmit = false; info.uncertain = false
       delete info.storedSessionId; delete info.runtimeSessionId; delete info.epoch; delete info.lastSeq; delete info.subscriptionId
       changed = true
@@ -954,7 +967,7 @@ export function install(rt, { transport = options => new HermesTransport(options
   adapter = new RemoteChatAdapter(rt, { open: openChat, models: servedModels, identity, save: saveState, enabled, attached: () => attachedRecord(record()) })
   api.adapter = adapter
   rt.hooks.endpoint('hermes-remote', async () => { await rt.load(); await rt.loadSecrets(); return view() }, { read: true })
-  rt.hooks.endpoint('hermes-remote-recover', () => recoverSessions())
+  rt.hooks.endpoint('hermes-remote-recover', (_body, signal) => recoverSessions(signal))
   rt.hooks.endpoint('hermes-remote-ssh-hosts', async (_body, signal) => {
     try {
       const found = await sshHosts({ signal })
