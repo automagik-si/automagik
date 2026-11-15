@@ -438,6 +438,9 @@ tagged `v<version>`, and a release workflow that dispatches to this repository w
   does for this repository's own plugins: such an Arca release is carried by a full release, never
   by a lane patch.
 - A failing gate moves no pointer. A bad plugin is fixed forward by a new Arca release.
+- The once-a-UTC-day hold (#371) belongs to Follow Omni's full-release carries. Arca's lane
+  patches are plugin-only and are not held, the two-week test included: a held patch would leave T
+  unmeasured.
 
 ### Bootstrap
 
@@ -464,7 +467,8 @@ a person's wait (T plus that poll) is reported beside T, not as the target.
 1. The bootstrap desktop release, with the three app policies above.
 2. Two weeks of Arca on this path, measuring T and the pass rate.
 3. Then Omni on the same path.
-4. Only then is the once-a-UTC-day hold (#371) dropped for lane-only carries.
+4. Only then is the once-a-UTC-day hold (#371) dropped for Omni's carries, once they ride the
+   lane.
 
 Nothing is built until this section merges and Arca has published a first plugin release worth
 carrying.
