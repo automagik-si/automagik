@@ -69,5 +69,5 @@ for c in "$(command -v bun 2>/dev/null)" "${HOME:-}/.bun/bin/bun"; do
   if [ -n "$c" ] && [ -x "$c" ] && "$c" --version </dev/null >/dev/null 2>&1; then exec "$c" --no-env-file "$@"; fi
 done
 
-echo "automagik-herdr needs Node.js 22.7 or later, or Bun: none on PATH, in ~/.nvm, /opt/homebrew/bin, /usr/local/bin or ~/.bun/bin$OLD. Install one: brew install node (or: curl -fsSL https://bun.sh/install | bash)" >&2
+echo "am needs Node.js 22.7 or later, or Bun: none on PATH, in ~/.nvm, /opt/homebrew/bin, /usr/local/bin or ~/.bun/bin$OLD. Install one: brew install node (or: curl -fsSL https://bun.sh/install | bash)" >&2
 exit 127

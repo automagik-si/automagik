@@ -577,11 +577,17 @@ describe("the brand's folder in a copy is a setting (--into)", () => {
     put(source, 'docs/brand/fonts/title.woff2', Buffer.from([0x77, 0x4f, 0x46, 0x32]));
     git(source, 'rm', '-q', 'docs/brand/logo/png/mark.png');
     const next = commit(source, 'the brand moves on');
+    // The added file is nobody's copy: --write stops on it, and goes on once it is out of the folder.
+    const stopped = own(target, '--write', '--from', source, '--remote', source);
+    expect(stopped.status).toBe(1);
+    expect(stopped.stderr).toContain('brand holds files this copy never recorded (brand/extra.svg)');
+    expect(readFileSync(join(target, 'brand/extra.svg'), 'utf8')).toBe('<svg/>\n');
+    expect(readFileSync(join(target, 'brand/tokens/tokens.css'), 'utf8')).toBe(':root{--bt-main:#000}\n');
+    rmSync(join(target, 'brand/extra.svg'));
     const again = own(target, '--write', '--from', source, '--remote', source);
     expect(again.stderr).toBe('');
     expect(again.status).toBe(0);
     expect(again.stdout).toContain('removed brand/logo/png/mark.png: the source no longer has it');
-    expect(again.stdout).toContain('removed brand/extra.svg');
     expect(readFileSync(join(target, 'brand/tokens/tokens.css'), 'utf8')).toBe(':root{--bt-main:#fefefe}\n');
     expect(existsSync(join(target, 'brand/fonts/title.woff2'))).toBe(true);
     expect(existsSync(join(target, 'brand/logo'))).toBe(false);
@@ -690,6 +696,52 @@ describe("the brand's folder in a copy is a setting (--into)", () => {
     commit(target, 'the brand copy');
     expect(() => write({ to: target, from: source, into: 'docs' })).toThrow('docs holds files that are not a brand copy');
     expect(git(target, 'status', '--porcelain', '-uall')).toBe('');
+  });
+
+  test('a later --write refuses a file it never recorded in a chosen folder, and the file stays; docs/brand still loses what is not the brand', () => {
+    const { source, target } = small();
+    write({ to: target, from: source, into: 'brand' });
+    commit(target, 'the brand copy');
+    put(target, 'brand/notes-of-ours.md', '# ours\n');
+    put(target, 'brand/logo/draft.svg', '<svg/>\n');
+    commit(target, 'our own files, in the brand folder');
+    // With --into and without it: the record names the folder either way.
+    for (const into of ['brand', undefined]) {
+      expect(() => write({ to: target, from: source, into })).toThrow('brand holds files this copy never recorded (brand/logo/draft.svg and 1 more). Nothing was changed');
+      expect(git(target, 'status', '--porcelain', '-uall')).toBe('');
+    }
+    const refused = own(target, '--write', '--from', source, '--remote', source);
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain('brand holds files this copy never recorded');
+    expect(readFileSync(join(target, 'brand/notes-of-ours.md'), 'utf8')).toBe('# ours\n');
+    // A file the copy did record, and the source then dropped, is still removed.
+    rmSync(join(target, 'brand/notes-of-ours.md'));
+    rmSync(join(target, 'brand/logo/draft.svg'));
+    rmSync(join(source, 'docs/brand/tokens/tokens.css'));
+    commit(source, 'the tokens leave');
+    expect(write({ to: target, from: source }).removed).toEqual(['brand/tokens/tokens.css']);
+    expect(check({ to: target })).toMatchObject({ problems: [], into: 'brand' });
+
+    // docs/brand is the brand's by name: what is not the brand is removed there, as before.
+    const again = small();
+    write({ to: again.target, from: again.source });
+    put(again.target, 'docs/brand/stray.md', '# stray\n');
+    expect(write({ to: again.target, from: again.source }).removed).toEqual(['docs/brand/stray.md']);
+    expect(existsSync(join(again.target, 'docs/brand/stray.md'))).toBe(false);
+  });
+
+  test('--into ignores letter case where it protects the skill and the tool', () => {
+    const { source, target } = small();
+    for (const into of ['.Claude', '.claude/Skills', '.CLAUDE/skills/Automagik-Brand', '.claude/skills/automagik-brand/Brand']) {
+      expect(() => write({ to: target, from: source, into })).toThrow(`--into ${into}: it overlaps the skill's folder`);
+      expect(git(target, 'status', '--porcelain', '-uall')).toBe('');
+    }
+    for (const into of ['Scripts', 'SCRIPTS']) {
+      expect(() => write({ to: target, from: source, into })).toThrow(`--into ${into}: it holds the tool`);
+      expect(git(target, 'status', '--porcelain', '-uall')).toBe('');
+    }
+    // A folder that only looks alike is still allowed.
+    expect(write({ to: target, from: source, into: 'Scripts-brand' }).into).toBe('Scripts-brand');
   });
 
   test("the skill finds the folder through the record beside it, names docs/brand only as the default, and gives the brand's two type families", () => {

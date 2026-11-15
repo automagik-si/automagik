@@ -8,7 +8,6 @@ export function install(rt) {
   const acp = () => ctx.get?.('acpAgents')
   const presets = () => ctx.get?.('permissionPresets')
   const sessionOf = id => (ctx.sessions?.list?.() ?? []).find(session => session?.id === id)
-  const denied = bot => (bot.denyTools?.length ?? 0) > 0
   const presetOK = () => {
     const spec = presets()?.resolve(MARK_LEVEL)
     return spec?.sandbox === 'workspace-write' && spec?.approval === 'ask'
@@ -22,7 +21,6 @@ export function install(rt) {
   function autoWhy(bot, { sessionId, session, route, provider, view } = {}) {
     if (!rt.holdsLock() || !rt.teamLoaded()) return 'lock'
     if (judgeOf(bot.permissionAuto) === undefined || bot.permission !== MARK_LEVEL) return 'level'
-    if (denied(bot)) return 'deny'
     if (rt.chatOwners.get(sessionId) !== bot.id && !inherited(bot, sessionId)) return 'session'
     if (session !== undefined && (presets()?.current(session) !== MARK_LEVEL || !presetOK() || rt.levelHeld(sessionId))) return 'preset'
     if (markOf(route ?? provider) !== bot.permissionAuto || markOf(bot.model) !== bot.permissionAuto) return 'route'
@@ -38,7 +36,7 @@ export function install(rt) {
       const mark = markOf(bot.model)
       const by = judgeOf(mark)
       const ready = by === 'own' || (by === 'team' ? !!rt.cachedBackground?.() : acp()?.ownModeOf?.(mark)?.answerer === true)
-      return { offered: mark !== undefined && markOf(bot.appliedModel) === mark && !denied(bot) && !rt.hostOwned?.(bot) && presetOK() && rt.holdsLock() && ready }
+      return { offered: mark !== undefined && markOf(bot.appliedModel) === mark && !rt.hostOwned?.(bot) && presetOK() && rt.holdsLock() && ready }
     } catch { return { offered: false } }
   }
   function autoViewOf(bot) {
@@ -83,7 +81,7 @@ export function install(rt) {
   }
   function sweepAuto() {
     for (const bot of Object.values(state.bots)) {
-      if (!bot.permissionAuto || (bot.permission === MARK_LEVEL && !denied(bot) && markOf(bot.model) === bot.permissionAuto)) continue
+      if (!bot.permissionAuto || (bot.permission === MARK_LEVEL && markOf(bot.model) === bot.permissionAuto)) continue
       delete bot.permissionAuto
       movePermissionRev(bot)
       endAuto(bot)
@@ -141,7 +139,7 @@ export function install(rt) {
     return undefined
   }
   async function markInherited(bot, route) {
-    if (bot.permission !== MARK_LEVEL || markOf(bot.model) !== route || denied(bot)) return
+    if (bot.permission !== MARK_LEVEL || markOf(bot.model) !== route) return
     try {
       const writing = rt.saveCopy(copy => Object.assign(copy.bots[bot.id], { permissionAuto: route, permissionRev: 1 }))
       const revision = state.revision

@@ -306,6 +306,23 @@ test("lead: absent means the main bot; a valid lead holds at any depth", () => {
   assert.deepEqual(effectiveLead(file, ID.main), { lead: "" });
 });
 
+test("mode #821: empty seat and worker modes mean default on read, validation and save", () => {
+  const raw = sample((f) => {
+    f.bots[0].agyMode = "";
+    f.bots[0].worker = { agent: "antigravity", agyMode: "" };
+    return f;
+  });
+  assert.deepEqual(checkBots(raw), []);
+  const parsed = parseBots(text(raw));
+  assert.deepEqual(parsed.warnings, []);
+  assert.equal(parsed.file.bots[0].agyMode, undefined);
+  assert.deepEqual(parsed.file.bots[0].worker, { agent: "antigravity" });
+  assert.equal(parsed.raw.bots[0].worker.agyMode, "", "reading does not mutate the raw roster");
+  const saved = applyBotEdit(raw, { ...raw.bots[0], name: "Renamed" }).bots[0];
+  assert.equal(saved.agyMode, undefined);
+  assert.deepEqual(saved.worker, { agent: "antigravity" });
+});
+
 test("lead: a missing lead falls back to the main bot with a warning", () => {
   const file = sample((f) => { f.bots[2].lead = "b-zzzzzzzzzz"; return f; });
   const r = effectiveLead(file, ID.dev);
@@ -323,6 +340,21 @@ test("lead: a planned lead falls back to the main bot with a warning", () => {
   assert.deepEqual(checkBots(file), []);
 });
 
+test("lead #742: a planned main is valid in a shared roster and remains the members' lead", () => {
+  const file = sample((f) => {
+    f.bots[0].planned = { wave: 1 };
+    delete f.bots[0].agent;
+    f.bots[2].lead = ID.main;
+    return f;
+  });
+  assert.deepEqual(checkBots(file), []);
+  assert.deepEqual(parseBots(text(file)).warnings, []);
+  assert.deepEqual(effectiveLead(file, ID.main), { lead: "" });
+  for (const id of [ID.cap, ID.dev]) {
+    assert.deepEqual(effectiveLead(file, id), { lead: ID.main }, "implicit and explicit main leads");
+  }
+});
+
 test("lead: a cycle falls back to the main bot for every bot in it, not for those under it", () => {
   const file = sample((f) => { f.bots[1].lead = ID.tst; f.bots[3].lead = ID.cap; return f; });
   for (const id of [ID.cap, ID.tst]) {
@@ -338,6 +370,24 @@ test("lead: a cycle falls back to the main bot for every bot in it, not for thos
   const plannedSelf = sample((f) => { f.bots[4].lead = ID.plan; return f; });
   assert.ok(checkBots(plannedSelf).some((e) => e.startsWith(ID.plan)));
   assert.ok(checkBots(file).some((e) => /leads back to this bot/.test(e)));
+});
+
+test("lead #741: saves refuse cycles through planned bots while reads keep their fallback", () => {
+  for (const allPlanned of [false, true]) {
+    const file = sample((f) => {
+      f.bots[1].lead = ID.dev;
+      f.bots[2].lead = ID.plan;
+      f.bots[4].lead = ID.cap;
+      if (allPlanned) for (const i of [1, 2]) f.bots[i].planned = { wave: 1 };
+      return f;
+    });
+    assert.match(effectiveLead(file, ID.dev).warning, /is planned/);
+    for (const id of [ID.cap, ID.dev, ID.plan]) {
+      assert.ok(checkBots(file).some((e) => e.startsWith(id) && /leads back to this bot/.test(e)), id);
+    }
+    delete file.bots[4].lead;
+    assert.deepEqual(checkBots(file), [], "an acyclic planned lead stays writable");
+  }
 });
 
 test("ids: b- plus 10 lowercase base32 characters, and random", () => {

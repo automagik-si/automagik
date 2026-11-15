@@ -10,13 +10,14 @@
 
 import { execFile, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { accessSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
+import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
   renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, uptime } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
+import { actionError } from "../actionError.js";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId,
@@ -29,7 +30,7 @@ import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, co
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, defaultModel, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, defaultModel, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -38,9 +39,9 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   prAskDue, prBranchKey, prBranches, prChecksPath, prChecksText, prLikely, prRowsFor, readPrChecks,
   sessionRow, stableGuardDir, stableKillDir, stableRootOf,
   parseWorktrees, runsTemplate, startRow, swapArm, swapByte,
-  taskIdProblem, taskWorkerName, TEMPLATE_SHAPE, templateAgent, workerArgs, workerBranch, workerKillRefusal, workerPlan, workerRole, worktreeFolder,
+  taskIdProblem, taskWorkerName, TEMPLATE_SHAPE, codexTemplateRefusal, codexTemplateWarning, templateAgent, workerArgs, workerBranch, workerKillRefusal, workerPlan, workerRole, worktreeFolder,
   workLeft, writesWorktree } from "../workers.js";
-import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, doomedHelpers, helperArgs, helperPlan, launchChange, ledgerSession, maskedArgv,
+import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
 import { SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
   pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../revive.js";
@@ -155,10 +156,33 @@ async function hcJson(args) {
   if (r.code !== 0) throw new CliError(`hc ${args.join(" ")} failed: ${(r.stderr || r.stdout).trim()}`);
   return parsed(r, args);
 }
-/** `hc get <t> --json`, or null when hc says there is no such terminal (hc itself missing still throws). */
+/** hc's exit code for "no such terminal" (hc --skill: 3 not_found). */
+export const HC_NOT_FOUND = 3;
+/**
+ * What a failed hc call said, safe to print: its error's kind and message when it printed one as
+ * JSON (hc --skill: `{error: {kind, message, hint}}` on stderr), else its first line; the home
+ * folder written as ~, cut to 300 characters.
+ */
+export function hcFailure(r, homeDir = home()) {
+  const text = String(r?.stderr || r?.stdout || "").trim();
+  let said = text.split("\n")[0];
+  try {
+    const e = JSON.parse(text)?.error;
+    if (e && typeof e === "object") said = [e.kind, e.message].filter((x) => typeof x === "string" && x).join(": ") || said;
+  } catch { /* not JSON: its first line */ }
+  if (homeDir && homeDir !== "/") said = said.split(homeDir).join("~");
+  return `${said || "no message"}${r?.killed ? " (timed out)" : ""} (exit ${r?.code ?? "?"})`.slice(0, 300);
+}
+/**
+ * `hc get <t> --json`, or null when hc says there is no such terminal: only its not_found exit
+ * (3). Any other failure (the core unreachable, a sandbox that blocks its socket, a timeout) and
+ * an answer that isn't JSON throw, so a failed lookup never reads as a missing pane (#1125).
+ */
 async function hcGet(terminal, { timeout } = {}) {
   const r = await hc(["get", terminal, "--json"], { timeout });
-  return r.code === 0 ? parsed(r, ["get", terminal]) : null;
+  if (r.code === HC_NOT_FOUND) return null;
+  if (r.code !== 0) throw new CliError(`hc get ${terminal} failed: ${hcFailure(r)}`);
+  return parsed(r, ["get", terminal]);
 }
 const local = (address) => typeof address === "string" && !address.includes("/");
 
@@ -586,13 +610,13 @@ function tryLock(lock, w) {
   takeOverStale(lock);
   if (Date.now() > w.start + w.wait) {
     const who = lockHolder(lock);
-    throw new Error(`${w.what ? `${w.what} (${lock})` : lock} is held by another automagik-herdr${who ? ` (${who})` : ""}`
+    throw new Error(`${w.what ? `${w.what} (${lock})` : lock} is held by another am${who ? ` (${who})` : ""}`
       + `${w.noted && w.wait > LOCK_NOTE_AFTER ? ` after ${Math.round(w.wait / 1000)} s` : ""}`);
   }
   if (!w.noted && Date.now() - w.start >= LOCK_NOTE_AFTER) {
     w.noted = true;
-    const who = lockHolder(lock) ?? "another automagik-herdr";
-    const line = `automagik-herdr: waiting for ${w.what ?? lock} (${lock}), held by ${who}; up to ${Math.round(w.wait / 1000)} s in all.\n`;
+    const who = lockHolder(lock) ?? "another am";
+    const line = `am: waiting for ${w.what ?? lock} (${lock}), held by ${who}; up to ${Math.round(w.wait / 1000)} s in all.\n`;
     try { writeSync(2, line); } catch { /* stderr closed */ }
   }
   return false;
@@ -668,7 +692,7 @@ export function listProject(key, dir = appHome()) {
       if (listedProjects(read()).includes(key)) return true;
     } catch (e) { why = e?.message ?? String(e); }
   }
-  process.stderr.write(`automagik-herdr: couldn't list ${key} in ${path}, so the sidebar shows it only once a space is open on it: ${why}\n`);
+  process.stderr.write(`am: couldn't list ${key} in ${path}, so the sidebar shows it only once a space is open on it: ${why}\n`);
   return false;
 }
 
@@ -730,7 +754,7 @@ async function botIn(project, ref, opts) {
 
 function findCategory(file, ref) {
   const hit = file.categories.find((c) => c.id === ref) ?? file.categories.find((c) => c.title.toLowerCase() === String(ref).toLowerCase());
-  if (!hit) throw new CliError(`No category "${ref}" in this project; add it first: automagik-herdr category add --title "${ref}".`);
+  if (!hit) throw new CliError(`No category "${ref}" in this project; add it first: am category add --title "${ref}".`);
   return hit;
 }
 
@@ -1197,16 +1221,17 @@ const OPTIONS = {
   "from-hc": { type: "boolean" }, "squad-label": { type: "string" }, apply: { type: "boolean" },
 };
 
-export const USAGE = `automagik-herdr: Automagik Herdr's bots and updates from the command line
+export const USAGE = `am: Automagik Herdr's bots and updates from the command line
 
-Usage: automagik-herdr <command> [options]      (every command takes --json and --project <folder>)
-       automagik-herdr <command> --machine M --project <folder there> ...
+Usage: am <command> [options]                   (every command takes --json and --project <folder>)
+       am <command> --machine M --project <folder there> ...
                                                  ls, show, create, edit, rm, category, start,
                                                  restart, attach, detach and whois on a linked
                                                  machine (hc machine ls), through hc
-       automagik-herdr --version                 the installed pack's version
+       am --version                              the installed pack's version
 
-  ls [--all]                    bots with kind, lead, category, rank, code, planned, agent, model, agy-mode, pane, status
+  ls [--all]                    bots with kind, lead, category, rank, agent, model, pane, status
+                               plus planned waves, code opt-outs and Antigravity modes
   show <bot>                    one bot in full
   create --name N --agent A [--kind main|member] [--role R]
          [--code true|false]            false omits the worker instruction; default true
@@ -1226,7 +1251,8 @@ Usage: automagik-herdr <command> [options]      (every command takes --json and 
          [--hc-proxy on|off]            per-bot Linux proxy; default off. Edit, proxy approve
                                        (review the diff), then restart to apply or roll back
          [--worker-template T]          (an hc template: owns the command, so it wins)
-  edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=]
+  edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category]
+             [--no-lead-project] [--no-cross-members] [--rank=]
              [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
              [--agy-mode=auto] [--worker-agy-mode=auto]   (empty: cleared; auto is the default)
              [--agy-allow=] [--agy-deny=] [--no-agy-permissions] [--cross-member=]   (empty: cleared)
@@ -1428,7 +1454,7 @@ last cached list and the refusal says when there is none. Every Antigravity laun
 \`worker.agyMode\`, else auto. Each launch also writes its own session permission list, 0600
 under <app home>/automagik-herdr/agy-settings/, and passes it as \`--settings\`: a narrow allow
 list for its scope and the fixed denies --force pushes, hard resets, rm -rf, PR merges,
-releases, flag-first gh api writes, roster edits and restarts (automagik-herdr and am), hc
+releases, flag-first gh api writes, roster edits and restarts (am and automagik-herdr), hc
 keys/interrupt/exec -- plus the
 bot's \`agyPermissions\` additions, never a fixed deny dropped. Where agy can't run --mode auto
 it continues in manual mode, so every launch also passes --dangerously-skip-permissions, only
@@ -1462,12 +1488,12 @@ keys to (its git main checkout), or --project's. With --machine, --project is an
 folder on that machine and the file is read and written there by the same rule (a file
 changed since it was read is never overwritten); its panes run there (M/tN). A pane that
 reports no status to hc can't say it is waiting for an approval: restart refuses it unless
---force, which still sends it no keys. restart --tree is this computer's only for now: with
---machine it is refused before anything is read or started there, and a bot whose helpers
+--force, which still sends it no keys. restart --tree works on this computer and, with
+--machine, on that machine (there it needs --force, since it runs at once); a bot whose helpers
 end with its pane there is refused until each helper's pane is ended (hc kill M/tN).`;
 
 /** `proxy approve`'s own help: the residual is part of the command's contract. */
-export const PROXY_USAGE = `usage: automagik-herdr proxy approve --project <dir>
+export const PROXY_USAGE = `usage: am proxy approve --project <dir>
 
 Approve a project's worked roster: reads <dir>'s .herdr/bots.json, prints the diff against the
 previous approval (bots added/removed, rank/lead/kind changes), then writes the record
@@ -1555,16 +1581,16 @@ function autoModeOf(bot, local = true) {
   const key = resolveAgent(bot.agent ?? "", agentTable());
   if (!key) return null;
   const args = autoModeArgs(key, bot, agentTable()[key]?.run ?? []);
+  // Codex's launch mode has no opt-out (#1125): a source's own approval words are left out.
   const note = args.length ? AUTO_MODE[key].what
-    : key === "codex" && bot.codexAuto === false ? "off for this bot (codexAuto is false)"
-      : AUTO_MODE[key] ? "its own run words already pick its approvals" : (AUTO_MODE_NONE[key] ?? "none this pack knows");
+    : AUTO_MODE[key] ? "its own run words already pick its approvals" : (AUTO_MODE_NONE[key] ?? "none this pack knows");
   return { args, note, ...(key === "antigravity" && local ? { sandbox: hostAgySandbox() } : {}) };
 }
 
 function launchAgyMode(bot, agentKey) {
   if (agentKey !== "antigravity") return null;
   const why = agyModeProblem(bot.agyMode);
-  if (why) throw new CliError(`${bot.name}: ${why} Fix it with automagik-herdr edit ${bot.id} --agy-mode <accept-edits|auto|plan>.`);
+  if (why) throw new CliError(`${bot.name}: ${why} Fix it with am edit ${bot.id} --agy-mode <accept-edits|auto|plan>.`);
   return agyModeOf(bot.agyMode);
 }
 
@@ -1649,7 +1675,8 @@ export function entryFrom(opts, base, project, { creating }) {
     const why = agyModeProblem(opts["agy-mode"]);
     if (why) throw new CliError(`--agy-mode: ${why}`, 2);
     const mode = agyModeOf(opts["agy-mode"]);
-    entry.agyMode = mode === AGY_MODE_DEFAULT ? "" : mode;
+    if (entry.agent !== "antigravity") report(["--agy-mode only applies to Antigravity; this bot's agent will ignore it."]);
+    if (mode === AGY_MODE_DEFAULT) delete entry.agyMode; else entry.agyMode = mode;
   }
   // Antigravity's permission additions (#823): repeatable rules that add to the fixed deny rules
   // and the launch's own allow list; one empty value clears that list, and --no-agy-permissions
@@ -1946,12 +1973,12 @@ async function cmdForget(opts, [ref]) {
   const sidebarLine = `the sidebar remembers it on its own and forgets it once its ${BOTS_PATH} is gone, so ls --all and the sidebar `
     + "still show it until then.";
   if (taken.includes(key)) {
-    if (sidebar) process.stderr.write(`automagik-herdr: ${key} is off this CLI's project list, but ${sidebarLine}\n`);
+    if (sidebar) process.stderr.write(`am: ${key} is off this CLI's project list, but ${sidebarLine}\n`);
     return opts.json ? { forgotten: key, list: path, sidebar_remembers: sidebar } : `${key} forgotten: off ${path}.`;
   }
   const why = sidebar
     ? `${key} isn't on this CLI's project list (${path}); ${sidebarLine}`
-    : `${key} isn't on the project list (${path}); automagik-herdr ls --all shows the projects there.`;
+    : `${key} isn't on the project list (${path}); am ls --all shows the projects there.`;
   throw new CliError(why, 1, { project: key, forgotten: false });
 }
 
@@ -1994,7 +2021,8 @@ function lsLines(projects) {
       const perms = b.agyPermissions || b.workerAgyPermissions
         ? `  agy-allow ${(b.agyPermissions ?? b.workerAgyPermissions).allow.length} deny ${(b.agyPermissions ?? b.workerAgyPermissions).deny.length}` : "";
       const status = b.planned ? `planned, wave ${b.planned.wave}` : b.terminal ? `${b.status} in ${p.machine ? `${p.machine}/` : ""}${b.terminal}` : b.status;
-      lines.push(`  ${b.id}  ${b.name}${b.rank ? ` (${b.rank})` : ""}  ${where}  code ${b.code}  ${b.agent ?? "-"}  ${model}${agy}${perms}  ${status}${b.warning ? `  ! ${b.warning}` : ""}`);
+      const code = b.code === false ? "  code false" : "";
+      lines.push(`  ${b.id}  ${b.name}${b.rank ? ` (${b.rank})` : ""}  ${where}${code}  ${b.agent ?? "-"}  ${model}${agy}${perms}  ${status}${b.warning ? `  ! ${b.warning}` : ""}`);
     }
     for (const w of p.warnings ?? []) lines.push(`  ! ${w}`);
     const hcError = p.bots.find((b) => b.hcError)?.hcError;
@@ -2016,7 +2044,7 @@ const proxyStateText = (state) => `working ${state.working ? "on" : "off"}; appr
   + `${state.error ? `; ${state.error}` : ""}`;
 
 const proxyWarning = (state) => `WARNING hc proxy: ${state.error}; working switch off; `
-  + "starting plain; run automagik-herdr proxy approve";
+  + "starting plain; run am proxy approve";
 const reportProxyWarning = (warning) => report([warning]);
 
 function proxyEnabled(state, platform = process.platform, warn = reportProxyWarning) {
@@ -2229,7 +2257,7 @@ async function cmdRm(opts, [ref]) {
   }
   const team = [...descendantsOf(file, bot.id)].map((id) => file.bots.find((b) => b.id === id)?.name ?? id);
   const leads = others.filter((b) => b?.lead === bot.id).map((b) => b.name ?? b.id);
-  if (team.length || leads.length) throw new CliError(`${bot.name} leads ${[...new Set([...leads, ...team])].join(", ")}; give them another lead first (automagik-herdr edit <bot> --lead …).`);
+  if (team.length || leads.length) throw new CliError(`${bot.name} leads ${[...new Set([...leads, ...team])].join(", ")}; give them another lead first (am edit <bot> --lead …).`);
   const raw = JSON.parse(JSON.stringify(project.raw));
   raw.bots = raw.bots.filter((b) => b?.id !== bot.id);
   // Only an empty list deletes the file; anything else must pass checkBots (a file left
@@ -2244,8 +2272,8 @@ async function cmdRm(opts, [ref]) {
   if (!last && !project.machine) await relabelAfter(file, raw); // its lead may stop being a captain
   const notes = [];
   if (last) notes.push(`${bot.name} was the project's last bot: ${fileName(project)} was deleted.`);
-  if (holders.length) notes.push(`${holders.join(", ")} is still attached to it; detach it with: automagik-herdr detach ${bot.id}`);
-  for (const n of notes) process.stderr.write(`automagik-herdr: ${n}\n`);
+  if (holders.length) notes.push(`${holders.join(", ")} is still attached to it; detach it with: am detach ${bot.id}`);
+  for (const n of notes) process.stderr.write(`am: ${n}\n`);
   return opts.json ? { removed: bot.id, ...placeOf(project), deletedFile: last, attachedTerminals: holders } : `${bot.name} (${bot.id}) removed.`;
 }
 
@@ -2287,7 +2315,7 @@ async function cmdCategory(opts, [verb, ...rest]) {
   if (verb === "rm") {
     const cat = find(rest[0]);
     const users = project.file.bots.filter((b) => b.category === cat.id).map((b) => b.name);
-    if (users.length) throw new CliError(`${users.join(", ")} ${users.length > 1 ? "are" : "is"} in ${cat.id}; move them first (automagik-herdr edit <bot> --category … or --no-category).`);
+    if (users.length) throw new CliError(`${users.join(", ")} ${users.length > 1 ? "are" : "is"} in ${cat.id}; move them first (am edit <bot> --category … or --no-category).`);
     raw.categories = raw.categories.filter((c) => c?.id !== cat.id);
     await save();
     return opts.json ? { ...placeOf(project), removed: cat.id } : `${cat.id} removed.`;
@@ -2313,7 +2341,7 @@ const heldIds = new Set();
 const holdId = (id) => { if (typeof id === "string" && id.trim().length >= 6) heldIds.add(id.trim()); return id; };
 /** `text` with every held session id shown as SESSION_MASK. */
 const unprinted = (text) => { let out = String(text); for (const id of heldIds) out = out.split(id).join(SESSION_MASK); return out; };
-const report = (warnings) => { for (const w of warnings) process.stderr.write(`automagik-herdr: ${unprinted(w)}\n`); };
+const report = (warnings) => { for (const w of warnings) process.stderr.write(`am: ${unprinted(w)}\n`); };
 
 /**
  * Appends one row to the workers ledger (workers.js) with a single O_APPEND write, the file the
@@ -2463,7 +2491,8 @@ async function placementOf(key, seen = null) {
   const mine = rows.filter((r) => keys.get(r.cwd) === key);
   const shows = (place) => !seen || spacePlace(seen.spaces.filter((s) => s.id === place.space), seen.keys, key) !== null;
   for (const r of mine) {
-    const place = placementFrom([await hcGet(r.address)].filter(Boolean));
+    // A pane hc can't answer for gives no place here (the window still decides).
+    const place = placementFrom([await hcGet(r.address).catch(() => null)].filter(Boolean));
     if (place && shows(place)) return place;
   }
   if (seen) return spacePlace(seen.spaces, seen.keys, key);
@@ -2628,7 +2657,7 @@ function tooLate(bot, machine, key, need, space = null) {
   return new CliError(`Only ${left} s of this Herdr's 30 s limit for the sidebar's programs was left, and starting ${bot.name} `
     + `on ${machine} needs ${need / 1000} s to finish once its pane starts, so nothing was started`
     + `${space ? ` (the space it opened, ${space}, stays, with only its shell)` : ""}. `
-    + `Start it from a terminal: automagik-herdr start ${shellWord(bot.id)} --project ${shellWord(key)} --machine ${shellWord(machine)}`);
+    + `Start it from a terminal: am start ${shellWord(bot.id)} --project ${shellWord(key)} --machine ${shellWord(machine)}`);
 }
 
 const quietOn = (machine, seen) => seen.login === "timed out" ? `${machine}'s login shell didn't answer within ${AGENT_WAIT_S} s`
@@ -2792,7 +2821,7 @@ async function launchHomeOn(machine, bot, paneEnv, purpose) {
   const dir = paneEnv.appHome ?? await appHomeOn(machine);
   if (!dir) return none(`${machine} gave no home folder for its app home`);
   if ((await remoteIo.exec("test", ["-d", dir], machine, { timeout: AGENT_WAIT_S })).code !== 0) {
-    return none(`its app home there, ${dir}, isn't a folder, and a start never makes one. Install automagik-herdr on ${machine}, `
+    return none(`its app home there, ${dir}, isn't a folder, and a start never makes one. Install Automagik Herdr on ${machine}, `
       + `or set HERDR_APP_HOME in the project's ${PANE_ENV_PATH} there to an app home that is there`);
   }
   return { dir, warning: null };
@@ -2945,7 +2974,7 @@ async function seatOnMachine(project, bot, over = {}) {
   const agyMode = launchAgyMode(bot, agentKey);
   if (!over.argv && bot.model && !modelList(bot.agent, bot.model).includes(bot.model)) {
     throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't a ${bot.agent} model this computer lists. `
-      + `Pick one with automagik-herdr edit ${bot.id} --model <model> --machine ${machine} --project ${key}, or clear it with --no-model.`);
+      + `Pick one with am edit ${bot.id} --model <model> --machine ${machine} --project ${key}, or clear it with --no-model.`);
   }
   const paneEnv = await paneEnvOn(machine, key);
   // #823: agy reads its permission list from a file on its own machine, under that machine's
@@ -2967,7 +2996,8 @@ async function seatOnMachine(project, bot, over = {}) {
   // does (launchSeat; RFC 0026 (e)): the pane's agent.session label is that machine's own record
   // of the seat's session. A command that picks its own session keeps it; a restart's plan
   // (over.argv) brings its own id, in its argv and its carried label.
-  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model)];
+  // A Codex --add-dir is left for that machine to weigh (codexOn, #1142): only it can resolve it.
+  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, codexWhereThere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model)];
   const chosen = !over.argv && choosesSession(agentKey) && !ownsSession(source) ? newSessionId() : null;
   const command = agyGuarded(agentKey, withAgySettings(agentKey, chosen ? [...source, ...sessionIdArgs(agentKey, chosen)] : source, agySettings?.path));
   // #612: a local absolute override that isn't there falls back to the shipped run when that is.
@@ -2998,7 +3028,11 @@ async function seatOnMachine(project, bot, over = {}) {
   const briefingHome = needsHome ? await briefingHomeOn(machine, bot, paneEnv) : { dir: null, warnings: [] };
   const briefed = await briefedOn(machine, project, bot, agentKey, there.argv, briefingHome.dir,
     agentKey === "dsh-tui" ? Boolean(remoteGuard) : null);
-  const argv = briefed.argv;
+  // #1125: a Codex seat there gets the folders that machine derives for its folder, and its own
+  // --add-dir words are weighed there too (#1142: resolved on that machine, never this one).
+  const codexHere = agentKey === "codex" ? await codexOn(machine, over.cwd ?? key, paneEnv, briefed.argv) : null;
+  const argv = codexHere ? withCodexGrants(codexHere.argv, codexHere.dirs) : briefed.argv;
+  const codexNotes = [codexHere?.warning, agentKey === "codex" ? codexCleanNote(agent.run, codexWhereThere()) : null].filter(Boolean);
   // The hook goes in before the session starts, so Claude Code reads it at startup.
   const hook = briefingHook(agentKey) && briefingHome.dir ? await briefingHookOn(machine, bot, over.cwd ?? key, briefingHome.dir)
     : { written: false, warnings: [] };
@@ -3018,7 +3052,7 @@ async function seatOnMachine(project, bot, over = {}) {
     parent: ["--no-parent"], argv, labels, path: there.path, env, agent: agentKey, guard: remoteGuard });
   args.splice(1, 0, "--on", machine);
   const warnings = [...paneEnv.warnings, ...there.warnings, ...guardWarnings, ...briefingHome.warnings, ...briefed.warnings, ...hook.warnings,
-    ...(agySettings?.warnings ?? [])];
+    ...(agySettings?.warnings ?? []), ...codexNotes];
   const run = async () => {
     if (deadlineLeft() < DEADLINE_MARGIN_MS) throw tooLate(bot, machine, key, DEADLINE_MARGIN_MS, place?.spare ? place.space : null);
     const r = await hc(args, callBound());
@@ -3054,7 +3088,7 @@ async function seatOnMachine(project, bot, over = {}) {
       write([attachRow({ event: "attach", bot: bot.id, project: key, terminal: seat.terminal, core: m.id, created_ms: seat.created_ms, machine, by: "start" })]);
     } catch (e) {
       throw new CliError(`${seat.address} runs, but its attach row wasn't written (${e?.message ?? e}): attach it with `
-        + `automagik-herdr attach ${bot.id} ${seat.address} --machine ${machine} --project ${key}`);
+        + `am attach ${bot.id} ${seat.address} --machine ${machine} --project ${key}`);
     }
     return seat;
   });
@@ -3092,9 +3126,85 @@ async function startOnMachine(opts, project, bot) {
   return opts.json ? seatOnJson(bot, seat) : seat.address;
 }
 
+// Execute the existing local tree transaction where the panes and worker ledger live.
+// Every argument is positional shell data; no controller path or --machine is forwarded.
+async function restartTreeOnMachine(opts, project, bot) {
+  // A queue on the holding machine would outlive this controller transaction and leave
+  // its attachment on the old pane. The sidebar's explicit helper choice is immediate.
+  if (!opts.force) throw new CliError("Restart with its helpers runs immediately; pass --tree --force to restart them on their machine now.", 2);
+  if (opts.space) throw new CliError("A restart on a linked machine keeps the old pane's window place.", 2);
+  const { machine, key } = project;
+  const m = await connectedMachine(machine, "nothing was restarted");
+  const view = await attachView();
+  const held = liveFor(view, bot.id, project);
+  if (unknownFor(view, bot.id, project)) throw new CliError(`${machine} isn't answering; reconnect it and retry the restart.`);
+  const paneEnv = await paneEnvOn(machine, key);
+  if (paneEnv.refused) throw new CliError(`The project's pane environment on ${machine} could not be read; fix it and retry the restart.`);
+  const args = ["restart", bot.id, "--project", key, "--tree", "--json"];
+  for (const flag of ["force", "fresh", "fresh-shared", "save"]) if (opts[flag]) args.push(`--${flag}`);
+  for (const flag of ["agent", "model"]) if (opts[flag] !== undefined) args.push(`--${flag}`, opts[flag]);
+  const script = `
+if [ -n "$1" ]; then HERDR_APP_HOME=$1; export HERDR_APP_HOME; fi
+PATH="$HOME/.local/bin:$PATH"
+if [ -n "$2" ]; then PATH="$2:$PATH"; fi
+export PATH
+restart_terminal=$3; restart_bot=$4; restart_project=$5
+shift 5
+unset HC_TERMINAL_ID
+if command -v automagik-herdr >/dev/null 2>&1; then restart_cli=automagik-herdr
+elif command -v am >/dev/null 2>&1; then restart_cli=am
+else
+  printf '%s\\n' 'Automagik is missing on this machine; install it there and retry.' >&2
+  exit 127
+fi
+if [ -n "$restart_terminal" ]; then
+  "$restart_cli" attach "$restart_bot" "$restart_terminal" --project "$restart_project" --json >/dev/null || exit $?
+fi
+exec "$restart_cli" "$@"`;
+  const result = await remoteIo.exec("sh", ["-c", script, "sh", paneEnv.appHome ?? "", paneEnv.prepend ?? "",
+    held?.binding.terminal ?? "", bot.id, key, ...args], machine, { cwd: key, timeout: 540 });
+  let out;
+  try { out = JSON.parse(result.stdout); } catch { /* a missing CLI or a lost reply */ }
+  if (!out || out.error || !out.terminal) {
+    if (result.stderr) console.error(result.stderr);
+    const message = out?.error ?? (result.code === 127
+      ? `Automagik is missing on ${machine}; install it there and retry.`
+      : result.code !== -1 && result.stderr.trim() ? actionError(result.stderr, "Restart")
+      : `The restart on ${machine} gave no completion result; inspect its panes before retrying.`);
+    throw new CliError(message, 1, out?.refused ? { refused: out.refused, terminal: out.terminal } : undefined);
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(out.terminal)) throw new CliError(`The restart on ${machine} returned an invalid pane; inspect its panes before retrying.`);
+  if (!out.queued) {
+    const address = `${machine}/${out.terminal}`;
+    const get = await hcGet(address).catch(() => null);
+    if (!get || get.state !== "live" || !Number.isSafeInteger(get.created_ms) || get.labels?.[BOT_LABEL] !== bot.id) {
+      throw new CliError(`The restart ran on ${machine}, but its replacement pane could not be confirmed; inspect its panes before retrying.`);
+    }
+    try {
+      await underLedger(async ({ machines, heldBy, holds, write }) => {
+        const now = heldBy(bot.id, m.id);
+        const sameReplacement = now?.terminal === out.terminal && now.created_ms === get.created_ms && now.project === key;
+        if (now && (!held || attachKey(now) !== attachKey(held.binding)) && !sameReplacement && await holds(now)) {
+          throw new Error(`${bot.name} was attached to ${addressOf(now, machines)} while it restarted`);
+        }
+        write([...(now ? [closingRow(now, "detach", "start", "moved")] : []),
+          attachRow({ event: "attach", bot: bot.id, project: key, terminal: out.terminal, core: m.id,
+            created_ms: get.created_ms, machine, by: "start" })]);
+      });
+    } catch (e) {
+      console.error(e);
+      throw new CliError(`${bot.name} restarted in ${address}, but its sidebar attachment could not be saved; attach that pane before restarting again.`);
+    }
+  }
+  exitAfter.code = result.code === 0 ? 0 : 1;
+  report(out.warnings ?? []);
+  if (result.code !== 0 && result.stderr) console.error(result.stderr);
+  return opts.json ? { ...out, machine } : `${bot.name}: ${out.queued ? "restart queued in" : "restarted in"} ${machine}/${out.terminal}.`;
+}
+
 /**
- * restart --machine: cmdRestart's rule on the project's linked machine, without --tree (cmdRestart
- * refuses it there, #437). The old pane must say whether its agent is busy: one that reports no
+ * restart --machine without --tree: the controller manages the replacement. Tree restarts
+ * use restartTreeOnMachine instead. The old pane must say whether its agent is busy: one that reports no
  * status to hc (Hermes) is refused unless --force, as is a busy one or one with helpers. The new pane starts in the old one's place and
  * folder, resuming as restartPlan says (an agent's own --continue resumes the folder's latest
  * conversation: refused while another bot's same agent runs in that folder there); the old
@@ -3112,7 +3222,10 @@ async function restartOnMachine(opts, project, bot, entry) {
   }
   const old = held ? { ...held.get, address: addressOf(held.binding, view.machines) } : null;
   if (old) {
-    const refusal = restartRefusal({ name: bot.name, old, helpers: await helpersOf(old.address), force: opts.force, onMachine: true });
+    const helpers = await helpersOf(old.address);
+    const helperRefusal = restartRefusal({ name: bot.name, old: { ...old, status: { state: "idle" } }, helpers, force: opts.force, onMachine: true });
+    if (helperRefusal) throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: old.address });
+    const refusal = restartRefusal({ name: bot.name, old, force: opts.force, onMachine: true });
     if (refusal) throw busyRefusal(refusal, old);
     if (!old.status && !opts.force) {
       throw new CliError(`${old.address} doesn't tell hc whether ${bot.name}'s agent is busy or waiting for an approval, so a restart `
@@ -3129,7 +3242,9 @@ async function restartOnMachine(opts, project, bot, entry) {
   // The old pane's launch, only to say when it differs from what the source launches now (#597).
   const oldLaunch = old ? paneCommand(old) : null;
   const planned = {
-    bot, run: launchRun(agentKey, run, bot), runningAgent: old ? agentKeyOfArgv(unwrapKeep(old.foreground?.argv), agentTable()) : null, session: label,
+    // #1142: its Codex --add-dir words are weighed there (codexOn): only that machine resolves them.
+    bot, run: launchRun(agentKey, run, bot, codexWhereThere()),
+    runningAgent: old ? agentKeyOfArgv(unwrapKeep(old.foreground?.argv), agentTable()) : null, session: label,
     fresh: opts.fresh || (!old && !bot.hermes), agent: entry ? entry.agent : undefined, model: entry ? (entry.model ?? "") : undefined,
     // A new conversation there starts on an id chosen here too (RFC 0026 (e)), as cmdRestart's does.
     newSession: newSessionId(),
@@ -3138,8 +3253,9 @@ async function restartOnMachine(opts, project, bot, entry) {
   let cwd = key;
   const oldCwd = old?.foreground?.cwd ?? old?.cwd ?? null;
   if (oldCwd && oldCwd !== key) { try { if ((await remoteProjectOf(machine, oldCwd)).key === key) cwd = oldCwd; } catch { /* the project's */ } }
-  // A session counts only when the command really resumes it by id (--resume <id> in its argv).
-  let session = plan.mode === "resume" && plan.resume[0] === "--resume" && plan.argv.includes(plan.resume[1]) ? plan.resume[1] : null;
+  // Each agent spells resume differently (Codex: resume ID, omp: --resume=ID).
+  // Use the same validated identity as a local restart, rather than Claude's flag spelling.
+  let session = plan.mode === "resume" && !plan.canonicalBot && resumesById(plan.agent) ? sessionFor(plan.agent, label) : null;
   // #598: dsh-tui's id-less -c only once a turn has finished in the old pane (hc's turn counter;
   // missing or unreadable is 0): else a new conversation, and why, in --json's warnings too (F3).
   let turnNote = null;
@@ -3199,7 +3315,7 @@ async function restartOnMachine(opts, project, bot, entry) {
     if (up.state !== "live") {
       if (up.state === "ended") {
         throw await exitedBefore(seat.address, `${old.address} still runs ${bot.name}, untouched.`
-          + (plan.mode === "resume" ? ` Try automagik-herdr restart ${bot.id} --machine ${machine} --project ${key} --fresh.` : ""));
+          + (plan.mode === "resume" ? ` Try am restart ${bot.id} --machine ${machine} --project ${key} --fresh.` : ""));
       }
       const ended = (await hcKill(seat.address)).code === 0;
       throw new CliError(`${seat.address} didn't keep an agent in front within ${RESTART_WAIT_MS / 1000}s${ended ? ", so it was ended" : ` and couldn't be ended (hc kill ${seat.address})`}; `
@@ -3247,6 +3363,193 @@ async function restartOnMachine(opts, project, bot, entry) {
     agent: plan.agent, model: plan.model, session: session ? SESSION_MASK : null, note: plan.note, saved } : seat.address;
 }
 
+/**
+ * Absolute path `p` as this computer resolves it (#1142), with filesystem semantics: the realpath
+ * of its nearest part that is there (the kernel follows each symlink, then each `..` from where
+ * it led), then the rest of `p` (no symlink can hide in a part that isn't there). Null when that
+ * can't be proved: a part that is a file, a symlink that points nowhere, or a `..` in the rest.
+ */
+export function canonHere(p) {
+  let base = p, rest = "";
+  for (;;) {
+    try {
+      const real = realpathSync.native(base);
+      if (rest && !statSync(real).isDirectory()) return null;
+      return rest ? `${real === "/" ? "" : real}${rest}` : real;
+    } catch (e) {
+      if (e?.code !== "ENOENT") return null;
+      try { lstatSync(base); return null; } catch { /* not there at all: its parent decides */ }
+    }
+    if (base === "/") return null;
+    const i = base.lastIndexOf("/");
+    if (base.slice(i + 1) === "..") return null;
+    rest = `${base.slice(i)}${rest}`;
+    base = base.slice(0, i) || "/";
+  }
+}
+
+/**
+ * A path's identity on this computer (#1142): "dev:ino" (bigint, exact), symlinks followed, or
+ * null when it can't be observed: any stat failure (a missing path, EACCES, a loop) is unknown.
+ */
+export function idHere(p) {
+  try {
+    const st = statSync(p, { bigint: true });
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
+  }
+}
+
+/** This computer's Codex launch rules (models.js codexWhere): its home folder and app home, resolved here, objects told apart here. */
+const localWhere = () => codexWhere({ home: home(), appHome: appHome(), resolve: canonHere, id: idHere });
+
+/**
+ * The folders a Codex launch in `cwd` on this computer may write besides it (#1125,
+ * models.js codexGrantPlan): `cwd`'s own git dir and its git common dir (a linked worktree's
+ * `.git/worktrees/<name>` and its main checkout's .git), herdr-core's state and data folders
+ * and the tool caches, from this process's environment, each resolved and observed here (#1142)
+ * and only when it is a folder here: { dirs, unproved }. Never fails: a folder git can't answer
+ * for just has no git grant.
+ */
+async function localCodexGrantPlan(cwd) {
+  const out = cwd ? await git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd) : null;
+  const [gitDir, gitCommonDir] = (out ?? "").split("\n").map((l) => l.trim());
+  return codexGrantPlan({ where: localWhere(), home: home(), env: process.env, gitDir: gitDir || null, gitCommonDir: gitCommonDir || null, isDir: dirHere });
+}
+
+/** codexGrantPlan's isDir here (#1142): true, false when it isn't there (or isn't a folder), null when stat fails otherwise. */
+export function dirHere(p) {
+  try {
+    return statSync(p).isDirectory();
+  } catch (e) {
+    return e?.code === "ENOENT" || e?.code === "ENOTDIR" ? false : null;
+  }
+}
+
+/**
+ * The one withheld-folders warning of a Codex launch here (#1142, models.js codexWithheldWarning):
+ * its source's own --add-dir words (`run`, weighed as launchRun weighs them) and `plan`'s derived
+ * folders, each withheld or passed folder counted once. Null when nothing was withheld.
+ */
+function localCodexWarning(run, plan) {
+  const source = codexClean(run ?? [], localWhere());
+  return codexWithheldWarning(new Set([...source.unproved, ...plan.unproved]).size, new Set([...addDirValues(source.argv), ...plan.dirs]).size);
+}
+
+// The environment words codexGrantPaths reads, printed on a linked machine one per line as NAME=value
+// (printenv per name: never the whole environment), then its git dirs for the launch folder.
+const GRANT_VARS = CODEX_DIR_VARS;
+const GRANT_PROBE = `for k in ${GRANT_VARS.join(" ")}; do v=$(printenv "$k") && printf '%s=%s\\n' "$k" "$v"; done; `
+  + `g=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) && printf 'GIT_DIR=%s\\n' "$g"; `
+  + `g=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && printf 'GIT_COMMON_DIR=%s\\n' "$g"; true`;
+// Each path argument as that machine resolves it (#1142), with filesystem semantics: path, TAB,
+// its canonical form (the nearest part there through cd -P and pwd -P, which follow each symlink
+// and then each `..` physically, then the rest; "-" when a part is a file or a dangling link, or a
+// `..` falls in the rest), TAB, 1 when the path itself is a folder there.
+export const RESOLVE_PROBE = 'for p do b=$p; r=; out=; while :; do '
+  + 'if [ -d "$b" ]; then c=$(cd -P "$b" 2>/dev/null && pwd -P) && { out=${c%/}$r; [ -n "$out" ] || out=/; }; break; fi; '
+  + 'if [ -e "$b" ] || [ -L "$b" ]; then break; fi; [ "$b" = / ] && break; [ "${b##*/}" = .. ] && break; '
+  + 'r=/${b##*/}$r; b=${b%/*}; [ -n "$b" ] || b=/; done; '
+  + 'd=0; [ -n "$out" ] && [ -z "$r" ] && d=1; printf "%s\\t%s\\t%s\\n" "$p" "${out:--}" "$d"; done; true';
+
+/** RESOLVE_PROBE's answer as { resolve, isDir } for models.js codexWhere and codexGrants: unknown paths resolve to null. */
+export function resolvedThere(stdout) {
+  const canon = new Map(), dirs = new Set();
+  for (const line of String(stdout ?? "").split("\n")) {
+    const [path, real, dir] = line.split("\t");
+    if (!path || real === undefined) continue;
+    const c = real === "-" ? null : cleanPath(real);
+    canon.set(path, c);
+    if (c && dir === "1") dirs.add(c);
+  }
+  return { resolve: (p) => canon.get(p) ?? null, isDir: (p) => dirs.has(p) };
+}
+
+// Each path's identity on that machine (#1142): the first argument is the home folder, the rest
+// the paths to observe. It picks stat -L's GNU (-c) or BSD (-f) form on the home folder first
+// ("unsupported" when neither prints dev:ino there), prints ok, then per path its dev:ino, or ?
+// when that stat fails or prints anything else: a failed observation is never an identity.
+export const IDENTITY_PROBE = 'h=$1; shift; f=; '
+  + 'for g in c f; do i=$(stat -L -$g %d:%i "$h" 2>/dev/null) || continue; case $i in *[!0-9:]*|*:*:*) ;; [0-9]*:[0-9]*) f=$g; break;; esac; done; '
+  + 'if [ -z "$f" ]; then echo unsupported; exit 0; fi; echo ok; '
+  + 'for p do i=$(stat -L -$f %d:%i "$p" 2>/dev/null) || i="?"; '
+  + 'case $i in *[!0-9:]*|*:*:*) i="?";; [0-9]*:[0-9]*) ;; *) i="?";; esac; printf "%s\\n" "$i"; done; true';
+
+/** IDENTITY_PROBE's answer for `paths` as `id(p)`: "dev:ino", or null (unsupported, short or malformed output, a failed stat). */
+export function idsThere(stdout, paths) {
+  const lines = String(stdout ?? "").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  const known = new Map();
+  if (lines[0] === "ok" && lines.length === paths.length + 1) {
+    paths.forEach((p, i) => { if (/^\d+:\d+$/.test(lines[i + 1])) known.set(p, lines[i + 1]); });
+  }
+  return (p) => known.get(p) ?? null;
+}
+
+/** The values of a Codex argv's `--add-dir` words, before any `--`. */
+const addDirValues = (argv) => {
+  const out = [];
+  for (let i = 0; i < argv.length && argv[i] !== "--"; i += 1) {
+    if (argv[i] === "--add-dir" && i + 1 < argv.length) out.push(argv[++i]);
+    else if (argv[i].startsWith("--add-dir=")) out.push(argv[i].slice("--add-dir=".length));
+  }
+  return out;
+};
+
+/**
+ * A Codex launch on `machine` (#1125, #1142), resolved there and never against this computer:
+ * that machine's home folder and effective app home (`paneEnv`'s HERDR_APP_HOME as launchHomeOn
+ * picks it, the shell's, and the default under its home, all protected), its own realpaths for
+ * each path weighed, its git dirs for `cwd` and its environment. `argv` loses each `--add-dir`
+ * those rules don't allow (all of them when the machine can't be asked); `dirs` are the folders it
+ * derives (codexGrants). { argv, dirs, warning }.
+ */
+async function codexOn(machine, cwd, paneEnv, argv) {
+  const blind = { home: null, appHomes: [], canon: () => null };
+  const away = (why) => ({ argv: codexKeepDirs(argv, blind).argv, dirs: [],
+    warning: `${machine}: Codex's folders couldn't be read there (${why}). ${codexWithheldWarning(1, 0)}` });
+  const r = await remoteIo.exec("sh", ["-c", GRANT_PROBE], machine, { cwd });
+  if (r.code !== 0) return away(r.code === -1 ? "no answer" : `exit ${r.code}`);
+  const env = {};
+  for (const line of String(r.stdout ?? "").split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) env[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  if (!absPath(env.HOME)) return away("no home folder");
+  const appHomes = [paneEnv?.appHome, env.HERDR_APP_HOME].filter(Boolean);
+  // One inventory (#1142): the paths probed here are the paths codexGrantPlan weighs.
+  const inventory = codexGrantPaths({ home: env.HOME, env, gitDir: env.GIT_DIR ?? null, gitCommonDir: env.GIT_COMMON_DIR ?? null });
+  // Sent as cleanPath leaves them, `..` included: that machine resolves each (#1142).
+  const paths = [...new Set([env.HOME, `${env.HOME}/.config/herdr-app`, ...appHomes, ...inventory.candidates, ...inventory.general, ...addDirValues(argv)]
+    .map(cleanPath).filter(Boolean))];
+  const there = await remoteIo.exec("sh", ["-c", RESOLVE_PROBE, "sh", ...paths], machine);
+  if (there.code !== 0) return away(there.code === -1 ? "no answer" : `exit ${there.code}`);
+  const { resolve, isDir: dirThere } = resolvedThere(there.stdout);
+  const plain = codexWhere({ home: env.HOME, appHome: appHomes, resolve });
+  if (plain.unproved.length) return away(`${plain.unproved.join(" and ")} can't be resolved there`);
+  // Identity there (#1142): each folder weighed, the home folder, each app home and each general
+  // folder, with every folder above them, observed by that machine's stat (codexDirVerdict).
+  const whole = inventory.general.map((g) => plain.canon(g)).filter(Boolean);
+  const weighed = [...new Set([...inventory.candidates, ...addDirValues(argv)].map((p) => plain.canon(p)).filter(Boolean))];
+  const observed = [...new Set([plain.home, ...plain.appHomes, ...whole, ...weighed].flatMap(chainOf))];
+  const ids = await remoteIo.exec("sh", ["-c", IDENTITY_PROBE, "sh", plain.home, ...observed], machine);
+  const where = codexWhere({ home: env.HOME, appHome: appHomes, resolve, id: idsThere(ids.code === 0 ? ids.stdout : "", observed) });
+  const kept = codexKeepDirs(argv, where);
+  const plan = codexGrantPlan({ where, env, isDir: dirThere, paths: inventory });
+  const withheld = codexWithheldWarning(new Set([...kept.unproved, ...plan.unproved]).size, new Set([...addDirValues(kept.argv), ...plan.dirs]).size);
+  const warnings = [kept.dropped
+    ? `${machine}: an --add-dir in Codex's command names the home folder, an app home, a folder above one or a relative path: left out (#1142).` : null,
+  withheld ? `${machine}: ${withheld}` : null].filter(Boolean);
+  return { argv: kept.argv, dirs: plan.dirs, warning: warnings.length ? warnings.join(" ") : null };
+}
+
+/** Canonical `p` and each folder above it, up to the root. */
+const chainOf = (p) => {
+  const out = [];
+  for (let c = p; ; c = c.slice(0, c.lastIndexOf("/")) || "/") { out.push(c); if (c === "/") return out; }
+};
+
 /** The agent a bot starts on, from Herdr's table: refused when it isn't one, or isn't installed. */
 function startableAgent(bot, agentKey = bot.agent) {
   const agent = agentTable()[agentKey];
@@ -3284,7 +3587,7 @@ async function launchSeat(project, bot, over = {}) {
   // A12: a pin that isn't one of the agent's listed models (an old free-text model) is refused.
   if (!over.argv && bot.model && !modelList(bot.agent, bot.model).includes(bot.model)) {
     throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't a ${bot.agent} model this computer lists. `
-      + `Pick one with automagik-herdr edit ${bot.id} --model <model> (the error lists them), or clear it with --no-model.`);
+      + `Pick one with am edit ${bot.id} --model <model> (the error lists them), or clear it with --no-model.`);
   }
   const agent = startableAgent(bot, agentKey);
   // Antigravity always gets a mode (auto by default); every other agent's argv is unchanged.
@@ -3307,7 +3610,7 @@ async function launchSeat(project, bot, over = {}) {
   const labels = { ...paneLabels(file, bot.id, carry, lead ? leadPane(await liveRows(lead))?.labels ?? null : null), ...carry }; // A16
   const taken = new Set(rowsOf(await hcJson(["ls"])).map((r) => r?.name).filter(Boolean));
   // A Start's command, on a new session whose id Herdr chooses (Claude), unless it picks its own.
-  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model)];
+  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, localWhere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model)];
   const chosen = !over.argv && choosesSession(agentKey) && !ownsSession(source) ? newSessionId() : null;
   const session = over.argv ? (over.session ?? null) : chosen;
   if (session && agentKey === "claude") labels[SESSION_LABEL] = session;
@@ -3318,7 +3621,15 @@ async function launchSeat(project, bot, over = {}) {
   // #955: a roster that names Antigravity's auto mode on a host that can't run it is told so.
   const modeWarning = agentKey === "antigravity" ? agyModeWarning({ name: bot.name, explicit: bot.agyMode ?? null, sandbox: hostAgySandbox() }) : null;
   if (modeWarning) briefed.warnings.push(modeWarning);
-  const argv = briefed.argv;
+  // #1125: a Codex seat runs the pack's Codex launch mode, with an --add-dir for each folder this
+  // launch in `cwd` may write (unless a restart's template plan carries them already); a
+  // programs.json run's own approval and sandbox words were left out, and that is said.
+  const cleaned = agentKey === "codex" ? codexCleanNote(agent.run, localWhere()) : null;
+  if (cleaned) briefed.warnings.push(cleaned);
+  const codexPlan = agentKey === "codex" && !over.granted ? await localCodexGrantPlan(cwd) : null;
+  const codexWithheld = codexPlan ? localCodexWarning(agent.run, codexPlan) : null;
+  if (codexWithheld) briefed.warnings.push(codexWithheld);
+  const argv = codexPlan ? withCodexGrants(briefed.argv, codexPlan.dirs) : briefed.argv;
   // As a worker (cmdWorker): the pane gets this PATH, with an npm agent's (#!/usr/bin/env node,
   // like codex) interpreter folder first when it lacks it (#56); start and restart both come
   // here. Always passed (#213): without it the pane has herdr-core's PATH, which may lack node.
@@ -3356,10 +3667,10 @@ async function launchSeat(project, bot, over = {}) {
     const get = await hcGet(address).catch(() => null);
     if (ledger) {
       if (!Number.isSafeInteger(get?.created_ms)) {
-        throw new CliError(`${address} runs, but hc get gave no created_ms, so it has no attach row: attach it with automagik-herdr attach ${bot.id} ${address}`);
+        throw new CliError(`${address} runs, but hc get gave no created_ms, so it has no attach row: attach it with am attach ${bot.id} ${address}`);
       }
       try { ledger.write([attachRow({ event: "attach", bot: bot.id, project: key, terminal: address, core: ledger.core, created_ms: get.created_ms, by: "start" })]); } catch (e) {
-        throw new CliError(`${address} runs, but its attach row wasn't written (${e?.message ?? e}): attach it with automagik-herdr attach ${bot.id} ${address}`);
+        throw new CliError(`${address} runs, but its attach row wasn't written (${e?.message ?? e}): attach it with am attach ${bot.id} ${address}`);
       }
     }
     return { terminal: address, created_ms: get?.created_ms ?? null, pid: get?.foreground?.pid ?? get?.pid ?? null };
@@ -3470,8 +3781,17 @@ async function agentUp(terminal, ms = RESTART_WAIT_MS) {
   const until = Date.now() + ms;
   let since = null;
   for (;;) {
-    const get = await hcGet(terminal);
-    if (!get || get.state === "finished") return { state: "ended", get };
+    // A failed lookup (not "no such terminal") is no answer yet: asked again until the deadline,
+    // never read as an ended pane (#1125).
+    let get;
+    try { get = await hcGet(terminal); } catch { get = undefined; }
+    if (get === null || get?.state === "finished") return { state: "ended", get };
+    if (get === undefined) {
+      since = null;
+      if (Date.now() >= until) return { state: "late", get: null };
+      await later(250);
+      continue;
+    }
     if (get.state === "live" && agentInForeground(get)) {
       since ??= Date.now();
       if (Date.now() - since >= (get.reported === true ? RESTART_SETTLE_MS : RESTART_STABLE_MS)) return { state: "live", get };
@@ -3978,7 +4298,7 @@ async function rerunHelpers(plans, parent, say) {
         moved = await attachMoved({ id: b.bot }, b, address, created, b.project);
       } catch (e) {
         out[i].error = `its attach row wasn't written (${e?.message ?? e})`;
-        say(`${who} runs again in ${address}, but bot ${b.bot}'s attach row wasn't written (${e?.message ?? e}): automagik-herdr attach ${b.bot} ${address}.`);
+        say(`${who} runs again in ${address}, but bot ${b.bot}'s attach row wasn't written (${e?.message ?? e}): am attach ${b.bot} ${address}.`);
         continue;
       }
       if (moved.lost !== undefined) {
@@ -4032,6 +4352,12 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     }
     treeWarnings.push(`--force: ${nested.join(", ")} ${one ? "ends" : "end"} with ${one ? "its parent" : "their parents"} and ${one ? "isn't" : "aren't"} run again.`);
   }
+  // #1125: the folders each helper may write when it runs Codex again, from the folder it runs in.
+  const grantsAt = new Map();
+  for (const h of doomed) {
+    const cwd = helperCwd({ get: h, worker: workerRowOf(ledger, h.address), realpath: realDir });
+    if (cwd && !grantsAt.has(cwd)) grantsAt.set(cwd, await localCodexGrantPlan(cwd));
+  }
   const planOf = (h, fresh = null) => {
     const worker = workerRowOf(ledger, h.address);
     // #939, revive only: a helper hc kept as a bare shell names its agent by its launch command.
@@ -4049,12 +4375,24 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
       ?? project.file.bots.find((b) => b.id === bot.id) ?? bot;
     for (const k of ["agent.session", "revive.session"]) holdId(h.labels?.[k]);
     holdId(knownSession(h, agentKey)?.session);
-    return { ...helperPlan({ get: h, worker, session: knownSession(h, agentKey)?.session ?? null,
+    const grantPlan = grantsAt.get(helperCwd({ get: h, worker, realpath: realDir })) ?? null;
+    const planned = helperPlan({ get: h, worker, session: knownSession(h, agentKey)?.session ?? null,
       agents, fresh, bot: agyBot, agy: { appHomeDir: appHome(), bot: agyBot, realpath: realDir, homeDir: home() },
-      launchAgent: revive && isBareShell(h) }), worker, binding, proxyIdentity,
+      launchAgent: revive && isBareShell(h), grants: grantPlan?.dirs ?? [], where: localWhere() });
+    // #1142: a Codex helper run in the launch mode says what its launch withheld; a template
+    // worker runs its own command as written and gets nothing of the pack's.
+    const templateWorker = Boolean(worker?.template || h.labels?.[WORKER_TEMPLATE_LABEL]);
+    const codexWithheld = agentKey === "codex" && !planned.error && !templateWorker && grantPlan
+      ? localCodexWarning(worker || h.labels?.[WORKER_OF_LABEL] ? agents.codex?.run : paneCommand(h)?.argv, grantPlan) : null;
+    return { ...planned, codexWithheld,
+      worker, binding, proxyIdentity,
       createdMs: Number.isSafeInteger(h.created_ms) ? h.created_ms : null };
   };
   let tree = doomed.map((h) => planOf(h));
+  for (const p of tree) {
+    if (p.warning) treeWarnings.push(p.warning);
+    if (p.codexWithheld) treeWarnings.push(`${p.name ?? p.replaced}: ${p.codexWithheld}`);
+  }
   const broken = tree.filter((p) => p.error).map((p) => p.error);
   const gone = tree.filter((p) => !p.error && !isDir(p.cwd)).map((p) => `${p.replaced}'s folder ${p.cwd} isn't there`);
   if (broken.length || gone.length) {
@@ -4284,7 +4622,7 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan }) {
   if (opts.json) return { id: bot.id, queued: true, terminal: old.address, reason: entry.reason, dialog,
     watcher: entry.watcher, mode: plan.mode, agent: plan.agent, model: plan.model };
   const why = dialog ? `blocked on dialog "${dialog.question}" — ${dialog.who} must answer it in ${old.address}; Herdr never answers dialogs` : `${bot.name} is working in ${old.address}`;
-  return `${bot.name}: restart queued for ${old.address} (${why}); it will restart and resume at its next idle (automagik-herdr restart --queued lists it; automagik-herdr restart --cancel ${bot.id} cancels it; pass --force to restart now).`;
+  return `${bot.name}: restart queued for ${old.address} (${why}); it will restart and resume at its next idle (am restart --queued lists it; am restart --cancel ${bot.id} cancels it; pass --force to restart now).`;
 }
 
 async function cmdRestart(opts, [ref]) {
@@ -4299,16 +4637,6 @@ async function cmdRestart(opts, [ref]) {
   if (opts.cwd !== undefined && opts.machine !== undefined) {
     throw new CliError("--cwd is a folder on this computer; a restart on a linked machine keeps the old pane's.", 2);
   }
-  // --tree on a linked machine isn't built yet (#437): refused before anything is read there, so
-  // its helpers are never left behind by a restart that looks done. Each sentence that says what
-  // happened names no flag: the Accounts panel shows a refusal without the clauses that name one.
-  if (opts.tree && opts.machine !== undefined) {
-    throw new CliError(`Restarting a bot's helpers on a linked machine isn't built yet, so nothing was read or restarted: `
-      + `${ref} and its helpers on ${opts.machine} still run as they were, on the account they started with. `
-      + `By hand: wait for a helper still working to finish, end each helper's pane (hc kill ${opts.machine}/tN for one), `
-      + `then restart ${ref} there without --tree. A helper that still had work to do, start again yourself with hc run `
-      + `on ${opts.machine} once ${ref} is back.`, 2);
-  }
   if (opts.cwd !== undefined) {
     const dir = opts.cwd ? realDir(resolvePath(opts.cwd)) : null;
     if (!dir || !isDir(dir)) throw new CliError(`--cwd ${opts.cwd || '""'} isn't a folder on this computer.`, 2);
@@ -4320,6 +4648,7 @@ async function cmdRestart(opts, [ref]) {
   const bot = await botIn(project, ref, opts);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
+  if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
   // A swap's agent and model are checked as an edit checks them (entryFrom); a new agent
   // without --model drops the old agent's pin. bots.json changes only with --save.
   let entry = null;
@@ -4331,7 +4660,7 @@ async function cmdRestart(opts, [ref]) {
     entry = entryFrom(edit, stored, project, { creating: false });
   } else if (bot.model && !modelList(bot.agent, bot.model).includes(bot.model)) {
     throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't a ${bot.agent} model this computer lists. `
-      + `Pick one with automagik-herdr edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`);
+      + `Pick one with am edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`);
   }
   if (project.machine) return restartOnMachine(opts, project, bot, entry);
   // The old pane: the one the attach ledger names for the bot, as hc confirms it.
@@ -4401,9 +4730,14 @@ async function cmdRestart(opts, [ref]) {
   // permission file (#884) trusts this folder, not the project, and a symlinked one by realpath.
   const oldCwd = old?.foreground?.cwd ?? old?.cwd ?? ghost?.cwd ?? null;
   const cwd = wanted ?? (oldCwd && isDir(oldCwd) ? (realDir(oldCwd) ?? oldCwd) : key);
+  const sourceRun = startableAgent(bot, entry?.agent ?? bot.agent).run;
+  // #1125: the folders a Codex seat in `cwd` may write, for a template plan's words (launchSeat
+  // adds them to an agent row's, and says what it withheld then).
+  const codexPlan = (entry?.agent ?? bot.agent) === "codex" ? await localCodexGrantPlan(cwd) : null;
   const planned = {
-    bot, run: launchRun(entry?.agent ?? bot.agent, startableAgent(bot, entry?.agent ?? bot.agent).run, bot),
+    bot, run: launchRun(entry?.agent ?? bot.agent, sourceRun, bot, localWhere()), where: localWhere(),
     runningAgent, session: known?.session ?? null,
+    grants: codexPlan?.dirs ?? [],
     fresh: opts.fresh || (!was && !bot.hermes), agent: entry ? entry.agent : undefined, model: entry ? (entry.model ?? "") : undefined,
     template: oldTemplate?.command ? { name: oldTemplate.name, command: oldTemplate.command } : null,
     agy: { appHomeDir: appHome(), folder: cwd, realpath: realDir, homeDir: home() },
@@ -4424,7 +4758,7 @@ async function cmdRestart(opts, [ref]) {
       + `or pick a folder whose slug is the same.`);
   }
   const place = opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : (old ? placementFrom([old]) ?? undefined : undefined);
-  let resumeId = plan.mode === "resume" && resumesById(plan.agent) ? sessionFor(plan.agent, known?.session) : null;
+  let resumeId = plan.mode === "resume" && !plan.canonicalBot && resumesById(plan.agent) ? sessionFor(plan.agent, known?.session) : null;
   // With no id, a resume takes the folder's latest conversation (--continue, codex resume
   // --last), for every agent: beside another bot on that agent there, a new conversation, and
   // why (#328: an omp --continue picked up a teammate's). Alone there, the resume as before.
@@ -4467,7 +4801,7 @@ async function cmdRestart(opts, [ref]) {
   }
   let seat = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
     carry: { ...carry, ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, resumeId),
-    replacing: old ? held.binding : null });
+    replacing: old ? held.binding : null, granted: plan.granted });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   // A direct restart supersedes a queued one only once it really started: its watcher must not
   // start a second replacement while this one hands the bot over.
@@ -4497,6 +4831,13 @@ async function cmdRestart(opts, [ref]) {
   // The sidebar's Restart shows only --json's warnings: why it didn't resume goes there too
   // (the text answer says it in its own line).
   if (sharedNote) warnings.push(`${bot.name} starts on a new conversation: ${sharedNote}.`);
+  // #1125: a Codex seat's template set aside for its agent row, by name and flag names.
+  if (plan.templateNote) say(`${bot.name}: ${plan.templateNote}.`);
+  // A seat template carried the grants (#1142): its launch's withheld folders are said here, once.
+  // Its launch is the template's command and the pack's grants, never the agent row's words (the
+  // template's own --add-dir words were proved exact before it was kept): only the grants count.
+  const templateWithheld = plan.granted && codexPlan ? localCodexWarning([], codexPlan) : null;
+  if (templateWithheld) say(`${bot.name}: ${templateWithheld}`);
   if (movedFrom && movedFrom !== wanted && plan.mode === "resume" && plan.agent !== "claude") {
     say(`${seat.terminal} runs in ${wanted}, not ${movedFrom}: ${plan.agent} finds its last conversation by folder${resumeId ? "" : ", so it may not find it there"}.`);
   }
@@ -4523,7 +4864,8 @@ async function cmdRestart(opts, [ref]) {
       say(`${bot.name} starts on a new conversation: ${note}.`);
       const again = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
         carry: { ...carriedLabels(old), ...(plan.template ? { [WORKER_TEMPLATE_LABEL]: plan.template } : {}),
-          ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, null), replacing: held.binding });
+          ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, null), replacing: held.binding,
+        granted: plan.granted });
       if (again.running) throw new CliError(`${bot.name} is running in ${again.running} now, so no new pane was started; ${old.address} still runs it, untouched.`);
       for (const w of again.hook.warnings) say(w);
       seat = again;
@@ -4533,7 +4875,7 @@ async function cmdRestart(opts, [ref]) {
       // An abandoned replacement is ended (no seat row was written for it); the old pane stays.
       if (up.state === "ended") {
         throw await exitedBefore(seat.terminal, `${old.address} still runs ${bot.name}, untouched.`
-          + (plan.mode === "resume" ? ` Try automagik-herdr restart ${bot.id} --fresh.` : ""));
+          + (plan.mode === "resume" ? ` Try am restart ${bot.id} --fresh.` : ""));
       }
       const ended = (await hcKill(seat.terminal)).code === 0;
       throw new CliError(`${seat.terminal} didn't keep an agent in front within ${RESTART_WAIT_MS / 1000}s${ended ? ", so it was ended" : ` and couldn't be ended (hc kill ${seat.terminal})`}; `
@@ -4583,7 +4925,7 @@ async function cmdRestart(opts, [ref]) {
     const up = await agentUp(seat.terminal);
     if (up.state === "ended") {
       throw await exitedBefore(seat.terminal, `${bot.name} isn't running.`
-        + (plan.mode === "resume" ? ` Try automagik-herdr restart ${bot.id} --fresh.` : ""));
+        + (plan.mode === "resume" ? ` Try am restart ${bot.id} --fresh.` : ""));
     }
     if (up.state !== "live") {
       const ended = (await hcKill(seat.terminal)).code === 0;
@@ -4675,11 +5017,11 @@ async function terminalPlace(terminal, project) {
 }
 
 /** Why a Claude bot on a linked machine has no briefing hook yet (automagik#206 part b2). */
-const noHookThere = (bot, machine) => `${bot.name} runs on ${machine} without its per-turn briefing: the hook needs automagik-herdr `
-  + `installed on ${machine}, which comes next (automagik-herdr machine install ${machine}). Its role and team still come from ${BOTS_PATH}.`;
+const noHookThere = (bot, machine) => `${bot.name} runs on ${machine} without its per-turn briefing: the hook needs Automagik Herdr `
+  + `installed on ${machine}, which comes next (am machine install ${machine}). Its role and team still come from ${BOTS_PATH}.`;
 
 async function cmdAttach(opts, [ref, terminal]) {
-  if (!terminal) throw new CliError("attach needs a bot and a terminal: automagik-herdr attach <bot> <terminal> [--move].", 2);
+  if (!terminal) throw new CliError("attach needs a bot and a terminal: am attach <bot> <terminal> [--move].", 2);
   if (terminal.startsWith("-")) throw new CliError(`"${terminal}" isn't a terminal; name one like t7.`, 2);
   const project = await projectFor(opts);
   const { file, key } = project;
@@ -4695,7 +5037,7 @@ async function cmdAttach(opts, [ref, terminal]) {
   if (!Number.isSafeInteger(get.created_ms)) throw new CliError(`hc get ${address} gave no created_ms; nothing was attached.`);
   const nameOf = (id) => { const n = file.bots.find((b) => b.id === id)?.name; return n ? `${n} (${id})` : `bot ${id}`; };
   const playsAnother = (b) => new CliError(`${address} already plays ${nameOf(b.bot)}, since ${b.at}; nothing was attached. `
-    + `Detach that bot first: automagik-herdr detach ${b.bot}`);
+    + `Detach that bot first: am detach ${b.bot}`);
   // Another bot's pane is refused first, by this run's view (and again under the lock).
   const seen = (await attachView()).byTerminal.get(address)?.binding;
   if (seen && seen.bot !== bot.id && seen.created_ms === get.created_ms) throw playsAnother(seen);
@@ -4718,7 +5060,7 @@ async function cmdAttach(opts, [ref, terminal]) {
     const mine = await holds(heldBy(bot.id, at.core));
     if (mine && !opts.move) {
       throw new CliError(`${bot.name} (${bot.id}) is attached to ${heldAt(mine.binding)}; nothing was attached. `
-        + `Move it with: automagik-herdr attach ${bot.id} ${address} --move (or detach it first).`);
+        + `Move it with: am attach ${bot.id} ${address} --move (or detach it first).`);
     }
     const rows = mine ? [closingRow(mine.binding, "detach", "attach", "moved")] : [];
     rows.push(attachRow({ event: "attach", bot: bot.id, project: key, terminal: bareId, core: at.core ?? core, created_ms: get.created_ms,
@@ -4756,7 +5098,7 @@ async function cmdAttach(opts, [ref, terminal]) {
       core: await rowCore(), createdMs: get.created_ms }));
     if (unlogged) hook.warnings.push(unlogged);
   }
-  if (hook.written) hook.warnings.push(`${bot.name}'s briefing hook was added while its Claude session was running. If its next prompt brings no briefing, restart the bot: automagik-herdr restart ${bot.id} (or the bot row's Restart).`);
+  if (hook.written) hook.warnings.push(`${bot.name}'s briefing hook was added while its Claude session was running. If its next prompt brings no briefing, restart the bot: am restart ${bot.id} (or the bot row's Restart).`);
   report(hook.warnings);
   if (!project.machine) listProject(key);
   const movedFrom = decided.movedFrom ? [decided.movedFrom] : [];
@@ -4850,7 +5192,7 @@ async function importPlan(project, label, { readOnly = false } = {}) {
   const skipped = [];
   if (!main) {
     conflicts.push(`${under(project.key, BOTS_PATH)} has no main bot; the import makes captains and members under it. `
-      + "Create it first: automagik-herdr create --name N --agent A");
+      + "Create it first: am create --name N --agent A");
   }
   const rows = rowsOf(await hcJson(["ls"])).filter((r) => local(r?.address) && r.state !== "finished");
   const gets = (await Promise.all(rows.map(async (r) => {
@@ -4905,7 +5247,7 @@ async function importPlan(project, label, { readOnly = false } = {}) {
       const there = liveFor(view, named.id, project);
       if (there) {
         conflicts.push(`${botName(named.id)} already plays ${there.binding.terminal}, not ${terminal}; the import never moves a bot. `
-          + `Detach it first (automagik-herdr detach ${named.id}), or give the seat another hc name.`);
+          + `Detach it first (am detach ${named.id}), or give the seat another hc name.`);
         continue;
       }
       if (named.kind === "main" || named.planned) {
@@ -4914,7 +5256,7 @@ async function importPlan(project, label, { readOnly = false } = {}) {
       }
       if (named.agent && named.agent !== agent) {
         conflicts.push(`${at} runs ${agent}, and ${botName(named.id)} is defined with agent ${named.agent}; the import never attaches `
-          + `a bot to another agent's pane. Edit it first (automagik-herdr edit ${named.id} --agent ${agent}), or give the seat another hc name.`);
+          + `a bot to another agent's pane. Edit it first (am edit ${named.id} --agent ${agent}), or give the seat another hc name.`);
         continue;
       }
       seats.push({ ...seat, agent, action: "attach", id: named.id, bot: named });
@@ -5009,7 +5351,7 @@ function importText(plan, { key, label, apply }) {
 }
 
 async function cmdImport(opts) {
-  if (!opts["from-hc"]) throw new CliError("import needs its source: automagik-herdr import --from-hc [--squad-label L] [--apply].", 2);
+  if (!opts["from-hc"]) throw new CliError("import needs its source: am import --from-hc [--squad-label L] [--apply].", 2);
   const label = opts["squad-label"] ?? "squad";
   if (!/^[A-Za-z0-9._-]+$/.test(label)) throw new CliError(`--squad-label: "${label}" isn't an hc label key.`, 2);
   const project = await editProjectFor(opts);
@@ -5057,7 +5399,7 @@ async function cmdImport(opts) {
 
 async function cmdWhois(opts, [terminal]) {
   if ((opts.bot === undefined) === (terminal === undefined)) {
-    throw new CliError("whois needs a terminal or --bot <id>: automagik-herdr whois <terminal> | whois --bot <id>.", 2);
+    throw new CliError("whois needs a terminal or --bot <id>: am whois <terminal> | whois --bot <id>.", 2);
   }
   if (opts.bot !== undefined) {
     const id = BOT_ID_SHAPE.test(opts.bot) || opts.bot.startsWith("session-") ? opts.bot : findBot((await projectFor(opts)).file, opts.bot).id;
@@ -5121,7 +5463,7 @@ async function cmdBrief(opts, [ref]) {
   const bot = await botIn(project, ref, opts);
   if (bot.planned) {
     if (opts.json) return { id: bot.id, briefing: null, reason: "planned bots get no briefing" };
-    process.stderr.write(`automagik-herdr: ${bot.name} is planned; planned bots get no briefing.\n`);
+    process.stderr.write(`am: ${bot.name} is planned; planned bots get no briefing.\n`);
     return "";
   }
   // briefing.mjs' own gathering; a failed hc call reads as "no answer" (unreachable), as
@@ -5212,8 +5554,15 @@ function definedIn(key, botId, { strict = false } = {}) {
 async function callingBot(opts) {
   const self = process.env.HC_TERMINAL_ID;
   if (!self) throw new CliError("Only a bot starts workers, from its own pane: HC_TERMINAL_ID isn't set here, so this isn't a bot's pane.");
-  const me = await hcGet(self);
-  if (!me) throw new CliError(`${self} isn't a terminal hc knows; start workers from a bot's pane.`);
+  // Three answers, told apart (#1125): no such terminal (hc's not_found), a lookup that failed (the
+  // core unreachable, a sandbox blocking hc's socket or folders), and an answer that isn't JSON.
+  let me;
+  try { me = await hcGet(self); } catch (e) {
+    throw new CliError(`hc couldn't look up this pane (${self}), so it can't be checked as a bot's: ${e?.message ?? e}. `
+      + "Nothing was started. In a Codex pane, hc needs the sandbox's network access and herdr-core's state and data "
+      + "folders (the pack's Codex launch gives both, #1125); restart the bot if it predates that.");
+  }
+  if (!me) throw new CliError(`${self} isn't a terminal hc knows (hc get: not found); start workers from a bot's pane.`);
   const address = me.address ?? self;
   // Named before the ledger is read: its one-time label import looks in a --project too.
   const named = opts.project !== undefined ? await namedKeyOf(opts.project) : null;
@@ -5261,8 +5610,8 @@ async function unboundRefusal(me, address) {
   const { found } = await projectsDefining(labelled, await botProjectHints(me, address));
   const key = found.length === 1 ? found[0].key : "<its project>";
   return `${base} Its ${BOT_LABEL}=${labelled} label is from before the ledger, which no longer reads labels. `
-    + `Tie it: automagik-herdr attach ${labelled} ${address} --project ${key}. A Claude session must run in that project to be `
-    + `attached; if it doesn't, start the bot there: automagik-herdr start ${labelled} --project ${key}.`;
+    + `Tie it: am attach ${labelled} ${address} --project ${key}. A Claude session must run in that project to be `
+    + `attached; if it doesn't, start the bot there: am start ${labelled} --project ${key}.`;
 }
 
 const realDir = (p) => { try { return realpathSync(p); } catch { return null; } };
@@ -5938,7 +6287,7 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
       try { await recordPullRequests({ asked, start, budget, every, lines: out.lines }); } catch (e) {
         out.lines.push(`pull requests not recorded: ${e?.message ?? e}`);
       }
-      if (out.more) out.lines.push(`${out.more} more finished ${out.more === 1 ? "worker's worktree" : "workers' worktrees"} left for the next cleanup (automagik-herdr reap)`);
+      if (out.more) out.lines.push(`${out.more} more finished ${out.more === 1 ? "worker's worktree" : "workers' worktrees"} left for the next cleanup (am reap)`);
     } finally { stop(); dropLock(lock, token); }
   } catch (e) {
     out.lines.push(`worktree cleanup failed: ${e?.message ?? e}`);
@@ -5963,7 +6312,7 @@ async function cmdReap(opts, rest) {
  * how a lead ends a worker that has finished. On this computer only.
  */
 async function cmdWorkerKill(opts, panes) {
-  if (panes.length !== 1 || optionLike(panes[0])) throw new CliError("worker kill takes one terminal: automagik-herdr worker kill <pane>.", 2);
+  if (panes.length !== 1 || optionLike(panes[0])) throw new CliError("worker kill takes one terminal: am worker kill <pane>.", 2);
   const [pane] = panes;
   if (pane.includes("/")) throw new CliError(`worker kill ends a worker on this computer only; ${pane} names another machine. Nothing was ended.`);
   const { me, bot } = await callingBot(opts);
@@ -6011,7 +6360,7 @@ async function cmdWorker(opts, rest) {
   // `worker kill <pane>`: a task call always names --branch or --worktree, so the two never mix.
   if (rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined) return cmdWorkerKill(opts, rest.slice(1));
   const task = rest.join(" ").trim();
-  if (!task) throw new CliError('worker needs the task text: automagik-herdr worker "<task>" --branch <name>.', 2);
+  if (!task) throw new CliError('worker needs the task text: am worker "<task>" --branch <name>.', 2);
   if (optionLike(task)) throw new CliError("The task text can't start with a dash; the agent would read it as an option.", 2);
   if ((opts.branch === undefined) === (opts.worktree === undefined)) throw new CliError("Give --branch or --worktree (one of them).", 2);
   if (opts.base !== undefined && opts.branch === undefined) throw new CliError("--base goes with --branch.", 2);
@@ -6071,7 +6420,7 @@ async function cmdWorker(opts, rest) {
     }
   }
   const override = !swap && Object.values(given).some((v) => v !== undefined);
-  const plan = workerPlan(bot, pick, agents);
+  const plan = workerPlan(bot, pick, agents, localWhere());
   if (plan.error) throw new CliError(plan.error, 2);
   warnings.push(...plan.warnings);
   // The agent that runs: the plan's, or the one a template's command names (null: can't tell).
@@ -6084,6 +6433,13 @@ async function cmdWorker(opts, rest) {
     const t = await templateRuns(plan.template, agents);
     runs = t.runs;
     templateCommand = t.command?.trim() ? t.command : null;
+    // #1125: a worker template owns its command (the owner's exception, bypass included): never
+    // rewritten or refused here; one that runs Codex without --no-daemon is named, with the fix.
+    // #1142: one whose Codex run puts an option after its -- would run without it: refused first.
+    const lost = templateCommand ? codexTemplateRefusal(plan.template, templateCommand, agents) : null;
+    if (lost) throw new CliError(lost);
+    const noDaemon = templateCommand ? codexTemplateWarning(plan.template, templateCommand, agents) : null;
+    if (noDaemon) warnings.push(noDaemon);
     if (runs === "claude") {
       templateArgv = t.command?.trim() ? commandArgv({ shell: t.command }, [task]) : null;
       if (!templateArgv) {
@@ -6117,6 +6473,8 @@ async function cmdWorker(opts, rest) {
   // --session-id, labelled and in its start row; a template's own command is left as it is.
   const session = !plan.template && choosesSession(plan.agent) && !ownsSession(plan.argv) ? newSessionId() : null;
   const launchArgv = session ? [...plan.argv, ...sessionIdArgs(plan.agent, session)] : plan.argv;
+  // The argv the worker runs, set once its worktree is known (a Codex worker's grants come from it).
+  let workerArgv = launchArgv;
   // Held across a fetch and git worktree add (60 s each) and the hc calls, so a second call on
   // this worktree waits for the first's start rather than failing; kept fresh while held. A
   // task's worker takes its name's lock first (taskLock), so a second call for the task on
@@ -6207,8 +6565,23 @@ async function cmdWorker(opts, rest) {
     if (runPath?.note) warnings.push(runPath.note);
     const taken = new Set(rowsOf(ls).map((r) => r?.name).filter(Boolean));
     const name = taskName ?? hcName(opts.name ?? branchSlug(place.branch), bot.id, taken);
+    // #1125: a Codex worker may write its worktree's own git dir and git common dir (the main
+    // checkout's .git), herdr-core's folders and the tool caches, resolved from the worktree it runs in.
+    // Through the actual hc proxy (#631) it gets the mode words alone: the proxy starts only the
+    // approved argv, which names no per-launch folder, and that contract stays as it is.
+    const grantless = plan.agent === "codex" && proxied;
+    if (grantless) {
+      warnings.push(`${bot.name}'s Codex worker starts through the hc proxy, so it runs Codex's launch mode without its extra `
+        + `folders (git dirs, herdr-core's, tool caches; #1125): the proxy starts only the approved command. A write there `
+        + `goes to Codex's reviewer, and the proxy's own sandbox may still refuse it.`);
+    }
+    const codexPlan = plan.agent === "codex" && !grantless ? await localCodexGrantPlan(place.worktree) : null;
+    // #1142: what the launch withheld, said once; a template worker runs its own command and gets nothing of the pack's.
+    const codexWithheld = codexPlan && !plan.template ? localCodexWarning(agents.codex?.run, codexPlan) : null;
+    if (codexWithheld) warnings.push(codexWithheld);
+    workerArgv = codexPlan ? withCodexGrants(launchArgv, codexPlan.dirs) : launchArgv;
     const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
-      agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: launchArgv, session, task, template: plan.template,
+      agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task, template: plan.template,
       templateArgv,
       login: claudeLogin(templateArgv ?? plan.argv ?? [], warnings),
       path: runPath?.path ?? process.env.PATH, taskId, project: project.key, lead,
@@ -6254,7 +6627,7 @@ async function cmdWorker(opts, rest) {
   report(warnings);
   const out = { terminal, bot: bot.id, role, parent: me.address, worktree: place.worktree, branch: place.branch, created: place.created,
     base: place.base, template: plan.template, agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, pid,
-    argv: maskedArgv(launchArgv, session),
+    argv: maskedArgv(workerArgv, session),
     warnings: [...fileWarnings, ...warnings],
     task: taskId ?? null, project: project.key, lead, baseCommit: base, swap, override, override_requested: overrideRequested };
   if (opts.json) return out;
@@ -6267,7 +6640,7 @@ async function cmdWorker(opts, rest) {
   const swapped = swap ? [`  swap      yes: ${bot.name}'s planned swap task`] : [];
   return [terminal, `  role      ${role}`, ...contract, `  worktree  ${place.worktree}`, `  branch    ${place.branch} (${how})`, ...what,
     ...swapped,
-    `End it once the task merges: automagik-herdr worker kill ${terminal}`].join("\n");
+    `End it once the task merges: am worker kill ${terminal}`].join("\n");
 }
 
 // ---- updates (A14) ----
@@ -6331,7 +6704,7 @@ export async function cmdUpdate(opts, _rest = [], io = {}) {
     const restore = r.installed.restored;
     const mods = (restore.failed?.length ? restore.failed : [restore.mod]).filter(Boolean).join(", ");
     const stopped = restore.unavailable ? `; ${restore.unavailable}` : "";
-    const removed = restore.prevRemoved ? " The failed pack was removed, so `automagik-herdr update --rollback` has nothing to go back to." : "";
+    const removed = restore.prevRemoved ? " The failed pack was removed, so `am update --rollback` has nothing to go back to." : "";
     const warnings = Array.isArray(restore.warnings) ? restore.warnings.filter((w) => typeof w === "string" && w !== "") : [];
     const warned = warnings.length > 0 ? ` Warning: ${warnings.join(" ")}` : "";
     return `Automagik Herdr ${restore.failedVersion ?? r.installed.version} failed to load (${mods} failed herdr-app check${stopped}): `
@@ -6342,9 +6715,9 @@ export async function cmdUpdate(opts, _rest = [], io = {}) {
       + `It is still installed; auto-update waits for a newer release.${note}`;
   }
   if (r.installed) {
-    return `Updated Automagik Herdr ${current} → ${r.installed.version}. The replaced pack is kept: \`automagik-herdr update --rollback\` puts it back. Herdr reloads its mods on its own.${note}${hooksLines(r.installed.hooks?.hooks)}${heldLines(r.installed)}${meter.lines.map((l) => `\n${l}`).join("")}`;
+    return `Updated Automagik Herdr ${current} → ${r.installed.version}. The replaced pack is kept: \`am update --rollback\` puts it back. Herdr reloads its mods on its own.${note}${hooksLines(r.installed.hooks?.hooks)}${heldLines(r.installed)}${meter.lines.map((l) => `\n${l}`).join("")}`;
   }
-  if (r.update) return `Automagik Herdr ${current} is installed; ${r.update.version} is out (${r.update.page}). Run \`automagik-herdr update\` to install it.`;
+  if (r.update) return `Automagik Herdr ${current} is installed; ${r.update.version} is out (${r.update.page}). Run \`am update\` to install it.`;
   return `Automagik Herdr ${current} is installed; the latest release is ${r.latest ?? "none yet"}. Up to date.${note}`;
 }
 
@@ -6360,7 +6733,7 @@ function autoSetting(opts, io) {
   }
   if (opts.json) return { ...s, checks: !updatesOff(env) };
   const lines = [`Install updates automatically: ${s.on ? "on" : "off"}.`];
-  if (!s.managed) lines.push(`It doesn't apply to this pack (${s.why}): updates stay a notice and \`automagik-herdr update\`.`);
+  if (!s.managed) lines.push(`It doesn't apply to this pack (${s.why}): updates stay a notice and \`am update\`.`);
   else if (s.on && s.skip) lines.push(`${s.skip} was rolled back here: it waits for a release newer than ${s.skip}.`);
   if (updatesOff(env)) lines.push(`Update checks are off (${NO_UPDATE_ENV}=1), so nothing is installed.`);
   return lines.join("\n");
@@ -6402,7 +6775,7 @@ const REVIVE_RESTART_MS = Number(process.env.AUTOMAGIK_HERDR_REVIVE_RESTART_MS) 
 const REVIVE_SETTLE_MS = process.env.AUTOMAGIK_HERDR_REVIVE_SETTLE_MS !== undefined ? Number(process.env.AUTOMAGIK_HERDR_REVIVE_SETTLE_MS) || 0 : 20_000;
 const reviveStampPath = () => join(appHome(), "automagik-herdr", "revive-boot.json");
 const reviveReportPath = () => join(appHome(), "automagik-herdr", "revive-last.json");
-const REVIVE_USAGE = "usage: automagik-herdr revive [--dry-run] [--boot] [--wait SECONDS] [--json] | revive service install|uninstall|status";
+const REVIVE_USAGE = "usage: am revive [--dry-run] [--boot] [--wait SECONDS] [--json] | revive service install|uninstall|status";
 
 /** Waits until herdr-core answers (`hc server status`), up to `seconds`; a CliError when it doesn't. */
 async function coreUp(seconds) {
@@ -6423,7 +6796,7 @@ async function coreUp(seconds) {
 const runSelf = (args) => runProgram(process.execPath, [fileURLToPath(import.meta.url), ...args], { timeout: REVIVE_RESTART_MS });
 
 /** A refusal's first sentence, for the report: what happened, without the advice after it. */
-const firstSentence = (text) => { const t = String(text ?? "").trim().replace(/^automagik-herdr: /, ""); const m = /^(.*?[.!?])(\s|$)/.exec(t); return (m ? m[1] : t).replace(/[.!?]$/, ""); };
+const firstSentence = (text) => { const t = String(text ?? "").trim().replace(/^(?:am|automagik-herdr): /, ""); const m = /^(.*?[.!?])(\s|$)/.exec(t); return (m ? m[1] : t).replace(/[.!?]$/, ""); };
 
 /**
  * One bot back through `restart --tree --revive` (cmdRestart: in its pane's space, tab and
@@ -6472,7 +6845,7 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   if (opts.boot && !dry) {
     let ran = null;
     try { ran = JSON.parse(readFileSync(reviveStampPath(), "utf8"))?.boot_ms ?? null; } catch { ran = null; }
-    if (sameBoot(ran, bootMs)) return opts.json ? { ran: false, reason: "already ran for this boot" } : "revive already ran for this boot; run automagik-herdr revive to look again.";
+    if (sameBoot(ran, bootMs)) return opts.json ? { ran: false, reason: "already ran for this boot" } : "revive already ran for this boot; run am revive to look again.";
   }
   const core = await coreId();
   const look = async () => {
@@ -6595,7 +6968,7 @@ async function reviveService(opts, verb, more = []) {
   }
   if (process.platform !== "linux") {
     throw new CliError("The revive login service is built for Linux (a systemd user unit) so far; macOS (launchd) is the next delivery of #939. "
-      + "Until then, run automagik-herdr revive by hand after a restart of this computer.");
+      + "Until then, run am revive by hand after a restart of this computer.");
   }
   if (text !== null && !unitIsOurs(text)) throw new CliError(`${unit} is there and isn't one Automagik Herdr wrote, so it was left as it is.`);
   const notes = [];
@@ -6732,7 +7105,7 @@ async function machinesAuto(opts) {
     on = opts.auto === "on";
   }
   if (opts.json) return { machine, on };
-  return `Updates from the Herdr ${machine ?? "this computer"} is linked into: ${on ? "on" : "off"}.${on ? "" : " Nothing is updated there until `automagik-herdr machines --auto on`."}`;
+  return `Updates from the Herdr ${machine ?? "this computer"} is linked into: ${on ? "on" : "off"}.${on ? "" : " Nothing is updated there until `am machines --auto on`."}`;
 }
 
 /**
@@ -6766,7 +7139,7 @@ export async function cmdMachines(opts, [verb, ...rest] = [], io = {}) {
       state.machines = state.machines[opts.machine] ? { [opts.machine]: state.machines[opts.machine] } : {};
     }
     if (opts.json) return { ...state, linked };
-    return stateLines(state, linked).join("\n") || "No machine has been checked yet: automagik-herdr machines update.";
+    return stateLines(state, linked).join("\n") || "No machine has been checked yet: am machines update.";
   }
   if (updatesOff(env)) {
     if (opts.json) return { disabled: true, entries: [], notes: [] };
@@ -6861,7 +7234,7 @@ export async function cmdDshTui(opts, [verb, ...rest], io = {}) {
       try {
         const approval = approvedProxyState({ project: projectKey, bot: { id: "" }, env });
         if (approval.error) r.checks.push({ check: "approved-roster", ok: true, warning: true,
-          detail: approval.error, fix: "automagik-herdr proxy approve (review the diff)" });
+          detail: approval.error, fix: "am proxy approve (review the diff)" });
         app = env.HERDR_APP_HOME || join(env.HOME || homedir(), ".config/herdr-app");
         let attachRows = [];
         try { attachRows = readAttachFile(attachPath(app)) ?? []; } catch { attachRows = []; }
@@ -6937,8 +7310,8 @@ export async function cmdDshTui(opts, [verb, ...rest], io = {}) {
         detail: `${bot.name}: ${agy}${perms ? `${perms}; ${guardrail}; ` : ""}hcProxy ${proxyStateText(state)}; ${bot.detail}`,
         ...(seatAgy ? { agyPermissions: { allow: seatAgy.allow, deny: seatAgy.deny, trustedWorkspaces: seatAgy.trustedWorkspaces } } : {}),
         ...(workerAgy ? { workerAgyPermissions: { allow: workerAgy.allow, deny: workerAgy.deny, trustedWorkspaces: workerTrusted } } : {}),
-        fix: needsApproval ? "automagik-herdr proxy approve (review the diff), then restart"
-          : !ok || bot.warning ? `automagik-herdr restart ${bot.id}` : null });
+        fix: needsApproval ? "am proxy approve (review the diff), then restart"
+          : !ok || bot.warning ? `am restart ${bot.id}` : null });
       if (!ok) r.code = 1;
       if (agent?.leadProject && projectFile) {
         const eff = effectiveLead(projectFile, bot.id, { project: projectKey, projects });
@@ -6949,7 +7322,7 @@ export async function cmdDshTui(opts, [verb, ...rest], io = {}) {
           check: `lead:${bot.id}`,
           ok: !eff.warning,
           detail: eff.warning ?? `${bot.name}: lead ${eff.leadBot?.name ?? eff.lead} (${eff.lead}) in ${eff.leadProject}`,
-          fix: eff.warning ? `automagik-herdr edit ${bot.id} --lead <bot> --lead-project <dir>` : null,
+          fix: eff.warning ? `am edit ${bot.id} --lead <bot> --lead-project <dir>` : null,
         });
         if (eff.warning) r.code = 1;
       }
@@ -6960,7 +7333,7 @@ export async function cmdDshTui(opts, [verb, ...rest], io = {}) {
             check: `cross-member:${bot.id}`,
             ok: false,
             detail: `${bot.name}: ${w}`,
-            fix: `automagik-herdr edit <member> --project <dir> --lead ${bot.id} --lead-project ${projectKey}`,
+            fix: `am edit <member> --project <dir> --lead ${bot.id} --lead-project ${projectKey}`,
           });
           r.code = 1;
         }
@@ -7000,7 +7373,7 @@ export async function meterAfterUpdate(io) {
     const out = JSON.parse(r.stdout);
     return { lines: [...out.results.map(resultLine), ...(out.notes ?? [])], results: out.results };
   } catch {
-    return { lines: [`Warning: usagemeter was not checked: ${(r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n").pop()}. Run \`automagik-herdr meter install\` to retry.`], results: [] };
+    return { lines: [`Warning: usagemeter was not checked: ${(r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n").pop()}. Run \`am meter install\` to retry.`], results: [] };
   }
 }
 
@@ -7097,7 +7470,7 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   try {
     parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true });
   } catch (e) {
-    process.stderr.write(`automagik-herdr: ${e.message}\n\n${USAGE}\n`);
+    process.stderr.write(`am: ${e.message}\n\n${USAGE}\n`);
     return 2;
   }
   const { values: opts, positionals } = parsed;
@@ -7106,13 +7479,13 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   if (opts.version && !command) {
     let version = "0.0.0";
     try { version = readFileSync(new URL("../VERSION", import.meta.url), "utf8").trim() || version; } catch { /* no VERSION file */ }
-    process.stdout.write(opts.json ? `${JSON.stringify({ version })}\n` : `automagik-herdr ${version}\n`);
+    process.stdout.write(opts.json ? `${JSON.stringify({ version })}\n` : `am ${version}\n`);
     return 0;
   }
   if (opts.help && command === "proxy") { process.stdout.write(`${PROXY_USAGE}\n`); return 0; }
   if (opts.help || !command || command === "help") { process.stdout.write(`${USAGE}\n`); return command || opts.help ? 0 : 2; }
   const run = COMMANDS[command];
-  if (!run) { process.stderr.write(`automagik-herdr: unknown command "${command}"\n\n${USAGE}\n`); return 2; }
+  if (!run) { process.stderr.write(`am: unknown command "${command}"\n\n${USAGE}\n`); return 2; }
   try {
     if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"]))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
     if (opts.machine !== undefined && !ON_MACHINE.has(command)) {
@@ -7127,8 +7500,17 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     if (TIDIES.has(command) && opts.machine === undefined) { await tidyQuietly(); await recordSessions(); }
     return exitAfter.code;
   } catch (e) {
-    const message = e instanceof CliError ? e.message : `${e?.stack ?? e}`;
-    process.stderr.write(unprinted(`automagik-herdr: ${message}\n`));
+    const botAction = command === "start" || command === "restart";
+    if (botAction) {
+      try {
+        const dir = join(appHome(), "automagik-herdr");
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        appendFileSync(join(dir, "actions.log"), unprinted(`${new Date().toISOString()} ${command}: ${e?.stack ?? e}\n`), { mode: 0o600 });
+      } catch { /* A log that cannot be written must not hide the original failure. */ }
+    }
+    const message = e instanceof CliError ? e.message : botAction
+      ? actionError(e, command === "start" ? "Start" : "Restart") : `${e?.stack ?? e}`;
+    process.stderr.write(unprinted(`am: ${message}\n`));
     if (opts.json && e instanceof CliError && e.detail) process.stdout.write(unprinted(`${JSON.stringify({ error: message, ...e.detail }, null, 2)}\n`));
     return e instanceof CliError ? e.code : 1;
   }

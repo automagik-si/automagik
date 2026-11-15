@@ -1,0 +1,43 @@
+<!-- The menu drawer (the owner, 2026-11-12: "i prefer a product drawer on the left"; "i really like the pushes the page"; "automagik, desktop and
+     mobile shouldnt be entire lines like this"; and, approving it: "yes to the drawer, build it into the page, add arca on the top place the drawer
+     button somewhere where the sandwich would be the burguer. the console thing shouldnt be on the left bar").
+     ONE header per page, in the product's own world. The menu button ([data-family-open], in the page's header, not in this file) is three
+     lines in the family's three colours, at the left edge of the window (the owner, 2026-11-12: "Left edge of the window", "Three lines,
+     three colours"). It opens this drawer from the left edge, and the page moves aside ([data-family-page] on the page's wrapper).
+     Top to bottom: WHERE YOU ARE (the product whose page this is, and its own sections: these show only where the header has no room for them);
+     Automagik itself with the two places its app runs, as ONE row; the other products; Support and Close at the thumb.
+     There is no console and no cloud row here.
+     What a host fills: the block marked data-family-here (its own product, tile, line and address), the list data-family-links (its own
+     sections), the pictures (the slots in capitals between double underscores) and the product rows. Everything else is the same on every page of the family.
+     APPROVED by the owner, 2026-11-12 ("thats better now, approved. coming soon under mykes"), after "its not good the logo isnt correct, on
+     genie and mykes also wrong": no pet and no stand-in
+     mark in a row. Omni and Genie show Automagik's own WORDMARK files (the name alone, with the product's sparkle); Mykes shows the word alone,
+     the file the live deck uses; the triskle appears once, in Automagik's lockup; the top row shows the host product's own logo.
+     The Automagik lockup is THEIR file, whole (mark, letters with the violet sparkle, spacing): the three-colour lockup with cream letters on
+     night and with ink letters on sand, as light PNGs at twice the shown size. Their rule: the triskle is always in colour. Nothing is redrawn.
+     NO picture of the drawer is among the page's own requests (twelfth issue): each carries its address in data-src (or data-srcset) and the
+     script gives it its address the first time its layer is shown. A closed drawer costs the page nothing, in every browser. PRIVATE until Automagik's header ships.
+     One piece: this HTML, family.css, family.js.
+     With script off the button is a plain link to automagik.si, and this drawer stays closed. -->
+<div class="fam-scrim" data-family-scrim hidden></div>
+<nav class="fam" id="family-drawer" data-family-drawer aria-label="Menu" tabindex="-1" hidden>
+  <div class="fam-here-block" data-family-here>
+    <a class="fam-item is-here" href="https://automagik.si/arca/" data-family-product="Arca" data-family-line="Be your own cloud. Infrastructure for AI agents." aria-current="page"><span class="fam-words"><span class="fam-logo">__FAM_ARCA__</span><span>Be your own cloud. Infrastructure for AI agents.</span></span><span class="fam-here">You are here</span></a>
+    <ul class="fam-links" data-family-links aria-label="Sections"><li><a href="#see">Product</a></li><li><a href="#usecases">Use cases</a></li><li><a href="#machines">Machines</a></li><li><a href="#os">Arca OS</a></li></ul>
+  </div>
+  <div class="fam-top">
+    <a class="fam-home" href="https://automagik.si/" aria-label="Automagik"><span class="fam-lockup"><picture class="fam-lock-cream"><source media="(max-width: 480px)" data-srcset="__FAM_LOCKUP_CREAM_48__"><img data-src="__FAM_LOCKUP_CREAM_64__" alt="" width="396" height="64" decoding="async"></picture><picture class="fam-lock-ink"><source media="(max-width: 480px)" data-srcset="__FAM_LOCKUP_INK_48__"><img data-src="__FAM_LOCKUP_INK_64__" alt="" width="396" height="64" decoding="async"></picture></span></a>
+    <span class="fam-apps" role="group" aria-label="The Automagik app"><a class="fam-chip" href="https://automagik.si/desktop/" data-family-product="Desktop" data-family-line="Your agent team, in your chats.">Desktop</a><a class="fam-chip" href="https://automagik.si/mobile/" data-family-product="Mobile" data-family-line="Your agents on your Android phone.">Mobile</a></span>
+  </div>
+  <span class="eyebrow">Products</span>
+  <ul class="fam-list">
+    <li><a class="fam-item is-word" href="https://automagik.si/omni/" data-family-product="Omni" data-family-line="Your chat apps, connected."><span class="fam-words"><span class="fam-lockup fam-word"><img class="fam-lock-cream" data-src="__FAM_WORD_OMNI_CREAM__" alt="Omni" width="617" height="264" decoding="async"><img class="fam-lock-ink" data-src="__FAM_WORD_OMNI_INK__" alt="Omni" width="617" height="264" decoding="async"></span><span>Your chat apps, connected.</span></span></a></li>
+    <li><a class="fam-item is-word" href="https://automagik.si/genie/" data-family-product="Genie" data-family-line="A wish, a branch, a report."><span class="fam-words"><span class="fam-lockup fam-word"><img class="fam-lock-cream" data-src="__FAM_WORD_GENIE_CREAM__" alt="Genie" width="677" height="264" decoding="async"><img class="fam-lock-ink" data-src="__FAM_WORD_GENIE_INK__" alt="Genie" width="677" height="264" decoding="async"></span><span>A wish, a branch, a report.</span></span></a></li>
+    <li><a class="fam-item is-word" href="https://automagik.si/mykes/" data-family-product="Mykes" data-family-line="Coming soon."><span class="fam-words"><span class="fam-lockup fam-word is-mykes"><img class="fam-lock-cream" data-src="__FAM_WORD_MYKES_CREAM__" alt="Mykes" width="793" height="257" decoding="async"><img class="fam-lock-ink" data-src="__FAM_WORD_MYKES_INK__" alt="Mykes" width="793" height="257" decoding="async"></span><span>Coming soon.</span></span></a></li>
+  </ul>
+  <div class="fam-foot"><a class="quiet-link" href="https://docs.automagik.dev">Support</a><button class="pill ghost small" type="button" data-family-close>Close</button></div>
+</nav>
+<!-- Stepping into another product's world: its ground opens from the thing that was pressed and covers the window; then the browser goes there.
+     On a real page this layer holds only the lockup, the product's name and its line. A page that keeps the visitor (data-family-stay, the look
+     page only) adds its own note and a way back into .fam-world-in; neither is in this file, so a host cannot ship them by accident. -->
+<div class="fam-world" data-family-world hidden><div class="fam-world-in"><span class="fam-lockup is-large" role="img" aria-label="Automagik"><picture class="fam-lock-cream"><img data-src="__FAM_LOCKUP_CREAM_128__" alt="" width="791" height="128" decoding="async"></picture><picture class="fam-lock-ink"><img data-src="__FAM_LOCKUP_INK_128__" alt="" width="791" height="128" decoding="async"></picture></span><b data-family-world-name></b><span data-family-world-line></span></div></div>

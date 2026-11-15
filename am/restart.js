@@ -3,12 +3,14 @@
 // the replacement carries over from the old pane. The CLI's `restart` runs it with hc; the
 // sidebar's Restart runs the CLI. Pure: no `herdr`, so `node --test` runs it. Apache-2.0.
 
-import { agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, effortArgs, launchRun, modelArgs, ownsSession,
-  resumeArgs, resumesById, sessionIdArgs, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
+import { agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
+  modelArgs, ownsSession, resumeArgs, resumesById, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
 import { SQUAD_LABEL, SQUAD_MARK } from "./launchArgs.js";
-import { ENV, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, templateAgent } from "./workers.js";
+import { ENV, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, codexCommandCheck,
+  codexTemplateRefusal, codexTemplateWarning, templateAgent } from "./workers.js";
 import { CONFIG_VAR, envWords } from "./logins.js";
-import { hermesPairArgs } from "./hermesPair.js";
+import { hermesPairRun } from "./hermesPair.js";
+import { actionError } from "./actionError.js";
 
 /** The pane label the briefing hook sets to the Claude session a terminal runs (workers.js SESSION_LABEL). */
 const SESSION = "agent.session";
@@ -126,14 +128,21 @@ export function withoutPrompt(args) {
  * and returns it as `sessionId`, unless its command picks a session of its own (ownsSession: a
  * person's --session-id, --resume or --continue wins) or is a template command that can't take
  * words; a resume never gets one (it keeps its session). Else `sessionId` is null.
+ * A Codex seat (#1125: a bot runs the pack's Codex launch mode, never a template's bypass) keeps
+ * its template only when the template's command names no approval or sandbox flag of its own (nor
+ * an `--add-dir` `where` doesn't allow: models.js codexWhere) and provably forwards words to Codex
+ * as options (codexCommandCheck `forwards`, #1142: no `--` in its Codex run, no earlier "$@"),
+ * and takes words after it: the mode words it lacks and an `--add-dir` for each
+ * of `grants` (the folders this launch may write, models.js codexGrants) go after it through
+ * "$@", as resume words do, and `granted` is true. Any other Codex template is set aside for the
+ * agent row, and `templateNote` names it and its flags (never a value). Else `templateNote` is
+ * null and `granted` false (the caller adds the grants to the agent row's mode words).
  */
 export function restartPlan({ bot, run, runningAgent = null, session = null, fresh = false, agent, model, template = null,
-  agy = null, newSession = null }) {
+  agy = null, newSession = null, grants = [], where = null }) {
   if (bot.agent === "hermes" && bot.hermes !== undefined) {
-    const pair = hermesPairArgs(bot);
-    if (fresh || agent !== undefined || model !== undefined || template) throw new Error("This Hermes bot is paired: unpair it before a fresh session, agent/model swap or template launch.");
-    const argv = run.length === 1 ? [...run, ...pair] : run;
-    if (JSON.stringify(argv.slice(1)) !== JSON.stringify(pair)) throw new Error("The paired Hermes launch does not match its stored binding.");
+    if (fresh || (agent !== undefined && agent !== "hermes") || model || template) throw new Error("This Hermes bot is paired; unpair it before a fresh session, agent/model swap or template launch.");
+    const argv = hermesPairRun(run, bot);
     return { mode: "resume", agent: "hermes", model: null, resume: ["--continue", "Bot Chat"], argv,
       source: argv, template: null, agySettings: null, sessionId: null, canonicalBot: true, note: "paired Bot Chat, resolved by exact title" };
   }
@@ -153,23 +162,38 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
   // A template owns its command only when it runs the bot's own agent, whatever the pane's
   // foreground says (unknown included): a template for another agent, a swap or a pane on
   // another agent starts from the agent row (the template would cross them).
-  const tpl = !swap && (!runningAgent || runningAgent === key) && typeof template?.command === "string" && template.command.trim()
+  let tpl = !swap && (!runningAgent || runningAgent === key) && typeof template?.command === "string" && template.command.trim()
     && templateAgent(template.command) === key ? template : null;
+  // #1125: a Codex seat's template, read (never rewritten): kept with the mode words it lacks and
+  // the grants after it, or set aside for the agent row, by name.
+  let codexWords = [], templateNote = null;
+  const check = tpl && key === "codex" ? codexCommandCheck(tpl.command, undefined, where) : null;
+  if (check) {
+    if (check.conflicts.length || !check.forwards || !takesWords(tpl.command)) {
+      const why = check.conflicts.length ? `names ${check.conflicts.join(", ")}`
+        : check.lost.length ? `puts ${check.lost.join(", ")} after its --, where Codex reads them as prompt text`
+          : "can't pass the pack's Codex words to Codex as options";
+      templateNote = `its template ${tpl.name} ${why}, so it started from its agent row in Codex's launch mode (#1125)`;
+      tpl = null;
+    } else codexWords = [...check.missing, ...grants.flatMap((d) => ["--add-dir", d])];
+  }
+  const granted = Boolean(check && tpl);
   // A template command can't take resume words (it ends in a separator or a comment): start it
   // fresh and say why, as a helper does.
   const blocked = "its template's command ends in a separator or a comment, so it can't take resume words";
   const plan = (mode, extra = [], note = null) => {
     if (!tpl) return { mode, agent: key, model: pin, resume: extra, argv: [...run, ...modeWords, ...settingsWords, ...extra, ...modelArgs(key, pin)],
-      source, template: null, agySettings: settings, note };
-    const words = [...settingsWords, ...extra];
+      source, template: null, agySettings: settings, note, templateNote, granted: false };
+    const words = [...codexWords, ...settingsWords, ...extra];
     const argv = commandArgv({ shell: tpl.command }, words);
-    if (argv) return { mode, agent: key, model: null, resume: extra, argv, source, template: tpl.name, agySettings: settings, note };
+    if (argv) return { mode, agent: key, model: null, resume: extra, argv, source, template: tpl.name, agySettings: settings, note, templateNote, granted };
     // Nothing past the template's own command: neither the permission list nor resume words.
     if (words.length) {
       return { mode: "fresh", agent: key, model: null, resume: [], argv: commandArgv({ shell: tpl.command }), source, template: tpl.name,
-        agySettings: null, note: settingsWords.length ? `${blocked}; the Antigravity permission list can't be added either` : blocked };
+        agySettings: null, note: settingsWords.length ? `${blocked}; the Antigravity permission list can't be added either` : blocked, templateNote, granted: false };
     }
-    return { mode, agent: key, model: null, resume: [], argv: commandArgv({ shell: tpl.command }), source, template: tpl.name, agySettings: null, note };
+    return { mode, agent: key, model: null, resume: [], argv: commandArgv({ shell: tpl.command }), source, template: tpl.name, agySettings: null, note,
+      templateNote, granted: false };
   };
   // A new conversation: on the CLI's chosen id when the command takes one and picks none itself.
   const started = (mode, note = null) => {
@@ -465,10 +489,8 @@ export function isPaneIdle(get, screenText = null) {
  * A pane mid-turn would have the turn cut in half; a helper hc ends with its parent
  * (die_with_parent, as a worker is) would end with it. --tree (`tree`) restarts those helpers
  * under the new pane (one mid-turn is waited for before anything starts: the CLI's treeIdle).
- * --force (`force`) overrides all. `onMachine`: the pane is on a linked machine, where --tree isn't
- * built yet (#437): the way out for helpers is to wait for a working one, end each pane by hand
- * (a finished worker's pane stays open), then restart, never --tree, nor --force (it drops the
- * other checks too).
+ * --force (`force`) overrides all. `onMachine`: the pane is on a linked machine, where --tree is
+ * run by the CLI on the machine holding the pane, using its existing local tree restart.
  */
 export function restartRefusal({ name, old, helpers = [], force = false, tree = false, onMachine = false, screen = null }) {
   if (force) return null;
@@ -480,11 +502,8 @@ export function restartRefusal({ name, old, helpers = [], force = false, tree = 
   if (doomed.length) {
     const one = doomed.length === 1;
     if (onMachine) {
-      const working = doomed.filter((h) => h.status?.state === "working").map((h) => h.address);
       return `${old.address} has ${one ? "a helper that ends" : "helpers that end"} with it: ${doomed.map((h) => h.address).join(", ")}. `
-        + `Restarting helpers on a linked machine isn't built yet, so nothing was restarted. `
-        + (working.length ? `Wait for ${working.join(", ")} to finish, then end` : "End")
-        + ` ${one ? "its pane" : "each one's pane"} (${doomed.map((h) => `hc kill ${h.address}`).join(", ")}) and restart ${name} again.`;
+        + "Choose Restart with its helpers (--tree runs on their machine), or End helpers and restart (--force).";
     }
     return `${old.address} has ${one ? "a helper that ends" : "helpers that end"} with it: ${doomed.map((h) => h.address).join(", ")}. `
       + `Let ${one ? "it" : "them"} finish, pass --tree to restart ${one ? "it" : "them"} too (resumed, under the new pane), `
@@ -504,23 +523,35 @@ export function restartRefusal({ name, old, helpers = [], force = false, tree = 
  * bot a rebuilt worker's command comes from: its automatic mode is the definition's (#946, #955).
  * A worker's command is rebuilt from its row (its task, the last word hc was given, isn't sent
  * twice) unless a template owns it;
- * any other helper's is its own launch command (paneCommand). Returns { name, replaced, cwd,
+ * any other helper's is its own launch command (paneCommand). Codex (#1125): only a template
+ * worker (its worker.template label, or its ledger row's template) keeps its command as it is,
+ * the owner's template exception, with a warning when it lacks --no-daemon, never with the pack's
+ * folders, and refused when it puts a Codex option after its `--` (#1142). Any other Codex
+ * helper runs the pack's Codex launch mode: a rebuilt worker or an argv command gets the mode
+ * words (its own approval and sandbox words left out, named in `warning`) and an `--add-dir` for
+ * each of `grants` (the folders this launch may write, from helperCwd's folder); a shell command
+ * that names no approval or sandbox flag of its own (nor an --add-dir `where`, models.js
+ * codexWhere, doesn't allow) and provably forwards words to Codex as options (codexCommandCheck
+ * `forwards`) gets the mode words it lacks and the grants through "$@"; any other is refused by name. Returns { name, replaced, cwd,
  * labels, agent, session, mode: "resume" | "fresh", resume, argv, agySettings (the file to write
- * first, or null), note }, or { name, replaced, error } when there is nothing to run.
+ * first, or null), note, warning }, or { name, replaced, error } when there is nothing to run.
  */
-export function helperPlan({ get, worker = null, session = null, agents, fresh = null, agy = null, bot = null, launchAgent = false }) {
+export function helperPlan({ get, worker = null, session = null, agents, fresh = null, agy = null, bot = null, launchAgent = false, grants = [],
+  where = null }) {
   const name = typeof get?.name === "string" && get.name ? get.name : null;
   const replaced = get?.address ?? null;
-  // A worker's worktree first (the ledger's), then the pane's folder, then its program's,
-  // resolved to its canonical path when the caller gave a realpath (a symlinked folder, #884).
-  const cwd = realPathOf(agy?.realpath, worker?.worktree ?? get?.cwd ?? get?.foreground?.cwd ?? null);
+  const cwd = helperCwd({ get, worker, realpath: agy?.realpath });
   const labels = { ...(get?.labels ?? {}) };
   // `launchAgent` (#939, revive: the pane is a bare shell hc kept): its agent by its launch command.
   const agent = agentKeyOfArgv(get?.foreground?.argv, agents) ?? (worker?.agent && agents[worker.agent] ? worker.agent : null)
     ?? (launchAgent ? agentKeyOfArgv(paneCommand(get)?.argv, agents) : null);
   const template = worker?.template ?? labels[WORKER_TEMPLATE_LABEL] ?? get?.template ?? null;
   const isWorker = Boolean(worker || labels[WORKER_OF_LABEL]);
+  // #1125: the owner's template exception reaches only a template worker the pack started.
+  const templateWorker = isWorker && Boolean(worker?.template || labels[WORKER_TEMPLATE_LABEL]);
   let command = null;
+  let warning = null;
+  let codexWords = [];
   if (!template && isWorker && agent && agents[agent]?.run?.length) {
     const model = worker?.model ?? labels[WORKER_MODEL_LABEL] ?? null;
     const effort = worker?.effort ?? labels[WORKER_EFFORT_LABEL] ?? null;
@@ -529,11 +560,46 @@ export function helperPlan({ get, worker = null, session = null, agents, fresh =
     const agyMode = labels[WORKER_AGY_MODE_LABEL] ?? null;
     const modeWhy = agent === "antigravity" ? agyModeProblem(agyMode) : null;
     if (modeWhy) return { name, replaced, error: `${name ?? replaced} can't be run again: ${modeWhy}` };
-    command = { argv: [...launchRun(agent, agents[agent].run, { ...bot, hermes: undefined }), ...agyModeArgs(agent, agyMode), ...modelArgs(agent, model), ...effortArgs(agent, effort)] };
+    command = { argv: withCodexGrants([...launchRun(agent, agents[agent].run, { ...bot, hermes: undefined }, where ?? agy?.homeDir ?? null),
+      ...agyModeArgs(agent, agyMode), ...modelArgs(agent, model), ...effortArgs(agent, effort)], grants) };
   } else {
     const launch = paneCommand(get);
-    if (launch?.shell !== undefined) command = launch;
-    else if (launch && agent && agentKeyOfArgv(launch.argv, agents) === agent) command = { argv: withoutPrompt(withoutResume(agent, launch.argv)) };
+    const check = launch?.shell !== undefined ? codexCommandCheck(launch.shell, agents, where) : null;
+    const who = name ?? replaced;
+    if (check && templateWorker) {
+      // The owner's exception keeps the template's command as written, never with the pack's
+      // folders; one that puts a Codex option after its -- is refused, never run (#1142).
+      const refusal = codexTemplateRefusal(template, launch.shell, agents);
+      if (refusal) return { name, replaced, error: `${who} can't be run again: ${refusal}` };
+      command = launch;
+      warning = codexTemplateWarning(template, launch.shell, agents);
+    } else if (check) {
+      if (check.conflicts.length) return { name, replaced, error: `${who} can't be run again: its command runs Codex with ${check.conflicts.join(", ")}, and a helper that isn't a template worker runs in Codex's launch mode (#1125)` };
+      if (!check.forwards || !takesWords(launch.shell)) {
+        const why = check.lost.length ? `puts ${check.lost.join(", ")} after its --, where Codex reads them as prompt text`
+          : "can't pass the pack's Codex words to Codex as options";
+        return { name, replaced, error: `${who} can't be run again: its command runs Codex but ${why} (#1125)` };
+      }
+      command = launch;
+      codexWords = [...check.missing, ...grants.flatMap((d) => ["--add-dir", d])];
+    } else if (launch?.shell !== undefined) {
+      // #1142: a Codex pane whose shell command runs Codex where the pack can't read it (inside an
+      // if, a group, behind exec -a ...) can't be given the launch mode: refused, never run as written.
+      // A template worker keeps the owner's exception: its command runs as written.
+      if (agent === "codex" && !templateWorker) {
+        return { name, replaced, error: `${who} can't be run again: it runs Codex, but its command runs it in a form this pack can't read, `
+          + "so it can't be given Codex's launch mode (#1125)" };
+      }
+      command = launch;
+    }
+    else if (launch && agent && agentKeyOfArgv(launch.argv, agents) === agent) {
+      const own = withoutPrompt(withoutResume(agent, launch.argv));
+      if (agent === "codex") {
+        const { dropped } = codexClean(own, where ?? agy?.homeDir ?? null);
+        if (dropped.length) warning = `${name ?? replaced}'s command named ${dropped.join(", ")}: left out; it runs in Codex's launch mode (#1125).`;
+        command = { argv: withCodexGrants(launchRun("codex", own, bot, where ?? agy?.homeDir ?? null), grants) };
+      } else command = { argv: own };
+    }
   }
   if (!command || !cwd) {
     return { name, replaced, error: `${replaced} can't be run again: hc gave ${cwd ? "no command this pack can reuse" : "no folder"} for it` };
@@ -550,7 +616,7 @@ export function helperPlan({ get, worker = null, session = null, agents, fresh =
   const id = agent ? sessionFor(agent, session) : null;
   let resume = fresh ? null : agent && canResume(agent) ? resumeArgs(agent, id) : null;
   let note = fresh ?? (resume ? null : agent ? `${agent} has no resume this pack knows` : "its agent isn't one this pack knows");
-  let argv = commandArgv(command, [...settingsWords, ...(resume ?? [])]);
+  let argv = commandArgv(command, [...codexWords, ...settingsWords, ...(resume ?? [])]);
   if (!argv) {
     resume = null;
     note = `its command ends in a separator or a comment, so it can't take resume words${settingsWords.length ? ` or its Antigravity permission list` : ""}`;
@@ -561,7 +627,16 @@ export function helperPlan({ get, worker = null, session = null, agents, fresh =
   // an Antigravity helper never runs on skip-permissions.
   argv = agyGuarded(agent, argv);
   return { name, replaced, cwd, labels, agent, session: resume && resumesById(agent) ? id : null, mode: resume ? "resume" : "fresh",
-    resume: resume ?? [], argv, agySettings: settings, note };
+    resume: resume ?? [], argv, agySettings: settings, note, warning };
+}
+
+/**
+ * The folder Restart --tree runs a helper in again (helperPlan's `cwd`): a worker's worktree first
+ * (the ledger's), then the pane's folder, then its program's, resolved to its canonical path when
+ * the caller gave a realpath (a symlinked folder, #884). Null when none is known.
+ */
+export function helperCwd({ get, worker = null, realpath = null }) {
+  return realPathOf(realpath, worker?.worktree ?? get?.cwd ?? get?.foreground?.cwd ?? null);
 }
 
 /**
@@ -649,9 +724,9 @@ export function planText(plan, session) {
  * this app home): `agent`: Restart on… (a swap); `force`: past a working pane or its helpers;
  * `fresh`: a new conversation.
  */
-export function restartArgs({ botId, projectKey, agent = null, force = false, fresh = false, machine = null }) {
+export function restartArgs({ botId, projectKey, agent = null, force = false, fresh = false, tree = false, machine = null }) {
   return ["restart", botId, "--project", projectKey, ...(machine ? ["--machine", machine] : []),
-    ...(agent ? ["--agent", agent] : []), ...(force ? ["--force"] : []), ...(fresh ? ["--fresh"] : [])];
+    ...(agent ? ["--agent", agent] : []), ...(force ? ["--force"] : []), ...(fresh ? ["--fresh"] : []), ...(tree ? ["--tree"] : [])];
 }
 
 /**
@@ -660,15 +735,24 @@ export function restartArgs({ botId, projectKey, agent = null, force = false, fr
  * overrides, or one a new conversation, --fresh, avoids).
  */
 export function restartAnswer(r) {
+  if (r?.out?.refused === "helpers" || (r?.code !== 0 && /has (?:a helper that ends|helpers that end) with it:/.test(r?.err ?? ""))) {
+    return { refused: "Its helpers would end with it; choose whether to restart them or end them.", helpers: true, forceable: false, freshable: false };
+  }
   if (r?.code === 0 && r.out?.queued) return { terminal: r.out.terminal, replaced: null, queued: true,
     reason: r.out.reason ?? null, dialog: r.out.dialog ?? null, warnings: [] };
-  if (r?.code === 0 && r.out?.terminal) {
-    return { terminal: r.out.terminal, replaced: r.out.replaced ?? null, warnings: Array.isArray(r.out.warnings) ? r.out.warnings : [] };
+  // A tree restart can replace the lead and then fail to bring back a helper. Do not
+  // offer to restart the lead again: show exactly which helper needs attention.
+  if (r?.out?.terminal && !r.out.error && (r.code === 0 || Array.isArray(r.out.helpers))) {
+    const warnings = [...(Array.isArray(r.out.warnings) ? r.out.warnings : [])];
+    for (const helper of r.out.helpers ?? []) if (helper.error) {
+      warnings.push(actionError(`${helper.name ?? helper.replaced}: ${helper.error}`, "Helper restart"));
+    }
+    return { terminal: r.out.terminal, replaced: r.out.replaced ?? null, warnings };
   }
   if (r?.code === 0 && r.out?.running) return { refused: `It is already running in ${r.out.running}.`, forceable: false, freshable: false };
   // Not run, or ended by Herdr (launch.js machineCli, #444): neither --force nor --fresh is the answer.
-  if (r?.asIs) return { refused: r.err, forceable: false, freshable: false };
+  if (r?.asIs) return { refused: actionError(r.err, "Restart"), forceable: false, freshable: false };
   // The CLI's refusal is its last stderr line (warnings come before it).
-  const refused = String(r?.err ?? "").split("\n").map((l) => l.trim()).filter(Boolean).pop() ?? `Restart failed (exit ${r?.code ?? "?"}).`;
-  return { refused, forceable: /pass --force/.test(refused), freshable: /--fresh\b/.test(refused) };
+  const raw = String(r?.err ?? "");
+  return { refused: actionError(raw, "Restart"), forceable: /pass --force/.test(raw), freshable: /--fresh\b/.test(raw) };
 }

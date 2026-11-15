@@ -132,7 +132,7 @@ export const SIDE_CSS = `
 .bt-side-q{max-width:85%;padding:7px 12px;border-radius:18px;background:var(--bt-user);color:var(--bt-user-ink);font-size:13px;line-height:19px;box-sizing:border-box;overflow-wrap:anywhere;white-space:pre-wrap}
 .bt-side-a{display:flex;flex-direction:column;gap:8px;align-items:flex-start;font-size:13px;line-height:19px;color:var(--bt-ink)}
 .bt-side-status{margin:0;font-size:12px;color:var(--bt-ink-3)}
-.bt-side-fail{margin:0;font-size:12px;line-height:17px;color:var(--bt-danger)}
+.bt-side-fail{margin:0;font-size:12px;line-height:17px;color:var(--st-bad-strong,var(--bt-danger))}
 .bt-side-form{flex:none;padding:10px 14px 14px;border-top:.5px solid var(--bt-line)}
 .bt-side-input{display:block;width:100%;box-sizing:border-box;min-height:36px;max-height:120px;padding:8px 12px;border:.5px solid var(--bt-line-2);border-radius:12px;background:var(--bt-main);color:var(--bt-ink);font:inherit;font-size:13px;line-height:19px;resize:none;outline:none;field-sizing:content}
 .bt-side-input::placeholder{color:var(--bt-ink-3)}

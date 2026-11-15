@@ -62,7 +62,7 @@ downloads the build for this machine from this repository's releases, checks it 
 ## DSH in Herdr (dsh-TUI)
 
 The title bar's menu has **Set up DSH in Herdr…** (a right click, or the app menu). It imports
-the shared installer `am/dshTui.mjs` — the same module `automagik-herdr dsh-tui` and the Herdr
+the shared installer `am/dshTui.mjs` — the same module `am dsh-tui` (`automagik-herdr` still works as an alias) and the Herdr
 pack use — through a child runner (`src/dsh-tui-run.mjs`), and shows the module's doctor before
 any action. `prepare-runtime` copies the module, its two local imports (`am/layoutSafe.mjs`,
 `am/release.js`) and the runner into `build/dsh-tui`, shipped as a resource outside the app

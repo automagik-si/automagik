@@ -689,7 +689,7 @@ test("the stable runner must match its baked node, and the baked node must still
   writeFileSync(runner, stableRunnerText(gone));
   await assert.rejects(
     startProxy({ forbiddenRoots: s.forbiddenRoots, terminal: "t100", upstream: join(s.root, "core.sock"), appHome: s.app, env: s.env }),
-    /the baked node .* is gone; run automagik-herdr dsh-tui install again/,
+    /the baked node .* is gone; run am dsh-tui install again/,
   );
 });
 
@@ -1123,7 +1123,7 @@ test(
   assert.equal(started.policy.file.bots.some((bot) => bot.id === "b-zzzzzzzzzz"), false);
   const warnings = events.filter((event) => event.ev === "roster_unapproved");
   assert.equal(warnings.length, 1, "one warning for the start, not one per request");
-  assert.match(warnings[0].message, /automagik-herdr proxy approve/);
+  assert.match(warnings[0].message, /am proxy approve/);
   assert.match(warnings[0].message, /differs from the approved one/);
 });
 
@@ -1134,7 +1134,7 @@ test("G1 (c): a missing record refuses a proxied pane and names the command", as
   rmSync(recordFileOf(s.project, s.env));
   await assert.rejects(
     start("t200", { caller: { bot: ID.dev, project: s.project, worker: false }, bound: true }),
-    /no approved roster .*automagik-herdr proxy approve/s,
+    /no approved roster .*am proxy approve/s,
   );
 });
 
@@ -1302,6 +1302,20 @@ for (const worker of [{ agent: "codex", model: "chosen", effort: "high" },
     assert.equal(fake.calls("terminal.run").length, 1);
   });
 }
+
+test("mode #821: approved Antigravity worker refuses a different argv mode without a mode label", async (t) => {
+  const worker = { agent: "antigravity", agyMode: "auto" };
+  const { s, client, fake } = await approvedWorkerScene(t, worker);
+  const params = approvedParams(s, worker);
+  assert.equal(params.labels["worker.agyMode"], undefined);
+  const at = params.argv.indexOf("--mode");
+  assert.ok(at > 0);
+  assert.equal(params.argv[at + 1], "auto");
+  const argv = params.argv.map((word, i) => i === at + 1 ? "plan" : word);
+  const answer = await client.call("terminal.run", { ...params, argv });
+  assert.match(answer.error?.message ?? "", /approved worker argv refused.*exactly/);
+  assert.equal(fake.calls("terminal.run").length, 0);
+});
 
 test("approved Antigravity worker names the deterministic permission file; a forged path is refused", async (t) => {
   const worker = { agent: "antigravity", agyMode: "auto" };

@@ -103,7 +103,7 @@ export function confirmText(current, latest) {
   return {
     title: `Update Automagik Herdr to ${latest}?`,
     detail: `Installs ${latest} in place of ${current ?? "the installed pack"}: the release's checksum is checked first, and `
-      + `${current ?? "the installed pack"} is kept, so \`automagik-herdr update --rollback\` puts it back. Herdr reloads its mods on its own.`,
+      + `${current ?? "the installed pack"} is kept, so \`am update --rollback\` puts it back. Herdr reloads its mods on its own.`,
   };
 }
 
@@ -129,7 +129,7 @@ export function autoLabel({ state = null, request = null, now = 0 } = {}) {
   const pending = r?.what === "auto" && typeof r.on === "boolean" && s.request !== r.id && typeof r.at === "number" && now - r.at < ANSWER_MS;
   const on = pending ? r.on : auto.on !== false;
   const lines = [on
-    ? "Verified releases install on their own; the replaced pack is kept (`automagik-herdr update --rollback`). Click to turn off."
+    ? "Verified releases install on their own; the replaced pack is kept (`am update --rollback`). Click to turn off."
     : "New releases are only announced; click update to install one. Click to turn on."];
   if (on && str(auto.skip)) lines.push(`${auto.skip} was rolled back here: it waits for a newer release.`);
   if (on && str(s.autoHeld) && !str(s.autoHeld).includes("was rolled back")) lines.push(`Not installed yet: ${s.autoHeld}.`);

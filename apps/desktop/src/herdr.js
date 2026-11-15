@@ -5,6 +5,7 @@
 import { execFile as nodeExecFile, spawn as nodeSpawn } from 'node:child_process'
 import { realpathSync, statSync } from 'node:fs'
 import { posix, win32 } from 'node:path'
+import { CLOSE_INHERITED, DETACH_CLEAN } from './child-paths.js'
 
 export const OVERRIDE = 'AUTOMAGIK_HERDR_APP'
 export const BUNDLE_ID = 'dev.herdr.app'
@@ -137,7 +138,30 @@ export function launchOf({ platform, found, env = {} }) {
   return { file: found.bin, args: [], detached: true }
 }
 
-function startDetached(file, args, { env, spawn = nodeSpawn }) {
+export function startDetached(file, args, {
+  env = process.env, spawn = nodeSpawn, node = process.execPath, platform = process.platform,
+} = {}) {
+  if (platform === 'linux') {
+    return new Promise(done => {
+      const failed = () => done({ code: null, stderr: 'herdr could not start' })
+      try {
+        const child = spawn(node, ['--require', CLOSE_INHERITED, DETACH_CLEAN, file, ...args], {
+          env: {
+            ...env, ELECTRON_RUN_AS_NODE: '1',
+            AUTOMAGIK_HOP_RUN_AS_NODE: env.ELECTRON_RUN_AS_NODE ?? '',
+          },
+          detached: true, stdio: 'ignore', windowsHide: false,
+        })
+        child.once('error', failed)
+        child.once('exit', code => {
+          if (code === 0) done({ code: 0, stderr: '' })
+          else failed()
+        })
+      } catch {
+        failed()
+      }
+    })
+  }
   return new Promise(done => {
     let child
     try {
@@ -218,7 +242,10 @@ export async function frontmost({ platform, env, execFile }) {
  * no-focus message unless it is true) or `{ ok: false, reason, message }`. `mark(step)` times
  * the steps for logs/switch.log.
  */
-export async function openHerdr({ platform, arch, env, home, isFile, resolve, execFile, spawn, now, sleep, limit, mark = () => {}, log = () => {} } = {}) {
+export async function openHerdr({
+  platform, arch, env, home, isFile, resolve, execFile, spawn, node, now, sleep, limit,
+  mark = () => {}, log = () => {},
+} = {}) {
   if (!supportedHost({ platform, arch })) {
     log('unsupported-host')
     return { ok: false, reason: 'unsupported', message: 'Herdr has no build for this computer' }
@@ -229,17 +256,20 @@ export async function openHerdr({ platform, arch, env, home, isFile, resolve, ex
     return { ok: false, reason: 'missing', message: 'Herdr is not set up' }
   }
   mark('found')
-  return raiseHerdr({ platform, found, env, execFile, spawn, now, sleep, limit, mark, log })
+  return raiseHerdr({ platform, found, env, execFile, spawn, node, now, sleep, limit, mark, log })
 }
 
 /**
  * Steps 3 and 4 for a herdr-app already found: start or raise it, wait for its window, and
  * look at what is in front. The same answers as openHerdr.
  */
-export async function raiseHerdr({ platform, found, env, execFile, spawn, now, sleep, limit, mark = () => {}, log = () => {} }) {
+export async function raiseHerdr({
+  platform, found, env, execFile, spawn, node, now, sleep, limit,
+  mark = () => {}, log = () => {},
+}) {
   const launch = launchOf({ platform, found, env })
   const started = launch.detached
-    ? await startDetached(launch.file, launch.args, { env, spawn })
+    ? await startDetached(launch.file, launch.args, { env, spawn, node, platform })
     : await run(launch.file, launch.args, { env, execFile })
   if (started.code !== 0) {
     log(`start-error ${lastLine(started.stderr)}`)

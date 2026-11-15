@@ -427,7 +427,7 @@ test("briefing.mjs: silent for a bot of a project with no bots.json, and for a p
   writeFileSync(join(root, "hc.json"), JSON.stringify(fx));
   const r = await brief({ HC_TERMINAL_ID: "t1", CLAUDE_PROJECT_DIR: tree });
   assert.equal(r.stdout, "");
-  assert.match(r.stderr, /^automagik-herdr briefing: .+\n$/); // one line, exit 0 (run() would reject otherwise)
+  assert.match(r.stderr, /^am briefing: .+\n$/); // one line, exit 0 (run() would reject otherwise)
 });
 
 test("briefing.mjs: once there is an attach ledger it says who plays where; a relabel moves no briefing", async (t) => {
@@ -464,7 +464,7 @@ test("briefing.mjs: once there is an attach ledger it says who plays where; a re
   chmodSync(ledger, 0o666);
   const unsafe = await as("t7");
   assert.equal(unsafe.stdout, "");
-  assert.match(unsafe.stderr, /^automagik-herdr briefing: .*attach\.jsonl is group- or world-writable/);
+  assert.match(unsafe.stderr, /^am briefing: .*attach\.jsonl is group- or world-writable/);
 });
 
 test("briefing.mjs: a new Claude session is labelled on its terminal and logged once; the briefing is unchanged", async (t) => {
@@ -673,7 +673,7 @@ test("briefing.mjs: no hc on PATH: nothing printed, one stderr line, exit 0", as
   const { tree, brief } = await scratch(t);
   const r = await brief({ HC_TERMINAL_ID: "t1", CLAUDE_PROJECT_DIR: tree, PATH: `${NODE_DIR}:/usr/bin:/bin` });
   assert.equal(r.stdout, "");
-  assert.equal(r.stderr, "automagik-herdr briefing: hc is not on PATH\n");
+  assert.equal(r.stderr, "am briefing: hc is not on PATH\n");
 });
 
 test("briefing.mjs: a hostile screen tail stays fenced: no closing tag, brackets neutralised", async (t) => {
@@ -948,19 +948,22 @@ test("launch text: who, role, instructions, how it works, lead and team by id; n
   assert.match(text, /written from \.herdr\/bots\.json when this session started/);
   assert.match(text, /You are Captain, a team member \(bot b-bbbbbbbbbb\)\./);
   assert.match(text, /Instructions:\nReview every PR\./);
-  assert.match(text, /automagik-herdr worker/);
-  assert.match(text, /run `automagik-herdr brief b-bbbbbbbbbb`/, "the live state is one command away");
+  assert.match(text, /am worker/);
+  assert.match(text, /run `am brief b-bbbbbbbbbb`/, "the live state is one command away");
+  assert.doesNotMatch(text, /automagik-herdr[ :`]/, "the command is am: the old name is in no briefing");
   // #428: a restart goes through Herdr, never the agent's own restart command, in English and pt-BR.
-  const restart = /runs `automagik-herdr restart b-bbbbbbbbbb` in this project's folder \(or with --project <that folder>\), which keeps your agent and model, or uses Restart in your bot's menu in the Herdr sidebar, not your agent's own restart command\./;
+  const restart = /runs `am restart b-bbbbbbbbbb` in this project's folder \(or with --project <that folder>\), which keeps your agent and model, or uses Restart in your bot's menu in the Herdr sidebar, not your agent's own restart command\./;
   assert.match(text, restart);
-  assert.match(text, /In pt-BR: "Para me reiniciar, rode `automagik-herdr restart b-bbbbbbbbbb` na pasta deste projeto \(ou com --project <essa pasta>\), que mantém meu agente e modelo/);
+  assert.match(text, /In pt-BR: "Para me reiniciar, rode `am restart b-bbbbbbbbbb` na pasta deste projeto \(ou com --project <essa pasta>\), que mantém meu agente e modelo/);
   assert.match(text, /\/restart.*never works in a Herdr pane/, "the same restart advice reaches every harness");
   for (const agent of ["codex", "omp", "pi", "grok", "hermes"]) {
     const other = launchBriefingText({ self: { ...byId(f, ID.cap), agent }, file: f });
     assert.match(other, restart, agent);
     assert.match(other, /\/restart.*never works in a Herdr pane/, agent);
   }
-  assert.doesNotMatch(briefingText({ self: byId(f, ID.cap), file: f }), /automagik-herdr restart/, "an attached pane can /restart");
+  assert.doesNotMatch(briefingText({ self: byId(f, ID.cap), file: f }), /`am restart/, "an attached pane can /restart");
+  assert.match(briefingText({ self: byId(f, ID.cap), file: f }), /`am worker /);
+  assert.doesNotMatch(briefingText({ self: byId(f, ID.cap), file: f }), /automagik-herdr[ :`]/);
   assert.match(text, /Your lead: Genie \(bot b-aaaaaaaaaa\).*hc ls --label bot=b-aaaaaaaaaa/s);
   assert.match(text, /- Dev \(bot b-cccccccccc/);
   assert.doesNotMatch(text, /Studio|idle|working|not running|untrusted-report|helpers/, "planned bots and live state stay out");
@@ -1098,6 +1101,34 @@ test("hook worker scope: a non-git project omits the instruction and stays quiet
   assert.match(out.stdout, /Keep the board green/);
   assert.doesNotMatch(out.stdout, /worker/i);
   assert.equal((await sc.brief(env, '{"session_id":"non-git"}', { keep: true })).stdout, "");
+});
+
+test("hook #848: a timed-out git check reuses seen.isGit after an edit invalidates the old hash", async (t) => {
+  for (const isGit of [true, false]) {
+    const sc = await turns(t, () => ["claude"]);
+    const realGit = spawnSync("sh", ["-c", "PATH=/usr/bin:/bin command -v git"], { encoding: "utf8" }).stdout.trim();
+    const fakeGit = join(sc.bin, "git");
+    const answer = (body) => {
+      writeFileSync(fakeGit, `#!/bin/sh\nif [ "$1" = "rev-parse" ] && [ "$2" = "--is-inside-work-tree" ]; then ${body}; fi\nexec "${realGit}" "$@"\n`);
+      chmodSync(fakeGit, 0o755);
+    };
+    answer(`echo ${isGit}; exit 0`);
+    const first = await sc.turn(1);
+    assert.equal(first.stderr, "");
+    assert.equal(first.stdout.includes(WORKER_LINE), isGit);
+    const seenFile = briefedPath(sc.app, "s-1");
+    assert.equal(JSON.parse(readFileSync(seenFile, "utf8")).isGit, isGit);
+    const file = team();
+    byId(file, ID.main).instructions = "New instructions after the first turn.";
+    writeFileSync(join(sc.main, ".herdr/bots.json"), JSON.stringify(file));
+    answer("kill -TERM $$");
+    const edited = await sc.turn(2);
+    assert.equal(edited.stderr, "");
+    assert.match(edited.stdout, /New instructions after the first turn/);
+    assert.equal(edited.stdout.includes(WORKER_LINE), isGit, "the stored boolean survives a new hash");
+    assert.equal(JSON.parse(readFileSync(seenFile, "utf8")).isGit, isGit);
+    assert.equal((await sc.turn(3)).stdout, "", "the edited briefing prints only once");
+  }
 });
 
 test("hook worker scope (#774): a timed-out git check reuses the recorded or launched git state and does not reprint", async (t) => {

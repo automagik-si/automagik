@@ -253,7 +253,7 @@ export default class ModManager extends View {
       const cli = `${appHome()}/${core.PACK_CLI}`;
       if ((await exec("test", ["-f", cli])).code !== 0) throw new Error(`${core.PACK_CLI} is missing (am-sidebar off or removed): run install.sh again`);
       const r = await exec("sh", ["-c", 'HERDR_APP_HOME=$1 exec sh "$2" update', "sh", appHome(), cli]);
-      if (r.code !== 0) throw new Error(firstLine(r.stderr || r.stdout) || "automagik-herdr update failed");
+      if (r.code !== 0) throw new Error(firstLine(r.stderr || r.stdout) || "am update failed");
       this.message = firstLine(r.stdout);
       notify({ title: `${core.PACK_TITLE} update`, body: this.message, level: "success" });
       for (const m of this.mods) if (m.kind === "pack") delete this.checks[m.name];
@@ -410,7 +410,7 @@ export default class ModManager extends View {
         const pack = this.mods.filter((m) => m.kind === "pack");
         const off = pack.filter((m) => !m.enabled).map((m) => m.name);
         const offSaid = !off.length ? "" : `; ${off.join(", ")} ${off.length === 1 ? "is off and stays" : "are off and stay"} off, updated in ${core.OFF_DIR}/`;
-        this.confirm = { text: `update ${core.PACK_TITLE} (all ${pack.length} of its mods${offSaid}) with automagik-herdr update? (y/n)`, run: (cx) => this.updatePack(cx) };
+        this.confirm = { text: `update ${core.PACK_TITLE} (all ${pack.length} of its mods${offSaid}) with am update? (y/n)`, run: (cx) => this.updatePack(cx) };
       } else if (mod.kind !== "installed") this.message = mod.kind === "herdr" ? "built-in mods update with Herdr" : "only mods installed from the marketplace have a source to update from";
       else if (!mod.enabled) this.message = `${mod.name} is off: switch it on before updating`;
       else cx.spawn(async (cx) => this.startReview(cx, mod.record.source));

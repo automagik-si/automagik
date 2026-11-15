@@ -126,6 +126,24 @@ async function main() {
   await docker(['exec', name, '/nodejs/bin/node', '-e', native])
   say('native modules: koffi and node-pty load and spawn')
 
+  // Omni verifies downloads itself, then uses tar (which invokes gzip) and find to
+  // unpack Postgres/NATS. Exercise real extraction, including the tools' library closure.
+  const extract = `
+    const fs = await import('node:fs'), cp = await import('node:child_process');
+    const { packPlugin } = await import('/opt/automagik/plugin-payload.mjs');
+    const dir = fs.mkdtempSync('/tmp/installer-tools-');
+    try {
+      const source = dir + '/source', out = dir + '/out', archive = dir + '/payload.tgz';
+      fs.mkdirSync(source); fs.mkdirSync(out); fs.writeFileSync(source + '/binary', 'verified-payload');
+      fs.writeFileSync(archive, packPlugin(source));
+      cp.execFileSync('tar', ['-xzf', archive, '-C', out]);
+      const found = cp.execFileSync('find', [out, '-name', 'binary', '-type', 'f'], { encoding: 'utf8' }).trim();
+      if (fs.readFileSync(found, 'utf8') !== 'verified-payload') throw new Error('installer extraction failed');
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  `
+  await docker(['exec', name, '/nodejs/bin/node', '--input-type=module', '-e', extract])
+  say('installer tools: tar, gzip and find extract the expected payload')
+
   // A restart keeps the user's profile: the seed runs only where nothing is.
   await docker(['restart', name])
   const restarted401 = await waitForFence()

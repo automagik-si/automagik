@@ -124,11 +124,11 @@ never red. Red is kept for errors (a failed read or switch).
   `data/am-quota/active.json` (an older record naming a saved login, `saved:<name>`, reads as not
   managed, and a `claude` entry an older version wrote is ignored and dropped at the next write). New client runs use the new account; ones already running keep the old one — that is
   the client's behaviour, not a defect. So the banner lists the bots still on the old account:
-  `automagik-herdr ls --all --json` (run as the sidebar runs it, through
+  `am ls --all --json` (run as the sidebar runs it, through
   `mods/am-sidebar/bin/run.sh`), the running bots whose agent is that tool and whose pane started
   (`since`) before the switch. If any of them has no start time the panel can't split them
   reliably: it lists every running bot of that tool and says so. **Restart N bots** asks for a
-  second press within five seconds, then runs `automagik-herdr restart <bot> --project <project>`
+  second press within five seconds, then runs `am restart <bot> --project <project>`
   for each, one at a time (each resumes its conversation), each in an hc terminal of its own
   rather than through Herdr's `exec`, so Herdr's 30 s limit on a mod's programs can't end a
   restart part-way. The panel follows that terminal to its end, reads what the CLI answered, and
@@ -157,7 +157,7 @@ never red. Red is kept for errors (a failed read or switch).
   `HOME`, `NVM_DIR`, `VIRTUAL_ENV` and `HERMES_HOME`, and finds node and the agents as it did
   before. The panel never names a CLI flag:
   a refusal is shown without the clause that offers one. Without the sidebar mod there is no CLI: the banner says to run
-  `automagik-herdr restart <bot>` instead.
+  `am restart <bot>` instead.
 
 ## Built from
 
@@ -171,7 +171,7 @@ writers, secret rules), and tests for every module in the repository's `test/`.
 
 Herdr API: `exec`, `theme`, `appHome`, `home`, `readTextFile`, `writeTextFile`, `window`,
 `fs/promises`; the runtime's `fetch`. Programs: `sh`, `open` (`xdg-open` on Linux) for Open, and
-the sidebar's `automagik-herdr`. Never `security`.
+the sidebar's `bin/automagik-herdr` launcher, the file behind `am` (`automagik-herdr` still works as an alias). Never `security`.
 
 ## Watch out
 

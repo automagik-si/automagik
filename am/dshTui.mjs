@@ -59,7 +59,7 @@ export const PIN = `${DSH_TUI.package}@${DSH_TUI.version}`;
 export const RELEASE_AGE_MINUTES = 1440;
 export const SHIM_MARK = "# Automagik Herdr's dsh-tui shim";
 export const SHIM_TEXT = `#!/bin/sh
-${SHIM_MARK} (installed by \`automagik-herdr dsh-tui install\`).
+${SHIM_MARK} (installed by \`am dsh-tui install\`).
 # The profile is dsh-TUI's own; "tui" can be a web-template profile that rejects --resume/-c/-p.
 # No separator of its own: dsh starts the app's arguments at the first token it does not
 # recognize, so --resume <id>, -c and --continue arrive the way dsh-TUI's own launcher passes
@@ -98,7 +98,7 @@ export const ONBOARDING_FILE = "onboarding.json";
 /** The guide revision dsh-TUI 0.19.0 writes (`lib/types/onboardingPrefs.js` ONBOARDING_VERSION). */
 export const ONBOARDING_VERSION = 1;
 /** The one honest line a machine with no DSH gets, and nothing else. */
-export const SKIP = "DSH is not installed (no dsh on PATH): skipped dsh-TUI. Install DSH Desktop or `npm install -g @deepseek-ai/dsh`, then run `automagik-herdr dsh-tui install`.";
+export const SKIP = "DSH is not installed (no dsh on PATH): skipped dsh-TUI. Install DSH Desktop or `npm install -g @deepseek-ai/dsh`, then run `am dsh-tui install`.";
 
 const read = (path) => {
   try { return readFileSync(path, "utf8"); } catch (e) { if (e?.code === "ENOENT" || e?.code === "ENOTDIR") return null; throw e; }
@@ -281,16 +281,16 @@ export function executionPathProblem({ stableRoot, env = process.env, project = 
     if (problem) return problem;
   }
   const baked = bakedNode === undefined ? bakedNodeOf(stableRoot) : bakedNode;
-  if (!baked) return `the stable runner ${join(stableRoot, STABLE_RUNNER)} has no baked node; run automagik-herdr dsh-tui install again`;
+  if (!baked) return `the stable runner ${join(stableRoot, STABLE_RUNNER)} has no baked node; run am dsh-tui install again`;
   const missing = bakedNodeProblem(baked);
   if (missing) return missing;
   if (bakedNode === undefined) {
     try {
       if (!readFileSync(join(stableRoot, STABLE_RUNNER)).equals(Buffer.from(stableRunnerText(baked)))) {
-        return `the stable runner ${join(stableRoot, STABLE_RUNNER)} does not match its baked node; run automagik-herdr dsh-tui install again`;
+        return `the stable runner ${join(stableRoot, STABLE_RUNNER)} does not match its baked node; run am dsh-tui install again`;
       }
     } catch {
-      return `the stable runner ${join(stableRoot, STABLE_RUNNER)} cannot be read; run automagik-herdr dsh-tui install again`;
+      return `the stable runner ${join(stableRoot, STABLE_RUNNER)} cannot be read; run am dsh-tui install again`;
     }
   }
   for (const candidate of [baked, node, ...nodeCandidates(env)]) {
@@ -325,7 +325,7 @@ export const sandboxCapable = (root = packRootOf()) => ["am-sidebar", "dsh-sandb
 /** Every file an unsandboxed worker start can reach, copied byte-equal to the stable folder. */
 export const STABLE_FILES = Object.freeze([
   "hcPane.mjs", "hcProxy.mjs", "approved.js", "dshTui.mjs", "workers.js", "models.js", "model.js",
-  "hermesPair.js",
+  "hermesPair.js", "actionError.js",
   "logins.js", "attach.js", "hcGuard.mjs", "restart.js", "launchArgs.js", "layoutSafe.mjs", "release.js", "retired.js",
   "bin/dsh-sandbox.mjs", "bin/run.sh",
 ]);
@@ -388,7 +388,7 @@ export function bakedNodeProblem(node) {
     accessSync(node, constants.X_OK);
     return null;
   } catch {
-    return `the baked node ${node} is gone; run automagik-herdr dsh-tui install again`;
+    return `the baked node ${node} is gone; run am dsh-tui install again`;
   }
 }
 
@@ -1112,7 +1112,7 @@ export function doctorDshTui({ env = process.env, panePath, forbiddenRoots = und
   const ours = shimText !== null && shimIsOurs(shimText);
   const pinned = state.pin === DSH_TUI.version && state.integrity === DSH_TUI.integrity && state.installed === DSH_TUI.version;
   const installed = state.pin !== null || shimPresent;
-  const installLine = "automagik-herdr dsh-tui install";
+  const installLine = "am dsh-tui install";
 
   const processDsh = dsh ?? findDsh(env);
   add("dsh", Boolean(dsh) || !installed,

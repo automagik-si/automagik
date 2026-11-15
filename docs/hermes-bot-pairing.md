@@ -7,13 +7,15 @@ credentials, or overwrite Hermes's instructions/model.
 
 ## Herdr
 
+The command is `am`; `automagik-herdr` still works as an alias for `am`.
+
 In Create/Edit, choose Hermes and fill **Pair an existing Hermes Bot** with the
 absolute Hermes data folder and exact profile name on the machine running the pane.
 For the root profile, explicitly choose `default`. Leave both empty for the existing
 unpaired behavior. The equivalent command is:
 
 ```sh
-automagik-herdr edit <bot> --agent hermes --no-model \
+am edit <bot> --agent hermes --no-model \
   --hermes-home /srv/agents/research --hermes-profile research
 ```
 
@@ -28,7 +30,7 @@ agent/model swap and template restarts refuse while paired. Task workers do not
 inherit their lead's forever-chat. To unpair without deleting any Hermes data:
 
 ```sh
-automagik-herdr edit <bot> --no-hermes
+am edit <bot> --no-hermes
 ```
 
 Duplicate home/profile pairs are rejected within a project roster. This is not a

@@ -604,14 +604,14 @@ test("relink: the CLI link follows the sidebar folder; --version works through i
   const link = join(bin, "automagik-herdr");
   symlinkSync(join(s.mods, "spaces-agents", "bin", "automagik-herdr.mjs"), link);
   const owned = new Set(["am-sidebar"]);
-  assert.match(relink({ binDir: bin, modsDir: s.mods, owned }), /^linked /);
+  assert.match(relink({ binDir: bin, modsDir: s.mods, owned }), /^linked .*automagik-herdr to /);
   // The folder ships the bin/automagik-herdr wrapper (it runs the .mjs through bin/run.sh): the link names it.
   assert.equal(readlinkSync(link), join(s.mods, "am-sidebar", "bin", "automagik-herdr"));
   const v = spawnSync(link, ["--version"], { encoding: "utf8", env: { PATH: `${NODE_DIR}:/usr/bin:/bin`, HOME: join(s.root, "home"), HERDR_APP_HOME: s.app } });
   assert.equal(v.status, 0, v.stderr);
-  assert.equal(v.stdout, `automagik-herdr ${read(join(PACK, "VERSION")).trim()}\n`);
+  assert.equal(v.stdout, `am ${read(join(PACK, "VERSION")).trim()}\n`);
   assert.equal(relink({ binDir: bin, modsDir: s.mods, owned }), null, "already there");
-  assert.deepEqual(readdirSync(bin), ["automagik-herdr"], "no temp name left");
+  assert.deepEqual(readdirSync(bin).sort(), ["am", "automagik-herdr"], "am's link made beside it, no temp name left");
   // Another link, a file, nothing: left as they are.
   rmSync(link);
   symlinkSync("/usr/bin/true", link);
@@ -624,6 +624,38 @@ test("relink: the CLI link follows the sidebar folder; --version works through i
   rmSync(link);
   assert.equal(relink({ binDir: bin, modsDir: s.mods, owned }), null);
   assert.equal(existsSync(link), false);
+});
+
+test("relink: am's link follows the sidebar folder on a rollback, is made when missing, and a file or another link stays", (t) => {
+  const s = scratch(t);
+  cpSync(PACK, join(s.mods, "am-sidebar"), { recursive: true });
+  const bin = join(s.root, "home", ".local", "bin");
+  mkdirSync(bin, { recursive: true });
+  const am = join(bin, "am");
+  const wrapper = join(s.mods, "am-sidebar", "bin", "automagik-herdr");
+  const owned = new Set(["am-sidebar"]);
+  // A link to the .mjs (the pack before its wrapper) moves to the wrapper, like the old name's.
+  symlinkSync(join(s.mods, "am-sidebar", "bin", "automagik-herdr.mjs"), am);
+  assert.match(relink({ binDir: bin, modsDir: s.mods, owned }), /^linked .*\/am to /);
+  assert.equal(readlinkSync(am), wrapper);
+  assert.equal(relink({ binDir: bin, modsDir: s.mods, owned }), null, "already there");
+  // Missing (an install from before am's link): made.
+  rmSync(am);
+  assert.match(relink({ binDir: bin, modsDir: s.mods, owned }), /^linked .*\/am to /);
+  assert.equal(readlinkSync(am), wrapper);
+  // A link elsewhere and a file are the person's.
+  rmSync(am);
+  symlinkSync("/usr/bin/true", am);
+  assert.equal(relink({ binDir: bin, modsDir: s.mods, owned }), null);
+  assert.equal(readlinkSync(am), "/usr/bin/true");
+  rmSync(am);
+  write(am, "mine\n");
+  assert.match(relink({ binDir: bin, modsDir: s.mods, owned }), /left .*\/am alone: it is a file/);
+  assert.equal(read(am), "mine\n");
+  // Not owned by the record: no link made.
+  rmSync(am);
+  assert.equal(relink({ binDir: bin, modsDir: s.mods, owned: new Set() }), null);
+  assert.equal(lstatSync(am, { throwIfNoEntry: false }), undefined);
 });
 
 /** The pack's sidebar folder as an am-sidebar release tarball (PACK_MODS overridden), at `version`. */
@@ -663,8 +695,8 @@ test("update.mjs: install across the rename moves the hooks; rollback to v0.3 pu
   const said = installed.stderr.split("\n").filter((l) => l.startsWith("notice: ")).map((l) => l.slice(8));
   assert.match(said[0], /^IMPORTANT: the bots' briefing hook moved to a new path in 2 settings files:$/);
   for (const dir of [s.proj, s.worker]) assert.ok(said.includes(`  ${dir}: ${settings(dir)}`), `${dir} is listed: ${said.join("\n")}`);
-  assert.ok(said.some((l) => /keeps the OLD hook and gets NO briefing until it is restarted\. Restart the bot: automagik-herdr restart <bot> \(or the bot row's Restart\)/.test(l)));
-  assert.ok(said.some((l) => /not rewritten .*automagik-herdr start <bot>.*automagik-herdr attach <bot>/.test(l)));
+  assert.ok(said.some((l) => /keeps the OLD hook and gets NO briefing until it is restarted\. Restart the bot: am restart <bot> \(or the bot row's Restart\)/.test(l)));
+  assert.ok(said.some((l) => /not rewritten .*am start <bot>.*am attach <bot>/.test(l)));
   assert.ok(installed.stderr.trimEnd().endsWith(said.at(-1)), "the notice is the last thing logged");
   const viaEntry = s.hook(hookCommand(s.app));
   assert.match(viaEntry.stdout, /You are Genie/, `the hook runs am-sidebar's briefing (${viaEntry.ms} ms, stderr: ${viaEntry.stderr})`);
@@ -683,7 +715,7 @@ test("update.mjs: install across the rename moves the hooks; rollback to v0.3 pu
   assert.equal(readlinkSync(link), join(s.mods, "spaces-agents", "bin", "automagik-herdr"));
   const v = spawnSync(link, ["--version"], { encoding: "utf8", env: { PATH: `${NODE_DIR}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: s.app } });
   assert.equal(v.status, 0, v.stderr);
-  assert.match(v.stdout, /^automagik-herdr \d+\.\d+\.\d+\n$/);
+  assert.match(v.stdout, /^am \d+\.\d+\.\d+\n$/);
   assert.equal(read(join(s.mods, "pocket-link", ".state", "pairing.key")), "secret\n");
   assert.deepEqual(readdirSync(join(s.mods, "pocket-link")), [".state"]);
 });
@@ -705,7 +737,7 @@ test("hooksNotice: every file with its project, the running sessions, unknown pr
   const forward = hooksNotice({ direction: "forward", rewritten: files, skipped: [] });
   assert.deepEqual(forward.slice(0, 3), ["IMPORTANT: the bots' briefing hook moved to a new path in 2 settings files:",
     `  /p/a: ${files[0]}`, `  /p/b/sub: ${files[1]}`]);
-  assert.match(forward[3], /running .* keeps the OLD hook and gets NO briefing until it is restarted\. Restart the bot: automagik-herdr restart <bot> \(or the bot row's Restart\)\.$/);
+  assert.match(forward[3], /running .* keeps the OLD hook and gets NO briefing until it is restarted\. Restart the bot: am restart <bot> \(or the bot row's Restart\)\.$/);
   assert.match(forward[4], /^Projects the pack doesn't know about were not rewritten/);
   const back = hooksNotice({ direction: "back", restored: [files[0]], skipped: [] });
   assert.equal(back[0], "IMPORTANT: the bots' briefing hook went back to the older release's path in 1 settings file:");

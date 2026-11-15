@@ -43,9 +43,13 @@ How they fit:
   **Auto** is Workspace plus a saved mark, chosen only by you after a confirmation in Details,
   the composer menu or the chat's permission card; the question names who decides for that Bot.
   Every message reaching the Bot's current chat counts, including another Bot's or a schedule's.
-  Auto needs no tool deny list, Workspace in the Session and this host holding the team;
+  Auto needs Workspace in the Session and this host holding the team;
   otherwise the saved choice says **Runs as Workspace here**. Picking any level, Workspace again
-  included, ends Auto and its agent sessions; route, model and deny-list changes clear it too.
+  included, ends Auto and its agent sessions; route and model changes clear it too.
+  Deny lists coexist with Auto: changing one keeps the mark, moves the permission revision
+  and ends agent sessions and outstanding grants. DSH refuses native/API and bridged denied
+  calls whatever the judge says. Unbridged CLI built-ins and team agents’ own tools were
+  never covered at Workspace either; they need to use DSH’s bridge for the deny to reach them.
   Tasks and Bots opened from that chat while Auto counts there inherit it; an inherited task
   counts only while the opener's mark and permission revision match. Groups, Settings and the
   team default offer no Auto row.
@@ -53,20 +57,31 @@ How they fit:
 - **Subagents**: in-process children of Read only, Workspace and Auto review Bots keep that level with approval prompts on, without changing their captured sandbox. Their asks appear above the composer of the Bot's chat or task (open it from the task card), or in the group member card; the sidebar, Live rail and notifications also show that they wait. Children keep DSH's refusal, shown as a permission stop, when their Bot runs at Full access, with approval prompts off, or at a custom or unknown level; when the Bot's level changed while the child was being created; when a resumed child has its prompts off; and when they belong to an automation run, a plugin Session, an earlier part or an ended task. An ask nothing here can answer is cancelled and noted as a stop. The phone does not show child asks.
 - **Hard steps and repeated refusals**: at Read only, Workspace and DSH Auto review,
   recursive deletes, force pushes, remote branch deletes, hard resets and cleans,
-  infrastructure destroys, database drops, file-tool deletes and deleting a Bot or group
-  ask the person when the existing tool gate allows them. Children follow the same check.
+  infrastructure destroys, database drops, file-tool deletes and deleting a Bot or group,
+  secret files/token commands, external messages, shared or ambiguous pushes, and deletes
+  outside the Bot’s folder ask the person when the existing tool gate allows them. Children follow the same check.
   Read-only team lookups such as `recall` do not ask just because their arguments mention a hard step.
   Auto also asks about these steps inside its Workspace boundary; its judge keeps its own counts.
+  Plugins classify external senders through `rt.stepHooks.sendsOutside(fn)`; a failed hook asks.
+  Ordinary example env files, public SSH keys, feature-branch pushes with an explicit
+  destination and local file deletes stay out of the added list; a bare `git push` or a
+  destination of `HEAD` asks. Exact boundaries are in RFC 0031’s #1092 amendment.
+  The judge’s deadline covers model lookup too; grants bind arguments. `rt.autoAuditRows()`
+  exposes its last 200 decisions without arguments, including allows, outside the failures list.
   After three consecutive automatic refusals or ten in a turn, the next refusal asks
   “Let it keep working?” Allow once only lets work continue: nothing refused runs.
   Reject stops the Bot for that turn. If approvals are off or no chat, group seat or working
   task can show the question, work stops with a reason and an automatic-stop notification
   when that host hook is available. Full access is unchanged.
-  Unbridged Claude Code gets session-only ask rules for destructive shell commands at every
+  Unbridged Claude Code gets session-only ask rules for expressible hard steps at every
   asking level, removed by restarting its session across Full access. Bridged Claude has no
   Bash of its own: its DSH calls use the checks above. Codex's own tools are excluded:
   prompt rules under its Full access `never` policy refuse instead of asking, rules have no
   per-session path, and its `agent` mode sends prompt rules to its reviewer, not the person.
+  This is an unmet dependency: Codex built-ins run without `session/request_permission`.
+  Enforcing the list needs a mandatory per-session ask policy before its reviewer or a blocking
+  pre-execution request with tool, arguments and cwd. Claude wildcard rules cannot express
+  outside-folder deletes or ambiguous push targets either; those need a bridge or richer policy.
 
 - **Bots work together**: `message_bot` sends a message to another Bot, `create_bot`, `update_bot` and `delete_bot` add, set up and remove Bots (including a profile photo from a local image file or a data URL), and `ask_user` asks you a question without blocking the other Bots. `show_view` draws a card in a Bot's own chat — text, metrics, tables, progress, choices, confirmations and short forms; an interactive card waits for your answer.
 - **Group chats**: members speak one at a time, and each one reads the latest messages first. A message can `@Name` a member to pass the turn on; type `@` to pick one from a list. **+ → Reference a chat** adds another Bot's chat to a message as context, and in a group the members who answer get it. A member with nothing new to add stays quiet (`[PASS]`). Each member has its own hidden Session per group, so a group never reads a Bot's private chat.
@@ -495,6 +510,8 @@ dev/check.sh                             # all checks (see below)
 | `src/host/` | Host: team and storage (`roster`, `store`), tools (`tools`), turns and delivery (`turns`, `delivery`), group chats (`groups`), chat parts, the context steward and the index (`parts`, `steward`, `chat-index`), image text (`images`), secrets (`secrets`), Bot browser (`browser`), the hooks other Omni plugins add through (`extend`), the `POST api/omni-ui` route (`channel`), the web app's name and icon (`app-manifest`, `app-icon.png`) |
 | `src/client/` | Browser source: sidebar, chat header, transcript cells, panels and dialogs, themes, Bot browser panel, the registries other Omni plugins add to (`extend`) and the canvas slot they draw into (`canvas-slot`, `canvas-text`) |
 | `client.js` | Built from `src/client/` by `scripts/build-client.mjs` (esbuild); committed |
+| `src/script-child/` | Source of the process a `browser_exec` script runs in: a QuickJS interpreter (WebAssembly) and the two functions it is given; `pins.json` holds the interpreter's version and the sha256 of each of its files |
+| `src/host/browser/script-child.js` | Built from `src/script-child/` and the pinned interpreter by `scripts/build-script-child.mjs` (esbuild) as one file; committed |
 | `web-search.js` | The `auto` search provider; independent of the team code |
 | `test/` | Unit tests and fixtures |
 | `dev/characters.mjs` | Builds the characters (small 3D models traced to outlines) into the `CHARACTERS` table in `src/client/characters.js` |

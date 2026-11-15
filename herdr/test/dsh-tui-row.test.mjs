@@ -215,7 +215,7 @@ test("working on requires approval before start or restart when approved off or 
     for (const verb of ["start", "restart"]) {
       const result = s.cli([verb, "Genie", "--json"]);
       assert.notEqual(result.code, 0);
-      assert.match(result.err, /run automagik-herdr proxy approve first/);
+      assert.match(result.err, /run am proxy approve first/);
       assert.equal(result.err.trim().split("\n").length, 1);
     }
     assert.deepEqual(s.runs(), [], "no plain fallback");
@@ -263,7 +263,7 @@ test("the same invalid record warns off to plain argv and refuses on for local s
     assert.deepEqual(s.runs().slice(-count), plain, `${mode}: byte-equal plain argv`);
     assert.equal((off.err.match(/WARNING hc proxy:/g) ?? []).length, count);
     assert.ok(off.err.includes(path));
-    assert.match(off.err, /does not match its sha256.*starting plain.*automagik-herdr proxy approve/);
+    assert.match(off.err, /does not match its sha256.*starting plain.*am proxy approve/);
     assert.doesNotMatch(off.out, /^WARNING hc proxy:/m, "warning goes to stderr");
     const doctor = s.cli(["dsh-tui", "doctor", "--json"]).json();
     const warning = doctor.checks.find((row) => row.check === "approved-roster");
@@ -275,7 +275,7 @@ test("the same invalid record warns off to plain argv and refuses on for local s
     assert.equal(s.cli(["edit", "Genie", "--hc-proxy", "on"]).code, 0);
     const on = s.cli(args);
     assert.notEqual(on.code, 0);
-    assert.match(on.err, /does not match its sha256.*automagik-herdr proxy approve first/);
+    assert.match(on.err, /does not match its sha256.*am proxy approve first/);
     assert.equal(s.runs().length, before, "working on starts no replacement pane");
     assert.equal(readFileSync(path, "utf8"), corrupt, "both sides used the same corrupt record");
   }

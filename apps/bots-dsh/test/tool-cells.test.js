@@ -9,7 +9,8 @@ import { build } from 'esbuild'
 const { outputFiles } = await build({
   stdin: {
     contents: [
-      "export { ToolCell, TriggerCell, callTree, stackReplies } from './src/client/cells.js'",
+      "export { ToolCell, TriggerCell, TurnProcessCell, callTree, stackReplies, CellEmpty, Bubbles, ChatRows } from './src/client/cells.js'",
+      "export { toolCards } from './src/client/extend.js'",
       "export { QuestionDock } from './src/client/questions.js'",
       "export { SecretDock } from './src/client/secret-card.js'",
       "export { countCards } from './src/client/sources.js'",
@@ -36,20 +37,42 @@ const react = {
   useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
 }
 const timers = new Set()
+// The observers CellEmpty sets on its slot, so a test can deliver a mutation.
+const observers = []
+class FakeObserver {
+  constructor(fn) { this.fn = fn; this.off = false; observers.push(this) }
+  observe() {}
+  disconnect() { this.off = true }
+}
+// The Markdown the host's renderer is given, and what this plugin's copy controls write.
+const markdownTexts = []
+const copiedTexts = []
+const clipboard = {}
+class ClipboardItem {
+  constructor(items) { this.getType = type => Promise.resolve(items[type]) }
+}
 const module = { exports: {} }
-runInNewContext(outputFiles[0].text, {
+// The page's globals; a test that needs ClipboardItem puts it here for its own run.
+const page = {
   module, exports: module.exports,
-  document: { hidden: false }, TextEncoder,
+  document: { hidden: false }, TextEncoder, MutationObserver: FakeObserver,
+  navigator: { clipboard }, Blob,
   setTimeout: (fn) => { const timer = { fn }; timers.add(timer); return timer },
   clearTimeout: timer => timers.delete(timer),
   require: (name) => {
     if (name === 'react') return react
     if (name === 'react-dom') return { createPortal: node => node }
-    if (name === '@deepseek-ai/dsh-client-ui-primitives') return { MarkdownText: ({ text }) => text }
+    if (name === '@deepseek-ai/dsh-client-ui-primitives') {
+      return {
+        MarkdownText: ({ text }) => { markdownTexts.push(text); return text },
+        writeClipboard: (text) => { copiedTexts.push(text); return Promise.resolve(clipboard.refuse !== true) },
+      }
+    }
     throw new Error(`Unexpected platform module ${name}`)
   },
-})
-const { ToolCell, TriggerCell, callTree, stackReplies, QuestionDock, SecretDock, countCards, ViewMenuList, WidgetView } = module.exports
+}
+runInNewContext(outputFiles[0].text, page)
+const { ToolCell, TriggerCell, TurnProcessCell, callTree, stackReplies, CellEmpty, Bubbles, ChatRows, toolCards, QuestionDock, SecretDock, countCards, ViewMenuList, WidgetView } = module.exports
 
 // Runs the effects collected since the last render; returns the cleanups.
 const mount = () => {
@@ -75,6 +98,8 @@ const find = (node, match) => {
   return match(node) ? node : find(node.props.children, match)
 }
 const count = (haystack, needle) => haystack.split(needle).length - 1
+// A cell that draws nothing leaves its empty mark (cell-empty.js CellEmpty).
+const emptied = node => find(expand(node), each => each.props?.['data-bt-empty'] === true) !== undefined
 
 const writer = { id: 'writer', name: 'Writer', color: 'blue' }
 const chief = { id: 'chief', name: 'Omni', color: 'green' }
@@ -292,9 +317,154 @@ test('each sub-call shows its own state, not its program\'s', () => {
 })
 
 test('a program with no known sub-call draws nothing, as before', () => {
-  assert.equal(ToolCell(props(program([]))), null)
-  assert.equal(ToolCell(props(program([call('bash', 'program:ptc:1'), call('read_file', 'program:ptc:2')]))), null)
-  assert.equal(ToolCell(props(call('bash', 'direct'))), null)
+  assert.ok(emptied(ToolCell(props(program([])))))
+  assert.ok(emptied(ToolCell(props(program([call('bash', 'program:ptc:1'), call('read_file', 'program:ptc:2')])))))
+  assert.ok(emptied(ToolCell(props(call('bash', 'direct')))))
+  effects = []
+})
+
+// Every element a cell drew is the hidden empty mark, and there is at least one.
+const onlyMarks = (node) => {
+  const elements = findAll(expand(node), each => typeof each.type === 'string')
+  return elements.length > 0 && elements.every(each => each.props?.['data-bt-empty'] === true && each.props.hidden === true)
+}
+
+test('every call that draws nothing leaves only the empty mark, so its seat can hide', () => {
+  const roster = team({
+    questions: { chief: question('q-call') },
+    secretRequests: { chief: [request('s-call')] },
+    views: { chief: { id: 'view-1', callId: 'v-call', title: 'Card', view: { type: 'metric', label: 'Done', value: '3' } } },
+  })
+  const held = {
+    chief: {
+      [JSON.stringify(['question', 'question'])]: 1,
+      [JSON.stringify(['secret', 'request'])]: 1,
+      [JSON.stringify(['view', 'view-1'])]: 1,
+    },
+  }
+  // A card the user is holding in the dock, an unfinished call, a name that
+  // resolves to nobody, an answerless reply: each marks itself, at any depth.
+  for (const root of [
+    call('ask_user', 'q-call'),
+    call('ask_user', 'answered-call'),
+    call('show_view', 'v-call'),
+    call('show_view', 'refused-call', { isError: true }),
+    call('request_secret', 's-call', { args: { name: 'DEMO_TOKEN' } }),
+    call('request_secret', 'unknown-call', { args: { name: 'DEMO_TOKEN' }, running: true }),
+    call('browser_handoff', 'h-call'),
+    call('create_bot', 'c-call', { args: { name: 'Nobody' } }),
+    call('update_bot', 'u-call', { args: { name: 'Nobody', bot: 'Nobody' } }),
+    call('delete_bot', 'd-call', { args: { bot: 'Writer' }, running: true }),
+    call('create_group', 'g-call', { running: true }),
+    call('read_group_chat', 'r-call', { args: { group: 'Nowhere' } }),
+    call('ask_user_question', 'aq-call', { args: { questions: [{ question: 'Ship it?' }] }, running: true }),
+    call('ask_user_question', 'aq-none', { args: { questions: [{ question: 'Ship it?' }] }, content: '{}' }),
+    call('remember', 'm-call', { running: true }),
+    call('group_relay', 'relay-call', { content: '[]' }),
+  ]) {
+    assert.ok(onlyMarks(ToolCell(props(root, { roster, held }))), `${root.name ?? root.call?.name} ${root.callId} leaves only marks`)
+    assert.ok(onlyMarks(ToolCell(props(program([{ ...root, callId: root.callId }]), { roster, held }))), `${root.callId} in a program leaves only marks`)
+    effects = []
+  }
+})
+
+test('a card another plugin registered that draws nothing leaves the empty mark', () => {
+  const off = toolCards.register('omni_quiet', ({ done }) => (done ? h('div', { className: 'bt-event' }, 'Called') : null))
+  try {
+    assert.ok(onlyMarks(ToolCell(props(call('omni_quiet', 'o-1', { running: true })))))
+    assert.equal(shown(call('omni_quiet', 'o-1')), 'Called')
+    assert.ok(!emptied(ToolCell(props(call('omni_quiet', 'o-1')))))
+  } finally {
+    off()
+  }
+  effects = []
+})
+
+test('a turn process cell with no new-messages line leaves the empty mark', () => {
+  const cell = TurnProcessCell({
+    node: { data: { turn: 2 }, location: { turn: { turn: 2, start: { time: 1 } } } }, sessionId: chief.id,
+    useRoster: select => select(team()), useUi: select => select({ visits: {} }), useTurnClock: select => select({}),
+    actions: { noteTurnTime() {} },
+  })
+  assert.ok(onlyMarks(cell))
+  effects = []
+})
+
+// The slot a node's cell renders into counts as emptied only while every child in it
+// is an empty mark: a row or seat hides on that mark, so a node holding anything else
+// must not be taken for empty. `slotOf` builds the slot the way the DOM would: one
+// child per rendered part, mark or not.
+const slotOf = (out) => {
+  const slot = { childNodes: [], dataset: {} }
+  const lift = (node) => {
+    if (Array.isArray(node)) { node.forEach(lift); return }
+    if (node === null || node === undefined || typeof node === 'boolean') return
+    if (typeof node !== 'object') { slot.childNodes.push({ nodeType: 3, hasAttribute: () => false }); return }
+    if (node.type === Fragment) { lift(node.props.children); return }
+    const dom = { nodeType: 1, hasAttribute: name => node.props?.[name] !== undefined, closest: () => slot }
+    if (node.props?.ref) node.props.ref.current = dom
+    slot.childNodes.push(dom)
+  }
+  lift(expand(out))
+  return slot
+}
+
+test('a node holding a visible event next to a mark is not emptied', () => {
+  const actions = { noteLive() {}, noteCards() {} }
+  // Marks alone: emptied, so the row or seat wrapping the slot may hide.
+  const alone = slotOf(ToolCell(props(call('ask_user', 'direct'), { actions })))
+  mount()
+  assert.equal(alone.dataset.btEmptied, '')
+
+  // A run_code node holding "Messaged Writer" and an answered question's mark:
+  // the event stays, so the node is not emptied.
+  const mixed = slotOf(ToolCell(props(program([
+    call('message_bot', 'program:ptc:1', { args: { to: 'Writer' } }),
+    call('ask_user', 'program:ptc:2'),
+  ]), { actions })))
+  mount()
+  assert.ok(mixed.childNodes.some(kid => kid.hasAttribute('data-bt-empty')), 'the answered question marks itself')
+  assert.ok(mixed.childNodes.some(kid => !kid.hasAttribute('data-bt-empty')), 'the event shows')
+  assert.ok(!('btEmptied' in mixed.dataset))
+  effects = []
+})
+
+test('a slot keeps its emptied state in step with what it holds', () => {
+  observers.length = 0
+  const slot = { childNodes: [], dataset: {} }
+  const mark = () => ({ nodeType: 1, hasAttribute: name => name === 'data-bt-empty', closest: () => slot })
+  const event = () => ({ nodeType: 1, hasAttribute: () => false, closest: () => slot })
+  const plainText = () => ({ nodeType: 3, hasAttribute: () => false })
+  // Mounts one CellEmpty into the slot beside `siblings`; returns its unmount.
+  const draw = (...siblings) => {
+    const self = mark()
+    CellEmpty({}).props.ref.current = self
+    slot.childNodes = [...siblings, self]
+    return mount()
+  }
+  const changed = () => observers.filter(observer => !observer.off).forEach(observer => observer.fn())
+
+  // A mark mounted beside a visible part, or beside plain text another
+  // renderer left, does not empty the slot.
+  draw(event(), mark())
+  assert.ok(!('btEmptied' in slot.dataset))
+  draw(plainText(), mark())
+  assert.ok(!('btEmptied' in slot.dataset))
+
+  // A mark alone empties the slot; a visible part landing later takes the mark
+  // back, and that part leaving empties the slot again.
+  const unmount = draw()
+  assert.equal(slot.dataset.btEmptied, '')
+  slot.childNodes = [...slot.childNodes, event()]
+  changed()
+  assert.ok(!('btEmptied' in slot.dataset))
+  slot.childNodes = slot.childNodes.slice(0, 1)
+  changed()
+  assert.equal(slot.dataset.btEmptied, '')
+
+  // The last mark leaving takes the emptied state with it.
+  unmount()
+  assert.ok(!('btEmptied' in slot.dataset))
   effects = []
 })
 
@@ -710,7 +880,7 @@ test('a goal round draws nothing, while another unknown trigger keeps its event 
     useUi: select => select({ visits: {} }),
     actions: {},
   }))
-  assert.equal(trigger({ kind: 'goal', goalId: 'goal-1', revision: 1, round: 1 }), null)
+  assert.ok(emptied(trigger({ kind: 'goal', goalId: 'goal-1', revision: 1, round: 1 })))
   assert.match(text(trigger({ kind: 'webhook' })), /<goal_round>Keep going/)
 })
 
@@ -1144,8 +1314,9 @@ test('a refused bash call draws the reason once, on its first call in that Sessi
   assert.equal(text(lines[0]), '2 steps did not run: the sandbox blocked it')
   assert.equal(lines[0].props.role, 'status')
   assert.equal(lines[0].props.title, 'sandbox')
-  assert.equal(draw('y', [entry]), null)
-  assert.equal(draw('x', []), null)
+  // The later call, and a call with no stop, draw nothing but the empty mark.
+  assert.ok(onlyMarks(draw('y', [entry])))
+  assert.ok(onlyMarks(draw('x', [])))
   effects = []
 })
 
@@ -1155,4 +1326,141 @@ test('a permission-stop group reply draws the round reason', () => {
   const lines = findAll(tree, node => node.props?.className === 'bt-event bt-event-error')
   assert.equal(lines.length, 1)
   assert.equal(text(lines[0]), 'ada stopped on a permission: Auto review refused it')
+})
+
+// A folded message's cut code block is drawn by the cell, so no copy control exists that
+// holds only the part shown; the cell's own is bound to the whole block, and a short
+// block keeps the host's normal rendering and copy.
+const codeLines = count => Array.from({ length: count }, (_, index) => `line ${index + 1}`).join('\n')
+const copyOf = node => findAll(node, item => item.type === 'button' && item.props?.className === 'bt-fold-copy')
+const bubbleOf = (texts, extra = {}) => expand(Bubbles({
+  texts, roster: team(), selfId: chief.id, sessionId: chief.id, actions: {},
+  useUi: select => select({ reactions: {} }), ...extra,
+}))
+
+test('a folded code block leaves no copy of only its shown part', async () => {
+  const inner = codeLines(40)
+  markdownTexts.length = 0
+  copiedTexts.length = 0
+  const out = bubbleOf([`Here:\n\`\`\`js\n${inner}\n\`\`\``])
+  // The Markdown the host renders holds no fence, so it can draw no copy of the part.
+  assert.deepEqual(markdownTexts, ['Here:'])
+  // The cell draws the part the preview keeps, and its copy holds the whole block.
+  assert.equal(text(find(out, item => item.type === 'pre')), codeLines(8))
+  const [copy] = copyOf(out)
+  assert.equal(copyOf(out).length, 1)
+  assert.equal(text(copy), 'Copy')
+  sets.length = 0
+  await copy.props.onClick()
+  assert.deepEqual(copiedTexts, [inner])
+  assert.deepEqual(sets.splice(0), [true], 'the control says Copied')
+
+  // A message that opens with the block gives the host nothing to render.
+  markdownTexts.length = 0
+  const bare = bubbleOf([`\`\`\`js\n${inner}\n\`\`\``])
+  assert.deepEqual(markdownTexts, [])
+  assert.equal(copyOf(bare).length, 1)
+
+  // A short block goes to the host whole, with the host's own copy and none of ours.
+  markdownTexts.length = 0
+  copiedTexts.length = 0
+  const short = bubbleOf(['```js\none\n```'])
+  assert.deepEqual(markdownTexts, ['```js\none\n```'])
+  assert.equal(copyOf(short).length, 0)
+  // So does a long message whose fold cuts no code block.
+  markdownTexts.length = 0
+  assert.equal(copyOf(bubbleOf([`\`\`\`js\none\n\`\`\`\n${codeLines(40)}`])).length, 0)
+  assert.ok(markdownTexts[0].startsWith('```js\none\n```'))
+  effects = []
+})
+
+test('a copy the clipboard refuses is reported, and the control does not say Copied', async () => {
+  const errors = []
+  copiedTexts.length = 0
+  sets.length = 0
+  clipboard.refuse = true
+  try {
+    const out = bubbleOf([`\`\`\`js\n${codeLines(40)}\n\`\`\``], { actions: { reportError: (error, where) => errors.push([error.message, where]) } })
+    await copyOf(out)[0].props.onClick()
+  } finally {
+    delete clipboard.refuse
+  }
+  assert.deepEqual(errors, [['Could not copy the code block', 'copy']])
+  assert.deepEqual(sets.splice(0), [])
+  effects = []
+})
+
+test('an earlier user message folded on a code block copies the whole block too', async () => {
+  const inner = codeLines(40)
+  copiedTexts.length = 0
+  markdownTexts.length = 0
+  const rows = expand(ChatRows({
+    items: [{ kind: 'user', text: `Run this:\n\`\`\`sh\n${inner}\n\`\`\`` }],
+    sessionId: chief.id, roster: team(), actions: {},
+  }))
+  assert.deepEqual(markdownTexts, ['Run this:'])
+  await copyOf(rows)[0].props.onClick()
+  assert.deepEqual(copiedTexts, [inner])
+  sets.length = 0
+  effects = []
+})
+
+test('a reply with a canvas keeps the host rendering when it folds', () => {
+  // A canvas reply never folds by length; kept only in part it does, and its cut fence
+  // stays in the Markdown the bubble hands on, as before.
+  const start = `Chart:\n\`\`\`openui-lang\n${codeLines(20)}`
+  markdownTexts.length = 0
+  const out = bubbleOf([start], { whole: { length: 90_000, load: async () => undefined } })
+  assert.equal(copyOf(out).length, 0)
+  assert.equal(findAll(out, item => item.props?.className === 'bt-fold-block').length, 0)
+  // The lines the fold kept are still drawn, by the Markdown the bubble hands on: with
+  // no block of its own to hold them, taking them out of that text would lose them.
+  assert.ok(markdownTexts.some(text => text.includes('line 1')), 'the cut fence stays in the Markdown')
+  effects = []
+})
+
+test('a preview of a message kept as a file copies its full code and never writes a partial read', async () => {
+  const inner = codeLines(4000)
+  const full = `\`\`\`js\n${inner}\n\`\`\``
+  let whole = true
+  const errors = []
+  const bubble = () => bubbleOf([full.slice(0, 1000)], {
+    actions: { reportError: error => errors.push(error.message) },
+    whole: { length: full.length, load: async () => ({ text: full, whole }) },
+  })
+  markdownTexts.length = 0
+  copiedTexts.length = 0
+  await copyOf(bubble())[0].props.onClick()
+  assert.deepEqual(copiedTexts, [inner])
+  assert.ok(markdownTexts.every(given => !given.includes('```')))
+  copiedTexts.length = 0
+  whole = false
+  await copyOf(bubble())[0].props.onClick()
+  assert.deepEqual(copiedTexts, [])
+  assert.deepEqual(errors, ['Could not read the whole code block'])
+  sets.length = 0
+  effects = []
+})
+
+test('a message kept as a file starts the clipboard write inside its click, before the text loads', async (t) => {
+  const inner = codeLines(4000)
+  const full = `\`\`\`js\n${inner}\n\`\`\``
+  let release
+  const loaded = new Promise((resolve) => { release = resolve })
+  let writing = false
+  clipboard.write = async (items) => {
+    writing = true
+    const blob = await items[0].getType('text/plain')
+    copiedTexts.push(await blob.text())
+  }
+  page.ClipboardItem = ClipboardItem
+  t.after(() => { delete clipboard.write; delete page.ClipboardItem; effects = []; sets.length = 0 })
+  const out = bubbleOf([full.slice(0, 1000)], { whole: { length: full.length, load: () => loaded } })
+  copiedTexts.length = 0
+  const copying = copyOf(out)[0].props.onClick()
+  assert.equal(writing, true, 'write is called synchronously in the gesture')
+  assert.deepEqual(copiedTexts, [], 'nothing is written before the full read')
+  release({ text: full, whole: true })
+  await copying
+  assert.deepEqual(copiedTexts, [inner])
 })

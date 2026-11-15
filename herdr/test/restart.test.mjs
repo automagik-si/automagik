@@ -103,18 +103,15 @@ test("restartRefusal: a working pane, then helpers that die with it; outliving h
   assert.equal(restartRefusal({ name: "Genie", old: idle }), null);
 });
 
-test("restartRefusal onMachine (#437): helpers there are ended by hand, never --tree or --force; a working one is waited for first", () => {
+test("restartRefusal onMachine offers tree on the holding machine and explicit force", () => {
   const idle = { address: "vm/t5", status: { state: "idle" } };
-  const done = { address: "vm/t7", state: "live", die_with_parent: true, status: { state: "done" } };
-  const busy = { address: "vm/t9", state: "live", die_with_parent: true, status: { state: "working" } };
-  assert.equal(restartRefusal({ name: "Genie", old: idle, helpers: [done], onMachine: true }),
-    "vm/t5 has a helper that ends with it: vm/t7. Restarting helpers on a linked machine isn't built yet, so nothing was restarted. "
-    + "End its pane (hc kill vm/t7) and restart Genie again.");
-  assert.equal(restartRefusal({ name: "Genie", old: idle, helpers: [done, busy], onMachine: true }),
-    "vm/t5 has helpers that end with it: vm/t7, vm/t9. Restarting helpers on a linked machine isn't built yet, so nothing was restarted. "
-    + "Wait for vm/t9 to finish, then end each one's pane (hc kill vm/t7, hc kill vm/t9) and restart Genie again.");
-  assert.equal(restartRefusal({ name: "Genie", old: idle, helpers: [{ ...done, die_with_parent: false }], onMachine: true }), null);
-  assert.equal(restartRefusal({ name: "Genie", old: idle, helpers: [done], onMachine: true, force: true }), null);
+  const helper = { address: "vm/t7", state: "live", die_with_parent: true, status: { state: "working" } };
+  const refusal = restartRefusal({ name: "Genie", old: idle, helpers: [helper], onMachine: true });
+  assert.match(refusal, /--tree runs on their machine/);
+  assert.match(refusal, /End helpers and restart/);
+  assert.equal(restartRefusal({ name: "Genie", old: idle, helpers: [helper], onMachine: true, force: true }), null);
+  assert.equal(restartAnswer({ code: 1, out: { refused: "helpers" }, err: refusal }).helpers, true);
+  assert.equal(restartRefusal({ name: "Genie", old: idle, helpers: [{ ...helper, die_with_parent: false }], onMachine: true }), null);
   assert.match(restartRefusal({ name: "Genie", old: { ...idle, status: { state: "working" } }, onMachine: true }), /Genie is working in vm\/t5/);
 });
 
@@ -138,8 +135,8 @@ test("the sidebar's Restart: the CLI's restart through launch.js runCli; its ans
   assert.match(working.refused, /^Genie is working in t5/);
   assert.equal(working.forceable, true);
   assert.equal(restartAnswer({ code: 1, err: "Genie has no recorded Claude session ... restart with --fresh for a new conversation." }).freshable, true);
-  assert.deepEqual(restartAnswer({ code: 1, out: null, err: "No bot x in this project." }), { refused: "No bot x in this project.", forceable: false, freshable: false });
-  assert.deepEqual(restartAnswer({ code: 127, out: null, err: "" }), { refused: "Restart failed (exit 127).", forceable: false, freshable: false });
+  assert.deepEqual(restartAnswer({ code: 1, out: null, err: "No bot x in this project." }), { refused: "No bot x in this project; check the log and try again.", forceable: false, freshable: false });
+  assert.deepEqual(restartAnswer({ code: 127, out: null, err: "" }), { refused: "Restart failed; check the log and try again.", forceable: false, freshable: false });
 });
 
 test("session ids: only UUID-shaped ones resume; a flag-like value never reaches --resume; the ledger's last row for the terminal stands in", () => {
@@ -384,7 +381,7 @@ test("restartRefusal --tree: helpers that end with the pane don't refuse, mid-tu
   const helper = { address: "t7", state: "live", die_with_parent: true, status: { state: "idle" } };
   const without = restartRefusal({ name: "Genie", old: idle, helpers: [helper] });
   assert.match(without, /pass --tree to restart it too \(resumed, under the new pane\), or pass --force to end it with the pane\./);
-  assert.equal(restartAnswer({ code: 1, err: without }).forceable, true, "the sidebar still offers --force");
+  assert.equal(restartAnswer({ code: 1, err: without }).helpers, true, "the sidebar offers both explicit helper choices");
   assert.equal(restartRefusal({ name: "Genie", old: idle, helpers: [helper], tree: true }), null);
   const busy = { ...helper, status: { state: "working" } };
   assert.equal(restartRefusal({ name: "Genie", old: idle, helpers: [busy], tree: true }), null, "--tree waits for it before anything starts (the CLI)");
@@ -399,7 +396,8 @@ test("helperPlan: a worker rebuilt from its ledger row (its task not sent again)
   assert.deepEqual([w.name, w.replaced, w.cwd, w.agent, w.mode, w.session], ["fix-dev", "t7", "/w", "omp", "resume", SID]);
   assert.deepEqual(w.argv, ["omp", "--model=k", "--thinking=high", `--resume=${SID}`]);
   const tpl = helperPlan({ get: { address: "t8", cwd: "/r", foreground: { argv: ["codex", "-m", "g"] }, argv: ["sh", "-c", "codex -m g"], template: "rev" }, agents: AGENTS });
-  assert.deepEqual(tpl.argv, ["sh", "-c", 'codex -m g "$@"', "sh", "resume", "--last"]);
+  // #1125: an hc template's pane that is no template worker keeps its command, with the launch-mode words after it.
+  assert.deepEqual(tpl.argv, ["sh", "-c", 'codex -m g "$@"', "sh", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "resume", "--last"]);
   const hand = helperPlan({ get: { address: "t9", cwd: "/h", foreground: { argv: ["claude", "--model", "m"] }, argv: ["claude", "--model", "m", "--continue"] }, agents: AGENTS });
   assert.deepEqual(hand.argv, ["claude", "--model", "m", "--continue"]);
   const none = helperPlan({ get: { address: "t10", cwd: "/h", foreground: { argv: ["claude"] } }, agents: AGENTS });
@@ -597,4 +595,15 @@ test("#805 H3: a markdown list above an idle prompt with many footers is not a d
     "  footer one", "  footer two", "  footer three", "  footer four", "  footer five", "  footer six"].join("\n");
   assert.equal(pendingDialog(screen), null);
   assert.equal(isPaneIdle({ address: "t5", state: "live", status: { state: "idle" } }, screen), true);
+});
+
+test("a tree restart with one failed helper reports the new lead and warning without offering another restart", () => {
+  const r = restartAnswer({ code: 1, out: { terminal: "t100", replaced: "t5", helpers: [
+    { replaced: "t7", name: "review", error: "hc run failed\n    at start (cli.js:1:1)" },
+  ] }, err: "a helper failed" });
+  assert.equal(r.terminal, "t100");
+  assert.equal(r.refused, undefined);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /review: hc run failed/);
+  assert.doesNotMatch(r.warnings[0], /\n|cli.js/);
 });

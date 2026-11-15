@@ -111,7 +111,7 @@ export async function runPane(argv = process.argv.slice(2), env = process.env, i
   // the real socket would stay reachable. Refuse before any proxy or child exists.
   const sandbox = sandboxState(env, { forbiddenRoots: io.forbiddenRoots });
   if (!sandbox.current || !sandbox.row.ok) {
-    throw new Error(`the dsh-tui profile's sandbox row is not current (${oneLine(sandbox.row.message ?? "the row does not match")}); run automagik-herdr dsh-tui install`);
+    throw new Error(`the dsh-tui profile's sandbox row is not current (${oneLine(sandbox.row.message ?? "the row does not match")}); run am dsh-tui install`);
   }
 
   const proxy = await (io.startProxy ?? startProxy)({

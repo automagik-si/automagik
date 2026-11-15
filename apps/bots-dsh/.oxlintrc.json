@@ -1,4 +1,5 @@
 {
+  "ignorePatterns": ["src/host/browser/script-child.js"],
   "env": { "browser": true, "node": true, "es2024": true },
   "rules": {
     "no-undef": "error",

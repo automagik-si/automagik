@@ -2196,3 +2196,16 @@ test('a marker in a topic, an entry or a provider failure reaches no log line, p
   assert.deepEqual(failures.map(item => item.code), Array(5).fill('bot/refused'))
   assert.deepEqual(leaks, [])
 })
+
+test('memory summaries retry transient failures on the same route and output budget', async (t) => {
+  const host = start({ replies: [Object.assign(new Error('temporary timeout'), { code: 'TIMEOUT' }), '## Overview\nYou like tea.'] })
+  t.after(host.stop)
+  host.ctx.llm.providerRetryPolicy = () => ({ mode: 'normal', maxRetries: 1, retryableCodes: ['TIMEOUT'], initialDelayMs: 1, maxDelayMs: 5, jitterRatio: 0 })
+  await host.tool('remember', { text: 'Likes tea' }, 'b2')
+  await host.call('memory-view', { botId: 'b2', summarize: true })
+  await summarized(host.call)
+  const done = (await host.call('memory-view', { botId: 'b2' })).value
+  assert.equal(done.summary?.text, '## Overview\nYou like tea.')
+  assert.equal(done.error, null)
+  assert.deepEqual(host.requests.map(({ provider, model, maxTokens }) => [provider, model, maxTokens]), [['deepseek', 'v4', 2048], ['deepseek', 'v4', 2048]])
+})

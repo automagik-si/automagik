@@ -110,7 +110,7 @@ test("the list: the pack as one group with its version, Yours, Herdr built-in fo
   assert.ok(view.grouped().rows.some((r) => r.mod?.name === "spaces"));
 });
 
-test("u on a pack mod asks, then runs automagik-herdr update in this app home; no clone", async (t) => {
+test("u on a pack mod asks, then runs am update in this app home; no clone", async (t) => {
   const s = scratch(t);
   const cx = makeCx();
   const view = new ModManager();
@@ -119,7 +119,7 @@ test("u on a pack mod asks, then runs automagik-herdr update in this app home; n
   select(view, "am-footer");
   await key(view, cx, "u");
   // #219: a switched-off pack mod is named before the yes: the update keeps it off, where it is.
-  assert.equal(view.confirm?.text, `update Automagik Herdr (all ${PACK_MODS.length} of its mods; am-tabs is off and stays off, updated in mods-disabled/) with automagik-herdr update? (y/n)`);
+  assert.equal(view.confirm?.text, `update Automagik Herdr (all ${PACK_MODS.length} of its mods; am-tabs is off and stays off, updated in mods-disabled/) with am update? (y/n)`);
   await key(view, cx, "y");
   await cx.settle();
   assert.equal(readFileSync(s.calls, "utf8"), `${s.appHome} update\n`);
@@ -128,13 +128,13 @@ test("u on a pack mod asks, then runs automagik-herdr update in this app home; n
   // u on the switched-off one asks the same; with every pack mod on, nothing is added; two off are both named.
   select(view, "am-tabs");
   await key(view, cx, "u");
-  assert.match(view.confirm?.text ?? "", /; am-tabs is off and stays off, updated in mods-disabled\/\) with automagik-herdr update\?/);
+  assert.match(view.confirm?.text ?? "", /; am-tabs is off and stays off, updated in mods-disabled\/\) with am update\?/);
   await key(view, cx, "n");
   await view.toggle(view.mods.find((m) => m.name === "am-tabs"), cx);
   await cx.settle();
   select(view, "am-footer");
   await key(view, cx, "u");
-  assert.equal(view.confirm?.text, `update Automagik Herdr (all ${PACK_MODS.length} of its mods) with automagik-herdr update? (y/n)`);
+  assert.equal(view.confirm?.text, `update Automagik Herdr (all ${PACK_MODS.length} of its mods) with am update? (y/n)`);
   await key(view, cx, "n");
   for (const name of ["am-quota", "am-tabs"]) { await view.toggle(view.mods.find((m) => m.name === name), cx); await cx.settle(); }
   select(view, "am-footer");

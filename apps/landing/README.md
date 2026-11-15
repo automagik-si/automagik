@@ -1,8 +1,8 @@
 # automagik.si
 
 RFC 0027, revised by the owner on 2026-11-11: the umbrella home plus Desktop, Mobile,
-Omni, Genie, Cloud and Mykes pages, plus one stand-in page for Arca until Arca's own site is
-served at `/arca/`. The app's current default Stage theme supplies
+Omni, Genie, Cloud and Mykes pages. Arca's page at `/arca/` is Arca's own, served by Arca's
+Worker: this site links to it and builds no page there. The app's current default Stage theme supplies
 the colours, type and component treatment. Every product screen is a provenance-backed
 capture; brand/font licences are in `assets/brand/LICENSES.md`.
 
@@ -14,29 +14,91 @@ has a dark capture of the same view for the dark theme. Pages show WebP art from
 by `scripts/build-art.mjs` from Automagik's own art and crops of the captures, each recorded
 with its source digest in `assets/art/manifest.json`.
 
-The committed HTML needs no Pages build step and contains no client JavaScript. The home
+The committed HTML needs no Pages build step. A page carries one script, the family drawer's
+own (see "The family drawer"); nothing else on a page runs script. The home
 has one small film slot: a real still with one quiet line until the film exists. Cloud is coming soon and carries intent, consent and removal
-forms, with email or inbound-first WhatsApp confirmation. No launch or marketing email.
+forms, with email confirmation; inbound-first WhatsApp confirmation is paused
+(`WHATSAPP_SIGNUPS_OPEN`, see `waitlist/README.md`). No launch or marketing email.
 The meter is not a product or page. Herdr and DSH are Desktop installation channels.
-Pages carries exactly one Arca page, the stand-in at `/arca/` (name, one line, Get Arca as
-the install command to copy, the way back), and nothing under it; Arca's own site takes that
-address over later. The installer's address answers with a shell script, so no link points
-at it; Get Arca on the home page and in the menus opens `/arca/`.
+Pages carries no Arca page: no file at `/arca/` and nothing under it. Arca's own page is
+live at that address since 2026-11-13, and the stand-in this site kept there until then is
+removed, as RFC 0027 says. The deploy uploads this folder as it is, so a file at `arca/`
+would be published beside Arca's page: `landing.test.mjs` holds that there is none. The
+installer's address answers with a shell script, so no link points at it; Get Arca on the
+home page and in the menus opens `/arca/`.
 
 ## Navigation
 
-It is a website, not one landing page. The header has three menus (Products, Resources,
-Company); each entry has a one-line description and its character, mark or glyph. With no
-client JavaScript, each menu button opens its panel through the browser's popover: click,
+It is a website, not one landing page. The header starts with the family's menu button, at
+the window's left edge, then the logo, three menus (Products, Resources, Company) and one
+button. Each menu entry has a one-line description and its character, mark or glyph. The
+menus need no script: each menu button opens its panel through the browser's popover: click,
 Enter or Space open it, Escape or a click outside close it and return the focus, and the
 browser keeps the button's expanded state for assistive technology (so the HTML carries no
 `aria-expanded` of its own). Hover opens the same panel in CSS, in the same place. Below
-860 px one Menu button opens a sheet under the header with the same three groups; while it
-is open the page behind it is hidden from the keyboard and from assistive technology. A
-browser without popovers opens the panels on hover or focus and gets a link to the footer's
-sitemap on a phone. The footer is the sitemap with the same groups. Every product page shows where it is (the header's Products button and a breadcrumb
+860 px the three menus fold away and the family drawer is the one menu: it carries the
+site's other pages under its top block. A browser without popovers opens the panels on
+hover or focus. The footer is the sitemap with the same groups. Every product page shows where it is (the header's Products button and a breadcrumb
 back to all products) and links to the previous and next product. Products keep one order
-everywhere; it is the `products` list in `scripts/build-pages.mjs`.
+everywhere; it is the `products` list in `scripts/build-pages.mjs`. The previous and next links walk
+the pages this site builds, so they pass Arca by: its page is Arca's own and has no link back
+into the round.
+
+## The family drawer
+
+The menu button and the drawer it opens are the product family's shared piece: Arca's
+drawer package, issue 11, approved by the owner on 2026-11-12, as issue 12 gives it (the
+same look, with the case where the host is Automagik answered and two faults found with
+real keys fixed). `assets/family/` holds the
+piece as it was given (`family.html`, `header-button.html`, `family.css`, `family.js`) and
+its art, all byte copies; `assets/family/SOURCE.md` lists each file's source and SHA-256,
+and `landing.test.mjs` pins them. Never edit a copy: a change is asked of the piece's
+author and arrives as a new issue, which is a file swap with new digests.
+
+- **What it shows**, top to bottom: where you are (Automagik, with its lockup and line),
+  with Desktop and Mobile right under it; then Products: Arca by its own logo, and Omni,
+  Genie and Mykes, each as its word in the lettering with no mark, "Coming soon." under
+  Mykes; Support and Close. No pet, no Genie head, and the triskle beside nothing but
+  Automagik.
+- **The host is Automagik** (the package's own rule for this case): Automagik appears once,
+  as the "You are here" block, never again lower down. So the piece's Automagik row is left
+  out, its Desktop and Mobile buttons move into the top block, and Arca, which the piece
+  has in the top block on Arca's site, is the first row of Products, by its logo
+  (`arca-logo-b.svg`, written into the page so it takes the text colour). The two style
+  rules this needs are in the piece's own `family.css`.
+- **A closed drawer fetches nothing**: every picture in it carries its address in
+  `data-src` or `data-srcset`, and the piece's script gives a picture its address when it
+  is shown (on a first open, the lockup and the three words for the ground in view). The
+  builder fills the same slots, in those attributes, and writes no `src` there. With script
+  off the drawer never opens, so its pictures are never needed.
+- **The keyboard stays in it**: Enter or Space opens it, Tab and Shift+Tab go round its
+  stops (Shift+Tab from the first goes to Close), Escape closes it and the focus returns to
+  the button.
+- **How it is built in**: `family(route)` in `scripts/build-pages.mjs` reads the piece's
+  file and writes it into every page with its comments left out, its slots filled, and this
+  site's own parts in the places the piece gives a host: the top block, the list under it
+  (`familyLinks`: Cloud, Get the app, Privacy, the pages with no row of their own; it
+  shows below 860 px, where the header's menus fold away), the three moves above,
+  addresses written from this site's root, and
+  `aria-current="page"` on the page being read. A link to a place on the page being read
+  is a bare `#name`, so the piece shuts the drawer before going there. The contract test
+  undoes those parts one by one and compares what is left with the piece's file.
+- **The page**: everything from the skip link to the footer is inside one wrapper,
+  `data-family-page`, which the open drawer pushes aside and puts out of reach (inert, and
+  hidden from assistive technology). The drawer, its clear layer and the layer that opens
+  another product's world come after the wrapper; the script is the body's last thing.
+- **The host's side of the styling** is one block in `styles.css`, and nothing in it
+  changes what the piece shows or does. It gives the names the piece reads this site's
+  values (colours from the theme's tokens, labels in the title face at its label weight);
+  draws the three classes the piece borrows (the label, the quiet link, the small button)
+  as this site draws them; says the piece's day values again for a light page, because
+  this site sets no `data-theme` and follows the visitor's system; centres the button in
+  this header's height; keeps the logo clear of the button with this site's own column;
+  and keeps the round button and the pills round under the site's focus ring.
+- **Script off**: the button is a plain link to the page's own sitemap, the footer, and
+  the drawer stays shut.
+- The Cloud form's answer pages (`waitlist/lib/ui.js`) keep their own small header with no
+  menu: they are sent with a policy that allows no script.
 
 ## we unfold and Open Intelligence
 
@@ -113,27 +175,43 @@ copied unchanged, and `LICENSES.md` pins each one's SHA-256 (`landing.test.mjs` 
   (ink letters) on the light page and `-cream-header.svg` (cream letters) on the dark one.
   `styles.css` sizes it by the triskle's height (`--mark`): the file is 264 tall where the
   triskle is 222, and the g's tail hangs under the triskle. The triskle is 32 px tall in the
-  header (26 on a phone, 23 under 360 px) and 40 px in the footer (34 on a phone).
+  header (26 on a phone, 24 at 360 px wide and under) and 40 px in the footer (34 on a phone),
+  so the lockup is never under the brand's 28 px floor (24 × 264 / 222 is 28.5).
   The browser gate reads the name's drawn colour in both themes, not only the file's name:
   it must stand clear of the ground the logo itself stands on, the header's or the footer's
   (a contrast of 7 or more), so the two files cannot be swapped unseen. No colour is named
   there.
-- Genie and Omni have their own lockups in the same kit: the same triskle, the name in the
-  same lettering, and the sparkle on the i in the product's colour (Automagik violet, Genie
-  pink, Omni cyan). The kit's large drawing is the heading of `/genie/` and `/omni/`
-  (`productLogo()` in `scripts/build-pages.mjs`), with ink letters on the light page and
-  cream ones on the dark page; the image's text is the product's name. `styles.css` sizes
-  it by height alone, a share of the window's width that always fits the heading's column,
-  up to 128 px. The drawing for small sizes titles the two product cards on the home page,
-  44 px high. Omni's card follows the theme; Genie's card is dark in both themes, so its
-  letters are always cream, and the kit's small Genie lockup with ink letters is not kept.
-  The browser gate reads each name's drawn colour against the ground it stands on (the
-  page, Omni's card, the lightest part of Genie's card) and measures each lockup at six
-  widths: its own proportions, inside its column.
+- Genie, Omni and Mykes each show as their own mark with their name (the brand's rules 9
+  and 10): Genie's flat lamp, Omni's tentacle vortex, Mykes's cords, one colour each, with
+  the name in the brand's lettering. The files are byte copies of the brand folder's
+  (`docs/brand/logo/`), pinned in `assets/brand/LICENSES.md`. The lockup is the heading of
+  `/genie/`, `/omni/` and `/mykes/` (`productLogo()` in `scripts/build-pages.mjs`), the ink
+  file on the light page and the cream one on the dark page; the image's text is the
+  product's name. `styles.css` sizes it by height alone, a share of the window's width that
+  fits the heading's column for the widest of the three (Genie's), up to 128 px, so the
+  three pages' letters are one size. The lockup also titles Genie's and Omni's cards on the
+  home page, 44 px high: Omni's card follows the theme and shows the drawing for small
+  sizes (`-header`; under about 56 px the large vortex's suckers turn to specks); Genie's
+  card is dark in both themes, so it shows the cream file. The lamp and the cords have one
+  drawing each. In the Products menu each of the three stands beside its mark alone
+  (`productMark()`), Omni's the vortex drawn for about 32 px.
+  The browser gate reads the colour each is drawn in against the ground it stands on (the
+  page, Omni's card, the lightest part of Genie's card, every stop of the stage behind
+  Mykes's heading, the menu's ground) and measures each lockup at six widths: its own
+  proportions, inside its column.
 - The official lockup with the tag (above) is built from the kit's large lockup.
-- The triskle alone (the Mykes entry in the menus, the Cloud and Mykes heroes) is the kit's
-  drawing for the size shown: `triskle-three-colours-32.svg` in a menu,
-  `triskle-three-colours.svg` from about 100 px up.
+- The triskle is Automagik's mark and Automagik's alone (the brand's rule 1). Alone it
+  shows for Automagik's own Cloud, the kit's drawing for the size shown:
+  `triskle-three-colours-32.svg` beside Cloud in the Products menu,
+  `triskle-three-colours.svg` in the Cloud hero. It stands beside no other product's name:
+  the Genie and Omni lockups that carried it are retired and gone from the site.
+- The picture beside a name in the Products menu is a mark's place, so no character stands
+  there (the brand's rule 3): Omni, Genie and Mykes show their own marks and Cloud the
+  triskle. The pets stay where they are art: the tiles and the list of more building blocks.
+- The drawer's lockup: the brand's floor for a lockup is 28 px, with one exception, 24 px in
+  the family drawer's phone layout. Here Automagik is the host, so its lockup stands alone
+  in the drawer's top block and is 24 px high down to the narrowest phone; the browser gate
+  measures it at 375 and 360 px wide.
 - The browser's icons are the kit's favicon set at the site's root, all in three colours:
   `favicon.ico` (16, 32 and 48 px), `favicon.svg` (the drawing for small sizes),
   `apple-touch-icon.png`, and `icon-192.png` and `icon-512.png` (the mark on the ink
@@ -146,14 +224,21 @@ put their digests in `LICENSES.md`; no page, style or test names what the files 
 
 ## Arca's logo
 
-Wherever Arca stands (the two menus, the home card, the heading of `/arca/`) the pages carry
-Arca's own icon from Arca's logo kit: `assets/brand/arca/svg/arca-icon-ink.svg` and
-`arca-icon-ivory.svg`, copied unchanged under the kit's own names. A newer kit replaces the
-files at the same paths; never edit a copy. Ink on Arca's sand ground in light, ivory on its
-night ground in dark. Arca's rules hold here: one colour, never redrawn or tinted, never
-animated by this site, never locked up with the Open Intelligence tag, no tagline locked to it,
-and the small cut for any size under 24 px (no place here is that small). Name any retina
-file `name-2x`, since the privacy check reads the usual at-sign form as an address.
+Arca's logo is the ark, in one colour, the text colour, never coloured (the owner's decision,
+handed over in the family package's issue 11c). Both files are byte copies from that
+package, in `assets/family/`, written into the page as they are so they take the text
+colour:
+
+- `arca-logo-b.svg`, the ark with its word: Arca's row in the family drawer.
+- `arca-ark-icon.svg`, the ark alone: the picture beside the name "Arca" in the Products
+  menu (centred in the menu's own square) and on the home card. The name stands beside it,
+  so the picture is hidden from assistive technology.
+
+The arch was Arca's earlier logo. The package says no other site should use it: no page
+here shows it, its files are not in this site, and the contract test holds both. This site
+never animates Arca's logo, never tints it and never locks it up with the Open Intelligence
+tag. Name any retina file `name-2x`, since the privacy check reads the usual at-sign form
+as an address.
 
 ## Motion
 
@@ -161,7 +246,8 @@ Motion is CSS only and sits in one block of `styles.css`, for visitors who have 
 for reduced motion: sections and cards rise as they scroll into view, a card's picture
 moves a little within it, the home's cast pops up and peeks higher as the page leaves,
 pages cross-fade with a character
-travelling to its own page, and the menus ease in. It moves only `translate`, `scale`,
+travelling to its own page, and the menus ease in. The drawer's motion is the piece's own,
+on the timings the host block gives it, and it too is still for a visitor who asks for less. It moves only `translate`, `scale`,
 `rotate`, `transform` and `opacity`, so the layout never shifts. With reduced motion, or in
 a browser without scroll-driven animation, the page is whole and still.
 
@@ -173,12 +259,16 @@ Edit public page copy in `scripts/build-pages.mjs`; shared Cloud form/response c
 three weights (`--weight-title`, `--weight-strong`, `--weight-label`) and the font file come
 from `docs/brand/tokens/tokens.json` and `docs/brand/fonts/`. In `styles.css`, set anything in
 the title face with one of those three weights, never a number: a heavier Fredoka is heavier
-than the logo. Regenerate and commit the HTML and CSS:
+than the logo. `docs/brand/components/bundle.css` is made from `styles.css`: every change to
+`styles.css` must be followed by `node scripts/brand-bundle.mjs`, committed with it (the brand
+tests fail until the two agree).
+Regenerate and commit the HTML and CSS:
 
 ```sh
 node apps/landing/scripts/sync-theme.mjs
 node apps/landing/scripts/build-art.mjs   # only after an art or capture change; needs ffmpeg with libwebp
 node apps/landing/scripts/build-pages.mjs
+node scripts/brand-bundle.mjs              # after a change to styles.css
 bun install --frozen-lockfile --ignore-scripts
 node --test apps/landing/landing.test.mjs apps/landing/waitlist.test.mjs
 LANDING_CHROME=/path/to/chrome node apps/landing/verify-browser.mjs
@@ -194,9 +284,17 @@ images/fonts, overflow, failed/external loads and native form 503/200 responses 
 isolated SQLite fixture. It drives the menus with real clicks and keys in both themes: open
 and close by click, Enter and Space, Escape with the focus returning to the button, the
 expanded state in the accessibility tree, hover in the same place as click, one panel at a
-time, the active page, every menu and footer link answering, and the phone sheet (it fills
-the screen under the header, the keyboard never lands behind it, Escape and the Menu button
-close it, a link in it goes to its page). Every page run is in reduced motion and checks
+time, the active page, and every menu, drawer and footer link answering. It drives the family
+drawer the same way at 1440, 390 and 320 px: the button at the window's edge with its three
+lines in this ground's colours, the logo clear of it; a click, Enter or Space opens it, and
+it pushes the page aside without widening the window; the page behind is inert and only the
+drawer is offered to assistive technology; the lockup, shown once, and the three words are
+the files for this ground, at one letter size, and no other picture is fetched; Desktop and
+Mobile stand in the top block under its link; Arca is the first product, by its logo, with
+its line in the names' column; Tab stays inside;
+Escape, Close, a press beside it or on the button shut it and the focus returns to the
+button; a product goes to its page, and a place on the page being read shuts the drawer
+first. With script off the button leads to the footer's sitemap. Every page run is in reduced motion and checks
 that no animation runs and the browser's layout-shift score is 0. A separate run with
 motion scrolls every page top to bottom at 1440 and 390: something moves, the layout-shift
 score stays 0, nothing widens the page, everything that rises ends fully shown down to the
@@ -280,8 +378,8 @@ HTML. The owner allows all crawlers, including AI training crawlers: `User-agent
 `Allow: /`, and explicit `Allow: /arca`. Search engines and AI crawlers may index every page.
 
 The root sitemap and assistant index include Arca's supplied lines verbatim. The home card,
-the Products menu and the footer link to `/arca/` in the same tab. Until Arca's own site is
-deployed, Pages serves the one stand-in page there. For Arca's site, the owner configures Worker routes **exactly**
+the Products menu, the drawer's list and the footer link to `/arca/` in the same tab. Arca's own page is live
+there (2026-11-13), and Pages carries no file at that address. For Arca's site, the owner configures Worker routes **exactly**
 `automagik.si/arca` and `automagik.si/arca/*`. A zone Single Redirect matches hostname equal
 to `automagik.si` AND URI path equal to `/arca`, returning 301 to
 `https://automagik.si/arca/` with the query preserved. Do not match the path alone:
@@ -290,8 +388,11 @@ No Worker route, redirect or account setting is changed by this source update.
 
 ## WhatsApp timing
 
-WhatsApp remains visible beside email. The form warns in English and Portuguese that
-confirmation may take a little while. Our support Bot sends the v2 envelope with the original
+New WhatsApp sign-ups are paused (`WHATSAPP_SIGNUPS_OPEN` in `waitlist/lib/shared.js`): the form
+offers email only and the endpoint refuses a WhatsApp sign-up. When the switch is on, the form
+offers WhatsApp beside email and warns in English and Portuguese that confirmation may take a
+little while. Codes issued before the pause confirm as follows. Our support Bot sends the
+v2 envelope with the original
 message receive time in top-level `timestamp` (Unix milliseconds). The callback accepts a
 message received at or before the code's 30-minute expiry, even if processed days later.
 More than two minutes ahead of processing time is 400; missing/invalid receive time is 400.

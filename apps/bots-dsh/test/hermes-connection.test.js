@@ -678,7 +678,16 @@ async function durableRuntime(t, fixture, overrides) {
 
 for (const rollback of [false, true]) {
   test(`hermes-mutation-lock-dropped: ${rollback ? 'rollback' : 'fresh save'} credential cleanup serializes a newer configure`, async t => {
-    const f = dashboard(), h = await durableRuntime(t, f), gate = barrier()
+    // This test parks a newer configure behind the mutation lock on purpose, and the
+    // product starts the setup budget when the action is created, before the queue wait
+    // (#1210). The fixture's 100 ms control deadline would therefore race the parked
+    // window on a loaded CI host; what this test proves is the serialization, and the
+    // dedicated queue-deadline test below still proves that waiting counts against it.
+    // A wider budget only made the race rarer: on a starved host every phase can still
+    // outlast it. So the clock stands still here: no setup timer fires and no deadline
+    // check sees time pass, and the test waits on its barrier and its own events only.
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+    const f = dashboard(), h = await durableRuntime(t, f, { deadlines: { start: 1000, control: 1000, cancel: 50 } }), gate = barrier()
     await h.rt.hermesRemote.configure({ enabled: true, address: f.address, profile: 'sample-profile', credential: f.credential })
     const tested = await h.rt.hermesRemote.test(f.token), secretEndpoint = h.rt.secretEndpoint, compare = h.rt.deleteSecretIfUnchanged
     let deletedReference, newerWrite = false

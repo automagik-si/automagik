@@ -842,18 +842,47 @@ export function ModelLineTail({ turn, sessionId, useRoster, useSessions, actions
     error ? h('div', { className: 'bt-secret-error', role: 'alert' }, error) : null)
 }
 
+// The last turn a chat lists, or null while it has none (a new Bot before its greeting).
+const lastTurnOf = outline => (Array.isArray(outline) && outline.length > 0 ? outline.at(-1)?.turn ?? null : null)
+
 // The card a Bot's chat opens on while the Bot has no model, or has one that is no
 // longer served. A Bot made without a model holds its greeting until it has one: the
 // welcome (@automagik/welcome-dsh) gives the companion and the Omni Bot one once Connect AI
 // succeeds, and here one press starts it on the model it would get.
-export function ModelChoiceDock({ sessionId, useRoster, actions }) {
+//
+// It reads as the Bot's own message, so it stands where a message would (#1138). A chat
+// with no turn yet has no transcript, and the card sits in the dock over the composer. A
+// chat that already holds turns (a Bot that lost its model, a new part under its earlier
+// ones) gets it after its last turn, in the transcript (ModelChoiceTail): the dock is part
+// of the composer's seat, which stays in place while the transcript scrolls, so a card
+// there lay over the last messages of a chat scrolled up.
+export function ModelChoiceDock({ sessionId, useRoster, useSessions, actions }) {
+  const seated = useSessions ? useSessions(list => lastTurnOf(outlineOf(list, sessionId)) !== null) : false
+  const card = useModelChoice({ sessionId, useRoster, actions }, seated)
+  return seated ? null : card
+}
+
+// The same card after the chat's last turn, on that turn's tail.
+export function ModelChoiceTail({ turn, sessionId, useRoster, useSessions, actions }) {
+  const last = useSessions(list => lastTurnOf(outlineOf(list, sessionId)))
+  if (last === null || last !== turn?.turn) return null
+  return h(ModelChoiceSeat, { sessionId, useRoster, actions })
+}
+
+function ModelChoiceSeat(props) {
+  const card = useModelChoice(props, false)
+  return card ? h('div', { className: 'bt-model-seat' }, card) : null
+}
+
+// The card itself, or null when the Bot needs none. `idle`: another place draws it.
+function useModelChoice({ sessionId, useRoster, actions }, idle) {
   const roster = useRoster(value => value)
   const bot = roster.byId[sessionId]
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   // A Bot whose model its plugin picks never waits for a DSH model.
   const hosted = roster.hostModels?.[bot?.id] !== undefined
-  const shown = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && !hosted
+  const shown = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && !hosted && !idle
   useEffect(() => { if (shown) void actions.refreshModels?.() }, [shown, sessionId])
   if (!shown) return null
   const models = roster.models ?? []
@@ -995,7 +1024,7 @@ export const MODEL_CSS = `${HERMES_MARK_CSS}
 .bt-model-trigger{display:inline-flex;align-items:center;gap:8px;max-width:100%;min-width:0;height:auto;min-height:32px;padding:4px 8px 4px 10px;border:0;border-radius:8px;background:var(--bt-hover);color:var(--bt-ink);font:inherit;text-align:left;cursor:pointer;transition:background-color .12s ease}
 .bt-model-trigger:hover,.bt-model-trigger[aria-expanded=true]{background:var(--bt-active)}
 .bt-model-trigger:focus-visible{outline:2px solid var(--bt-accent);outline-offset:1px}
-.bt-model-trigger[data-missing] .bt-model-provider{color:var(--bt-danger)}
+.bt-model-trigger[data-missing] .bt-model-provider{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-model-trigger[data-wide]{display:flex;width:100%;min-height:48px;padding:7px 12px;justify-content:space-between;border-radius:12px;background:var(--bt-card);box-shadow:inset 0 0 0 1px var(--bt-line)}
 .bt-model-trigger[data-wide]:hover,.bt-model-trigger[data-wide][aria-expanded=true]{background:var(--bt-hover)}
 .bt-model-copy{display:flex;flex-direction:column;min-width:0}
@@ -1019,6 +1048,10 @@ export const MODEL_CSS = `${HERMES_MARK_CSS}
 .bt-host-model-status{padding:2px 8px 6px;font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-host-model-confirm{flex:none;color:var(--bt-accent);font-size:12px;font-weight:600}
 .bt-model-dock{width:100%;max-width:var(--dsh-chat-content-width,748px);margin:0 auto;display:flex;flex-direction:column;align-items:flex-start;gap:8px;padding:0 0 10px;box-sizing:border-box;animation:bt-model-in ${SPRING_POP.duration}ms ${SPRING_POP.easing} backwards}
+/* After the last turn of a transcript the card is one more message: the column's width, and
+   the room a message has above it. */
+.bt-model-seat{margin:6px 0 4px}
+.bt-model-seat>.bt-model-dock{max-width:none;margin:0;padding:0}
 .bt-model-chips{display:flex;flex-wrap:wrap;gap:6px;margin-left:30px;max-width:min(560px,calc(100% - 30px));max-height:min(240px,36vh);max-height:min(240px,36dvh);overflow-y:auto;scrollbar-width:thin}
 .bt-model-choice-group{display:flex;flex-direction:column;gap:6px;width:100%;min-width:0}
 .bt-model-choice-provider{padding-top:4px;font-size:12px;line-height:16px;font-weight:500;color:var(--bt-ink-2);overflow-wrap:anywhere}
@@ -1063,7 +1096,7 @@ export const MODEL_CSS = `${HERMES_MARK_CSS}
 .bt-model-confirm-title{font-size:13px;line-height:18px;font-weight:600;color:var(--bt-ink)}
 .bt-model-confirm-move{font-size:11px;line-height:15px;color:var(--bt-ink-3);overflow-wrap:anywhere}
 .bt-model-confirm-text{padding:2px 0 6px;font-size:12px;line-height:17px;color:var(--bt-ink-2)}
-.bt-model-confirm-access{padding:0 0 6px;font-size:12px;line-height:17px;color:var(--bt-danger)}
+.bt-model-confirm-access{padding:0 0 6px;font-size:12px;line-height:17px;color:var(--st-bad-strong,var(--bt-danger))}
 .bt-model-confirm-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 .bt-menu .bt-model-confirm-actions .bt-model-confirm-cancel,.bt-menu .bt-model-confirm-actions .bt-model-confirm-go{width:auto;min-height:30px;padding:5px 12px;border-radius:999px;font:inherit;font-size:12px;line-height:18px;cursor:pointer}
 .bt-menu .bt-model-confirm-actions .bt-model-confirm-cancel{border:.5px solid var(--bt-line-2);background:var(--bt-main);color:var(--bt-ink-2)}

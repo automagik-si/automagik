@@ -315,7 +315,7 @@ test("meter install: a pointer that does not verify, or one older than the recor
   writePointer(s.release, s.pointer, { signer: other });
   const unsigned = s.cli("meter", "install");
   assert.equal(unsigned.code, 1);
-  assert.match(unsigned.err, /^automagik-herdr: usagemeter: the meter-lane pointer is not signed by a key this pack trusts \(meter-keys\.json\): nothing was installed\.$/m);
+  assert.match(unsigned.err, /^am: usagemeter: the meter-lane pointer is not signed by a key this pack trusts \(meter-keys\.json\): nothing was installed\.$/m);
   writePointer(s.release, s.pointer, { signer: s.key, sig: false });
   assert.match(s.cli("meter", "install").err, /the meter-lane pointer has no signature/);
   // A newer pointer taken before: this older one is refused, on every machine and here.
@@ -540,7 +540,7 @@ test("an old opt-out (no scope line, no usagemeter= line): update installs nowhe
   const io = { modsDir: s.mods, meter: async (args) => { calls.push(args); return { code: 0, stdout: '{"results":[],"notes":[]}' }; } };
   const r = await meterAfterUpdate(io);
   assert.deepEqual(r, { lines: [OPT_IN], results: [] });
-  assert.match(OPT_IN, /automagik-herdr meter install$/);
+  assert.match(OPT_IN, /am meter install$/);
   assert.deepEqual(calls, [], "nothing ran, here or on a machine");
   // The sidebar's sync stays on this computer too.
   assert.deepEqual(syncTargets([{ name: "lin", state: "connected" }], meterScope(s.mark())), []);

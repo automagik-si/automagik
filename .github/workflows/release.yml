@@ -61,6 +61,11 @@ name: Release
 # rolling `pocket-lane` release, which holds nothing else and is never Latest: installed phones read
 # only that (apps/pocket/android/app/build.gradle.kts) and take the APK from its vX.Y.Z release.
 #
+# Every stable release carrying plugins.json also dispatches server-image.yml on its tag with
+# content=v<version>. The workflow token's release event starts no workflow, but workflow_dispatch
+# does. This is a separate job after the cut, with only actions: write; a failed dispatch warns
+# and no other lane waits for it. The image workflow publishes the image and server-image.json.
+#
 # and then the desktop app's builds (desktop-build.yml). Omni pins a release's plugins.json
 # (its apps/automagik.json) to serve them from its own market and admin UI; the
 # dsh-marketplace lists the plugins at the tag's commit. After the release, the market index
@@ -173,6 +178,7 @@ jobs:
       contents: write
     outputs:
       version: ${{ steps.cut.outputs.version }}
+      plugins: ${{ steps.publish.outputs.plugins }}
       sha: ${{ steps.cut.outputs.sha }}
       lane: ${{ steps.lane.outputs.kind }}
       herdr: ${{ steps.lane.outputs.herdr }}
@@ -502,6 +508,7 @@ jobs:
           (cd release && sha256sum -- * > PLUGINS.SHA256SUMS)
 
       - name: Publish the release
+        id: publish
         if: steps.cut.outputs.version != ''
         env:
           VERSION: ${{ steps.cut.outputs.version }}
@@ -540,6 +547,9 @@ jobs:
             --verify-tag \
             --title "Automagik ${VERSION%.0}" \
             --notes "${notes}"
+          if [[ -f release/plugins.json ]]; then
+            echo "plugins=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Sign and post the herdr lane
         if: steps.cut.outputs.version != '' && steps.lane.outputs.herdr == 'yes'
@@ -612,6 +622,27 @@ jobs:
               --notes "lane.json lists the newest Automagik plugins (their tarballs are on their own versioned releases); lane.json.sig is its ed25519 signature, checked against plugin-lane/keys.json. See scripts/lane.ts."
           fi
           gh release upload plugin-lane lane/lane.json lane/lane.json.sig --clobber --repo "${GITHUB_REPOSITORY}"
+
+  server-image:
+    name: Dispatch the release's server image
+    needs: cut
+    if: needs.cut.outputs.version != '' && needs.cut.outputs.plugins == 'true' && inputs.prerelease != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.cut.outputs.version }}
+    steps:
+      - name: Dispatch server-image.yml on the release tag
+        run: |
+          set -euo pipefail
+          if ! gh workflow run server-image.yml --repo "${GITHUB_REPOSITORY}" \
+            --ref "v${VERSION}" -f "content=v${VERSION}"; then
+            echo "::warning::Could not dispatch server-image.yml for v${VERSION}; retry with content=v${VERSION}"
+          fi
 
   pocket:
     name: Pocket

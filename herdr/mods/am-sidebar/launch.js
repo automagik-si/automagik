@@ -9,6 +9,7 @@ import { installHook, runnerPath } from "./briefingText.mjs";
 import { spareTab } from "./launchArgs.js";
 import { configPaths } from "./models.js";
 import { PACK_NAME } from "./release.js";
+import { actionError } from "./actionError.js";
 
 const local = (address) => typeof address === "string" && !address.includes("/");
 const cliPath = (dir) => `${dir.replace(/\/+$/, "")}/mods/${PACK_NAME}/bin/automagik-herdr.mjs`;
@@ -25,11 +26,12 @@ export async function runCli(args, { timeout, env = [] } = {}) {
   try {
     r = await exec("env", [`HERDR_APP_HOME=${dir}`, ...env, "sh", runnerPath(dir), cliPath(dir), ...args, "--json"], ...(timeout ? [{ timeout }] : []));
   } catch (e) {
+    console.error(e?.stack ?? e);
     return { code: 127, out: null, err: String(e?.message ?? e), thrown: true };
   }
   let out = null;
   try { out = JSON.parse(r.stdout); } catch { out = null; }
-  return { code: r.code, out, err: String(r.stderr ?? "").replace(/^automagik-herdr: /gm, "").trim() };
+  return { code: r.code, out, err: String(r.stderr ?? "").replace(/^(?:am|automagik-herdr): /gm, "").trim() };
 }
 
 // ---- Start and Restart on a linked machine (#444): Herdr's exec limit ----
@@ -69,7 +71,8 @@ export async function honoursTimeout() {
 const shellWord = (w) => (/^[\w@%+=:,./-]+$/.test(w) ? w : `'${String(w).replace(/'/g, "'\\''")}'`);
 
 /**
- * runCli for `start` or `restart` with --machine (`what`), with MACHINE_EXEC_MS. On a Herdr that
+ * runCli for `start` or `restart` with --machine (`what`), or this computer's `restart --tree`
+ * (it runs each helper in turn: 26.5 s with 4 helpers, 36.8 s with 6), with MACHINE_EXEC_MS. On a Herdr that
  * doesn't take it, or can't say, Herdr ends the CLI at 30 s: a start runs with that deadline
  * (AUTOMAGIK_HERDR_DEADLINE, an absolute time taken before exec, so it counts run.sh and node's
  * startup), and the CLI starts nothing when too little of it is left to finish; a restart isn't
@@ -80,8 +83,9 @@ const shellWord = (w) => (/^[\w@%+=:,./-]+$/.test(w) ? w : `'${String(w).replace
  */
 export async function machineCli(args, what) {
   const at = args.indexOf("--machine");
-  const machine = at >= 0 ? args[at + 1] : "that machine";
-  const command = `automagik-herdr ${args.map(shellWord).join(" ")}`;
+  const machine = at >= 0 ? args[at + 1] : "this computer";
+  const onMachine = at >= 0 ? ` --machine ${shellWord(machine)}` : "";
+  const command = `am ${args.map(shellWord).join(" ")}`;
   const long = await honoursTimeout();
   if (!long && what === "restart") {
     return { code: 1, out: null, asIs: true,
@@ -95,14 +99,18 @@ export async function machineCli(args, what) {
   const bot = shellWord(args[1]);
   const project = args.indexOf("--project") >= 0 ? ` --project ${shellWord(args[args.indexOf("--project") + 1])}` : "";
   const check = what === "restart"
-    ? `its old pane and a new one may both run it: check ${machine}'s panes (hc ls) and end the one automagik-herdr whois --bot ${bot}${project} --machine ${shellWord(machine)} doesn't name with hc kill`
-    : `a pane may run it with no attach row: check with automagik-herdr whois --bot ${bot}${project} --machine ${shellWord(machine)} and ${machine}'s panes (hc ls), and end a pane of it the attach ledger doesn't name with hc kill`;
+    ? `its old pane and a new one may both run it: check ${machine}'s panes (hc ls) and end the one am whois --bot ${bot}${project}${onMachine} doesn't name with hc kill`
+    : `a pane may run it with no attach row: check with am whois --bot ${bot}${project}${onMachine} and ${machine}'s panes (hc ls), and end a pane of it the attach ledger doesn't name with hc kill`;
   return { code: 1, out: null, asIs: true,
-    err: `Herdr ended automagik-herdr ${what} on ${machine} (${r.err}), and it may have stopped part-way: ${check}. `
+    err: `Herdr ended am ${what} on ${machine} (${r.err}), and it may have stopped part-way: ${check}. `
       + `Then ${what} it from a terminal if it isn't running: ${command}` };
 }
 
-const refusedBy = (r, what) => ({ refused: r.err || `automagik-herdr ${what} failed (exit ${r.code}).` });
+const refusedBy = (r, what) => {
+  if (what !== "start") return { refused: r.err || `am ${what} failed (exit ${r.code}).` };
+  console.error(`am ${what}: ${r.err || `exit ${r.code}`}`);
+  return { refused: actionError(r.err, what === "start" ? "Start" : "Attach") };
+};
 const warn = (bodies) => { for (const body of bodies ?? []) notify({ title: "Bots", body, level: "warning", timeout: 15000 }); };
 
 /**
@@ -266,7 +274,11 @@ const starting = new Set();
 export async function startBot(projectKey, botId, place = {}, machine = null) {
   if (starting.has(botId)) return { refused: `${botId} is already starting.` };
   starting.add(botId);
-  try { return await (machine ? startOn(projectKey, botId, machine) : startOnce(projectKey, botId, place)); } finally { starting.delete(botId); }
+  try { return await (machine ? startOn(projectKey, botId, machine) : startOnce(projectKey, botId, place)); }
+  catch (e) {
+    console.error(e?.stack ?? e);
+    return { refused: actionError(e, "Start") };
+  } finally { starting.delete(botId); }
 }
 
 // Start on a linked machine (automagik#206): the CLI finds the window place there itself.

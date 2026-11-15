@@ -1,15 +1,17 @@
 // Bot authentication belongs to this installation, never to the terminal (#869).
 import { randomUUID } from 'node:crypto'
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   LOGIN_OWNER_ENV, LOGIN_RECORD_VERSION, unverifiedLogin, verifyLoginRecords,
 } from './login-ownership.js'
 import {
-  alive, assertGeneration, CliGenerations, GENERATION_ENV, POINTER_ENV,
+  assertGeneration, CliGenerations, GENERATION_ENV, ownershipAt, ownershipState,
+  POINTER_ENV, removeDeadOwnership, sameOwnership,
 } from './cli-generations.js'
+import { processState, validBirth } from './process-identity.js'
 
 export const HOME_ENV = 'AUTOMAGIK_BOT_CLI_HOME'
 const VERSION_ENV = 'AUTOMAGIK_BOT_CLI_VERSION'
@@ -57,9 +59,9 @@ export class CliHomes {
     // Register before checking the mutation lock: either a concurrent changer sees us and
     // refuses, or we see its lock and refuse. Other app processes can never change live auth.
     if (this.registered.get(vendor) !== home) {
-      writeFileSync(join(instances, this.instance), LOGIN_RECORD_VERSION, { mode: 0o600 })
+      this.generations.publish(join(instances, this.instance), LOGIN_RECORD_VERSION)
       if (existsSync(join(home, 'changing'))) {
-        rmSync(join(instances, this.instance), { force: true })
+        this.generations.release(join(instances, this.instance))
         if (!registered) this.generations.unregister(vendor)
         throw failure('The Bot account is changing. Try again when it finishes.')
       }
@@ -101,6 +103,11 @@ export class CliHomes {
   }
 
   changing(vendor) { return existsSync(join(this.home(vendor), 'changing')) }
+  matches(env) {
+    assertGeneration(env)
+    const file = join(env[HOME_ENV], 'version')
+    return env[VERSION_ENV] === (existsSync(file) ? readFileSync(file, 'utf8') : '')
+  }
   paused(vendor) { return existsSync(join(this.home(vendor), 'paused')) }
   resume(vendor) { rmSync(join(this.home(vendor), 'paused'), { force: true }) }
 
@@ -111,7 +118,7 @@ export class CliHomes {
       this.verify(home)
       const lock = join(home, 'changing')
       if (existsSync(lock)) {
-        return !alive(Number(readFileSync(join(lock, 'pid'), 'utf8')))
+        return this.lockState(lock) !== 'live'
       }
       return false
     } catch { return true }
@@ -156,7 +163,7 @@ export class CliHomes {
     this.end(vendor)
     const registered = this.registered.get(vendor)
     if (registered) {
-      rmSync(join(registered, 'instances', this.instance), { force: true })
+      this.generations.release(join(registered, 'instances', this.instance))
       this.registered.delete(vendor)
     }
     this.generations.select(vendor, generation)
@@ -176,25 +183,33 @@ export class CliHomes {
         if (generation !== 'legacy' && !/^[a-f0-9-]{36}$/.test(generation)) continue
         const old = this.generations.folder(vendor, generation)
         try {
+          const physical = lstatSync(old)
+          if (!physical.isDirectory() || physical.isSymbolicLink()) continue
+          const retired = join(directory, generation)
+          const marker = lstatSync(retired)
+          if (!marker.isFile() || marker.size !== 0) continue
           verifyLoginRecords(old, '') // Even this instance's abandoned login needs exit proof.
           this.verify(old)
           this.generations.otherApps(vendor, old)
           const instances = join(old, 'instances')
-          if (existsSync(instances) && readdirSync(instances).some(name => (
-            alive(Number(name.split('-')[0]))
-          ))) continue
+          const names = existsSync(instances) ? readdirSync(instances).sort() : []
+          const owners = names.map(name => ownershipAt(join(instances, name), { legacy: 'home' }))
+          if (owners.some(owner => ownershipState(owner) !== 'dead')) continue
           const lock = join(old, 'changing')
-          if (existsSync(lock)) {
-            const pid = Number(readFileSync(join(lock, 'pid'), 'utf8'))
-            const owner = readFileSync(join(lock, 'owner'), 'utf8')
-            if (alive(pid) || !/^\d+-[a-f0-9-]+$/.test(owner)
-              || Number(owner.split('-')[0]) !== pid) continue
-            const claim = join(lock, 'recovering')
-            if (existsSync(claim)
-              && alive(Number(readFileSync(claim, 'utf8').split('-')[0]))) continue
-          }
+          const changing = existsSync(lock) ? this.lockSnapshot(lock) : null
+          if (changing && this.lockState(lock, changing) !== 'dead') continue
+          verifyLoginRecords(old, '')
+          this.verify(old)
+          this.generations.otherApps(vendor, old)
+          if (owners.some(owner => !sameOwnership(owner) || ownershipState(owner) !== 'dead' || !sameOwnership(owner))) continue
+          if (JSON.stringify(existsSync(instances) ? readdirSync(instances).sort() : []) !== JSON.stringify(names)) continue
+          if (changing ? this.lockState(lock, changing) !== 'dead'
+            || JSON.stringify(this.lockSnapshot(lock)) !== JSON.stringify(changing) : existsSync(lock)) continue
+          const finalHome = lstatSync(old), finalMarker = lstatSync(retired)
+          if (finalHome.dev !== physical.dev || finalHome.ino !== physical.ino
+            || finalMarker.dev !== marker.dev || finalMarker.ino !== marker.ino || finalMarker.size !== 0) continue
           rmSync(old, { recursive: true, force: true })
-          rmSync(join(directory, generation), { force: true })
+          rmSync(retired, { force: true })
         } catch { /* No exit proof: retain the original folder and try on a later app start. */ }
       }
     })
@@ -205,8 +220,9 @@ export class CliHomes {
     const instances = join(home, 'instances')
     if (!existsSync(instances)) return
     for (const name of readdirSync(instances)) {
-      if (!alive(Number(name.split('-')[0]))
-        && readFileSync(join(instances, name), 'utf8') !== LOGIN_RECORD_VERSION) {
+      const snapshot = ownershipAt(join(instances, name), { legacy: 'home' })
+      if (!snapshot || (ownershipState(snapshot) === 'dead'
+        && snapshot.record.marker !== LOGIN_RECORD_VERSION)) {
         throw unverifiedLogin()
       }
     }
@@ -224,34 +240,7 @@ export class CliHomes {
     mkdirSync(home, { recursive: true, mode: 0o700 })
     this.verify(home)
     const lock = join(home, 'changing')
-    if (existsSync(lock)) {
-      let pid
-      try { pid = Number(readFileSync(join(lock, 'pid'), 'utf8')) } catch {}
-      if (!alive(pid)) {
-        // Pre-ownership versions cannot prove whether they left a detached login behind.
-        let owner
-        try { owner = readFileSync(join(lock, 'owner'), 'utf8') } catch {}
-        if (!owner || !/^\d+-[a-f0-9-]+$/.test(owner)
-          || Number(owner.split('-')[0]) !== pid) throw unverifiedLogin()
-        // An older version's claimant may itself have died. The installation-level mutex
-        // now serializes recovery, including cleanup of that dead claim. Re-read both owners
-        // and the tree proof before removing anything; a live/replacement claim stays put.
-        const claim = join(lock, 'recovering')
-        let claimant
-        if (existsSync(claim)) {
-          claimant = readFileSync(claim, 'utf8')
-          if (alive(Number(claimant.split('-')[0]))) throw unverifiedLogin()
-        }
-        const current = Number(readFileSync(join(lock, 'pid'), 'utf8'))
-        if (current !== pid || alive(current)
-          || readFileSync(join(lock, 'owner'), 'utf8') !== owner
-          || (claimant !== undefined && readFileSync(claim, 'utf8') !== claimant)) {
-          throw unverifiedLogin()
-        }
-        this.verify(home)
-        rmSync(lock, { recursive: true, force: true })
-      }
-    }
+    if (existsSync(lock)) this.recoverChanging(home)
     this.environment(vendor)
     try { mkdirSync(lock, { mode: 0o700 }) } catch {
       throw failure('The Bot account is already changing. Try again when it finishes.')
@@ -260,14 +249,15 @@ export class CliHomes {
     try {
       writeFileSync(join(lock, 'pid'), String(process.pid), { mode: 0o600 })
       writeFileSync(join(lock, 'owner'), this.instance, { mode: 0o600 })
+      writeFileSync(join(lock, 'birth'), JSON.stringify(this.generations.birth), { mode: 0o600 })
       this.generations.otherApps(vendor, home)
       const instances = join(home, 'instances')
       for (const name of readdirSync(instances)) {
         if (name === this.instance) continue
-        if (alive(Number(name.split('-')[0]))) {
+        const snapshot = ownershipAt(join(instances, name), { legacy: 'home' })
+        if (ownershipState(snapshot) !== 'dead' || !removeDeadOwnership(snapshot)) {
           throw failure('Close other Automagik sessions before changing the Bot account.')
         }
-        rmSync(join(instances, name), { force: true })
       }
       writeFileSync(join(home, 'paused'), '', { mode: 0o600 })
       writeFileSync(join(home, 'version'), randomUUID(), { mode: 0o600 })
@@ -275,6 +265,83 @@ export class CliHomes {
       this.end(vendor)
       throw error
     }
+  }
+
+  lockSnapshot(lock) {
+    const stat = lstatSync(lock)
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw unverifiedLogin()
+    const fields = {}
+    for (const name of ['pid', 'owner', 'birth', 'recovering']) {
+      try {
+        const entry = lstatSync(join(lock, name))
+        if (!entry.isFile() || entry.size > 4096) throw unverifiedLogin()
+        fields[name] = { bytes: readFileSync(join(lock, name), 'utf8'), dev: entry.dev, ino: entry.ino }
+      } catch (error) { if (error.code !== 'ENOENT') throw error }
+    }
+    return { dev: stat.dev, ino: stat.ino, fields }
+  }
+
+  lockState(lock, snapshot = this.lockSnapshot(lock)) {
+    const { fields } = snapshot
+    const pid = Number(fields.pid?.bytes)
+    const owner = fields.owner?.bytes
+    if (!/^\d+-[a-f0-9-]+$/.test(owner ?? '') || Number(owner.split('-')[0]) !== pid) return 'unknown'
+    let birth = null
+    if (fields.birth) {
+      try { birth = JSON.parse(fields.birth.bytes) } catch { return 'unknown' }
+      if (birth !== null && !validBirth(birth)) return 'unknown'
+    }
+    const state = processState(pid, birth)
+    if (state !== 'dead') return state
+    if (fields.recovering) {
+      const claim = fields.recovering.bytes
+      if (!/^\d+-[a-f0-9-]+$/.test(claim)
+        || processState(Number(claim.split('-')[0]), null) !== 'dead') return 'unknown'
+    }
+    return 'dead'
+  }
+
+  recoverChanging(home) {
+    const lock = join(home, 'changing')
+    if (!existsSync(lock)) return
+    this.verify(home)
+    const snapshot = this.lockSnapshot(lock)
+    if (this.lockState(lock, snapshot) !== 'dead') throw unverifiedLogin()
+    const exact = () => JSON.stringify(this.lockSnapshot(lock)) === JSON.stringify(snapshot)
+    if (!exact() || this.lockState(lock, snapshot) !== 'dead') throw unverifiedLogin()
+    // A crash may have preceded the original pause write. Persist it before clearing the
+    // only remaining barrier, without changing either the selected home or its version.
+    const fd = openSync(join(home, 'paused'), 'a', 0o600)
+    try { fsyncSync(fd) } finally { closeSync(fd) }
+    // Linux/Unix directory fsync persists the new pause entry as well as its file bytes.
+    if (process.platform !== 'win32') {
+      const directory = openSync(home, 'r')
+      try { fsyncSync(directory) } finally { closeSync(directory) }
+    }
+    this.verify(home)
+    if (!exact() || this.lockState(lock, snapshot) !== 'dead' || !exact()) throw unverifiedLogin()
+    rmSync(lock, { recursive: true, force: true })
+  }
+
+  startup(vendor) {
+    this.generations.register(vendor)
+    this.generations.exclusive(vendor, () => {
+      const home = this.home(vendor)
+      if (existsSync(home)) {
+        this.verify(home)
+        this.recoverChanging(home)
+      }
+      for (const [directory, legacy] of [[this.generations.instances(vendor), 'root'], [join(home, 'instances'), 'home']]) {
+        if (!existsSync(directory)) continue
+        for (const name of readdirSync(directory)) {
+          if (name === this.instance) continue
+          const snapshot = ownershipAt(join(directory, name), { legacy })
+          if (legacy === 'home' && snapshot?.record.marker !== LOGIN_RECORD_VERSION) continue
+          if (ownershipState(snapshot) === 'dead') removeDeadOwnership(snapshot)
+        }
+      }
+    })
+    this.collect(vendor)
   }
 
   end(vendor) {
@@ -286,7 +353,7 @@ export class CliHomes {
 
   dispose() {
     for (const [vendor, home] of this.registered) {
-      rmSync(join(home, 'instances', this.instance), { force: true })
+      this.generations.release(join(home, 'instances', this.instance))
       this.generations.unregister(vendor)
     }
     this.registered.clear()

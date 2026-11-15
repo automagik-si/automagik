@@ -214,7 +214,7 @@ test("the helper refuses a stable runner whose baked node is gone", async (t) =>
   const out = join(s.root, "child.json");
   const r = await runHelper(s, { out });
   assert.notEqual(r.code, 0);
-  assert.match(r.stderr, /the baked node .* is gone; run automagik-herdr dsh-tui install again/);
+  assert.match(r.stderr, /the baked node .* is gone; run am dsh-tui install again/);
   assert.equal(existsSync(out), false);
 });
 
@@ -224,7 +224,7 @@ test("without the dsh-tui sandbox row the helper starts neither proxy nor pane (
   const r = await runHelper(s, { out });
   assert.notEqual(r.code, 0);
   assert.match(r.stderr, /sandbox row is not current|sandbox is not usable/);
-  assert.match(r.stderr, /automagik-herdr dsh-tui install/);
+  assert.match(r.stderr, /am dsh-tui install/);
   assert.equal(existsSync(out), false);
   assert.equal(existsSync(join(s.runtime, "automagik-hc-proxy")), false);
 });
@@ -298,7 +298,7 @@ test("G1 (b): a working-tree roster edit warns once and the pane still starts", 
   const lines = r.stderr.split("\n").filter(Boolean);
   assert.equal(lines.length, 1, "one warning line, no other noise");
   assert.match(lines[0], /^hc-pane: /);
-  assert.match(lines[0], /automagik-herdr proxy approve/);
+  assert.match(lines[0], /am proxy approve/);
   const got = JSON.parse(readFileSync(out, "utf8"));
   assert.equal(got.socket, true, "the approved roster still started the proxy");
 });
@@ -309,6 +309,6 @@ test("G1 (c): a missing record refuses a proxied pane before the child starts", 
   const out = join(s.root, "child.json");
   const r = await runHelper(s, { out });
   assert.notEqual(r.code, 0);
-  assert.match(r.stderr, /no approved roster .*automagik-herdr proxy approve/s);
+  assert.match(r.stderr, /no approved roster .*am proxy approve/s);
   assert.equal(existsSync(out), false);
 });

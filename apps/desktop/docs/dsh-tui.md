@@ -5,7 +5,7 @@ Herdr's PATH. This page is the desktop app's opt-in step for that: it installs t
 `@deepseek-harness-tui/dsh-tui` into the user's own DSH, writes the `dsh-tui` shim, and shows
 the existing doctor, update and uninstall paths in one place.
 
-The installer itself is not here. It is `am/dshTui.mjs`, shared with `automagik-herdr dsh-tui`
+The installer itself is not here. It is `am/dshTui.mjs`, shared with `am dsh-tui` (`automagik-herdr` still works as an alias)
 and the Herdr pack; this app imports it (see "How the app invokes it") and owns none of the pin,
 profile, shim or pnpm rules.
 

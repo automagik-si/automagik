@@ -1,11 +1,12 @@
 import { heldText, stopOfCall, stopLine, whyText } from './stops.js'
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
-import { MarkdownText } from './dsh-primitives.js'
+import { MarkdownText, writeClipboard } from './dsh-primitives.js'
 import { inkText } from './inks.js'
 import { linkMentions, mentionTarget, dayLabel, contentText, stripHeader, isHiddenTurn, isRelayContext, relaysBefore, relayPart, commRunOf, toolName, toolArgs, reminderPrompts, elapsedLabel, clockLabel, messageClock } from './text.js'
 import { SmileIcon, ReplyIcon, DotsIcon, CheckIcon, DownloadIcon, CopyIcon, MemoryIcon, TasksIcon } from './icons.js'
 import { colorOf, toolState, BotMark, RoomAvatar } from './mark.js'
+import { CellEmpty } from './cell-empty.js'
 import { SettledQuestion, PendingQuestion } from './questions.js'
 import { AnsweredReply, WidgetCell } from './widget-cell.js'
 import { SecretToolCell } from './secret-card.js'
@@ -59,13 +60,45 @@ export function Bubbles({ texts, roster, selfId, actions, streaming, sessionId, 
     }))
 }
 
+// A folded message's last code block shows only its start. The host's Markdown would
+// give that part a copy control holding just the part, so the block is drawn here,
+// with a copy bound to the whole block: `code` is its text, or a function that reads
+// it when the message is kept as a file.
+function FoldCodeCopy({ code, actions }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      if (typeof code === 'function' && typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+        // Safari needs the clipboard write inside the click, before the file loads.
+        const text = Promise.resolve().then(code).then(value => new Blob([value], { type: 'text/plain' }))
+        await navigator.clipboard.write([new ClipboardItem({ 'text/plain': text })])
+      } else {
+        const text = typeof code === 'function' ? await code() : code
+        if (!await writeClipboard(text)) throw new Error('Could not copy the code block')
+      }
+      setCopied(true); setTimeout(() => setCopied(false), 1000)
+    } catch (error) { actions?.reportError?.(error, 'copy') }
+  }
+  return h('button', { type: 'button', className: 'bt-fold-copy', onClick: copy }, copied ? t('Copied') : t('Copy'))
+}
+
+// `body` is the Markdown before the cut block (null when the message opens with it).
+// The block is drawn as the host draws a code block, its copy in the same place, so a
+// folded message reads the same as before.
+const foldArea = (body, code, codeHead, actions) => (code === undefined ? body
+  : h('div', { className: 'bt-fold-code' },
+    body,
+    h('div', { className: 'bt-fold-block' },
+      h('div', { className: 'bt-fold-bar' }, h(FoldCodeCopy, { code, actions })),
+      h('pre', { className: 'bt-fold-pre' }, h('code', null, codeHead)))))
+
 function Bubble({ text, index, roster, selfId, actions, sessionId, msgKey, mentions, fold, picked, live, lead, whole }) {
   // A reply with a canvas is never folded: a cut would split the canvas from its source.
   const canvas = hasCanvas(text)
-  const { shown, folded, control } = useFold(text, { limit: canvas ? NEVER : fold, whole, live })
+  const { shown, folded, control, code, codeHead } = useFold(text, { limit: canvas ? NEVER : fold, whole, live, ownCode: !canvas })
   const key = msgKey ? `${msgKey}:${index}` : undefined
   const markdown = value => h(MarkdownText, { text: linkMentions(value, roster.bots, selfId), streaming: live, labels: mdLabels(), variant: 'compact', fileMentions: mentions })
-  const body = canvas ? null : markdown(shown)
+  const body = canvas ? null : foldArea(shown === '' ? null : markdown(shown), code, codeHead, actions)
   const row = useRef(null)
   // Touch has no hover: a tap on the bubble opens its tools, a tap elsewhere
   // closes them. Interactive targets keep their own meaning.
@@ -252,12 +285,12 @@ export function AssistantCell({ node, groupPart, sessionId, openFile, fileMentio
   const ms = useThinkingMs({ sessionId, turn: data.turn, settledSteps: members.filter(step => step.status !== 'running').length, skip: hidden || reasoning === '' })
   // A streaming reply stands in for the activity row.
   useLiveNote(actions, sessionId, `text:${node.key ?? data.seq}`, !hidden && running && texts.length > 0 ? { text: true } : null)
-  if (hidden) return null
+  if (hidden) return h(CellEmpty)
   // A relay spliced mid-turn is a 'context' node, hidden from the chat flow on
   // DSH 0.2; the step that answers it shows the event line where it was read,
   // once, in the step's first cell.
   const relays = relayPart(data, groupPart) ? relaysBefore(contexts, steps, data) : []
-  if (texts.length === 0 && !reasoning && relays.length === 0) return null
+  if (texts.length === 0 && !reasoning && relays.length === 0) return h(CellEmpty)
   const selfId = roster.byId[sessionId]?.id ?? sessionId
   // The flat layout heads a reply with who speaks, once per Turn: in the step that opens
   // it, in that step's reasoning part when the reasoning shows there.
@@ -398,7 +431,7 @@ function MemoryEvent({ sessionId, scope, tool, result, failed, code, roster, act
       panel === undefined ? h('span', null, h(MemoryIcon), t('Already saved')) : h('button', { type: 'button', onClick: () => actions.openMemory(panel) }, h(MemoryIcon), t('Already saved')))
   }
   if (!failed && MEMORY_SAVED.test(result)) {
-    if (!target) return null
+    if (!target) return h(CellEmpty)
     const label = team ? t('Team memory updated') : target === self ? t('Memory updated') : t("Updated {name}'s memory", { name: target.name })
     return h('div', { className: 'bt-event' },
       h('button', { type: 'button', title: result, onClick: () => actions.openMemory(target.id) }, h(MemoryIcon), label))
@@ -426,9 +459,9 @@ const scrollParent = (node) => {
   return null
 }
 
-function EarlierUser({ row }) {
-  const { shown, folded, control } = useFold(row.text ?? '')
-  const body = row.text ? h(MarkdownText, { text: shown, labels: mdLabels(), variant: 'compact' }) : null
+function EarlierUser({ row, actions }) {
+  const { shown, folded, control, code, codeHead } = useFold(row.text ?? '')
+  const body = foldArea(row.text && shown !== '' ? h(MarkdownText, { text: shown, labels: mdLabels(), variant: 'compact' }) : null, code, codeHead, actions)
   return h('div', { className: 'bt-urow' }, h('div', { className: 'bt-ububble', 'data-folded': folded || undefined },
     control ? h('div', { className: 'bt-fold-body' }, body) : body,
     control,
@@ -544,7 +577,7 @@ export function ChatRows({ items, sessionId, roster, actions, useUi, clock = fal
 function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDelete }) {
   switch (row.kind) {
     case 'divider': return h(PartLine, { key, time: row.time })
-    case 'user': return h(EarlierUser, { key, row })
+    case 'user': return h(EarlierUser, { key, row, actions })
     case 'answer': return h(AnsweredReply, { key, node: { data: row } })
     // A display-only view replays from the blueprint the host kept on the call.
     case 'view': return h(WidgetCell, { key, sessionId, callId: row.callId, args: { text: name => name === 'title' ? row.title : undefined, value: name => name === 'view' ? row.view : undefined }, done: true, isError: false, roster, actions })
@@ -600,7 +633,7 @@ export function TriggerCell({ node, sessionId, useRoster, useSessions, useTurnCl
   const body = triggerBody()
   return unreadOpening
     ? h(Fragment, null, h('div', { className: 'bt-open-new' }, h(NewDivider), h('div', { className: 'bt-time-sep', role: 'separator' }, unreadOpening)), body)
-    : body
+    : (body ?? h(CellEmpty))
 
   function triggerBody() {
     if (source.kind === 'bot') {
@@ -697,10 +730,12 @@ export function TurnProcessCell({ node, sessionId, turnProcess, useRoster, useUi
     return !hidden && typeof visit?.seen === 'number' && own?.first !== undefined && own.first <= visit.seen
       && own.end !== undefined && own.end > visit.seen && own.end <= visit.entered
   })
-  return fresh ? h(NewDivider) : null
+  return fresh ? h(NewDivider) : h(CellEmpty)
 }
 
 export function Nothing() { return null }
+
+export { CellEmpty }
 
 // A pause longer than this splits the transcript with a time separator.
 const SEPARATOR_GAP_MS = 30 * 60 * 1000
@@ -957,7 +992,7 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
   if (replies.length === 0 && pending.length === 0) {
     // A pruned tool result left nothing to draw; keep a marker row instead of an
     // empty turn, which reads as a blank gap on a narrow first paint.
-    return broken ? h('div', { className: 'bt-group-replies' }, h('div', { className: 'bt-event' }, t('The group replies could not be shown'))) : null
+    return broken ? h('div', { className: 'bt-group-replies' }, h('div', { className: 'bt-event' }, t('The group replies could not be shown'))) : h(CellEmpty)
   }
   const room = roster.roomsById[sessionId]
   return h('div', { className: 'bt-group-replies' },
@@ -1125,7 +1160,7 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
     case 'ask_user': {
       const question = roster.questions?.[sessionId]
       // Answered or closed: the card leaves no gap where it was.
-      if (!question || question.callId !== call.callId) return h('span', { className: 'bt-q-gone', hidden: true })
+      if (!question || question.callId !== call.callId) return h(CellEmpty, { className: 'bt-q-gone' })
       if (heldCards?.[heldCardKey('question', question.id)] > 0) return null
       return h(PendingQuestion, { key: JSON.stringify([sessionId, question.id]), sessionId, question, actions, inline: true })
     }
@@ -1186,11 +1221,13 @@ export function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessio
   // A running tool shows only as the activity row's phrase.
   useLiveNote(actions, sessionId, `tool:${root.callId ?? node.key}`, note)
   useShownCards(actions, sessionId, drawn.filter(call => (CARDS.has(toolName(call)) || toolCards.asks(toolName(call))) && call.callId).map(call => call.callId))
-  if (drawn.length === 0) return null
+  if (drawn.length === 0) return h(CellEmpty)
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages } }
   return h(Fragment, null, drawn.map((call, index) => {
     const stop = stops.get(call.callId)
-    return h(Fragment, { key: call.callId ?? index }, renderCall(call, env),
+    // A call that draws nothing leaves the empty mark: one of this plugin's own, or a
+    // card another plugin registered (extend.js) that returned nothing.
+    return h(Fragment, { key: call.callId ?? index }, renderCall(call, env) ?? h(CellEmpty),
       stop ? h('div', { className: 'bt-event bt-event-error', role: 'status', title: stop.why }, stop.line) : null)
   }))
 }

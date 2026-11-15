@@ -1,18 +1,20 @@
-// Codex auto mode (#946, #1045): every Codex launch the pack makes passes Codex's
+// Codex auto mode (#946, #1045, #1125): every Codex launch the pack makes passes Codex's
 // `--approve-for-me` and `--disable hooks`, so an approval request goes to Codex's own reviewer
 // instead of stopping for a person, and TUI startup never stops at the "Hooks need review"
-// dialog for one: a bot's Start, its Restart, and `automagik-herdr worker` with a Codex agent. A
-// bot's `codexAuto: false` opts out, a restart rebuilds the flags from the definition (never the
-// old pane's command), and an hc template that owns a worker's command gets no flag. Scratch
-// projects and a fake hc (test/fake-hc.mjs) only: the real hc and window are never touched.
+// dialog for one: a bot's Start, its Restart, and `automagik-herdr worker` with a Codex agent.
+// Since #1125 the mode also carries --no-daemon and the sandbox's network access, a bot's
+// `codexAuto: false` no longer opts out (it is warned about), a restart rebuilds the flags from
+// the definition (never the old pane's command), and an hc template that owns a worker's command
+// gets no flag. codex-mode.test.mjs has the rest of #1125. Scratch projects and a fake hc
+// (test/fake-hc.mjs) only: the real hc and window are never touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
 import { checkBots, parseBots } from "../mods/am-sidebar/model.js";
-import { AGENTS, autoModeArgs, withoutBriefing } from "../mods/am-sidebar/models.js";
+import { AGENTS, CODEX_MODE_ARGS, autoModeArgs, withoutBriefing } from "../mods/am-sidebar/models.js";
 import { helperPlan, restartPlan } from "../mods/am-sidebar/restart.js";
 import { workerArgs, workerPlan } from "../mods/am-sidebar/workers.js";
 import { readJsonLines } from "./log-lines.mjs";
@@ -28,7 +30,7 @@ const MAIN = { id: ID, name: "Genie", kind: "main", agent: "codex", look: { char
 function scene(t, bots = [MAIN]) {
   const root = scratchRoot(t, "hb-codex-");
   const bin = join(root, "bin"), home = join(root, "home"), app = join(root, "app");
-  for (const d of [bin, home, join(app, "mods/am-sidebar")]) mkdirSync(d, { recursive: true });
+  for (const d of [bin, home, join(home, ".config/herdr-app"), join(app, "mods/am-sidebar")]) mkdirSync(d, { recursive: true });
   // No template: a runner's own init.templateDir can't change the exclude file a start writes.
   const project = scratchProject(root, "proj", { template: "" });
   exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
@@ -55,6 +57,10 @@ function scene(t, bots = [MAIN]) {
   return { project, statePath, cli, calls: () => readJsonLines(logPath), state, idle };
 }
 
+const MODE = [...CODEX_MODE_ARGS];
+/** The grant a scratch project's seat gets: its own .git, the only one of codexGrants' folders there. */
+const gitGrant = (project) => ["--add-dir", realpathSync(join(project, ".git"))];
+
 /** What an `hc run` call launches, past `/usr/bin/env PATH=…` and the agents' briefings. */
 function launched(call) {
   const words = call.slice(call.indexOf("--") + 1);
@@ -71,7 +77,7 @@ test("start and restart of a Codex bot pass --approve-for-me from its definition
   const s = scene(t);
   const started = s.cli(["start", "Genie"]);
   assert.equal(started.code, 0, started.err);
-  assert.deepEqual(launched(runs(s.calls())[0]), ["codex", "--approve-for-me", "--disable", "hooks"]);
+  assert.deepEqual(launched(runs(s.calls())[0]), ["codex", ...MODE, ...gitGrant(s.project)]);
   // The old pane's command is not the definition: the restart replaces it with the source's words.
   s.idle();
   const now = s.state();
@@ -82,50 +88,52 @@ test("start and restart of a Codex bot pass --approve-for-me from its definition
   const restarted = s.cli(["restart", "Genie"]);
   assert.equal(restarted.code, 0, restarted.err);
   const plan = launched(runs(s.calls()).at(-1));
-  assert.deepEqual(plan, ["codex", "--approve-for-me", "--disable", "hooks", "resume", "--last"]);
+  assert.deepEqual(plan, ["codex", ...MODE, ...gitGrant(s.project), "resume", "--last"]);
   assert.equal(plan.includes("--yolo"), false, "the old pane's command is never reused");
 });
 
-test("codexAuto false on the bot's definition leaves its Codex seat and restart on Codex's default approvals (#946)", (t) => {
+test("#1125: codexAuto false no longer opts out: the seat and its restart run the launch mode, and the field is warned about", (t) => {
   const s = scene(t, [{ ...MAIN, codexAuto: false }]);
-  assert.equal(s.cli(["start", "Genie"]).code, 0);
-  assert.deepEqual(launched(runs(s.calls())[0]), ["codex"]);
+  const started = s.cli(["start", "Genie"]);
+  assert.equal(started.code, 0, started.err);
+  assert.deepEqual(launched(runs(s.calls())[0]), ["codex", ...MODE, ...gitGrant(s.project)]);
   s.idle();
   assert.equal(s.cli(["restart", "Genie"]).code, 0);
-  assert.deepEqual(launched(runs(s.calls()).at(-1)), ["codex", "resume", "--last"]);
+  assert.deepEqual(launched(runs(s.calls()).at(-1)), ["codex", ...MODE, ...gitGrant(s.project), "resume", "--last"]);
+  const parsed = parseBots(JSON.stringify({ version: 1, categories: [], bots: [{ ...MAIN, codexAuto: false }] }));
+  assert.match(parsed.warnings.join("\n"), /codexAuto false no longer opts out/);
 });
 
-test("a Codex worker passes --approve-for-me from the bot's definition; codexAuto false opts out (#946)", () => {
+test("a Codex worker passes the launch mode from the bot's definition, codexAuto false or not (#946, #1125)", () => {
   const bot = { id: ID, name: "Genie", agent: "claude" };
   const on = workerPlan(bot, { agent: "codex" });
   assert.equal(on.error, undefined);
-  assert.deepEqual(on.argv, ["codex", "--approve-for-me", "--disable", "hooks"]);
+  assert.deepEqual(on.argv, ["codex", ...MODE]);
   assert.deepEqual(workerArgs({ botId: ID, branch: "fix/946", cwd: "/w", parent: "t1", agent: "codex", argv: on.argv, task: "do it" })
-    .slice(-5), ["codex", "--approve-for-me", "--disable", "hooks", "do it"]);
-  const off = workerPlan({ ...bot, codexAuto: false }, { agent: "codex" });
-  assert.deepEqual(off.argv, ["codex"]);
+    .slice(-(MODE.length + 2)), ["codex", ...MODE, "do it"]);
+  assert.deepEqual(workerPlan({ ...bot, codexAuto: false }, { agent: "codex" }).argv, ["codex", ...MODE]);
   const other = workerPlan({ ...bot, codexAuto: false }, { agent: "claude" });
-  assert.deepEqual(other.argv, ["claude", "--permission-mode", "auto"], "the opt-out only ever touches Codex");
+  assert.deepEqual(other.argv, ["claude", "--permission-mode", "auto"]);
 });
 
-test("Restart --tree's Codex worker helper keeps the auto mode from the bot's definition; a template gets none (#946)", () => {
+test("Restart --tree's Codex worker helper keeps the auto mode from the bot's definition; a template keeps its own command (#946, #1125)", () => {
   const get = { address: "t7", cwd: "/w", state: "live", argv: ["codex"], foreground: { argv: ["codex"], cwd: "/w" } };
   const worker = { agent: "codex", worktree: "/w" };
   const on = helperPlan({ get, worker, agents: AGENTS, bot: { codexAuto: true } });
-  assert.deepEqual(on.argv, ["codex", "--approve-for-me", "--disable", "hooks", "resume", "--last"]);
+  assert.deepEqual(on.argv, ["codex", ...MODE, "resume", "--last"]);
   const off = helperPlan({ get: { ...get, argv: ["codex", "--approve-for-me"], foreground: { argv: ["codex", "--approve-for-me"], cwd: "/w" } },
     worker, agents: AGENTS, bot: { codexAuto: false } });
-  assert.deepEqual(off.argv, ["codex", "resume", "--last"]);
-  // A template owns its command: the pack adds no flag to it, on a restart or a worker start.
+  assert.deepEqual(off.argv, ["codex", ...MODE, "resume", "--last"]);
+  // A seat's Codex template is read, never rewritten: the mode words it lacks go after it through "$@".
   const tpl = restartPlan({ bot: { agent: "codex" }, run: ["codex", "--approve-for-me"], runningAgent: "codex", session: null,
     template: { name: "rev", command: "codex --model g" } });
-  assert.deepEqual(tpl.argv, ["sh", "-c", 'codex --model g "$@"', "sh", "resume", "--last"]);
+  assert.deepEqual(tpl.argv, ["sh", "-c", 'codex --model g "$@"', "sh", ...MODE, "resume", "--last"]);
   const viaTpl = workerPlan({ id: ID, name: "Genie", agent: "codex" }, { template: "rev" });
   assert.deepEqual([viaTpl.template, viaTpl.argv], ["rev", null]);
   assert.deepEqual(workerArgs({ botId: ID, branch: "b", cwd: "/w", parent: "t1", template: "rev", task: "do it" }).slice(-2), ["rev", "do it"]);
 });
 
-test("#1045: --disable hooks rides a Codex start, restart, worker and tree helper; codexAuto false leaves it off", (t) => {
+test("#1045: --disable hooks rides a Codex start, restart, worker and tree helper; codexAuto false changes nothing (#1125)", (t) => {
   const hooksOff = (words) => {
     const at = words.indexOf("--disable");
     return at > 0 && words[at + 1] === "hooks";
@@ -140,12 +148,12 @@ test("#1045: --disable hooks rides a Codex start, restart, worker and tree helpe
   const get = { address: "t7", cwd: "/w", state: "live", argv: ["codex"], foreground: { argv: ["codex"], cwd: "/w" } };
   const worker = { agent: "codex", worktree: "/w" };
   assert.equal(hooksOff(helperPlan({ get, worker, agents: AGENTS, bot: MAIN }).argv), true, "helperPlan");
-  // The opt-out leaves Codex's own hooks alone: no --disable, on any of the four launches.
+  // The retired opt-out changes nothing: both flags, on every launch.
   for (const words of [autoModeArgs("codex", { codexAuto: false }, ["codex"]),
     workerPlan({ ...MAIN, codexAuto: false }, { agent: "codex" }).argv,
     helperPlan({ get, worker, agents: AGENTS, bot: { codexAuto: false } }).argv]) {
-    assert.equal(hooksOff(words), false, "codexAuto false");
-    assert.equal(words.includes("--approve-for-me"), false, "codexAuto false opts out of both flags");
+    assert.equal(hooksOff(words), true, "codexAuto false");
+    assert.equal(words.includes("--approve-for-me"), true, "codexAuto false keeps auto mode");
   }
 });
 

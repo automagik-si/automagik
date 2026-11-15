@@ -222,9 +222,9 @@ const packEntries = (env) => ["am-sidebar", "spaces-agents"].flatMap((m) =>
   ["automagik-herdr", "automagik-herdr.mjs"].map((f) => join(appHomeOf(env), "mods", m, "bin", f)));
 
 /**
- * Links ~/.local/bin/am and ~/.local/bin/automagik-herdr to the current am. `am` is am's alone: a
- * file there, or a link elsewhere, is left alone and reported. automagik-herdr is taken only when it
- * is missing, already am's, or one of the pack's own links. Returns one line per link.
+ * Links ~/.local/bin/am and ~/.local/bin/automagik-herdr to the current am. Either is taken only
+ * when it is missing, already am's, or one of the pack's own links (install.sh links the pack's
+ * CLI under both names); a file there, or a link elsewhere, is left alone and reported. Returns one line per link.
  */
 export function linkCommands(env = process.env) {
   const bin = binDirOf(env);
@@ -245,7 +245,8 @@ export function linkCommands(env = process.env) {
     renameSync(tmp, link);
     return { link, state: to === null ? "created" : "moved", detail: to ?? undefined };
   };
-  return [one("am", ours), one("automagik-herdr", (to) => ours(to) || pack.has(to))];
+  const takes = (to) => ours(to) || pack.has(to);
+  return [one("am", takes), one("automagik-herdr", takes)];
 }
 
 /** The briefing hooks' entry point under Herdr's app home, and what am links it to. */
@@ -288,8 +289,8 @@ function unlinkEntry(env) {
 }
 
 /**
- * am's half of an uninstall: ~/.local/bin/am goes, and automagik-herdr goes back to the pack's
- * entry when a pack is installed (else it goes). The store stays, unless `purge`.
+ * am's half of an uninstall: ~/.local/bin/am and automagik-herdr go back to the pack's
+ * entry when a pack is installed (else they go). The store stays, unless `purge`.
  */
 export function uninstallSelf({ env = process.env, purge = false } = {}) {
   const bin = binDirOf(env);
@@ -304,7 +305,7 @@ function unplace({ env, purge, bin, store }) {
     const link = join(bin, name);
     const to = linkOf(link);
     if (to === null || !inside(absolute(link, to), store)) continue;
-    const back = name === "automagik-herdr" ? packEntries(env).find((p) => existsSync(p)) : null;
+    const back = packEntries(env).find((p) => existsSync(p)) ?? null;
     if (back) {
       const tmp = join(bin, `.${name}-${randomBytes(4).toString("hex")}`);
       symlinkSync(back, tmp);
@@ -427,7 +428,7 @@ export function doctorSelf({ env = process.env, project = process.cwd() } = {}) 
   const store = storeOf(env);
   const record = readRecord(store);
   const line = (check, ok, detail, fix) => ({ part: PART, check, ok, detail, ...(ok ? {} : { fix }) });
-  const lines = [line("restart-path", true, "In a Herdr bot pane, restart the session with automagik-herdr restart <bot> (or am restart <bot>), never /restart.")];
+  const lines = [line("restart-path", true, "In a Herdr bot pane, restart the session with am restart <bot>, never /restart.")];
   const current = join(store, "current");
   const problems = existsSync(current) ? extractProblems(current, record.current?.version) : ["it is not installed"];
   lines.push(line("installed", problems.length === 0, problems.length ? problems.join("; ") : `${record.current?.version} in ${realpathSync(current)}`,

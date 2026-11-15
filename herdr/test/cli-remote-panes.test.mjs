@@ -113,7 +113,7 @@ test("linked Linux starts require approval, then refuse approved on even with wo
   Object.assign(file.bots[0], { agent: "dsh-tui", hcProxy: true });
   writeFileSync(path, JSON.stringify(file));
   const unapproved = s.cli(["start", "Atlas", ...s.on, "--json"]);
-  assert.match(unapproved.err, /run automagik-herdr proxy approve first/);
+  assert.match(unapproved.err, /run am proxy approve first/);
   s.approve();
   file.bots[0].hcProxy = false;
   writeFileSync(path, JSON.stringify(file));
@@ -188,7 +188,7 @@ test("the same invalid record warns off to plain linked argv and refuses working
     assert.deepEqual(s.calls().filter((call) => call[0] === "run").at(-1), plain);
     assert.equal((off.err.match(/WARNING hc proxy:/g) ?? []).length, 1);
     assert.ok(off.err.includes(path));
-    assert.match(off.err, /does not match its sha256.*starting plain.*automagik-herdr proxy approve/);
+    assert.match(off.err, /does not match its sha256.*starting plain.*am proxy approve/);
     assert.doesNotMatch(off.out, /^WARNING hc proxy:/m);
     reset();
     file.bots[0].hcProxy = true;
@@ -196,7 +196,7 @@ test("the same invalid record warns off to plain linked argv and refuses working
     const before = s.calls().filter((call) => call[0] === "run").length;
     const on = s.cli(args);
     assert.notEqual(on.code, 0);
-    assert.match(on.err, /does not match its sha256.*automagik-herdr proxy approve first/);
+    assert.match(on.err, /does not match its sha256.*am proxy approve first/);
     assert.equal(s.calls().filter((call) => call[0] === "run").length, before);
     assert.equal(readFileSync(path, "utf8"), corrupt);
   }
@@ -213,7 +213,7 @@ test("linked uname failure warns off to a plain start and refuses working on", (
   const off = s.cli(["start", "Atlas", ...s.on, "--json"]);
   assert.equal(off.code, 0, off.err);
   assert.match(off.err, /WARNING hc proxy: cannot check the target platform:.*starting plain/);
-  assert.match(off.err, /automagik-herdr proxy approve/);
+  assert.match(off.err, /am proxy approve/);
   const run = s.calls().find((call) => call[0] === "run");
   assert.ok(run.includes("dsh-tui"));
   assert.equal(run.some((word) => word.endsWith("/hcPane.mjs")), false);
@@ -651,14 +651,14 @@ test("start --machine of an Antigravity bot: its 0600 permission file is written
 test("start and restart --machine of an Antigravity bot with no app home there: one clear refusal, nothing started, nothing written here", (t) => {
   const s = agyScene(t, { appHome: false });
   const line = new RegExp(`^Atlas runs on vm without its Antigravity permission list: its app home there, `
-    + `${vmApp(s)}, isn't a folder, and a start never makes one\\. Install automagik-herdr on vm, or set `
+    + `${vmApp(s)}, isn't a folder, and a start never makes one\\. Install Automagik Herdr on vm, or set `
     + `HERDR_APP_HOME in the project's \\.herdr/pane-env there to an app home that is there\\. Nothing was started\\.$`);
   for (const args of [["start", "Atlas", ...s.on], ["restart", "Atlas", ...s.on, "--force"]]) {
     const r = s.cli(args);
     assert.equal(r.code, 1, args.join(" "));
     const said = r.err.split("\n").filter((x) => x.includes("Antigravity permission list"));
     assert.equal(said.length, 1, r.err);
-    assert.match(said[0].replace(/^automagik-herdr: /, ""), line);
+    assert.match(said[0].replace(/^am: /, ""), line);
   }
   assert.equal(s.calls().filter((c) => c[0] === "run").length, 0, "nothing started");
   assert.equal(existsSync(join(s.root, "vm/.config")), false, "no app home made there");
@@ -734,47 +734,67 @@ test("restart --machine names a pane's stale flags without their values (#597 re
   assert.ok(run.includes("--proxy=http://user:token@proxy.example:8080") === false, "the source's command, never the pane's flag");
 });
 
-test("restart --machine --tree is refused before anything is read there (#437): the bot and its helper keep running, and what to do by hand is said", (t) => {
-  const helper = atlasPane({ address: "vm/t9", created_ms: 1700000000009, parent: "vm/t8", die_with_parent: true, status: { state: "idle", app: "claude" } });
+test("linked --tree runs the real local tree restart on the holding machine and moves the controller attachment", (t) => {
+  const helper = atlasPane({ address: "vm/t9", created_ms: 1700000000009, parent: "vm/t8", die_with_parent: true,
+    argv: ["claude"], foreground: { argv: ["claude"], name: "claude" }, status: { state: "idle" },
+    labels: { "agent.session": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa" } });
   const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" } }), helper] });
   assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
-  const before = s.calls().length;
-  for (const extra of [[], ["--force"], ["--fresh"], ["--fresh-shared"], ["--json"]]) {
-    const r = s.cli(["restart", "Atlas", ...s.on, "--tree", ...extra]);
-    assert.equal(r.code, 2, extra.join(" "));
-    assert.match(r.err, /Restarting a bot's helpers on a linked machine isn't built yet, so nothing was read or restarted: Atlas and its helpers on vm still run as they were, on the account they started with./);
-    assert.match(r.err, /By hand: wait for a helper still working to finish, end each helper's pane \(hc kill vm\/tN for one\), then restart Atlas there without --tree\. A helper that still had work to do, start again yourself with hc run on vm once Atlas is back\./);
-    assert.doesNotMatch(r.err, /--force/, "--force would drop the other checks too (a bot mid-turn)");
-    assert.equal(r.out, "", "--json prints nothing, as the other flag refusals on a linked machine");
-  }
-  assert.deepEqual(s.calls().slice(before), [], "not one hc call: nothing read, started or ended there");
-  assert.deepEqual(s.hcState().terminals.map((x) => [x.address, x.state]), [["vm/t8", "live"], ["vm/t9", "live"]]);
-  assert.deepEqual(s.rows().map((x) => [x.event, x.terminal]), [["attach", "t8"]], "the ledger still has Atlas in t8");
+  const bin = join(s.root, "vm-bin"), app = join(s.root, "holding-app");
+  mkdirSync(app);
+  exe(join(bin, "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+  exe(join(bin, "herdr-app"), "#!/bin/sh\nexit 1\n");
+  const holdingCli = new URL("./fake-holding-cli.mjs", import.meta.url).pathname;
+  exe(join(bin, "automagik-herdr"), `#!/bin/sh\nexec "${process.execPath}" "${holdingCli}" "$@"\n`);
+  s.setState((state) => { state.machines[0].env = { HOLDING_CLI: CLI, HOLDING_APP: app }; });
+  const r = s.cli(["restart", "Atlas", ...s.on, "--tree", "--force", "--fresh", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const result = r.json();
+  assert.equal(result.machine, "vm");
+  assert.equal(result.replaced, "t8");
+  const panes = s.hcState().terminals;
+  assert.equal(panes.find((p) => p.address === "vm/t8").state, "finished");
+  assert.equal(panes.find((p) => p.address === "vm/t9").state, "finished");
+  const replacements = panes.filter((p) => p.state === "live");
+  assert.equal(replacements.length, 2);
+  const child = replacements.find((p) => p.parent === `vm/${result.terminal}` && p.die_with_parent);
+  assert.ok(child);
+  assert.ok(child.argv.includes("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"), "the helper resumes its conversation");
+  const who = s.cli(["whois", `vm/${result.terminal}`, "--json"]);
+  assert.equal(who.code, 0, who.err);
+  assert.equal(who.json().bot, ATLAS);
+  assert.equal(s.rows().at(-1).terminal, result.terminal);
+  assert.equal(s.rows().at(-1).core, CORE);
+  const call = s.calls().find((c) => c[0] === "exec" && c.includes("--tree"));
+  assert.ok(call.includes("540"));
+  assert.equal(call.includes("--machine"), false, "the target CLI must execute its local tree route");
+  assert.deepEqual(keysSent(s.calls()), []);
 });
 
-test("restart --machine of a bot whose helper ends with its pane there (#437): never offers --tree or --force; ending the finished helper's pane by hand, as it says, lets the restart through", (t) => {
-  // A finished worker keeps its pane open: live, its agent done, and it ends with its parent.
-  const helper = atlasPane({ address: "vm/t9", created_ms: 1700000000009, parent: "vm/t8", die_with_parent: true, status: { state: "done", app: "claude" } });
-  const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" } }), helper] });
+test("linked --tree without an installed CLI fails without ending the lead or its helpers", (t) => {
+  const s = scene(t, { terminals: [atlasPane()] });
+  assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
+  const r = s.cli(["restart", "Atlas", ...s.on, "--tree", "--force", "--json"]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /Automagik is missing on vm; install it there and retry/);
+  assert.equal(s.hcState().terminals[0].state, "live");
+  assert.equal(s.calls().filter((c) => c[0] === "run" || c[0] === "kill").length, 0);
+});
+
+for (const state of ["idle", "working"]) test(`linked restart with helpers offers both actions when the lead is ${state}`, (t) => {
+  const helper = atlasPane({ address: "vm/t9", created_ms: 1700000000009, parent: "vm/t8", die_with_parent: true,
+    status: { state: "working", app: "claude" } });
+  const s = scene(t, { terminals: [atlasPane({ status: { state, app: "hermes" } }), helper] });
   assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
   const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--json"]);
   assert.equal(r.code, 1);
-  const said = "vm/t8 has a helper that ends with it: vm/t9. Restarting helpers on a linked machine isn't built yet, so nothing was restarted. "
-    + "End its pane (hc kill vm/t9) and restart Atlas again.";
-  assert.deepEqual(r.json(), { error: said, refused: "helpers", terminal: "vm/t8" }, "the --json shape of a busy refusal, unchanged");
-  assert.doesNotMatch(r.err, /--tree|--force/);
-  // Still working: wait for it first.
-  s.setState((st) => { st.terminals.find((x) => x.address === "vm/t9").status = { state: "working", app: "claude" }; });
-  const busy = s.cli(["restart", "Atlas", ...s.on, "--fresh"]);
-  assert.equal(busy.code, 1);
-  assert.match(busy.err, /Wait for vm\/t9 to finish, then end its pane \(hc kill vm\/t9\) and restart Atlas again\./);
-  assert.doesNotMatch(busy.err, /--tree|--force/);
-  assert.equal(s.calls().filter((c) => c[0] === "run" || c[0] === "kill").length, 0, "nothing started or ended");
-  // Done as it says: the helper's pane ended, the same restart goes through.
-  s.setState((st) => { Object.assign(st.terminals.find((x) => x.address === "vm/t9"), { state: "finished", status: { state: "done", app: "claude" } }); });
-  const ok = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--json"]);
+  assert.equal(r.json().refused, "helpers");
+  assert.match(r.json().error, /Restart with its helpers/);
+  assert.match(r.json().error, /End helpers and restart/);
+  assert.equal(s.calls().filter((c) => c[0] === "run" || c[0] === "kill").length, 0);
+  const ok = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--force", "--json"]);
   assert.equal(ok.code, 0, ok.err);
-  assert.deepEqual([ok.json().machine, ok.json().replaced], ["vm", "t8"]);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t9").state, "finished");
 });
 
 test("restart --machine: --continue is refused while another bot's same agent runs in that folder there", (t) => {
@@ -1123,7 +1143,7 @@ test("start --machine under the sidebar's 30 s deadline (#444): too little left 
   const late = s.cli(["start", "Atlas", ...s.on], { AUTOMAGIK_HERDR_DEADLINE: String(Date.now() + 5000) });
   assert.equal(late.code, 1, late.err);
   assert.match(late.err, /Only \d s of this Herdr's 30 s limit for the sidebar's programs was left, and starting Atlas on vm needs 20 s to finish once its pane starts, so nothing was started\. /);
-  assert.ok(late.err.trim().endsWith(`Start it from a terminal: automagik-herdr start ${ATLAS} --project ${s.project} --machine vm`), late.err);
+  assert.ok(late.err.trim().endsWith(`Start it from a terminal: am start ${ATLAS} --project ${s.project} --machine vm`), late.err);
   assert.equal((DEADLINE_MARGIN_MS + DEADLINE_PLACE_MS) / 1000, 20);
   assert.deepEqual(s.calls().filter((c) => c[0] === "run"), []);
   assert.deepEqual(s.rows(), []);
@@ -1373,4 +1393,38 @@ test("start and restart --machine (#1033): on Darwin when security show-keychain
   assert.deepEqual([restarted.json().terminal, restarted.json().replaced], ["t101", "t8"]);
   assert.equal(existsSync(agySeatFile(s)), true);
   assert.ok(s.calls().some((c) => c[0] === "kill" && c[1] === "vm/t8"));
+});
+
+test("linked --tree requires the explicit immediate choice instead of leaving an unattended remote queue", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ status: { state: "working" } })] });
+  const r = s.cli(["restart", "Atlas", ...s.on, "--tree", "--json"]);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /--tree --force/);
+  assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill" || c.includes("--tree")), false);
+});
+
+for (const failure of ["timeout", "invalid-reply"]) test(`linked tree ${failure}: no automatic retry or controller kill`, (t) => {
+  const s = scene(t, { terminals: [atlasPane()] });
+  assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
+  if (failure === "timeout") s.setState((state) => { state.execTimedOut = ["shift 5"]; });
+  else exe(join(s.root, "vm-bin", "automagik-herdr"), `#!/bin/sh\nprintf '%s\\n' '{"terminal":"../other"}'\n`);
+  const r = s.cli(["restart", "Atlas", ...s.on, "--tree", "--force", "--json"]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /inspect its panes before retrying/);
+  if (failure === "invalid-reply") assert.match(r.err, /returned an invalid pane/, "the shape check answers, not the later pane lookup");
+  assert.equal(s.calls().filter((c) => c[0] === "exec" && c.includes("--tree")).length, 1);
+  assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
+  assert.equal(s.rows().at(-1).terminal, "t8");
+});
+
+test("linked tree reply naming a live pane that is not the bot's replacement: not confirmed, no ledger move or kill", (t) => {
+  const stranger = atlasPane({ address: "vm/t9", created_ms: 1700000000009 });
+  const s = scene(t, { terminals: [atlasPane(), stranger] });
+  assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
+  exe(join(s.root, "vm-bin", "automagik-herdr"), `#!/bin/sh\nprintf '%s\\n' '{"terminal":"t9"}'\n`);
+  const r = s.cli(["restart", "Atlas", ...s.on, "--tree", "--force", "--json"]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /its replacement pane could not be confirmed/);
+  assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
+  assert.equal(s.rows().at(-1).terminal, "t8", "the controller attachment stays on the old pane");
 });

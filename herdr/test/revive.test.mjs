@@ -158,10 +158,10 @@ test("reportLine: one line: who resumed, who is on a new conversation and why, w
   assert.match(line, /Helpers resumed: fix-1 \(under Genie\)\./);
   assert.match(line, /Helpers not back: rev-2 \(under Genie\), hc run failed\./);
   assert.ok(line.includes(`Not back: Dev, claude isn't installed on this computer; by hand: ${byHandCommand("b-cccccccccc", "/p")}.`), line);
-  assert.equal(byHandCommand("b-cccccccccc", "/p"), "automagik-herdr restart b-cccccccccc --project /p --tree");
+  assert.equal(byHandCommand("b-cccccccccc", "/p"), "am restart b-cccccccccc --project /p --tree");
   assert.match(line, /Left alone: Ops, hc get t9 failed\./);
   assert.ok(line.endsWith(KEEP_DOWN), "how a bot is kept down is said every time");
-  assert.match(KEEP_DOWN, /automagik-herdr detach <bot>/);
+  assert.match(KEEP_DOWN, /am detach <bot>/);
   assert.equal(reportLine("/p", []), null, "nothing came back and nothing failed: no report");
   // The boot pass's own line (the user journal keeps it): counts, never a folder or a name.
   const counts = countsLine([{ project: "/home/u/secret", results: [{ name: "Genie", outcome: "resumed" }, { name: "Dev", outcome: "failed" }] }, { project: "/q", results: [{ name: "Cap", outcome: "fresh" }] }]);
@@ -301,7 +301,7 @@ test("revive: after a reboot each bot at a bare shell is restarted in its place,
   // One report, to the main bot's new pane, naming who resumed; no session id in it or in any output.
   assert.equal(state.sent.length, 1, JSON.stringify(state.sent));
   assert.equal(state.sent[0].to, "t100");
-  assert.match(state.sent[0].text, /^Revive after a restart of this computer, project .*Resumed where they were: Genie \(t100\); Dev \(t101\)\. To keep a bot down across restarts of this computer: automagik-herdr detach <bot>\.$/);
+  assert.match(state.sent[0].text, /^Revive after a restart of this computer, project .*Resumed where they were: Genie \(t100\); Dev \(t101\)\. To keep a bot down across restarts of this computer: am detach <bot>\.$/);
   const out = r.json();
   assert.equal(out.projects.length, 1);
   assert.equal(out.projects[0].sent, "t100");
@@ -453,7 +453,7 @@ test("revive: a bot that can't come back is reported as not back with the comman
   const results = r.json().projects[0].results;
   assert.deepEqual(results.map((x) => [x.name, x.outcome]), [["Genie", "resumed"], ["Captain", "failed"]]);
   assert.match(results[1].why, /^hc run failed/);
-  assert.ok(s.hcState().sent[0].text.includes(`by hand: automagik-herdr restart ${ID.cap} --project ${s.project} --tree.`), s.hcState().sent[0].text);
+  assert.ok(s.hcState().sent[0].text.includes(`by hand: am restart ${ID.cap} --project ${s.project} --tree.`), s.hcState().sent[0].text);
   assert.equal(s.hcState().terminals.find((x) => x.address === "t6").state, "live", "its shell stays");
 });
 

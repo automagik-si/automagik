@@ -175,8 +175,14 @@ switch (words[0]) {
     break;
   }
   case "get": {
-    // state.failGet: terminals hc can't answer for (a server error, not "no such terminal").
-    if ((state.failGet ?? []).includes(words[1])) fail(`hc: server error reading ${words[1]}`);
+    // state.failGet: terminals hc can't answer for (a server error, not "no such terminal"); with
+    // state.failGetExit, that exit code and hc's JSON error of another kind instead of exit 1.
+    if ((state.failGet ?? []).includes(words[1])) {
+      if (state.failGetExit) fail(JSON.stringify({ error: { kind: "internal", message: `server error reading ${words[1]}` } }), state.failGetExit);
+      fail(`hc: server error reading ${words[1]}`);
+    }
+    // state.badGet: terminals hc answers for with text that isn't JSON, exit 0 (#1125).
+    if ((state.badGet ?? []).includes(words[1])) { process.stdout.write("not json\n"); process.exit(0); }
     const t = find(words[1]);
     // Like the real one: exit 3 and a not_found error on stderr.
     if (!t) fail(JSON.stringify({ error: { kind: "not_found", message: `no terminal "${words[1]}"` } }), 3);

@@ -1,6 +1,7 @@
 import { createElement as h, Fragment, useEffect, useId, useRef, useState } from 'react'
 import { MarkdownText } from './dsh-primitives.js'
 import { CheckIcon, CloseIcon, CopyIcon, DotsIcon, DownloadIcon, InfoIcon } from './icons.js'
+import { CellEmpty } from './cell-empty.js'
 import { t } from './i18n.js'
 import { AnsweredCell, keyLetter, useOptionKeys } from './questions.js'
 import { useDockHold } from './card-hold.js'
@@ -435,11 +436,11 @@ export function PendingView({ sessionId, view, actions, inline }) {
 export function WidgetCell({ sessionId, callId, args, done, isError, roster, actions, heldCards }) {
   const record = roster.views?.[sessionId]
   if (record !== undefined && record.callId === callId) {
-    if (heldCards?.[heldCardKey('view', record.id)] > 0) return null
+    if (heldCards?.[heldCardKey('view', record.id)] > 0) return h(CellEmpty)
     return h(PendingView, { sessionId, view: record, actions, inline: true })
   }
   // A refused call (bad blueprint) drew no card; don't render an empty one.
-  if (done && isError) return h('span', { className: 'bt-q-gone', hidden: true })
+  if (done && isError) return h(CellEmpty, { className: 'bt-q-gone' })
   // Display-only cards draw from the recorded call arguments, which keep the
   // provider's encoding: checkShownView measures and unwraps them as the host did.
   // The args accessor reads strings through `text`; `value` drops them.
@@ -449,7 +450,7 @@ export function WidgetCell({ sessionId, callId, args, done, isError, roster, act
   // a settled interactive call: answered, dismissed or replaced, it leaves no gap
   // where it was (same as ask_user).
   if (shown.error !== undefined || shown.interactive || args?.value?.('await_reply') === true) {
-    return h('span', { className: 'bt-q-gone', hidden: true })
+    return h(CellEmpty, { className: 'bt-q-gone' })
   }
   return h('div', { className: 'bt-q-inline' }, h(WidgetCard, { title: shown.title, view: shown.view }))
 }
@@ -474,7 +475,7 @@ export function AnsweredView({ node }) {
     if (payload?.kind !== 'answer_to_pending_view') payload = null
   }
   const view = payload?.views?.[0]
-  if (view === null || typeof view !== 'object' || view.view === undefined) return null
+  if (view === null || typeof view !== 'object' || view.view === undefined) return h(CellEmpty)
   const answers = Array.isArray(payload.answers) ? payload.answers : []
   const answer = answers.find(entry => entry?.id === view.id) ?? answers[0] ?? null
   return h('div', { className: 'bt-q-inline' }, h(WidgetCard, { title: view.title ?? '', view: view.view, settled: true, answer }))
@@ -523,7 +524,7 @@ export const WIDGET_CSS = `
 .bt-widget-metric-value{font-size:22px;line-height:28px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--bt-ink);overflow-wrap:anywhere}
 .bt-widget-metric[data-tone=good] .bt-widget-metric-value{color:var(--bt-green)}
 .bt-widget-metric[data-tone=warn] .bt-widget-metric-value{color:var(--bt-star)}
-.bt-widget-metric[data-tone=bad] .bt-widget-metric-value{color:var(--bt-danger)}
+.bt-widget-metric[data-tone=bad] .bt-widget-metric-value{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-view-caption{font-size:12px;line-height:16px;color:var(--bt-ink-2);overflow-wrap:anywhere}
 .bt-view-muted{font-size:12px;line-height:16px;color:var(--bt-ink-2)}
 .bt-view-muted *{font-size:inherit!important;line-height:inherit!important;color:inherit!important}
@@ -545,7 +546,7 @@ export const WIDGET_CSS = `
 .bt-widget-progress[data-tone=good] .bt-widget-progress-fill{background:var(--bt-green)}
 .bt-widget-progress[data-tone=warn] .bt-widget-progress-fill{background:var(--bt-star)}
 .bt-widget-progress[data-tone=bad] .bt-widget-progress-fill{background:var(--bt-danger)}
-.bt-widget-progress[data-tone=bad] .bt-widget-progress-label>span:last-child{color:var(--bt-danger)}
+.bt-widget-progress[data-tone=bad] .bt-widget-progress-label>span:last-child{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-view-callout{display:flex;gap:8px;padding:8px 12px;border-radius:10px;--bt-tone:var(--bt-accent);background:color-mix(in srgb,var(--bt-tone) 8%,transparent);color:var(--bt-ink)}
 .bt-view-callout[data-tone=good]{--bt-tone:var(--bt-green)}
 .bt-view-callout[data-tone=warn]{--bt-tone:var(--bt-star)}

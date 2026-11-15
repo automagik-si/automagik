@@ -445,7 +445,7 @@ test("hc kill (#955): a main bot's seat ends a pane; the roster's kind decides, 
       writeFileSync(s.logPath, "");
       const r = guardRun(s, ["kill", "t105"], { HC_TERMINAL_ID: terminal });
       assertRefused(r);
-      assert.match(r.stderr, /refused kill: hc kill is for a project's main bot only; end a worker you started with automagik-herdr worker kill <pane>/, `${agent} ${who}`);
+      assert.match(r.stderr, /refused kill: hc kill is for a project's main bot only; end a worker you started with am worker kill <pane>/, `${agent} ${who}`);
       assert.deepEqual(killsSeen(s), [], `${agent} ${who}: nothing reached hc`);
     }
     // A worker, the main bot's own included, never kills.
@@ -523,7 +523,7 @@ test("kill shim (#955): per agent kind and per bot kind, hc kill in every flag o
       for (const [who, terminal] of [["a member lead's seat", "t101"], ["a member's seat", "t100"], ["a member's seat with a lead that is no main bot", "t102"]]) {
         writeFileSync(s.logPath, "");
         assertShimRefused(shimRun(s, args, { HC_TERMINAL_ID: terminal }),
-          /hc kill is for a project's main bot only; end a worker you started with automagik-herdr worker kill <pane>/);
+          /hc kill is for a project's main bot only; end a worker you started with am worker kill <pane>/);
         assert.deepEqual(killsSeen(s), [], `${said} from ${who}: no kill reached hc`);
       }
       // A worker never kills: a member's and the main bot's own alike.

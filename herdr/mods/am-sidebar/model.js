@@ -176,11 +176,16 @@ export function parseBots(text) {
       warnings.push(`${where}: hcProxy is not a boolean; ignored`);
       delete bot.hcProxy;
     }
-    // Codex's auto mode switch (#946): true (the default) passes --approve-for-me; false opts
-    // out and leaves Codex its own approvals.
+    // Codex's auto mode switch (#946). Since #1125 (the owner's ruling: every Codex seat and
+    // worker runs in auto mode with its sandbox on) false no longer opts out: kept as written,
+    // ignored, and said once here.
     if (bot.codexAuto !== undefined && typeof bot.codexAuto !== "boolean") {
       warnings.push(`${where}: codexAuto is not a boolean; ignored`);
       delete bot.codexAuto;
+    }
+    if (bot.codexAuto === false) {
+      warnings.push(`${where}: codexAuto false no longer opts out: every Codex seat and worker runs in auto mode `
+        + "(--approve-for-me) with its sandbox on (#1125); remove the field");
     }
     if (!ID_SHAPE.test(bot.id)) warnings.push(`${where}: id is not b- plus 10 base32 characters`);
     if (typeof bot.role !== "string") { if (bot.role !== undefined) warnings.push(`${where}: role is not text`); bot.role = ""; }
@@ -203,7 +208,8 @@ export function parseBots(text) {
     // Antigravity's launch mode: kept when it is text, even an unknown one, so a start refuses
     // it by name instead of silently launching on the default.
     if (bot.agyMode !== undefined) {
-      if (typeof bot.agyMode !== "string") { warnings.push(`${where}: agyMode is not text; ignored`); delete bot.agyMode; }
+      if (bot.agyMode === "") delete bot.agyMode;
+      else if (typeof bot.agyMode !== "string") { warnings.push(`${where}: agyMode is not text; ignored`); delete bot.agyMode; }
       else if (!AGY_MODES.includes(bot.agyMode)) warnings.push(`${where}: agyMode ${JSON.stringify(bot.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
     // Antigravity's permission additions (#823): a malformed shape is dropped whole; a bad rule
@@ -218,6 +224,10 @@ export function parseBots(text) {
         if (normalized.allow.length || normalized.deny.length) bot.agyPermissions = { allow: normalized.allow, deny: normalized.deny };
         else delete bot.agyPermissions;
       }
+    }
+    if (isObject(bot.worker) && bot.worker.agyMode === "") {
+      bot.worker = { ...bot.worker };
+      delete bot.worker.agyMode;
     }
     const workerWhy = workerProblem(bot.worker);
     if (workerWhy) { warnings.push(`${where}: ${workerWhy}; ignored`); delete bot.worker; }
@@ -437,7 +447,7 @@ export function inferProjectOf(file, botId, project, projects) {
   return byBot ? byBot[0] : "";
 }
 
-export function leadsBackTo(startProj, startFile, startBot, originProj, originId, projects) {
+export function leadsBackTo(startProj, startFile, startBot, originProj, originId, projects, { includePlanned = false } = {}) {
   const seen = new Set();
   let curProj = startProj;
   let curFile = startFile;
@@ -447,14 +457,14 @@ export function leadsBackTo(startProj, startFile, startBot, originProj, originId
     const key = `${curProj ?? ""}\0${curBot.id}`;
     if (seen.has(key)) return false;
     seen.add(key);
-    if (curBot.planned) return false;
+    if (curBot.planned && !includePlanned) return false;
     const curMain = mainBotOf(curFile);
     const nextCross = isText(curBot.leadProject) ? cleanProjectPath(curBot.leadProject) : "";
     if (nextCross && (!curProj || nextCross !== curProj)) {
       if (!projects || !isText(curBot.lead)) return false;
       const nextFile = projectFileOf(projects, nextCross);
       const nextBot = nextFile?.bots?.find((b) => b.id === curBot.lead);
-      if (!nextBot || nextBot.planned) {
+      if (!nextBot || (nextBot.planned && !includePlanned)) {
         if (curBot === curMain || !curMain) return false;
         curBot = curMain;
         continue;
@@ -616,10 +626,10 @@ export function checkBots(file, before = null, { project = null, projects = null
     else if (b.instructions.length > MAX_INSTRUCTIONS) errors.push(`${at}: instructions longer than ${MAX_INSTRUCTIONS} characters`);
     if (b.planned !== undefined && (!isObject(b.planned) || !isWave(b.planned.wave))) errors.push(`${at}: planned needs a positive whole wave`);
     if (!b.planned && !isText(b.agent)) errors.push(`${at}: no coding agent`);
-    if (b.agyMode !== undefined && !AGY_MODES.includes(b.agyMode)) {
+    if (b.agyMode !== undefined && b.agyMode !== "" && !AGY_MODES.includes(b.agyMode)) {
       errors.push(`${at}: agyMode ${JSON.stringify(b.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
-    if (isObject(b.worker) && b.worker.agyMode !== undefined && !AGY_MODES.includes(b.worker.agyMode)) {
+    if (isObject(b.worker) && b.worker.agyMode !== undefined && b.worker.agyMode !== "" && !AGY_MODES.includes(b.worker.agyMode)) {
       errors.push(`${at}: worker agyMode ${JSON.stringify(b.worker.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
     if (b.agyPermissions !== undefined) {
@@ -674,6 +684,15 @@ export function checkBots(file, before = null, { project = null, projects = null
       if (b.kind !== "member" && !b.leadProject) continue;
       const isCross = Boolean(b.leadProject && (!ownProject || cleanProjectPath(b.leadProject) !== ownProject));
       if (isCross && !projects) continue;
+      // Validate the stored graph too: planning a bot must not hide a dormant cycle.
+      // Reads still use effectiveLead's fallback for a planned lead.
+      const targetProject = isCross ? cleanProjectPath(b.leadProject) : ownProject;
+      const targetFile = isCross ? projectFileOf(projects, targetProject) : file;
+      const storedLead = targetFile?.bots.find((row) => row.id === (b.lead ?? mainBotOf(file)?.id));
+      if (leadsBackTo(targetProject, targetFile, storedLead, ownProject, b.id, projects, { includePlanned: true })) {
+        errors.push(`${b.id}: lead ${storedLead.id} leads back to this bot`);
+        continue;
+      }
       const { warning } = effectiveLead(file, b.id, { project, projects });
       const target = !isCross ? byId.get(b.lead) : null;
       if (warning && !/is one-sided/.test(warning) && (isCross || b.lead === b.id || !target?.planned)) {
@@ -883,6 +902,11 @@ export function applyBotEdit(raw, entry, newCategory = null) {
   }
   if ("rank" in bot && (bot.rank === undefined || bot.rank === null || bot.rank === "")) delete merged.rank;
   if ("code" in bot && (bot.code === undefined || bot.code === null || bot.code === "")) delete merged.code;
+  if (isObject(merged.worker) && merged.worker.agyMode === "") {
+    merged.worker = { ...merged.worker };
+    delete merged.worker.agyMode;
+    if (!Object.keys(merged.worker).length) delete merged.worker;
+  }
   if ("worker" in bot && (!isObject(bot.worker) || Object.keys(bot.worker).length === 0)) delete merged.worker;
   if (i >= 0) out.bots[i] = merged; else out.bots.push(merged);
   return out;

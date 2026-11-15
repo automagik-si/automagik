@@ -3,19 +3,19 @@
 **Status: C2b-2 preparation, off by default.** The effective rollout setting is the bot entry's
 `hcProxy` boolean in the project's **approved roster snapshot**, read afresh at each start,
 restart and worker start. Edit the working value with
-`automagik-herdr edit <bot> --hc-proxy on|off`, then run `automagik-herdr proxy approve`
+`am edit <bot> --hc-proxy on|off`, then run `am proxy approve`
 and review the diff before restarting. A valid approved on stays on if a pane changes or removes
 the working key. Working on with approval off or missing refuses and names `proxy approve`;
 an invalid approval refuses only when the working switch is on. With working off, an invalid
 record starts plain with the existing argv byte for byte and a loud STDERR warning naming
-the record, the problem and `automagik-herdr proxy approve`. An invalid record cannot be
+the record, the problem and `am proxy approve`. An invalid record cannot be
 trusted to say on. This applies to starts, restarts, tree helpers, workers and linked starts.
 Doctor prints a project WARN row for invalid approval, whatever the switches.
 Approved off (or no record with working off)
 keeps the existing command byte for byte. Only approved `true` on Linux wraps a
 pack-started dsh-tui bot or dsh-tui worker in `hcPane.mjs`. Other agents and templates keep their
 existing launch. `AM_HC_PROXY` no longer enables anything: the saved setting belongs to one bot.
-`automagik-herdr show <bot>` reports both working and approved values, including missing
+`am show <bot>` reports both working and approved values, including missing
 approval. Editing it never restarts a running pane.
 
 **Known limit:** if a bot was approved on, its working switch was turned off, and the approved
@@ -26,7 +26,7 @@ review `proxy approve` before restarting to restore the intended setting.
 The helper starts the proxy **before DSH** and closes it when the child ends. A failed proxy
 start never launches the child; a listening proxy that errors or closes ends the child and
 returns failure. There is no fallback launch against the real core. A stale execution copy or
-profile row refuses startup and names `automagik-herdr dsh-tui install` as the repair.
+profile row refuses startup and names `am dsh-tui install` as the repair.
 
 C2b-2 adds approved-worker allowance through the proxy. Every switch stays off; the managed
 sandbox profile row and socket mask are unchanged. The coordinated profile-row enablement
@@ -38,7 +38,7 @@ remain outside this work.
 After the remaining slices land, the captain can roll out one bot at a time from an ordinary
 terminal on the computer running that bot:
 
-1. Run `automagik-herdr dsh-tui update`, then `automagik-herdr dsh-tui doctor`.
+1. Run `am dsh-tui update`, then `am dsh-tui doctor`.
    Install and update refresh the stable helper, proxy, guard and wrapper together. Doctor
    checks the stable execution copy and managed profile row without changing either.
    `dsh-tui doctor --project <project>` also shows every bot's working and approved `hcProxy` and
@@ -46,15 +46,15 @@ terminal on the computer running that bot:
    has not completed rollback and prints a warning. A malformed roster adds one failed row
    while install checks still print. A missing proxy is reported down; doctor never starts a core,
    proxy or pane. Install and update preserve every saved switch, including an absent value.
-2. Run `automagik-herdr edit <bot> --hc-proxy on`, then
-   `automagik-herdr proxy approve --project <project>`. Review the printed roster diff,
+2. Run `am edit <bot> --hc-proxy on`, then
+   `am proxy approve --project <project>`. Review the printed roster diff,
    including the switch change. A **roster change needs a pane restart** after approval.
    After a re-approval, every worker start from an approved pane is refused until that pane
    restarts, including dsh-tui helper workers. Restart before asking the pane to start workers.
-3. Run `automagik-herdr restart <bot>`. Check that bot before opting in the next.
-4. To roll back, run `automagik-herdr edit <bot> --hc-proxy off`, then
-   `automagik-herdr proxy approve --project <project>` (review the diff), then
-   `automagik-herdr restart <bot>`. With a valid approved-on record, off without approval
+3. Run `am restart <bot>`. Check that bot before opting in the next.
+4. To roll back, run `am edit <bot> --hc-proxy off`, then
+   `am proxy approve --project <project>` (review the diff), then
+   `am restart <bot>`. With a valid approved-on record, off without approval
    keeps the pane proxied; the invalid-record exception above starts plain with a warning.
    Existing workers keep their launch until restarted;
    end and relaunch any workers that also need rollback.
@@ -265,16 +265,16 @@ writable tree**:
 
 The record lives outside the project and the app home; the sandbox row binds the whole data root
 read-only once, so every stable file and every approved record is reachable but not writable
-inside a sandbox. `automagik-herdr proxy approve --project <dir>` is the only writer: it reads
+inside a sandbox. `am proxy approve --project <dir>` is the only writer: it reads
 the working roster, prints the diff against the previous record (bots added/removed,
 rank/lead/kind changes), then writes the new record. `dsh-tui install` never approves.
 Only `proxy approve` and a proxied start check the approved data root. Plain `dsh-tui`
 install/check keeps its stable execution root checks without validating approval storage.
 
 A working-tree roster that differs from the record **warns once and still starts**, naming
-`automagik-herdr proxy approve`; the approved roster stays in force. A missing record **refuses**
+`am proxy approve`; the approved roster stays in force. A missing record **refuses**
 a proxied pane. **A roster change therefore needs a pane restart**, after
-`automagik-herdr proxy approve`: the helper starts the proxy before DSH, so the new pane's proxy
+`am proxy approve`: the helper starts the proxy before DSH, so the new pane's proxy
 reads the newly approved record, and
 nothing in the old sandbox can write it first. The proxy's own socket folder is outside both
 trees: `$XDG_RUNTIME_DIR/automagik-hc-proxy/<terminal>/hc.sock`, not under the app home.
@@ -304,7 +304,7 @@ made the approved snapshot authoritative for the per-bot switch. C2b-2 adds the 
 allowance above. Every switch stays off in this preparation.
 
 Residual, recorded for the person who approves: a sandboxed bot can ask an in-team unsandboxed
-pane to run `automagik-herdr proxy approve`. The printed diff is the check, and approving is the
+pane to run `am proxy approve`. The printed diff is the check, and approving is the
 person's act. The record is outside the sandbox; the command that writes it is not automatically
 trusted because it ran in an unsandboxed pane.
 
@@ -343,5 +343,5 @@ installed shim under `~/.local/bin` and the stable root's parent are assumed rea
 sandbox, as the policy states; a stable root inside the project, the app home, the temp folder or
 the runtime folder is refused by `dsh-tui install` and by the proxy at start. The stable runner
 bakes one absolute node at install; a custom `NVM_DIR` or `AUTOMAGIK_HERDR_RUNTIME_DIRS` inside a
-writable tree is refused too. A node upgrade (nvm, Homebrew, bun) needs `automagik-herdr dsh-tui
+writable tree is refused too. A node upgrade (nvm, Homebrew, bun) needs `am dsh-tui
 install` again: the stable runner bakes one absolute node and a missing one is refused.

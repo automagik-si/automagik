@@ -262,3 +262,63 @@ test('an open stop previews in amber without changing the face; a task approval 
   const waiting = draw({ stops: [{ botId: 'pip', open: true }], approvals: [{ id: 'x', botId: 'pip', taskId: 'x' }] })
   assert.equal(textOf(find(waiting, node => node.props?.className === 'bt-row-preview bt-row-preview-ask')), 'A task needs your approval')
 })
+
+test('Bot badges count approvals, cap at 9+ and preserve the uncounted question badge', () => {
+  for (const count of [1, 3, 12]) {
+    const { rowOf } = sidebar({ tasks: {}, approvals: Array.from({ length: count }, (_, i) => ({ id: `a${i}`, botId: 'pip' })) })
+    const node = rowOf('pip')
+    const row = node.type(node.props)
+    assert.match(row.props['aria-label'], new RegExp(count === 1 ? 'Waiting for your approval.*1 approval waiting' : `${count} approvals waiting`))
+    const avatar = find(row, named('BotAvatar'))[0]
+    assert.equal(avatar.props.count, count)
+    const badge = find(avatar.type(avatar.props), node => node.props?.className === 'bt-badge bt-badge-alert')[0]
+    assert.equal(textOf(badge), count > 9 ? '9+' : String(count))
+    assert.equal(badge.props['aria-label'], count === 1 ? '1 approval waiting' : `${count} approvals waiting`)
+    const uncounted = find(avatar.type({ ...avatar.props, count: undefined }), node => node.props?.className === 'bt-badge bt-badge-alert')[0]
+    assert.equal(textOf(uncounted), '?')
+    assert.equal(uncounted.props['aria-label'], 'Waiting for your answer')
+  }
+})
+
+test('a waiting thread and task card name the one ask they wait on, never a guess between two', () => {
+  const one = [{ id: 'first', botId: 'pip', taskId: 'session-a', sessionId: 'session-a', callId: 'a', detail: { code: 'bun test --filter api' } }]
+  const two = [...one, { id: 'second', botId: 'pip', taskId: 'session-a', sessionId: 'session-a', callId: 'b', detail: { code: 'rm -rf build' } }]
+  const rowOf = (approvals) => {
+    const { threadsOf } = sidebar({ tasks: { 'session-a': task('pip', 'Check API', 2) }, approvals })
+    const node = threadsOf('pip')
+    return find(node.type(node.props), node => node.props?.className === 'bt-thread')[0]
+  }
+  assert.equal(rowOf(one).props.title, 'Check API · bun test --filter api')
+  assert.equal(rowOf(one).props['aria-label'], 'Check API, Waiting for you, bun test --filter api')
+  assert.equal(rowOf(two).props.title, 'Check API')
+  const said = (approvals, pending) => {
+    const card = TaskCard({ sessionId: 'session-a', title: 'Check API', task: task('pip', 'Check API', 2), useWork: pick => pick({ approvals }),
+      useSessionStatus: pick => pick(new Map(pending ? [['session-a', { pendingInteraction: pending }]] : [])) })
+    return find(card, node => node.props?.className === 'op-task-said').map(textOf)
+  }
+  assert.ok(said(one).includes('bun test --filter api'))
+  // Two asks and no shown one: no command is named.
+  assert.ok(!said(two).some(text => text === 'bun test --filter api' || text === 'rm -rf build'))
+  // The buttons answer DSH's ask: the command named is that ask's own.
+  const ask = { kind: 'approval', toolName: 'bash', callId: 'b', answer: () => {} }
+  assert.ok(said(two, ask).includes('rm -rf build'))
+  assert.ok(!said(two, ask).includes('bun test --filter api'))
+  assert.ok(!said(one, ask).includes('bun test --filter api'))
+})
+
+test('room rows count their approvals in the existing tag and retain the waiting dot', () => {
+  const room = { id: 'room', name: 'Ops', members: ['pip'] }
+  const approvals = [{ roomId: 'room' }, { roomId: 'elsewhere' }, { roomId: 'room' }]
+  const roster = { bots: [pip], rooms: [room], agents: [], byId: { pip }, roomsById: { room }, agentOf: {}, mainBotIds: ['pip'], questions: {}, ready: true, tasks: {} }
+  const tree = TeamSidebar({
+    wide: true, actions: {}, useRoster: pick => pick(roster), useUi: pick => pick({ unread: {} }), useRegistry: pick => pick({}),
+    useSessions: pick => pick({ ids: [], byId: {} }), useUpdate: () => ({}), useSessionStatus: pick => pick(new Map()),
+    useSessionRetainInfo: (_id, pick) => pick(undefined), useActivity: pick => pick({}),
+    useWork: pick => pick({ approvals, rooms: {}, waiting: {} }),
+  })
+  const node = find(tree, named('RoomRow'))[0]
+  const row = node.type(node.props)
+  assert.match(row.props['aria-label'], /2 approvals waiting/)
+  assert.equal(textOf(find(row, node => node.props?.className === 'bt-tag')), '2')
+  assert.equal(find(row, node => node.props?.className === 'bt-unread bt-unread-wait').length, 1)
+})

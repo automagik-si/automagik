@@ -139,7 +139,7 @@ for (const copy of copies) {
     await import(pathToFileURL(target).href);
     ok = true;
   } catch (e) {
-    process.stderr.write(`automagik-herdr briefing: ${firstLine(e)}\n`);
+    process.stderr.write(`am briefing: ${firstLine(e)}\n`);
     putBack(kept);
     if (copy.am && !before) delete process.env.HERDR_APP_HOME;
     process.exitCode = 0;

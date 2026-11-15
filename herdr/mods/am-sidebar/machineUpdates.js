@@ -249,7 +249,7 @@ const stepText = (s) => {
 /** How an entry's last update went, in words. */
 export function resultText(e) {
   if (e.result === "disconnected") return "not connected: nothing was checked";
-  if (e.result === "off") return "updates are off there (automagik-herdr machines --auto on turns them on)";
+  if (e.result === "off") return "updates are off there (am machines --auto on turns them on)";
   if (e.result === "failed" && !e.steps?.length) return `not checked (${e.why?.[0] ?? "failed"})`;
   const said = (e.steps ?? []).map(stepText).filter(Boolean);
   return said.length ? said.join("; ") : "up to date";
@@ -268,7 +268,7 @@ export function stateLines(state, linked = []) {
   const lines = [];
   if (state.here) lines.push(entryLine(state.here));
   const names = [...new Set([...Object.keys(state.machines), ...linked])].sort();
-  for (const name of names) lines.push(state.machines[name] ? entryLine(state.machines[name]) : `${name}: not checked yet (automagik-herdr machines update).`);
+  for (const name of names) lines.push(state.machines[name] ? entryLine(state.machines[name]) : `${name}: not checked yet (am machines update).`);
   return lines;
 }
 
@@ -287,7 +287,7 @@ export function failureNotice(state, shown = null) {
   const sig = lines.join("\n");
   if (!sig || sig === shown) return { sig, notice: null };
   return { sig, notice: { title: failed.length === 1 ? `${failed[0].machine ?? "This computer"} was not updated` : `${failed.length} machines were not updated`,
-    level: "warning", body: `${lines.join(" ")} \`automagik-herdr machines\` shows each machine.` } };
+    level: "warning", body: `${lines.join(" ")} \`am machines\` shows each machine.` } };
 }
 
 /**

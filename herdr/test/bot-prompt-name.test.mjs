@@ -1,5 +1,6 @@
 // Golden hashes from origin/dev, with #805 restart advice in the briefing; re-recorded for #955,
-// whose briefing ends a worker with `automagik-herdr worker kill` (the text and its five carriers).
+// whose briefing ends a worker with `am worker kill` (the text and its five carriers), and again
+// when the briefing took the command's name, am (the fixture's base is the dev commit under it).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

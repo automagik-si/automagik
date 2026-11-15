@@ -10,12 +10,18 @@ import { Readable, Writable } from 'node:stream'
 import { PROTOCOL_VERSION, client, methods, ndJsonStream } from '@agentclientprotocol/sdk/unstable'
 import { batchSafe } from './batch-spawn.js'
 import { HOME_ENV, releaseRun, trackRun } from './cli-homes.js'
-import { isBridgeName } from './names.js'
+import { BRIDGE_NAME, isBridgeName } from './names.js'
+import { processBirth } from './process-identity.js'
+import { descendants, signalTree, snapshotBudget, supportsTree, treeStates }
+  from './process-tree.js'
 
 const STDERR_KEEP = 4000
 // How long a closed connection waits for the agent's exit, which says why (start()).
 const EXIT_GRACE_MS = 500
 const TERMINAL = new Set(['completed', 'failed'])
+const isToolId = id => typeof id === 'string' && id !== ''
+// Keep recent call identities without retaining every turn's payloads for the session.
+export const RETIRED_MAX = 1024
 // SDK 2.x refuses an incoming message over 32 MiB by default and closes the connection on it.
 // An image call carries its picture twice (content and rawOutput), base64: one a little over the
 // 12 MiB this plugin keeps (image.js) would end the turn as a dead agent instead of the "too
@@ -56,6 +62,29 @@ export function contentImages(content) {
   return content.type === 'image' ? [content] : []
 }
 
+// Saved image paths still scrub later replies; the image bytes and other output can go.
+function retiredTool(tool) {
+  const record = { id: tool.id, retired: true, unanswerable: true }
+  for (const key of ['title', 'kind', 'status', 'structuredName', 'mcp', 'bridge', 'drift', 'refused', 'mirrored']) {
+    if (tool[key] !== undefined) record[key] = tool[key]
+  }
+  record.listeners = new Set()
+  record.content = []
+  for (const item of Array.isArray(tool.content) ? tool.content : []) {
+    const block = item?.type === 'content' ? item.content : item
+    if (block?.type !== 'image' || typeof block.uri !== 'string') continue
+    const image = { type: 'image', uri: block.uri }
+    record.content.push(item.type === 'content' ? { type: 'content', content: image } : image)
+  }
+  for (const key of ['savedPath', 'saved_path']) {
+    if (typeof tool.rawOutput?.[key] === 'string') {
+      record.rawOutput ??= {}
+      record.rawOutput[key] = tool.rawOutput[key]
+    }
+  }
+  return record
+}
+
 // How long the agent has to answer. A CLI that waits on a first-run question, a keychain dialog
 // or an update starts and then never answers, and the chat must not wait with it: the whole
 // start (initialize, session/new, the bridge's first list) has START_MS, and every request sent
@@ -88,7 +117,10 @@ function stopped(what) {
 
 export class AgentRun {
   /**
-   * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string, name: string, startMs?: number, requestMs?: number, timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
+   * @param {{ command: string, args?: string[], env?: Record<string, string>, cwd: string,
+   *   name: string, onIgnored?: (message: string) => void, onRejected?: (what: string) => void,
+   *   onWarn?: (message: string) => void, startMs?: number, requestMs?: number,
+   *   timers?: { setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout } }} spec
    *   startMs, requestMs: the deadlines, START_MS and REQUEST_MS unless a test sets shorter ones.
    *   timers: the clock the deadlines run on, for a test that moves it by hand.
    */
@@ -100,6 +132,9 @@ export class AgentRun {
     this.queue = []
     this.waiters = []
     this.tools = new Map()
+    this.turn = new Set()
+    this.retired = new Set()
+    this.didIgnore = false
     this.stderr = ''
     this.prompting = undefined
     this.exited = undefined
@@ -124,6 +159,7 @@ export class AgentRun {
     }))
     this.child = child
     this.grouped = process.platform !== 'win32'
+    if (supportsTree(process.platform)) this.birth = processBirth(child.pid)
     // An idle agent never keeps DSH running: only a prompt in flight holds the event loop.
     child.unref()
     for (const pipe of [child.stdin, child.stdout, child.stderr]) pipe.unref?.()
@@ -136,7 +172,11 @@ export class AgentRun {
         this.exited = { code, signal }
         // Whatever it left running goes too, however it ended: nothing reports to it any more.
         this.endTree()
-        fail(new Error(`${this.spec.name} exited (${signal ?? code})${this.stderr ? `: ${this.stderr.trim().split('\n').slice(-3).join(' ')}` : ''}`))
+        const error = new Error(`${this.spec.name} exited (${signal ?? code})${this.stderr ? `: ${this.stderr.trim().split('\n').slice(-3).join(' ')}` : ''}`)
+        // Keep the import origin for repair detection without changing the displayed tail.
+        const missing = /ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND|Cannot find module|Cannot find package/.exec(this.stderr)
+        if (missing !== null) error.missingModule = this.stderr.slice(missing.index, missing.index + 2000)
+        fail(error)
       })
     })
     gone.catch(() => {})
@@ -157,10 +197,22 @@ export class AgentRun {
         error.code = 'acp_protocol_mismatch'
         throw error
       }
+      const identity = this.spec.botIdentity?.()
+      this.identityDelivery = identity
+        ? this.init.agentCapabilities?.sessionCapabilities?.systemPrompt != null
+          ? 'systemPrompt' : 'preamble'
+        : 'none'
+      if (this.identityDelivery === 'systemPrompt') {
+        this.systemPrompt = { mode: 'append', content: [{ type: 'text', text: identity }] }
+      } else if (this.identityDelivery === 'preamble') {
+        this.identityPreamble = identity
+      }
+      this.spec.onIdentity?.(this.identityDelivery)
       const session = await this.conn.newSession({
         cwd,
         mcpServers,
         ...(sessionMeta === undefined ? {} : { _meta: sessionMeta }),
+        ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
       })
       this.sessionId = session.sessionId
       this.modes = session.modes
@@ -209,11 +261,17 @@ export class AgentRun {
   async fork({ cwd, mcpServers }) {
     if (typeof this.conn.forkSession !== 'function') throw new Error('it cannot fork its session')
     const source = this.sessionId
-    const answer = await this.held(() => this.conn.forkSession({ sessionId: source, cwd, mcpServers }))
+    const answer = await this.held(() => this.conn.forkSession({
+      sessionId: source, cwd, mcpServers,
+      ...(this.systemPrompt === undefined ? {} : { systemPrompt: this.systemPrompt }),
+    }))
     this.sessionId = answer.sessionId
     if (answer.modes !== undefined && answer.modes !== null) this.modes = answer.modes
     if (Array.isArray(answer.configOptions)) this.options = withModels(answer.configOptions, answer.models ?? modelStateOf(this.options))
+    for (const tool of this.tools.values()) tool.permission?.answer(CANCELLED)
     this.tools.clear()
+    this.turn.clear()
+    this.retired.clear()
     // The fork's source is closed by us: the spike did not show the fork closing it, and a
     // Session must never hold two bridges.
     try {
@@ -314,11 +372,27 @@ export class AgentRun {
     // The calls of the prompts before this one are over for DSH too: their cards ran in turns
     // that have ended, and a call already known never gets a second card. A question for one
     // has nobody left to answer it (onPermission); one still stored is withdrawn here.
-    for (const tool of this.tools.values()) {
+    for (const id of this.turn) {
+      const tool = this.tools.get(id)
+      if (tool === undefined) continue
       tool.unanswerable = true
       tool.permission?.answer(CANCELLED)
+      // A mirror body may still hold the old object while it saves its result.
+      this.tools.set(id, retiredTool(tool))
+      this.retired.add(id)
+    }
+    this.turn = new Set()
+    // An update for a call more than 1024 calls old is treated as new; no session restart.
+    while (this.retired.size > RETIRED_MAX) {
+      const id = this.retired.values().next().value
+      this.retired.delete(id)
+      this.tools.delete(id)
     }
     this.holdOn()
+    if (this.identityPreamble !== undefined) {
+      prompt = [{ type: 'text', text: this.identityPreamble }, ...prompt]
+      this.identityPreamble = undefined
+    }
     const run = this.conn.prompt({ sessionId: this.sessionId, prompt })
     this.prompting = Promise.race([run, this.gone]).then(
       result => this.endPrompt({ type: 'end', stopReason: result?.stopReason ?? 'end_turn' }),
@@ -333,7 +407,9 @@ export class AgentRun {
     this.promptEnded = true
     this.letGo()
     // A call the agent never closed is over with its turn; a question it never got an answer to is withdrawn.
-    for (const tool of this.tools.values()) {
+    for (const id of this.turn) {
+      const tool = this.tools.get(id)
+      if (tool === undefined) continue
       tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
       if (!TERMINAL.has(tool.status)) this.changeTool(tool, { status: tool.status === 'pending' ? 'failed' : 'completed', ended: true })
     }
@@ -409,21 +485,35 @@ export class AgentRun {
   dispose() {
     if (this.disposed === true) return
     this.disposed = true
+    const child = this.child
+    const deps = snapshotBudget(this.treeDeps)
+    if (this.grouped && supportsTree(deps.platform ?? process.platform)
+      && child?.exitCode === null && child?.signalCode === null) {
+      if (!this.birth) this.birth = processBirth(child.pid, deps)
+      const snapshot = descendants(child.pid, this.birth, deps)
+      this.detached = snapshot.records.filter(record => record.pgid !== child.pid)
+      if (!snapshot.complete) {
+        try {
+          this.spec.onWarn?.('Could not read the whole Bot process tree; '
+            + 'stopping known tools and checking the agent group for the rest.')
+        } catch {}
+      }
+    }
     this.letGo(true)
     for (const tool of this.tools.values()) tool.permission?.answer({ outcome: { outcome: 'cancelled' } })
     try { this.child?.stdin.end() } catch {}
-    const child = this.child
     if (child && child.exitCode === null && child.signalCode === null) this.endTree()
     void releaseRun(this)
   }
 
-  // Account changes wait for the entire process group, including children left behind by an
-  // adapter. Sending SIGTERM alone is not proof that the old account stopped doing work.
+  // Account changes wait for the group and the detached tools in the snapshot. Sending
+  // SIGTERM alone is not proof that the old account stopped doing work.
   async stop() {
     this.dispose()
     const child = this.child
     if (!Number.isInteger(child?.pid) || child.pid <= 1) return
-    const until = Date.now() + 5000
+    const now = this.treeDeps?.now ?? Date.now
+    const until = now() + 5000
     while (true) {
       let running = child.exitCode === null && child.signalCode === null
       if (this.grouped) {
@@ -432,8 +522,10 @@ export class AgentRun {
           running = false
         }
       }
-      if (!running) return
-      if (Date.now() >= until) throw new Error('The Bot process has not stopped. Try again.')
+      const states = this.grouped ? await treeStates(this.detached ?? [], this.treeDeps) : []
+      const detachedGone = states.every(state => state === 'dead')
+      if (!running && detachedGone) return
+      if (now() >= until) throw new Error('The Bot process has not stopped. Try again.')
       await new Promise(resolve => setTimeout(resolve, 25))
     }
   }
@@ -445,7 +537,10 @@ export class AgentRun {
    * working in the person's folder beside the next session. The whole process group is asked
    * to end, and what is left of it after KILL_AFTER_MS is killed; the agent's own exit does not
    * end that wait while any of the group is alive. Windows has no groups: the process tree is
-   * killed there, at once. A process the agent put in a group of its own is not reached.
+   * killed there, at once. Detached tools found before disposal get the same signals, with
+   * their births checked again. Tools reparented before that snapshot, including those left
+   * by an agent that exits by itself, are not found. Birth checks cannot make a numeric kill
+   * atomic against pid reuse; macOS births have only whole seconds.
    */
   endTree() {
     if (this.ending === true) return
@@ -482,18 +577,61 @@ export class AgentRun {
     if (!signal('SIGTERM')) {
       // No group to signal while the agent runs: it is ended alone rather than not at all.
       if (running) try { child.kill('SIGTERM') } catch {}
-      return
+    } else {
+      const timer = this.timers.setTimeout(() => signal('SIGKILL'), KILL_AFTER_MS)
+      timer.unref?.()
+      // Nothing left in the group: its id is free again.
+      const settled = () => { if (!signal(0)) this.timers.clearTimeout(timer) }
+      if (running) child.once('exit', settled)
     }
-    const timer = this.timers.setTimeout(() => signal('SIGKILL'), KILL_AFTER_MS)
-    timer.unref?.()
-    // The agent gone with all of its group: nothing is left to kill, and the id is free again.
-    const settled = () => { if (!signal(0)) this.timers.clearTimeout(timer) }
-    if (running) child.once('exit', settled)
+    // Each detached pass checks births asynchronously on macOS, with its own timeout.
+    if (this.detached?.length) {
+      const deps = { ...this.treeDeps, agentPgid: child.pid }
+      const detachedTimer = this.timers.setTimeout(() => {
+        void signalTree(this.detached, 'SIGKILL', deps)
+      }, KILL_AFTER_MS)
+      detachedTimer.unref?.()
+      void signalTree(this.detached, 'SIGTERM', deps)
+    }
   }
 
   // --- the agent's side of the conversation ---------------------------------------------
 
-  async onUpdate(update) {
+  ignored(what, payload) {
+    // Rejected traffic still needs safety checks, without retaining it or making a card.
+    try {
+      if (payload !== undefined && this.tools.get(payload?.toolCallId)?.retired !== true) {
+        this.markCall({ title: payload?.title ?? 'Tool', listeners: new Set() }, payload)
+      }
+    } catch {}
+    try { this.spec.onRejected?.(what) } catch {}
+    if (this.didIgnore) return
+    this.didIgnore = true
+    try { this.spec.onIgnored?.(`${this.spec.name} sent ${what} with no usable call id or for another session; such updates are ignored`) } catch {}
+  }
+
+  acceptsPermission(params) {
+    if (!isToolId(params?.toolCall?.toolCallId)
+      || (params.sessionId !== undefined && this.sessionId !== undefined && params.sessionId !== this.sessionId)) {
+      this.ignored('a permission request', params?.toolCall)
+      return false
+    }
+    return true
+  }
+
+  async onUpdate(update, sessionId) {
+    const isTool = update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update'
+    if (sessionId !== undefined && this.sessionId !== undefined && sessionId !== this.sessionId) {
+      this.ignored('an update', isTool ? update : undefined)
+      return
+    }
+    if (isTool) {
+      if (!isToolId(update.toolCallId)) {
+        this.ignored('a tool update', update)
+        return
+      }
+      if (this.tools.get(update.toolCallId)?.retired === true) return
+    }
     switch (update?.sessionUpdate) {
       case 'agent_message_chunk': {
         const text = contentText(update.content)
@@ -512,7 +650,7 @@ export class AgentRun {
         break
       case 'tool_call_update': {
         const tool = this.tools.get(update.toolCallId) ?? this.seeTool(update)
-        this.changeTool(tool, update)
+        if (tool !== undefined) this.changeTool(tool, update)
         break
       }
       case 'config_option_update':
@@ -527,9 +665,13 @@ export class AgentRun {
   }
 
   seeTool(update) {
+    if (!isToolId(update?.toolCallId)) {
+      this.ignored('a tool update', update)
+      return undefined
+    }
     const known = this.tools.get(update.toolCallId)
     if (known) {
-      this.changeTool(known, update)
+      if (known.retired !== true) this.changeTool(known, update)
       return known
     }
     if (this.reviews?.last) this.reviews.after = true
@@ -543,6 +685,7 @@ export class AgentRun {
     // if the event is still queued; an existing card keeps its question for its body to ask.
     if (tool.drift === true) tool.unanswerable = true
     this.tools.set(tool.id, tool)
+    this.turn.add(tool.id)
     this.push({ type: 'tool', id: tool.id })
     return tool
   }
@@ -551,6 +694,7 @@ export class AgentRun {
   markCall(tool, update) {
     const name = structuredNameOf(update)
     if (name !== undefined) tool.structuredName = name
+    if (typeof update?.rawInput?.server === 'string') tool.mcpServer = update.rawInput.server
     if (update?._meta?.is_mcp_tool_call === true) tool.mcp = true
     if (tool.structuredName !== undefined && tool.structuredName.startsWith('mcp__')) tool.mcp = true
     if (isBridgeName(tool.structuredName)) tool.bridge = true
@@ -600,17 +744,47 @@ export class AgentRun {
     permission?.answer(refusal(tool.refused, permission.options))
   }
 
+  /** A skipped fork MCP call has no mirror to answer its question. */
+  answerSkippedMcp(tool, options) {
+    if (this.spec.dshTools !== true || this.spec.refresh !== 'fork' || tool.mcp !== true) return undefined
+    const answerFor = (choices) => {
+      if (tool.unanswerable === true) return CANCELLED
+      if (tool.mcpServer !== BRIDGE_NAME) return refusal('rejected', choices)
+      const allow = choices.find(option => option.kind === 'allow_once') ?? choices.find(option => option.kind === 'allow_always')
+      return allow === undefined ? CANCELLED : { outcome: { outcome: 'selected', optionId: allow.optionId } }
+    }
+    // A question already stored is answered from its own options, a new one (`options`) from its own.
+    const stored = tool.permission
+    if (stored !== undefined) stored.answer(answerFor(stored.options ?? []))
+    const answer = answerFor(options ?? stored?.options ?? [])
+    // Refused with no dialog: the log says so, once per question answered.
+    if (tool.unanswerable !== true && tool.mcpServer !== BRIDGE_NAME && (stored !== undefined || options !== undefined)) {
+      try { this.spec.onRefusedMcp?.(tool) } catch {}
+    }
+    return answer
+  }
+
   /**
    * @param {any} params the agent's `session/request_permission`
    * @param {AbortSignal} [signal] aborts when the agent withdraws the request (`$/cancel_request`)
    */
   onPermission(params, signal) {
+    if (!this.acceptsPermission(params)) return Promise.resolve(CANCELLED)
     const known = this.tools.get(params.toolCall?.toolCallId)
     const tool = known ?? this.seeTool({ status: 'pending', ...params.toolCall })
+    if (tool === undefined) return Promise.resolve(CANCELLED)
     // The question's own title ("Run command?") names the question, not the call the card shows.
     const { title, ...details } = params.toolCall ?? {}
-    this.changeTool(tool, { ...details, status: undefined })
-    try { this.spec.onAsked?.(tool) } catch {}
+    if (tool.retired !== true) {
+      this.changeTool(tool, { ...details, status: undefined })
+      try { this.spec.onAsked?.(tool) } catch {}
+    }
+    // The queued tool event is read after this synchronous handler: mark standalone approvals
+    // before the adapter can turn one into a mirror card.
+    if (params._meta?.is_mcp_tool_approval === true) {
+      tool.mcp = true
+      if (typeof params.toolCall?.rawInput?.serverName === 'string') tool.mcpServer = params.toolCall.rawInput.serverName
+    }
     // The bridge's call is not the mirror's: acp-dsh answers this ACP request itself with
     // `allow-once` and raises no DSH dialog from it. The bridge's own `approval/request` is the
     // one dialog the person sees (RFC 0003, amendment, "One dialog per call").
@@ -619,6 +793,8 @@ export class AgentRun {
         ?? (params.options ?? []).find(option => option.kind === 'allow_always')
       return Promise.resolve(once === undefined ? { outcome: { outcome: 'cancelled' } } : { outcome: { outcome: 'selected', optionId: once.optionId } })
     }
+    const skipped = this.answerSkippedMcp(tool, params.options ?? [])
+    if (skipped !== undefined) return Promise.resolve(skipped)
     // DSH already refused this call before the mirror's body could ask (refuse): no body is
     // left to answer the agent, so the refusal is its answer.
     if (tool.refused !== undefined) return Promise.resolve(refusal(tool.refused, params.options ?? []))
@@ -631,14 +807,19 @@ export class AgentRun {
     // A second question for the call while the first was not asked yet: the first is withdrawn,
     // or nothing would ever answer it. One already in its dialog keeps the dialog's answer.
     const earlier = tool.permission
+    earlier?.invalidate?.()
     if (earlier !== undefined && earlier.asked !== true) earlier.answer({ outcome: { outcome: 'cancelled' } })
     return new Promise((resolve) => {
       let done = false
+      const lifetime = new AbortController()
       const permission = {
+        signal: lifetime.signal,
+        invalidate: () => lifetime.abort(),
         options: params.options ?? [],
         answer: (response) => {
           if (done) return
           done = true
+          lifetime.abort()
           if (tool.permission === permission) tool.permission = undefined
           resolve(response)
           for (const listener of tool.listeners) listener()
@@ -671,7 +852,7 @@ export class AgentRun {
  */
 function connect(run, stream) {
   const connection = client({ name: 'automagik-acp-dsh' })
-    .onNotification(methods.client.session.update, ({ params }) => run.onUpdate(params.update))
+    .onNotification(methods.client.session.update, ({ params }) => run.onUpdate(params.update, params.sessionId))
     .onRequest(methods.client.session.requestPermission, ({ params, signal }) => run.onPermission(params, signal))
     .connect(stream)
   const agent = connection.agent

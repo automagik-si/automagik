@@ -5,8 +5,8 @@
 // usagemeter reads. Pure: no `herdr`, `gpui-*` or `fs`, so `node --test`, the CLI and the
 // briefing hook share it. Apache-2.0.
 
-import { AGENTS, AGY_MODE_DEFAULT, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, effortArgs, hasEffortFlag, launchRun, modelArgs, modelRefusal,
-  promptArgs, resolveAgent } from "./models.js";
+import { AGENTS, AGY_MODE_DEFAULT, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
+  hasEffortFlag, launchRun, modelArgs, modelRefusal, promptArgs, resolveAgent } from "./models.js";
 import { TEMPLATE_SHAPE } from "./model.js";
 import { envWords } from "./logins.js";
 
@@ -273,11 +273,13 @@ export const EFFORT_SHAPE = /^[a-z][a-z0-9-]{0,31}$/;
  * names one. The bot's own model pin is its seat's, never its workers'. An Antigravity worker
  * always gets `--mode` (the bot's `worker.agyMode`, auto by default; an unknown one is refused).
  * A model or effort the agent has no flag for is left out with a warning. `agents`: the table
- * Herdr starts from.
+ * Herdr starts from. A Codex worker runs the pack's Codex launch mode (#1125); its source's own
+ * approval and sandbox words are left out with a warning naming them (`where`: the launch's
+ * models.js codexWhere, so an --add-dir of the home folder or an app home goes too, by any alias).
  * Returns { template, agent, model, effort, agyMode, argv, warnings } (template null, or agent,
  * model, effort, agyMode and argv null) or { error }.
  */
-export function workerPlan(bot, pick = {}, agents = AGENTS) {
+export function workerPlan(bot, pick = {}, agents = AGENTS, where = null) {
   const warnings = [];
   const defaults = bot?.worker && typeof bot.worker === "object" ? bot.worker : {};
   const picked = ["agent", "model", "effort"].filter((k) => pick[k]);
@@ -308,7 +310,7 @@ export function workerPlan(bot, pick = {}, agents = AGENTS) {
   // name, never replaced with the default behind the person's back.
   const agyModeWhy = agent === "antigravity" ? agyModeProblem(defaults.agyMode) : null;
   if (agyModeWhy) {
-    const fix = bot?.id ? ` Fix it with automagik-herdr edit ${bot.id} --worker-agy-mode <accept-edits|auto|plan>.` : "";
+    const fix = bot?.id ? ` Fix it with am edit ${bot.id} --worker-agy-mode <accept-edits|auto|plan>.` : "";
     return { error: `${bot?.name ?? "This bot"}'s workers: ${agyModeWhy}${fix}` };
   }
   const agyMode = agent === "antigravity" ? agyModeOf(defaults.agyMode) : null;
@@ -337,8 +339,11 @@ export function workerPlan(bot, pick = {}, agents = AGENTS) {
     warnings.push(`${agents[agent].name} has no effort flag; effort ${effort} left out.`);
     effort = null;
   }
+  const cleaned = agent === "codex" ? codexCleanNote(agents[agent].run, where) : null;
+  if (cleaned) warnings.push(cleaned);
   // A task worker is not its lead's persistent Hermes Bot Chat.
-  const argv = [...launchRun(agent, agents[agent].run, { ...bot, hermes: undefined }), ...agyModeArgs(agent, agyMode), ...modelArgs(agent, model), ...effortArgs(agent, effort)];
+  const argv = [...launchRun(agent, agents[agent].run, { ...bot, hermes: undefined }, where), ...agyModeArgs(agent, agyMode), ...modelArgs(agent, model),
+    ...effortArgs(agent, effort)];
   return { template: null, agent, model, effort, agyMode, argv, warnings };
 }
 
@@ -468,9 +473,10 @@ function shellCommands(text) {
  * assignments and the wrappers env, exec and nohup; a shell's `-c` script is followed the same
  * way, a few levels deep. A word in argument position is never a program.
  */
-function commandPrograms(text, depth = 0) {
+function commandRuns(text, depth = 0) {
   const out = [];
-  for (const words of shellCommands(text)) {
+  const commands = shellCommands(text);
+  commands.forEach((words, n) => {
     let i = 0;
     for (;;) {
       while (i < words.length && ASSIGNMENT.test(words[i])) i += 1;
@@ -486,16 +492,20 @@ function commandPrograms(text, depth = 0) {
       }
       if (name === "exec" || name === "nohup") { i += 1; continue; }
       if (SHELLS.has(name) && words[i + 1] === "-c" && typeof words[i + 2] === "string") {
-        if (depth < 4) out.push(...commandPrograms(words[i + 2], depth + 1));
+        if (depth < 4) out.push(...commandRuns(words[i + 2], depth + 1));
         i = words.length;
         break;
       }
       break;
     }
-    if (i < words.length) out.push(shellBase(words[i]));
-  }
+    // `last`: the command string's last simple command, at its top level (where "$@" lands).
+    if (i < words.length) out.push({ program: shellBase(words[i]), args: words.slice(i + 1), last: depth === 0 && n === commands.length - 1 });
+  });
   return out;
 }
+
+/** The programs a command string runs (commandRuns), in order. */
+const commandPrograms = (text) => commandRuns(text).map((r) => r.program);
 
 /** The agent key `program` names (a key, an agent's run[0] or a match name), or null. */
 function agentOfProgram(program, agents) {
@@ -519,6 +529,160 @@ export function templateAgent(command, agents = AGENTS) {
     if (key) found.add(key);
   }
   return found.size === 1 ? [...found][0] : null;
+}
+
+// The Codex options a template could mean for its launch: when one comes after the run's `--`,
+// Codex reads it as prompt text, never as the option (#1142).
+const CODEX_LOST_OPTIONS = new Set(["--approve-for-me", "--no-daemon", "--disable", "--enable", "-c", "--config", "--add-dir",
+  "-a", "--ask-for-approval", "-s", "--sandbox", "--remote", "--dangerously-bypass-approvals-and-sandbox", "--yolo",
+  "-p", "--profile"]);
+const optionName = (w) => (w.startsWith("--") ? w.split("=")[0] : w.startsWith("-c") || w.startsWith("-a") || w.startsWith("-s") ? w.slice(0, 2) : w);
+// A positional-parameter expansion in a shell command ($@, $*, ${@…}, ${*…}): where the words after a command go.
+const POSITIONAL = /\$(?:[@*]|\{[@*])/g;
+const isPositional = (w) => /^\$(?:[@*]|\{[@*]\})$/.test(w);
+
+// #1142, codexForwards: the words commandArgv passes a shell command land where its "$@" is (it
+// appends one when the command has none). A literal word is unquoted letters, digits and
+// `_@%+=:,./-`, '…', or "…" without $, ` or a backslash; its decoded value is what counts.
+const QUOTED_ARGS = '"$@"';
+const LITERAL = /^(?:[A-Za-z0-9_@%+=:,./-]|'[^']*'|"[^"$`\\]*")+/;
+const WORD_END = /[ \t;\n&]/;
+const NAME_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const decoded = (raw) => raw.replace(/'([^']*)'|"([^"]*)"/g, (_, single, double) => single ?? double);
+
+/**
+ * Whether shell command `command`, run the way commandArgv runs it, provably hands the words
+ * after it to Codex as options (#1142). It is matched against one shape, never interpreted:
+ * setup commands, each only literal assignments (NAME=word ...) or `export` of them, joined by
+ * `;`, `&&` or a newline, then one Codex run: literal assignments, an optional `exec`, an unquoted
+ * word naming Codex and literal words, with exactly one "$@" among them (the command's own, or
+ * the one commandArgv appends) and no `--` (decoded: a quoted '--' ends Codex's options too).
+ * An assignment and `export` (a POSIX special built-in, found before any function) only set
+ * variables: no code runs and the positional parameters stay as passed. Every word is literal,
+ * so no expansion can move, drop or end the words; "$@" is the only one. Anything else (set,
+ * shift, eval, ., source, a function, an alias, cd or any other program before Codex, a
+ * conditional, a pipe, a subshell, a group, `&`, a redirection, a substitution, $*, an unquoted
+ * $@, "${@}", a variable or ~ in a word, a glob, a comment) proves nothing. Nor does an assignment
+ * to a word that places the launch's folders or program (models.js codexDirVar: HOME, PATH, XDG_*,
+ * CODEX_*, the cache words), or a Codex word that isn't an option of known arity with its value in
+ * place (models.js codexOptionArity: a subcommand, a prompt, an unknown flag, a flag whose value
+ * would be a forwarded word). This proves where the words land against Codex's flags as the pack
+ * lists them, not Codex's own parser.
+ */
+export function codexForwards(command, agents = AGENTS) {
+  const text = String(command ?? "");
+  const effective = (text.includes(QUOTED_ARGS) ? text : `${text} ${QUOTED_ARGS}`).replace(/^[ \t\n]+|[ \t\n]+$/g, "");
+  const commands = [[]];
+  const ends = (n) => n === effective.length || WORD_END.test(effective[n]);
+  for (let i = 0; i < effective.length;) {
+    const ch = effective[i];
+    if (ch === " " || ch === "\t") { i += 1; continue; }
+    if (ch === ";" || ch === "\n") { commands.push([]); i += 1; continue; }
+    if (effective.startsWith("&&", i)) { commands.push([]); i += 2; continue; }
+    if (effective.startsWith(QUOTED_ARGS, i) && ends(i + QUOTED_ARGS.length)) {
+      commands.at(-1).push({ args: true });
+      i += QUOTED_ARGS.length;
+      continue;
+    }
+    const m = LITERAL.exec(effective.slice(i));
+    if (!m || !ends(i + m[0].length)) return false;
+    commands.at(-1).push({ raw: m[0], value: decoded(m[0]) });
+    i += m[0].length;
+  }
+  if (commands.some((c) => c.length === 0)) return false;
+  // #1142: an assignment that could move the launch's folders or its program (HOME, PATH, XDG_*, a
+  // cache word...; models.js codexDirVar) proves nothing: the folders were weighed for the pane's own.
+  const assignment = (w) => !w.args && NAME_ASSIGNMENT.test(w.raw) && !codexDirVar(w.raw.slice(0, w.raw.indexOf("=")));
+  const setup = commands.slice(0, -1).every((c) => {
+    const words = c[0].raw === "export" ? c.slice(1) : c;
+    return words.length > 0 && words.every(assignment);
+  });
+  if (!setup) return false;
+  const run = commands.at(-1);
+  let i = 0;
+  while (i < run.length && assignment(run[i])) i += 1;
+  if (run[i] && !run[i].args && run[i].raw === "exec") i += 1;
+  const program = run[i];
+  if (!program || program.args || program.raw !== program.value || agentOfProgram(shellBase(program.value), agents) !== "codex") return false;
+  const words = run.slice(i + 1);
+  if (commands.flat().filter((w) => w.args).length !== 1 || !words.some((w) => w.args) || !words.every((w) => w.args || w.value !== "--")) return false;
+  // #1142: every Codex word around "$@" is an option of known arity with its value in place, so
+  // none can take a forwarded word as its value or turn the rest into a subcommand's or a prompt.
+  let pending = false;
+  for (const w of words) {
+    if (w.args) { if (pending) return false; continue; }
+    if (pending) { if (w.value.startsWith("-")) return false; pending = false; continue; }
+    const arity = codexOptionArity(w.value);
+    if (arity === null) return false;
+    pending = arity === "value";
+  }
+  return !pending;
+}
+
+/**
+ * What a shell command that runs Codex (an hc template's, a helper's) says about the pack's
+ * Codex launch mode (#1125), read from its words, never changed: null when it runs no Codex
+ * (or another agent too). Only a Codex run's words before its `--` are options (#1142).
+ * `conflicts`: the flags among them that pick Codex's approvals or sandbox, or an `--add-dir`
+ * `where` doesn't allow (models.js codexClean, by name: bypass, -a, -s, the -c keys, --remote,
+ * --add-dir) or that isn't written as the canonical value it is checked as (codexDirsExact,
+ * #1142: the text is never rewritten); `missing`: the pack mode words they lack, in the order the mode has them
+ * (`--approve-for-me`, `--disable hooks`, `--no-daemon`, network on); `lost`: Codex options
+ * written after a run's `--`, by name (prompt text to Codex); `forwards`: words after the
+ * command provably reach Codex as options: Codex runs once, as the top-level last simple
+ * command, with no `--`, the command expands no positional parameter ($@, $*) except as that
+ * run's own word (an earlier "$@" takes them all, and commandArgv then adds none), and the
+ * whole command has the one shape codexForwards proves (#1142: set --, shift and the rest don't).
+ */
+export function codexCommandCheck(command, agents = AGENTS, where = null) {
+  const text = String(command ?? "");
+  if (templateAgent(text, agents) !== "codex") return null;
+  const runs = commandRuns(text).filter((r) => agentOfProgram(r.program, agents) === "codex");
+  const split = (args) => { const cut = args.indexOf("--"); return cut < 0 ? [args, []] : [args.slice(0, cut), args.slice(cut + 1)]; };
+  const options = runs.map((r) => split(r.args)[0]);
+  const all = (test) => options.length > 0 && options.every((a) => test(a));
+  const pair = (args, flag, value) => args.some((w, i) => (w === flag && args[i + 1] === value) || w === `${flag}=${value}`);
+  const config = (args, value) => pair(args, "-c", value) || pair(args, "--config", value) || args.includes(`-c${value}`);
+  const missing = [];
+  if (!all((a) => a.includes("--approve-for-me"))) missing.push("--approve-for-me");
+  if (!all((a) => pair(a, "--disable", "hooks") || config(a, "features.hooks=false"))) missing.push("--disable", "hooks");
+  if (!all((a) => a.includes("--no-daemon"))) missing.push("--no-daemon");
+  if (!all((a) => config(a, CODEX_NETWORK))) missing.push("-c", CODEX_NETWORK);
+  const inexact = options.some((a) => !codexDirsExact(a, where)) ? ["--add-dir"] : [];
+  const conflicts = [...new Set([...options.flatMap((a) => codexClean(["codex", ...a], where).dropped), ...inexact])];
+  const lost = [...new Set(runs.flatMap((r) => split(r.args)[1].map(optionName).filter((n) => CODEX_LOST_OPTIONS.has(n))))];
+  const only = runs.length === 1 && runs[0].last ? runs[0] : null;
+  const expansions = (text.match(POSITIONAL) ?? []).length;
+  const forwards = Boolean(only) && !only.args.includes("--") && expansions === only.args.filter(isPositional).length
+    && codexForwards(text, agents);
+  return { conflicts, missing, lost, forwards, single: runs.length === 1 && runs[0].last };
+}
+
+/**
+ * Why a worker template whose Codex run puts a Codex option after its `--` is not started
+ * (#1142, the lead's condition): Codex would read that option as prompt text, so the launch the
+ * template means can't be proved. Null when none does. The owner's template exception keeps every
+ * other template as written (never rewritten, rerouted or stripped).
+ */
+export function codexTemplateRefusal(template, command, agents = AGENTS) {
+  const check = codexCommandCheck(command, agents);
+  if (!check?.lost.length) return null;
+  return `Template ${template} runs Codex with ${check.lost.join(", ")} after its --, where Codex reads ${check.lost.length > 1 ? "them" : "it"} `
+    + `as prompt text, not as options, so the launch it means can't be proved: not started (#1142). Put those options before -- `
+    + `in that template's file (hc templates lists it).`;
+}
+
+/**
+ * The warning for a worker template whose command runs Codex without --no-daemon among its
+ * options (#1125): hc says Codex must run with it, or its commands run outside hc. The owner's
+ * template exception keeps the command as it is (never rewritten, rerouted or refused): this
+ * names the fix.
+ */
+export function codexTemplateWarning(template, command, agents = AGENTS) {
+  const check = codexCommandCheck(command, agents);
+  if (!check || !check.missing.includes("--no-daemon")) return null;
+  return `Template ${template} runs Codex without --no-daemon, so its commands may run in Codex's shared server, outside hc `
+    + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`;
 }
 
 /** The env program agent workers start under, by its full path (macOS and Linux both have it). */

@@ -107,6 +107,6 @@ export const FOLDER_CSS = `
 .bt-menu .bt-folder-use{justify-content:center;font-weight:500;color:var(--bt-accent)}
 .bt-menu .bt-folder-use:disabled{color:var(--bt-ink-3);cursor:default;background:none}
 .bt-model-trigger:disabled{opacity:.6;cursor:default}
-.bt-folder-error{padding:4px 8px;font-size:12px;line-height:16px;color:var(--bt-danger);overflow-wrap:anywhere}
+.bt-folder-error{padding:4px 8px;font-size:12px;line-height:16px;color:var(--st-bad-strong,var(--bt-danger));overflow-wrap:anywhere}
 @media (prefers-reduced-motion:reduce){.bt-folder-view{animation:none}}
 `

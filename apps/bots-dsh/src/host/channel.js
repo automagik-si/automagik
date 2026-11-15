@@ -14,6 +14,7 @@ import { install as installSide } from './side.js'
 import { handoffReply, questionReply, viewReply } from './parts.js'
 import { defaultRelayLimit } from './groups.js'
 import { validateViewAnswer } from '../shared/views.js'
+import { previewText } from '../shared/plain-text.js'
 import { normalizeAddressList } from './browser/address-policy.js'
 import { COLORS, EXTRA_COLORS, IMAGE_ROUTE, PET_CODEX_ROUTE, PET_ROUTE, ROUTE } from './constants.js'
 
@@ -99,7 +100,9 @@ export function install(rt) {
     rooms: Object.values(state.rooms).map(({ log, seen, lateRounds, relays, sessions, segments, ...room }) => {
       const parts = [...Object.values(sessions ?? {}), ...Object.values(segments ?? {}).flat().map(segment => segment.sessionId)]
       const last = (log ?? []).filter(line => line.kind === undefined).at(-1)
-      return { ...room, relayLimitDefault: defaultRelayLimit(room), parts, ...rt.permissionFallbackOf('room', room), ...(last ? { preview: last.who === 'User' ? last.text : `${last.who}：${last.text}` } : {}) }
+      // The row's one line: the start of the last message, without its markdown marks (#1155).
+      const said = last ? previewText(last.text) : ''
+      return { ...room, relayLimitDefault: defaultRelayLimit(room), parts, ...rt.permissionFallbackOf('room', room), ...(said ? { preview: last.who === 'User' ? said : `${last.who}：${said}` } : {}) }
     }),
     exchangeTurns: state.exchangeTurns,
     questions: state.questions,

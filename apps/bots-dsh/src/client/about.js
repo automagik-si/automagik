@@ -2,7 +2,7 @@
 // and the links to the repository. The sidebar's cloud button shows the same update state.
 // Inside the Automagik app the page is the app's: its version, its update and its plugins come
 // from the app (desktop-update.js); in a plain DSH the Bot team's own update (Omni's) shows.
-import { createElement as h, useEffect, useState } from 'react'
+import { createElement as h, useEffect, useRef, useState } from 'react'
 import { GitHubMark } from './connectors.js'
 import { whenText } from './feedback.js'
 import { dateLocale, hostText, t } from './i18n.js'
@@ -11,7 +11,8 @@ import { SPRING_POP } from './motion.js'
 import { BotMark } from './mark.js'
 import { MAIN_LOOK } from './characters.js'
 import { showsDshRow } from './dsh-offer.js'
-import { appState, pluginName, splitsPlugins, updatePill, useDesktopUpdate, useDesktopVersions } from './desktop-update.js'
+import { appState, pluginName, updatePill, useDesktopUpdate, useDesktopVersions } from './desktop-update.js'
+import { opensIntoPlugins, splitsPlugins } from './update-hold.js'
 import { Switch } from './bot-settings.js'
 
 // The length of the mark's `done` hop (bt-done in styles.js).
@@ -68,7 +69,7 @@ function versionRows({ versions, update, Row }) {
   const plugins = versions ? (Array.isArray(versions.plugins) ? versions.plugins : []) : [{ name: update.name, version: update.current }]
   return plugins
     .filter(plugin => typeof plugin?.name === 'string' && typeof plugin.version === 'string')
-    .map(plugin => h(Row, { key: `version:${plugin.name}`, label: pluginName(plugin.name), hint: t('Version {version}', { version: plugin.version }) }))
+    .map(plugin => h(Row, { key: `version:${plugin.name}`, label: pluginName(plugin.name), hint: pluginVersionHint(plugin, versions?.latest?.[plugin.name]) }))
 }
 
 // The plugins the Automagik app updates by itself (its lane): a row for each one updating, and the
@@ -92,19 +93,62 @@ function pluginRows({ app, Row }) {
   return rows
 }
 
-// An app from before `check` (v3.120.0) has only `open`, and its `open` puts staged plugins in at
-// once, with DSH restarted, never asking whether an agent is at work (#1029). While that app holds
-// plugins it applies by itself, it is waiting for its own safe moment: Check for updates must not
-// cut it short. So `open` is not asked of that app while it says plugins are staged (in the
-// plugins' own part, or the whole marked as the plugins'), while they are still coming (they are
-// staged a moment later, perhaps before the click is heard), or before it has said anything.
-// What is left: the page reads what the app last said, so plugins staged since are not seen.
-const PLUGINS_COMING = new Set(['ready', 'downloading'])
-function opensIntoPlugins(bridge, state) {
-  if (!bridge || typeof bridge.check === 'function') return false
-  if (state == null) return true
-  if (!splitsPlugins(state) || state.plugins.auto === false) return false
-  return PLUGINS_COMING.has(state.plugins.phase) || (state.kind === 'plugins' && PLUGINS_COMING.has(state.phase))
+// Versions from the desktop are semver text, including prereleases.
+function newerVersion(next, current) {
+  const parse = value => /^(\d+)\.(\d+)\.(\d+)(?:-([\w.]+))?(?:\+[\w.]+)?$/.exec(value ?? '')
+  const a = parse(next), b = parse(current)
+  if (!a || !b) return false
+  for (let i = 1; i <= 3; i++) if (+a[i] !== +b[i]) return +a[i] > +b[i]
+  if (!a[4] || !b[4]) return !a[4] && Boolean(b[4])
+  const x = a[4].split('.'), y = b[4].split('.')
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue
+    if (x[i] === undefined || y[i] === undefined) return y[i] === undefined
+    const nx = /^\d+$/.test(x[i]), ny = /^\d+$/.test(y[i])
+    if (nx && ny) return +x[i] > +y[i]
+    return nx !== ny ? !nx : x[i] > y[i]
+  }
+  return false
+}
+
+function pluginVersionHint(plugin, latest) {
+  return newerVersion(latest, plugin.version)
+    ? t('Version {version} · {latest} available', { version: plugin.version, latest })
+    : t('Version {version}', { version: plugin.version })
+}
+
+function forceHint(force) {
+  switch (force?.phase) {
+    case 'stopping': return t('Stopping conversations…')
+    case 'checking': return t('Checking for updates…')
+    case 'downloading': return t('Downloading the Automagik update…')
+    case 'installing': return t('Installing…')
+    case 'restarting': return t('Restarting…')
+  }
+  switch (force?.code) {
+    case 'up-to-date': return t('Everything is up to date.')
+    case 'updated': return t('Updated.')
+    case 'plugins-rolled-back': return t('The plugins did not start, so the previous ones are back.')
+    case 'app-download-failed': return t('The Automagik update could not be downloaded. Try again.')
+    case 'app-manual': return t("This copy updates through your system's package manager.")
+    case 'restart-failed': return t('The restart did not finish. Try again.')
+    default: return pluginReason({ reason: force }) ?? t('Stops running conversations and sign-ins, installs every available update and restarts.')
+  }
+}
+
+function pluginReason(versions) {
+  const params = versions?.reason?.params ?? {}
+  switch (versions?.reason?.code) {
+    case 'app-line': return t('Plugins {version} need Automagik {line}; this app is {app}. Update Automagik first.', params)
+    case 'app-minimum': return t('Plugins {version} need Automagik {base} or newer; this app is {app}.', params)
+    case 'trial-failed': return t('Plugins {version} did not start here before, so the current ones are kept.', params)
+    case 'dsh-range': return t('Plugins {version} need a different DeepSeek Harness version.', params)
+    case 'older-sequence':
+    case 'invalid-lane': return t('The published plugin update was not accepted.')
+    case 'not-checked':
+    case 'check-failed': return t('Plugin updates could not be checked. Try again.')
+    default: return null
+  }
 }
 
 const linkProps = href => ({ className: 'bt-soft bt-soft-sm bt-about-link', href, target: '_blank', rel: 'noopener noreferrer' })
@@ -112,7 +156,7 @@ const linkProps = href => ({ className: 'bt-soft bt-soft-sm bt-about-link', href
 export function AboutPage({ useUpdate, actions, run, Section, Row }) {
   const update = useUpdate(value => value) ?? {}
   const app = useDesktopUpdate()
-  const versions = useDesktopVersions()
+  const versions = useDesktopVersions(app.state)
   const [checking, setChecking] = useState(false)
   const [stars, setStars] = useState(null)
   useEffect(() => {
@@ -145,7 +189,26 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
   // A check is only a check (the app's `check`): `open` also restarts into an update that is
   // ready and puts staged plugins in, so it is asked only under the label that says so. An
   // app from before `check` has only `open`.
-  // That app's `open` is not asked while it would restart DSH under the agents at work (#1029).
+  // That app's `open` is not asked while it would restart DSH under the agents at work, with
+  // auto-apply on or off (#1029).
+  const [confirmForce, setConfirmForce] = useState(false)
+  const [pendingForce, setPendingForce] = useState(null)
+  const forceSent = useRef(false)
+  const force = pendingForce ?? app.state?.force
+  const forceBusy = Boolean(force?.phase && !['done', 'failed'].includes(force.phase))
+  const canForce = typeof app.bridge?.force === 'function' && !updatesOff(versions)
+  const startForce = () => {
+    if (!canForce || forceBusy || forceSent.current) return
+    forceSent.current = true
+    setConfirmForce(false)
+    setPendingForce({ phase: 'stopping' })
+    void Promise.resolve().then(() => app.bridge.force()).then(() => setPendingForce(null), () => {
+      setPendingForce({ phase: 'failed', code: 'restart-failed' })
+    }).finally(() => { forceSent.current = false })
+  }
+  // Main owns progress, including after the page is reloaded by the restart.
+  useEffect(() => { if (app.state?.force) setPendingForce(null) }, [app.state?.force])
+  const reason = pluginReason(versions)
   const held = opensIntoPlugins(app.bridge, app.state)
   const appCheck = () => {
     if (held) return
@@ -192,7 +255,14 @@ export function AboutPage({ useUpdate, actions, run, Section, Row }) {
       dsh?.current ? h(Row, { label: 'DeepSeek Harness', hint: dshHint(dsh, dshShown) }, dshControl)
         // With the plugin's own check off, the app still knows the runtime it carries.
         : ours && typeof versions?.dsh === 'string' ? h(Row, { label: 'DeepSeek Harness', hint: t('Version {version}', { version: versions.dsh }) }) : null,
-      ...pluginRows({ app, Row })),
+      ...pluginRows({ app, Row }),
+      reason ? h(Row, { label: t('Plugin updates'), hint: reason }) : null,
+      canForce ? h(Row, { label: t('Force update'), hint: confirmForce && !forceBusy
+        ? t('Running conversations, tasks and Bot sign-ins stop now. Bots that were signing in ask you to sign in again.') : forceHint(force) },
+      confirmForce && !forceBusy ? [
+        h('button', { key: 'stop', type: 'button', className: 'bt-fb-primary', onClick: startForce }, t('Stop and update')),
+        h('button', { key: 'cancel', type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => setConfirmForce(false) }, t('Cancel')),
+      ] : h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: forceBusy, onClick: () => { if (!forceBusy) setConfirmForce(true) } }, t('Force update'))) : null),
     plugins.length > 0 ? h(Section, { key: 'plugins', title: t('Plugins') }, ...plugins) : null,
     h(Section, { key: 'links', title: t('Links') },
       repo ? h(Row, { label: t('Source code'), hint: repo.replace(/^https:\/\//, '') }, h('a', linkProps(repo), h(GitHubMark), t('Open'))) : null,

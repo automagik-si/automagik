@@ -50,6 +50,15 @@ const KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'execute', 't
 // (codex-acp): read-only, workspace-write, agent, agent-full-access. The ones this plugin asks
 // for (agents.js modeFor) are among them; a test holds the two together.
 export const MODES = new Set(['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions', 'auto', 'read-only', 'workspace-write', 'agent', 'agent-full-access'])
+const PROFILE_BASES = {
+  'permission-profile:automagik-read': 'read-only',
+  'permission-profile:automagik-workspace': 'workspace-write',
+}
+const KNOWN_MODES = new Set([...MODES, ...Object.keys(PROFILE_BASES)])
+const profileLabel = value => typeof value === 'string'
+  ? value.replace(/^(permission-profile:automagik-(?:read|workspace))-[0-9a-f]{32}$/, '$1') : value
+const modeOf = value => pick(KNOWN_MODES, profileLabel(value))
+const baseOf = value => Object.hasOwn(PROFILE_BASES, value) ? PROFILE_BASES[value] : value
 // The review codes of the back-channel (backchannel.js) and of DSH's Auto review.
 export const REVIEW_CODES = new Set(['AUTO_REVIEW_NO_STEP', 'AUTO_REVIEW_NO_ROUTE', 'AUTO_REVIEW_NO_SCHEMA', 'AUTO_REVIEW_FAILED', 'AUTO_REVIEW_LEVEL_CHANGED', 'AUTO_REVIEW_TIMEOUT', 'AUTO_REVIEW_DENIED'])
 // How a review candidate can fail: the codes of the review route itself (adapter.js aside), of
@@ -70,7 +79,7 @@ function modesOf(values) {
   const out = []
   if (!Array.isArray(values)) return out
   const count = Math.min(values.length, MAX_MODES)
-  for (let i = 0; i < count; i++) out.push(pick(MODES, values[i]))
+  for (let i = 0; i < count; i++) out.push(modeOf(values[i]))
   return out
 }
 
@@ -170,13 +179,17 @@ export class PermissionDiagnostics {
       if (entry === undefined) return
       const { wanted: wantedIds, offered: offeredIds, chosen: chosenId } = seen
       const wanted = modesOf(wantedIds)
-      const chosen = chosenId === undefined ? undefined : pick(MODES, chosenId)
+      const chosen = chosenId === undefined ? undefined : modeOf(chosenId)
+      const bases = (Array.isArray(wantedIds) ? wantedIds : []).map(id => baseOf(profileLabel(id)))
+        .filter((base, index, all) => index === 0 || base !== all[index - 1])
       entry.modes = {
         wanted,
         offered: modesOf(offeredIds),
         ...(chosen === undefined ? {} : { chosen }),
         // The last wanted mode is the strict one (agents.js modeFor).
-        fellToStrict: chosen !== undefined && chosen !== OTHER && wanted.length > 1 && chosen === wanted.at(-1),
+        fellToStrict: chosenId !== undefined && bases.length > 1 && baseOf(profileLabel(chosenId)) === bases.at(-1),
+        // A chat profile was wanted and its own legacy mode was taken instead.
+        ...(Array.isArray(wantedIds) && wantedIds.some(id => Object.hasOwn(PROFILE_BASES, profileLabel(id)) && baseOf(profileLabel(id)) === chosenId) ? { profileFallback: true } : {}),
         at: this.now(),
       }
     } catch {}
@@ -324,7 +337,7 @@ export class PermissionDiagnostics {
         out.modes = { wanted: [...wanted], offered: [...offered], ...rest }
         if (active) {
           const current = state.run.modes?.currentModeId
-          if (current !== undefined && current !== null) out.modes.current = pick(MODES, current)
+          if (current !== undefined && current !== null) out.modes.current = modeOf(current)
           // Only two ids this code does not know say nothing about each other: a known mode
           // and an unknown one differ.
           const unknown = rest.chosen === OTHER && out.modes.current === OTHER

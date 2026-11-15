@@ -1,8 +1,9 @@
 # Brand assets
 
-Automagik's own marks and character art, Arca's icon, we unfold's Open Intelligence tag and
-the official logos of eleven open projects the products are built on (the last section) are
-used. No customer marks or new drawings are included.
+Automagik's own marks and character art, we unfold's marks for Genie, Omni and Mykes (the
+lamp, the vortex and the cords), Arca's logo, we unfold's Open Intelligence tag and the
+official logos of eleven open projects the products are built on (the last section) are used.
+No marks of the people who use the products, and no new drawings, are included.
 
 - `app-icon.png`: Automagik
   brand files copied from the owner's Genie landing draft for RFC 0027 D3, 2026-11-11.
@@ -13,15 +14,38 @@ used. No customer marks or new drawings are included.
   is always shown in colour; only the letters change, ink on the light page and cream on
   the dark one. The lockups with `-header` are the kit's drawings for small sizes: the
   header and the footer show them. The large lockups are set inside the official lockup
-  below. Genie's and Omni's lockups are the same kit's: the same triskle, each name in
-  the same lettering, the sparkle on the i in the product's colour (Automagik violet,
-  Genie pink, Omni cyan). Their large drawings are the headings of `/genie/` and `/omni/`;
-  their drawings for small sizes title the two product cards on the home page (Genie's
-  card is dark in both themes, so only its cream one is kept). The triskle alone is the
-  kit's large drawing and its 32 px drawing, each shown near its own size. The icons sit
-  at the site's root (paths below are from `apps/landing`); `site.webmanifest` names the
-  two large ones. Never recolour, stretch or redraw these files; a newer kit replaces them
+  below. The triskle alone is the kit's large drawing, in the Cloud hero, and its 32 px
+  drawing, beside Cloud in the Products menu, each shown near its own size. The triskle is
+  Automagik's mark and Automagik's alone (the brand's rule 1): it stands beside no other
+  product's name. The icons sit at the site's root (paths below are from `apps/landing`);
+  `site.webmanifest` names the two large ones. Never recolour, stretch or redraw these
+  files; a newer kit replaces them at the same paths, with new digests here.
+- Genie's, Omni's and Mykes's own marks and lockups (the second table): byte copies of the
+  files in the brand folder, `docs/brand/logo/`, under the same names. Each product shows
+  as its own flat, one-colour mark with its name (the brand's rules 9 and 10): Genie's
+  lamp, Omni's vortex, Mykes's cords, in ink on a light ground and in cream on a dark one.
+  The lockups are the headings of `/genie/`, `/omni/` and `/mykes/` and title Genie's and
+  Omni's cards on the home page (Omni's card shows its drawing for small sizes, `-header`;
+  Genie's card is dark in both themes and shows the cream file). The marks alone stand in
+  the Products menu; Omni's is the vortex drawn for about 32 px. They are we unfold's
+  drawings, approved by the owner on 12 and 13 November 2026; where they came from and their
+  packages' digests are in `docs/brand/logo/README.md`. The brand folder names no licence
+  for them, so nothing here calls them open-licensed: like the word "mykes" and the Open
+  Intelligence tag, they are not under this site's Apache-2.0 grant. The earlier Genie and
+  Omni lockups, which carried the triskle, are retired and no longer on the site. The pet
+  pictures stay where they are art (the tiles, the list of more building blocks); a pet is
+  never a mark, so none stands in the Products menu. Never
+  recolour, stretch or redraw these files; a newer file in the brand folder replaces them
   at the same paths, with new digests here.
+
+- The family drawer's files are in `assets/family/`, byte copies from the drawer's package;
+  `assets/family/SOURCE.md` lists each one's source and SHA-256. Automagik's lockup (PNG at
+  three sizes, ink and cream letters) and the Omni and Genie wordmarks are Automagik's own
+  logo kit, Apache-2.0 as the files above. The word "mykes" is we unfold's file for its
+  product; like the Open Intelligence tag it is not under this site's Apache-2.0 grant, and
+  nothing here calls it open-licensed. Arca's logo (`arca-logo-b.svg`, the ark with its
+  word, and `arca-ark-icon.svg`, the ark alone) is from the same package, used unchanged.
+  Arca's logo belongs to Arca, is shown here for Arca, and is not covered by this grant.
 
 | File | In the kit | SHA-256 |
 | --- | --- | --- |
@@ -29,13 +53,6 @@ used. No customer marks or new drawings are included.
 | `assets/brand/automagik-lockup-three-colours-cream-header.svg` | `lockups/svg/automagik-lockup-three-colours-cream-header.svg` | `e8dd0d21e42d7b2722386738972d46432f083895fb2bf00a990ee7588d3561f7` |
 | `assets/brand/automagik-lockup-three-colours-ink.svg` | `lockups/svg/automagik-lockup-three-colours-ink.svg` | `86cecf0da06bb2d3dcea22c4fcfbe4cc8a8bef0c9422c6af339be72edb326a14` |
 | `assets/brand/automagik-lockup-three-colours-cream.svg` | `lockups/svg/automagik-lockup-three-colours-cream.svg` | `33288af6de838023da4e9170103b80f247d31dfa8d08241ad425222e23a1db1e` |
-| `assets/brand/genie-lockup-three-colours-ink.svg` | `lockups/svg/genie-lockup-three-colours-ink.svg` | `1ae076c6a649c781d51b3b6cd6de6338441984a61e08ed91c6a05756571d53e4` |
-| `assets/brand/genie-lockup-three-colours-cream.svg` | `lockups/svg/genie-lockup-three-colours-cream.svg` | `a7204ae8d1709fb9f3166c7fdd2cfbc64958cec25678dce74ac38c370955ee69` |
-| `assets/brand/genie-lockup-three-colours-cream-header.svg` | `lockups/svg/genie-lockup-three-colours-cream-header.svg` | `726737ed38d35d5ea2ef9ab87f23527c738fc7b89b4f09ea7db660be9e69189c` |
-| `assets/brand/omni-lockup-three-colours-ink.svg` | `lockups/svg/omni-lockup-three-colours-ink.svg` | `29b13de7467f6cd38e918be22148e6fe48ac5b93b0c8810ef92e5ed866592601` |
-| `assets/brand/omni-lockup-three-colours-cream.svg` | `lockups/svg/omni-lockup-three-colours-cream.svg` | `4bcc10bb523c8014f721cc9caf9676cee45aba4a267d7d96aaa21b2bb760c722` |
-| `assets/brand/omni-lockup-three-colours-ink-header.svg` | `lockups/svg/omni-lockup-three-colours-ink-header.svg` | `04a4b973a92c2f57dd4e0911ae68931e8fc6403b79b28c7d8aca3acccc265c69` |
-| `assets/brand/omni-lockup-three-colours-cream-header.svg` | `lockups/svg/omni-lockup-three-colours-cream-header.svg` | `74cadeae1ba0a439dfb16a9dbeb42f3e36475e120bd5c563a7f25117f060e2b8` |
 | `assets/brand/triskle-three-colours.svg` | `svg/triskle-three-colours.svg` | `bc9fd54124f5d3cfdd0461c5ab6ac6860254c14bfdedf46a11cc5ca433e01a72` |
 | `assets/brand/triskle-three-colours-32.svg` | `svg/triskle-three-colours-32.svg` | `3ce36573385e5c18116e894b77b2aea39594a2763cfd911c553265d7b09abbf9` |
 | `favicon.ico` | `favicon/favicon.ico` | `5a99c83b69d9e3a34483fbc4df15770da82d722e8f2b0ced16cb2cd2a7502a2b` |
@@ -44,16 +61,29 @@ used. No customer marks or new drawings are included.
 | `icon-192.png` | `favicon/icon-192.png` | `a312e3087539ef7828577813c531a285565dc5e5ed6c6103586e84e983efd5c7` |
 | `icon-512.png` | `favicon/icon-512.png` | `4b5093fda26231b81851e579600bcf811bb67ea98135aa84b20651c53440b6e1` |
 
+| File | In the brand folder | SHA-256 |
+| --- | --- | --- |
+| `assets/brand/genie-lamp-lockup-ink.svg` | `docs/brand/logo/lockups/genie-lamp-lockup-ink.svg` | `5efc6f5a6a109638a98dd69730e67361c4617f3ccdd60d79546d6712abbb9335` |
+| `assets/brand/genie-lamp-lockup-cream.svg` | `docs/brand/logo/lockups/genie-lamp-lockup-cream.svg` | `3bce670e43c4293f5e2617b8f56aeebd820448a66ba88cec7686c7e4f226cc60` |
+| `assets/brand/omni-mark-lockup-ink.svg` | `docs/brand/logo/lockups/omni-mark-lockup-ink.svg` | `820d20dd9efdab808843829633167056d7c67c4c764f89909f93ae61ff42ea3b` |
+| `assets/brand/omni-mark-lockup-cream.svg` | `docs/brand/logo/lockups/omni-mark-lockup-cream.svg` | `e7132f429a0c94544fe67c5c7450751807a25c6bc9564aa064d8bdeec442eb17` |
+| `assets/brand/omni-mark-lockup-ink-header.svg` | `docs/brand/logo/lockups/omni-mark-lockup-ink-header.svg` | `cef19f7a34cba707c8995eac9ded832bc6b4ddf6361793ed62ddc6d7d20c387a` |
+| `assets/brand/omni-mark-lockup-cream-header.svg` | `docs/brand/logo/lockups/omni-mark-lockup-cream-header.svg` | `8af9ca4d1c5b075c98913b82ae63ef9b9a9b28e0babea28d6e71f0f95fe08f16` |
+| `assets/brand/mykes-clean-lockup-ink.svg` | `docs/brand/logo/lockups/mykes-clean-lockup-ink.svg` | `d5f4c9d4fbdd1b36b1baf3e9d94b43d87a15468e4ee0e669072e06048c5ee6d1` |
+| `assets/brand/mykes-clean-lockup-cream.svg` | `docs/brand/logo/lockups/mykes-clean-lockup-cream.svg` | `3a36b5cbea56c95eec22a01f1166b3bce4adcaad94eb6fd4b5f4e04f38746758` |
+| `assets/brand/genie-lamp-ink.svg` | `docs/brand/logo/svg/genie-lamp-ink.svg` | `a837a92a18fb4a319ce17b1d91e0f3f347c2feb3e8c49aaa696ea1e5154b6914` |
+| `assets/brand/genie-lamp-cream.svg` | `docs/brand/logo/svg/genie-lamp-cream.svg` | `ef94842939a9219c21d1c75b6570605500e9dcb03ec133b3e9a2b527d5514724` |
+| `assets/brand/omni-mark-ink-32.svg` | `docs/brand/logo/svg/omni-mark-ink-32.svg` | `9de3588852dc64ae54783e63fbb53de22b83626ad47139c17655a1e943cb9e2e` |
+| `assets/brand/omni-mark-cream-32.svg` | `docs/brand/logo/svg/omni-mark-cream-32.svg` | `6fb43b5a6fc57c4365bbfc37b696def28fab5cdd8b739d97907621ef5293a5d9` |
+| `assets/brand/mykes-clean-ink.svg` | `docs/brand/logo/svg/mykes-clean-ink.svg` | `464d74f76cfe6ab5ad351d07938736bd68697a3210e0a82cfbe580d068c292ba` |
+| `assets/brand/mykes-clean-cream.svg` | `docs/brand/logo/svg/mykes-clean-cream.svg` | `74cdf63bb480c803d4ea7e63677e78594890fbe598294d997f50a0077780ffd9` |
+
 - `lamp.webp`, `omni-pleased.png`: Automagik's own character art, copied unchanged from the
   same draft. The lamp also lives in `apps/bots-dsh/src/client/art/lamp.webp`; the octopus
   in `apps/desktop/assets/dmg-source/omni-pleased.png`. Apache-2.0. The app's art comes
   from DS Bot, Copyright 2026 Fei2411 and the DS Bot contributors, and Automagik,
   Copyright 2026 Namastex Labs and the Omni contributors (the Bots and welcome NOTICEs).
   These are brand accents, never substitutes for product captures.
-- `arca/svg/arca-icon-ink.svg`, `arca/svg/arca-icon-ivory.svg`: Arca's icon, from Arca's logo
-  kit (draft 3), copied unchanged under the kit's file names. Arca's mark belongs to Arca;
-  it is shown here for Arca with Arca's agreement, by its kit's rules, and is not covered by
-  this site's Apache-2.0 grant. A newer kit replaces these files at the same paths.
 - `open-intelligence/open-intelligence-tag.svg`: we unfold's horizontal Open Intelligence
   tag, one colour, copied unchanged from Arca's public repository (`automagik-si/arca`,
   commit `7da787e`, `assets/open-intelligence/`). The tag is we unfold's mark, used as the

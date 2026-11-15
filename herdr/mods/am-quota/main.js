@@ -146,7 +146,7 @@ function cliAnswer(code, stdout, stderr) {
   try {
     out = JSON.parse(stdout ?? "");
   } catch {}
-  return { code, out, err: String(stderr ?? "").replace(/^automagik-herdr: /gm, "").trim() };
+  return { code, out, err: String(stderr ?? "").replace(/^(?:am|automagik-herdr): /gm, "").trim() };
 }
 /** Why a restart's terminal gave no answer; `partway`: it may have stopped part-way. */
 function runError(why, { partway = false } = {}) {
@@ -763,7 +763,7 @@ export default class AmQuota extends View {
         const r = await this.cli(["ls", "--all"]);
         if (this.switched[provider] !== s) return;
         if (!r) s.look = "no-cli";
-        else if (r.code !== 0 || !r.out) s.look = { error: refusal(r) || `automagik-herdr ls failed (exit ${r.code})` };
+        else if (r.code !== 0 || !r.out) s.look = { error: refusal(r) || `am ls failed (exit ${r.code})` };
         else if (provider !== "claude") s.look = staleBots(r.out, provider, s.at);
         else {
           const bots = runningBots(r.out, "claude");
@@ -1101,7 +1101,7 @@ export default class AmQuota extends View {
     const hint = (text) => box.child(div().text_size(11).text_color(t.dim).child(text));
     const look = s.look;
     if (look === "loading") hint(`New bots start on it. Looking for bots still on the old ${old}…`);
-    else if (look === "no-cli") hint(`New bots start on it. Bots already running keep the old ${old} until restarted: automagik-herdr restart <bot>.`);
+    else if (look === "no-cli") hint(`New bots start on it. Bots already running keep the old ${old} until restarted: am restart <bot>.`);
     else if (look?.error) hint(`New bots start on it. The panel couldn't list the bots (${look.error}); restart the ones that use ${label} to move them.`);
     else if (!look.bots.length) {
       hint(s.result ? `Restarted ${s.result.done}: every ${label} bot is on the new ${old}.`

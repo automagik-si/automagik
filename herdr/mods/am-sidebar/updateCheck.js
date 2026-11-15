@@ -289,7 +289,7 @@ export function restoredNotice(restore) {
   const back = restore?.version ?? "the previous version";
   const stopped = typeof restore?.unavailable === "string" && restore.unavailable !== "" ? `; ${restore.unavailable}` : "";
   const removed = restore?.prevRemoved === true
-    ? " The failed pack was removed, so `automagik-herdr update --rollback` has nothing to go back to." : "";
+    ? " The failed pack was removed, so `am update --rollback` has nothing to go back to." : "";
   const warnings = Array.isArray(restore?.warnings) ? restore.warnings.filter((w) => typeof w === "string" && w !== "") : [];
   const warned = warnings.length > 0 ? ` Warning: ${warnings.join(" ")}` : "";
   return { title: `Automagik Herdr restored ${back}`, level: "warning",
@@ -314,7 +314,7 @@ export function checkNote(check) {
 export function applyNotice(patch) {
   if (patch.kind === "installed") {
     return { title: "Automagik Herdr updated", level: "success", body: `${patch.from ?? "?"} → ${patch.current}. The replaced pack is kept`
-      + " (`automagik-herdr update --rollback` puts it back). Herdr reloads its mods on its own." };
+      + " (`am update --rollback` puts it back). Herdr reloads its mods on its own." };
   }
   if (patch.applyError) return { title: "Automagik Herdr not updated", level: "error", body: patch.applyError };
   return null;
@@ -482,9 +482,9 @@ export function landing(state, version, now) {
  * `check`: an install whose herdr-app check could not run says so here, once (the update was kept).
  */
 export function landedNotice(version, from, restartBots = false, held = [], check = null) {
-  const back = from ? ` \`automagik-herdr update --rollback\` puts ${from} back.` : "";
+  const back = from ? ` \`am update --rollback\` puts ${from} back.` : "";
   return { title: `Automagik Herdr updated to ${version}`, level: "success",
-    body: (restartBots ? "Your bots kept running; restart each Claude bot (automagik-herdr restart <bot>) so it gets its briefing again."
+    body: (restartBots ? "Your bots kept running; restart each Claude bot (am restart <bot>) so it gets its briefing again."
       : "Your bots kept running.") + checkNote(check) + heldOf(held).map((h) => ` ${heldModLine(h, version)}`).join("") + back };
 }
 

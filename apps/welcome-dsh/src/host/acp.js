@@ -74,6 +74,8 @@ export function agentView(agent) {
       ...(agent.connector?.native === true ? { native: true } : {}),
       ...(typeof agent.connector?.version === 'string' ? { version: agent.connector.version } : {}),
       ...(typeof agent.connector?.error === 'string' ? { error: shownText(redactText(agent.connector.error)).slice(0, 300) } : {}),
+      // Installed, but its last start failed: the settings page offers Retry, which reinstalls it.
+      ...(agent.connector?.state === 'ready' && typeof agent.connector?.startError === 'string' ? { startError: shownText(redactText(agent.connector.startError)).slice(0, 300) } : {}),
       // The installer's own output and where it was written, for a failed connector.
       ...(typeof agent.connector?.diagnostic === 'string' ? { diagnostic: shownText(redactText(agent.connector.diagnostic)).slice(0, 4000) } : {}),
       ...(typeof agent.connector?.logPath === 'string' ? { logPath: shownPath(agent.connector.logPath) } : {}),

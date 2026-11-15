@@ -157,3 +157,19 @@ test('a Main Bot rule that throws is left out, and the other rules still come', 
   assert.deepEqual(rt.extended.rules({}), ['first', 'third'])
   assert.equal(warned.length, 1)
 })
+
+test('#1092 sendsOutside hooks register, ask on failure and dispose', () => {
+  const rt = {}; install(rt)
+  const step = { tool: 'team_send', args: { recipient: 'outside' } }
+  assert.equal(rt.sendsOutside(step), false)
+  const dispose = rt.stepHooks.sendsOutside(input => { assert.deepEqual(input, step); return true })
+  assert.equal(rt.sendsOutside(step), true)
+  dispose(); dispose()
+  assert.equal(rt.sendsOutside(step), false)
+  const throwing = rt.stepHooks.sendsOutside(() => { throw new Error('unknown recipient') })
+  assert.equal(rt.sendsOutside(step), true)
+  throwing()
+  assert.equal(rt.sendsOutside(step), false)
+  rt.stepHooks.sendsOutside(() => false)
+  assert.equal(rt.sendsOutside(step), false)
+})

@@ -12,7 +12,7 @@ Each segment is left out when its field is missing. Separators and labels are di
 (`COLUMNS`, which Claude Code sets), the quota moves to a second line.
 
 - `🤖`: the bot this Herdr pane plays, only in a Herdr pane (`HC_TERMINAL_ID` set):
-  `automagik-herdr whois --json <terminal>`, run as `/bin/sh ~/.local/bin/automagik-herdr` (the
+  `am whois --json <terminal>`, run as `/bin/sh ~/.local/bin/automagik-herdr`, the alias file for `am` (the
   launcher finds its own node, so a bare PATH is fine), then the bot's name in
   `<project>/.herdr/bots.json`. whois gets 1.5 s, then SIGKILL; the answer, a miss included, is
   cached 10 minutes per terminal in the Meter state folder (`statusline-bots.json`). Only expired

@@ -68,6 +68,7 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
     + `if [ -f "${join(root, "gh.json")}" ]; then cat "${join(root, "gh.json")}"; exit 0; fi\necho "fake gh: no answer" >&2\nexit 1\n`);
   const home = join(root, "home");
   mkdirSync(join(home, ".claude"), { recursive: true });
+  mkdirSync(join(home, ".config/herdr-app"), { recursive: true });
   const app = join(root, "app");
   mkdirSync(join(app, "mods/am-sidebar"), { recursive: true });
   if (briefing) writeFileSync(join(app, "mods/am-sidebar/briefing.mjs"), "// stand-in\n");
@@ -251,7 +252,7 @@ test("worker refuses unapproved working on and corrupt approval without a plain 
     assert.equal(s.cli(["edit", "Dev", "--hc-proxy", "on"]).code, 0);
     const result = s.cli(["worker", "do the task", "--branch", "feat/refused", "--json"]);
     assert.notEqual(result.code, 0, result.err);
-    assert.match(result.err, /run automagik-herdr proxy approve first/);
+    assert.match(result.err, /run am proxy approve first/);
     assert.equal(s.runs().length, 0);
   }
 });
@@ -281,14 +282,14 @@ test("the same invalid record warns off to plain worker argv and refuses working
   assert.deepEqual(s.runs().at(-1), plain, "invalid approval preserves the whole worker argv");
   assert.equal((off.err.match(/WARNING hc proxy:/g) ?? []).length, 1);
   assert.ok(off.err.includes(path));
-  assert.match(off.err, /does not match its sha256.*starting plain.*automagik-herdr proxy approve/);
+  assert.match(off.err, /does not match its sha256.*starting plain.*am proxy approve/);
   assert.doesNotMatch(off.out, /^WARNING hc proxy:/m);
   writeFileSync(join(s.root, "hc.json"), initialState);
   const before = s.runs().length;
   assert.equal(s.cli(["edit", "Dev", "--hc-proxy", "on"]).code, 0);
   const on = s.cli(args);
   assert.notEqual(on.code, 0);
-  assert.match(on.err, /does not match its sha256.*automagik-herdr proxy approve first/);
+  assert.match(on.err, /does not match its sha256.*am proxy approve first/);
   assert.equal(s.runs().length, before);
   assert.equal(readFileSync(path, "utf8"), corrupt, "both sides used the same corrupt record");
 });
@@ -313,29 +314,47 @@ test("a dsh-tui worker reads its bot's approved switch; other agents keep the or
   assert.equal(s.runs().at(-1).some((word) => word.endsWith("/hcPane.mjs")), false);
 });
 
+// #1125: Codex's launch mode, spelled out, and a Codex run's --add-dir grants taken apart from its
+// other words (the tool-cache grants follow the runner's environment, so they are not compared).
+const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"];
+const grantsApart = (words) => {
+  const rest = [];
+  const dirs = [];
+  for (let i = 0; i < words.length; i += 1) {
+    if (words[i] === "--add-dir") dirs.push(words[++i]);
+    else rest.push(words[i]);
+  }
+  return { words: rest, dirs };
+};
+// A Codex worker's first two grants: its worktree's own git dir, then the project's .git.
+const workerGitDirs = (s, worktree) => [realpathSync(join(s.project, ".git", "worktrees", worktree)), realpathSync(join(s.project, ".git"))];
+
 test("worker: the bot's worker defaults are used, and per-task --agent/--model/--effort win", (t) => {
   const s = scene(t);
   const r = s.cli(["worker", "fix the login form", "--branch", "feat/login", "--json"]);
   assert.equal(r.code, 0, r.err);
   const out = r.json();
   assert.deepEqual([out.agent, out.model, out.effort], ["codex", "gpt-5.5", "medium"]);
-  assert.deepEqual(after(s.runs()[0]), ["codex", "--approve-for-me", "--disable", "hooks", "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
+  const codex = grantsApart(after(s.runs()[0]));
+  assert.deepEqual(codex.words, ["codex", ...CODEX_MODE, "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
+  assert.deepEqual(codex.dirs.slice(0, 2), workerGitDirs(s, "feat-login"));
   const o = s.cli(["worker", "review it", "--branch", "feat/review", "--agent", "claude", "--model", "opus", "--effort", "max", "--json"]);
   assert.equal(o.code, 0, o.err);
   assert.deepEqual([o.json().agent, o.json().model, o.json().effort], ["claude", "opus", "max"]);
   assert.deepEqual(freshClaude(after(s.runs()[1])), ["claude", "--permission-mode", "auto", "--model", "opus", "--effort", "max", "review it"]);
 });
 
-test("worker #946: a bot's codexAuto false leaves its Codex workers on Codex's default approvals", (t) => {
+test("worker #1125: a bot's codexAuto false no longer opts out (#946 retired): its Codex workers run the launch mode", (t) => {
   const file = team();
   file.bots[2].codexAuto = false;
   const s = scene(t, { file });
   const r = s.cli(["worker", "fix the login form", "--branch", "feat/login", "--json"]);
   assert.equal(r.code, 0, r.err);
-  assert.deepEqual(after(s.runs()[0]), ["codex", "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
+  assert.deepEqual(grantsApart(after(s.runs()[0])).words, ["codex", ...CODEX_MODE, "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
   const o = s.cli(["worker", "tune it", "--branch", "feat/tune", "--agent", "codex", "--json"]);
   assert.equal(o.code, 0, o.err);
-  assert.equal(s.runs()[1].includes("--approve-for-me"), false, "a per-task --agent codex keeps the opt-out");
+  assert.deepEqual(grantsApart(after(s.runs()[1])).words.slice(0, 1 + CODEX_MODE.length), ["codex", ...CODEX_MODE], "a per-task --agent codex too");
+  assert.equal(s.runs()[1].includes("--dangerously-bypass-approvals-and-sandbox"), false);
 });
 
 test("worker kill (#955): a bot ends a worker it started and nothing else: a seat, another bot's worker, its own pane and a plain pane are refused", (t) => {
@@ -594,6 +613,17 @@ test("worker: hc run --bg as a child of the bot's pane, in the worktree, with th
     swap: false, override: false, override_requested: null,
     core: "fakecore0000", created_ms: s.hcState().terminals.find((x) => x.address === "t100").created_ms, squad: ID.dev, session: null, at: undefined });
   assert.ok(!Number.isNaN(Date.parse(row.at)));
+});
+
+test("mode #821: an empty worker mode launches auto without a mode label", (t) => {
+  const bot = { id: ID.dev, name: "A", agent: "antigravity", worker: { agyMode: "" } };
+  const plan = workerPlan(bot);
+  assert.equal(plan.error, undefined);
+  assert.equal(plan.agyMode, "auto");
+  assert.deepEqual(plan.argv.slice(-2), ["--mode", "auto"]);
+  const args = workerArgs({ botId: ID.dev, branch: "feat/task", role: "dev", name: "worker",
+    cwd: "/work/task", parent: "t1", ...plan, task: "Do the task", path: "/bin" });
+  assert.equal(args.some((word) => word.startsWith("worker.agyMode=")), false);
 });
 
 test("worker Antigravity: --mode auto by default, the chosen worker.agyMode when set, one clear line for an unknown one", (t) => {
@@ -998,7 +1028,9 @@ test("worker: a bots.json template default is used; a per-task --agent sets it a
   // --model alone is a per-task pick too: the default template steps aside for the default agent.
   const m = s.cli(["worker", "tune it", "--branch", "feat/tune", "--model", "gpt-6", "--json"]);
   assert.equal(m.code, 0, m.err);
-  assert.deepEqual(after(s.runs()[3]), ["codex", "--approve-for-me", "--disable", "hooks", "--model", "gpt-6", "-c", "model_reasoning_effort=medium", "tune it"]);
+  const tuned = grantsApart(after(s.runs()[3]));
+  assert.deepEqual(tuned.words, ["codex", ...CODEX_MODE, "--model", "gpt-6", "-c", "model_reasoning_effort=medium", "tune it"]);
+  assert.deepEqual(tuned.dirs.slice(0, 2), workerGitDirs(s, "feat-tune"));
 });
 
 test("worker --template: an agent the command doesn't name skips the hook with a warning; no template list refuses", (t) => {
@@ -1146,7 +1178,7 @@ test("effortArgs: claude/antigravity --effort, codex -c model_reasoning_effort, 
   assert.deepEqual([chosen.agyMode, chosen.argv], ["plan", ["agy", "--dangerously-skip-permissions", "--mode", "plan"]]);
   const unknown = workerPlan({ id: ID.dev, name: "A", agent: "antigravity", worker: { agyMode: "yolo" } });
   assert.equal(unknown.error, 'A\'s workers: Antigravity mode "yolo" isn\'t one of accept-edits, auto, plan. '
-    + `Fix it with automagik-herdr edit ${ID.dev} --worker-agy-mode <accept-edits|auto|plan>.`);
+    + `Fix it with am edit ${ID.dev} --worker-agy-mode <accept-edits|auto|plan>.`);
   assert.equal(unknown.error.includes("\n"), false, "one clear line");
   // Another agent's worker defaults never add mode words: its argv stays as it was.
   const claude = workerPlan({ id: ID.dev, name: "A", agent: "claude", worker: { agyMode: "plan" } });
@@ -1269,8 +1301,8 @@ test("the bot briefing says a bot doesn't code: one worker per task, checked, en
   const file = parseBots(JSON.stringify(team())).file;
   const text = briefingText({ self: { ...file.bots[2], instructions: "x".repeat(4000) }, file });
   assert.ok(text.includes(WORKER_LINE));
-  assert.match(WORKER_LINE, /automagik-herdr worker/);
-  assert.match(WORKER_LINE, /end it with `automagik-herdr worker kill <terminal>` once the task merges/);
+  assert.match(WORKER_LINE, /am worker/);
+  assert.match(WORKER_LINE, /end it with `am worker kill <terminal>` once the task merges/);
   assert.doesNotMatch(WORKER_LINE, /hc kill/, "hc kill is the main bot's only (#955)");
   assert.ok(text.length <= BRIEFING_LIMIT);
 });
@@ -1468,7 +1500,7 @@ test("worker --task: Genie's short id only; t_ ids get the exact message; bad sh
   const s = scene(t);
   const tid = s.cli(["worker", "go", "--branch", "fix/t_9-x", "--task", "t_9f3a"]);
   assert.equal(tid.code, 2);
-  assert.equal(tid.err, "automagik-herdr: internal Genie id; pass the short id gn-N, gh-N or gl-N\n");
+  assert.equal(tid.err, "am: internal Genie id; pass the short id gn-N, gh-N or gl-N\n");
   for (const bad of ["GL-231", "-gl-1", "gl_231", "gl.231", "", `g${"1".repeat(41)}`, "gl 231"]) {
     const r = s.cli(["worker", "go", "--branch", `fix/x-${bad}`, `--task=${bad}`]);
     assert.equal(r.code, 2, `${JSON.stringify(bad)}: ${r.err}`);
@@ -1524,7 +1556,7 @@ test("worker --lead: defaults to the calling bot; a bot id or a Genie session; r
   for (const rank of ["reviewer", "fixer"]) {
     const r = s.cli(["worker", "go", "--branch", `fix/gl-4-${rank}`, "--task", "gl-4"], { from: `p-${rank}` });
     assert.equal(r.code, 2, `${rank}: ${r.err}`);
-    assert.equal(r.err, "automagik-herdr: pass --lead <the task's lead bot>\n");
+    assert.equal(r.err, "am: pass --lead <the task's lead bot>\n");
   }
   assert.equal(s.runs().length, runs, "nothing started");
   const review = s.cli(["worker", "go", "--branch", "fix/gl-4-a", "--task", "gl-4", "--lead", ID.cap, "--json"], { from: "p-reviewer" });
@@ -1849,7 +1881,7 @@ test("worker: a pre-ledger pane (bot= label only) working outside its project is
   const r = s.cli(["worker", "fix it", "--branch", "feat/x"], { cwd: s.root });
   assert.equal(r.code, 1);
   assert.match(r.err, new RegExp(`t1 isn't a bot's pane \\(the attach ledger ties no bot to it\\)\\. Its bot=${ID.dev} label is from before `
-    + `the ledger.*Tie it: automagik-herdr attach ${ID.dev} t1 --project <its project>\\..*automagik-herdr start ${ID.dev} --project`));
+    + `the ledger.*Tie it: am attach ${ID.dev} t1 --project <its project>\\..*am start ${ID.dev} --project`));
   assert.equal(s.runs().length, 0);
   // The one-time import ran (and found nothing); the advice works.
   assert.equal(s.cli(["attach", ID.dev, "t1", "--project", s.project], { from: null, cwd: s.root }).code, 0);
@@ -1884,7 +1916,7 @@ test("worker #225: the calling bot's bots.json warnings go to stderr at once, re
   file.bots[1].rank = "boss"; // Captain: another bot's warning
   const s = scene(t, { file });
   const said = "b-cccccccccc: worker model starts with a dash (an agent would read it as an option); ignored";
-  const mine = new RegExp(`automagik-herdr: ${said.replace(/[()]/g, "\\$&")}\n`);
+  const mine = new RegExp(`am: ${said.replace(/[()]/g, "\\$&")}\n`);
   const r = s.cli(["worker", "x", "--branch", "feat/x", "--json"]);
   assert.equal(r.code, 0, r.err);
   assert.match(r.err, mine);
@@ -1896,7 +1928,7 @@ test("worker #225: the calling bot's bots.json warnings go to stderr at once, re
   // Refused once the bot is known (the main checkout is no task worktree): the warning comes first.
   const refused = s.cli(["worker", "y", "--worktree", s.project]);
   assert.equal(refused.code, 1);
-  assert.match(refused.err, new RegExp(`^${mine.source}automagik-herdr: ${s.project}.* is the project's main checkout`));
+  assert.match(refused.err, new RegExp(`^${mine.source}am: ${s.project}.* is the project's main checkout`));
   // Captain (t4) is told about its own rank, not Dev's worker field.
   const cap = s.cli(["worker", "z", "--branch", "feat/z", "--role", "review"], { from: "t4" });
   assert.equal(cap.code, 0, cap.err);
@@ -1973,7 +2005,7 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
   t.after(() => clearTimeout(free));
   const r = await call;
   assert.equal(r.code, 0, r.err);
-  assert.match(r.err, new RegExp(`^automagik-herdr: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
+  assert.match(r.err, new RegExp(`^am: waiting for the worker lock on ${reEsc(wt)} \\(${reEsc(lock)}\\), `
     + `held by pid ${process.pid}; up to 75 s in all\\.\\n`, "m"));
   assert.equal(r.err.split("waiting for").length, 2, "said once");
   assert.equal(s.runs().length, 1);
@@ -2097,9 +2129,9 @@ test("worker #552: the name lock's wait and the worktree lock's share one deadli
   child.stderr.on("data", (d) => { err += d; if (/waiting for the task name/.test(err)) rmSync(name, { force: true }); });
   const code = await new Promise((resolve) => child.on("close", resolve));
   assert.equal(code, 1, err + out);
-  assert.match(err, new RegExp(`automagik-herdr: waiting for the task name gl-231-dev \\(${reEsc(name)}\\), held by pid ${process.pid}; up to 6 s in all\\.`));
+  assert.match(err, new RegExp(`am: waiting for the task name gl-231-dev \\(${reEsc(name)}\\), held by pid ${process.pid}; up to 6 s in all\\.`));
   assert.doesNotMatch(err, /waiting for the worker lock/, "the worktree lock's wait is what the deadline leaves");
-  assert.match(err, new RegExp(`the worker lock on \\S*fix-gl-231-a \\(${reEsc(wt)}\\) is held by another automagik-herdr \\(pid ${process.pid}\\)\\n`));
+  assert.match(err, new RegExp(`the worker lock on \\S*fix-gl-231-a \\(${reEsc(wt)}\\) is held by another am \\(pid ${process.pid}\\)\\n`));
   assert.equal(existsSync(join(s.project, ".claude/worktrees/fix-gl-231-a")), false, "nothing made");
   assert.equal(s.runs().length, 1, "only the warm-up ran");
 });
@@ -2406,7 +2438,7 @@ test("worker #567 (fail-before): an ended worker's created worktree is gone at t
   assert.equal(worktreesOf(s).includes(one.worktree), false, "and pruned from git's list");
   assert.equal(existsSync(two.worktree), true, "the worker just started keeps its own");
   assert.ok(two.warnings.includes(`removed ${one.worktree}: its workers ended`), JSON.stringify(two.warnings));
-  assert.match(second.err, new RegExp(`automagik-herdr: removed ${reEsc(one.worktree)}: its workers ended`));
+  assert.match(second.err, new RegExp(`am: removed ${reEsc(one.worktree)}: its workers ended`));
   assert.deepEqual(reapFile(s).map((r) => [r.worktree, r.result, r.why]), [[one.worktree, "removed", null]]);
   // The ledger gets no cleanup rows; the sweep found the first worker finished: its end row (RFC 0021 (f) 4), once.
   const firstRow = s.ledger().find((r) => r.event === "start" && r.terminal === one.terminal);

@@ -25,6 +25,7 @@ import { parseMarker } from "./release.js";
 import { fleetPlan, meterScope } from "./meterFleet.js";
 import { MACHINES_FIRST_MS, MACHINES_SHOWN_KEY, MACHINES_TICK_MS, STATE_FILE as MACHINES_STATE, failureNotice, parseState as parseMachines, startCycle } from "./machineUpdates.js";
 import { startBot, attachBot, botOfTerminal, modelTexts, sleepOf } from "./launch.js";
+import { actionError } from "./actionError.js";
 import { parseCommand } from "./launchArgs.js";
 import { characterSvg, characterFile, inkOf, isDark } from "./characters.js";
 import { workerClick, rowWorker, openWorkerTab } from "./workerTab.js";
@@ -240,7 +241,10 @@ export default class Spaces extends View {
         const { name: c, args } = parseCommand(await nextCommand());
         if (["new-bot", "edit", "start", "attach", "refresh"].includes(c)) {
           // A throw here must not end this loop (paste and every command would stop).
-          try { await this.botCommand(c, args, cx); } catch (e) { notify({ title: "Bots", body: String(e?.message ?? e), level: "error" }); }
+          try { await this.botCommand(c, args, cx); } catch (e) {
+            console.error(e?.stack ?? e);
+            notify({ title: "Bots", body: actionError(e, c === "start" ? "Start" : "Bot action"), level: "error" });
+          }
         }
         else if (c === "paste" || c === "paste_image") {
           const address = focused()?.terminal;
@@ -837,7 +841,10 @@ export default class Spaces extends View {
 
   startFromRow(bot, cx) {
     cx.spawn(async (cx) => {
-      try { await this.botCommand("start", { bot }, cx); } catch (e) { notify({ title: "Bots", body: String(e?.message ?? e), level: "error" }); }
+      try { await this.botCommand("start", { bot }, cx); } catch (e) {
+        console.error(e?.stack ?? e);
+        notify({ title: "Bots", body: actionError(e, "Start"), level: "error" });
+      }
     });
   }
 

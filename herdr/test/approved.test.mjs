@@ -133,7 +133,7 @@ test("G1 (a): the reader returns the approved roster after the working file chan
 test("G1 (c): a missing record is refused and names proxy approve", (t) => {
   const s = scene(t);
   assert.throws(() => readApprovedRecord({ project: s.project, env: s.env }),
-    /no approved roster .*automagik-herdr proxy approve/s);
+    /no approved roster .*am proxy approve/s);
   rmSync(approvedRootOf(s.env), { recursive: true, force: true });
   assert.throws(() => readApprovedRecord({ project: s.project, env: s.env }), /no approved roster/);
 });

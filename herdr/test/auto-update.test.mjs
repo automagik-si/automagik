@@ -89,7 +89,7 @@ test("a newer verified release installs on its own through apply --expect <v> --
   await h.tick(1);
   assert.deepEqual(h.notes.map((n) => n.title), ["Automagik Herdr updated to 0.8.1"]);
   assert.match(h.notes[0].body, /Your bots kept running\./);
-  assert.match(h.notes[0].body, /`automagik-herdr update --rollback` puts 0\.8\.0 back/);
+  assert.match(h.notes[0].body, /`am update --rollback` puts 0\.8\.0 back/);
   // The old build's grace timer stopped with the reload; a later reload of the same build says nothing.
   await h.tick(RELOAD_GRACE_MS);
   h.build().u.start();
@@ -144,7 +144,7 @@ test("off: no install, today's notice once", async () => {
   h.build().u.start();
   await h.tick(FIRST_CHECK_MS);
   assert.deepEqual(h.applies(), []);
-  assert.deepEqual(h.notes.map((n) => n.body), ["Automagik Herdr 0.8.1 is out. Run `automagik-herdr update` to install it (https://x/v0.8.1)."]);
+  assert.deepEqual(h.notes.map((n) => n.body), ["Automagik Herdr 0.8.1 is out. Run `am update` to install it (https://x/v0.8.1)."]);
   await h.tick(backoffOf(1));
   assert.equal(h.notes.length, 1, "the next check doesn't announce it again");
 });
@@ -167,7 +167,7 @@ test("a bad pack is restored: one notice names the failed version and mod, the m
   assert.equal(old.reloaded, true, "the restored folders reloaded the mod");
   assert.equal(h.notes.length, 1);
   assert.match(h.notes[0].body, /0\.8\.1 failed to load \(am-tabs failed herdr-app check\): the previous version 0\.8\.0 is back/);
-  assert.match(h.notes[0].body, /The failed pack was removed, so `automagik-herdr update --rollback` has nothing to go back to\./);
+  assert.match(h.notes[0].body, /The failed pack was removed, so `am update --rollback` has nothing to go back to\./);
   assert.match(h.notes[0].body, /Warning: the failed pack could not be removed .*\.prev-next-1/);
   assert.equal(h.state().kind, "restored");
   assert.equal(h.state().announced, "0.8.0");
@@ -198,7 +198,7 @@ test("the restored build reads update.mjs's note when the old build never hears 
   await h.tick(1);
   assert.deepEqual(h.notes.map((n) => n.title), ["Automagik Herdr restored 0.8.0"]);
   assert.match(h.notes[0].body, /0\.8\.1 failed to load \(am-tabs failed herdr-app check\): the previous version 0\.8\.0 is back/);
-  assert.match(h.notes[0].body, /The failed pack was removed, so `automagik-herdr update --rollback` has nothing to go back to\./);
+  assert.match(h.notes[0].body, /The failed pack was removed, so `am update --rollback` has nothing to go back to\./);
   assert.match(h.notes[0].body, /Warning: the failed pack could not be removed .*\.prev-next-1/);
   // A later build of the restored version says nothing more.
   h.build().u.start();

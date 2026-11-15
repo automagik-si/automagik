@@ -172,11 +172,11 @@ function FormActions({ onCancel, onAdd, ready }) {
 
 export const PROVIDERS_CSS = `
 .bt-provider-id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:var(--bt-ink-3)}
-.bt-provider .bt-set-hint[data-error]{color:var(--bt-danger)}
+.bt-provider .bt-set-hint[data-error]{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-provider-state{display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:16px;color:var(--bt-ink-2);white-space:nowrap}
 .bt-provider-state::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--bt-ink-3)}
 .bt-provider-state[data-state=set]::before{background:var(--bt-green)}
-.bt-provider-state[data-state=missing]{color:var(--bt-danger)}
+.bt-provider-state[data-state=missing]{color:var(--st-bad-strong,var(--bt-danger))}
 .bt-provider-state[data-state=missing]::before{background:var(--bt-danger)}
 .bt-provider .bt-secret-field{align-items:center;gap:8px}
 .bt-provider .bt-secret-field>svg,.bt-provider-form .bt-secret-field>svg{flex:none;color:var(--bt-ink-3)}

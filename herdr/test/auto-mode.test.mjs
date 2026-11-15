@@ -30,7 +30,7 @@ const SKIP_ALL = ["--dangerously-skip-permissions", "--dangerously-bypass-approv
 // What each kind's launch adds, written out here so a change to the table is a change to this list.
 const EXPECTED = {
   claude: ["--permission-mode", "auto"],
-  codex: ["--approve-for-me", "--disable", "hooks"],
+  codex: ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"],
   antigravity: ["--dangerously-skip-permissions"],
 };
 
@@ -72,13 +72,14 @@ for (const key of Object.keys(AGENTS)) {
   });
 }
 
-test("a run that already picks its approvals (programs.json) is left as the person wrote it; codexAuto false opts Codex out", () => {
+test("a run that already picks its approvals (programs.json) is left as the person wrote it, except Codex's (#1125)", () => {
   assert.deepEqual(launchRun("claude", ["claude", "--permission-mode", "manual"], {}), ["claude", "--permission-mode", "manual"]);
   assert.deepEqual(launchRun("claude", ["claude", "--permission-mode=plan"], {}), ["claude", "--permission-mode=plan"]);
-  assert.deepEqual(launchRun("codex", ["codex", "-a", "never"], {}), ["codex", "-a", "never"]);
+  // Codex's own approval words go and its launch mode comes, codexAuto false or not (codex-mode.test.mjs has the forms).
+  assert.deepEqual(launchRun("codex", ["codex", "-a", "never"], {}), ["codex", ...EXPECTED.codex]);
   assert.deepEqual(launchRun("antigravity", ["agy", AGY_SKIP_PERMISSIONS], {}), ["agy", AGY_SKIP_PERMISSIONS]);
-  assert.deepEqual(autoModeArgs("codex", { codexAuto: false }, ["codex"]), []);
-  assert.deepEqual(autoModeArgs("claude", { codexAuto: false }, ["claude"]), ["--permission-mode", "auto"], "the opt-out only touches Codex");
+  assert.deepEqual(autoModeArgs("codex", { codexAuto: false }, ["codex"]), EXPECTED.codex);
+  assert.deepEqual(autoModeArgs("claude", { codexAuto: false }, ["claude"]), ["--permission-mode", "auto"]);
   // A flag after `--` is a prompt word, never the run's own choice.
   assert.deepEqual(launchRun("claude", ["claude", "--", "--permission-mode"], {}), ["claude", "--", "--permission-mode", "--permission-mode", "auto"]);
 });

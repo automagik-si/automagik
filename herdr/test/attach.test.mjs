@@ -196,6 +196,35 @@ test("NEGATIVE: a terminal id reused with a new created_ms reads as unattached (
   assert.equal(s.whois("t1").bot, null);
 });
 
+test("NEGATIVE: a failed hc get is not a missing pane: whois refuses, the binding stays and no end row is written", (t) => {
+  const s = scene(t, (p) => [term("t1", { cwd: p }), term("t2", { cwd: p })]);
+  assert.equal(s.cli("attach", "Genie", "t1").code, 0);
+  const before = s.ledger();
+  const refused = (args, why) => {
+    const r = s.cli(...args);
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.out}`);
+    assert.match(r.err, why, args.join(" "));
+    assert.equal(/plays no bot|attached to no terminal/.test(r.out), false, `${args.join(" ")} never reads as no pane`);
+    assert.deepEqual(s.ledger(), before, `${args.join(" ")} wrote no end row`);
+  };
+  // hc get exits 5 with an error of another kind than not_found: for the bound t1 (the ledger's
+  // own check) and for the unbound t2 (whois' lookup).
+  s.edit((st) => { st.failGet = ["t1"]; st.failGetExit = 5; });
+  refused(["whois", "--bot", ID.main], /hc get t1 failed: .*"kind":"internal".*server error reading t1/);
+  refused(["whois", "t1"], /hc get t1 failed: .*server error reading t1/);
+  s.edit((st) => { st.failGet = ["t2"]; });
+  refused(["whois", "t2", "--json"], /hc get t2 failed: .*server error reading t2/);
+  // hc get exits 0 with an answer that isn't JSON: a failure too.
+  s.edit((st) => { st.failGet = []; st.badGet = ["t1"]; });
+  refused(["whois", "--bot", ID.main, "--json"], /hc get t1 printed no JSON/);
+  s.edit((st) => { st.badGet = ["t2"]; });
+  refused(["whois", "t2"], /hc get t2 printed no JSON/);
+  // hc answers again: the binding was never ended.
+  s.edit((st) => { st.badGet = []; });
+  assert.equal(s.whois("t1").bot, ID.main);
+  assert.equal(s.whois("t2").bot, null);
+});
+
 test("NEGATIVE: a group- or world-writable ledger is refused on read, with a clear message, by every reader", (t) => {
   const s = scene(t, (p) => [term("t1", { cwd: p })]);
   assert.equal(s.cli("attach", "Genie", "t1").code, 0);

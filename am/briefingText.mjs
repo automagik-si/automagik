@@ -1,6 +1,6 @@
 // The briefing over plain data (DESIGN Approach "Group 3", Decisions 9-10, A1, A3): the text
 // a bot starts with (its system prompt, launchBriefingText), the fuller one the hook prints once
-// where that isn't possible and `automagik-herdr brief` prints, and the two file edits Start and Attach
+// where that isn't possible and `am brief` prints, and the two file edits Start and Attach
 // make for it (the hook entry in .claude/settings.local.json, the git exclude line).
 // Pure: no `herdr`, `gpui-kit`, `gpui-base` or `fs`, so briefing.mjs runs it under plain
 // node and `node --test` runs it too. Apache-2.0.
@@ -11,8 +11,8 @@ import { OLD_PACK_NAME, PACK_NAME } from "./release.js";
 
 /** How a bot works (bot workers): it writes no code; one worker per task does. */
 export const WORKER_LINE = "You write no code yourself: for each task start one worker with "
-  + "`automagik-herdr worker \"<task>\" --branch <branch>` (it runs in the task's worktree, under your pane), "
-  + "check its result, and end it with `automagik-herdr worker kill <terminal>` once the task merges.";
+  + "`am worker \"<task>\" --branch <branch>` (it runs in the task's worktree, under your pane), "
+  + "check its result, and end it with `am worker kill <terminal>` once the task merges.";
 
 // The caller checks git; an omitted flag keeps the existing pure-text default.
 const workerLines = (self, isGit) => (isGit && self.code !== false ? [WORKER_LINE] : []);
@@ -185,7 +185,7 @@ export function briefingText({ self, file, members = [], lead, helpers = [], gua
 }
 
 /** Where a bot finds its team's live state: the briefing at launch is a snapshot. */
-export const liveLine = (botId) => `Live status and latest reports of your team and lead: run \`automagik-herdr brief ${botId}\`.`;
+export const liveLine = (botId) => `Live status and latest reports of your team and lead: run \`am brief ${botId}\`.`;
 
 /**
  * How a bot launched with its briefing gets restarted (#428), for every agent the briefing reaches
@@ -195,12 +195,12 @@ export const liveLine = (botId) => `Live status and latest reports of your team 
  * it runs in, or --project. Only in the launch briefing: a pane attached while running was not
  * started with it.
  */
-export const restartLine = (botId) => `To restart you, the person runs \`automagik-herdr restart ${botId}\` `
+export const restartLine = (botId) => `To restart you, the person runs \`am restart ${botId}\` `
   + "in this project's folder (or with --project <that folder>), which keeps your agent and model, or uses Restart "
   + "in your bot's menu in the Herdr sidebar, not your agent's own restart command. In pt-BR: \"Para me reiniciar, "
-  + `rode \`automagik-herdr restart ${botId}\` na pasta deste projeto (ou com --project <essa pasta>), que mantém `
+  + `rode \`am restart ${botId}\` na pasta deste projeto (ou com --project <essa pasta>), que mantém `
   + "meu agente e modelo, ou use Restart no menu do bot na barra lateral do Herdr, não o comando de reinício do "
-  + `próprio agente." Or run \`am restart ${botId}\`. /restart (including Claude Code's `
+  + "próprio agente.\" /restart (including Claude Code's "
   + "Update installed · /restart to apply) never works in a Herdr pane because of its launch flags "
   + "--append-system-prompt-file and --settings.";
 
@@ -208,7 +208,7 @@ export const restartLine = (botId) => `To restart you, the person runs \`automag
  * The briefing a bot starts with, its agent's system prompt (≤ BRIEFING_LIMIT): who it is, its
  * role and instructions, how it works, its lead and its team as .herdr/bots.json names them.
  * Nothing that changes while it runs (a status, an address, a report): for those it runs
- * `automagik-herdr brief`. The hook's once-only print compares this text, so it changes only
+ * `am brief`. The hook's once-only print compares this text, so it changes only
  * when the file does.
  */
 export function launchBriefingText({ self, file, guard = null, isGit = true, project = null, projects = null, lead: givenLead = null }) {

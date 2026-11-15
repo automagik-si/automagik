@@ -99,12 +99,32 @@ const versionText = value => (typeof value === 'string' && value.length <= 64 &&
  * publishers the app follows (lane.js installedVersions, by name), and `updates` whether this
  * copy updates at all (update.js updateMode). Version text only: no path, no setting.
  */
-export function versionsAnswer({ app, dsh, plugins, mode } = {}) {
+export function versionsAnswer({ app, dsh, plugins, mode, latest, reason, appUpdate, force } = {}) {
   const listed = Object.entries(plugins ?? {})
     .map(([name, version]) => ({ name, version: versionText(version) }))
     .filter(plugin => plugin.version !== null)
-  return { app: versionText(app), dsh: versionText(dsh), plugins: listed, updates: mode === 'auto' || mode === 'notify' }
+  return { app: versionText(app), dsh: versionText(dsh), plugins: listed, updates: mode === 'auto' || mode === 'notify',
+    ...(latest === undefined ? {} : { latest: Object.fromEntries(Object.entries(latest ?? {}).map(([name, version]) => [name, versionText(version)]).filter(([, version]) => version !== null)) }),
+    ...(reason === undefined ? {} : { reason: reasonText(reason) }),
+    ...(appUpdate === undefined ? {} : { appUpdate: { version: versionText(appUpdate?.version), latest: appUpdate?.latest === true } }),
+    ...(force === undefined ? {} : { force: forceText(force) }),
+  }
 }
+
+const REASONS = new Set(['invalid-lane', 'older-sequence', 'app-line', 'app-minimum', 'trial-failed', 'dsh-range', 'up-to-date', 'check-failed', 'not-checked'])
+const FORCE_PHASES = new Set(['stopping', 'checking', 'downloading', 'installing', 'restarting', 'done', 'failed'])
+const FORCE_CODES = new Set([...REASONS, 'updated', 'plugins-rolled-back', 'app-download-failed', 'app-manual', 'restart-failed'])
+const paramsText = params => Object.fromEntries(['line', 'base', 'version', 'app'].flatMap(key => {
+  const value = params?.[key]
+  const clean = key === 'line' && typeof value === 'string' && /^\d{1,9}\.\d{1,9}$/.test(value) ? value : versionText(value)
+  return clean ? [[key, clean]] : []
+}))
+const reasonText = reason => reason && REASONS.has(reason.code) ? { code: reason.code, params: paramsText(reason.params) } : null
+export const forceText = force => force && FORCE_PHASES.has(force.phase) ? {
+  phase: force.phase,
+  ...(FORCE_CODES.has(force.code) ? { code: force.code } : {}),
+  ...(force.params ? { params: paramsText(force.params) } : {}),
+} : null
 
 /**
  * Whether a check that found the app up to date still failed: a lane could not be read

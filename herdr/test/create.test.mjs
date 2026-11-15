@@ -240,7 +240,7 @@ test("Copy copies only a line the form would save; a refused one shows why", asy
   form.inputs.name.type("qa", cx);
   draw();
   await click("bot-copy");
-  assert.match(cx.clip, /^automagik-herdr create --name=qa /);
+  assert.match(cx.clip, /^am create --name=qa /);
   // The model is read once per agent, not on every render.
   assert.ok(form.models.has("claude"));
 });
@@ -371,7 +371,29 @@ test("Code bot toggle (#774): defaults on, toggles into the copied line and save
   await edited.click("bot-copy");
   assert.match(edited.cx.clip, / --code=true /);
   await edited.click("bot-save");
-  assert.equal("code" in stored().bots.find((b) => b.id === writer.id), false);
+  assert.equal(stored().bots.find((b) => b.id === writer.id).code, true);
+});
+
+test("toggles #848: code and planned change independently and keep their accessible labels", async () => {
+  seed([MAIN]);
+  const { form, draw, click } = await open({ form: "create" });
+  draw();
+  const label = (id) => nodes.get(id)?.calls.find(([call]) => call === "accessibility_label")?.[1];
+  assert.equal(label("bot-code"), "Code bot (worker instruction in Git projects)");
+  assert.equal(label("bot-planned"), "Planned for a later wave");
+  assert.equal(form.s.code, true);
+  assert.equal(form.s.planned, false);
+  await click("bot-planned");
+  assert.equal(form.s.planned, true);
+  assert.equal(form.s.code, true);
+  draw();
+  await click("bot-code");
+  assert.equal(form.s.code, false);
+  assert.equal(form.s.planned, true);
+  draw();
+  await click("bot-planned");
+  assert.equal(form.s.planned, false);
+  assert.equal(form.s.code, false);
 });
 
 test("Bot settings (pick) with no bot: one New bot line that opens the Create form and closes the list", async () => {
@@ -885,7 +907,7 @@ test("the CLI and the form word the pull warning for an uncommitted or changed b
   assert.equal(first.status, 0, first.stderr);
   assert.equal(untracked, warningOf(first.stderr));
   // A long TMPDIR adds the CLI's tidy warning after the note; the compare keeps the note alone.
-  assert.equal(warningOf(`${first.stderr}\nautomagik-herdr: tidy: hc ls --json failed: socket path too long`), untracked);
+  assert.equal(warningOf(`${first.stderr}\nam: tidy: hc ls --json failed: socket path too long`), untracked);
   // Modified: commit it in the main checkout, then change it there.
   g("add", ".herdr/bots.json");
   g("commit", "-q", "-m", "bots");
@@ -1506,4 +1528,104 @@ test("menu Restart queued: an info toast names the pane and who must answer", as
   assert.equal(state.notes.length, 1);
   assert.deepEqual(state.notes[0], { title: "Bots", level: "info", timeout: 15000,
     body: `${OMP.name}: restart queued for t5 (blocked on "Do you want to proceed?" — the owner must answer); it will restart at its next idle.` });
+});
+
+for (const machine of [null, "vm"]) for (const action of ["start", "restart", "restart-on"]) for (const failure of ["throw", "exit"]) {
+  test(`menu ${action} ${machine ?? "local"} ${failure}: a failed command shows one sentence, logs its trace and clears busy`, async (t) => {
+    seed([MAIN, OMP]);
+    fakeCli({});
+    const { form, cx } = await menu({ machine });
+    const trace = "Error: launch failed\n    at launchRun (models.js:508:3)\n    at startOnMachine (cli.mjs:42:1)";
+    const logs = [];
+    t.mock.method(console, "error", (...words) => logs.push(words.join(" ")));
+    state.timeoutProbe = "honours";
+    if (failure === "throw") state.execFault = (command) => command === "env" ? new Error(trace) : null;
+    else {
+      const bin = join(state.appHome, "mods/am-sidebar/bin");
+      writeFileSync(join(bin, "error.txt"), trace);
+      writeFileSync(join(bin, "run.sh"), `cat "${bin}/error.txt" >&2\nexit 1\n`);
+    }
+    t.after(() => { delete state.execFault; delete state.timeoutProbe; });
+    if (action === "start") form.start({ key: project, machine }, OMP, cx);
+    else form.restart({ key: project, machine }, OMP, cx, action === "restart-on" ? { agent: "codex" } : {});
+    await cx.settle();
+    assert.equal(form.busy, false);
+    assert.ok(form.error);
+    assert.doesNotMatch(form.error, /\n|Error:|at launchRun|models\.js/);
+    assert.match(form.error, /; (?:check|retry)/);
+    assert.ok(logs.some((line) => line.includes("at launchRun")), logs.join("\n"));
+    assert.equal(state.closed.length, 0);
+  });
+}
+
+for (const machine of [null, "vm"]) for (const choice of ["menu-restart-helpers", "menu-end-helpers-restart"]) {
+  test(`helper refusal: ${choice} is one click on ${machine ?? "local"}, keeping agent and conversation choice`, async (t) => {
+    seed([MAIN, OMP]);
+    const args = fakeCli({ refused: "helpers", terminal: "t5", error: "Its helpers would end." }, 1);
+    state.timeoutProbe = "honours";
+    t.after(() => { delete state.timeoutProbe; });
+    const { form, cx, draw, click } = await menu({ machine });
+    form.restart({ key: project, machine }, OMP, cx, { agent: "codex", fresh: true });
+    await cx.settle();
+    draw();
+    assert.ok(nodes.has("menu-restart-helpers"));
+    assert.ok(nodes.has("menu-end-helpers-restart"));
+    assert.equal(nodes.has("menu-restart-force"), false);
+    fakeCli({ terminal: "t100", replaced: "t5" });
+    const press = nodes.get(choice).click;
+    press(null, cx);
+    assert.doesNotThrow(() => press(null, cx), "a repeated click cannot read a cleared retry choice");
+    await cx.settle();
+    assert.equal(args().length, 2, "one initial refusal and only one retry");
+    const last = args().at(-1);
+    assert.match(last, /--agent codex/);
+    assert.match(last, /--force/);
+    assert.match(last, /--fresh/);
+    assert.equal(last.includes("--tree"), choice === "menu-restart-helpers");
+    assert.equal(last.includes("--machine vm"), Boolean(machine));
+    assert.equal(form.busy, false);
+    assert.equal(form.error, null);
+    assert.deepEqual(state.closed, ["o9"]);
+  });
+}
+
+test("a repeated Restart anyway click does not read a cleared retry choice", async () => {
+  seed([MAIN, OMP]);
+  const args = fakeCli({ terminal: "t100" });
+  const { form, cx, draw } = await menu();
+  form.forceable = { project: { key: project }, bot: OMP, agent: null };
+  draw();
+  const press = nodes.get("menu-restart-force").click;
+  press(null, cx);
+  assert.doesNotThrow(() => press(null, cx));
+  await cx.settle();
+  assert.equal(args().length, 1);
+});
+
+// Herdr ends a mod's program at 30 s unless exec gets a timeout; a tree restart runs each helper in
+// turn (26.5 s with 4 helpers, 36.8 s with 6), so the button must pass the long one (or not run).
+for (const machine of [null, "vm"]) test(`menu Restart with its helpers on ${machine ?? "local"}: the CLI runs with the 600 s exec timeout`, async (t) => {
+  seed([MAIN, OMP]);
+  const args = fakeCli({ terminal: "t100", replaced: "t5" });
+  Object.assign(state, { timeoutProbe: "honours", execTimeouts: [] });
+  t.after(() => { delete state.timeoutProbe; delete state.execTimeouts; });
+  const { form, cx } = await menu({ machine });
+  form.restart({ key: project, machine }, OMP, cx, { tree: true, force: true });
+  await cx.settle();
+  assert.match(args().at(-1), /--tree/);
+  assert.deepEqual(state.execTimeouts.filter((x) => x.command === "env"), [{ command: "env", timeout: 600_000 }]);
+});
+
+test("menu Restart with its helpers on a Herdr that takes no exec timeout: not run, nothing restarted, a terminal command", async (t) => {
+  seed([MAIN, OMP]);
+  const args = fakeCli({ terminal: "t100", replaced: "t5" });
+  Object.assign(state, { timeoutProbe: "ignores", execTimeouts: [] });
+  t.after(() => { delete state.timeoutProbe; delete state.execTimeouts; });
+  const { form, cx } = await menu();
+  form.restart({ key: project }, OMP, cx, { tree: true, force: true });
+  await cx.settle();
+  assert.equal(state.execTimeouts.some((x) => x.command === "env"), false, "the CLI never ran");
+  assert.throws(() => args(), /ENOENT/, "no restart reached the CLI");
+  assert.match(form.error, /cannot wait long enough for a restart with its helpers; restart it from a terminal/);
+  assert.equal(form.busy, false);
 });

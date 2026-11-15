@@ -5,7 +5,7 @@
 // `read(path) => string | null`, so `node --test` runs it and the CLI and the mod share it.
 // Apache-2.0.
 import { LEGACY_AGENTS } from "./retired.js";
-import { hermesPairArgs } from "./hermesPair.js";
+import { hermesPairRun } from "./hermesPair.js";
 
 /**
  * The agents people start, keyed as Herdr's shipped programs table keys them (the table in
@@ -420,15 +420,531 @@ export function agyModeArgs(agentKey, mode = null) {
 // stop TUI startup at "Hooks need review" for a person to answer, and the pack never passes
 // --dangerously-bypass-hook-trust (it would run an untrusted hook's commands in a worktree).
 // The pack puts both on every Codex launch it makes, so an unattended bot or worker never stops
-// at an approval prompt or a hook review only a person can answer (#946). A bot's
-// `codexAuto: false` opts out, and an hc template owns a worker's command: neither flag reaches one.
+// at an approval prompt or a hook review only a person can answer (#946).
 export const CODEX_AUTO_ARGS = Object.freeze(["--approve-for-me", "--disable", "hooks"]);
 
-/** Whether a launch of `agentKey` for `bot` passes Codex's auto mode: a Codex seat or worker, unless its bot opted out. */
-export const codexAutoOn = (agentKey, bot) => agentKey === "codex" && bot?.codexAuto !== false;
+// One Codex launch mode on every machine (#1125, the owner's ruling of 10 and 12 Nov): every
+// Codex seat and every worker the pack starts with --agent codex runs the auto mode above with
+// the workspace-write sandbox on, never --dangerously-bypass-approvals-and-sandbox. Two more
+// words make it usable there. `--no-daemon`: hc --skill says Codex must run with it (templates
+// included), or its commands run in Codex's shared background server, outside hc and with the
+// environment of whichever pane started that server (HC_TERMINAL_ID included). The sandbox's
+// own `network_access`: on, so hc's socket and GitHub (gh, git's transport) answer. The folders
+// it may write besides its working folder are derived per launch (codexGrants, withCodexGrants).
+// A bot's `codexAuto: false` no longer opts out (model.js warns), and the source's own approval
+// and sandbox words are left out by name (codexClean). An hc worker template owns its command,
+// bypass included: the owner's exception for template workers (#1125), never a seat's.
+export const CODEX_NETWORK = "sandbox_workspace_write.network_access=true";
+export const CODEX_MODE_ARGS = Object.freeze([...CODEX_AUTO_ARGS, "--no-daemon", "-c", CODEX_NETWORK]);
 
-/** The words Codex's auto mode adds, [] for every other agent and for a bot whose `codexAuto` is false. */
-export const codexAutoArgs = (agentKey, bot) => (codexAutoOn(agentKey, bot) ? [...CODEX_AUTO_ARGS] : []);
+/** Whether a launch of `agentKey` passes Codex's launch mode: every Codex seat and worker the pack builds (#1125: no opt-out). */
+export const codexAutoOn = (agentKey) => agentKey === "codex";
+
+/** The words Codex's launch mode adds, [] for every other agent. */
+export const codexAutoArgs = (agentKey) => (codexAutoOn(agentKey) ? [...CODEX_MODE_ARGS] : []);
+
+// The words a Codex source may carry that pick its approvals or its sandbox, or run its commands
+// outside the pane (checked against codex-cli 0.167.0 on 2026-11-12). Codex refuses
+// --approve-for-me beside -a, -s or the bypass flag; a `-c default_permissions=…` overrides it
+// (the effective sandbox becomes danger-full-access), so those keys go too.
+const CODEX_PACK_WORDS = new Set(["--approve-for-me", "--no-daemon"]);
+const CODEX_BYPASS = new Set(["--dangerously-bypass-approvals-and-sandbox", "--yolo"]);
+const CODEX_VALUED = [["-a", "--ask-for-approval"], ["-s", "--sandbox"], [null, "--remote"], [null, "--remote-auth-token-env"]];
+const CODEX_CONFIG_KEYS = ["sandbox_mode", "approval_policy", "approvals_reviewer", "sandbox_workspace_write",
+  "default_permissions", "permission_profile", "permissions"];
+// Codex's other flags that take a value: the word after one is never read as a flag here.
+const CODEX_TAKES_VALUE = new Set(["-m", "--model", "-p", "--profile", "-C", "--cd", "-i", "--image", "--enable", "--disable",
+  "--local-provider", "--add-dir"]);
+// #1142: every Codex option of known arity, as the pack lists Codex 0.167's: these take a value,
+// these take none. Anything else is of unknown arity.
+const CODEX_VALUE_FLAGS = new Set([...CODEX_TAKES_VALUE, "-c", "--config", ...CODEX_VALUED.flat().filter(Boolean)]);
+const CODEX_PLAIN_FLAGS = new Set(["--approve-for-me", "--no-daemon", "--oss", "--search"]);
+
+/**
+ * A Codex word's arity (#1142): "flag" (takes no value), "value" (its value is the next word),
+ * "joined" (its value is in it: --model=x, -mx), or null (a subcommand, a prompt, an unknown flag).
+ */
+export function codexOptionArity(w) {
+  if (CODEX_PLAIN_FLAGS.has(w)) return "flag";
+  if (CODEX_VALUE_FLAGS.has(w)) return "value";
+  if (w.startsWith("--")) return w.includes("=") && CODEX_VALUE_FLAGS.has(w.slice(0, w.indexOf("="))) ? "joined" : null;
+  return /^-[A-Za-z]./.test(w) && CODEX_VALUE_FLAGS.has(w.slice(0, 2)) ? "joined" : null;
+}
+
+/**
+ * The environment words that place a Codex launch's folders (#1142): one list for the linked
+ * probe (codexOn), the folders derived from them (codexGrantPaths) and the shell forms a template
+ * may not set (codexForwards, with PATH and every CODEX_, XDG_, npm_config_ and BUN_INSTALL word).
+ */
+export const CODEX_DIR_VARS = ["HOME", "HERDR_APP_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "GOPATH",
+  "GOMODCACHE", "GOCACHE", "npm_config_cache", "NPM_CONFIG_CACHE", "BUN_INSTALL", "BUN_INSTALL_CACHE_DIR"];
+/** Whether a shell assignment to `name` could move a Codex launch's folders or its program (#1142). */
+export const codexDirVar = (name) => CODEX_DIR_VARS.includes(name) || name === "PATH" || /^(XDG_|CODEX_|npm_config_|BUN_INSTALL)/i.test(name);
+
+// TOML's one-letter basic-string escapes (\xHH, \uXXXX and \UXXXXXXXX are read apart).
+const TOML_ESCAPES = { b: "\b", t: "\t", n: "\n", f: "\f", r: "\r", "\"": "\"", "\\": "\\" };
+
+/**
+ * A basic string's text with its escapes decoded (TOML 1.1's \xHH included). An escape TOML
+ * lacks reads as its letter (toward dropping).
+ */
+const tomlBasic = (body) => body.replace(/\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[\s\S])/g, (m, e) => {
+  if (e.length === 1) return TOML_ESCAPES[e] ?? e;
+  const cp = parseInt(e.slice(1), 16);
+  return cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+});
+
+/**
+ * A trimmed TOML key part unquoted: a basic string "…" with its escapes decoded (tomlBasic), a
+ * literal string '…' as it is, a bare key as written.
+ */
+function tomlKeyPart(part) {
+  if (part.length >= 2 && part[0] === "'" && part.endsWith("'")) return part.slice(1, -1);
+  if (!(part.length >= 2 && part[0] === "\"" && part.endsWith("\""))) return part;
+  return tomlBasic(part.slice(1, -1));
+}
+
+/**
+ * A config text's key parts as TOML reads them: the dotted key before the first `=` outside
+ * quotes, split on the dots outside quotes, each part trimmed, then unquoted (tomlKeyPart).
+ * When a quote doesn't close, the parts finished before it (none when the first quote is open).
+ */
+function tomlKeyParts(text) {
+  const parts = [];
+  let start = 0, quote = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (quote === "\"" && ch === "\\") i += 1;
+      else if (ch === quote) quote = null;
+    } else if (ch === "\"" || ch === "'") quote = ch;
+    else if (ch === "." || ch === "=") {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+      if (ch === "=") return parts.map((p) => tomlKeyPart(p.trim()));
+    }
+  }
+  if (!quote) parts.push(text.slice(start));
+  return parts.map((p) => tomlKeyPart(p.trim()));
+}
+
+/**
+ * A config text's key parts read raw, the one reading of a key whose first quote doesn't close:
+ * the text before its first `=`, trimmed, one outer quote off, split on every dot, each part
+ * trimmed. A key opening with a double quote is a basic string's text, its escapes decoded
+ * (tomlBasic) before the split; one opening with a single quote is literal, as written.
+ */
+function rawKeyParts(text) {
+  const raw = text.split("=")[0].trim();
+  const body = raw.replace(/^["']|["']$/g, "");
+  return (raw[0] === "\"" ? tomlBasic(body) : body).split(".").map((p) => p.trim());
+}
+
+/**
+ * The name a config key is left out by, from one reading's parts, or null (#1125): a key
+ * CODEX_CONFIG_KEYS lists, or any key under one, by that key; a listed key under a profile
+ * (`profiles.<name>.<key>`, which `--profile <name>` applies) as `profiles.*.<key>`, never the
+ * profile's name; `profiles` or one profile whole (a table that can hold any listed key, its
+ * narrowness unproved) as `profiles`.
+ */
+function codexConfigName(parts) {
+  if (CODEX_CONFIG_KEYS.includes(parts[0])) return parts[0];
+  if (parts[0] !== "profiles") return null;
+  if (parts.length < 3) return "profiles";
+  return CODEX_CONFIG_KEYS.includes(parts[2]) ? `profiles.*.${parts[2]}` : null;
+}
+
+/**
+ * `-c`/`--config`'s key=value at `words[i]` in any form: { name, text, span } (span: words it
+ * takes; name: what it is left out by, codexConfigName, or null), or null. The key is matched by
+ * its meaning, never its spelling (#1125: config keys written in another valid TOML spelling were
+ * kept), in two readings: TOML's (tomlKeyParts) and the raw one (rawKeyParts), which alone reads
+ * a key whose first quote doesn't close. A name from either drops the word. Codex's own reading
+ * (split on every dot, each part trimmed) needs none of its own: a key that starts with no quote
+ * is read so by the raw one too (a closing quote off), and one that starts with a quote has no
+ * bare first part for Codex.
+ */
+function codexConfigAt(words, i) {
+  const w = words[i];
+  let text = null, span = 1;
+  if (w === "-c" || w === "--config") { text = words[i + 1] ?? ""; span = 2; }
+  else if (w.startsWith("--config=")) text = w.slice("--config=".length);
+  else if (w.startsWith("-c")) text = w.slice(w[2] === "=" ? 3 : 2);
+  if (text === null) return null;
+  const name = [tomlKeyParts(text), rawKeyParts(text)].map(codexConfigName).find(Boolean) ?? null;
+  return { name, text, span };
+}
+
+/** The approval or sandbox flag at `w` in any form (`-a x`, `-ax`, `-a=x`, `--sandbox=x`): { flag (as written, no value), next }, or null. */
+function codexValuedAt(w) {
+  for (const [short, long] of CODEX_VALUED) {
+    if (w === long || (short && w === short)) return { flag: w, next: true };
+    if (w.startsWith(`${long}=`)) return { flag: long, next: false };
+    if (short && w.startsWith(short) && w.length > 2) return { flag: short, next: false };
+  }
+  return null;
+}
+
+/** Whether `dir` is the filesystem root, `home` or a folder above it: a grant that wide is never passed. */
+export const homeWide = (dir, home) => {
+  const d = String(dir ?? "").replace(/\/+$/, "") || "/";
+  const h = typeof home === "string" && home ? home.replace(/\/+$/, "") : null;
+  return d === "/" || (h !== null && (d === h || h.startsWith(`${d}/`)));
+};
+
+/** `p` as one absolute path, its `.` and `..` segments resolved and no trailing slash; null when it isn't absolute. */
+export function absPath(p) {
+  if (typeof p !== "string" || !p.startsWith("/") || /[\x00-\x1f\x7f]/.test(p)) return null;
+  const out = [];
+  for (const seg of p.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") out.pop();
+    else out.push(seg);
+  }
+  return `/${out.join("/")}`;
+}
+
+/**
+ * `p` as one absolute path without its empty and `.` segments or a trailing slash, its `..`
+ * segments KEPT (#1142): what a `..` names depends on the symlinks before it, so only the
+ * filesystem where the path is used can say (`link/..` is the parent of the link's target, not
+ * the folder holding the link). Null when it isn't absolute.
+ */
+export function cleanPath(p) {
+  if (typeof p !== "string" || !p.startsWith("/") || /[\x00-\x1f\x7f]/.test(p)) return null;
+  return `/${p.split("/").filter((s) => s && s !== ".").join("/")}`;
+}
+
+/** Whether absolute `p` has a `..` segment. */
+const hasParent = (p) => p.split("/").includes("..");
+
+/** Whether canonical `a` is canonical `b` or inside it. */
+const within = (a, b) => a === b || b === "/" || a.startsWith(`${b}/`);
+
+/**
+ * Where a Codex launch runs, for its folder rules (#1125, #1142): `{ home, appHomes, canon }`,
+ * each root canonical there. `canon(p)`: an absolute path as that machine resolves it, or null
+ * when its narrowness can't be proved (not absolute, or `resolve` couldn't tell). `resolve` answers
+ * for the launch's own machine with filesystem semantics: it gets the path as cleanPath leaves it,
+ * `..` included, and gives its realpath through the nearest folder that is there (symlinks
+ * followed, then each `..`). Without one, paths compare as written (cleanPath), and one with a
+ * `..` proves nothing (null). `appHome`: the launch's effective app home (one path or several);
+ * the default one under `home` is always protected too.
+ */
+export function codexWhere({ home = null, appHome = null, resolve = null, id = null } = {}) {
+  const resolved = (p) => {
+    const a = cleanPath(p);
+    if (!a) return null;
+    if (!resolve) return hasParent(a) ? null : a;
+    let r = null;
+    try { r = cleanPath(resolve(a)); } catch { return null; }
+    return r && !hasParent(r) ? r : null;
+  };
+  // #1142: a protected root that is given but can't be resolved there (empty, relative, not
+  // answered, a resolver error) is never dropped or guessed: `unproved` names it, and then `canon`
+  // proves nothing and codexDirAllowed allows nothing (no --add-dir, no derived folder).
+  const given = (p) => typeof p === "string";
+  const unproved = [];
+  const h = given(home) ? resolved(home) : null;
+  if (given(home) && !h) unproved.push("its home folder (HOME)");
+  const appHomes = [];
+  for (const a of [...(Array.isArray(appHome) ? appHome : [appHome]).filter(given), ...(given(home) ? [`${home}/.config/herdr-app`] : [])]) {
+    const c = resolved(a);
+    if (c) { if (!appHomes.includes(c)) appHomes.push(c); } else if (!unproved.includes("an app home")) unproved.push("an app home");
+  }
+  // `spelled`: the home folder as the launch spells it, the form its paths were derived and resolved from.
+  // `id`: the launch machine's identity observation (idHere, idsThere): "dev:ino" of a path, symlinks followed, or null.
+  return { home: h, spelled: given(home) ? home : null, appHomes, canon: unproved.length ? () => null : resolved,
+    id: typeof id === "function" ? id : null, unproved };
+}
+
+/**
+ * Whether a Codex launch may be granted canonical `dir` under `where` (codexWhere): "ok",
+ * "refused" (a rule proves it protected: the root, the home folder or a folder above it, an app
+ * home, a folder inside one or above one, a whole general folder or above one), or "unproved" (an
+ * observation it needs failed: it is withheld). Paths first, then (#1142) the launch machine's
+ * identity observations (`where.id`): `dir` and every folder above it, the home folder and every
+ * folder above it, and each app home and every folder above it must all be observed, and none may
+ * make `dir` the home folder or above it, an app home or above one, or a folder inside one. Any
+ * failed observation withholds: `dir`'s own only `dir`; the home folder's or an app home's (an
+ * absent default app home included) every folder. A general folder (or a folder above it) that
+ * can be observed refuses `dir` by identity too; one that can't (an absent optional cache, say)
+ * is not granted itself and withholds nothing. A where without observations never grants, except
+ * codexWhereThere's (deferred: the destination weighs those words). This is not a proof against a
+ * bind mount that shows a folder inside an app home under another path (a known limit, #1151).
+ */
+export function codexDirVerdict(dir, where = {}, general = []) {
+  if (typeof dir !== "string" || !dir.startsWith("/") || dir === "/") return "refused";
+  if (where.unproved?.length) return "unproved";
+  if (where.home && within(where.home, dir)) return "refused";
+  if ((where.appHomes ?? []).some((app) => within(dir, app) || within(app, dir))) return "refused";
+  // #1142: a derived folder at or above a whole general folder (`general`, canonical) is no narrow grant.
+  if (general.some((g) => within(g, dir))) return "refused";
+  if (where.deferred) return "ok";
+  return typeof where.id === "function" && where.home ? idVerdict(dir, where, general) : "unproved";
+}
+
+/** codexDirVerdict's "ok": whether `dir` may be granted. */
+export const codexDirAllowed = (dir, where = {}, general = []) => codexDirVerdict(dir, where, general) === "ok";
+
+/** Canonical `p` and each folder above it, up to the root. */
+const chain = (p) => {
+  const out = [];
+  for (let c = p; ; c = c.slice(0, c.lastIndexOf("/")) || "/") { out.push(c); if (c === "/") return out; }
+};
+
+const DEV_INO = /^\d+:\d+$/;
+
+/** codexDirVerdict's identity walk (#1142): every observation it needs, or "unproved". */
+function idVerdict(dir, where, general) {
+  const id = (p) => {
+    let v = null;
+    try { v = where.id(p); } catch { v = null; }
+    return typeof v === "string" && DEV_INO.test(v) ? v : null;
+  };
+  const walk = (p) => chain(p).map(id);
+  const homeUp = walk(where.home);
+  const appUps = (where.appHomes ?? []).map(walk);
+  if (homeUp.includes(null) || appUps.some((up) => up.includes(null))) return "unproved";
+  const mine = walk(dir);
+  if (mine.includes(null)) return "unproved";
+  const self = mine[0];
+  if (homeUp.includes(self)) return "refused";
+  if (appUps.some((up) => up.includes(self) || mine.includes(up[0]))) return "refused";
+  if (general.some((g) => chain(g).some((p) => id(p) === self))) return "refused";
+  return "ok";
+}
+
+/**
+ * The one warning a Codex launch gives when folders it would pass were withheld (#1142):
+ * `withheld` folders it couldn't prove outside the app home, `granted` folders it still passes
+ * (counted once each). Null when nothing was withheld.
+ */
+export function codexWithheldWarning(withheld, granted) {
+  if (!(withheld > 0)) return null;
+  const tail = "writes outside permitted locations may require automatic review or fail. See #1151.";
+  return granted > 0
+    ? `Codex extra folders withheld: the pack cannot prove ${withheld} of them are outside the Herdr app home and passes no grant for those; ${tail}`
+    : `Codex extra folders withheld: the pack cannot prove they are outside the Herdr app home. It passes no additional folder grants; ${tail}`;
+}
+
+/** `where` as codexWhere gives it, from one: a codexWhere result, a home folder (compared as written), or nothing. */
+const whereOf = (where) => (where && typeof where === "object" && typeof where.canon === "function" ? where
+  : codexWhere({ home: typeof where === "string" ? where : null }));
+
+/**
+ * The rules for a launch built here to run on another machine (seatOnMachine, #1142): every
+ * absolute `--add-dir` stays as cleanPath leaves it, `..` included, because only that machine can
+ * resolve it; codexOn weighs each there and passes that machine's canonical value.
+ */
+export const codexWhereThere = () => ({ home: null, appHomes: [], canon: cleanPath, deferred: true });
+
+/**
+ * An `--add-dir` value under `where` (#1142): { c, verdict }: its canonical form there (the value
+ * a launch passes) and codexDirVerdict's answer. A relative value is refused; one that can't be
+ * resolved there (a dangling link, an error) is unproved.
+ */
+const weighDir = (value, where) => {
+  if (cleanPath(value) === null) return { c: null, verdict: "refused" };
+  const c = where.canon(value);
+  return c === null ? { c: cleanPath(value), verdict: "unproved" } : { c, verdict: codexDirVerdict(c, where) };
+};
+
+/**
+ * A Codex argv's `--add-dir` words (before any `--`) under `where`: each one `where` allows is
+ * passed as its canonical value there, the one the rules checked (#1142: so a `link/..` can't
+ * be checked as one folder and reach Codex as another); each other one is left out: { argv,
+ * dropped } (dropped: true when one went). For a launch whose folders are known only where it
+ * runs (a linked machine: seatOnMachine), after the argv is built.
+ */
+export function codexKeepDirs(argv, where) {
+  const w = whereOf(where);
+  const words = Array.isArray(argv) ? argv.map(String) : [];
+  const out = [], unproved = [];
+  let dropped = false;
+  for (let i = 0; i < words.length; i += 1) {
+    const x = words[i];
+    if (x === "--") { out.push(...words.slice(i)); break; }
+    const value = x === "--add-dir" ? words[i + 1] : x.startsWith("--add-dir=") ? x.slice("--add-dir=".length) : undefined;
+    if (value === undefined) { out.push(x); continue; }
+    const { c, verdict } = weighDir(value, w);
+    if (verdict !== "ok") {
+      if (verdict === "unproved") { if (!unproved.includes(c)) unproved.push(c); } else dropped = true;
+      if (x === "--add-dir") i += 1;
+      continue;
+    }
+    if (x === "--add-dir") { out.push(x, c); i += 1; } else out.push(`--add-dir=${c}`);
+  }
+  return { argv: out, dropped, unproved };
+}
+
+/**
+ * Whether each `--add-dir` in Codex words `args` (before any `--`) is already the canonical value
+ * `where` allows, byte for byte (#1142): a template's text is never rewritten, so a value it
+ * passes is the one checked only when it is written that way.
+ */
+export function codexDirsExact(args, where) {
+  const words = ["codex", ...(Array.isArray(args) ? args.map(String) : [])];
+  const cut = words.indexOf("--");
+  const options = cut < 0 ? words : words.slice(0, cut);
+  const kept = codexKeepDirs(options, where);
+  return !kept.dropped && !kept.unproved.length && kept.argv.length === options.length && kept.argv.every((w, i) => w === options[i]);
+}
+
+/**
+ * A Codex source's words (`run`, Herdr's table with programs.json applied) without the ones that
+ * pick its approvals or sandbox: bypass and --yolo, -a/--ask-for-approval and -s/--sandbox in
+ * their separate, joined and `=` forms, -c/--config for the keys CODEX_CONFIG_KEYS names (and
+ * any key under one, and under a profile; or a profile whole: codexConfigName), --remote
+ * (another app server: outside the pane, #1125), and an --add-dir
+ * `where` doesn't allow (codexWhere, codexDirAllowed: canonical where the launch runs, so a dot,
+ * parent or symlink alias of the home folder or the app home goes too, as does a relative one:
+ * its narrowness can't be proved, #1142); one it allows is passed as that canonical value, the
+ * one checked. `where` may also be a home folder, compared as written.
+ * The pack's own --approve-for-me, --no-daemon and network word go quietly (launchRun puts them
+ * back once). Every other word stays as it is, after a `--` too.
+ * Returns { argv, dropped, unproved } (`dropped`: the flags left out, by name, `-c sandbox_mode`,
+ * `-c profiles.*.sandbox_mode` or `-c profiles` style: never a value or a profile's name;
+ * `unproved`: the --add-dir folders withheld because an observation they
+ * need failed, #1142, which the launch's one withheld warning counts instead).
+ */
+export function codexClean(run, where = null) {
+  const at = whereOf(where);
+  const words = Array.isArray(run) ? run.map(String) : [];
+  const argv = [], dropped = [], unproved = [];
+  const drop = (name) => { if (!dropped.includes(name)) dropped.push(name); };
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i];
+    if (w === "--") { argv.push(...words.slice(i)); break; }
+    if (CODEX_PACK_WORDS.has(w)) continue;
+    if (CODEX_BYPASS.has(w)) { drop(w); continue; }
+    const valued = codexValuedAt(w);
+    if (valued) { drop(valued.flag); if (valued.next) i += 1; continue; }
+    const config = codexConfigAt(words, i);
+    if (config) {
+      // The pack's own network word goes quietly, as --approve-for-me does: launchRun adds it once.
+      if (config.text.trim() === CODEX_NETWORK) { i += config.span - 1; continue; }
+      // Any other spelling of that word is a config key like the rest: dropped and named (launchRun
+      // still adds the exact one).
+      if (config.name) drop(`-c ${config.name}`);
+      else argv.push(...words.slice(i, i + config.span));
+      i += config.span - 1;
+      continue;
+    }
+    const addDir = w === "--add-dir" ? words[i + 1] : w.startsWith("--add-dir=") ? w.slice("--add-dir=".length) : undefined;
+    if (addDir !== undefined) {
+      const { c, verdict } = weighDir(addDir, at);
+      if (verdict !== "ok") {
+        if (verdict === "unproved") { if (!unproved.includes(c)) unproved.push(c); } else drop("--add-dir");
+        if (w === "--add-dir") i += 1;
+        continue;
+      }
+      if (w === "--add-dir") { argv.push(w, c); i += 1; } else argv.push(`--add-dir=${c}`);
+      continue;
+    }
+    argv.push(w);
+    if (CODEX_TAKES_VALUE.has(w) && i + 1 < words.length) argv.push(words[++i]);
+  }
+  return { argv, dropped, unproved };
+}
+
+/** One line naming what codexClean left out of `run` (flag names only), or null when nothing. */
+export function codexCleanNote(run, where = null, source = "programs.json's Codex command") {
+  const { dropped } = codexClean(run, whereOf(where));
+  return dropped.length ? `${source} names ${dropped.join(", ")}: left out. Every Codex seat and worker runs in auto mode `
+    + "(--approve-for-me) with its sandbox on (#1125)." : null;
+}
+
+/**
+ * The paths codexGrants weighs for a launch, as written (cleanPath: a `..` kept for the
+ * filesystem to resolve, #1142), before any is resolved:
+ * { candidates, general }. `candidates`, in order: `gitDir`, the launch checkout's own git dir (a
+ * linked worktree's `.git/worktrees/<name>`, which Codex keeps read-only even beside its common
+ * dir), and `gitCommonDir`, its git common dir (its own .git, or the main checkout's); then
+ * herdr-core's state and data folders (XDG_STATE_HOME, XDG_DATA_HOME, else under `home`), which hc
+ * needs to reach its core; then the tool caches a build writes: Go's module and build caches
+ * (GOMODCACHE, GOCACHE, else GOPATH's), npm's (npm_config_cache), pnpm's store and cache, and Bun's
+ * install cache (BUN_INSTALL_CACHE_DIR, BUN_INSTALL). `general`: the folders never granted whole
+ * (each XDG folder, ~/.local, GOPATH and Bun's own). `env` is the launch's environment.
+ */
+export function codexGrantPaths({ home = null, env = {}, gitDir = null, gitCommonDir = null }) {
+  const h = cleanPath(home);
+  const abs = (p) => cleanPath(p);
+  const at = (base, rest) => (base ? cleanPath(`${base}/${rest}`) : null);
+  const xdg = (name, fallback) => abs(env[name]) ?? at(h, fallback);
+  const state = xdg("XDG_STATE_HOME", ".local/state"), data = xdg("XDG_DATA_HOME", ".local/share");
+  const cache = xdg("XDG_CACHE_HOME", ".cache"), config = xdg("XDG_CONFIG_HOME", ".config");
+  const gopath = abs(String(env.GOPATH ?? "").split(":")[0]) ?? at(h, "go");
+  const bun = abs(env.BUN_INSTALL) ?? at(h, ".bun");
+  const general = [state, data, cache, config, at(h, ".local"), gopath, bun].filter(Boolean);
+  const candidates = [abs(gitDir), abs(gitCommonDir), at(state, "herdr-core"), at(data, "herdr-core"),
+    abs(env.GOMODCACHE) ?? at(gopath, "pkg/mod"), abs(env.GOCACHE) ?? at(cache, "go-build"),
+    abs(env.npm_config_cache) ?? abs(env.NPM_CONFIG_CACHE) ?? at(h, ".npm"),
+    at(data, "pnpm/store"), at(cache, "pnpm"),
+    abs(env.BUN_INSTALL_CACHE_DIR) ?? at(bun, "install/cache")].filter(Boolean);
+  return { candidates, general };
+}
+
+/**
+ * The folders a Codex launch may write besides its working folder (#1125): codexGrantPaths'
+ * candidates, each made canonical where the launch runs (`where`, codexWhere: a dot, parent or
+ * symlink alias resolved there, #1142), kept only when it is a folder there (`isDir`, asked with
+ * the canonical path), codexDirAllowed (never the root, the home folder or above it, never an app
+ * home, inside one or above one) and not a whole general folder (canonical too). `where`: a
+ * codexWhere result; without one, `home` and `appHome` build it with paths compared as written.
+ * Pure: `where.canon` and `isDir` answer for the launch's machine.
+ */
+export function codexGrants(opts) {
+  return codexGrantPlan(opts).dirs;
+}
+
+/**
+ * codexGrants with what it withheld: { dirs, unproved }. One inventory (#1142): `paths`, the
+ * codexGrantPaths result the resolver was asked about (codexOn passes the one it probed), else one
+ * built from `home` as the launch spells it, else from where.spelled (codexWhere keeps the home as
+ * given): never rebuilt from the canonical home, whose paths a resolver may not have been asked about.
+ * Each candidate is judged on its own (codexDirVerdict): one that isn't a folder there is not
+ * granted; one that can't be resolved there, or whose observations fail, is withheld and named in
+ * `unproved` (counted by the launch's warning); the others are granted. A general folder that can't
+ * be resolved there (absent behind a dangling link, say) keeps no candidate out by its path and
+ * withholds nothing; the candidates under it can't be resolved either.
+ */
+export function codexGrantPlan({ where = null, home = null, appHome = null, env = {}, gitDir = null, gitCommonDir = null, isDir = () => false,
+  paths = null }) {
+  const w = where ?? codexWhere({ home, appHome });
+  const { candidates, general } = paths ?? codexGrantPaths({ home: home ?? w.spelled ?? w.home, env, gitDir, gitCommonDir });
+  const whole = general.map((g) => w.canon(g)).filter(Boolean);
+  const out = [], unproved = [];
+  const withhold = (d) => { if (d && !unproved.includes(d)) unproved.push(d); };
+  for (const raw of candidates) {
+    const dir = w.canon(raw);
+    if (dir === null) { withhold(cleanPath(raw)); continue; }
+    if (out.includes(dir)) continue;
+    // isDir: true (a folder), false (not there, or not a folder: nothing to grant), anything else
+    // or a throw: it couldn't be observed, so the candidate is withheld and counted.
+    let there = null;
+    try { there = isDir(dir); } catch { there = null; }
+    if (there === false) continue;
+    if (there !== true) { withhold(dir); continue; }
+    const verdict = codexDirVerdict(dir, w, whole);
+    if (verdict === "ok") out.push(dir);
+    else if (verdict === "unproved") withhold(dir);
+  }
+  return { dirs: out, unproved };
+}
+
+/**
+ * `argv` with an `--add-dir <dir>` for each of `dirs` right after the pack's Codex mode words
+ * (CODEX_MODE_ARGS, as launchRun puts them), so they land before any subcommand (`resume`) and
+ * the task. An argv without those words (a template's command, another agent) is returned as it is.
+ */
+export function withCodexGrants(argv, dirs = []) {
+  const words = Array.isArray(argv) ? [...argv] : [];
+  const n = CODEX_MODE_ARGS.length;
+  const at = words.findIndex((_, i) => CODEX_MODE_ARGS.every((m, k) => words[i + k] === m));
+  if (at < 0 || !dirs.length) return words;
+  return [...words.slice(0, at + n), ...dirs.flatMap((d) => ["--add-dir", d]), ...words.slice(at + n)];
+}
 
 /** agy's flag that answers every permission request itself; its --settings deny list still holds. */
 export const AGY_SKIP_PERMISSIONS = "--dangerously-skip-permissions";
@@ -447,9 +963,10 @@ export const AUTO_MODE = Object.freeze({
   claude: Object.freeze({ args: Object.freeze(["--permission-mode", "auto"]),
     own: Object.freeze(["--permission-mode", "--dangerously-skip-permissions"]),
     what: "Claude Code's auto mode: its classifier answers permission requests" }),
-  codex: Object.freeze({ args: CODEX_AUTO_ARGS,
+  codex: Object.freeze({ args: CODEX_MODE_ARGS,
     own: Object.freeze(["--approve-for-me", "-a", "--ask-for-approval", "--yolo", "--dangerously-bypass-approvals-and-sandbox"]),
-    what: "Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox, with hooks off" }),
+    what: "Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox with network on, "
+      + "outside Codex's shared server (--no-daemon), with hooks off" }),
   antigravity: Object.freeze({ args: Object.freeze([AGY_SKIP_PERMISSIONS]),
     own: Object.freeze([AGY_SKIP_PERMISSIONS]),
     what: "no permission prompts; the launch's deny list still refuses what it names" }),
@@ -488,13 +1005,14 @@ function runNames(run, flags) {
 
 /**
  * The words `agentKey`'s automatic mode adds to `run` for `bot`: AUTO_MODE's, [] for an agent
- * with none, for a Codex bot whose `codexAuto` is false, and for a run that already picks its
- * own approvals (a programs.json override).
+ * with none and for a run that already picks its own approvals (a programs.json override).
+ * Codex always gets its launch mode (#1125): launchRun leaves the source's own approval and
+ * sandbox words out instead.
  */
 export function autoModeArgs(agentKey, bot = null, run = []) {
   const mode = AUTO_MODE[agentKey];
+  if (agentKey === "codex") return codexAutoArgs(agentKey);
   if (!mode || runNames(run, mode.own)) return [];
-  if (agentKey === "codex") return codexAutoArgs(agentKey, bot);
   return [...mode.args];
 }
 
@@ -502,11 +1020,18 @@ export function autoModeArgs(agentKey, bot = null, run = []) {
  * The words `agentKey` starts with: the given run (Herdr's table, programs.json applied) and the
  * flags this pack adds for that agent's automatic mode. They are added here, so a bot's start,
  * its restart and its workers all take them from the definition, never from an old pane's command.
+ * A Codex run loses its own approval and sandbox words first (codexClean, #1125; `where`, the
+ * launch's codexWhere when the caller knows it, also stops an --add-dir of the home folder or an
+ * app home, by any alias); the mode words go before a `--` in it, so they stay options.
  */
-export function launchRun(agentKey, run, bot) {
-  const pair = agentKey === "hermes" ? hermesPairArgs(bot) : [];
-  if (pair.length && run.length !== 1) throw new Error("A paired Hermes bot cannot use a command override; use its explicit pairing.");
-  return [...run, ...pair, ...autoModeArgs(agentKey, bot, run)];
+export function launchRun(agentKey, run, bot, where = null) {
+  if (agentKey !== "codex") {
+    const words = agentKey === "hermes" ? hermesPairRun(run, bot) : run;
+    return [...words, ...autoModeArgs(agentKey, bot, run)];
+  }
+  const { argv } = codexClean(run, where);
+  const cut = argv.indexOf("--");
+  return cut < 0 ? [...argv, ...CODEX_MODE_ARGS] : [...argv.slice(0, cut), ...CODEX_MODE_ARGS, ...argv.slice(cut)];
 }
 
 /**

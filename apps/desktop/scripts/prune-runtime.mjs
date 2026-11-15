@@ -14,8 +14,77 @@
 // plugin-development skill (dsh-agent-preset, cordis-plugin-development) reads
 // `<packageDir>/README.md` and `lib/types/**/*.d.ts` of installed packages. No .md other
 // than a package's top-level README/CHANGELOG/HISTORY is touched (skills are .md files).
-import { lstatSync, readdirSync, readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { lstatSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { createRequire } from 'node:module'
+
+/** Desktop only: force sharp's wasm fallback, including when reusing an installed tree.
+ * Keep this separate from the generic pruner: the server still selects native sharp.
+ */
+export function prepareSharpWasm(nodeModules) {
+  const root = resolve(nodeModules)
+  if (!lstatSync(root).isDirectory()) throw new Error(`sharp runtime must be a directory: ${root}`)
+  const realRoot = realpathSync(root)
+  const inside = file => {
+    const path = relative(realRoot, realpathSync(file))
+    if (path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path)) {
+      throw new Error(`sharp dependency resolves outside runtime: ${file}`)
+    }
+    return file
+  }
+  const sharpDirs = []
+  const forbidden = []
+  // Walk physical directories only, including nested package-manager stores. Never follow
+  // directory links; reject links hiding a sharp tree rather than mutate their targets.
+  const scan = dir => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (basename(dir) === '@img' && basename(dirname(dir)) === 'node_modules' &&
+          entry.name.startsWith('sharp-') && entry.name !== 'sharp-wasm32') {
+        forbidden.push(full)
+        continue
+      }
+      const sharp = basename(dir) === 'node_modules' && entry.name === 'sharp'
+      if (entry.isSymbolicLink() && (sharp || entry.name === 'node_modules' ||
+          (basename(dir) === 'node_modules' && entry.name === '@img'))) {
+        throw new Error(`cannot verify linked sharp tree: ${full}`)
+      }
+      if (!entry.isDirectory()) continue
+      if (sharp) sharpDirs.push(full)
+      scan(full)
+    }
+  }
+  scan(root)
+  if (!sharpDirs.length) throw new Error(`missing sharp in ${root}`)
+  // Validate every sharp copy before removing anything. Resolution must match its loader,
+  // not merely find an unrelated wasm package somewhere else in the tree.
+  for (const dir of sharpDirs) {
+    const manifest = JSON.parse(readFileSync(inside(join(dir, 'package.json')), 'utf8'))
+    const require = createRequire(join(dir, 'package.json'))
+    const wasmFile = inside(require.resolve('@img/sharp-wasm32/package'))
+    const wasm = JSON.parse(readFileSync(wasmFile, 'utf8'))
+    if (manifest.name !== 'sharp' || wasm.name !== '@img/sharp-wasm32' ||
+        !manifest.version || manifest.version !== wasm.version) {
+      throw new Error(`sharp/wasm version mismatch at ${dir}: ${manifest.version} / ${wasm.version}`)
+    }
+    // A manifest alone cannot satisfy preparation: require the binding and wasm payload.
+    inside(require.resolve('@img/sharp-wasm32/sharp.node'))
+    inside(join(dirname(wasmFile), 'lib', `sharp-wasm32-${wasm.version}.node.js`))
+    inside(join(dirname(wasmFile), 'lib', `sharp-wasm32-${wasm.version}.node.wasm`))
+    for (const local of ['build', 'src/build']) {
+      // A symlinked src must not let removal escape the runtime.
+      if (local.startsWith('src/') && lstatSync(join(dir, 'src'), { throwIfNoEntry: false })?.isSymbolicLink()) {
+        throw new Error(`cannot verify linked sharp source: ${dir}`)
+      }
+      forbidden.push(join(dir, local))
+    }
+  }
+  for (const path of forbidden) rmSync(path, { recursive: true, force: true })
+  for (const path of forbidden) {
+    if (lstatSync(path, { throwIfNoEntry: false })) throw new Error(`native sharp remains: ${path}`)
+  }
+  return { sharp: sharpDirs.length }
+}
 
 const MAP = /\.(?:[cm]?js|[cm]?ts|jsx|tsx|css)\.map$/
 const TYPINGS = /\.d\.[cm]?ts$/

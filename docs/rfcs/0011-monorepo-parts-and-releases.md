@@ -45,6 +45,7 @@ and updaters that find their asset among releases that are mostly someone else's
 |---|---|---|---|
 | Desktop app | everything not below (`apps/desktop/`, the profile, lockfiles…) | the dmg, AppImage and deb, `latest-*.yml`, `SHA256SUMS` | `apps/desktop/src/update.js`: the newest release with its platform's feed |
 | Plugins | `apps/<plugin>/` | `automagik-<plugin>-<v>.tgz`, `plugins.json`, `PLUGINS.SHA256SUMS`, `lane.json` | the rolling `plugin-lane` release (`scripts/lane.ts`) |
+| Server image | `server/` | GHCR image by digest, keyless GitHub build provenance, `server-image.json` on the content release | [server-lane/server-image.json](https://github.com/automagik-si/automagik/releases/download/server-lane/server-image.json); a rolling prerelease, never Latest, advanced only by stable content without downgrades; consumers verify the image attestation (`server/README.md`, Follow) |
 | Herdr pack | `herdr/`, `herdr-layout/` | `automagik-herdr-pack-<v>.tgz` and `automagik-herdr-pack-<v>.tgz.sha256`; the `herdr-lane` pointer is re-signed | the rolling `herdr-lane` release (`scripts/herdr-lane.ts`), checked against the pack's `pack-keys.json` |
 | Pocket | `apps/pocket/` (Pocket Link, `herdr/mods/pocket-link`, is on the herdr lane) | `automagik-pocket-<v>.apk` and `latest.json`; `latest.json` on the rolling `pocket-lane` release is replaced | `latest.json` on `pocket-lane` (`apps/pocket/android/app/build.gradle.kts`, `UPDATE_URL`) |
 

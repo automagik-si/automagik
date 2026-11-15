@@ -17,6 +17,42 @@ export const detailOfArgs = raw => {
   return { ...(text ? { text: text.trim().slice(0, 300) } : {}), ...(code ? { code: code.trim().slice(0, 400) } : {}) }
 }
 
+// What one ask would do, as text, when one shown field says all of it: the command, path, url
+// or query detailOfArgs shows, in full. Words about the call (a shell's `description`, any
+// `justification`) and its timeout change nothing it does and are left out, as stops.js does;
+// its sandbox request is kept in the identity. Anything else (a write's content, a message, several targets) makes the
+// ask its own: two such asks never share a card, since the card could not show what differs.
+const SHOWN_TARGETS = ['command', 'cmd', 'file_path', 'path', 'url', 'query']
+const SHELLS = new Set(['bash', 'pwsh'])
+const SIDE_ARGS = new Set(['justification', 'sandbox_permissions', 'timeout', 'timeout_ms'])
+// A control character (a line break, a tab) would show on one line what runs as two.
+const CONTROL = /[\u0000-\u001f\u007f]/
+// An agent's own call through ACP (acp-dsh tool.js callArguments) is shown by its title, which
+// the ask's reason carries; its input is the agent's raw call. Two such asks are one capability
+// only when everything but the call's own id is the same, byte for byte, so nothing can differ
+// between them unseen.
+const AGENT_CALL = 'acp_tool'
+const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
+  : value !== null && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
+    : JSON.stringify(value)
+export function capabilityOfArgs(raw, tool) {
+  if (typeof raw !== 'string') return undefined
+  let args
+  try { args = JSON.parse(raw) } catch { return undefined }
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return undefined
+  if (tool === AGENT_CALL) {
+    const { id: _id, ...call } = args
+    return typeof call.title === 'string' && call.title.trim() !== '' && call.input !== undefined ? canonical(call) : undefined
+  }
+  const kept = Object.keys(args).filter(key => !SIDE_ARGS.has(key) && !(SHELLS.has(tool) && key === 'description'))
+  if (kept.length !== 1 || !SHOWN_TARGETS.includes(kept[0])) return undefined
+  const value = args[kept[0]]
+  // detailOfArgs shows the trimmed value up to 400 characters: past that the card would cut it.
+  if (typeof value !== 'string' || value.trim() === '' || value !== value.trim() || value.length > 400 || CONTROL.test(value)) return undefined
+  // The sandbox a step asks for is part of what it would do: asks for different ones never merge.
+  return JSON.stringify([kept[0], value, args.sandbox_permissions ?? null])
+}
+
 // Turns that open with no person or Bot asking: a goal round, which carries a reply the
 // person waits for. A Bot's request that lands inside one joins it rather than claiming it,
 // so its reply stays in the chat (issue #62).
@@ -66,12 +102,21 @@ export function attachReference(queued, source, text) {
 }
 
 // A tool call some models write into their text instead of making it (the XML-like
-// form of their own chat template).
-const WRITTEN_CALL = /<tool_call>\s*<function=|<function=[\w.-]+>\s*<parameter=/
+// form of their own chat template). A reply cut off in the middle of such a call can
+// keep only its closing tags, so those count as one too, or only the first tags of a
+// parameter. Some models write the CJK brackets, so both forms match.
+const TAG_OPEN = '[<＜]'
+const TAG_CLOSE = '[>＞]'
+const TOOL_CALL_TAG = `${TAG_OPEN}tool_call${TAG_CLOSE}`
+const FUNCTION_TAG = `${TAG_OPEN}function=[\\w.-]+${TAG_CLOSE}`
+const PARAMETER_TAG = `${TAG_OPEN}parameter=[\\w.-]+${TAG_CLOSE}`
+const CLOSING_TAG = `${TAG_OPEN}/(?:parameter|function|tool_call)${TAG_CLOSE}`
+const WRITTEN_CALL = new RegExp(`${TOOL_CALL_TAG}\\s*${TAG_OPEN}function=|${FUNCTION_TAG}\\s*${TAG_OPEN}parameter=|${CLOSING_TAG}`)
 export const writesToolCall = text => typeof text === 'string' && WRITTEN_CALL.test(text)
 export const stripWrittenCalls = text => text
-  .replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/g, '')
-  .replace(/<function=[\w.-]+>[\s\S]*?(?:<\/function>|$)/g, '')
+  .replace(new RegExp(`${TOOL_CALL_TAG}[\\s\\S]*?(?:${TAG_OPEN}/tool_call${TAG_CLOSE}|$)`, 'g'), '')
+  .replace(new RegExp(`${FUNCTION_TAG}[\\s\\S]*?(?:${TAG_OPEN}/function${TAG_CLOSE}|$)`, 'g'), '')
+  .replace(new RegExp(`(?:${CLOSING_TAG}|${PARAMETER_TAG})\\s*`, 'g'), '')
   .trim()
 
 // Under DSH's PTC presentation the model calls only this tool; the program's sub-calls
@@ -79,6 +124,15 @@ export const stripWrittenCalls = text => text
 const PROGRAM_TOOL = 'run_code'
 
 const RETRY_TEXT = 'Your last reply wrote a tool call as plain text (<tool_call>…), so it did not run and nothing happened. Call the tool through the tool interface now, then reply as you meant to.'
+
+// A turn cut off at the model's output limit is not a finish. Whoever reads its answer
+// is told, so half an answer is not taken as the whole one and silence is not taken as
+// a deliberate one.
+const CUT_OFF_NOTE = '[cut off at the model\'s output limit; the answer is not complete]'
+const CUT_OFF_EMPTY_NOTE = '[cut off at the model\'s output limit before it wrote anything]'
+// The answer a cut-off turn leaves: what it said, marked as unfinished, or the line
+// that stands in for a turn that wrote nothing at all.
+export const cutOffText = said => (said === '' ? CUT_OFF_EMPTY_NOTE : `${said}\n\n${CUT_OFF_NOTE}`)
 
 export function install(rt) {
   const { ctx, state } = rt
@@ -353,6 +407,8 @@ export function install(rt) {
     ? detailOfArgs(live.get(sessionId)?.calls?.get(callId)?.args)
     : rt.childCallDetail?.(sessionId, callId) ?? {}
 
+  const callCapability = (sessionId, callId, tool) => capabilityOfArgs(live.get(sessionId)?.calls?.get(callId)?.args, tool)
+
   // The Bots whose last turn failed, for their pets (a sad face until their next turn starts):
   // per Bot, when it failed and the short reason. Process-local, like activity.
   /** @type {Record<string, { at: number, text: string, code?: string }>} */
@@ -373,6 +429,27 @@ export function install(rt) {
     const room = rt.roomOf(rt.groupOwners.get(id)?.roomId) ?? rt.roomOf(id)
     return room ? `group "${room.name}"` : 'own chat'
   }
+  // A turn cut off at the output limit is not a finish, but no failure either. The
+  // record names the route and the size of the input, so a route whose declared
+  // window is larger than the service really serves can be found from it.
+  const noteCutOffTurn = (id, { session, wroteNothing }) => {
+    const route = session.requestHeader?.()?.config
+    const ref = route?.provider && route?.model ? `${route.provider}/${route.model}` : undefined
+    const tokens = rt.sessionTokens?.(session)
+    const facts = [ref, Number.isFinite(tokens) && tokens > 0 ? `${tokens} tokens in` : undefined].filter(Boolean)
+    rt.noteFailure({
+      level: 'warn',
+      source: 'turn',
+      code: 'MAX_TOKENS',
+      text: `${wroteNothing
+        ? 'the turn was cut off at the output limit before it wrote anything'
+        : 'the turn was cut off at the output limit, so its answer is not complete'}${facts.length > 0 ? ` (${facts.join(', ')})` : ''}`,
+      bot: rt.botOf(rt.selfOf(id))?.name ?? (rt.roomOf(id) ? undefined : 'unknown Bot'),
+      where: placeOf(id),
+      sessionId: id,
+    })
+  }
+
   const noteTurnFailure = (id, failure) => {
     rt.noteFailure({
       source: 'turn',
@@ -520,7 +597,18 @@ export function install(rt) {
             const content = Array.isArray(event.data.content) ? event.data.content : []
             const images = content.filter(block => block?.type === 'image' && !block.offloaded).map(block => block.attachment)
             const files = content.filter(block => block?.type === 'file' && block.attachment !== undefined).map(block => block.attachment)
-            queueRoomMessage(id, { text: textOf(event.data.content), ...(images.length > 0 ? { images } : {}), ...(files.length > 0 ? { files } : {}) })
+            const uploads = content.flatMap((block, blockIndex) =>
+              typeof event.data.id === 'string' &&
+              block?.attachment !== undefined &&
+              (block.type === 'file' || (block.type === 'image' && !block.offloaded))
+                ? [{ messageId: event.data.id, blockIndex,
+                  attachmentId: block.attachment.attachmentId, kind: block.type }] : [])
+            queueRoomMessage(id, {
+              text: textOf(event.data.content),
+              ...(images.length > 0 ? { images } : {}),
+              ...(files.length > 0 ? { files } : {}),
+              ...(uploads.length > 0 ? { uploads } : {}),
+            })
           }
           const own = rt.chatOwners.get(id)
           if (own !== undefined) rt.dropKickoff(own)
@@ -566,10 +654,12 @@ export function install(rt) {
         const joined = entry.joined ?? []
         // What the group already saw of the turn is not posted again.
         const texts = entry.texts.slice(entry.shown)
+        const wroteText = entry.texts.length > 0
         const shown = entry.shown > 0
         const { lastText, lastCalled } = entry
         // A turn stopped for a switch goes on in the next part, which answers instead.
         const switched = entry.switched === true
+        const watched = entry.turn !== undefined
         entry.turn = undefined
         entry.info = undefined
         entry.texts = []
@@ -604,6 +694,10 @@ export function install(rt) {
         if (failure !== undefined) setFailed(id, failure)
         const held = rt.groupOwners.has(id) ? rt.takeRoomSteps?.(id) ?? '' : ''
         if (switched) break
+        const cutOff = watched && failure === undefined && reason?.kind === 'max-tokens'
+        const wroteNothing = cutOff && !wroteText
+        rt.noteCutOffTurn?.(id, { withoutText: wroteNothing })
+        if (cutOff) noteCutOffTurn(id, { session, wroteNothing })
         // A model that writes its tool call as text ends the turn as if it were done,
         // though nothing ran. It gets one more turn on the same trigger, so a waiting
         // round or sender gets the real answer; a second time, the text goes on without
@@ -613,7 +707,9 @@ export function install(rt) {
         if (retry) void retryWrittenCall(id, info).catch(error => rt.warn('ds-bot: asking %s to run its written tool call failed: %s', id, error))
         const replyText = () => {
           const reply = (wroteCall ? texts.map(stripWrittenCalls) : texts).join('\n\n').trim()
-          return wroteCall && reply === '' ? 'Tried to run a tool but wrote the call as text, so it did not run.' : reply
+          if (wroteCall && reply === '') return 'Tried to run a tool but wrote the call as text, so it did not run.'
+          if (cutOff) return reply === '' && wroteText ? CUT_OFF_NOTE : cutOffText(reply)
+          return reply
         }
         const groupReply = () => rt.withRoomSteps?.(held, replyText()) ?? replyText()
         // Whoever the turn answers gets the same three-way rule: a failure notice,
@@ -695,5 +791,5 @@ export function install(rt) {
     }
   })
 
-  Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, doingOf, stopRoomTurn, releaseBot })
+  Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, callCapability, doingOf, stopRoomTurn, releaseBot })
 }

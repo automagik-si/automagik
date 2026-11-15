@@ -130,6 +130,14 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
       }
     },
     openCliLogin,
+    async recoverCliLogin(botId, provider) {
+      const bot = cliLoginBotOf(roster.getSnapshot(), botId)
+      const manager = loginState?.()
+      if (!bot || !manager || !Object.hasOwn(CLI_NAMES, provider)) return false
+      const recovered = await manager.recover({ botId: bot.id, provider })
+      if (recovered && cliLoginBotOf(roster.getSnapshot(), bot.id)) openSession?.(bot.id)
+      return recovered
+    },
     cliLoginStart: (botId, provider, model) => call('cli-login-start', loginPayload(botId, provider, model === undefined ? {} : { model })),
     cliLoginCurrent: (botId, provider) => call('cli-login-current', loginPayload(botId, provider)),
     cliLoginStatus: (botId, provider, attemptId, signal) => call('cli-login-status', loginPayload(botId, provider, { attemptId }), signal),

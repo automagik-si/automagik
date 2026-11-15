@@ -10,6 +10,7 @@ import { dateLocale, t } from './i18n.js'
 import { SPRING_POP, SPRING_SHAPE, spring } from './motion.js'
 import { useDockHold } from './card-hold.js'
 import { heldCardKey } from './sources.js'
+import { CellEmpty } from './cell-empty.js'
 import { GITHUB_FIELDS, githubPermissions, githubTokenUrl } from '../shared/github-token.js'
 
 const MIN_VALUE = 4
@@ -169,10 +170,10 @@ function RequestView({ sessionId, bot, request, roster, actions }) {
 // The card at its request_secret call; a key that was already there gets one line.
 export function SecretToolCell({ sessionId, callId, name, done, content, roster, actions, heldCards = NONE }) {
   const bot = roster.byId[sessionId]
-  if (!bot) return null
+  if (!bot) return h(CellEmpty)
   // Call ids repeat across a Bot's chat parts.
   const request = (roster.secretRequests?.[bot.id] ?? []).find(entry => entry.callId === callId && (entry.sessionId ?? sessionId) === sessionId)
-  if (request?.status === 'pending' && heldCards[heldCardKey('secret', request.id)] > 0) return null
+  if (request?.status === 'pending' && heldCards[heldCardKey('secret', request.id)] > 0) return h(CellEmpty)
   if (request) return h('div', { className: 'bt-q-inline' }, h(RequestView, { sessionId, bot, request, roster, actions }))
   if (done && /already saved/.test(contentText(content))) {
     return h('div', { className: 'bt-event' }, h('span', { className: 'bt-secret-event' }, h(KeyIcon), t('{bot} is using {name}', { bot: bot.name, name: name ?? t('a saved key') })))
@@ -182,7 +183,7 @@ export function SecretToolCell({ sessionId, callId, name, done, content, roster,
   if (done && contentText(content).startsWith('No card can be shown now')) {
     return h('div', { className: 'bt-event' }, h('span', { className: 'bt-secret-event' }, h(KeyIcon), t('{bot} could not ask for a key: this window can only view the team', { bot: bot.name })))
   }
-  return null
+  return h(CellEmpty)
 }
 
 // A card whose call the transcript does not draw (an earlier part of the chat, a
@@ -357,7 +358,7 @@ export const SECRET_CSS = `
 .bt-secret-steps code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
 .bt-secret-note code,.bt-secret-about code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px}
 .bt-secret-warn{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;font-size:12px;line-height:16px;color:#b25e09;background:color-mix(in srgb,#f59e0b 12%,transparent)}
-.bt-secret-error{font-size:12px;line-height:16px;color:var(--bt-danger)}
+.bt-secret-error{font-size:12px;line-height:16px;color:var(--st-bad-strong,var(--bt-danger))}
 .bt-secret .bt-q-btn:disabled{opacity:.5;cursor:default}
 .bt-secret-done .bt-q-head{align-items:center}
 .bt-secret-done .bt-q-title{font-size:13px;line-height:18px;color:var(--bt-ink-2);font-weight:500}
@@ -388,7 +389,7 @@ export const SECRET_CSS = `
 .bt-secret-inline .bt-input{flex:1;height:34px}
 .bt-secret-row-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 .bt-secret-row-actions .bt-set-hint{flex:1}
-.bt-secret-danger{color:var(--bt-danger);display:inline-flex;align-items:center;gap:4px}
+.bt-secret-danger{color:var(--st-bad-strong,var(--bt-danger));display:inline-flex;align-items:center;gap:4px}
 .bt-secret-danger svg{width:13px;height:13px}
 .bt-secret-add .bt-input{height:34px}
 @media (prefers-reduced-motion:reduce){.bt-secret-glide{transition:none}.bt-secret-check,.bt-secret-done,.bt-secret-ok,.bt-secret-edit{animation:none}}

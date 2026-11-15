@@ -41,7 +41,7 @@ export function meterScope(record) {
 }
 
 /** The line `update` prints when nobody asked: how to opt in. */
-export const OPT_IN = "usagemeter: not installed by the update (no install has asked for it). To install it on this computer and every linked machine: automagik-herdr meter install";
+export const OPT_IN = "usagemeter: not installed by the update (no install has asked for it). To install it on this computer and every linked machine: am meter install";
 
 /** A machine name as `hc machine ls` gives it, safe in the ownership record (`name:version,…`). */
 export const MACHINE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;

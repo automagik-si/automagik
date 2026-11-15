@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { PLUGINS } from './plugin-payload.mjs'
+import { isDeepStrictEqual } from 'node:util'
+
+export const PLUGINS = ['@automagik/acp-dsh', '@automagik/bots-dsh', '@automagik/welcome-dsh']
 
 export const SEED_MARKER = 'automagik-server-profile'
 export const FOLLOW_STATUS = 'automagik-server-status.json'
@@ -40,10 +42,26 @@ export function compareRelease(left, right) {
   }
   return 0
 }
-export function markSeed(profile, release, observedHash = packageHash(profile)) {
+export function markSeed(profile, release, observedHash = packageHash(profile), imagePackage = readJson(join(profile, 'package.json'))) {
   if (!releaseVersion(release)) throw new Error('Invalid seed release')
   if (!/^[a-f0-9]{64}$/.test(observedHash)) throw new Error('Invalid seed hash')
-  writeJson(join(profile, SEED_MARKER), { version: 1, release, packageSha256: observedHash })
+  writeJson(join(profile, SEED_MARKER), { version: 1, release, packageSha256: observedHash, imagePackage })
+}
+
+/** Added dependencies/bundles belong to the workspace; the image still owns its base. */
+export function extendsImage(pkg, baseline) {
+  if (!baseline?.dependencies || !Array.isArray(baseline.dsh?.profile?.bundles) || !pkg?.dependencies || !Array.isArray(pkg.dsh?.profile?.bundles)) return false
+  const copy = structuredClone(pkg)
+  for (const [name, spec] of Object.entries(copy.dependencies)) {
+    if (Object.hasOwn(baseline.dependencies, name)) continue
+    if (typeof spec !== 'string' || !spec) return false
+    delete copy.dependencies[name]
+  }
+  const bundles = copy.dsh.profile.bundles
+  if (new Set(bundles).size !== bundles.length) return false
+  if (bundles.some(name => !baseline.dsh.profile.bundles.includes(name) && !Object.hasOwn(pkg.dependencies, name))) return false
+  copy.dsh.profile.bundles = bundles.filter(name => baseline.dsh.profile.bundles.includes(name))
+  return isDeepStrictEqual(copy, baseline)
 }
 
 /** Legacy adoption is deliberately stricter than a subset or dependency-name check. */
@@ -59,8 +77,15 @@ export function ownership(profile, source) {
     if (marker?.version !== 1 || !releaseVersion(marker.release) || !/^[a-f0-9]{64}$/.test(marker.packageSha256 ?? '')) {
       return { managed: false, ownerManaged: false, reason: 'unsupported-seed-marker' }
     }
-    if (packageHash(profile) !== marker.packageSha256) return { managed: false, ownerManaged: true, reason: 'owner-managed' }
-    return { managed: true, ownerManaged: false, reason: 'image-seed', release: marker.release, packageSha256: marker.packageSha256 }
+    const observedHash = packageHash(profile)
+    // Old markers held only the hash. Their base has the canonical image shape with
+    // its three dependency filenames at the recorded release.
+    const baseline = marker.imagePackage ?? readJson(join(source, 'package.json'))
+    if (!marker.imagePackage && baseline?.dependencies) {
+      for (const name of PLUGINS) baseline.dependencies[name] = `file:vendor/automagik-${name.split('/')[1]}-${marker.release}.tgz`
+    }
+    if (observedHash !== marker.packageSha256 && !extendsImage(pkg, baseline)) return { managed: false, ownerManaged: true, reason: 'owner-managed' }
+    return { managed: true, ownerManaged: false, reason: 'image-seed', release: marker.release, packageSha256: observedHash }
   }
   const expected = readJson(join(source, 'package.json'))
   const versions = PLUGINS.map(name => {
