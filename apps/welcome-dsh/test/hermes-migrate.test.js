@@ -154,16 +154,16 @@ test('the gateway record says whether the pid is alive and who owns Telegram', (
 })
 
 test('the Hermes host is the Bot team\'s SSH one when it is on, else this computer', () => {
-  const ssh = hermesTargetOf({ hermesRemote: { view: () => ({ enabled: true, mode: 'ssh', ssh: { host: 'hx470', user: 'namastex', port: '2222', identityFile: '/keys/h', hermesHome: '/home/namastex/.hermes' } }) } })
-  assert.deepEqual(ssh, { where: 'ssh', ssh: { host: 'hx470', user: 'namastex', port: 2222, identityFile: '/keys/h', hermesHome: '/home/namastex/.hermes' } })
+  const ssh = hermesTargetOf({ hermesRemote: { view: () => ({ enabled: true, mode: 'ssh', ssh: { host: 'proxy.example.com', user: 'me', port: '2222', identityFile: '/keys/h', hermesHome: '~/hermes' } }) } })
+  assert.deepEqual(ssh, { where: 'ssh', ssh: { host: 'proxy.example.com', user: 'me', port: 2222, identityFile: '/keys/h', hermesHome: '~/hermes' } })
   assert.equal(scriptCommand(ssh).command, 'ssh')
-  assert.ok(scriptCommand(ssh).args.includes('namastex@hx470'))
-  assert.equal(scriptCommand(ssh).args.at(-2), 'namastex@hx470')
+  assert.ok(scriptCommand(ssh).args.includes('me@proxy.example.com'))
+  assert.equal(scriptCommand(ssh).args.at(-2), 'me@proxy.example.com')
   assert.match(scriptCommand(ssh).args.at(-1), /python3 -/)
 
-  assert.deepEqual(hermesTargetOf({ hermesRemote: { view: () => ({ enabled: false, mode: 'ssh', ssh: { host: 'hx470' } }) } }, { env: {}, home: '/home/me' }), { where: 'local', home: '/home/me/.hermes' })
-  assert.deepEqual(hermesTargetOf({}, { env: { HERMES_HOME: '/srv/hermes' }, home: '/home/me' }), { where: 'local', home: '/srv/hermes' })
-  assert.deepEqual(hermesTargetOf({ hermesRemote: { view: () => ({ enabled: true, mode: 'ssh', ssh: { host: '-oProxyCommand=x' } }) } }, { env: {}, home: '/home/me' }), { where: 'local', home: '/home/me/.hermes' })
+  assert.deepEqual(hermesTargetOf({ hermesRemote: { view: () => ({ enabled: false, mode: 'ssh', ssh: { host: 'proxy.example.com' } }) } }, { env: {}, home: '~/me' }), { where: 'local', home: '~/me/.hermes' })
+  assert.deepEqual(hermesTargetOf({}, { env: { HERMES_HOME: '/srv/hermes' }, home: '~/me' }), { where: 'local', home: '/srv/hermes' })
+  assert.deepEqual(hermesTargetOf({ hermesRemote: { view: () => ({ enabled: true, mode: 'ssh', ssh: { host: '-oProxyCommand=x' } }) } }, { env: {}, home: '~/me' }), { where: 'local', home: '~/me/.hermes' })
 })
 
 const fakeTeam = ({ bots = [{ id: BOT, name: 'Omni', kind: 'omni' }], main = BOT } = {}) => {
