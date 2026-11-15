@@ -535,17 +535,18 @@ The route is off by default. Clicking it without a saved connection opens setup;
 working connection opens its remembered profile in one click. Crossing harnesses still uses the
 conversation/handoff confirmation.
 
-Setup is three things: **choose a computer, Connect, chat.**
+Setup is four things: **choose a computer, Connect, pick the bot, chat.**
 
 - **Choose a computer** lists the `Host` entries of the user's SSH config (an `Include` is
   followed when there is one; wildcard and negated patterns are never offered), with the hosts
   in `known_hosts` collapsed under them. Typing a host or config name stays possible. Picking or
   typing another computer starts from that computer's own SSH defaults.
-- **Connect** signs in with the system SSH client and the user's SSH config/agent, finds the
-  Hermes already installed there, starts its own `hermes serve` and opens the chat. Progress is
-  shown as it happens. There is no route choice, address step or test step.
-- **A profile is asked for only when Hermes has more than one.** The picker opens on the one
-  Hermes runs as (then its active one, then the first). With one profile the chat opens at once.
+- **Connect** signs in with the system SSH client and the user's SSH config/agent, then reads
+  what is already there: every Hermes home with a config, each home's own serve record, and its
+  profiles. It never starts, restarts or stops Hermes, and never opens `.env` or auth files.
+- **Pick the bot.** Every Hermes profile found is shown by its own name and state, with its
+  model as a second line. A bot whose serve is not running is shown with the command that
+  starts it there; Automagik never starts it. With one running bot the chat opens at once.
 - Everything optional is behind **More** (Bot settings → Remote Hermes → More, or **More
   options** on a failure): another user, port, identity-file path, Hermes executable path or
   Hermes home (its data folder), and a Hermes reached by its **Remote address** over HTTPS (reverse-proxy path prefix

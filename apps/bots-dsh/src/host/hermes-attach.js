@@ -60,15 +60,8 @@ def locate(hermes_path, timeout):
             return path
     raise Fault("hermes-not-found")
 
-def state_folder():
-    home = os.path.expanduser("~")
-    root = os.environ.get("HERMES_GATEWAY_LOCK_DIR", "").strip()
-    if root:
-        return root
-    state = os.environ.get("XDG_STATE_HOME", "").strip() or os.path.join(home, ".local", "state")
-    return os.path.join(state, "hermes", "gateway-locks")
-
-def read_record(folder):
+def records_of(folder):
+    """(record, why) for one folder; why names a gateway record or a home mismatch."""
     try:
         with open(os.path.join(folder, "host-serve.json"), "r", encoding="utf-8-sig") as handle:
             record = json.load(handle)
@@ -77,14 +70,75 @@ def read_record(folder):
     if not isinstance(record, dict):
         # Only a running serve publishes this record. A gateway's record is not read: this
         # app opens host-serve.json and host-serve.token, and nothing else in that folder.
-        raise Fault("serve-not-running")
+        return None, ""
+    if record.get("role") == "gateway":
+        return None, "gateway"
     if record.get("role") != "serve":
-        raise Fault("serve-gateway" if record.get("role") == "gateway" else "serve-not-running")
+        return None, ""
     port = record.get("port")
     pid = record.get("pid")
     if not isinstance(port, int) or port <= 0 or port >= 65536 or not isinstance(pid, int) or pid <= 0:
-        raise Fault("serve-not-running")
-    return record
+        return None, ""
+    return record, ""
+
+def same_home(record, launch_home):
+    recorded = record.get("home")
+    if not isinstance(recorded, str) or not recorded or not launch_home:
+        return True
+    if not recorded.startswith("/") or not launch_home.startswith("/"):
+        return True
+    # A sandbox names its own home inside the sandbox; only a home that exists on this
+    # side can be compared. The explicit record folder already scoped the read to the
+    # chosen serve, so an internal name is not another serve's home.
+    if not os.path.isdir(recorded) or not os.path.isdir(launch_home):
+        return True
+    return os.path.realpath(recorded) == os.path.realpath(launch_home)
+
+def state_folder(explicit, launch_home):
+    """The chosen serve's own record folder.
+
+    An explicit folder comes from detection and is the only one read. Without one, this
+    home's own state folders are tried before the account-level default, so two homes'
+    serves are never confused; a record that names another home is skipped, never used.
+    """
+    folders = []
+    def add(path):
+        if isinstance(path, str) and path.startswith("/") and path not in folders:
+            folders.append(path)
+    if explicit:
+        if not isinstance(explicit, str) or not explicit.startswith("/"):
+            raise Fault("serve-record")
+        add(explicit)
+        if len(folders) == 1:
+            record, why = records_of(folders[0])
+            if record is not None and not same_home(record, launch_home):
+                raise Fault("serve-record")
+            if record is None and why == "gateway":
+                raise Fault("serve-gateway")
+            if record is None:
+                raise Fault("serve-not-running")
+            return folders[0], record
+    root = os.environ.get("HERMES_GATEWAY_LOCK_DIR", "").strip()
+    if root:
+        add(root)
+    if isinstance(launch_home, str) and launch_home.startswith("/"):
+        add(os.path.join(launch_home, "gateway-locks"))
+        state = os.environ.get("XDG_STATE_HOME", "").strip()
+        if state.startswith("/"):
+            add(os.path.join(state, "hermes", "gateway-locks"))
+        add(os.path.join(launch_home, ".local", "state", "hermes", "gateway-locks"))
+    home = os.path.expanduser("~")
+    state = os.environ.get("XDG_STATE_HOME", "").strip()
+    if not state.startswith("/"):
+        state = os.path.join(home, ".local", "state")
+    add(os.path.join(state, "hermes", "gateway-locks"))
+    gateway = False
+    for folder in folders:
+        record, why = records_of(folder)
+        gateway = gateway or why == "gateway"
+        if record is not None and same_home(record, launch_home):
+            return folder, record
+    raise Fault("serve-gateway" if gateway else "serve-not-running")
 
 def read_token(folder, record):
     path = os.path.join(folder, "host-serve.token")
@@ -272,8 +326,7 @@ try:
     version = ".".join(str(int(part)) for part in release.groups())
     if tuple(int(part) for part in release.groups()) < minimum:
         raise Fault("update-required", version=version, minimum=wanted)
-    folder = state_folder()
-    record = read_record(folder)
+    folder, record = state_folder(options.get("stateDir"), options.get("hermesHome"))
     token = read_token(folder, record)
     # The CLI must read the same data root the owner was launched from: the record says
     # which HERMES_HOME that is, and every read below is scoped to it.
@@ -498,7 +551,7 @@ export async function startHermesAttach(ssh, {
       }
     })
     const startMs = Math.max(1, Math.floor(limits.start - Math.min(limits.control / 2, limits.start * 0.15)))
-    remote.stdin.write(`${JSON.stringify({ nonce, hermesPath: config.hermesPath, hermesHome: config.hermesHome, minVersion: minimum, startMs, controlMs: limits.control })}\n`)
+    remote.stdin.write(`${JSON.stringify({ nonce, hermesPath: config.hermesPath, hermesHome: config.hermesHome, stateDir: config.recordDir, minVersion: minimum, startMs, controlMs: limits.control })}\n`)
     const port = await bounded(ready.promise, until - Date.now())
     if (!credential || !profiles.length) throw hermesSshFailure('serve-profiles')
     const localPort = await bounded(Promise.resolve(allocatePort()), Math.min(limits.control, until - Date.now()))

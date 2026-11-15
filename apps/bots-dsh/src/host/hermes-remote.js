@@ -5,7 +5,7 @@ import { HermesTransport, RemoteChat, remoteAddress, HERMES_DEADLINES } from './
 import { attachedModelOf, prepareHermesConnection, refreshHermesProfiles } from './hermes-connection.js'
 import { discoverSshHosts } from './hermes-ssh-hosts.js'
 import { redactSshNames } from './hermes-ssh-names.js'
-import { HERMES_MINIMUM } from './hermes-ssh.js'
+import { HERMES_MINIMUM, hermesSshDestination } from './hermes-ssh.js'
 import { MISSING_TOOLS, RemoteChatAdapter } from './remote-chat-adapter.js'
 import { refusal } from './refusal.js'
 
@@ -15,7 +15,8 @@ const ATTACH_CREDENTIAL_REF = 'HERMES_REMOTE_ATTACH_CREDENTIAL'
 const TEST_LIFETIME = 5 * 60_000
 const CHAT_BUSY = 'A chat is still running on this connection; stop it or wait.'
 const fail = (message, kind = 'connection') => refusal(message, { code: `bot/hermes-${kind}` })
-const sshFields = ssh => Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome'].filter(key => ssh?.[key] !== undefined).map(key => [key, ssh[key]]))
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const sshFields = ssh => Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome', 'recordDir'].filter(key => ssh?.[key] !== undefined).map(key => [key, ssh[key]]))
 const CONNECTION_ERRORS = Object.freeze({
   'bot/hermes-busy': CHAT_BUSY,
   'bot/hermes-pairing': 'The Hermes Bot pairing could not be verified. Check the selected profile and its existing Bot Chat.',
@@ -94,7 +95,7 @@ const connectionFailure = (error, native = false) => error?.cleanupUnknown === t
   ? refusal(CONNECTION_ERRORS[error.code], { code: error.code })
   : refusal(native && error?.code === 'bot/hermes' ? error.message : 'Remote Hermes could not connect.')
 
-export function install(rt, { transport = options => new HermesTransport(options), fetch: fetcher = globalThis.fetch, startSsh, trustSsh = async (...args) => (await import('./hermes-ssh.js')).trustHermesSshHostKey(...args), sshHosts = discoverSshHosts, now = Date.now, deadlines = HERMES_DEADLINES, testLifetime = TEST_LIFETIME } = {}) {
+export function install(rt, { transport = options => new HermesTransport(options), fetch: fetcher = globalThis.fetch, startSsh, detectHermes = async (...args) => (await import('./hermes-detect.js')).detectHermesBots(...args), trustSsh = async (...args) => (await import('./hermes-ssh.js')).trustHermesSshHostKey(...args), sshHosts = discoverSshHosts, now = Date.now, deadlines = HERMES_DEADLINES, testLifetime = TEST_LIFETIME } = {}) {
   const { ctx, state } = rt
   // The last failed SSH connection of each wizard request, kept in memory for its own
   // screen (the stage, SSH's and Hermes's last lines, a new host key to trust).
@@ -216,7 +217,6 @@ export function install(rt, { transport = options => new HermesTransport(options
       const text = await readFile(rt.statePath, 'utf8')
       if (text.length > 16 * 1024 * 1024) return
       const disk = JSON.parse(text), saved = disk?.prefs?.hermesRemote
-      const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
       if (!object(disk) || !object(disk.prefs) || !object(saved) || typeof saved.enabled !== 'boolean'
         || (saved.credentialRef !== undefined && typeof saved.credentialRef !== 'string')
         || (saved.credentialRef === undefined && saved.mode !== 'ssh')
@@ -627,7 +627,10 @@ export function install(rt, { transport = options => new HermesTransport(options
       const entry = { id: randomUUID(), lease: lease(connection, true), controller, expires: now() + testLifetime, requestId: pending.requestId, checkSource: source?.check, checkSavedSource: source?.checkCredential, reuseReference: source?.reuseReference, fetch: checkedFetch }
       try {
         entry.checkSource?.()
-        await probe(entry.lease, connection.profiles[0].id, controller.signal, startup.until)
+        const chosen = draft?.profile === undefined ? connection.profiles[0].id
+          : connection.profiles.find(profile => profile.id === draft.profile)?.id
+        if (!chosen) throw fail('The chosen bot is not served by this Hermes any more. Check the bots again.', 'profiles')
+        await probe(entry.lease, chosen, controller.signal, startup.until)
         entry.checkSource?.()
         if (disposed || owner !== testGeneration || controller.signal.aborted) throw fail('Connection setup was cancelled.')
       } catch (error) { if (error && typeof error === 'object') error.hermesStage ??= 'chat'; await entry.lease.close(); throw error }
@@ -641,7 +644,9 @@ export function install(rt, { transport = options => new HermesTransport(options
       entry.timer.unref?.()
       tested = entry
       pending.stage = 'connected'
-      return { testId: entry.id, profiles: connection.profiles, defaultProfile: connection.defaultProfile ?? connection.profiles[0].id, status: 'connected' }
+      return { testId: entry.id, profiles: connection.profiles,
+        defaultProfile: draft?.profile === undefined ? (connection.defaultProfile ?? connection.profiles[0].id) : draft.profile,
+        status: 'connected' }
     })()
     try {
       const answer = await pending.task
@@ -914,6 +919,21 @@ export function install(rt, { transport = options => new HermesTransport(options
     try { await stopLive() } finally { disconnecting = false }
     return view()
   }
+  // Detection is one read-only SSH command: it finds the homes, serves and profiles and
+  // returns them; nothing is tested, saved or started here.
+  async function detectBots(body, signal, startup) {
+    const ssh = body?.ssh
+    if (!object(ssh)) throw fail('Enter an SSH host or config name.', 'ssh')
+    const started = Date.now()
+    try {
+      hermesSshDestination(ssh)
+      const found = await detectHermes(sshFields(ssh), { signal, deadlines: remaining(startup.until) })
+      return { homes: found.homes, bots: found.bots }
+    } catch (error) {
+      if (typeof body?.requestId === 'string' && body.requestId) noteSshFailure(body.requestId, ssh, error, started)
+      throw error
+    }
+  }
   async function refreshProfiles(body, signal, startup) {
     const entry = tested
     if (!entry || entry.id !== body?.testId || entry.expires <= now() || entry.lease.closed) throw fail('This connection waited too long and was closed. Connect again.', 'expired')
@@ -978,6 +998,7 @@ export function install(rt, { transport = options => new HermesTransport(options
       return { aliases: project(found?.aliases), knownHosts: project(found?.knownHosts) }
     } catch { return { aliases: [], knownHosts: [] } }
   }, { read: true })
+  rt.hooks.endpoint('hermes-remote-detect', (body, signal) => action(startup => detectBots(body, startup.signal, startup), signal, {}))
   rt.hooks.endpoint('hermes-remote-test', (body, signal) => api.test(body, signal))
   rt.hooks.endpoint('hermes-remote-test-status', body => {
     const failure = failureOf(body?.connect === true ? 'connect' : body?.requestId)?.view

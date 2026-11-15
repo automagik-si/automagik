@@ -142,8 +142,8 @@ export async function prepareHermesConnection(draft, {
       redactionSecrets.push(...existingConnection.redactionSecrets)
     } else if (draft.mode === 'ssh') {
       if (!object(draft.ssh) || !clean(draft.ssh.host, 4096)) throw fail('Enter an SSH host or config name.', 'ssh')
-      for (const name of ['user', 'identityFile', 'hermesPath', 'hermesHome']) if (draft.ssh[name] !== undefined && draft.ssh[name] !== '' && !clean(draft.ssh[name], 4096)) throw fail('Enter valid optional SSH details.', 'ssh')
-      const ssh = Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome'].filter(name => draft.ssh[name] !== undefined).map(name => [name, draft.ssh[name]]))
+      for (const name of ['user', 'identityFile', 'hermesPath', 'hermesHome', 'recordDir']) if (draft.ssh[name] !== undefined && draft.ssh[name] !== '' && !clean(draft.ssh[name], 4096)) throw fail('Enter valid optional SSH details.', 'ssh')
+      const ssh = Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome', 'recordDir'].filter(name => draft.ssh[name] !== undefined).map(name => [name, draft.ssh[name]]))
       phase = 'ssh'
       owned = await startSsh(ssh, { signal: controller.signal, deadlines, onProgress })
       phase = 'token'
@@ -236,7 +236,7 @@ export async function prepareHermesConnection(draft, {
     let closePromise
     return {
       mode: draft.mode, authMode, address, credential, authHeaders, redactionSecrets, profiles, defaultProfile, attached,
-      ssh: draft.mode === 'ssh' ? Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome'].filter(name => draft.ssh[name] !== undefined).map(name => [name, draft.ssh[name]])) : undefined,
+      ssh: draft.mode === 'ssh' ? Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome', 'recordDir'].filter(name => draft.ssh[name] !== undefined).map(name => [name, draft.ssh[name]])) : undefined,
       secret: persisted,
       allowLoopback: draft.mode === 'ssh',
       fetch: async (url, init) => {
