@@ -67,7 +67,7 @@ function Page({ view }) {
 }
 
 let root = null
-window.mount = ({ view = 'card', levels = ['read-only', 'workspace-write', 'danger-full-access'], defaultPreset = 'read-only', permission, readOnly, name = 'FazoL' } = {}) => {
+window.mount = ({ view = 'card', levels = ['read-only', 'workspace-write', 'danger-full-access'], defaultPreset = 'read-only', permission, readOnly, name = 'Test Bot' } = {}) => {
   root?.unmount()
   window.saves = []
   try { localStorage.clear() } catch { /* storage unavailable */ }

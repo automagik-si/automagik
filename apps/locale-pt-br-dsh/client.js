@@ -277,6 +277,8 @@ const pack = createPack({
     "Default": "Padrão",
     "Thinking level": "Nível de raciocínio",
     "Model: {model}": "Modelo: {model}",
+    "instead of {model}": "no lugar de {model}",
+    "Running instead of {model}": "Rodando no lugar de {model}",
     "none": "nenhum",
     "Choose a model": "Escolha um modelo",
     "{provider} · not available": "{provider} · indisponível",

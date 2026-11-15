@@ -87,6 +87,24 @@ export function install(rt) {
   const staged = new Map()
   const ok = value => ({ ok: true, value })
   const fail = (message, code = 'bot/error') => ({ ok: false, error: { code, message, details: {} } })
+  const runningOf = (bot) => {
+    try {
+      if (rt.hostOwned?.(bot)) return {}
+      const sessionId = rt.chatOf(bot.id)
+      const agent = ctx.get?.('agents')?.get?.(sessionId)
+      let selection
+      if (agent != null) selection = agent.model?.current?.()
+      else {
+        const session = ctx.sessions?.list?.().find(session => session.id === sessionId)
+        if (session !== undefined) selection = ctx.get?.('sessionProjections')?.snapshot(session, ['modelSelection']).values.modelSelection?.next
+      }
+      if (typeof selection?.provider !== 'string' || typeof selection?.model !== 'string') return {}
+      return {
+        runningModel: `${selection.provider}/${selection.model}`,
+        ...(typeof selection.reasoningEffort === 'string' && selection.reasoningEffort !== '' ? { runningEffort: selection.reasoningEffort } : {}),
+      }
+    } catch { return {} }
+  }
   // Models come from DSH, not state.json, so a provider added in Harness settings
   // changes the view without a new revision. So do the permission presets DSH offers and
   // the Bots and groups whose Auto runs as workspace-write (permissions.js).
@@ -99,6 +117,11 @@ export function install(rt) {
     ].join('')).join(','),
     rt.cachedDefault() ?? '', rt.cachedBackground?.() ?? '', rt.permissionKey?.() ?? '',
     rt.modelsEpoch?.() ?? 0,
+    // Fresh reads each poll catch selection changes and Agents appearing or going, without a listener or state revision.
+    Object.values(state.bots).map(bot => {
+      const running = runningOf(bot)
+      return running.runningModel === undefined ? '' : `${bot.id}=${running.runningModel}:${running.runningEffort ?? ''}`
+    }).join(','),
   ].join('|')
   const view = () => ({
     revision: state.revision,
@@ -122,6 +145,7 @@ export function install(rt) {
         ...(bot.dshAgentId === undefined ? {} : { adoptionHistoryMatches: rt.adoptionHistoryMatches(bot.id) }),
         ...rt.permissionFallbackOf('bot', bot),
         ...rt.autoViewOf?.(bot),
+        ...runningOf(bot),
         ...(tail ? { lastAt: tail.lastAt, preview: tail.preview } : {}),
       }
     }),

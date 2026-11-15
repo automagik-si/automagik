@@ -1313,6 +1313,8 @@ var ZH = {
   Default: "默认",
   "Thinking level": "思考强度",
   "Model: {model}": "模型：{model}",
+  "instead of {model}": "替代 {model}",
+  "Running instead of {model}": "正在运行，替代 {model}",
   none: "无",
   "Choose a model": "选择模型",
   "{provider} · not available": "{provider} · 不可用",
@@ -6941,7 +6943,7 @@ function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm }) {
     )
   );
 }
-function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = false, chat = false, bar = false, onPick, onPickEffort, saved = onPick === void 0, withEfforts = true }) {
+function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = false, chat = false, bar = false, running: running2 = false, onPick, onPickEffort, saved = onPick === void 0, withEfforts = true }) {
   const [view, setView] = (0, import_react16.useState)(MENU_ROOT);
   const [hermes, setHermes] = (0, import_react16.useState)(false);
   const remote = (0, import_react16.useRef)({ generation: 0, active: false, mounted: true });
@@ -6978,11 +6980,15 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
   const shown = modelOf(bot, roster);
   const current = bot.model ?? bot.appliedModel;
   const currentRoute = current === void 0 ? void 0 : modelRoute(roster, current);
+  const shownRunning = running2 && bar && current !== void 0 && typeof bot.runningModel === "string" && bot.runningModel !== current ? modelOf({ model: bot.runningModel }, roster) : void 0;
+  const triggerRoute = shownRunning === void 0 ? currentRoute : modelRoute(roster, bot.runningModel);
+  const runningTitle = shownRunning === void 0 ? void 0 : t("Running instead of {model}", { model: shown?.name ?? current });
   const served = servedOf(roster, current);
   const reasoning = useEfforts(served, withEfforts ? current : void 0, actions);
   const picked = reasoning?.efforts?.some((effort) => effort.id === bot.effort) ? bot.effort : void 0;
   const currentEffort = picked ?? reasoning?.defaultEffort;
   const effortLabel = !withEfforts ? void 0 : currentEffort === void 0 ? reasoning?.efforts?.length > 0 ? t("Default") : void 0 : reasoning.efforts.find((effort) => effort.id === currentEffort)?.name ?? currentEffort;
+  const triggerEffort = shownRunning === void 0 ? effortLabel : servedOf(roster, bot.runningModel)?.reasoning?.efforts?.find((effort) => effort.id === bot.runningEffort)?.name;
   const [opening, setOpening] = (0, import_react16.useState)(0);
   const [folded, setFolded] = (0, import_react16.useState)({ opening, manual: NO_MANUAL });
   const folds = {
@@ -7210,19 +7216,21 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
         className: `bt-model-trigger${bar ? " bt-model-bar-trigger" : ""}`,
         "data-wide": wide || void 0,
         "data-bar": bar || void 0,
-        "data-route": currentRoute?.route,
+        "data-route": triggerRoute?.route,
         "aria-haspopup": "menu",
         "aria-expanded": isOpen,
-        "aria-label": t("Model: {model}", { model: shown?.name ?? t("none") }),
+        "aria-label": t("Model: {model}", { model: shownRunning?.name ?? shown?.name ?? t("none") }) + (runningTitle === void 0 ? "" : `. ${runningTitle}`),
+        title: runningTitle,
         "data-missing": shown !== void 0 && shown.unavailable && models.length > 0 ? "" : void 0,
         onClick: toggle
       },
       bar ? (0, import_react16.createElement)(
         "span",
         { className: "bt-model-bar" },
-        currentRoute === void 0 ? null : (0, import_react16.createElement)("span", { className: "bt-model-bar-route", "aria-hidden": true }, (0, import_react16.createElement)(ROUTE_ICON[currentRoute.route] ?? ConnectorIcon, { size: 14 })),
-        (0, import_react16.createElement)("span", { className: "bt-model-bar-name" }, shown?.name ?? t("Choose a model")),
-        effortLabel === void 0 ? null : (0, import_react16.createElement)("span", { className: "bt-model-bar-effort" }, effortLabel)
+        triggerRoute === void 0 ? null : (0, import_react16.createElement)("span", { className: "bt-model-bar-route", "aria-hidden": true }, (0, import_react16.createElement)(ROUTE_ICON[triggerRoute.route] ?? ConnectorIcon, { size: 14 })),
+        (0, import_react16.createElement)("span", { className: "bt-model-bar-name" }, shownRunning?.name ?? shown?.name ?? t("Choose a model")),
+        triggerEffort === void 0 ? null : (0, import_react16.createElement)("span", { className: "bt-model-bar-effort" }, triggerEffort),
+        shownRunning === void 0 ? null : (0, import_react16.createElement)("span", { className: "bt-model-bar-effort", "data-running-instead": "" }, t("instead of {model}", { model: shown?.name ?? current }))
       ) : (0, import_react16.createElement)(
         "span",
         { className: "bt-model-copy" },
@@ -7611,7 +7619,7 @@ function packModelCell(env) {
     return (0, import_react17.createElement)(
       "span",
       { className: "bt-composer-model", "data-pack": pack.id },
-      (0, import_react17.createElement)(ModelMenu, { key: target.bot.id, bot: target.bot, roster, actions, run: run2, chat: true, bar: true })
+      (0, import_react17.createElement)(ModelMenu, { key: target.bot.id, bot: target.bot, roster, actions, run: run2, chat: true, bar: true, running: sessionId === target.bot.sessionId })
     );
   };
 }
