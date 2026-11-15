@@ -1,8 +1,8 @@
 {
-  "sdk": "2.5.0",
+  "sdk": "2.7.0",
   "adapters": {
-    "@agentclientprotocol/claude-agent-acp": "0.104.1",
+    "@agentclientprotocol/claude-agent-acp": "0.107.0",
     "@agentclientprotocol/codex-acp": "2.6.0"
   },
-  "passed": "2026-11-10"
+  "passed": "2026-11-15"
 }

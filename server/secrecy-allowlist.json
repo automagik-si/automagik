@@ -258,46 +258,46 @@
     "reason": "Byte-identical offline cache of the already-reviewed playwright-core/lib/coreBundle.js container-user example; both the content-addressed cache path and module digest are pinned."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/03/c6120bb190c5d9228d578d829c20f1b817bfb6f2ae9275df89a1137311492c1c0a0276a904e080a185664b4488fdf1ae2a1c3ee63fee2aa5ef3ba27573f13c",
+    "file": "opt/automagik/offline-store/v10/files/7f/861a67335aad7e52daebb5dcdbbe5a4f2073667434a049449d363d9bb2d9718a7958b2450a0a2daab049f64ab280a85d7dcbcf32ee592a58969481d9f63d43",
     "rule": "home-path",
     "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
-    "fileSha256": "4f1ff2e3905271e9281b43cec64d329cb4de3ffff5f2ead3ba795100dc7f3e7a",
-    "reason": "Byte-identical offline cache of ACP SDK 2.5.0 schema/v2/schema.unstable.json: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "4fb9c0276f1d94ba8960acb00cffc476810b03abf6498f1e3fc78f1592a80ff6",
+    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 schema/v2/schema.unstable.json: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/94/3509fdb812a1f011a4bc172430f777ae70fc8329daec54fedec41ab3b2fbc05f4c44d7f6cb703fee32ea773651aabb0e367c0e26b7f474a88bb5bc88279035",
+    "file": "opt/automagik/offline-store/v10/files/52/55995b4a474deccb66a48981338ef6cee31591ee61320eaca6bff7c20786414a5a0397124cbf35ead301495fe1ca26ffe21fbd9d2e71f93056d69f02b74a6b",
     "rule": "home-path",
     "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
-    "fileSha256": "b279d57ae6f9663acca8e2737de2c58ae2594349966a61c660c7b068a2466d9d",
-    "reason": "Byte-identical offline cache of ACP SDK 2.5.0 dist/v2/unstable/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "317e1eba9052ec879a26d3e59c575e66d4c67476464cb49a640e1dd4bbf70c12",
+    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 dist/v2/unstable/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/94/3509fdb812a1f011a4bc172430f777ae70fc8329daec54fedec41ab3b2fbc05f4c44d7f6cb703fee32ea773651aabb0e367c0e26b7f474a88bb5bc88279035",
+    "file": "opt/automagik/offline-store/v10/files/52/55995b4a474deccb66a48981338ef6cee31591ee61320eaca6bff7c20786414a5a0397124cbf35ead301495fe1ca26ffe21fbd9d2e71f93056d69f02b74a6b",
     "rule": "home-path",
     "sha256": "6600e9264f9f11ce58bd63caf7a2ae1f56bee1cda6f13410faf84bf30a80ae3e",
-    "fileSha256": "b279d57ae6f9663acca8e2737de2c58ae2594349966a61c660c7b068a2466d9d",
-    "reason": "Byte-identical offline cache of ACP SDK 2.5.0 dist/v2/unstable/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "317e1eba9052ec879a26d3e59c575e66d4c67476464cb49a640e1dd4bbf70c12",
+    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 dist/v2/unstable/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/9c/98e50807637bfa75d42a136353a663230b7df5f2e91ed715a28a04532b4169b06fe597e06e56b45fb1586eded12bf57ff4af396d530b88d5251cbfa08c7a33",
+    "file": "opt/automagik/offline-store/v10/files/46/5481d2c6323d6c6bff8538acca47380460bb3a8fc642d2a928443595f1a2736bb11450561a93c7efd597f80644e7ce6a68c812ab7669f879422b91ae922b6e",
     "rule": "home-path",
     "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
-    "fileSha256": "7ea2cf5fd8eb56102a19729c6254bfabb78ecd83572d92c7fd155bc2fa7f8bc4",
-    "reason": "Byte-identical offline cache of ACP SDK 2.5.0 schema/v2/schema.json: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "22a631a896e2df061f64f81f3414949d46f1d25151ceb3f74bda2255ad36773d",
+    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 schema/v2/schema.json: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/b0/dad49174eba9f0a0ec0269b1384b4f7bbd6c5c7add3debbcf12c53f26de7c605808ed6487166dc30d05adfd054da17cf4394e49281db330ee7cc7ce63fed85",
+    "file": "opt/automagik/offline-store/v10/files/82/1487c4bcc5a289720239783d1ae36c3311b016e781d62f6e45fdbab10da3942798c975ed02045184d20cba1a0afc9a48e08f41c5af839096db93ef77f8518b",
     "rule": "home-path",
     "sha256": "b98d692c4574a80e508cf6fa38e6f27ae5348e616448edaa7fe675e363669fd2",
-    "fileSha256": "009c84353012c953e7dfb1970a9a48830918278cee7fff21c397391368190879",
-    "reason": "Byte-identical offline cache of ACP SDK 2.5.0 dist/v2/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "f3b967a7d99a1b65b92353289af0adf056a510f243628d104367f06d2ca7abc4",
+    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 dist/v2/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
   },
   {
-    "file": "opt/automagik/offline-store/v10/files/b0/dad49174eba9f0a0ec0269b1384b4f7bbd6c5c7add3debbcf12c53f26de7c605808ed6487166dc30d05adfd054da17cf4394e49281db330ee7cc7ce63fed85",
+    "file": "opt/automagik/offline-store/v10/files/82/1487c4bcc5a289720239783d1ae36c3311b016e781d62f6e45fdbab10da3942798c975ed02045184d20cba1a0afc9a48e08f41c5af839096db93ef77f8518b",
     "rule": "home-path",
     "sha256": "6600e9264f9f11ce58bd63caf7a2ae1f56bee1cda6f13410faf84bf30a80ae3e",
-    "fileSha256": "009c84353012c953e7dfb1970a9a48830918278cee7fff21c397391368190879",
-    "reason": "Byte-identical offline cache of ACP SDK 2.5.0 dist/v2/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
+    "fileSha256": "f3b967a7d99a1b65b92353289af0adf056a510f243628d104367f06d2ca7abc4",
+    "reason": "Byte-identical offline cache of ACP SDK 2.7.0 dist/v2/schema/zod.gen.js: the reviewed AbsolutePath example, not a host account. Exact cache path, matched bytes and complete module digest are pinned."
   },
   {
     "file": "opt/automagik/runtime/node_modules/@deepseek-ai/dsh-app-boot/src/config-schema/document.ts",
