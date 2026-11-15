@@ -123,6 +123,27 @@ test('a serve restart between turns takes the new epoch seq and the next turn an
   assert.equal(run.identity.lastSeq, 2)
 })
 
+test('a same-epoch session reload with a rewound seq answers on the first attached turn', async t => {
+  const replay = { events: [], latest_seq: 0, epoch: 'epoch-a', truncated: false, count: 0, open_requests: [] }
+  const f = fixture(t, {
+    attached: true,
+    handle: (frame, socket) => {
+      if (frame.method === 'session.events.since') { socket.reply(frame, replay); return true }
+      return false
+    },
+  })
+  await f.wire.connect()
+  const run = new RemoteChat(f.wire, { identity: { canonicalBot: true, storedSessionId: 'stored', runtimeSessionId: 'old-runtime', lastSeq: 50, epoch: 'epoch-a' }, save: async () => {} })
+  t.after(() => run.dispose())
+  await run.submit('First')
+  f.socket().event('message.complete', { text: 'First done' }, 1)
+  const rows = await nextTurn(run)
+  assert.ok(rows.some(row => row.kind === 'done'), 'the reloaded first turn completed')
+  assert.equal(rows.find(row => row.kind === 'text')?.text, 'First done')
+  assert.equal(run.identity.epoch, 'epoch-a')
+  assert.equal(run.identity.lastSeq, 1)
+})
+
 test('a carried-over lastSeq above the new serve seq answers on the first attached turn', async t => {
   const replay = { events: [], latest_seq: 0, epoch: 'epoch-b', truncated: false, count: 0, open_requests: [] }
   const f = fixture(t, {

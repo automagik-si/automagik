@@ -592,14 +592,19 @@ export class RemoteChat {
         session_id: snapshot.session_id, last_seen: this.identity.lastSeq ?? 0, replay_epoch: this.identity.epoch,
       }, this.transport.deadlines?.control)
       const changedEpoch = typeof replay?.epoch === 'string' && replay.epoch !== this.identity.epoch
-      if (changedEpoch) {
+      // A reloaded session (new runtime) or a sequence that went backwards is the same
+      // reset as a restart even when the epoch string did not change: the new events start
+      // near zero and receive would drop them all against the old, larger lastSeq.
+      const reloaded = this.identity.runtimeSessionId !== undefined && this.identity.runtimeSessionId !== snapshot.session_id
+      const rewound = Number.isSafeInteger(replay?.latest_seq) && Number.isSafeInteger(this.identity.lastSeq) && replay.latest_seq < this.identity.lastSeq
+      if (changedEpoch || reloaded || rewound) {
         // A restarted serve has a new epoch and sequence numbers near zero. Taking the new
         // latest_seq (not max with the old) is what reconcile does; otherwise submit sees
         // equal epochs, never resets, and receive drops every new event.
         this.resetStream()
-        this.identity.epoch = replay.epoch
-        this.transport.epoch = replay.epoch
-        this.identity.lastSeq = Number.isSafeInteger(replay.latest_seq) ? replay.latest_seq : 0
+        if (typeof replay?.epoch === 'string') this.identity.epoch = replay.epoch
+        if (typeof replay?.epoch === 'string') this.transport.epoch = replay.epoch
+        this.identity.lastSeq = Number.isSafeInteger(replay?.latest_seq) ? replay.latest_seq : 0
       } else if (typeof replay?.epoch === 'string') {
         this.identity.epoch = replay.epoch
         this.transport.epoch = replay.epoch
