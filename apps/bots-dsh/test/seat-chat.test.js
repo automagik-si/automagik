@@ -116,6 +116,72 @@ test('a seat opens as its transcript rows, read only, and a remote or unknown te
   }
 })
 
+test('a linked machine\'s Bot is never a seat here (S3)', async (t) => {
+  const fixture = homeWith({
+    bots: [{ id: ONE, name: 'Orchestrator One' }, { id: TWO, name: 'On Another Computer', folder: '/srv/two', machine: 'mac' }],
+  })
+  t.after(fixture.stop)
+  const { chat, stop } = seatChat(fixture.home, {
+    registryPath: fixture.registryPath,
+    terminals: [terminal('t1', ONE, { transcript: fixture.transcript }), terminal('t2', TWO, { transcript: fixture.transcript })],
+  })
+  t.after(stop)
+  assert.deepEqual((await chat.list()).map(seat => seat.id), [ONE], 'a Bot with a machine is not a seat on this computer')
+  await assert.rejects(() => chat.open('win-1', 't2'), error => error.code === 'bot/refused' && /not a seat/.test(error.message))
+})
+
+test('the window id is checked before the watch (S6)', async (t) => {
+  const fixture = homeWith({ bots: [{ id: ONE, name: 'Orchestrator One' }] })
+  t.after(fixture.stop)
+  const { hc, chat, stop } = seatChat(fixture.home, {
+    registryPath: fixture.registryPath,
+    terminals: [terminal('t1', ONE, { transcript: fixture.transcript })],
+  })
+  t.after(stop)
+  for (const client of ['', ' bad', 'x'.repeat(65), 'bad/id', undefined, 42]) {
+    await assert.rejects(() => chat.open(client, 't1'), error => error.code === 'bot/refused' && /window cannot open/.test(error.message), `open ${String(client)}`)
+    await assert.rejects(() => chat.read(client, 't1', null), error => error.code === 'bot/refused' && /window cannot open/.test(error.message), `read ${String(client)}`)
+  }
+  // A well-formed window that never opened the seat still cannot read it.
+  await assert.rejects(() => chat.read('win-1', 't1', null), /not open/)
+  assert.equal(hc.calls.some(call => call.method === 'terminal.read'), false, 'a refused read reaches no terminal')
+})
+
+test('one window keeps four watches at most; the oldest seat goes (S7)', async (t) => {
+  const ids = ['b-aaaaaaaaaa', 'b-bbbbbbbbbb', 'b-cccccccccc', 'b-dddddddddd', 'b-eeeeeeeeee']
+  const fixture = homeWith({ bots: ids.map((id, index) => ({ id, name: `Seat ${index + 1}` })) })
+  t.after(fixture.stop)
+  const { chat, stop } = seatChat(fixture.home, {
+    registryPath: fixture.registryPath,
+    terminals: ids.map((id, index) => terminal(`t${index + 1}`, id, { transcript: fixture.transcript })),
+  })
+  t.after(stop)
+  for (const address of ['t1', 't2', 't3', 't4']) await chat.open('win-1', address)
+  assert.equal(chat.watches.get('win-1').size, 4)
+  await chat.open('win-1', 't5')
+  assert.equal(chat.watches.get('win-1').size, 4, 'the cap holds')
+  assert.equal(chat.watches.get('win-1').has('t1'), false, 'the oldest watch went for the new one')
+  await assert.rejects(() => chat.read('win-1', 't1', null), /not open/)
+  assert.equal((await chat.read('win-1', 't5', null)).seat.terminal, 't5')
+})
+
+test('no read without the window\'s own open watch (S8)', async (t) => {
+  const fixture = homeWith({ bots: [{ id: ONE, name: 'Orchestrator One' }, { id: TWO, name: 'Other' }] })
+  t.after(fixture.stop)
+  const { hc, chat, stop } = seatChat(fixture.home, {
+    registryPath: fixture.registryPath,
+    terminals: [terminal('t1', ONE, { transcript: fixture.transcript }), terminal('t2', TWO, { transcript: fixture.transcript })],
+  })
+  t.after(stop)
+  await chat.open('win-1', 't1')
+  await assert.rejects(() => chat.read('win-2', 't1', null), /not open/, 'another window cannot read it')
+  await assert.rejects(() => chat.read('win-1', 't2', null), /not open/, 'a window cannot read a seat it did not open')
+  const reads = () => hc.calls.filter(call => call.method === 'terminal.get').length
+  const before = reads()
+  await assert.rejects(() => chat.read('win-2', 't1', null), /not open/)
+  assert.equal(reads(), before, 'a refused read asks the terminal for nothing')
+})
+
 test('a blocked seat asks for the owner, and the bar says "needs you"', async (t) => {
   const fixture = homeWith({ bots: [{ id: ONE, name: 'Orchestrator One' }] })
   t.after(fixture.stop)

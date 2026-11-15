@@ -127,7 +127,7 @@ export class SeatChat {
    */
   async open(client, terminal) {
     const seat = await this.seatOf(terminal)
-    if (!CLIENT_ID.test(String(client ?? ''))) throw refused('This window cannot open a seat.')
+    if (typeof client !== 'string' || !CLIENT_ID.test(client)) throw refused('This window cannot open a seat.')
     const existing = this.watchOf(client, terminal)
     if (existing) return this.snapshot(seat, existing, { all: true })
     const owned = this.watches.get(client) ?? new Map()
@@ -149,9 +149,11 @@ export class SeatChat {
 
   /** The face since `after`: rows after the cursor (all of them when it is gone), status, card. */
   async read(client, terminal, after) {
-    const seat = await this.seatOf(terminal, { live: false })
+    // The window is checked before the watch: a malformed id is refused, not read as "no watch".
+    if (typeof client !== 'string' || !CLIENT_ID.test(client)) throw refused('This window cannot open a seat.')
     const handle = this.watchOf(client, terminal)
     if (!handle) throw refused('This chat is not open in this window.')
+    const seat = await this.seatOf(terminal, { live: false })
     return this.snapshot(seat, handle, { after })
   }
 
