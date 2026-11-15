@@ -8,28 +8,27 @@ import { t } from './i18n.js'
 // (docs/brand, "Colour"). Only "needs you" keeps its word: it is the one that asks for the
 // owner. The others say their word as a hover title and as the mark's accessible name.
 //
-// Nothing imports the left-bar-*.js files yet: the bar that draws today is being rewritten by
-// the DS Bot 0.3.6 merge, and the switch to these goes in on top of it.
+// The Bot team's sidebar draws these (left-bar.js, through sidebar.js's TeamSidebar).
 
 // `off` is a Bot that is not running: an idle mark, on a row drawn grey.
 export const STATUSES = Object.freeze(['working', 'needs', 'idle', 'error', 'off'])
 export const statusOr = status => (STATUSES.includes(status) ? status : 'idle')
 
-// The bar's words. Three are in the dictionary already. The other six reach t() through a
-// name, not as literals, because the dictionary (i18n.js) is one of the files the merge
-// rewrites: their entries go in with the switch, and until then every language reads the
-// English (test/left-bar-status.test.js lists what is owed). `faces` names the view's Chat and
-// Terminal switch (left-bar-faces.js).
-const SAID = { working: () => t('Working'), needs: () => t('Needs you'), error: () => t('Error') }
-export const OWED_WORDS = Object.freeze({
-  idle: 'Idle',
-  off: 'Not running',
-  team: 'Team',
-  projects: 'Projects',
-  add: 'Add a project',
-  faces: 'This Bot as',
-})
-export const word = name => (SAID[name] ? SAID[name]() : t(OWED_WORDS[name]))
+// The bar's words, all in the dictionary (i18n.js). `projects` names the rail, a tile per space;
+// `add` its "+"; `faces` names the view's Chat and Terminal switch (left-bar-faces.js).
+const SAID = {
+  working: () => t('Working'),
+  needs: () => t('Needs you'),
+  error: () => t('Error'),
+  idle: () => t('Idle'),
+  off: () => t('Not running'),
+  team: () => t('Team'),
+  projects: () => t('Spaces'),
+  add: () => t('Create or join a space'),
+  faces: () => t('This Bot as'),
+}
+export const WORDS = Object.freeze(Object.keys(SAID))
+export const word = name => SAID[name]()
 
 // The statuses that show their word, and the ones a row does not draw at all.
 export const WORDED = Object.freeze(['needs'])

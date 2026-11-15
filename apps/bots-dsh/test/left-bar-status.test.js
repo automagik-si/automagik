@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { findAll, parts, render, textOf } from './left-bar-load.js'
 
-const { STATUSES, OWED_WORDS, Status, StatusMark, installLocale, stateOfStatus, statusOfState, statusOr, word, worstStatus } = parts
+const { STATUSES, WORDS, Status, StatusMark, installLocale, stateOfStatus, statusOfState, statusOr, word, worstStatus } = parts
 
 const zh = () => {
   const dicts = new Map()
@@ -93,16 +93,16 @@ test('the mascot states and the bar statuses map both ways', () => {
   assert.equal(stateOfStatus('off'), 'idle')
 })
 
-test('the words the dictionary has are translated; the owed ones read English until the switch', () => {
-  // These go into i18n.js with the switch to the new bar: i18n.js is one of the files the
-  // DS Bot 0.3.6 merge rewrites, so this branch does not touch it.
-  assert.deepEqual({ ...OWED_WORDS }, { idle: 'Idle', off: 'Not running', team: 'Team', projects: 'Projects', add: 'Add a project', faces: 'This Bot as' })
+test('every word the bar says is in the dictionary', () => {
+  assert.deepEqual([...WORDS], ['working', 'needs', 'error', 'idle', 'off', 'team', 'projects', 'add', 'faces'])
+  const english = Object.fromEntries(WORDS.map(name => [name, word(name)]))
+  assert.deepEqual(english, { working: 'Working', needs: 'Needs you', error: 'Error', idle: 'Idle', off: 'Not running', team: 'Team', projects: 'Spaces', add: 'Create or join a space', faces: 'This Bot as' })
   const off = zh()
   try {
-    assert.equal(word('working'), '工作中')
+    assert.equal(word('working'), '进行中')
     assert.equal(word('needs'), '需要你')
     assert.equal(word('error'), '错误')
-    for (const [name, english] of Object.entries(OWED_WORDS)) assert.equal(word(name), english, `${name} is owed a translation`)
+    for (const name of WORDS) assert.notEqual(word(name), english[name], `${name} reads Chinese`)
   } finally {
     off()
   }

@@ -1,4 +1,4 @@
-import { createElement as h } from 'react'
+import { createElement as h, isValidElement } from 'react'
 import { StatusMark, statusOr, word } from './left-bar-status.js'
 
 // -------------------------------------------------------------------------
@@ -9,7 +9,8 @@ import { StatusMark, statusOr, word } from './left-bar-status.js'
 // A project: { id, name, icon, iconSize, status }. `icon` is a picture's address, or
 // { light, dark } for a mark with an ink and a cream drawing (docs/brand: ink on a light ground,
 // cream on a dark one); `iconSize` is its width in px where the mark is not drawn for the
-// tile's own box (--lb-tile-icon). A project with no icon wears its first letter.
+// tile's own box (--lb-tile-icon). `icon` may also be a drawn element (the app's own mark). A
+// project with no icon wears its first letter.
 
 export const projectLetter = name => ([...String(name ?? '').trim()][0] ?? '?').toUpperCase()
 
@@ -17,18 +18,23 @@ export const projectLetter = name => ([...String(name ?? '').trim()][0] ?? '?').
 export const projectBadge = (project, currentId) => (project.id !== currentId && statusOr(project.status) === 'needs' ? 'needs' : null)
 
 const paired = project => typeof project.icon?.light === 'string' && typeof project.icon?.dark === 'string'
-const pictured = project => typeof project.icon === 'string' || paired(project)
+const drawn = project => isValidElement(project.icon)
+const pictured = project => typeof project.icon === 'string' || paired(project) || drawn(project)
 function icon(project) {
   const sized = Number.isFinite(project.iconSize) && project.iconSize > 0 ? { style: { width: project.iconSize, height: project.iconSize } } : null
   const picture = (src, className) => h('img', { key: className ?? 'icon', className, src, alt: '', draggable: false, ...sized })
+  if (drawn(project)) return project.icon
   if (typeof project.icon === 'string') return picture(project.icon)
   if (paired(project)) return [picture(project.icon.light, 'lb-on-light'), picture(project.icon.dark, 'lb-on-dark')]
   return projectLetter(project.name)
 }
 const Plus = () => h('svg', { width: 18, height: 18, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', 'aria-hidden': true }, h('path', { d: 'M10 4.5v11M4.5 10h11' }))
 
-/** The rail. `onOpen(project)` hears a press on a tile, `onAdd()` one on the "+". */
-export function ProjectRail({ projects = [], currentId, onOpen, onAdd, label }) {
+/**
+ * The rail. `onOpen(project)` hears a press on a tile, `onAdd(event)` one on the "+";
+ * `addLabel` names the "+" where the default word does not say what it does.
+ */
+export function ProjectRail({ projects = [], currentId, onOpen, onAdd, label, addLabel, addExpanded }) {
   return h('nav', { className: 'lb-rail', 'aria-label': label ?? word('projects') },
     projects.map((project) => {
       const badge = projectBadge(project, currentId)
@@ -39,5 +45,5 @@ export function ProjectRail({ projects = [], currentId, onOpen, onAdd, label }) 
         onClick: onOpen ? () => onOpen(project) : undefined,
       }, h('span', { className: 'lb-tile-face' }, icon(project)), badge ? h('span', { className: 'lb-pip' }, h(StatusMark, { status: badge, named: false })) : null)
     }),
-    h('button', { type: 'button', className: 'lb-tile lb-tile-add', 'aria-label': word('add'), title: word('add'), onClick: onAdd }, h('span', { className: 'lb-tile-face' }, h(Plus))))
+    h('button', { type: 'button', className: 'lb-tile lb-tile-add', 'aria-label': addLabel ?? word('add'), title: addLabel ?? word('add'), 'aria-expanded': addExpanded, onClick: onAdd }, h('span', { className: 'lb-tile-face' }, h(Plus))))
 }

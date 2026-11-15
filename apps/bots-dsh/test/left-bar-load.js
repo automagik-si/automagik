@@ -27,6 +27,7 @@ const react = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
   useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}],
   useEffect: () => {}, useLayoutEffect: () => {}, useMemo: make => make(), useRef: current => ({ current }), Fragment: 'fragment',
+  isValidElement: value => value !== null && typeof value === 'object' && 'type' in value && 'props' in value,
 }
 const module = { exports: {} }
 // Run in this realm, so the arrays and objects the parts return compare deeply with a test's own.

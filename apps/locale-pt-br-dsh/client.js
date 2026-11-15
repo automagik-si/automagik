@@ -2749,7 +2749,14 @@ const pack = createPack({
     "Auto is not offered for this Bot's model.": "O Automático não é oferecido para o modelo deste Bot.",
     "Auto is offered once this Bot's chat runs on the model saved for it.": "O Automático passa a ser oferecido quando a conversa deste Bot rodar no modelo salvo para o Bot.",
     "On this model, Auto needs a background model, and no connected model can be one. Connect a model with an API key to turn it on.": "Neste modelo, o Automático precisa de um modelo de segundo plano, e nenhum modelo conectado pode ser usado. Conecte um modelo com chave de API para ativá-lo.",
-    "Auto is not available for this Bot right now.": "O Automático não está disponível para este Bot agora."
+    "Auto is not available for this Bot right now.": "O Automático não está disponível para este Bot agora.",
+    "Team": "Equipe",
+    "Spaces": "Espaços",
+    "This computer": "Este computador",
+    "Create or join a space": "Criar ou entrar em um espaço",
+    "Creating or joining a space comes with Automagik Cloud. Nothing is made from here yet.": "Criar ou entrar em um espaço chega com o Automagik Cloud. Nada é criado daqui ainda.",
+    "This Bot as": "Ver este Bot como",
+    "No terminal for this Bot yet": "Este Bot ainda não tem terminal"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

@@ -261,7 +261,7 @@ test('the list says when rows lie above or below it; a press reaches the caller'
   assert.deepEqual(await drawn(), { above: NONE, more: REST }, 'a list that fits draws no scroll edge')
   await page.getByRole('button', { name: 'Tess' }).click()
   await page.getByRole('button', { name: 'Genie, Needs you' }).click()
-  await page.getByRole('button', { name: 'Add a project' }).click()
+  await page.getByRole('button', { name: 'Create or join a space' }).click()
   await page.getByRole('button', { name: 'Help desk' }).click()
   assert.deepEqual(await page.evaluate(() => window.opened), ['chat:pip/ch-help/tess', 'project:genie', 'add', 'channel:pip/ch-help'])
 })

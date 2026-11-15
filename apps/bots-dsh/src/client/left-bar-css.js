@@ -177,9 +177,55 @@ const FACES = `
 .lb-face-part[aria-pressed=true]{background:var(--st-paper,var(--bt-card));color:var(--bt-ink);box-shadow:0 1px 0 var(--lb-line);cursor:default}
 .lb-face-part:focus-visible{outline:3px solid var(--st-ring,var(--bt-accent));outline-offset:1px}
 .lb-face-glyph{flex:none;display:block;width:var(--lb-face-glyph);height:var(--lb-face-glyph)}
+.lb-face-part[aria-disabled=true],.lb-face-part[aria-disabled=true]:hover{color:color-mix(in srgb,var(--bt-ink) 42%,transparent);cursor:not-allowed}
+.bt-head .lb-face{margin-right:4px}
+`
+
+// In the app the bar fills the shell's sidebar card (left-bar.js, through sidebar.js). The card
+// is the panel: its ground is the skin's, it sits --lb-panel-gap in, and nothing pads it, so the
+// rail runs from its top edge; a hairline at the rail's edge runs the card's whole height, past
+// the shell's footer (the account menu), which stands in the list's column. The shell's own
+// scroll fade goes: the Team rows fade their own edges. A phone's drawer fills the screen.
+const HOST = `
+.bt-side.lb-host{display:flex;flex-direction:column;height:100%;min-height:0;padding:0}
+.lb-bar[data-lb-host]{flex:1;height:auto;min-height:0;margin:0;border-radius:0;background:none}
+.lb-bar[data-lb-host] .lb-rail{border-right:0}
+.lb-railcol{flex:none;display:flex;flex-direction:column;align-items:center;width:var(--lb-rail-w);min-height:0}
+.lb-railcol .lb-rail{flex:1;min-height:0}
+.lb-railcol .bt-side-collapse{flex:none;width:36px;height:36px;margin:0 0 10px;border:0;border-radius:var(--lb-tile-r);background:none;box-shadow:none;color:var(--lb-muted)}
+.lb-railcol .bt-side-collapse:hover{background:var(--bt-hover);color:var(--bt-ink)}
+.lb-bar[data-lb-host] .lb-list{flex:1;width:auto}
+html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){position:relative;margin:var(--lb-panel-gap)!important;height:calc(100% - 2 * var(--lb-panel-gap))!important;padding:0!important;border-radius:var(--lb-panel-r);background:var(--lb-ground)!important}
+html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host)::before{content:'';position:absolute;left:calc(var(--lb-rail-w) - 1px);top:0;bottom:0;width:1px;background:var(--lb-line);pointer-events:none}
+html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){margin:0!important;height:100%!important;border-radius:0}
+[class*="_root"]:has(.lb-host) [class*="_scrollArea"]:has(.lb-host){grid-template-columns:0 minmax(0,1fr) 0;grid-template-rows:0 max-content 0 minmax(0,1fr);margin:0}
+[class*="_root"]:has(.lb-host) [class*="_scrollFade"]{display:none}
+[class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
+.lb-head{flex:none;display:flex;align-items:center;gap:4px;height:52px;padding:0 8px 0 14px;box-sizing:border-box}
+.lb-brand{flex:1;min-width:0;display:flex;align-items:center;overflow:hidden}
+.lb-brand .omni-wordmark{display:block;flex:none}
+.lb-head .bt-round{flex:none;width:30px;height:30px;background:none;box-shadow:none;color:var(--bt-ink)}
+.lb-head .bt-round:hover{background:var(--bt-hover)}
+html[data-automagik-desktop] .lb-brand{visibility:hidden}
+html[data-automagik-desktop=darwin]:not([data-automagik-fullscreen]) .lb-bar[data-lb-host] .lb-rail{padding-top:44px}
+html[data-automagik-desktop=darwin] .lb-head{-webkit-app-region:drag}
+html[data-automagik-desktop=darwin] .lb-head :is(a,button,input,[role=button],[aria-haspopup],[tabindex]){-webkit-app-region:no-drag}
+.lb-host .bt-hint{margin:2px 10px 8px}
+.lb-foot{flex:none;padding:6px 8px 2px}
+.lb-foot:empty{display:none}
+.lb-agent .bt-agent-sub-in{margin-left:calc(8px + var(--lb-art) + var(--lb-art-gap) - 8px)}
+.lb-host .bt-threads{margin-left:calc(8px + var(--lb-art) / 2)}
+/* The account menu in the footer, under the list: the person's face and the word Account. */
+.bt-account-name{display:none}
+[class*="_root"]:has(.lb-host) .bt-account{width:auto;height:36px;align-items:center;gap:10px;padding:0 12px 0 0;border-radius:18px;color:var(--bt-ink);font:var(--bt-weight-label,500) 14px/1 var(--bt-head-font,var(--bt-font))}
+[class*="_root"]:has(.lb-host) .bt-account-name{display:inline}
+[class*="_root"]:has(.lb-host) .bt-account:hover{background:var(--bt-hover)}
+.bt-you .bt-person{display:block}
+.lb-tile-add[aria-expanded=true] .lb-tile-face{background:var(--bt-hover);color:var(--bt-ink)}
+.lb-note{position:fixed;z-index:200;width:max-content;max-width:min(260px,calc(100vw - 24px));padding:10px 12px;box-sizing:border-box;border-radius:12px;background:var(--st-paper,var(--bt-main));border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.12),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);font:400 13px/1.45 var(--bt-font)}
 `
 
 export const LEFT_BAR_CSS = `
 ${tokenCss('body', LEFT_BAR_TOKENS)}
 ${tokenCss('[data-lb-skin=flat]', LEFT_BAR_SKINS.flat)}
-${tokenCss('[data-lb-skin=stage]', LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS}${MARKS}${FACES}`
+${tokenCss('[data-lb-skin=stage]', LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS}${MARKS}${FACES}${HOST}`

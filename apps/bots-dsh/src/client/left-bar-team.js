@@ -1,4 +1,4 @@
-import { createElement as h, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createElement as h, Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { BotMark, lookOf, petOf, useBaked } from './mark.js'
 import { PetSprite } from './pet.js'
 import { BODY, CELL, FLOOR } from './pet-poses.js'
@@ -16,7 +16,7 @@ import { QUIET, Status, WORDED, stateOfStatus, statusOr, word, worstStatus } fro
 //             [{ id, name, kind, folded, chats: [{ id, name, status }] }]
 //   frontId   the project's front Bot: shown first, above every section
 //   sections  [{ label, bots: [id] }], optional quiet labels (DS Bot ruling 10)
-//   groups    [{ id, name, members: [id] }], after the Bots
+//   groups    [{ id, name, members: [id], status, unread }], after the Bots
 
 const chatStatuses = bot => (bot.channels ?? []).flatMap(channel => (channel.chats ?? []).map(chat => statusOr(chat.status)))
 
@@ -60,7 +60,7 @@ export function teamRows(team) {
   ;(team?.groups ?? []).forEach((group, index) => {
     const members = (group.members ?? []).map(id => byId.get(id)).filter(Boolean)
     // Under sections the groups stand a little apart, so they do not read as the last section's.
-    rows.push({ kind: 'group', key: `group:${group.id}`, id: group.id, name: group.name, members, lead: index === 0 && rows.some(row => row.kind === 'section') })
+    rows.push({ kind: 'group', key: `group:${group.id}`, id: group.id, name: group.name, members, lead: index === 0 && rows.some(row => row.kind === 'section'), status: statusOr(group.status), unread: group.unread === true })
   })
   return rows
 }
@@ -135,9 +135,18 @@ function BotArt({ bot, size, state }) {
     h('span', { className: 'bt-mark', 'data-shape': 'pet', 'data-state': state, 'data-live': '', 'aria-hidden': true, style: { width: drawn, height: drawn } },
       h(PetSprite, { pet: baked, size: drawn, state, live: true })))
 }
-const drawBot = (bot, size, state) => h(BotArt, { bot, size, state })
+/** A Bot's character for a row, as the bar draws it by default. */
+export const drawBot = (bot, size, state) => h(BotArt, { bot, size, state })
 const Chevron = () => h('svg', { className: 'lb-chev', width: 13, height: 13, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'M7.5 4.5L13 10l-5.5 5.5' }))
 const classes = (...names) => names.filter(Boolean).join(' ')
+// A name the row cuts shows in full on hover. Only the laid-out row can tell, so it is
+// measured as the pointer enters.
+export const nameIfCut = (event) => {
+  const row = event.currentTarget
+  const name = row.querySelector('.lb-name')
+  if (name && name.scrollWidth > name.clientWidth) row.title = name.textContent
+  else row.removeAttribute('title')
+}
 
 /**
  * The Team rows. `current` is the open row's key (`bot:<id>`, `chat:<bot>/<channel>/<id>`,
@@ -145,8 +154,11 @@ const classes = (...names) => names.filter(Boolean).join(' ')
  * it). `renderArt(bot, size, state)` and `renderGlyph(channel)` draw a Bot's character and a
  * channel's glyph; a glyph is one colour, so colour only ever means status. `skin` is the
  * name of the token set in use (left-bar-css.js): when it changes, the art is measured again.
+ * `onMenu(row, event)` hears a row's context menu. `renderAfter(row)` draws what hangs under a
+ * row that the bar does not draw itself (a Bot's running tasks, what other plugins add under a
+ * Bot, a DSH bot's Sessions); it is drawn as is, between that row and the next.
  */
-export function TeamRows({ team, current, onOpen, label, skin, renderArt = drawBot, renderGlyph, worded = WORDED, quiet = QUIET }) {
+export function TeamRows({ team, current, onOpen, onMenu, renderAfter, label, skin, renderArt = drawBot, renderGlyph, worded = WORDED, quiet = QUIET }) {
   const ref = useRef(null)
   const rows = teamRows(team)
   const { art, duo } = useArtSizes(ref, skin, rows.length)
@@ -155,7 +167,8 @@ export function TeamRows({ team, current, onOpen, label, skin, renderArt = drawB
   const status = row => h(Status, { status: row.status, worded, quiet })
   const button = (row, className, extra, ...children) => h('button', {
     key: row.key, type: 'button', className: classes('lb-row', className), 'data-kind': row.kind, 'data-id': row.id,
-    'aria-current': row.key === current ? 'page' : undefined, onClick: press(row), ...extra,
+    'aria-current': row.key === current ? 'page' : undefined, onClick: press(row), onMouseEnter: nameIfCut,
+    onContextMenu: onMenu ? (event) => { event.preventDefault(); onMenu(row, event) } : undefined, ...extra,
   }, ...children)
   const draw = (row) => {
     if (row.kind === 'section') return h('div', { key: row.key, className: classes('lb-sec', row.first && 'lb-sec-first') }, row.label)
@@ -181,14 +194,19 @@ export function TeamRows({ team, current, onOpen, label, skin, renderArt = drawB
         status(row))
     }
     const [first, second] = row.members
-    return button(row, classes(row.lead && 'lb-row-lead'), null,
+    return button(row, classes(row.lead && 'lb-row-lead', row.unread && 'lb-row-unread'), null,
       second
         ? h('span', { className: 'lb-art lb-duo' },
           h('span', { className: 'lb-duo-a' }, renderArt(first, duo, 'idle')),
           h('span', { className: 'lb-duo-b' }, renderArt(second, duo, 'idle')))
         : h('span', { className: 'lb-art' }, first ? renderArt(first, art, 'idle') : null),
-      h('span', { className: 'lb-name' }, row.name))
+      h('span', { className: 'lb-name' }, row.name),
+      row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,
+      status(row))
   }
   return h('div', { className: 'lb-scroll', 'data-above': edges.above ? '' : undefined, 'data-more': edges.more ? '' : undefined },
-    h('div', { ref, className: 'lb-rows', role: 'group', 'aria-label': label ?? word('team') }, rows.map(draw)))
+    h('div', { ref, className: 'lb-rows', role: 'group', 'aria-label': label ?? word('team') }, rows.map((row) => {
+      const after = renderAfter ? renderAfter(row) : null
+      return after ? h(Fragment, { key: row.key }, draw(row), after) : draw(row)
+    })))
 }
