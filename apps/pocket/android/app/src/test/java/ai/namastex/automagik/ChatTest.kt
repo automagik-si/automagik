@@ -312,6 +312,16 @@ class ChatTest {
         assertNull(Chat.cutNote(rowOf("""{"id":"c1","kind":"tool-call","tool":"Bash","input":"ls"}""")))
     }
 
+    @Test fun aCutRowOnABotChatDoesNotPointAtATerminal() {
+        val text = rowOf(JSONObject().put("id", "r1").put("kind", "text").put("text", "a…").put("cut", true).toString())
+        val out = rowOf(JSONObject().put("id", "o1").put("kind", "tool-result").put("output", "x".repeat(Chat.OUTPUT_PREVIEW) + "…").toString())
+        for (r in listOf(text, out)) {
+            assertEquals(Chat.CUT_NOTE_DSH, Chat.cutNote(r, dsh = true))
+            assertFalse(Chat.cutNote(r, dsh = true)!!.contains("terminal"))
+        }
+        assertNull(Chat.cutNote(rowOf("""{"id":"r2","kind":"text","text":"short"}"""), dsh = true))
+    }
+
     @Test fun aSendOver32KiBRefusedByTheBridgeStaysRefusedWithItsReason() {
         val text = "é".repeat(17 * 1024)
         val refused = Chat.answered(state(), "m", text, j("""{"state":"refused","id":"m","reason":"too-long"}"""))
@@ -327,8 +337,14 @@ class ChatTest {
         val dir = java.io.File("src/main/java/ai/namastex/automagik")
         val files = dir.listFiles { f -> f.name.startsWith("Chat") && f.name.endsWith(".kt") }.orEmpty()
         assertTrue("chat sources not found from ${java.io.File(".").absoluteFile.name}", files.any { it.name == "Chat.kt" })
-        val banned = Regex("""android\.util\.Log|\bLog\.[a-z]\(|\bprintln\(|\bprint\(|printStackTrace|Timber|SharedPreferences|getSharedPreferences|DataStore|openFileOutput|FileOutputStream|FileWriter|writeText|writeBytes|@Dao|@Entity|SQLiteDatabase|\.edit\(\)""")
-        val hits = files.flatMap { f -> f.readLines().mapIndexedNotNull { i, l -> if (banned.containsMatchIn(l)) "${f.name}:${i + 1}: ${l.trim()}" else null } }
+        // The view model's live-chat section, from its banner to the next unrelated function.
+        val vm = java.io.File(dir, "PocketViewModel.kt").readText()
+        val from = vm.indexOf("// ---- The live chat (RFC 0015 delivery 5)")
+        val to = vm.indexOf("fun startTerminal(")
+        assertTrue("live-chat section not found", from in 0 until to)
+        val banned = Regex("""android\.util\.Log|\bLog\.[a-z]\(|\bprintln\(|\bprint\(|printStackTrace|Timber|SharedPreferences|getSharedPreferences|DataStore|openFileOutput|FileOutputStream|FileWriter|writeText|writeBytes|@Dao|@Entity|SQLiteDatabase|\.edit\(\)|\bprefs\b""")
+        val sources = files.map { it.name to it.readText() } + ("PocketViewModel.kt (live chat)" to vm.substring(from, to))
+        val hits = sources.flatMap { (name, text) -> text.lines().mapIndexedNotNull { i, l -> if (banned.containsMatchIn(l)) "$name:${i + 1}: ${l.trim()}" else null } }
         assertEquals(emptyList<String>(), hits)
     }
 

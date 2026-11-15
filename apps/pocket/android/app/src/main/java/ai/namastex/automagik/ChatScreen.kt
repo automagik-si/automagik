@@ -341,14 +341,14 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                     modifier = Modifier.widthIn(max = 560.dp)) {
                     Column(Modifier.padding(10.dp, 8.dp)) {
                         ChatTextView(row.text, openLink)
-                        Chat.cutNote(row)?.let { Text(it, fontSize = 11.sp, color = Muted) }
+                        Chat.cutNote(row, s.dsh)?.let { Text(it, fontSize = 11.sp, color = Muted) }
                         if (row.interrupted) Text(Chat.STOPPED, fontSize = 11.sp, color = Muted)
                     }
                 }
             }
         }
         "tool-call" -> Collapsed(row.id + ":call", row.tool + row.summary.takeIf { it.isNotBlank() && it != row.tool }?.let { ": $it" }.orEmpty(), row.input, expanded)
-        "tool-result" -> Collapsed(row.id + ":result", if (row.ok) "result" else "failed", row.output, expanded, result = true, note = Chat.cutNote(row))
+        "tool-result" -> Collapsed(row.id + ":result", if (row.ok) "result" else "failed", row.output, expanded, result = true, note = Chat.cutNote(row, s.dsh))
         "status" -> Hint(ChatText.clean(row.msg.ifBlank { row.state }))
         "tokens" -> {}
         "approval", "question" -> PendingCard(row, s, vm)
