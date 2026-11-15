@@ -680,50 +680,12 @@ export function install(rt) {
         try { await handle?.close?.() } catch {}
       }
     }
-    // A durable snapshot of the Hermes route last OBSERVED for a Session, never a pick: it is
-    // written only when the live header or the stored log shows that route, and cleared when
-    // one shows another provider. It keeps the rule across a restart when the stored log is
-    // not readable, without going back to the history of picks.
-    let carriedChanged = false
-    const carriedRef = (sessionId) => {
-      const saved = bot.carriedRoutes?.[sessionId]
-      if (typeof saved === 'string' && saved.startsWith('hermes-remote/') && saved !== 'hermes-remote/attach') return saved
-      if (sessionId === chat && typeof bot.previousModel === 'string' && bot.previousModel.startsWith('hermes-remote/')
-        && bot.previousModel !== 'hermes-remote/attach') return bot.previousModel
-      return undefined
-    }
-    const rememberCarried = (sessionId, config) => {
-      if (config?.provider !== 'hermes-remote') {
-        if (bot.carriedRoutes?.[sessionId] !== undefined) {
-          delete bot.carriedRoutes[sessionId]
-          carriedChanged = true
-        }
-        return
-      }
-      const carried = `${config.provider}/${config.model}`
-      if (carried === 'hermes-remote/attach') return
-      if (bot.carriedRoutes === null || typeof bot.carriedRoutes !== 'object') bot.carriedRoutes = {}
-      if (bot.carriedRoutes[sessionId] !== carried) {
-        bot.carriedRoutes[sessionId] = carried
-        carriedChanged = true
-      }
-    }
     const onHermesRoute = async (sessionId) => {
       if (ref !== 'hermes-remote/attach') return false
       let config
       try { config = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config } catch { return false }
       if (config === undefined) config = await storedRoute(sessionId)
-      if (config !== undefined) rememberCarried(sessionId, config)
-      if (config?.provider === 'hermes-remote') return true
-      if (config !== undefined) return false
-      // No route is readable now: the last observed route for this Session decides, and an
-      // answer already attributed to the attach row is that route. A group Session with no
-      // record of its own is served by the same attach row as its Bot chat.
-      const lastAttachAnswer = () => {
-        try { return rt.modelStateView?.()?.[bot.id]?.lastAnswer?.ref === 'hermes-remote/attach' } catch { return false }
-      }
-      return carriedRef(sessionId) !== undefined || (sessionId === chat && lastAttachAnswer())
-        || (sessionId !== chat && (carriedRef(chat) !== undefined || lastAttachAnswer()))
+      return config?.provider === 'hermes-remote'
     }
     if (ownChanged && !staying.has(chat) && !(await onHermesRoute(chat))) await selectSessionModel(chat, route)
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
@@ -746,10 +708,7 @@ export function install(rt) {
       await rt.save()
       return undefined
     }
-    if (!ownChanged) {
-      if (carriedChanged) await rt.save()
-      return ref
-    }
+    if (!ownChanged) return ref
     bot.appliedModel = ref
     if (effort === undefined) delete bot.appliedEffort
     else bot.appliedEffort = effort
