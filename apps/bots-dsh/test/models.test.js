@@ -253,7 +253,7 @@ test('a carried-over chat that is not loaded still keeps its Hermes route', asyn
     : []
   rt.ctx.sessions = { get: () => undefined }
   // The stored Session's last request is what decides, not a pick's history.
-  rt.ctx.sessionPersistence = {
+  const persistence = {
     open: async id => id === 'b1'
       ? {
         read: async () => ({ events: [{ type: 'request/header', data: { header: { config: { provider: 'hermes-remote', model: 'nous:openai/gpt-6-astra' } } } }] }),
@@ -261,6 +261,8 @@ test('a carried-over chat that is not loaded still keeps its Hermes route', asyn
       }
       : undefined,
   }
+  const get = rt.ctx.get
+  rt.ctx.get = name => name === 'sessionPersistence' ? persistence : get(name)
   const carried = { id: 'b1', model: 'hermes-remote/attach', appliedModel: 'hermes-remote/attach', previousModel: 'hermes-remote/attach' }
   assert.equal(await rt.applyModel(carried, { force: true }), 'hermes-remote/attach')
   assert.deepEqual(selected, [], 'no in-place switch while the carried chat is not loaded')

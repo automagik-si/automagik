@@ -8,6 +8,7 @@ import * as Jsonl from '@deepseek-ai/dsh-session-persistence-jsonl'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
+import { inject as BOTS_INJECT } from '../index.js'
 import { install as installModels } from '../src/host/models.js'
 import { install as installModelState } from '../src/host/model-state.js'
 import { RemoteChatAdapter } from '../src/host/remote-chat-adapter.js'
@@ -84,29 +85,36 @@ async function storedTeam(t, sessions) {
   return host
 }
 
-function runtime(host, { bots, groups = {}, chats = {} }) {
-  const listeners = new Map()
+// The whole table runs the way the app loads bots-dsh: real cordis, the plugin's REAL
+// inject list, and the Session store as a sibling plugin under the same context. The
+// plugin therefore reaches the store only through ctx.get, as it must in production.
+async function runtime(host, { bots, groups = {}, chats = {}, live = {} }) {
   const selected = []
-  const ctx = {
-    sessionPersistence: host.sessionPersistence,
-    sessions: { get: () => undefined, list: () => [] },
-    on(name, listener) { listeners.set(name, listener); return () => {} },
-    get: () => undefined,
+  const services = {
+    sessions: { get: id => live[id], list: () => [] },
     llm: {
       listProviders: () => [{ id: 'hermes-remote', name: 'Remote Hermes' }, { id: 'deepseek', name: 'DeepSeek' }],
       listModels: async provider => provider === 'hermes-remote' ? [ROW] : [{ id: 'saved' }],
       resolveModelInfo: async () => ({ context: { contextWindow: 200_000 }, defaultMaxTokens: 8000 }),
     },
     sessionController: { selectModel: async ({ sessionId, provider, model }) => { selected.push(`${sessionId}:${provider}/${model}`) } },
+    tools: {}, systemPrompt: {}, sessionTitle: {}, workspaceRegistry: {}, connection: {},
   }
-  const rt = {
-    ctx, state: { bots }, chatOf: id => chats[id] ?? id, groupSessionsOf: id => groups[id] ?? [],
-    chatOwners: new Map(Object.keys(bots).map(id => [id, id])),
-    botOf: id => bots[id], awaitingFirstAnswer: () => false, save: async () => {}, warn() {},
-  }
-  installModels(rt)
-  installModelState(rt)
-  const event = (sessionId, type, data) => listeners.get('session/event')?.({ id: sessionId }, { type, data, time: 1 })
+  for (const name of BOTS_INJECT) { host.provide(name); host.set(name, services[name]) }
+  let rt
+  await host.plugin({
+    name: 'bots-dsh-carried-rule-probe', inject: BOTS_INJECT,
+    apply: (ctx) => {
+      rt = {
+        ctx, state: { bots }, chatOf: id => chats[id] ?? id, groupSessionsOf: id => groups[id] ?? [],
+        chatOwners: new Map(Object.keys(bots).map(id => [id, id])),
+        botOf: id => bots[id], awaitingFirstAnswer: () => false, save: async () => {}, warn() {},
+      }
+      installModels(rt)
+      installModelState(rt)
+    },
+  })
+  const event = (sessionId, type, data) => host.emit('session/event', { id: sessionId }, { type, data, time: 1 })
   const answer = (sessionId) => event(sessionId, 'assistant/message', { message: { source: CARRIED } })
   const failed = (sessionId) => event(sessionId, 'turn/end', { reason: { kind: 'error', error: { code: 'REMOTE_HERMES', message: 'Remote Hermes reported a turn failure.' } } })
   const accepted = (sessionId, config = CARRIED) => {
@@ -310,13 +318,9 @@ test('a new part that picked another provider then picked attach back takes atta
   // pick must be applied, not skipped by any last-answer fallback from the old part.
   const host = await storedTeam(t, { b1: [{ route: CARRIED }] })
   const bot = carries({ previousModel: ATTACH })
-  const bench = runtime(host, { bots: { b1: bot }, chats: { b1: 'part-2' } })
+  const bench = await runtime(host, { bots: { b1: bot }, chats: { b1: 'part-2' }, live: { 'part-2': { requestHeader: () => undefined } } })
   bench.rt.chatOwners.set('part-2', 'b1')
   bench.answer('b1')
-  bench.rt.ctx.sessions = {
-    get: id => (id === 'part-2' ? { requestHeader: () => undefined } : undefined),
-    list: () => [],
-  }
   await bench.rt.applyModel(bot, { force: true })
   assert.deepEqual(bench.selected, ['part-2:hermes-remote/attach'])
   // The new part's first request is the attach row, and the guard accepts it.
@@ -328,7 +332,7 @@ for (const row of ROWS) {
     const host = await storedTeam(t, row.sessions)
     const bots = { b1: carries(row.bot) }
     Object.assign(bots, row.bots ?? {})
-    const bench = runtime(host, { bots, groups: row.groups, chats: row.chats })
+    const bench = await runtime(host, { bots, groups: row.groups, chats: row.chats })
     await row.run(bench)
     if (!row.name.startsWith('Control') && row.name !== 'Tester 6: part roll-over, the new part takes the attach row') {
       bench.answer('b1')

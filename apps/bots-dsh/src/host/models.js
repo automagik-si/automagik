@@ -667,10 +667,14 @@ export function install(rt) {
     // the chat's ACTUAL route: the live Session's request header, or, for an unloaded
     // chat, the last request/header in its stored log. It is never the history of picks.
     const storedRoute = async (sessionId) => {
-      if (typeof ctx.sessionPersistence?.open !== 'function') return undefined
+      // bots-dsh does not inject sessionPersistence: in real cordis a sibling plugin's
+      // service throws on a property read but is readable through ctx.get.
+      let persistence
+      try { persistence = ctx.get?.('sessionPersistence') } catch { return undefined }
+      if (typeof persistence?.open !== 'function') return undefined
       let handle
       try {
-        handle = await ctx.sessionPersistence.open(sessionId, 'read')
+        handle = await persistence.open(sessionId, 'read')
         const { events } = await handle.read()
         for (let index = events.length - 1; index >= 0; index -= 1) {
           if (events[index]?.type === 'request/header') return events[index].data?.header?.config
