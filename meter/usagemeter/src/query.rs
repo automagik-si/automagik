@@ -1821,6 +1821,12 @@ fn read(
         .collect();
     if let Some((since, until)) = req.interval {
         scan_evidence(c, &repos, from, to, evidence_from, &mut |r| rows.push(r))?;
+        // Hourly tokens that have no per-call record, in the whole hours of the interval, count
+        // as before-evidence actor tokens: never a branch or bot row.
+        if evidence_from.is_some() {
+            let excess = hourly_excess(c, &repos, from, to, evidence_from, &rows)?;
+            rows.extend(excess);
+        }
         // Hourly history cannot be sliced exactly. Report it only as before-evidence
         // actor totals, never as exact branch or bot usage in the custom interval.
         if evidence_from.is_none_or(|ev| since < ev) {
@@ -2104,6 +2110,103 @@ fn scan_evidence(
         });
     }
     Ok(())
+}
+
+/// The seven token columns of a group, in `TokensOut` order.
+fn columns(t: &TokensOut) -> [i64; 7] {
+    [
+        t.input,
+        t.cache_read,
+        t.cache_write_5m,
+        t.cache_write_1h,
+        t.output,
+        t.reasoning.unwrap_or(0),
+        t.unsplit,
+    ]
+}
+
+/// Hourly tokens inside the whole hours of `from..to` that per-call evidence does not hold: per
+/// (hour, harness, model, repo), each column's `max(0, hourly - evidence)`, as a before-evidence
+/// row with no branch and no bot. `evidence` is what `scan_evidence` read for the same interval.
+/// A partial hour at either end is not added (the rollup cannot be sliced); an hour before
+/// `evidence_from` is the existing before-evidence reader's.
+fn hourly_excess(
+    c: &Connection,
+    repos: &[&str],
+    from: i64,
+    to: i64,
+    evidence_from: Option<i64>,
+    evidence: &[UsageRead],
+) -> rusqlite::Result<Vec<UsageRead>> {
+    let first = from.saturating_add(HOUR_MS - 1).div_euclid(HOUR_MS) * HOUR_MS;
+    let last = hour_start(to);
+    if first >= last {
+        return Ok(Vec::new());
+    }
+    type Key = (i64, String, String, String);
+    let add = |sums: &mut BTreeMap<Key, [i64; 7]>, r: &UsageRead| {
+        let Some(repo) = r.repo.clone() else { return };
+        let s = sums
+            .entry((r.hour_ms, r.harness.clone(), r.model.clone(), repo))
+            .or_default();
+        for (a, b) in s.iter_mut().zip(columns(&r.tokens)) {
+            *a = a.saturating_add(b);
+        }
+    };
+    let mut held: BTreeMap<Key, [i64; 7]> = BTreeMap::new();
+    for r in evidence
+        .iter()
+        .filter(|r| r.hour_ms >= first && r.hour_ms < last)
+    {
+        add(&mut held, r);
+    }
+    let mut hourly: BTreeMap<Key, [i64; 7]> = BTreeMap::new();
+    scan_usage(c, Some(repos), first, last, evidence_from, &mut |r| {
+        add(&mut hourly, &r);
+    })?;
+    let mut out = Vec::new();
+    for ((hour_ms, harness, model, repo), sums) in hourly {
+        let have = held
+            .get(&(hour_ms, harness.clone(), model.clone(), repo.clone()))
+            .copied()
+            .unwrap_or_default();
+        let mut e = [0i64; 7];
+        for i in 0..7 {
+            e[i] = (sums[i] - have[i]).max(0);
+        }
+        let mut tokens = TokensOut {
+            input: e[0],
+            cache_read: e[1],
+            cache_write_5m: e[2],
+            cache_write_1h: e[3],
+            output: e[4],
+            reasoning: Source::from_harness(&harness)
+                .filter(|s| s.logs_reasoning())
+                .map(|_| e[5]),
+            unsplit: e[6],
+            total: 0,
+        };
+        tokens.total = split_total(&tokens).saturating_add(tokens.unsplit);
+        if tokens.total == 0 {
+            continue;
+        }
+        out.push(UsageRead {
+            repo: Some(repo),
+            branch: None,
+            harness,
+            model,
+            events: 1,
+            hour_ms,
+            tokens,
+            total_only: false,
+            reported_usd: None,
+            class: Class::Before,
+            branch_basis: BranchBasis::None,
+            bot: None,
+            tagged: false,
+        });
+    }
+    Ok(out)
 }
 
 fn split_total(t: &TokensOut) -> i64 {
