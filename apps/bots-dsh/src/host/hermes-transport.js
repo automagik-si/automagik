@@ -597,6 +597,16 @@ export class RemoteChat {
     this.transport.answer(event.id, { choice: choice === 'once' ? 'once' : 'deny' })
   }
 
+  checkProfile(snapshot) {
+    const profileName = snapshot.info?.profile_name
+    if (typeof profileName === 'string' && profileName && this.transport.profile
+      && profileName !== this.transport.profile) {
+      throw failure('Hermes returned a different profile or Bot Chat; nothing was submitted.',
+        'bot/hermes-pairing')
+    }
+    return snapshot
+  }
+
   async prepare(model) {
     this.joinGap = false
     await this.save()
@@ -608,9 +618,14 @@ export class RemoteChat {
         // The attach JOIN is resume -> activate -> the gap: activate returns the
         // authoritative snapshot and the viewer subscription, which detach later releases.
         const cursor = this.identity.lastSeq ?? 0
+        const joined = snapshot.stored_session_id
         this.joining = new Set()
         this.joinControls = []
-        snapshot = this.transport.check(await this.transport.request('session.activate', { session_id: snapshot.session_id }, this.transport.deadlines?.control))
+        snapshot = this.checkProfile(this.transport.check(await this.transport.request(
+          'session.activate', { session_id: snapshot.session_id },
+          this.transport.deadlines?.control)))
+        // Only resume verified the stored id against the Bot Chat we joined.
+        snapshot = { ...snapshot, stored_session_id: joined }
         const replay = await this.transport.request('session.events.since', {
           session_id: snapshot.session_id, last_seen: cursor, replay_epoch: this.identity.epoch,
         }, this.transport.deadlines?.control)
@@ -623,7 +638,10 @@ export class RemoteChat {
         // near zero and receive would drop them all against the old, larger lastSeq.
         const reloaded = this.identity.runtimeSessionId !== undefined && this.identity.runtimeSessionId !== snapshot.session_id
         const rewound = Number.isSafeInteger(replay?.latest_seq) && Number.isSafeInteger(cursor) && replay.latest_seq < cursor
-        const gap = replay.truncated === true || Boolean((changedEpoch || reloaded || rewound) && this.identity.epoch && cursor > 0)
+        const gap = replay.truncated === true || Boolean((changedEpoch || reloaded || rewound)
+          && this.identity.epoch
+          && (cursor > 0 || this.identity.pendingSubmit === true
+            || this.identity.uncertain === true))
         if (changedEpoch || reloaded || rewound) {
           // A restarted serve has a new epoch and sequence numbers near zero. Taking the new
           // latest_seq (not max with the old) is what reconcile does; otherwise submit sees
@@ -735,11 +753,14 @@ export class RemoteChat {
       let snapshot
       for (let attempt = 0; attempt < 3; attempt++) {
         const before = snapshotChanges()
-        snapshot = this.transport.check(await this.transport.request('session.activate', { session_id: this.identity.runtimeSessionId }))
+        snapshot = this.checkProfile(this.transport.check(await this.transport.request(
+          'session.activate', { session_id: this.identity.runtimeSessionId })))
         if (snapshotChanges() === before) break
         if (attempt === 2) throw failure('Remote session changed while reconciling. Reconnect and reconcile again before sending.')
       }
-      Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
+      // Keep the stored id that prepare verified, including in the returned snapshot.
+      snapshot = { ...snapshot, stored_session_id: this.identity.storedSessionId }
+      this.identity.runtimeSessionId = snapshot.session_id
       for (const event of this.reconciling) if (event.epoch === replay.epoch && Number.isSafeInteger(event.seq)) this.identity.lastSeq = Math.max(this.identity.lastSeq, event.seq)
       this.identity.uncertain = snapshot.running === true || snapshot.info?.running === true || snapshot.hydrating === true || snapshot.inflight?.streaming === true
         || ['starting', 'waiting', 'working', 'streaming', 'resuming'].includes(snapshot.status) || (snapshot.open_requests?.length ?? 0) > 0 || Boolean(snapshot.auto_continue)
