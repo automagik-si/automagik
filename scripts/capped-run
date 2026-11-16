@@ -6,8 +6,11 @@
 #
 #   --mem SIZE   MemoryMax for the scope (default 4G). It only ever raises the cap: a size
 #                below the default keeps the default, and anything above 8G is refused.
-#   --lock       Take the full-gate flock (the one the full suites already share) for the run's
-#                duration. One-file runs skip it; full suites take it.
+#   --lock       Take the shared full-gate flock at the main checkout's
+#                .automagik/locks/full-gate.lock (a 0700 folder and a 0600 file; never /tmp: a
+#                sandboxed pane mounts its own tmpfs there). CAPPED_RUN_LOCK_FILE overrides it
+#                for another shared path. The first output line under --lock names the resolved
+#                path and its device and inode. One-file runs skip it; full suites take it.
 #   --name N     Name the scope unit (a label for `systemctl --user list-units`).
 #
 # How a run goes:
@@ -49,11 +52,15 @@
 #
 # Test-only overrides (never set for a real run): CAPPED_RUN_TEST_MEM replaces the default cap
 # (a tiny scope for the cap-kill test), CAPPED_RUN_TEST_STATE overrides the state folder,
-# CAPPED_RUN_TEST_LOCK overrides the lock file, CAPPED_RUN_TEST_LOCK_WAIT overrides the lock
-# wait in seconds, CAPPED_RUN_TEST_UNREADABLE_EVENTS makes the monitor report the memory-kill
-# cause unreadable. A real run reads none of them beyond that.
+# CAPPED_RUN_TEST_LOCK_WAIT overrides the lock wait in seconds, CAPPED_RUN_TEST_UNREADABLE_EVENTS
+# makes the monitor report the memory-kill cause unreadable. A real run reads none of them beyond
+# that; CAPPED_RUN_LOCK_FILE is the one real override, for another shared lock path.
 #
 # No release job and no build-host cargo build goes through this wrapper.
+#
+# Any tool that coordinates through /tmp (lock, pidfile, socket) does not coordinate in a
+# sandboxed pane: the pane mounts its own tmpfs there. The full-gate lock is therefore one
+# shared path in the main checkout, never /tmp.
 #
 # Never start herdr-core, `hc server` or any serve in a run without BOTH HC_SESSION=<a unique
 # session> and XDG_RUNTIME_DIR=<a scratch folder> set on that command: a second core under the
@@ -66,7 +73,6 @@
 # for a tiny scope instead of allocating gigabytes.
 default_mem=${CAPPED_RUN_TEST_MEM:-4G}
 max_mib=8192
-lock_file_default=/tmp/automagik-full-gate.lock
 lock_wait_default=3000
 
 say() {
@@ -292,12 +298,40 @@ detect_scope() {
 
 # --- the full-gate lock ---------------------------------------------------------------------
 
+# The lock lives at one shared path in the main checkout, never in /tmp. The main checkout comes
+# from the script's own location through git's worktree list, so a linked worktree resolves to
+# the checkout it belongs to and never to itself. CAPPED_RUN_LOCK_FILE overrides it for another
+# shared path.
+shared_lock_file() {
+  if [ -n "${CAPPED_RUN_LOCK_FILE:-}" ]; then
+    printf '%s' "$CAPPED_RUN_LOCK_FILE"
+    return 0
+  fi
+  script_dir=$(dirname -- "$0")
+  script_dir=$( ( unset CDPATH; cd -- "$script_dir" && pwd ) )
+  main_root=
+  if command -v git >/dev/null 2>&1; then
+    main_root=$(git -C "$script_dir" worktree list --porcelain 2>/dev/null |
+      sed -n 's/^worktree //p' | head -1)
+  fi
+  [ -n "$main_root" ] || main_root=$(dirname -- "$script_dir")
+  printf '%s' "$main_root/.automagik/locks/full-gate.lock"
+}
+
 take_lock() {
-  lock_file=${CAPPED_RUN_TEST_LOCK:-$lock_file_default}
+  lock_file=$(shared_lock_file)
   lock_wait=${CAPPED_RUN_TEST_LOCK_WAIT:-$lock_wait_default}
   case $lock_wait in
     '' | *[!0-9]*) lock_wait=$lock_wait_default ;;
   esac
+  lock_dir=${lock_file%/*}
+  if [ "$lock_dir" != "$lock_file" ]; then
+    ( umask 077; mkdir -p "$lock_dir" ) 2>/dev/null || {
+      say "cannot create the full-gate lock folder: $lock_dir"
+      return 1
+    }
+    chmod 700 "$lock_dir" 2>/dev/null
+  fi
   if ! command -v flock >/dev/null 2>&1; then
     say 'UNLOCKED: flock is not available; running without the full-gate lock'
     return 0
@@ -306,11 +340,21 @@ take_lock() {
     say "cannot create the full-gate lock file: $lock_file"
     return 1
   }
+  chmod 600 "$lock_file" 2>/dev/null
   exec 9>>"$lock_file" || return 1
   if ! flock -w "$lock_wait" 9; then
     say "the full-gate lock is still held after ${lock_wait}s; not starting a second run"
     return 1
   fi
+  dev=$(stat -c '%d' "$lock_file" 2>/dev/null)
+  ino=$(stat -c '%i' "$lock_file" 2>/dev/null)
+  if [ -z "$dev" ] || [ -z "$ino" ]; then
+    dev=$(stat -f '%d' "$lock_file" 2>/dev/null)
+    ino=$(stat -f '%i' "$lock_file" 2>/dev/null)
+  fi
+  [ -n "$dev" ] || dev='?'
+  [ -n "$ino" ] || ino='?'
+  printf 'LOCK: path=%s dev=%s ino=%s\n' "$lock_file" "$dev" "$ino" >&2
   return 0
 }
 

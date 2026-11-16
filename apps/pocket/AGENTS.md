@@ -25,7 +25,8 @@ the same rules apply. The monorepo's own contract is [AGENTS.md](../../AGENTS.md
    ([releasing](docs/guides/releasing.md)).
 4. Before a pull request: `cd apps/pocket/android && ../../../scripts/capped-run --lock -- ./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`
    (the toolchain line in the root [AGENTS.md](../../AGENTS.md); start it through the one run path,
-   `scripts/capped-run --lock`, so the suite is memory-capped and holds the full-gate lock).
+   `scripts/capped-run --lock`, so the suite is memory-capped and holds the shared
+   `.automagik/locks/full-gate.lock`).
 5. Never commit or print the signing key or its password. Never change the app ID, the signing key,
    the `latest.json` format or where phones read it (the `pocket-lane` release) without an RFC
    (the monorepo's [RFC 0011](../../docs/rfcs/0011-monorepo-parts-and-releases.md), "Pocket").

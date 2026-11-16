@@ -5,7 +5,7 @@
 // own state folder, lock file and (where needed) a stub PATH: no test touches the real lock, a
 // live terminal or the network.
 import { afterAll, describe, expect, test } from 'bun:test';
-import { spawn, spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -150,6 +150,46 @@ function shmHasRoom(): boolean {
 
 const dd = spawnSync('dd', ['--version'], { encoding: 'utf8' }).status === 0;
 
+function mainCheckout(): string {
+  const git = spawnSync('git', ['-C', join(import.meta.dir, '..'), 'worktree', 'list', '--porcelain'], {
+    encoding: 'utf8',
+  });
+  const first = (git.stdout ?? '')
+    .split('\n')
+    .find(line => line.startsWith('worktree '));
+  return first ? first.slice('worktree '.length).trim() : join(import.meta.dir, '..');
+}
+
+function sharedLockWritable(): boolean {
+  try {
+    mkdirSync(join(mainCheckout(), '.automagik', 'locks'), { recursive: true, mode: 0o700 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function closeCode(child: ChildProcess): Promise<number | null> {
+  return new Promise(resolve => child.on('close', code => resolve(code)));
+}
+
+const unshareWorks = (() => {
+  if (process.platform !== 'linux') return false;
+  const probe = spawnSync(
+    'unshare',
+    [
+      '-rm',
+      'sh',
+      '-c',
+      'mount -t tmpfs tmpfs /tmp && git -C "$1" worktree list --porcelain | head -1',
+      'sh',
+      import.meta.dir,
+    ],
+    { encoding: 'utf8', timeout: 20_000 },
+  );
+  return probe.status === 0 && (probe.stdout ?? '').trim().startsWith(`worktree ${mainCheckout()}`);
+})();
+
 describe('capped-run', () => {
   test('passes a passing and a failing exit code through unchanged', () => {
     const passing = cappedRun(['--', 'sh', '-c', 'printf pass; exit 0']);
@@ -275,19 +315,26 @@ describe('capped-run', () => {
 
     const outcome = cappedRun(['--lock', '--', 'sh', '-c', 'exit 0', 'argv-leak-marker'], {
       state,
-      env: { CAPPED_RUN_TEST_LOCK: lock, HC_TERMINAL_ID: 'pane-name', LEAK_ENV_MARKER: 'env-leak-marker' },
+      env: { CAPPED_RUN_LOCK_FILE: lock, HC_TERMINAL_ID: 'pane-name', LEAK_ENV_MARKER: 'env-leak-marker' },
       timeout: 30_000,
     });
     holder.kill();
 
     expect(outcome.status).toBe(0);
     expect(outcome.milliseconds).toBeGreaterThan(400);
+    // The first output line under --lock proves the resolved path and the file it locked.
+    const lockLine = outcome.stderr.split('\n')[0];
+    expect(lockLine).toContain(`path=${lock} dev=`);
+    expect(lockLine).toMatch(/ dev=\S+ ino=\S+$/);
     const lines = outcome.lines();
     expect(lines.filter(line => / start owner=\S+ comm=sh$/.test(line))).toHaveLength(1);
     expect(lines.filter(line => / end owner=\S+ comm=sh exit=0$/.test(line))).toHaveLength(1);
     expect(outcome.log).not.toContain('argv-leak-marker');
     expect(outcome.log).not.toContain('env-leak-marker');
     expect(statSync(outcome.logPath).mode & 0o777).toBe(0o600);
+    // The lock file stays 0600 and its folder 0700.
+    expect(statSync(lock).mode & 0o777).toBe(0o600);
+    expect(statSync(work).mode & 0o777).toBe(0o700);
   });
 
   test.skipIf(!flock)('the start line is in the log before the command runs', async () => {
@@ -301,7 +348,7 @@ describe('capped-run', () => {
       'sleep 0.05; i=$((i+1)); done; exit 5';
     const outcome = cappedRun(['--lock', '--', 'sh', '-c', child], {
       state,
-      env: { CAPPED_RUN_TEST_LOCK: lock },
+      env: { CAPPED_RUN_LOCK_FILE: lock },
       timeout: 30_000,
     });
     expect(outcome.status).toBe(0);
@@ -319,7 +366,7 @@ describe('capped-run', () => {
 
     const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], {
       state,
-      env: { CAPPED_RUN_TEST_LOCK: lock },
+      env: { CAPPED_RUN_LOCK_FILE: lock },
       timeout: 30_000,
     });
     holder.kill();
@@ -340,7 +387,7 @@ describe('capped-run', () => {
       const outcome = cappedRun(['--mem', '256M', '--lock', '--', process.execPath, allocator], {
         state,
         env: {
-          CAPPED_RUN_TEST_LOCK: lock,
+          CAPPED_RUN_LOCK_FILE: lock,
           CAPPED_RUN_TEST_MEM: '256M',
           HC_TERMINAL_ID: 'pane-name',
           LEAK_ENV_MARKER: 'env-leak-marker',
@@ -469,10 +516,10 @@ describe('capped-run', () => {
     const lock = join(work, 'selfkill.lock');
     const outcome = cappedRun(['--lock', '--', 'sh', '-c', 'kill -9 $$'], {
       state,
-      env: { CAPPED_RUN_TEST_LOCK: lock },
+      env: { CAPPED_RUN_LOCK_FILE: lock },
     });
     expect(outcome.status).toBe(137);
-    expect(outcome.stderr.trim()).toBe('');
+    expect(outcome.stderr.trim().split('\n').filter(line => !line.startsWith('LOCK: '))).toEqual([]);
     const lines = outcome.lines();
     expect(lines.filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
     expect(lines.filter(line => / end owner=\S+ comm=sh exit=137$/.test(line))).toHaveLength(1);
@@ -489,4 +536,69 @@ describe('capped-run', () => {
     expect(lines.filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
     expect(lines).toEqual(['exit 137: could not read the memory-kill cause (scope gone, command=sh)']);
   });
+
+  test.skipIf(process.platform !== 'linux' || !flock || !sharedLockWritable())(
+    'two concurrent runs exclude each other on the shared lock (Linux; shared path writable)',
+    async () => {
+      const seq = join('/dev/shm', `capped-run-lock-seq-${process.pid}-${Date.now()}`);
+      const child = join('/dev/shm', `capped-run-lock-child-${process.pid}-${Date.now()}.sh`);
+      writeFileSync(child, 'printf "start\\n" >> "$1"\nsleep 0.5\nprintf "end\\n" >> "$1"\n');
+      const env = { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '60' };
+      try {
+        const first = spawn('sh', [SCRIPT, '--lock', '--', 'sh', child, seq], {
+          cwd: work,
+          env,
+          stdio: 'ignore',
+        });
+        const firstDone = closeCode(first);
+        expect(await waitFor(seq, 20_000)).toBe(true);
+        const second = spawn('sh', [SCRIPT, '--lock', '--', 'sh', child, seq], {
+          cwd: work,
+          env,
+          stdio: 'ignore',
+        });
+        const secondDone = closeCode(second);
+        expect(await Promise.all([firstDone, secondDone])).toEqual([0, 0]);
+        expect(readFileSync(seq, 'utf8').trim().split('\n')).toEqual(['start', 'end', 'start', 'end']);
+      } finally {
+        rmSync(seq, { force: true });
+        rmSync(child, { force: true });
+      }
+    },
+    60_000,
+  );
+
+  test.skipIf(process.platform !== 'linux' || !flock || !sharedLockWritable() || !unshareWorks)(
+    'a run with its own tmpfs on /tmp still excludes on the shared lock (Linux; unshare -rm)',
+    async () => {
+      const seq = join('/dev/shm', `capped-run-unshare-seq-${process.pid}-${Date.now()}`);
+      const child = join('/dev/shm', `capped-run-unshare-child-${process.pid}-${Date.now()}.sh`);
+      writeFileSync(child, 'printf "start\\n" >> "$1"\nsleep 0.5\nprintf "end\\n" >> "$1"\n');
+      const env = { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '60' };
+      const inner = 'mount -t tmpfs tmpfs /tmp && exec sh "$1" --lock -- sh "$2" "$3"';
+      try {
+        const first = spawn('sh', [SCRIPT, '--lock', '--', 'sh', child, seq], {
+          cwd: work,
+          env,
+          stdio: 'ignore',
+        });
+        const firstDone = closeCode(first);
+        expect(await waitFor(seq, 20_000)).toBe(true);
+        // The second run mounts its own tmpfs on /tmp: the shared lock must still be the same
+        // file, or the two runs overlap (mutant 20 fails here).
+        const second = spawn('unshare', ['-rm', 'sh', '-c', inner, 'sh', SCRIPT, child, seq], {
+          cwd: join(import.meta.dir, '..'),
+          env,
+          stdio: 'ignore',
+        });
+        const secondDone = closeCode(second);
+        expect(await Promise.all([firstDone, secondDone])).toEqual([0, 0]);
+        expect(readFileSync(seq, 'utf8').trim().split('\n')).toEqual(['start', 'end', 'start', 'end']);
+      } finally {
+        rmSync(seq, { force: true });
+        rmSync(child, { force: true });
+      }
+    },
+    60_000,
+  );
 });
