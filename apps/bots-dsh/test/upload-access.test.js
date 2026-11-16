@@ -89,6 +89,23 @@ async function fixture(t, { withTools = true } = {}) {
   return { rt, bots, ref, other, folder, books, approval, opened, person, show, rows, guard, call, agentOf, append, storePath, edits: () => edits }
 }
 
+test('a name under the bots root that is no Bot folder is not refused', async t => {
+  const f = await fixture(t, { withTools: false })
+  // The bots root holds the team's own files and the shared working folders beside the Bots'
+  // own folders, and a Bot's workspace is one of them: naming one of those is not opening a
+  // picture. Only a Bot's own folder is another Bot's to keep out.
+  for (const leaf of ['bots/workspace', 'bots/workspace/omni', 'bots/state.json', 'bots/bots.json', 'bots/learning/state.json']) {
+    const candidate = join(f.folder, '.automagik', leaf)
+    assert.equal(await f.guard('b', 'read', { file_path: candidate }), 'ran', leaf)
+    assert.equal(await f.guard('b', 'bash', { command: `ls ${candidate}` }), 'ran', leaf)
+    assert.equal(await f.guard('b', 'grep', { path: candidate, pattern: 'x' }), 'ran', leaf)
+  }
+  const own = join('.automagik', 'bots', 'a', 'uploads')
+  await assert.rejects(f.guard('b', 'read', { file_path: join(f.folder, own, 'x.png') }), /another Bot's own folder/)
+  await assert.rejects(f.guard('b', 'bash', { command: `ls ${own}` }), /another Bot's own folder/)
+  assert.equal(await f.guard('a', 'bash', { command: `ls ${own}` }), 'ran')
+})
+
 test('a picture belongs only to its recipient; all direct tools and shell spellings enforce it', async t => {
   const f = await fixture(t, { withTools: false })
   f.person('a', f.ref)
@@ -99,18 +116,18 @@ test('a picture belongs only to its recipient; all direct tools and shell spelli
   assert.equal(await f.rt.sharedUploads.holds('b', hex), false)
   for (const candidate of [path, join(f.folder, '.automagik/uploads', hex, f.ref.name), f.storePath(f.ref)]) {
     for (const [name, args] of [['read', { file_path: candidate }], ['bash', { command: `cat ${JSON.stringify(candidate)}` }], ['custom_tool', { text: candidate }]]) {
-      await assert.rejects(f.guard('b', name, args), /not sent to the test Bot b/)
+      await assert.rejects(f.guard('b', name, args), /not sent to the test Bot b|another Bot's own folder/)
       assert.equal(await f.guard('a', name, args), 'ran')
     }
   }
-  for (const name of ['read', 'write', 'edit', 'read_image']) await assert.rejects(f.guard('b', name, { file_path: path }), /not sent/)
-  await assert.rejects(f.guard('b', 'str_replace_editor', { path }), /not sent/)
+  for (const name of ['read', 'write', 'edit', 'read_image']) await assert.rejects(f.guard('b', name, { file_path: path }), /not sent to the test Bot b|another Bot's own folder/)
+  await assert.rejects(f.guard('b', 'str_replace_editor', { path }), /not sent to the test Bot b|another Bot's own folder/)
   for (const name of ['glob', 'grep']) {
-    await assert.rejects(f.guard('b', name, { path: join(f.folder, '.automagik/bots/a') }), /not sent/)
-    await assert.rejects(f.guard('b', name, { path: join(f.folder, '.automagik/bots'), pattern: `${path}*` }), /not sent/)
+    await assert.rejects(f.guard('b', name, { path: join(f.folder, '.automagik', 'bots', 'a') }), /another Bot's own folder/)
+    await assert.rejects(f.guard('b', name, { path: join(f.folder, '.automagik/bots'), pattern: `${path}*` }), /not sent to the test Bot b|another Bot's own folder/)
     assert.equal(await f.guard('b', name, { path: join(f.folder, '.automagik/bots') }), 'ran')
   }
-  for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) await assert.rejects(f.guard('b', name, { command: `cat .automagik/bots/a/uploads/${hex}/picture.png` }), /not sent/)
+  for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) await assert.rejects(f.guard('b', name, { command: `cat .automagik/bots/a/uploads/${hex}/picture.png` }), /not sent to the test Bot b|another Bot's own folder/)
   uploads(f.rt) // fresh in-memory grants; the own-chat directory is the durable holding.
   assert.equal(f.rt.sharedUploads.grantedTo('a').size, 0)
   assert.equal(await f.rt.sharedUploads.holds('a', hex), true)
@@ -411,7 +428,7 @@ test('a child task’s upload and tool access belong to its owner Bot', async t 
   assert.equal(await f.rt.sharedUploads.holds('a', f.ref.attachmentId.slice(7)), true)
   assert.equal(await f.rt.sharedUploads.holds('b', f.ref.attachmentId.slice(7)), false)
   assert.equal(await f.guard('test-subagent', 'read', { file_path: path }), 'ran')
-  await assert.rejects(f.guard('b', 'read', { file_path: path }), /not sent/)
+  await assert.rejects(f.guard('b', 'read', { file_path: path }), /not sent to the test Bot b|another Bot's own folder/)
 })
 
 test('private senders retain unread request merging and each image forward has its own authority record', async t => {
@@ -438,11 +455,12 @@ for (const spelling of ['.automagik/bots/a', '.Automagik/Bots/a', '.AUTOMAGIK/BO
   test(`guard ends Bot ids at shell punctuation and whitespace: ${spelling}`, async t => {
     const f = await fixture(t, { withTools: false })
     for (const command of [`cp -r ${spelling} /tmp/x`, `cp -r "${spelling}" /tmp/x`, `cat ${spelling}; true`, `cat ${spelling}|cat`, `cat ${spelling}\ntrue`]) {
-      await assert.rejects(f.guard('b', 'bash', { command }), /not sent/)
+      await assert.rejects(f.guard('b', 'bash', { command }), /not sent to the test Bot b|another Bot's own folder/)
       assert.equal(await f.guard('a', 'bash', { command }), 'ran')
     }
     // A longer id cannot be mistaken for the caller's id.
-    for (const suffix of ['-other', '.other', '_other']) await assert.rejects(f.guard('a', 'bash', { command: `cp -r ${spelling}${suffix} /tmp/x` }), /not sent/)
+    // A name no Bot has is not a Bot folder: the guard ends the id exactly.
+    for (const suffix of ['-other', '.other', '_other']) assert.equal(await f.guard('a', 'bash', { command: `cp -r ${spelling}${suffix} /tmp/x` }), 'ran')
   })
 }
 
@@ -486,7 +504,7 @@ for (const spelling of [
   test(`shell guard normalizes Bot path segments: ${spelling}`, async t => {
     const f = await fixture(t, { withTools: false })
     for (const command of [`cat ${spelling}/uploads/picture.png`, `cp -r ${spelling} /tmp/test-copy`]) {
-      await assert.rejects(f.guard('b', 'bash', { command }), /not sent/)
+      await assert.rejects(f.guard('b', 'bash', { command }), /not sent to the test Bot b|another Bot's own folder/)
       assert.equal(await f.guard('a', 'bash', { command }), 'ran')
     }
   })

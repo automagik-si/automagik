@@ -327,9 +327,17 @@ export function install(rt) {
     const storeRoot = storePath('0'.repeat(64))?.replace(/[/\\]objects[/\\].*$/, '').replace(/\\/g, '/')
     if (!/\.automagik/i.test(raw) && !(storeRoot && raw.includes(flatten(storeRoot))) && !/[a-f0-9]{64}/i.test(raw)) return next()
     const closed = () => { throw refusal(`That picture was not sent to ${caller.name}, so it cannot open it. Ask the user to send it here, or ask the Bot that has it to forward it.`) }
+    const closedFolder = () => { throw refusal(`That is another Bot's own folder, which ${caller.name} does not open. Ask the user, or that Bot, to share what you need.`) }
     async function check(text) {
       const flat = flatten(text)
-      for (const found of flat.matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) if (found[1] !== caller.id) closed()
+      // The bots root holds both a Bot's own folder, which is private, and the team's own
+      // files and shared working folders (the state file, the registry, the workspace), which
+      // are not. Only a Bot's own id is closed; matching every name under the root refused
+      // commands that merely named a shared path, the Bot's own workspace included.
+      for (const found of flat.matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) {
+        if (found[1] === caller.id || rt.botOf?.(found[1]) === undefined) continue
+        closedFolder()
+      }
       for (const found of flat.matchAll(/\.automagik\/uploads\/([a-f0-9]{64})(?:\/|$)/gi)) if (!await holds(caller.id, found[1].toLowerCase())) closed()
       for (const found of flat.matchAll(/objects\/([a-f0-9]{2})\/([a-f0-9]{62,64})(?![a-f0-9])/gi)) {
         const hex = (found[2].length === 64 ? found[2] : found[1] + found[2]).toLowerCase()
