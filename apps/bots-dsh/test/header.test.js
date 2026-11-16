@@ -156,7 +156,7 @@ test('Details is labeled, names the panel and expands only while it shows this s
   for (const [details, view] of cases) {
     const button = byClass(header({}, { useUi: hook({ details, view }) }), 'bt-head-details')
     assert.equal(button.props['aria-controls'], 'bt-conversation-panel')
-    assert.ok(button.children.includes('Details'), 'the label is visible text, not only a tooltip')
+    assert.ok(button.children.some(child => child?.props?.className === 'bt-head-word' && child.children.includes('Details')), 'the label is visible text, not only a tooltip')
   }
 })
 
@@ -215,7 +215,7 @@ test('only the Details pill names the pane and takes focus before the icon butto
   assert.equal(details.props['aria-label'], 'View conversation details')
   assert.equal(details.props['data-details-subject'], 'a')
   assert.equal(details.props['aria-expanded'], false, 'the Browser view is not the Details pane')
-  assert.deepEqual(details.children.slice(1), ['Details'], 'the visible label follows the icon')
+  assert.deepEqual(details.children.slice(1).map(child => (child?.props?.className === 'bt-head-word' ? child.children[0] : child)), ['Details'], 'the visible label follows the icon')
   for (const other of buttons.filter(button => button !== details)) {
     assert.equal(other.props['aria-controls'], undefined,
       `${other.props['aria-label']} controls no pane`)

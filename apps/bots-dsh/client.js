@@ -21878,6 +21878,9 @@ var HOST = `
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){position:relative;margin:var(--lb-panel-gap)!important;height:calc(100% - 2 * var(--lb-panel-gap))!important;padding:0!important;border-radius:var(--lb-panel-r);background:var(--lb-ground)!important}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host)::before{content:'';position:absolute;left:calc(var(--lb-rail-w) - 1px);top:0;bottom:0;width:1px;background:var(--lb-line);pointer-events:none}
 html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){margin:0!important;height:100%!important;border-radius:0}
+/* The phone's drawer is DSH's own 280 whatever the wide width was: the wide width stays in
+   DSH's state and comes back the moment the frame leaves drawer mode. */
+html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]:has(.lb-host){width:min(280px,calc(100vw - 48px))!important}
 [class*="_root"]:has(.lb-host) [class*="_scrollArea"]:has(.lb-host){grid-template-columns:0 minmax(0,1fr) 0;grid-template-rows:0 max-content 0 minmax(0,1fr);margin:0}
 [class*="_root"]:has(.lb-host) [class*="_scrollFade"]{display:none}
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
@@ -21903,6 +21906,14 @@ html[data-automagik-desktop=darwin] .lb-head :is(a,button,input,[role=button],[a
 .bt-you .bt-person{display:block}
 .lb-tile-add[aria-expanded=true] .lb-tile-face{background:var(--bt-hover);color:var(--bt-ink)}
 .lb-note{position:fixed;z-index:200;width:max-content;max-width:min(260px,calc(100vw - 24px));padding:10px 12px;box-sizing:border-box;border-radius:12px;background:var(--st-paper,var(--bt-main));border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.12),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);font:400 13px/1.45 var(--bt-font)}
+/* At a phone's width the view header carries the bar's Chat / Terminal switch beside the shell's
+   controls: the Details control keeps its icon and drops its word there, so the switch is never
+   cut at the left edge. */
+@media (max-width:620px){
+html body header[class*="_header"] .bt-head{gap:6px;padding:0 10px}
+html body header[class*="_header"] .bt-head .lb-face{margin-right:2px}
+html body header[class*="_header"] .bt-head-word{display:none}
+}
 `;
 var LEFT_BAR_CSS = `
 ${tokenCss("body", LEFT_BAR_TOKENS)}
@@ -23563,7 +23574,7 @@ function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus, useSe
         event.currentTarget.focus();
         actions.toggleDetails(sessionId);
       }
-    }, (0, import_react58.createElement)(InfoIcon), t("Details")) : null,
+    }, (0, import_react58.createElement)(InfoIcon), (0, import_react58.createElement)("span", { className: "bt-head-word" }, t("Details"))) : null,
     (0, import_react58.createElement)(NewMessagePills, { key: sessionId, sessionId, useSessions, useUi, useTurnClock }),
     (0, import_react58.createElement)(ActivityIndicator, { key: `activity:${sessionId}`, sessionId, useRoster, useSessionStatus, useSession, useLive, useWork, actions })
   );

@@ -184,7 +184,7 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
       'aria-expanded': detailsOpen, 'aria-controls': 'bt-conversation-panel', 'data-details-subject': sessionId,
       // Focus the trigger first (Safari does not on click), so the panel returns focus to it.
       onClick: (event) => { event.currentTarget.focus(); actions.toggleDetails(sessionId) },
-    }, h(InfoIcon), t('Details')) : null,
+    }, h(InfoIcon), h('span', { className: 'bt-head-word' }, t('Details'))) : null,
     h(NewMessagePills, { key: sessionId, sessionId, useSessions, useUi, useTurnClock }),
     h(ActivityIndicator, { key: `activity:${sessionId}`, sessionId, useRoster, useSessionStatus, useSession, useLive, useWork, actions }))
 }
