@@ -1,8 +1,9 @@
 // scripts/capped-run: one command under a memory-capped user scope, or UNCAPPED where a cgroup
 // scope is impossible; a memory kill is reported as CAPPED with a 0600 log line, the full-gate
-// flock is taken only with --lock, and the child never sees the live-core variables. Every test
-// uses its own state folder, lock file and (where needed) a stub PATH: no test touches the real
-// lock, a live terminal or the network.
+// flock is taken only with --lock, and the child gets neither the live-core variables nor the
+// real runtime folder (it gets a fresh scratch one, removed after the run). Every test uses its
+// own state folder, lock file and (where needed) a stub PATH: no test touches the real lock, a
+// live terminal or the network.
 import { afterAll, describe, expect, test } from 'bun:test';
 import { spawn, spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import {
@@ -120,11 +121,11 @@ describe('capped-run', () => {
     const passing = cappedRun(['--', 'sh', '-c', 'printf pass; exit 0']);
     expect(passing.status).toBe(0);
     expect(passing.stdout).toBe('pass');
-    expect(passing.stderr).not.toContain('CAPPED:');
+    expect(passing.stderr.split('\n').filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
 
     const failing = cappedRun(['--', 'sh', '-c', 'exit 3']);
     expect(failing.status).toBe(3);
-    expect(failing.stderr).not.toContain('CAPPED:');
+    expect(failing.stderr.split('\n').filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
   });
 
   test('a failing systemd-run falls back to UNCAPPED, one line, and the child exit code', () => {
@@ -139,7 +140,7 @@ describe('capped-run', () => {
     const uncapped = outcome.stderr.split('\n').filter(line => line.startsWith('UNCAPPED: '));
     expect(uncapped).toHaveLength(1);
     expect(uncapped[0]).toMatch(/^UNCAPPED: \S/);
-    expect(outcome.stderr).not.toContain('CAPPED:');
+    expect(outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
   });
 
   test('refuses a cap above 8G with one line and starts nothing', () => {
@@ -151,32 +152,45 @@ describe('capped-run', () => {
     expect(outcome.stderr).not.toContain('UNCAPPED:');
   });
 
-  test('the child never sees the live-core variables, even when the parent has them', () => {
-    const child =
-      'printf "ok:%s:%s:%s:%s\\n" "${HC_SCOPE-}" "${HC_SOCKET-}" "${HC_TERMINAL_SOCKET-}" "${HC_TERMINAL_ID-}"';
+  test('the child gets no live-core variables, no session and no real runtime folder', () => {
+    const parentRuntime = process.env.XDG_RUNTIME_DIR ?? '';
+    const child = [
+      'printf "vars:%s|%s|%s|%s|%s\\n" "${HC_SCOPE-}" "${HC_SOCKET-}" "${HC_TERMINAL_SOCKET-}" "${HC_TERMINAL_ID-}" "${HC_SESSION-}"',
+      'printf "rt:%s\\n" "${XDG_RUNTIME_DIR-}"',
+      'if [ -n "${XDG_RUNTIME_DIR-}" ]; then ls -ld "$XDG_RUNTIME_DIR" | cut -c1-10; fi',
+    ].join('; ');
     const outcome = cappedRun(['--', 'sh', '-c', child], {
       env: {
         HC_SCOPE: 'scope-from-pane',
         HC_SOCKET: '/tmp/socket-from-pane',
         HC_TERMINAL_SOCKET: '/tmp/terminal-socket-from-pane',
         HC_TERMINAL_ID: 'pane-name',
+        HC_SESSION: 'live-session',
       },
     });
     expect(outcome.status).toBe(0);
-    expect(outcome.stdout.trim()).toBe('ok::::');
+    const lines = outcome.stdout.trim().split('\n');
+    expect(lines[0]).toBe('vars:||||');
+    const runtime = lines[1].slice('rt:'.length);
+    expect(runtime).not.toBe('');
+    expect(runtime).not.toBe(parentRuntime);
+    expect(lines[2]).toBe('drwx------');
+    // The scratch folder is per run and goes away with the run.
+    expect(existsSync(runtime)).toBe(false);
   });
 
-  test.skipIf(!scope)('only raises the cap: a smaller --mem keeps the default, a larger one raises it', () => {
+  // One rule with mutant 4: --mem only raises. 256M is below the 4G default and must leave the
+  // cap at 4294967296 bytes (4G); 6G is above it and must raise the cap to 6442450944 bytes.
+  test.skipIf(!scope)('only raises the cap: --mem 256M below the 4G default stays 4G, and 6G raises it', () => {
     const readMax = 'cg=$(sed -n "s/^0:://p" /proc/self/cgroup); cat "/sys/fs/cgroup$cg/memory.max"';
-    const env = { CAPPED_RUN_TEST_MEM: '1G' };
 
-    const lowered = cappedRun(['--mem', '256M', '--', 'sh', '-c', readMax], { env });
+    const lowered = cappedRun(['--mem', '256M', '--', 'sh', '-c', readMax]);
     expect(lowered.status).toBe(0);
-    expect(Number(lowered.stdout.trim())).toBe(1024 * 1024 * 1024);
+    expect(Number(lowered.stdout.trim())).toBe(4 * 1024 * 1024 * 1024);
 
-    const raised = cappedRun(['--mem', '2G', '--', 'sh', '-c', readMax], { env });
+    const raised = cappedRun(['--mem', '6G', '--', 'sh', '-c', readMax]);
     expect(raised.status).toBe(0);
-    expect(Number(raised.stdout.trim())).toBe(2 * 1024 * 1024 * 1024);
+    expect(Number(raised.stdout.trim())).toBe(6 * 1024 * 1024 * 1024);
   });
 
   test.skipIf(!flock)('--lock waits for the full-gate lock, runs, and logs start and end', async () => {
@@ -203,6 +217,24 @@ describe('capped-run', () => {
     expect(outcome.log).not.toContain('argv-leak-marker');
     expect(outcome.log).not.toContain('env-leak-marker');
     expect(statSync(outcome.logPath).mode & 0o777).toBe(0o600);
+  });
+
+  test.skipIf(!flock)('the start line is in the log before the command runs', async () => {
+    const state = scratch('order-state');
+    const logPath = join(state, 'runs.log');
+    const lock = join(work, 'order.lock');
+    // The child exits 0 only after it has seen the start line in the log: a wrapper that wrote
+    // that line after the run (or at exit) leaves the child looping until it exits 5.
+    const child =
+      `i=0; while [ "$i" -lt 100 ]; do grep -q " start owner=" "${logPath}" && exit 0; ` +
+      'sleep 0.05; i=$((i+1)); done; exit 5';
+    const outcome = cappedRun(['--lock', '--', 'sh', '-c', child], {
+      state,
+      env: { CAPPED_RUN_TEST_LOCK: lock },
+      timeout: 30_000,
+    });
+    expect(outcome.status).toBe(0);
+    expect(outcome.lines().filter(line => line.includes(' start owner='))).toHaveLength(1);
   });
 
   test.skipIf(!flock)('without --lock a run does not take the full-gate lock', async () => {
@@ -255,8 +287,15 @@ describe('capped-run', () => {
       expect(outcome.stderr).not.toContain('argv-leak-marker');
       expect(outcome.stderr).not.toContain('env-leak-marker');
 
+      // The CAPPED append sits between the start line and the end line. A mutant that moved it
+      // after the script's exit cannot write it at all (a shell runs nothing after exit), which
+      // the assertions above already catch; an EXIT-trap write still happens before the process
+      // ends, which is exactly what the brief asks for and cannot be told apart from the outside.
       const lines = outcome.lines();
       expect(lines.filter(line => line.startsWith('CAPPED: '))).toHaveLength(1);
+      expect(lines.findIndex(line => line.startsWith('CAPPED: '))).toBeLessThan(
+        lines.findIndex(line => line.includes(' end owner=')),
+      );
       expect(
         lines.filter(line => line.includes(' start owner=') && line.endsWith(`comm=${command}`)),
       ).toHaveLength(1);

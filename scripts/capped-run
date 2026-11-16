@@ -20,16 +20,18 @@
 #     A missing cap never fails a gate, and a capped run is never reported as a pass.
 #   - When the scope is killed for memory, the exit status is 137 and one line on stderr says
 #     `CAPPED: ...`: the limit, the peak the scope reached and the command name (the basename
-#     only). The same line is appended to the run log before the wrapper exits. No argv and no
+#     only). The line is appended to the run log and read back from it before the wrapper says
+#     CAPPED (a log that did not take it is reported as `log=unwritten`), and no argv and no
 #     environment value ever reaches that line or the log.
 #   - With --lock, the log also gets one line at the start and one at the end of every run:
 #     UTC time, owner (the terminal id in the environment, name only), command name, start or
 #     end, and the exit code at the end. The same log always stays 0600.
-#   - The command never inherits HC_SCOPE, HC_SOCKET, HC_TERMINAL_SOCKET or HC_TERMINAL_ID: a
-#     test or gate started from a pane cannot reach the live core. The wrapper does not touch
-#     PATH (a test's fake-first PATH belongs to the test) and leaves XDG_RUNTIME_DIR alone:
-#     systemd-run needs it to reach the user manager, and the scope's command only ever inherits
-#     it once the scope has started. A test that needs a runtime dir sets its own.
+#   - The command never inherits HC_SCOPE, HC_SOCKET, HC_TERMINAL_SOCKET, HC_SESSION or
+#     HC_TERMINAL_ID, and never the real XDG_RUNTIME_DIR: it gets a fresh 0700 scratch folder
+#     per run (removed after the run), so a test that starts herdr-core or `hc server` inside a
+#     gate cannot reach the live core's sockets. systemd-run itself keeps the real
+#     XDG_RUNTIME_DIR to reach the user manager. PATH is untouched (a test's fake-first PATH
+#     belongs to the test).
 #
 # Test-only overrides (never set for a real run): CAPPED_RUN_TEST_MEM replaces the default cap
 # (a tiny scope for the cap-kill test), CAPPED_RUN_TEST_STATE overrides the state folder,
@@ -37,6 +39,10 @@
 # wait in seconds. A real run reads none of them beyond that.
 #
 # No release job and no build-host cargo build goes through this wrapper.
+#
+# Never start herdr-core, `hc server` or any serve in a run without BOTH HC_SESSION=<a unique
+# session> and XDG_RUNTIME_DIR=<a scratch folder> set on that command: a second core under the
+# same session name retires the live holders.
 
 # The default cap: 4G, memory.high 75% of it, swap 0. CAPPED_RUN_TEST_MEM only exists so a test
 # can ask for a tiny scope instead of allocating gigabytes.
@@ -192,6 +198,19 @@ log_event() {
   return 0
 }
 
+# The child's own runtime folder: a fresh 0700 scratch folder per run, never the real one, so a
+# test that starts herdr-core or `hc server` inside a gate cannot open the live core's sockets.
+# Removed after the run.
+runtime_root=${TMPDIR:-/tmp}
+
+cleanup_runtime() {
+  [ -n "${runtime_dir:-}" ] || return 0
+  case $runtime_dir in
+    "$runtime_root"/capped-run-rt.*) rm -rf "${runtime_dir:?}" 2>/dev/null ;;
+  esac
+  return 0
+}
+
 # --- capability -----------------------------------------------------------------------------
 
 uncapped_reason=
@@ -312,23 +331,36 @@ run_systemd() {
   systemd-run "$@"
 }
 
+# The shim, then the payload's own environment: no live-core variables, and a scratch
+# XDG_RUNTIME_DIR in place of the real one (unset when no scratch folder could be made).
 run_capped() {
   if [ "$have_ionice" = 1 ]; then
-    run_systemd env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_TERMINAL_ID \
-      sh -c "$SHIM" capped-run-shim "$peek" nice -n 10 ionice -c 3 "$@"
+    set -- sh -c "$SHIM" capped-run-shim "$peek" nice -n 10 ionice -c 3 "$@"
   else
-    run_systemd env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_TERMINAL_ID \
-      sh -c "$SHIM" capped-run-shim "$peek" nice -n 10 "$@"
+    set -- sh -c "$SHIM" capped-run-shim "$peek" nice -n 10 "$@"
   fi
+  if [ -n "$runtime_dir" ]; then
+    set -- env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_SESSION \
+      -u HC_TERMINAL_ID XDG_RUNTIME_DIR="$runtime_dir" "$@"
+  else
+    set -- env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_SESSION \
+      -u HC_TERMINAL_ID -u XDG_RUNTIME_DIR "$@"
+  fi
+  run_systemd "$@"
 }
 
 run_uncapped() {
   if [ "$have_ionice" = 1 ]; then
-    env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_TERMINAL_ID \
-      nice -n 10 ionice -c 3 "$@"
+    set -- nice -n 10 ionice -c 3 "$@"
   else
-    env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_TERMINAL_ID \
-      nice -n 10 "$@"
+    set -- nice -n 10 "$@"
+  fi
+  if [ -n "$runtime_dir" ]; then
+    env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_SESSION \
+      -u HC_TERMINAL_ID XDG_RUNTIME_DIR="$runtime_dir" "$@"
+  else
+    env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_SESSION \
+      -u HC_TERMINAL_ID -u XDG_RUNTIME_DIR "$@"
   fi
 }
 
@@ -340,7 +372,7 @@ read_peak() {
     while [ "$tries" -lt 30 ]; do
       if [ -r "$peek" ]; then
         if read -r kind bytes <"$peek" 2>/dev/null; then
-          if [ "$kind" = done ]; then
+          if [ "$kind" = "done" ]; then
             peak=$bytes
             return 0
           fi
@@ -379,6 +411,12 @@ if [ "$use_lock" = 1 ]; then
   log_event start ''
 fi
 
+runtime_dir=
+if command -v mktemp >/dev/null 2>&1; then
+  runtime_dir=$(mktemp -d "$runtime_root/capped-run-rt.XXXXXX" 2>/dev/null) || runtime_dir=
+fi
+[ -n "$runtime_dir" ] && chmod 700 "$runtime_dir" 2>/dev/null
+
 capped=0
 peek=
 if detect_scope; then
@@ -395,12 +433,18 @@ code=$?
 
 if [ "$capped" = 1 ] && [ "$code" = 137 ]; then
   read_peak
+  peak_text=$(peak_label)
   capped_line=$(printf 'CAPPED: killed at the memory limit (limit=%s, peak=%s, command=%s)' \
-    "$mem_label" "$(peak_label)" "$cmd_comm")
-  printf '%s\n' "$capped_line" >&2
-  # Logged before the wrapper exits: a capped run must leave its evidence even when nothing
-  # else about the run survived.
+    "$mem_label" "$peak_text" "$cmd_comm")
+  # Logged and read back BEFORE the wrapper says CAPPED: the report may only claim the log it
+  # actually holds. A log that could not take the line is reported honestly.
   log_capped "$capped_line"
+  if grep -qxF "$capped_line" "$log_file" 2>/dev/null; then
+    printf '%s\n' "$capped_line" >&2
+  else
+    printf 'CAPPED: killed at the memory limit (limit=%s, peak=%s, command=%s, log=unwritten)\n' \
+      "$mem_label" "$peak_text" "$cmd_comm" >&2
+  fi
 fi
 
 # The peak scratch file is the monitor's; once the run is over it is removed, after a short
@@ -409,7 +453,7 @@ if [ "$capped" = 1 ] && [ -n "$peek" ]; then
   if [ "$code" != 137 ]; then
     tries=0
     while [ "$tries" -lt 5 ] && [ -r "$peek" ]; do
-      if read -r kind bytes <"$peek" 2>/dev/null && [ "$kind" = done ]; then
+      if read -r kind bytes <"$peek" 2>/dev/null && [ "$kind" = "done" ]; then
         break
       fi
       sleep 0.1
@@ -423,4 +467,5 @@ if [ "$locked" = 1 ]; then
   log_event end " exit=$code"
 fi
 
+cleanup_runtime
 exit "$code"
