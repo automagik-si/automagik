@@ -17,11 +17,13 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rm
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fetchPlugins, DEFAULT_PACKAGES } from './fetch-plugins.mjs'
+import { fetchAm } from './fetch-am.mjs'
 import { readCheckoutPlugins, validateInput, verifyCheckoutDirectory } from './checkout-input.mjs'
 import { profileDirOf, PROFILE, pinStore } from './lib.mjs'
 import { pruneNodeModules } from '../apps/desktop/scripts/prune-runtime.mjs'
 import { patchRuntime } from '../apps/desktop/scripts/runtime-patches.mjs'
 import { buildOfflineStore } from './offline-store.mjs'
+import { HERDR_CORE_SHA256, HERDR_CORE_TARBALL, HERDR_CORE_VERSION, SKILL_NAME, SKILL_SHA256 } from './toolchain.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
@@ -145,8 +147,11 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
   rmSync(out, { recursive: true, force: true })
   mkdirSync(runtimeDir, { recursive: true })
 
-  const pinned = readJson(join(RUNTIME_SOURCE, 'package.json')).dependencies?.['@deepseek-ai/dsh']
+  const runtimePackage = readJson(join(RUNTIME_SOURCE, 'package.json'))
+  const pinned = runtimePackage.dependencies?.['@deepseek-ai/dsh']
   if (pinned !== dsh) throw new Error(`apps/desktop/runtime pins dsh ${pinned}, not the image's ${dsh}`)
+  const pnpmPin = runtimePackage.dependencies?.pnpm
+  if (!/^10\.\d+\.\d+$/.test(String(pnpmPin ?? ''))) throw new Error(`apps/desktop/runtime pins pnpm ${pnpmPin}, not a pnpm 10`)
   for (const file of ['package.json', 'package-lock.json']) cpSync(join(RUNTIME_SOURCE, file), join(runtimeDir, file))
   say(`installing dsh ${dsh} and pnpm`)
   // npm 11.19 gates dependency install scripts behind allowScripts and skips them by default.
@@ -156,6 +161,8 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
   run('npm', ['ci', '--omit=dev', '--no-audit', '--no-fund', '--dangerously-allow-all-scripts'], { cwd: runtimeDir, env: ENV })
   const installedDsh = readJson(join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')).version
   if (installedDsh !== dsh) throw new Error(`runtime installed dsh ${installedDsh}, not ${dsh}`)
+  const installedPnpm = readJson(join(runtimeDir, 'node_modules', 'pnpm', 'package.json')).version
+  if (installedPnpm !== pnpmPin) throw new Error(`runtime installed pnpm ${installedPnpm}, not ${pnpmPin}`)
 
   // The same carried patches the desktop runtime applies, to the same pinned packages: this
   // image serves the web app, so the index cache policy is the one the desktop's patch sets.
@@ -163,6 +170,9 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
 
   say(`fetching ${DEFAULT_PACKAGES.join(', ')} at ${version}`)
   mkdirSync(installDir, { recursive: true })
+  say(`fetching am ${version} from its pinned release tarball`)
+  const am = await fetchAm({ version, out: join(out, 'am'), repository })
+
   const fetched = kind === 'checkout'
     ? readCheckoutPlugins({ ...input, out: join(installDir, 'vendor') })
     : await fetchPlugins({ version, out: join(installDir, 'vendor'), repository })
@@ -250,6 +260,10 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
     revision,
     source,
     dsh: installedDsh,
+    pnpm: installedPnpm,
+    am,
+    herdrCore: { version: HERDR_CORE_VERSION, sha256: HERDR_CORE_SHA256, tarball: HERDR_CORE_TARBALL },
+    skills: { [SKILL_NAME]: SKILL_SHA256 },
     profile: PROFILE,
     plugins: Object.fromEntries(DEFAULT_PACKAGES.map((name) => [name, version])),
   }, null, 2)}\n`)

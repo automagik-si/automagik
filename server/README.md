@@ -147,6 +147,28 @@ pruned payload keeps everything the composed tree names — office-to-pdf and it
 variants, the win32/darwin node-pty prebuilds and the experimental bundles the profile never
 composes.
 
+### The toolchain
+
+| Tool | Source and pin | Path in the image |
+|---|---|---|
+| `am` | the content release's `automagik-am-<content>.tgz`, checked against its release `.sha256`; unpacked, never an archive | `/opt/automagik/am`, command `/usr/local/bin/am` |
+| `herdr-core`, `hc` | `releases.herdr.dev/core/0.1.18/herdr-core-linux-x86_64.tar.gz`, sha256 `5b2f97cb…`; verified and run in the tools stage | `/usr/local/bin/herdr-core`, `/usr/local/bin/hc` |
+| pnpm | the desktop runtime's pinned pnpm 10.34.6 (`apps/desktop/runtime/package.json`), through the image's shim; `AUTOMAGIK_PNPM` names it | `/usr/local/bin/pnpm` |
+| node | the distroless nodejs24 runtime, on `PATH` | `/nodejs/bin/node` |
+| `session-absorption` skill | the reviewed payload, sha256 pinned in `server/toolchain.mjs`, checked in the builder and again in the in-image smoke | `/opt/automagik/skills/session-absorption` |
+
+The vendor CLIs (Claude Code, Codex) are never in the image. On the first start of a data volume
+the entrypoint installs the reviewed skill into `$HOME/.agents/skills/session-absorption` and
+links it from `.claude/skills` and `.codex/skills`, then runs the v2 registry seed when the team
+home has no registry. The seed is #1424's; while it is unmerged the hook calls the documented
+path (`<profile>/node_modules/@automagik/bots-dsh/src/shared/registry-seed.js`) and reports the
+interface it assumed (`--home <team home> --workspace <folder>`) instead of writing a registry
+by hand. After DSH is up, that first start installs Claude Code and Codex through the shipped
+ACP CLI store from the seeded profile (into `$AUTOMAGIK_HOME/acp/clis`), with `AUTOMAGIK_PNPM`
+and `registry.npmjs.org`; a failure is logged and the plugin's own schedule retries. Setting
+`AUTOMAGIK_CLI_INSTALL=off` skips that background install for an operator who manages the CLIs
+elsewhere.
+
 ## Build and smoke
 
 ```sh
@@ -159,6 +181,16 @@ node server/follow-smoke.mjs automagik-server:local
 `--version` is the release whose plugin tarballs are installed; `--image-version` is the content
 version label (normally the same release, without its `v`); `--revision` is the commit label. With
 no arguments the release is `3.90.1` and the revision label `unknown`.
+
+The builder fetches am from that release's pinned tarball and verifies it before unpacking
+(`fetch-am.mjs`); the tools stage fetches herdr-core at its own pinned version and sha256 and
+runs `hc --version` there. The in-image smoke (`server/in-image-smoke.mjs`, run by the smoke
+inside the container) also proves `am --version`, `hc --version`, `pnpm --version`,
+`node --version`, a CLI-store dry run against the seeded profile, the skill hashes, and the v2
+seed in a temporary home. The smoke's temporary-home case stages a fixture at the documented
+path to prove the call and the interface; it is not a seed of its own and does not replace
+#1424's. The main smoke starts the container with no network, so first boot is proven to seed,
+fence and install the skill without downloading a vendor CLI.
 
 The context is the repository root because the builder reuses
 `apps/desktop/runtime/package-lock.json`; `server/Dockerfile.dockerignore` keeps the context
@@ -508,16 +540,20 @@ node server/secrecy.mjs --rootfs /tmp/rootfs --inventory secrecy
 | File | Role |
 |---|---|
 | `Dockerfile`, `Dockerfile.dockerignore` | the builder, tools and distroless runtime stages |
-| `assemble.mjs` | builder stage: runtime, release tarballs, profile, prune |
-| `fetch-plugins.mjs` | downloads and verifies the pinned release's tarballs |
-| `entrypoint.mjs`, `lib.mjs` | seed `/data`, key file, pnpm store, dsh, redacted log |
+| `assemble.mjs` | builder stage: runtime, release tarballs, am, profile, prune, versions |
+| `fetch-plugins.mjs`, `fetch-am.mjs` | download and verify the pinned release's plugin tarballs and am |
+| `toolchain.mjs`, `verify-payload.mjs` | the literal tool paths/versions/hashes, and the build-time skill check |
+| `first-boot.mjs`, `cli-store.mjs` | first-boot skill/seed hook and the shipped CLI store's dry run |
+| `in-image-smoke.mjs` | the checks that run inside the built image |
+| `skills/` | the reviewed, byte-pinned session-absorption payload |
+| `entrypoint.mjs`, `lib.mjs` | seed `/data`, first boot, key file, pnpm store, dsh, redacted log |
 | `profile-follow.mjs`, `profile-state.mjs` | ownership, staged offline update, backup and live version state |
 | `plugin-payload.mjs`, `offline-store.mjs` | local install inputs from scanned files; build-only dependency-cache preparation |
 | `healthcheck.mjs` | compact Docker health check and keeper JSON report |
 | `secrecy.mjs`, `secrecy-allowlist.json` | pre-push scan: rootfs extraction, inventory, rules (billing included) and the exact reviewed exceptions; `--repo` for the tracked files |
 | `image-record.mjs` | the release's record of the pushed image digest (`server-image.json`) |
 | `passwd` | the image's account record (no `/home/<user>`; `automagik` is uid 1000) |
-| `bin/dsh`, `bin/pnpm` | the image's pinned commands for `docker exec` |
+| `bin/dsh`, `bin/pnpm`, `bin/am` | the image's pinned commands for `docker exec` |
 | `profile/` | the seed profile: `package.json`, `cordis.patch.yml`, `pnpm-workspace.yaml` |
 | `build.mjs`, `smoke.mjs`, `follow-smoke.mjs`, `test/` | build, fresh/restart and older-volume smokes, unit tests |
 

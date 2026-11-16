@@ -60,7 +60,7 @@ const harness = `
 `
 
 function run(value, dir, followResult = 'owner-managed') {
-  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_WORKSPACE: dir, DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult }
+  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir, DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult }
   delete env.AUTOMAGIK_PUBLIC_URL
   if (value !== undefined) env.AUTOMAGIK_PUBLIC_URL = value
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', harness], {

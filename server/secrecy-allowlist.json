@@ -1,5 +1,19 @@
 [
   {
+    "file": "usr/local/bin/herdr-core",
+    "rule": "home-path",
+    "sha256": "b1cbc5f347543a03701354923cd95344068142e4aa08c74d259fbfe7c62984fc",
+    "reason": "herdr-core's Go build records its GitHub-hosted build account in embedded paths, not a host account; the pinned release tarball's sha256 and this copy's fileSha256 bind the bytes",
+    "fileSha256": "baa9d208d6400556a6e379152455fe1301e0e1acdbc114ff60b79d64425179cf"
+  },
+  {
+    "file": "usr/local/bin/hc",
+    "rule": "home-path",
+    "sha256": "b1cbc5f347543a03701354923cd95344068142e4aa08c74d259fbfe7c62984fc",
+    "reason": "the same herdr-core binary, copied as hc: its Go build account is not a host account; the pinned release tarball's sha256 and this copy's fileSha256 bind the bytes",
+    "fileSha256": "baa9d208d6400556a6e379152455fe1301e0e1acdbc114ff60b79d64425179cf"
+  },
+  {
     "file": "opt/automagik/runtime/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
     "rule": "home-path",
     "match": "/home/CLI",

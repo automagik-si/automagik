@@ -73,10 +73,13 @@ async function main() {
   // Nothing baked into /data: no profile, and the image runs as the non-root uid. Distroless
   // carries no coreutils, so the uid check is node's own.
   await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c', 'test ! -e /data/dsh/profiles'])
+  await docker(['run', '--rm', '--entrypoint', '/bin/bash', image, '-c', 'test ! -e /data/acp && test ! -e /data/.agents'])
   await docker(['run', '--rm', '--entrypoint', '/nodejs/bin/node', image, '-e', 'process.exit(process.getuid() === 1000 ? 0 : 1)'])
 
   await docker(['volume', 'create', volume])
-  await docker(['run', '--detach', '--name', name, '--volume', `${volume}:/data`,
+  // No network: first boot must still seed and fence, and the vendor-CLI download is never
+  // part of this smoke (its store path is rehearsed in-image below).
+  await docker(['run', '--detach', '--name', name, '--network', 'none', '--volume', `${volume}:/data`,
     '--health-interval', '2s', '--health-timeout', '2s', '--health-retries', '60', '--health-start-period', '0s', image])
 
   const startTo401 = await waitForFence()
@@ -120,6 +123,12 @@ async function main() {
     check(config.includes(`name: '${plugin}'`) || config.includes(`name: "${plugin}"`), `${plugin} is not composed`)
   }
   say(`seeded profile, three plugins, 600 launch URL, uid 1000, ${entries} composed entries`)
+
+  // The toolchain smoke runs inside the image: am, hc, pnpm and node on PATH, the shipped
+  // CLI store's install path without a download, and the first-boot skill and registry seed
+  // in a temporary home. It never publishes or starts a service.
+  const inImage = (await docker(['exec', name, '/nodejs/bin/node', '/opt/automagik/in-image-smoke.mjs'])).stdout.trim()
+  for (const line of inImage.split('\n').filter(Boolean)) say(line.replace(/^\[in-image\] /, ''))
 
   // The distroless base is older glibc than the builder: exercise both native modules.
   const native = "const k=require('/opt/automagik/runtime/node_modules/koffi');const p=require('/opt/automagik/runtime/node_modules/node-pty');const t=p.spawn('/bin/sh',['-c','echo native-ok'],{name:'xterm',cols:80,rows:24,cwd:'/tmp',env:process.env});let o='';t.onData((d)=>{o+=d});t.onExit(()=>process.exit(o.includes('native-ok')&&typeof k.version==='string'?0:1));setTimeout(()=>process.exit(1),5000)"

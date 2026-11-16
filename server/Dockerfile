@@ -9,11 +9,14 @@
 #
 # The runtime is the distroless nodejs24 rootfs (node and glibc), cleaned in the tools stage
 # (no man pages or changelogs), plus the image's code and the tools Bots need in their shell
-# (bash, dash as /bin/sh, git core, ripgrep, tar, gzip and find for Omni's installer).
-# No npm, apt, curl or build toolchain. The release
-# pins are build args; every plugin tarball is checked against the release's plugins.json
-# (sha512 integrity, size) and PLUGINS.SHA256SUMS (sha256) before dsh installs it
-# (server/fetch-plugins.mjs).
+# (bash, dash as /bin/sh, git core, ripgrep, tar, gzip and find for Omni's installer), am from
+# the content release's pinned tarball, and herdr-core/hc from its pinned release. No npm, apt,
+# curl or build toolchain in the final image. The release pins are build args; every plugin
+# tarball is checked against the release's plugins.json (sha512 integrity, size) and
+# PLUGINS.SHA256SUMS (sha256) before dsh installs it (server/fetch-plugins.mjs), and am is
+# checked against its own release .sha256 (server/fetch-am.mjs). The vendor CLIs (Claude Code,
+# Codex) are never baked in: the first boot installs them into the data volume through the
+# shipped CLI store, with AUTOMAGIK_PNPM pointing at /usr/local/bin/pnpm.
 
 FROM gcr.io/distroless/nodejs24-debian12@sha256:61f4f4341db81820c24ce771b83d202eb6452076f58628cd536cc7d94a10978b AS base
 
@@ -41,6 +44,10 @@ COPY apps/desktop/runtime/patches /build/apps/desktop/runtime/patches
 COPY apps/desktop/scripts/prune-runtime.mjs apps/desktop/scripts/runtime-patches.mjs /build/apps/desktop/scripts/
 COPY server /build/server
 
+# The reviewed skill payload is shipped byte-for-byte; a changed byte fails the build here,
+# before anything is installed.
+RUN node /build/server/verify-payload.mjs
+
 RUN node /build/server/assemble.mjs \
       --out /build/out \
       --version "$AUTOMAGIK_VERSION" \
@@ -55,6 +62,11 @@ RUN node /build/server/assemble.mjs \
 # the distroless nodejs24-debian12 base.
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS tools
 
+# herdr-core's supported Linux release, pinned by the sha256 its manifest names. The build
+# runs it here, on the same glibc family as the distroless base, before copying the binary.
+ARG HERDR_CORE_VERSION=0.1.18
+ARG HERDR_CORE_SHA256=5b2f97cb4b2a9d7a6b2cc5942628203ed9fbb7cc0c2b4b09ad8a6f5648e246b7
+
 # The distroless rootfs, stripped here where coreutils exist, before it is copied into the final
 # image. No man pages or changelogs (nothing reads them, and their .gz files are archives the
 # secrecy scan refuses); the shell and libraries Bots need stay.
@@ -63,7 +75,7 @@ COPY --from=base / /out/rootfs
 RUN set -eux; \
     rm -rf /out/rootfs/usr/share/doc /out/rootfs/usr/share/man /out/rootfs/usr/share/info /out/rootfs/usr/share/lintian; \
     apt-get update; \
-    apt-get install -y --no-install-recommends bash dash git ripgrep ca-certificates util-linux tar gzip findutils; \
+    apt-get install -y --no-install-recommends bash dash git ripgrep ca-certificates util-linux tar gzip findutils curl; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /out/bin /out/lib /out/data/dsh /out/data/bots /out/data/workspace /out/data/secrets; \
     for f in /bin/bash /bin/dash /usr/bin/git /usr/bin/rg /usr/bin/flock /bin/tar /bin/gzip /usr/bin/find /usr/lib/git-core/*; do ldd "$f" 2>/dev/null || true; done \
@@ -79,6 +91,15 @@ RUN set -eux; \
     cp -a /usr/lib/git-core /out/git-core; \
     cp -a /usr/share/git-core /out/git-core-share; \
     cp -a /etc/ssl/certs /out/certs; \
+    mkdir -p /out/licenses/herdr-core; \
+    curl -fsSL --proto '=https' -o /tmp/herdr-core.tar.gz "https://releases.herdr.dev/core/${HERDR_CORE_VERSION}/herdr-core-linux-x86_64.tar.gz"; \
+    echo "${HERDR_CORE_SHA256}  /tmp/herdr-core.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/herdr-core.tar.gz -C /tmp herdr-core LICENSE THIRD-PARTY-NOTICES; \
+    install -m 0755 /tmp/herdr-core /out/bin/herdr-core; \
+    ln -s herdr-core /out/bin/hc; \
+    mv /tmp/LICENSE /tmp/THIRD-PARTY-NOTICES /out/licenses/herdr-core/; \
+    rm -f /tmp/herdr-core.tar.gz /tmp/herdr-core; \
+    /out/bin/hc --version | grep -qx "hc ${HERDR_CORE_VERSION}"; \
     chmod 0700 /out/data/secrets; \
     chown -R 1000:1000 /out/data
 
@@ -126,6 +147,9 @@ COPY --from=tools /out/bin/find /usr/bin/find
 COPY --from=tools /out/git-core /usr/lib/git-core
 COPY --from=tools /out/git-core-share /usr/share/git-core
 COPY --from=tools /out/certs /etc/ssl/certs
+COPY --from=tools /out/bin/herdr-core /usr/local/bin/herdr-core
+COPY --from=tools /out/bin/hc /usr/local/bin/hc
+COPY --from=tools /out/licenses /opt/automagik/licenses
 COPY --from=tools --chown=1000:1000 /out/data /data
 
 COPY --from=gate-deps /gate/node_modules /opt/automagik/node_modules
@@ -133,11 +157,13 @@ COPY --from=builder /build/out/runtime /opt/automagik/runtime
 COPY --from=builder /build/out/profile /opt/automagik/profile
 COPY --from=builder /build/out/versions.json /opt/automagik/versions.json
 COPY --from=builder /build/out/offline-store /opt/automagik/offline-store
-COPY server/entrypoint.mjs server/healthcheck.mjs server/lib.mjs server/gate*.mjs server/profile-*.mjs server/plugin-payload.mjs server/volume-lock.mjs /opt/automagik/
+COPY --from=builder /build/out/am /opt/automagik/am
+COPY server/skills /opt/automagik/skills
+COPY server/entrypoint.mjs server/healthcheck.mjs server/lib.mjs server/gate*.mjs server/profile-*.mjs server/plugin-payload.mjs server/volume-lock.mjs server/first-boot.mjs server/cli-store.mjs server/in-image-smoke.mjs server/toolchain.mjs /opt/automagik/
 # No /home/<user> in the image's account record: the distroless nonroot home is replaced with
 # the uid the image actually runs as. The scanner's home check then has nothing to excuse.
 COPY server/passwd /etc/passwd
-COPY --chmod=0755 server/bin/dsh server/bin/pnpm /usr/local/bin/
+COPY --chmod=0755 server/bin/dsh server/bin/pnpm server/bin/am /usr/local/bin/
 
 ENV AUTOMAGIK_GATE_IMAGE=1 \
     HOME=/data \
@@ -145,6 +171,7 @@ ENV AUTOMAGIK_GATE_IMAGE=1 \
     AUTOMAGIK_BOTS_HOME=/data/bots \
     AUTOMAGIK_HOME=/data \
     AUTOMAGIK_WORKSPACE=/data/workspace \
+    AUTOMAGIK_PNPM=/usr/local/bin/pnpm \
     NODE_ENV=production \
     DO_NOT_TRACK=1 \
     PATH=/nodejs/bin:/usr/local/bin:/usr/bin:/bin

@@ -19,6 +19,7 @@ import {
   redactTokens,
 } from './lib.mjs'
 import { followImage } from './profile-follow.mjs'
+import { installVendorClis, runFirstBoot } from './first-boot.mjs'
 
 const ROOT = '/opt/automagik'
 const DSH_BIN = join(ROOT, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -116,6 +117,17 @@ async function main() {
   log(seeded.seeded ? `seeded ${seeded.target}` : `profile present at ${seeded.target}`)
   log(`image follow: ${seeded.result}; ${seeded.reason}`)
 
+  // First boot puts the reviewed skills and the v2 registry seed in the team home. The vendor
+  // CLIs follow in the background after dsh is up: they are hundreds of MB from npm and must
+  // never hold the auth fence closed, nor be baked into the image.
+  let firstBoot
+  try {
+    firstBoot = runFirstBoot({ home: env.AUTOMAGIK_HOME, workspace, profile: seeded.target, version: build.automagik, log, warn })
+  } catch (error) {
+    warn(`first boot: ${error?.message ?? error}`)
+    firstBoot = { fresh: false }
+  }
+
   let key
   try {
     key = modelKey(env)
@@ -137,6 +149,12 @@ async function main() {
     warn(`dsh did not start: ${error.message}`)
     process.exit(1)
   })
+  if (firstBoot.fresh && env.AUTOMAGIK_CLI_INSTALL !== 'off') {
+    log('vendor CLIs: installing Claude Code and Codex into the data volume in the background')
+    void installVendorClis({ home: env.AUTOMAGIK_HOME, profile: seeded.target, env, log, warn })
+      .then((result) => { if (result.state !== 'ready') warn(`vendor CLIs: ${result.state}; the ACP plugin will retry`) })
+      .catch((error) => warn(`vendor CLIs: ${error?.message ?? error}`))
+  }
 
   let announced = false
   const onLine = (line) => {
