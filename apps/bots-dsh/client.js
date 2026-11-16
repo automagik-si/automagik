@@ -35476,6 +35476,9 @@ function ModelSwitchNotice({ sessionId, useRoster }) {
   const [said, setSaid] = (0, import_react94.useState)("");
   const line = mismatch === void 0 ? "" : t("This chat is running on {running} instead of {saved}.", { running: mismatch.running, saved: mismatch.saved });
   (0, import_react94.useEffect)(() => {
+    setSaid("");
+  }, [bot?.id]);
+  (0, import_react94.useEffect)(() => {
     if (!known2) return;
     const next = switchSeen(memo.current, bot.id, key);
     memo.current = next.memo;
