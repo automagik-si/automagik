@@ -135,7 +135,8 @@ while [ $# -gt 0 ]; do
         'usage: capped-run [--mem SIZE] [--lock] [--name N] -- COMMAND [ARGS...]' \
         '  --mem SIZE  raise the memory cap (default 4G, ceiling 8G)' \
         '  --lock      take the full-gate lock for the run' \
-        '  --name N    name the scope unit'
+        '  --name N    name the scope unit' \
+        '  CAPPED is certain only while the monitor survives; otherwise the run reports that the monitor ended before its final read'
       exit 0
       ;;
     --mem)
