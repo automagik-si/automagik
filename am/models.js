@@ -233,8 +233,10 @@ export function defaultModel(agentKey, { home, read }) {
 }
 
 // Claude Code: the aliases `claude --help` names ("an alias for the latest model (e.g.
-// 'sonnet' or 'opus')") and the current model ids of the Claude 5 family (2026-11-01).
-const CLAUDE_MODELS = ["opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+// 'sonnet' or 'opus')") and the current model ids of the Claude 5 family (2026-11-16). A `[1m]`
+// id is Claude Code's 1M-context form, passed to --model as is. An older id stays listed so a
+// bot pinned to it still starts.
+const CLAUDE_MODELS = ["opus", "sonnet", "haiku", "claude-fable-5-2", "claude-fable-5-2[1m]", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 
 /** Where the cache lives under an app home; the folder holds the pack's ledgers too. */
 export const AG_MODELS_FILE = "automagik-herdr/antigravity-models.json";
