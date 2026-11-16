@@ -182,7 +182,10 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: live feed route',
     'route GET /api/omni-ui/feed',
     'effect ds-bot: live feed',
-    // The shared gen-UI kit's host half: the live slice, its feed nudge and the media route.
+    // The Code side's watched pane stream (code-side.js), then the shared gen-UI kit's host
+    // half: the live slice, its feed nudge and the media route.
+    'effect omni-ui: code pane stream',
+    'route GET /api/omni-ui/code/stream',
     'effect omni-ui: genui slice',
     'effect omni-ui: genui feed nudge',
     'effect omni-ui: genui media route',
@@ -204,6 +207,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     // Auto's judge, after every module, so it runs first (auto-judge.js installAhead).
     'on approval/request (prepend)',
     'provide omniTeam',
+    'effect omni-ui: stop the team modules',
   ])
 })
 
