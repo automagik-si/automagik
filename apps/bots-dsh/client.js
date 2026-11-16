@@ -21875,7 +21875,7 @@ html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]>[data-sl
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
 .lb-head{flex:none;display:flex;align-items:center;gap:4px;height:52px;padding:0 8px 0 14px;box-sizing:border-box}
 .lb-brand{flex:1;min-width:0;display:flex;align-items:center;overflow:hidden}
-.lb-brand .omni-wordmark{display:block;flex:none}
+.lb-brand .omni-wordmark{display:block;flex:none;max-width:100%;height:auto}
 .lb-head .bt-round{flex:none;width:30px;height:30px;background:none;box-shadow:none;color:var(--bt-ink)}
 .lb-head .bt-round:hover{background:var(--bt-hover)}
 html[data-automagik-desktop] .lb-brand{visibility:hidden}
@@ -25157,6 +25157,7 @@ function installBarWidth({ doc = globalThis.document, storage = globalThis.local
   let frame = 0;
   let sized = null;
   let watched = null;
+  let tried = null;
   const parts = () => {
     const shell2 = doc.querySelector(FRAME2);
     return { shell: shell2, column: shell2?.querySelector(COLUMN), handle: shell2?.querySelector(HANDLE) };
@@ -25166,14 +25167,19 @@ function installBarWidth({ doc = globalThis.document, storage = globalThis.local
     const { shell: shell2, column, handle } = parts();
     if (!shell2 || !column) return;
     watch(shell2, column);
+    const width = column.getBoundingClientRect().width;
+    const collapsed = shell2.hasAttribute("data-sidebar-collapsed");
+    if (collapsed) tried = null;
     const move2 = widthMove({
-      width: column.getBoundingClientRect().width,
+      width,
       kept: keptWidth(storage),
       drawer: shell2.hasAttribute("data-sidebar-drawer"),
-      collapsed: shell2.hasAttribute("data-sidebar-collapsed"),
+      collapsed,
       dragging: shell2.hasAttribute("data-dragging") || shell2.hasAttribute("data-animating")
     });
     if (move2 === 0 || !handle) return;
+    if (tried === Math.round(width)) return;
+    tried = Math.round(width);
     const x = handle.getBoundingClientRect().left + 4;
     const at = { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0 };
     handle.dispatchEvent(new view.PointerEvent("pointerdown", { ...at, buttons: 1, clientX: x }));
@@ -25202,6 +25208,7 @@ function installBarWidth({ doc = globalThis.document, storage = globalThis.local
     view.requestAnimationFrame(() => {
       const { shell: shell2, column } = parts();
       if (!shell2 || !column || shell2.hasAttribute("data-sidebar-drawer") || shell2.hasAttribute("data-sidebar-collapsed")) return;
+      tried = null;
       try {
         storage?.setItem(WIDTH_KEY, String(Math.round(column.getBoundingClientRect().width)));
       } catch {
