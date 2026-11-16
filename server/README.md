@@ -188,14 +188,16 @@ store from the seeded profile (into `$AUTOMAGIK_HOME/acp/clis`), with `AUTOMAGIK
 elsewhere.
 
 The image sets `HERDR_APP_HOME=/data/herdr-app`, `XDG_RUNTIME_DIR=/data/run`,
-`HC_RUNTIME=/data/run/herdr-core` and
-`HC_TERMINAL_SOCKET=/data/run/herdr-core/default.sock`. The entrypoint creates
-`/data/run` and `/data/run/herdr-core` as uid 1000 with mode 0700 and starts `herdr-core serve` as a supervised
-child before DSH, with the same environment dsh and `hc` receive. If either child exits, the
-entrypoint stops the other and exits so the container's restart policy applies to both;
-`SIGTERM`, `SIGINT` and `SIGHUP` stop both cleanly. The in-image smoke checks that the socket is
-a Unix socket, that the core answers `hc server status` and `hc ls`, and that `am ls` sees the
-three team bots through it.
+`HC_RUNTIME=/data/run/herdr-core` and `HC_SESSION=automagik-server`. The entrypoint creates
+`/data/run` and `/data/run/herdr-core` as uid 1000 with mode 0700 and derives
+`HC_TERMINAL_SOCKET=${HC_RUNTIME}/${HC_SESSION}.sock` - herdr-core names its socket after the
+session. It starts `herdr-core serve` as a supervised child before DSH, with the same
+environment dsh and `hc` receive, and prints `herdr-core: serving on <path>` only after that
+socket exists; on failure it prints the directory listing, the core's stderr and its exit code.
+If either child exits, the entrypoint stops the other and exits so the container's restart
+policy applies to both; `SIGTERM`, `SIGINT` and `SIGHUP` stop both cleanly. The smoke checks
+that the session socket is a Unix socket, that `hc server status` and `hc ls` answer, and that
+`am ls` sees the three team bots through it.
 
 ## Build and smoke
 

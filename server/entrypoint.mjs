@@ -7,7 +7,7 @@
 // --network host or a proxy in the same network namespace, not -p.
 import { spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import {
   ensureDataDirs,
   launchUrlOf,
@@ -102,9 +102,14 @@ async function main() {
   const appHome = env.HERDR_APP_HOME || join(home, 'herdr-app')
   const runtimeDir = env.XDG_RUNTIME_DIR || join(home, 'run')
   const coreRuntime = env.HC_RUNTIME || join(runtimeDir, 'herdr-core')
-  const socketPath = env.HC_TERMINAL_SOCKET || join(coreRuntime, 'default.sock')
-  const coreDir = dirname(socketPath)
   const session = env.HC_SESSION || 'automagik-server'
+  // herdr-core names its socket after HC_SESSION. This is the only source of truth: both the
+  // wait and the "serving on" line use this path, never a stale static HC_TERMINAL_SOCKET.
+  const socketPath = join(coreRuntime, `${session}.sock`)
+  const coreDir = dirname(socketPath)
+  if (env.HC_TERMINAL_SOCKET && resolve(env.HC_TERMINAL_SOCKET) !== resolve(socketPath)) {
+    warn(`HC_TERMINAL_SOCKET=${env.HC_TERMINAL_SOCKET} is not a herdr-core session socket; using ${socketPath}`)
+  }
   const dirs = [dshHome, botsHome, workspace, join(dshHome, 'pnpm-store'), join(home, 'secrets'), appHome, coreDir, coreRuntime, runtimeDir]
   try {
     prepareWorkspace(workspace, { uid: 1000 })
@@ -188,8 +193,8 @@ async function main() {
     })
   }
   pipeRedacted(core.stdout, process.stdout, () => {})
-  pipeRedacted(core.stderr, process.stderr, () => {})
-  log(`herdr-core: serving on ${socketPath}`)
+  let coreStderr = ''
+  pipeRedacted(core.stderr, process.stderr, (line) => { coreStderr += `${line}\n` })
   try {
     const started = Date.now()
     while (!existsSync(socketPath)) {
@@ -199,13 +204,19 @@ async function main() {
     }
   } catch (error) {
     stopping = true
-    stopCore()
     warn(error.message)
+    // List while the core is still alive: its own socket (if it used a different name) is
+    // visible here, and SIGTERM cannot erase it before the diagnostic is printed.
     for (const dir of [coreRuntime, runtimeDir]) {
       try { warn(`${dir}: ${readdirSync(dir).join(', ') || '(empty)'}`) } catch { /* missing */ }
     }
+    warn(`herdr-core exitCode=${core.exitCode ?? 'null'} signal=${core.signalCode ?? 'none'}`)
+    warn(`herdr-core stderr:\n${coreStderr || '(empty)'}`)
+    stopCore()
     process.exit(1)
   }
+  // Announce only after the socket exists: the earlier line claimed a path the core never made.
+  log(`herdr-core: serving on ${socketPath}`)
 
   // First boot puts the reviewed skills and the v2 registry seed in the team home. The vendor
   // CLIs follow in the background after dsh is up: they are hundreds of MB from npm and must

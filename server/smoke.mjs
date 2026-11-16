@@ -8,6 +8,7 @@
 //   node server/smoke.mjs [automagik-server:local]
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { herdrCoreSocket, SMOKE_HC_SESSION } from './toolchain.mjs'
 
 const run = promisify(execFile)
 const image = process.argv[2] || 'automagik-server:local'
@@ -80,7 +81,7 @@ async function main() {
   // No network: first boot must still seed and fence, and the vendor-CLI download is never
   // part of this smoke (its store path is rehearsed in-image below).
   await docker(['run', '--detach', '--name', name, '--network', 'none',
-    '--env', 'XDG_RUNTIME_DIR=/data/run', '--env', 'HC_SESSION=automagik-server-smoke',
+    '--env', 'XDG_RUNTIME_DIR=/data/run', '--env', `HC_SESSION=${SMOKE_HC_SESSION}`,
     '--volume', `${volume}:/data`,
     '--health-interval', '2s', '--health-timeout', '2s', '--health-retries', '60', '--health-start-period', '0s', image])
 
@@ -90,7 +91,10 @@ async function main() {
 
   const logs = await logsOf()
   check(/automagik-web: startup: http:\/\/127\.0\.0\.1:3081\//.test(logs), 'no startup line')
-  check(/automagik-web: herdr-core: serving on \/data\/run\/herdr-core\/default\.sock/.test(logs), 'herdr-core did not start on the contract socket')
+  const socket = herdrCoreSocket(SMOKE_HC_SESSION)
+  check(logs.includes(`automagik-web: herdr-core: serving on ${socket}`), `herdr-core did not start on ${socket}`)
+  const coreStatus = await docker(['exec', name, '/usr/local/bin/hc', 'server', 'status', '--json'])
+  check(coreStatus.stdout.trim().length > 0, 'hc server status printed nothing on the session socket')
   check(!/(?<![A-Za-z0-9_])token=(?!<redacted>)\S+/.test(logs), 'the launch token is in the log')
   check(/automagik-web: seeded \/data\/dsh\/profiles\/automagik-web/.test(logs), 'the first start did not seed the profile')
   check(/automagik-web: profile automagik-web: automagik \d+\.\d+\.\d+, dsh \d+\.\d+\.\d+/.test(logs), 'no version line')

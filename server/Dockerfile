@@ -174,7 +174,6 @@ ENV AUTOMAGIK_GATE_IMAGE=1 \
     AUTOMAGIK_WORKSPACE=/data/workspace \
     AUTOMAGIK_PNPM=/usr/local/bin/pnpm \
     HERDR_APP_HOME=/data/herdr-app \
-    HC_TERMINAL_SOCKET=/data/run/herdr-core/default.sock \
     XDG_RUNTIME_DIR=/data/run \
     HC_RUNTIME=/data/run/herdr-core \
     HC_SESSION=automagik-server \

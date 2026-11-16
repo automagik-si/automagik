@@ -50,6 +50,16 @@ const harness = `
               core.stdout = new PassThrough()
               core.stderr = new PassThrough()
               const socket = options.env?.HC_TERMINAL_SOCKET
+              if (process.env.TEST_CORE_FAIL) {
+                setImmediate(() => {
+                  core.exitCode = 1
+                  core.signalCode = null
+                  core.stderr.write('core map failed')
+                  core.stderr.end()
+                  core.emit('exit', 1, null)
+                })
+                return core
+              }
               if (socket) { mkdirSync(dirname(socket), { recursive: true }); writeFileSync(socket, '') }
               return core
             }
@@ -75,8 +85,8 @@ const harness = `
   await import(${JSON.stringify(new URL('../entrypoint.mjs', import.meta.url).href)})
 `
 
-function run(value, dir, followResult = 'owner-managed') {
-  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir, HERDR_APP_HOME: join(dir, 'herdr-app'), HC_TERMINAL_SOCKET: join(dir, 'run', 'herdr-core', 'default.sock'), XDG_RUNTIME_DIR: join(dir, 'run'), HC_RUNTIME: join(dir, 'run', 'herdr-core'), HC_SESSION: 'test-entrypoint', DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult }
+function run(value, dir, followResult = 'owner-managed', extra = {}) {
+  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir, HERDR_APP_HOME: join(dir, 'herdr-app'), HC_TERMINAL_SOCKET: join(dir, 'run', 'herdr-core', 'default.sock'), XDG_RUNTIME_DIR: join(dir, 'run'), HC_RUNTIME: join(dir, 'run', 'herdr-core'), HC_SESSION: 'test-entrypoint', DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult, ...extra }
   delete env.AUTOMAGIK_PUBLIC_URL
   if (value !== undefined) env.AUTOMAGIK_PUBLIC_URL = value
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', harness], {
@@ -87,16 +97,28 @@ function run(value, dir, followResult = 'owner-managed') {
 }
 
 // ENTRY_ABORT_ROLLBACK: a failed update must not prevent starting the coherent old profile.
-test('the entrypoint gives dsh the core socket and the Arca app home', (t) => {
+test('a non-default HC_SESSION derives <session>.sock and announces it after it exists', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'automagik-core-env-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   const result = run(undefined, dir)
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /CORE /)
-  assert.match(result.stdout, /herdr-core: serving on /)
+  assert.match(result.stdout, /herdr-core: serving on .*test-entrypoint\.sock/)
   const call = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('SPAWN ')).slice(6))
-  assert.equal(call.socket, join(dir, 'run', 'herdr-core', 'default.sock'))
+  assert.equal(call.socket, join(dir, 'run', 'herdr-core', 'test-entrypoint.sock'))
   assert.equal(call.appHome, join(dir, 'herdr-app'))
+})
+
+test('a core socket failure prints no serving line and logs stderr, exit code and the listing', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-fail-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { TEST_CORE_FAIL: '1' })
+  assert.equal(result.status, 1)
+  assert.doesNotMatch(result.stdout, /herdr-core: serving on /)
+  assert.match(result.stderr, /herdr-core exited before its socket .*test-entrypoint\.sock/)
+  assert.match(result.stderr, /core map failed/)
+  assert.match(result.stderr, /herdr-core exitCode=1 signal=none/)
+  assert.match(result.stderr, new RegExp(`${join(dir, 'run', 'herdr-core').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: \\(empty\\)`))
 })
 
 test('the real entrypoint still starts DSH after the updater reports rollback', t => {

@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { dryRunVendorClis } from './cli-store.mjs'
 import { FIRST_BOOT_MARKER, TRIAD, runFirstBoot, seedRegistry, seedScript, sha256File, SKILL_LINKS, verifySurfaces } from './first-boot.mjs'
 import { profileDirOf } from './lib.mjs'
-import { HC_RUNTIME, HERDR_APP_HOME, HERDR_CORE_SOCKET, HERDR_CORE_VERSION, PNPM_PATH, REGISTRY_SEED_SHA256, REGISTRY_SEED_VENDOR, SKILL_NAME, SKILL_ROOT, SKILL_SHA256, SMOKE_HC_SESSION, XDG_RUNTIME_DIR } from './toolchain.mjs'
+import { HC_RUNTIME, HERDR_APP_HOME, HERDR_CORE_VERSION, PNPM_PATH, REGISTRY_SEED_SHA256, REGISTRY_SEED_VENDOR, SKILL_NAME, SKILL_ROOT, SKILL_SHA256, SMOKE_HC_SESSION, XDG_RUNTIME_DIR, herdrCoreSocket } from './toolchain.mjs'
 
 const ROOT = '/opt/automagik'
 const HOME = process.env.AUTOMAGIK_HOME || '/data'
@@ -52,13 +52,14 @@ async function main() {
   // The Code side's terminals live in the supervised herdr-core on the contract socket. The
   // same env reaches dsh, am and hc; here the core must answer both its status and its list.
   check(process.env.HERDR_APP_HOME === HERDR_APP_HOME, `HERDR_APP_HOME is ${process.env.HERDR_APP_HOME ?? 'unset'}, not ${HERDR_APP_HOME}`)
-  check(process.env.HC_TERMINAL_SOCKET === HERDR_CORE_SOCKET, `HC_TERMINAL_SOCKET is ${process.env.HC_TERMINAL_SOCKET ?? 'unset'}, not ${HERDR_CORE_SOCKET}`)
+  const coreSocket = herdrCoreSocket(SMOKE_HC_SESSION)
+  check(process.env.HC_TERMINAL_SOCKET === coreSocket, `HC_TERMINAL_SOCKET is ${process.env.HC_TERMINAL_SOCKET ?? 'unset'}, not ${coreSocket}`)
   check(process.env.XDG_RUNTIME_DIR === XDG_RUNTIME_DIR, `XDG_RUNTIME_DIR is ${process.env.XDG_RUNTIME_DIR ?? 'unset'}, not ${XDG_RUNTIME_DIR}`)
   check(process.env.HC_SESSION === SMOKE_HC_SESSION, `HC_SESSION is ${process.env.HC_SESSION ?? 'unset'}, not ${SMOKE_HC_SESSION}`)
   check(process.env.HC_RUNTIME === HC_RUNTIME, `HC_RUNTIME is ${process.env.HC_RUNTIME ?? 'unset'}, not ${HC_RUNTIME}`)
   const runtime = lstatSync(XDG_RUNTIME_DIR)
   check(runtime.isDirectory() && (runtime.mode & 0o777) === 0o700, `${XDG_RUNTIME_DIR} is not a 0700 directory`)
-  check(lstatSync(HERDR_CORE_SOCKET).isSocket(), `${HERDR_CORE_SOCKET} is not a Unix socket`)
+  check(lstatSync(coreSocket).isSocket(), `${coreSocket} is not a Unix socket`)
   const coreStatus = command('hc', ['server', 'status', '--json'])
   check(coreStatus.trim().length > 0, 'hc server status printed nothing')
   const coreList = command('hc', ['ls', '--json'])
@@ -69,7 +70,7 @@ async function main() {
   const seenBots = (amList?.projects ?? []).flatMap((project) => project.bots ?? [])
   check(amList?.projects?.[0]?.hcError === undefined, `am ls could not see the core: ${amList?.projects?.[0]?.hcError}`)
   check(seenBots.length === TRIAD.length, `am ls sees ${seenBots.length} bots, not ${TRIAD.length}`)
-  say(`herdr-core: ${HERDR_CORE_SOCKET} answered server status and ls; am sees ${seenBots.length} team bots`)
+  say(`herdr-core: ${coreSocket} answered server status and ls; am sees ${seenBots.length} team bots`)
 
   // The reviewed skill is installed read-only in the shared agents folder and linked for both
   // agents on first boot. Both the image payload and the volume copy must match the pins.
