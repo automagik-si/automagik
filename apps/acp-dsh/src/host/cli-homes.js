@@ -342,6 +342,8 @@ export class CliHomes {
       }
     })
     this.collect(vendor)
+    // ACP start: the generation record follows both pointers; a matching record is not rewritten.
+    this.generations.ensureRecord()
   }
 
   end(vendor) {
