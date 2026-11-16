@@ -152,84 +152,94 @@ const repoRegistryOf = (workspace) => join(workspace, '.automagik', 'bots', 'bot
 const BOT_ID = /^b-[a-z2-7]{10}$/
 const NO_MODEL_LIST = /There is no list of [a-z]+ models to pin from/i
 const noModelList = (error) => NO_MODEL_LIST.test(`${error?.stderr ?? ''}\n${error?.message ?? ''}`)
-const PENDING_PINS = 'pending-model-pins.json'
-const pendingPinsOf = (home) => join(home, 'bots', PENDING_PINS)
+const MODEL_PIN_STATE = 'model-pin-state.json'
+const modelPinStateOf = (home) => join(home, 'bots', MODEL_PIN_STATE)
+const pinPendingLine = (model) => `Model pin pending: ${model}. No task starts while the team is model-pin pending; this clears after all three reviewed pins are applied and the v1/v2 registries verify.`
+const clearPinPendingLine = (instructions) => String(instructions ?? '').replace(/\n*Model pin pending:[^\n]*/g, '').trimEnd()
 
-/** The per-role pins a no-list boot still owes: [{ id, name, model }]. */
-export function readPendingPins(home) {
-  const file = pendingPinsOf(home)
-  if (!existsSync(file)) return []
+/** The authoritative model-pin state: pending, ready (verified), failed, conflict or unknown. */
+export function readModelPinState(home) {
+  const file = modelPinStateOf(home)
+  if (!existsSync(file)) return { state: 'unknown', pins: [] }
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8'))
-    return Array.isArray(parsed?.pins) ? parsed.pins.filter((pin) => pin && typeof pin.id === 'string' && typeof pin.model === 'string') : []
+    const state = ['pending', 'ready', 'failed', 'conflict'].includes(parsed?.state) ? parsed.state : 'unknown'
+    const pins = Array.isArray(parsed?.pins)
+      ? parsed.pins.filter((pin) => pin && typeof pin.id === 'string' && typeof pin.model === 'string') : []
+    return { ...parsed, state, pins }
   } catch {
-    return []
+    return { state: 'unknown', pins: [] }
   }
 }
 
-function writePendingPins(home, pins) {
-  const file = pendingPinsOf(home)
+/** The pins still owed; a ready state has none. */
+export function readPendingPins(home) {
+  const state = readModelPinState(home)
+  return state.state === 'ready' ? [] : state.pins
+}
+
+function writeModelPinState(home, state, { pins = [], superseded = [], conflicts = [], receipt = null, error = null } = {}) {
+  const file = modelPinStateOf(home)
   mkdirSync(dirname(file), { recursive: true })
-  const text = `${JSON.stringify({ version: 1, pins }, null, 2)}\n`
+  const text = `${JSON.stringify({ version: 1, state, pins, ...(superseded.length ? { superseded } : {}), ...(conflicts.length ? { conflicts } : {}), ...(receipt ? { receipt } : {}), ...(error ? { error } : {}) }, null, 2)}\n`
   writeFileSync(file, text, { mode: 0o600 })
   chmodSync(file, 0o600)
 }
 
-function clearPendingPins(home) {
-  rmSync(pendingPinsOf(home), { force: true })
+/** The evidence a ready state carries: what the three surfaces held at verification time. */
+function modelPinReceipt({ home, workspace, now = () => new Date().toISOString() }) {
+  const models = (bot) => ({ id: bot?.id, name: bot?.name, model: bot?.model })
+  const v1 = readJson(rosterOf(workspace))
+  const repo = existsSync(repoRegistryOf(workspace)) ? readJson(repoRegistryOf(workspace)) : null
+  const homeRegistry = existsSync(homeRegistryOf(home)) ? readJson(homeRegistryOf(home)) : null
+  return {
+    version: 1,
+    verifiedAt: now(),
+    v1: (v1.bots ?? []).map(models),
+    repo: (repo?.bots ?? []).map(models),
+    home: (homeRegistry?.bots ?? []).filter((bot) => bot?.folder === workspace).map(models),
+  }
 }
 
 /**
- * Keep the derived version 2 surfaces in step when a pin is applied with am edit. Only the
- * model and instructions of an existing id are touched; ids, roles and every other field stay.
+ * Fill a resolved pin into the v2 repo and home surfaces without overwriting a person. A model
+ * already set on that surface is preserved; if it differs from v1 it is a conflict, not a
+ * correction. Only our "Model pin pending" line is removed from that surface's own instructions;
+ * other edits stay. Nothing is written for an id that did not resolve, so a no-progress retry
+ * leaves all three roster files byte-identical.
  */
-function syncV2Models({ home, workspace }) {
+function fillV2Surfaces({ home, workspace, ids }) {
+  const resolved = new Set(ids)
+  if (!resolved.size) return []
   const v1 = readJson(rosterOf(workspace))
   const v1Bots = Array.isArray(v1.bots) ? v1.bots : []
-  const repoFile = repoRegistryOf(workspace)
-  if (existsSync(repoFile)) {
-    const repo = readJson(repoFile)
-    let changed = false
-    for (const bot of Array.isArray(repo.bots) ? repo.bots : []) {
-      const source = v1Bots.find((candidate) => candidate?.id === bot?.id)
-      if (!source) continue
-      if (source.model === undefined ? bot.model !== undefined : bot.model !== source.model) {
-        if (source.model === undefined) delete bot.model
-        else bot.model = source.model
-        changed = true
-      }
-      if (source.instructions === undefined ? bot.instructions !== undefined : bot.instructions !== source.instructions) {
-        if (source.instructions === undefined) delete bot.instructions
-        else bot.instructions = source.instructions
-        changed = true
-      }
-    }
-    if (changed) writeFileSync(repoFile, `${JSON.stringify(repo, null, 2)}\n`, { mode: statSync(repoFile).mode & 0o777 })
-  }
-  const homeFile = homeRegistryOf(home)
-  if (existsSync(homeFile)) {
-    const registry = readJson(homeFile)
-    const main = v1Bots.find((bot) => bot?.kind === 'main')
+  const conflicts = []
+  const fill = (file, surface, match) => {
+    if (!existsSync(file)) return
+    const registry = readJson(file)
     let changed = false
     for (const bot of Array.isArray(registry.bots) ? registry.bots : []) {
-      if (!main || bot?.id !== main.id || bot?.folder !== workspace) continue
-      if (main.model === undefined ? bot.model !== undefined : bot.model !== main.model) {
-        if (main.model === undefined) delete bot.model
-        else bot.model = main.model
-        changed = true
+      if (!resolved.has(bot?.id) || !match(bot)) continue
+      const source = v1Bots.find((candidate) => candidate?.id === bot.id)
+      if (!source) continue
+      if (source.model !== undefined) {
+        if (bot.model === undefined) { bot.model = source.model; changed = true }
+        else if (bot.model !== source.model) conflicts.push({ surface, id: bot.id, field: 'model', have: bot.model, want: source.model })
+      } else if (bot.model !== undefined) {
+        conflicts.push({ surface, id: bot.id, field: 'model', have: bot.model, want: null })
       }
-      if (main.instructions === undefined ? bot.instructions !== undefined : bot.instructions !== main.instructions) {
-        if (main.instructions === undefined) delete bot.instructions
-        else bot.instructions = main.instructions
-        changed = true
+      const clean = clearPinPendingLine(bot.instructions)
+      if (clean !== String(bot.instructions ?? '').trimEnd()) { bot.instructions = clean; changed = true }
+      if (source.instructions !== undefined && clean !== source.instructions) {
+        conflicts.push({ surface, id: bot.id, field: 'instructions', have: clean, want: source.instructions })
       }
     }
-    if (changed) writeFileSync(homeFile, `${JSON.stringify(registry, null, 2)}\n`, { mode: statSync(homeFile).mode & 0o777 })
+    if (changed) writeFileSync(file, `${JSON.stringify(registry, null, 2)}\n`, { mode: statSync(file).mode & 0o777 })
   }
+  fill(repoRegistryOf(workspace), 'repo', () => true)
+  fill(homeRegistryOf(home), 'home', (bot) => bot?.folder === workspace)
+  return conflicts
 }
-
-const pinPendingLine = (model) => `Model pin pending: ${model}. No task starts while the team is model-pin pending; this clears after all three reviewed pins are applied and the v1/v2 registries verify.`
-const clearPinPendingLine = (instructions) => String(instructions ?? '').replace(/\n*Model pin pending:[^\n]*/g, '').trimEnd()
 
 /**
  * Apply the pins a no-list first boot could not set. am edit refuses with its no-list message
@@ -251,7 +261,7 @@ export function applyPendingPins({
   const pending = readPendingPins(home)
   if (!pending.length) {
     log('pins: no pending model pins; no-op')
-    return { state: 'none', applied: [], superseded: [], pending: [], noList: false }
+    return { state: 'none', applied: [], superseded: [], pending: [], conflicts: [], noList: false }
   }
   const exec = run ?? process.getBuiltinModule('node:child_process').execFileSync
   const childEnv = {
@@ -263,6 +273,7 @@ export function applyPendingPins({
   const applied = []
   const superseded = []
   const left = []
+  const resolved = []
   let sawNoList = false
   const save = (bot, args) => {
     exec(am, ['edit', bot.id, '--project', workspace, ...args, '--json'], {
@@ -277,6 +288,7 @@ export function applyPendingPins({
     const marker = clean !== String(bot.instructions ?? '').trimEnd()
     if (bot.model !== undefined && bot.model !== pin.model) {
       superseded.push({ pin, model: bot.model })
+      resolved.push(bot.id)
       log(`pins: ${pin.name ?? pin.id} keeps the person's model ${bot.model}; reviewed ${pin.model} superseded`)
       if (marker) {
         try { save(bot, ['--instructions', clean]) } catch (error) { warn(`pins: ${pin.name ?? pin.id} marker not cleared: ${error?.message ?? error}`); left.push(pin) }
@@ -291,6 +303,7 @@ export function applyPendingPins({
       if (after?.model !== undefined && after.model !== pin.model) throw new Error(`${am} edit ${pin.id} did not save the pin`)
       if (clearPinPendingLine(after?.instructions) !== String(after?.instructions ?? '').trimEnd()) throw new Error(`${am} edit ${pin.id} did not clear the pending marker`)
       applied.push(pin)
+      resolved.push(bot.id)
       log(`pins: ${pin.name ?? pin.id} -> ${pin.model}`)
     } catch (error) {
       if (noModelList(error)) { sawNoList = true; log(`pins: waiting for the Codex model catalogue; ${pending.length} pin${pending.length === 1 ? '' : 's'} pending`) }
@@ -298,10 +311,10 @@ export function applyPendingPins({
       left.push(pin)
     }
   }
-  syncV2Models({ home, workspace })
+  const conflicts = fillV2Surfaces({ home, workspace, ids: resolved })
   return {
-    state: left.length ? (applied.length || superseded.length ? 'partial' : 'pending') : 'pinned',
-    applied, superseded, pending: left, noList: sawNoList,
+    state: conflicts.length ? 'conflict' : left.length ? (resolved.length ? 'partial' : 'pending') : 'pinned',
+    applied, superseded, pending: left, conflicts, noList: sawNoList,
   }
 }
 
@@ -540,12 +553,19 @@ export function runFirstBoot(options = {}) {
     const marker = home ? join(home, FIRST_BOOT_MARKER) : null
     const message = String(error?.message ?? error)
     const warn = options.warn ?? console.warn
+    if (home) {
+      try {
+        const prior = readModelPinState(home)
+        writeModelPinState(home, 'failed', { pins: prior.pins ?? [], superseded: prior.superseded ?? [], conflicts: prior.conflicts ?? [], error: message })
+      } catch { /* the health report will say unknown */ }
+    }
     warn(`first boot: ${message}; the server starts and the team/seed retry on a later boot`)
     return {
       fresh: marker ? !existsSync(marker) : true,
       marker,
       team: { state: 'failed', error: message },
       registry: { state: 'failed', error: message },
+      pins: home ? readModelPinState(home) : { state: 'unknown', pins: [] },
       error: message,
     }
   }
@@ -584,8 +604,7 @@ function boot({
   if (!fs.existsSync(homeFile)) {
     team = ensureTeam({ home, workspace, env, am, run, log, warn })
     if (team.state === 'created') {
-      if (team.pendingPins?.length) writePendingPins(home, team.pendingPins)
-      else clearPendingPins(home)
+      if (team.pendingPins?.length) writeModelPinState(home, 'pending', { pins: team.pendingPins })
     }
     registry = seedRegistry({ home, workspace, profile, env, run, vendorRoot, log, warn })
     log(`first boot: registry ${registry.state} from ${registry.script.source}${registry.script.commit ? ` @ ${registry.script.commit}` : ''}`)
@@ -598,12 +617,20 @@ function boot({
   // can be reported and the v2 copies synced, then verify the result. The file is cleared only
   // after verifySurfaces passes.
   const pins = applyPendingPins({ home, workspace, env, am, run, log, warn })
+  if (pins.conflicts.length) {
+    writeModelPinState(home, 'failed', {
+      pins: readPendingPins(home), superseded: pins.superseded, conflicts: pins.conflicts,
+      error: 'model pin conflicts: a roster surface was edited and was not overwritten',
+    })
+    warn(`first boot: model pin conflicts on ${pins.conflicts.map((entry) => entry.surface).join(', ')}; person edits were kept`)
+  }
   surfaces = verifySurfaces({
     home, workspace,
     ...(team.state === 'created' ? { expectedIds: team.bots.map((bot) => bot.id) } : {}),
   })
-  if (pins.pending.length === 0 && (pins.applied.length || pins.superseded.length)) {
-    clearPendingPins(home)
+  if (!pins.conflicts.length) {
+    if (pins.pending.length) writeModelPinState(home, 'pending', { pins: pins.pending, superseded: pins.superseded })
+    else writeModelPinState(home, 'ready', { pins: [], superseded: pins.superseded, receipt: modelPinReceipt({ home, workspace, now }) })
   }
   log(`first boot: v1 ${surfaces.v1.file} (${surfaces.v1.bots} bots, ${surfaces.v1.mains} main); v2 home ${surfaces.home.file} (${surfaces.home.bots} bots, ${surfaces.home.projects} project); v2 repo ${surfaces.repo.file} (${surfaces.repo.bots} bots, ${surfaces.repo.mains} main)`)
   log(`first boot: coherent ids: v1 [${surfaces.v1.ids.join(' ')}] main ${surfaces.v1.mainId}; v2 home [${surfaces.home.ids.join(' ')}] main ${surfaces.home.mainId}; v2 repo [${surfaces.repo.ids.join(' ')}] main ${surfaces.repo.mainId}`)
@@ -616,7 +643,7 @@ function boot({
       skill: skill?.state ?? 'skipped',
       team: team.state === 'created' ? { state: team.state, bots: team.bots, mainId: team.mainId } : { state: team.state },
       registry: registry.state,
-      pins: pins.state,
+      pins: readModelPinState(home).state,
       ...(pins.pending.length ? { pendingPins: pins.pending } : {}),
       ...(pins.superseded.length ? { supersededPins: pins.superseded } : {}),
       ...(registry.script ? { seed: registry.script.path, seedSource: registry.script.source, ...(registry.script.commit ? { seedCommit: registry.script.commit } : {}) } : {}),
@@ -628,10 +655,10 @@ function boot({
       warn(`first boot: ${marker} was not written: ${error?.message ?? error}`)
     }
     log(`first boot: skill ${record.skill}, team ${record.team.state}, registry ${record.registry}`)
-  } else if (fs.existsSync(marker) && pins.pending.length === 0 && (pins.applied.length || pins.superseded.length)) {
+  } else if (fs.existsSync(marker) && readModelPinState(home).state === 'ready') {
     try {
       const record = JSON.parse(fs.readFileSync(marker, 'utf8'))
-      record.pins = pins.state
+      record.pins = readModelPinState(home).state
       delete record.pendingPins
       if (pins.superseded.length) record.supersededPins = pins.superseded
       else delete record.supersededPins

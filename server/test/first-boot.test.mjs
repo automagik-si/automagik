@@ -356,7 +356,7 @@ test('mutant WRITER_WRITES_UNMANAGED_PATH is killed: a path outside the store is
   assert.equal(existsSync(join(home, 'herdr-app', 'programs.json')), false)
 })
 
-const PENDING_PINS = join('bots', 'pending-model-pins.json')
+const PIN_STATE = join('bots', 'model-pin-state.json')
 
 test('no Codex catalogue: the team is created unpinned and says "model pin pending" per Bot', () => {
   const dir = temp()
@@ -372,7 +372,7 @@ test('no Codex catalogue: the team is created unpinned and says "model pin pendi
   const v1 = JSON.parse(readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8'))
   assert.ok(v1.bots.every((bot) => bot.model === undefined))
   assert.ok(v1.bots.every((bot) => /model pin pending/i.test(bot.instructions)))
-  const pending = JSON.parse(readFileSync(join(home, PENDING_PINS), 'utf8'))
+  const pending = JSON.parse(readFileSync(join(home, PIN_STATE), 'utf8'))
   assert.equal(pending.pins.length, TRIAD.length)
   assert.deepEqual(Object.fromEntries(pending.pins.map((pin) => [pin.name, pin.model])), { Purpose: 'gpt-6-astra', Dogfooder: 'gpt-6.1-terra', Fixer: 'gpt-6.1-sol' })
   const repo = JSON.parse(readFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), 'utf8'))
@@ -397,7 +397,9 @@ test('a later boot with a catalogue applies all three pins, then a second apply 
   const second = runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env, am, ...silence })
   assert.equal(second.pins.state, 'pinned')
   assert.equal(second.pins.applied.length, TRIAD.length)
-  assert.equal(existsSync(join(home, PENDING_PINS)), false)
+  const state = JSON.parse(readFileSync(join(home, PIN_STATE), 'utf8'))
+  assert.equal(state.state, 'ready')
+  assert.ok(state.receipt?.verifiedAt)
   const v1 = JSON.parse(readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8'))
   assert.deepEqual(Object.fromEntries(v1.bots.map((bot) => [bot.name, bot.model])), { Purpose: 'gpt-6-astra', Dogfooder: 'gpt-6.1-terra', Fixer: 'gpt-6.1-sol' })
   assert.ok(v1.bots.every((bot) => !/model pin pending/i.test(bot.instructions)))
@@ -407,7 +409,7 @@ test('a later boot with a catalogue applies all three pins, then a second apply 
   const homeRegistry = JSON.parse(readFileSync(join(home, 'bots', 'bots.json'), 'utf8'))
   assert.equal(homeRegistry.bots.find((bot) => bot.main === true).model, 'gpt-6-astra')
   const marker = JSON.parse(readFileSync(join(home, FIRST_BOOT_MARKER), 'utf8'))
-  assert.equal(marker.pins, 'pinned')
+  assert.equal(marker.pins, 'ready')
   const before = readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8')
   assert.equal(applyPendingPins({ home, workspace, env, am, ...silence }).state, 'none')
   assert.equal(readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8'), before)
@@ -433,7 +435,54 @@ test("a person's model is never overwritten; the reviewed pin is reported supers
   const after = JSON.parse(readFileSync(file, 'utf8'))
   assert.equal(after.bots.find((bot) => bot.name === 'Dogfooder').model, 'gpt-6.1-sol')
   assert.ok(after.bots.every((bot) => !/model pin pending/i.test(bot.instructions)))
-  assert.equal(existsSync(join(home, PENDING_PINS)), false)
+  const state = JSON.parse(readFileSync(join(home, PIN_STATE), 'utf8'))
+  assert.equal(state.state, 'ready')
   const repo = JSON.parse(readFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), 'utf8'))
   assert.equal(repo.bots.find((bot) => bot.name === 'Dogfooder').model, 'gpt-6.1-sol')
+})
+
+test('a no-progress retry leaves v1, v2 repo and v2 home byte-identical, including a v2 person edit', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const noList = { ...envAt(dir, home, workspace), FAKE_AM_NO_MODEL_LIST: '1' }
+  runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env: noList, am, ...silence })
+  const repoFile = join(workspace, '.automagik', 'bots', 'bots.json')
+  const repo = JSON.parse(readFileSync(repoFile, 'utf8'))
+  const dogfooder = repo.bots.find((bot) => bot.name === 'Dogfooder')
+  dogfooder.model = 'gpt-6.1-sol'
+  dogfooder.instructions = 'Person changed this bot through the app'
+  writeFileSync(repoFile, `${JSON.stringify(repo, null, 2)}\n`)
+  const files = [join(workspace, '.herdr', 'bots.json'), repoFile, join(home, 'bots', 'bots.json')]
+  const before = files.map((file) => readFileSync(file, 'utf8'))
+  const result = applyPendingPins({ home, workspace, env: noList, am, ...silence })
+  assert.equal(result.state, 'pending')
+  assert.equal(result.pending.length, TRIAD.length)
+  assert.deepEqual(files.map((file) => readFileSync(file, 'utf8')), before)
+  const after = JSON.parse(readFileSync(repoFile, 'utf8')).bots.find((bot) => bot.name === 'Dogfooder')
+  assert.equal(after.model, 'gpt-6.1-sol')
+  assert.equal(after.instructions, 'Person changed this bot through the app')
+})
+
+test('a v2 person edit is preserved as a conflict, never overwritten from v1', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const noList = { ...envAt(dir, home, workspace), FAKE_AM_NO_MODEL_LIST: '1' }
+  runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env: noList, am, ...silence })
+  const repoFile = join(workspace, '.automagik', 'bots', 'bots.json')
+  const repo = JSON.parse(readFileSync(repoFile, 'utf8'))
+  const dogfooder = repo.bots.find((bot) => bot.name === 'Dogfooder')
+  dogfooder.model = 'gpt-6.1-sol'
+  dogfooder.instructions = 'Person changed this bot through the app'
+  writeFileSync(repoFile, `${JSON.stringify(repo, null, 2)}\n`)
+  const result = applyPendingPins({ home, workspace, env: envAt(dir, home, workspace), am, ...silence })
+  assert.equal(result.state, 'conflict')
+  assert.ok(result.conflicts.some((entry) => entry.surface === 'repo' && entry.field === 'model' && entry.have === 'gpt-6.1-sol'))
+  assert.ok(result.conflicts.some((entry) => entry.surface === 'repo' && entry.field === 'instructions'))
+  const after = JSON.parse(readFileSync(repoFile, 'utf8')).bots.find((bot) => bot.name === 'Dogfooder')
+  assert.equal(after.model, 'gpt-6.1-sol')
+  assert.equal(after.instructions, 'Person changed this bot through the app')
 })

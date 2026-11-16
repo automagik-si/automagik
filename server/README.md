@@ -207,11 +207,11 @@ First boot never stops DSH over a team or seed failure: the reason is logged, th
 and the work is retried on a later boot and after the vendor CLI install. When am has no Codex
 model catalogue (a fresh HOME has no `~/.codex/models_cache.json` and the config names none), the
 triad is created unpinned; each Bot's roster entry and briefing says `Model pin pending`, and the
-three reviewed pins are recorded in `bots/pending-model-pins.json`. The health report carries
-`modelPins: pending`, and no task is handed to a pending team. A later boot or the CLI install
+three reviewed pins are recorded in `bots/model-pin-state.json`. The health report carries
+`modelPins: pending` (a missing or corrupt state reads `unknown`, never `applied`), and no task is handed to a pending team. A later boot or the CLI install
 completion applies the pins with `am edit` and patches the v2 copies; the pending state clears
 only after all pins resolve (applied or explicitly superseded by a person's own model) and
-`verifySurfaces` passes. A second apply is a reported no-op, and a person's model is never
+`verifySurfaces` passes, and then the state is `ready` with a verified receipt naming the three roster models. A second apply is a reported no-op, and a person's model is never
 overwritten.
 
 ## Build and smoke

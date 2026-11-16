@@ -100,11 +100,18 @@ test('missing or mixed plugins in a canonical legacy seed never receive an owner
   }
 })
 
+test('a missing model-pin state is unknown, not applied', async t => {
+  const f = fixture(t), dsh = await listener(t)
+  const r = await report(f, dsh.port, { AUTOMAGIK_HOME: join(f.root, 'data') })
+  assert.equal(r.modelPins.state, 'unknown')
+  assert.equal(r.healthy, true)
+})
+
 test('pending model pins are reported while the healthy fence stays green', async t => {
   const f = fixture(t), dsh = await listener(t)
   const data = join(f.root, 'data')
   mkdirSync(join(data, 'bots'), { recursive: true })
-  writeFileSync(join(data, 'bots', 'pending-model-pins.json'), JSON.stringify({ version: 1, pins: [
+  writeFileSync(join(data, 'bots', 'model-pin-state.json'), JSON.stringify({ version: 1, state: 'pending', pins: [
     { id: 'b-aaaaaaaaaa', name: 'Purpose', model: 'gpt-6-astra' },
     { id: 'b-bbbbbbbbbb', name: 'Dogfooder', model: 'gpt-6.1-terra' },
     { id: 'b-cccccccccc', name: 'Fixer', model: 'gpt-6.1-sol' },
@@ -114,4 +121,41 @@ test('pending model pins are reported while the healthy fence stays green', asyn
   assert.equal(r.modelPins.count, 3)
   assert.equal(r.healthy, true)
   assert.ok(!JSON.stringify(r).includes(data))
+  writeFileSync(join(data, 'bots', 'model-pin-state.json'), 'not json')
+  const corrupt = await report(f, dsh.port, { AUTOMAGIK_HOME: data })
+  assert.equal(corrupt.modelPins.state, 'unknown')
+  writeFileSync(join(data, 'bots', 'model-pin-state.json'), JSON.stringify({ version: 1, state: 'ready' }))
+  const noReceipt = await report(f, dsh.port, { AUTOMAGIK_HOME: data })
+  assert.equal(noReceipt.modelPins.state, 'failed')
+})
+
+test('ready requires a verified receipt and all three current rosters', async t => {
+  const f = fixture(t), dsh = await listener(t)
+  const data = join(f.root, 'data'), workspace = join(data, 'workspace')
+  const ids = { Purpose: 'b-aaaaaaaaaa', Dogfooder: 'b-bbbbbbbbbb', Fixer: 'b-cccccccccc' }
+  const models = { Purpose: 'gpt-6-astra', Dogfooder: 'gpt-6.1-terra', Fixer: 'gpt-6.1-sol' }
+  const v1 = { version: 1, categories: [], bots: Object.entries(models).map(([name, model], index) => ({ id: ids[name], name, model, kind: index === 0 ? 'main' : 'member' })) }
+  const repo = { version: 2, bots: Object.entries(models).map(([name, model], index) => ({ id: ids[name], name, model, main: index === 0 })) }
+  const home = { version: 2, projects: [{ folder: workspace }], bots: [{ id: ids.Purpose, name: 'Purpose', model: models.Purpose, main: true, folder: workspace }] }
+  mkdirSync(join(workspace, '.herdr'), { recursive: true })
+  mkdirSync(join(workspace, '.automagik', 'bots'), { recursive: true })
+  mkdirSync(join(data, 'bots'), { recursive: true })
+  writeFileSync(join(workspace, '.herdr', 'bots.json'), JSON.stringify(v1))
+  writeFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), JSON.stringify(repo))
+  writeFileSync(join(data, 'bots', 'bots.json'), JSON.stringify(home))
+  const receipt = {
+    version: 1, verifiedAt: '2026-11-16T00:00:00.000Z',
+    v1: v1.bots.map(({ id, name, model }) => ({ id, name, model })),
+    repo: repo.bots.map(({ id, name, model }) => ({ id, name, model })),
+    home: home.bots.map(({ id, name, model }) => ({ id, name, model })),
+  }
+  writeFileSync(join(data, 'bots', 'model-pin-state.json'), JSON.stringify({ version: 1, state: 'ready', pins: [], receipt }))
+  const ready = await report(f, dsh.port, { AUTOMAGIK_HOME: data, AUTOMAGIK_WORKSPACE: workspace })
+  assert.equal(ready.modelPins.state, 'ready')
+  assert.equal(ready.healthy, true)
+  repo.bots[1].model = 'gpt-6.1-sol'
+  writeFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), JSON.stringify(repo))
+  const mismatch = await report(f, dsh.port, { AUTOMAGIK_HOME: data, AUTOMAGIK_WORKSPACE: workspace })
+  assert.equal(mismatch.modelPins.state, 'failed')
+  assert.equal(mismatch.healthy, true)
 })
