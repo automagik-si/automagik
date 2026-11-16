@@ -37,9 +37,16 @@ The UI path already behaved this way: `apps/bots-dsh/src/host/agents.js` passes
 Why the pin exists: under the PTC preset (DSH Desktop's default) a model may call only
 `run_code`. A group chat's Session is handed a synthesized `group_relay` call; PTC
 rejects that direct call as an unknown tool, so the group never relays. That is
-Fei2411/DS-Bot#37, and it is why the relay code also has a `run_code` compatibility
-branch for groups made before the fix (`src/host/groups.js`, "Only for a group made
-under the PTC preset"). The pin keeps new group Sessions on the direct path.
+Fei2411/DS-Bot#37, fixed upstream in
+[71d4b5ca](https://github.com/Fei2411/DS-Bot/commit/71d4b5ca887534522572831423d90acc9ed657e4)
+("New Bot chats, group Sessions and conversation parts are now created with the
+standard preset when DSH serves it"). The same commit kept a `run_code`
+compatibility branch for groups made before the fix (`src/host/groups.js`, "Only for a
+group made under the PTC preset") and notes that such a round is bound by the DSH
+program time limit. The pin keeps new group Sessions on the direct path. That blanket
+pin also covered new Bot chats, which is the behavior this wish changes: a Bot's own
+chat is not a group relay Session, so it can inherit the default without touching
+group relay.
 
 Because a Session keeps the preset it is made with, I did not remove the default pin
 globally. I applied the DSH default at the place that was actually wrong: the Bot's
