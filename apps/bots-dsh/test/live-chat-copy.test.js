@@ -11,6 +11,8 @@ import { test } from 'node:test'
 const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
 const SOURCE = join(PLUGIN, '..', '..', 'herdr', 'mods', 'pocket-link', 'chat')
 const COPY = join(PLUGIN, 'src', 'host', 'live-chat')
+const SHARED_VECTORS = join(PLUGIN, '..', '..', 'herdr', 'test', 'fixtures', 'transcript-folder-rule.json')
+const COPIED_VECTORS = join(PLUGIN, 'test', 'fixtures', 'transcript-folder-rule.json')
 
 // Every file, by its path in the folder, in a stable order, so a missing or extra file fails too.
 function folderFiles(root, at = '') {
@@ -34,6 +36,14 @@ test('the live-chat copy is byte-equal to the herdr pack folder, file for file',
       `${path} is byte-equal (a change ships herdr first, then this copy)`,
     )
   }
+})
+
+test('the copied folder-rule test reads the pack\'s shared vectors, byte for byte', () => {
+  // The copied test asks for test/fixtures/transcript-folder-rule.json from its own place; the
+  // pack's copy of the rule and am-sidebar's read the same shared file. Keeping a byte copy here
+  // lets the byte-equal test folder run in this plugin's CI without changing its bytes.
+  assert.equal(readFileSync(COPIED_VECTORS).equals(readFileSync(SHARED_VECTORS)), true,
+    'test/fixtures/transcript-folder-rule.json is the pack\'s shared vectors (herdr/test/fixtures)')
 })
 
 test('the copy keeps its upstream credit and its Apache-2.0 package marker', () => {
