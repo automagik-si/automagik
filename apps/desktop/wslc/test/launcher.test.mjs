@@ -216,7 +216,11 @@ test('the running check sees the fake DSH through its launcher, and not after th
     }
     assert.equal(alive(pid), true, 'the fake DSH process is live')
     assert.equal(dshRunning(guest, launcher), true, 'the live launcher hosts the fake DSH')
-    assert.equal(dshRunning(guest, '@deepseek-ai/dsh/lib/bin.js'), false, 'the old entry pattern misses it')
+    // The old entry pattern, scoped to this test's own image: unscoped, a live DSH elsewhere on
+    // the host would match and make this row depend on the machine (process.test.mjs keeps the
+    // container literals, where the process list is a fake).
+    const oldEntry = join(box.image, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    assert.equal(dshRunning(guest, oldEntry), false, 'the old entry pattern misses it')
     const stopped = await electron.close()
     assert.equal(stopped.code, EXIT.stopped)
     assert.equal(dshRunning(guest, launcher), false, 'the launcher is gone after the stop')
