@@ -267,8 +267,11 @@ export function isGuardFolder(dir) {
   try { bytes = readFileSync(join(dir, "..", "hcGuard.mjs")); } catch { return false; }
   return SELF_BYTES !== null && bytes.equals(SELF_BYTES);
 }
-/** A folder the loose rule would call a guard, which isGuardFolder cannot vouch for (#643). */
-const looksLikeGuardFolder = (dir) => typeof dir === "string" && dir !== ""
+/**
+ * A folder the loose rule would call a guard, which isGuardFolder cannot vouch for (#643); the
+ * revive unit drops it from the PATH it keeps too (#1418: another or older copy's guard).
+ */
+export const looksLikeGuardFolder = (dir) => typeof dir === "string" && dir !== ""
   && existsSync(join(dir, "..", "hcGuard.mjs"));
 /**
  * The env for `real`: the re-entry marker only when that hc looks like a guard this guard

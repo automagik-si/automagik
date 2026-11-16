@@ -11678,6 +11678,7 @@ var ZH = {
   "Screen only: this agent has no transcript reader, so these are its last screens.": "只有屏幕：这个 agent 没有对话记录读取器，所以这里显示的是它最近的屏幕。",
   "Read from this seat’s own transcript. This view never runs or types into it.": "读取自这个席位自己的对话记录。这个视图绝不运行它，也不向它输入。",
   "Choose a seat in the team bar to read its chat.": "在团队栏里选一个席位，读它的聊天。",
+  "This seat is not running on this computer, so its terminal cannot open.": "这个席位没有在这台电脑上运行，所以无法打开它的终端。",
   "Back to the team": "返回团队",
   "Reading the seat…": "正在读取席位…",
   "No transcript rows yet. The seat is quiet.": "还没有对话记录。这个席位很安静。",
@@ -11866,6 +11867,7 @@ var HOST_ZH = {
   "{n} projects": "{n} 个项目",
   "Reading…": "读取中…",
   "Code team": "代码团队",
+  "Global Bots": "全局 Bot",
   "The Code side could not read this computer’s team.": "代码端无法读取本机的团队。",
   "No project has a Bot on this computer yet.": "本机还没有任何项目包含 Bot。",
   "Reading this computer’s team…": "正在读取本机的团队…",
@@ -14963,32 +14965,36 @@ function CodeBody({ code }) {
     else code.selectPane({ botId, worker: null });
   };
   const projects = tree?.projects ?? [];
-  const projectCount = projects.length === 1 ? t("1 project") : t("{n} projects", { n: projects.length });
-  const treeRows = projects.map((project) => (0, import_react2.createElement)(
-    "section",
-    { key: project.folder, className: "cs-project" },
-    (0, import_react2.createElement)("div", { className: "cs-project-name", title: project.folder }, project.name ?? project.folder),
-    project.bots.map((bot) => (0, import_react2.createElement)(
-      "div",
-      { key: bot.id, className: "cs-bot" },
-      (0, import_react2.createElement)(TreeRow, {
-        label: bot.name,
-        status: bot.status,
-        current: current.selected?.botId === bot.id && !current.selected?.worker,
-        note: bot.main ? t("lead") : null,
-        onClick: () => choose(bot.id)
-      }),
-      bot.workers.map((worker) => (0, import_react2.createElement)(TreeRow, {
-        key: worker.terminal,
-        label: worker.role ?? worker.agent ?? worker.terminal,
-        status: worker.status,
-        depth: 1,
-        current: current.selected?.botId === bot.id && current.selected?.worker === worker.terminal,
-        title: [worker.role, worker.branch?.replace(/^refs\/heads\//, "")].filter(Boolean).join(" · "),
-        onClick: () => choose(bot.id, worker.terminal)
-      }))
-    ))
-  ));
+  const realProjects = projects.filter((project) => project.global !== true);
+  const projectCount = realProjects.length === 1 ? t("1 project") : t("{n} projects", { n: realProjects.length });
+  const treeRows = projects.map((project) => {
+    const label = project.global === true ? t("Global Bots") : project.name ?? project.folder;
+    return (0, import_react2.createElement)(
+      "section",
+      { key: project.global === true ? "global" : project.folder, className: "cs-project" },
+      (0, import_react2.createElement)("div", { className: "cs-project-name", title: project.global === true ? label : project.folder }, label),
+      project.bots.map((bot) => (0, import_react2.createElement)(
+        "div",
+        { key: bot.id, className: "cs-bot" },
+        (0, import_react2.createElement)(TreeRow, {
+          label: bot.name,
+          status: bot.status,
+          current: current.selected?.botId === bot.id && !current.selected?.worker,
+          note: bot.main ? t("lead") : null,
+          onClick: () => choose(bot.id)
+        }),
+        bot.workers.map((worker) => (0, import_react2.createElement)(TreeRow, {
+          key: worker.terminal,
+          label: worker.role ?? worker.agent ?? worker.terminal,
+          status: worker.status,
+          depth: 1,
+          current: current.selected?.botId === bot.id && current.selected?.worker === worker.terminal,
+          title: [worker.role, worker.branch?.replace(/^refs\/heads\//, "")].filter(Boolean).join(" · "),
+          onClick: () => choose(bot.id, worker.terminal)
+        }))
+      ))
+    );
+  });
   return (0, import_react2.createElement)(
     "div",
     { className: "cs-host" },

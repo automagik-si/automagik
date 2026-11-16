@@ -17,6 +17,7 @@ import { FIRST_SESSION_MS, KEEP_DOWN, UNIT_MARK, UNIT_NAME, agyCandidates, agyHi
   pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
 import { firstLine as firstLineTrusted } from "../mods/am-sidebar/sessionFiles.mjs";
 import { readJsonLines } from "./log-lines.mjs";
+import { servicePath, unitKeepsPath } from "../mods/am-sidebar/revive.js";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir, kimiCandidates, kimiHomeOf, kimiIndexPath, uuidV7Ms } from "../mods/am-sidebar/revive.js";
 
@@ -1120,4 +1121,234 @@ test("#1490 revive: a symlinked rollout file is refused, never followed", (t) =>
   assert.deepEqual(sessionLabels(s), []);
   assert.ok(!wordsOf(runFor(s, ID.main)).includes(id));
   assert.deepEqual(r.json().projects[0].results.map((x) => x.outcome), ["fresh"]);
+});
+
+// ---- #1418: the login service keeps the PATH it was installed with ----
+
+/** The PATH an installed unit keeps, read back as systemd would hand it to the boot pass. */
+const keptPathOf = (text) => {
+  const line = text.split("\n").find((l) => l.startsWith('Environment="PATH='));
+  return line ? line.slice('Environment="PATH='.length, -1).replace(/%%/g, "%").replace(/\\(["\\])/g, "$1") : null;
+};
+/** The pane PATH an `hc run` gave its program (the env wrapper's PATH word). */
+const panePathOf = (run) => wordsOf(run).find((w) => w.startsWith("PATH="))?.slice(5) ?? null;
+/** The first folder of `path` that holds an executable `name`: what the pane's own lookup runs. */
+const firstOnPath = (path, name) => {
+  for (const dir of path.split(":")) {
+    try { if (statSync(join(dir, name)).mode & 0o111) return join(dir, name); } catch { /* next */ }
+  }
+  return null;
+};
+
+test("servicePath: the caller's PATH, absolute words only, once each, without guard folders, node_modules/.bin or the venv's bin; ~/.local/bin and /usr/bin:/bin always there (#1418)", () => {
+  const drop = (d) => /(^|\/)(guard|hc-kill)\/?$/.test(d);
+  assert.equal(servicePath("/opt/agents/bin:/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin", { binDir: "/home/u/.local/bin" }),
+    "/opt/agents/bin:/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin", "already whole: unchanged, binDir never moved");
+  assert.equal(servicePath("/home/u/.automagik/parts/automagik.am/3.149.9/hc-kill:/pack/guard/:/opt/a:relative/bin::/opt/a:/p/node_modules/.bin:/p/node_modules/.bin/:/venv/bin:/opt/b",
+    { binDir: "/home/u/.local/bin", venv: "/venv/", drop }),
+  "/opt/a:/opt/b:/home/u/.local/bin:/usr/bin:/bin");
+  assert.equal(servicePath("", { binDir: "/home/u/.local/bin" }), "/home/u/.local/bin:/usr/bin:/bin", "no PATH at all still finds the CLI's link and the system's tools");
+  assert.equal(servicePath("/ok:/bad\nword:/tab\there", { binDir: "/b" }), "/ok:/b:/usr/bin:/bin", "a word with a control character never reaches the unit");
+});
+
+test("unitText: a kept PATH is its own Environment= line; % doubled, \" and \\ escaped, $ and spaces left as they are (#1418)", () => {
+  const text = unitText({ runner: "/home/u/.local/bin/automagik-herdr", env: { HERDR_APP_HOME: "/a", PATH: '/opt/my tools/bin:/opt/$x:/opt/100%:/opt/q"t' }, wait: 600 });
+  assert.ok(text.split("\n").includes('Environment="PATH=/opt/my tools/bin:/opt/$x:/opt/100%%:/opt/q\\"t"'), text);
+  assert.equal(keptPathOf(text), '/opt/my tools/bin:/opt/$x:/opt/100%:/opt/q"t', "read back word for word");
+  assert.match(text, /^ExecStart="\/home\/u\/\.local\/bin\/automagik-herdr" revive --boot --wait 600$/m, "ExecStart as before");
+  assert.equal(unitKeepsPath(text), true);
+  assert.equal(unitKeepsPath(unitText({ runner: "/r", env: { HERDR_APP_HOME: "/a" } })), false, "a unit from before #1418 keeps none");
+  assert.equal(unitKeepsPath(null), false);
+});
+
+test("revive service install keeps the installer's PATH, without the pack's guard folders; status says when a unit keeps none (#1418)", { skip: process.platform !== "linux" }, (t) => {
+  const s = world(t);
+  // A pane's PATH: the kill shim's folder (beside an hcGuard.mjs) first, a project's node_modules/.bin, then the person's own.
+  const shim = join(s.root, "parts/automagik.am/3.0.0/hc-kill");
+  mkdirSync(shim, { recursive: true });
+  writeFileSync(join(s.root, "parts/automagik.am/3.0.0/hcGuard.mjs"), "// an older copy\n");
+  exe(join(shim, "hc"), "#!/bin/sh\nexit 0\n");
+  const tools = join(s.root, "tools");
+  mkdirSync(tools);
+  const r = s.cli(["revive", "service", "install", "--json"], { env: { PATH: `${shim}:${join(s.project, "node_modules/.bin")}:${tools}:${s.env.PATH}` } });
+  assert.equal(r.code, 0, r.err);
+  const out = r.json();
+  assert.equal(out.path, unitPath(s.home), "--json's path is still the unit's");
+  const text = readFileSync(unitPath(s.home), "utf8");
+  const kept = keptPathOf(text);
+  assert.equal(out.kept_path, kept);
+  const words = kept.split(":");
+  assert.equal(words[0], tools, kept);
+  assert.ok(!words.includes(shim), "a pane's versioned shim folder is never the boot pass's");
+  assert.ok(!words.some((w) => w.includes("node_modules")), kept);
+  assert.ok(words.includes(join(s.home, ".local/bin")) && words.includes("/usr/bin") && words.includes("/bin"), kept);
+  assert.ok(text.includes(`Environment="HERDR_APP_HOME=${s.app}"`), text);
+  const status = s.cli(["revive", "service", "status", "--json"]);
+  assert.equal(status.json().path_kept, true);
+  assert.doesNotMatch(s.cli(["revive", "service", "status"]).out, /keeps no PATH/);
+  // A unit written before #1418: status says so, and how to refresh it.
+  writeFileSync(unitPath(s.home), unitText({ runner: "/r", env: { HERDR_APP_HOME: s.app } }));
+  assert.equal(s.cli(["revive", "service", "status", "--json"]).json().path_kept, false);
+  assert.match(s.cli(["revive", "service", "status"]).out, /It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install\./);
+});
+
+test("revive with the unit's kept PATH starts the agent the person's terminal starts, not an older one a minimal PATH finds first (#1418)", { skip: process.platform !== "linux" }, (t) => {
+  const make = () => world(t, { file: team({ main: { agent: "codex" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, argv: ["codex"], labels: { "herdr.space": "sp9", "herdr.tab": "tb3" } })] });
+  const setup = (s) => {
+    // An old global codex (no status reports) where systemd's minimal PATH looks first, and the
+    // person's current codex earlier on their own PATH.
+    const system = join(s.root, "usr-local-bin"), mine = join(s.root, "home-local-bin");
+    for (const dir of [system, mine]) { mkdirSync(dir); exe(join(dir, "codex"), "#!/bin/sh\nexit 0\n"); }
+    return { system, mine };
+  };
+  // Installed from the person's terminal: their PATH is kept.
+  const s = make();
+  const { system, mine } = setup(s);
+  const install = s.cli(["revive", "service", "install"], { env: { PATH: `${mine}:${s.env.PATH}:${system}` } });
+  assert.equal(install.code, 0, install.err);
+  const kept = keptPathOf(readFileSync(unitPath(s.home), "utf8"));
+  assert.ok(kept.startsWith(`${mine}:`), kept);
+  // The boot pass runs with exactly that PATH.
+  const r = s.cli(["revive", "--json"], { env: { PATH: kept } });
+  assert.equal(r.code, 0, r.err);
+  const runs = runsOf(s);
+  assert.equal(runs.length, 1, JSON.stringify(runs));
+  assert.equal(firstOnPath(panePathOf(runs[0]), "codex"), join(mine, "codex"), runs[0].join(" "));
+  // Contrast, the unit before #1418: the boot pass under a minimal PATH starts the old one.
+  const before = make();
+  const old = setup(before);
+  const b = before.cli(["revive", "--json"], { env: { PATH: `${old.system}:${before.env.PATH}` } });
+  assert.equal(b.code, 0, b.err);
+  assert.equal(firstOnPath(panePathOf(runsOf(before)[0]), "codex"), join(old.system, "codex"), "what #1418 saw: another agent than the person's");
+});
+
+// ---- #1419: every pass is recorded, one that stops early too, and `revive --last` shows it ----
+
+import { lastText } from "../mods/am-sidebar/revive.js";
+
+const hcDown = (s) => exe(join(s.root, "bin", "hc"), "#!/bin/sh\necho 'core is not running' >&2\nexit 1\n");
+const hcUp = (s) => exe(join(s.root, "bin", "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+const recordPath = (s) => join(s.app, "automagik-herdr/revive-last.json");
+const stampPath = (s) => join(s.app, "automagik-herdr/revive-boot.json");
+const CHIEF = team({ main: { name: "Chief" } });
+
+test("lastText: the last pass, by the login service or by hand, each report and whether it was sent; one that stopped early; none on record", () => {
+  assert.match(lastText(null, "/x/revive-last.json"), /^No revive pass is on record on this computer \(\/x\/revive-last\.json\)\. .*am revive service status\.$/);
+  const sent = lastText({ at: "2026-11-16T10:00:00.000Z", boot: true, projects: [{ project: "/p", report: "Revive after a restart of this computer, project /p.", sent: "t9", unsent: null }] }, "/x");
+  assert.equal(sent, "Last revive pass: 2026-11-16T10:00:00.000Z, the login service's pass (--boot).\nRevive after a restart of this computer, project /p.\n  Sent to the main bot (t9).");
+  const unsent = lastText({ at: "2026-11-16T10:00:00.000Z", boot: false, projects: [{ project: "/p", report: "R.", sent: null, unsent: "Main has no pane" }] }, "/x");
+  assert.match(unsent, /, run by hand\.\nR\.\n {2}Not sent: Main has no pane\.$/);
+  // An older record has no `boot`: neither is said. Nothing came back: said so.
+  assert.equal(lastText({ at: "2026-11-16T10:00:00.000Z", projects: [] }, "/x"), "Last revive pass: 2026-11-16T10:00:00.000Z.\nNothing to bring back: every bot the ledger named ran its agent.");
+  // Stopped early: the reason, never "nothing to bring back"; a project with no report yet is named.
+  const stopped = lastText({ boot_ms: 1, projects: [{ project: "/p", report: null, sent: null, unsent: "the pass stopped early" }],
+    stopped: { at: "2026-11-16T11:00:00.000Z", boot: true, reason: "herdr-core isn't answering 600s on (down). Nothing was started." } }, "/x");
+  assert.match(stopped, /^Last revive pass: 2026-11-16T11:00:00\.000Z, the login service's pass \(--boot\)\.\nProject \/p: no report\.\n {2}Not sent: the pass stopped early\.\nA pass stopped early \(2026-11-16T11:00:00\.000Z, --boot\): herdr-core isn't answering/);
+  assert.doesNotMatch(stopped, /Nothing to bring back/);
+});
+
+test("revive --boot with herdr-core not answering keeps a record that says it stopped early, stamps nothing, and the next boot pass runs", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const env = { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) };
+  hcDown(s);
+  const r = s.cli(["revive", "--boot", "--wait", "1"], { env });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /herdr-core isn't answering 1s on \(core is not running\)\. Nothing was started\./);
+  const rec = s.lastReport();
+  assert.equal(statSync(recordPath(s)).mode & 0o777, 0o600);
+  assert.deepEqual(rec.projects, []);
+  assert.equal(rec.stopped.boot, true);
+  assert.match(rec.stopped.reason, /^herdr-core isn't answering 1s on/);
+  assert.ok(!JSON.stringify(rec).includes("at "), "no stack in the record");
+  assert.equal(existsSync(stampPath(s)), false, "an aborted pass never stamps the boot");
+  const last = s.cli(["revive", "--last"]);
+  assert.equal(last.code, 0, last.err);
+  assert.match(last.out, /A pass stopped early \(.*, --boot\): herdr-core isn't answering 1s on/);
+  // herdr-core answers again: the same boot's pass runs, records, stamps.
+  hcUp(s);
+  const again = s.cli(["revive", "--boot", "--json"], { env });
+  assert.equal(again.code, 0, again.err);
+  assert.equal(again.json().ran, true);
+  assert.equal(s.lastReport().boot, true);
+  assert.equal(s.lastReport().stopped, undefined);
+  assert.ok(existsSync(stampPath(s)));
+});
+
+test("a pass that stops early keeps the report this boot's pass couldn't send, under its own stop", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t6", { bot: ID.cap, cwd: p, labels: { "agent.session": SID2 } })] });
+  const env = { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) };
+  const r = s.cli(["revive"], { env });
+  assert.equal(r.code, 0, r.err);
+  const before = s.lastReport();
+  assert.equal(before.boot, false);
+  assert.equal(before.projects[0].unsent, "Chief has no pane");
+  hcDown(s);
+  assert.equal(s.cli(["revive", "--wait", "1"], { env }).code, 1);
+  const after = s.lastReport();
+  assert.deepEqual(after.projects, before.projects);
+  assert.equal(after.at, before.at);
+  assert.equal(after.stopped.boot, false);
+  const last = s.cli(["revive", "--last"]).out;
+  assert.match(last, /, run by hand\.\nRevive after a restart of this computer, project .*Captain \(t100\).*\n {2}Not sent: Chief has no pane\.\nA pass stopped early/);
+});
+
+test("a second boot pass while herdr-core is down says it already ran and leaves the record as it is", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const env = { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) };
+  assert.equal(s.cli(["revive", "--boot"], { env }).code, 0);
+  const record = readFileSync(recordPath(s), "utf8");
+  const stamp = readFileSync(stampPath(s), "utf8");
+  hcDown(s);
+  const r = s.cli(["revive", "--boot", "--json", "--wait", "1"], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), { ran: false, reason: "already ran for this boot" });
+  assert.equal(readFileSync(recordPath(s), "utf8"), record);
+  assert.equal(readFileSync(stampPath(s), "utf8"), stamp);
+});
+
+test("the main bot's report goes only to a pane this core bound: a binding of another core is no pane of its own", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, front: ["claude"], status: "idle" }), pane("t6", { bot: ID.cap, cwd: p, labels: { "agent.session": SID2 } })],
+    attach: () => [{ bot: ID.main, terminal: "t5", created_ms: 1, core: "othercore000" }, { bot: ID.cap, terminal: "t6", created_ms: 1 }] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(s.hcState().sent, undefined, "nothing typed into another core's pane");
+  assert.equal(r.json().projects[0].unsent, "Chief has no pane");
+  assert.equal(s.lastReport().projects[0].unsent, "Chief has no pane");
+});
+
+test("revive --last shows the last pass and whether its report was sent, asks hc nothing and writes nothing; --json gives the record", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const none = s.cli(["revive", "--last"]);
+  assert.equal(none.code, 0, none.err);
+  assert.match(none.out, /^No revive pass is on record on this computer \(.*revive-last\.json\)\. To see whether the login service that runs it after a restart is installed: am revive service status\./);
+  assert.deepEqual(s.cli(["revive", "--last", "--json"]).json(), { path: recordPath(s), record: null });
+  assert.equal(s.cli(["revive"]).code, 0);
+  const files = [recordPath(s), attachPath(s.app)].map((f) => readFileSync(f, "utf8"));
+  const calls = s.calls().length;
+  hcDown(s);
+  const r = s.cli(["revive", "--last"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /^Last revive pass: .*, run by hand\.\nRevive after a restart of this computer, project .*Resumed where they were: Chief \(t100\)\..*\n {2}Sent to the main bot \(t100\)\.\n?$/);
+  assert.ok(!r.out.includes(SID) && !r.err.includes(SID), r.out);
+  const j = s.cli(["revive", "--last", "--json"]).json();
+  assert.equal(j.path, recordPath(s));
+  assert.equal(j.record.projects[0].sent, "t100");
+  assert.equal(s.calls().length, calls, "no hc call");
+  assert.deepEqual([recordPath(s), attachPath(s.app)].map((f) => readFileSync(f, "utf8")), files);
+  assert.equal(existsSync(stampPath(s)), false);
+});
+
+test("revive --last: a record that isn't JSON exits 1 and says so; --last with a pass's options or a verb is a usage mistake", (t) => {
+  const s = world(t, { file: CHIEF });
+  writeFileSync(recordPath(s), "{ not json");
+  const r = s.cli(["revive", "--last"]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /The revive record isn't valid JSON \(.*revive-last\.json\)\./);
+  for (const args of [["revive", "--last", "--boot"], ["revive", "--last", "--wait", "0"], ["revive", "--last", "--dry-run"], ["revive", "service", "install", "--last"]]) {
+    const u = s.cli(args);
+    assert.equal(u.code, 2, args.join(" "));
+    assert.match(u.err, /revive --last \[--json\]/, args.join(" "));
+  }
+  assert.deepEqual(s.sysCalls(), [], "service install never ran");
 });

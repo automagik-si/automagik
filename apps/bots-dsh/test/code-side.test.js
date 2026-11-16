@@ -14,7 +14,7 @@ import * as plugin from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { foldAttach, readAttach } from '../src/shared/attach-record.js'
 import { foldWorkers, readWorkers } from '../src/shared/workers-journal.js'
-import { buildCodeTree, readRegistryTree, resolvePane, statusWord } from '../src/host/code-tree.js'
+import { buildCodeTree, readCodeTree, readRegistryTree, resolvePane, statusWord } from '../src/host/code-tree.js'
 import { connectCore } from '../src/host/code-core.js'
 import { install, openPaneStream, streamAdmission, streamTarget } from '../src/host/code-side.js'
 
@@ -147,6 +147,35 @@ test('the tree: projects, the main Bot first, workers under their Bot, this comp
   const other = buildCodeTree({ ...registry, attach: { rows: [], fold: foreign }, workers: new Map(), terminals, core: { id: CORE, name: 'test-machine' } })
   assert.equal(other.projects[0].bots.find(bot => bot.id === DEV).terminal, null)
   assert.equal(other.projects[0].bots.find(bot => bot.id === DEV).status, 'not-running')
+})
+
+test('a global Bot with no folder is a seat: the tree lists it and its pane resolves', async (t) => {
+  const f = fixture(t)
+  const GLOBAL = 'b-dddddddddd'
+  const at = '2026-11-16T00:00:00.000Z'
+  writeFileSync(join(f.automagikHome, 'bots', 'bots.json'), JSON.stringify({
+    version: 2,
+    projects: [{ folder: f.project }],
+    bots: [
+      { id: LEAD, name: 'Atlas', role: 'lead', agent: 'claude', main: true, folder: f.project },
+      // RFC 0014: a home-file Bot with no folder. RFC 0022 lists it as a seat.
+      { id: GLOBAL, name: 'General Orchestrator', role: 'lead', agent: 'claude' },
+    ],
+  }))
+  writeFileSync(join(f.ledgerDir, 'attach.jsonl'), [
+    { v: 1, event: 'attach', bot: LEAD, project: f.project, terminal: 't7', core: CORE, created_ms: 700, machine: null, at, by: 'start' },
+    { v: 1, event: 'attach', bot: GLOBAL, project: null, terminal: 't10', core: CORE, created_ms: 1000, machine: null, at, by: 'start' },
+  ].map(row => `${JSON.stringify(row)}\n`).join(''))
+  writeFileSync(f.terminalsFile, JSON.stringify([...TERMINALS, { address: 't10', created_ms: 1000, state: 'live', cols: 110, rows: 34, status: 'working', agent: 'claude-code' }]))
+  const read = readRegistryTree({ env: f.env })
+  assert.equal(read.bots.find(bot => bot.id === GLOBAL)?.folder, undefined, 'the home file keeps a global Bot folderless')
+  const answer = await readCodeTree({ env: f.env })
+  assert.ok(answer.tree, 'the tree reads a registry with a global Bot')
+  const group = answer.tree.projects.find(project => project.global === true)
+  assert.ok(group, 'global Bots have a project-less group of their own')
+  assert.deepEqual(group.bots.map(bot => [bot.id, bot.status, bot.terminal?.id]), [[GLOBAL, 'working', 't10']])
+  const pane = await resolvePane({ botId: GLOBAL, env: f.env })
+  assert.deepEqual(pane && { terminal: pane.terminal, core: pane.core }, { terminal: 't10', core: CORE }, 'the stream resolves the global seat by Bot id')
 })
 
 test('the tree words: a blocked or failed terminal needs the person, a missing one is not running', () => {

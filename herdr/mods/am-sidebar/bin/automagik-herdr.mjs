@@ -31,6 +31,7 @@ import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../ag
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
 import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, defaultModel, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+  codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -45,7 +46,7 @@ import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchEnvOf, launchHomeEnv, ledgerRivals,
-  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, sweptSince, unitIsOurs, unitPath, unitText, uuidV7Ms } from "../revive.js";
+  lastText, pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { firstLine as rolloutFirstLine, regularIdentity, wholeText } from "../sessionFiles.mjs";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
@@ -58,6 +59,7 @@ import { botHistory, historyLines } from "../inspect.js";
 import { chooseLogin } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
+import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
 import { approveProject, approvedProxyEnabled, approvedProxyState, approvedSettingsDir, parseApprovedRecord,
@@ -1218,7 +1220,7 @@ const OPTIONS = {
   queued: { type: "boolean" }, cancel: { type: "boolean" }, "run-queued": { type: "string" },
   fresh: { type: "boolean" }, force: { type: "boolean" }, save: { type: "boolean" }, tree: { type: "boolean" }, "fresh-shared": { type: "boolean" },
   cwd: { type: "string" },
-  revive: { type: "boolean" }, boot: { type: "boolean" }, wait: { type: "string" }, "dry-run": { type: "boolean" },
+  revive: { type: "boolean" }, boot: { type: "boolean" }, wait: { type: "string" }, "dry-run": { type: "boolean" }, last: { type: "boolean" },
   machine: { type: "string" }, linked: { type: "boolean" }, local: { type: "boolean" },
   "from-hc": { type: "boolean" }, "squad-label": { type: "string" }, apply: { type: "boolean" },
 };
@@ -1262,7 +1264,7 @@ Usage: am <command> [options]                   (every command takes --json and 
   category ls | add --title T [--sub S] [--id ID] | edit <id> [--title T] [--sub S]
            | rm <id> | order <id>...
   start <bot> [--space ID] [--tab ID]   a new pane on this computer (prints its terminal)
-  revive [--dry-run] [--boot] [--wait SECONDS]
+  revive [--dry-run] [--boot] [--wait SECONDS] | revive --last
                                 after a restart of this computer: every bot the attach ledger
                                 binds here whose pane is gone, or is the bare shell herdr-core
                                 keeps in a pane whose program ended, is restarted in its place
@@ -1275,8 +1277,9 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 Each project's main bot gets one report: who resumed, who is on
                                 a new conversation and why, who isn't back and the command that
                                 brings it back by hand; it is kept in the app home's
-                                automagik-herdr/revive-last.json too. --dry-run prints the plan
-                                and touches nothing. --boot is the login service's pass: once
+                                automagik-herdr/revive-last.json too, and so is a pass that
+                                stopped early; --last shows the last pass and runs nothing.
+                                --dry-run prints the plan and touches nothing. --boot is the login service's pass: once
                                 per boot, it also takes the bots whose ended pane another
                                 command swept since the boot. --wait waits that long for
                                 herdr-core first, and prints counts only. This computer's
@@ -3420,7 +3423,8 @@ const localWhere = () => codexWhere({ home: home(), appHome: appHome(), resolve:
 async function localCodexGrantPlan(cwd) {
   const out = cwd ? await git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd) : null;
   const [gitDir, gitCommonDir] = (out ?? "").split("\n").map((l) => l.trim());
-  return codexGrantPlan({ where: localWhere(), home: home(), env: process.env, gitDir: gitDir || null, gitCommonDir: gitCommonDir || null, isDir: dirHere });
+  return { ...codexGrantPlan({ where: localWhere(), home: home(), env: process.env, gitDir: gitDir || null, gitCommonDir: gitCommonDir || null, isDir: dirHere }),
+    gitDir: gitDir || null, gitCommonDir: gitCommonDir || null };
 }
 
 /** codexGrantPlan's isDir here (#1142): true, false when it isn't there (or isn't a folder), null when stat fails otherwise. */
@@ -6742,6 +6746,25 @@ async function cmdWorker(opts, rest) {
     const codexWithheld = codexPlan && !plan.template ? localCodexWarning(agents.codex?.run, codexPlan) : null;
     if (codexWithheld) warnings.push(codexWithheld);
     workerArgv = codexPlan ? withCodexGrants(launchArgv, codexPlan.dirs) : launchArgv;
+    // #1420: worker starts alone get a per-launch trust word, after checking the person's settings.
+    // The proxy and templates keep their commands; no config is written and no prompt is answered.
+    if (plan.template && runs === "codex") {
+      warnings.push(codexTrustKeptWarning(`${bot.name}'s Codex worker`, `template ${plan.template} owns its command`));
+    } else if (plan.agent === "codex" && proxied && !plan.template) {
+      warnings.push(codexTrustKeptWarning(`${bot.name}'s Codex worker`, "proxy"));
+    } else if (plan.agent === "codex" && !proxied && !plan.template && codexPlan) {
+      const codexHome = process.env.CODEX_HOME || join(home(), ".codex");
+      const configs = isAbsolute(codexHome)
+        ? ["/etc/codex/config.toml", "/etc/codex/managed_config.toml", join(codexHome, "config.toml")].map((path) => {
+          try { return { text: readFileSync(path, "utf8") }; } catch (error) { return { error }; }
+        }) : [{ error: { code: "EINVAL" } }];
+      // The common dir's parent, and the project's main checkout too (a git dir kept elsewhere): one more only withholds.
+      const roots = codexPlan.gitCommonDir ? [...new Set([realDir(dirname(codexPlan.gitCommonDir)) ?? dirname(codexPlan.gitCommonDir),
+        realDir(project.key) ?? project.key].filter(Boolean))] : null;
+      const trust = codexTrustPlan({ folder: place.worktree, roots, configs, run: agents.codex?.run, home: home(), realpath: realDir });
+      if (trust.args.length) workerArgv = withCodexTrust(workerArgv, place.worktree);
+      else warnings.push(codexTrustWarning(`${bot.name}'s Codex worker`, trust.withheld));
+    }
     const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
       agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task, template: plan.template,
       templateArgv,
@@ -6937,7 +6960,7 @@ const REVIVE_RESTART_MS = Number(process.env.AUTOMAGIK_HERDR_REVIVE_RESTART_MS) 
 const REVIVE_SETTLE_MS = process.env.AUTOMAGIK_HERDR_REVIVE_SETTLE_MS !== undefined ? Number(process.env.AUTOMAGIK_HERDR_REVIVE_SETTLE_MS) || 0 : 20_000;
 const reviveStampPath = () => join(appHome(), "automagik-herdr", "revive-boot.json");
 const reviveReportPath = () => join(appHome(), "automagik-herdr", "revive-last.json");
-const REVIVE_USAGE = "usage: am revive [--dry-run] [--boot] [--wait SECONDS] [--json] | revive service install|uninstall|status";
+const REVIVE_USAGE = "usage: am revive [--dry-run] [--boot] [--wait SECONDS] [--json] | revive --last [--json] | revive service install|uninstall|status";
 
 /** Waits until herdr-core answers (`hc server status`), up to `seconds`; a CliError when it doesn't. */
 async function coreUp(seconds) {
@@ -6997,18 +7020,28 @@ async function reviveOne(target, bot) {
  * plan, nothing touched. --wait S: waits that long for herdr-core first.
  */
 async function cmdRevive(opts, [verb, sub, ...more]) {
+  if (opts.last) return reviveLast(opts, verb);
   if (verb === "service") return reviveService(opts, sub, more);
   if (verb) throw new CliError(REVIVE_USAGE, 2);
   const wait = opts.wait === undefined ? 0 : Number(opts.wait);
   if (!Number.isFinite(wait) || wait < 0 || wait > 86_400) throw new CliError("--wait takes seconds, 0 to 86400.", 2);
   const dry = Boolean(opts["dry-run"]);
-  await coreUp(wait);
   const bootMs = bootTime();
+  // Before herdr-core is asked: a second boot pass while it is down says so and keeps the record as it is.
   if (opts.boot && !dry) {
     let ran = null;
     try { ran = JSON.parse(readFileSync(reviveStampPath(), "utf8"))?.boot_ms ?? null; } catch { ran = null; }
     if (sameBoot(ran, bootMs)) return opts.json ? { ran: false, reason: "already ran for this boot" } : "revive already ran for this boot; run am revive to look again.";
   }
+  const projects = new Map();
+  if (dry) return revivePass(opts, { wait, dry, bootMs, projects });
+  // #1419: a pass that stops early is recorded too (never stamped), and its error stands.
+  try { return await revivePass(opts, { wait, dry, bootMs, projects }); } catch (e) { keepStopped(e, opts, bootMs, projects); throw e; }
+}
+
+/** cmdRevive's pass, from herdr-core's wait to the reports; `projects` is cmdRevive's, so a pass that stops early is recorded with what it knew. */
+async function revivePass(opts, { wait, dry, bootMs, projects }) {
+  await coreUp(wait);
   const core = await coreId();
   const look = async () => {
     // The ledger as it stands, never the one-time import: with no ledger there is nothing to bring back.
@@ -7025,7 +7058,6 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   // Sessions first, while each pane still stands: a dsh-TUI, Antigravity, Codex or Kimi pane gets its id recorded.
   if (!dry) await recordSessions();
   const me = process.env.HC_TERMINAL_ID ?? null;
-  const projects = new Map();
   const projectOfKey = (key) => {
     if (!projects.has(key)) {
       let loaded = null;
@@ -7079,19 +7111,23 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   const out = [];
   for (const proj of projects.values()) {
     const line = reportLine(proj.key ?? "(no project)", proj.results);
+    proj.report = line;
     if (!line) continue;
     const main = proj.file ? mainBotOf(proj.file) : null;
-    const binding = main ? [...fold.byKey.values()].find((b) => !b.machine && b.bot === main.id && (b.project == null || b.project === proj.key)) ?? null : null;
+    // #1419: this core's binding, and the pane it was bound to: a reused terminal is another's pane.
+    const binding = main ? [...fold.byKey.values()].find((b) => !b.machine && b.core === core && b.bot === main.id && (b.project == null || b.project === proj.key)) ?? null : null;
     let sent = null, unsent = null;
     if (!binding) unsent = main ? `${main.name} has no pane` : "the project has no main bot that can be read";
     else {
-      const live = await hcState(binding.terminal);
-      if (live.state !== "live" || !agentInForeground(live.get)) unsent = `${main.name}'s pane ${binding.terminal} runs no agent`;
-      else {
-        const r = await hc(["send", binding.terminal, line]);
-        if (r.code === 0) sent = binding.terminal;
-        else unsent = `hc send ${binding.terminal} failed (${(r.stderr || r.stdout).trim().split("\n")[0]})`;
-      }
+      try {
+        const live = await hcState(binding.terminal);
+        if (live.state !== "live" || live.get?.created_ms !== binding.created_ms || !agentInForeground(live.get)) unsent = `${main.name}'s pane ${binding.terminal} runs no agent`;
+        else {
+          const r = await hc(["send", binding.terminal, line]);
+          if (r.code === 0) sent = binding.terminal;
+          else unsent = `hc send ${binding.terminal} failed (${(r.stderr || r.stdout).trim().split("\n")[0]})`;
+        }
+      } catch (e) { unsent = `the report to ${binding.terminal} couldn't be sent (${stoppedReason(e)})`; }
     }
     out.push({ project: proj.key, report: line, sent, unsent, results: proj.results });
   }
@@ -7099,7 +7135,7 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   // What happened, kept for the owner (0600; it holds no session id), and the boot's stamp.
   try {
     mkdirSync(dirname(reviveReportPath()), { recursive: true });
-    writeFileSync(reviveReportPath(), unprinted(`${JSON.stringify({ at: new Date().toISOString(), boot_ms: bootMs, projects: out }, null, 2)}\n`), { mode: 0o600 });
+    writeFileSync(reviveReportPath(), unprinted(`${JSON.stringify({ at: new Date().toISOString(), boot_ms: bootMs, boot: Boolean(opts.boot), projects: out }, null, 2)}\n`), { mode: 0o600 });
     if (opts.boot) writeFileSync(reviveStampPath(), `${JSON.stringify({ boot_ms: bootMs, at: new Date().toISOString() })}\n`, { mode: 0o600 });
   } catch (e) { report([`revive: its record wasn't written (${opts.boot ? e?.code ?? "an error" : e?.message ?? e}).`]); }
   if (failed) exitAfter.code = 1;
@@ -7108,6 +7144,40 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   // The login service's output goes to the user journal: counts only, no folder, no name.
   if (opts.boot) return countsLine(out);
   return out.map((p) => `${p.report}\n  ${p.sent ? `Sent to the main bot (${p.sent}).` : `Not sent: ${p.unsent}. It is kept in ${reviveReportPath()}.`}`).join("\n");
+}
+
+/** Why a pass or a send stopped, for the record: a refusal's first line, else an error's code; never a stack. */
+const stoppedReason = (e) => (e instanceof CliError ? unprinted(String(e.message).split("\n")[0]) : typeof e?.code === "string" ? e.code : "an unexpected error");
+
+/**
+ * #1419: a pass that stopped early, kept in revive-last.json with `stopped: { at, boot, reason }`.
+ * The record already there for this boot is kept under it (a report not sent yet is never lost);
+ * else the projects the pass knew, none of them sent. Never throws: the pass's own error stands.
+ */
+function keepStopped(e, opts, bootMs, projects) {
+  try {
+    let base = null;
+    try { base = JSON.parse(readFileSync(reviveReportPath(), "utf8")); } catch { base = null; }
+    if (!base || typeof base !== "object" || !sameBoot(base.boot_ms, bootMs)) {
+      base = { boot_ms: bootMs, projects: [...projects.values()].map((p) => ({ project: p.key, report: p.report ?? reportLine(p.key ?? "(no project)", p.results),
+        sent: null, unsent: "the pass stopped early", results: p.results })) };
+    }
+    const stopped = { at: new Date().toISOString(), boot: Boolean(opts.boot), reason: stoppedReason(e) };
+    mkdirSync(dirname(reviveReportPath()), { recursive: true });
+    writeFileSync(reviveReportPath(), unprinted(`${JSON.stringify({ ...base, stopped }, null, 2)}\n`), { mode: 0o600 });
+    chmodSync(reviveReportPath(), 0o600);
+  } catch { /* the pass's own error is what the caller sees */ }
+}
+
+/** `revive --last`: the last pass as kept in the app home (revive.js lastText); runs nothing, asks hc nothing. */
+function reviveLast(opts, verb) {
+  if (verb || opts.boot || opts["dry-run"] || opts.wait !== undefined) throw new CliError(REVIVE_USAGE, 2);
+  const path = reviveReportPath();
+  let record = null;
+  try { record = JSON.parse(readFileSync(path, "utf8")); } catch (e) {
+    if (e?.code !== "ENOENT") throw new CliError(e instanceof SyntaxError ? `The revive record isn't valid JSON (${path}).` : `The revive record can't be read (${path}, ${e?.code ?? "an error"}).`);
+  }
+  return opts.json ? { path, record } : lastText(record, path);
 }
 
 /**
@@ -7124,9 +7194,11 @@ async function reviveService(opts, verb, more = []) {
   const said = (r) => (r.stderr || r.stdout).trim().split("\n")[0] || `exit ${r.code}`;
   if (verb === "status") {
     const enabled = process.platform === "linux" && text !== null ? (await systemctl(["is-enabled", UNIT_NAME])).code === 0 : false;
-    const out = { path: unit, installed: text !== null, ours: unitIsOurs(text), enabled };
+    const out = { path: unit, installed: text !== null, ours: unitIsOurs(text), enabled,
+      ...(text !== null ? { path_kept: unitKeepsPath(text) } : {}) };
     return opts.json ? out : !out.installed ? `The revive login service isn't installed (${unit}).`
-      : `${unit}: ${out.ours ? "Automagik Herdr's" : "not one Automagik Herdr wrote"}, ${enabled ? "enabled" : "not enabled"}.`;
+      : `${unit}: ${out.ours ? "Automagik Herdr's" : "not one Automagik Herdr wrote"}, ${enabled ? "enabled" : "not enabled"}.`
+        + (out.ours && !out.path_kept ? " It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install." : "");
   }
   if (process.platform !== "linux") {
     throw new CliError("The revive login service is built for Linux (a systemd user unit) so far; macOS (launchd) is the next delivery of #939. "
@@ -7145,14 +7217,18 @@ async function reviveService(opts, verb, more = []) {
   // The command as people run it (the link install.sh makes, which an update keeps), else the wrapper beside this file.
   const link = join(binDirOf(), "automagik-herdr");
   const runner = existsSync(link) ? link : join(dirname(fileURLToPath(import.meta.url)), "automagik-herdr");
-  const unitBody = unitText({ runner, env: process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}, wait: SERVICE_WAIT_S });
+  // A pane's guard folders (this copy's, am's, or an older version's) never become the boot pass's.
+  const guardWord = (dir) => isGuardFolder(dir) || looksLikeGuardFolder(dir);
+  const keptPath = servicePath(process.env.PATH ?? "", { binDir: binDirOf(), venv: process.env.VIRTUAL_ENV ?? null, drop: guardWord });
+  const unitBody = unitText({ runner, env: { ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}), PATH: keptPath }, wait: SERVICE_WAIT_S });
   mkdirSync(dirname(unit), { recursive: true });
   writeFileSync(unit, unitBody, { mode: 0o644 });
   const reload = await systemctl(["daemon-reload"]);
   const on = reload.code === 0 ? await systemctl(["enable", UNIT_NAME]) : reload;
   if (on.code !== 0) notes.push(`The unit is written but not enabled (systemctl --user: ${said(on)}); enable it with: systemctl --user daemon-reload && systemctl --user enable ${UNIT_NAME}`);
   notes.push("It runs at your next login after a restart of this computer. For bots that come back before anyone logs in: loginctl enable-linger.");
-  return opts.json ? { path: unit, installed: true, enabled: on.code === 0, runner, notes }
+  notes.push("The unit keeps this PATH to find the agents and hc; rerunning am revive service install refreshes it.");
+  return opts.json ? { path: unit, installed: true, enabled: on.code === 0, runner, kept_path: keptPath, notes }
     : [`Installed the revive login service (${unit}): after a restart it runs ${runner} revive --boot.`, ...notes].join("\n");
 }
 

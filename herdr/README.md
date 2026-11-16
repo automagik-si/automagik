@@ -1374,7 +1374,7 @@ nothing to it (a Codex seat's template excepted, see [Codex's launch mode](#code
 | Agent | What its launch adds | What that does |
 | --- | --- | --- |
 | Claude Code (`claude`) | `--permission-mode auto` | Claude Code's auto mode: its classifier answers permission requests. |
-| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true`, `--add-dir <folder>` per derived folder | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). No opt-out. |
+| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true`, `--add-dir <folder>` per derived folder; worker starts only: `-c 'projects={"<worktree>"={trust_level="trusted"}}'` when the checks below allow it | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). Worker starts pre-trust only their worktree path (#1420); a withheld trust word gets a warning. No opt-out from the launch mode. |
 | Antigravity (`agy`) | `--dangerously-skip-permissions`, `--mode <agyMode>`, `--settings <file>` | No permission prompt and no classifier: everything the file's deny list does not name runs (see [what runs without a prompt](#antigravitys-permission-list)). The file's `trustedWorkspaces` answers the folder-trust question. |
 | dsh-TUI (`dsh-tui`) | nothing | Its DSH profile on the machine it runs on sets the approval policy; dsh-tui takes no such flag. |
 | Oh My Pi (`omp`) | nothing | omp 18.14.2 has only skip-all flags (`--auto-approve`, `--approval-mode=yolo`). |
@@ -1415,6 +1415,29 @@ a worker and a Restart --tree helper:
   Codex captain's `isn't a terminal hc knows` refusal; it was not reproduced in isolation.
 - `-c sandbox_workspace_write.network_access=true`: the sandbox's own network switch, so `hc`'s
   socket and GitHub (`gh`, git's transport) answer. It is off by default under the auto mode.
+- Worker starts only (#1420): `-c 'projects={"<worktree>"={trust_level="trusted"}}'`, after the
+  mode words and before any extra folders, subcommand or task. Checked on codex-cli 0.169.0:
+  this inline TOML table keeps dots in paths literal, merges with the person's projects table,
+  skips that folder's trust prompt and writes no setting. It trusts the worktree path only,
+  never its repository root, a parent or the home folder. Seats and Restart --tree helpers
+  do not get this word; those are a follow-up.
+  Before adding it, the pack reads `/etc/codex/config.toml`, `/etc/codex/managed_config.toml`
+  and `$CODEX_HOME/config.toml` (the default is `~/.codex/config.toml` when `CODEX_HOME` is unset
+  or empty). A missing file is absent. Codex consults the cwd and its repository root, the
+  parent of the git common dir: the pack checks both, and the project's main checkout too (a git
+  dir kept elsewhere), by written path and resolved aliases,
+  and withholds trust if either has any level other than exactly `trusted` in any read file.
+  A `trusted` entry never blocks it. An invalid worktree path or the home folder, an unknown
+  repository root, an unreadable config, or a relative `CODEX_HOME` also withholds it. So do
+  settings the narrow reader cannot prove: unclosed strings, duplicate project paths, inline
+  project tables, project arrays of tables, non-string trust levels or `project_root_markers`.
+  A Codex run through a wrapper, or one choosing its own folder (`-C`/`--cd`), profile
+  (`-p`/`--profile`) or projects/root markers (`-c`/`--config`), gets no trust word. Proxied
+  workers and Codex template workers keep their commands and get no trust word either.
+  Each withheld case warns why, without printing config contents: its folder wasn't
+  pre-trusted and Codex may stop at its folder-trust prompt until a person answers it in the
+  worker's pane. The pack never observes the pane to answer that prompt. Limit: cloud/MDM
+  Codex layers cannot be read by the pack, so these local checks cannot account for them.
 - `--add-dir <folder>`, derived per launch and only for folders that are there: the launch
   folder's git dirs, which Codex otherwise keeps read-only (`git rev-parse --git-dir
   --git-common-dir`: a checkout's own `.git`; for a linked worktree its own folder under the main
