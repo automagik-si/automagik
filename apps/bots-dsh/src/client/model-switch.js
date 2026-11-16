@@ -54,6 +54,8 @@ export function ModelSwitchNotice({ sessionId, useRoster }) {
   const [fresh, setFresh] = useState(false)
   const [said, setSaid] = useState('')
   const line = mismatch === undefined ? '' : t('This chat is running on {running} instead of {saved}.', { running: mismatch.running, saved: mismatch.saved })
+  // Another Bot on this slot (or none) starts with an empty status: its own switches announce later.
+  useEffect(() => { setSaid('') }, [bot?.id])
   useEffect(() => {
     if (!known) return
     const next = switchSeen(memo.current, bot.id, key)
