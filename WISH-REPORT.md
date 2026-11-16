@@ -26,6 +26,8 @@ Host behavior and what a delete does are unchanged; this is only the confirmatio
   confirmation cancelled by closing/reopening the menu, and the DSH bot Remove.
 - `apps/bots-dsh/test/context-menu-adoption.test.js` — its stub `useState` is now stateful so a
   second render sees the click's state; the Remove case clicks twice, as the UI now requires.
+- `apps/locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json` and its `client.js` — the pack
+  translates every omni-ui key the Bot team renders, so the two new labels ship in pt-BR too.
 
 ## Red first (before the fix)
 
@@ -85,6 +87,20 @@ $ node scripts/build-client.mjs --check
 # exit 0
 ```
 
+The pt-BR pack's own gate (its `runtime.test.js` needs the DSH harness):
+
+```
+$ cd apps/locale-pt-br-dsh
+$ DSH_HARNESS=$(cd ../bots-dsh/dev/harness && pwd) node --test "test/*.test.js"
+# exit 0
+ℹ tests 22
+ℹ pass 22
+ℹ fail 0
+
+$ node scripts/build-client.mjs --check
+# exit 0
+```
+
 The 137 lint warnings are pre-existing in untouched files; the new and changed files are
 warning-free.
 
@@ -97,8 +113,24 @@ so the branch was rebuilt on the real `origin/dev` (`a380fb498`, then rebased on
 `dev` `4fac7057` when it advanced during the work). Nothing else was touched: no other branch was
 pushed or merged, and `dev` is unchanged.
 
+## CI
+
+The first CI run on the fix caught a gate the package suite does not cover: `locale-pt-br-dsh
+(plugin tests)` failed because every omni-ui key the Bot team renders needs pt-BR text.
+
+```
+✖ every omni-ui key the Bot team renders has its pt-BR text
+  AssertionError [ERR_ASSERTION]: a Bot string with no pt-BR text stays in English
+  + actual - expected
+  + [ 'Remove Tasks?', 'Remove {name}?' ]
+  - []
+```
+
+Fixed by the pt-BR dictionary and bundle above; the locale pack's 22 tests pass locally. The
+commit subject (72 chars) and this file's lines are inside the 100-character limit the
+Conventional commits job enforces.
+
 ## Open
 
-- CI checks were still pending when this file was written (PR state `OPEN`, `MERGEABLE`); the
-  commit subject (72 chars) and this file's lines are inside the 100-character limit the
-  Conventional commits job enforces.
+- The CI run on the follow-up commit was still in progress when this file was written (PR state
+  `OPEN`, `MERGEABLE`); read the PR for its conclusion. Nothing is merged.
