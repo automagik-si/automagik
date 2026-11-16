@@ -139,13 +139,15 @@ Finished in 23ms on 4 files with 97 rules using 32 threads.
 
 ## PR checks
 
+- `bots-dsh (plugin tests)` **passed** on `8dc7a730`
+  ([job 133290726083](https://github.com/automagik-si/automagik/actions/runs/43864817344/job/133290726083),
+  started 12:15:30Z, finished 12:22:37Z). Its lint step also passed.
 - `Conventional commits` is **red**: `a8cccc813 has a line over 100 characters` and
   `22d8ad569 has a line over 100 characters`. The subjects follow the convention; one
   body paragraph in each commit is longer than the check's 100-character limit. Per the
   wish, I did not amend or force-push, so the check stays red and is recorded here.
-- The remaining checks were still running when this report was written; the local
-  package suite and lint above are green. `bots-dsh (plugin tests)` is the relevant CI
-  job to watch on the PR.
+- The other checks (server image, desktop, Pocket, landing, etc.) are unrelated to this
+  package; they were still queued/running when this report was last updated.
 
 ## Worktree note
 
