@@ -86,7 +86,7 @@ for (const theme of ['deepseek', 'clay', 'mono']) {
       // DSH's widest sidebar (420px) less the stage card's margins and DSH's own padding.
       await page.evaluate(() => { window.setUpdate({ available: true, latest: '9.9.9', current: '1.0.0' }); window.mount({ width: 380 }) })
       await power(page).waitFor()
-      const labels = await page.evaluate(() => [...document.querySelector('.bt-side-top').children].map(node => node.getAttribute('aria-label') ?? node.className))
+      const labels = await page.evaluate(() => [...document.querySelector('.lb-head').children].map(node => node.getAttribute('aria-label') ?? node.className))
       const at = labels.indexOf('Omni on, Genie off')
       assert.deepEqual(labels.slice(at - 1, at + 2), ['Omni 9.9.9 is available', 'Omni on, Genie off', 'Search'])
       assert.equal(await power(page).getAttribute('aria-label'), 'Omni on, Genie off')
@@ -95,7 +95,7 @@ for (const theme of ['deepseek', 'clay', 'mono']) {
       // The button wears the row's own look: the same box as Search.
       const sizes = await page.evaluate(() => {
         const box = node => { const style = getComputedStyle(node); return [style.width, style.height, style.borderRadius, style.backgroundColor] }
-        return { power: box(document.querySelector('.bt-power')), search: box(document.querySelector('.bt-side-top [aria-label="Search"]')) }
+        return { power: box(document.querySelector('.bt-power')), search: box(document.querySelector('.lb-head [aria-label="Search"]')) }
       })
       assert.deepEqual(sizes.power, sizes.search)
       await power(page).click()
@@ -135,14 +135,14 @@ async function sweep(page, label) {
     const row = {}
     for (const tool of [false, true]) {
       await page.evaluate(([width, tool]) => window.mount({ width: width - 40, tool }), [width, tool])
-      await (tool ? power(page) : page.locator('.bt-side-top [aria-label="Search"]')).waitFor()
+      await (tool ? power(page) : page.locator('.lb-head [aria-label="Search"]')).waitFor()
       await frame(page)
       row[tool ? 'with' : 'without'] = await page.evaluate(() => window.rowCheck())
       if (width === 280) await shot(page, `header-${label}-280-${tool ? 'with' : 'without'}`)
     }
     // The shortcut is one of the row: never narrower than the buttons beside it.
     if (row.with.fits === false) {
-      const widths = await page.evaluate(() => [...document.querySelectorAll('.bt-side-top .bt-round')].map(node => Math.round(node.getBoundingClientRect().width)))
+      const widths = await page.evaluate(() => [...document.querySelectorAll('.lb-head .bt-round')].map(node => Math.round(node.getBoundingClientRect().width)))
       assert.ok(Math.min(...widths) >= Math.min(...widths.filter((_, i) => i !== 1)) - 2, `${widths}`)
     }
     table.push(`${width}px: without ${row.without.fits ? 'fits' : row.without.out.join('; ')} | with ${row.with.fits ? 'fits' : row.with.out.join('; ')}`)
@@ -332,13 +332,37 @@ test('Unfold shows only in its own instance, read-only', async (t) => {
   assert.equal(await card(page).getAttribute('aria-label'), 'Omni, Genie and Unfold')
 })
 
+test('the bar asks for seats only with a source, only while shown, and once', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  const seatCalls = () => page.evaluate(() => window.calls.filter(call => call.endpoint === 'seat-chat-list').length)
+  // The page's zero-host-call contract: with no seat source the bar asks for none, and a
+  // rerender does not start asking.
+  await page.evaluate(() => window.mount({ width: 300 }))
+  await page.waitForTimeout(700)
+  await page.evaluate(() => window.setRoster({ bots: [{ id: 'pip', name: 'Pip', createdAt: 1 }] }))
+  await page.waitForTimeout(400)
+  assert.equal(await seatCalls(), 0, 'without the shell action, nothing is asked')
+  // With the shell's source: one ask on mount; a rerender must not ask again (the poll is 4 s).
+  await page.evaluate(() => window.mount({ width: 300, seatList: true }))
+  await page.waitForTimeout(700)
+  assert.equal(await seatCalls(), 1, 'one ask when the bar opens')
+  await page.evaluate(() => window.setRoster({ bots: [{ id: 'pip', name: 'Pip', createdAt: 1 }, { id: 'otto', name: 'Otto', createdAt: 2 }] }))
+  await page.waitForTimeout(400)
+  assert.equal(await seatCalls(), 1, 'a rerender does not re-ask')
+  // The rail is not the bar's Team list: no seats are asked for there.
+  await page.evaluate(() => window.mount({ width: 300, wide: false, seatList: true }))
+  await page.waitForTimeout(700)
+  assert.equal(await seatCalls(), 1, 'seats load only where the bar shows them')
+})
+
 test('a tool that throws is left out, and the row stays', async (t) => {
   const page = await fixture(t)
   if (!page) return
   await page.evaluate(() => window.mount({ width: 300, throwing: true }))
   await power(page).waitFor()
-  assert.equal(await page.locator('.bt-side-top [aria-label="Search"]').count(), 1)
-  assert.equal(await page.locator('.bt-side-top [aria-label="New…"]').count(), 1)
+  assert.equal(await page.locator('.lb-head [aria-label="Search"]').count(), 1)
+  assert.equal(await page.locator('.lb-head [aria-label="New…"]').count(), 1)
 })
 
 

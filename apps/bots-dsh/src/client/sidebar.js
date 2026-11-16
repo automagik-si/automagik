@@ -19,6 +19,8 @@ import { agentRowSessions, approvalFor, endLabel, runningTasksOf, taskState, wai
 import { approvalCount, approvalDetail, useApproval } from './approvals.js'
 import { WorkCodeSwitch } from './work-code-switch.js'
 import { BotPills, pillLabels } from './capability-pills.js'
+import { LeftBar } from './left-bar.js'
+import { useSeats } from './seat-chat.js'
 
 // -------------------------------------------------------------------------
 // Sidebar
@@ -283,7 +285,7 @@ function AgentSessionRow({ session, agent, actions, renaming, index }) {
 // A DSH bot's row: its plain dsh Sessions, under the Bots with a terminal mark. The tasks
 // record has a row only while it keeps a Session no other list shows (agentRowSessions);
 // the minute's tick moves a task here as the Live rail lets go of it.
-function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi, wide, marked }) {
+function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi, wide, marked, bare = false }) {
   const tasks = agent.kind === 'tasks'
   const own = agentRowSessions(agent, roster, useMinute(tasks))
   const name = tasks ? t('Tasks') : agent.name
@@ -324,6 +326,16 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
   const open = active && wide
   // Only a DSH bot makes new Sessions; tasks come from the Bots.
   const first = tasks ? 0 : 1
+  const list = h('div', { className: 'bt-agent-sub', 'data-open': open || undefined },
+    h('div', { className: 'bt-agent-sub-in' },
+      tasks ? null : h('button', { type: 'button', className: 'bt-agent-sub-row bt-agent-new', style: { '--i': 0 }, onClick: () => { void actions.newAgentSession(agent.id).catch(error => actions.reportError(error, 'agent-session')) } },
+        h(PlusIcon), h('span', { className: 'bt-agent-sub-title' }, t('New session'))),
+      sessions.map((session, index) => h(AgentSessionRow, {
+        key: session.id, session, agent, actions, index: index + first,
+        renaming: renaming === session.id,
+      }))))
+  // The new left bar draws the row itself and hangs only the Session list under it.
+  if (bare) return open ? h('div', { className: 'bt-agent lb-agent' }, list) : null
   return h('div', { className: 'bt-agent' },
     h('button', {
       type: 'button', className: 'bt-row', 'aria-label': label, 'aria-current': active ? 'page' : undefined,
@@ -335,14 +347,7 @@ function AgentRow({ agent, roster, actions, useSessions, useSessionStatus, useUi
       h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, name), agent.pinned ? h(PinMark) : null),
       preview ? h('span', { className: 'bt-row-preview' }, preview) : null) : null,
     wide && unread && !active ? h('span', { className: 'bt-unread', 'aria-hidden': true }) : null),
-    h('div', { className: 'bt-agent-sub', 'data-open': open || undefined },
-      h('div', { className: 'bt-agent-sub-in' },
-        tasks ? null : h('button', { type: 'button', className: 'bt-agent-sub-row bt-agent-new', style: { '--i': 0 }, onClick: () => { void actions.newAgentSession(agent.id).catch(error => actions.reportError(error, 'agent-session')) } },
-          h(PlusIcon), h('span', { className: 'bt-agent-sub-title' }, t('New session'))),
-        sessions.map((session, index) => h(AgentSessionRow, {
-          key: session.id, session, agent, actions, index: index + first,
-          renaming: renaming === session.id,
-        })))))
+    list)
 }
 
 // List rows glide to new places on a spring.
@@ -386,6 +391,8 @@ export function TeamSidebar(props) {
   const closing = useRef(false)
   useLayoutEffect(() => { closing.current = false })
   const roster = useRoster(value => value)
+  // The seats on this computer (RFC 0022 1L): the registry's orchestrators as the bar's rows.
+  const seats = useSeats(actions.seatList, wide)
   const markedUnread = useUi(value => value.unread)
   const bootFailed = useUi(value => value.bootFailed === true)
   props.useRegistry(value => value)
@@ -438,6 +445,42 @@ export function TeamSidebar(props) {
     actions.openPalette(event.key)
   }
   const toolProps = { wide, roster, actions: rowActions, useRoster }
+  const notice = roster.readOnly ? h('div', { className: 'bt-hint bt-read-only', role: 'status' }, hostText(roster.readOnly)) : null
+  if (wide) {
+    // The new left bar (left-bar.js): the rail, the Team rows, the same openings as below.
+    const byId = id => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find(agent => agent.id === id)
+    const open = row => (row.bot?.seat ? rowActions.openSeat(row.bot)
+      : row.kind === 'group' ? rowActions.openSession(row.id)
+      : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
+    const menu = (row, event) => {
+      // A seat is read here and run in Herdr: it has no Bot settings or context menu.
+      if (row.bot?.seat) return
+      const kind = row.kind === 'group' ? 'room' : row.bot?.dsh ? 'agent' : 'bot'
+      if (byId(row.id)) actions.openMenu({ kind, id: row.id, x: event.clientX, y: event.clientY })
+    }
+    const renderAfter = (row) => {
+      if (row.kind !== 'bot' || row.bot?.seat) return null
+      if (row.bot.dsh) {
+        const agent = (roster.agents ?? []).find(candidate => candidate.id === row.id)
+        return agent ? h(AgentRow, { ...rowProps, agent, bare: true, marked: markedUnread[agent.id] === true }) : null
+      }
+      const bot = roster.byId[row.id]
+      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotChildren, { ...rowProps, bot })) : null
+    }
+    return h(LeftBar, {
+      roster, order, marked: markedUnread, seats, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
+      open, menu, renderAfter, notice, onKeyDown: typeToSearch,
+      // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
+      renderEnd: (row) => {
+        const bot = row.bot.dsh ? undefined : roster.byId[row.id]
+        return bot ? h(RowBadges, { bot, roster, useWork: props.useWork }) : null
+      },
+      tools: h(Fragment, null, h(UpdateButton, { useUpdate: props.useUpdate, actions }), h(SidebarTools, toolProps)),
+      foot: h(WorkCodeSwitch, { roster, useSessions }),
+      collapse: h('button', { type: 'button', className: 'bt-round bt-side-collapse', 'aria-label': t('Collapse sidebar'), title: t('Collapse sidebar'), onClick: () => actions.toggleSidebar() }, h(SidebarIcon)),
+      empty: roster.ready ? null : h('div', { className: 'bt-hint' }, bootFailed ? bootHint() : t('Setting up your Main Bot…')),
+    })
+  }
   return h('div', { className: wide ? 'bt-side' : 'bt-side bt-rail', onKeyDown: typeToSearch },
     wide ? h('div', { className: 'bt-side-top' },
       h('span', { className: 'bt-brand' }, h(Lockup, { height: 21 })),
@@ -596,7 +639,7 @@ export function ChannelsMoved({ wide, actions, useRoster }) {
 // Account seat of the Settings trigger: the visible label stays for assistive tech only.
 export function YouAvatar() {
   return h('span', { className: 'bt-you-wrap' },
-    h('span', { className: 'bt-you', 'aria-hidden': true }, h(OmniMark, { size: 22 })),
+    h('span', { className: 'bt-you', 'aria-hidden': true }, h(PersonFace)),
     h('span', { style: { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' } }, t('Settings')))
 }
 
@@ -654,6 +697,11 @@ function pressSettingsShortcut() {
     ctrlKey: held.has('control'), altKey: held.has('alt'), shiftKey: held.has('shift'), metaKey: held.has('meta'),
   }))
 }
+
+// The account's face: a plain person, not the app's mark (the mark is the rail's "This
+// computer" tile). Nothing about the person is known here, so it shows no name or picture.
+const PersonFace = () => h('svg', { className: 'bt-person', width: 18, height: 18, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', 'aria-hidden': true },
+  h('circle', { cx: 10, cy: 7, r: 3.2 }), h('path', { d: 'M4.2 16.2c.9-2.9 3.1-4.4 5.8-4.4s4.9 1.5 5.8 4.4' }))
 
 const NO_SUBSCRIBE = () => () => {}
 const NO_SNAPSHOT = () => null
@@ -760,7 +808,9 @@ export function AccountLauncher({ seat = true, settingsOpen, openSettings, openO
   if (signedIn) groups.push([[accountT('signOut'), SignOutIcon, askSignOut, undefined, true]])
   return h(Fragment, null,
     h('button', { ref: button, type: 'button', className: 'bt-account', 'aria-label': t('Account'), 'aria-haspopup': 'menu', 'aria-expanded': open, onClick: toggle },
-      h('span', { className: 'bt-you', 'aria-hidden': true }, h(OmniMark, { size: 22 }))),
+      h('span', { className: 'bt-you', 'aria-hidden': true }, h(PersonFace)),
+      // The new left bar shows the word beside the face (left-bar-css.js); the rail does not.
+      h('span', { className: 'bt-account-name', 'aria-hidden': true }, t('Account'))),
     open && box ? createPortal(h('div', { className: 'bt-menu bt-menu-up bt-account-menu', role: 'menu', 'aria-label': t('Account'), style: box },
       confirm !== null ? h('div', { className: 'bt-confirm', role: 'alertdialog', 'aria-label': accountT('signOut') },
         h('p', { className: 'bt-confirm-text' }, accountT(confirm === 'running' ? 'signOutRunningDescription' : confirm === 'unknown' ? 'signOutUnknownDescription' : 'signOutDescription')),

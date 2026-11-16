@@ -26,11 +26,15 @@ import { ComposerPermission, ComposerPlus, ComposerVoice, menuIcons } from './co
 import { CHATS_SOURCE, atSources } from './at-menu.js'
 import { BtwDock, BtwTurnTail } from './btw.js'
 import { SIDE_CSS, sideSource } from './side-chat.js'
+import { SEAT_CHAT_CSS, SEAT_CHAT_PANEL, SeatChatPanel, seatChatView } from './seat-chat.js'
 import { VOICE_BUNDLE, closingReplyText, requestPreparation } from './speech.js'
 import { sameVersion } from './dsh-offer.js'
 import { QuestionCard, QuestionDock } from './questions.js'
 import { DesktopUpdate, DESKTOP_UPDATE_CSS } from './desktop-update.js'
 import { WORK_CODE_SWITCH_CSS } from './work-code-switch.js'
+import { installCodeSide } from './code-side.js'
+import { LEFT_BAR_CSS } from './left-bar-css.js'
+import { installBarWidth } from './left-bar-width.js'
 import { PRIVACY_CSS } from './privacy.js'
 import { AGENT_ACCESS_CSS } from './agent-access.js'
 import { PET_CSS } from './pet.js'
@@ -630,6 +634,13 @@ export function apply(ctx) {
       const target = bot && currentPart(bot) !== last.sessionId ? currentPart(bot) : partFor(id)
       show(target)
     },
+    // A seat is not a Session: the bar sets the seat and picks the keyed main panel
+    // (RFC 0022 1L). Opening any Session returns the main panel to the conversation.
+    openSeat: (seat) => {
+      seatChatView.set({ seat })
+      try { ctx.layout.selectPanel(SEAT_CHAT_PANEL) } catch (error) { noteClientError('seat-chat', error) }
+    },
+    seatList: () => call('seat-chat-list'),
     selectPanel: (id) => { ctx.layout.selectPanel(id) },
     toggleSidebar: () => { ctx.layout.toggleSidebar() },
     setPanelYield: (on) => ui.set(state => (state.panelYield === on ? state : { ...state, panelYield: on })),
@@ -1154,7 +1165,10 @@ export function apply(ctx) {
   // so a surface change withdraws the whole group and the outlets re-render.
   const installShell = () => [
     () => installCompiledStyles(SHELL_CSS, 'shell'),
+    () => installCodeSide(ctx),
     () => installCompiledStyles(SIDEBAR_CSS, 'sidebar'),
+    () => installCompiledStyles(LEFT_BAR_CSS, 'left-bar'),
+    () => installBarWidth(),
     () => installCompiledStyles(SECRET_CSS + CONNECTOR_CSS + CONNECTORS_PAGE_CSS, 'secrets'),
     () => installCompiledStyles(LEARNING_CSS, 'learning'),
     () => installCompiledStyles(MODEL_CSS + CLI_LOGIN_CSS + FOLDER_CSS + BOT_SETTINGS_CSS + GROUP_SETTINGS_CSS + AVATAR_LIBRARY_CSS, 'models'),
@@ -1189,12 +1203,19 @@ export function apply(ctx) {
     () => installCompiledStyles(WIDGET_CSS, 'widgets'),
     () => installCompiledStyles(HANDOFF_CSS, 'handoff'),
     () => installCompiledStyles(SIDE_CSS, 'side'),
+    () => installCompiledStyles(SEAT_CHAT_CSS, 'seat-chat'),
     // Strip and panel styles also serve the side-chat tabs, which need no bridge.
     () => installCompiledStyles(BROWSER_CSS, 'browser'),
     () => installViewportWatch(),
     () => installFrameSync(),
     () => installTheme(),
     () => shadow('sidebar.workspaces', { priority: BOT_PRIORITY, inject: face }, TeamSidebar),
+    // The seat's rendered face is a keyed main panel, not a Session (RFC 0022 1L): the bar
+    // picks it, and opening any Session (or Back) puts the conversation back.
+    () => ctx.slots.inject('main', () => ctx.slots.register({
+      name: 'main', key: SEAT_CHAT_PANEL,
+      inject: () => ({ onBack: () => ctx.layout.selectPanel(null) }),
+    }, SeatChatPanel)),
     () => shadow('sidebar.brand.mark', { priority: BOT_PRIORITY }, BrandMark),
     () => shadow('sidebar.brand.name', { priority: BOT_PRIORITY }, BrandName),
     // The desktop app's own update, above the account and Channels (desktop-update.js).
