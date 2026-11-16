@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { EXIT } from '../lib/launcher.mjs'
+import { dshRunning } from '../smoke/process.mjs'
 import { FakeElectron, RELAY_PORT, TOKEN } from '../smoke/driver.mjs'
 
 const WSLC = fileURLToPath(new URL('..', import.meta.url))
@@ -192,6 +193,34 @@ test('a missing image pnpm stops the guest instead of falling back to PATH', asy
     const { code } = await electron.closed
     assert.equal(code, EXIT.dsh)
     assert.match(electron.stderr, /DSH did not start: the app's bundled pnpm is missing at .*pnpm\.cjs/)
+  } finally {
+    reap()
+    rmSync(box.dir, { recursive: true, force: true })
+  }
+})
+
+// The smoke's stop check now finds DSH by its launcher: the entry is in the environment, so the
+// command line shows the launcher. This is TRUE while the fake DSH lives and FALSE after stop.
+test('the running check sees the fake DSH through its launcher, and not after the stop', async () => {
+  const box = makeImage()
+  try {
+    const { electron } = await launch(box)
+    await electron.waitFor(frame => frame.type === 'ready', 15_000, 'ready')
+    electron.send({ type: 'ipc', message: { type: 'smoke:env' } })
+    const { pid } = await electron.ipc('smoke:env')
+    const launcher = join(box.image, 'dsh-launch', 'dsh-launch.cjs')
+    const guest = {
+      ok: (command, flag, pattern) => {
+        try { execFileSync(command, [flag, pattern], { stdio: 'ignore' }); return true } catch { return false }
+      },
+    }
+    assert.equal(alive(pid), true, 'the fake DSH process is live')
+    assert.equal(dshRunning(guest, launcher), true, 'the live launcher hosts the fake DSH')
+    assert.equal(dshRunning(guest, '@deepseek-ai/dsh/lib/bin.js'), false, 'the old entry pattern misses it')
+    const stopped = await electron.close()
+    assert.equal(stopped.code, EXIT.stopped)
+    assert.equal(dshRunning(guest, launcher), false, 'the launcher is gone after the stop')
+    assert.equal(alive(pid), false, 'the fake DSH is gone after the stop')
   } finally {
     reap()
     rmSync(box.dir, { recursive: true, force: true })
