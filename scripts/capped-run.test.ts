@@ -659,11 +659,70 @@ describe('capped-run', () => {
   });
 
   test.skipIf(!scope)(
-    'the unit Description carries the command name only, never argv',
+    'the unit Description and journal carry the command name only, never argv',
     async () => {
       const state = scratch('description-state');
       const name = `desc-${process.pid}-${Date.now()}`;
-      const script = join(scratch('description'), 'sleep-alloc.mjs');
+      const script = join(scratch('description'), 'sleep-marker.mjs');
+      const marker = 'fake-secret-marker-should-not-leak';
+      // A plain non-killed run: the marker is an argument, the payload only sleeps well under
+      // the cap, so there is no OOM (and no chance the kernel also takes the monitor).
+      writeFileSync(script, 'await Bun.sleep(2500);\n');
+      const wrapper = spawn(
+        'sh',
+        [SCRIPT, '--name', name, '--', process.execPath, script, marker],
+        {
+          cwd: work,
+          env: { ...process.env, CAPPED_RUN_TEST_STATE: state },
+          stdio: ['ignore', 'ignore', 'pipe'],
+        },
+      );
+      let stderr = '';
+      wrapper.stderr?.on('data', chunk => {
+        stderr += chunk.toString();
+      });
+      const done = closeCode(wrapper);
+      let unit = '';
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const list = spawnSync(
+          'systemctl',
+          ['--user', 'list-units', '--all', '--plain', '--no-legend', `capped-run-${name}-*`],
+          { encoding: 'utf8' },
+        );
+        const first = (list.stdout ?? '').trim().split('\n')[0] ?? '';
+        unit = first.trim().split(/\s+/)[0] ?? '';
+        if (unit) break;
+        await Bun.sleep(100);
+      }
+      expect(unit).not.toBe('');
+      const shown = spawnSync('systemctl', ['--user', 'show', '-p', 'Description', '--value', unit], {
+        encoding: 'utf8',
+      });
+      expect(shown.status).toBe(0);
+      expect(shown.stdout ?? '').toContain('bun');
+      expect(shown.stdout ?? '').not.toContain(marker);
+      expect(await done).toBe(0);
+      // Nothing was killed: no CAPPED line and no monitor-ended line.
+      expect(stderr.split('\n').filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
+      expect(stderr).not.toContain('exit 137:');
+      const log = existsSync(join(state, 'runs.log')) ? readFileSync(join(state, 'runs.log'), 'utf8') : '';
+      expect(log).not.toContain(marker);
+      await Bun.sleep(200);
+      const journal = spawnSync('journalctl', ['--user', '--unit', unit, '--no-pager', '--output', 'cat'], {
+        encoding: 'utf8',
+      });
+      expect(journal.stdout ?? '').not.toContain(marker);
+    },
+    120_000,
+  );
+
+  test.skipIf(!scope)(
+    'an OOM-killed run with the marker argument prints one honest line without it',
+    async () => {
+      const state = scratch('description-killed-state');
+      const name = `desc-kill-${process.pid}-${Date.now()}`;
+      const script = join(scratch('description-killed'), 'sleep-alloc.mjs');
       const marker = 'fake-secret-marker-should-not-leak';
       writeFileSync(
         script,
@@ -704,10 +763,20 @@ describe('capped-run', () => {
       expect(shown.stdout ?? '').not.toContain(marker);
       expect(await done).toBe(137);
       const capped = stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
-      expect(capped).toHaveLength(1);
-      expect(capped[0]).not.toContain(marker);
+      const ended = stderr
+        .split('\n')
+        .filter(line => line.startsWith('exit 137: the memory monitor ended before its final read;'));
+      // Either honest line, exactly one: never both and never silence.
+      expect(capped.length + ended.length).toBe(1);
+      const line = capped[0] ?? ended[0];
+      expect(line).not.toContain(marker);
       const log = existsSync(join(state, 'runs.log')) ? readFileSync(join(state, 'runs.log'), 'utf8') : '';
       expect(log).not.toContain(marker);
+      await Bun.sleep(200);
+      const journal = spawnSync('journalctl', ['--user', '--unit', unit, '--no-pager', '--output', 'cat'], {
+        encoding: 'utf8',
+      });
+      expect(journal.stdout ?? '').not.toContain(marker);
     },
     120_000,
   );
