@@ -5204,6 +5204,22 @@ test("#1411: a Fast model changed to a standard one doesn't keep Fast; --tier wi
   assert.equal(s.bots().bots[0].effort, undefined);
 });
 
+test("#1411: a model change to a Fast model with --tier fast keeps Fast on the launch", (t) => {
+  const s = scene(t);
+  codexHome(s);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "fast", "--json"]).code, 0);
+  // Sol -> Terra is a model change to another Fast-capable model, and the person keeps Fast in
+  // the same call: the new model still runs Fast, never the default tier.
+  const changed = s.cli(["edit", "Genie", "--model", "gpt-6.1-terra", "--tier", "fast"]);
+  assert.equal(changed.code, 0, changed.err);
+  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier], ["gpt-6.1-terra", "fast"]);
+  assert.equal(s.cli(["start", "Genie", "--json"]).code, 0);
+  assert.deepEqual(codexSeatWords(runCall(s.calls())).slice(-4),
+    ["-c", "model_reasoning_effort=high", "-c", "service_tier=priority"]);
+  assert.equal(codexSeatWords(runCall(s.calls())).includes("service_tier=default"), false,
+    "the default tier is for a model change that chose no tier of its own");
+});
+
 test("#1411: effort and tier are a Codex bot's: moving to another agent clears them, and another agent refuses them", (t) => {
   const s = scene(t);
   codexHome(s);
