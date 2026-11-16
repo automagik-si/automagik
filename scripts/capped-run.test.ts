@@ -26,7 +26,6 @@ const SCRIPT = join(import.meta.dir, 'capped-run');
 const WORDING = join(import.meta.dir, 'capped-run-wording.sh');
 const SHIM_FILE = join(import.meta.dir, 'capped-run-shim.sh');
 const work = mkdtempSync(join(tmpdir(), 'capped-run-test-'));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
 
 let sequence = 0;
 
@@ -157,9 +156,6 @@ function cappedKillDecision(
   return 'fail';
 }
 
-afterAll(() => {
-  expect(fileRetries).toBeLessThanOrEqual(RETRY_BUDGET);
-});
 
 async function cappedKillOutcome(
   args: string[],
@@ -1396,11 +1392,25 @@ describe('capped-run', () => {
     120_000,
   );
 });
+// The only final afterAll: cleanup first, then the checks, so an overrun cannot skip it.
 afterAll(() => {
-  if (lockScratch) rmSync(lockScratch.root, { recursive: true, force: true });
-  if (!existsSync('/dev/shm')) return;
-  const leftovers = readdirSync('/dev/shm').filter(
-    name => name.startsWith('capped-run-') && name.includes(`-${process.pid}-`),
-  );
-  expect(leftovers).toEqual([]);
+  let leftovers: string[] = [];
+  try {
+    if (lockScratch) rmSync(lockScratch.root, { recursive: true, force: true });
+    if (existsSync('/dev/shm')) {
+      leftovers = readdirSync('/dev/shm').filter(
+        name => name.startsWith('capped-run-') && name.includes(`-${process.pid}-`),
+      );
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+    const problems: string[] = [];
+    if (fileRetries > RETRY_BUDGET) {
+      problems.push(`retry budget: ${fileRetries} retries > ${RETRY_BUDGET}`);
+    }
+    if (leftovers.length > 0) {
+      problems.push(`/dev/shm leftovers: ${leftovers.join(', ')}`);
+    }
+    if (problems.length > 0) throw new Error(problems.join('; '));
+  }
 });
