@@ -7,6 +7,7 @@ import { apply } from '../index.js'
 import { TEAM_TOOLS } from '../src/host/constants.js'
 import { TEAM_LOOKUPS } from '../src/host/approvals.js'
 import { SETTINGS_PAGES, SHOWABLE_PAGES, isShowablePage } from '../src/shared/settings-pages.js'
+import { parseProposal } from '../src/shared/proposals.js'
 import { fakeContext } from './fake-ctx.js'
 
 // show_settings opens a Settings page as a card in a Bot's own chat. It changes nothing, so
@@ -41,16 +42,22 @@ function start(t) {
   ctx.connection.fetch.register = () => () => {}
   apply(ctx, { home })
   const rt = ctx.provided.get('omniTeam')
-  return (args, agentId) => {
+  const run = name => (args, agentId) => {
     let concluded = false
     const exec = { agent: { id: agentId }, callId: `call-${agentId}`, concludeTurn: () => { concluded = true } }
-    return rt.teamTools.find(d => d.name === 'show_settings').execute(args, exec).then(text => ({ text, concluded }))
+    return rt.teamTools.find(d => d.name === name).execute(args, exec).then(text => ({ text, concluded }))
   }
+  const show = run('show_settings')
+  show.propose = run('propose_bot_change')
+  show.rt = rt
+  return show
 }
 
-test('show_settings is a team tool that needs no approval', () => {
-  assert.ok(TEAM_TOOLS.includes('show_settings'))
-  assert.ok(TEAM_LOOKUPS.has('show_settings'), 'it changes nothing, so the person is not asked about it')
+test('show_settings and propose_bot_change are team tools that need no approval', () => {
+  for (const name of ['show_settings', 'propose_bot_change']) {
+    assert.ok(TEAM_TOOLS.includes(name), name)
+    assert.ok(TEAM_LOOKUPS.has(name), `${name} changes nothing, so the person is not asked about it`)
+  }
 })
 
 test('every page the Settings dialog lists can be shown, and only those or a plugin page', () => {
@@ -86,4 +93,36 @@ test('an unknown page, a long note, a group Session and a stranger are refused',
   assert.match((await show({ page: 'general', note: 'x'.repeat(201) }, 'm1')).text, /^Keep the note to one short line/)
   assert.match((await show({ page: 'general' }, 'g-b2')).text, /^Settings cards only work in your own chat/)
   assert.equal((await show({ page: 'general' }, 'stranger')).text, 'Only Bots on the team can use show_settings.')
+})
+
+// propose_bot_change: a card with each field as it is and as it would be; nothing changes until
+// the user presses Apply, so the tool only checks and resolves what the card will save.
+test('a proposal is checked, carries only what changes, and changes nothing', async (t) => {
+  const show = start(t)
+  const before = JSON.stringify(show.rt.botOf('b2'))
+  const asked = await show.propose({ role: 'Editor', name: 'Writer', instructions: '  Edit the drafts.  ', note: 'As you asked' }, 'b2')
+  assert.equal(asked.concluded, false)
+  assert.match(asked.text, /^Proposed for Writer: role, instructions\. The card is on screen; nothing changes until the user presses Apply\.\n/)
+  assert.deepEqual(parseProposal(asked.text), { bot: 'b2', note: 'As you asked', change: { role: 'Editor', instructions: 'Edit the drafts.' } })
+  assert.equal(JSON.stringify(show.rt.botOf('b2')), before, 'the Bot is unchanged')
+})
+
+test('a Main Bot proposes for another Bot; any other Bot only for itself', async (t) => {
+  const show = start(t)
+  assert.equal(parseProposal((await show.propose({ bot: 'writer', role: 'Editor' }, 'm1')).text)?.bot, 'b2')
+  assert.match((await show.propose({ bot: 'Omni', role: 'Boss' }, 'b2')).text, /^Only a Main Bot can propose changes to another Bot/)
+  assert.equal((await show.propose({ bot: 'Nobody', role: 'x' }, 'm1')).text, 'No Bot named Nobody.')
+})
+
+test('an empty, unchanged or bad proposal is refused, and so are groups and strangers', async (t) => {
+  const show = start(t)
+  assert.match((await show.propose({}, 'b2')).text, /^Propose at least one change/)
+  assert.match((await show.propose({ deny_tools: ['bash'] }, 'b2')).text, /^Propose at least one change/, 'what only the user may set is no proposal')
+  assert.equal((await show.propose({ name: 'Writer', role: 'Wr' }, 'b2')).text, 'Nothing to propose: Writer already has these settings.')
+  assert.equal((await show.propose({ name: '   ' }, 'b2')).text, 'A name has 1 to 40 characters.')
+  assert.match((await show.propose({ role: 'x'.repeat(25) }, 'b2')).text, /^A role label has 24 characters at most\./)
+  assert.match((await show.propose({ model: ' ' }, 'b2')).text, /^Name the model to move to/)
+  assert.match((await show.propose({ role: 'x', note: 'n'.repeat(201) }, 'b2')).text, /^Keep the note to one short line/)
+  assert.match((await show.propose({ role: 'x' }, 'g-b2')).text, /^Proposal cards only work in your own chat/)
+  assert.equal((await show.propose({ role: 'x' }, 'stranger')).text, 'Only Bots on the team can use propose_bot_change.')
 })

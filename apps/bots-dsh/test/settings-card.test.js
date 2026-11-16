@@ -34,7 +34,7 @@ const load = (text) => {
   })
   return module.exports
 }
-const card = load(await bundle("export * from './src/client/settings-card.js'"))
+const card = load(await bundle("export * from './src/client/settings-card.js'; export { parseProposal, applySteps } from './src/shared/proposals.js'"))
 const settings = load(await bundle("export { PAGE_ICONS, PageBoundary, SettingsPage, SettingsDialog } from './src/client/settings.js'"))
 
 const walk = (node, match, out = []) => {
@@ -121,4 +121,63 @@ test('open without the pages registered, or on a page this window lacks, it says
   const missing = card.SettingsCard({ target: card.settingsTarget({ page: 'plugin:gone' }, roster), roster, actions: {} })
   assert.match(textOf(missing), /This page is not in this window's Settings\./)
   assert.equal(walk(missing, node => node.type === 'button' && textOf(node) === 'Open in Settings').length, 0, 'no opener, no button')
+})
+
+// --- propose_bot_change -------------------------------------------------------------------
+// Values made in the bundle's own realm compare by their JSON.
+const plain = value => JSON.parse(JSON.stringify(value))
+const line = proposal => `Proposed for Writer: role. The card is on screen; nothing changes until the user presses Apply.\nproposal: ${JSON.stringify(proposal)}`
+
+test('a proposal is read from the result\'s last line, with only the fields a Bot may propose', () => {
+  assert.deepEqual(plain(card.parseProposal(line({ bot: 'b2', note: 'n', change: { role: 'Editor', denyTools: 'bash', private: 'false', model: 'a/b' } }))),
+    { bot: 'b2', note: 'n', change: { role: 'Editor', model: 'a/b' } })
+  for (const text of ['No Bot named x.', line({ bot: 'b2', change: {} }), line({ change: { role: 'x' } }), 'proposal: {not json', line({ bot: 'b2', change: { denyTools: 'bash' } })]) {
+    assert.equal(card.parseProposal(text), undefined, text)
+  }
+})
+
+test('Apply saves a new model and its level alone, first, then the rest', () => {
+  assert.deepEqual(plain(card.applySteps({ role: 'Editor', model: 'p/m', effort: 'high', name: 'Ed' })), [{ model: 'p/m', effort: 'high' }, { role: 'Editor', name: 'Ed' }])
+  assert.deepEqual(plain(card.applySteps({ effort: 'low', role: 'x' })), [{ effort: 'low', role: 'x' }], 'a level alone stays with the rest')
+  assert.deepEqual(plain(card.applySteps({ model: 'p/m' })), [{ model: 'p/m' }])
+})
+
+const editor = { ...writer, role: 'Wr', instructions: 'Write.', workDir: '', model: 'p/old', effort: 'high' }
+const rosterOf = bot => ({ ...roster, byId: { b2: bot }, bots: [bot] })
+
+test('the card shows each field as it is and as it would be, with Apply', () => {
+  states = ['open', '']
+  const proposal = { bot: 'b2', note: 'As you asked', change: { role: 'Editor', effort: '', workDir: '' } }
+  const tree = card.ProposalCard({ proposal, roster: rosterOf(editor), actions: { updateBot() {}, openSettings() {} } })
+  const rows = walk(tree, node => node.props?.className === 'bt-propcard-row').map(row => walk(row, node => node.props?.role === 'cell').map(textOf))
+  assert.deepEqual(rows, [['Wr', 'Editor'], ['high', 'Model default'], ['Team workspace', 'Team workspace']])
+  assert.match(textOf(tree), /As you asked/)
+  assert.equal(walk(tree, node => node.type === 'button' && textOf(node) === 'Apply').length, 1)
+})
+
+test('Apply is the user\'s own save, in the steps applySteps gives, with the default level as null', async () => {
+  states = ['open', '']
+  const saved = []
+  const proposal = { bot: 'b2', change: { role: 'Editor', model: 'p/new', effort: '' } }
+  const tree = card.ProposalCard({ proposal, roster: rosterOf(editor), actions: { updateBot: async (id, patch) => { saved.push([id, patch]) } } })
+  const [apply] = walk(tree, node => node.type === 'button' && textOf(node) === 'Apply')
+  await apply.props.onClick()
+  assert.deepEqual(plain(saved), [['b2', { model: 'p/new', effort: null }], ['b2', { role: 'Editor' }]])
+})
+
+test('once the Bot holds every proposed value the card settles as applied, with no buttons', () => {
+  states = ['open', '']
+  const proposal = { bot: 'b2', change: { role: 'Editor' } }
+  const tree = card.ProposalCard({ proposal, roster: rosterOf({ ...editor, role: 'Editor' }), actions: { updateBot() {} } })
+  assert.match(textOf(tree), /Applied/)
+  assert.equal(walk(tree, node => node.type === 'button').length, 0)
+})
+
+test('a refused or unfinished call draws no proposal; a Bot gone from the team says so', () => {
+  const actions = { updateBot() {} }
+  for (const props of [{ done: false, content: '' }, { done: true, isError: true, content: line({ bot: 'b2', change: { role: 'x' } }) }, { done: true, content: 'Nothing to propose: Writer already has these settings.' }]) {
+    assert.equal(walk(card.ProposalCall({ roster, actions, ...props }), node => node.type === card.ProposalCard).length, 0)
+  }
+  states = ['open', '']
+  assert.match(textOf(card.ProposalCard({ proposal: { bot: 'gone', change: { role: 'x' } }, roster, actions })), /no longer on the team/)
 })

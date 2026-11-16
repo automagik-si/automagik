@@ -6,9 +6,10 @@
 // change (the tools a Bot is denied, who may send) without being able to change it.
 import { createElement as h, useState } from 'react'
 import { CellEmpty } from './cell-empty.js'
-import { ChevronRightIcon, PlugIcon } from './icons.js'
+import { CheckIcon, ChevronRightIcon, PencilIcon, PlugIcon } from './icons.js'
 import { t } from './i18n.js'
 import { SETTINGS_PAGES } from '../shared/settings-pages.js'
+import { applySteps, parseProposal } from '../shared/proposals.js'
 
 // The Settings pages, registered by index.js (as canvas-slot.js is), so the chat cells load
 // without the whole Settings dialog. Without them (tests, a window before the client is
@@ -79,6 +80,74 @@ export function SettingsCall({ args, done, content, isError, roster, actions }) 
   return h('div', { className: 'bt-q-inline' }, h(SettingsCard, { target, note: args.text('note'), roster, actions }))
 }
 
+// --- The propose_bot_change card ---------------------------------------------------------
+// Each proposed field as it is now (from the live roster) and as it would be. Apply saves
+// through actions.updateBot, the call the Bot's settings form makes, so it is the user's own
+// change; a field that already holds the proposed value shows as done, so the card settles
+// by itself once applied, here or anywhere else, and needs no record of its own.
+
+const FIELD_LABELS = { name: 'Name', role: 'Role', instructions: 'Instructions', workDir: 'Working folder', model: 'Model', effort: 'Thinking level' }
+const SHORT = 140
+export const currentOf = (bot, key) => {
+  if (key === 'model') return bot.model ?? bot.appliedModel ?? ''
+  const value = bot[key]
+  return typeof value === 'string' ? value : ''
+}
+const shown = (key, value) => {
+  if (value === '') return key === 'workDir' ? t('Team workspace') : key === 'effort' ? t('Model default') : t('(empty)')
+  return value.length > SHORT ? `${value.slice(0, SHORT)}…` : value
+}
+// The patch updateBot takes: an empty level is the model's default (null).
+const patchOf = step => Object.fromEntries(Object.entries(step).map(([key, value]) => [key, key === 'effort' && value === '' ? null : value]))
+
+export function ProposalCard({ proposal, roster, actions }) {
+  const [state, setState] = useState('open')
+  const [error, setError] = useState('')
+  const bot = roster.byId?.[proposal.bot]
+  if (bot === undefined) return h('div', { className: 'bt-event' }, t('That Bot is no longer on the team.'))
+  const rows = Object.entries(proposal.change).map(([key, value]) => ({ key, value, now: currentOf(bot, key) }))
+  const done = rows.every(row => row.now === row.value)
+  const apply = async () => {
+    if (state === 'busy' || !actions.updateBot) return
+    setState('busy')
+    setError('')
+    try {
+      for (const step of applySteps(proposal.change)) await actions.updateBot(bot.id, patchOf(step))
+      setState('open')
+    } catch (failure) {
+      setError(failure?.message ?? String(failure))
+      setState('open')
+    }
+  }
+  const status = done ? t('Applied') : state === 'dismissed' ? t('Dismissed') : null
+  return h('section', { className: 'bt-setcard bt-propcard', 'data-done': done || undefined, 'aria-label': t('Proposed change to {name}', { name: bot.name }) },
+    h('div', { className: 'bt-setcard-head' },
+      h('span', { className: 'bt-setcard-icon', 'aria-hidden': true }, done ? h(CheckIcon) : h(PencilIcon)),
+      h('span', { className: 'bt-setcard-text' },
+        h('span', { className: 'bt-setcard-kicker' }, t('Proposed change')),
+        h('span', { className: 'bt-setcard-title' }, bot.name),
+        proposal.note ? h('span', { className: 'bt-setcard-note' }, proposal.note) : null),
+      status ? h('span', { className: 'bt-propcard-status' }, status) : null),
+    h('div', { className: 'bt-propcard-rows', role: 'table', 'aria-label': t('Changes') },
+      rows.map(row => h('div', { key: row.key, className: 'bt-propcard-row', role: 'row', 'data-done': row.now === row.value || undefined },
+        h('span', { className: 'bt-propcard-field', role: 'rowheader' }, t(FIELD_LABELS[row.key])),
+        h('span', { className: 'bt-propcard-was', role: 'cell' }, shown(row.key, row.now)),
+        h('span', { className: 'bt-propcard-arrow', 'aria-hidden': true }, '→'),
+        h('span', { className: 'bt-propcard-new', role: 'cell' }, shown(row.key, row.value))))),
+    error ? h('div', { className: 'bt-error bt-propcard-error', role: 'alert' }, error) : null,
+    done || state === 'dismissed' ? null : h('div', { className: 'bt-q-foot bt-propcard-actions' },
+      actions.openSettings ? h('button', { type: 'button', className: 'bt-q-btn', onClick: () => actions.openSettings('bots', bot.id) }, t('Open in Settings')) : null,
+      h('button', { type: 'button', className: 'bt-q-btn', disabled: state === 'busy', onClick: () => setState('dismissed') }, t('Dismiss')),
+      h('button', { type: 'button', className: 'bt-q-submit', disabled: state === 'busy' || !actions.updateBot, onClick: apply }, state === 'busy' ? t('Applying…') : t('Apply'))))
+}
+
+// The propose_bot_change call in the transcript: the checked proposal from its result.
+export function ProposalCall({ done, content, isError, roster, actions }) {
+  const proposal = done && !isError ? parseProposal(content) : undefined
+  if (proposal === undefined) return h(CellEmpty)
+  return h('div', { className: 'bt-q-inline' }, h(ProposalCard, { proposal, roster, actions }))
+}
+
 export const SETTINGS_CARD_CSS = `
 .bt-setcard{width:100%;max-width:640px;border:1px solid var(--st-line,var(--bt-line));border-radius:var(--st-r-dialog,24px);background:var(--st-paper,var(--bt-card));overflow:hidden}
 .bt-setcard-head{display:flex;align-items:center;gap:8px;padding:10px 14px 10px 10px}
@@ -93,4 +162,14 @@ export const SETTINGS_CARD_CSS = `
 .bt-setcard[data-open] .bt-setcard-chev{transform:rotate(90deg)}
 .bt-setcard-body{border-top:1px solid var(--st-line,var(--bt-line));padding:12px 14px;max-height:480px;overflow:auto}
 .bt-setcard-missing{margin:0;color:var(--bt-ink-2)}
+.bt-propcard-status{margin-left:auto;font-size:12px;color:var(--bt-ink-2)}
+.bt-propcard-rows{display:grid;grid-template-columns:max-content minmax(0,1fr) auto minmax(0,1fr);gap:6px 10px;align-items:baseline;border-top:1px solid var(--st-line,var(--bt-line));padding:10px 14px}
+.bt-propcard-row{display:contents}
+.bt-propcard-field{font-size:12px;color:var(--bt-ink-2)}
+.bt-propcard-was{color:var(--bt-ink-3);text-decoration:line-through;overflow-wrap:anywhere}
+.bt-propcard-row[data-done] .bt-propcard-was{text-decoration:none}
+.bt-propcard-arrow{color:var(--bt-ink-3)}
+.bt-propcard-new{overflow-wrap:anywhere}
+.bt-propcard-error{margin:0 14px 8px}
+.bt-propcard-actions{padding:0 14px 12px}
 `

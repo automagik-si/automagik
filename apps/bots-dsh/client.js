@@ -414,6 +414,16 @@ var ZH = {
   "Settings: {title}": "设置：{title}",
   "Open in Settings": "在设置中打开",
   "This page is not in this window's Settings.": "此窗口的设置中没有这个页面。",
+  // The propose_bot_change card (settings-card.js)
+  "Model default": "模型默认",
+  "(empty)": "（空）",
+  "That Bot is no longer on the team.": "这个 Bot 已不在团队中。",
+  "Applied": "已应用",
+  "Proposed change to {name}": "对 {name} 的修改建议",
+  "Proposed change": "修改建议",
+  "Changes": "修改",
+  "Applying…": "正在应用…",
+  "Apply": "应用",
   "Off by default. Set up Remote Hermes in Bot settings.": "默认关闭。请在 Bot 设置中设置远程 Hermes。",
   "No models are known for this connection yet. Manage the connection to list them.": "此连接尚不清楚有哪些模型。请管理连接以列出模型。",
   "Manage connection…": "管理连接…",
@@ -4104,21 +4114,21 @@ function usageOf(list, ids) {
 function runStatsOf(values) {
   const stats = values?.sessionStats;
   const pressure = values?.contextPressure;
-  const shown = [];
-  if (stats?.turns > 0) shown.push({ key: "turns", text: stats.turns === 1 ? t("1 turn") : t("{count} turns", { count: stats.turns }) });
+  const shown2 = [];
+  if (stats?.turns > 0) shown2.push({ key: "turns", text: stats.turns === 1 ? t("1 turn") : t("{count} turns", { count: stats.turns }) });
   if (stats?.decodeMs > 0 && stats.decodeTokens > 0) {
     const speed = stats.decodeTokens / (stats.decodeMs / 1e3);
-    shown.push({ key: "speed", text: t("{speed} tok/s", { speed: speed >= 10 ? Math.round(speed) : Math.round(speed * 10) / 10 }) });
+    shown2.push({ key: "speed", text: t("{speed} tok/s", { speed: speed >= 10 ? Math.round(speed) : Math.round(speed * 10) / 10 }) });
   }
   const used = pressure?.projectedTokens ?? pressure?.pressureTokens;
   if (Number.isFinite(used) && pressure.contextWindow > 0) {
-    shown.push({
+    shown2.push({
       key: "context",
       text: t("Context {percent}%", { percent: Math.min(100, Math.round(used / pressure.contextWindow * 100)) }),
       title: t("{used} of {total} tokens of context in use", { used: formatTokens(used), total: formatTokens(pressure.contextWindow) })
     });
   }
-  return shown;
+  return shown2;
 }
 
 // src/client/inks.js
@@ -4949,11 +4959,11 @@ function BotMark(props) {
 function PetMark({ size, state: state2 = "idle", live = false, gaze = false, pokeable = false, label, pet, tint }) {
   const [poked, setPoked] = (0, import_react7.useState)(false);
   const drowsy = useDrowsy(live);
-  const shown = poked ? "poked" : drowsy && state2 === "idle" ? "sleeping" : STATES.includes(state2) ? state2 : "idle";
+  const shown2 = poked ? "poked" : drowsy && state2 === "idle" ? "sleeping" : STATES.includes(state2) ? state2 : "idle";
   return (0, import_react7.createElement)("span", {
     className: "bt-mark",
     "data-shape": "pet",
-    "data-state": shown,
+    "data-state": shown2,
     "data-live": live ? "" : void 0,
     "data-tint": tint === GENIE_AURORA ? GENIE_AURORA : void 0,
     style: { width: size, height: size, ...tint && tint !== GENIE_AURORA ? { filter: tint } : {} },
@@ -4961,7 +4971,7 @@ function PetMark({ size, state: state2 = "idle", live = false, gaze = false, pok
     "aria-label": label,
     "aria-hidden": label ? void 0 : true,
     onClick: pokeable ? () => setPoked(true) : void 0
-  }, (0, import_react7.createElement)(PetSprite, { pet, size, state: shown, live, gaze, onOnce: () => setPoked(false) }));
+  }, (0, import_react7.createElement)(PetSprite, { pet, size, state: shown2, live, gaze, onOnce: () => setPoked(false) }));
 }
 function DrawnMark({ bot, look, size = 36, state: state2 = "idle", live = false, gaze = false, pokeable = false, label, tint }) {
   const ref = (0, import_react7.useRef)(null);
@@ -5423,11 +5433,11 @@ function SecretToolCell({ sessionId, callId, name, done, content, roster, action
 }
 function SecretDock({ sessionId, useRoster, useCards, useHeldCards, actions }) {
   const roster = useRoster((value) => value);
-  const shown = useCards?.((state2) => state2[sessionId]) ?? NONE;
+  const shown2 = useCards?.((state2) => state2[sessionId]) ?? NONE;
   const held = useHeldCards?.((state2) => state2[sessionId]) ?? NONE;
   const bot = roster.byId[sessionId];
   if (!bot || currentPart(bot) !== sessionId) return null;
-  const drawn2 = (entry) => entry.callId && entry.sessionId === sessionId && shown[entry.callId] > 0 && !(held[heldCardKey("secret", entry.id)] > 0);
+  const drawn2 = (entry) => entry.callId && entry.sessionId === sessionId && shown2[entry.callId] > 0 && !(held[heldCardKey("secret", entry.id)] > 0);
   const waiting = (roster.secretRequests?.[bot.id] ?? []).filter((entry) => entry.status === "pending" && !drawn2(entry));
   if (waiting.length === 0) return null;
   return (0, import_react10.createElement)("div", { className: "bt-q-dock bt-secret-dock" }, waiting.map((request) => (0, import_react10.createElement)(SecretCard, { key: JSON.stringify([sessionId, request.id, request.kind]), sessionId, bot, request, roster, actions })));
@@ -6242,9 +6252,9 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
   const callbacks = (0, import_react15.useRef)({ onConnected, onSaved, onClose });
   callbacks.current = { onConnected, onSaved, onClose };
   const minimum = view?.minimum ?? initialView?.minimum;
-  const failed = (failure, shown, detail, requestId) => {
+  const failed = (failure, shown2, detail, requestId) => {
     setDetails(false);
-    setError({ ...errorFor(failure, shown, detail, minimum), ...requestId ? { requestId } : {} });
+    setError({ ...errorFor(failure, shown2, detail, minimum), ...requestId ? { requestId } : {} });
     setStep("error");
     setStatus("error");
   };
@@ -6405,7 +6415,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
     setStep("error");
     setStatus("error");
   };
-  const save = async (testId, chosen, shown = draft) => {
+  const save = async (testId, chosen, shown2 = draft) => {
     if (saving.current) return;
     saving.current = true;
     const generation = ++epoch.current;
@@ -6423,7 +6433,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       else callbacks.current.onClose();
     } catch (failure) {
       if (!live.current || generation !== epoch.current || failure?.name === "AbortError") return;
-      failed(failure, shown);
+      failed(failure, shown2);
     } finally {
       saving.current = false;
     }
@@ -6519,7 +6529,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
   };
   const trustHost = async () => {
     if (saving.current || !error?.trust || !error.requestId) return;
-    const generation = ++epoch.current, requestId = error.requestId, shown = draft;
+    const generation = ++epoch.current, requestId = error.requestId, shown2 = draft;
     setStatus("trusting");
     try {
       await run3("hermes-remote-ssh-trust", { requestId });
@@ -6529,7 +6539,7 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
       if (!live.current || generation !== epoch.current || failure?.name === "AbortError") return;
       const detail = await failureDetail({ requestId });
       if (!live.current || generation !== epoch.current) return;
-      failed(failure, shown, detail, requestId);
+      failed(failure, shown2, detail, requestId);
     }
   };
   const refreshProfiles = async () => {
@@ -6925,10 +6935,10 @@ function modelHint(bot, roster, state2) {
     const answering = host.entries?.find((entry) => entry.answering)?.label;
     return answering ? t("{model} answers now.", { model: answering }) : null;
   }
-  const shown = modelOf(bot, roster);
-  if (shown === void 0) return t("Pick the model this Bot runs on.");
-  if (!shown.served && (roster.models ?? []).length > 0) return t("This model is not available now. Pick another one.");
-  const served = servedOf(roster, shown.ref);
+  const shown2 = modelOf(bot, roster);
+  if (shown2 === void 0) return t("Pick the model this Bot runs on.");
+  if (!shown2.served && (roster.models ?? []).length > 0) return t("This model is not available now. Pick another one.");
+  const served = servedOf(roster, shown2.ref);
   if (served?.needsSignIn) return t("{model} needs a sign-in before it can answer.", { model: served.name });
   if (served?.needsAccount) return t("{model} waits for you to confirm its account.", { model: served.name });
   const waiting = served?.covered ? roster.subscriptionWaiting?.[served.provider] : void 0;
@@ -7417,14 +7427,14 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
   const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu({ onEscape: back, minWidth: 300 });
   const live = (0, import_react16.useRef)(false);
   live.current = isOpen;
-  const shown = modelOf(bot, roster);
+  const shown2 = modelOf(bot, roster);
   const current = bot.model ?? bot.appliedModel;
   const currentRef = (0, import_react16.useRef)(current);
   currentRef.current = current;
   const currentRoute = current === void 0 ? void 0 : modelRoute(roster, current);
   const shownRunning = running2 && bar && current !== void 0 && typeof bot.runningModel === "string" && bot.runningModel !== current ? modelOf({ model: bot.runningModel }, roster) : void 0;
   const triggerRoute = shownRunning === void 0 ? currentRoute : modelRoute(roster, bot.runningModel);
-  const runningTitle = shownRunning === void 0 ? void 0 : t("Running instead of {model}", { model: shown?.name ?? current });
+  const runningTitle = shownRunning === void 0 ? void 0 : t("Running instead of {model}", { model: shown2?.name ?? current });
   const served = servedOf(roster, current);
   const reasoning = useEfforts(served, withEfforts ? current : void 0, actions);
   const picked = reasoning?.efforts?.some((effort) => effort.id === bot.effort) ? bot.effort : void 0;
@@ -7587,8 +7597,8 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
       return done;
     })
   } : actions;
-  const bits = shown === void 0 ? [] : [...new Set([currentRoute ? routeName(currentRoute.route) : void 0, shown.provider].filter(Boolean))];
-  if (shown !== void 0 && shown.unavailable && models.length > 0) bits.push(t("not available"));
+  const bits = shown2 === void 0 ? [] : [...new Set([currentRoute ? routeName(currentRoute.route) : void 0, shown2.provider].filter(Boolean))];
+  if (shown2 !== void 0 && shown2.unavailable && models.length > 0) bits.push(t("not available"));
   else if (effortLabel !== void 0) bits.push(effortLabel);
   const second = bits.length > 0 ? bits.join(" · ") : null;
   const confirmView = confirm === void 0 ? null : (0, import_react16.createElement)(RouteConfirm, {
@@ -7668,22 +7678,22 @@ function DshModelMenu({ bot, roster, actions, run: run3, wide = false, link = fa
         "data-route": triggerRoute?.route,
         "aria-haspopup": "menu",
         "aria-expanded": isOpen,
-        "aria-label": t("Model: {model}", { model: shownRunning?.name ?? shown?.name ?? t("none") }) + (runningTitle === void 0 ? "" : `. ${runningTitle}`),
+        "aria-label": t("Model: {model}", { model: shownRunning?.name ?? shown2?.name ?? t("none") }) + (runningTitle === void 0 ? "" : `. ${runningTitle}`),
         title: runningTitle,
-        "data-missing": shown !== void 0 && shown.unavailable && models.length > 0 ? "" : void 0,
+        "data-missing": shown2 !== void 0 && shown2.unavailable && models.length > 0 ? "" : void 0,
         onClick: toggle
       },
       bar ? (0, import_react16.createElement)(
         "span",
         { className: "bt-model-bar" },
         triggerRoute === void 0 ? null : (0, import_react16.createElement)("span", { className: "bt-model-bar-route", "aria-hidden": true }, (0, import_react16.createElement)(ROUTE_ICON[triggerRoute.route] ?? ConnectorIcon, { size: 14 })),
-        (0, import_react16.createElement)("span", { className: "bt-model-bar-name" }, shownRunning?.name ?? shown?.name ?? t("Choose a model")),
+        (0, import_react16.createElement)("span", { className: "bt-model-bar-name" }, shownRunning?.name ?? shown2?.name ?? t("Choose a model")),
         triggerEffort === void 0 ? null : (0, import_react16.createElement)("span", { className: "bt-model-bar-effort" }, triggerEffort),
-        shownRunning === void 0 ? null : (0, import_react16.createElement)("span", { className: "bt-model-bar-effort", "data-running-instead": "" }, t("instead of {model}", { model: shown?.name ?? current }))
+        shownRunning === void 0 ? null : (0, import_react16.createElement)("span", { className: "bt-model-bar-effort", "data-running-instead": "" }, t("instead of {model}", { model: shown2?.name ?? current }))
       ) : (0, import_react16.createElement)(
         "span",
         { className: "bt-model-copy" },
-        (0, import_react16.createElement)("span", { className: "bt-model-name" }, shown?.name ?? t("Choose a model")),
+        (0, import_react16.createElement)("span", { className: "bt-model-name" }, shown2?.name ?? t("Choose a model")),
         second === null ? null : (0, import_react16.createElement)("span", { className: "bt-model-provider" }, second)
       ),
       (0, import_react16.createElement)(Caret)
@@ -7779,11 +7789,11 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
   const [busy, setBusy] = (0, import_react16.useState)("");
   const [error, setError] = (0, import_react16.useState)("");
   const hosted = roster.hostModels?.[bot?.id] !== void 0;
-  const shown = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && !hosted && !idle;
+  const shown2 = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && !hosted && !idle;
   (0, import_react16.useEffect)(() => {
-    if (shown) void actions.refreshModels?.();
-  }, [shown, sessionId]);
-  if (!shown) return null;
+    if (shown2) void actions.refreshModels?.();
+  }, [shown2, sessionId]);
+  if (!shown2) return null;
   const models = roster.models ?? [];
   const routes = routesFor(bot, roster);
   const usable = models.filter(usableModel).filter((model) => routes.includes(modelRoute(roster, model.ref).route));
@@ -10716,8 +10726,8 @@ function valueAxis(values, zero) {
   const pad2 = (high - low) * 0.1 || Math.abs(high) * 0.1 || 1;
   return niceTicks(low - pad2, high + pad2);
 }
-function columns({ categories, series, unit, kind }, width, active, shown) {
-  const visible = series.filter((_, index) => shown[index]);
+function columns({ categories, series, unit, kind }, width, active, shown2) {
+  const visible = series.filter((_, index) => shown2[index]);
   const ticks = valueAxis(visible.flatMap((item) => item.values), kind !== "line");
   const lo = ticks[0];
   const hi = ticks.at(-1);
@@ -10774,8 +10784,8 @@ function columns({ categories, series, unit, kind }, width, active, shown) {
   const hits = categories.map((_, at) => ({ x: plot.x + band * at, y: plot.y, w: band, h: plot.h }));
   return { parts, height, points, hits };
 }
-function rows({ categories, series, unit }, width, active, shown) {
-  const visible = series.filter((_, index) => shown[index]);
+function rows({ categories, series, unit }, width, active, shown2) {
+  const visible = series.filter((_, index) => shown2[index]);
   const ticks = valueAxis(visible.flatMap((item) => item.values), true);
   const lo = ticks[0];
   const hi = ticks.at(-1);
@@ -10934,15 +10944,15 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   const menuKey = (0, import_react24.useId)();
   const table = (0, import_react24.useRef)(asTable);
   table.current = asTable;
-  const shown = series.map((_, index) => !hidden.includes(index));
+  const shown2 = series.map((_, index) => !hidden.includes(index));
   const toggle = (index) => {
     if (hidden.includes(index)) setHidden(hidden.filter((item) => item !== index));
-    else if (shown.filter(Boolean).length > 1) setHidden([...hidden, index]);
+    else if (shown2.filter(Boolean).length > 1) setHidden([...hidden, index]);
   };
   const label = typeof node.caption === "string" && node.caption !== "" ? node.caption : ui2.t("Chart");
   const isDonut = kind === "donut";
   const legendBeside = isDonut && width >= 360;
-  const drawn2 = isDonut ? donut(data, legendBeside ? width - 200 : width, active, setActive) : kind === "hbar" ? rows(data, width, active, shown) : columns(data, width, active, shown);
+  const drawn2 = isDonut ? donut(data, legendBeside ? width - 200 : width, active, setActive) : kind === "hbar" ? rows(data, width, active, shown2) : columns(data, width, active, shown2);
   const svgWidth = isDonut ? drawn2.size : width;
   const move2 = (event) => {
     const keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
@@ -10956,7 +10966,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   };
   const point = active === null ? null : drawn2.points[active];
   const share = (at) => unit === "%" ? withUnit(drawn2.values[at], unit) : `${withUnit(drawn2.values[at], unit)} · ${drawn2.total > 0 ? Math.round(drawn2.values[at] / drawn2.total * 100) : 0}%`;
-  const tipRows = active === null || isDonut ? [] : series.filter((_, index) => shown[index]).map((item) => ({ color: item.color, name: item.name, value: withUnit(item.values[active], unit) }));
+  const tipRows = active === null || isDonut ? [] : series.filter((_, index) => shown2[index]).map((item) => ({ color: item.color, name: item.name, value: withUnit(item.values[active], unit) }));
   const copy2 = () => {
     void navigator.clipboard?.writeText(chartCsv(data, ui2.t)).then(() => {
       setCopied(true);
@@ -11000,7 +11010,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
     key: index,
     type: "button",
     className: "dv-chart-key",
-    "aria-pressed": shown[index],
+    "aria-pressed": shown2[index],
     onClick: () => toggle(index)
   }, (0, import_react24.createElement)("i", { style: { background: item.color } }), item.name || `${ui2.t("Series")} ${index + 1}`))) : null;
   const plot = (0, import_react24.createElement)(
@@ -12026,12 +12036,12 @@ function viewCardText(args) {
       return "";
     }
   }
-  const shown = checkShownView(card?.title, card?.view);
-  if (shown.error !== void 0) return "";
-  if (!shown.interactive && card?.await_reply === true) return "";
-  if (shown.interactive && card?.await_reply === false) return "";
-  const summary = viewSummary(shown.view);
-  const head = shown.title === "" ? "[View card]" : `[View card] ${shown.title}`;
+  const shown2 = checkShownView(card?.title, card?.view);
+  if (shown2.error !== void 0) return "";
+  if (!shown2.interactive && card?.await_reply === true) return "";
+  if (shown2.interactive && card?.await_reply === false) return "";
+  const summary = viewSummary(shown2.view);
+  const head = shown2.title === "" ? "[View card]" : `[View card] ${shown2.title}`;
   return summary === "" ? head : `${head}
 ${summary}`;
 }
@@ -12039,10 +12049,10 @@ function viewReply(record, action, values, sourceKind = REPLY_KIND) {
   const checked = validateViewAnswer(record?.view, action, values);
   if (checked.error !== void 0) return void 0;
   const callId = record.callId ?? record.id;
-  const shown = { id: record.id, title: record.title, view: record.view };
+  const shown2 = { id: record.id, title: record.title, view: record.view };
   const given = { id: record.id, action, values: checked };
   return {
-    text: JSON.stringify({ kind: "answer_to_pending_view", tool: "show_view", callId, views: [shown], answers: [given] }),
+    text: JSON.stringify({ kind: "answer_to_pending_view", tool: "show_view", callId, views: [shown2], answers: [given] }),
     source: { kind: sourceKind, callId, outcome: "answered" }
   };
 }
@@ -12172,14 +12182,14 @@ function WidgetCell({ sessionId, callId, args, done, isError, roster, actions, h
     return (0, import_react27.createElement)(PendingView, { sessionId, view: record, actions, inline: true });
   }
   if (done && isError) return (0, import_react27.createElement)(CellEmpty, { className: "bt-q-gone" });
-  const shown = checkShownView(args?.text?.("title"), args?.value?.("view"));
-  if (shown.error !== void 0) return (0, import_react27.createElement)(CellEmpty, { className: "bt-q-gone" });
-  if (shown.interactive || args?.value?.("await_reply") === true) {
+  const shown2 = checkShownView(args?.text?.("title"), args?.value?.("view"));
+  if (shown2.error !== void 0) return (0, import_react27.createElement)(CellEmpty, { className: "bt-q-gone" });
+  if (shown2.interactive || args?.value?.("await_reply") === true) {
     const closed = callId === void 0 ? void 0 : roster.closedCards?.[sessionId]?.[callId];
     if (closed === void 0) return (0, import_react27.createElement)(CellEmpty, { className: "bt-q-gone" });
-    return (0, import_react27.createElement)(ClosedView, { title: shown.title, closed });
+    return (0, import_react27.createElement)(ClosedView, { title: shown2.title, closed });
   }
-  return (0, import_react27.createElement)("div", { className: "bt-q-inline" }, (0, import_react27.createElement)(Card, { title: shown.title, view: shown.view }));
+  return (0, import_react27.createElement)("div", { className: "bt-q-inline" }, (0, import_react27.createElement)(Card, { title: shown2.title, view: shown2.view }));
 }
 function ClosedView({ title, closed }) {
   return (0, import_react27.createElement)("div", { className: "bt-q-inline" }, (0, import_react27.createElement)(SettledQuestion, { question: { question: title || t("View") }, closed }));
@@ -12499,8 +12509,8 @@ async function copyImage(url) {
 function ImageCell({ callId, prompt, size, done, content, isError, bot, onAsk }) {
   const running2 = !done;
   const progress = useProgress(callId, running2);
-  const [shown] = (0, import_react30.useState)(() => Date.now());
-  const elapsed = useElapsed(running2, progress.started ?? shown);
+  const [shown2] = (0, import_react30.useState)(() => Date.now());
+  const elapsed = useElapsed(running2, progress.started ?? shown2);
   const id = done ? imageIdOf(content) : void 0;
   const [image, setImage] = (0, import_react30.useState)("loading");
   const loaded = image === "loaded";
@@ -12732,7 +12742,7 @@ function AvatarLibraryPanel({ actions, onPick }) {
       setBusy(false);
     }
   };
-  const shown = items?.length ?? 0;
+  const shown2 = items?.length ?? 0;
   return (0, import_react31.createElement)(
     "div",
     { className: "bt-lib" },
@@ -12774,11 +12784,11 @@ function AvatarLibraryPanel({ actions, onPick }) {
         (0, import_react31.createElement)(TrashIcon)
       )
     ))) : null,
-    shown < total ? (0, import_react31.createElement)(
+    shown2 < total ? (0, import_react31.createElement)(
       "div",
       { className: "bt-lib-more" },
       (0, import_react31.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => void load(offset, true) }, t("Show more photos")),
-      (0, import_react31.createElement)("span", { className: "bt-note" }, t("Showing {shown} of {total} photos", { shown, total }))
+      (0, import_react31.createElement)("span", { className: "bt-note" }, t("Showing {shown} of {total} photos", { shown: shown2, total }))
     ) : null,
     report ? (0, import_react31.createElement)(
       "div",
@@ -13613,7 +13623,7 @@ function SchedulesPage({ roster, actions, start: start2 }) {
   const [adding, setAdding] = (0, import_react34.useState)(Boolean(start2) && owner === null);
   if (view === null) return (0, import_react34.createElement)("div", { className: "bt-set-hint" }, t("Loading…"));
   if (!view.available) return (0, import_react34.createElement)(AutomationOff, { actions });
-  const shown = (next) => {
+  const shown2 = (next) => {
     publish2(next);
     setAdding(false);
   };
@@ -13622,7 +13632,7 @@ function SchedulesPage({ roster, actions, start: start2 }) {
     ...roster.rooms.map((room2) => [room2.id, (0, import_react34.createElement)(RoomAvatar, { room: room2, roster, size: 18 }), room2.name, view.tasks.filter((task) => task.botId === void 0 && task.roomId === room2.id)])
   ].filter(([id, , , tasks]) => tasks.length > 0 && (owner === null || id === owner));
   return [
-    adding ? (0, import_react34.createElement)(TaskForm, { key: "form", roster, actions, start: owner ?? start2, onDone: shown, onCancel: () => setAdding(false) }) : (0, import_react34.createElement)(
+    adding ? (0, import_react34.createElement)(TaskForm, { key: "form", roster, actions, start: owner ?? start2, onDone: shown2, onCancel: () => setAdding(false) }) : (0, import_react34.createElement)(
       "div",
       { key: "add", className: "bt-actions" },
       (0, import_react34.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm bt-with-icon", onClick: () => setAdding(true) }, (0, import_react34.createElement)(PlusIcon), t("New task")),
@@ -14989,9 +14999,9 @@ function AdvancedSettings({ bot, roster, actions, save, Card: Card3, Row: Row3, 
       clearInterval(timer);
     };
   }, [key, bot.advanced, bot.contextCheckRatio, bot.contextRecentTokens, bot.memoryReview, bot.memoryTidy, refresh]);
-  const shown = snapshot2?.key === key ? snapshot2 : null;
-  const context = shown?.context;
-  const memory = shown?.memory;
+  const shown2 = snapshot2?.key === key ? snapshot2 : null;
+  const context = shown2?.context;
+  const memory = shown2?.memory;
   const readOnly = Boolean(roster.readOnly) || context?.readOnly === true;
   const mutate = async (operation) => {
     setPending(true);
@@ -15054,7 +15064,7 @@ function AdvancedSettings({ bot, roster, actions, save, Card: Card3, Row: Row3, 
         (0, import_react39.createElement)(SwitchRow2, { label: t("Daily memory tidy"), hint: t("Once a day, when this Bot’s own memory has changed, its model merges repeats, retires what is over and moves details into topics. It uses tokens every day, so it is off until you turn it on. The memory panel can undo the latest tidy."), on: memory?.tidy?.enabled === true, disabled: disabled || !memory?.tidy?.allowed || memory.tidy.always === true, onChange: (memoryTidy) => save({ memoryTidy }) }),
         (0, import_react39.createElement)("p", { className: "bt-set-hint bt-advanced-note", role: "status" }, !memory?.tidy ? t("Loading…") : !memory.tidy.allowed ? t("The daily memory tidy is disabled by the host configuration.") : memory.tidy.always ? t("The host configuration runs the daily memory tidy for every memory.") : memory.tidy.enabled ? t("The daily memory tidy is on for this Bot.") : t("The daily memory tidy is off for this Bot."))
       ),
-      (0, import_react39.createElement)(Card3, { title: t("Stats") }, (0, import_react39.createElement)("div", { className: "bt-set-row bt-bs-row bt-bs-stack" }, (0, import_react39.createElement)(Statistics, { stats: shown?.stats }), (0, import_react39.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setRefresh((value) => value + 1), disabled: pending }, t("Refresh stats"))))
+      (0, import_react39.createElement)(Card3, { title: t("Stats") }, (0, import_react39.createElement)("div", { className: "bt-set-row bt-bs-row bt-bs-stack" }, (0, import_react39.createElement)(Statistics, { stats: shown2?.stats }), (0, import_react39.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => setRefresh((value) => value + 1), disabled: pending }, t("Refresh stats"))))
     )
   );
 }
@@ -16205,11 +16215,11 @@ function ConnectorToolCell({ sessionId, callId, done, content, roster, actions, 
 }
 function ConnectorDock({ sessionId, useRoster, useCards, useHeldCards, actions }) {
   const roster = useRoster((value) => value);
-  const shown = useCards?.((state2) => state2[sessionId]) ?? NONE2;
+  const shown2 = useCards?.((state2) => state2[sessionId]) ?? NONE2;
   const held = useHeldCards?.((state2) => state2[sessionId]) ?? NONE2;
   const bot = roster.byId[sessionId];
   if (!bot || currentPart(bot) !== sessionId) return null;
-  const drawn2 = (entry) => entry.callId && entry.sessionId === sessionId && shown[entry.callId] > 0 && !(held[heldCardKey("connector", entry.id)] > 0);
+  const drawn2 = (entry) => entry.callId && entry.sessionId === sessionId && shown2[entry.callId] > 0 && !(held[heldCardKey("connector", entry.id)] > 0);
   const waiting = (roster.connectorRequests?.[bot.id] ?? []).filter((entry) => entry.status === "pending" && !drawn2(entry));
   if (waiting.length === 0) return null;
   return (0, import_react42.createElement)("div", { className: "bt-q-dock bt-secret-dock" }, waiting.map((request) => (0, import_react42.createElement)(ConnectorCard, { key: request.id, sessionId, bot, request, actions })));
@@ -16365,11 +16375,11 @@ function MailToolCell({ sessionId, callId, roster, actions, heldCards = NONE2 })
 }
 function MailDock({ sessionId, useRoster, useCards, useHeldCards, actions }) {
   const roster = useRoster((value) => value);
-  const shown = useCards?.((state2) => state2[sessionId]) ?? NONE2;
+  const shown2 = useCards?.((state2) => state2[sessionId]) ?? NONE2;
   const held = useHeldCards?.((state2) => state2[sessionId]) ?? NONE2;
   const bot = roster.byId[sessionId];
   if (!bot || currentPart(bot) !== sessionId) return null;
-  const drawn2 = (entry) => entry.callId && entry.sessionId === sessionId && shown[entry.callId] > 0 && !(held[heldCardKey("mail", entry.id)] > 0);
+  const drawn2 = (entry) => entry.callId && entry.sessionId === sessionId && shown2[entry.callId] > 0 && !(held[heldCardKey("mail", entry.id)] > 0);
   const waiting = (roster.mailRequests?.[bot.id] ?? []).filter((entry) => entry.status === "pending" && !drawn2(entry));
   if (waiting.length === 0) return null;
   return (0, import_react42.createElement)("div", { className: "bt-q-dock bt-secret-dock" }, waiting.map((request) => (0, import_react42.createElement)(MailSendCard, { key: request.id, sessionId, bot, request, roster, actions })));
@@ -17099,8 +17109,8 @@ function UserMessageCell({ node, sessionId, useRoster, actions, renderMessageIma
   const steering = node.kind === "steering";
   const sentAt = Number.isFinite(data.time) ? messageClock(data.time) : void 0;
   const via = viaOf2(data.source) ?? roster.imVia?.[sessionId]?.[data.seq];
-  const { shown, folded, control } = useFold(text2, { markdown: false });
-  const body = (0, import_react45.createElement)(UserText, { text: shown, bots: mentionableBots(roster, sessionId), referenceLabels, skillNames: data.skillNames ?? [], references, actions });
+  const { shown: shown2, folded, control } = useFold(text2, { markdown: false });
+  const body = (0, import_react45.createElement)(UserText, { text: shown2, bots: mentionableBots(roster, sessionId), referenceLabels, skillNames: data.skillNames ?? [], references, actions });
   const row = (0, import_react45.useRef)(null);
   const [toolsOpen, setToolsOpen] = (0, import_react45.useState)(false);
   (0, import_react45.useEffect)(() => {
@@ -17663,6 +17673,45 @@ var SHOWABLE_PAGES = [...SETTINGS_PAGES.map(([id]) => id), "hermes-remote"];
 var PLUGIN_PAGE = /^plugin:[a-z0-9][a-z0-9._-]{0,63}$/;
 var isShowablePage = (page) => typeof page === "string" && (SHOWABLE_PAGES.includes(page) || PLUGIN_PAGE.test(page));
 
+// src/shared/proposals.js
+var PROPOSAL_FIELDS = [
+  ["name", "name"],
+  ["role", "role"],
+  ["instructions", "instructions"],
+  ["workDir", "work_dir"],
+  ["model", "model"],
+  ["effort", "effort"]
+];
+var KEYS = new Set(PROPOSAL_FIELDS.map(([key]) => key));
+var MARK = "proposal: ";
+var proposalLine = (proposal) => `${MARK}${JSON.stringify(proposal)}`;
+function parseProposal(text2) {
+  const last = String(text2 ?? "").split("\n").at(-1) ?? "";
+  if (!last.startsWith(MARK)) return void 0;
+  let value;
+  try {
+    value = JSON.parse(last.slice(MARK.length));
+  } catch {
+    return void 0;
+  }
+  if (value === null || typeof value !== "object" || typeof value.bot !== "string") return void 0;
+  const change = value.change;
+  if (change === null || typeof change !== "object") return void 0;
+  const clean = {};
+  for (const [key, field] of Object.entries(change)) if (KEYS.has(key) && typeof field === "string") clean[key] = field;
+  if (Object.keys(clean).length === 0) return void 0;
+  return { bot: value.bot, note: typeof value.note === "string" ? value.note : void 0, change: clean };
+}
+function applySteps(change) {
+  const model = {};
+  const rest2 = {};
+  for (const [key, value] of Object.entries(change)) {
+    if (key === "model" || key === "effort" && change.model !== void 0) model[key] = value;
+    else rest2[key] = value;
+  }
+  return [model, rest2].filter((step2) => Object.keys(step2).length > 0);
+}
+
 // src/client/settings-card.js
 var import_react46 = require("react");
 var pages = null;
@@ -17745,6 +17794,81 @@ function SettingsCall({ args, done, content, isError, roster, actions }) {
   const target = settingsTarget({ page: args.text("page"), bot: args.text("bot"), group: args.text("group") }, roster, actions.pluginSettings?.() ?? []);
   return (0, import_react46.createElement)("div", { className: "bt-q-inline" }, (0, import_react46.createElement)(SettingsCard, { target, note: args.text("note"), roster, actions }));
 }
+var FIELD_LABELS = { name: "Name", role: "Role", instructions: "Instructions", workDir: "Working folder", model: "Model", effort: "Thinking level" };
+var SHORT = 140;
+var currentOf = (bot, key) => {
+  if (key === "model") return bot.model ?? bot.appliedModel ?? "";
+  const value = bot[key];
+  return typeof value === "string" ? value : "";
+};
+var shown = (key, value) => {
+  if (value === "") return key === "workDir" ? t("Team workspace") : key === "effort" ? t("Model default") : t("(empty)");
+  return value.length > SHORT ? `${value.slice(0, SHORT)}…` : value;
+};
+var patchOf = (step2) => Object.fromEntries(Object.entries(step2).map(([key, value]) => [key, key === "effort" && value === "" ? null : value]));
+function ProposalCard({ proposal, roster, actions }) {
+  const [state2, setState] = (0, import_react46.useState)("open");
+  const [error, setError] = (0, import_react46.useState)("");
+  const bot = roster.byId?.[proposal.bot];
+  if (bot === void 0) return (0, import_react46.createElement)("div", { className: "bt-event" }, t("That Bot is no longer on the team."));
+  const rows2 = Object.entries(proposal.change).map(([key, value]) => ({ key, value, now: currentOf(bot, key) }));
+  const done = rows2.every((row) => row.now === row.value);
+  const apply2 = async () => {
+    if (state2 === "busy" || !actions.updateBot) return;
+    setState("busy");
+    setError("");
+    try {
+      for (const step2 of applySteps(proposal.change)) await actions.updateBot(bot.id, patchOf(step2));
+      setState("open");
+    } catch (failure) {
+      setError(failure?.message ?? String(failure));
+      setState("open");
+    }
+  };
+  const status = done ? t("Applied") : state2 === "dismissed" ? t("Dismissed") : null;
+  return (0, import_react46.createElement)(
+    "section",
+    { className: "bt-setcard bt-propcard", "data-done": done || void 0, "aria-label": t("Proposed change to {name}", { name: bot.name }) },
+    (0, import_react46.createElement)(
+      "div",
+      { className: "bt-setcard-head" },
+      (0, import_react46.createElement)("span", { className: "bt-setcard-icon", "aria-hidden": true }, done ? (0, import_react46.createElement)(CheckIcon) : (0, import_react46.createElement)(PencilIcon)),
+      (0, import_react46.createElement)(
+        "span",
+        { className: "bt-setcard-text" },
+        (0, import_react46.createElement)("span", { className: "bt-setcard-kicker" }, t("Proposed change")),
+        (0, import_react46.createElement)("span", { className: "bt-setcard-title" }, bot.name),
+        proposal.note ? (0, import_react46.createElement)("span", { className: "bt-setcard-note" }, proposal.note) : null
+      ),
+      status ? (0, import_react46.createElement)("span", { className: "bt-propcard-status" }, status) : null
+    ),
+    (0, import_react46.createElement)(
+      "div",
+      { className: "bt-propcard-rows", role: "table", "aria-label": t("Changes") },
+      rows2.map((row) => (0, import_react46.createElement)(
+        "div",
+        { key: row.key, className: "bt-propcard-row", role: "row", "data-done": row.now === row.value || void 0 },
+        (0, import_react46.createElement)("span", { className: "bt-propcard-field", role: "rowheader" }, t(FIELD_LABELS[row.key])),
+        (0, import_react46.createElement)("span", { className: "bt-propcard-was", role: "cell" }, shown(row.key, row.now)),
+        (0, import_react46.createElement)("span", { className: "bt-propcard-arrow", "aria-hidden": true }, "→"),
+        (0, import_react46.createElement)("span", { className: "bt-propcard-new", role: "cell" }, shown(row.key, row.value))
+      ))
+    ),
+    error ? (0, import_react46.createElement)("div", { className: "bt-error bt-propcard-error", role: "alert" }, error) : null,
+    done || state2 === "dismissed" ? null : (0, import_react46.createElement)(
+      "div",
+      { className: "bt-q-foot bt-propcard-actions" },
+      actions.openSettings ? (0, import_react46.createElement)("button", { type: "button", className: "bt-q-btn", onClick: () => actions.openSettings("bots", bot.id) }, t("Open in Settings")) : null,
+      (0, import_react46.createElement)("button", { type: "button", className: "bt-q-btn", disabled: state2 === "busy", onClick: () => setState("dismissed") }, t("Dismiss")),
+      (0, import_react46.createElement)("button", { type: "button", className: "bt-q-submit", disabled: state2 === "busy" || !actions.updateBot, onClick: apply2 }, state2 === "busy" ? t("Applying…") : t("Apply"))
+    )
+  );
+}
+function ProposalCall({ done, content, isError, roster, actions }) {
+  const proposal = done && !isError ? parseProposal(content) : void 0;
+  if (proposal === void 0) return (0, import_react46.createElement)(CellEmpty);
+  return (0, import_react46.createElement)("div", { className: "bt-q-inline" }, (0, import_react46.createElement)(ProposalCard, { proposal, roster, actions }));
+}
 var SETTINGS_CARD_CSS = `
 .bt-setcard{width:100%;max-width:640px;border:1px solid var(--st-line,var(--bt-line));border-radius:var(--st-r-dialog,24px);background:var(--st-paper,var(--bt-card));overflow:hidden}
 .bt-setcard-head{display:flex;align-items:center;gap:8px;padding:10px 14px 10px 10px}
@@ -17759,6 +17883,16 @@ var SETTINGS_CARD_CSS = `
 .bt-setcard[data-open] .bt-setcard-chev{transform:rotate(90deg)}
 .bt-setcard-body{border-top:1px solid var(--st-line,var(--bt-line));padding:12px 14px;max-height:480px;overflow:auto}
 .bt-setcard-missing{margin:0;color:var(--bt-ink-2)}
+.bt-propcard-status{margin-left:auto;font-size:12px;color:var(--bt-ink-2)}
+.bt-propcard-rows{display:grid;grid-template-columns:max-content minmax(0,1fr) auto minmax(0,1fr);gap:6px 10px;align-items:baseline;border-top:1px solid var(--st-line,var(--bt-line));padding:10px 14px}
+.bt-propcard-row{display:contents}
+.bt-propcard-field{font-size:12px;color:var(--bt-ink-2)}
+.bt-propcard-was{color:var(--bt-ink-3);text-decoration:line-through;overflow-wrap:anywhere}
+.bt-propcard-row[data-done] .bt-propcard-was{text-decoration:none}
+.bt-propcard-arrow{color:var(--bt-ink-3)}
+.bt-propcard-new{overflow-wrap:anywhere}
+.bt-propcard-error{margin:0 14px 8px}
+.bt-propcard-actions{padding:0 14px 12px}
 `;
 
 // src/client/cells.js
@@ -17831,10 +17965,10 @@ var foldArea = (body, code, codeHead, actions) => code === void 0 ? body : (0, i
 );
 function Bubble({ text: text2, index, roster, selfId, actions, sessionId, msgKey, mentions, fold, picked, live, lead, whole }) {
   const canvas = hasCanvas(text2);
-  const { shown, folded, control, code, codeHead } = useFold(text2, { limit: canvas ? NEVER : fold, whole, live, ownCode: !canvas });
+  const { shown: shown2, folded, control, code, codeHead } = useFold(text2, { limit: canvas ? NEVER : fold, whole, live, ownCode: !canvas });
   const key = msgKey ? `${msgKey}:${index}` : void 0;
   const markdown = (value) => (0, import_react47.createElement)(import_dsh_client_ui_primitives.MarkdownText, { text: linkMentions(value, roster.bots, selfId), streaming: live, labels: mdLabels3(), variant: "compact", fileMentions: mentions });
-  const body = canvas || shown === "" ? null : markdown(shown);
+  const body = canvas || shown2 === "" ? null : markdown(shown2);
   const row = (0, import_react47.useRef)(null);
   const [toolsOpen, setToolsOpen] = (0, import_react47.useState)(false);
   useDismiss(toolsOpen, () => setToolsOpen(false), [row]);
@@ -17842,8 +17976,8 @@ function Bubble({ text: text2, index, roster, selfId, actions, sessionId, msgKey
     if (!noHover() || event.target instanceof Element && event.target.closest("a,button,input,textarea,select,pre,code,[role=button],[role=link]")) return;
     setToolsOpen((value) => !value);
   };
-  const tools = live ? null : (0, import_react47.createElement)(MessageTools, { text: folded ? text2 : shown, name: roster.byId[selfId]?.name ?? t("Bot"), sessionId, react: key ? (emoji) => actions.toggleReaction(msgKey, index, emoji) : void 0, actions, open: toolsOpen });
-  const lines = canvas ? splitCanvases(shown).map((part, at, parts) => part.kind === "canvas" ? (0, import_react47.createElement)("div", { key: at, className: "bt-canvas-line" }, (0, import_react47.createElement)(CanvasSlot, { program: part.program, complete: part.complete, onAsk: (message) => message && actions.send(sessionId ?? selfId, message) })) : (0, import_react47.createElement)("div", { key: at, className: "bt-msg-line" }, at === 0 ? lead : null, (0, import_react47.createElement)("div", { className: "bt-bubble" }, markdown(part.text)), at === parts.length - 1 ? tools : null)) : null;
+  const tools = live ? null : (0, import_react47.createElement)(MessageTools, { text: folded ? text2 : shown2, name: roster.byId[selfId]?.name ?? t("Bot"), sessionId, react: key ? (emoji) => actions.toggleReaction(msgKey, index, emoji) : void 0, actions, open: toolsOpen });
+  const lines = canvas ? splitCanvases(shown2).map((part, at, parts) => part.kind === "canvas" ? (0, import_react47.createElement)("div", { key: at, className: "bt-canvas-line" }, (0, import_react47.createElement)(CanvasSlot, { program: part.program, complete: part.complete, onAsk: (message) => message && actions.send(sessionId ?? selfId, message) })) : (0, import_react47.createElement)("div", { key: at, className: "bt-msg-line" }, at === 0 ? lead : null, (0, import_react47.createElement)("div", { className: "bt-bubble" }, markdown(part.text)), at === parts.length - 1 ? tools : null)) : null;
   const area = foldArea(body, code, codeHead, actions);
   return (0, import_react47.createElement)(
     "div",
@@ -18038,9 +18172,9 @@ function AssistantCell({ node, groupPart, sessionId, openFile, fileMentions, use
   const texts2 = groupPart === "reasoning" ? [] : data.blocks.filter((block) => block.kind === "text" && block.text.trim() !== "").map((block) => heldText(block.text));
   const running2 = data.status === "running";
   const members = steps.length ? steps : [data];
-  const shown = thinkingShown(roster.prefs);
-  const reasoning = groupPart === "response" || !shown ? "" : turnReasoning(steps, data);
-  const thinking = groupPart === "response" || !shown ? void 0 : thinkingStep(members);
+  const shown2 = thinkingShown(roster.prefs);
+  const reasoning = groupPart === "response" || !shown2 ? "" : turnReasoning(steps, data);
+  const thinking = groupPart === "response" || !shown2 ? void 0 : thinkingStep(members);
   const ms = useThinkingMs({ sessionId, turn: data.turn, settledSteps: members.filter((step2) => step2.status !== "running").length, skip: hidden || reasoning === "" });
   useLiveNote(actions, sessionId, `text:${node.key ?? data.seq}`, !hidden && running2 && texts2.length > 0 ? { text: true } : null);
   if (hidden) return (0, import_react47.createElement)(CellEmpty);
@@ -18049,7 +18183,7 @@ function AssistantCell({ node, groupPart, sessionId, openFile, fileMentions, use
   if (texts2.length === 0 && !reasoning && relays.length === 0 && activity.length === 0) return (0, import_react47.createElement)(CellEmpty);
   const selfId = roster.byId[sessionId]?.id ?? sessionId;
   const speaker = layoutOf(roster.prefs) === "flat" ? roster.byId[sessionId] : void 0;
-  const head = speaker !== void 0 && opensReply(steps, data, shown) && (reasoning !== "" || texts2.length > 0 && !(groupPart === "response" && shown && turnReasoning(steps, data) !== ""));
+  const head = speaker !== void 0 && opensReply(steps, data, shown2) && (reasoning !== "" || texts2.length > 0 && !(groupPart === "response" && shown2 && turnReasoning(steps, data) !== ""));
   return (0, import_react47.createElement)(
     import_react47.Fragment,
     null,
@@ -18253,8 +18387,8 @@ var scrollParent = (node) => {
   return null;
 };
 function EarlierUser({ row, actions }) {
-  const { shown, folded, control, code, codeHead } = useFold(row.text ?? "");
-  const body = row.text && shown !== "" ? (0, import_react47.createElement)(import_dsh_client_ui_primitives.MarkdownText, { text: shown, labels: mdLabels3(), variant: "compact" }) : null;
+  const { shown: shown2, folded, control, code, codeHead } = useFold(row.text ?? "");
+  const body = row.text && shown2 !== "" ? (0, import_react47.createElement)(import_dsh_client_ui_primitives.MarkdownText, { text: shown2, labels: mdLabels3(), variant: "compact" }) : null;
   const area = foldArea(body, code, codeHead, actions);
   return (0, import_react47.createElement)(
     "div",
@@ -18359,14 +18493,14 @@ function ChatRows({ items, sessionId, roster, actions, useUi, clock: clock4 = fa
   let before;
   return rows2.flatMap((row, index) => {
     const key = rows2.length - index;
-    const shown = chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDelete });
+    const shown2 = chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDelete });
     if (row.kind === "divider") {
       before = void 0;
-      return [shown];
+      return [shown2];
     }
     const pause = clock4 && Number.isFinite(row.time) && (before === void 0 || row.time - before >= SEPARATOR_GAP_MS);
     if (Number.isFinite(row.end ?? row.time)) before = row.end ?? row.time;
-    return pause ? [(0, import_react47.createElement)("div", { key: `${key}:clock`, className: "bt-time-sep", role: "separator" }, clockLabel(row.time)), shown] : [shown];
+    return pause ? [(0, import_react47.createElement)("div", { key: `${key}:clock`, className: "bt-time-sep", role: "separator" }, clockLabel(row.time)), shown2] : [shown2];
   });
 }
 function chatRow(row, key, { sessionId, selfId, roster, actions, useUi, onBtwDelete }) {
@@ -18882,7 +19016,7 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
   );
 }
 var isComputerCall = (name) => name === "cua" || name?.startsWith("cua_driver_native__") === true;
-var DRAWN = /* @__PURE__ */ new Set(["start_task", "message_bot", "stop_bot", "create_bot", "update_bot", "delete_bot", "group_relay", "create_group", "update_group", "delete_group", "post_to_group", "ask_user", "request_secret", "request_connector", "mail_send", "ask_user_question", "show_view", "show_settings", "browser_handoff", "read_group_chat", "remember", "forget", "generate_image"]);
+var DRAWN = /* @__PURE__ */ new Set(["start_task", "message_bot", "stop_bot", "create_bot", "update_bot", "delete_bot", "group_relay", "create_group", "update_group", "delete_group", "post_to_group", "ask_user", "request_secret", "request_connector", "mail_send", "ask_user_question", "show_view", "show_settings", "propose_bot_change", "browser_handoff", "read_group_chat", "remember", "forget", "generate_image"]);
 var CARDS = /* @__PURE__ */ new Set(["ask_user", "request_secret", "request_connector", "mail_send", "show_view", "browser_handoff", "computer_handoff"]);
 var agentImage = (call2) => isAgentImageCall({ name: toolName(call2), image: toolArgs(call2).value("image"), done: call2.kind === "tool-result", content: call2.kind === "tool-result" ? contentText(call2.content) : "" });
 function callTree(root) {
@@ -18981,6 +19115,8 @@ function renderCall(call2, { sessionId, roster, actions, useUi, useWork, useSess
       return (0, import_react47.createElement)(WidgetCell, { sessionId, callId: call2.callId, args: { text: arg, value: argValue }, done, isError: call2.isError, roster, actions, heldCards });
     case "show_settings":
       return (0, import_react47.createElement)(SettingsCall, { args: { text: arg, value: argValue }, done, content: done ? contentText(call2.content) : "", isError: call2.isError, roster, actions });
+    case "propose_bot_change":
+      return (0, import_react47.createElement)(ProposalCall, { done, content: done ? contentText(call2.content) : "", isError: call2.isError, roster, actions });
     case "generate_image":
       return (0, import_react47.createElement)(ImageCell, { bot: self, callId: call2.callId, prompt: arg("prompt"), size: arg("size"), done, content: done ? contentText(call2.content) : "", isError: call2.isError, onAsk: askHere });
     case "acp_tool":
@@ -19341,10 +19477,10 @@ function installLiveTab({ tabs, slots, sidebar, face, Body }) {
     }
   };
 }
-function sidebarActions({ sidebar, shown, teamSession = () => false, closePanel, reportError }) {
+function sidebarActions({ sidebar, shown: shown2, teamSession = () => false, closePanel, reportError }) {
   const perform = (operation) => {
     const controller = sidebar();
-    const sessionId = shown();
+    const sessionId = shown2();
     if (!controller || sessionId === void 0 || controller.mounted.getSnapshot() !== sessionId || !teamSession(sessionId)) return;
     closePanel();
     try {
@@ -21487,21 +21623,21 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   const inputAt = Math.max(inputRef.current, pendingInput);
   inputRef.current = inputAt;
   const want = !visible ? null : moveAt !== 0 ? { key: "move", label: t("Switching working folder"), state: "thinking" } : inputAt > (tool?.at ?? 0) ? { key: `input:${inputAt}`, pool: PHRASES.thinking, state: "thinking" } : tool ? { key: tool.label ? `tool:${tool.label}` : "working", label: tool.label, pool: PHRASES.working, state: tool.state ?? "working" } : { key: "thinking", pool: PHRASES.thinking, state: "thinking" };
-  const [shown, setShown] = (0, import_react50.useState)(null);
+  const [shown2, setShown] = (0, import_react50.useState)(null);
   const wantKey = want?.key ?? null;
   const markState = (0, import_react50.useRef)("thinking");
   if (want) markState.current = want.state;
   (0, import_react50.useEffect)(() => {
-    if (wantKey === null || shown?.key === wantKey) return void 0;
+    if (wantKey === null || shown2?.key === wantKey) return void 0;
     const make = () => setShown({ key: wantKey, text: want.label ?? drawPhrase(want.pool), at: Date.now() });
-    const wait = shown ? shown.at + PHRASE_HOLD_MS - Date.now() : 0;
+    const wait = shown2 ? shown2.at + PHRASE_HOLD_MS - Date.now() : 0;
     if (wait <= 0) {
       make();
       return void 0;
     }
     const timer = setTimeout(make, wait);
     return () => clearTimeout(timer);
-  }, [wantKey, shown]);
+  }, [wantKey, shown2]);
   const [phase, setPhase] = (0, import_react50.useState)(null);
   const endedAt = (0, import_react50.useRef)(0);
   const shift = (0, import_react50.useRef)(null);
@@ -21535,7 +21671,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
   }, [running2, sessionId]);
   useRowEntrances(() => leaving.current || Date.now() - endedAt.current < 300);
   const host = useRunningHost(running2 || moveAt !== 0);
-  if (!host || phase === null || !shown) return null;
+  if (!host || phase === null || !shown2) return null;
   return (0, import_react_dom8.createPortal)((0, import_react50.createElement)(
     "div",
     { className: "bt-typing", "data-exiting": phase === "out" ? "" : void 0, "aria-hidden": true },
@@ -21543,7 +21679,7 @@ function ActivityIndicator({ sessionId, useRoster, useSessionStatus, useLive, us
     (0, import_react50.createElement)(
       "span",
       { className: "bt-typing-text" },
-      (0, import_react50.createElement)("span", { key: `${shown.key}:${shown.at}`, className: "bt-typing-label" }, (0, import_react50.createElement)(Shimmer, null, `${shown.text}…`)),
+      (0, import_react50.createElement)("span", { key: `${shown2.key}:${shown2.at}`, className: "bt-typing-label" }, (0, import_react50.createElement)(Shimmer, null, `${shown2.text}…`)),
       (0, import_react50.createElement)(Elapsed, { at: moveAt !== 0 ? moveAt : Math.max(turnAt ?? runAt.current, inputAt), className: "bt-typing-time" })
     )
   ), host);
@@ -22350,11 +22486,11 @@ function currentKey2(roster, shownId) {
 }
 function teamOf({ roster, order, status, marked = {}, current, now = Date.now(), seats = [] }) {
   const main = roster.byId?.[roster.mainBotId];
-  const shown = (key) => key === current;
-  const unread = (id, key, own) => !shown(key) && (own || marked[id] === true);
+  const shown2 = (key) => key === current;
+  const unread = (id, key, own) => !shown2(key) && (own || marked[id] === true);
   const bot = (item) => {
     const key = `bot:${item.id}`;
-    if (item.hidden && !shown(key) && !isMainOf(roster, item.id)) return null;
+    if (item.hidden && !shown2(key) && !isMainOf(roster, item.id)) return null;
     const seen = status.bots.get(item.id) ?? { status: "idle", unread: false };
     return { ...item, channels: [], status: seen.status, unread: unread(item.id, key, seen.unread) };
   };
@@ -22383,7 +22519,7 @@ function teamOf({ roster, order, status, marked = {}, current, now = Date.now(),
     ...order.filter((entry) => entry.kind === "bot").map((entry) => bot(entry.item)),
     ...order.filter((entry) => entry.kind === "agent").map((entry) => agent(entry.item))
   ].filter(Boolean);
-  const groups = order.filter((entry) => entry.kind === "room" && (!entry.item.hidden || shown(`group:${entry.item.id}`))).map((entry) => {
+  const groups = order.filter((entry) => entry.kind === "room" && (!entry.item.hidden || shown2(`group:${entry.item.id}`))).map((entry) => {
     const seen = status.groups?.get(entry.item.id) ?? { status: "idle", unread: false };
     return { id: entry.item.id, name: entry.item.name, members: entry.item.members ?? [], status: seen.status, unread: unread(entry.item.id, `group:${entry.item.id}`, seen.unread) };
   });
@@ -23161,12 +23297,12 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
   if (!wide || tasks.length === 0) return null;
   const waiting = new Set(waitingKey.split(",").filter(Boolean));
   const sorted = [...tasks].sort((a, b) => Number(waiting.has(b.sessionId)) - Number(waiting.has(a.sessionId)));
-  const shown = open || sorted.length <= THREADS_SHOWN + 1 ? sorted : sorted.slice(0, THREADS_SHOWN);
-  const more = sorted.length - shown.length;
+  const shown2 = open || sorted.length <= THREADS_SHOWN + 1 ? sorted : sorted.slice(0, THREADS_SHOWN);
+  const more = sorted.length - shown2.length;
   return (0, import_react60.createElement)(
     "div",
     { className: "bt-threads", role: "group", "aria-label": t("Tasks {name} started", { name: bot.name }) },
-    shown.map((task) => {
+    shown2.map((task) => {
       const state2 = taskState(task, waiting.has(task.sessionId));
       const asks = state2 === "waiting" ? (approvals ?? []).filter((entry) => entry.taskId === task.sessionId) : [];
       const detail = asks.length === 1 ? approvalDetail(asks[0]) : "";
@@ -24243,7 +24379,7 @@ function dragColumn(x, viewport) {
   const high = docks ? Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, viewport - MIN_CHAT)) : SIDEBAR_MAX;
   return { left: docks ? "open" : "drawer", width: Math.round(Math.max(SIDEBAR_MIN, Math.min(x, high))) };
 }
-var toggledPref = (pref, shown) => pref === "hidden" ? shown : "hidden";
+var toggledPref = (pref, shown2) => pref === "hidden" ? shown2 : "hidden";
 var RESIZE_SETTLE_MS = 500;
 var userSidebarToggle = ({ before, after, requested = false, sinceResize = Infinity }) => before.collapsed !== after.collapsed && !requested && sinceResize >= RESIZE_SETTLE_MS && before.viewport < DSH_NARROW === after.viewport < DSH_NARROW;
 var PREFS = ["open", "rail", "hidden"];
@@ -24251,9 +24387,9 @@ function readSidebar(storage = globalThis.localStorage) {
   try {
     const saved = JSON.parse(storage.getItem(STORAGE.sidebar) ?? "null");
     const pref = PREFS.includes(saved?.pref) ? saved.pref : "open";
-    const shown = saved?.shown === "rail" ? "rail" : "open";
+    const shown2 = saved?.shown === "rail" ? "rail" : "open";
     const width = Number.isFinite(saved?.width) ? Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, saved.width)) : FALLBACK_SIDEBAR_WIDTH;
-    return { pref, shown, width };
+    return { pref, shown: shown2, width };
   } catch {
     return { pref: "open", shown: "open", width: FALLBACK_SIDEBAR_WIDTH };
   }
@@ -24288,7 +24424,7 @@ var MEMORY_NOTICE_MS = 3200;
 var noNews = (select) => select({});
 function useMemoryNotice(ids, useMemoryNews) {
   const seen = useMemoryNews((map) => Math.max(0, ...ids.map((id) => map?.[id]?.seen ?? 0)));
-  const [shown, setShown] = (0, import_react62.useState)(false);
+  const [shown2, setShown] = (0, import_react62.useState)(false);
   (0, import_react62.useEffect)(() => {
     const left = seen + MEMORY_NOTICE_MS - Date.now();
     setShown(seen > 0 && left > 0);
@@ -24296,15 +24432,15 @@ function useMemoryNotice(ids, useMemoryNews) {
     const timer = setTimeout(() => setShown(false), left);
     return () => clearTimeout(timer);
   }, [seen]);
-  return shown;
+  return shown2;
 }
-function MemoryNotice({ shown }) {
+function MemoryNotice({ shown: shown2 }) {
   const inner = (0, import_react62.useRef)(null);
   const [width, setWidth] = (0, import_react62.useState)(0);
   const label = t("Memory updated");
   (0, import_react62.useLayoutEffect)(() => {
-    if (shown) setWidth(inner.current?.scrollWidth ?? 0);
-  }, [label, shown]);
+    if (shown2) setWidth(inner.current?.scrollWidth ?? 0);
+  }, [label, shown2]);
   return (0, import_react62.createElement)(
     "span",
     { className: "bt-pill-mem", "aria-hidden": true, style: { "--bt-mem-w": `${width}px` } },
@@ -25187,7 +25323,7 @@ function ComposerPermission({ sessionId, useRoster, actions }) {
 function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions }) {
   const roster = useRoster((value) => value);
   const [open, setOpen] = (0, import_react64.useState)(null);
-  const [shown, leaving] = useLinger(open, 120);
+  const [shown2, leaving] = useLinger(open, 120);
   const button = (0, import_react64.useRef)(null);
   const menu = (0, import_react64.useRef)(null);
   const tick = useViewport();
@@ -25244,10 +25380,10 @@ function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions })
     return () => window.removeEventListener("keydown", onKey, true);
   }, [open, sessionId]);
   const place = (0, import_react64.useMemo)(() => {
-    if (!shown || !button.current) return null;
+    if (!shown2 || !button.current) return null;
     const rect = button.current.getBoundingClientRect();
     return { left: rect.left, bottom: viewBottom() - rect.top + 8 };
-  }, [shown, open, tick]);
+  }, [shown2, open, tick]);
   const target = roster.byId?.[sessionId]?.id ?? roster.roomsById?.[sessionId]?.id;
   if (sessionId === void 0 || target === void 0) return null;
   const fileInput = () => button.current?.closest("[data-composer-card]")?.querySelector("input[type=file]");
@@ -25290,7 +25426,7 @@ function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions })
       onMouseDown: keepComposerFocus,
       onClick: toggle
     }, (0, import_react64.createElement)(PlusIcon)),
-    shown ? (0, import_react_dom13.createPortal)((0, import_react64.createElement)(
+    shown2 ? (0, import_react_dom13.createPortal)((0, import_react64.createElement)(
       "div",
       {
         ref: menu,
@@ -25300,7 +25436,7 @@ function ComposerPlus({ sessionId, inputActions, useInput, useRoster, actions })
         style: place ?? {},
         "data-leaving": leaving || void 0
       },
-      shown.files ? plusRow(PaperclipIcon, t("Add photos & files"), t("Upload from computer"), attach) : null,
+      shown2.files ? plusRow(PaperclipIcon, t("Add photos & files"), t("Upload from computer"), attach) : null,
       canReference ? plusRow(ChatsIcon, t("Reference a chat"), t("Continue in another conversation"), reference, keepComposerFocus) : null,
       canSetGoal(room2, roster) ? plusRow(GoalIcon, t("Set a goal"), t("The group works toward it in stages"), goal) : null,
       plusRow(ClockIcon, t("Scheduled task"), t("Run this chat later"), schedule)
@@ -26681,7 +26817,7 @@ function AgentAccessPage({ actions, run: run3, roster, Section: Section3 }) {
     );
   }
   const { live, revoked } = keyRows(view);
-  const shown = older ? revoked : revoked.slice(0, REVOKED_SHOWN);
+  const shown2 = older ? revoked : revoked.slice(0, REVOKED_SHOWN);
   const keyRow = (row) => (0, import_react68.createElement)(KeyRow, {
     key: row.id,
     row,
@@ -26707,11 +26843,11 @@ function AgentAccessPage({ actions, run: run3, roster, Section: Section3 }) {
         (0, import_react68.createElement)("span", { className: "bt-set-hint" }, t("No keys yet. Create one for each agent you let in, so you can revoke them one by one."))
       ) : null,
       live.map(keyRow),
-      shown.map(keyRow),
-      revoked.length > shown.length ? (0, import_react68.createElement)(
+      shown2.map(keyRow),
+      revoked.length > shown2.length ? (0, import_react68.createElement)(
         "button",
         { type: "button", className: "bt-set-row bt-aa-more", onClick: () => setOlder(true) },
-        t("Show {count} older revoked keys", { count: revoked.length - shown.length })
+        t("Show {count} older revoked keys", { count: revoked.length - shown2.length })
       ) : null
     ),
     (0, import_react68.createElement)(ConnectSection, { view, Section: Section3 }),
@@ -27509,11 +27645,11 @@ function CommandPalette({ start: start2, token, roster, actions, useSessions }) 
   if (commands.length) sections.push([t("Commands"), commands]);
   const rows2 = sections.flatMap(([, items]) => items);
   const active = Math.min(cursor, Math.max(rows2.length - 1, 0));
-  const shown = rows2.map((row) => row.key).join("\n");
+  const shown2 = rows2.map((row) => row.key).join("\n");
   const glide = useGlide(`${active}
-${shown}`, { axis: "y", ...QUICK_EDGES });
+${shown2}`, { axis: "y", ...QUICK_EDGES });
   const listRef = glide.box;
-  useFlip(listRef, shown, "[data-flip]");
+  useFlip(listRef, shown2, "[data-flip]");
   (0, import_react72.useEffect)(() => {
     listRef.current?.querySelector("[aria-selected=true]")?.scrollIntoView({ block: "nearest" });
   }, [active, query]);
@@ -29308,7 +29444,7 @@ function titleOf2(range, bucket) {
   return dates({ year: "numeric", month: "long" }).format(bucket.start);
 }
 function useTween(value) {
-  const [shown, setShown] = (0, import_react81.useState)(0);
+  const [shown2, setShown] = (0, import_react81.useState)(0);
   const from = (0, import_react81.useRef)(0);
   (0, import_react81.useEffect)(() => {
     if (reducedMotion() || typeof requestAnimationFrame !== "function") {
@@ -29328,7 +29464,7 @@ function useTween(value) {
     frame = requestAnimationFrame(step2);
     return () => cancelAnimationFrame(frame);
   }, [value]);
-  return shown;
+  return shown2;
 }
 var glyphBox = (size, icon3) => (0, import_react81.createElement)("span", { className: "bt-us-glyph", style: { width: size, height: size } }, (0, import_react81.createElement)(icon3));
 function ModelGlyph({ name, paint, size }) {
@@ -29389,7 +29525,7 @@ ${names}`, { box: boxRef });
   );
 }
 function Stats({ range, total, previous }) {
-  const shown = useTween(total.total);
+  const shown2 = useTween(total.total);
   const change = previous > 0 ? Math.round((total.total - previous) / previous * 100) : null;
   const cell = (label, value) => (0, import_react81.createElement)("div", { className: "bt-us-stat" }, (0, import_react81.createElement)("span", { className: "bt-us-stat-label" }, label), (0, import_react81.createElement)("span", { className: "bt-us-stat-value" }, value));
   return (0, import_react81.createElement)(
@@ -29402,7 +29538,7 @@ function Stats({ range, total, previous }) {
       (0, import_react81.createElement)(
         "span",
         { className: "bt-us-stat-value" },
-        compact(shown),
+        compact(shown2),
         (0, import_react81.createElement)("small", null, t("tokens")),
         change === null ? null : (0, import_react81.createElement)(
           "span",
@@ -30317,13 +30453,13 @@ function ConnectorsPage({ roster, actions }) {
       )
     );
   }
-  const shown = view?.app ? apps.find((app) => app.id === view.app) : null;
-  if (shown) {
+  const shown2 = view?.app ? apps.find((app) => app.id === view.app) : null;
+  if (shown2) {
     return (0, import_react82.createElement)(
       Subview,
-      { title: shown.name, onBack: back },
-      (0, import_react82.createElement)("div", { className: "bt-set-card bt-connectors-card bt-app-detail" }, (0, import_react82.createElement)(ConnectorRow, { connector: shown, actions })),
-      shown.about ? (0, import_react82.createElement)("p", { className: "bt-app-about" }, t(shown.about)) : null
+      { title: shown2.name, onBack: back },
+      (0, import_react82.createElement)("div", { className: "bt-set-card bt-connectors-card bt-app-detail" }, (0, import_react82.createElement)(ConnectorRow, { connector: shown2, actions })),
+      shown2.about ? (0, import_react82.createElement)("p", { className: "bt-app-about" }, t(shown2.about)) : null
     );
   }
   if (view === "connected") {
@@ -30940,7 +31076,7 @@ function FeedbackPage({ actions, run: run3, Section: Section3, Row: Row3, roster
   const browserErrors = clientErrors().map((entry) => ({ ...entry, source: "browser" }));
   const entries2 = [...report?.entries ?? [], ...browserErrors].sort((a, b) => new Date(b.time) - new Date(a.time));
   const total = (report?.total ?? 0) + browserErrors.length;
-  const shown = entries2.slice(0, 8);
+  const shown2 = entries2.slice(0, 8);
   return [
     (0, import_react85.createElement)(
       Section3,
@@ -30979,7 +31115,7 @@ function FeedbackPage({ actions, run: run3, Section: Section3, Row: Row3, roster
     (0, import_react85.createElement)(
       Section3,
       { key: "errors", title: report ? t("Recent errors · {count}", { count: total }) : t("Recent errors") },
-      shown.length === 0 ? (0, import_react85.createElement)(Row3, { label: t("No errors recorded."), hint: t("Failed model calls and Omni problems show here, newest first.") }) : shown.map((entry, index) => (0, import_react85.createElement)(
+      shown2.length === 0 ? (0, import_react85.createElement)(Row3, { label: t("No errors recorded."), hint: t("Failed model calls and Omni problems show here, newest first.") }) : shown2.map((entry, index) => (0, import_react85.createElement)(
         "div",
         { key: `${entry.time}-${index}`, className: "bt-set-row bt-fb-entry", title: entry.text },
         (0, import_react85.createElement)("span", { className: "bt-fb-dot", "data-level": entry.level, "aria-hidden": true }),
@@ -31077,12 +31213,12 @@ function botHint(update, app, versions) {
   const checked = t("Checked {time}", { time: whenText(update.checkedAt) });
   return `${update.latest ? t("Up to date") : t("Could not check for updates.")} · ${checked}`;
 }
-function dshHint(dsh, shown) {
+function dshHint(dsh, shown2) {
   if (dsh.phase === "installing") return t("Updating DSH…");
   if (dsh.phase === "installed") return t("Restart DSH to start using DSH {version}.", { version: dsh.installed ?? dsh.verified });
   if (dsh.phase === "failed") return t("The update did not finish: {reason}", { reason: hostText(dsh.error ?? "") });
   if (dsh.available === false && dsh.blockedBy) return t("Update Omni {version} first.", { version: dsh.blockedBy });
-  if (shown) return t("DSH {version} is available", { version: dsh.verified });
+  if (shown2) return t("DSH {version} is available", { version: dsh.verified });
   return t("Version {version}", { version: dsh.current });
 }
 function pluginHint(change, plugins) {
@@ -31425,7 +31561,7 @@ function ProviderRow({ provider, apply: apply2, actions, open, onToggle }) {
     if (!open) setConfirm(false);
   }, [open]);
   const state2 = keyState(provider.key);
-  const shown = provider.models.slice(0, SHOWN_MODELS);
+  const shown2 = provider.models.slice(0, SHOWN_MODELS);
   const hint = provider.error ?? (provider.models.length === 0 ? t("No models") : t("{count} models", { count: provider.models.length }));
   return (0, import_react87.createElement)(
     "div",
@@ -31453,8 +31589,8 @@ function ProviderRow({ provider, apply: apply2, actions, open, onToggle }) {
         (0, import_react87.createElement)(
           "div",
           { className: "bt-provider-models" },
-          shown.map((model) => (0, import_react87.createElement)("span", { key: model.ref, className: "bt-tag", title: model.ref }, model.name)),
-          provider.models.length > shown.length ? (0, import_react87.createElement)("span", { className: "bt-set-hint" }, t("and {count} more", { count: provider.models.length - shown.length })) : null
+          shown2.map((model) => (0, import_react87.createElement)("span", { key: model.ref, className: "bt-tag", title: model.ref }, model.name)),
+          provider.models.length > shown2.length ? (0, import_react87.createElement)("span", { className: "bt-set-hint" }, t("and {count} more", { count: provider.models.length - shown2.length })) : null
         )
       ) : null,
       provider.removable ? (0, import_react87.createElement)(
@@ -31962,7 +32098,7 @@ function BackgroundSection({ roster, actions, run: run3 }) {
   const saved = roster.prefs?.backgroundModel ?? "";
   const choices = backgroundChoices(roster.models, saved);
   if (choices.length === 0) return null;
-  const shown = choices.some((model) => model.ref === saved) ? saved : "";
+  const shown2 = choices.some((model) => model.ref === saved) ? saved : "";
   const fallback = choices.find((model) => model.ref === roster.backgroundModel && saved === "");
   return (0, import_react88.createElement)(
     SetSection,
@@ -31972,7 +32108,7 @@ function BackgroundSection({ roster, actions, run: run3 }) {
       { label: t("Background model"), hint: t("Memory review runs on it, and so do the notes of a chat on Claude Code or Codex.") },
       (0, import_react88.createElement)(
         "select",
-        { className: "bt-select", "aria-label": t("Background model"), value: shown, onChange: (event) => run3(actions.setPrefs({ backgroundModel: event.target.value || null })) },
+        { className: "bt-select", "aria-label": t("Background model"), value: shown2, onChange: (event) => run3(actions.setPrefs({ backgroundModel: event.target.value || null })) },
         (0, import_react88.createElement)("option", { value: "" }, fallback ? t("Default: {model}", { model: fallback.name }) : t("Default")),
         choices.map((model) => (0, import_react88.createElement)("option", { key: model.ref, value: model.ref }, `${model.name} · ${model.providerName ?? model.provider}`))
       )
@@ -32099,19 +32235,19 @@ function SettingsDialog({ page, id, roster, actions, useUpdate, leaving = false 
   pluginPages.splice(agents < 0 ? pluginPages.length : agents + 1, 0, ["hermes-remote", "Remote Hermes"]);
   const pages2 = [...own.filter(([key]) => key !== "about"), ...pluginPages, ...own.filter(([key]) => key === "about")];
   const pluginPage = extra.find((section) => `plugin:${section.id}` === page);
-  const shown = pages2.some(([key]) => key === page) ? page : "general";
-  const usageFocus = shown === "usage" && id ? id : null;
-  const label = pluginPage ? pluginPage.label : t(pages2.find(([key]) => key === shown)[1]);
+  const shown2 = pages2.some(([key]) => key === page) ? page : "general";
+  const usageFocus = shown2 === "usage" && id ? id : null;
+  const label = pluginPage ? pluginPage.label : t(pages2.find(([key]) => key === shown2)[1]);
   const back = bot ? t("Back to Bots") : room2 ? t("Back to group chats") : usageFocus ? t("All usage") : null;
-  const nav2 = useGlide(shown, { axis: "y" });
-  const pageKey = `${shown}:${bot?.id ?? room2?.id ?? ""}`;
+  const nav2 = useGlide(shown2, { axis: "y" });
+  const pageKey = `${shown2}:${bot?.id ?? room2?.id ?? ""}`;
   const depth = bot || room2 ? 1 : 0;
   const last = (0, import_react88.useRef)({ key: pageKey, depth, move: "up" });
   if (last.current.key !== pageKey) {
     last.current = { key: pageKey, depth, move: depth > last.current.depth ? "in" : depth < last.current.depth ? "out" : "up" };
   }
-  const [usageOpened, setUsageOpened] = (0, import_react88.useState)(shown === "usage");
-  if (shown === "usage" && !usageOpened) setUsageOpened(true);
+  const [usageOpened, setUsageOpened] = (0, import_react88.useState)(shown2 === "usage");
+  if (shown2 === "usage" && !usageOpened) setUsageOpened(true);
   const errorLine = error ? (0, import_react88.createElement)("div", { className: "bt-error", role: "alert", style: { padding: 0 } }, error) : null;
   return (0, import_react88.createElement)(
     "div",
@@ -32128,7 +32264,7 @@ function SettingsDialog({ page, id, roster, actions, useUpdate, leaving = false 
           key,
           type: "button",
           className: "bt-settings-item",
-          "aria-current": shown === key ? "page" : void 0,
+          "aria-current": shown2 === key ? "page" : void 0,
           onClick: () => actions.openSettings(key)
         }, (0, import_react88.createElement)(PAGE_ICONS[key] ?? PlugIcon), key.startsWith("plugin:") ? text2 : t(text2))),
         actions.openHarnessSettings ? (0, import_react88.createElement)("button", {
@@ -32147,49 +32283,49 @@ function SettingsDialog({ page, id, roster, actions, useUpdate, leaving = false 
         (0, import_react88.createElement)(
           "div",
           { className: "bt-settings-head" },
-          back ? (0, import_react88.createElement)("button", { type: "button", className: "bt-icon-btn", "aria-label": back, title: back, onClick: () => actions.openSettings(shown) }, (0, import_react88.createElement)(ChevronLeftIcon)) : null,
+          back ? (0, import_react88.createElement)("button", { type: "button", className: "bt-icon-btn", "aria-label": back, title: back, onClick: () => actions.openSettings(shown2) }, (0, import_react88.createElement)(ChevronLeftIcon)) : null,
           // A plugin's page draws its own title, as in DSH's settings.
-          pluginPage ? null : (0, import_react88.createElement)("h2", { key: bot?.id ?? room2?.id ?? shown }, bot?.name ?? room2?.name ?? label)
+          pluginPage ? null : (0, import_react88.createElement)("h2", { key: bot?.id ?? room2?.id ?? shown2 }, bot?.name ?? room2?.name ?? label)
         ),
-        shown === "usage" ? null : (0, import_react88.createElement)(
+        shown2 === "usage" ? null : (0, import_react88.createElement)(
           "div",
           { key: pageKey, className: "bt-settings-scroll bt-settings-page", "data-move": last.current.move },
           errorLine,
           // Called, not mounted: it holds no state, and the dialog's tree stays as it was.
-          (0, import_react88.createElement)(PageBoundary, null, SettingsPage({ shown, id, bot, room: room2, pluginPage, roster, actions, run: run3, useUpdate, close }))
+          (0, import_react88.createElement)(PageBoundary, null, SettingsPage({ shown: shown2, id, bot, room: room2, pluginPage, roster, actions, run: run3, useUpdate, close }))
         ),
         usageOpened ? (0, import_react88.createElement)(
           "div",
-          { key: "usage", className: "bt-settings-scroll bt-settings-usage", "data-off": shown === "usage" ? void 0 : "", "aria-hidden": shown === "usage" ? void 0 : true },
-          shown === "usage" ? errorLine : null,
-          (0, import_react88.createElement)(PageBoundary, { reset: shown }, (0, import_react88.createElement)(UsagePage, { roster, actions, focusId: usageFocus }))
+          { key: "usage", className: "bt-settings-scroll bt-settings-usage", "data-off": shown2 === "usage" ? void 0 : "", "aria-hidden": shown2 === "usage" ? void 0 : true },
+          shown2 === "usage" ? errorLine : null,
+          (0, import_react88.createElement)(PageBoundary, { reset: shown2 }, (0, import_react88.createElement)(UsagePage, { roster, actions, focusId: usageFocus }))
         ) : null
       ),
       (0, import_react88.createElement)("button", { type: "button", className: "bt-settings-close", "aria-label": t("Close settings"), onClick: close }, (0, import_react88.createElement)(CloseIcon))
     )
   );
 }
-function SettingsPage({ shown, id, bot, room: room2, pluginPage, roster, actions, run: run3, useUpdate, close }) {
+function SettingsPage({ shown: shown2, id, bot, room: room2, pluginPage, roster, actions, run: run3, useUpdate, close }) {
   return (0, import_react88.createElement)(
     import_react88.Fragment,
     null,
-    shown === "general" ? (0, import_react88.createElement)(GeneralPage, { roster, actions, run: run3 }) : null,
-    shown === "models" ? (0, import_react88.createElement)(ProvidersPage, { actions, run: run3, Section: SetSection }) : null,
-    shown === "hermes-remote" ? (0, import_react88.createElement)(HermesRemoteSettings, { run: run3, Section: SetSection, actions }) : null,
+    shown2 === "general" ? (0, import_react88.createElement)(GeneralPage, { roster, actions, run: run3 }) : null,
+    shown2 === "models" ? (0, import_react88.createElement)(ProvidersPage, { actions, run: run3, Section: SetSection }) : null,
+    shown2 === "hermes-remote" ? (0, import_react88.createElement)(HermesRemoteSettings, { run: run3, Section: SetSection, actions }) : null,
     bot ? (0, import_react88.createElement)("div", { className: "bt-settings-form" }, (0, import_react88.createElement)(BotSettingsForm, { key: bot.id, bot, roster, actions, run: run3 })) : null,
-    shown === "bots" && !bot ? (0, import_react88.createElement)(BotsPage, { roster, actions, run: run3 }) : null,
+    shown2 === "bots" && !bot ? (0, import_react88.createElement)(BotsPage, { roster, actions, run: run3 }) : null,
     room2 ? (0, import_react88.createElement)("div", { className: "bt-settings-form" }, (0, import_react88.createElement)(GroupSettingsForm, { key: room2.id, room: room2, roster, actions, run: run3 })) : null,
-    shown === "groups" && !room2 ? (0, import_react88.createElement)(GroupsPage, { roster, actions, run: run3 }) : null,
-    shown === "connectors" ? (0, import_react88.createElement)(ConnectorsPage, { roster, actions }) : null,
-    shown === "capabilities" ? (0, import_react88.createElement)(CapabilitiesPage, { roster, actions, run: run3 }) : null,
-    shown === "browser" ? (0, import_react88.createElement)(BrowserPage, { roster, actions, run: run3, Section: SetSection, Row: SetRow }) : null,
-    shown === "computer" ? (0, import_react88.createElement)(ComputerPage, { roster, actions, run: run3, Section: SetSection, Row: SetRow, Switch }) : null,
-    shown === "schedules" ? (0, import_react88.createElement)(SchedulesPage, { roster, actions, start: id ?? void 0 }) : null,
-    shown === "secrets" ? (0, import_react88.createElement)(SecretsPage, { roster, actions, run: run3, Section: SetSection }) : null,
-    shown === "agent-access" ? (0, import_react88.createElement)(AgentAccessPage, { roster, actions, run: run3, Section: SetSection }) : null,
-    shown === "privacy" ? (0, import_react88.createElement)(PrivacyPage, { actions, run: run3, Section: SetSection, Row: SetRow }) : null,
-    shown === "feedback" ? (0, import_react88.createElement)(FeedbackPage, { actions, run: run3, roster, Section: SetSection, Row: SetRow }) : null,
-    shown === "about" ? (0, import_react88.createElement)(AboutPage, { useUpdate, actions, run: run3, Section: SetSection, Row: SetRow }) : null,
+    shown2 === "groups" && !room2 ? (0, import_react88.createElement)(GroupsPage, { roster, actions, run: run3 }) : null,
+    shown2 === "connectors" ? (0, import_react88.createElement)(ConnectorsPage, { roster, actions }) : null,
+    shown2 === "capabilities" ? (0, import_react88.createElement)(CapabilitiesPage, { roster, actions, run: run3 }) : null,
+    shown2 === "browser" ? (0, import_react88.createElement)(BrowserPage, { roster, actions, run: run3, Section: SetSection, Row: SetRow }) : null,
+    shown2 === "computer" ? (0, import_react88.createElement)(ComputerPage, { roster, actions, run: run3, Section: SetSection, Row: SetRow, Switch }) : null,
+    shown2 === "schedules" ? (0, import_react88.createElement)(SchedulesPage, { roster, actions, start: id ?? void 0 }) : null,
+    shown2 === "secrets" ? (0, import_react88.createElement)(SecretsPage, { roster, actions, run: run3, Section: SetSection }) : null,
+    shown2 === "agent-access" ? (0, import_react88.createElement)(AgentAccessPage, { roster, actions, run: run3, Section: SetSection }) : null,
+    shown2 === "privacy" ? (0, import_react88.createElement)(PrivacyPage, { actions, run: run3, Section: SetSection, Row: SetRow }) : null,
+    shown2 === "feedback" ? (0, import_react88.createElement)(FeedbackPage, { actions, run: run3, roster, Section: SetSection, Row: SetRow }) : null,
+    shown2 === "about" ? (0, import_react88.createElement)(AboutPage, { useUpdate, actions, run: run3, Section: SetSection, Row: SetRow }) : null,
     // A page another plugin added, drawn as DSH's settings draws it (with `close`).
     pluginPage ? (0, import_react88.createElement)("div", { className: "bt-settings-plugin" }, (0, import_react88.createElement)(pluginPage.Component, { close })) : null
   );
@@ -33114,12 +33250,12 @@ function RunStats({ bot, part, running: running2, actions }) {
       current = false;
     };
   }, [bot.id, part, running2]);
-  const shown = runStatsOf(values);
-  if (shown.length === 0) return null;
+  const shown2 = runStatsOf(values);
+  if (shown2.length === 0) return null;
   return (0, import_react92.createElement)(
     "div",
     { className: "bt-run-stats" },
-    shown.map((entry, index) => (0, import_react92.createElement)(
+    shown2.map((entry, index) => (0, import_react92.createElement)(
       import_react92.Fragment,
       { key: entry.key },
       index > 0 ? (0, import_react92.createElement)("span", { className: "bt-run-sep", "aria-hidden": true }, "·") : null,
@@ -33202,13 +33338,13 @@ function About({ text: text2, title = "About" }) {
 var PILE_MAX = 4;
 function MemberPile({ room: room2, roster }) {
   const members = room2.members.map((id) => roster.byId[id]).filter(Boolean);
-  const shown = members.length > PILE_MAX ? members.slice(0, PILE_MAX - 1) : members;
-  const more = members.length - shown.length;
+  const shown2 = members.length > PILE_MAX ? members.slice(0, PILE_MAX - 1) : members;
+  const more = members.length - shown2.length;
   return (0, import_react92.createElement)(
     "span",
     { className: "bt-pile", "aria-hidden": true },
-    shown.map((bot, index) => (0, import_react92.createElement)("span", { key: bot.id, className: "bt-pile-face", style: { animationDelay: `${index * 40}ms` } }, (0, import_react92.createElement)(BotMark, { bot, size: 44, live: true }))),
-    more > 0 ? (0, import_react92.createElement)("span", { key: "more", className: "bt-pile-face bt-pile-more", style: { animationDelay: `${shown.length * 40}ms` } }, `+${more}`) : null
+    shown2.map((bot, index) => (0, import_react92.createElement)("span", { key: bot.id, className: "bt-pile-face", style: { animationDelay: `${index * 40}ms` } }, (0, import_react92.createElement)(BotMark, { bot, size: 44, live: true }))),
+    more > 0 ? (0, import_react92.createElement)("span", { key: "more", className: "bt-pile-face bt-pile-more", style: { animationDelay: `${shown2.length * 40}ms` } }, `+${more}`) : null
   );
 }
 var markOf2 = (entry) => entry?.state === "ask" ? "alert" : entry?.state === "work" ? workState(entry.doing) : "idle";
@@ -33575,7 +33711,7 @@ var reducedMotion2 = () => typeof matchMedia === "function" && matchMedia("(pref
 var tabLabel = (page) => page.title || shortAddress(page.url) || t("New tab");
 function PanelMenu({ items, className, "aria-label": label }) {
   const [open, setOpen] = (0, import_react93.useState)(false);
-  const [shown, leaving] = useLinger(open, 120);
+  const [shown2, leaving] = useLinger(open, 120);
   const wrap = (0, import_react93.useRef)(null);
   const button = (0, import_react93.useRef)(null);
   (0, import_react93.useEffect)(() => {
@@ -33610,7 +33746,7 @@ function PanelMenu({ items, className, "aria-label": label }) {
       "aria-expanded": open,
       onClick: () => setOpen((value) => !value)
     }, (0, import_react93.createElement)(DotsIcon)),
-    shown ? (0, import_react93.createElement)(
+    shown2 ? (0, import_react93.createElement)(
       "div",
       { className: "bt-pmenu-pop", role: "menu", "data-leaving": leaving || void 0 },
       items.map((item, index) => item.sep ? (0, import_react93.createElement)("span", { key: `sep-${index}`, className: "bt-pmenu-sep", role: "separator" }) : (0, import_react93.createElement)("button", {
@@ -34214,9 +34350,9 @@ function BotPanel({ pane, leaving, room: room2, overlay, roster, actions, useSes
   (0, import_react93.useEffect)(() => {
     const panel = root.current;
     if (!overlay || view !== "details" || leaving || !panel) return void 0;
-    const shown = (node) => getComputedStyle(node).display !== "none" && getComputedStyle(node).visibility !== "hidden";
-    const otherLayer = () => [...document.querySelectorAll('[role="dialog"],[role="menu"],[role="listbox"]')].some((node) => node !== panel && !panel.contains(node) && !node.closest('[data-leaving],[hidden],[inert],[aria-hidden="true"]') && shown(node));
-    const focusable = () => [...panel.querySelectorAll("button,a[href],input,textarea,select,[tabindex]")].filter((node) => node.tabIndex >= 0 && !node.disabled && !node.closest('[hidden],[inert],[aria-hidden="true"]') && shown(node));
+    const shown2 = (node) => getComputedStyle(node).display !== "none" && getComputedStyle(node).visibility !== "hidden";
+    const otherLayer = () => [...document.querySelectorAll('[role="dialog"],[role="menu"],[role="listbox"]')].some((node) => node !== panel && !panel.contains(node) && !node.closest('[data-leaving],[hidden],[inert],[aria-hidden="true"]') && shown2(node));
+    const focusable = () => [...panel.querySelectorAll("button,a[href],input,textarea,select,[tabindex]")].filter((node) => node.tabIndex >= 0 && !node.disabled && !node.closest('[hidden],[inert],[aria-hidden="true"]') && shown2(node));
     const contain = (event) => {
       if (!panel.isConnected || panel.getAttribute("aria-hidden") === "true" || otherLayer()) return;
       if (event.type === "focusin") {
@@ -34624,17 +34760,17 @@ function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity
     pref: "hidden",
     panel: open ? { view: open.view, yielded: ui2.panelYield === true } : null
   });
-  const shown = open !== null && layout.panel !== "folded" ? open : null;
-  const [kept, setKept] = (0, import_react94.useState)(shown);
+  const shown2 = open !== null && layout.panel !== "folded" ? open : null;
+  const [kept, setKept] = (0, import_react94.useState)(shown2);
   (0, import_react94.useEffect)(() => {
-    if (shown) {
-      setKept(shown);
+    if (shown2) {
+      setKept(shown2);
       return void 0;
     }
     const timer = setTimeout(() => setKept(null), PANEL_LINGER_MS);
     return () => clearTimeout(timer);
-  }, [ui2.details, ui2.view, ui2.renaming, ui2.tab, shown === null]);
-  const pane = shown ?? kept;
+  }, [ui2.details, ui2.view, ui2.renaming, ui2.tab, shown2 === null]);
+  const pane = shown2 ?? kept;
   const [settings, settingsLeaving] = useLinger(ui2.settings, DIALOG_EXIT_MS);
   const memoryOwner = (id) => {
     const bot = roster.byId[id];
@@ -34648,7 +34784,7 @@ function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity
   return (0, import_react94.createElement)(
     import_react94.Fragment,
     null,
-    pane ? (0, import_react_dom16.createPortal)((0, import_react94.createElement)(BotPanel, { pane, leaving: shown === null, room: layout.room, overlay: layout.panel === "overlay", roster, actions, useSessions, useSessionStatus, useActivity, useWork, useBrowserTabs, useBrowserPages, useBrowserHolds, useComputer }), document.body) : null,
+    pane ? (0, import_react_dom16.createPortal)((0, import_react94.createElement)(BotPanel, { pane, leaving: shown2 === null, room: layout.room, overlay: layout.panel === "overlay", roster, actions, useSessions, useSessionStatus, useActivity, useWork, useBrowserTabs, useBrowserPages, useBrowserHolds, useComputer }), document.body) : null,
     ui2.newChat ? (0, import_react_dom16.createPortal)((0, import_react94.createElement)(NewChat, { key: `${ui2.newChat}:${ui2.newChatSection ?? ""}`, mode: ui2.newChat, sectionId: ui2.newChatSection ?? null, roster, actions }), document.body) : null,
     ui2.palette ? (0, import_react_dom16.createPortal)((0, import_react94.createElement)(CommandPalette, { key: ui2.palette.token, start: ui2.palette.query, token: ui2.palette.token, roster, actions, useSessions }), document.body) : null,
     ui2.exchange ? (0, import_react_dom16.createPortal)((0, import_react94.createElement)(ExchangeDialog, { pair: ui2.exchange, roster, actions }), document.body) : null,
@@ -34889,9 +35025,9 @@ ${body2 || "(no text)"}
     const style = styleOf(el);
     const display = style.display;
     if (display === "none" || style.contentVisibility === "hidden") return "";
-    const shown = style.visibility === "visible";
+    const shown2 = style.visibility === "visible";
     const keepsSpace = String(style.whiteSpace || "").startsWith("pre") || style.whiteSpace === "break-spaces";
-    const next = { ...ctx, depth: ctx.depth + 1, shown };
+    const next = { ...ctx, depth: ctx.depth + 1, shown: shown2 };
     if (display === "contents" && !SEMANTIC.test(tag) && !el.matches(ITEM)) return children(el, next);
     if (style.overflowX !== "visible" || style.overflowY !== "visible") {
       const box = el.getBoundingClientRect();
@@ -34901,7 +35037,7 @@ ${body2 || "(no text)"}
     if (tag === "hr") return "\n\n---\n\n";
     if (tag === "img") {
       const alt = collapse(el.getAttribute("alt"));
-      return shown && alt ? `[image: ${alt}]` : "";
+      return shown2 && alt ? `[image: ${alt}]` : "";
     }
     if (tag === "canvas") {
       const box = el.getBoundingClientRect();
@@ -34919,7 +35055,7 @@ ${body2 || "(no text)"}
     }
     let body2;
     if (tag === "pre") {
-      const code = shown ? String(el.innerText || el.textContent || "") : "";
+      const code = shown2 ? String(el.innerText || el.textContent || "") : "";
       chars += code.length;
       body2 = code.trim() ? keep(fenced(code, langOf(el))) : "";
     } else if (tag === "table") {
@@ -35100,7 +35236,7 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
   const placeholders = /* @__PURE__ */ new Set();
   const seen = /* @__PURE__ */ new Set();
   let layer;
-  let shown = null;
+  let shown2 = null;
   let rect = null;
   let visible = false;
   let resizeLater = 0;
@@ -35229,7 +35365,7 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
   const place = (entry) => {
     const box = rect ?? { left: 0, top: 0, width: 800, height: 600 };
     if (entry.appView) {
-      void bridge.views.place(entry.tabId, box, shown === entry.tabId && visible && Boolean(rect));
+      void bridge.views.place(entry.tabId, box, shown2 === entry.tabId && visible && Boolean(rect));
       return;
     }
     Object.assign(entry.element.style, {
@@ -35237,7 +35373,7 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
       top: `${box.top}px`,
       width: `${box.width}px`,
       height: `${box.height}px`,
-      visibility: shown === entry.tabId && visible && rect ? "visible" : "hidden"
+      visibility: shown2 === entry.tabId && visible && rect ? "visible" : "hidden"
     });
   };
   async function preview(tabId) {
@@ -35372,7 +35508,7 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
     return job;
   }
   function trim() {
-    const idle = [...views.values()].filter((entry) => !entry.appView && !entry.botAttached && entry.tabId !== shown).sort((a, b) => a.usedAt - b.usedAt);
+    const idle = [...views.values()].filter((entry) => !entry.appView && !entry.botAttached && entry.tabId !== shown2).sort((a, b) => a.usedAt - b.usedAt);
     while ([...views.values()].filter((entry) => !entry.appView).length > MAX_LIVE && idle.length > 0) void release2(idle.shift().tabId);
   }
   async function release2(tabId) {
@@ -35407,7 +35543,7 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
     placeholders.delete(tabId);
     await opening.get(tabId)?.catch(() => {
     });
-    if (shown === tabId) await show2(null);
+    if (shown2 === tabId) await show2(null);
     if (views.get(tabId)?.appView) {
       await bridge.views.close(botId, tabId);
       views.get(tabId)?.stop();
@@ -35441,7 +35577,7 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
   }
   const activeTab = (botId) => tabs.getSnapshot()[botId]?.active ?? null;
   async function show2(tabId, box = null) {
-    if (tabId !== null && tabId === shown && visible && box !== null) {
+    if (tabId !== null && tabId === shown2 && visible && box !== null) {
       rect = box;
       const entry2 = views.get(tabId);
       if (entry2) place(entry2);
@@ -35451,13 +35587,13 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
       }, RESIZE_LATER_MS);
       return;
     }
-    shown = tabId;
+    shown2 = tabId;
     if (box) rect = box;
     visible = tabId !== null && box !== null;
     for (const entry2 of views.values()) place(entry2);
     if (tabId === null) return;
     const entry = await open(tabId);
-    if (entry === void 0 || shown !== tabId) return;
+    if (entry === void 0 || shown2 !== tabId) return;
     entry.usedAt = Date.now();
     place(entry);
   }
@@ -35481,7 +35617,7 @@ function createBotBrowsers({ bridge, createSource: createSource2, storage = glob
     for (const tabId of tabs.getSnapshot()[botId]?.ids ?? []) {
       await opening.get(tabId)?.catch(() => {
       });
-      if (shown === tabId) await show2(null);
+      if (shown2 === tabId) await show2(null);
       if (views.get(tabId)?.appView) {
         await bridge.views.close(botId, tabId);
         views.get(tabId)?.stop();
@@ -36730,7 +36866,7 @@ function lineDiff(before, after) {
 // src/client/learning-card.js
 var import_react97 = require("react");
 var failedAnswers = /* @__PURE__ */ new Map();
-function ProposalCard({ proposal, initialError = "", onFailure, onResolved, actions }) {
+function ProposalCard2({ proposal, initialError = "", onFailure, onResolved, actions }) {
   const outcome = proposal.outcome;
   const [busy, setBusy] = (0, import_react97.useState)(false);
   const [error, setError] = (0, import_react97.useState)(initialError);
@@ -36901,7 +37037,7 @@ function LearningProposals({ turn, dock, sessionId, useRoster, actions }) {
   return (0, import_react97.createElement)("div", { className: dock ? "bt-learning-stack bt-learning-dock" : "bt-learning-stack" }, cards2.map((proposal) => (0, import_react97.createElement)(
     "div",
     { className: "bt-q-inline", key: proposal.id },
-    (0, import_react97.createElement)(ProposalCard, {
+    (0, import_react97.createElement)(ProposalCard2, {
       proposal,
       initialError: failed[proposal.id]?.error ?? failedAnswers.get(proposal.id)?.error,
       onFailure,
@@ -38552,8 +38688,8 @@ function apply(ctx) {
     const paint = () => {
       frame2 = 0;
       const list = ctx.sessions.list.getSnapshot();
-      const shown = Object.values(list.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id;
-      const turns = shown === void 0 ? {} : turnClock.getSnapshot()[shown] ?? {};
+      const shown2 = Object.values(list.byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id;
+      const turns = shown2 === void 0 ? {} : turnClock.getSnapshot()[shown2] ?? {};
       for (const row of document.querySelectorAll("[data-chat-flow-kind=user][data-chat-turn]")) {
         const first = turns[row.dataset.chatTurn]?.first;
         const label = first === void 0 ? "" : new Date(first).toLocaleTimeString(dateLocale(), { hour: "numeric", minute: "2-digit" });
