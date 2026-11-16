@@ -537,11 +537,29 @@ for (const spelling of [
 
 test('shell text collapses parent segments under the bots root', async t => {
   const f = await fixture(t, { withTools: false })
-  for (const command of ['cat .automagik/bots/learning/../outside/notes.txt', 'cat .automagik/bots/b/../outside/notes.txt']) {
-    for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) {
-      await assert.rejects(f.guard('b', name, { command }), /another Bot's own folder/)
-      assert.equal(await f.guard('outside', name, { command }), 'ran')
-    }
+  const command = 'cat .automagik/bots/learning/../outside/notes.txt'
+  for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) {
+    await assert.rejects(f.guard('b', name, { command }), /another Bot's own folder/)
+    assert.equal(await f.guard('outside', name, { command }), 'ran')
+  }
+})
+
+test('a later parent segment cannot erase an earlier protected path', async t => {
+  const f = await fixture(t, { withTools: false })
+  f.person('a', f.ref)
+  await f.show('a')
+  const hex = f.ref.attachmentId.slice(7)
+  for (const command of [
+    'cat .automagik/bots/outside/draft.md /../../scratch/dump',
+    'cat .automagik/bots/outside/cache/draft.md # /../../..',
+    'cat .automagik/bots/outside/draft.md; echo /../../..',
+  ]) await assert.rejects(f.guard('b', 'bash', { command }), /another Bot's own folder/)
+  for (const command of [
+    `cat .automagik/uploads/${hex}/picture.png # /../..`,
+    `cat objects/${hex.slice(0, 2)}/${hex} # /..`,
+  ]) {
+    await assert.rejects(f.guard('b', 'bash', { command }), /not sent to the test Bot b/)
+    assert.equal(await f.guard('a', 'bash', { command }), 'ran')
   }
 })
 
@@ -555,6 +573,24 @@ test('a link outside the bots root into another Bot folder is refused', async t 
   await assert.rejects(f.guard('b', 'read', { file_path: path }), /another Bot's own folder/)
   await assert.rejects(f.guard('b', 'grep', { path: link, pattern: 'notes' }), /another Bot's own folder/)
   assert.equal(await f.guard('outside', 'read', { file_path: path }), 'ran')
+})
+
+test('a relative glob pattern through a link outside the bots root is refused', async t => {
+  const f = await fixture(t, { withTools: false })
+  const working = join(f.folder, 'working')
+  await mkdir(working)
+  const target = join(f.folder, '.automagik', 'bots', 'outside')
+  await mkdir(target, { recursive: true })
+  const link = join(working, 'bot-folder-link')
+  await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+  const pattern = 'bot-folder-link/cache/*.md'
+  await assert.rejects(f.guard('b', 'glob', { path: working, pattern }), /another Bot's own folder/)
+  assert.equal(await f.guard('outside', 'glob', { path: working, pattern }), 'ran')
+  // The pattern alone names the folder too; with no private Bot to close the whole walk,
+  // the link's target is what refuses it.
+  delete f.rt.state.bots['test-private-bot']
+  await assert.rejects(f.guard('b', 'glob', { pattern: 'working/bot-folder-link/cache/*.md' }), /another Bot's own folder/)
+  assert.equal(await f.guard('outside', 'glob', { pattern: 'working/bot-folder-link/cache/*.md' }), 'ran')
 })
 
 test('shell store guards match object ids in home-relative, quoted and cd-relative paths', async t => {

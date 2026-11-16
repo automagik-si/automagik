@@ -71,10 +71,20 @@ const mutants = [
   {
     name: 'shell text keeps parent segments under the bots root',
     source: '../src/host/shared-uploads.js',
-    from: 'const parentSegment = /\\/(?!\\.\\.?(?:\\/|$))[^/]+\\/\\.\\.(?=\\/|$)/g',
+    from: 'const parentSegment = /\\/(?!\\.\\.?(?=$|[\\s/;&|#<>()]))[^\\s/;&|#<>()]+\\/\\.\\.(?=$|[\\s/;&|#<>()])/g',
     to: 'const parentSegment = /(?!)/g',
     file: 'test/upload-access.test.js',
     test: 'shell text collapses parent segments under the bots root',
+  },
+  {
+    name: 'a later parent segment erases an earlier protected path',
+    source: '../src/host/shared-uploads.js',
+    from: 'const parentSegment = /\\/(?!\\.\\.?(?=$|[\\s/;&|#<>()]))[^\\s/;&|#<>()]+\\/\\.\\.(?=$|[\\s/;&|#<>()])/g',
+    to: 'const parentSegment = /\\/(?!\\.\\.?(?:\\/|$))[^/]+\\/\\.\\.(?=\\/|$)/g',
+    alsoFrom: '      await inspect(flat)\n',
+    alsoTo: '',
+    file: 'test/upload-access.test.js',
+    test: 'a later parent segment cannot erase an earlier protected path',
   },
   {
     name: 'a link outside the bots root is not resolved',
@@ -83,6 +93,14 @@ const mutants = [
     to: '      // mutant: the real path is not checked',
     file: 'test/upload-access.test.js',
     test: 'a link outside the bots root into another Bot folder is refused',
+  },
+  {
+    name: 'a relative glob pattern skips the real-path check',
+    source: '../src/host/shared-uploads.js',
+    from: "      : SEARCH_TOOLS.includes(exec.name) ? [args.path ?? '.', pattern === '' ? undefined : resolve(folder, args.path ?? '.', pattern)]",
+    to: "      : SEARCH_TOOLS.includes(exec.name) ? [args.path ?? '.', undefined]",
+    file: 'test/upload-access.test.js',
+    test: 'a relative glob pattern through a link outside the bots root is refused',
   },
 ]
 for (const mutant of mutants) {
