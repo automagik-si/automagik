@@ -726,22 +726,42 @@ const FAKE_CODEX = [
   "",
 ].join("\n");
 
-function runDriver({ input, extraArgs = [], env = {} }) {
+const FAKE_HC = [
+  "#!/usr/bin/env node",
+  'const { writeFileSync } = require("node:fs");',
+  'writeFileSync(process.env.FAKE_HC_MARKER, "hc");',
+  "",
+].join("\n");
+
+function runDriver({ input, extraArgs = [], env = {}, withCodex = true }) {
   const dir = mkdtempSync(join(tmpdir(), "event-notice-driver-"));
   try {
     const log = join(dir, "calls.jsonl");
-    const fake = join(dir, "codex");
-    writeFileSync(fake, FAKE_CODEX);
-    chmodSync(fake, 0o755);
+    const hcMarker = join(dir, "hc-executed");
+    if (withCodex) {
+      const fake = join(dir, "codex");
+      writeFileSync(fake, FAKE_CODEX);
+      chmodSync(fake, 0o755);
+    }
+    const fakeHc = join(dir, "hc");
+    writeFileSync(fakeHc, FAKE_HC);
+    chmodSync(fakeHc, 0o755);
     const run = spawnSync(process.execPath, [DRIVER, THREAD, ...extraArgs], {
       input,
       encoding: "utf8",
-      env: { ...process.env, PATH: `${dir}${delimiter}${process.env.PATH}`, FAKE_CODEX_LOG: log, ...env },
+      env: { ...process.env, PATH: `${dir}${delimiter}${process.env.PATH}`, FAKE_CODEX_LOG: log, FAKE_HC_MARKER: hcMarker, ...env },
     });
     const calls = existsSync(log)
       ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
       : [];
-    return { status: run.status, stdout: run.stdout, stderr: run.stderr, calls };
+    return {
+      status: run.status,
+      stdout: run.stdout,
+      stderr: run.stderr,
+      calls,
+      spawned: existsSync(log),
+      hcSpawned: existsSync(hcMarker),
+    };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -770,12 +790,22 @@ test("driver row: a dry run calls nothing and prints the argv", () => {
   const run = runDriver({ input: JSON.stringify(EVENT) });
   assert.equal(run.status, 0);
   assert.equal(run.calls.length, 0);
+  assert.equal(run.spawned, false);
+  assert.equal(run.hcSpawned, false);
   const argvLine = run.stdout.split("\n").find((line) => line.startsWith("argv "));
   assert.ok(argvLine);
   assert.deepEqual(JSON.parse(argvLine.slice(5)), ["codex", "queue", "--thread", THREAD, "--message", TEXT]);
   const receipts = receiptsOf(run.stdout);
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].decision, "paused");
+
+  const noCodex = runDriver({ input: JSON.stringify(EVENT), withCodex: false, env: { PATH: "" } });
+  assert.equal(noCodex.status, 0);
+  assert.equal(noCodex.calls.length, 0);
+  assert.equal(noCodex.spawned, false);
+  assert.equal(noCodex.hcSpawned, false);
+  assert.ok(noCodex.stdout.includes("argv "));
+  assert.equal(receiptsOf(noCodex.stdout)[0].decision, "paused");
 });
 
 test("driver row: an invalid event is refused, calls nothing, and never echoes its text", () => {
@@ -803,6 +833,27 @@ test("driver row: a queue exit of 1 gives a failed receipt and a nonzero exit", 
   assert.notEqual(run.status, 0);
   assert.equal(run.calls.length, 1);
   assert.equal(receiptsOf(run.stdout)[0].decision, "failed");
+});
+
+test("driver row: nothing the driver runs reaches hc", () => {
+  const moduleSource = readFileSync(MODULE_PATH, "utf8");
+  const driverSource = readFileSync(DRIVER, "utf8");
+  const hcSpawn = /\b(?:spawn|spawnSync|exec|execFile|execSync|execFileSync)\s*\(\s*["'`]hc["'`]/;
+  assert.doesNotMatch(moduleSource, hcSpawn);
+  assert.doesNotMatch(driverSource, hcSpawn);
+  assert.doesNotMatch(driverSource, /["'`]hc["'`]/);
+  assert.doesNotMatch(moduleSource, /automagik-herdr/);
+  assert.doesNotMatch(driverSource, /automagik-herdr/);
+
+  const dry = runDriver({ input: JSON.stringify(EVENT) });
+  assert.equal(dry.status, 0);
+  assert.equal(dry.hcSpawned, false);
+  const live = runDriver({ input: JSON.stringify(EVENT), env: { LIVE: "1" } });
+  assert.equal(live.status, 0);
+  assert.equal(live.hcSpawned, false);
+  const refused = runDriver({ input: JSON.stringify({ ...EVENT, note: "x" }), env: { LIVE: "1" } });
+  assert.notEqual(refused.status, 0);
+  assert.equal(refused.hcSpawned, false);
 });
 
 test("driver row: the runbook hash matches the driver bytes", () => {
