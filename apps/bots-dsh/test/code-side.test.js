@@ -157,8 +157,10 @@ test('the tree words: a blocked or failed terminal needs the person, a missing o
 })
 
 test('a pane request names a Bot (or its worker), never a terminal to attach as given', () => {
-  assert.deepEqual(streamTarget(`http://x/api/omni-ui/code/stream?bot=${LEAD}`), { bot: LEAD, worker: null })
-  assert.deepEqual(streamTarget(`http://x/api/omni-ui/code/stream?bot=${LEAD}&worker=t9`), { bot: LEAD, worker: 't9' })
+  assert.deepEqual(streamTarget(`http://x/api/omni-ui/code/stream?bot=${LEAD}`), { bot: LEAD, worker: null, viewer: null })
+  assert.deepEqual(streamTarget(`http://x/api/omni-ui/code/stream?bot=${LEAD}&worker=t9`), { bot: LEAD, worker: 't9', viewer: null })
+  assert.deepEqual(streamTarget(`http://x/api/omni-ui/code/stream?bot=${LEAD}&viewer=viewer-1`), { bot: LEAD, worker: null, viewer: 'viewer-1' })
+  assert.equal(streamTarget(`http://x/api/omni-ui/code/stream?bot=${LEAD}&viewer=x`).error, 'no-viewer')
   assert.equal(streamTarget('http://x/api/omni-ui/code/stream?terminal=t7').error, 'unknown-parameter')
   assert.equal(streamTarget('http://x/api/omni-ui/code/stream?bot=nope').error, 'no-bot')
   assert.equal(streamTarget('http://x/api/omni-ui/code/stream').error, 'no-bot')

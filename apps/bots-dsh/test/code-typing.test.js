@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import { createTypingService, typingRoutes } from '../src/host/code-typing.js'
 
@@ -177,4 +178,70 @@ test('owner only: the take route is an exact Fetch route DSH answers only for th
   assert.equal((await handler.fetch(request(), viewer)).status, 403)
   assert.equal((await handler.fetch(request(), botSession)).status, 403)
   assert.equal((await typing.take({ request: request(), bot: LEAD, viewer: 'viewer-1' })).status, 200, 'the owner reaches it')
+})
+
+test('releaseViewer lets a viewer\'s attach go when its watch stream ends', async (t) => {
+  const f = fixture(t)
+  const typing = service(f)
+  t.after(() => typing.dispose())
+  const taken = await typing.take({ request: request(), bot: LEAD, viewer: 'viewer-1' })
+  assert.equal(taken.status, 200)
+  assert.deepEqual(await typing.releaseViewer('viewer-1'), { released: true })
+  assert.equal(typing.sessions().length, 0)
+  assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2)), 'the core gets its CLOSE when the viewer goes')
+  assert.deepEqual(await typing.releaseViewer('viewer-1'), { released: false })
+})
+
+test('a real Cordis plugin stop lets the typing attach go', async (t) => {
+  const f = fixture(t)
+  const team = join(f.root, 'team')
+  mkdirSync(team, { recursive: true })
+  const saved = {}
+  const env = {
+    HOME: f.root,
+    AUTOMAGIK_HOME: join(f.root, 'automagik'),
+    AUTOMAGIK_BOTS_HOME: team,
+    HERDR_APP_HOME: join(f.root, 'herdr-app'),
+    HERDR_HC: FAKE,
+    FAKE_CORE_TERMINALS: join(f.root, 'terminals.json'),
+    FAKE_CORE_LOG: f.log,
+    FAKE_CORE_KEEP_OPEN: '1',
+  }
+  for (const [key, value] of Object.entries(env)) { saved[key] = process.env[key]; process.env[key] = value }
+  t.after(() => {
+    for (const key of Object.keys(saved)) {
+      if (saved[key] === undefined) delete process.env[key]
+      else process.env[key] = saved[key]
+    }
+  })
+  const { apply } = await import('../index.js')
+  const { fakeContext } = await import('./fake-ctx.js')
+  const outer = new Context()
+  const stub = fakeContext({})
+  let takeRoute = null
+  const register = stub.connection.fetch.register
+  stub.connection.fetch.register = (options) => {
+    if (options.path === '/api/omni-ui/code/take') takeRoute = options
+    return register(options)
+  }
+  stub.connection.admit = () => ({})
+  const innerGet = stub.get
+  stub.get = name => (name === 'connection' ? stub.connection : innerGet(name))
+  const fork = outer.plugin({
+    apply(c) {
+      stub.effect = (...args) => c.effect(...args)
+      stub.on = (...args) => c.on(...args)
+      apply(stub, { home: team, browserPlugin: false })
+    },
+  })
+  await fork
+  assert.ok(takeRoute, 'the take route is registered in the real scope')
+  const response = await takeRoute.fetch(new Request('http://127.0.0.1/api/omni-ui/code/take', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ bot: LEAD, viewer: 'viewer-1' }),
+  }))
+  assert.equal(response.status, 200)
+  await fork.dispose()
+  assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2)), 'stopping the plugin scope sends CLOSE for the typing attach')
 })

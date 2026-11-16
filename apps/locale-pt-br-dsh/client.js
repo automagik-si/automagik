@@ -2776,7 +2776,9 @@ const pack = createPack({
     "Typing · Esc to stop": "Digitando · Esc para parar",
     "Taking the pane…": "Assumindo o painel…",
     "Typing is open in another window · view only": "Digitação aberta em outra janela · somente leitura",
-    "Your session ended · view only": "Sua sessão encerrada · somente leitura"
+    "Your session ended · view only": "Sua sessão encerrada · somente leitura",
+    "Line breaks were removed: this terminal has no bracketed paste": "Quebras de linha removidas: este terminal não tem colagem com colchetes",
+    "Control characters were removed from the paste": "Caracteres de controle removidos da colagem"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connectCore } from '../src/host/code-core.js'
 import { createTypingService } from '../src/host/code-typing.js'
+import { BRACKET_PASTE_ON, pasteBytes } from '../src/client/code-side-paste.js'
 
 const BOT = 'b-aaaaaaaaaa'
 const CORE_BIN = process.env.HERDR_TEST_HC || join(process.env.HOME || '', '.local', 'bin', 'herdr-core')
@@ -84,7 +85,77 @@ try {
   console.log(`record rows: ${record.length}`)
   for (const row of record) console.log(`  ${row}`)
   if (record.some(row => row.includes(line) || row.includes(paste))) throw new Error('a keystroke reached the record')
+
+  // A real scratch shell, twice: without bracketed paste the guard must leave no CR or LF in
+  // the paste (so nothing runs); with bracketed paste on, the paste goes inside the markers
+  // and the program takes it as text only.
+  const pasteProof = async ({ label, argv, text, bracketed }) => {
+    const made = await core.call('terminal.run', { argv, cwd: project, name: `proof-${label}`, keep: true })
+    const terminal = made.address
+    writeFileSync(join(ledgerDir, 'attach.jsonl'), `${JSON.stringify({ v: 1, event: 'attach', bot: BOT, project, terminal, core: coreId, created_ms: made.created_ms, machine: null, at: new Date().toISOString(), by: 'start' })}\n`)
+    const seen = []
+    const watcher = await connectCore({ env })
+    const attached = await watcher.attach({ terminal, cols: made.cols ?? 80, rows: made.rows ?? 24, history: 0, observe: true })
+    watcher.watch(attached.channel, { onData: (bytes) => { seen.push(bytes.toString('latin1')); watcher.credit(attached.channel, bytes.length) }, onClose: () => {} })
+    const readyUntil = Date.now() + 5000
+    while (Date.now() < readyUntil && !(await core.call('terminal.read', { terminal, lines: 5 }))?.text?.includes('$')) await new Promise(resolve => setTimeout(resolve, 50))
+    const marker = bracketed ? BRACKET_PASTE_ON : null
+    if (marker) {
+      const untilMarker = Date.now() + 5000
+      while (Date.now() < untilMarker && !seen.join('').includes(marker)) await new Promise(resolve => setTimeout(resolve, 50))
+      if (!seen.join('').includes(marker)) throw new Error(`${label}: the program did not turn on bracketed paste`)
+    }
+    const taken = await typing.take({ request: { headers: new Headers() }, bot: BOT, viewer: `proof-${label}` })
+    if (taken.status !== 200) throw new Error(`${label}: take refused ${taken.status}`)
+    const { bytes, note } = pasteBytes(text, bracketed)
+    const answer = await typing.input({ request: { headers: new Headers() }, session: taken.body.session, data: Buffer.from(bytes).toString('base64') })
+    if (answer.status !== 204) throw new Error(`${label}: paste input refused ${answer.status}`)
+    await new Promise(resolve => setTimeout(resolve, 1600))
+    const screen = (await core.call('terminal.read', { terminal, lines: 30 }))?.text ?? ''
+    const ran = screen.split('\n').some(line => line.trim() === text.split(/\r?\n/)[0].replace(/^echo /, '').trim())
+    console.log(`${label}: sent note=${note} ran=${ran} screenHasText=${screen.includes(text.split(/\r?\n/)[0].trim())}`)
+    if (ran) throw new Error(`${label}: the paste ran a command`)
+    await typing.release({ request: { headers: new Headers() }, session: taken.body.session })
+    watcher.detach(attached.channel); watcher.close()
+    await core.call('terminal.kill', { terminal }).catch(() => {})
+    return { label, note, ran }
+  }
+  const plain = await pasteProof({ label: 'sh-no-bracketed', argv: ['sh', '-i'], text: 'echo PASTED\n', bracketed: false })
+  if (plain.note !== 'line-breaks-stripped') throw new Error('without bracketed paste a multi-line paste must be stripped')
+  const bracketed = await pasteProof({ label: 'bash-bracketed', argv: ['bash', '--norc', '--noprofile', '-i'], text: 'echo BRACKETED\n', bracketed: true })
+  // The breakout: a paste that carries the bracketed-paste end marker of its own. The guard
+  // strips its ESC, so the marker is plain text and nothing after it can run.
+  const breakout = async () => {
+    const made = await core.call('terminal.run', { argv: ['bash', '--norc', '--noprofile', '-i'], cwd: project, name: 'proof-breakout', keep: true })
+    const terminal = made.address
+    writeFileSync(join(ledgerDir, 'attach.jsonl'), `${JSON.stringify({ v: 1, event: 'attach', bot: BOT, project, terminal, core: coreId, created_ms: made.created_ms, machine: null, at: new Date().toISOString(), by: 'start' })}\n`)
+    const seen = []
+    const watcher = await connectCore({ env })
+    const attached = await watcher.attach({ terminal, cols: made.cols ?? 80, rows: made.rows ?? 24, history: 0, observe: true })
+    watcher.watch(attached.channel, { onData: (bytes) => { seen.push(bytes.toString('latin1')); watcher.credit(attached.channel, bytes.length) }, onClose: () => {} })
+    const untilMarker = Date.now() + 5000
+    while (Date.now() < untilMarker && !seen.join('').includes(BRACKET_PASTE_ON)) await new Promise(resolve => setTimeout(resolve, 50))
+    if (!seen.join('').includes(BRACKET_PASTE_ON)) throw new Error('breakout: bash did not turn on bracketed paste')
+    const untilPrompt = Date.now() + 5000
+    while (Date.now() < untilPrompt && !(await core.call('terminal.read', { terminal, lines: 5 }))?.text?.includes('$')) await new Promise(resolve => setTimeout(resolve, 50))
+    const taken = await typing.take({ request: { headers: new Headers() }, bot: BOT, viewer: 'proof-breakout' })
+    if (taken.status !== 200) throw new Error(`breakout: take refused ${taken.status}`)
+    const payload = 'x' + '\u001b[201~' + 'echo BROKE\n'
+    const { bytes, note } = pasteBytes(payload, true)
+    const answer = await typing.input({ request: { headers: new Headers() }, session: taken.body.session, data: Buffer.from(bytes).toString('base64') })
+    if (answer.status !== 204) throw new Error(`breakout: input refused ${answer.status}`)
+    await new Promise(resolve => setTimeout(resolve, 1600))
+    const screen = (await core.call('terminal.read', { terminal, lines: 30 }))?.text ?? ''
+    const ran = screen.split('\n').some(line => line.trim() === 'BROKE')
+    console.log(`bracketed-breakout: note=${note} ran=${ran} screenHasText=${screen.includes('BROKE')}`)
+    if (ran) throw new Error('breakout: the pasted end marker ran the rest')
+    await typing.release({ request: { headers: new Headers() }, session: taken.body.session })
+    watcher.detach(attached.channel); watcher.close()
+    await core.call('terminal.kill', { terminal }).catch(() => {})
+  }
+  await breakout()
   console.log('the record holds no keystrokes: true')
+  console.log(`paste proof: ${plain.label} stripped its line breaks and ran nothing; ${bracketed.label} took the markers and ran nothing; the bracketed-breakout paste ran nothing`)
 } catch (error) {
   console.error(`proof failed: ${error?.message ?? error}`)
   process.exitCode = 1

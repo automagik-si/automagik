@@ -28,6 +28,7 @@ export const STREAM_IDLE_MS = 5 * 60_000
 /** A comment event this often keeps a proxy from closing an idle stream. */
 export const HEARTBEAT_MS = 20_000
 const WORKER_QUERY = /^[A-Za-z0-9._-]{1,64}$/
+const VIEWER_QUERY = /^[A-Za-z0-9._:-]{8,128}$/
 
 const sse = (event, data) => `event: ${event}\ndata: ${data}\n\n`
 const jsonError = (status, reason) => Response.json({ error: reason }, { status, headers: { 'cache-control': 'no-store' } })
@@ -37,13 +38,15 @@ const noStore = { 'cache-control': 'no-store', 'x-content-type-options': 'nosnif
 export function streamTarget(url) {
   const params = new URL(url).searchParams
   for (const key of params.keys()) {
-    if (key !== 'bot' && key !== 'worker') return { error: 'unknown-parameter' }
+    if (key !== 'bot' && key !== 'worker' && key !== 'viewer') return { error: 'unknown-parameter' }
   }
   const bots = params.getAll('bot')
   const workers = params.getAll('worker')
+  const viewers = params.getAll('viewer')
   if (bots.length !== 1 || !isBotId(bots[0])) return { error: 'no-bot' }
   if (workers.length > 1 || (workers.length === 1 && !WORKER_QUERY.test(workers[0]))) return { error: 'no-worker' }
-  return { bot: bots[0], worker: workers.length === 1 ? workers[0] : null }
+  if (viewers.length > 1 || (viewers.length === 1 && !VIEWER_QUERY.test(viewers[0]))) return { error: 'no-viewer' }
+  return { bot: bots[0], worker: workers.length === 1 ? workers[0] : null, viewer: viewers.length === 1 ? viewers[0] : null }
 }
 
 /** Whether a request may read a pane at all: same-origin page fetch/EventSource, never a cross-site one. */
@@ -228,7 +231,13 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
       try {
         const response = await openPaneStream({
           url: request.url, signal: request.signal, env, warn, connect, readFile,
-          onEnd: () => { streams.delete(tag); forgetCloser() },
+          onEnd: () => {
+            streams.delete(tag)
+            forgetCloser()
+            // The watch stream ending is how a signed-out page (or a refused batch that made
+            // the client close it) tells this host to let that viewer's typing attach go.
+            if (target.viewer) void typing.releaseViewer(target.viewer)
+          },
           onStop: (close) => {
             const stop = () => { live.delete(stop); close() }
             live.add(stop)

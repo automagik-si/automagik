@@ -8991,6 +8991,7 @@ var code_side_pane_exports = {};
 __export(code_side_pane_exports, {
   CODE_SIDE_CSS: () => CODE_SIDE_CSS,
   CodeBody: () => CodeBody,
+  TerminalPane: () => TerminalPane,
   statusLabel: () => statusLabel
 });
 module.exports = __toCommonJS(code_side_pane_exports);
@@ -11816,6 +11817,8 @@ var HOST_ZH = {
   "Taking the pane…": "正在接管终端…",
   "Typing is open in another window · view only": "另一个窗口正在输入 · 只读",
   "Your session ended · view only": "你的会话已结束 · 只读",
+  "Line breaks were removed: this terminal has no bracketed paste": "已移除换行：此终端未启用括号粘贴",
+  "Control characters were removed from the paste": "已从粘贴内容中移除控制字符",
   "Operating": "在操作",
   "You have the computer": "你在操作",
   "Latest screenshot": "最新截图",
@@ -14262,6 +14265,34 @@ function stillThere(selected, tree) {
 var STATUS_WORDS = Object.freeze(["working", "needs-you", "idle", "not-running"]);
 var statusKey = (status) => STATUS_WORDS.includes(status) ? status : "idle";
 
+// src/client/code-side-paste.js
+var BRACKET_PASTE_ON = "\x1B[?2004h";
+var BRACKET_PASTE_OFF = "\x1B[?2004l";
+var PASTE_START = "\x1B[200~";
+var PASTE_END = "\x1B[201~";
+var encoder = () => new TextEncoder();
+var bytesOf = (text) => encoder().encode(text);
+var CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f]/g;
+function bracketedState(current, bytes) {
+  const text = typeof bytes === "string" ? bytes : new TextDecoder().decode(bytes);
+  const on2 = text.lastIndexOf(BRACKET_PASTE_ON);
+  const off = text.lastIndexOf(BRACKET_PASTE_OFF);
+  if (on2 < 0 && off < 0) return current === true;
+  return on2 > off;
+}
+function pasteBytes(text, bracketed) {
+  const raw = typeof text === "string" ? text : "";
+  if (raw === "") return { bytes: new Uint8Array(), note: null };
+  const value = raw.replace(CONTROL, "");
+  const controls = value !== raw;
+  const lineBreaks = /[\r\n]/.test(value);
+  if (bracketed === true) {
+    return { bytes: bytesOf(`${PASTE_START}${value.replace(/\r\n?/g, "\n")}${PASTE_END}`), note: controls ? "controls-stripped" : null };
+  }
+  if (!lineBreaks) return { bytes: bytesOf(value), note: controls ? "controls-stripped" : null };
+  return { bytes: bytesOf(value.replace(/\r\n|\r|\n/g, " ")), note: controls ? "controls-stripped" : "line-breaks-stripped" };
+}
+
 // node_modules/@xterm/xterm/css/xterm.css
 var xterm_default = `/**
  * Copyright (c) 2014 The xterm.js authors. All rights reserved.
@@ -14600,7 +14631,9 @@ function TerminalPane({ botId, worker, title }) {
   const [phase, setPhase] = (0, import_react2.useState)({ kind: "connecting" });
   const [attempt, setAttempt] = (0, import_react2.useState)(0);
   const [mode, setMode] = (0, import_react2.useState)("view");
+  const [pasteNote, setPasteNote] = (0, import_react2.useState)(false);
   const modeRef = (0, import_react2.useRef)("view");
+  const bracketedRef = (0, import_react2.useRef)(false);
   const sessionRef = (0, import_react2.useRef)(null);
   const termRef = (0, import_react2.useRef)(null);
   const takeRef = (0, import_react2.useRef)(null);
@@ -14621,6 +14654,7 @@ function TerminalPane({ botId, worker, title }) {
     let observer = null;
     let fitFrame = 0;
     let outside = null;
+    let cleanupPaste = null;
     const fitNow = () => {
       if (!fit || disposed) return;
       cancelAnimationFrame(fitFrame);
@@ -14655,6 +14689,10 @@ function TerminalPane({ botId, worker, title }) {
       if (answer.status === 401) {
         sessionRef.current = null;
         setModeNow("ended");
+        if (source) {
+          source.close();
+          source = null;
+        }
         return false;
       }
       if (answer.status === 409) {
@@ -14676,6 +14714,7 @@ function TerminalPane({ botId, worker, title }) {
       const session = sessionRef.current;
       sessionRef.current = null;
       if (modeRef.current === "typing") setModeNow(reason === "ended" ? "ended" : "view");
+      setPasteNote(false);
       if (term) term.options.disableStdin = true;
       if (outside) {
         document.removeEventListener("pointerdown", outside, true);
@@ -14743,15 +14782,33 @@ function TerminalPane({ botId, worker, title }) {
           void flush();
         }, 20);
       });
+      const onPaste = (event) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (modeRef.current !== "typing" || !sessionRef.current) return;
+        const pasted = pasteBytes(event.clipboardData?.getData("text/plain") ?? "", bracketedRef.current);
+        setPasteNote(pasted.note ?? false);
+        if (pasted.bytes.length === 0) return;
+        queueRef.current.push(pasted.bytes);
+        if (!timerRef.current) timerRef.current = setTimeout(() => {
+          timerRef.current = 0;
+          void flush();
+        }, 20);
+      };
+      element.addEventListener("paste", onPaste, true);
+      cleanupPaste = () => element.removeEventListener("paste", onPaste, true);
       setPhase({ kind: "connecting" });
-      const query = `api/omni-ui/code/stream?bot=${encodeURIComponent(botId)}${worker ? `&worker=${encodeURIComponent(worker)}` : ""}`;
+      const query = `api/omni-ui/code/stream?bot=${encodeURIComponent(botId)}${worker ? `&worker=${encodeURIComponent(worker)}` : ""}&viewer=${encodeURIComponent(VIEWER)}`;
       source = new EventSource(query);
       source.addEventListener("pane", (event) => {
         if (!event.data) return;
         setPhase({ kind: "open" });
       });
       source.addEventListener("data", (event) => {
-        if (!disposed && term && event.data) term.write(decode(event.data));
+        if (disposed || !event.data) return;
+        const bytes = decode(event.data);
+        bracketedRef.current = bracketedState(bracketedRef.current, bytes);
+        if (term) term.write(bytes);
       });
       source.addEventListener("close", () => {
         if (source) {
@@ -14775,6 +14832,7 @@ function TerminalPane({ botId, worker, title }) {
       disposed = true;
       void stopTyping("left");
       cancelAnimationFrame(fitFrame);
+      cleanupPaste?.();
       observer?.disconnect();
       source?.close();
       try {
@@ -14795,6 +14853,7 @@ function TerminalPane({ botId, worker, title }) {
       { className: "cs-pane-head" },
       (0, import_react2.createElement)("span", { className: "cs-pane-title", title }, title),
       (0, import_react2.createElement)("span", { className: "cs-pane-note", role: "status", "data-mode": mode }, stateWord),
+      pasteNote ? (0, import_react2.createElement)("span", { className: "cs-paste-note", role: "status" }, pasteNote === "controls-stripped" ? t("Control characters were removed from the paste") : t("Line breaks were removed: this terminal has no bracketed paste")) : null,
       retryable ? (0, import_react2.createElement)("button", { type: "button", className: "cs-btn", onClick: () => {
         setPhase({ kind: "connecting" });
         setAttempt((value) => value + 1);
@@ -14939,6 +14998,7 @@ var CODE_SIDE_CSS = `
 .cs-pane{display:flex;flex:1;flex-direction:column;min-height:0}
 .cs-pane-head{display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--lb-line,var(--bt-line));flex:none}
 .cs-pane-title{font:var(--bt-weight-title,600) 13.5px/1.3 var(--bt-head-font,var(--bt-font));min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-paste-note{color:var(--lb-needs-ink,var(--st-warn,var(--bt-ink)));font:400 12px/1.3 var(--bt-font);white-space:nowrap}
 .cs-pane-note{margin-left:auto;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 12.5px/1.3 var(--bt-font);white-space:nowrap}
 .cs-screen{flex:1;min-height:0;padding:6px 8px 0;background:var(--bt-card);contain:strict;cursor:text}
 .cs-screen[data-code-mode='typing']{cursor:text}

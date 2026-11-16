@@ -10,6 +10,7 @@ import { createElement as h, useEffect, useRef, useState, useSyncExternalStore }
 import { t } from './i18n.js'
 import { installStyles } from './styles.js'
 import { botRowOf, statusKey } from './code-side-model.js'
+import { bracketedState, pasteBytes } from './code-side-paste.js'
 import XTERM_CSS from '@xterm/xterm/css/xterm.css'
 
 const WORD = { working: () => t('Working'), 'needs-you': () => t('Needs you'), idle: () => t('Idle'), 'not-running': () => t('Not running') }
@@ -64,12 +65,14 @@ async function post(path, payload) {
  * host in small batches until Escape, a click outside, another Bot or an ended session lets go.
  * No key, batch or paste is ever written to a log or a record here.
  */
-function TerminalPane({ botId, worker, title }) {
+export function TerminalPane({ botId, worker, title }) {
   const host = useRef(null)
   const [phase, setPhase] = useState({ kind: 'connecting' })
   const [attempt, setAttempt] = useState(0)
   const [mode, setMode] = useState('view')
+  const [pasteNote, setPasteNote] = useState(false)
   const modeRef = useRef('view')
+  const bracketedRef = useRef(false)
   const sessionRef = useRef(null)
   const termRef = useRef(null)
   const takeRef = useRef(null)
@@ -87,6 +90,7 @@ function TerminalPane({ botId, worker, title }) {
     let observer = null
     let fitFrame = 0
     let outside = null
+    let cleanupPaste = null
 
     const fitNow = () => {
       if (!fit || disposed) return
@@ -114,6 +118,9 @@ function TerminalPane({ botId, worker, title }) {
       if (answer.status === 401) {
         sessionRef.current = null
         setModeNow('ended')
+        // A batch the host refused (a signed-out page) means this watch stream is the only
+        // thing left to tell the host to let the typing attach go: close it.
+        if (source) { source.close(); source = null }
         return false
       }
       if (answer.status === 409) {
@@ -132,6 +139,7 @@ function TerminalPane({ botId, worker, title }) {
       const session = sessionRef.current
       sessionRef.current = null
       if (modeRef.current === 'typing') setModeNow(reason === 'ended' ? 'ended' : 'view')
+      setPasteNote(false)
       if (term) term.options.disableStdin = true
       if (outside) { document.removeEventListener('pointerdown', outside, true); outside = null }
       return flush().then(() => (session ? post('release', { session }).catch(() => {}) : undefined))
@@ -188,15 +196,34 @@ function TerminalPane({ botId, worker, title }) {
         queueRef.current.push(new TextEncoder().encode(data))
         if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
       })
+      // A paste never goes through xterm's own paste path (which turns newlines into Enter
+      // unless the program asked for bracketed paste): the clipboard text is queued byte for
+      // byte, so a pasted line keeps its newline and presses nothing.
+      const onPaste = (event) => {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        if (modeRef.current !== 'typing' || !sessionRef.current) return
+        const pasted = pasteBytes(event.clipboardData?.getData('text/plain') ?? '', bracketedRef.current)
+        setPasteNote(pasted.note ?? false)
+        if (pasted.bytes.length === 0) return
+        queueRef.current.push(pasted.bytes)
+        if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
+      }
+      element.addEventListener('paste', onPaste, true)
+      cleanupPaste = () => element.removeEventListener('paste', onPaste, true)
       setPhase({ kind: 'connecting' })
-      const query = `api/omni-ui/code/stream?bot=${encodeURIComponent(botId)}${worker ? `&worker=${encodeURIComponent(worker)}` : ''}`
+      const query = `api/omni-ui/code/stream?bot=${encodeURIComponent(botId)}${worker ? `&worker=${encodeURIComponent(worker)}` : ''}&viewer=${encodeURIComponent(VIEWER)}`
       source = new EventSource(query)
       source.addEventListener('pane', (event) => {
         if (!event.data) return
         setPhase({ kind: 'open' })
       })
       source.addEventListener('data', (event) => {
-        if (!disposed && term && event.data) term.write(decode(event.data))
+        if (disposed || !event.data) return
+        const bytes = decode(event.data)
+        // The program says whether a paste may use its bracketed-paste markers.
+        bracketedRef.current = bracketedState(bracketedRef.current, bytes)
+        if (term) term.write(bytes)
       })
       source.addEventListener('close', () => {
         if (source) { source.close(); source = null }
@@ -215,6 +242,7 @@ function TerminalPane({ botId, worker, title }) {
       disposed = true
       void stopTyping('left')
       cancelAnimationFrame(fitFrame)
+      cleanupPaste?.()
       observer?.disconnect()
       source?.close()
       try { term?.dispose() } catch { /* already gone */ }
@@ -232,6 +260,7 @@ function TerminalPane({ botId, worker, title }) {
     h('div', { className: 'cs-pane-head' },
       h('span', { className: 'cs-pane-title', title }, title),
       h('span', { className: 'cs-pane-note', role: 'status', 'data-mode': mode }, stateWord),
+      pasteNote ? h('span', { className: 'cs-paste-note', role: 'status' }, pasteNote === 'controls-stripped' ? t('Control characters were removed from the paste') : t('Line breaks were removed: this terminal has no bracketed paste')) : null,
       retryable ? h('button', { type: 'button', className: 'cs-btn', onClick: () => { setPhase({ kind: 'connecting' }); setAttempt(value => value + 1) } }, t('Reconnect')) : null),
     h('div', { ref: host, className: 'cs-screen', role: 'button', tabIndex: 0, 'aria-label': stateWord, 'data-code-mode': mode, onClick: () => { if (modeRef.current === 'view' || modeRef.current === 'elsewhere') void takeRef.current?.() } }))
 }
@@ -353,6 +382,7 @@ export const CODE_SIDE_CSS = `
 .cs-pane{display:flex;flex:1;flex-direction:column;min-height:0}
 .cs-pane-head{display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--lb-line,var(--bt-line));flex:none}
 .cs-pane-title{font:var(--bt-weight-title,600) 13.5px/1.3 var(--bt-head-font,var(--bt-font));min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-paste-note{color:var(--lb-needs-ink,var(--st-warn,var(--bt-ink)));font:400 12px/1.3 var(--bt-font);white-space:nowrap}
 .cs-pane-note{margin-left:auto;color:var(--lb-muted,color-mix(in srgb,var(--bt-ink) 72%,transparent));font:400 12.5px/1.3 var(--bt-font);white-space:nowrap}
 .cs-screen{flex:1;min-height:0;padding:6px 8px 0;background:var(--bt-card);contain:strict;cursor:text}
 .cs-screen[data-code-mode='typing']{cursor:text}

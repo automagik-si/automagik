@@ -164,6 +164,15 @@ export function createTypingService({ env = process.env, connect = connectCore, 
       return { status: 204, body: null }
     },
 
+    /** The watch stream for a viewer ended (its page went, or a refused batch closed it): that
+     * viewer's typing attach goes with it, so a signed-out session leaves nothing behind. */
+    async releaseViewer(viewer) {
+      const held = byViewer.get(String(viewer ?? ''))
+      if (!held) return { released: false }
+      await close(held, 'viewer-gone')
+      return { released: true }
+    },
+
     /** Let the pane go (Escape, leaving it, another Bot, a closed window). */
     async release({ request, session } = {}) {
       if (!admitted(request)) return refuse(401, 'unauthorized')

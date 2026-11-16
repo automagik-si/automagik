@@ -2884,6 +2884,8 @@ var HOST_ZH = {
   "Taking the pane…": "正在接管终端…",
   "Typing is open in another window · view only": "另一个窗口正在输入 · 只读",
   "Your session ended · view only": "你的会话已结束 · 只读",
+  "Line breaks were removed: this terminal has no bracketed paste": "已移除换行：此终端未启用括号粘贴",
+  "Control characters were removed from the paste": "已从粘贴内容中移除控制字符",
   "Operating": "在操作",
   "You have the computer": "你在操作",
   "Latest screenshot": "最新截图",
