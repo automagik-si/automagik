@@ -18,6 +18,175 @@ import { attachSupervisor } from '../src/host/hermes-attach.js'
 import { detectHermesBots, detectSupervisor } from '../src/host/hermes-detect.js'
 import { HERMES_MINIMUM } from '../src/host/hermes-ssh.js'
 
+// Keep the existing attach fixture's private token and isolated account, but remove all
+// rendezvous records. The fake logs the environment used for the diagnostic CLI call.
+async function gatewayAttachFixture(t, { mode = 'running', record = false } = {}) {
+  const fixture = await attachFixture(t)
+  for (const folder of [fixture.chosen, fixture.other, fixture.shared]) {
+    if (!record || folder !== fixture.chosen) await rm(join(folder, 'host-serve.json'))
+  }
+  fixture.log = join(fixture.root, 'gateway-calls.jsonl')
+  await writeFile(fixture.log, '')
+  await writeFile(join(fixture.root, 'gateway-mode.json'), JSON.stringify(mode))
+  await writeFile(fixture.hermes, `#!/usr/bin/env python3
+import json, os, sys, time
+root = os.path.dirname(__file__)
+args = sys.argv[1:]
+with open(os.path.join(root, "gateway-calls.jsonl"), "a") as handle:
+    handle.write(json.dumps({"args": args, "home": os.environ.get("HERMES_HOME")}) + "\\n")
+if args == ["--version"]:
+    print("Hermes Agent v0.23.1")
+elif args == ["profile", "list"]:
+    mode = json.load(open(os.path.join(root, "gateway-mode.json")))
+    print(" Profile Model Gateway Alias Distribution")
+    print(" ------- ----- ------- ----- ------------")
+    print(" Oak (oak) sample/model stopped oak -")
+    print(" Atlas (default) gateway-cli-output-marker %s default -" % ("stopped" if mode == "stopped" else "running"), flush=True)
+    print("gateway-cli-stderr-marker", file=sys.stderr, flush=True)
+    if mode == "fail":
+        sys.exit(7)
+    if mode == "slow":
+        time.sleep(9)
+else:
+    sys.exit(2)
+`)
+  return fixture
+}
+
+async function gatewayCalls(fixture) {
+  return (await readFile(fixture.log, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line))
+}
+
+function assertGatewayError(result, gateway = false) {
+  const error = result.frames.find(frame => frame.type === 'error')
+  assert.ok(error, result.raw)
+  assert.deepEqual(error, {
+    type: 'error', nonce: error.nonce, code: 'serve-not-running', ...(gateway ? { gateway: true } : {}),
+  }, 'only the public error and the optional true gateway diagnosis leave the reader')
+  assert.equal(Object.hasOwn(error, 'absent'), false)
+  assert.doesNotMatch(result.raw, /gateway-cli-output-marker|gateway-cli-stderr-marker/)
+  assert.equal(result.err, '', 'CLI stderr stays inside the reader too')
+  assert.equal(result.frames.some(frame => ['record', 'token', 'ready'].includes(frame.type)), false)
+}
+
+test('an absent serve record diagnoses a running gateway using the picked Hermes home without exposing CLI output', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await gatewayAttachFixture(t)
+  const result = await runAttach(fixture, { stateDir: fixture.chosen, hermesHome: fixture.home })
+  assertGatewayError(result, true)
+  const calls = await gatewayCalls(fixture)
+  assert.deepEqual(calls.map(call => call.args), [['--version'], ['profile', 'list']])
+  assert.equal(calls[1].home, fixture.home, 'profile list is scoped to the picked home')
+})
+
+test('an absent serve record can diagnose the default home without changing the CLI environment', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await gatewayAttachFixture(t)
+  assertGatewayError(await runAttach(fixture, { gatewayLockDir: fixture.chosen }), true)
+  const listed = (await gatewayCalls(fixture)).find(call => call.args[0] === 'profile')
+  assert.ok(listed)
+  assert.equal(listed.home, process.env.HERMES_HOME ?? null)
+})
+
+test('an absent serve record with every gateway stopped stays plain not-running and hides CLI output', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await gatewayAttachFixture(t, { mode: 'stopped' })
+  assertGatewayError(await runAttach(fixture, { stateDir: fixture.chosen, hermesHome: fixture.home }))
+  assert.deepEqual((await gatewayCalls(fixture)).map(call => call.args), [['--version'], ['profile', 'list']])
+})
+
+test('a nonzero gateway CLI exit cannot diagnose a running gateway from its output', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await gatewayAttachFixture(t, { mode: 'fail' })
+  assertGatewayError(await runAttach(fixture, { stateDir: fixture.chosen, hermesHome: fixture.home }))
+  assert.deepEqual((await gatewayCalls(fixture)).map(call => call.args), [['--version'], ['profile', 'list']])
+})
+
+test('a gateway CLI timeout stays plain not-running even after printing a running row', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await gatewayAttachFixture(t, { mode: 'slow' })
+  assertGatewayError(await runAttach(fixture, { stateDir: fixture.chosen, hermesHome: fixture.home }))
+  assert.deepEqual((await gatewayCalls(fixture)).map(call => call.args), [['--version'], ['profile', 'list']])
+})
+
+test('an explicit state folder without a usable Hermes home never asks the gateway CLI', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await gatewayAttachFixture(t)
+  for (const hermesHome of [undefined, '', 'relative-home', join(fixture.root, 'missing-home'), fixture.hermes]) {
+    await writeFile(fixture.log, '')
+    assertGatewayError(await runAttach(fixture, { stateDir: fixture.chosen, hermesHome }))
+    assert.deepEqual((await gatewayCalls(fixture)).map(call => call.args), [['--version']], String(hermesHome))
+  }
+})
+
+test('a present serve record with a dead port never falls back to gateway diagnosis', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await gatewayAttachFixture(t, { record: true })
+  const probe = createServer()
+  await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve))
+  const deadPort = probe.address().port
+  await new Promise(resolve => probe.close(resolve))
+  const path = join(fixture.chosen, 'host-serve.json')
+  const record = JSON.parse(await readFile(path, 'utf8'))
+  await writeFile(path, JSON.stringify({ ...record, port: deadPort }))
+  assertGatewayError(await runAttach(fixture, { stateDir: fixture.chosen, hermesHome: fixture.home }))
+  assert.deepEqual((await gatewayCalls(fixture)).map(call => call.args), [['--version']], 'the running gateway fake is never consulted')
+})
+
+test('detection carries a CLI gateway into both the Python bot frame and the JS result when no serve is live', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { cloneRecord: false })
+  const specPath = join(fixture.root, 'spec.json')
+  const spec = JSON.parse(await readFile(specPath, 'utf8'))
+  spec.homes[fixture.primary].profiles[0].gateway = 'running'
+  spec.homes[fixture.clone].profiles[0].name = 'Oak'
+  await writeFile(specPath, JSON.stringify(spec))
+  const { frames } = await runReader(fixture)
+  assert.equal(frames.some(frame => frame.type === 'error'), false, JSON.stringify(frames))
+  const row = botsOf(frames).find(row => row.home === fixture.primary && row.id === 'default')
+  assert.ok(row)
+  assert.equal(row.running, false)
+  assert.equal(row.gateway, true)
+  const ssh = fakeSsh({ frames: frames.map(({ nonce, ...frame }) => frame) })
+  const found = await detectHermesBots({ host: 'sample-box' }, { spawn: ssh.spawn, deadlines })
+  const bot = found.bots.find(bot => bot.home === fixture.primary && bot.id === 'default')
+  assert.equal(bot.running, false)
+  assert.equal(bot.gateway, true)
+})
+
+test('a bot served by a live serve suppresses its CLI gateway in the reader frame and JS result', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: true, cloneRecord: false })
+  const specPath = join(fixture.root, 'spec.json')
+  const spec = JSON.parse(await readFile(specPath, 'utf8'))
+  spec.homes[fixture.clone].profiles[0].name = 'Oak'
+  await writeFile(specPath, JSON.stringify(spec))
+  const { frames } = await runReader(fixture)
+  const row = botsOf(frames).find(row => row.home === fixture.primary && row.id === 'default')
+  assert.ok(row, JSON.stringify(frames))
+  assert.equal(row.running, true)
+  assert.equal(row.gateway, false)
+  const ssh = fakeSsh({ frames: frames.map(({ nonce, ...frame }) => frame) })
+  const found = await detectHermesBots({ host: 'sample-box' }, { spawn: ssh.spawn, deadlines })
+  const bot = found.bots.find(bot => bot.home === fixture.primary && bot.id === 'default')
+  assert.equal(bot.running, true)
+  assert.equal(bot.gateway, false)
+})
+
+test('the detection result keeps only boolean true gateways on stopped bots', async () => {
+  for (const [gateway, running] of [['yes', false], [1, false], [false, false], [true, false], [true, true]]) {
+    const ssh = fakeSsh({ frames: [
+      { type: 'home', home: '/srv/sample-hermes', state: running ? 'running' : 'stopped', sandbox: false, serve: null },
+      { type: 'bot', home: '/srv/sample-hermes', id: 'default', name: 'Atlas', model: 'sample/model', provider: '',
+        running, gateway, recordDir: running ? '/srv/sample-hermes/gateway-locks' : '', port: running ? 9300 : 0, start: 'hermes serve' },
+      { type: 'ready', homes: 1, bots: 1, hermes: true },
+    ] })
+    const found = await detectHermesBots({ host: 'sample-box' }, { spawn: ssh.spawn, deadlines })
+    assert.equal(found.bots.length, 1)
+    assert.equal(found.bots[0].gateway, gateway === true && !running, JSON.stringify({ gateway, running }))
+  }
+})
+
 const deadlines = { start: 8000, control: 2000, cancel: 400 }
 const token = randomBytes(24).toString('hex')
 

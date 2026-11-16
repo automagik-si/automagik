@@ -298,3 +298,55 @@ test('no bot at all is said plainly, with the fix, not an empty list', async t =
   assert.match(document.body.textContent, /No Hermes bots found on sample-box/)
   assert.match(document.body.textContent, /Install Hermes there, add another Hermes folder, or choose another computer\./)
 })
+
+test('a gateway-only bot shows its detected serve command and stays unusable beside a plain stopped bot', async t => {
+  const command = 'HERMES_HOME=/srv/x hermes serve'
+  const { document, calls, opened } = await mount(t, { detection: { bots: [
+    { home: '/srv/x', id: 'default', name: 'Atlas', model: 'sample/model', provider: '', running: false, gateway: true, start: command },
+    { home: '/srv/oak', id: 'default', name: 'Oak', model: '', provider: '', running: false, start: 'hermes serve' },
+  ] } })
+  await click(document, 'Use SSH host sample-box')
+  await click(document, 'Connect')
+  const until = Date.now() + 5000
+  while (!document.querySelector('[data-step=bots]')) {
+    assert.ok(Date.now() < until, 'the gateway-only bot picker opens')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const rows = [...document.querySelectorAll('.bt-hw-bot')]
+  assert.deepEqual(rows.map(row => row.querySelector('strong').textContent), ['Atlas', 'Oak'])
+  const [gateway, stopped] = rows
+  assert.equal(gateway.querySelector('.bt-hw-bot-state').textContent, 'Gateway running')
+  assert.equal(gateway.querySelector('.bt-hw-bot-state').classList.contains('bt-hw-bot-ok'), false)
+  assert.equal(gateway.querySelector('.bt-hw-bot-start').textContent,
+    `Its gateway is running, but no “hermes serve” is. Start it with “${command}” on sample-box in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.`)
+  assert.equal(stopped.querySelector('.bt-hw-bot-state').textContent, 'Not running')
+  assert.equal(stopped.querySelector('.bt-hw-bot-start').textContent,
+    'Start it with “hermes serve” on sample-box in a terminal. Automagik never starts or restarts Hermes.')
+  const use = [...document.querySelectorAll('.bt-hw-foot button')].find(button => button.textContent.includes('Use this bot'))
+  assert.ok(use)
+  assert.equal(use.disabled, true)
+  for (const row of rows) {
+    flushSync(() => row.click())
+    assert.equal(use.disabled, true, 'selecting either stopped serve cannot enable attachment')
+    flushSync(() => use.click())
+  }
+  assert.deepEqual(calls.map(call => call.endpoint), ['hermes-remote-detect'])
+  assert.deepEqual(opened, [])
+})
+
+test('the picker drops non-boolean gateway flags rather than showing a gateway diagnosis', async t => {
+  const { document, calls } = await mount(t, { detection: { bots: [
+    { home: '/srv/atlas', id: 'default', name: 'Atlas', running: false, gateway: 'yes', start: 'hermes serve' },
+    { home: '/srv/oak', id: 'default', name: 'Oak', running: false, gateway: 1, start: 'hermes serve' },
+  ] } })
+  await click(document, 'Use SSH host sample-box')
+  await click(document, 'Connect')
+  const until = Date.now() + 5000
+  while (!document.querySelector('[data-step=bots]')) {
+    assert.ok(Date.now() < until, 'the stopped bot picker opens')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.deepEqual([...document.querySelectorAll('.bt-hw-bot-state')].map(node => node.textContent), ['Not running', 'Not running'])
+  assert.doesNotMatch(document.body.textContent, /Gateway running|Its gateway is running/)
+  assert.deepEqual(calls.map(call => call.endpoint), ['hermes-remote-detect'])
+})

@@ -17,6 +17,26 @@ import { HERMES_MINIMUM } from '../src/host/hermes-ssh.js'
 import { HermesTransport, RemoteChat } from '../src/host/hermes-transport.js'
 import { desktop8Session } from './fixtures/hermes-desktop8.mjs'
 
+test('only a boolean gateway diagnosis maps the missing serve frame to the gateway-running error', async t => {
+  for (const gateway of [true, 'yes', 1]) await t.test(`gateway=${JSON.stringify(gateway)}`, async sub => {
+    const ssh = fakeSsh(sub, { frames: [{ type: 'error', code: 'serve-not-running', gateway }] })
+    await assert.rejects(startHermesAttach({ host: 'sample-box' }, {
+      spawn: ssh.spawn, allocatePort: async () => 40123, deadlines,
+    }), error => {
+      assert.equal(error.code, gateway === true ? 'bot/hermes-attach-gateway-running' : 'bot/hermes-attach-not-running')
+      assert.match(error.message, /hermes serve/)
+      if (gateway === true) assert.match(error.message, /gateway/i)
+      return true
+    })
+    assert.equal(ssh.calls.length, 1, 'an error opens no tunnel')
+  })
+})
+
+test('gateway diagnosis adds neither process signal probes nor gateway record reads to the attach reader', () => {
+  assert.doesNotMatch(attachSupervisor, /os\.kill/)
+  assert.doesNotMatch(attachSupervisor, /host-gateway\.json/)
+})
+
 const deadlines = { start: 8000, control: 2000, cancel: 400 }
 const token = randomBytes(24).toString('hex')
 const profiles = [

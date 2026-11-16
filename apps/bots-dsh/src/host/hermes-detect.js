@@ -594,6 +594,7 @@ try:
             running = bool(served_by)
             emit("bot", home=home, id=ident, name=text(row.get("name"), 100) or ident,
                  model=text(model, 200), provider=text(provider, 100), running=running,
+                 gateway=bool(row.get("gateway")) and not running,
                  recordDir=served_by[0]["recordDir"] if running else "",
                  port=served_by[0]["port"] if running else 0,
                  blocked=blocked if not running else "",
@@ -630,6 +631,7 @@ function botOf(value) {
     model: clean(value.model, 200) ? value.model : '',
     provider: clean(value.provider, 100) ? value.provider : '',
     running,
+    gateway: !running && value.gateway === true,
     recordDir: chosen ? value.recordDir : '', port: chosen ? value.port : 0,
     blocked,
     start: clean(value.start, 500) ? value.start : '',

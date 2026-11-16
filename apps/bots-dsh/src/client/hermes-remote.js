@@ -55,6 +55,7 @@ const botRows = rows => {
     seen.add(key)
     return [{
       key, home, id, running,
+      gateway: !running && row.gateway === true,
       name: text(row.name, 100) || id,
       model: text(row.model, 200),
       provider: text(row.provider, 100),
@@ -164,6 +165,8 @@ function errorFor(error, draft, detail, minimum) {
   return { ...base, rows, lines: base.trust ? [] : [facts.hermes.length ? { label: t('Last lines from Hermes'), lines: facts.hermes } : null, facts.ssh.length ? { label: t('Last lines from SSH'), lines: facts.ssh } : null].filter(Boolean) }
 }
 
+const shellQuote = value => /^[A-Za-z0-9@%+=:,./_-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\"'\"'")}'`
+
 function screenFor(code, draft, facts) {
   const host = shortText(draft?.ssh?.host?.trim?.() ?? '') || t('the other computer')
   if (code === 'bot/hermes-busy') return { heading: t('Remote Hermes'), title: t('A chat is still running on this connection; stop it or wait.'), text: t('Your connection settings were not changed.'), hint: t('Stop the chat or wait') }
@@ -194,6 +197,10 @@ function screenFor(code, draft, facts) {
     }
   }
   if (code === 'bot/hermes-attach-not-running' || code === 'bot/hermes-attach-record') return { heading: t('Hermes is not running there'), title: t('Start Hermes on {host}', { host }), text: t('Hermes is not running on {host}. Start it there with “hermes serve”, then try again.', { host }), hint: t('Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.', { host }), ssh: true }
+  if (code === 'bot/hermes-attach-gateway-running') {
+    const home = shortText(draft?.ssh?.hermesHome?.trim?.() ?? '', 4096), command = home.startsWith('/') ? `HERMES_HOME=${shellQuote(home)} hermes serve` : 'hermes serve'
+    return { heading: t('Hermes’s gateway is running there, but no serve is'), title: t('Start “hermes serve” on {host}', { host }), text: t('Hermes on {host} is running as a gateway, but no “hermes serve” is running there. This chat attaches only to a running “hermes serve”.', { host }), hint: t('Run “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.', { command, host }), rows: [{ label: t('Gateway state'), value: t('Running') }, { label: t('Serve state'), value: t('Not running') }, { label: t('Serve command'), value: command, mono: true }], ssh: true }
+  }
   if (code === 'bot/hermes-attach-gateway') return { heading: t('Hermes is running there as a gateway'), title: t('Start “hermes serve” on {host}', { host }), text: t('The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.', { host }), hint: t('Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.', { host }), ssh: true }
   if (code === 'bot/hermes-attach-profiles') return { heading: t('Hermes’s profiles could not be read'), title: t('Hermes on {host} did not list its profiles', { host }), text: t('Hermes is running on {host}, but its own profile list could not be read.', { host }), hint: t('Run “hermes profile list” on {host}, then try again.', { host }), ssh: true }
   if (code === 'bot/hermes-ssh-platform') return { heading: t('This computer cannot run the SSH connection yet'), title: t('Check the remote system and Python'), text: t('The remote computer needs Linux or macOS, Python 3, and a supported Hermes installation.'), hint: t('Check Python and the supported system on the other computer, then try again.'), ssh: true }
@@ -587,8 +594,9 @@ export function HermesRemoteConnect({ onClose, onConnected, edit = false, more =
         h('span', { className: 'bt-hw-bot-copy' }, h('strong', null, item.name),
           item.model ? h('small', { className: 'bt-hw-bot-model' }, `${t('Model')}: ${botModelLine(item)}`) : null,
           item.blocked === 'shared-beside' ? h('small', { className: 'bt-hw-bot-blocked' }, t('Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.')) : null,
+          !item.running && item.gateway ? h('small', { className: 'bt-hw-bot-start' }, t('Its gateway is running, but no “hermes serve” is. Start it with “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.', { command: item.start || 'hermes serve', host })) :
           !item.running && item.start ? h('small', { className: 'bt-hw-bot-start' }, t('Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.', { command: item.start, host })) : null),
-        h('span', { className: `bt-hw-bot-state${item.running ? ' bt-hw-bot-ok' : ''}` }, item.running ? t('Running') : t('Not running'))))),
+        h('span', { className: `bt-hw-bot-state${item.running ? ' bt-hw-bot-ok' : ''}` }, item.running ? t('Running') : item.gateway ? t('Gateway running') : t('Not running'))))),
       h('div', { className: 'bt-hw-profile-tools' }, h('span', null, t('{count} bots on {host}', { count: bots.length, host })),
         h('button', { type: 'button', disabled: status === 'refreshing' || status === 'saving', onClick: () => findBots() }, t('Check again'))))
     footer = h(Fragment, null,

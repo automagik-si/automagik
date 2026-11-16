@@ -42,6 +42,7 @@ const CONNECTION_ERRORS = Object.freeze({
   'bot/hermes-ssh-unreachable': 'SSH could not reach the other computer. Check the host and connection.',
   'bot/hermes-ssh-cleanup': 'The SSH connection could not confirm remote cleanup. Check the remote Hermes before reconnecting.',
   'bot/hermes-attach-not-running': 'Hermes is not running on the other computer. Start it there with “hermes serve”, then try again.',
+  'bot/hermes-attach-gateway-running': 'Hermes is running on the other computer as a gateway, but no “hermes serve” is running. Start “hermes serve” there, then try again.',
   'bot/hermes-attach-gateway': 'Hermes is running there as a gateway that owns its sessions. Start “hermes serve” there, then try again.',
   'bot/hermes-attach-record': 'Hermes is not running there: its connection record or private token is stale. Start “hermes serve” there, then try again.',
   'bot/hermes-attach-profiles': 'Hermes is running there, but its profiles could not be read. Run “hermes profile list” there, then try again.',
