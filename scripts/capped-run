@@ -22,8 +22,10 @@
 #     OOM kill so it can read the cause (the default stop policy kills the monitor first). Before
 #     exec the payload raises its own oom_score_adj to 500 (the monitor is forked first and keeps
 #     the lower inherited value), so the kernel prefers the payload even when a tmpfs payload's
-#     pages are not its RSS. systemd-run execs the command itself, so the wrapper sees the
-#     command's exit status and the scope's memory kill (137).
+#     pages are not its RSS. The unit Description (what the user journal shows as "Started ...")
+#     is the command name and the run name only, never argv: a gate's argv may carry a token.
+#     systemd-run execs the command itself, so the wrapper sees the command's exit status and
+#     the scope's memory kill (137).
 #   - Anywhere else (macOS, CI runners, a distroless image, a failing systemd-run) it runs the
 #     command UNCAPPED after one `UNCAPPED: <reason>` line on stderr, and keeps its exit status.
 #     A missing cap never fails a gate, and a capped run is never reported as a pass.
@@ -203,6 +205,11 @@ if [ -n "$name" ]; then
   unit_name=capped-run-$name-$$-${stamp}
 fi
 
+# The unit Description reaches the user journal as the "Started ..." line, and argv may hold a
+# token: it is the command name and the run name only, never arguments.
+description="capped-run: ${cmd_comm}"
+[ -n "$name" ] && description="capped-run: ${cmd_comm} (${name})"
+
 # --- the run log ---------------------------------------------------------------------------
 
 if [ -n "${CAPPED_RUN_TEST_STATE:-}" ]; then
@@ -281,11 +288,13 @@ expand_opt=
 probe_run() {
   if command -v timeout >/dev/null 2>&1; then
     timeout 15 systemd-run --user --scope --collect --quiet "$@" \
-      -p MemoryMax=64M -p MemorySwapMax=0 -p OOMPolicy=continue true \
+      -p MemoryMax=64M -p MemorySwapMax=0 -p OOMPolicy=continue \
+      --description="capped-run: true (probe)" true \
       </dev/null >/dev/null 2>&1
   else
     systemd-run --user --scope --collect --quiet "$@" \
-      -p MemoryMax=64M -p MemorySwapMax=0 -p OOMPolicy=continue true \
+      -p MemoryMax=64M -p MemorySwapMax=0 -p OOMPolicy=continue \
+      --description="capped-run: true (probe)" true \
       </dev/null >/dev/null 2>&1
   fi
 }
@@ -437,7 +446,8 @@ exec "$@"
 run_systemd() {
   # Extra options come first, then the scope properties, then the payload after --.
   set -- --user --scope --collect --quiet \
-    -p "MemoryMax=${mib}M" -p MemorySwapMax=0 -p OOMPolicy=continue -- "$@"
+    -p "MemoryMax=${mib}M" -p MemorySwapMax=0 -p OOMPolicy=continue \
+    --description="$description" -- "$@"
   if [ -n "$unit_name" ]; then
     set -- "--unit=$unit_name" "$@"
   fi

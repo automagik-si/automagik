@@ -645,6 +645,60 @@ describe('capped-run', () => {
     expect(Number(monitorAdj)).toBeLessThan(Number(selfAdj));
   });
 
+  test.skipIf(!scope)(
+    'the unit Description carries the command name only, never argv',
+    async () => {
+      const state = scratch('description-state');
+      const name = `desc-${process.pid}-${Date.now()}`;
+      const script = join(scratch('description'), 'sleep-alloc.mjs');
+      const marker = 'fake-secret-marker-should-not-leak';
+      writeFileSync(
+        script,
+        'await Bun.sleep(3000);\nconst hold = [];\nfor (;;) hold.push(Buffer.alloc(1 << 20, 1));\n',
+      );
+      const wrapper = spawn(
+        'sh',
+        [SCRIPT, '--name', name, '--mem', '256M', '--', process.execPath, script, marker],
+        {
+          cwd: work,
+          env: { ...process.env, CAPPED_RUN_TEST_STATE: state, CAPPED_RUN_TEST_MEM: '256M' },
+          stdio: ['ignore', 'ignore', 'pipe'],
+        },
+      );
+      let stderr = '';
+      wrapper.stderr?.on('data', chunk => {
+        stderr += chunk.toString();
+      });
+      const done = closeCode(wrapper);
+      let unit = '';
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const list = spawnSync(
+          'systemctl',
+          ['--user', 'list-units', '--all', '--plain', '--no-legend', `capped-run-${name}-*`],
+          { encoding: 'utf8' },
+        );
+        const first = (list.stdout ?? '').trim().split('\n')[0] ?? '';
+        unit = first.trim().split(/\s+/)[0] ?? '';
+        if (unit) break;
+        await Bun.sleep(100);
+      }
+      expect(unit).not.toBe('');
+      const shown = spawnSync('systemctl', ['--user', 'show', '-p', 'Description', '--value', unit], {
+        encoding: 'utf8',
+      });
+      expect(shown.status).toBe(0);
+      expect(shown.stdout ?? '').not.toContain(marker);
+      expect(await done).toBe(137);
+      const capped = stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
+      expect(capped).toHaveLength(1);
+      expect(capped[0]).not.toContain(marker);
+      const log = existsSync(join(state, 'runs.log')) ? readFileSync(join(state, 'runs.log'), 'utf8') : '';
+      expect(log).not.toContain(marker);
+    },
+    120_000,
+  );
+
   test.skipIf(process.platform !== 'linux' || !flock || !scratchLockReady())(
     'two concurrent runs exclude each other on a scratch checkout lock (Linux; no real lock)',
     async () => {
