@@ -139,10 +139,10 @@ Finished in 23ms on 4 files with 97 rules using 32 threads.
 
 ## PR checks
 
-- `Conventional commits` is **red**: `a8cccc813 has a line over 100 characters`.
-  The commit subject follows the convention; one body paragraph is longer than the
-  check's 100-character limit. Per the wish, I did not amend or force-push, so the
-  check stays red and is recorded here.
+- `Conventional commits` is **red**: `a8cccc813 has a line over 100 characters` and
+  `22d8ad569 has a line over 100 characters`. The subjects follow the convention; one
+  body paragraph in each commit is longer than the check's 100-character limit. Per the
+  wish, I did not amend or force-push, so the check stays red and is recorded here.
 - The remaining checks were still running when this report was written; the local
   package suite and lint above are green. `bots-dsh (plugin tests)` is the relevant CI
   job to watch on the PR.
