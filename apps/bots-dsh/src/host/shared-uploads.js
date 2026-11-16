@@ -14,9 +14,17 @@ const SEARCH_TOOLS = ['glob', 'grep']
 const SHELL_TOOLS = ['bash', 'pwsh', 'terminal_open', 'terminal_send']
 const strings = value => (typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : [])
 const hexOf = ref => /^sha256:[a-f0-9]{64}$/.test(ref?.attachmentId) ? ref.attachmentId.slice(7) : undefined
-// Windows and macOS file systems ignore case, so a Bot's id does too; on linux two names in
-// different case are two different folders, as they are for a path.
+// Windows and macOS file systems ignore case, so a Bot's id does too (private-bots.js folds
+// them the same way); on linux two names in different case are two different folders.
 const fold = text => (process.platform === 'linux' ? text : text.toLowerCase())
+// resolve() collapses `name/../` for the path tools; shell text goes through the same collapse,
+// one shell word at a time: the segment before `..` cannot reach across whitespace or a delimiter.
+const parentSegment = /\/(?!\.\.?(?=$|[\s/;&|#<>()]))[^\s/;&|#<>()]+\/\.\.(?=$|[\s/;&|#<>()])/g
+const collapse = text => {
+  let flat = text
+  for (let next = flat.replace(parentSegment, ''); next !== flat; next = flat.replace(parentSegment, '')) flat = next
+  return flat
+}
 // The words a shell command spells out that look like a path. The check that uses them is
 // best effort, not a fence: a word carrying a shell character is left alone, so a path the
 // shell builds or expands ($VAR, $(...), a glob, ~), a folder the command changes into
@@ -321,11 +329,10 @@ export function install(rt) {
     } catch { return false }
   }
 
-  // This is a tool-level guard, like private Bots: the file tools are checked by real path,
-  // and shell commands get a best-effort check of the path words they spell out. A path a
-  // command builds or expands, a folder it changes into, and a file a script opens are not
-  // seen, so this narrows the gap and never claims to be a fence. Tools a coding agent runs
-  // itself and parent-folder walks are outside it too.
+  // This is a tool-level guard, like private Bots. It does not inspect tools a coding agent
+  // runs itself; the text it does see is checked as written and collapsed the way resolve()
+  // collapses the path tools, and shell commands get a best-effort check of the path words
+  // they spell out (see shellPaths), which is not a fence either.
   ctx.on('tools/execute', async (exec, next) => {
     const caller = rt.botOfSession(exec.agent?.session?.id ?? exec.agent?.id, exec.agent)
     if (!caller) return next()
@@ -333,14 +340,16 @@ export function install(rt) {
     const flatten = text => text.replace(/["']/g, '').replace(/\\/g, '/').replace(/\/+/g, '/')
       .replace(/\/(?:\.\/)+/g, '/')
     const raw = flatten(strings(args).join('\n'))
+    const closed = () => { throw refusal(`That picture was not sent to ${caller.name}, so it cannot open it. Ask the user to send it here, or ask the Bot that has it to forward it.`) }
+    const closedFolder = () => { throw refusal(`That is another Bot's own folder, which ${caller.name} does not open. Ask the user, or that Bot, to share what you need.`) }
+    // A case variant names the same Bot on a case-insensitive host; rt.botOf is a plain lookup.
+    const botOfId = id => rt.botOf?.(id) ?? (process.platform === 'linux' ? undefined
+      : Object.values(rt.state?.bots ?? {}).find(bot => fold(bot.id) === fold(id)))
     // Another Bot's own folder gets the folder words, with this shell check's limit: it is
     // best effort, not a fence.
     const closedShell = () => {
       throw refusal(`That is another Bot's own folder, which ${caller.name} does not open. Ask the user, or that Bot, to share what you need. Shell commands get a best-effort path check, not a fence: a path a command builds, a variable or glob it expands, or a file a script opens can still reach it.`)
     }
-    // A case variant can name the same Bot on a case-insensitive host.
-    const botWithId = id => rt.botOf?.(id) ?? (process.platform === 'linux' ? undefined
-      : Object.values(rt.state?.bots ?? {}).find(bot => fold(bot.id) === fold(id)))
     // Before a shell command runs, real-path every word that looks like a path, from the
     // folder the command runs in. See shellPaths for the known misses: best effort, not a fence.
     async function checkShellPaths() {
@@ -352,39 +361,48 @@ export function install(rt) {
         // The path as written, then where links lead, as the file tools check them.
         for (const candidate of new Set([flatten(absolute), flatten(real)])) {
           for (const found of candidate.matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) {
-            if (fold(found[1]) === fold(caller.id) || botWithId(found[1]) === undefined) continue
+            if (fold(found[1]) === fold(caller.id) || botOfId(found[1]) === undefined) continue
             closedShell()
           }
         }
       }
     }
     await checkShellPaths()
-    const storePath = hex => {
-      try {
-        const host = ctx.get('attachments')?.imageHostPath?.({ attachmentId: `sha256:${hex}` })
-        return host && (ctx.get('fs')?.processPathFromHostPath?.(host) ?? host)
-      } catch { return undefined }
-    }
-    const storeRoot = storePath('0'.repeat(64))?.replace(/[/\\]objects[/\\].*$/, '').replace(/\\/g, '/')
-    if (!/\.automagik/i.test(raw) && !(storeRoot && raw.includes(flatten(storeRoot))) && !/[a-f0-9]{64}/i.test(raw)) return next()
-    const closed = () => { throw refusal(`That picture was not sent to ${caller.name}, so it cannot open it. Ask the user to send it here, or ask the Bot that has it to forward it.`) }
-    async function check(text) {
-      const flat = flatten(text)
-      for (const found of flat.matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) if (found[1] !== caller.id) closed()
+    async function inspect(flat) {
+      // The bots root holds both a Bot's own folder, which is private, and the team's own
+      // files and shared working folders (the state file, the registry, the workspace), which
+      // are not. Only a Bot's own id is closed; matching every name under the root refused
+      // commands that merely named a shared path, the Bot's own workspace included.
+      for (const found of flat.matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) {
+        if (fold(found[1]) === fold(caller.id) || botOfId(found[1]) === undefined) continue
+        closedFolder()
+      }
       for (const found of flat.matchAll(/\.automagik\/uploads\/([a-f0-9]{64})(?:\/|$)/gi)) if (!await holds(caller.id, found[1].toLowerCase())) closed()
       for (const found of flat.matchAll(/objects\/([a-f0-9]{2})\/([a-f0-9]{62,64})(?![a-f0-9])/gi)) {
         const hex = (found[2].length === 64 ? found[2] : found[1] + found[2]).toLowerCase()
         if (!await holds(caller.id, hex) && !await inOwnHistory(caller.id, exec.agent?.session?.id ?? exec.agent?.id, hex, exec.signal)) closed()
       }
     }
+    async function check(text) {
+      const flat = flatten(text)
+      // As written first, so a later `..` can never erase a path already in the text; then
+      // collapsed, so a parent segment that hides one is revealed the way a shell runs it.
+      await inspect(flat)
+      const collapsed = collapse(flat)
+      if (collapsed !== flat) await inspect(collapsed)
+    }
     await check(raw)
+    const folder = rt.sessionFolder(exec.agent?.session ?? exec.agent) ?? '.'
+    const pattern = typeof args.pattern === 'string' ? args.pattern.replace(/[*?[{].*$/, '') : ''
     const paths = exec.name in FILE_TOOLS ? [args[FILE_TOOLS[exec.name]]]
-      : SEARCH_TOOLS.includes(exec.name) ? [args.path ?? '.', isAbsolute(args.pattern ?? '') ? args.pattern.replace(/[*?[{].*$/, '') : undefined]
+      : SEARCH_TOOLS.includes(exec.name) ? [args.path ?? '.', pattern === '' ? undefined : resolve(folder, args.path ?? '.', pattern)]
         : SHELL_TOOLS.includes(exec.name) ? [] : [args.cwd, args.cd]
     for (const path of paths) {
       if (typeof path !== 'string' || !path) continue
-      const absolute = resolve(rt.sessionFolder(exec.agent?.session ?? exec.agent) ?? '.', path)
+      const absolute = resolve(folder, path)
       await check(absolute)
+      // A link outside .automagik can lead into a Bot's own folder, so the real path is
+      // checked even when the text names nothing closed.
       if (rt.realBeyond) await check(await rt.realBeyond(absolute))
     }
     return next()
