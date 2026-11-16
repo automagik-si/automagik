@@ -25,7 +25,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   AGENTS_RELATIVE,
   CLI_STORE_RELATIVE,
@@ -835,38 +835,63 @@ export async function installVendorClis({
     warn(`vendor CLIs: the shipped CLI store is not in ${profile}; left for the ACP plugin`)
     return { state: 'unavailable', results: {} }
   }
-  const { CliStore } = await import(pathToFileURL(clisFile).href)
   const { AGENTS } = await import(pathToFileURL(agentsFile).href)
-  const store = new CliStore({
-    env: { ...env, AUTOMAGIK_HOME: home, AUTOMAGIK_PNPM: env.AUTOMAGIK_PNPM || PNPM_PATH },
-    log: (message) => log(`vendor CLIs: ${message}`),
-  })
+  const install = fileURLToPath(new URL('./vendor-install.mjs', import.meta.url))
+  const stateFile = join(home, 'vendor-clis-state.json')
+  const exec = process.getBuiltinModule('node:child_process').spawnSync
+  const cgroup = () => {
+    const read = (file) => { try { return readFileSync(file, 'utf8').trim() } catch { return null } }
+    const events = read('/sys/fs/cgroup/memory.events') ?? ''
+    const number = (name) => Number((events.match(new RegExp(`^${name} (\\d+)$`, 'm')) ?? [])[1] ?? 0)
+    return { memoryEvents: events || null, oom: number('oom'), oomKill: number('oom_kill'), memoryPeakBytes: Number(read('/sys/fs/cgroup/memory.peak') ?? 0) || null, memoryMaxBytes: Number(read('/sys/fs/cgroup/memory.max') ?? 0) || null }
+  }
   const results = {}
-  try {
-    for (const [id, spec] of Object.entries(AGENTS)) {
-      if (!spec.cliPackage) continue
-      try {
-        const found = await store.ensure(spec, undefined)
-        if (!found) { results[id] = { state: 'missing' }; continue }
-        results[id] = { state: 'ready', version: found.version, path: found.path }
-        log(`vendor CLIs: ${spec.defaultName} ${found.version} at ${found.path}`)
-        if (found.managed) {
-          const bridge = writeProgramsBridge({
-            home, appHome: env.HERDR_APP_HOME || join(home, 'herdr-app'),
-            agent: spec.key, path: found.path, log, warn,
-          })
-          results[id].bridge = bridge.reason
-        }
-      } catch (error) {
-        results[id] = { state: 'failed', error: String(error?.message ?? error) }
-        warn(`vendor CLIs: ${spec.defaultName} was not installed: ${error?.message ?? error}`)
-      }
+  const writeState = () => {
+    const state = { version: 1, at: new Date().toISOString(), limitBytes: cgroup().memoryMaxBytes, results }
+    writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
+    chmodSync(stateFile, 0o600)
+  }
+  for (const [id, spec] of Object.entries(AGENTS)) {
+    if (!spec.cliPackage) continue
+    const child = exec(process.execPath, [install, '--profile', profile, '--vendor', spec.key, '--home', home], {
+      env: {
+        ...env,
+        HOME: env.HOME || home,
+        AUTOMAGIK_HOME: home,
+        HERDR_APP_HOME: env.HERDR_APP_HOME || join(home, 'herdr-app'),
+        AUTOMAGIK_PNPM: env.AUTOMAGIK_PNPM || PNPM_PATH,
+        NODE_OPTIONS: [env.NODE_OPTIONS, '--max-old-space-size=1024'].filter(Boolean).join(' '),
+        npm_config_child_concurrency: '1',
+        npm_config_network_concurrency: '2',
+      },
+      cwd: home, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 840_000, maxBuffer: 16 * 1024 * 1024,
+    })
+    for (const line of String(child.stderr ?? '').split('\n').filter(Boolean)) log(`vendor CLIs: ${line}`)
+    let result
+    try { result = JSON.parse(String(child.stdout ?? '').trim()) } catch {
+      result = { state: 'failed', error: String(child.error?.message ?? `install child exited ${child.status ?? child.signal ?? 'unknown'}`), signal: child.signal ?? null, status: child.status ?? null }
     }
-  } finally {
-    store.dispose?.()
+    if (result.state === 'failed' && !result.memoryEvents) Object.assign(result, cgroup())
+    results[id] = result
+    writeState()
+    if (result.state === 'ready') {
+      log(`vendor CLIs: ${spec.defaultName} ${result.version} at ${result.path}`)
+      if (result.managed) {
+        const bridge = writeProgramsBridge({
+          home, appHome: env.HERDR_APP_HOME || join(home, 'herdr-app'),
+          agent: spec.key, path: result.path, log, warn,
+        })
+        results[id].bridge = bridge.reason
+        writeState()
+      }
+    } else if (result.state === 'failed') {
+      warn(`vendor CLIs: ${spec.defaultName} was not installed: ${result.error} (signal=${result.signal ?? 'none'}, oom_kill=${result.oomKill ?? 0}, memory.peak=${result.memoryPeakBytes ?? 'unknown'})`)
+    } else {
+      warn(`vendor CLIs: ${spec.defaultName} is missing`)
+    }
   }
   const states = Object.values(results).map((entry) => entry.state)
-  return { state: states.length > 0 && states.every((state) => state === 'ready') ? 'ready' : 'failed', results }
+  return { state: states.length > 0 && states.every((state) => state === 'ready') ? 'ready' : 'failed', results, stateFile }
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

@@ -171,7 +171,7 @@ COPY --from=builder /build/out/offline-store /opt/automagik/offline-store
 COPY --from=builder /build/out/am /opt/automagik/am
 COPY server/skills /opt/automagik/skills
 COPY server/vendor/registry-seed /opt/automagik/registry-seed
-COPY server/entrypoint.mjs server/healthcheck.mjs server/lib.mjs server/gate*.mjs server/profile-*.mjs server/plugin-payload.mjs server/volume-lock.mjs server/first-boot.mjs server/cli-store.mjs server/in-image-smoke.mjs server/toolchain.mjs /opt/automagik/
+COPY server/entrypoint.mjs server/healthcheck.mjs server/lib.mjs server/gate*.mjs server/profile-*.mjs server/plugin-payload.mjs server/volume-lock.mjs server/first-boot.mjs server/vendor-install.mjs server/cli-store.mjs server/in-image-smoke.mjs server/toolchain.mjs /opt/automagik/
 # No /home/<user> in the image's account record: the distroless nonroot home is replaced with
 # the uid the image actually runs as. The scanner's home check then has nothing to excuse.
 COPY server/passwd /etc/passwd

@@ -24,6 +24,10 @@ test('the image sets the Arca app home, runtime and session; the socket derives 
   assert.equal(herdrCoreSocket('other-session'), `${HC_RUNTIME}/other-session.sock`)
 })
 
+test('the runtime carries the per-vendor install child for bounded, serialized installs', () => {
+  assert.match(dockerfile, /^COPY server\/entrypoint\.mjs .*server\/vendor-install\.mjs .*\/opt\/automagik\/$/m)
+})
+
 test('the image runs the app under a pinned tini so it is never PID 1', () => {
   assert.match(dockerfile, new RegExp(`^ARG TINI_VERSION=${TINI_VERSION}$`, 'm'))
   assert.match(dockerfile, new RegExp(`^ARG TINI_SHA256=${TINI_SHA256}$`, 'm'))
