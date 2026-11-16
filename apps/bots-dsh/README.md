@@ -546,7 +546,7 @@ node apps/bots-dsh/scripts/seed-registry.mjs --project <project> --home <automag
 node /opt/automagik/profile/node_modules/@automagik/bots-dsh/scripts/seed-registry.mjs --project /data/workspace --home /data
 ```
 
-It creates a missing file, leaves an identical one untouched (so re-running is safe), and refuses an existing file that differs rather than overwriting it. It never mints Bot ids: a project with no `.herdr/bots.json` is refused, because creating a team and its ids is Herdr's job. It keeps unknown fields, checks that the roster has exactly one main Bot, and removes `sessionId`, `sessions` and `segments` at every depth (including under `dsh`) before writing. The report it prints is the read-back: both files' Bot counts, any parser warnings and each file's `sha256`.
+It creates a missing file and leaves an identical one untouched, so re-running is safe. A repo file that differs is refused rather than overwritten; an existing home file is merged, keeping its other projects, picks and unknown fields, and a conflicting project entry or main Bot in it is refused. It never mints Bot ids: a project with no `.herdr/bots.json` is refused, because creating a team and its ids is Herdr's job. It keeps unknown fields, checks that the roster has exactly one main Bot, and removes `sessionId`, `sessions` and `segments` at every depth (including under `dsh`) before writing. The report it prints is the read-back: both files' Bot counts, any parser warnings and each file's `sha256`.
 
 ## Development
 

@@ -8,9 +8,10 @@
 // read the home file's Bots. So the repo file gets the whole roster, and the home file gets the
 // project entry plus its one main Bot (the project's seat).
 //
-// The seed creates what is missing and leaves an identical file alone. It never updates a file
-// that differs and never overwrites one: an existing file that disagrees with the roster is
-// refused. Bot ids are never minted here. A project with no `.herdr/bots.json` is refused,
+// The seed creates what is missing and leaves an identical file alone. A repo file that differs
+// is refused, never overwritten; an existing home file is merged, keeping its other projects,
+// picks and unknown fields, and a conflicting project entry or main Bot in it is refused. Bot
+// ids are never minted here. A project with no `.herdr/bots.json` is refused,
 // because a team and its ids are made by Herdr when the project's team is created; this seed
 // only reflects a roster that already exists.
 //
@@ -24,7 +25,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import {
   HOME_PATH, REPO_PATH, checkRegistry, emptyRegistry, fromHerdrV1, parseRegistry,
   readRegistryText, writeRegistry,
@@ -47,10 +48,11 @@ It writes, from <project>/.herdr/bots.json version 1:
   <project>/.automagik/bots/bots.json   the project's Bots (repo file)
   <home>/bots/bots.json                 projects[] and the project's main Bot (home file)
 
-A missing file is created; an identical one is left alone; a different one is refused, never
-overwritten. No Bot id is minted: a project with no version 1 roster is refused. No Session id,
-Session list or segment is written. The report ends with a read-back of both files: Bot counts,
-parser warnings and each file's sha256.`
+A missing file is created and an identical one is left alone. A repo file that differs is refused,
+never overwritten; an existing home file is merged, and a conflicting project entry or main Bot
+in it is refused. No Bot id is minted: a project with no version 1 roster is refused. No Session
+id, Session list or segment is written. The report ends with a read-back of both files: Bot
+counts, parser warnings and each file's sha256.`
 
 /** A refusal the operator can act on: no roster, no usable main, or a conflicting file. */
 export class SeedError extends Error {
@@ -201,14 +203,15 @@ export function planHome(path, project, homeBot, text) {
   scrubSessions(raw, '', scrubbed)
   for (const at of scrubbed) warnings.push(`${path}: ${at} is never kept in bots.json; removed`)
   const projects = raw.projects ?? (raw.projects = [])
-  const entries = projects.map((entry, index) => ({ entry, index })).filter(({ entry }) => isObject(entry) && entry.folder === project)
+  const sameFolder = entry => isObject(entry) && typeof entry.folder === 'string' && (entry.folder === project || (isAbsolute(entry.folder) && resolve(entry.folder) === project))
+  const entries = projects.filter(entry => sameFolder(entry))
   if (entries.length > 1) throw new SeedError(`Not seeded: ${path} lists the project more than once; fix the file and run the seed again`, 'seed/conflict')
   if (entries.length === 1) {
-    if (entries[0].entry.machine !== undefined) {
-      throw new SeedError(`Not seeded: ${path} lists this project on machine ${JSON.stringify(entries[0].entry.machine)}; seed it on that machine, or remove that entry first`, 'seed/conflict')
+    if (entries[0].machine !== undefined) {
+      throw new SeedError(`Not seeded: ${path} lists this project on machine ${JSON.stringify(entries[0].machine)}; seed it on that machine, or remove that entry first`, 'seed/conflict')
     }
   } else projects.push({ folder: project })
-  const existingMain = raw.bots.find(bot => isObject(bot) && bot.folder === project && bot.main === true && bot.id !== homeBot.id)
+  const existingMain = raw.bots.find(bot => sameFolder(bot) && bot.main === true && bot.id !== homeBot.id)
   if (existingMain) {
     throw new SeedError(`Not seeded: ${path} already names ${existingMain.id} as this project's main Bot; the project has exactly one main. Fix the home file and run the seed again`, 'seed/conflict')
   }
@@ -264,11 +267,13 @@ export async function seedRegistry({ project = process.cwd(), home = defaultHome
       const homePlan = planHome(homePath, projectFolder, derived.homeBot, homeText)
       if (repo.action !== 'unchanged') await writeRegistry(repoPath, repo.raw, repo.text, { kind: 'repo', wait, stale })
       if (homePlan.action !== 'unchanged') await writeRegistry(homePath, homePlan.raw, homePlan.text, { kind: 'home', wait, stale })
+      const homeRead = readBack(homePath, 'home')
+      const repoRead = readBack(repoPath, 'repo')
       return {
         project: projectFolder,
         source: { path: sourcePath, bots: derived.sourceBots, mains: 1, warnings: derived.warnings },
-        home: { ...readBack(homePath, 'home'), action: homePlan.action },
-        repo: { ...readBack(repoPath, 'repo'), action: repo.action },
+        home: { ...homeRead, warnings: [...homePlan.warnings, ...homeRead.warnings], action: homePlan.action },
+        repo: { ...repoRead, action: repo.action },
       }
     } catch (error) {
       if (error?.code === 'registry/stale' && attempt < ATTEMPTS) continue

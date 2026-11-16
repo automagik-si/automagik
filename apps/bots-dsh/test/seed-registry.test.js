@@ -228,6 +228,8 @@ test('a v1 with odd fields keeps what version 2 can hold and writes no Session k
   assert.equal(seat.bots[0].id, ID.main)
   assert.equal(seat.bots[0].folder, project)
   assert.equal(seat.bots[0].dsh, undefined)
+  assert.deepEqual(seat.bots[0].someFutureField, { kept: true })
+  assert.deepEqual(seat.bots[0].agyPermissions, { allow: ['read'], deny: [] })
   assert.ok(result.source.warnings.some(warning => /kind "helper" is not main or member/.test(warning)))
   assert.ok(result.source.warnings.some(warning => /folder is read from the home file only/.test(warning)))
   assert.ok(result.source.warnings.some(warning => /sessionId is never kept in bots.json; removed/.test(warning)))
@@ -298,7 +300,22 @@ test('a shared home keeps another project and its picks, and adds only this proj
   assert.deepEqual(merged.unknownTop.kept, true)
   assert.deepEqual(keysNamed(merged, SESSION_KEYS), [])
   assert.equal(merged.bots.filter(bot => bot.folder === project).length, 1)
+  assert.ok(result.home.warnings.some(warning => /unknownTop\.sessions is never kept in bots.json; removed/.test(warning)))
   assert.deepEqual(json(join(project, REPO)).bots.map(bot => bot.id), ['b-aaaaaaaaaa', 'b-cccccccccc', 'b-dddddddddd', 'b-ffffffffff'])
+})
+
+test('a home entry for the same project is matched around a trailing slash, not duplicated', async (t) => {
+  const { project, home } = layout(t, fixture('herdr-v1-team.json'))
+  const homePath = join(home, HOME)
+  mkdirSync(dirname(homePath), { recursive: true })
+  writeFileSync(homePath, `${JSON.stringify({ version: 2, projects: [{ folder: `${project}/` }], bots: [], shown: [] }, null, 2)}\n`)
+  const result = await seedRegistry({ project, home })
+  const merged = json(homePath)
+  assert.equal(result.home.action, 'updated')
+  assert.equal(merged.projects.length, 1)
+  assert.equal(merged.projects[0].folder, `${project}/`)
+  assert.equal(merged.bots.length, 1)
+  assert.equal(merged.bots[0].folder, project)
 })
 
 test('the command runs with the same report and exits 0, 1 on a conflict and 2 on bad usage', async (t) => {
