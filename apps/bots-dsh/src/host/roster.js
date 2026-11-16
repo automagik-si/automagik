@@ -106,8 +106,10 @@ export function install(rt) {
 
   // Under the PTC preset (DSH Desktop's default) a model may call only run_code, which
   // turns down the group_relay call that a group chat's Session is given. A Session
-  // keeps the preset it is made with.
-  async function botPreset(profile) {
+  // keeps the preset it is made with, so a group Session stays on the standard preset,
+  // where group_relay is directly callable. A Bot's own chat asks for no preset at all
+  // and so inherits DSH's default, as a DSH bot made from the UI does.
+  async function botPreset(profile, { group = false } = {}) {
     const presets = ctx.get?.('agentPresets')
     if (presets === undefined) return {}
     const served = (await presets.list()).filter(preset => preset.broken === undefined)
@@ -116,6 +118,7 @@ export function install(rt) {
       if (!served.some(preset => preset.id === profile)) throw refusal(`The preset ${profile} is not available in this DSH`)
       return { agentPreset: profile }
     }
+    if (!group) return {}
     return served.some(preset => preset.id === 'standard') ? { agentPreset: 'standard' } : {}
   }
 
@@ -135,7 +138,7 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile } = {}) {
+  async function createSession(title, { dir, profile, group = false } = {}) {
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
     const readOnly = rt.readOnly()
@@ -157,7 +160,7 @@ export function install(rt) {
         place = { cwd: fallback }
       }
     }
-    const { sessionId } = await ctx.sessionController.create({ ...place, ...await botPreset(profile) })
+    const { sessionId } = await ctx.sessionController.create({ ...place, ...await botPreset(profile, { group }) })
     if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
@@ -935,7 +938,7 @@ export function install(rt) {
     const title = custom || autoRoomName(members)
     // The group's own Session only relays; like a member's it moves to a fresh part
     // in the group's folder once the group has one (parts.js).
-    const id = await createSession(title)
+    const id = await createSession(title, { group: true })
     try {
       // A member deleted while the Session was made stays out, and the group is checked
       // again as it is written.
