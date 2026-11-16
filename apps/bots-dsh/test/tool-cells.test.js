@@ -327,6 +327,23 @@ test('a message_bot refusal shows the host\'s reason instead of "Messaged"', () 
   assert.match(shown(call('message_bot', 'sent', { args: { to: 'Writer' }, content: 'Delivered to Writer.', meta: { sent: true } })), /Messaged.*Writer/)
 })
 
+test('a message_bot refusal with no reason and pruned content never says "Messaged"', () => {
+  // The host's `sent: false` alone is the refusal: an empty reason or content pruned away
+  // must not turn the line into a delivery claim.
+  const emptyReason = shown(call('message_bot', 'direct', { args: { to: 'Writer' }, content: '', meta: { sent: false, reason: '' } }))
+  assert.doesNotMatch(emptyReason, /Messaged/)
+  assert.match(emptyReason, /Couldn't message Writer/)
+  const pruned = shown(call('message_bot', 'direct', { args: { to: 'Writer' }, content: '', meta: { sent: false } }))
+  assert.doesNotMatch(pruned, /Messaged/)
+  assert.match(pruned, /Couldn't message Writer/)
+  // The same host signal on a program's sub-call keeps the refusal line.
+  const nested = shown(program([call('message_bot', 'program:ptc:1', { args: { to: 'Writer' }, content: '', meta: { sent: false } })]))
+  assert.doesNotMatch(nested, /Messaged/)
+  assert.match(nested, /Couldn't message Writer/)
+  // A real delivery still says "Messaged".
+  assert.match(shown(call('message_bot', 'sent', { args: { to: 'Writer' }, content: 'Delivered to Writer.', meta: { sent: true } })), /Messaged.*Writer/)
+})
+
 test('a program with no known sub-call draws nothing, as before', () => {
   assert.ok(emptied(ToolCell(props(program([])))))
   assert.ok(emptied(ToolCell(props(program([call('bash', 'program:ptc:1'), call('read_file', 'program:ptc:2')])))))
