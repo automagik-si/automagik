@@ -172,6 +172,29 @@ test('every refusal a sign-in can meet has its own sentence', async (t) => {
   }
 })
 
+// The reviewer's two medium findings, pinned: a code read straight out of the object can be a
+// name of Object.prototype, and any two-segment string is not a failure class.
+test('a prototype name as a code is refused like any other, not turned into an internal error', async (t) => {
+  const h = await fixture(t)
+  for (const code of ['toString', 'valueOf', 'constructor', '__proto__', 'hasOwnProperty']) {
+    h.acp.accountConfirm = async () => { throw Object.assign(new Error('private-cli-output'), { code }) }
+    const { result } = await h.call('cli-login-confirm', { botId: 'first', provider: 'acp-claude', ref: 'account-ref' })
+    assert.equal(result.error.code, 'bot/refused', code)
+    assert.equal(result.error.message, 'The account could not be confirmed. Try again.', code)
+    assert.doesNotMatch(JSON.stringify(result), /private-cli-output/, code)
+  }
+})
+
+test('only an acp failure namespace is said as a class', async (t) => {
+  const h = await fixture(t)
+  for (const code of ['Users/example-user', 'home/example-user', 'Bearer/fake-tok-000000', 'ACP-net/unreachable', 'filesystem/enoent']) {
+    h.acp.loginStart = async () => { throw Object.assign(new Error('private-cli-output'), { code }) }
+    const { result } = await h.call('cli-login-start', h.payload)
+    assert.equal(result.error.message, 'Could not continue this sign-in. Try again.', code)
+    assert.doesNotMatch(JSON.stringify(result), /example-user|fake-tok|private-cli-output/, code)
+  }
+})
+
 test('owner sign-in and account controls preserve a safe recovery action without native details',
   async t => {
     const h = await fixture(t)

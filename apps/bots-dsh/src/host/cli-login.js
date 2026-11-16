@@ -143,7 +143,9 @@ const failed = (message, code = 'bot/refused') => Object.assign(new Error(messag
 // A native failure the team has no sentence for: the CLI's own words never reach the person
 // (a CLI may print an account name or a secret, #970), but its failure class does. The class is
 // a bounded identifier, so the row can say which kind of failure it was instead of one dead end.
-const FAILURE_CLASS = /^[a-z][a-z0-9-]{0,31}\/[a-z0-9-]{1,40}$/i
+// Only an ACP failure namespace: a relative path, a scheme and a token, or any other two-segment
+// string an error happens to carry is not a class and is never put in the row.
+const FAILURE_CLASS = /^acp-[a-z0-9-]{1,27}\/[a-z0-9-]{1,40}$/
 const failureClassOf = error => (typeof error?.code === 'string' && FAILURE_CLASS.test(error.code) ? error.code : '')
 const unmappedFailure = (error) => {
   const kind = failureClassOf(error)
@@ -396,7 +398,12 @@ export function install(rt) {
     try {
       await service.accountConfirm(body.provider, body.ref === undefined ? {} : { ref: body.ref })
     } catch (error) {
-      const [message, code] = ACCOUNT_ERRORS[error?.code]
+      // Read through Object.hasOwn, as the sign-in path does: `error.code` can be a name of
+      // Object.prototype ('toString', '__proto__'), and a plain index would then hand back a
+      // function and break the destructuring into an internal error.
+      const known = typeof error?.code === 'string' && Object.hasOwn(ACCOUNT_ERRORS, error.code)
+        ? ACCOUNT_ERRORS[error.code] : undefined
+      const [message, code] = known
         ?? [`The account could not be confirmed${failureClassOf(error) === '' ? '' : ` (${failureClassOf(error)})`}. Try again.`, 'bot/refused']
       throw failed(message, code)
     }
