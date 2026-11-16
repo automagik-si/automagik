@@ -203,7 +203,7 @@ html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]>[data-sl
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
 .lb-head{flex:none;display:flex;align-items:center;gap:4px;height:52px;padding:0 8px 0 14px;box-sizing:border-box}
 .lb-brand{flex:1;min-width:0;display:flex;align-items:center;overflow:hidden}
-.lb-brand .omni-wordmark{display:block;flex:none}
+.lb-brand .omni-wordmark{display:block;flex:none;max-width:100%;height:auto}
 .lb-head .bt-round{flex:none;width:30px;height:30px;background:none;box-shadow:none;color:var(--bt-ink)}
 .lb-head .bt-round:hover{background:var(--bt-hover)}
 html[data-automagik-desktop] .lb-brand{visibility:hidden}
