@@ -27,7 +27,6 @@ import {
   readlinkSync,
   renameSync,
   rmSync,
-  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -240,9 +239,12 @@ export function toolchainRoot({ volume, rootPath } = {}) {
   }
   let baseInfo
   try {
-    baseInfo = statSync(base)
+    baseInfo = lstatSync(base)
   } catch (error) {
     throw new ToolchainError(`project toolchain: the project volume ${base} does not exist`, { code: 'path', cause: error })
+  }
+  if (baseInfo.isSymbolicLink()) {
+    throw new ToolchainError(`project toolchain: the project volume ${base} is a symbolic link; use its real path`, { code: 'path' })
   }
   if (!baseInfo.isDirectory()) throw new ToolchainError(`project toolchain: the project volume ${base} is not a directory`, { code: 'path' })
   const root = rootPath === undefined ? join(base, TOOLCHAIN_RELATIVE) : resolve(rootPath)
@@ -254,19 +256,23 @@ export function toolchainRoot({ volume, rootPath } = {}) {
 
 /** Refuse a pre-existing symlink on the way to the install root, so a write cannot be redirected out of the volume. */
 function assertNoSymlinkComponents(base, root) {
+  const chain = [base]
   let current = base
   for (const part of relative(base, root).split(sep).filter(Boolean)) {
     current = join(current, part)
+    chain.push(current)
+  }
+  for (const path of chain) {
     let info
     try {
-      info = lstatSync(current)
+      info = lstatSync(path)
     } catch (error) {
       if (error?.code === 'ENOENT') continue
       throw error
     }
     if (info.isSymbolicLink()) {
       throw new ToolchainError(
-        `project toolchain: ${current} is a symbolic link; the toolchain writes only inside the project volume's own directories`,
+        `project toolchain: ${path} is a symbolic link; the toolchain writes only inside the project volume's own directories`,
         { code: 'path' },
       )
     }
@@ -575,7 +581,7 @@ export async function installBun({
     throw new ToolchainError(`project toolchain: bun ${version} pins no sha256 for ${platform}`, { code: 'manifest' })
   }
   const target = join(root, 'tools', 'bun', version)
-  assertNoSymlinkComponents(resolve(root), dirname(target))
+  assertNoSymlinkComponents(resolve(root), target)
   assertNoSymlinkComponents(resolve(root), join(root, 'bin'))
   assertNoSymlinkComponents(resolve(root), join(root, '.staging'))
   const current = inspectInstall(target, { version, platform, archiveSha256 })
@@ -605,7 +611,7 @@ export async function installBun({
     const record = installRecord({ version, platform, archiveSha256, binary: extracted, installedAt: now() })
     writeFileSync(join(payload, INSTALL_RECORD), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
 
-    assertNoSymlinkComponents(resolve(root), dirname(target))
+    assertNoSymlinkComponents(resolve(root), target)
     mkdirSync(dirname(target), { recursive: true, mode: 0o755 })
     let replaced = false
     if (existsSync(target)) {

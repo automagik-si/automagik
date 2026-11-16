@@ -459,12 +459,50 @@ test('a symlinked install root is refused, never followed out of the volume', as
   const { symlinkSync } = await import('node:fs')
   symlinkSync(outside, join(volume, TOOLCHAIN_RELATIVE))
   writeManifest(workspace, manifestFor(bunArchive()))
+  const stub = fakeFetch(bunArchive())
 
   await assert.rejects(
-    bootstrapProjectToolchain({ workspace, volume, platform: 'linux-x64', fetch: fakeFetch(bunArchive()).fetch }),
+    bootstrapProjectToolchain({ workspace, volume, platform: 'linux-x64', fetch: stub.fetch }),
     /is a symbolic link/,
   )
+  assert.deepEqual(stub.calls, [], 'the containment check runs before the network')
   assert.deepEqual(readdirSync(outside), [])
+})
+
+test('a symlinked project volume is refused, never followed out of the volume', async () => {
+  const { parent, workspace } = project()
+  const real = join(parent, 'real-volume')
+  mkdirSync(real)
+  const volume = join(parent, 'volume-link')
+  const { symlinkSync } = await import('node:fs')
+  symlinkSync(real, volume)
+  writeManifest(workspace, manifestFor(bunArchive()))
+  const stub = fakeFetch(bunArchive())
+
+  await assert.rejects(
+    bootstrapProjectToolchain({ workspace, volume, platform: 'linux-x64', fetch: stub.fetch }),
+    /project volume .* is a symbolic link/,
+  )
+  assert.deepEqual(stub.calls, [], 'the volume check runs before the network')
+  assert.deepEqual(readdirSync(real), [])
+})
+
+test('a dangling symlink at the version target is refused before the network', async () => {
+  const { parent, workspace, volume } = project()
+  const missing = join(parent, 'missing-version')
+  const binRoot = join(volume, TOOLCHAIN_RELATIVE, 'tools', 'bun')
+  mkdirSync(binRoot, { recursive: true })
+  const { symlinkSync } = await import('node:fs')
+  symlinkSync(missing, join(binRoot, VERSION))
+  writeManifest(workspace, manifestFor(bunArchive()))
+  const stub = fakeFetch(bunArchive())
+
+  await assert.rejects(
+    bootstrapProjectToolchain({ workspace, volume, platform: 'linux-x64', fetch: stub.fetch }),
+    /is a symbolic link/,
+  )
+  assert.deepEqual(stub.calls, [], 'the target check runs before the network')
+  assert.equal(existsSync(missing), false)
 })
 
 test('a symlinked bin directory is refused, never followed out of the volume', async () => {

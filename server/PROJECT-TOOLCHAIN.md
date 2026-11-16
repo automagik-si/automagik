@@ -21,6 +21,10 @@ project, travels with its source, and is reviewed like any other project file. T
 is [`project-toolchain.schema.json`](project-toolchain.schema.json); this repository's own
 manifest is [`.automagik-toolchain.json`](../.automagik-toolchain.json).
 
+The manifest is repository-local, not a release input: `scripts/lane.ts` never-ships this exact
+path, so a merge that touches only it rates nothing under `ships` and cuts no release. A lane
+test row pins that, and keeps the normal behavior for real shipping paths.
+
 ```json
 {
   "schemaVersion": 1,
@@ -91,9 +95,10 @@ cleaned up by this deliverable.
   hard kill cannot leave a partial archive growing forever. A live install is never that old and
   is left alone.
 - **Volume-confined.** Every write resolves under the project volume; an explicit root outside
-  it is refused, and a symlinked component on the way to the root or to `bin`/`tools`/`.staging`
-  is refused rather than followed. The module never writes `/opt/automagik`, `/usr/local/bin`,
-  `HOME`, `/tmp` or the workspace.
+  it is refused. The volume itself, the install root, and every component of the version target
+  (the target included) are checked before any download; a symlink is refused rather than
+  followed, whether it is live or dangling. The module never writes `/opt/automagik`,
+  `/usr/local/bin`, `HOME`, `/tmp` or the workspace.
 - **No permission to publish.** This is preparation: it signs in to nothing, pushes nothing and
   changes no image.
 
@@ -177,9 +182,10 @@ The module is covered offline by `server/test/project-toolchain.test.mjs`:
 - a stored (uncompressed) release archive installs, and stale staging is pruned while a recent
   staging directory is kept;
 - plus refusal coverage for unpinned manifests, a platform with no pin, an install root outside
-  the volume, a symlinked root, `bin` or a dangling install path, an over-large declared download,
-  malformed archives (duplicate, encrypted, zip64, unsupported compression, size lie), an archive
-  without the expected member, and a corrupt archive that matches its pin.
+  the volume, a symlinked volume, root, `bin`, dangling install path or version target, an
+  over-large declared download, malformed archives (duplicate, encrypted, zip64, unsupported
+  compression, size lie), an archive without the expected member, and a corrupt archive that
+  matches its pin.
 
 This repository's real gate, run with the volume's Bun as above, is the acceptance evidence
 after integration: the download is proven by the archive and binary hashes, and the gate by its
