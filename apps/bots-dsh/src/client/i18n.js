@@ -2831,6 +2831,8 @@ const HOST_ZH = {
   'Your session ended · view only': '你的会话已结束 · 只读',
   'Line breaks were removed from the paste': '已移除粘贴内容中的换行',
   'Control characters were removed from the paste': '已从粘贴内容中移除控制字符',
+  'Typing paused after 60 s idle. Press any key to resume': '闲置 60 秒后已暂停输入。按任意键继续',
+  'Typing is back: type again': '输入已恢复：请重新输入',
   'Operating': '在操作',
   'You have the computer': '你在操作',
   'Latest screenshot': '最新截图',

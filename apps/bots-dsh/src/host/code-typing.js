@@ -4,8 +4,14 @@
 // on an ended session.
 //
 // Rules this file keeps:
-//   - owner only: every request re-admits through DSH's Connection, so an expired or dropped
-//     browser session is refused at the next keystroke batch and the typing attach closes;
+//   - owner only: every request re-admits through DSH's Connection. DSH's own /api layer
+//     refuses a signed-out or expired cookie (401) before this route runs, so the attach must
+//     also be let go on its own: an idle lease (60 s by default, injectable) ends a session
+//     with no accepted batch, and the watch stream ending lets that viewer's attach go. A
+//     signed-out page cannot keep typing open by going quiet;
+//   - nothing typed before typing is confirmed is sent: after the lease, the waking key or
+//     paste only takes the pane again, and the pane says typing paused / typing is back so the
+//     owner types again (a lost first batch is never replayed);
 //   - the same pane resolution as the watch route: a Bot id (and its own folded worker
 //     terminal), confirmed by this computer's core, never a terminal id from the request;
 //   - one typing viewer per pane: a second window is refused and sees view only;

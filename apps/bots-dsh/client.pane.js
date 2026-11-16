@@ -11819,6 +11819,8 @@ var HOST_ZH = {
   "Your session ended · view only": "你的会话已结束 · 只读",
   "Line breaks were removed from the paste": "已移除粘贴内容中的换行",
   "Control characters were removed from the paste": "已从粘贴内容中移除控制字符",
+  "Typing paused after 60 s idle. Press any key to resume": "闲置 60 秒后已暂停输入。按任意键继续",
+  "Typing is back: type again": "输入已恢复：请重新输入",
   "Operating": "在操作",
   "You have the computer": "你在操作",
   "Latest screenshot": "最新截图",
@@ -14618,6 +14620,7 @@ function TerminalPane({ botId, worker, title }) {
   const [attempt, setAttempt] = (0, import_react2.useState)(0);
   const [mode, setMode] = (0, import_react2.useState)("view");
   const [pasteNote, setPasteNote] = (0, import_react2.useState)(false);
+  const [resumeNote, setResumeNote] = (0, import_react2.useState)(false);
   const modeRef = (0, import_react2.useRef)("view");
   const sessionRef = (0, import_react2.useRef)(null);
   const termRef = (0, import_react2.useRef)(null);
@@ -14675,6 +14678,7 @@ function TerminalPane({ botId, worker, title }) {
       if (answer.status === 401) {
         sessionRef.current = null;
         setModeNow("ended");
+        setResumeNote("paused");
         if (source) {
           source.close();
           source = null;
@@ -14684,6 +14688,7 @@ function TerminalPane({ botId, worker, title }) {
       if (answer.status === 409) {
         sessionRef.current = null;
         setModeNow("ended");
+        setResumeNote("paused");
         return false;
       }
       return true;
@@ -14701,6 +14706,7 @@ function TerminalPane({ botId, worker, title }) {
       sessionRef.current = null;
       if (modeRef.current === "typing") setModeNow(reason === "ended" ? "ended" : "view");
       setPasteNote(false);
+      setResumeNote(reason === "ended" ? "paused" : false);
       if (term) term.options.disableStdin = true;
       if (outside) {
         document.removeEventListener("pointerdown", outside, true);
@@ -14709,7 +14715,7 @@ function TerminalPane({ botId, worker, title }) {
       return flush().then(() => session ? post("release", { session }).catch(() => {
       }) : void 0);
     };
-    const take = async (pending = null) => {
+    const take = async () => {
       if (takingRef.current || modeRef.current === "typing") return;
       takingRef.current = true;
       setModeNow("taking");
@@ -14719,6 +14725,7 @@ function TerminalPane({ botId, worker, title }) {
       if (answer.status === 200 && answer.body?.session) {
         sessionRef.current = answer.body.session;
         setModeNow("typing");
+        setResumeNote("back");
         if (term) {
           term.options.disableStdin = false;
           term.focus();
@@ -14729,16 +14736,10 @@ function TerminalPane({ botId, worker, title }) {
           };
           document.addEventListener("pointerdown", outside, true);
         }
-        if (pending?.length) {
-          queueRef.current.push(pending);
-          if (!timerRef.current) timerRef.current = setTimeout(() => {
-            timerRef.current = 0;
-            void flush();
-          }, 20);
-        }
         return;
       }
       setModeNow(answer.status === 409 ? "elsewhere" : "ended");
+      setResumeNote("paused");
     };
     takeRef.current = take;
     const start = async () => {
@@ -14773,21 +14774,27 @@ function TerminalPane({ botId, worker, title }) {
       });
       term.onData((data) => {
         if (modeRef.current === "typing" && sessionRef.current) {
+          setResumeNote(false);
           queueRef.current.push(new TextEncoder().encode(data));
           if (!timerRef.current) timerRef.current = setTimeout(() => {
             timerRef.current = 0;
             void flush();
           }, 20);
         } else if (modeRef.current === "ended") {
-          void takeRef.current?.(new TextEncoder().encode(data));
+          void takeRef.current?.();
         }
       });
       const onPaste = (event) => {
         event.preventDefault();
         event.stopImmediatePropagation();
+        if (modeRef.current === "ended") {
+          void takeRef.current?.();
+          return;
+        }
         if (modeRef.current !== "typing" || !sessionRef.current) return;
         const pasted = pasteBytes(event.clipboardData?.getData("text/plain") ?? "");
         setPasteNote(pasted.note ?? false);
+        setResumeNote(false);
         if (pasted.bytes.length === 0) return;
         queueRef.current.push(pasted.bytes);
         if (!timerRef.current) timerRef.current = setTimeout(() => {
@@ -14852,7 +14859,7 @@ function TerminalPane({ botId, worker, title }) {
       { className: "cs-pane-head" },
       (0, import_react2.createElement)("span", { className: "cs-pane-title", title }, title),
       (0, import_react2.createElement)("span", { className: "cs-pane-note", role: "status", "data-mode": mode }, stateWord),
-      pasteNote ? (0, import_react2.createElement)("span", { className: "cs-paste-note", role: "status" }, pasteNote === "controls-stripped" ? t("Control characters were removed from the paste") : t("Line breaks were removed from the paste")) : null,
+      resumeNote === "paused" ? (0, import_react2.createElement)("span", { className: "cs-paste-note", role: "status" }, t("Typing paused after 60 s idle. Press any key to resume")) : resumeNote === "back" ? (0, import_react2.createElement)("span", { className: "cs-paste-note", role: "status" }, t("Typing is back: type again")) : pasteNote ? (0, import_react2.createElement)("span", { className: "cs-paste-note", role: "status" }, pasteNote === "controls-stripped" ? t("Control characters were removed from the paste") : t("Line breaks were removed from the paste")) : null,
       retryable ? (0, import_react2.createElement)("button", { type: "button", className: "cs-btn", onClick: () => {
         setPhase({ kind: "connecting" });
         setAttempt((value) => value + 1);

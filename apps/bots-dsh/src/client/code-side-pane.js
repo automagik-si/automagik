@@ -71,6 +71,8 @@ export function TerminalPane({ botId, worker, title }) {
   const [attempt, setAttempt] = useState(0)
   const [mode, setMode] = useState('view')
   const [pasteNote, setPasteNote] = useState(false)
+  // 'paused': the lease ended typing (or a batch was lost); 'back': a retake succeeded.
+  const [resumeNote, setResumeNote] = useState(false)
   const modeRef = useRef('view')
   const sessionRef = useRef(null)
   const termRef = useRef(null)
@@ -118,14 +120,18 @@ export function TerminalPane({ botId, worker, title }) {
       if (answer.status === 401) {
         sessionRef.current = null
         setModeNow('ended')
+        setResumeNote('paused')
         // A batch the host refused (a signed-out page) means this watch stream is the only
         // thing left to tell the host to let the typing attach go: close it.
         if (source) { source.close(); source = null }
         return false
       }
       if (answer.status === 409) {
+        // The batch that hit the end is lost on purpose (nothing is replayed); the note tells
+        // the owner to type again.
         sessionRef.current = null
         setModeNow('ended')
+        setResumeNote('paused')
         return false
       }
       return true
@@ -140,12 +146,15 @@ export function TerminalPane({ botId, worker, title }) {
       sessionRef.current = null
       if (modeRef.current === 'typing') setModeNow(reason === 'ended' ? 'ended' : 'view')
       setPasteNote(false)
+      setResumeNote(reason === 'ended' ? 'paused' : false)
       if (term) term.options.disableStdin = true
       if (outside) { document.removeEventListener('pointerdown', outside, true); outside = null }
       return flush().then(() => (session ? post('release', { session }).catch(() => {}) : undefined))
     }
     // A take, and a retake after the idle lease ended typing: the same watch, no navigating.
-    const take = async (pending = null) => {
+    // Nothing typed before the take is confirmed is ever sent: the waking key or paste only
+    // asks for typing back, and the owner types again after the confirmation.
+    const take = async () => {
       if (takingRef.current || modeRef.current === 'typing') return
       takingRef.current = true
       setModeNow('taking')
@@ -155,19 +164,16 @@ export function TerminalPane({ botId, worker, title }) {
       if (answer.status === 200 && answer.body?.session) {
         sessionRef.current = answer.body.session
         setModeNow('typing')
+        setResumeNote('back')
         if (term) { term.options.disableStdin = false; term.focus() }
         if (!outside) {
           outside = (event) => { if (!element.contains(event.target)) void stopTyping('left') }
           document.addEventListener('pointerdown', outside, true)
         }
-        // The key that woke typing up is not lost: it goes in the first batch.
-        if (pending?.length) {
-          queueRef.current.push(pending)
-          if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
-        }
         return
       }
       setModeNow(answer.status === 409 ? 'elsewhere' : 'ended')
+      setResumeNote('paused')
     }
     takeRef.current = take
     const start = async () => {
@@ -203,11 +209,13 @@ export function TerminalPane({ botId, worker, title }) {
       })
       term.onData((data) => {
         if (modeRef.current === 'typing' && sessionRef.current) {
+          setResumeNote(false)
           queueRef.current.push(new TextEncoder().encode(data))
           if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
         } else if (modeRef.current === 'ended') {
-          // The lease ended typing; the owner's next key takes it again in place.
-          void takeRef.current?.(new TextEncoder().encode(data))
+          // The lease ended typing; the waking key only takes typing back, it is never sent
+          // (Enter included).
+          void takeRef.current?.()
         }
       })
       // A paste never goes through xterm's own paste path (which turns newlines into Enter):
@@ -216,9 +224,15 @@ export function TerminalPane({ botId, worker, title }) {
       const onPaste = (event) => {
         event.preventDefault()
         event.stopImmediatePropagation()
+        if (modeRef.current === 'ended') {
+          // A paste in the ended state asks for typing back too; it is not sent.
+          void takeRef.current?.()
+          return
+        }
         if (modeRef.current !== 'typing' || !sessionRef.current) return
         const pasted = pasteBytes(event.clipboardData?.getData('text/plain') ?? '')
         setPasteNote(pasted.note ?? false)
+        setResumeNote(false)
         if (pasted.bytes.length === 0) return
         queueRef.current.push(pasted.bytes)
         if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
@@ -272,7 +286,9 @@ export function TerminalPane({ botId, worker, title }) {
     h('div', { className: 'cs-pane-head' },
       h('span', { className: 'cs-pane-title', title }, title),
       h('span', { className: 'cs-pane-note', role: 'status', 'data-mode': mode }, stateWord),
-      pasteNote ? h('span', { className: 'cs-paste-note', role: 'status' }, pasteNote === 'controls-stripped' ? t('Control characters were removed from the paste') : t('Line breaks were removed from the paste')) : null,
+      resumeNote === 'paused' ? h('span', { className: 'cs-paste-note', role: 'status' }, t('Typing paused after 60 s idle. Press any key to resume'))
+        : resumeNote === 'back' ? h('span', { className: 'cs-paste-note', role: 'status' }, t('Typing is back: type again'))
+          : pasteNote ? h('span', { className: 'cs-paste-note', role: 'status' }, pasteNote === 'controls-stripped' ? t('Control characters were removed from the paste') : t('Line breaks were removed from the paste')) : null,
       retryable ? h('button', { type: 'button', className: 'cs-btn', onClick: () => { setPhase({ kind: 'connecting' }); setAttempt(value => value + 1) } }, t('Reconnect')) : null),
     h('div', { ref: host, className: 'cs-screen', role: 'button', tabIndex: 0, 'aria-label': stateWord, 'data-code-mode': mode, onClick: () => { if (modeRef.current === 'view' || modeRef.current === 'elsewhere' || modeRef.current === 'ended') void takeRef.current?.() } }))
 }

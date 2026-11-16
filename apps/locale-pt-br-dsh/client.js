@@ -2778,7 +2778,9 @@ const pack = createPack({
     "Typing is open in another window · view only": "Digitação aberta em outra janela · somente leitura",
     "Your session ended · view only": "Sua sessão encerrada · somente leitura",
     "Control characters were removed from the paste": "Caracteres de controle removidos da colagem",
-    "Line breaks were removed from the paste": "Quebras de linha removidas da colagem"
+    "Line breaks were removed from the paste": "Quebras de linha removidas da colagem",
+    "Typing paused after 60 s idle. Press any key to resume": "Digitação pausada após 60 s ocioso. Pressione qualquer tecla para retomar",
+    "Typing is back: type again": "A digitação voltou: digite de novo"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })
