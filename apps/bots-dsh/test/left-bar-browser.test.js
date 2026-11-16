@@ -288,19 +288,20 @@ test('the phone drawer keeps DSH\'s own 280 whatever the wide width was', async 
   assert.equal(await width(392, false), 392, 'and a kept 392 comes back unchanged')
 })
 
-test('at a phone\'s width the view header keeps the switch whole and its Details word quiet', async (t) => {
+test('a phone header keeps the switch whole beside one More, and its panel in the window', async (t) => {
   const guard = await browserGuard()
   if (guard.skip) { t.skip(guard.skip); return null }
   const browser = await guard.chromium.launch({ executablePath: guard.executablePath, headless: true })
   t.after(() => browser.close())
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
-  const word = async (width) => {
-    await page.setViewportSize({ width, height: 844 })
-    await page.setContent(`<style>${LEFT_BAR_CSS}</style><header class="_header"><div class="bt-head"><div class="lb-face"><button class="lb-face-part">Chat</button><button class="lb-face-part">Terminal</button></div><button class="bt-head-details">Live</button><button class="bt-head-details">→</button><button class="bt-head-details" aria-controls="x" aria-label="View conversation details"><span class="bt-head-word">Details</span></button></div></header>`)
-    return page.locator('.bt-head-word').evaluate(node => getComputedStyle(node).display)
-  }
-  assert.equal(await word(390), 'none', 'a phone drops the word so the switch is never cut')
-  assert.equal(await word(1440), 'inline', 'a wide window keeps the word')
+  await page.setContent(`<style>${LEFT_BAR_CSS}</style><header class="_header"><div class="bt-head" style="width:346px"><div class="lb-face"><button class="lb-face-part">Chat</button><button class="lb-face-part">Terminal</button></div><details class="bt-head-more"><summary class="bt-head-details bt-head-more-btn">⋯</summary><div class="bt-head-more-pop"><button class="bt-head-details">Live</button><button class="bt-head-details">Details</button></div></details></div></header>`)
+  await page.evaluate(() => document.querySelector('.bt-head-more')?.setAttribute('open', ''))
+  const layout = await page.evaluate(() => {
+    const box = node => { if (!node) return null; const r = node.getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) } }
+    return { face: box(document.querySelector('.lb-face')), pop: box(document.querySelector('.bt-head-more-pop')) }
+  })
+  assert.ok(layout.face && layout.face.left >= 0, 'the switch is not cut at the left edge')
+  assert.ok(layout.pop && layout.pop.left >= 0 && layout.pop.right <= 390, 'the panel stays inside the window')
 })
 
 test('the view\'s switch reads Chat and Terminal, the open face raised, on both themes', async (t) => {
