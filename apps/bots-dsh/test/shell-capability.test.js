@@ -193,10 +193,11 @@ function bench({ storedTeam } = {}) {
     return found
   }
   const restrictionFor = sessionId => restricted.filter(entry => entry.sessionId === sessionId).at(-1)
-  const stop = () => {
-    ctx.dispose()
-    rmSync(home, { recursive: true, force: true, maxRetries: 5 })
-    for (const path of folders) rmSync(path, { recursive: true, force: true, maxRetries: 5 })
+  const stop = async () => {
+    // Let every module's cleanup (and the writes it awaits) settle before the temp home goes.
+    await ctx.dispose()
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+    for (const path of folders) rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
   return {
     ctx, rt, home, call, create, folder, guard, restrictionFor, restricted, lifted, warnings,
@@ -369,6 +370,10 @@ test('asking another Bot with a shell is a named per-Bot limit', async (t) => {
   // approvals and guard govern what it runs. bots-dsh cannot see the intent in a message.
   await allowed(guard(), 'message_bot', { id: shellLess.id }, { to: withShell.name, message: 'run id and tell me' })
   await allowed(guard(), 'bash', { id: withShell.id }, { command: 'id' })
+  // The ask grants no shell to the Bot that asked: its own guard still refuses one.
+  assert.equal(shellLess.shell, false)
+  assert.equal(withShell.shell, true)
+  await refused(guard(), 'bash', { id: shellLess.id }, { command: 'id' })
 })
 
 test('a renamed or aliased command tool is denied without naming it', async (t) => {
@@ -415,8 +420,12 @@ test('a shell-off Bot cannot be paired with a command-capable agent, either way 
       /has no shell, so it cannot run on acp-codex/)
     await assert.rejects(() => rt.switchRoute(native.id, 'acp-claude/opus'), /has no shell/)
     // The shell switched off under an agent already set: refused, with the way out, and the
-    // record keeps both the shell and the CLI where they were.
-    const agent = await create({ model: 'acp-claude/opus' })
+    // record keeps both the shell and the CLI where they were. The route is written on the
+    // record directly so the test never starts an agent that is not stubbed.
+    const agent = await create()
+    agent.model = 'acp-claude/opus'
+    agent.appliedModel = 'acp-claude/opus'
+    await rt.save()
     await assert.rejects(() => rt.updateBot(agent.id, { shell: false }), (error) => {
       assert.match(error.message, /runs on acp-claude, whose own tools can run commands, so its shell cannot be turned off/)
       assert.match(error.message, /Pick a model that uses DeepSeek Harness's tools first/)
@@ -427,6 +436,14 @@ test('a shell-off Bot cannot be paired with a command-capable agent, either way 
     const saved = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
     assert.equal(saved.bots[agent.id].shell, true)
     assert.equal(saved.bots[agent.id].model, 'acp-claude/opus')
+    // Clearing the model does not dodge the boundary: the Bot keeps running on what it
+    // applied, so that is the model the shell-off decision is tested against.
+    for (const model of [null, '']) {
+      await assert.rejects(() => rt.updateBot(agent.id, { model, shell: false }),
+        /runs on acp-claude, whose own tools can run commands, so its shell cannot be turned off/)
+    }
+    assert.equal(agent.shell, true)
+    assert.equal(agent.model, 'acp-claude/opus')
     // A native model with the shell off, and an agent with the shell on, both still work.
     assert.equal(native.shell, false)
     assert.equal(agent.shell, true)
@@ -479,10 +496,19 @@ test('a stored Bot with no field reads shell on', async (t) => {
   const stored = rt.botOf('old')
   assert.equal(stored.shell, undefined)
   await allowed(guard(), 'bash', { id: 'old' }, { command: 'id' })
-  // Loading and saving a team written before the capability does not add the field.
+  // Loading and saving a team written before the capability does not add the field itself.
   await rt.save()
+  const untouched = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
+  assert.equal(untouched.bots.old.shell, undefined)
+  // Absent reads as a shell: the capability can be taken away, then stated back, through the
+  // same boundary a new Bot uses.
+  await rt.updateBot('old', { shell: false })
+  await refused(guard(), 'bash', { id: 'old' }, { command: 'id' })
+  await rt.updateBot('old', { shell: true })
+  assert.equal(rt.botOf('old').shell, true)
+  await allowed(guard(), 'bash', { id: 'old' }, { command: 'id' })
   const saved = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
-  assert.equal(saved.bots.old.shell, undefined)
+  assert.equal(saved.bots.old.shell, true)
 })
 
 test('a new non-private Bot states shell on and is otherwise unchanged', async (t) => {

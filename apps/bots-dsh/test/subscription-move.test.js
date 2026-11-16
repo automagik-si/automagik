@@ -287,6 +287,23 @@ test('a shell-off Bot stays on its retired plan route, warns once per Bot per ro
   assert.equal(second.saved().bots.s2.model, 'anthropic/claude-opus-5-5')
 })
 
+test('a shell-off Bot keeps the previous model a pending switch would go back to', async (t) => {
+  const team = seed([bot('s1', 'deepseek/deepseek-v4-flash', {
+    shell: false,
+    previousModel: 'openai-codex/gpt-6.1-sol',
+  })])
+  const host = await start(team)
+  t.after(host.stop)
+  await until(() => host.saved().subscriptionCliMoved?.['openai-codex'] === true, { label: 'the move pass ran' })
+  const state = host.saved()
+  // The current model is not on a plan route, but the model a pending switch would go back
+  // to is: it must not be moved onto the CLI either, or the switch would land on a shell.
+  assert.equal(state.bots.s1.model, 'deepseek/deepseek-v4-flash')
+  assert.equal(state.bots.s1.previousModel, 'openai-codex/gpt-6.1-sol')
+  assert.equal(state.bots.s1.subscriptionMoved, undefined)
+  assert.equal(state.bots.s1.shell, false)
+})
+
 test('a Claude Bot on an Anthropic API key never moves', async (t) => {
   const team = seed([bot('a1', 'anthropic/claude-opus-5-5'), bot('c1', 'openai-codex/gpt-6.1-sol')])
   const host = await start(team, { pi: { anthropic: { apiKeyEnv: 'ANTHROPIC_API_KEY' } } })

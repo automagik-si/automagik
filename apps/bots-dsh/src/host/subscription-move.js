@@ -457,14 +457,17 @@ export function install(rt) {
       for (const bot of bots) {
         // A Bot without a shell cannot move onto a coding CLI that brings its own shell. It
         // stays where it is, its settings say why, and the person is warned once per hold.
-        if (bot.shell === false && onRoute(spec, bot)) {
-          heldOnRoute = true
-          const held = bot.subscriptionShellHeld
-          if (held?.from !== spec.from || held?.to !== spec.to || held?.cli !== spec.cli) {
-            bot.subscriptionShellHeld = { from: spec.from, to: spec.to, cli: spec.cli }
-            changed = true
-            rt.warn?.('ds-bot: %s stays on %s: %s is a coding CLI that brings its own shell, '
-              + 'so turn the shell on or pick a native model.', bot.name, spec.from, spec.cli)
+        // Neither its model nor the model a pending switch would go back to moves.
+        if (bot.shell === false) {
+          if (onRoute(spec, bot)) {
+            heldOnRoute = true
+            const held = bot.subscriptionShellHeld
+            if (held?.from !== spec.from || held?.to !== spec.to || held?.cli !== spec.cli) {
+              bot.subscriptionShellHeld = { from: spec.from, to: spec.to, cli: spec.cli }
+              changed = true
+              rt.warn?.('ds-bot: %s stays on %s: %s is a coding CLI that brings its own shell, '
+                + 'so turn the shell on or pick a native model.', bot.name, spec.from, spec.cli)
+            }
           }
           continue
         }

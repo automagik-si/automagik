@@ -605,7 +605,11 @@ export function install(rt) {
     // The shell and the model are one boundary: a Bot without a shell cannot run on an
     // agent whose own tools run commands, and such a Bot's shell cannot be turned off.
     const nextShell = shell === undefined ? bot.shell : shell
-    const nextModel = modelRef === undefined ? bot.model ?? bot.appliedModel : modelRef
+    // A cleared model (`null` or '') leaves the Bot running on the model it last applied
+    // until a new one replaces it, so that is the one the boundary must test.
+    const nextModel = modelRef === undefined ? bot.model ?? bot.appliedModel
+      : modelRef === null ? bot.appliedModel
+      : modelRef
     if (nextShell === false && commandCapableAgent(nextModel)) {
       const provider = String(nextModel).split('/')[0]
       throw refusal(commandCapableAgent(bot.model ?? bot.appliedModel)
