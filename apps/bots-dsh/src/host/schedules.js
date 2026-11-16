@@ -122,9 +122,13 @@ export function install(rt) {
   const headerOf = async (sessionId) => {
     const live = ctx.sessions?.get?.(sessionId)?.header
     if (live !== undefined) return live
-    if (typeof ctx.sessionPersistence?.stat !== 'function') return undefined
+    // The optional store needs an explicit lookup; test contexts may only expose a property.
+    let persistence
+    try { persistence = ctx.get?.('sessionPersistence') } catch {}
     try {
-      return (await ctx.sessionPersistence.stat(sessionId))?.header
+      if (persistence === undefined) persistence = ctx.sessionPersistence
+      if (typeof persistence?.stat !== 'function') return undefined
+      return (await persistence.stat(sessionId))?.header
     } catch {
       return undefined
     }

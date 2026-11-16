@@ -60,8 +60,14 @@ const actions = {
 
 let root = null
 let offTool = null
+// The shell's own seat source, as index.js serves it: the bar's seats list.
+window.seatList = () => window.fetch('api/omni-ui', {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ endpoint: 'seat-chat-list', payload: null }),
+}).then(response => response.json()).then(result => result.value)
 // `onboarding: false`: a Bot team without the shell's onboarding opener.
-window.mount = ({ wide = true, width = 300, tool = true, throwing = false, onboarding = true } = {}) => {
+// `seatList: true`: the shell's seat source is present; false leaves it out (a page with no seats).
+window.mount = ({ wide = true, width = 300, tool = true, throwing = false, onboarding = true, seatList = false } = {}) => {
   root?.unmount()
   offTool?.()
   offTool = null
@@ -73,9 +79,10 @@ window.mount = ({ wide = true, width = 300, tool = true, throwing = false, onboa
   const host = document.getElementById('root')
   host.style.width = wide ? `${width}px` : '56px'
   root = createRoot(host)
-  const { openHarnessOnboarding, ...without } = actions
+  const available = seatList ? { ...actions, seatList: () => window.seatList() } : actions
+  const { openHarnessOnboarding, ...without } = available
   root.render(h(TeamSidebar, {
-    wide, actions: onboarding ? actions : without,
+    wide, actions: onboarding ? available : without,
     useRoster: hook(roster), useUi: constant({ unread: {} }), useRegistry: constant({}), useSessions: constant(NO_SESSIONS), useUpdate: hook(update),
     useSessionStatus: constant(NO_STATUS), useSessionRetainInfo: (_id, pick) => pick(undefined), useActivity: constant({}), useWork: constant(NO_WORK),
   }))
@@ -84,7 +91,7 @@ window.mount = ({ wide = true, width = 300, tool = true, throwing = false, onboa
 // The top row fits when nothing reaches past its edges and no button was squeezed below its
 // size (a flex row shrinks its items before it overflows).
 window.rowCheck = () => {
-  const row = document.querySelector('.bt-side-top')
+  const row = document.querySelector('.lb-head')
   const edge = row.getBoundingClientRect()
   const out = []
   for (const node of row.children) {

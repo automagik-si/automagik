@@ -1,0 +1,8 @@
+{
+  "name": "herdr-pocket-link-chat",
+  "private": true,
+  "type": "module",
+  "description": "The live chat projection (RFC 0015): plain ES modules, no dependencies, no build.",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=20.3.0" }
+}
