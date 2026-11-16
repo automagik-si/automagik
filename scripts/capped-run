@@ -12,9 +12,11 @@
 #
 # How a run goes:
 #   - On a Linux host with cgroup v2, a user manager and systemd-run, the command runs in
-#     `systemd-run --user --scope --collect -p MemoryMax=... -p MemoryHigh=... -p
-#     MemorySwapMax=0`, with `nice -n 10` and `ionice -c 3`. systemd-run execs the command
-#     itself, so the wrapper sees the command's exit status and the scope's memory kill (137).
+#     `systemd-run --user --scope --collect -p MemoryMax=... -p MemorySwapMax=0`, with
+#     `nice -n 10` and `ionice -c 3`. There is no MemoryHigh: the only limit is the kill at
+#     MemoryMax (a MemoryHigh would quietly throttle a run that is allowed to reach the cap).
+#     systemd-run execs the command itself, so the wrapper sees the command's exit status and
+#     the scope's memory kill (137).
 #   - Anywhere else (macOS, CI runners, a distroless image, a failing systemd-run) it runs the
 #     command UNCAPPED after one `UNCAPPED: <reason>` line on stderr, and keeps its exit status.
 #     A missing cap never fails a gate, and a capped run is never reported as a pass.
@@ -46,9 +48,12 @@
 # Never start herdr-core, `hc server` or any serve in a run without BOTH HC_SESSION=<a unique
 # session> and XDG_RUNTIME_DIR=<a scratch folder> set on that command: a second core under the
 # same session name retires the live holders.
+#
+# There is no MemoryHigh on purpose: the only limit is the kill at MemoryMax. A run that needs a
+# softer boundary sets MemoryHigh above the measured peak WITH swap, never with swap 0.
 
-# The default cap: 4G, memory.high 75% of it, swap 0. CAPPED_RUN_TEST_MEM only exists so a test
-# can ask for a tiny scope instead of allocating gigabytes.
+# The default cap: 4G, swap 0, no MemoryHigh. CAPPED_RUN_TEST_MEM only exists so a test can ask
+# for a tiny scope instead of allocating gigabytes.
 default_mem=${CAPPED_RUN_TEST_MEM:-4G}
 max_mib=8192
 lock_file_default=/tmp/automagik-full-gate.lock
@@ -155,8 +160,6 @@ if [ -n "$mem_arg" ]; then
     mib=$default_mib
   fi
 fi
-high_mib=$(( (mib * 3 + 3) / 4 ))
-
 unit_name=
 if [ -n "$name" ]; then
   case $name in
@@ -244,11 +247,11 @@ expand_opt=
 probe_run() {
   if command -v timeout >/dev/null 2>&1; then
     timeout 15 systemd-run --user --scope --collect --quiet "$@" \
-      -p MemoryMax=64M -p MemoryHigh=48M -p MemorySwapMax=0 true \
+      -p MemoryMax=64M -p MemorySwapMax=0 true \
       </dev/null >/dev/null 2>&1
   else
     systemd-run --user --scope --collect --quiet "$@" \
-      -p MemoryMax=64M -p MemoryHigh=48M -p MemorySwapMax=0 true \
+      -p MemoryMax=64M -p MemorySwapMax=0 true \
       </dev/null >/dev/null 2>&1
   fi
 }
@@ -344,7 +347,7 @@ exec "$@"
 run_systemd() {
   # Extra options come first, then the scope properties, then the payload after --.
   set -- --user --scope --collect --quiet \
-    -p "MemoryMax=${mib}M" -p "MemoryHigh=${high_mib}M" -p MemorySwapMax=0 -- "$@"
+    -p "MemoryMax=${mib}M" -p MemorySwapMax=0 -- "$@"
   if [ -n "$unit_name" ]; then
     set -- "--unit=$unit_name" "$@"
   fi

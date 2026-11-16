@@ -91,8 +91,6 @@ function userScopeWorks(): boolean {
       '-p',
       'MemoryMax=64M',
       '-p',
-      'MemoryHigh=48M',
-      '-p',
       'MemorySwapMax=0',
       'true',
     ],
@@ -206,6 +204,15 @@ describe('capped-run', () => {
     } finally {
       rmSync(parentTmpdir, { recursive: true, force: true });
     }
+  });
+
+  // Mutant 14: the wrapper must not set MemoryHigh (a high at 75% would throttle the cap-kill
+  // test instead of letting it reach MemoryMax). An unset MemoryHigh leaves memory.high at max.
+  test.skipIf(!scope)('the scope has no MemoryHigh: memory.high stays max', () => {
+    const readHigh = 'cg=$(sed -n "s/^0:://p" /proc/self/cgroup); cat "/sys/fs/cgroup$cg/memory.high"';
+    const outcome = cappedRun(['--', 'sh', '-c', readHigh]);
+    expect(outcome.status).toBe(0);
+    expect(outcome.stdout.trim()).toBe('max');
   });
 
   // One rule with mutant 4: --mem only raises. 256M is below the 4G default and must leave the
