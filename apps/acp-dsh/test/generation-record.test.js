@@ -101,15 +101,42 @@ test('every write advances the sequence, across vendors, instances and resets', 
 
 test('a switch of one vendor preserves the other vendor’s exact field', t => {
   const { cliHome, generations } = place(t)
-  generations.select('claude', randomUUID())
-  generations.select('codex', randomUUID())
+  const claude = randomUUID()
+  const codex = randomUUID()
+  generations.select('claude', claude)
+  generations.select('codex', codex)
+  const claudeField = {
+    generation: claude, configDir: join(cliHome, 'homes', 'claude', claude, '.claude'),
+  }
+  const codexField = {
+    generation: codex, home: join(cliHome, 'homes', 'codex', codex, '.codex'),
+  }
   const before = recordOf(cliHome)
-  generations.select('claude', randomUUID())
-  const after = recordOf(cliHome)
-  assert.deepEqual(after.codex, before.codex)
-  assert.equal(after.claude.generation, pointerOf(cliHome, 'claude'))
-  assert.notDeepEqual(after.claude, before.claude)
-  assert.equal(after.sequence, before.sequence + 1)
+  assert.deepEqual(before.claude, claudeField)
+  assert.deepEqual(before.codex, codexField)
+  assert.equal(before.codex.generation, pointerOf(cliHome, 'codex'))
+  // A Claude switch keeps Codex's present field exactly as it was.
+  const nextClaude = randomUUID()
+  generations.select('claude', nextClaude)
+  const afterClaude = recordOf(cliHome)
+  assert.deepEqual(afterClaude.codex, codexField)
+  assert.equal(afterClaude.codex.generation, pointerOf(cliHome, 'codex'))
+  assert.equal(afterClaude.codex.home, codexField.home)
+  assert.equal(afterClaude.claude.generation, nextClaude)
+  assert.equal(afterClaude.sequence, before.sequence + 1)
+  // The reverse: a Codex switch keeps Claude's present field exactly as it was.
+  const nextCodex = randomUUID()
+  generations.select('codex', nextCodex)
+  const afterCodex = recordOf(cliHome)
+  const nextClaudeField = {
+    generation: nextClaude, configDir: join(cliHome, 'homes', 'claude', nextClaude, '.claude'),
+  }
+  assert.deepEqual(afterClaude.claude, nextClaudeField)
+  assert.deepEqual(afterCodex.claude, nextClaudeField)
+  assert.equal(afterCodex.claude.generation, pointerOf(cliHome, 'claude'))
+  assert.equal(afterCodex.claude.configDir, nextClaudeField.configDir)
+  assert.equal(afterCodex.codex.generation, nextCodex)
+  assert.equal(afterCodex.sequence, before.sequence + 2)
 })
 
 test('a reset writes its new generation and leaves the other vendor field unchanged', t => {
