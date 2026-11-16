@@ -182,6 +182,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: live feed route',
     'route GET /api/omni-ui/feed',
     'effect ds-bot: live feed',
+    'effect omni-ui: code pane stream',
+    'route GET /api/omni-ui/code/stream',
     'effect ds-bot: agent access',
     'effect ds-bot: pet route',
     'route GET /api/omni-ui/pet',
@@ -199,6 +201,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     // Auto's judge, after every module, so it runs first (auto-judge.js installAhead).
     'on approval/request (prepend)',
     'provide omniTeam',
+    'effect omni-ui: stop the team modules',
   ])
 })
 

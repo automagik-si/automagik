@@ -1,6 +1,6 @@
 import { createElement as h, Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { headerButtons, useEntries } from './extend.js'
-import { FaceSwitch } from './left-bar-faces.js'
+import { BotFaceSwitch } from './code-side.js'
 import { createPortal } from 'react-dom'
 import { currentPart, latestMemoryChange } from './text.js'
 import { ArrowUpIcon, CloseIcon, ArrowDownIcon, DotsIcon, GoalIcon, InfoIcon, MemoryIcon } from './icons.js'
@@ -190,9 +190,10 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
   return h('div', { className: native ? 'bt-native-head' : 'bt-head' },
     showGoal ? h(GoalIsland, { room, goal, view, open: goalOpen, composing: goalCompose, roomWork, roster, actions, pill }) : pill,
     h('span', { className: 'bt-sr', role: 'status' }, memoryNotice ? t('Memory updated') : ''),
-    // The open Bot's two faces (left-bar-faces.js). No Bot has a terminal of its own to show
-    // until the Code side lands, so Terminal says so and opens nothing; no shell is started.
-    bot && !away && !native ? h(FaceSwitch, { face: 'chat', unavailable: { terminal: t('No terminal for this Bot yet') } }) : null,
+    // The open Bot's two faces (left-bar-faces.js): Chat, and the herdr-core terminal the Code
+    // side watches (code-side.js). A Bot without a pane keeps Terminal on screen, says why it
+    // cannot open yet, and opens nothing; no shell is started.
+    bot && !away && !native ? h(BotFaceSwitch, { bot }) : null,
     narrow ? more : h(Fragment, null, headButtons, liveButtons, details),
     native && bot ? h('button', { type: 'button', className: 'bt-head-details', 'aria-label': t('Bot settings'), title: t('Bot settings'), onClick: () => actions.openSettings('bots', bot.id) }, h(InfoIcon)) : null,
     h(NewMessagePills, { key: sessionId, sessionId, useSessions, useUi, useTurnClock }),
