@@ -94,6 +94,7 @@ export function install(rt) {
     output,
     async execute(_args, exec) {
       await rt.load()
+      await rt.refreshInstallation?.({ force: true })
       const self = rt.selfOf(exec.agent?.id)
       const lines = Object.values(state.bots).map(bot => {
         // A private Bot is only named to the others: not what it does, where, or what now.
@@ -210,6 +211,10 @@ export function install(rt) {
       if (target === undefined) return `No Bot named ${args.to}. Team: ${Object.values(state.bots).map(bot => bot.name).join(', ')}`
       if (target.id === sender.id) return 'You cannot message yourself.'
       if (String(args.message ?? '').trim() === '') return 'Write a message to send.'
+      // Work never goes to a Bot whose plugin is not installed: it cannot run it (installed.js).
+      await rt.refreshInstallation?.()
+      const installation = rt.installationOf?.(target)
+      if (installation?.installed === false) return `Not sent: ${target.name} is not installed in this DSH (${installation.reason}). Ask the user to install it before giving it work.`
       const toUser = rt.isPrivate(target.id) || args.reply_to === 'user'
       const name = typeof args.request_id === 'string' ? args.request_id.trim() : ''
       if (name.length > NAME_MAX) return `The request_id is ${name.length} characters long; a request name is at most ${NAME_MAX}.`
