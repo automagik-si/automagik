@@ -79,11 +79,23 @@ async function main() {
   if (existsSync(profilePnpm)) pnpmCalls.push([profilePnpm, ['--version']])
   const pnpmVersions = pnpmCalls.map(([file, args]) => command(file, args, { env: admissionEnv }))
   check(new Set(pnpmVersions).size === 1, `pnpm versions differ across entries: ${JSON.stringify(pnpmVersions)}`)
-  const admissions = readFileSync('/data/run/pnpm-admission.log', 'utf8').split('\n').filter((line) => line.includes(`owner=${admissionOwner}`))
-  check(admissions.length === pnpmCalls.length, `admission log has ${admissions.length} entries for ${pnpmCalls.length} calls`)
+  const admissions = readFileSync('/data/run/pnpm-admission.log', 'utf8').split('\n').filter((line) => line.startsWith('admit ') && line.includes(`owner=${admissionOwner}`))
+  check(admissions.length === pnpmCalls.length, `admission log has ${admissions.length} admits for ${pnpmCalls.length} calls`)
   say(`pnpm admission: ${pnpmCalls.length} entry paths, one owner and version ${pnpmVersions[0]}`)
   const admissionLog = () => readFileSync('/data/run/pnpm-admission.log', 'utf8')
+  const countEvents = (event, owner) => admissionLog().split('\n').filter((line) => line.startsWith(event) && line.includes(`owner=${owner}`)).length
   const rowDir = mkdtempSync(join(tmpdir(), 'automagik-pnpm-admission-'))
+  for (const code of [23, 137]) {
+    const real = join(rowDir, `exit-${code}.mjs`)
+    writeFileSync(real, `process.exit(${code})\n`)
+    const failed = spawnSync('/bin/sh', ['/usr/local/bin/pnpm-admission', real], {
+      encoding: 'utf8', timeout: 15_000,
+      env: { ...process.env, AUTOMAGIK_PNPM_OWNER: `smoke-exit-${code}` },
+    })
+    check(failed.status === code, `admission wrapper returned ${failed.status} for exit ${code}`)
+    check(new RegExp(`failed .*owner=smoke-exit-${code} .*status=${code}`).test(admissionLog()), `admission failure for ${code} was not recorded`)
+  }
+  say('pnpm admission exit status: 23 and 137 propagate and are recorded')
   try {
     const outerReal = join(rowDir, 'outer.mjs')
     writeFileSync(outerReal, "import { execFileSync } from 'node:child_process'\nexecFileSync('/usr/local/bin/pnpm', ['--version'], { stdio: 'inherit', env: process.env })\n")
@@ -127,10 +139,14 @@ async function main() {
 
     const wrapper = startHolder('smoke-wrapper-held', 3000)
     process.kill(Number(wrapper.fields.pid), 'SIGKILL')
+    const beforeWait = countEvents('wait ', admissionOwner)
+    const beforeAdmit = countEvents('admit ', admissionOwner)
     started = Date.now()
     command('/usr/local/bin/pnpm', ['--version'], { env: admissionEnv, timeout: 15_000 })
     const waited = Date.now() - started
     check(waited >= 2000, `wrapper-only kill let the next waiter start early (${waited} ms)`)
+    check(countEvents('wait ', admissionOwner) === beforeWait + 1, 'the contended call did not log exactly one wait line')
+    check(countEvents('admit ', admissionOwner) === beforeAdmit + 1, 'the contended call did not log exactly one admit line')
     check(/wait .*holder_owner=smoke-wrapper-held/.test(admissionLog()), 'the wait was not logged with the lock owner')
     say(`pnpm admission wrapper-only kill: next waiter held for ${waited} ms until the install exited`)
 
