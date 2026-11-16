@@ -372,8 +372,18 @@ describe('the brand copy tool (scripts/brand-sync.mjs)', () => {
     const scratch = join(dirname(target), 'scratch');
     mkdirSync(scratch);
     const tool = (...args: string[]) => spawnSync('node', [join(ROOT, TOOL), ...args], { cwd: target, encoding: 'utf8', env: { ...process.env, GITHUB_ACTIONS: '', TMPDIR: scratch } });
-    const gitState = () => [git(target, 'for-each-ref'), git(target, 'config', '--local', '--list'), git(target, 'count-objects', '-v'),
-      String(existsSync(join(target, '.git/FETCH_HEAD'))), String(existsSync(join(target, '.git/shallow'))), readdirSync(join(target, '.git')).sort().join(' ')].join('\n--\n');
+    // Git's size fields count disk blocks, which can change after filesystem writeback.
+    // Untouched objects keep their paths and bytes, regardless of disk allocation.
+    const objects = join(target, '.git/objects');
+    const gitState = () => [git(target, 'for-each-ref'), git(target, 'config', '--local', '--list'),
+      git(target, 'count-objects', '-v').split('\n').filter(line => !/^size(-pack|-garbage)?: /.test(line)).join('\n'),
+      readdirSync(objects, { recursive: true, withFileTypes: true })
+        .filter(entry => !entry.isDirectory())
+        .map(entry => join(entry.parentPath, entry.name))
+        .sort()
+        .map(path => `${path.slice(objects.length + 1)} ${sha256(readFileSync(path))}`).join('\n'),
+      String(existsSync(join(target, '.git/FETCH_HEAD'))), String(existsSync(join(target, '.git/shallow'))),
+      readdirSync(join(target, '.git')).sort().join(' ')].join('\n--\n');
     const before = gitState();
 
     // Behind: the look runs both fetches (the two trees, then dev's commits).
