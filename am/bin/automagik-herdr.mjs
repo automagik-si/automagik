@@ -77,6 +77,7 @@ import { claudeMember, confirmedClaude, idDigest, isClaudeKey, isCodexKey, isFin
 import { loginEdit, setLoginOp, writerCapability, writerQualified, WRITER_MAX_BYTES } from "../accountsWrite.js";
 import { exceptionWarning, routeManaged } from "../accountsLaunch.js";
 import { paneLogin } from "../loginProbe.js";
+import { loginVar, loginWords, resolveLogin } from "../loginRecord.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { isInstalledGuardFolder } from "../hcGuard.mjs";
@@ -301,6 +302,39 @@ function claudeLogin(argv, warnings = []) {
   if (chosen.warning) warnings.push(chosen.warning);
   return chosen.words;
 }
+/**
+ * The Bot login record (#1509): the reader's injected filesystem and this installation's
+ * one-number sequence memory. Reads only the record, the pointer, the folder's stat, the marker
+ * and this file; never a credential file.
+ */
+const loginMemoryPath = () => join(appHome(), "automagik-herdr", "login-sequence.json");
+const loginReaderIo = () => ({
+  read: (path) => readFileSync(path, "utf8"),
+  lstat: (path) => lstatSync(path),
+  writeAtomic: (path, text) => {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const fresh = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(fresh, text, { mode: 0o600 });
+    chmodSync(fresh, 0o600);
+    renameSync(fresh, path);
+  },
+});
+
+/** The refusal a launch shows: one effect-only sentence and the stable code, never a path. */
+const loginRefusal = (record) => new CliError(`${record.reason} (${record.code})`, 2);
+
+/**
+ * The login a launch of `vendor` must use, from the pointer record, or null when the pointer is
+ * absent and the pilot marker is not set (today's behaviour).
+ */
+function botLogin(vendor, { log = () => {}, readOnly = false } = {}) {
+  if (loginVar(vendor) === null) return null;
+  const resolved = resolveLogin({ vendor, env: process.env, memoryPath: loginMemoryPath(), io: loginReaderIo(), log, readOnly });
+  if (resolved.state === "absent") return null;
+  if (resolved.code) throw loginRefusal(resolved);
+  return { ...resolved, words: loginWords(vendor, resolved.dir) };
+}
+
 const modelIo = () => ({ home: home(), appHome: appHome(), read: (p) => { try { return readText(p); } catch { return null; } } });
 /** The agents Herdr can start: its shipped table with the app home's programs.json applied. */
 const agentTable = () => withOverrides(readText(`${appHome()}/programs.json`));
@@ -1913,6 +1947,10 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 --machine M --project <folder there>, the attach, detach and end
                                 events this computer recorded for that machine's project
   brief <bot>                   print the bot's briefing with its team's live state, as it is now
+  login --check <claude|codex>  the Bot login generation this computer resolves, and a folder
+                                name; read-only, never a path or an account
+  login-env <claude|codex>      the one vendor config assignment a raw launch wrapper needs,
+                                or nothing; stdout only
   tidy                          what drifted in the window, labels and project list, as a plan;
                                 changes nothing (--json: the plan's actions)
   forget <project>              take a project's folder off this CLI's project list; its folder,
@@ -5565,9 +5603,11 @@ async function launchSeat(project, bot, over = {}) {
     const seen = await windowSpaces();
     place = spaceOnly(await windowPlace(key, await placementOf(key, seen), seen));
   }
-  // The Claude login this launch uses (#453): read from claude-logins.json now, Claude only.
-  const login = over.login?.words ?? claudeLogin(argv, briefed.warnings);
-  if (over.login) briefed.warnings.push(...over.login.warnings);
+  // The pointer record (#1509) wins when the entrypoint exported it; otherwise the Claude
+  // login record (#453) chooses, exactly as before.
+  const readerLogin = botLogin(agentKey, { log: (line) => briefed.warnings.push(line) });
+  const login = readerLogin ? readerLogin.words : over.login?.words ?? claudeLogin(argv, briefed.warnings);
+  if (!readerLogin && over.login) briefed.warnings.push(...over.login.warnings);
   const proxyOn = agentKey === "dsh-tui" && proxyEnabled(
     approvedProxyState({ project: key, bot }), process.platform,
     (warning) => briefed.warnings.push(warning));
@@ -10996,6 +11036,19 @@ async function cmdWorker(opts, rest) {
   }
   // The Bot login generation this launch starts on (#1532), read at the spawn and frozen in its row.
   let ledgerLogin = { generation: null, sequence: null };
+  // The pointer record (#1509) rules when the entrypoint set it; otherwise the launch is exactly
+  // as it was.
+  const readerLogin = botLogin(runs, { log: (line) => warnings.push(line) });
+  const readerWords = readerLogin ? readerLogin.words : null;
+  // A Codex template needs commandArgv when the record's home must ride the launch: hc's
+  // template form carries no environment. The Claude path above already built its argv.
+  if (plan.template && runs === "codex" && readerWords && !templateArgv) {
+    templateArgv = templateCommand ? commandArgv({ shell: templateCommand }, [task]) : null;
+    if (!templateArgv) {
+      const why = templateCommand ? "its command ends in a separator or a comment, so it can't take the task" : "hc gave no command for it";
+      throw new CliError(`Template ${plan.template} runs Codex, but ${why}; it can't be started on the Bot login. Not started.`);
+    }
+  }
   // Where it works: --worktree's, the branch's worktree, or the folder a new one gets (made
   // below, once the check passes). Nothing is made yet.
   let place = opts.worktree !== undefined ? await givenWorktree(opts.worktree, project.key, bot)
@@ -11163,8 +11216,9 @@ async function cmdWorker(opts, rest) {
     const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
       agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task: prompt, template: plan.template,
       templateArgv,
-      // #1208: a chosen home's words replace the Claude Accounts login (and unset the keys that would outrank it).
-      login: chosen ? chosenHomeWords(chosen.agent, chosen.home, chosen.launch) : claudeLogin(templateArgv ?? plan.argv ?? [], warnings),
+      // #1208: a chosen home's words replace the Claude Accounts login (and unset the keys that would outrank it);
+      // the pointer record (#1509) rules over both when the entrypoint exported it.
+      login: readerWords ?? (chosen ? chosenHomeWords(chosen.agent, chosen.home, chosen.launch) : claudeLogin(templateArgv ?? plan.argv ?? [], warnings)),
       outliveParent: Boolean(chosen),
       path: runPath?.path ?? process.env.PATH, taskId, project: project.key, lead,
       agySettingsPath: agySettings && !templateArgv ? agySettings.path : null,
@@ -13378,10 +13432,47 @@ export async function accountsMain(argv) {
   }
 }
 
+/** The two vendor logins the reader serves. */
+const LOGIN_VENDORS = new Set(["claude", "codex"]);
+function loginVendor(rest, what) {
+  const [vendor, extra] = rest;
+  if (extra || !LOGIN_VENDORS.has(vendor)) throw new CliError(`${what} takes one vendor: claude or codex.`, 2);
+  return vendor;
+}
+
+/** What `am login --check <vendor>` may show: the generation id and a folder NAME, never a path. */
+function loginReport(vendor) {
+  const resolved = resolveLogin({ vendor, env: process.env, memoryPath: loginMemoryPath(), io: loginReaderIo(), readOnly: true });
+  if (resolved.state === "absent") return { vendor, state: "absent" };
+  if (resolved.code) throw loginRefusal(resolved);
+  return { vendor, generation: resolved.generation, folder: String(resolved.dir).replace(/\/+$/, "").split("/").pop(), sequence: resolved.sequence };
+}
+
+/** `am login --check <vendor>`: read-only; prints only the generation id and folder name. */
+function cmdLogin(opts, rest) {
+  if (!opts.check) throw new CliError("login needs --check: am login --check <claude|codex>.", 2);
+  const vendor = loginVendor(rest, "login --check");
+  const report = loginReport(vendor);
+  if (opts.json) return report;
+  return report.state === "absent" ? "No Bot login pointer is set; launches keep their current login."
+    : `generation ${report.generation}, folder ${report.folder}, sequence ${report.sequence}`;
+}
+
+/** `am login-env <vendor>`: the one assignment a raw launch wrapper needs, stdout only. */
+function cmdLoginEnv(opts, rest) {
+  const vendor = loginVendor(rest, "login-env");
+  const resolved = resolveLogin({ vendor, env: process.env, memoryPath: loginMemoryPath(), io: loginReaderIo(), readOnly: false,
+    log: (line) => process.stderr.write(`${line}\n`) });
+  if (resolved.state === "absent") return PRINTED;
+  if (resolved.code) throw loginRefusal(resolved);
+  process.stdout.write(`${loginVar(vendor)}=${resolved.dir}\n`);
+  return PRINTED;
+}
+
 const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, main: cmdMain, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
   tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
-  proxy: cmdProxy, "launch-path": cmdLaunchPath, accounts: cmdAccounts, revive: cmdRevive, "rate-limit": cmdRateLimit, "delivery-status": cmdDeliveryStatus, holders: cmdHolders };
+  proxy: cmdProxy, "launch-path": cmdLaunchPath, accounts: cmdAccounts, revive: cmdRevive, "rate-limit": cmdRateLimit, "delivery-status": cmdDeliveryStatus, holders: cmdHolders, login: cmdLogin, "login-env": cmdLoginEnv };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 
 /** Runs one command line; resolves with the exit code. Output goes to stdout, problems to stderr. */

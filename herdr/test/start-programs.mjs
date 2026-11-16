@@ -8,6 +8,7 @@ import { join, dirname } from "node:path";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { attachPath } from "../mods/am-sidebar/attach.js";
+import { POINTER_VAR } from "../mods/am-sidebar/loginRecord.js";
 
 const fixture = JSON.parse(readFileSync(new URL("./fixtures/start-programs.json", import.meta.url), "utf8"));
 const fake = new URL("./fake-hc.mjs", import.meta.url).pathname;
@@ -38,8 +39,8 @@ function scene(t, cli, agent, paired, remote) {
     AUTOMAGIK_HERDR_RESTART_STABLE_MS: "1", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "1000" };
   const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
   Object.assign(env, { ...core.env });
-  const run = (args) => spawnSync(process.execPath, [cli, ...args, "--project", project,
-    ...(remote ? ["--machine", "vm"] : []), "--json"], { cwd: project, env, encoding: "utf8" });
+  const run = (args, extraEnv = {}) => spawnSync(process.execPath, [cli, ...args, "--project", project,
+    ...(remote ? ["--machine", "vm"] : []), "--json"], { cwd: project, env: { ...env, ...extraEnv }, encoding: "utf8" });
   const live = () => {
     state.terminals = [{ address: remote ? "vm/t1" : "t1", state: "live", created_ms: 1, cwd: project,
       labels: { bot: id, "agent.session": "test-session" },
@@ -114,6 +115,26 @@ export function startProgramsTests(cli) {
       assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
     });
   }
+  test("restart resolves the one pointer export (#1509)", (t) => {
+    const s = scene(t, cli, "codex", false, false);
+    s.live();
+    const current = join(s.root, "cli-homes", "current");
+    const claudeDir = join(s.root, "generation-claude"), codexDir = join(s.root, "generation-codex");
+    for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
+    chmodSync(claudeDir, 0o700); chmodSync(codexDir, 0o700);
+    const claudeGen = "11111111-1111-4111-8111-111111111111";
+    const codexGen = "22222222-2222-4222-8222-222222222222";
+    writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 5,
+      claude: { generation: claudeGen, configDir: claudeDir }, codex: { generation: codexGen, home: codexDir },
+      updatedAt: "2026-11-16T20:00:00.000Z" }));
+    writeFileSync(join(current, "claude"), claudeGen);
+    writeFileSync(join(current, "codex"), codexGen);
+    const r = s.run(["restart", id], { [POINTER_VAR]: join(current, "claude") });
+    assert.equal(r.status, 0, r.stderr);
+    const launch = s.calls().filter((call) => call[0] === "run").at(-1);
+    assert.ok(launch.includes(`CODEX_HOME=${codexDir}`), JSON.stringify(launch));
+  });
+
   for (const mode of ["tree", "end", "partial"]) test(`programs fixture: linked paired helper restart ${mode}`, (t) => {
     const tree = mode !== "end";
     const s = scene(t, cli, "hermes", true, true);

@@ -20,6 +20,7 @@ import { ENV, GUARD_DIR, WORKER_OF_LABEL, stableGuardDir, stableHelper, stableRu
   prBranches, prChecksPath, prChecksText, prLikely, prRow, prRowsFor, prTime, prWatch, readPrChecks } from "../mods/am-sidebar/workers.js";
 import { approveProject, recordFileOf } from "../mods/am-sidebar/approved.js";
 import { stableRunnerText } from "../mods/am-sidebar/dshTui.mjs";
+import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 import { startProxy } from "../mods/am-sidebar/hcProxy.mjs";
 import { startFakeCore } from "./fake-hc-core.mjs";
 import { fixturePaneEdit } from "./fixture-pane-edit.mjs";
@@ -277,6 +278,69 @@ test("M4: switch off keeps the complete worker argv byte for byte against C1", (
     .split(GUARD_DIR).join("<guard>")), baseline);
 });
 
+test("one exported pointer resolves BOTH vendors to their recorded homes (#1509)", (t) => {
+  const s = scene(t);
+  const current = join(s.root, "cli-homes", "current");
+  const claudeDir = join(s.root, "generation-claude"), codexDir = join(s.root, "generation-codex");
+  for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
+  chmodSync(claudeDir, 0o700); chmodSync(codexDir, 0o700);
+  const claudeGen = "11111111-1111-4111-8111-111111111111";
+  const codexGen = "22222222-2222-4222-8222-222222222222";
+  writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 4,
+    claude: { generation: claudeGen, configDir: claudeDir }, codex: { generation: codexGen, home: codexDir },
+    updatedAt: "2026-11-16T20:00:00.000Z" }));
+  writeFileSync(join(current, "claude"), claudeGen);
+  writeFileSync(join(current, "codex"), codexGen);
+  // The one export names current/claude; the Codex launch must derive current/codex from it.
+  const pointer = { [POINTER_VAR]: join(current, "claude") };
+
+  const claude = s.cli(["worker", "claude pointer task", "--branch", "feat/pointer-claude", "--agent", "claude", "--json"], { env: pointer });
+  assert.equal(claude.code, 0, claude.err);
+  const claudeRun = s.runs().at(-1);
+  assert.ok(claudeRun.includes(`CLAUDE_CONFIG_DIR=${claudeDir}`), JSON.stringify(claudeRun));
+  assert.equal(claudeRun.some((word) => word.startsWith("CODEX_HOME=")), false);
+
+  const codex = s.cli(["worker", "codex pointer task", "--branch", "feat/pointer-codex", "--agent", "codex", "--json"], { env: pointer });
+  assert.equal(codex.code, 0, codex.err);
+  const codexRun = s.runs().at(-1);
+  assert.ok(codexRun.includes(`CODEX_HOME=${codexDir}`), JSON.stringify(codexRun));
+  assert.equal(codexRun.some((word) => word.startsWith("CLAUDE_CONFIG_DIR=")), false);
+});
+
+test("#1509 reader refusals stop the worker before any launch", (t) => {
+  const s = scene(t);
+  const current = join(s.root, "cli-homes", "current");
+  const claudeDir = join(s.root, "generation-claude"), codexDir = join(s.root, "generation-codex");
+  for (const dir of [current, claudeDir, codexDir]) mkdirSync(dir, { recursive: true });
+  chmodSync(claudeDir, 0o700); chmodSync(codexDir, 0o700);
+  const claudeGen = "11111111-1111-4111-8111-111111111111";
+  const codexGen = "22222222-2222-4222-8222-222222222222";
+  const writeRecord = (mode = 0o700) => {
+    chmodSync(codexDir, mode);
+    writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 4,
+      claude: { generation: claudeGen, configDir: claudeDir }, codex: { generation: codexGen, home: codexDir },
+      updatedAt: "2026-11-16T20:00:00.000Z" }));
+    writeFileSync(join(current, "claude"), claudeGen);
+    writeFileSync(join(current, "codex"), codexGen);
+  };
+  writeRecord();
+  const pointer = { [POINTER_VAR]: join(current, "claude") };
+  const baseline = s.runs().length;
+  const args = (extra = []) => ["worker", "reader refusal task", "--branch", "feat/reader-refusal", "--agent", "codex", ...extra, "--json"];
+
+  chmodSync(codexDir, 0o755);
+  const mode = s.cli(args(), { env: pointer });
+  assert.equal(mode.code, 2, mode.err);
+  assert.match(mode.err, /missing or out of date/);
+  assert.match(mode.err, /folder-mode/);
+  assert.equal(mode.err.includes(s.root), false, "the refusal names no path");
+  assert.equal(s.runs().length, baseline, "no launch after a bad mode");
+
+  const required = s.cli(args(), { env: { [REQUIRED_VAR]: "required" } });
+  assert.equal(required.code, 2, required.err);
+  assert.match(required.err, /login-required/);
+  assert.equal(s.runs().length, baseline);
+});
 test("M7: fixture pane edits cannot disable the approved switch at the next worker start",
   { skip: process.platform !== "linux" }, (t) => {
   for (const remove of [false, true]) {
