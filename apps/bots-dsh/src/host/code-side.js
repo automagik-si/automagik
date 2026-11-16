@@ -224,11 +224,18 @@ export function install(rt, { env = process.env, connect = connectCore, readFile
       if (streams.has(tag)) return jsonError(409, 'already-open')
       if (streams.size >= MAX_STREAMS) return jsonError(429, 'busy')
       streams.add(tag)
+      let forgetCloser = () => {}
       try {
         const response = await openPaneStream({
           url: request.url, signal: request.signal, env, warn, connect, readFile,
-          onEnd: () => streams.delete(tag),
-          onStop: (close) => { const stop = () => { live.delete(stop); close() }; live.add(stop) },
+          onEnd: () => { streams.delete(tag); forgetCloser() },
+          onStop: (close) => {
+            const stop = () => { live.delete(stop); close() }
+            live.add(stop)
+            // A stream that ends on its own (its reader went, the terminal ended) must not
+            // leave its closer in the live set.
+            forgetCloser = () => live.delete(stop)
+          },
         })
         // A refusal owns no stream: its slot goes back at once, or refusals would spend the
         // pane budget and every later open would read busy.

@@ -99,6 +99,10 @@ const MODULES = [
 export function apply(ctx, config = {}) {
   const rt = createRuntime(ctx, config)
   ctx.provide('omniTeam', rt)
+  // The plugin's own scope owns the team's end: when this plugin stops (a reload, the app
+  // closing, the host unloading), every module lets go — the Code side's streams send their
+  // CLOSE to herdr-core there.
+  ctx.effect(() => () => rt.dispose(), 'omni-ui: stop the team modules')
 }
 
 // A team kept elsewhere before (config.importHome, e.g. ~/.dsh/bot) is copied in once,
@@ -133,7 +137,10 @@ export function createRuntime(ctx, config = {}) {
     const dispose = module.install(rt)
     if (typeof dispose === 'function') disposers.push(dispose)
   }
+  let disposed = false
   rt.dispose = () => {
+    if (disposed) return
+    disposed = true
     for (const dispose of disposers.reverse()) {
       try { dispose() } catch (error) { rt.warn?.('omni-ui: a module did not stop cleanly: %s', error?.message ?? error) }
     }
