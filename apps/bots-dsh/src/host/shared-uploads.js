@@ -97,7 +97,6 @@ export function install(rt) {
   const { ctx } = rt
   const granted = new Map()
   const historyImages = new Map()
-  const memo = new Map()
   const pending = new Map()
   const owner = id => rt.botOfSession(id)
   const workingFolder = (sessionId, bot) => rt.workDirOf({ botId: bot.id, roomId: rt.groupOwners?.get(sessionId)?.roomId }) ?? rt.teamFolder()
@@ -146,20 +145,14 @@ export function install(rt) {
       file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0))
       const stat = await file.stat()
       if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_BYTES || (ref.bytes !== undefined && stat.size !== ref.bytes)) throw new Error('Unsafe upload copy.')
-      const dir = await realpath(dirname(path))
-      const cached = memo.get(path)
-      if (cached && cached.dir === dir && ['dev', 'ino', 'size', 'ctimeMs'].every(key => cached[key] === stat[key])) return true
-      memo.delete(path)
       const hash = createHash('sha256')
       for await (const chunk of file.createReadStream({ autoClose: false, signal })) hash.update(chunk)
       if (`sha256:${hash.digest('hex')}` !== ref.attachmentId) throw new Error('Upload copy has different bytes.')
       await same(path, stat)
       const after = await file.stat()
       if (after.ctimeMs !== stat.ctimeMs || after.nlink !== 1) throw new Error('Upload copy changed.')
-      memo.set(path, { dev: stat.dev, ino: stat.ino, size: stat.size, ctimeMs: stat.ctimeMs, dir })
       return true
     } catch (error) {
-      memo.delete(path)
       if (error.code === 'ENOENT') return false
       throw error
     } finally { await file?.close() }
@@ -216,7 +209,7 @@ export function install(rt) {
       await file?.close()
       if (temp) await removeOwn(temp, created)
     }
-    // The temporary hard link is gone before nlink is checked or memoized.
+    // The temporary hard link is gone before nlink is checked.
     if (!await existing(path, ref, signal)) throw new Error('Upload copy disappeared.')
     return { path }
   }
