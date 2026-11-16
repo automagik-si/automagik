@@ -146,15 +146,15 @@ export class CoreConnection {
    * @param {{ terminal: string, cols: number, rows: number, history?: number, timeoutMs?: number }} options
    * @returns {Promise<{ channel: number, terminal: object }>} the stream channel and the terminal
    */
-  async attach({ terminal, cols, rows, history = HISTORY_LINES, timeoutMs = CALL_TIMEOUT_MS }) {
+  async attach({ terminal, cols, rows, history = HISTORY_LINES, observe = true, timeoutMs = CALL_TIMEOUT_MS }) {
     const result = await this.call('terminal.attach', {
       terminal,
       cols,
       rows,
       history,
-      // Watch only: the core never lets this viewer type or resize, so attaching here
-      // cannot reflow a terminal someone else is using (RFC 0030 delivery 1's rule).
-      observe: true,
+      // A watcher (`observe: true`, the Code pane's default) is never allowed to type or
+      // resize; the typing piece passes `observe: false` for the one viewer that types.
+      observe: observe !== false,
       resize_notifications: true,
     }, { timeoutMs })
     if (!Number.isSafeInteger(result?.channel)) throw new CoreError('core-refused', 'herdr-core attached no stream')
