@@ -64,7 +64,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
   AUTO_FILE, CATALOG_URL, CHECK_FILE, HELD_FILE, OFF_BY_DEFAULT, OLD_PACK_NAME, PACK_CATALOG_URLS, PACK_KEYS, PACK_KEYS_FILE, PACK_LAYOUT, PACK_NAME, POCKET_LINK, POINTER_SIG_URL,
-  POINTER_URL, RESTORE_FILE, TIMEOUT_MS, V020_LAYOUT_SHA256, autoHold, formatAuto, formatMarker, heldModLine, layoutNeeds, packOfPointer, parseAuto, parseMarker, parseSums,
+  POINTER_URL, RESTORE_FILE, TIMEOUT_MS, V020_LAYOUT_SHA256, autoHold, formatAuto, formatMarker, heldModLine, layoutNeeds, mergeAuto, packOfPointer, parseAuto, parseMarker, parseSums,
   pickUpdate, updatesOff,
 } from "./release.js";
 import { ABSORBED, RENAMES, editTarget, own, renamedFrom } from "./migrate.js";
@@ -171,25 +171,31 @@ export function heldAfterMigration(modsDir, installed, log = () => {}) {
 
 /** The pack's auto-update setting and rollback skip (release.js AUTO_FILE), beside the record. */
 export const autoFileOf = (modsDir) => join(stateDirOf(modsDir), AUTO_FILE);
-export const readAuto = (modsDir) => { try { return parseAuto(readFileSync(autoFileOf(modsDir), "utf8")); } catch { return parseAuto(""); } };
+const readAutoText = (modsDir) => { try { return readFileSync(autoFileOf(modsDir), "utf8"); } catch { return ""; } };
+export const readAuto = (modsDir) => parseAuto(readAutoText(modsDir));
 
 /**
- * Changes the setting (`{ on }` and/or `{ skip }`), written whole through a rename, holding the
- * lock, so a switch never races a rollback's skip. Returns it; throws `locked` while a run holds it.
+ * Changes the setting (`{ on }`) and/or the skip (`{ skip }`, `{ skipCause }`), written whole
+ * through a rename, holding the lock, so a switch never races a rollback's skip. Returns the
+ * parsed view; throws `locked` while a run holds it.
  */
 export function writeAuto(modsDir, patch) {
   const free = takeLock(modsDir);
   try { return writeAutoHeld(modsDir, patch); } finally { free(); }
 }
 
-/** writeAuto for a caller already holding the lock (rollback). */
+/**
+ * writeAuto for a caller already holding the lock (rollback, retry). The record the file holds is
+ * merged into, not rebuilt from the keys this code knows: an unrecognised skipCause or a newer
+ * release's field survives every write, so a cause never degrades into a legacy cause-less skip.
+ */
 function writeAutoHeld(modsDir, patch) {
-  const next = { ...readAuto(modsDir), ...patch };
+  const text = formatAuto(mergeAuto(readAutoText(modsDir), patch));
   mkdirSync(stateDirOf(modsDir), { recursive: true });
   const tmp = join(stateDirOf(modsDir), `.${AUTO_FILE}.${process.pid}`);
-  writeFileSync(tmp, formatAuto(next));
+  writeFileSync(tmp, text);
   renameSync(tmp, autoFileOf(modsDir));
-  return next;
+  return parseAuto(text);
 }
 
 /**

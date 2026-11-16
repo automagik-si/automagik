@@ -1735,6 +1735,83 @@ test("a legacy cause-less skip: auto waits, a newer release moves past, am updat
   } finally { third.done(); }
 });
 
+/** The auto-update record exactly as the file holds it, unknown fields included. */
+const autoRecordOf = (modsDir) => JSON.parse(readFileSync(autoFileOf(modsDir), "utf8"));
+/** Seeds the auto-update file as a newer release (or a hand edit) would leave it. */
+const seedAutoRecord = (modsDir, record) => {
+  mkdirSync(stateDirOf(modsDir), { recursive: true });
+  writeFileSync(autoFileOf(modsDir), `${JSON.stringify(record, null, 2)}\n`);
+};
+
+test("an unknown skipCause survives the record's writes and the skip still holds", async () => {
+  const h = autoHome(["0.2.0"]);
+  const raw = { auto: true, skip: "0.2.0", skipCause: "vendor-specific", extra: "x" };
+  try {
+    seedAutoRecord(h.mods, raw);
+    const held = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(held.installed, null, "an ordinary update does not install the skipped version");
+    assert.match(held.held, /0\.2\.0 was rolled back here/);
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the first ordinary update keeps the unknown cause");
+    // The setting changer writes the same record: it must carry the cause and the extra field.
+    writeAuto(h.mods, { on: true });
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the setting write keeps the unknown cause");
+    const again = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(again.installed, null, "a second ordinary update still does not install it");
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the second ordinary update keeps the unknown cause");
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0", "the skipped version was never installed");
+  } finally { h.done(); }
+});
+
+test("an unknown extra field beside a skip survives every write of the record", async () => {
+  const h = autoHome(["0.2.0"]);
+  const raw = { auto: true, skip: "0.2.0", skipCause: "mods", keepMe: { nested: ["x"] } };
+  try {
+    seedAutoRecord(h.mods, raw);
+    const held = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(held.installed, null);
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the update keeps it");
+    writeAuto(h.mods, { on: false });
+    assert.deepEqual(autoRecordOf(h.mods), { ...raw, auto: false }, "switching off keeps it");
+    writeAuto(h.mods, { on: true });
+    assert.deepEqual(autoRecordOf(h.mods), raw, "switching on keeps it");
+  } finally { h.done(); }
+});
+
+test("--retry-skipped clears a known skip and its cause but keeps an unknown field", async () => {
+  const h = autoHome(["0.2.0"]);
+  try {
+    seedAutoRecord(h.mods, { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" });
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: h.mods, env: {}, keys, fetch: fakeFetch(h.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.deepEqual(autoRecordOf(h.mods), { auto: true, extra: "x" },
+      "the skip and its cause are cleared, the unknown field stays");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: null });
+  } finally { h.done(); }
+});
+
+test("the setting changer changes on but keeps the skip, its cause and an unknown field", async () => {
+  const h = autoHome([]);
+  try {
+    seedAutoRecord(h.mods, { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" });
+    writeAuto(h.mods, { on: false });
+    assert.deepEqual(autoRecordOf(h.mods), { auto: false, skip: "0.2.0", skipCause: "mods", extra: "x" });
+    writeAuto(h.mods, { on: true });
+    assert.deepEqual(autoRecordOf(h.mods), { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" });
+  } finally { h.done(); }
+});
+
+test("a rollback writes its new skip and cause over an older one, keeping an unknown field", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "bad-new-skip"), { code: 1, mod: "am-tabs", stderr: "am-tabs: cannot load" });
+  try {
+    seedAutoRecord(h.mods, { auto: true, skip: "0.1.0", skipCause: "mods", extra: "x" });
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assert.equal(r.installed.restored.version, "0.1.0");
+    assert.deepEqual(autoRecordOf(h.mods), { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" },
+      "the new skip and cause replace the old ones; the unknown field stays");
+  } finally { h.done(); }
+});
+
 test("a judged failed mod wins over a later killed check: restore and one notice", async () => {
   const h = autoHome(["0.2.0"]);
   const app = fakeCheckFailThenKill(join(h.home, "mixed"));

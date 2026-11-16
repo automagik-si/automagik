@@ -327,7 +327,9 @@ export const CHECK_FILE = "unchecked-mods.json";
 /**
  * The setting as `{ on, skip }`, plus `skipCause` when one was recorded: on unless the file says
  * `"auto": false`; skip a version or null; the cause, `mods` or `runner`, only for a skip that has
- * one (a manual rollback, and a skip written before causes were kept, carry none).
+ * one (a manual rollback, and a skip written before causes were kept, carry none). This is the
+ * view the code reads; `parseAutoRecord` is the record as the file holds it, and writes merge into
+ * that, so a value this code does not know is never lost.
  */
 export function parseAuto(text) {
   let value = null;
@@ -338,8 +340,29 @@ export function parseAuto(text) {
   return { on: o.auto !== false, skip, ...(skipCause ? { skipCause } : {}) };
 }
 
-export const formatAuto = ({ on = true, skip = null, skipCause = null } = {}) =>
-  `${JSON.stringify({ auto: on !== false, ...(skip ? { skip, ...(skipCause ? { skipCause } : {}) } : {}) }, null, 2)}\n`;
+/** The record as the file holds it, every field included; a bad or missing file is `{}`. */
+export function parseAutoRecord(text) {
+  let value = null;
+  try { value = JSON.parse(text); } catch {}
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+/**
+ * The record to write for `patch` (`{ on }`, `{ skip }`, `{ skipCause }`), merged into `text` as
+ * it is: a field the patch sets wins, `on` is written as `auto`, a field set to null is removed,
+ * and a field this code does not know (an unrecognised cause, a newer release's) is carried
+ * through untouched, never rebuilt from the known keys alone.
+ */
+export function mergeAuto(text, patch = {}) {
+  const { on, ...rest } = patch;
+  const next = { ...parseAutoRecord(text), ...rest };
+  if (on !== undefined) next.auto = on !== false;
+  for (const [key, value] of Object.entries(next)) if (value === null || value === undefined) delete next[key];
+  if (typeof next.auto !== "boolean") next.auto = true;
+  return next;
+}
+
+export const formatAuto = (record = {}) => `${JSON.stringify(record, null, 2)}\n`;
 
 /**
  * Why auto-update leaves `version` alone, or null when it may install it. `auto`: `{ on, skip,
