@@ -130,7 +130,9 @@ Fixed by the pt-BR dictionary and bundle above; the locale pack's 22 tests pass 
 commit subject (72 chars) and this file's lines are inside the 100-character limit the
 Conventional commits job enforces.
 
+The run on `1460db7e` is green, including `bots-dsh (plugin tests)`, `locale-pt-br-dsh
+(plugin tests)` and `Conventional commits`; the PR is `OPEN` and `MERGEABLE`.
+
 ## Open
 
-- The CI run on the follow-up commit was still in progress when this file was written (PR state
-  `OPEN`, `MERGEABLE`); read the PR for its conclusion. Nothing is merged.
+- Nothing merged. This report's own commit is docs-only; it is covered by the same CI gate.
