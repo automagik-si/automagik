@@ -179,6 +179,40 @@ async function cappedKillOutcome(
   return last ?? (await cappedKillAttempt(args, { ...options, state }));
 }
 
+function grandchildRetryDecision(outcome: Outcome, retries: number): CappedKillDecision {
+  const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
+  const ended = outcome.stderr
+    .split('\n')
+    .filter(line => line.startsWith(`exit ${outcome.status}: the memory monitor ended before its final read;`));
+  if (outcome.status === 1 && capped.length === 1 && ended.length === 0) return 'pass';
+  if ((outcome.status === 1 || outcome.status === 137) && capped.length === 1 && ended.length === 0) {
+    return retries < RETRY_BUDGET ? 'retry' : 'fail';
+  }
+  if ((outcome.status === 1 || outcome.status === 137) && ended.length === 1 && capped.length === 0) {
+    const expected = `exit ${outcome.status}: the memory monitor ended before its final read; the run may have hit the memory limit (command=sh)`;
+    if (ended[0] !== expected || !outcome.log.includes(expected)) return 'fail';
+    return retries < RETRY_BUDGET ? 'retry' : 'fail';
+  }
+  return 'fail';
+}
+
+async function grandchildKillOutcome(args: string[], options: RunOptions): Promise<Outcome> {
+  const state = options.state ?? scratch('state');
+  let last: Outcome | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) rmSync(join(state, 'runs.log'), { force: true });
+    const outcome = await cappedKillAttempt(args, { ...options, state });
+    last = outcome;
+    const decision = grandchildRetryDecision(outcome, fileRetries);
+    if (decision !== 'retry') return outcome;
+    fileRetries++;
+    console.log(
+      `capped-run test retry ${fileRetries}/3 (grandchild): the command's own shell was the second victim, known limit #1465`,
+    );
+  }
+  return last ?? (await cappedKillAttempt(args, { ...options, state }));
+}
+
 // A real user scope is needed for the cap itself: cgroup v2, a user manager and systemd-run
 // that accepts the scope's memory properties. Everything else runs UNCAPPED by design.
 function userScopeWorks(): boolean {
@@ -803,6 +837,15 @@ describe('capped-run', () => {
     expect(cappedKillDecision(fake(1, cappedOne, cappedOne), 'sh', 0, 1)).toBe('pass');
     expect(cappedKillDecision(fake(1, endedOne, endedOne), 'sh', 0, 1)).toBe('retry');
     expect(cappedKillDecision(fake(137, cappedOne, cappedOne), 'sh', 0, 1)).toBe('fail');
+    const endedKilled =
+      'exit 137: the memory monitor ended before its final read; the run may have hit the memory limit (command=sh)';
+    expect(grandchildRetryDecision(fake(1, cappedOne, cappedOne), 0)).toBe('pass');
+    expect(grandchildRetryDecision(fake(137, cappedOne, cappedOne), 0)).toBe('retry');
+    expect(grandchildRetryDecision(fake(137, cappedOne, cappedOne), 2)).toBe('fail');
+    expect(grandchildRetryDecision(fake(1, endedOne, endedOne), 0)).toBe('retry');
+    expect(grandchildRetryDecision(fake(137, endedKilled, endedKilled), 0)).toBe('retry');
+    expect(grandchildRetryDecision(fake(2, cappedOne, cappedOne), 0)).toBe('fail');
+    expect(grandchildRetryDecision(fake(137, '', ''), 0)).toBe('fail');
     // Three attempts without CAPPED fail at the third: the file budget is two retries.
     expect(cappedKillDecision(fake(137, ended, ended), 'dd', 0)).toBe('retry');
     expect(cappedKillDecision(fake(137, ended, ended), 'dd', 1)).toBe('retry');
@@ -1362,32 +1405,30 @@ describe('capped-run', () => {
     30_000,
   );
 
-  test.skipIf(!scope)(
+  test.skipIf(!scope || !dd || !shmHasRoom())(
     'a grandchild OOM kill prints one CAPPED line and the child exit 1 passes through',
     async () => {
       const state = scratch('grandchild-state');
-      const allocator = join(scratch('grandchild-allocator'), 'alloc.js');
-      writeFileSync(allocator, 'const hold = [];\nfor (;;) hold.push(Buffer.alloc(1 << 20, 1));\n');
-      // Anonymous memory: the kernel kills the allocator and the pages are freed, so the
-      // waiting shell survives and exits 1; the subshell raises its own priority so the
-      // grandchild, not the shell, is the victim.
-      const script = `( echo 1000 >/proc/self/oom_score_adj; exec ${process.execPath} ${allocator} ) & wait; exit 1`;
-      const outcome = await cappedKillOutcome(
-        ['--mem', '256M', '--', 'sh', '-c', script],
-        { state, env: { CAPPED_RUN_TEST_MEM: '256M' }, timeout: 120_000 },
-        'sh',
-        1,
-      );
-      expect(outcome.status).toBe(1);
-      const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
-      expect(capped).toHaveLength(1);
-      expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=');
-      const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
-      expect(Number.isFinite(floorMib)).toBe(true);
-      expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
-      expect(capped[0]).toMatch(/last sample (?:[0-9.]+M|unknown)/);
-      expect(capped[0]).toContain('command=sh)');
-      expect(outcome.log.trim().split('\n')).toContain(capped[0]);
+      const file = join('/dev/shm', `capped-run-grandchild-${process.pid}-${Date.now()}`);
+      const script = `( echo 1000 >/proc/self/oom_score_adj; exec dd if=/dev/zero of=${file} bs=1M count=512 status=none ) & wait; exit 1`;
+      try {
+        const outcome = await grandchildKillOutcome(
+          ['--mem', '256M', '--', 'sh', '-c', script],
+          { state, env: { CAPPED_RUN_TEST_MEM: '256M' }, timeout: 120_000 },
+        );
+        expect(outcome.status).toBe(1);
+        const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
+        expect(capped).toHaveLength(1);
+        expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=');
+        const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
+        expect(Number.isFinite(floorMib)).toBe(true);
+        expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
+        expect(capped[0]).toMatch(/last sample (?:[0-9.]+M|unknown)/);
+        expect(capped[0]).toContain('command=sh)');
+        expect(outcome.log.trim().split('\n')).toContain(capped[0]);
+      } finally {
+        rmSync(file, { force: true });
+      }
     },
     120_000,
   );
