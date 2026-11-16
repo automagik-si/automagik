@@ -446,8 +446,9 @@ export function TeamSidebar(props) {
   if (wide) {
     // The new left bar (left-bar.js): the rail, the Team rows, the same openings as below.
     const byId = id => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find(agent => agent.id === id)
-    const open = row => (row.kind === 'group' ? rowActions.openSession(row.id)
-      : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
+    const open = row => (row.kind === 'chat' ? row.source?.open?.(row.id)
+      : row.kind === 'group' ? rowActions.openSession(row.id)
+        : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
     const menu = (row, event) => {
       const kind = row.kind === 'group' ? 'room' : row.bot?.dsh ? 'agent' : 'bot'
       if (byId(row.id)) actions.openMenu({ kind, id: row.id, x: event.clientX, y: event.clientY })
@@ -459,7 +460,10 @@ export function TeamSidebar(props) {
         return agent ? h(AgentRow, { ...rowProps, agent, bare: true, marked: markedUnread[agent.id] === true }) : null
       }
       const bot = roster.byId[row.id]
-      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotChildren, { ...rowProps, bot })) : null
+      // A channel source draws the Bot's channels as the bar's own rows; the team's old rows
+      // under it come off for that Bot, so the two never draw the same channels twice.
+      const children = row.channelSource ?? row.bot?.channelSource ? null : h(BotChildren, { ...rowProps, bot })
+      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), children) : null
     }
     return h(LeftBar, {
       roster, order, marked: markedUnread, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,

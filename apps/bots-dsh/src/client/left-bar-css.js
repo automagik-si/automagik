@@ -18,10 +18,12 @@ const SIZES = {
   '--lb-tile-r': '12px',
   '--lb-tile-icon': '28px',
   '--lb-rail-gap': '10px',
-  // The rows: one line each. A Bot's and a group's carry art; a channel's and a chat's do not.
+  // The rows: one line each. A Bot's and a group's carry art; a channel carries its glyph, a
+  // chat its person's face.
   '--lb-row-h': '34px',
   '--lb-channel-h': '26px',
   '--lb-chat-h': '25px',
+  '--lb-chat-face': '16px',
   '--lb-label-h': '26px',
   '--lb-label-first-gap': '8px',
   '--lb-row-r': 'var(--st-r-seg,8px)',
@@ -136,7 +138,17 @@ const ROWS = `
 .lb-row-off .lb-art{filter:grayscale(1);opacity:.55}
 .lb-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
-.lb-row-chat{height:var(--lb-chat-h);padding-left:var(--lb-chat-inset,calc(16px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph)))}
+.lb-row-chat{height:var(--lb-chat-h);gap:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
+/* A chat's person: the photo, else their initials, on the tone Omni's chat view gives that side
+   of the conversation. Omni shares --oc-in and --oc-out with the bar; the fallbacks are the
+   formulas its own chat view uses for them, so a row and that chat agree either way. */
+.lb-chat-face{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-chat-face);height:var(--lb-chat-face);box-sizing:border-box;border-radius:50%;overflow:hidden;background:var(--oc-in,var(--bt-card));color:var(--bt-ink)}
+body[data-ds-dark-theme] .lb-chat-face{background:var(--oc-in,var(--bt-bubble))}
+.lb-chat-face[data-self]{background:var(--oc-out,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card)))}
+body[data-ds-dark-theme] .lb-chat-face[data-self]{background:var(--oc-out,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble)))}
+.lb-chat-face img{position:absolute;inset:1px;width:calc(100% - 2px);height:calc(100% - 2px);border-radius:50%;object-fit:cover}
+.lb-chat-face-initials{font:600 7.5px/1 var(--bt-head-font,var(--bt-font));letter-spacing:.02em}
+.lb-row-chat .lb-chat-face-initials{color:inherit}
 .lb-row-channel .lb-name,.lb-row-chat .lb-name{font:400 13.5px/1.3 var(--bt-font);letter-spacing:0}
 .lb-row-chat .lb-name{color:var(--lb-muted)}
 .lb-row-chat.lb-row-hot .lb-name,.lb-row-chat[aria-current] .lb-name{color:var(--bt-ink)}

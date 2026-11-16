@@ -8,10 +8,38 @@ import { DSH_LOOK } from './characters.js'
 import { t } from './i18n.js'
 import { openStops } from './stops.js'
 import { isMainOf } from './sources.js'
+import { botChannels, botChannelSource, useEntries } from './extend.js'
 import { agentRowSessions } from './task-card.js'
 import { ProjectRail } from './left-bar-rail.js'
 import { TeamRows, drawBot } from './left-bar-team.js'
 import { LEFT_BAR_SKIN } from './left-bar-css.js'
+
+// A channel's glyph in its kind's shape, in one colour: colour in the bar only ever means a
+// status, so the glyph says what kind of channel a row is. Anything unknown wears a chat bubble.
+const CHANNEL_GLYPHS = {
+  whatsapp: () => [
+    h('path', { key: 'bubble', d: 'M12 3.8a8.2 8.2 0 0 0-7 12.5L3.8 20.2l4-1.1A8.2 8.2 0 1 0 12 3.8z' }),
+    h('path', { key: 'phone', d: 'M9.3 8.4c-.3 0-.6.1-.8.4-.3.5-.5 1.1-.2 1.9.5 1.7 2.1 3.2 3.8 3.8.8.2 1.5.1 1.9-.2.3-.2.4-.5.4-.8l-.1-.4-1.4-.7-.8.9c-.9-.4-1.7-1.1-2.1-2l.9-.8-.7-1.5z' }),
+  ],
+  telegram: () => [
+    h('path', { key: 'plane', d: 'M20.5 4.5 3.5 11.2l5.2 1.9 2 6.1 3-3.3 4.4 3.3z' }),
+    h('path', { key: 'fold', d: 'M8.7 13.1 16.8 8' }),
+  ],
+  slack: () => [h('path', { key: 'hash', d: 'M9 4.5 7.5 19.5M16.5 4.5 15 19.5M4.5 9h15M3.5 15h15' })],
+  discord: () => [
+    h('path', { key: 'face', d: 'M5 6.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 16V8A1.5 1.5 0 0 1 5 6.5z' }),
+    h('path', { key: 'eyes', d: 'M9.5 10.5v1.5M14.5 10.5v1.5' }),
+    h('path', { key: 'smile', d: 'M9.5 14.5c1.5 1 3.5 1 5 0' }),
+  ],
+  chat: () => [h('path', { key: 'bubble', d: 'M5 5.5h14A1.5 1.5 0 0 1 20.5 7v8.5A1.5 1.5 0 0 1 19 17h-9l-4.5 3.5V17H5A1.5 1.5 0 0 1 3.5 15.5V7A1.5 1.5 0 0 1 5 5.5z' })],
+}
+
+/** A channel's glyph: its kind's shape, the chat bubble for any other kind. */
+export function channelGlyph(channel) {
+  const kind = String(channel?.kind ?? '')
+  const shape = kind.startsWith('whatsapp') ? 'whatsapp' : Object.hasOwn(CHANNEL_GLYPHS, kind) ? kind : 'chat'
+  return h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, CHANNEL_GLYPHS[shape]())
+}
 
 // -------------------------------------------------------------------------
 // The new left bar in the Bot team's sidebar (RFC 0022 (i), direction C on the themed ground):
@@ -97,8 +125,10 @@ export function teamOf({ roster, order, status, marked = {}, current, now = Date
     const key = `bot:${item.id}`
     if (item.hidden && !shown(key) && !isMainOf(roster, item.id)) return null
     const seen = status.bots.get(item.id) ?? { status: 'idle', unread: false }
-    // Channels hang under a Bot through other plugins (renderAfter), not as the bar's rows.
-    return { ...item, channels: [], status: seen.status, unread: unread(item.id, key, seen.unread) }
+    // A Bot's channels come from the one plugin that serves it (extend.js's botChannels): with
+    // a source the bar draws them under its row, and while there is none the team's own
+    // botChildren rows stay exactly as today. Never both.
+    return { ...item, channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) }
   }
   const agent = (item) => {
     const tasks = item.kind === 'tasks'
@@ -173,6 +203,25 @@ export function LeftBar({ roster, order, marked, useSessions, useSessionStatus, 
     if (currentId && marked?.[currentId] === true) actions.clearUnread(currentId)
   }, [currentId, marked?.[currentId]])
   const [note, setNote] = useState(null)
+  // Sources may load after the bar is up (a plugin's shell installer); draw their rows then.
+  useEntries(botChannels)
+  // A channel is unfolded by default once its chats are known; a person's fold is kept here. A
+  // person unfolding one asks its Bot's chats to load, as opening the Bot's Session does.
+  const [folded, setFolded] = useState(() => new Set())
+  const [wanted, setWanted] = useState(() => new Set())
+  const loads = id => current === `bot:${id}` || wanted.has(id)
+  const fold = (row, next) => {
+    const key = `${row.botId}/${row.id}`
+    setFolded((before) => {
+      const after = new Set(before)
+      if (next) after.add(key)
+      else after.delete(key)
+      return after
+    })
+    if (!next) setWanted(before => (before.has(row.botId) ? before : new Set(before).add(row.botId)))
+  }
+  // A channel folds and unfolds here; every other row opens as today.
+  const press = row => (row.kind === 'channel' ? fold(row, !row.folded) : open(row))
   const spaces = [{ id: LOCAL_SPACE, name: t('This computer'), icon: h(OmniMark, { size: 26 }) }]
   return h('div', { className: 'bt-side lb-host', onKeyDown },
     h('div', { className: 'lb-bar', 'data-lb-host': '', 'data-lb-skin': LEFT_BAR_SKIN },
@@ -192,7 +241,7 @@ export function LeftBar({ roster, order, marked, useSessions, useSessionStatus, 
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon))),
         notice,
         team.bots.length === 0 && empty ? empty
-          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, renderEnd, label: t('Bot list') }),
+          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, label: t('Bot list') }),
         foot ? h('div', { className: 'lb-foot' }, foot) : null)),
     note ? h(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null)
 }

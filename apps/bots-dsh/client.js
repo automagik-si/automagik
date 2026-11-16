@@ -3526,6 +3526,12 @@ var toolCards = {
 var nav = registry();
 var badges = registry();
 var botChildren = registry();
+var botChannels = registry();
+var botChannelSource = (bot) => {
+  if (!bot) return void 0;
+  const entries2 = botChannels.entries();
+  return entries2.findLast((entry) => entry.botId === bot.id) ?? entries2.findLast((entry) => entry.owns?.(bot) === true);
+};
 var headerButtons = registry();
 var sidebarTools = registry();
 var botSettings = registry();
@@ -21433,19 +21439,56 @@ function ProjectRail({ projects = [], currentId, onOpen, onAdd, label, addLabel,
 
 // src/client/left-bar-team.js
 var import_react54 = require("react");
-var chatStatuses = (bot) => (bot.channels ?? []).flatMap((channel) => (channel.chats ?? []).map((chat) => statusOr(chat.status)));
+var CHANNEL_STATUS = Object.freeze({ connected: "idle", "needs-pairing": "needs", disconnected: "off", error: "error" });
+var CHAT_STATUS = Object.freeze({ answering: "working", paused: "idle", "needs-someone": "needs", idle: "idle" });
+var channelStatusOf = (channel) => statusOr(CHANNEL_STATUS[channel?.status] ?? channel?.status);
+var chatStatusOf = (chat) => statusOr(CHAT_STATUS[chat?.status] ?? chat?.status);
+var chatStatuses = (bot) => (bot.channels ?? []).flatMap((channel) => (channel.chats ?? []).map(chatStatusOf));
 function botRowStatus(bot) {
   const status = statusOr(bot.status);
   return status === "needs" && chatStatuses(bot).includes("needs") ? "idle" : status;
 }
-function botRows(bot) {
-  const rows2 = [{ kind: "bot", key: `bot:${bot.id}`, id: bot.id, name: bot.name, bot, status: botRowStatus(bot), unread: bot.unread === true }];
-  for (const channel of bot.channels ?? []) {
-    const chats = channel.chats ?? [];
-    const folded = channel.folded === true;
-    rows2.push({ kind: "channel", key: `channel:${bot.id}/${channel.id}`, id: channel.id, botId: bot.id, name: channel.name, channel, folded, status: folded ? worstStatus(chats.map((chat) => statusOr(chat.status))) : "idle" });
-    if (folded) continue;
-    for (const chat of chats) rows2.push({ kind: "chat", key: `chat:${bot.id}/${channel.id}/${chat.id}`, id: chat.id, botId: bot.id, channelId: channel.id, name: chat.name, status: statusOr(chat.status) });
+var NO_FOLDS = /* @__PURE__ */ new Set();
+var chatsOf = (channel) => [...channel.chats ?? []].sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0));
+var foldedStatusOf = (own, chats) => {
+  const statuses = [own, ...chats.map(chatStatusOf)];
+  const worst = worstStatus(statuses);
+  return worst === "idle" && statuses.includes("off") ? "off" : worst;
+};
+function channelRows(bot, channels = [], folded = NO_FOLDS) {
+  const rows2 = [];
+  for (const channel of channels) {
+    const chats = chatsOf(channel);
+    const isFolded = channel.chats === void 0 || folded.has(`${bot.id}/${channel.id}`);
+    const own = channelStatusOf(channel);
+    rows2.push({
+      kind: "channel",
+      key: `channel:${bot.id}/${channel.id}`,
+      id: channel.id,
+      botId: bot.id,
+      name: channel.name,
+      channel,
+      folded: isFolded,
+      status: isFolded ? foldedStatusOf(own, chats) : own,
+      unread: chats.some((chat) => Number(chat.unread) > 0),
+      source: bot.channelSource
+    });
+    if (isFolded) continue;
+    for (const chat of chats) {
+      rows2.push({
+        kind: "chat",
+        key: `chat:${bot.id}/${channel.id}/${chat.id}`,
+        id: chat.id,
+        botId: bot.id,
+        channelId: channel.id,
+        name: chat.name,
+        chat,
+        who: chat.who,
+        status: chatStatusOf(chat),
+        unread: Number(chat.unread) > 0,
+        source: bot.channelSource
+      });
+    }
   }
   return rows2;
 }
@@ -21455,13 +21498,14 @@ function teamRows(team) {
   const sections = (team?.sections ?? []).map((section) => ({ label: section.label, bots: (section.bots ?? []).map((id) => byId.get(id)).filter(Boolean) })).filter((section) => section.bots.length > 0);
   const placed = new Set(sections.flatMap((section) => section.bots.map((bot) => bot.id)));
   const front = byId.get(team?.frontId);
+  const botRow = (bot) => ({ kind: "bot", key: `bot:${bot.id}`, id: bot.id, name: bot.name, bot, status: botRowStatus(bot), unread: bot.unread === true });
   const loose = bots.filter((bot) => bot !== front && !placed.has(bot.id));
-  const rows2 = [...front ? [front] : [], ...loose].flatMap(botRows);
+  const rows2 = [...front ? [front] : [], ...loose].map(botRow);
   sections.forEach((section, index) => {
     const held = section.bots.filter((bot) => bot !== front);
     if (held.length === 0) return;
     rows2.push({ kind: "section", key: `section:${index}`, label: section.label, first: !rows2.some((row) => row.kind === "section") });
-    rows2.push(...held.flatMap(botRows));
+    rows2.push(...held.map(botRow));
   });
   (team?.groups ?? []).forEach((group, index) => {
     const members = (group.members ?? []).map((id) => byId.get(id)).filter(Boolean);
@@ -21494,9 +21538,12 @@ function useScrollEdges(ref, count) {
     node.addEventListener("scroll", read, { passive: true });
     const watch = typeof ResizeObserver === "function" ? new ResizeObserver(read) : null;
     watch?.observe(node);
+    const mutations = typeof MutationObserver === "function" ? new MutationObserver(read) : null;
+    mutations?.observe(node, { childList: true, subtree: true });
     return () => {
       node.removeEventListener("scroll", read);
       watch?.disconnect();
+      mutations?.disconnect();
     };
   }, [count]);
   return edges;
@@ -21536,7 +21583,31 @@ var nameIfCut = (event) => {
   if (name && name.scrollWidth > name.clientWidth) row.title = name.textContent;
   else row.removeAttribute("title");
 };
-function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label, skin, renderArt: renderArt2 = drawBot, renderGlyph, worded = WORDED, quiet: quiet2 = QUIET }) {
+var initialsOf = (name) => String(name ?? "?").replace(/[^\p{L}\p{N} ]/gu, "").trim().split(/\s+/).slice(0, 2).map((word2) => word2[0] ?? "").join("").toUpperCase() || "?";
+function ChatFace({ who }) {
+  return (0, import_react54.createElement)(
+    "span",
+    { className: "lb-chat-face", "data-self": who?.self === true ? "" : void 0, "aria-hidden": true },
+    who?.photo ? (0, import_react54.createElement)("img", { src: who.photo, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: (event) => {
+      event.currentTarget.remove();
+    } }) : null,
+    (0, import_react54.createElement)("span", { className: "lb-chat-face-initials" }, initialsOf(who?.name))
+  );
+}
+function BotBlock({ row, renderRow, folded, loads }) {
+  const source = row.bot.channelSource ?? botChannelSource(row.bot);
+  return source ? (0, import_react54.createElement)(BotChannels, { key: source.id, row, source, renderRow, folded, loads }) : (0, import_react54.createElement)(BotRows, { row, channels: row.bot.channels ?? [], source: row.bot.channelSource, renderRow, folded });
+}
+function BotChannels({ row, source, renderRow, folded, loads }) {
+  const channels = source.useChannels(row.id, { open: loads ? loads(row.id) === true : false }) ?? [];
+  return (0, import_react54.createElement)(BotRows, { row, channels, source, renderRow, folded });
+}
+function BotRows({ row, channels, source, renderRow, folded = NO_FOLDS }) {
+  const bot = { ...row.bot, channels };
+  const head = { ...row, bot, status: botRowStatus(bot), channelSource: source ?? row.bot.channelSource };
+  return [renderRow(head), ...channelRows(bot, channels, folded).map(renderRow)];
+}
+function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label, skin, renderArt: renderArt2 = drawBot, renderGlyph, worded = WORDED, quiet: quiet2 = QUIET, folded = NO_FOLDS, loads }) {
   const ref = (0, import_react54.useRef)(null);
   const rows2 = teamRows(team);
   const { art, duo } = useArtSizes(ref, skin, rows2.length);
@@ -21576,20 +21647,23 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
     if (row.kind === "channel") {
       return button(
         row,
-        "lb-row-channel",
+        classes("lb-row-channel", row.unread && "lb-row-unread"),
         { "aria-expanded": !row.folded },
         (0, import_react54.createElement)("span", { className: "lb-glyph", "aria-hidden": true }, renderGlyph ? renderGlyph(row.channel) : null),
         (0, import_react54.createElement)("span", { className: "lb-name" }, row.name),
-        row.folded ? status(row) : null,
+        row.unread ? (0, import_react54.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
+        status(row),
         row.folded ? (0, import_react54.createElement)(Chevron) : null
       );
     }
     if (row.kind === "chat") {
       return button(
         row,
-        classes("lb-row-chat", row.status !== "idle" && "lb-row-hot"),
+        classes("lb-row-chat", row.status !== "idle" && "lb-row-hot", row.unread && "lb-row-unread"),
         null,
+        (0, import_react54.createElement)(ChatFace, { who: row.who }),
         (0, import_react54.createElement)("span", { className: "lb-name" }, row.name),
+        row.unread ? (0, import_react54.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
         status(row)
       );
     }
@@ -21609,13 +21683,15 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
       status(row)
     );
   };
+  const renderRow = (row) => {
+    const after = renderAfter ? renderAfter(row) : null;
+    return after ? (0, import_react54.createElement)(import_react54.Fragment, { key: row.key }, draw(row), after) : draw(row);
+  };
+  const served = (row) => row.bot.channelSource ?? botChannelSource(row.bot) ?? (row.bot.channels?.length ? true : void 0);
   return (0, import_react54.createElement)(
     "div",
     { className: "lb-scroll", "data-above": edges.above ? "" : void 0, "data-more": edges.more ? "" : void 0 },
-    (0, import_react54.createElement)("div", { ref, className: "lb-rows", role: "group", "aria-label": label ?? word("team") }, rows2.map((row) => {
-      const after = renderAfter ? renderAfter(row) : null;
-      return after ? (0, import_react54.createElement)(import_react54.Fragment, { key: row.key }, draw(row), after) : draw(row);
-    }))
+    (0, import_react54.createElement)("div", { ref, className: "lb-rows", role: "group", "aria-label": label ?? word("team") }, rows2.map((row) => row.kind === "bot" && served(row) ? (0, import_react54.createElement)(BotBlock, { key: row.key, row, renderRow, folded, loads }) : renderRow(row)))
   );
 }
 
@@ -21629,10 +21705,12 @@ var SIZES = {
   "--lb-tile-r": "12px",
   "--lb-tile-icon": "28px",
   "--lb-rail-gap": "10px",
-  // The rows: one line each. A Bot's and a group's carry art; a channel's and a chat's do not.
+  // The rows: one line each. A Bot's and a group's carry art; a channel carries its glyph, a
+  // chat its person's face.
   "--lb-row-h": "34px",
   "--lb-channel-h": "26px",
   "--lb-chat-h": "25px",
+  "--lb-chat-face": "16px",
   "--lb-label-h": "26px",
   "--lb-label-first-gap": "8px",
   "--lb-row-r": "var(--st-r-seg,8px)",
@@ -21732,7 +21810,17 @@ var ROWS2 = `
 .lb-row-off .lb-art{filter:grayscale(1);opacity:.55}
 .lb-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
-.lb-row-chat{height:var(--lb-chat-h);padding-left:var(--lb-chat-inset,calc(16px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph)))}
+.lb-row-chat{height:var(--lb-chat-h);gap:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
+/* A chat's person: the photo, else their initials, on the tone Omni's chat view gives that side
+   of the conversation. Omni shares --oc-in and --oc-out with the bar; the fallbacks are the
+   formulas its own chat view uses for them, so a row and that chat agree either way. */
+.lb-chat-face{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-chat-face);height:var(--lb-chat-face);box-sizing:border-box;border-radius:50%;overflow:hidden;background:var(--oc-in,var(--bt-card));color:var(--bt-ink)}
+body[data-ds-dark-theme] .lb-chat-face{background:var(--oc-in,var(--bt-bubble))}
+.lb-chat-face[data-self]{background:var(--oc-out,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card)))}
+body[data-ds-dark-theme] .lb-chat-face[data-self]{background:var(--oc-out,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble)))}
+.lb-chat-face img{position:absolute;inset:1px;width:calc(100% - 2px);height:calc(100% - 2px);border-radius:50%;object-fit:cover}
+.lb-chat-face-initials{font:600 7.5px/1 var(--bt-head-font,var(--bt-font));letter-spacing:.02em}
+.lb-row-chat .lb-chat-face-initials{color:inherit}
 .lb-row-channel .lb-name,.lb-row-chat .lb-name{font:400 13.5px/1.3 var(--bt-font);letter-spacing:0}
 .lb-row-chat .lb-name{color:var(--lb-muted)}
 .lb-row-chat.lb-row-hot .lb-name,.lb-row-chat[aria-current] .lb-name{color:var(--bt-ink)}
@@ -21815,6 +21903,28 @@ ${tokenCss("[data-lb-skin=stage]", LEFT_BAR_SKINS.stage)}${PANEL}${RAIL}${ROWS2}
 // src/client/left-bar.js
 var import_react55 = require("react");
 var import_react_dom9 = require("react-dom");
+var CHANNEL_GLYPHS = {
+  whatsapp: () => [
+    (0, import_react55.createElement)("path", { key: "bubble", d: "M12 3.8a8.2 8.2 0 0 0-7 12.5L3.8 20.2l4-1.1A8.2 8.2 0 1 0 12 3.8z" }),
+    (0, import_react55.createElement)("path", { key: "phone", d: "M9.3 8.4c-.3 0-.6.1-.8.4-.3.5-.5 1.1-.2 1.9.5 1.7 2.1 3.2 3.8 3.8.8.2 1.5.1 1.9-.2.3-.2.4-.5.4-.8l-.1-.4-1.4-.7-.8.9c-.9-.4-1.7-1.1-2.1-2l.9-.8-.7-1.5z" })
+  ],
+  telegram: () => [
+    (0, import_react55.createElement)("path", { key: "plane", d: "M20.5 4.5 3.5 11.2l5.2 1.9 2 6.1 3-3.3 4.4 3.3z" }),
+    (0, import_react55.createElement)("path", { key: "fold", d: "M8.7 13.1 16.8 8" })
+  ],
+  slack: () => [(0, import_react55.createElement)("path", { key: "hash", d: "M9 4.5 7.5 19.5M16.5 4.5 15 19.5M4.5 9h15M3.5 15h15" })],
+  discord: () => [
+    (0, import_react55.createElement)("path", { key: "face", d: "M5 6.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 16V8A1.5 1.5 0 0 1 5 6.5z" }),
+    (0, import_react55.createElement)("path", { key: "eyes", d: "M9.5 10.5v1.5M14.5 10.5v1.5" }),
+    (0, import_react55.createElement)("path", { key: "smile", d: "M9.5 14.5c1.5 1 3.5 1 5 0" })
+  ],
+  chat: () => [(0, import_react55.createElement)("path", { key: "bubble", d: "M5 5.5h14A1.5 1.5 0 0 1 20.5 7v8.5A1.5 1.5 0 0 1 19 17h-9l-4.5 3.5V17H5A1.5 1.5 0 0 1 3.5 15.5V7A1.5 1.5 0 0 1 5 5.5z" })]
+};
+function channelGlyph(channel) {
+  const kind = String(channel?.kind ?? "");
+  const shape = kind.startsWith("whatsapp") ? "whatsapp" : Object.hasOwn(CHANNEL_GLYPHS, kind) ? kind : "chat";
+  return (0, import_react55.createElement)("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, CHANNEL_GLYPHS[shape]());
+}
 var LOCAL_SPACE = "local";
 var pack = (value) => JSON.stringify(value);
 function botStatus({ question, pending, approval, failed, running: running2, away }) {
@@ -21874,7 +21984,7 @@ function teamOf({ roster, order, status, marked = {}, current, now = Date.now() 
     const key = `bot:${item.id}`;
     if (item.hidden && !shown(key) && !isMainOf(roster, item.id)) return null;
     const seen = status.bots.get(item.id) ?? { status: "idle", unread: false };
-    return { ...item, channels: [], status: seen.status, unread: unread(item.id, key, seen.unread) };
+    return { ...item, channels: item.channels ?? [], channelSource: botChannelSource(item), status: seen.status, unread: unread(item.id, key, seen.unread) };
   };
   const agent = (item) => {
     const tasks = item.kind === "tasks";
@@ -21936,6 +22046,21 @@ function LeftBar({ roster, order, marked, useSessions, useSessionStatus, useWork
     if (currentId && marked?.[currentId] === true) actions.clearUnread(currentId);
   }, [currentId, marked?.[currentId]]);
   const [note, setNote] = (0, import_react55.useState)(null);
+  useEntries(botChannels);
+  const [folded, setFolded] = (0, import_react55.useState)(() => /* @__PURE__ */ new Set());
+  const [wanted, setWanted] = (0, import_react55.useState)(() => /* @__PURE__ */ new Set());
+  const loads = (id) => current === `bot:${id}` || wanted.has(id);
+  const fold = (row, next) => {
+    const key = `${row.botId}/${row.id}`;
+    setFolded((before) => {
+      const after = new Set(before);
+      if (next) after.add(key);
+      else after.delete(key);
+      return after;
+    });
+    if (!next) setWanted((before) => before.has(row.botId) ? before : new Set(before).add(row.botId));
+  };
+  const press = (row) => row.kind === "channel" ? fold(row, !row.folded) : open(row);
   const spaces = [{ id: LOCAL_SPACE, name: t("This computer"), icon: (0, import_react55.createElement)(OmniMark, { size: 26 }) }];
   return (0, import_react55.createElement)(
     "div",
@@ -21969,7 +22094,7 @@ function LeftBar({ roster, order, marked, useSessions, useSessionStatus, useWork
           (0, import_react55.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("New…"), title: t("New…"), onClick: () => actions.openNewChat("new") }, (0, import_react55.createElement)(PlusIcon))
         ),
         notice,
-        team.bots.length === 0 && empty ? empty : (0, import_react55.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, renderEnd, label: t("Bot list") }),
+        team.bots.length === 0 && empty ? empty : (0, import_react55.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, label: t("Bot list") }),
         foot ? (0, import_react55.createElement)("div", { className: "lb-foot" }, foot) : null
       )
     ),
@@ -22413,7 +22538,7 @@ function TeamSidebar(props) {
   const notice = roster.readOnly ? (0, import_react56.createElement)("div", { className: "bt-hint bt-read-only", role: "status" }, hostText(roster.readOnly)) : null;
   if (wide) {
     const byId = (id) => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find((agent) => agent.id === id);
-    const open = (row) => row.kind === "group" ? rowActions.openSession(row.id) : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === "bot" ? rowActions.openSession(row.id) : void 0;
+    const open = (row) => row.kind === "chat" ? row.source?.open?.(row.id) : row.kind === "group" ? rowActions.openSession(row.id) : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === "bot" ? rowActions.openSession(row.id) : void 0;
     const menu = (row, event) => {
       const kind = row.kind === "group" ? "room" : row.bot?.dsh ? "agent" : "bot";
       if (byId(row.id)) actions.openMenu({ kind, id: row.id, x: event.clientX, y: event.clientY });
@@ -22425,7 +22550,8 @@ function TeamSidebar(props) {
         return agent ? (0, import_react56.createElement)(AgentRow, { ...rowProps, agent, bare: true, marked: markedUnread[agent.id] === true }) : null;
       }
       const bot = roster.byId[row.id];
-      return bot ? (0, import_react56.createElement)(import_react56.Fragment, null, (0, import_react56.createElement)(BotThreads, { ...rowProps, bot }), (0, import_react56.createElement)(BotChildren, { ...rowProps, bot })) : null;
+      const children = row.channelSource ?? row.bot?.channelSource ? null : (0, import_react56.createElement)(BotChildren, { ...rowProps, bot });
+      return bot ? (0, import_react56.createElement)(import_react56.Fragment, null, (0, import_react56.createElement)(BotThreads, { ...rowProps, bot }), children) : null;
     };
     return (0, import_react56.createElement)(LeftBar, {
       roster,
@@ -36404,6 +36530,7 @@ var omni = Object.freeze({
   nav,
   badges,
   botChildren,
+  botChannels,
   headerButtons,
   sidebarTools,
   botSettings,
