@@ -8,6 +8,20 @@ import { useEscape } from './overlay-hooks.js'
 import { stepMenuFocus, useViewport, viewBottom } from './motion.js'
 import { t } from './i18n.js'
 
+// A destructive menu item asks first, like Settings' delete does: the first click only names
+// what would be lost, the second one acts. The menu's own lifetime bounds the ask — closing
+// it unmounts the menu and forgets the confirmation — and a forgotten ask lapses anyway.
+function useConfirmStep() {
+  const [asking, setAsking] = useState(false)
+  useEffect(() => {
+    if (!asking) return undefined
+    const timer = setTimeout(() => setAsking(false), 4000)
+    return () => clearTimeout(timer)
+  }, [asking])
+  // True when this click may act; false on the click that only asks.
+  return [asking, () => { if (asking) return true; setAsking(true); return false }]
+}
+
 const SECTION_COLORS = ['blue', 'orange', 'green', 'violet', 'rose']
 // Sections are kept as data, and our own bar does not draw them yet (that is its own piece
 // of work). Until it does, no menu makes or fills one: a section nobody can see would only
@@ -45,6 +59,7 @@ export function ContextMenu({ menu, roster, actions, useWork, leaving = false })
     return () => { window.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey, true) }
   }, [])
   const [place, setPlace] = useState({ left: menu.x, top: menu.y })
+  const [confirmingDelete, readyToDelete] = useConfirmStep()
   const tick = useViewport()
   useLayoutEffect(() => {
     const box = ref.current?.getBoundingClientRect()
@@ -100,7 +115,9 @@ export function ContextMenu({ menu, roster, actions, useWork, leaving = false })
     bot ? (waits?.waits ?? []).map(item => [t('Give up waiting for {name}', { name: item.name ?? t('a Bot') }), SignOutIcon, () => actions.abandonWork(item.id)]) : [],
     [
       isMainBot ? null : [t('Hide from sidebar'), HideIcon, () => actions.setFlags(menu.id, { hidden: true })],
-      isMainBot || adopted ? null : [room ? t('Delete group') : t('Delete'), TrashIcon, () => (bot ? actions.deleteBot(bot.id) : actions.deleteRoom(menu.id)), true],
+      // A Bot's delete archives its chats and forgets its secrets, so the item asks first;
+      // only a second click on the named item runs it.
+      isMainBot || adopted ? null : [confirmingDelete ? t('Delete {name}?', { name: room ? room.name : bot.name }) : (room ? t('Delete group') : t('Delete')), TrashIcon, () => (bot ? actions.deleteBot(bot.id) : actions.deleteRoom(menu.id)), true, false, undefined, readyToDelete],
       // Only a confirmed rollback whose host preconditions are visible as met is offered.
       canRollback ? [t('Roll back DSH adoption…'), TrashIcon, () => {
         const warning = t('Roll back this adoption? This deletes the Bot record and any settings changed after adoption; the original DSH bot and its session return.')
@@ -112,10 +129,16 @@ export function ContextMenu({ menu, roster, actions, useWork, leaving = false })
   return h('div', { ref, className: 'bt-menu', role: 'menu', 'aria-label': t('{name} actions', { name: bot?.name ?? room.name }), style: place, 'data-leaving': leaving || undefined },
     groups.map((group, index) => h(Fragment, { key: index },
       index > 0 ? h('div', { className: 'bt-menu-sep', role: 'separator' }) : null,
-      group.map(([label, Icon, run, danger, checked, describedBy]) => h('button', {
+      // `ask` is the item's own confirmation: it returns false on the click that only asks,
+      // and the menu stays open with the item now naming what it would lose.
+      group.map(([label, Icon, run, danger, checked, describedBy, ask]) => h('button', {
         key: label, type: 'button', role: 'menuitem', className: danger ? 'bt-danger' : undefined,
         'aria-describedby': describedBy,
-        onClick: () => { actions.closeMenu(); void Promise.resolve(run()).catch(error => actions.reportError(error, 'menu')) },
+        onClick: () => {
+          if (ask && !ask()) return
+          actions.closeMenu()
+          void Promise.resolve(run()).catch(error => actions.reportError(error, 'menu'))
+        },
       }, h(Icon), h('span', { className: 'bt-menu-label' }, label), checked ? h('span', { className: 'bt-menu-check' }, h(CheckIcon)) : null)))),
     adopted ? h('div', { className: 'bt-menu-note', id: 'bt-menu-note', role: 'presentation' },
       rollbackBlocked !== undefined
@@ -224,6 +247,7 @@ function AgentMenu({ menu, roster, actions, leaving }) {
     return () => window.removeEventListener('keydown', onKey, true)
   }, [])
   const [place, setPlace] = useState({ left: menu.x, top: menu.y })
+  const [confirmingRemove, readyToRemove] = useConfirmStep()
   const tick = useViewport()
   useLayoutEffect(() => {
     const box = ref.current?.getBoundingClientRect()
@@ -242,7 +266,8 @@ function AgentMenu({ menu, roster, actions, leaving }) {
         ],
         sectionMoveItems(agent, roster, actions),
         [
-          [agent.kind === 'tasks' ? t('Remove Tasks') : t('Remove {name}', { name: agent.name }), TrashIcon, () => actions.removeAgent(agent.id), true],
+          // Removing the DSH bot archives every Session it owns, so it asks first too.
+          [confirmingRemove ? (agent.kind === 'tasks' ? t('Remove Tasks?') : t('Remove {name}?', { name: agent.name })) : (agent.kind === 'tasks' ? t('Remove Tasks') : t('Remove {name}', { name: agent.name })), TrashIcon, () => actions.removeAgent(agent.id), true, false, undefined, readyToRemove],
         ],
       ].filter(group => group.length > 0)
     : [
@@ -256,8 +281,13 @@ function AgentMenu({ menu, roster, actions, leaving }) {
   return h('div', { ref, className: 'bt-menu', role: 'menu', 'aria-label': menu.kind === 'agent' ? (agent.kind === 'tasks' ? t('Tasks') : agent.name) : t('Session actions'), style: place, 'data-leaving': leaving || undefined },
     groups.map((group, index) => h(Fragment, { key: index },
       index > 0 ? h('div', { className: 'bt-menu-sep', role: 'separator' }) : null,
-      group.map(([label, Icon, run, danger, checked]) => h('button', {
+      group.map(([label, Icon, run, danger, checked, describedBy, ask]) => h('button', {
         key: label, type: 'button', role: 'menuitem', className: danger ? 'bt-danger' : undefined,
-        onClick: () => { actions.closeMenu(); void Promise.resolve(run()).catch(error => actions.reportError(error, 'menu')) },
+        'aria-describedby': describedBy,
+        onClick: () => {
+          if (ask && !ask()) return
+          actions.closeMenu()
+          void Promise.resolve(run()).catch(error => actions.reportError(error, 'menu'))
+        },
       }, h(Icon), h('span', { className: 'bt-menu-label' }, label), checked ? h('span', { className: 'bt-menu-check' }, h(CheckIcon)) : null)))))
 }

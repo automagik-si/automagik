@@ -1106,6 +1106,7 @@ var ZH = {
   "Message Bot": "给 Bot 发消息",
   "To:": "发给：",
   "Remove {name}": "移除 {name}",
+  "Remove {name}?": "移除 {name}？",
   "Adopt as Bot": "转为团队 Bot",
   Recipient: "收件人",
   Recipients: "收件人",
@@ -2373,6 +2374,7 @@ var ZH = {
   "{count} messages": "{count} 条消息",
   "done": "完成",
   "Remove Tasks": "移除任务",
+  "Remove Tasks?": "移除任务？",
   "Started task": "已开始任务",
   "Starting a task": "正在开始任务",
   "Task finished": "任务完成",
@@ -31998,6 +32000,19 @@ function SettingsDialog({ page, id, roster, actions, useUpdate, leaving = false 
 
 // src/client/context-menu.js
 var import_react88 = require("react");
+function useConfirmStep() {
+  const [asking, setAsking] = (0, import_react88.useState)(false);
+  (0, import_react88.useEffect)(() => {
+    if (!asking) return void 0;
+    const timer = setTimeout(() => setAsking(false), 4e3);
+    return () => clearTimeout(timer);
+  }, [asking]);
+  return [asking, () => {
+    if (asking) return true;
+    setAsking(true);
+    return false;
+  }];
+}
 var SECTION_COLORS = ["blue", "orange", "green", "violet", "rose"];
 var SECTIONS_IN_BAR = false;
 function sectionMoveItems(entry, roster, actions) {
@@ -32037,6 +32052,7 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
     };
   }, []);
   const [place, setPlace] = (0, import_react88.useState)({ left: menu.x, top: menu.y });
+  const [confirmingDelete, readyToDelete] = useConfirmStep();
   const tick = useViewport();
   (0, import_react88.useLayoutEffect)(() => {
     const box = ref.current?.getBoundingClientRect();
@@ -32085,7 +32101,9 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
     bot ? (waits?.waits ?? []).map((item) => [t("Give up waiting for {name}", { name: item.name ?? t("a Bot") }), SignOutIcon, () => actions.abandonWork(item.id)]) : [],
     [
       isMainBot ? null : [t("Hide from sidebar"), HideIcon, () => actions.setFlags(menu.id, { hidden: true })],
-      isMainBot || adopted ? null : [room2 ? t("Delete group") : t("Delete"), TrashIcon, () => bot ? actions.deleteBot(bot.id) : actions.deleteRoom(menu.id), true],
+      // A Bot's delete archives its chats and forgets its secrets, so the item asks first;
+      // only a second click on the named item runs it.
+      isMainBot || adopted ? null : [confirmingDelete ? t("Delete {name}?", { name: room2 ? room2.name : bot.name }) : room2 ? t("Delete group") : t("Delete"), TrashIcon, () => bot ? actions.deleteBot(bot.id) : actions.deleteRoom(menu.id), true, false, void 0, readyToDelete],
       // Only a confirmed rollback whose host preconditions are visible as met is offered.
       canRollback ? [t("Roll back DSH adoption…"), TrashIcon, () => {
         const warning = t("Roll back this adoption? This deletes the Bot record and any settings changed after adoption; the original DSH bot and its session return.");
@@ -32101,13 +32119,16 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
       import_react88.Fragment,
       { key: index },
       index > 0 ? (0, import_react88.createElement)("div", { className: "bt-menu-sep", role: "separator" }) : null,
-      group.map(([label, Icon, run2, danger, checked, describedBy]) => (0, import_react88.createElement)("button", {
+      // `ask` is the item's own confirmation: it returns false on the click that only asks,
+      // and the menu stays open with the item now naming what it would lose.
+      group.map(([label, Icon, run2, danger, checked, describedBy, ask]) => (0, import_react88.createElement)("button", {
         key: label,
         type: "button",
         role: "menuitem",
         className: danger ? "bt-danger" : void 0,
         "aria-describedby": describedBy,
         onClick: () => {
+          if (ask && !ask()) return;
           actions.closeMenu();
           void Promise.resolve(run2()).catch((error) => actions.reportError(error, "menu"));
         }
@@ -32285,6 +32306,7 @@ function AgentMenu({ menu, roster, actions, leaving }) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
   const [place, setPlace] = (0, import_react88.useState)({ left: menu.x, top: menu.y });
+  const [confirmingRemove, readyToRemove] = useConfirmStep();
   const tick = useViewport();
   (0, import_react88.useLayoutEffect)(() => {
     const box = ref.current?.getBoundingClientRect();
@@ -32302,7 +32324,8 @@ function AgentMenu({ menu, roster, actions, leaving }) {
     ],
     sectionMoveItems(agent, roster, actions),
     [
-      [agent.kind === "tasks" ? t("Remove Tasks") : t("Remove {name}", { name: agent.name }), TrashIcon, () => actions.removeAgent(agent.id), true]
+      // Removing the DSH bot archives every Session it owns, so it asks first too.
+      [confirmingRemove ? agent.kind === "tasks" ? t("Remove Tasks?") : t("Remove {name}?", { name: agent.name }) : agent.kind === "tasks" ? t("Remove Tasks") : t("Remove {name}", { name: agent.name }), TrashIcon, () => actions.removeAgent(agent.id), true, false, void 0, readyToRemove]
     ]
   ].filter((group) => group.length > 0) : [
     [
@@ -32319,12 +32342,14 @@ function AgentMenu({ menu, roster, actions, leaving }) {
       import_react88.Fragment,
       { key: index },
       index > 0 ? (0, import_react88.createElement)("div", { className: "bt-menu-sep", role: "separator" }) : null,
-      group.map(([label, Icon, run2, danger, checked]) => (0, import_react88.createElement)("button", {
+      group.map(([label, Icon, run2, danger, checked, describedBy, ask]) => (0, import_react88.createElement)("button", {
         key: label,
         type: "button",
         role: "menuitem",
         className: danger ? "bt-danger" : void 0,
+        "aria-describedby": describedBy,
         onClick: () => {
+          if (ask && !ask()) return;
           actions.closeMenu();
           void Promise.resolve(run2()).catch((error) => actions.reportError(error, "menu"));
         }
