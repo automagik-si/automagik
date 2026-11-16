@@ -100,8 +100,27 @@ async function main() {
   check(surfaces.home.bots === 1 && surfaces.home.projects === 1, `first boot v2 home has ${surfaces.home.bots} bots, ${surfaces.home.projects} projects`)
   check(surfaces.repo.bots === TRIAD.length && surfaces.repo.mains === 1, `first boot v2 repo has ${surfaces.repo.bots} bots, ${surfaces.repo.mains} main`)
   check(new Set(surfaces.bots.map((bot) => bot.id)).size === TRIAD.length, 'first boot reused a Bot id')
+  const v1Registry = JSON.parse(readFileSync(join(WORKSPACE, '.herdr', 'bots.json'), 'utf8'))
+  const homeRegistry = JSON.parse(readFileSync(join(HOME, 'bots', 'bots.json'), 'utf8'))
+  const repoRegistry = JSON.parse(readFileSync(join(WORKSPACE, '.automagik', 'bots', 'bots.json'), 'utf8'))
+  const v1Ids = v1Registry.bots.map((bot) => bot.id).sort()
+  const repoIds = repoRegistry.bots.map((bot) => bot.id).sort()
+  check(JSON.stringify(v1Ids) === JSON.stringify(repoIds), `cross-surface ids differ: v1 [${v1Ids.join(' ')}], repo [${repoIds.join(' ')}]`)
+  const v1Main = v1Registry.bots.find((bot) => bot.kind === 'main')
+  const homeMain = homeRegistry.bots.find((bot) => bot.main === true && bot.folder === WORKSPACE)
+  check(homeMain?.id === v1Main?.id, `home main ${homeMain?.id} is not v1 main ${v1Main?.id}`)
+  check(homeRegistry.projects.some((project) => project.folder === WORKSPACE), `home has no project ${WORKSPACE}`)
+  for (const bot of v1Registry.bots) {
+    const other = repoRegistry.bots.find((candidate) => candidate.id === bot.id)
+    check(other, `repo has no Bot ${bot.id}`)
+    check(other.name === bot.name && other.role === bot.role && other.agent === bot.agent && other.model === bot.model,
+      `repo Bot ${bot.id} identity differs from v1`)
+  }
+  check(homeMain.name === v1Main.name && homeMain.role === v1Main.role && homeMain.agent === v1Main.agent && homeMain.model === v1Main.model,
+    'home main identity differs from the v1 main')
   say(`first boot: team ${surfaces.bots.map((bot) => `${bot.name} ${bot.id}`).join(', ')}`)
   say(`first boot: v1 ${surfaces.v1.file} (${surfaces.v1.bots} bots, ${surfaces.v1.mains} main); v2 home ${surfaces.home.file} (${surfaces.home.bots} bots, ${surfaces.home.projects} project); v2 repo ${surfaces.repo.file} (${surfaces.repo.bots} bots, ${surfaces.repo.mains} main)`)
+  say(`first boot: cross-surface ids ${v1Ids.join(' ')} agree; home main ${homeMain.id} matches v1 main`)
 
   // The shipped CLI store, called with a recording runner: no vendor CLI is downloaded and no
   // package manager command runs, but the real install path, pnpm path and registry are proved.

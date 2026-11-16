@@ -181,7 +181,7 @@ test('a seed refusal after the roster is a real failure with its stderr', () => 
   assert.equal(existsSync(join(home, 'bots', 'bots.json')), false)
 })
 
-test('first boot creates, seeds and verifies the team and both surfaces', () => {
+test('mutant FIRST_BOOT_PRESENT_HOME_SKIPS_VERIFY is killed: a partial home is not accepted on retry', () => {
   const dir = temp()
   const home = join(dir, 'home')
   const workspace = join(dir, 'workspace')
@@ -196,22 +196,32 @@ test('first boot creates, seeds and verifies the team and both surfaces', () => 
   assert.equal(first.registry.state, 'seeded')
   assert.equal(first.registry.script.source, 'vendored')
   assert.equal(first.surfaces.v1.bots, 3)
-  const marker = JSON.parse(readFileSync(join(home, FIRST_BOOT_MARKER), 'utf8'))
+  const markerFile = join(home, FIRST_BOOT_MARKER)
+  const marker = JSON.parse(readFileSync(markerFile, 'utf8'))
   assert.equal(marker.version, '3.149.2')
   assert.equal(marker.team.state, 'created')
   assert.equal(marker.team.bots.length, 3)
   assert.equal(marker.registry, 'seeded')
   assert.equal(marker.seedCommit, REGISTRY_SEED_COMMIT)
-  const second = runFirstBoot({
-    home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE,
-    vendorRoot: VENDOR, env, am, ...silence,
-  })
-  assert.equal(second.fresh, false)
-  assert.equal(second.team.state, 'present')
-  assert.equal(second.registry.state, 'present')
+
+  // The recovery state g9 reproduced: a home file, no v1 roster, no repo v2, no marker.
+  // The present-home early return would accept it and write a marker for the unchecked state.
+  const homeFile = join(home, 'bots', 'bots.json')
+  const homeBefore = readFileSync(homeFile, 'utf8')
+  rmSync(join(workspace, '.herdr', 'bots.json'), { force: true })
+  rmSync(join(workspace, '.automagik'), { recursive: true, force: true })
+  rmSync(markerFile, { force: true })
+  assert.throws(
+    () => runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env, am, ...silence }),
+    /registry verifier failed: missing/,
+  )
+  assert.equal(existsSync(markerFile), false, 'no marker is written for a partial state')
+  assert.equal(readFileSync(homeFile, 'utf8'), homeBefore, 'the home file is preserved')
+  assert.equal(existsSync(join(workspace, '.herdr', 'bots.json')), false, 'no ids are recreated')
+  assert.equal(existsSync(join(workspace, '.automagik', 'bots', 'bots.json')), false, 'no repo file is recreated')
 })
 
-test('the verifier refuses a Session key in a version 2 file', () => {
+test('mutant VERIFY_MEMBER_IDS_SKIPPED is killed: the verifier refuses a Session key and a member-id mismatch', () => {
   const dir = temp()
   const home = join(dir, 'home')
   const workspace = join(dir, 'workspace')
@@ -224,6 +234,43 @@ test('the verifier refuses a Session key in a version 2 file', () => {
   v2.bots[0].sessionId = 'session-00000000-0000-0000-0000-000000000000'
   writeFileSync(file, `${JSON.stringify(v2, null, 2)}\n`)
   assert.throws(() => verifySurfaces({ home, workspace }), /sessionId is a Session key/)
+  delete v2.bots[0].sessionId
+  v2.bots[1].id = 'b-zzzzzzzzzz'
+  writeFileSync(file, `${JSON.stringify(v2, null, 2)}\n`)
+  assert.throws(() => verifySurfaces({ home, workspace }), /v1 ids .* and v2 repo ids .* differ/)
+})
+
+test('mutants VERIFY_FIXED_TRIO_COUNT and VERIFY_HOME_EQUAL_COUNTS are killed: 6- and 9-Bot expansions verify with a one-Bot home index', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const env = envAt(dir, home, workspace)
+  ensureTeam({ home, workspace, env, am, ...silence })
+  seedRegistry({ home, workspace, profile: join(dir, 'profile'), env, vendorRoot: VENDOR, ...silence })
+  const v1File = join(workspace, '.herdr', 'bots.json')
+  const repoFile = join(workspace, '.automagik', 'bots', 'bots.json')
+  const expand = (from, count) => {
+    const v1 = JSON.parse(readFileSync(v1File, 'utf8'))
+    const repo = JSON.parse(readFileSync(repoFile, 'utf8'))
+    for (let index = 0; index < count; index += 1) {
+      const name = `Expansion ${from + index}`
+      const id = `b-${'mnopqr'[(from + index) % 6]}${'m'.repeat(9)}`
+      const identity = { id, name, role: 'Expand the team', instructions: 'A legitimate later expansion.', agent: 'codex', model: 'gpt-6-astra' }
+      v1.bots.push({ ...identity, kind: 'member' })
+      repo.bots.push({ ...identity, main: false })
+    }
+    writeFileSync(v1File, `${JSON.stringify(v1, null, 2)}\n`)
+    writeFileSync(repoFile, `${JSON.stringify(repo, null, 2)}\n`)
+  }
+  expand(0, 3)
+  const six = verifySurfaces({ home, workspace })
+  assert.equal(six.v1.bots, 6)
+  assert.equal(six.home.bots, 1)
+  expand(3, 3)
+  const nine = verifySurfaces({ home, workspace })
+  assert.equal(nine.v1.bots, 9)
+  assert.equal(nine.home.bots, 1)
 })
 
 test('the role briefs carry the Claude-only UI and opposite-provider review rules', () => {

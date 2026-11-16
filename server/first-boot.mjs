@@ -274,39 +274,79 @@ const noSessionKeys = (value, path = '') => {
   ))
 }
 
+/** Sorted Bot ids; a verifier never drops or re-mints one. */
+const sortedIds = (bots) => bots.map((bot) => bot?.id).filter((id) => typeof id === 'string').sort()
+/** The identity fields both the v1 roster and the v2 repo file carry. */
+const identityOf = (bot) => JSON.stringify({
+  name: bot?.name,
+  role: bot?.role ?? null,
+  agent: bot?.agent ?? null,
+  model: bot?.model ?? null,
+})
+
 /**
  * Verify the three surfaces the first boot leaves behind: the version 1 roster, the version 2
- * home file and the version 2 repo file. Counts and ids must agree; no Session key may survive.
+ * home file and the version 2 repo file. The v1 roster and the repo file must carry the same
+ * full identity set; the home file carries this project's main Bot and index entry. No count is
+ * fixed here, so a legitimate 3-, 6- or 9-Bot expansion is accepted; `expectedIds` is passed
+ * only for the triad a fresh boot just minted. No Session key may survive.
  */
-export function verifySurfaces({ home, workspace } = {}) {
-  const v1 = readJson(rosterOf(workspace))
+export function verifySurfaces({ home, workspace, expectedIds } = {}) {
+  const rosterFile = rosterOf(workspace)
   const homeFile = homeRegistryOf(home)
   const repoFile = repoRegistryOf(workspace)
+  const missing = [rosterFile, homeFile, repoFile].filter((file) => !existsSync(file))
+  if (missing.length) throw new Error(`first boot: registry verifier failed: missing ${missing.join(', ')}`)
+  const v1 = readJson(rosterFile)
   const homeRegistry = readJson(homeFile)
   const repoRegistry = readJson(repoFile)
   const v1Bots = Array.isArray(v1.bots) ? v1.bots : []
   const v1Mains = v1Bots.filter((bot) => bot?.kind === 'main')
   const homeBots = Array.isArray(homeRegistry.bots) ? homeRegistry.bots : []
-  const homeMains = homeBots.filter((bot) => bot?.main === true)
   const repoBots = Array.isArray(repoRegistry.bots) ? repoRegistry.bots : []
   const repoMains = repoBots.filter((bot) => bot?.main === true)
+  const v1Ids = sortedIds(v1Bots)
+  const repoIds = sortedIds(repoBots)
   const problems = []
-  if (v1.version !== 1 || v1Mains.length !== 1) problems.push(`v1 ${rosterOf(workspace)}: ${v1Bots.length} bots, ${v1Mains.length} main`)
-  if (v1Bots.length !== TRIAD.length) problems.push(`v1 has ${v1Bots.length} bots, not ${TRIAD.length}`)
-  if (homeRegistry.version !== 2 || homeMains.length !== 1) problems.push(`v2 home ${homeFile}: ${homeBots.length} bots, ${homeMains.length} main`)
+  if (v1.version !== 1 || v1Mains.length !== 1) problems.push(`v1 ${rosterFile}: ${v1Bots.length} bots, ${v1Mains.length} main`)
+  if (homeRegistry.version !== 2) problems.push(`v2 home ${homeFile}: version ${JSON.stringify(homeRegistry.version)}`)
   if (!Array.isArray(homeRegistry.projects) || !homeRegistry.projects.some((entry) => entry?.folder === workspace)) problems.push(`v2 home ${homeFile}: no project ${workspace}`)
   if (repoRegistry.version !== 2 || repoMains.length !== 1) problems.push(`v2 repo ${repoFile}: ${repoBots.length} bots, ${repoMains.length} main`)
-  if (repoBots.length !== TRIAD.length) problems.push(`v2 repo has ${repoBots.length} bots, not ${TRIAD.length}`)
-  const mainId = v1Mains[0]?.id
-  if (!mainId || !homeMains.some((bot) => bot?.id === mainId) || !repoMains.some((bot) => bot?.id === mainId)) problems.push('the main Bot id differs between the v1 roster and the v2 files')
-  for (const file of [rosterOf(workspace), homeFile, repoFile]) {
-    for (const at of noSessionKeys(readJson(file))) problems.push(`${file}: ${at} is a Session key`)
+  if (expectedIds) {
+    const wanted = [...expectedIds].map(String).sort()
+    if (JSON.stringify(wanted) !== JSON.stringify(v1Ids)) problems.push(`fresh team ids [${wanted.join(' ')}] do not match the v1 roster [${v1Ids.join(' ')}]`)
+  }
+  if (JSON.stringify(v1Ids) !== JSON.stringify(repoIds)) {
+    problems.push(`v1 ids [${v1Ids.join(' ')}] and v2 repo ids [${repoIds.join(' ')}] differ`)
+  }
+  const repoById = new Map(repoBots.map((bot) => [bot?.id, bot]))
+  for (const bot of v1Bots) {
+    const other = repoById.get(bot?.id)
+    if (!other) { problems.push(`v1 Bot ${JSON.stringify(bot?.id)} is missing from the v2 repo file`); continue }
+    if ((bot?.kind === 'main') !== (other?.main === true)) problems.push(`v1 Bot ${bot.id} main flag differs in the v2 repo file`)
+    if (identityOf(bot) !== identityOf(other)) problems.push(`v1 Bot ${bot.id} identity differs in the v2 repo file`)
+  }
+  const homeProjectBots = homeBots.filter((bot) => bot?.folder === workspace)
+  const homeMain = homeProjectBots.find((bot) => bot?.main === true)
+  const homeProjectIds = sortedIds(homeProjectBots)
+  if (!homeProjectBots.length) problems.push(`v2 home ${homeFile}: no Bot for ${workspace}`)
+  if (!homeMain) problems.push(`v2 home ${homeFile}: no main Bot for ${workspace}`)
+  const v1Main = v1Mains[0]
+  if (homeMain && v1Main) {
+    if (homeMain.id !== v1Main.id) problems.push(`v2 home ${homeFile}: main ${homeMain.id} is not the v1 main ${v1Main.id}`)
+    else if (identityOf(homeMain) !== identityOf(v1Main)) problems.push(`v2 home ${homeFile}: main ${homeMain.id} identity differs from the v1 main`)
+  }
+  for (const id of homeProjectIds) {
+    if (!v1Ids.includes(id)) problems.push(`v2 home ${homeFile}: Bot ${id} is not in the v1 roster`)
+  }
+  for (const [file, value] of [[rosterFile, v1], [homeFile, homeRegistry], [repoFile, repoRegistry]]) {
+    for (const at of noSessionKeys(value)) problems.push(`${file}: ${at} is a Session key`)
   }
   if (problems.length) throw new Error(`first boot: registry verifier failed: ${problems.join('; ')}`)
   return {
-    v1: { file: rosterOf(workspace), bots: v1Bots.length, mains: v1Mains.length, id: mainId, mainId, ids: v1Bots.map((bot) => bot.id) },
-    home: { file: homeFile, bots: homeBots.length, projects: homeRegistry.projects.length, mains: homeMains.length, mainId: homeMains[0]?.id, ids: homeBots.map((bot) => bot.id) },
-    repo: { file: repoFile, bots: repoBots.length, mains: repoMains.length, mainId: repoMains[0]?.id, ids: repoBots.map((bot) => bot.id) },
+    v1: { file: rosterFile, bots: v1Bots.length, mains: v1Mains.length, mainId: v1Main?.id, ids: v1Ids },
+    home: { file: homeFile, bots: homeProjectBots.length, projects: homeRegistry.projects.length, mains: homeMain ? 1 : 0, mainId: homeMain?.id, ids: homeProjectIds },
+    repo: { file: repoFile, bots: repoBots.length, mains: repoMains.length, mainId: repoMains[0]?.id, ids: repoIds },
     bots: v1Bots.map((bot) => ({ id: bot.id, name: bot.name, kind: bot.kind, role: bot.role })),
   }
 }
@@ -349,15 +389,19 @@ export function runFirstBoot({
   if (!fs.existsSync(homeFile)) {
     team = ensureTeam({ home, workspace, env, am, run, log, warn })
     registry = seedRegistry({ home, workspace, profile, env, run, vendorRoot, log, warn })
-    surfaces = verifySurfaces({ home, workspace })
+    surfaces = verifySurfaces({
+      home, workspace,
+      ...(team.state === 'created' ? { expectedIds: team.bots.map((bot) => bot.id) } : {}),
+    })
     log(`first boot: registry ${registry.state} from ${registry.script.source}${registry.script.commit ? ` @ ${registry.script.commit}` : ''}`)
-    log(`first boot: v1 ${surfaces.v1.file} (${surfaces.v1.bots} bots, ${surfaces.v1.mains} main); v2 home ${surfaces.home.file} (${surfaces.home.bots} bots, ${surfaces.home.projects} project); v2 repo ${surfaces.repo.file} (${surfaces.repo.bots} bots, ${surfaces.repo.mains} main)`)
-    log(`first boot: coherent ids: v1 [${surfaces.v1.ids.join(' ')}] main ${surfaces.v1.mainId}; v2 home [${surfaces.home.ids.join(' ')}] main ${surfaces.home.mainId}; v2 repo [${surfaces.repo.ids.join(' ')}] main ${surfaces.repo.mainId}`)
   } else {
     team = { state: 'present' }
     registry = { state: 'present', homeFile }
-    log(`first boot: registry present at ${homeFile}; left as it is`)
+    surfaces = verifySurfaces({ home, workspace })
+    log(`first boot: registry present at ${homeFile}; verified`)
   }
+  log(`first boot: v1 ${surfaces.v1.file} (${surfaces.v1.bots} bots, ${surfaces.v1.mains} main); v2 home ${surfaces.home.file} (${surfaces.home.bots} bots, ${surfaces.home.projects} project); v2 repo ${surfaces.repo.file} (${surfaces.repo.bots} bots, ${surfaces.repo.mains} main)`)
+  log(`first boot: coherent ids: v1 [${surfaces.v1.ids.join(' ')}] main ${surfaces.v1.mainId}; v2 home [${surfaces.home.ids.join(' ')}] main ${surfaces.home.mainId}; v2 repo [${surfaces.repo.ids.join(' ')}] main ${surfaces.repo.mainId}`)
   if (fresh) {
     const record = {
       schemaVersion: 1,
