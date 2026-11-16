@@ -305,7 +305,7 @@ test('a phone header keeps the switch whole beside one More, and its panel in th
   assert.ok(layout.pop && layout.pop.left >= 0 && layout.pop.right <= 390, 'the panel stays inside the window')
   assert.deepEqual(layout.rows.map(row => row.height), [34, 34, 34, 34], 'every row is one height')
   assert.equal(layout.word, 'inline', 'the side panel row says its word')
-  assert.equal(layout.count, '9px', 'the count is its own badge')
+  assert.equal(layout.count, '10px', 'the count is its own badge')
 })
 
 test('the view\'s switch reads Chat and Terminal, the open face raised, on both themes', async (t) => {
