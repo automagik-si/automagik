@@ -101,12 +101,13 @@ function destination(input) {
     args.push('-p', String(Number(input.port)))
   }
   for (const name of ['identityFile', 'hermesPath']) if (input[name] !== undefined && input[name] !== '' && !safeField(input[name])) throw failure('invalid-details', 'Enter a valid identity file or remote Hermes path.')
+  if (input.recordDir !== undefined && input.recordDir !== '' && (!safeField(input.recordDir) || !input.recordDir.startsWith('/') || input.recordDir.split('/').includes('..'))) throw failure('invalid-details', 'The serve record folder must be an absolute remote folder.')
   if (input.identityFile) {
     if (input.identityFile.startsWith('-')) throw failure('invalid-details', 'Enter a valid identity file path.')
     args.push('-i', input.identityFile)
   }
   if (input.hermesHome && (!safeField(input.hermesHome) || !input.hermesHome.startsWith('/') || input.hermesHome.split('/').some(part => part === '..' || part === '.'))) throw failure('invalid-details', 'Hermes home must be an absolute remote folder.')
-  return { args, target: user ? `${user}@${host}` : host, hermesPath: input.hermesPath || '', hermesHome: input.hermesHome || '' }
+  return { args, target: user ? `${user}@${host}` : host, hermesPath: input.hermesPath || '', hermesHome: input.hermesHome || '', recordDir: input.recordDir || '' }
 }
 
 // This is our POSIX remote supervisor, not upstream code. Its private stdin owns the

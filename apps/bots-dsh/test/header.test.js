@@ -18,8 +18,10 @@ const bundle = await build({
   } }] : [],
 })
 const module = { exports: {} }
+// The header reads the window's width for its phone layout; the tests set it per render.
+const viewport = { innerWidth: 1280, addEventListener() {}, removeEventListener() {} }
 runInNewContext(bundle.outputFiles[0].text, {
-  module, exports: module.exports, URL, URLSearchParams, setTimeout, clearTimeout,
+  module, exports: module.exports, URL, URLSearchParams, setTimeout, clearTimeout, window: viewport,
   require: (name) => {
     const platform = {
       react: { createContext: (initial) => { const ctx = { value: initial }; ctx.Provider = ({ value, children }) => { ctx.value = value; return children }; return ctx }, useContext: ctx => ctx.value, useId: () => 'dv-id', useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),  createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }), useState: initial => [initial, () => {}], useEffect: () => {}, useRef: current => ({ current }), useLayoutEffect: () => {}, useMemo: make => make(), useCallback: fn => fn, Fragment: 'fragment' },
@@ -48,6 +50,15 @@ const header = (actions, navigation = {}) => HeaderPill({
   actions,
   ...navigation,
 })
+const find = (node, match) => {
+  if (node === null || typeof node !== 'object') return null
+  if (match(node)) return node
+  for (const child of node.children ?? []) {
+    const found = find(child, match)
+    if (found) return found
+  }
+  return null
+}
 const sideButton = (node) => {
   if (node === null || typeof node !== 'object') return null
   if (node.props?.['data-bt-right-sidebar'] !== undefined) return node
@@ -156,8 +167,33 @@ test('Details is labeled, names the panel and expands only while it shows this s
   for (const [details, view] of cases) {
     const button = byClass(header({}, { useUi: hook({ details, view }) }), 'bt-head-details')
     assert.equal(button.props['aria-controls'], 'bt-conversation-panel')
-    assert.ok(button.children.includes('Details'), 'the label is visible text, not only a tooltip')
+    assert.ok(button.children.some(child => child?.props?.className === 'bt-head-word' && child.children.includes('Details')), 'the label is visible text, not only a tooltip')
   }
+})
+
+test('a phone folds every header control into one More, so the switch keeps the room', () => {
+  const actions = { hasRightSidebar: () => true, openLive() {}, toggleRightSidebar() {}, toggleDetails() {} }
+  viewport.innerWidth = 1280
+  const wide = header(actions)
+  assert.equal(byClass(wide, 'bt-head-more'), null, 'a wide window keeps its buttons in the row')
+  assert.ok(byClass(wide, 'bt-head-details'), 'Details is in the row')
+  viewport.innerWidth = 621
+  assert.equal(byClass(header(actions), 'bt-head-more'), null, '621 is still the wide row')
+  viewport.innerWidth = 620
+  const narrow = header(actions)
+  viewport.innerWidth = 1280
+  const more = byClass(narrow, 'bt-head-more')
+  assert.ok(more, '620 folds the controls into More')
+  const summary = more.children.find(child => child.type === 'summary')
+  assert.equal(summary.props['aria-label'], 'More')
+  assert.equal(summary.props.title, 'More')
+  const panel = byClass(more, 'bt-head-more-pop')
+  assert.ok(panel, 'the controls live in the panel')
+  assert.ok(byClass(panel, 'bt-head-details'), 'Live, the right sidebar and Details are in the panel')
+  assert.ok(byClass(panel, 'bt-head-details').props['aria-controls'] === undefined)
+  const side = find(panel, node => node.props?.['data-bt-right-sidebar'] !== undefined)
+  assert.ok(byClass(side, 'bt-head-more-word'), 'the side panel row says its word in the panel')
+  assert.ok(find(narrow, node => node.type?.name === 'BotFaceSwitch'), 'the Chat / Terminal switch stays in the row')
 })
 
 test('Details toggles the current Bot or group, never a plain or native wish thread', () => {
@@ -215,7 +251,7 @@ test('only the Details pill names the pane and takes focus before the icon butto
   assert.equal(details.props['aria-label'], 'View conversation details')
   assert.equal(details.props['data-details-subject'], 'a')
   assert.equal(details.props['aria-expanded'], false, 'the Browser view is not the Details pane')
-  assert.deepEqual(details.children.slice(1), ['Details'], 'the visible label follows the icon')
+  assert.deepEqual(details.children.slice(1).map(child => (child?.props?.className === 'bt-head-word' ? child.children[0] : child)), ['Details'], 'the visible label follows the icon')
   for (const other of buttons.filter(button => button !== details)) {
     assert.equal(other.props['aria-controls'], undefined,
       `${other.props['aria-label']} controls no pane`)

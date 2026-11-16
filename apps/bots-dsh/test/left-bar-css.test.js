@@ -38,6 +38,10 @@ test('the sizes are round 1.1 values', () => {
   assert.match(LEFT_BAR_SKINS.stage['--lb-needs-ink'], /--st-warn.* 70%,var\(--bt-ink\)/)
 })
 
+test('the wordmark fits the brand box at any width, so the phone drawer never cuts it', () => {
+  assert.match(LEFT_BAR_CSS, /\.lb-brand \.omni-wordmark\{[^}]*max-width:100%[^}]*height:auto\}/)
+})
+
 test('the working ring rests when motion is turned down', () => {
   assert.match(LEFT_BAR_CSS, /body\[data-bt-motion=quiet\] \.lb-mark-arc\{animation:none\}/)
   assert.match(LEFT_BAR_CSS, /@media \(prefers-reduced-motion:reduce\)\{\.lb-mark-arc\{animation:none\}\}/)
