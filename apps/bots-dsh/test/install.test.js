@@ -182,6 +182,11 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: live feed route',
     'route GET /api/omni-ui/feed',
     'effect ds-bot: live feed',
+    // The shared gen-UI kit's host half: the live slice, its feed nudge and the media route.
+    'effect omni-ui: genui slice',
+    'effect omni-ui: genui feed nudge',
+    'effect omni-ui: genui media route',
+    'route GET /api/omni-ui/genui-media',
     'effect ds-bot: agent access',
     'effect ds-bot: pet route',
     'route GET /api/omni-ui/pet',

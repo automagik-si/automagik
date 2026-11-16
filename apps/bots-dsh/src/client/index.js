@@ -57,6 +57,14 @@ import { cliLoginBotOf } from './cli-login-model.js'
 import { ConnectorDock, MailDock, CONNECTOR_CSS } from './connectors.js'
 import { CONNECTORS_PAGE_CSS } from './connectors-page.js'
 import { LearningDock, LearningTurnTail, LEARNING_CSS } from './learning-card.js'
+import {
+  CoverageRow, GENUI_CSS, PersonCard, ProgressRow, ProgressRows, READING_NOTE,
+  loadReadingNote, genuiRows, revisionOf,
+} from './genui.js'
+import {
+  coverageLine, coverageOf, countText, parseReadingNote, percentOf, personView, rowView,
+  shortDate, spanOf, stateId, stateWord,
+} from './genui-model.js'
 import { BOT_SETTINGS_CSS } from './bot-settings.js'
 import { AVATAR_LIBRARY_CSS } from './avatar-library.js'
 import { GROUP_SETTINGS_CSS } from './group-settings.js'
@@ -100,6 +108,17 @@ export const omni = Object.freeze({
   onShell, toolCards, nav, badges, botChildren, headerButtons, sidebarTools, botSettings, chatSuggestions, registerComposerPack, setCanvasRenderer,
   // Parts of the Bot surface a plugin's own views are drawn with.
   ui: Object.freeze({ icons, OmniMark, BotMark, MAIN_LOOK, CHARACTERS, relativeShort, createSource }),
+  // The shared gen-UI kit (#1326): live rows and the person card, drawn inside a plugin's
+  // own tool card. `rows(roster, batchId)` reads the host's slice; the model is the same
+  // words and number formats the kit's cards use, for a card of a plugin's own shape.
+  genui: Object.freeze({
+    PersonCard, ProgressRow, ProgressRows, CoverageRow,
+    rows: genuiRows, revisionOf, loadReadingNote, READING_NOTE,
+    model: Object.freeze({
+      coverageLine, coverageOf, countText, parseReadingNote, percentOf, personView, rowView,
+      shortDate, spanOf, stateId, stateWord,
+    }),
+  }),
   // The roster and actions of the running surface, or null before it runs.
   face: () => currentFace?.() ?? null,
 })
@@ -1175,6 +1194,7 @@ export function apply(ctx) {
     () => installCompiledStyles(VOICE_SETTINGS_CSS, 'voice-settings'),
     () => installCompiledStyles(IMAGE_CELL_CSS, 'image-cell'),
     () => installCompiledStyles(SUGGEST_CSS, 'suggestions'),
+    () => installCompiledStyles(GENUI_CSS, 'genui'),
     () => installCompiledStyles(LIVE_CSS, 'live'),
     () => {
       const fiber = ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
