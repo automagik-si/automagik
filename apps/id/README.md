@@ -65,11 +65,14 @@ main action. When enabled, WhatsApp lets the person send the prefilled message
 from a link or QR code; the page has no phone-number or code-entry fields. Copy
 is English only, in one table in `id.js`.
 
-The Worker serves a page only at `/sign-in` and `/consent`, where it adds
-`referrer-policy`, `cache-control: no-store` and `x-frame-options`. Any direct
-`.html` path answers 404, so a page never arrives without those headers. Other
-files in `pages/` are served as they are. A Worker running without the `PAGES`
-binding answers plain text `501 page not built yet` on both routes.
+The Worker serves a page only at `/sign-in` and `/consent`, with
+`cache-control: no-store`. Any direct `.html` path answers 404, so there is one
+address per page. Every answer the Worker gives, pages, files, API, well-known
+metadata and errors alike, carries the security headers `PAGES-CONTRACT.md`
+lists: a strict Content-Security-Policy, `x-content-type-options: nosniff`,
+`strict-transport-security`, `referrer-policy: no-referrer` and
+`x-frame-options: DENY`. A Worker running without the `PAGES` binding answers
+plain text `501 page not built yet` on both routes.
 
 From this directory:
 
@@ -102,8 +105,10 @@ Mutation checks drop inbound authentication or timestamp checks, permit proof
 reuse, select the current session account, restore the session JWT header, disable
 PKCE, relax redirects, enable public registration, move rate limits to memory,
 serve a page file directly as `.html`, take the passkey site name from the host,
-start on (or configure) a host outside it, accept a look-alike host and let CI
-skip the page browser tests,
+start on (or configure) a host outside it, accept a look-alike host, let CI
+skip the page browser tests, drop the Content-Security-Policy or nosniff, let
+inline script run, send files and API answers without the security headers, let
+a direct `.html` path through, and rebuild the headers losing Better Auth's cookies,
 one at a time. Each must fail its targeted test; source files are restored
 afterward. Announcements and results are printed to stdout.
 `bun scripts/generate-migration.ts` regenerates the initial schema for review;
