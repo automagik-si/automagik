@@ -21,10 +21,14 @@
 #     command UNCAPPED after one `UNCAPPED: <reason>` line on stderr, and keeps its exit status.
 #     A missing cap never fails a gate, and a capped run is never reported as a pass.
 #   - When the scope is killed for memory, the exit status is 137 and one line on stderr says
-#     `CAPPED: ...`: the limit, the peak the scope reached and the command name (the basename
-#     only). The line is appended to the run log and read back from it before the wrapper says
-#     CAPPED (a log that did not take it is reported as `log=unwritten`), and no argv and no
-#     environment value ever reaches that line or the log.
+#     `CAPPED: ...`: the limit, the peak and the command name (the basename only). A kill means
+#     the scope reached its MemoryMax, so the printed peak is at least the limit (the sampled
+#     peak is a lower bound, labelled by the limit on the same line). The line is appended to the
+#     run log and read back from it before the wrapper says CAPPED (a log that did not take it is
+#     reported as `log=unwritten`), and no argv and no environment value ever reaches that line
+#     or the log.
+#   - A signal from outside (INT, TERM, HUP) stops this run's own scope and removes its scratch
+#     folders and peak file before the wrapper exits.
 #   - With --lock, the log also gets one line at the start and one at the end of every run:
 #     UTC time, owner (the terminal id in the environment, name only), command name, start or
 #     end, and the exit code at the end. The same log always stays 0600.
@@ -160,13 +164,14 @@ if [ -n "$mem_arg" ]; then
     mib=$default_mib
   fi
 fi
-unit_name=
+stamp=$(date +%s)
+unit_name=capped-run-$$-${stamp}
 if [ -n "$name" ]; then
   case $name in
     *[!A-Za-z0-9_.-]*) fail '--name may only hold letters, digits, dot, underscore and dash' ;;
   esac
   [ ${#name} -le 60 ] || fail '--name is too long'
-  unit_name=capped-run-$name-$$
+  unit_name=capped-run-$name-$$-${stamp}
 fi
 
 # --- the run log ---------------------------------------------------------------------------
@@ -413,11 +418,11 @@ read_peak() {
 }
 
 peak_label() {
-  case ${peak:-} in
+  case ${1:-} in
     '' | *[!0-9]*) printf '%s' unknown; return 0 ;;
   esac
-  human=$(awk -v bytes="$peak" 'BEGIN { printf "%.1fM", bytes / 1048576 }' 2>/dev/null)
-  [ -n "$human" ] || human=${peak}B
+  human=$(awk -v bytes="$1" 'BEGIN { printf "%.1fM", bytes / 1048576 }' 2>/dev/null)
+  [ -n "$human" ] || human=${1}B
   printf '%s' "$human"
 }
 
@@ -429,6 +434,23 @@ log_capped() {
 }
 
 # --- main -----------------------------------------------------------------------------------
+
+# A signal from outside stops this run's own scope and removes its scratch folders and peak file,
+# so a killed wrapper leaves no live scope and nothing behind in the state folder. The body runs
+# only from the traps below.
+# shellcheck disable=SC2317
+on_signal() {
+  trap - INT TERM HUP
+  [ -n "${unit_name:-}" ] && systemctl --user stop "${unit_name}.scope" >/dev/null 2>&1
+  [ -n "${child:-}" ] && kill "$child" 2>/dev/null
+  [ "${locked:-0}" = 1 ] && log_event end " exit=$1"
+  cleanup_scratch
+  [ -n "${peek:-}" ] && rm -f "$peek" "$peek.tmp" 2>/dev/null
+  exit "$1"
+}
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+trap 'on_signal 129' HUP
 
 locked=0
 if [ "$use_lock" = 1 ]; then
@@ -464,16 +486,27 @@ if detect_scope; then
   if ensure_state; then
     peek=$state_dir/peak.$$
   fi
-  run_capped "$@"
+  run_capped "$@" &
+  child=$!
+  wait "$child"
 else
   printf 'UNCAPPED: %s\n' "$uncapped_reason" >&2
-  run_uncapped "$@"
+  run_uncapped "$@" &
+  child=$!
+  wait "$child"
 fi
 code=$?
 
 if [ "$capped" = 1 ] && [ "$code" = 137 ]; then
   read_peak
-  peak_text=$(peak_label)
+  # A kill means the scope reached MemoryMax; the monitor's last sample is a lower bound, so the
+  # printed peak is at least the limit. Mutant 15 drops this floor and the peak test fails.
+  limit_bytes=$((mib * 1048576))
+  case ${peak:-} in
+    '' | *[!0-9]*) peak_bytes=$limit_bytes ;;
+    *) if [ "$peak" -lt "$limit_bytes" ]; then peak_bytes=$limit_bytes; else peak_bytes=$peak; fi ;;
+  esac
+  peak_text=$(peak_label "$peak_bytes")
   capped_line=$(printf 'CAPPED: killed at the memory limit (limit=%s, peak=%s, command=%s)' \
     "$mem_label" "$peak_text" "$cmd_comm")
   # Logged and read back BEFORE the wrapper says CAPPED: the report may only claim the log it
@@ -492,7 +525,7 @@ fi
 if [ "$capped" = 1 ] && [ -n "$peek" ]; then
   if [ "$code" != 137 ]; then
     tries=0
-    while [ "$tries" -lt 5 ] && [ -r "$peek" ]; do
+    while [ "$tries" -lt 20 ] && [ -r "$peek" ]; do
       if read -r kind bytes <"$peek" 2>/dev/null && [ "$kind" = "done" ]; then
         break
       fi

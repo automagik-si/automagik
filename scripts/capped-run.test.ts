@@ -12,6 +12,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -114,6 +115,40 @@ async function waitFor(path: string, milliseconds: number): Promise<boolean> {
   }
   return existsSync(path);
 }
+
+async function goneWithin(path: string, milliseconds: number): Promise<boolean> {
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    if (!existsSync(path)) return true;
+    await Bun.sleep(100);
+  }
+  return !existsSync(path);
+}
+
+async function processGoneWithin(pid: number, milliseconds: number): Promise<boolean> {
+  if (!pid) return true;
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    await Bun.sleep(100);
+  }
+  return false;
+}
+
+function shmHasRoom(): boolean {
+  if (!existsSync('/dev/shm')) return false;
+  const df = spawnSync('df', ['-k', '/dev/shm'], { encoding: 'utf8' });
+  if (df.status !== 0) return false;
+  const line = (df.stdout ?? '').trim().split('\n').pop() ?? '';
+  const availableKb = Number((line.trim().split(/\s+/) ?? [])[3]);
+  return Number.isFinite(availableKb) && availableKb > 1024 * 1024;
+}
+
+const dd = spawnSync('dd', ['--version'], { encoding: 'utf8' }).status === 0;
 
 describe('capped-run', () => {
   test('passes a passing and a failing exit code through unchanged', () => {
@@ -295,7 +330,7 @@ describe('capped-run', () => {
   });
 
   test.skipIf(!scope)(
-    'a memory kill exits 137, prints one CAPPED line, and logs it before exiting',
+    'a memory kill exits 137, prints one CAPPED line with a peak at least 90 percent of the cap, and logs it before exiting',
     () => {
       const state = scratch('cap-state');
       const lock = join(work, 'cap.lock');
@@ -320,6 +355,11 @@ describe('capped-run', () => {
       expect(capped[0]).toContain('CAPPED: killed at the memory limit (limit=256M, peak=');
       expect(capped[0]).toMatch(/peak=[^,)]+/);
       expect(capped[0]).toContain(`command=${command})`);
+      // Labelled peak bound: a kill at the 256M cap must print at least 90 percent of it, never
+      // the last in-scope sample (mutant 15 fails here).
+      const peakMib = Number((capped[0].match(/peak=([0-9.]+)M/) ?? [])[1]);
+      expect(Number.isFinite(peakMib)).toBe(true);
+      expect(peakMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
       expect(outcome.stderr).not.toContain('argv-leak-marker');
       expect(outcome.stderr).not.toContain('env-leak-marker');
 
@@ -345,5 +385,77 @@ describe('capped-run', () => {
       expect(statSync(outcome.logPath).mode & 0o777).toBe(0o600);
     },
     120_000,
+  );
+
+  test.skipIf(!scope || !dd || !shmHasRoom())(
+    'a dd-like allocation killed at the cap reports a peak at least 90 percent of the cap',
+    () => {
+      const state = scratch('dd-state');
+      const file = join('/dev/shm', `capped-run-dd-${process.pid}-${Date.now()}`);
+      try {
+        const outcome = cappedRun(
+          ['--mem', '256M', '--', 'dd', 'if=/dev/zero', `of=${file}`, 'bs=1M', 'count=512', 'status=none'],
+          { state, env: { CAPPED_RUN_TEST_MEM: '256M' }, timeout: 120_000 },
+        );
+        expect(outcome.status).toBe(137);
+        const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
+        expect(capped).toHaveLength(1);
+        const peakMib = Number((capped[0].match(/peak=([0-9.]+)M/) ?? [])[1]);
+        expect(Number.isFinite(peakMib)).toBe(true);
+        expect(peakMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
+      } finally {
+        rmSync(file, { force: true });
+      }
+    },
+    120_000,
+  );
+
+  test.skipIf(!scope)('a short run leaves no peak file in the state folder', () => {
+    const state = scratch('short-state');
+    const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], { state });
+    expect(outcome.status).toBe(0);
+    expect(readdirSync(state).filter(name => name.startsWith('peak'))).toEqual([]);
+  });
+
+  test.skipIf(!scope)(
+    'a wrapper killed from outside stops its scope and removes its scratch folders and peak file',
+    async () => {
+      const state = scratch('signal-state');
+      const info = join(work, 'signal-info.txt');
+      const childScript =
+        'printf "%s\\n%s\\n%s\\n" "$$" "${TMPDIR-}" "${XDG_RUNTIME_DIR-}" > "$0.tmp" && mv "$0.tmp" "$0"; sleep 30';
+      const wrapper = spawn('sh', [SCRIPT, '--', 'sh', '-c', childScript, info], {
+        cwd: work,
+        env: { ...process.env, CAPPED_RUN_TEST_STATE: state },
+        stdio: 'ignore',
+      });
+      let pid = 0;
+      try {
+        expect(await waitFor(info, 20_000)).toBe(true);
+        const [pidText, tmpdir, runtime] = readFileSync(info, 'utf8').trim().split('\n');
+        pid = Number(pidText);
+        wrapper.kill('SIGTERM');
+        const ended = await new Promise<{ code: number | null; signal: string | null }>(resolve => {
+          const timer = setTimeout(() => resolve({ code: null, signal: null }), 20_000);
+          wrapper.on('close', (code, signal) => {
+            clearTimeout(timer);
+            resolve({ code, signal });
+          });
+        });
+        expect(ended.code !== null || ended.signal !== null).toBe(true);
+        expect(await goneWithin(tmpdir, 10_000)).toBe(true);
+        expect(await goneWithin(runtime, 10_000)).toBe(true);
+        expect(await processGoneWithin(pid, 10_000)).toBe(true);
+        expect(readdirSync(state).filter(name => name.startsWith('peak'))).toEqual([]);
+      } finally {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+        wrapper.kill('SIGKILL');
+      }
+    },
+    90_000,
   );
 });
