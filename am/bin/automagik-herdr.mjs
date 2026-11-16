@@ -67,6 +67,7 @@ import { SPACE_LABEL, plan as tidyPlan, planText } from "../tidy.js";
 import { fixNonVisual, readState, spacesOf } from "./state.mjs";
 import { deliverArgv } from "../eventNotice.mjs";
 import { NOTIFY_EXIT, runNotify } from "../notify.mjs";
+import { openSeenJournal, SeenJournalError } from "../seenJournal.mjs";
 
 /**
  * A refusal or a usage mistake: printed on stderr, exit `code`. `detail`: fields a --json run
@@ -1450,10 +1451,13 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 Made for mods: their exec has no stdin to speak hc connect with.
   notify --thread <uuid>        JSON lines on stdin, one event each, through the event-notice
                                 shim: one receipt line (JSON) per line on stdout, never the
-                                line's text. Exit 0: every line queued, deduped, suppressed,
-                                paused or stopped (or no lines); 1: a line refused, with no
-                                queue call for it; 2: a usage mistake; 3: stdin could not be
-                                read to the end; 4: a queue call failed. A stop ends the run.
+                                line's text. The seen ids persist across runs in a 0600 journal
+                                ($AUTOMAGIK_NOTIFY_JOURNAL, else $XDG_STATE_HOME/automagik/
+                                notify-seen.jsonl; the newest 1000). Exit 0: every line queued,
+                                deduped, suppressed, paused or stopped (or no lines); 1: a line
+                                refused, with no queue call for it; 2: a usage mistake; 3: stdin
+                                could not be read to the end, or the journal could not be read
+                                or written; 4: a queue call failed. A stop ends the run.
                                 This build is a dry run: no queue is wired, so each valid line
                                 is paused and nothing is called.
   launch-path <program>         where a launch finds <program> (PATH, ~/.local/bin, this CLI's
@@ -7602,6 +7606,9 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
  * `notify --thread <uuid>`: JSON lines on stdin through the event-notice shim (notify.mjs holds
  * the loop and the exit codes). The queue, the control read, the thread check and the clock come
  * from `io`; with no `io.queue` it is a dry run: every valid line is paused, nothing is called.
+ * The seen ids come from the persistent journal (seenJournal.mjs): it is opened before stdin is
+ * read, a corrupt or unreadable one is refused (exit 3), and every queued id is written 0600 so a
+ * restart dedupes.
  */
 export async function cmdNotify(opts, rest, io = {}) {
   if (rest.length) throw new CliError("notify takes no arguments: JSON lines on stdin and --thread <uuid>.", NOTIFY_EXIT.usage);
@@ -7609,19 +7616,47 @@ export async function cmdNotify(opts, rest, io = {}) {
   if (!Array.isArray(deliverArgv(opts.thread, "-"))) throw new CliError("notify: --thread must be a lowercase uuid.", NOTIFY_EXIT.usage);
   const stdout = io.stdout ?? process.stdout;
   const stderr = io.stderr ?? process.stderr;
+  const env = io.env ?? process.env;
+  const stateRoot = env.XDG_STATE_HOME && env.XDG_STATE_HOME.length > 0
+    ? env.XDG_STATE_HOME
+    : env.HOME && env.HOME.length > 0 ? join(env.HOME, ".local", "state") : undefined;
+  const journalPath = io.journalPath
+    ?? (env.AUTOMAGIK_NOTIFY_JOURNAL && env.AUTOMAGIK_NOTIFY_JOURNAL.length > 0
+      ? env.AUTOMAGIK_NOTIFY_JOURNAL
+      : stateRoot ? join(stateRoot, "automagik", "notify-seen.jsonl") : undefined);
+  if (!journalPath) {
+    stderr.write("am notify: no state directory for the seen journal; set AUTOMAGIK_NOTIFY_JOURNAL or HOME/XDG_STATE_HOME.\n");
+    exitAfter.code = NOTIFY_EXIT.io;
+    return PRINTED;
+  }
+  let seen;
+  try {
+    seen = openSeenJournal(journalPath);
+  } catch {
+    stderr.write(`am notify: the seen journal at ${journalPath} is unreadable or corrupt; nothing was read or delivered.\n`);
+    exitAfter.code = NOTIFY_EXIT.io;
+    return PRINTED;
+  }
   const live = typeof io.queue === "function";
   if (!live) stderr.write("am notify: dry run: no queue in this build; each valid line is paused, nothing is called.\n");
   const result = await runNotify({
     input: io.stdin ?? process.stdin,
     write: (text) => stdout.write(text),
     queue: live ? io.queue : () => ({ exit: 1 }),
+    seen,
     threadId: opts.thread,
     readControl: live ? io.readControl : () => "paused",
     threadCurrent: io.threadCurrent,
     threadExists: io.threadExists,
     now: io.now,
   });
-  if (result.code === NOTIFY_EXIT.io) stderr.write(`am notify: stdin could not be read to the end; ${result.lines} receipt line(s) written.\n`);
+  if (result.code === NOTIFY_EXIT.io) {
+    if (result.error instanceof SeenJournalError && result.error.kind === "write") {
+      stderr.write(`am notify: the seen journal could not be written; ${result.lines} receipt line(s) written.\n`);
+    } else {
+      stderr.write(`am notify: stdin could not be read to the end; ${result.lines} receipt line(s) written.\n`);
+    }
+  }
   exitAfter.code = result.code;
   return PRINTED;
 }

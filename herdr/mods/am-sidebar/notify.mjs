@@ -9,12 +9,14 @@
 //   1  at least one line refused (malformed JSON, too long, outside the schema, a thread refusal),
 //      each with zero queue calls; the lines after it still run
 //   2  a usage mistake (the CLI's own code; this module never returns it)
-//   3  reading the input (or writing a receipt) threw: reading stops, the lines before keep
-//      their receipts
+//   3  reading the input (or writing a receipt) threw, or the seen journal could not be read
+//      or written: reading stops, the lines before keep their receipts
 //   4  at least one queue call failed (it threw or exited nonzero)
 //
 // A blank line is skipped with no receipt. A stop ends the run after its own receipt: the lines
-// after it are not read. Dedupe holds within one run (a bounded journal), not across runs.
+// after it are not read. Dedupe is the injected seen store's business (has/add): the CLI passes
+// the persistent journal (seenJournal.mjs), so a restart still dedupes; a direct caller that
+// passes no store gets createSeenJournal's in-memory bound.
 // Apache-2.0.
 
 import { createSeenJournal, deliver, receiptLine } from "./eventNotice.mjs";
@@ -97,6 +99,7 @@ export async function runNotify(options = {}) {
   const run = { stopped: false };
   let code = NOTIFY_EXIT.ok;
   let lines = 0;
+  let failure;
   const raise = (next) => {
     if (SEVERITY.get(next) > SEVERITY.get(code)) code = next;
   };
@@ -123,8 +126,10 @@ export async function runNotify(options = {}) {
       if (receipt.decision === "failed") raise(NOTIFY_EXIT.failed);
       if (run.stopped) break;
     }
-  } catch {
+  } catch (error) {
+    failure = error;
     raise(NOTIFY_EXIT.io);
   }
-  return { code, lines, stopped: run.stopped };
+  const journalFailure = failure && failure.name === "SeenJournalError" && failure.kind === "write";
+  return journalFailure ? { code, lines, stopped: run.stopped, error: failure } : { code, lines, stopped: run.stopped };
 }
