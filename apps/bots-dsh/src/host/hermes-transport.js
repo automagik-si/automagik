@@ -472,6 +472,7 @@ export class RemoteChat {
     this.tools = new Map()
     this.questions = new Map()
     this.cancelledQuestions = new Set()
+    this.openAtJoin = []
     this.streamed = ''
     this.off = event => this.receive(event)
     transport.listeners.add(this.off)
@@ -500,6 +501,10 @@ export class RemoteChat {
       return
     }
     if (this.reconciling) { this.reconciling.push(event); return }
+    if (this.joining && (event.kind === 'question' || event.type === 'request.cancel')) {
+      this.joinControls.push(event)
+      return
+    }
     if (event.epoch && this.identity.epoch && event.epoch !== this.identity.epoch) return
     const sid = event.kind === 'question' ? event.params?.session_id : event.session_id
     if (sid !== this.identity.runtimeSessionId && sid !== this.identity.storedSessionId) return
@@ -596,22 +601,28 @@ export class RemoteChat {
     this.joinGap = false
     await this.save()
     let snapshot = await this.transport.session(this.identity, model)
-    if (this.transport.attached === true) {
-      // The attach JOIN is resume -> activate -> the gap: activate returns the
-      // authoritative snapshot and the viewer subscription, which detach later releases.
-      const cursor = this.identity.lastSeq ?? 0
-      this.joining = new Set()
-      try {
+    let requests = (snapshot.open_requests ?? []).map(request => ({ ...request, epoch: this.transport.epoch }))
+    let cancels = []
+    try {
+      if (this.transport.attached === true) {
+        // The attach JOIN is resume -> activate -> the gap: activate returns the
+        // authoritative snapshot and the viewer subscription, which detach later releases.
+        const cursor = this.identity.lastSeq ?? 0
+        this.joining = new Set()
+        this.joinControls = []
         snapshot = this.transport.check(await this.transport.request('session.activate', { session_id: snapshot.session_id }, this.transport.deadlines?.control))
         const replay = await this.transport.request('session.events.since', {
           session_id: snapshot.session_id, last_seen: cursor, replay_epoch: this.identity.epoch,
         }, this.transport.deadlines?.control)
+        // Replay is newer than activate; an approval may already have been answered.
+        requests = (replay.open_requests ?? []).map(request => ({ ...request, epoch: replay.epoch }))
+        cancels = (replay.events ?? []).filter(event => event.type === 'request.cancel')
         const changedEpoch = typeof replay?.epoch === 'string' && replay.epoch !== this.identity.epoch
         // A reloaded session (new runtime) or a sequence that went backwards is the same
         // reset as a restart even when the epoch string did not change: the new events start
         // near zero and receive would drop them all against the old, larger lastSeq.
         const reloaded = this.identity.runtimeSessionId !== undefined && this.identity.runtimeSessionId !== snapshot.session_id
-        const rewound = Number.isSafeInteger(replay?.latest_seq) && Number.isSafeInteger(this.identity.lastSeq) && replay.latest_seq < this.identity.lastSeq
+        const rewound = Number.isSafeInteger(replay?.latest_seq) && Number.isSafeInteger(cursor) && replay.latest_seq < cursor
         const gap = replay.truncated === true || Boolean((changedEpoch || reloaded || rewound) && this.identity.epoch && cursor > 0)
         if (changedEpoch || reloaded || rewound) {
           // A restarted serve has a new epoch and sequence numbers near zero. Taking the new
@@ -646,11 +657,33 @@ export class RemoteChat {
           this.joinGap = true
           this.recovered.push(REPLAY_GAP)
         }
-      } finally { this.joining = undefined }
+      }
+      Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
+      if (typeof snapshot.subscription_id === 'string' && snapshot.subscription_id) this.identity.subscriptionId = snapshot.subscription_id
+      if (snapshot.admission_id) this.identity.admissionId = snapshot.admission_id
+      const open = new Map()
+      for (const request of [...requests, ...(this.joinControls ?? []).filter(event => event.kind === 'question')]) {
+        if (request.method !== 'approval' || (request.params?.session_id !== this.identity.runtimeSessionId
+          && request.params?.session_id !== this.identity.storedSessionId) || open.has(request.id)) continue
+        open.set(request.id, request)
+      }
+      // These controls can precede the new identity or fall behind the replay cursor.
+      for (const event of [...cancels, ...(this.joinControls ?? []).filter(event => event.type === 'request.cancel')]) {
+        if ((event.session_id !== this.identity.runtimeSessionId && event.session_id !== this.identity.storedSessionId)
+          || (event.epoch !== undefined && event.epoch !== this.identity.epoch)) continue
+        this.cancelledQuestions.add(event.payload.id)
+        this.questions.get(event.payload.id)?.abort?.()
+        this.questions.delete(event.payload.id)
+        open.delete(event.payload.id)
+      }
+      this.openAtJoin = [...open.values()]
+      for (const event of this.joinControls ?? []) {
+        if (event.kind === 'question' && event.method !== 'approval' && this.question) void this.control(event)
+      }
+    } finally {
+      this.joining = undefined
+      this.joinControls = undefined
     }
-    Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
-    if (typeof snapshot.subscription_id === 'string' && snapshot.subscription_id) this.identity.subscriptionId = snapshot.subscription_id
-    if (snapshot.admission_id) this.identity.admissionId = snapshot.admission_id
     await this.save()
     return snapshot
   }
@@ -680,6 +713,7 @@ export class RemoteChat {
     this.reconciling = []
     try {
       await this.prepare()
+      this.openAtJoin = []
       const joinGap = this.joinGap
       this.recovered = []
       const replay = await this.transport.request('session.events.since', {
@@ -727,6 +761,8 @@ export class RemoteChat {
       this.identity.lastSeq = 0
     }
     this.identity.epoch = this.transport.epoch
+    for (const { epoch, ...request } of this.openAtJoin) void this.control({ ...request, kind: 'question', epoch })
+    this.openAtJoin = []
     this.identity.pendingSubmit = true
     await this.save() // Durable before any submit bytes leave.
     try {
