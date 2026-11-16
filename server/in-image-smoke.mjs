@@ -52,11 +52,15 @@ async function main() {
   // The Code side's terminals live in the supervised herdr-core on the contract socket. The
   // same env reaches dsh, am and hc; here the core must answer both its status and its list.
   check(process.env.HERDR_APP_HOME === HERDR_APP_HOME, `HERDR_APP_HOME is ${process.env.HERDR_APP_HOME ?? 'unset'}, not ${HERDR_APP_HOME}`)
-  const coreSocket = herdrCoreSocket(SMOKE_HC_SESSION)
-  check(process.env.HC_TERMINAL_SOCKET === coreSocket, `HC_TERMINAL_SOCKET is ${process.env.HC_TERMINAL_SOCKET ?? 'unset'}, not ${coreSocket}`)
+  const coreSession = process.env.HC_SESSION || SMOKE_HC_SESSION
+  const coreRuntime = process.env.HC_RUNTIME || HC_RUNTIME
+  const coreSocket = herdrCoreSocket(coreSession, coreRuntime)
+  // docker exec inherits the container-creation env, not the entrypoint's later mutations:
+  // derive here from the session/runtime we were given, then give the derived value to hc/am.
+  process.env.HC_TERMINAL_SOCKET = coreSocket
   check(process.env.XDG_RUNTIME_DIR === XDG_RUNTIME_DIR, `XDG_RUNTIME_DIR is ${process.env.XDG_RUNTIME_DIR ?? 'unset'}, not ${XDG_RUNTIME_DIR}`)
-  check(process.env.HC_SESSION === SMOKE_HC_SESSION, `HC_SESSION is ${process.env.HC_SESSION ?? 'unset'}, not ${SMOKE_HC_SESSION}`)
-  check(process.env.HC_RUNTIME === HC_RUNTIME, `HC_RUNTIME is ${process.env.HC_RUNTIME ?? 'unset'}, not ${HC_RUNTIME}`)
+  check(coreSession === SMOKE_HC_SESSION, `HC_SESSION is ${coreSession}, not ${SMOKE_HC_SESSION}`)
+  check(coreRuntime === HC_RUNTIME, `HC_RUNTIME is ${coreRuntime}, not ${HC_RUNTIME}`)
   const runtime = lstatSync(XDG_RUNTIME_DIR)
   check(runtime.isDirectory() && (runtime.mode & 0o777) === 0o700, `${XDG_RUNTIME_DIR} is not a 0700 directory`)
   check(lstatSync(coreSocket).isSocket(), `${coreSocket} is not a Unix socket`)

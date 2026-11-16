@@ -93,8 +93,6 @@ async function main() {
   check(/automagik-web: startup: http:\/\/127\.0\.0\.1:3081\//.test(logs), 'no startup line')
   const socket = herdrCoreSocket(SMOKE_HC_SESSION)
   check(logs.includes(`automagik-web: herdr-core: serving on ${socket}`), `herdr-core did not start on ${socket}`)
-  const coreStatus = await docker(['exec', name, '/usr/local/bin/hc', 'server', 'status', '--json'])
-  check(coreStatus.stdout.trim().length > 0, 'hc server status printed nothing on the session socket')
   check(!/(?<![A-Za-z0-9_])token=(?!<redacted>)\S+/.test(logs), 'the launch token is in the log')
   check(/automagik-web: seeded \/data\/dsh\/profiles\/automagik-web/.test(logs), 'the first start did not seed the profile')
   check(/automagik-web: profile automagik-web: automagik \d+\.\d+\.\d+, dsh \d+\.\d+\.\d+/.test(logs), 'no version line')

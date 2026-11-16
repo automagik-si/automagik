@@ -25,7 +25,7 @@ export const HC_RUNTIME = '/data/run/herdr-core'
 export const HC_SESSION = 'automagik-server'
 export const SMOKE_HC_SESSION = 'automagik-server-smoke'
 /** herdr-core names its socket after HC_SESSION: one source of truth for wait and announce. */
-export const herdrCoreSocket = (session = HC_SESSION) => `${HC_RUNTIME}/${session}.sock`
+export const herdrCoreSocket = (session = HC_SESSION, runtime = HC_RUNTIME) => `${runtime}/${session}.sock`
 export const HERDR_CORE_SOCKET = herdrCoreSocket()
 
 /** The reviewed session-absorption skill, byte-pinned; its two files are the whole payload. */
