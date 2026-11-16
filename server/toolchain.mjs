@@ -17,6 +17,10 @@ export const HERDR_CORE_SHA256 = '5b2f97cb4b2a9d7a6b2cc5942628203ed9fbb7cc0c2b4b
 export const HERDR_CORE_TARBALL = 'herdr-core-linux-x86_64.tar.gz'
 export const HERDR_CORE_URL = `https://releases.herdr.dev/core/${HERDR_CORE_VERSION}/${HERDR_CORE_TARBALL}`
 
+/** The Arca contract's app home and the core socket, both on the data volume. */
+export const HERDR_APP_HOME = '/data/herdr-app'
+export const HERDR_CORE_SOCKET = '/data/run/herdr-core/default.sock'
+
 /** The reviewed session-absorption skill, byte-pinned; its two files are the whole payload. */
 export const SKILL_NAME = 'session-absorption'
 export const SKILL_ROOT = '/opt/automagik/skills'
@@ -25,8 +29,15 @@ export const SKILL_SHA256 = Object.freeze({
   'references/packet.md': 'edd34e81fbb2a9f1f185a491290c838426c4b076245c450cdf3f509e7ccd6268',
 })
 
-/** The v2 registry seed #1424 ships; this is the interface the pending caller assumes. */
-export const REGISTRY_SEED_RELATIVE = 'node_modules/@automagik/bots-dsh/src/shared/registry-seed.js'
+/** The #1424 seed, vendored at the published commit until that PR merges. */
+export const REGISTRY_SEED_COMMIT = '92fe5ef7486556cad42e6b5e789aef5d07c08f49'
+export const REGISTRY_SEED_VENDOR = '/opt/automagik/registry-seed'
+export const REGISTRY_SEED_INSTALLED = 'node_modules/@automagik/bots-dsh/scripts/seed-registry.mjs'
+export const REGISTRY_SEED_SHA256 = Object.freeze({
+  'scripts/seed-registry.mjs': '6845d0ece5983561f7394ab69b0e254f5f7e3cf8841c55404a36776403ddb3e6',
+  'src/host/registry-seed.js': '08ad60001dd721d63ab1ff31ce620420920504e740e666190c851714ac0343fc',
+  'src/shared/registry.js': 'b20e91fa9d5d44c6799ab6ab116e90969286803cb156feb58b0890adf18785e6',
+})
 /** The shipped ACP CLI store, read from the seeded profile; no part of it is baked into /opt. */
 export const CLI_STORE_RELATIVE = 'node_modules/@automagik/acp-dsh/src/host/clis.js'
 export const AGENTS_RELATIVE = 'node_modules/@automagik/acp-dsh/src/host/agents.js'

@@ -159,15 +159,42 @@ composes.
 
 The vendor CLIs (Claude Code, Codex) are never in the image. On the first start of a data volume
 the entrypoint installs the reviewed skill into `$HOME/.agents/skills/session-absorption` and
-links it from `.claude/skills` and `.codex/skills`, then runs the v2 registry seed when the team
-home has no registry. The seed is #1424's; while it is unmerged the hook calls the documented
-path (`<profile>/node_modules/@automagik/bots-dsh/src/shared/registry-seed.js`) and reports the
-interface it assumed (`--home <team home> --workspace <folder>`) instead of writing a registry
-by hand. After DSH is up, that first start installs Claude Code and Codex through the shipped
-ACP CLI store from the seeded profile (into `$AUTOMAGIK_HOME/acp/clis`), with `AUTOMAGIK_PNPM`
-and `registry.npmjs.org`; a failure is logged and the plugin's own schedule retries. Setting
+links it from `.claude/skills` and `.codex/skills`, then seeds the version 2 registry when the
+team home has none.
+
+The seed is #1424's, vendored at PR #1428's published head
+(`92fe5ef7486556cad42e6b5e789aef5d07c08f49`) until it merges; the hook prefers the installed
+path `node_modules/@automagik/bots-dsh/scripts/seed-registry.mjs` whenever the profile carries
+it, and falls back to `server/vendor/registry-seed/` (copied to `/opt/automagik/registry-seed`).
+When `<workspace>/.herdr/bots.json` is absent, the hook first creates the fresh three-role team
+(Purpose as main, Dogfooder and Fixer as members) through `am create --model`, so every id is
+newly minted by am; it never copies another team's roster. The reviewed routes are Purpose
+`gpt-6-astra`, Dogfooder `gpt-6.1-terra` and Fixer `gpt-6.1-sol`, all on the codex agent.
+Per-role reasoning effort and service tier are not roster fields (#1411) and the image writes
+neither. The role briefs send UI work through the approved Claude route and a Sol/Terra author's
+code review to another provider, Opus for critical work, never Terra reviewing Sol.
+It then runs the real seed with exactly `--project <workspace> --home <AUTOMAGIK_HOME>`: `--home`
+is the registry home, not `AUTOMAGIK_BOTS_HOME`. The command exits `0` on success, `1` on an
+operational refusal and `2` on a usage error; it never mints an id, and with no v1 roster it
+writes nothing. The hook checks for that roster itself, creates the triad first, and fails the
+boot with the seed's stderr on any nonzero exit rather than starting a half-seeded team. It then
+reads back the v1 roster and both version 2 files. A team home that already has a registry is
+left as it is.
+
+After DSH is up, that first start installs Claude Code and Codex through the shipped ACP CLI
+store from the seeded profile (into `$AUTOMAGIK_HOME/acp/clis`), with `AUTOMAGIK_PNPM` and
+`registry.npmjs.org`; a failure is logged and the plugin's own schedule retries. Setting
 `AUTOMAGIK_CLI_INSTALL=off` skips that background install for an operator who manages the CLIs
 elsewhere.
+
+The image sets `HERDR_APP_HOME=/data/herdr-app` and
+`HC_TERMINAL_SOCKET=/data/run/herdr-core/default.sock`. The entrypoint creates
+`/data/run/herdr-core` as uid 1000 with mode 0700 and starts `herdr-core serve` as a supervised
+child before DSH, with the same environment dsh and `hc` receive. If either child exits, the
+entrypoint stops the other and exits so the container's restart policy applies to both;
+`SIGTERM`, `SIGINT` and `SIGHUP` stop both cleanly. The in-image smoke checks that the socket is
+a Unix socket, that the core answers `hc server status` and `hc ls`, and that `am ls` sees the
+three team bots through it.
 
 ## Build and smoke
 
@@ -186,11 +213,11 @@ The builder fetches am from that release's pinned tarball and verifies it before
 (`fetch-am.mjs`); the tools stage fetches herdr-core at its own pinned version and sha256 and
 runs `hc --version` there. The in-image smoke (`server/in-image-smoke.mjs`, run by the smoke
 inside the container) also proves `am --version`, `hc --version`, `pnpm --version`,
-`node --version`, a CLI-store dry run against the seeded profile, the skill hashes, and the v2
-seed in a temporary home. The smoke's temporary-home case stages a fixture at the documented
-path to prove the call and the interface; it is not a seed of its own and does not replace
-#1424's. The main smoke starts the container with no network, so first boot is proven to seed,
-fence and install the skill without downloading a vendor CLI.
+`node --version`, a CLI-store dry run against the seeded profile, the skill hashes, the real
+first-boot team and both registry surfaces, and a second seed in a temporary home from a copy
+of that real v1 roster. It runs the real seed; there is no fixture. The main smoke starts the
+container with no network, so first boot is proven to create the team, seed, fence and install
+the skill without downloading a vendor CLI.
 
 The context is the repository root because the builder reuses
 `apps/desktop/runtime/package-lock.json`; `server/Dockerfile.dockerignore` keeps the context
@@ -543,9 +570,10 @@ node server/secrecy.mjs --rootfs /tmp/rootfs --inventory secrecy
 | `assemble.mjs` | builder stage: runtime, release tarballs, am, profile, prune, versions |
 | `fetch-plugins.mjs`, `fetch-am.mjs` | download and verify the pinned release's plugin tarballs and am |
 | `toolchain.mjs`, `verify-payload.mjs` | the literal tool paths/versions/hashes, and the build-time skill check |
-| `first-boot.mjs`, `cli-store.mjs` | first-boot skill/seed hook and the shipped CLI store's dry run |
+| `first-boot.mjs`, `cli-store.mjs` | first-boot skill/team/seed hook and the shipped CLI store's dry run |
 | `in-image-smoke.mjs` | the checks that run inside the built image |
 | `skills/` | the reviewed, byte-pinned session-absorption payload |
+| `vendor/registry-seed/` | #1424's published seed at its PR head, byte-pinned until it merges |
 | `entrypoint.mjs`, `lib.mjs` | seed `/data`, first boot, key file, pnpm store, dsh, redacted log |
 | `profile-follow.mjs`, `profile-state.mjs` | ownership, staged offline update, backup and live version state |
 | `plugin-payload.mjs`, `offline-store.mjs` | local install inputs from scanned files; build-only dependency-cache preparation |

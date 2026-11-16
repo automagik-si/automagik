@@ -10,6 +10,7 @@ import { publicUrlArgs } from '../lib.mjs'
 const ENTRY = fileURLToPath(new URL('../entrypoint.mjs', import.meta.url))
 const LIB = new URL('../lib.mjs', import.meta.url).href
 const FOLLOW = new URL('../profile-follow.mjs', import.meta.url).href
+const FIRST_BOOT = new URL('../first-boot.mjs', import.meta.url).href
 const BASE = ['--profile', 'automagik-web', '--no-open', '--host', '127.0.0.1', '--port', '3081']
 
 // Run the real entrypoint, replacing only data preparation and the DSH process. No service
@@ -27,6 +28,10 @@ const harness = `
       if (url === ${JSON.stringify(FOLLOW)}) return { format: 'module', shortCircuit: true,
         source: 'export async function followImage() { const result=process.env.TEST_FOLLOW_RESULT || "owner-managed"; return { seeded: false, target: "test-profile", result, reason: result } }',
       }
+      if (url === ${JSON.stringify(FIRST_BOOT)}) return {
+        format: 'module', shortCircuit: true,
+        source: 'export function runFirstBoot() { return { fresh: false } } export async function installVendorClis() { return { state: "ready" } }',
+      }
       if (url === ${JSON.stringify(LIB)}) return {
         format: 'module', shortCircuit: true,
         source: Object.keys(lib).map(key => 'export const ' + key + ' = globalThis.serverTestLib.' + key).join(';'),
@@ -36,8 +41,19 @@ const harness = `
         source: \`
           import { EventEmitter } from 'node:events'
           import { PassThrough } from 'node:stream'
+          import { mkdirSync, writeFileSync } from 'node:fs'
+          import { dirname } from 'node:path'
           export function spawn(command, args, options) {
-            console.log('SPAWN ' + JSON.stringify({ command, args, shell: options.shell ?? false }))
+            if (command === '/usr/local/bin/herdr-core' || args[0] === 'serve') {
+              console.log('CORE ' + JSON.stringify({ command, args }))
+              const core = new EventEmitter()
+              core.stdout = new PassThrough()
+              core.stderr = new PassThrough()
+              const socket = options.env?.HC_TERMINAL_SOCKET
+              if (socket) { mkdirSync(dirname(socket), { recursive: true }); writeFileSync(socket, '') }
+              return core
+            }
+            console.log('SPAWN ' + JSON.stringify({ command, args, shell: options.shell ?? false, socket: options.env?.HC_TERMINAL_SOCKET, appHome: options.env?.HERDR_APP_HOME }))
             const child = new EventEmitter()
             child.stdout = new PassThrough()
             child.stderr = new PassThrough()
@@ -60,7 +76,7 @@ const harness = `
 `
 
 function run(value, dir, followResult = 'owner-managed') {
-  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir, DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult }
+  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir, HERDR_APP_HOME: join(dir, 'herdr-app'), HC_TERMINAL_SOCKET: join(dir, 'run', 'herdr-core', 'default.sock'), DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult }
   delete env.AUTOMAGIK_PUBLIC_URL
   if (value !== undefined) env.AUTOMAGIK_PUBLIC_URL = value
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', harness], {
@@ -71,6 +87,18 @@ function run(value, dir, followResult = 'owner-managed') {
 }
 
 // ENTRY_ABORT_ROLLBACK: a failed update must not prevent starting the coherent old profile.
+test('the entrypoint gives dsh the core socket and the Arca app home', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-core-env-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir)
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /CORE /)
+  assert.match(result.stdout, /herdr-core: serving on /)
+  const call = JSON.parse(result.stdout.split('\n').find(line => line.startsWith('SPAWN ')).slice(6))
+  assert.equal(call.socket, join(dir, 'run', 'herdr-core', 'default.sock'))
+  assert.equal(call.appHome, join(dir, 'herdr-app'))
+})
+
 test('the real entrypoint still starts DSH after the updater reports rollback', t => {
   const dir = mkdtempSync(join(tmpdir(), 'automagik-follow-entry-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))

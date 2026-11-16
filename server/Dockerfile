@@ -159,6 +159,7 @@ COPY --from=builder /build/out/versions.json /opt/automagik/versions.json
 COPY --from=builder /build/out/offline-store /opt/automagik/offline-store
 COPY --from=builder /build/out/am /opt/automagik/am
 COPY server/skills /opt/automagik/skills
+COPY server/vendor/registry-seed /opt/automagik/registry-seed
 COPY server/entrypoint.mjs server/healthcheck.mjs server/lib.mjs server/gate*.mjs server/profile-*.mjs server/plugin-payload.mjs server/volume-lock.mjs server/first-boot.mjs server/cli-store.mjs server/in-image-smoke.mjs server/toolchain.mjs /opt/automagik/
 # No /home/<user> in the image's account record: the distroless nonroot home is replaced with
 # the uid the image actually runs as. The scanner's home check then has nothing to excuse.
@@ -172,6 +173,8 @@ ENV AUTOMAGIK_GATE_IMAGE=1 \
     AUTOMAGIK_HOME=/data \
     AUTOMAGIK_WORKSPACE=/data/workspace \
     AUTOMAGIK_PNPM=/usr/local/bin/pnpm \
+    HERDR_APP_HOME=/data/herdr-app \
+    HC_TERMINAL_SOCKET=/data/run/herdr-core/default.sock \
     NODE_ENV=production \
     DO_NOT_TRACK=1 \
     PATH=/nodejs/bin:/usr/local/bin:/usr/bin:/bin

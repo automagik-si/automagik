@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // What the image does once, on the first start of a data volume: put the reviewed skills where
-// the agents read them, and ask the shipped v2 registry seed to fill a team home that has none.
-// The vendor CLIs are installed separately, in the background, by installVendorClis(): they are
-// hundreds of MB and come from registry.npmjs.org, so they must never be baked into the image.
+// the agents read them, create a fresh three-role team when the workspace has no Herdr roster,
+// and run #1424's published seed so both version 2 registry surfaces exist. The vendor CLIs are
+// installed separately, in the background, by installVendorClis(): they are hundreds of MB and
+// come from registry.npmjs.org, so they must never be baked into the image.
 //
-// Nothing here is baked into /data at build time. The in-image smoke calls the same functions in
-// a temporary home (in-image-smoke.mjs).
+// No registry is written by hand. Until #1424 merges, the seed is the published bytes of PR
+// #1428's head (vendored under server/vendor/registry-seed); once the installed plugin carries
+// it, seedScript() prefers that path. A seed failure (exit 1 or 2) fails the boot: the whole
+// point is a team whose roster and both readers agree.
 import { createHash } from 'node:crypto'
 import {
   chmodSync,
@@ -15,16 +18,20 @@ import {
   mkdirSync,
   readFileSync,
   readlinkSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   AGENTS_RELATIVE,
   CLI_STORE_RELATIVE,
   PNPM_PATH,
-  REGISTRY_SEED_RELATIVE,
+  REGISTRY_SEED_COMMIT,
+  REGISTRY_SEED_INSTALLED,
+  REGISTRY_SEED_SHA256,
+  REGISTRY_SEED_VENDOR,
   SKILL_NAME,
   SKILL_ROOT,
   SKILL_SHA256,
@@ -33,8 +40,35 @@ import {
 export const FIRST_BOOT_MARKER = '.automagik-first-boot.json'
 /** Where Claude Code and Codex look for their skills; each is a link to the shared folder. */
 export const SKILL_LINKS = Object.freeze(['.claude', '.codex'])
-/** The seed's exit code for "there is no version 1 roster to migrate". */
-export const SEED_NO_SOURCE = 3
+/**
+ * The fresh team a new project starts with. The ids are minted by `am create`, never copied.
+ * The model is the reviewed per-role route; reasoning effort and service tier are deliberately
+ * absent (per-bot effort/tier is #1411, not a roster field yet). UI work goes through the
+ * approved Claude route; a Sol/Terra author's code review comes from another provider.
+ */
+export const TRIAD = Object.freeze([
+  Object.freeze({
+    name: 'Purpose',
+    kind: 'main',
+    model: 'gpt-6-astra',
+    role: 'Own the project outcome',
+    instructions: 'Own a bounded product outcome: prioritize the queue, state acceptance criteria, resolve dependencies and accept evidenced delivery. UI work goes through the approved Claude route (Fable 5.2; catalog id pending #1415).',
+  }),
+  Object.freeze({
+    name: 'Dogfooder',
+    kind: 'member',
+    model: 'gpt-6.1-terra',
+    role: 'Verify the product',
+    instructions: 'Exercise the product against the outcome, produce reproducible failures and independently verify fixes, keeping the acceptance evidence. UI work goes through the approved Claude route (Fable 5.2; catalog id pending #1415). A Sol or Terra author\'s code review comes from another provider, Opus for critical work, never Terra reviewing Sol.',
+  }),
+  Object.freeze({
+    name: 'Fixer',
+    kind: 'member',
+    model: 'gpt-6.1-sol',
+    role: 'Implement the change',
+    instructions: 'Implement the increment or repair in a worktree, run the relevant gates, and return the patch and evidence. UI work goes through the approved Claude route (Fable 5.2; catalog id pending #1415). A Sol or Terra author\'s code review comes from another provider, Opus for critical work, never Terra reviewing Sol.',
+  }),
+])
 
 const lstatOrUndefined = (path) => {
   try { return lstatSync(path) } catch { return undefined }
@@ -107,57 +141,180 @@ export function installSkill({
   return { state, target, links }
 }
 
+const readJson = (file) => JSON.parse(readFileSync(file, 'utf8'))
+const rosterOf = (workspace) => join(workspace, '.herdr', 'bots.json')
+const homeRegistryOf = (home) => join(home, 'bots', 'bots.json')
+const repoRegistryOf = (workspace) => join(workspace, '.automagik', 'bots', 'bots.json')
+
+/** A `b-` id, as `am create` mints one. No id is ever copied from another team. */
+const BOT_ID = /^b-[a-z2-7]{10}$/
+
 /**
- * Run the shipped v2 registry seed when the team home has no registry. The path and interface
- * come from #1424: `registry-seed.js --home <team home> --workspace <folder>`, writing
- * `<home>/bots/bots.json` and, when there is a version 1 roster, the workspace's repo file.
- * Exit 3 means there is no roster to migrate; that is not a failure. While #1424 is unmerged the
- * path is absent, and this reports the interface it assumed instead of writing a registry by
- * hand.
+ * Create the fresh triad through `am create` when the workspace has no Herdr roster. The ids
+ * come from am (newBotId), not from a template or another team's file. A partial failure removes
+ * the roster it just made, so the next boot starts cleanly.
+ */
+export function ensureTeam({
+  home,
+  workspace,
+  env = process.env,
+  am = env.AUTOMAGIK_AM || 'am',
+  run,
+  log = console.log,
+  warn = console.warn,
+} = {}) {
+  const roster = rosterOf(workspace)
+  if (existsSync(roster)) return { state: 'present', roster }
+  const exec = run ?? process.getBuiltinModule('node:child_process').execFileSync
+  const childEnv = {
+    ...env,
+    HOME: env.HOME || home,
+    HERDR_APP_HOME: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'),
+    AUTOMAGIK_HOME: home,
+  }
+  mkdirSync(workspace, { recursive: true })
+  const made = []
+  try {
+    let lead
+    for (const role of TRIAD) {
+      const args = ['create', '--project', workspace, '--name', role.name, '--agent', 'codex',
+        '--model', role.model, '--kind', role.kind, '--role', role.role, '--instructions', role.instructions]
+      if (lead) args.push('--lead', lead)
+      args.push('--json')
+      const output = exec(am, args, {
+        cwd: workspace,
+        env: childEnv,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 120_000,
+      })
+      let result
+      try { result = JSON.parse(output) } catch { throw new Error(`${am} create ${role.name} printed no JSON: ${String(output).trim().slice(0, 300)}`) }
+      if (!BOT_ID.test(result?.id ?? '')) throw new Error(`${am} create ${role.name} minted no b- id`)
+      if (role.kind === 'main') lead = result.id
+      made.push({ name: role.name, id: result.id, kind: role.kind })
+      log(`team: created ${role.name} (${role.kind}) ${result.id}`)
+    }
+    const v1 = readJson(roster)
+    const mains = Array.isArray(v1.bots) ? v1.bots.filter((bot) => bot?.kind === 'main') : []
+    if (v1.version !== 1 || mains.length !== 1 || mains[0].name !== 'Purpose' || v1.bots.length !== TRIAD.length) {
+      throw new Error(`${roster} does not hold the fresh triad: ${v1.bots?.length ?? 0} bots, ${mains.length} main`)
+    }
+    return { state: 'created', roster, bots: made, mainId: lead }
+  } catch (error) {
+    // Only the file this call made: an existing roster is never removed.
+    try { rmSync(roster, { force: true }) } catch {}
+    warn(`team: not created: ${error?.stderr?.trim() || error?.message || error}`)
+    throw error
+  }
+}
+
+/** The real #1424 seed: the installed plugin's script when it is there, else the vendored bytes. */
+export function seedScript({ profile, vendorRoot = REGISTRY_SEED_VENDOR } = {}) {
+  const root = resolve(vendorRoot)
+  const installed = join(profile, REGISTRY_SEED_INSTALLED)
+  if (existsSync(installed)) return { path: installed, source: 'installed', commit: null }
+  const vendored = join(root, 'scripts', 'seed-registry.mjs')
+  for (const [relative, expected] of Object.entries(REGISTRY_SEED_SHA256)) {
+    const file = join(root, relative)
+    const actual = sha256File(file)
+    if (actual !== expected) throw new Error(`registry seed vendor ${relative}: sha256 ${actual}, not ${expected}`)
+  }
+  return { path: vendored, source: 'vendored', commit: REGISTRY_SEED_COMMIT }
+}
+
+/**
+ * Run #1424's seed when the workspace has a version 1 roster. It takes the two flags the
+ * published contract names exactly: `--project <checkout>` and `--home <registry home>`. Exit 0
+ * is success; 1 (operational) and 2 (usage) are failures and fail the boot with its stderr.
  */
 export function seedRegistry({
   home,
   workspace,
   profile,
+  env = process.env,
+  run,
+  vendorRoot = REGISTRY_SEED_VENDOR,
   log = console.log,
   warn = console.warn,
-  run,
-  env = process.env,
 } = {}) {
-  const file = join(home, 'bots', 'bots.json')
-  if (existsSync(file)) return { state: 'present', file }
-  const script = join(profile, REGISTRY_SEED_RELATIVE)
-  if (!existsSync(script)) {
-    warn(`registry seed pending: ${script} is not in this @automagik/bots-dsh release; #1424 adds it (assumed interface: --home <team home> --workspace <folder>)`)
-    return { state: 'pending', file, script }
+  const roster = rosterOf(workspace)
+  if (!existsSync(roster)) {
+    throw new Error(`first boot: no version 1 roster at ${roster}; the seed mints no Bot ids`)
   }
+  const script = seedScript({ profile, vendorRoot })
+  const exec = run ?? process.getBuiltinModule('node:child_process').execFileSync
+  let stdout
   try {
-    const exec = run ?? process.getBuiltinModule('node:child_process').execFileSync
-    const output = exec(process.execPath, [script, '--home', home, '--workspace', workspace], {
+    stdout = exec(process.execPath, [script.path, '--project', workspace, '--home', home], {
       cwd: workspace,
-      env: { ...env, AUTOMAGIK_HOME: home, AUTOMAGIK_BOTS_HOME: join(home, 'bots') },
+      env: { ...env, AUTOMAGIK_HOME: home },
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 120_000,
     })
-    if (output?.trim()) log(`registry seed: ${output.trim()}`)
   } catch (error) {
-    if (error?.status === SEED_NO_SOURCE) return { state: 'no-source', file, script }
-    warn(`registry seed failed: ${error?.stderr?.trim() || error?.message || error}`)
-    return { state: 'failed', file, script }
+    const stderr = String(error?.stderr ?? '').trim()
+    throw new Error(`first boot: registry seed (${script.source}) failed with exit ${error?.status ?? 'unknown'}: ${stderr || error?.message || error}`)
   }
-  if (!existsSync(file)) {
-    warn(`registry seed at ${script} returned 0 but wrote no ${file}`)
-    return { state: 'failed', file, script }
+  for (const line of String(stdout ?? '').trim().split('\n').filter(Boolean)) log(line)
+  const homeFile = homeRegistryOf(home)
+  const repoFile = repoRegistryOf(workspace)
+  if (!existsSync(homeFile) || !existsSync(repoFile)) {
+    throw new Error(`first boot: the seed returned 0 but ${!existsSync(homeFile) ? homeFile : repoFile} is missing`)
   }
-  log(`registry seed: wrote ${file}`)
-  return { state: 'seeded', file, script }
+  return { state: 'seeded', script, homeFile, repoFile, stdout: String(stdout ?? '') }
+}
+
+const noSessionKeys = (value, path = '') => {
+  if (Array.isArray(value)) return value.flatMap((item, index) => noSessionKeys(item, `${path}[${index}]`))
+  if (value === null || typeof value !== 'object') return []
+  return Object.entries(value).flatMap(([key, inner]) => (
+    ['sessionId', 'sessions', 'segments'].includes(key) ? [`${path}.${key}`] : noSessionKeys(inner, `${path}.${key}`)
+  ))
 }
 
 /**
- * The first-start hook: install the skill once (marker), then seed a home that has no registry.
- * The registry check runs on every start, so a home deleted by hand is filled again; the seed
- * never overwrites an existing file. Returns what it did for the startup log and tests.
+ * Verify the three surfaces the first boot leaves behind: the version 1 roster, the version 2
+ * home file and the version 2 repo file. Counts and ids must agree; no Session key may survive.
+ */
+export function verifySurfaces({ home, workspace } = {}) {
+  const v1 = readJson(rosterOf(workspace))
+  const homeFile = homeRegistryOf(home)
+  const repoFile = repoRegistryOf(workspace)
+  const homeRegistry = readJson(homeFile)
+  const repoRegistry = readJson(repoFile)
+  const v1Bots = Array.isArray(v1.bots) ? v1.bots : []
+  const v1Mains = v1Bots.filter((bot) => bot?.kind === 'main')
+  const homeBots = Array.isArray(homeRegistry.bots) ? homeRegistry.bots : []
+  const homeMains = homeBots.filter((bot) => bot?.main === true)
+  const repoBots = Array.isArray(repoRegistry.bots) ? repoRegistry.bots : []
+  const repoMains = repoBots.filter((bot) => bot?.main === true)
+  const problems = []
+  if (v1.version !== 1 || v1Mains.length !== 1) problems.push(`v1 ${rosterOf(workspace)}: ${v1Bots.length} bots, ${v1Mains.length} main`)
+  if (v1Bots.length !== TRIAD.length) problems.push(`v1 has ${v1Bots.length} bots, not ${TRIAD.length}`)
+  if (homeRegistry.version !== 2 || homeMains.length !== 1) problems.push(`v2 home ${homeFile}: ${homeBots.length} bots, ${homeMains.length} main`)
+  if (!Array.isArray(homeRegistry.projects) || !homeRegistry.projects.some((entry) => entry?.folder === workspace)) problems.push(`v2 home ${homeFile}: no project ${workspace}`)
+  if (repoRegistry.version !== 2 || repoMains.length !== 1) problems.push(`v2 repo ${repoFile}: ${repoBots.length} bots, ${repoMains.length} main`)
+  if (repoBots.length !== TRIAD.length) problems.push(`v2 repo has ${repoBots.length} bots, not ${TRIAD.length}`)
+  const mainId = v1Mains[0]?.id
+  if (!mainId || !homeMains.some((bot) => bot?.id === mainId) || !repoMains.some((bot) => bot?.id === mainId)) problems.push('the main Bot id differs between the v1 roster and the v2 files')
+  for (const file of [rosterOf(workspace), homeFile, repoFile]) {
+    for (const at of noSessionKeys(readJson(file))) problems.push(`${file}: ${at} is a Session key`)
+  }
+  if (problems.length) throw new Error(`first boot: registry verifier failed: ${problems.join('; ')}`)
+  return {
+    v1: { file: rosterOf(workspace), bots: v1Bots.length, mains: v1Mains.length, id: mainId },
+    home: { file: homeFile, bots: homeBots.length, projects: homeRegistry.projects.length, mains: homeMains.length },
+    repo: { file: repoFile, bots: repoBots.length, mains: repoMains.length },
+    bots: v1Bots.map((bot) => ({ id: bot.id, name: bot.name, kind: bot.kind })),
+  }
+}
+
+/**
+ * The first-start hook: install the skill once (marker), create the fresh triad when the team
+ * home has no registry, run the real seed, and verify all three files. A seed or verification
+ * failure propagates: the entrypoint exits nonzero rather than starting a half-seeded team.
  */
 export function runFirstBoot({
   home,
@@ -165,6 +322,9 @@ export function runFirstBoot({
   profile,
   version = 'unknown',
   source = SKILL_ROOT,
+  vendorRoot = REGISTRY_SEED_VENDOR,
+  env = process.env,
+  am = env.AUTOMAGIK_AM || 'am',
   log = console.log,
   warn = console.warn,
   now = () => new Date().toISOString(),
@@ -182,24 +342,40 @@ export function runFirstBoot({
       skill = { state: 'failed', error: String(error?.message ?? error) }
     }
   }
-  const registry = seedRegistry({ home, workspace, profile, log, warn, run })
+  const homeFile = homeRegistryOf(home)
+  let team
+  let registry
+  let surfaces
+  if (!fs.existsSync(homeFile)) {
+    team = ensureTeam({ home, workspace, env, am, run, log, warn })
+    registry = seedRegistry({ home, workspace, profile, env, run, vendorRoot, log, warn })
+    surfaces = verifySurfaces({ home, workspace })
+    log(`first boot: registry ${registry.state} from ${registry.script.source}${registry.script.commit ? ` @ ${registry.script.commit}` : ''}`)
+    log(`first boot: v1 ${surfaces.v1.file} (${surfaces.v1.bots} bots, ${surfaces.v1.mains} main); v2 home ${surfaces.home.file} (${surfaces.home.bots} bots, ${surfaces.home.projects} project); v2 repo ${surfaces.repo.file} (${surfaces.repo.bots} bots, ${surfaces.repo.mains} main)`)
+  } else {
+    team = { state: 'present' }
+    registry = { state: 'present', homeFile }
+    log(`first boot: registry present at ${homeFile}; left as it is`)
+  }
   if (fresh) {
     const record = {
       schemaVersion: 1,
       version,
       at: now(),
       skill: skill?.state ?? 'skipped',
+      team: team.state === 'created' ? { state: team.state, bots: team.bots, mainId: team.mainId } : { state: team.state },
       registry: registry.state,
-      ...(registry.script ? { seed: registry.script } : {}),
+      ...(registry.script ? { seed: registry.script.path, seedSource: registry.script.source, ...(registry.script.commit ? { seedCommit: registry.script.commit } : {}) } : {}),
+      ...(surfaces ? { v1: surfaces.v1, home: surfaces.home, repo: surfaces.repo } : {}),
     }
     try {
       fs.writeFileSync(marker, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
     } catch (error) {
       warn(`first boot: ${marker} was not written: ${error?.message ?? error}`)
     }
-    log(`first boot: skill ${record.skill}, registry ${record.registry}`)
+    log(`first boot: skill ${record.skill}, team ${record.team.state}, registry ${record.registry}`)
   }
-  return { fresh, marker, ...(skill ? { skill } : {}), registry }
+  return { fresh, marker, ...(skill ? { skill } : {}), team, registry, ...(surfaces ? { surfaces } : {}) }
 }
 
 /**
@@ -252,6 +428,10 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const home = process.env.AUTOMAGIK_HOME || '/data'
   const dshHome = process.env.DSH_HOME || '/data/dsh'
   const workspace = process.env.AUTOMAGIK_WORKSPACE || '/data/workspace'
-  const result = runFirstBoot({ home, workspace, profile: join(dshHome, 'profiles', 'automagik-web'), version: process.env.AUTOMAGIK_VERSION })
-  process.exitCode = result.skill?.state === 'failed' ? 1 : 0
+  try {
+    runFirstBoot({ home, workspace, profile: join(dshHome, 'profiles', 'automagik-web'), version: process.env.AUTOMAGIK_VERSION })
+  } catch (error) {
+    console.error(`first boot: ${error?.message ?? error}`)
+    process.exitCode = 1
+  }
 }

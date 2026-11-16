@@ -1,15 +1,19 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { FIRST_BOOT_MARKER, installSkill, runFirstBoot, seedRegistry, sha256File, skillProblems } from '../first-boot.mjs'
-import { SKILL_NAME, SKILL_SHA256 } from '../toolchain.mjs'
+import {
+  FIRST_BOOT_MARKER, TRIAD, ensureTeam, installSkill, runFirstBoot, seedRegistry, seedScript,
+  sha256File, skillProblems, verifySurfaces,
+} from '../first-boot.mjs'
+import { REGISTRY_SEED_COMMIT, REGISTRY_SEED_SHA256, SKILL_NAME, SKILL_SHA256 } from '../toolchain.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const SOURCE = join(ROOT, 'server', 'skills')
+const VENDOR = join(ROOT, 'server', 'vendor', 'registry-seed')
 const temps = []
 const temp = () => {
   const dir = mkdtempSync(join(tmpdir(), 'automagik-first-boot-'))
@@ -21,10 +25,34 @@ after(() => {
 })
 const silence = { log: () => {}, warn: () => {} }
 
-function fakeSeed(profile, body) {
-  const dir = join(profile, 'node_modules', '@automagik', 'bots-dsh', 'src', 'shared')
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'registry-seed.js'), body)
+/** A stand-in for `am create`: writes the same v1 shape with a fresh id per name. */
+function fakeAm() {
+  const dir = temp()
+  const bin = join(dir, 'am')
+  writeFileSync(bin, `#!/usr/bin/env node
+const fs = require('node:fs'), path = require('node:path');
+const args = process.argv.slice(2);
+const value = (name) => args[args.indexOf(name) + 1];
+const project = value('--project');
+const name = value('--name');
+const chars = 'abcdefghijklmnopqrstuvwxyz234567';
+let h = 0; for (const c of name) h = (Math.imul(h, 31) + c.charCodeAt(0)) >>> 0;
+let id = 'b-'; for (let i = 0; i < 10; i += 1) id += chars[(h >>> (i * 3)) % 32];
+const file = path.join(project, '.herdr', 'bots.json');
+let raw = { version: 1, categories: [], bots: [] };
+try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+raw.bots.push({ id, kind: value('--kind'), name, role: value('--role'), instructions: value('--instructions'),
+  agent: value('--agent'), model: value('--model'), ...(value('--lead') ? { lead: value('--lead') } : {}) });
+fs.mkdirSync(path.dirname(file), { recursive: true });
+fs.writeFileSync(file, JSON.stringify(raw, null, 2) + '\\n');
+process.stdout.write(JSON.stringify({ id }) + '\\n');
+`)
+  chmodSync(bin, 0o755)
+  return bin
+}
+
+function envAt(dir, home, workspace) {
+  return { ...process.env, HOME: join(dir, 'user'), HERDR_APP_HOME: join(dir, 'herdr-app'), AUTOMAGIK_HOME: home, AUTOMAGIK_WORKSPACE: workspace }
 }
 
 test('the reviewed skill is copied to the shared folder and linked for both agents', () => {
@@ -56,79 +84,154 @@ test('an existing skill with other bytes is never overwritten', () => {
   assert.match(warnings.join('\n'), /exists with other bytes/)
 })
 
-test('a missing seed path is pending #1424, not a registry written by hand', () => {
-  const home = temp()
-  const workspace = temp()
-  const profile = temp()
-  const warnings = []
-  const result = seedRegistry({ home, workspace, profile, log: () => {}, warn: (message) => warnings.push(message) })
-  assert.equal(result.state, 'pending')
-  assert.match(result.script, /node_modules\/@automagik\/bots-dsh\/src\/shared\/registry-seed\.js$/)
-  assert.match(warnings.join('\n'), /assumed interface: --home <team home> --workspace <folder>/)
+test('the triad is created through am with fresh ids and one main', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const first = ensureTeam({ home, workspace, env: envAt(dir, home, workspace), am, ...silence })
+  assert.equal(first.state, 'created')
+  assert.equal(first.bots.length, TRIAD.length)
+  assert.equal(new Set(first.bots.map((bot) => bot.id)).size, TRIAD.length)
+  const v1 = JSON.parse(readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8'))
+  assert.equal(v1.version, 1)
+  assert.equal(v1.bots.filter((bot) => bot.kind === 'main').length, 1)
+  assert.equal(v1.bots.find((bot) => bot.kind === 'main').name, 'Purpose')
+  assert.equal(v1.bots.find((bot) => bot.name === 'Dogfooder').lead, first.mainId)
+  const models = Object.fromEntries(v1.bots.map((bot) => [bot.name, bot.model]))
+  assert.deepEqual(models, { Purpose: 'gpt-6-astra', Dogfooder: 'gpt-6.1-terra', Fixer: 'gpt-6.1-sol' })
+  assert.ok(v1.bots.every((bot) => bot.agent === 'codex'))
+  for (const bot of v1.bots) {
+    assert.equal(bot.effort, undefined, `${bot.name} carries an effort field`)
+    assert.equal(bot.tier, undefined, `${bot.name} carries a tier field`)
+    assert.equal(bot.service_tier, undefined, `${bot.name} carries a service_tier field`)
+    assert.ok(!/"fast"/.test(JSON.stringify(bot)), `${bot.name} carries Fast`)
+  }
+  assert.doesNotMatch(readFileSync(join(ROOT, 'server', 'first-boot.mjs'), 'utf8'), /service_tier|serviceTier/)
+  assert.equal(ensureTeam({ home, workspace, env: envAt(dir, home, workspace), am, ...silence }).state, 'present')
+})
+
+test('the vendored seed is the published #1424 commit', () => {
+  assert.equal(REGISTRY_SEED_COMMIT, '92fe5ef7486556cad42e6b5e789aef5d07c08f49')
+  for (const [relative, expected] of Object.entries(REGISTRY_SEED_SHA256)) {
+    assert.equal(sha256File(join(VENDOR, relative)), expected)
+  }
+  assert.equal(seedScript({ profile: join(temp(), 'profile'), vendorRoot: VENDOR }).source, 'vendored')
+})
+
+test('the vendored seed runs from a folder outside the repository', () => {
+  const dir = temp()
+  const vendor = join(dir, 'registry-seed')
+  cpSync(VENDOR, vendor, { recursive: true })
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const env = envAt(dir, home, workspace)
+  ensureTeam({ home, workspace, env, am, ...silence })
+  assert.equal(seedRegistry({ home, workspace, profile: join(dir, 'profile'), env, vendorRoot: vendor, ...silence }).state, 'seeded')
+  assert.equal(verifySurfaces({ home, workspace }).v1.bots, 3)
+})
+
+test('the real seed writes both version 2 files from a real am-created roster', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const env = envAt(dir, home, workspace)
+  ensureTeam({ home, workspace, env, am, ...silence })
+  const seeded = seedRegistry({ home, workspace, profile: join(dir, 'profile'), env, vendorRoot: VENDOR, ...silence })
+  assert.equal(seeded.state, 'seeded')
+  assert.match(seeded.stdout, /seed-registry: home /)
+  assert.match(seeded.stdout, /seed-registry: repo /)
+  const surfaces = verifySurfaces({ home, workspace })
+  assert.equal(surfaces.v1.bots, 3)
+  assert.equal(surfaces.v1.mains, 1)
+  assert.equal(surfaces.home.bots, 1)
+  assert.equal(surfaces.home.projects, 1)
+  assert.equal(surfaces.repo.bots, 3)
+  assert.equal(surfaces.repo.mains, 1)
+  const v2 = JSON.parse(readFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), 'utf8'))
+  assert.equal(v2.version, 2)
+  assert.equal(v2.bots.length, 3)
+  assert.equal(v2.bots.filter((bot) => bot.main === true).length, 1)
+  assert.deepEqual(Object.fromEntries(v2.bots.map((bot) => [bot.name, bot.model])), { Purpose: 'gpt-6-astra', Dogfooder: 'gpt-6.1-terra', Fixer: 'gpt-6.1-sol' })
+  assert.ok(v2.bots.every((bot) => bot.agent === 'codex'))
+})
+
+test('the real seed refuses a missing v1 roster and writes nothing', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  mkdirSync(workspace, { recursive: true })
+  assert.throws(() => seedRegistry({ home, workspace, profile: join(dir, 'profile'), vendorRoot: VENDOR, ...silence }), /no version 1 roster/i)
+  assert.equal(existsSync(join(home, 'bots', 'bots.json')), false)
+  assert.equal(existsSync(join(workspace, '.automagik')), false)
+})
+
+test('a seed refusal after the roster is a real failure with its stderr', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const env = envAt(dir, home, workspace)
+  ensureTeam({ home, workspace, env, am, ...silence })
+  mkdirSync(join(workspace, '.automagik', 'bots'), { recursive: true })
+  writeFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), '{"version":2,"bots":[{"id":"b-aaaaaaaaaa","name":"Other","main":true}]}\n')
+  assert.throws(() => seedRegistry({ home, workspace, profile: join(dir, 'profile'), env, vendorRoot: VENDOR, ...silence }), /registry seed .* failed with exit 1: .*different project roster/s)
   assert.equal(existsSync(join(home, 'bots', 'bots.json')), false)
 })
 
-test('the seed is called with the team home and workspace and its home file is accepted', () => {
-  const home = temp()
-  const workspace = temp()
-  const profile = temp()
-  fakeSeed(profile, `
-const fs = require('node:fs'), path = require('node:path');
-const args = process.argv.slice(2);
-const home = args[args.indexOf('--home') + 1], workspace = args[args.indexOf('--workspace') + 1];
-if (!home || !workspace) process.exit(9);
-fs.mkdirSync(path.join(home, 'bots'), { recursive: true });
-fs.writeFileSync(path.join(home, 'bots', 'bots.json'), JSON.stringify({ version: 2, bots: [] }, null, 2) + '\\n');
-fs.writeFileSync(path.join(workspace, 'called'), 'yes\\n');
-`)
-  const result = seedRegistry({ home, workspace, profile, log: () => {}, warn: () => {} })
-  assert.equal(result.state, 'seeded')
-  assert.equal(JSON.parse(readFileSync(join(home, 'bots', 'bots.json'), 'utf8')).version, 2)
-  assert.equal(readFileSync(join(workspace, 'called'), 'utf8'), 'yes\n')
-  assert.equal(seedRegistry({ home, workspace, profile, log: () => {}, warn: () => {} }).state, 'present')
-})
-
-test('exit 3 means there is no v1 roster, not a seed failure', () => {
-  const profile = temp()
-  fakeSeed(profile, 'process.exit(3)\n')
-  const result = seedRegistry({ home: temp(), workspace: temp(), profile, log: () => {}, warn: () => {} })
-  assert.equal(result.state, 'no-source')
-})
-
-test('a seed that returns 0 without writing the home file is a failure', () => {
-  const profile = temp()
-  fakeSeed(profile, 'process.exit(0)\n')
-  const warnings = []
-  const result = seedRegistry({ home: temp(), workspace: temp(), profile, log: () => {}, warn: (message) => warnings.push(message) })
-  assert.equal(result.state, 'failed')
-  assert.match(warnings.join('\n'), /returned 0 but wrote no/)
-})
-
-test('first boot installs the skill and records the seed state once', () => {
-  const home = temp()
-  const workspace = temp()
-  const profile = temp()
-  fakeSeed(profile, `
-const fs = require('node:fs'), path = require('node:path');
-const home = process.argv[process.argv.indexOf('--home') + 1];
-fs.mkdirSync(path.join(home, 'bots'), { recursive: true });
-fs.writeFileSync(path.join(home, 'bots', 'bots.json'), JSON.stringify({ version: 2, bots: [] }, null, 2));
-`)
-  const first = runFirstBoot({ home, workspace, profile, version: '3.149.2', source: SOURCE, ...silence })
+test('first boot creates, seeds and verifies the team and both surfaces', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const env = envAt(dir, home, workspace)
+  const first = runFirstBoot({
+    home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE,
+    vendorRoot: VENDOR, env, am, ...silence,
+  })
   assert.equal(first.fresh, true)
-  assert.equal(first.skill.state, 'installed')
+  assert.equal(first.team.state, 'created')
   assert.equal(first.registry.state, 'seeded')
+  assert.equal(first.registry.script.source, 'vendored')
+  assert.equal(first.surfaces.v1.bots, 3)
   const marker = JSON.parse(readFileSync(join(home, FIRST_BOOT_MARKER), 'utf8'))
   assert.equal(marker.version, '3.149.2')
-  assert.equal(marker.skill, 'installed')
+  assert.equal(marker.team.state, 'created')
+  assert.equal(marker.team.bots.length, 3)
   assert.equal(marker.registry, 'seeded')
-  const second = runFirstBoot({ home, workspace, profile, version: '3.149.2', source: SOURCE, ...silence })
+  assert.equal(marker.seedCommit, REGISTRY_SEED_COMMIT)
+  const second = runFirstBoot({
+    home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE,
+    vendorRoot: VENDOR, env, am, ...silence,
+  })
   assert.equal(second.fresh, false)
+  assert.equal(second.team.state, 'present')
   assert.equal(second.registry.state, 'present')
-  assert.equal(existsSync(join(home, 'bots', 'bots.json')), true)
 })
 
-test('the pinned hashes are the reviewed bytes', () => {
+test('the verifier refuses a Session key in a version 2 file', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const env = envAt(dir, home, workspace)
+  ensureTeam({ home, workspace, env, am, ...silence })
+  seedRegistry({ home, workspace, profile: join(dir, 'profile'), env, vendorRoot: VENDOR, ...silence })
+  const file = join(workspace, '.automagik', 'bots', 'bots.json')
+  const v2 = JSON.parse(readFileSync(file, 'utf8'))
+  v2.bots[0].sessionId = 'session-00000000-0000-0000-0000-000000000000'
+  writeFileSync(file, `${JSON.stringify(v2, null, 2)}\n`)
+  assert.throws(() => verifySurfaces({ home, workspace }), /sessionId is a Session key/)
+})
+
+test('the role briefs carry the Claude-only UI and opposite-provider review rules', () => {
+  assert.ok(TRIAD.every((role) => role.instructions.includes('approved Claude route')))
+  assert.ok(TRIAD.filter((role) => role.kind === 'member').every((role) => /Opus for critical work, never Terra reviewing Sol/.test(role.instructions)))
+})
+
+test('the pinned skill hashes are the reviewed bytes', () => {
   assert.equal(createHash('sha256').update(readFileSync(join(SOURCE, SKILL_NAME, 'SKILL.md'))).digest('hex'), SKILL_SHA256['SKILL.md'])
   assert.equal(createHash('sha256').update(readFileSync(join(SOURCE, SKILL_NAME, 'references', 'packet.md'))).digest('hex'), SKILL_SHA256['references/packet.md'])
 })

@@ -88,6 +88,7 @@ async function main() {
 
   const logs = await logsOf()
   check(/automagik-web: startup: http:\/\/127\.0\.0\.1:3081\//.test(logs), 'no startup line')
+  check(/automagik-web: herdr-core: serving on \/data\/run\/herdr-core\/default\.sock/.test(logs), 'herdr-core did not start on the contract socket')
   check(!/(?<![A-Za-z0-9_])token=(?!<redacted>)\S+/.test(logs), 'the launch token is in the log')
   check(/automagik-web: seeded \/data\/dsh\/profiles\/automagik-web/.test(logs), 'the first start did not seed the profile')
   check(/automagik-web: profile automagik-web: automagik \d+\.\d+\.\d+, dsh \d+\.\d+\.\d+/.test(logs), 'no version line')
@@ -123,6 +124,9 @@ async function main() {
     check(config.includes(`name: '${plugin}'`) || config.includes(`name: "${plugin}"`), `${plugin} is not composed`)
   }
   say(`seeded profile, three plugins, 600 launch URL, uid 1000, ${entries} composed entries`)
+  for (const line of logs.split('\n').filter((line) => /first boot:|seed-registry:/.test(line))) {
+    say(line.replace(/^automagik-web: /, ''))
+  }
 
   // The toolchain smoke runs inside the image: am, hc, pnpm and node on PATH, the shipped
   // CLI store's install path without a download, and the first-boot skill and registry seed

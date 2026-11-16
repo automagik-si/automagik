@@ -1,21 +1,23 @@
 #!/usr/bin/env node
 // The smoke that runs inside the built image: the four commands an operator expects on PATH
-// (am, hc, pnpm, node), the shipped CLI store's install path without a download, and the
-// first-boot hook (skill + v2 registry seed) in a temporary home. Run by server/smoke.mjs with
-// `docker exec`; it never starts a service or writes outside /tmp and the data volume.
+// (am, hc, pnpm, node), the shipped CLI store's install path without a download, the real
+// #1424 seed against the real first-boot team and against a copy of that v1 roster, and the
+// skill hashes. Run by server/smoke.mjs with `docker exec`; it writes only under /tmp.
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { dryRunVendorClis } from './cli-store.mjs'
-import { FIRST_BOOT_MARKER, runFirstBoot, seedRegistry, sha256File, SKILL_LINKS } from './first-boot.mjs'
+import { FIRST_BOOT_MARKER, TRIAD, runFirstBoot, seedRegistry, seedScript, sha256File, SKILL_LINKS, verifySurfaces } from './first-boot.mjs'
 import { profileDirOf } from './lib.mjs'
-import { HERDR_CORE_VERSION, PNPM_PATH, SKILL_NAME, SKILL_ROOT, SKILL_SHA256 } from './toolchain.mjs'
+import { HERDR_APP_HOME, HERDR_CORE_SOCKET, HERDR_CORE_VERSION, PNPM_PATH, REGISTRY_SEED_SHA256, REGISTRY_SEED_VENDOR, SKILL_NAME, SKILL_ROOT, SKILL_SHA256 } from './toolchain.mjs'
 
 const ROOT = '/opt/automagik'
 const HOME = process.env.AUTOMAGIK_HOME || '/data'
 const DSH_HOME = process.env.DSH_HOME || '/data/dsh'
+const WORKSPACE = process.env.AUTOMAGIK_WORKSPACE || '/data/workspace'
 const PROFILE = profileDirOf(DSH_HOME)
+const VENDOR = join(ROOT, 'registry-seed')
 const VERSIONS = JSON.parse(readFileSync(join(ROOT, 'versions.json'), 'utf8'))
 
 const say = (message) => console.log(`[in-image] ${message}`)
@@ -47,22 +49,54 @@ async function main() {
   check(node === process.version, `node on PATH is ${node}, this process is ${process.version}`)
   say(`am ${am}, hc ${hc}, herdr-core ${VERSIONS.herdrCore?.version || HERDR_CORE_VERSION}, pnpm ${pnpm}, node ${node}`)
 
+  // The Code side's terminals live in the supervised herdr-core on the contract socket. The
+  // same env reaches dsh, am and hc; here the core must answer both its status and its list.
+  check(process.env.HERDR_APP_HOME === HERDR_APP_HOME, `HERDR_APP_HOME is ${process.env.HERDR_APP_HOME ?? 'unset'}, not ${HERDR_APP_HOME}`)
+  check(process.env.HC_TERMINAL_SOCKET === HERDR_CORE_SOCKET, `HC_TERMINAL_SOCKET is ${process.env.HC_TERMINAL_SOCKET ?? 'unset'}, not ${HERDR_CORE_SOCKET}`)
+  check(lstatSync(HERDR_CORE_SOCKET).isSocket(), `${HERDR_CORE_SOCKET} is not a Unix socket`)
+  const coreStatus = command('hc', ['server', 'status', '--json'])
+  check(coreStatus.trim().length > 0, 'hc server status printed nothing')
+  const coreList = command('hc', ['ls', '--json'])
+  check(coreList.trim().length > 0, 'hc ls printed nothing')
+  const listed = JSON.parse(coreList)
+  check(Array.isArray(listed), 'hc ls --json did not print a list')
+  const amList = JSON.parse(command('am', ['ls', '--project', WORKSPACE, '--json']))
+  const seenBots = (amList?.projects ?? []).flatMap((project) => project.bots ?? [])
+  check(amList?.projects?.[0]?.hcError === undefined, `am ls could not see the core: ${amList?.projects?.[0]?.hcError}`)
+  check(seenBots.length === TRIAD.length, `am ls sees ${seenBots.length} bots, not ${TRIAD.length}`)
+  say(`herdr-core: ${HERDR_CORE_SOCKET} answered server status and ls; am sees ${seenBots.length} team bots`)
+
   // The reviewed skill is installed read-only in the shared agents folder and linked for both
   // agents on first boot. Both the image payload and the volume copy must match the pins.
   for (const [relative, expected] of Object.entries(SKILL_SHA256)) {
-    const imageCopy = join(SKILL_ROOT, SKILL_NAME, relative)
-    const homeCopy = join(HOME, '.agents', 'skills', SKILL_NAME, relative)
-    check(sha256File(imageCopy) === expected, `image skill payload ${relative} does not match its pin`)
-    check(sha256File(homeCopy) === expected, `installed skill ${relative} does not match its pin`)
+    check(sha256File(join(SKILL_ROOT, SKILL_NAME, relative)) === expected, `image skill payload ${relative} does not match its pin`)
+    check(sha256File(join(HOME, '.agents', 'skills', SKILL_NAME, relative)) === expected, `installed skill ${relative} does not match its pin`)
   }
   for (const vendor of SKILL_LINKS) {
     const link = join(HOME, vendor, 'skills', SKILL_NAME)
     check(lstatSync(link).isSymbolicLink(), `${link} is not a symlink`)
     check(readlinkSync(link) === join('..', '..', '.agents', 'skills', SKILL_NAME), `${link} points at ${readlinkSync(link)}`)
   }
+  say(`skill ${SKILL_NAME}: pinned payload, shared copy and both agent links match`)
+
+  // The vendored #1424 seed is the published PR head, byte-pinned. The real first boot used it
+  // (or an installed plugin carrying it) to create and read back both version 2 surfaces.
+  for (const [relative, expected] of Object.entries(REGISTRY_SEED_SHA256)) {
+    check(sha256File(join(VENDOR, relative)) === expected, `vendored seed ${relative} does not match its pin`)
+  }
+  const seed = seedScript({ profile: PROFILE, vendorRoot: VENDOR })
+  say(`registry seed: ${seed.source}${seed.commit ? ` @ ${seed.commit}` : ''} at ${seed.path}`)
   const marker = JSON.parse(readFileSync(join(HOME, FIRST_BOOT_MARKER), 'utf8'))
   check(['installed', 'present'].includes(marker.skill), `first boot recorded skill ${marker.skill}`)
-  say(`skill ${SKILL_NAME}: pinned payload, shared copy and both agent links match`)
+  check(marker.team?.state === 'created', `first boot recorded team ${marker.team?.state}`)
+  check(marker.registry === 'seeded', `first boot recorded registry ${marker.registry}`)
+  const surfaces = verifySurfaces({ home: HOME, workspace: WORKSPACE })
+  check(surfaces.v1.bots === TRIAD.length && surfaces.v1.mains === 1, `first boot v1 has ${surfaces.v1.bots} bots, ${surfaces.v1.mains} main`)
+  check(surfaces.home.bots === 1 && surfaces.home.projects === 1, `first boot v2 home has ${surfaces.home.bots} bots, ${surfaces.home.projects} projects`)
+  check(surfaces.repo.bots === TRIAD.length && surfaces.repo.mains === 1, `first boot v2 repo has ${surfaces.repo.bots} bots, ${surfaces.repo.mains} main`)
+  check(new Set(surfaces.bots.map((bot) => bot.id)).size === TRIAD.length, 'first boot reused a Bot id')
+  say(`first boot: team ${surfaces.bots.map((bot) => `${bot.name} ${bot.id}`).join(', ')}`)
+  say(`first boot: v1 ${surfaces.v1.file} (${surfaces.v1.bots} bots, ${surfaces.v1.mains} main); v2 home ${surfaces.home.file} (${surfaces.home.bots} bots, ${surfaces.home.projects} project); v2 repo ${surfaces.repo.file} (${surfaces.repo.bots} bots, ${surfaces.repo.mains} main)`)
 
   // The shipped CLI store, called with a recording runner: no vendor CLI is downloaded and no
   // package manager command runs, but the real install path, pnpm path and registry are proved.
@@ -72,56 +106,45 @@ async function main() {
   check(dry.pnpm === PNPM_PATH, `the CLI store used ${dry.pnpm}, not ${PNPM_PATH}`)
   check(dry.registry === 'https://registry.npmjs.org', `the CLI store used ${dry.registry}`)
 
-  // The seed in a temporary home. While #1424 is unmerged the documented path is absent, so
-  // the fixture beside the shipped registry module stands in for its CLI and proves the
-  // interface the first-boot hook calls: --home <team home> --workspace <folder>.
+  // A whole first boot in a temporary home: the real am creates the triad, the real seed writes
+  // both files, and the verifier reads them back. The same seed then runs on a copy of the real
+  // first-boot v1 roster, so a roster made by am is exercised twice from different homes.
   const temp = mkdtempSync(join(tmpdir(), 'automagik-in-image-'))
   try {
+    const user = join(temp, 'user')
     const home = join(temp, 'home')
     const workspace = join(temp, 'workspace')
     const profile = join(temp, 'profile')
-    mkdirSync(join(workspace, '.herdr'), { recursive: true })
-    writeFileSync(join(workspace, '.herdr', 'bots.json'), `${JSON.stringify({
-      version: 1,
-      bots: [{ id: 'b-aaaaaaaaaa', name: 'Smoke', kind: 'main', agent: 'claude', instructions: 'Seed smoke' }],
-    }, null, 2)}\n`)
-    const bots = join(profile, 'node_modules', '@automagik', 'bots-dsh')
-    const shared = join(bots, 'src', 'shared')
-    mkdirSync(shared, { recursive: true })
-    writeFileSync(join(bots, 'package.json'), '{"type":"module"}\n')
-    copyFileSync(join(PROFILE, 'node_modules', '@automagik', 'bots-dsh', 'src', 'shared', 'registry.js'), join(shared, 'registry.js'))
-    writeFileSync(join(shared, 'registry-seed.js'), `import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { fromHerdrV1, writeRegistry } from './registry.js'
-const args = process.argv.slice(2)
-const value = (name) => args[args.indexOf(name) + 1]
-const home = value('--home')
-const workspace = value('--workspace')
-const { file } = fromHerdrV1(readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8'))
-await writeRegistry(join(home, 'bots', 'bots.json'), { ...file, projects: [{ folder: workspace }], shown: [] }, null, { kind: 'home' })
-await writeRegistry(join(workspace, '.automagik', 'bots', 'bots.json'), file, null, { kind: 'repo' })
-console.log('fixture seed: wrote the home and repo registries')
-`)
+    const env = { ...process.env, HOME: user, HERDR_APP_HOME: join(temp, 'herdr-app'), AUTOMAGIK_HOME: home, AUTOMAGIK_WORKSPACE: workspace }
     const first = runFirstBoot({
-      home, workspace, profile, version: VERSIONS.automagik,
+      home, workspace, profile, env, vendorRoot: VENDOR, version: VERSIONS.automagik,
       source: join(ROOT, 'skills'), log: (message) => say(message), warn: (message) => say(`warning: ${message}`),
     })
     check(first.fresh, 'the temporary home was not first boot')
-    check(first.registry.state === 'seeded', `the seed in a temporary home was ${first.registry.state}`)
+    check(first.team?.state === 'created', `the temporary team was ${first.team?.state}`)
+    check(first.registry?.state === 'seeded', `the temporary seed was ${first.registry?.state}`)
+    check(first.surfaces?.v1.bots === TRIAD.length, 'the temporary first boot did not verify the v1 roster')
     check(first.skill?.state === 'installed', `the skill in a temporary home was ${first.skill?.state}`)
-    const registry = JSON.parse(readFileSync(join(home, 'bots', 'bots.json'), 'utf8'))
-    check(registry.version === 2 && registry.bots?.some((bot) => bot.id === 'b-aaaaaaaaaa'), 'the seed did not write the v2 home registry')
-    check(existsSync(join(workspace, '.automagik', 'bots', 'bots.json')), 'the seed did not write the v2 repo registry')
-    const marker = JSON.parse(readFileSync(join(home, FIRST_BOOT_MARKER), 'utf8'))
-    check(marker.registry === 'seeded' && marker.skill === 'installed', 'the temporary first-boot marker does not record the seed and skill')
-    const pending = seedRegistry({ home: join(temp, 'empty'), workspace, profile: join(temp, 'missing'), log: () => {}, warn: () => {} })
-    check(pending.state === 'pending', `a profile without the seed reported ${pending.state}, not pending`)
-    say('seed: first boot wrote the v2 home and repo registries in a temporary home; a missing seed is pending #1424')
+    const tempMarker = JSON.parse(readFileSync(join(home, FIRST_BOOT_MARKER), 'utf8'))
+    check(tempMarker.team?.bots?.length === TRIAD.length && tempMarker.registry === 'seeded', 'the temporary first-boot marker does not record the team and seed')
+    const again = seedRegistry({ home, workspace, profile, env, vendorRoot: VENDOR, log: () => {}, warn: () => {} })
+    check(again.stdout.includes('unchanged'), 'an identical re-run did not report both files unchanged')
+    say('seed: a real am-created triad seeded both surfaces; an identical re-run reported unchanged')
+
+    const copyProject = join(temp, 'copy-project')
+    const copyHome = join(temp, 'copy-home')
+    mkdirSync(join(copyProject, '.herdr'), { recursive: true })
+    copyFileSync(join(WORKSPACE, '.herdr', 'bots.json'), join(copyProject, '.herdr', 'bots.json'))
+    const copied = seedRegistry({ home: copyHome, workspace: copyProject, profile, env, vendorRoot: VENDOR, log: () => {}, warn: () => {} })
+    check(copied.state === 'seeded', 'a copy of the real v1 roster did not seed')
+    const copySurfaces = verifySurfaces({ home: copyHome, workspace: copyProject })
+    check(copySurfaces.v1.bots === TRIAD.length && copySurfaces.repo.bots === TRIAD.length, 'the copied roster did not produce all three Bots')
+    say('seed: a copy of the real first-boot v1 roster produced both version 2 surfaces')
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }
 
-  console.log(`IN-IMAGE SMOKE OK am=${am} hc=${hc} pnpm=${pnpm} node=${node} seed=temp-home cli-store=dry-run`)
+  console.log(`IN-IMAGE SMOKE OK am=${am} hc=${hc} pnpm=${pnpm} node=${node} seed=real cli-store=dry-run`)
 }
 
 main().catch((error) => {

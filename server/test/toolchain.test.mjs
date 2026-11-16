@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { HERDR_CORE_SHA256, HERDR_CORE_VERSION, PNPM_PATH } from '../toolchain.mjs'
+import { HERDR_APP_HOME, HERDR_CORE_SHA256, HERDR_CORE_SOCKET, HERDR_CORE_VERSION, PNPM_PATH } from '../toolchain.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const dockerfile = readFileSync(join(ROOT, 'server/Dockerfile'), 'utf8')
@@ -12,6 +12,11 @@ test('the Dockerfile defaults match the pinned toolchain constants', () => {
   assert.match(dockerfile, new RegExp(`^ARG HERDR_CORE_VERSION=${HERDR_CORE_VERSION}$`, 'm'))
   assert.match(dockerfile, new RegExp(`^ARG HERDR_CORE_SHA256=${HERDR_CORE_SHA256}$`, 'm'))
   assert.match(dockerfile, new RegExp(`AUTOMAGIK_PNPM=${PNPM_PATH}`))
+})
+
+test('the image sets the Arca app home and the core socket on the data volume', () => {
+  assert.match(dockerfile, new RegExp(`HERDR_APP_HOME=${HERDR_APP_HOME}`))
+  assert.match(dockerfile, new RegExp(`HC_TERMINAL_SOCKET=${HERDR_CORE_SOCKET}`))
 })
 
 test('the final image carries both hc and herdr-core at literal paths', () => {
@@ -29,6 +34,10 @@ test('the final image carries am from the fetched release tarball and its comman
 test('the reviewed skill is verified at build time and copied read-only', () => {
   assert.match(dockerfile, /RUN node \/build\/server\/verify-payload\.mjs/)
   assert.match(dockerfile, /^COPY server\/skills \/opt\/automagik\/skills$/m)
+})
+
+test('the published #1424 seed is copied into the image until the plugin carries it', () => {
+  assert.match(dockerfile, /^COPY server\/vendor\/registry-seed \/opt\/automagik\/registry-seed$/m)
 })
 
 test('the first-boot hook and the in-image smoke are inside the image', () => {
