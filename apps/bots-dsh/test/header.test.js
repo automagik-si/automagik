@@ -191,6 +191,8 @@ test('a phone folds every header control into one More, so the switch keeps the 
   assert.ok(panel, 'the controls live in the panel')
   assert.ok(byClass(panel, 'bt-head-details'), 'Live, the right sidebar and Details are in the panel')
   assert.ok(byClass(panel, 'bt-head-details').props['aria-controls'] === undefined)
+  const side = find(panel, node => node.props?.['data-bt-right-sidebar'] !== undefined)
+  assert.ok(byClass(side, 'bt-head-more-word'), 'the side panel row says its word in the panel')
   assert.ok(find(narrow, node => node.type?.name === 'FaceSwitch'), 'the Chat / Terminal switch stays in the row')
 })
 

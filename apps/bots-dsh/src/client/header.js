@@ -173,7 +173,7 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
   const headButtons = bot ? h(HeaderButtons, { bot, roster, actions, useWork }) : null
   const liveButtons = actions.hasRightSidebar?.() ? h(Fragment, null,
     h('button', { type: 'button', className: 'bt-head-details', title: t('Live'), 'aria-label': t('Open Live'), onClick: () => actions.openLive() }, t('Live')),
-    !native ? h('button', { type: 'button', className: 'bt-head-details', 'data-bt-right-sidebar': '', title: t('Right sidebar'), 'aria-label': t('Toggle right sidebar'), onClick: () => actions.toggleRightSidebar() }, h(GoArrow)) : null) : null
+    !native ? h('button', { type: 'button', className: 'bt-head-details', 'data-bt-right-sidebar': '', title: t('Right sidebar'), 'aria-label': t('Toggle right sidebar'), onClick: () => actions.toggleRightSidebar() }, h(GoArrow), h('span', { className: 'bt-head-more-word' }, t('Right sidebar'))) : null) : null
   const details = !away && (bot || room) ? h('button', {
     type: 'button', className: 'bt-head-details', 'aria-label': t('View conversation details'), title: t('Details'),
     'aria-expanded': detailsOpen, 'aria-controls': 'bt-conversation-panel', 'data-details-subject': sessionId,
