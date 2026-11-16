@@ -226,9 +226,9 @@ async function main() {
   try {
     runFirstBoot({ home: env.AUTOMAGIK_HOME, workspace, profile: seeded.target, version: build.automagik, log, warn })
   } catch (error) {
-    stopping = true
-    stopCore()
-    throw error
+    // First boot is work in progress, not a reason to stop a healthy server. The team/seed
+    // retries on a later boot and after the vendor CLI install completes.
+    warn(`first boot: ${error?.message ?? error}; the server starts and the team/seed retries`)
   }
   if (coreExit !== null) {
     stopping = true
@@ -247,7 +247,14 @@ async function main() {
   if (env.AUTOMAGIK_CLI_INSTALL !== 'off') {
     log('vendor CLIs: checking Claude Code and Codex and refreshing the launch bridge in the background')
     void installVendorClis({ home: env.AUTOMAGIK_HOME, profile: seeded.target, env, log, warn })
-      .then((result) => { if (result.state !== 'ready') warn(`vendor CLIs: ${result.state}; the ACP plugin will retry`) })
+      .then((result) => {
+        if (result.state !== 'ready') warn(`vendor CLIs: ${result.state}; the ACP plugin will retry`)
+        try {
+          runFirstBoot({ home: env.AUTOMAGIK_HOME, workspace, profile: seeded.target, version: build.automagik, log, warn })
+        } catch (error) {
+          warn(`first boot retry after vendor CLIs: ${error?.message ?? error}`)
+        }
+      })
       .catch((error) => warn(`vendor CLIs: ${error?.message ?? error}`))
   }
 

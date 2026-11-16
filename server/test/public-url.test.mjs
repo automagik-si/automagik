@@ -30,7 +30,7 @@ const harness = `
       }
       if (url === ${JSON.stringify(FIRST_BOOT)}) return {
         format: 'module', shortCircuit: true,
-        source: 'export function runFirstBoot() { return { fresh: false } } export async function installVendorClis() { return { state: "ready" } }',
+        source: 'export function runFirstBoot() { if (process.env.TEST_FIRST_BOOT_THROW) throw new Error("team: no codex model list"); return { fresh: false } } export async function installVendorClis() { return { state: "ready" } }',
       }
       if (url === ${JSON.stringify(LIB)}) return {
         format: 'module', shortCircuit: true,
@@ -119,6 +119,15 @@ test('a core socket failure prints no serving line and logs stderr, exit code an
   assert.match(result.stderr, /core map failed/)
   assert.match(result.stderr, /herdr-core exitCode=1 signal=none/)
   assert.match(result.stderr, new RegExp(`${join(dir, 'run', 'herdr-core').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: \\(empty\\)`))
+})
+
+test('mutant ENTRYPOINT_EXITS_ON_FIRST_BOOT_FAILURE is killed: a first-boot error does not stop DSH', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'automagik-first-boot-fail-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const result = run(undefined, dir, 'owner-managed', { TEST_FIRST_BOOT_THROW: '1' })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /SPAWN /)
+  assert.match(result.stderr, /first boot: team: no codex model list; the server starts/)
 })
 
 test('the real entrypoint still starts DSH after the updater reports rollback', t => {

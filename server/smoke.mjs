@@ -104,6 +104,7 @@ async function main() {
   check(!logs.includes(token), 'the real launch token is in the log')
   const report = JSON.parse((await docker(['exec', name, '/nodejs/bin/node', '/opt/automagik/healthcheck.mjs', '--json'])).stdout)
   check(report.schemaVersion === 1 && report.healthy && report.followsImage && report.reason === 'matching-image', 'fresh image report does not match installed plugins')
+  check(['pending', 'applied'].includes(report.modelPins?.state), `health report modelPins is ${JSON.stringify(report.modelPins)}`)
   check(Object.values(report.plugins).every(version => version === report.image.version), 'installed versions differ from the image report')
   check(!JSON.stringify(report).includes(token), 'health report contains the launch credential')
 

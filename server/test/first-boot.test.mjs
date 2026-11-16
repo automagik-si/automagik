@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
-  FIRST_BOOT_MARKER, TRIAD, ensureTeam, installSkill, managedProgram, runFirstBoot, seedRegistry, seedScript,
+  FIRST_BOOT_MARKER, TRIAD, applyPendingPins, ensureTeam, installSkill, managedProgram, runFirstBoot, seedRegistry, seedScript,
   sha256File, skillProblems, verifySurfaces, writeProgramsBridge,
 } from '../first-boot.mjs'
 import { REGISTRY_SEED_COMMIT, REGISTRY_SEED_SHA256, SKILL_NAME, SKILL_SHA256 } from '../toolchain.mjs'
@@ -32,15 +32,30 @@ function fakeAm() {
   writeFileSync(bin, `#!/usr/bin/env node
 const fs = require('node:fs'), path = require('node:path');
 const args = process.argv.slice(2);
-const value = (name) => args[args.indexOf(name) + 1];
+const value = (name) => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1]; };
+const command = args[0];
+const noList = process.env.FAKE_AM_NO_MODEL_LIST === '1';
 const project = value('--project');
-const name = value('--name');
 const chars = 'abcdefghijklmnopqrstuvwxyz234567';
-let h = 0; for (const c of name) h = (Math.imul(h, 31) + c.charCodeAt(0)) >>> 0;
-let id = 'b-'; for (let i = 0; i < 10; i += 1) id += chars[(h >>> (i * 3)) % 32];
 const file = path.join(project, '.herdr', 'bots.json');
 let raw = { version: 1, categories: [], bots: [] };
 try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+if (command === 'edit') {
+  const ref = args[1];
+  const bot = raw.bots.find((candidate) => candidate.id === ref || candidate.name === ref);
+  if (!bot) { process.stderr.write('am: no such Bot\\n'); process.exit(2); }
+  const model = value('--model');
+  if (model && noList) { process.stderr.write('am: There is no list of codex models to pin from; leave the model unpinned (the running one is detected)\\n'); process.exit(1); }
+  if (model) bot.model = model;
+  if (value('--instructions') !== undefined) bot.instructions = value('--instructions');
+  fs.writeFileSync(file, JSON.stringify(raw, null, 2) + '\\n');
+  process.stdout.write(JSON.stringify({ id: bot.id }) + '\\n');
+  process.exit(0);
+}
+const name = value('--name');
+if (value('--model') && noList) { process.stderr.write('am: There is no list of codex models to pin from; leave the model unpinned (the running one is detected)\\n'); process.exit(1); }
+let h = 0; for (const c of name) h = (Math.imul(h, 31) + c.charCodeAt(0)) >>> 0;
+let id = 'b-'; for (let i = 0; i < 10; i += 1) id += chars[(h >>> (i * 3)) % 32];
 raw.bots.push({ id, kind: value('--kind'), name, role: value('--role'), instructions: value('--instructions'),
   agent: value('--agent'), model: value('--model'), ...(value('--lead') ? { lead: value('--lead') } : {}) });
 fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -211,10 +226,9 @@ test('mutant FIRST_BOOT_PRESENT_HOME_SKIPS_VERIFY is killed: a partial home is n
   rmSync(join(workspace, '.herdr', 'bots.json'), { force: true })
   rmSync(join(workspace, '.automagik'), { recursive: true, force: true })
   rmSync(markerFile, { force: true })
-  assert.throws(
-    () => runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env, am, ...silence }),
-    /registry verifier failed: missing/,
-  )
+  const failed = runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env, am, ...silence })
+  assert.equal(failed.team.state, 'failed')
+  assert.match(failed.error, /registry verifier failed: missing/)
   assert.equal(existsSync(markerFile), false, 'no marker is written for a partial state')
   assert.equal(readFileSync(homeFile, 'utf8'), homeBefore, 'the home file is preserved')
   assert.equal(existsSync(join(workspace, '.herdr', 'bots.json')), false, 'no ids are recreated')
@@ -340,4 +354,86 @@ test('mutant WRITER_WRITES_UNMANAGED_PATH is killed: a path outside the store is
   const home = temp()
   assert.throws(() => writeProgramsBridge({ home, appHome: join(home, 'herdr-app'), agent: 'claude', path: '/opt/person/claude', ...silence }), /not in this instance's CLI store/)
   assert.equal(existsSync(join(home, 'herdr-app', 'programs.json')), false)
+})
+
+const PENDING_PINS = join('bots', 'pending-model-pins.json')
+
+test('no Codex catalogue: the team is created unpinned and says "model pin pending" per Bot', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const env = { ...envAt(dir, home, workspace), FAKE_AM_NO_MODEL_LIST: '1' }
+  const first = runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env, am, ...silence })
+  assert.equal(first.team.state, 'created')
+  assert.equal(first.team.pinned, false)
+  assert.equal(first.team.pendingPins.length, TRIAD.length)
+  assert.equal(first.pins.state, 'pending')
+  const v1 = JSON.parse(readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8'))
+  assert.ok(v1.bots.every((bot) => bot.model === undefined))
+  assert.ok(v1.bots.every((bot) => /model pin pending/i.test(bot.instructions)))
+  const pending = JSON.parse(readFileSync(join(home, PENDING_PINS), 'utf8'))
+  assert.equal(pending.pins.length, TRIAD.length)
+  assert.deepEqual(Object.fromEntries(pending.pins.map((pin) => [pin.name, pin.model])), { Purpose: 'gpt-6-astra', Dogfooder: 'gpt-6.1-terra', Fixer: 'gpt-6.1-sol' })
+  const repo = JSON.parse(readFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), 'utf8'))
+  assert.ok(repo.bots.every((bot) => bot.model === undefined && /model pin pending/i.test(bot.instructions)))
+  const homeRegistry = JSON.parse(readFileSync(join(home, 'bots', 'bots.json'), 'utf8'))
+  const homeMain = homeRegistry.bots.find((bot) => bot.main === true)
+  assert.equal(homeMain.model, undefined)
+  assert.match(homeMain.instructions, /model pin pending/i)
+  const marker = JSON.parse(readFileSync(join(home, FIRST_BOOT_MARKER), 'utf8'))
+  assert.equal(marker.pins, 'pending')
+  assert.equal(marker.pendingPins.length, TRIAD.length)
+})
+
+test('a later boot with a catalogue applies all three pins, then a second apply is a no-op', () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const noList = { ...envAt(dir, home, workspace), FAKE_AM_NO_MODEL_LIST: '1' }
+  runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env: noList, am, ...silence })
+  const env = envAt(dir, home, workspace)
+  const second = runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env, am, ...silence })
+  assert.equal(second.pins.state, 'pinned')
+  assert.equal(second.pins.applied.length, TRIAD.length)
+  assert.equal(existsSync(join(home, PENDING_PINS)), false)
+  const v1 = JSON.parse(readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8'))
+  assert.deepEqual(Object.fromEntries(v1.bots.map((bot) => [bot.name, bot.model])), { Purpose: 'gpt-6-astra', Dogfooder: 'gpt-6.1-terra', Fixer: 'gpt-6.1-sol' })
+  assert.ok(v1.bots.every((bot) => !/model pin pending/i.test(bot.instructions)))
+  const repo = JSON.parse(readFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), 'utf8'))
+  assert.deepEqual(Object.fromEntries(repo.bots.map((bot) => [bot.name, bot.model])), { Purpose: 'gpt-6-astra', Dogfooder: 'gpt-6.1-terra', Fixer: 'gpt-6.1-sol' })
+  assert.ok(repo.bots.every((bot) => !/model pin pending/i.test(bot.instructions)))
+  const homeRegistry = JSON.parse(readFileSync(join(home, 'bots', 'bots.json'), 'utf8'))
+  assert.equal(homeRegistry.bots.find((bot) => bot.main === true).model, 'gpt-6-astra')
+  const marker = JSON.parse(readFileSync(join(home, FIRST_BOOT_MARKER), 'utf8'))
+  assert.equal(marker.pins, 'pinned')
+  const before = readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8')
+  assert.equal(applyPendingPins({ home, workspace, env, am, ...silence }).state, 'none')
+  assert.equal(readFileSync(join(workspace, '.herdr', 'bots.json'), 'utf8'), before)
+})
+
+test("a person's model is never overwritten; the reviewed pin is reported superseded", () => {
+  const dir = temp()
+  const home = join(dir, 'home')
+  const workspace = join(dir, 'workspace')
+  const am = fakeAm()
+  const noList = { ...envAt(dir, home, workspace), FAKE_AM_NO_MODEL_LIST: '1' }
+  runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env: noList, am, ...silence })
+  const file = join(workspace, '.herdr', 'bots.json')
+  const v1 = JSON.parse(readFileSync(file, 'utf8'))
+  const dogfooder = v1.bots.find((bot) => bot.name === 'Dogfooder')
+  dogfooder.model = 'gpt-6.1-sol'
+  writeFileSync(file, `${JSON.stringify(v1, null, 2)}\n`)
+  const env = envAt(dir, home, workspace)
+  const second = runFirstBoot({ home, workspace, profile: join(dir, 'profile'), version: '3.149.2', source: SOURCE, vendorRoot: VENDOR, env, am, ...silence })
+  assert.equal(second.pins.superseded.length, 1)
+  assert.equal(second.pins.superseded[0].model, 'gpt-6.1-sol')
+  assert.equal(second.pins.superseded[0].pin.model, 'gpt-6.1-terra')
+  const after = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(after.bots.find((bot) => bot.name === 'Dogfooder').model, 'gpt-6.1-sol')
+  assert.ok(after.bots.every((bot) => !/model pin pending/i.test(bot.instructions)))
+  assert.equal(existsSync(join(home, PENDING_PINS)), false)
+  const repo = JSON.parse(readFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), 'utf8'))
+  assert.equal(repo.bots.find((bot) => bot.name === 'Dogfooder').model, 'gpt-6.1-sol')
 })

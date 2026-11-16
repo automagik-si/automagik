@@ -150,11 +150,167 @@ const repoRegistryOf = (workspace) => join(workspace, '.automagik', 'bots', 'bot
 
 /** A `b-` id, as `am create` mints one. No id is ever copied from another team. */
 const BOT_ID = /^b-[a-z2-7]{10}$/
+const NO_MODEL_LIST = /There is no list of [a-z]+ models to pin from/i
+const noModelList = (error) => NO_MODEL_LIST.test(`${error?.stderr ?? ''}\n${error?.message ?? ''}`)
+const PENDING_PINS = 'pending-model-pins.json'
+const pendingPinsOf = (home) => join(home, 'bots', PENDING_PINS)
+
+/** The per-role pins a no-list boot still owes: [{ id, name, model }]. */
+export function readPendingPins(home) {
+  const file = pendingPinsOf(home)
+  if (!existsSync(file)) return []
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'))
+    return Array.isArray(parsed?.pins) ? parsed.pins.filter((pin) => pin && typeof pin.id === 'string' && typeof pin.model === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writePendingPins(home, pins) {
+  const file = pendingPinsOf(home)
+  mkdirSync(dirname(file), { recursive: true })
+  const text = `${JSON.stringify({ version: 1, pins }, null, 2)}\n`
+  writeFileSync(file, text, { mode: 0o600 })
+  chmodSync(file, 0o600)
+}
+
+function clearPendingPins(home) {
+  rmSync(pendingPinsOf(home), { force: true })
+}
+
+/**
+ * Keep the derived version 2 surfaces in step when a pin is applied with am edit. Only the
+ * model and instructions of an existing id are touched; ids, roles and every other field stay.
+ */
+function syncV2Models({ home, workspace }) {
+  const v1 = readJson(rosterOf(workspace))
+  const v1Bots = Array.isArray(v1.bots) ? v1.bots : []
+  const repoFile = repoRegistryOf(workspace)
+  if (existsSync(repoFile)) {
+    const repo = readJson(repoFile)
+    let changed = false
+    for (const bot of Array.isArray(repo.bots) ? repo.bots : []) {
+      const source = v1Bots.find((candidate) => candidate?.id === bot?.id)
+      if (!source) continue
+      if (source.model === undefined ? bot.model !== undefined : bot.model !== source.model) {
+        if (source.model === undefined) delete bot.model
+        else bot.model = source.model
+        changed = true
+      }
+      if (source.instructions === undefined ? bot.instructions !== undefined : bot.instructions !== source.instructions) {
+        if (source.instructions === undefined) delete bot.instructions
+        else bot.instructions = source.instructions
+        changed = true
+      }
+    }
+    if (changed) writeFileSync(repoFile, `${JSON.stringify(repo, null, 2)}\n`, { mode: statSync(repoFile).mode & 0o777 })
+  }
+  const homeFile = homeRegistryOf(home)
+  if (existsSync(homeFile)) {
+    const registry = readJson(homeFile)
+    const main = v1Bots.find((bot) => bot?.kind === 'main')
+    let changed = false
+    for (const bot of Array.isArray(registry.bots) ? registry.bots : []) {
+      if (!main || bot?.id !== main.id || bot?.folder !== workspace) continue
+      if (main.model === undefined ? bot.model !== undefined : bot.model !== main.model) {
+        if (main.model === undefined) delete bot.model
+        else bot.model = main.model
+        changed = true
+      }
+      if (main.instructions === undefined ? bot.instructions !== undefined : bot.instructions !== main.instructions) {
+        if (main.instructions === undefined) delete bot.instructions
+        else bot.instructions = main.instructions
+        changed = true
+      }
+    }
+    if (changed) writeFileSync(homeFile, `${JSON.stringify(registry, null, 2)}\n`, { mode: statSync(homeFile).mode & 0o777 })
+  }
+}
+
+const pinPendingLine = (model) => `Model pin pending: ${model}. No task starts while the team is model-pin pending; this clears after all three reviewed pins are applied and the v1/v2 registries verify.`
+const clearPinPendingLine = (instructions) => String(instructions ?? '').replace(/\n*Model pin pending:[^\n]*/g, '').trimEnd()
+
+/**
+ * Apply the pins a no-list first boot could not set. am edit refuses with its no-list message
+ * until ~/.codex/models_cache.json (or the config default) gives a catalogue; every other
+ * failure is logged and the pin is kept. A model a person set to something else is never
+ * overwritten: the reviewed pin is reported superseded and that Bot's pending marker is removed.
+ * The version 2 copies are patched to the v1 model and instructions; the pending file is only
+ * cleared by runFirstBoot after verifySurfaces passes.
+ */
+export function applyPendingPins({
+  home,
+  workspace,
+  env = process.env,
+  am = env.AUTOMAGIK_AM || 'am',
+  run,
+  log = console.log,
+  warn = console.warn,
+} = {}) {
+  const pending = readPendingPins(home)
+  if (!pending.length) {
+    log('pins: no pending model pins; no-op')
+    return { state: 'none', applied: [], superseded: [], pending: [], noList: false }
+  }
+  const exec = run ?? process.getBuiltinModule('node:child_process').execFileSync
+  const childEnv = {
+    ...env,
+    HOME: env.HOME || home,
+    HERDR_APP_HOME: env.HERDR_APP_HOME || join(home, '.config', 'herdr-app'),
+    AUTOMAGIK_HOME: home,
+  }
+  const applied = []
+  const superseded = []
+  const left = []
+  let sawNoList = false
+  const save = (bot, args) => {
+    exec(am, ['edit', bot.id, '--project', workspace, ...args, '--json'], {
+      cwd: workspace, env: childEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000,
+    })
+    return (readJson(rosterOf(workspace)).bots ?? []).find((candidate) => candidate?.id === bot.id)
+  }
+  for (const pin of pending) {
+    const bot = (readJson(rosterOf(workspace)).bots ?? []).find((candidate) => candidate?.id === pin.id)
+    if (!bot) { warn(`pins: ${pin.name ?? pin.id} is no longer in the v1 roster; kept for the next boot`); left.push(pin); continue }
+    const clean = clearPinPendingLine(bot.instructions)
+    const marker = clean !== String(bot.instructions ?? '').trimEnd()
+    if (bot.model !== undefined && bot.model !== pin.model) {
+      superseded.push({ pin, model: bot.model })
+      log(`pins: ${pin.name ?? pin.id} keeps the person's model ${bot.model}; reviewed ${pin.model} superseded`)
+      if (marker) {
+        try { save(bot, ['--instructions', clean]) } catch (error) { warn(`pins: ${pin.name ?? pin.id} marker not cleared: ${error?.message ?? error}`); left.push(pin) }
+      }
+      continue
+    }
+    try {
+      const args = []
+      if (bot.model === undefined) args.push('--model', pin.model)
+      if (marker) args.push('--instructions', clean)
+      const after = args.length ? save(bot, args) : bot
+      if (after?.model !== undefined && after.model !== pin.model) throw new Error(`${am} edit ${pin.id} did not save the pin`)
+      if (clearPinPendingLine(after?.instructions) !== String(after?.instructions ?? '').trimEnd()) throw new Error(`${am} edit ${pin.id} did not clear the pending marker`)
+      applied.push(pin)
+      log(`pins: ${pin.name ?? pin.id} -> ${pin.model}`)
+    } catch (error) {
+      if (noModelList(error)) { sawNoList = true; log(`pins: waiting for the Codex model catalogue; ${pending.length} pin${pending.length === 1 ? '' : 's'} pending`) }
+      else warn(`pins: ${pin.name ?? pin.id} was not pinned: ${error?.stderr?.trim() || error?.message || error}`)
+      left.push(pin)
+    }
+  }
+  syncV2Models({ home, workspace })
+  return {
+    state: left.length ? (applied.length || superseded.length ? 'partial' : 'pending') : 'pinned',
+    applied, superseded, pending: left, noList: sawNoList,
+  }
+}
 
 /**
  * Create the fresh triad through `am create` when the workspace has no Herdr roster. The ids
- * come from am (newBotId), not from a template or another team's file. A partial failure removes
- * the roster it just made, so the next boot starts cleanly.
+ * come from am (newBotId), not from a template or another team's file. When am has no Codex
+ * model catalogue (a fresh HOME has no ~/.codex/models_cache.json), the triad is created
+ * unpinned, each Bot's instructions and roster say "Model pin pending", and the three reviewed
+ * pins are recorded for a later am edit. A partial failure removes the roster it just made.
  */
 export function ensureTeam({
   home,
@@ -175,12 +331,14 @@ export function ensureTeam({
     AUTOMAGIK_HOME: home,
   }
   mkdirSync(workspace, { recursive: true })
-  const made = []
-  try {
+  const create = (pinned) => {
+    const made = []
     let lead
     for (const role of TRIAD) {
+      const instructions = pinned ? role.instructions : `${role.instructions}\n\n${pinPendingLine(role.model)}`
       const args = ['create', '--project', workspace, '--name', role.name, '--agent', 'codex',
-        '--model', role.model, '--kind', role.kind, '--role', role.role, '--instructions', role.instructions]
+        '--kind', role.kind, '--role', role.role, '--instructions', instructions]
+      if (pinned) args.push('--model', role.model)
       if (lead) args.push('--lead', lead)
       args.push('--json')
       const output = exec(am, args, {
@@ -202,7 +360,23 @@ export function ensureTeam({
     if (v1.version !== 1 || mains.length !== 1 || mains[0].name !== 'Purpose' || v1.bots.length !== TRIAD.length) {
       throw new Error(`${roster} does not hold the fresh triad: ${v1.bots?.length ?? 0} bots, ${mains.length} main`)
     }
-    return { state: 'created', roster, bots: made, mainId: lead }
+    return { made, lead }
+  }
+  try {
+    let created
+    try {
+      created = create(true)
+    } catch (error) {
+      rmSync(roster, { force: true })
+      if (!noModelList(error)) throw error
+      log('team: no Codex model catalogue (am reads ~/.codex/models_cache.json plus the config default); creating the triad unpinned and recording all three pins')
+      created = create(false)
+      return {
+        state: 'created', roster, bots: created.made, mainId: created.lead, pinned: false,
+        pendingPins: created.made.map((bot) => ({ id: bot.id, name: bot.name, model: TRIAD.find((role) => role.name === bot.name).model })),
+      }
+    }
+    return { state: 'created', roster, bots: created.made, mainId: created.lead, pinned: true }
   } catch (error) {
     // Only the file this call made: an existing roster is never removed.
     try { rmSync(roster, { force: true }) } catch {}
@@ -354,11 +528,30 @@ export function verifySurfaces({ home, workspace, expectedIds } = {}) {
 }
 
 /**
- * The first-start hook: install the skill once (marker), create the fresh triad when the team
- * home has no registry, run the real seed, and verify all three files. A seed or verification
- * failure propagates: the entrypoint exits nonzero rather than starting a half-seeded team.
+ * The first-start hook never kills the server over the team: a team/seed/verification failure
+ * is logged and returned, DSH starts, and the work is retried on a later boot and after the
+ * vendor CLI install. The detailed flow lives in boot().
  */
-export function runFirstBoot({
+export function runFirstBoot(options = {}) {
+  try {
+    return boot(options)
+  } catch (error) {
+    const home = options.home
+    const marker = home ? join(home, FIRST_BOOT_MARKER) : null
+    const message = String(error?.message ?? error)
+    const warn = options.warn ?? console.warn
+    warn(`first boot: ${message}; the server starts and the team/seed retry on a later boot`)
+    return {
+      fresh: marker ? !existsSync(marker) : true,
+      marker,
+      team: { state: 'failed', error: message },
+      registry: { state: 'failed', error: message },
+      error: message,
+    }
+  }
+}
+
+function boot({
   home,
   workspace,
   profile,
@@ -390,20 +583,31 @@ export function runFirstBoot({
   let surfaces
   if (!fs.existsSync(homeFile)) {
     team = ensureTeam({ home, workspace, env, am, run, log, warn })
+    if (team.state === 'created') {
+      if (team.pendingPins?.length) writePendingPins(home, team.pendingPins)
+      else clearPendingPins(home)
+    }
     registry = seedRegistry({ home, workspace, profile, env, run, vendorRoot, log, warn })
-    surfaces = verifySurfaces({
-      home, workspace,
-      ...(team.state === 'created' ? { expectedIds: team.bots.map((bot) => bot.id) } : {}),
-    })
     log(`first boot: registry ${registry.state} from ${registry.script.source}${registry.script.commit ? ` @ ${registry.script.commit}` : ''}`)
   } else {
     team = { state: 'present' }
     registry = { state: 'present', homeFile }
-    surfaces = verifySurfaces({ home, workspace })
-    log(`first boot: registry present at ${homeFile}; verified`)
+    log(`first boot: registry present at ${homeFile}`)
+  }
+  // A pending pin is a known state: apply it before verification, so a person's model change
+  // can be reported and the v2 copies synced, then verify the result. The file is cleared only
+  // after verifySurfaces passes.
+  const pins = applyPendingPins({ home, workspace, env, am, run, log, warn })
+  surfaces = verifySurfaces({
+    home, workspace,
+    ...(team.state === 'created' ? { expectedIds: team.bots.map((bot) => bot.id) } : {}),
+  })
+  if (pins.pending.length === 0 && (pins.applied.length || pins.superseded.length)) {
+    clearPendingPins(home)
   }
   log(`first boot: v1 ${surfaces.v1.file} (${surfaces.v1.bots} bots, ${surfaces.v1.mains} main); v2 home ${surfaces.home.file} (${surfaces.home.bots} bots, ${surfaces.home.projects} project); v2 repo ${surfaces.repo.file} (${surfaces.repo.bots} bots, ${surfaces.repo.mains} main)`)
   log(`first boot: coherent ids: v1 [${surfaces.v1.ids.join(' ')}] main ${surfaces.v1.mainId}; v2 home [${surfaces.home.ids.join(' ')}] main ${surfaces.home.mainId}; v2 repo [${surfaces.repo.ids.join(' ')}] main ${surfaces.repo.mainId}`)
+  log(`first boot: model pins ${pins.state}${pins.pending.length ? ` (${pins.pending.length} pending: ${pins.pending.map((pin) => `${pin.name ?? pin.id} ${pin.model}`).join(', ')})` : ''}${pins.superseded.length ? ` (${pins.superseded.length} superseded)` : ''}`)
   if (fresh) {
     const record = {
       schemaVersion: 1,
@@ -412,6 +616,9 @@ export function runFirstBoot({
       skill: skill?.state ?? 'skipped',
       team: team.state === 'created' ? { state: team.state, bots: team.bots, mainId: team.mainId } : { state: team.state },
       registry: registry.state,
+      pins: pins.state,
+      ...(pins.pending.length ? { pendingPins: pins.pending } : {}),
+      ...(pins.superseded.length ? { supersededPins: pins.superseded } : {}),
       ...(registry.script ? { seed: registry.script.path, seedSource: registry.script.source, ...(registry.script.commit ? { seedCommit: registry.script.commit } : {}) } : {}),
       ...(surfaces ? { v1: surfaces.v1, home: surfaces.home, repo: surfaces.repo } : {}),
     }
@@ -421,8 +628,20 @@ export function runFirstBoot({
       warn(`first boot: ${marker} was not written: ${error?.message ?? error}`)
     }
     log(`first boot: skill ${record.skill}, team ${record.team.state}, registry ${record.registry}`)
+  } else if (fs.existsSync(marker) && pins.pending.length === 0 && (pins.applied.length || pins.superseded.length)) {
+    try {
+      const record = JSON.parse(fs.readFileSync(marker, 'utf8'))
+      record.pins = pins.state
+      delete record.pendingPins
+      if (pins.superseded.length) record.supersededPins = pins.superseded
+      else delete record.supersededPins
+      record.pinsResolvedAt = now()
+      fs.writeFileSync(marker, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
+    } catch (error) {
+      warn(`first boot: ${marker} pin state was not updated: ${error?.message ?? error}`)
+    }
   }
-  return { fresh, marker, ...(skill ? { skill } : {}), team, registry, ...(surfaces ? { surfaces } : {}) }
+  return { fresh, marker, ...(skill ? { skill } : {}), team, registry, pins, ...(surfaces ? { surfaces } : {}) }
 }
 
 /**
@@ -553,7 +772,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const dshHome = process.env.DSH_HOME || '/data/dsh'
   const workspace = process.env.AUTOMAGIK_WORKSPACE || '/data/workspace'
   try {
-    runFirstBoot({ home, workspace, profile: join(dshHome, 'profiles', 'automagik-web'), version: process.env.AUTOMAGIK_VERSION })
+    const result = runFirstBoot({ home, workspace, profile: join(dshHome, 'profiles', 'automagik-web'), version: process.env.AUTOMAGIK_VERSION })
+    if (result.team?.state === 'failed') process.exitCode = 1
   } catch (error) {
     console.error(`first boot: ${error?.message ?? error}`)
     process.exitCode = 1

@@ -35,7 +35,7 @@ const report=(f,port,env={})=>healthReport({root:f.root,dshHome:f.home,dshPort:p
 test('JSON health has a fixed non-secret shape and only a 401 fence is healthy',async t=>{
   const f=fixture(t),dsh=await listener(t)
   const r=await report(f,dsh.port)
-  assert.deepEqual(Object.keys(r).sort(),['schemaVersion','image','plugins','followsImage','ownerManaged','reason','dsh','gate','fence','healthy'].sort())
+  assert.deepEqual(Object.keys(r).sort(),['schemaVersion','image','plugins','followsImage','ownerManaged','reason','dsh','gate','fence','modelPins','healthy'].sort())
   assert.deepEqual(r.image,{version:'3.93.0',revision:'b'.repeat(40)})
   assert.deepEqual(r.plugins,f.build.plugins);assert.equal(r.followsImage,true);assert.equal(r.reason,'matching-image');assert.equal(r.healthy,true)
   assert.deepEqual(r.gate,{enabled:false,up:null,status:null});assert.deepEqual(r.dsh,{up:true,status:401})
@@ -98,4 +98,20 @@ test('missing or mixed plugins in a canonical legacy seed never receive an owner
     assert.equal(state.ownerManaged,false,broken)
     assert.equal(state.healthy,false,broken)
   }
+})
+
+test('pending model pins are reported while the healthy fence stays green', async t => {
+  const f = fixture(t), dsh = await listener(t)
+  const data = join(f.root, 'data')
+  mkdirSync(join(data, 'bots'), { recursive: true })
+  writeFileSync(join(data, 'bots', 'pending-model-pins.json'), JSON.stringify({ version: 1, pins: [
+    { id: 'b-aaaaaaaaaa', name: 'Purpose', model: 'gpt-6-astra' },
+    { id: 'b-bbbbbbbbbb', name: 'Dogfooder', model: 'gpt-6.1-terra' },
+    { id: 'b-cccccccccc', name: 'Fixer', model: 'gpt-6.1-sol' },
+  ] }))
+  const r = await report(f, dsh.port, { AUTOMAGIK_HOME: data })
+  assert.equal(r.modelPins.state, 'pending')
+  assert.equal(r.modelPins.count, 3)
+  assert.equal(r.healthy, true)
+  assert.ok(!JSON.stringify(r).includes(data))
 })

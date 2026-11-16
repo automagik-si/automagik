@@ -37,6 +37,11 @@ export async function healthReport({ root = ROOT, env = process.env, dshHome, ds
   const fenced = dshStatus === 401 && (!enabled || gateStatus === 401)
   const version = releaseVersion(build?.automagik) ? build.automagik : null
   const revision = typeof build?.revision === 'string' && /^(?:[a-f0-9]{40}|unknown)$/.test(build.revision) ? build.revision : null
+  const pendingPins = readJson(join(env.AUTOMAGIK_HOME || '/data', 'bots', 'pending-model-pins.json'))
+  const pins = Array.isArray(pendingPins?.pins) ? pendingPins.pins : []
+  const modelPins = pins.length
+    ? { state: 'pending', count: pins.length, pins: pins.map((pin) => ({ id: pin?.id, name: pin?.name, model: pin?.model })) }
+    : { state: 'applied', count: 0 }
   return {
     schemaVersion: 1,
     image: { version, revision },
@@ -47,6 +52,7 @@ export async function healthReport({ root = ROOT, env = process.env, dshHome, ds
     dsh: { up: dshStatus !== null, status: dshStatus },
     gate: { enabled, up: enabled ? gateStatus !== null : null, status: gateStatus },
     fence: { healthy: fenced, status: enabled ? gateStatus : dshStatus },
+    modelPins,
     healthy: fenced && validBuild(build) && revision !== null && (state.followsImage || state.ownerManaged),
   }
 }
