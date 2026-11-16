@@ -10,7 +10,8 @@ import { agModelsCacheText, agModelsPath, parseAgModelsOutput } from "../mods/am
 import {
   AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AGY_READ_ALLOW, AGY_SHELL_READ, AGY_WRITE_ALLOW, LEGACY_AGENTS, TIERS,
   agentArgv, agentKeyOfArgv, agyModeArgs, agyModeOf, agyModeProblem, agySettingsDir, agySettingsPlan, codexConfigValue,
-  codexDefaultsFrom, codexEffortProblem, configPaths, configTexts, defaultModel, defaultModelFrom, detectModel, effortArgs, knownModels, knownModelsFrom,
+  codexDefaultsFrom, codexEffortProblem, codexProfileFrom, codexProfileName, codexProfilePath, codexSettingsFrom, configPaths, configTexts,
+  defaultModel, defaultModelFrom, detectModel, effortArgs, knownModels, knownModelsFrom,
   modelArgs, promptArgs, promptByMessage, resolveAgent, resumeArgs, seatSettingsArgs, serviceTierId, shownModel, tierArgs, tierName,
   tierProblem, withOverrides,
 } from "../mods/am-sidebar/models.js";
@@ -435,13 +436,14 @@ test("#1411: the value a Codex argv gives a config key, in every word form, the 
   assert.equal(codexConfigValue(undefined, "service_tier"), null);
 });
 
-test("#1411: what a Codex bot with neither stored inherits is the config's top-level pair, never a profile's", () => {
+test("#1411: a Codex bot with neither stored inherits the global config's top-level pair, and a profile is its own file", () => {
   const texts = { codexConfig: 'model = "gpt-6-astra"\nmodel_reasoning_effort = "high" # the host default\nservice_tier = "priority"\n\n'
     + '[profiles.work]\nmodel_reasoning_effort = "low"\nservice_tier = "default"\n' };
   assert.deepEqual(codexDefaultsFrom("codex", texts), { effort: "high", tier: "priority" });
   assert.deepEqual(codexDefaultsFrom("claude", texts), { effort: null, tier: null });
   assert.deepEqual(codexDefaultsFrom("codex", {}), { effort: null, tier: null });
-  // A profile's section alone names neither: a bot that runs it inherits the global defaults.
+  // A [profiles.…] section isn't the file `-p` layers (codexProfileFrom): it never stands in for
+  // the global top level, and a bot that runs one still reads the global pair here.
   const profileOnly = { codexConfig: '[profiles.work]\nmodel_reasoning_effort = "low"\nservice_tier = "default"\n' };
   assert.deepEqual(codexDefaultsFrom("codex", profileOnly), { effort: null, tier: null });
   assert.deepEqual(codexDefaultsFrom("codex", { codexConfig: "model_reasoning_effort = 'xhigh'\nservice_tier = 'flex'\n" }),
@@ -451,4 +453,42 @@ test("#1411: what a Codex bot with neither stored inherits is the config's top-l
   assert.deepEqual(Object.keys(configTexts("/h", () => null)), Object.keys(configPaths("/h")));
   assert.equal(configTexts("/h", (p) => (p === configPaths("/h").codexConfig ? "service_tier = \"default\"\n" : null)).codexConfig,
     "service_tier = \"default\"\n");
+});
+
+test("#1411: the Codex profile a launch names is one file beside the global config, read for its own pair", () => {
+  // Every word form Codex takes for -p/--profile, the last one winning, nothing after -- read.
+  for (const [argv, name] of [
+    [["codex", "-p", "sol"], "sol"],
+    [["codex", "-psol"], "sol"],
+    [["codex", "-p=sol"], "sol"],
+    [["codex", "--profile", "sol"], "sol"],
+    [["codex", "--profile=sol"], "sol"],
+    [["codex", "-p", "one", "--profile", "two"], "two"],
+    [["codex", "--profile", "sol.config.toml"], "sol.config.toml"],
+    [["codex", "--", "-p", "sol"], null],
+    [["codex"], null],
+    [["codex", "-p"], null],
+    [["codex", "-p", ""], null],
+    [["codex", "-p", "../x"], null],
+    [["codex", "--profile=/abs/sol"], null],
+    [["codex", "-p", "sol", "-p", "../x"], null],
+  ]) assert.equal(codexProfileName(argv), name, JSON.stringify(argv));
+  assert.equal(codexProfileName(undefined), null);
+  assert.equal(codexProfileName("codex -p sol"), null, "only a word list is an argv");
+  // The file `-p <name>` layers on the global config, and the pair it names at its top level.
+  assert.equal(codexProfilePath("/h", "sol"), "/h/.codex/sol.config.toml");
+  assert.equal(codexProfilePath("/h", "../sol"), null);
+  assert.equal(codexProfilePath(undefined, "sol"), null);
+  const files = { "/h/.codex/sol.config.toml": 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\nservice_tier = "fast"\n' };
+  const read = (p) => files[p] ?? null;
+  assert.deepEqual(codexProfileFrom("sol", { home: "/h", read }), { effort: "high", tier: "fast" });
+  assert.deepEqual(codexProfileFrom("astra", { home: "/h", read }), null, "a file that isn't there names nothing");
+  assert.equal(codexProfileFrom("../sol", { home: "/h", read }), null, "a name that can't be one file is never read");
+  assert.equal(codexProfileFrom("sol", { home: "/h", read: () => { throw new Error("no"); } }), null);
+  assert.equal(codexProfileFrom("sol", {}), null);
+  // codexSettingsFrom is the one top-level reader both callers share.
+  assert.deepEqual(codexSettingsFrom(files["/h/.codex/sol.config.toml"]), { effort: "high", tier: "fast" });
+  assert.deepEqual(codexSettingsFrom(undefined), { effort: null, tier: null });
+  assert.deepEqual(codexSettingsFrom('[profiles.work]\nmodel_reasoning_effort = "low"\nservice_tier = "default"\n'),
+    { effort: null, tier: null }, "a section's keys aren't the file's top-level pair");
 });

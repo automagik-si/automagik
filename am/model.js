@@ -921,12 +921,17 @@ export function applyBotEdit(raw, entry, newCategory = null) {
   const i = out.bots.findIndex((b) => b?.id === bot.id);
   const merged = i >= 0 ? { ...out.bots[i], ...bot } : bot;
   // #1411: a bot's own effort and tier are a Codex bot's, and a tier goes with the model it was
-  // stored for. An edit that now runs another agent, or another model while naming no tier,
-  // drops them here too, so no front end can leave a tier that no longer applies.
+  // stored for. An edit that now runs another agent drops them; one that runs another model
+  // while naming no tier stores standard, so the launch says -c service_tier=default and neither
+  // a profile nor the host config can leave Fast on the new model. `model` here is the entry's
+  // own field when it has one (a front end's), else the stored one it leaves alone.
   if (resolveAgent(merged.agent) !== "codex") {
     delete merged.effort;
     delete merged.tier;
-  } else if (i >= 0 && out.bots[i].model !== merged.model && !("tier" in bot)) delete merged.tier;
+  } else if (i >= 0) {
+    const modelAfter = "model" in bot ? (bot.model || null) : (out.bots[i].model ?? null);
+    if ((out.bots[i].model ?? null) !== modelAfter && !("tier" in bot)) merged.tier = "standard";
+  }
   if (Object.hasOwn(bot, "hermes") && bot.hermes === undefined) delete merged.hermes;
   for (const k of ["planned", "lead", "leadProject", "category", "agent", "model", "agyMode", "agyPermissions"]) {
     if (!(k in bot) || bot[k] === undefined || bot[k] === null || bot[k] === "") delete merged[k];

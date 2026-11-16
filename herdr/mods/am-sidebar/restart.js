@@ -159,10 +159,14 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
   // #1411: the bot's own reasoning effort and service tier (Codex's), after its own words so
   // they win over a profile, and after a template's own words so the roster wins there too. A
   // stored tier goes with the model it was picked for: a restart's model swap (the one path that
-  // changes the model with no tier option) doesn't carry it, so a standard model never keeps Fast.
+  // changes the model with no tier option) runs the new model on Codex's default tier, said
+  // explicitly as standard, so neither the record's Fast nor a profile's can stay on it.
   const storedModel = typeof bot.model === "string" && bot.model ? bot.model : null;
   const modelSwitch = model !== undefined && (model || null) !== storedModel;
-  const seatWords = seatSettingsArgs(key, modelSwitch ? { ...bot, tier: undefined } : bot);
+  // A Codex seat's own record carries the tier; a bot changing agent (or one that was never
+  // Codex's) has none of its own, so it keeps inheriting as before.
+  const seatSwap = modelSwitch && bot.agent === "codex" && key === "codex";
+  const seatWords = seatSettingsArgs(key, seatSwap ? { ...bot, tier: "standard" } : bot);
   // The source a pane's launch is compared with names no settings file: that one is this
   // launch's own, never a change a restart should report.
   const source = [...run, ...modeWords, ...modelArgs(key, pin), ...seatWords];

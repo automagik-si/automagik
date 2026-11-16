@@ -620,11 +620,13 @@ test("#1411: a Codex seat's own effort and tier are on every plan (resume, fresh
   assert.deepEqual(resume.source, [...run, "--model", "gpt-6.1-sol", ...own],
     "the source launchChange compares names them too, so a restart never reports them as a change of its own");
   assert.deepEqual(restartPlan({ bot: seat, run, runningAgent: "codex", fresh: true }).argv, [...run, "--model", "gpt-6.1-sol", ...own]);
-  // A model swap names no tier: the stored Fast doesn't carry over to the new model, the effort does.
+  // A model swap names no tier: the stored Fast doesn't carry over to the new model, which runs
+  // on the default tier said explicitly, so a profile or the host config can't fill the gap.
+  const standard = ["-c", "model_reasoning_effort=high", "-c", "service_tier=default"];
   assert.deepEqual(restartPlan({ bot: seat, run, runningAgent: "codex", model: "gpt-6.1-terra" }).argv,
-    [...run, "--model", "gpt-6.1-terra", "-c", "model_reasoning_effort=high"]);
+    [...run, "--model", "gpt-6.1-terra", ...standard]);
   assert.deepEqual(restartPlan({ bot: seat, run, runningAgent: "codex", model: "" }).argv,
-    [...run, "-c", "model_reasoning_effort=high"], "clearing the pin swaps the model too");
+    [...run, ...standard], "clearing the pin swaps the model too");
   // Naming the model it already runs is no swap: both stay.
   assert.deepEqual(restartPlan({ bot: seat, run, runningAgent: "codex", model: "gpt-6.1-sol" }).argv,
     [...run, "--model", "gpt-6.1-sol", ...own]);
@@ -633,11 +635,12 @@ test("#1411: a Codex seat's own effort and tier are on every plan (resume, fresh
   assert.deepEqual([claude.mode, claude.argv], ["swap", ["claude"]]);
   // A bot with neither stored adds nothing, and the inherited profile/global values run unchanged.
   assert.deepEqual(restartPlan({ bot: { agent: "codex" }, run, runningAgent: "codex", fresh: true }).argv, run);
-  // An hc template's current command stays the source, its own words untouched; the record's words
-  // are added after it through "$@", so the record wins over one the template names.
-  const template = { name: "seat", command: "codex --no-daemon -m gpt-6.1-sol" };
+  // An hc template's current command stays the source, its own words untouched (a profile it
+  // names included); the record's words are added after it through "$@", so the record wins over
+  // the template's and over the profile's.
+  const template = { name: "seat", command: "codex --no-daemon -p sol -m gpt-6.1-sol" };
   const tpl = restartPlan({ bot: seat, run: ["codex"], runningAgent: "codex", session: SID, template });
   assert.equal(tpl.template, "seat");
-  assert.deepEqual(tpl.argv, ["sh", "-c", 'codex --no-daemon -m gpt-6.1-sol "$@"', "sh",
+  assert.deepEqual(tpl.argv, ["sh", "-c", 'codex --no-daemon -p sol -m gpt-6.1-sol "$@"', "sh",
     ...CODEX_MODE_ARGS.filter((w) => w !== "--no-daemon"), "resume", SID, ...own]);
 });

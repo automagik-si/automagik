@@ -30,7 +30,7 @@ import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, co
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexDefaultsFrom, codexEffortProblem, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -1025,14 +1025,18 @@ function localProjectsFor(project, appHomeDir = appHome(), extraKeys = []) {
 /**
  * A Codex setting as ls and show report it (#1411): what the bot's live pane runs (detected:
  * a stored value a restart hasn't applied yet isn't what runs), else the bot's own stored value
- * (roster), else the one its global config gives (profile or default), else null. `map` turns
- * Codex's id into the roster's word (a service tier: priority is fast).
+ * (roster), else the first of `levels` ([source, value] from strongest to weakest: the profile
+ * its launch names, then its global config), else `fallback`, else null. `map` turns Codex's id
+ * into the roster's word (a service tier: priority is fast).
  */
-function shownCodexSetting({ argv, pinned, fallback, fallbackSource = "profile", key, map = (v) => v }) {
+function shownCodexSetting({ argv, pinned, levels = [], fallback = null, fallbackSource = "default", key, map = (v) => v }) {
   if (Array.isArray(argv)) {
     const detected = codexConfigValue(argv, key);
     if (detected !== null) return { value: map(detected), source: "detected" };
   } else if (pinned) return { value: pinned, source: "roster" };
+  for (const [source, value] of levels) {
+    if (value !== null && value !== undefined) return { value: map(value), source };
+  }
   if (fallback !== null && fallback !== undefined) return { value: map(fallback), source: fallbackSource };
   return { value: null, source: null };
 }
@@ -1053,14 +1057,20 @@ function describe(project, bot, view, hcError, projects = null) {
   const fallback = bot.agent ? defaultModelFrom(bot.agent, texts) : null;
   const shown = shownModel({ argv: live?.foreground?.argv, agentKey: bot.agent, pinned: bot.model, fallback });
   // #1411: the Codex reasoning effort and service tier this bot runs now (its pane's command
-  // line), else its own record when it isn't running, else the one its global config gives.
-  const inherited = codexDefaultsFrom(agentKey, texts);
-  const shownEffort = agentKey === "codex"
-    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.effort, fallback: inherited.effort, key: "model_reasoning_effort" })
+  // line), else its own record when it isn't running, else the profile its launch names, else
+  // the host's global config, else Codex's own: no effort, the default (standard) tier. A
+  // template's own words are on the pane's command line too, so they read as detected.
+  const codex = agentKey === "codex";
+  const global = codex ? codexSettingsFrom(texts.codexConfig) : null;
+  const profileName = codex ? codexProfileName(live?.foreground?.argv) : null;
+  const profile = profileName ? codexProfileFrom(profileName, io) : null;
+  const shownEffort = codex
+    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.effort, key: "model_reasoning_effort",
+      levels: [["profile", profile?.effort], ["global", global?.effort]] })
     : { value: null, source: null };
-  const shownTier = agentKey === "codex"
-    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.tier, fallback: inherited.tier ?? "default",
-      fallbackSource: inherited.tier === null ? "default" : "profile", key: "service_tier", map: tierName })
+  const shownTier = codex
+    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.tier, key: "service_tier", map: tierName, fallback: "standard",
+      levels: [["profile", profile?.tier], ["global", global?.tier]] })
     : { value: null, source: null };
   // The workers' Antigravity mode is shown as the default (auto) when their agent is Antigravity.
   const worker = bot.worker && typeof bot.worker === "object" ? { ...bot.worker } : null;
@@ -1294,8 +1304,9 @@ Usage: am <command> [options]                   (every command takes --json and 
   effort and service tier; every start, restart and revive passes them as per-launch Codex
   overrides, and the global Codex config is never written. What wins: the bot's record, then
   the hc template it runs, then its Codex profile, then the global config. A --model change
-  drops a stored tier unless --tier is given in the same call, so a standard model never keeps
-  Fast. am show --json reports the effective values and their source.
+  that names no --tier runs the new model on standard, said explicitly on the launch line, so
+  a Fast a profile, a template or the host config still names never applies to it. am show
+  --json reports the effective values and their source.
   rm <bot>
   category ls | add --title T [--sub S] [--id ID] | edit <id> [--title T] [--sub S]
            | rm <id> | order <id>...
@@ -1711,8 +1722,9 @@ export function entryFrom(opts, base, project, { creating }) {
   }
   // #1411: a bot's own reasoning effort and service tier (Codex's), passed on every launch as
   // its own overrides. Empty clears. A service tier belongs to the model choice: a --model
-  // change that names no --tier drops a stored one, so a Fast model swapped for a standard one
-  // never keeps Fast.
+  // change that names no --tier runs the new model on Codex's default tier, stored as standard
+  // and so said explicitly on the launch line, where a profile's, a template's or the host
+  // config's Fast no longer applies to it.
   const modelChanged = (opts.model !== undefined || opts["no-model"]) && (opts.model || undefined) !== base.model;
   const givenEffort = opts.effort !== undefined && opts.effort !== "";
   const givenTier = opts.tier !== undefined && opts.tier !== "";
@@ -1738,9 +1750,12 @@ export function entryFrom(opts, base, project, { creating }) {
     entry.effort = "";
     entry.tier = "";
     report([`${entry.name}: its reasoning effort and service tier were cleared, since they are a Codex bot's and it runs ${entry.agent || "no agent"}.`]);
-  } else if (opts.tier === undefined && modelChanged && storedTier) {
-    entry.tier = "";
-    report([`${entry.name}: its service tier doesn't carry over to a new model; pass --tier fast or --tier standard with --model to keep one.`]);
+  } else if (opts.tier === undefined && modelChanged && !creating && codexBot) {
+    // An edit that swaps the model names no tier: the new model runs on Codex's default one,
+    // stored as standard rather than left out, so the launch passes -c service_tier=default
+    // after the template's and the profile's own words and neither can keep Fast on it.
+    entry.tier = "standard";
+    if (storedTier) report([`${entry.name}: its service tier doesn't carry over to a new model; it runs standard unless --tier fast is passed with --model.`]);
   }
   // Antigravity's execution mode: applied at launch (auto unless another is stored), so the
   // default is written as no field at all and auto clears a stored one.

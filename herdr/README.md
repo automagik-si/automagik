@@ -1300,8 +1300,10 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   sets them; an empty value clears one. Every start, restart and revive passes them as that
   launch's own `-c` overrides, after the agent's and its template's own words, so the record wins
   over a Codex profile and the global config (which is never written). A `--model` change without
-  `--tier` drops a stored tier. `show` prints both with their source, and `show --json` carries
-  `effort`, `effortSource`, `tier`, `tierSource`, `pinnedEffort` and `pinnedTier`. See
+  `--tier` runs the new model on standard, stored and said on the launch line, so a Fast a
+  profile or the host config still names never applies to it. `show` prints both with their
+  source, and `show --json` carries `effort`, `effortSource`, `tier`, `tierSource`,
+  `pinnedEffort` and `pinnedTier`. See
   [Reasoning effort and service tier](#reasoning-effort-and-service-tier-codex).
 - `codexAuto` is retired (#1125). It used to opt a bot's Codex seat and workers out of Codex's
   auto mode; the owner's ruling (10 and 12 Nov) is that every Codex seat and worker runs in it,
@@ -1411,19 +1413,24 @@ What wins, when more than one names a value:
 1. the bot's record (`effort`, `tier`), added after the agent's own words;
 2. the hc template the pane runs, whose own `-c` words come first in the command; the record's go
    after it, so the record wins when both name one;
-3. the Codex profile the launch names (`-p <profile>`), if any;
+3. the Codex profile the launch names (`-p <profile>`), if any: the file
+   `~/.codex/<profile>.config.toml`, which Codex layers on the global config;
 4. the global Codex config.
 
 Codex reads the last `-c` for a key, so a later word wins. A service tier belongs to the model
-choice: `am edit <bot> --model M` without `--tier` in the same call drops a stored tier, so a
-model swapped for a standard one never keeps Fast. Workers take their agent, model and effort
-from the worker defaults or a template, never from the seat's `effort`/`tier`.
+choice: `am edit <bot> --model M` without `--tier` in the same call runs the new model on
+Standard, stored as `standard` and passed as `-c service_tier=default`, so a model swapped for a
+standard one never keeps a Fast that the record, a profile, a template or the host's config still
+names. Workers take their agent, model and effort from the worker defaults or a template, never
+from the seat's `effort`/`tier`.
 
 `am show <bot> --json` reports the effective values and their source: `effort`, `effortSource`,
 `tier` and `tierSource`, beside `pinnedEffort` and `pinnedTier` (what the record stores). A source
-is `detected` (what the live pane's command line runs), `roster` (the bot's own value, when it
-isn't running), `profile` (the global Codex config) or `default` (Codex's own default tier,
-Standard). The text `am show` prints the same two lines.
+is `detected` (what the live pane's command line runs, a template's own words included), `roster`
+(the bot's own value, when it isn't running), `profile` (the Codex profile the live launch names:
+`-p <name>` layers `~/.codex/<name>.config.toml` on the global config), `global` (that global
+config's top level) or `default` (Codex's own default tier, Standard). The text `am show` prints
+the same two lines.
 
 ### Codex's launch mode
 

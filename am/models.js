@@ -460,20 +460,75 @@ export function codexConfigValue(argv, key) {
 }
 
 /**
- * The reasoning effort and service tier a Codex launch inherits when its roster stores neither:
- * its top-level `model_reasoning_effort` and `service_tier` from `~/.codex/config.toml` (a
- * profile's own values are not read: a bot that names a profile still inherits nothing here).
- * The tier is Codex's id (`priority`, `default`, `flex`), null when the key is absent.
+ * The reasoning effort and service tier one Codex config text's top level names
+ * (`model_reasoning_effort` and `service_tier`), as { effort, tier }, each null when its key is
+ * absent or the text isn't one. The tier is Codex's id (`priority`, `fast`, `default`, `flex`),
+ * as written: Codex takes both `fast` and `priority` for the Fast tier.
+ */
+export function codexSettingsFrom(text) {
+  if (typeof text !== "string") return { effort: null, tier: null };
+  return { effort: tomlTopValue(text, "model_reasoning_effort"), tier: tomlTopValue(text, "service_tier") };
+}
+
+/**
+ * The pair a Codex launch inherits under its roster and the profile it names: the global
+ * `~/.codex/config.toml` top level (`texts`: configPaths' names). Nulls for every other agent,
+ * for no file and for a key the file doesn't name. A `[profiles.…]` section is not read: `-p`
+ * layers a whole file (codexProfileFrom), which is the profile this pack reports.
  */
 export function codexDefaultsFrom(agentKey, texts = {}) {
-  if (agentKey !== "codex" || typeof texts.codexConfig !== "string") return { effort: null, tier: null };
-  return { effort: tomlTopValue(texts.codexConfig, "model_reasoning_effort"),
-    tier: tomlTopValue(texts.codexConfig, "service_tier") };
+  return agentKey === "codex" ? codexSettingsFrom(texts.codexConfig) : { effort: null, tier: null };
 }
 
 /** codexDefaultsFrom over a synchronous `read(path)` under `home` (the CLI). */
 export function codexDefaults(agentKey, { home, read }) {
   return codexDefaultsFrom(agentKey, configTexts(home, read));
+}
+
+// A profile file's name beside the global config: letters, digits, "." "_" and "-", never a
+// path, never a leading dash (`-p ../x` reads nothing).
+const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * The Codex profile a launch argv names: `-p <name>`, `-p<name>`, `-p=<name>`, `--profile
+ * <name>` or `--profile=<name>`, the last one winning, nothing after `--` read. Null when the
+ * argv names none, or names something that can't be one file beside the config.
+ */
+export function codexProfileName(argv) {
+  const words = Array.isArray(argv) ? argv : [];
+  let name = null;
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i];
+    if (w === "--") break;
+    let text = null;
+    if (w === "-p" || w === "--profile") text = words[i + 1] ?? null;
+    else if (w.startsWith("--profile=")) text = w.slice("--profile=".length);
+    else if (w.startsWith("-p") && w.length > 2) text = w.slice(w[2] === "=" ? 3 : 2);
+    if (text !== null) name = text.trim();
+  }
+  return name !== null && PROFILE_NAME.test(name) ? name : null;
+}
+
+/**
+ * The file a Codex profile is: `~/.codex/<name>.config.toml` beside the global config, which
+ * `-p <name>` layers on top of it. Null for a name that can't be one. The pack only reads it.
+ */
+export function codexProfilePath(home, name) {
+  return typeof home === "string" && typeof name === "string" && PROFILE_NAME.test(name)
+    ? `${home}/.codex/${name}.config.toml` : null;
+}
+
+/**
+ * What the Codex profile `name` names at its top level, as codexSettingsFrom reads it, or null
+ * when the name can't be a profile's or its file is missing or unreadable. `home` and `read`
+ * are modelIo's (a synchronous reader).
+ */
+export function codexProfileFrom(name, { home, read } = {}) {
+  const path = codexProfilePath(home, name);
+  if (!path || typeof read !== "function") return null;
+  let text = null;
+  try { text = read(path); } catch { text = null; }
+  return typeof text === "string" ? codexSettingsFrom(text) : null;
 }
 
 // agy 1.5.3's execution mode (`--mode accept-edits|auto|plan`): the pack names one on every

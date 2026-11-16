@@ -434,9 +434,10 @@ test("#1411: the form keeps a stored effort and tier it doesn't edit, and a mode
   const saved = (state) => applyBotEdit(file, entryOf(state, file).entry).bots.find((b) => b.id === stored.id);
   // An edit that names neither writes both back as stored.
   assert.deepEqual([saved(formFrom({ mode: "edit", bot: stored })).effort, saved(formFrom({ mode: "edit", bot: stored })).tier], ["high", "fast"]);
-  // The form's own model change (it has no tier field) drops the tier, never the effort.
+  // The form's own model change (it has no tier field) runs the new model on standard, said
+  // explicitly, and keeps the effort.
   const movedModel = saved({ ...formFrom({ mode: "edit", bot: stored }), pin: "gpt-6.1-terra" });
-  assert.deepEqual([movedModel.model, movedModel.effort, movedModel.tier], ["gpt-6.1-terra", "high", undefined]);
+  assert.deepEqual([movedModel.model, movedModel.effort, movedModel.tier], ["gpt-6.1-terra", "high", "standard"]);
   // Moving the bot to another agent, where a service tier is not its, drops both.
   const movedAgent = saved({ ...formFrom({ mode: "edit", bot: stored }), agent: "claude" });
   assert.deepEqual([movedAgent.agent, movedAgent.effort, movedAgent.tier], ["claude", undefined, undefined]);

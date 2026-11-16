@@ -5120,6 +5120,12 @@ function codexHome(s, text = null) {
   if (text !== null) writeFileSync(config, text);
   return config;
 }
+/** A Codex profile file beside that config, which `-p <name>` layers on it: the file's path. */
+function codexProfile(s, name, text) {
+  const path = join(s.home, `.codex/${name}.config.toml`);
+  writeFileSync(path, text);
+  return path;
+}
 const codexSeatWords = (run) => codexWords(agentWords(run));
 
 test("#1411: create stores a Codex bot's effort and tier; start and restart pass them; show reports each with its source", (t) => {
@@ -5149,7 +5155,7 @@ test("#1411: create stores a Codex bot's effort and tier; start and restart pass
   assert.equal(existsSync(config), false);
 });
 
-test("#1411: two Codex bots on one host run different tiers; one that stores none inherits the profile, which is never written", (t) => {
+test("#1411: two Codex bots on one host run different tiers; one that stores none inherits the host's config, which is never written", (t) => {
   const s = scene(t);
   const text = 'model = "gpt-6-astra"\nmodel_reasoning_effort = "low"\nservice_tier = "priority"\n';
   const config = codexHome(s, text);
@@ -5164,7 +5170,7 @@ test("#1411: two Codex bots on one host run different tiers; one that stores non
   assert.equal(captain.some((w) => w.startsWith("model_reasoning_effort=")), false);
   const shown = s.cli(["show", "Captain", "--json"]).json();
   assert.deepEqual([shown.effort, shown.effortSource, shown.tier, shown.tierSource, shown.pinnedEffort, shown.pinnedTier],
-    ["low", "profile", "fast", "profile", null, null]);
+    ["low", "global", "fast", "global", null, null]);
   assert.equal(readFileSync(config, "utf8"), text, "the global Codex config is never written");
 });
 
@@ -5172,14 +5178,15 @@ test("#1411: a Fast model changed to a standard one doesn't keep Fast; --tier wi
   const s = scene(t);
   codexHome(s);
   assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "fast", "--json"]).code, 0);
-  // Sol -> Astra naming no tier: the stored Fast goes, with one line saying why.
+  // Sol -> Astra naming no tier: the stored Fast goes, and the new model runs on standard.
   const changed = s.cli(["edit", "Genie", "--model", "gpt-6-astra"]);
   assert.equal(changed.code, 0, changed.err);
-  assert.match(changed.err, /service tier doesn't carry over to a new model; pass --tier fast or --tier standard with --model/);
-  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier, s.bots().bots[0].effort], ["gpt-6-astra", undefined, "high"]);
-  // The launch carries no service_tier word: a standard model never inherits Fast from the record.
+  assert.match(changed.err, /service tier doesn't carry over to a new model; it runs standard unless --tier fast is passed with --model/);
+  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier, s.bots().bots[0].effort], ["gpt-6-astra", "standard", "high"]);
+  // The launch says the default tier itself, rather than leaving it out for a host to fill in.
   assert.equal(s.cli(["start", "Genie", "--json"]).code, 0);
-  assert.equal(codexSeatWords(runCall(s.calls())).some((w) => w.startsWith("service_tier=")), false);
+  assert.deepEqual(codexSeatWords(runCall(s.calls())).slice(-6),
+    ["--model", "gpt-6-astra", "-c", "model_reasoning_effort=high", "-c", "service_tier=default"]);
   // Naming the tier with the model stores the new choice, and the next restart passes it.
   assert.equal(s.cli(["edit", "Genie", "--model", "gpt-6.1-terra", "--tier", "fast"]).code, 0);
   assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier], ["gpt-6.1-terra", "fast"]);
@@ -5214,4 +5221,88 @@ test("#1411: effort and tier are a Codex bot's: moving to another agent clears t
   assert.equal(unknown.code, 2);
   assert.match(unknown.err, /--effort: reasoning effort "banana" isn't one of/);
   assert.equal(s.bots().bots.length, 1, "nothing written");
+});
+
+// ---- #1411 FIX-FIRST: a standard model keeps the default tier over a profile's or the host's
+// Fast, and show reads the profile a launch names. ----
+
+test("#1411: a model changed to a standard one says the default tier itself, over the host's Fast", (t) => {
+  const s = scene(t);
+  // The host's own Codex config asks for Fast and a low effort: neither may reach the new model.
+  const text = 'model = "gpt-6-astra"\nmodel_reasoning_effort = "low"\nservice_tier = "fast"\n';
+  const config = codexHome(s, text);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "fast", "--json"]).code, 0);
+  const changed = s.cli(["edit", "Genie", "--model", "gpt-6-astra"]);
+  assert.equal(changed.code, 0, changed.err);
+  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier], ["gpt-6-astra", "standard"], "standard is stored, not left out");
+  assert.equal(s.cli(["start", "Genie", "--json"]).code, 0);
+  // The launch's own -c words come last and say standard; the host's Fast can't fill a gap.
+  assert.deepEqual(codexSeatWords(runCall(s.calls())).slice(-4),
+    ["-c", "model_reasoning_effort=high", "-c", "service_tier=default"]);
+  assert.equal(readFileSync(config, "utf8"), text, "the host's Codex config is never written");
+});
+
+test("#1411: a restart through a template naming a Fast profile still runs the standard tier the record says", (t) => {
+  const s = scene(t);
+  codexHome(s);
+  // The owner's fleet profile: Fast, high effort, for the Fast model the bot is on now.
+  const profile = codexProfile(s, "sol", 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\nservice_tier = "fast"\n');
+  const f = team();
+  f.bots[0] = { ...f.bots[0], agent: "codex", model: "gpt-6.1-sol", effort: "high", tier: "fast" };
+  s.seed(f);
+  // Its pane came from a template whose command names that profile (-p sol): hc still lists it.
+  const state = s.hcState();
+  state.templates = [{ name: "codex-sol", command: "codex -p sol -m gpt-6.1-sol" }];
+  state.terminals.push({ address: "t70", name: "t70", cwd: s.project, state: "live", created_ms: 7, labels: { bot: ID.main },
+    template: "codex-sol", argv: ["sh", "-c", "codex -p sol -m gpt-6.1-sol"],
+    foreground: { argv: ["codex", "-p", "sol", "-m", "gpt-6.1-sol"], cwd: s.project }, status: { app: "codex", state: "idle" } });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  // Sol -> Astra naming no tier: the new model runs standard, said after the profile's own words.
+  const changed = s.cli(["edit", "Genie", "--model", "gpt-6-astra"]);
+  assert.equal(changed.code, 0, changed.err);
+  assert.equal(s.bots().bots[0].tier, "standard");
+  const restarted = s.cli(["restart", "Genie", "--force", "--json"]);
+  assert.equal(restarted.code, 0, restarted.err);
+  const words = agentWords(runs(s).at(-1));
+  assert.match(words[2], /-p sol/, "the template's own command still names the Fast profile");
+  assert.deepEqual(words.slice(-4), ["-c", "model_reasoning_effort=high", "-c", "service_tier=default"]);
+  assert.equal(readFileSync(profile, "utf8").includes("service_tier = \"fast\""), true, "the profile is read, never written");
+});
+
+test("#1411: show reads the profile a launch names for the effort and tier it states", (t) => {
+  const s = scene(t);
+  // The host's config says low effort and the default tier; the profile the launch names says
+  // high and Fast, so the profile is what runs (Codex layers it on the host's config).
+  const config = codexHome(s, 'model = "gpt-6-astra"\nmodel_reasoning_effort = "low"\nservice_tier = "default"\n');
+  codexProfile(s, "sol", 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\nservice_tier = "fast"\n');
+  const f = team();
+  f.bots[0] = { ...f.bots[0], agent: "codex", model: "gpt-6.1-sol" };
+  s.seed(f);
+  const state = s.hcState();
+  state.terminals.push({ address: "t70", name: "t70", cwd: s.project, state: "live", created_ms: 7, labels: { bot: ID.main },
+    argv: ["sh", "-c", "codex -p sol -m gpt-6.1-sol"],
+    foreground: { argv: ["codex", "-p", "sol", "-m", "gpt-6.1-sol"], cwd: s.project }, status: { app: "codex", state: "idle" } });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const shown = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([shown.effort, shown.effortSource, shown.tier, shown.tierSource, shown.pinnedEffort, shown.pinnedTier],
+    ["high", "profile", "fast", "profile", null, null]);
+  assert.match(s.cli(["show", "Genie"]).out, /effort {7}high \(profile\)/);
+  assert.match(s.cli(["show", "Genie"]).out, /tier {9}fast \(profile\)/);
+  // A -c word on the pane's own command line is what runs: it wins over the profile it also names.
+  const now = s.hcState();
+  now.terminals.find((x) => x.address === "t70").foreground.argv = ["codex", "--profile=sol", "-m", "gpt-6.1-sol", "-c", "service_tier=priority", "-c", "model_reasoning_effort=xhigh"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(now));
+  const detected = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([detected.effort, detected.effortSource, detected.tier, detected.tierSource, detected.pinnedEffort, detected.pinnedTier],
+    ["xhigh", "detected", "fast", "detected", null, null]);
+  // A profile name that can't be one file's isn't read: the host's values stand, under its own name.
+  const unsafe = s.hcState();
+  unsafe.terminals.find((x) => x.address === "t70").foreground.argv = ["codex", "-p", "../config"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(unsafe));
+  const fallback = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([fallback.effort, fallback.effortSource, fallback.tier, fallback.tierSource], ["low", "global", "standard", "global"]);
+  // Nothing names either anywhere: no effort, and Codex's own default tier, Standard.
+  rmSync(config);
+  const own = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([own.effort, own.effortSource, own.tier, own.tierSource], [null, null, "standard", "default"]);
 });
