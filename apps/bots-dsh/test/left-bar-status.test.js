@@ -51,14 +51,18 @@ test('the marks are drawn to round 1.1 sizes', () => {
   assert.equal(ring.props.strokeWidth, 1.5)
 })
 
-test('a row shows nothing when idle, the word only for needs you, and the mark alone else', () => {
+test('a row shows nothing when idle; not running says its word, the mark alone else', () => {
   assert.equal(render(Status({ status: 'idle' })), null)
   assert.equal(render(Status({ status: 'nonsense' })), null, 'an unknown status is idle')
-  for (const status of ['working', 'error', 'off']) {
+  for (const status of ['working', 'error']) {
     const shown = render(Status({ status }))
     assert.equal(shown.props.role, 'img', `${status}: the mark alone`)
     assert.equal(textOf(shown), '', `${status}: no word on the row`)
   }
+  // One set for Bots and seats: the hollow ring alone would read as another kind of idle.
+  const off = render(Status({ status: 'off' }))
+  assert.equal(textOf(off), 'Not running', 'not running says its word')
+  assert.equal(off.props['data-status'], 'off')
   const needs = render(Status({ status: 'needs' }))
   assert.equal(needs.props.className, 'lb-st lb-st-needs')
   assert.equal(textOf(needs), 'Needs you', 'needs you keeps its word')

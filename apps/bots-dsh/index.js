@@ -71,6 +71,7 @@ import * as feed from './src/host/feed.js'
 import * as genui from './src/host/genui.js'
 import * as appManifest from './src/host/app-manifest.js'
 import * as pocketChat from './src/host/pocket-chat.js'
+import * as seatChat from './src/host/seat-chat.js'
 import * as hermesRemote from './src/host/hermes-remote.js'
 import * as officeSkills from './src/host/office-skills.js'
 import * as goalSkills from './src/host/goal-skills.js'
@@ -91,7 +92,7 @@ const MODULES = [
   turns, steer, handoffs, requests, delivery, roster, folders, agents, toolDeny, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
-  update, dshUpdate, thinking, agentSpace, feed, codeSide, genui, channel, appManifest, pocketChat, hermesRemote,
+  update, dshUpdate, thinking, agentSpace, feed, codeSide, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
   officeSkills, goalSkills,
 ]
 

@@ -182,8 +182,15 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: live feed route',
     'route GET /api/omni-ui/feed',
     'effect ds-bot: live feed',
-    // The Code side's watched pane stream (code-side.js), then the shared gen-UI kit's host
-    // half: the live slice, its feed nudge and the media route.
+    // The Code side's typing routes and watched pane stream (code-side.js), then the shared
+    // gen-UI kit's host half: the live slice, its feed nudge and the media route.
+    'effect omni-ui: code typing releases',
+    'effect omni-ui: code typing /api/omni-ui/code/take',
+    'route POST /api/omni-ui/code/take',
+    'effect omni-ui: code typing /api/omni-ui/code/input',
+    'route POST /api/omni-ui/code/input',
+    'effect omni-ui: code typing /api/omni-ui/code/release',
+    'route POST /api/omni-ui/code/release',
     'effect omni-ui: code pane stream',
     'route GET /api/omni-ui/code/stream',
     'effect omni-ui: genui slice',
@@ -202,6 +209,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: api route',
     'route POST /api/omni-ui',
     'effect omni-ui: load state',
+    'effect omni-ui: seat chat',
     'on agent/created',
     'effect ds-bot: remote Hermes',
     // Auto's judge, after every module, so it runs first (auto-judge.js installAhead).
