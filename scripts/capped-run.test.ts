@@ -591,6 +591,60 @@ describe('capped-run', () => {
     expect(lines).toEqual(['exit 137: could not read the memory-kill cause (scope gone, command=sh)']);
   });
 
+  test.skipIf(!scope)(
+    'a 137 after the in-scope monitor is killed prints the monitor-ended line',
+    () => {
+      const state = scratch('monitor-killed-state');
+      const script = join(scratch('monitor-killed'), 'kill-monitor.sh');
+      writeFileSync(
+        script,
+        [
+          'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
+          '[ -n "$cg" ] || kill -9 $$',
+          'for pid in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do',
+          '  [ "$pid" = "$$" ] || kill -9 "$pid" 2>/dev/null',
+          'done',
+          'kill -9 $$',
+          '',
+        ].join('\n'),
+      );
+      const outcome = cappedRun(['--', 'sh', script], { state, timeout: 30_000 });
+      const line =
+        'exit 137: the memory monitor ended before its final read; the run may have hit the memory limit (command=sh)';
+      expect(outcome.status).toBe(137);
+      expect(outcome.stderr.trim().split('\n').filter(Boolean)).toEqual([line]);
+      expect(outcome.log.trim().split('\n')).toContain(line);
+    },
+    60_000,
+  );
+
+  test.skipIf(!scope)('the payload runs with an oom_score_adj above the monitor', () => {
+    const state = scratch('oom-score-state');
+    const script = join(scratch('oom-score'), 'compare-adj.sh');
+    writeFileSync(
+      script,
+      [
+        'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
+        'self_adj=$(cat /proc/self/oom_score_adj 2>/dev/null)',
+        'monitor_adj=',
+        'for pid in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do',
+        '  [ "$pid" = "$$" ] && continue',
+        '  comm=$(cat "/proc/$pid/comm" 2>/dev/null) || continue',
+        '  case $comm in',
+        '    sh | dash | bash | ash | busybox) monitor_adj=$(cat "/proc/$pid/oom_score_adj" 2>/dev/null) ;;',
+        '  esac',
+        'done',
+        'printf "%s %s\\n" "$self_adj" "${monitor_adj:-missing}"',
+      ].join('\n'),
+    );
+    const outcome = cappedRun(['--', 'sh', script], { state, timeout: 30_000 });
+    expect(outcome.status).toBe(0);
+    const [selfAdj, monitorAdj] = outcome.stdout.trim().split(' ');
+    expect(Number(selfAdj)).toBeGreaterThanOrEqual(500);
+    expect(Number.isFinite(Number(monitorAdj))).toBe(true);
+    expect(Number(monitorAdj)).toBeLessThan(Number(selfAdj));
+  });
+
   test.skipIf(process.platform !== 'linux' || !flock || !scratchLockReady())(
     'two concurrent runs exclude each other on a scratch checkout lock (Linux; no real lock)',
     async () => {

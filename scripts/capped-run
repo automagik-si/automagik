@@ -19,9 +19,11 @@
 #     OOMPolicy=continue`, with `nice -n 10` and `ionice -c 3`. There is no MemoryHigh: the only
 #     limit is the kill at MemoryMax (a MemoryHigh would quietly throttle a run that is allowed
 #     to reach the cap). OOMPolicy=continue keeps the in-scope monitor alive after the kernel's
-#     OOM kill so it can read the cause (the default stop policy kills the monitor first).
-#     systemd-run execs the command itself, so the wrapper sees the command's exit status and
-#     the scope's memory kill (137).
+#     OOM kill so it can read the cause (the default stop policy kills the monitor first). Before
+#     exec the payload raises its own oom_score_adj to 500 (the monitor is forked first and keeps
+#     the lower inherited value), so the kernel prefers the payload even when a tmpfs payload's
+#     pages are not its RSS. systemd-run execs the command itself, so the wrapper sees the
+#     command's exit status and the scope's memory kill (137).
 #   - Anywhere else (macOS, CI runners, a distroless image, a failing systemd-run) it runs the
 #     command UNCAPPED after one `UNCAPPED: <reason>` line on stderr, and keeps its exit status.
 #     A missing cap never fails a gate, and a capped run is never reported as a pass.
@@ -36,9 +38,12 @@
 #     (a 137 stays 137; a child that exits 1 stays 1). The line is appended to the run log and
 #     read back from it before the wrapper says CAPPED (a log that did not take it is reported
 #     as `log=unwritten`), and no argv and no environment value ever reaches that line or the
-#     log. A 137 with no oom_kill prints nothing extra; when even the oom_kill cause could not
-#     be read, the wrapper prints one line `exit 137: could not read the memory-kill cause
-#     (scope gone, command=<comm>)` instead. The line's text is built by the pure function in
+#     log. A 137 with no oom_kill prints nothing extra. When the monitor wrote its final word with
+#     the cause unreadable, the wrapper prints one line `exit 137: could not read the memory-kill
+#     cause (scope gone, command=<comm>)`; when the monitor ended before writing its final word,
+#     the line is `exit 137: the memory monitor ended before its final read; the run may have hit
+#     the memory limit (command=<comm>)`. Both go to the log too, and the command's own exit code
+#     passes through. The CAPPED line's text is built by the pure function in
 #     `capped-run-wording.sh` next to this script (the tests source it too).
 #   - A signal from outside (INT, TERM, HUP) stops this run's own scope and removes its scratch
 #     folders and peak file before the wrapper exits.
@@ -420,6 +425,11 @@ if [ -n "$peek" ]; then
     ) &
   fi
 fi
+# The payload exec path only: the monitor was forked above and keeps the lower inherited
+# oom_score_adj, so the kernel prefers this process when the pages of a tmpfs payload are not its RSS.
+if [ -w /proc/self/oom_score_adj ]; then
+  printf "500\n" > /proc/self/oom_score_adj 2>/dev/null || :
+fi
 exec "$@"
 '
 
@@ -472,25 +482,30 @@ run_uncapped() {
 # Reads the monitor's last value, waiting a bounded moment for its final `done` line.
 read_peak() {
   peak=
-  oom_state=
+  oom_state=unknown
+  read_done=0
   tries=0
   if [ -n "$peek" ]; then
     while [ "$tries" -lt 30 ]; do
       if [ -r "$peek" ]; then
         if read -r kind bytes oom <"$peek" 2>/dev/null; then
           [ -n "$bytes" ] && peak=$bytes
-          case ${oom:-} in
-            '' | unknown | *[!0-9]*) oom_state=unknown ;;
-            *) oom_state=$oom ;;
-          esac
-          [ "$kind" = "done" ] && return 0
+          if [ "$kind" = "done" ]; then
+            # Only the monitor's final word may state the oom_kill count. A tick is not
+            # evidence: if the monitor died before its final read, the cause stays unknown.
+            read_done=1
+            case ${oom:-} in
+              '' | unknown | *[!0-9]*) oom_state=unknown ;;
+              *) oom_state=$oom ;;
+            esac
+            return 0
+          fi
         fi
       fi
       sleep 0.1
       tries=$((tries + 1))
     done
   fi
-  [ -n "${oom_state:-}" ] || oom_state=unknown
   return 0
 }
 
@@ -589,10 +604,14 @@ if [ "$capped" = 1 ] && [ "$capped_oom" -gt 0 ]; then
     printf '%s, log=unwritten)\n' "${capped_line%?}" >&2
   fi
 elif [ "$capped" = 1 ] && [ "$code" = 137 ] && [ "${oom_state:-}" = unknown ]; then
-  # The kernel's cause could not be read (the scope was gone before the monitor saw it): no
-  # CAPPED, just one honest line with the command name.
-  printf 'exit 137: could not read the memory-kill cause (scope gone, command=%s)\n' \
-    "$cmd_comm" >&2
+  # No CAPPED claim without the kernel's word: one honest line, and the log keeps it too.
+  if [ "${read_done:-0}" = 1 ]; then
+    cause_line=$(printf 'exit 137: could not read the memory-kill cause (scope gone, command=%s)' "$cmd_comm")
+  else
+    cause_line=$(printf 'exit 137: the memory monitor ended before its final read; the run may have hit the memory limit (command=%s)' "$cmd_comm")
+  fi
+  printf '%s\n' "$cause_line" >&2
+  log_capped "$cause_line"
 fi
 
 # read_peak above already waited for the monitor's last word; the scratch file goes now.
