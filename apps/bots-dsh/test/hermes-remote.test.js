@@ -1494,3 +1494,30 @@ test('an attached chat with no visible row still opens so the first open can nor
   assert.equal(chunks.at(-1).type, 'finish')
   assert.equal(chunks.at(-1).reason.kind, 'stop')
 })
+
+for (const [type, field] of [['error', 'message'], ['message.complete', 'error']]) {
+  test(type + ' reason drops a split supplementary character at the cut', async t => {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    const reason = '.'.repeat(498) + '\u{1F600}' + 'tail ' + 'more '.repeat(10)
+    f.socket().event(type, { ...(type === 'message.complete' ? { status: 'error', text: '' } : {}), [field]: reason }, 1)
+    const row = await f.run.next()
+    assert.equal(row.kind, 'error')
+    const detail = row.text.slice(row.text.indexOf(': ') + 2)
+    assert.equal(detail, '.'.repeat(498) + '…')
+    assert.ok(detail.isWellFormed())
+  })
+
+  test(type + ' reason keeps a complete supplementary character before the cut', async t => {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    const reason = '.'.repeat(497) + '\u{1F600}' + 'tail' + 'more '.repeat(10)
+    f.socket().event(type, { ...(type === 'message.complete' ? { status: 'error', text: '' } : {}), [field]: reason }, 1)
+    const row = await f.run.next()
+    assert.equal(row.kind, 'error')
+    const detail = row.text.slice(row.text.indexOf(': ') + 2)
+    assert.equal(detail, '.'.repeat(497) + '\u{1F600}' + '…')
+    assert.equal(detail.length, 500)
+    assert.ok(detail.isWellFormed())
+  })
+}
