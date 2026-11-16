@@ -34,6 +34,7 @@
     "src/host/",
     "src/shared/",
     "src/office/",
+    "scripts/seed-registry.mjs",
     "client.js",
     "client.pane.js",
     "office.js",
