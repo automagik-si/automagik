@@ -4,7 +4,7 @@
 // stored as `shell: false` (absent means a shell), so an existing Bot keeps what it had.
 import { Session, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -250,7 +250,7 @@ const allowed = async (guard, name, agent, args = {}) => {
 }
 
 test('a new private Bot gets no shell on its own chat', async (t) => {
-  const { rt, home: benchHome, create, folder, guard, restrictionFor } = team(t)
+  const { home: benchHome, create, folder, guard, restrictionFor } = team(t)
   const bot = await create({ private: true, workDir: folder() })
   assert.equal(bot.private, true)
   // The stored capability: a new private-folder Bot starts without a shell.
@@ -326,7 +326,7 @@ test('a worker task of a shell-less Bot has no shell', async (t) => {
 })
 
 test('a shell-less Bot cannot reach a shell by delegating to a subagent', async (t) => {
-  const { ctx, rt, create, guard, restrictionFor, sessions } = team(t)
+  const { ctx, create, guard, restrictionFor, sessions } = team(t)
   const bot = await create({ shell: false })
   // Delegation itself stays; the child is bound to the parent's fence by its header lineage.
   await allowed(guard(), 'subagent', { id: bot.id }, { prompt: 'inspect the folder' })
@@ -526,7 +526,7 @@ test('turning a Bot private never changes its stored shell', async (t) => {
 })
 
 test('a private Bot created with an explicit shell keeps it', async (t) => {
-  const { rt, create, guard, folder } = team(t)
+  const { create, guard, folder } = team(t)
   const bot = await create({ private: true, workDir: folder(), shell: true })
   assert.equal(bot.private, true)
   assert.equal(bot.shell, true)
