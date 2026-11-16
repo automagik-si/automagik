@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MAX_REQUEST_BYTES, MAX_REQUEST_WAIT_MS, Refusal, parseRequest, plain } from "./proto.mjs";
-import { PeerProof, checkLocks, checkSocketFile, lstatOr } from "./locks.mjs";
+import { PeerProof, checkFolderChain, checkLocks, checkSocketFile, lstatOr } from "./locks.mjs";
 import { checkCwd, createRunner } from "./spawn.mjs";
 
 const CONFIG_KEYS = new Set([
@@ -123,14 +123,59 @@ export function readConfigFile(path, host) {
   return validateConfig(value);
 }
 
-/** Resolves each path through its parent's real path, so the folder-chain lock sees no symlink. */
+/**
+ * The chains as the config gives them, before any real path resolves a symlink away: every
+ * existing folder from each path's nearest existing parent up to / must be a real folder no group
+ * or other can write. A symlinked ancestor refuses here, never after it was canonicalised.
+ */
+export function checkGivenChains(config, host) {
+  const checks = [
+    ["socket folder", config.socket, false],
+    ["proof folder", config.proofs, false],
+    ["homes root", config.homesRoot, true],
+    ["work root", config.workRoot, true],
+    ["state folder", config.state, false],
+  ];
+  for (const [label, path, isLeaf] of checks) {
+    let at = isLeaf ? path : dirname(path);
+    while (at !== "/" && lstatOr(host.fs, at) === null) at = dirname(at);
+    checkFolderChain(host.fs, at, `the ${label} chain`);
+  }
+  for (const [label, path] of [
+    ["socket", config.socket],
+    ["proof folder", config.proofs],
+    ["homes root", config.homesRoot],
+    ["work root", config.workRoot],
+    ["state file", config.state],
+  ]) {
+    const info = lstatOr(host.fs, path);
+    if (info !== null && info.isSymbolicLink()) {
+      throw new Refusal("LOCK_FAILED", `the ${label} ${path} is a symbolic link`);
+    }
+  }
+}
+
+/**
+ * Resolves each path through its nearest existing ancestor's real path. A leaf the runner makes
+ * itself (the socket folder, the proof folder, the homes and work roots) may be missing; its
+ * parent must exist, and checkGivenChains has already refused a symlink anywhere on the way.
+ */
 export function resolveConfigPaths(config, fsApi) {
   const through = (path) => {
-    const parent = dirname(path);
-    try {
-      return join(fsApi.realpathSync(parent), basename(path));
-    } catch (error) {
-      throw new Refusal("CONFIG_INVALID", `the folder of ${path}: ${plain(error)}`);
+    const tail = [];
+    let at = path;
+    for (;;) {
+      try {
+        return join(fsApi.realpathSync(at), ...tail.reverse());
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw new Refusal("CONFIG_INVALID", `the folder of ${path}: ${plain(error)}`);
+        }
+      }
+      tail.push(basename(at));
+      const parent = dirname(at);
+      if (parent === at) throw new Refusal("CONFIG_INVALID", `the path ${path} cannot be resolved`);
+      at = parent;
     }
   };
   return {
@@ -253,9 +298,9 @@ async function handleConnection(conn, ctx) {
     let ids;
     let layout;
     try {
-      checkCwd(config, request.member, request.cwd);
+      const cwd = checkCwd(config, request.member, request.cwd);
       ids = runner.idsFor(request.member);
-      layout = runner.provision(request.member, ids);
+      layout = runner.provision(request.member, ids, cwd);
     } catch (error) {
       return fail(error?.code ?? "INTERNAL", plain(error));
     }
@@ -344,6 +389,7 @@ export function listenServer(server, socket) {
 export async function start(config, host) {
   validateConfig(config);
   if (host.platform !== "linux") throw new Refusal("CONFIG_INVALID", "the member runner runs on Linux");
+  checkGivenChains(config, host);
   const resolved = resolveConfigPaths(config, host.fs);
   const lock = checkLocks(resolved, host);
   const instance = createServer(resolved, host);

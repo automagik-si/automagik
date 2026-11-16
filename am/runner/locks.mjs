@@ -378,6 +378,11 @@ export class PeerProof {
         conn.once("error", () => finish(false, "the connection closed"));
         conn.once("data", () => {
           if (settled) return;
+          const expires = this.pending.get(name);
+          if (expires === undefined || this.now() > expires) {
+            finish(false, "name expired or used");
+            return;
+          }
           try {
             this.verifyFile(name, sentNs);
             this.sweep();

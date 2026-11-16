@@ -3,10 +3,13 @@
 // can drive the request path; the proof itself has its own test file.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync as fsSymlink, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createServer, listenServer } from "../runner/main.mjs";
 import {
+  MEMBER_GID,
+  MEMBER_UID,
   accounts,
   base,
   clientExit,
@@ -23,7 +26,13 @@ async function serve(t, { host: hostOverrides = {}, config: configOverrides = {}
   const bin = fakeBin(t);
   const config = testConfig(root, configOverrides);
   prepareDirs(config, dirs);
-  const host = testHost({ root, bin, accounts: accounts(), ...hostOverrides });
+  const host = testHost({
+    root,
+    bin,
+    accounts: accounts(),
+    memberUids: { alice: MEMBER_UID, bob: MEMBER_UID + 1 },
+    ...hostOverrides,
+  });
   const instance = createServer(config, host, { proof: { challenge: async () => true } });
   await listenServer(instance.server, config.socket);
   t.after(() => instance.server.close());
@@ -43,12 +52,15 @@ const run = (s, argv, env = {}, extra = {}) =>
 
 test("runs the command as the member with HOME, the XDG homes and TMPDIR under its own home", async (t) => {
   const s = await serve(t);
-  const result = await run(s, ["/bin/sh", "-c", "pwd; echo HOME=$HOME; id -u; echo USER=$USER"]);
+  const result = await run(s, ["/bin/sh", "-c", "pwd; echo HOME=$HOME; echo USER=$USER"]);
   assert.equal(result.error, null);
   assert.equal(result.exit.code, 0);
+  const start = result.frames.find((frame) => frame.t === "start");
+  assert.equal(start.uid, MEMBER_UID);
+  assert.equal(start.gid, MEMBER_GID);
   const home = join(s.config.homesRoot, "alice");
   const area = join(s.config.workRoot, "alice");
-  assert.equal(result.output.out, `${area}\nHOME=${home}\n1000\nUSER=alice\n`);
+  assert.equal(result.output.out, `${area}\nHOME=${home}\nUSER=alice\n`);
   for (const path of [
     home,
     join(home, ".config"),
@@ -133,10 +145,10 @@ test("a request field or environment name that must not reach the child is refus
 
 test("the member's uid is stable in the state file, and the range can fill", async (t) => {
   const s = await serve(t, { config: { uidCount: 1, gidCount: 1 } });
-  const first = await run(s, ["/bin/sh", "-c", "id -u"]);
-  assert.equal(first.frames.find((frame) => frame.t === "start").uid, 1000);
-  const again = await run(s, ["/bin/sh", "-c", "id -u"]);
-  assert.equal(again.output.out.trim(), "1000");
+  const first = await run(s, ["/bin/sh", "-c", "echo ok"]);
+  assert.equal(first.frames.find((frame) => frame.t === "start").uid, MEMBER_UID);
+  const again = await run(s, ["/bin/sh", "-c", "echo ok"]);
+  assert.equal(again.frames.find((frame) => frame.t === "start").uid, MEMBER_UID);
   const full = await rawRequest(s.config.socket, {
     v: 1,
     member: "bob",
@@ -151,7 +163,7 @@ test("the member's uid is stable in the state file, and the range can fill", asy
 });
 
 test("member B's shell never gets member A's home, and a planted file is not in its environment", async (t) => {
-  const s = await serve(t, { host: { memberUids: { alice: 1000, bob: 1001 } } });
+  const s = await serve(t);
   const a = await run(s, ["/bin/sh", "-c", "printf %s \"$HOME\""]);
   assert.equal(a.output.out, join(s.config.homesRoot, "alice"));
   mkdirSync(join(s.config.homesRoot, "alice"), { recursive: true });
@@ -167,6 +179,7 @@ test("member B's shell never gets member A's home, and a planted file is not in 
     timeoutMs: 5000,
   });
   assert.equal(b.exit.code, 0);
+  assert.equal(b.frames.find((frame) => frame.t === "start").uid, MEMBER_UID + 1);
   assert.ok(b.output.out.includes(`HOME=${join(s.config.homesRoot, "bob")}`));
   assert.ok(!b.output.out.includes(join(s.config.homesRoot, "alice")));
   assert.ok(!b.output.out.includes(".npmrc"));
@@ -183,7 +196,7 @@ test("the scope gets MemoryMax and TasksMax, and the child enters cwd after the 
   const unshare = s.bin.calls("unshare").at(-1);
   const setpriv = s.bin.calls("setpriv").at(-1);
   assert.ok(unshare.includes("--setuid"));
-  assert.ok(unshare.includes("1000"));
+  assert.ok(unshare.includes(String(MEMBER_UID)));
   assert.ok(setpriv.includes("--no-new-privs"));
   assert.equal(s.bin.calls("unshare").length, 2);
 });
@@ -213,14 +226,14 @@ test("a home that is a symlink, a folder that is a file and a symlinked XDG fold
     fsSymlink("/etc/hostname", join(s.config.homesRoot, "alice"));
     const result = await run(s, ["/bin/sh", "-c", "true"]);
     assert.equal(result.error.code, "HOME_INVALID");
-    assert.match(result.error.message, /home is a symbolic link/);
+    assert.match(result.error.message, /symbolic link|not a real folder/);
   }
   {
     const s = await serve(t);
     writeFileSync(join(s.config.homesRoot, "alice"), "file");
     const result = await run(s, ["/bin/sh", "-c", "true"]);
     assert.equal(result.error.code, "HOME_INVALID");
-    assert.match(result.error.message, /home is not a folder/);
+    assert.match(result.error.message, /not a real folder/);
   }
   {
     const s = await serve(t);
@@ -229,7 +242,7 @@ test("a home that is a symlink, a folder that is a file and a symlinked XDG fold
     fsSymlink("/etc", join(s.config.homesRoot, "alice", ".config"));
     const result = await run(s, ["/bin/sh", "-c", "true"]);
     assert.equal(result.error.code, "HOME_INVALID");
-    assert.match(result.error.message, /home folder is a symbolic link/);
+    assert.match(result.error.message, /symbolic link|not a real folder/);
   }
 });
 
@@ -252,7 +265,10 @@ test("a home root under a world-writable folder is refused at start", async (t) 
 test("a state file made for another range is refused", async (t) => {
   const s = await serve(t);
   s.instance.server.close();
-  writeFileSync(s.config.state, JSON.stringify({ v: 1, uidStart: 999, uidCount: 8, gidStart: 1000, members: {} }));
+  writeFileSync(
+    s.config.state,
+    JSON.stringify({ v: 1, uidStart: 999, uidCount: 8, gidStart: MEMBER_GID, members: {} }),
+  );
   assert.throws(() => createServer(s.config, s.host, { proof: { challenge: async () => true } }), /another range/);
 });
 
@@ -261,7 +277,7 @@ test("the runner's own uid and DSH's uid may not be in the member range", async 
   s.instance.server.close();
   const own = { ...s.config, uidStart: 65534 };
   assert.throws(() => createServer(own, s.host, { proof: { challenge: async () => true } }), /own uid/);
-  const dsh = { ...s.config, dshUid: 1000, uidStart: 1000, uidCount: 2 };
+  const dsh = { ...s.config, dshUid: MEMBER_UID, uidStart: MEMBER_UID, uidCount: 2 };
   assert.throws(() => createServer(dsh, s.host, { proof: { challenge: async () => true } }), /DSH's uid/);
 });
 
@@ -299,4 +315,85 @@ test("a second shell over the concurrency cap is BUSY", async (t) => {
   assert.equal(second.error.code, "BUSY");
   writeFileSync(go, "");
   assert.equal((await first).exit.code, 0);
+});
+
+test("a home owned by another uid than the member's is refused", async (t) => {
+  const s = await serve(t, { host: { memberUids: {} } });
+  const result = await run(s, ["/bin/sh", "-c", "true"]);
+  assert.equal(result.error.code, "HOME_INVALID");
+  assert.match(result.error.message, /not the member's/);
+});
+
+test("a cwd that leaves the member's area through a symbolic link is refused", async (t) => {
+  const s = await serve(t);
+  const area = join(s.config.workRoot, "alice");
+  assert.equal((await run(s, ["/bin/sh", "-c", "true"])).exit.code, 0);
+  fsSymlink("/etc", join(area, "escape"));
+  const result = await run(s, ["/bin/sh", "-c", "pwd"], {}, { cwd: join(area, "escape") });
+  assert.equal(result.error.code, "BAD_CWD");
+  assert.match(result.error.message, /symbolic link/);
+});
+
+test("a failed state write uses no uid, and a restart gives each member a different one", async (t) => {
+  const s = await serve(t);
+  s.instance.server.close();
+  const { idsFor, openState } = await import("../runner/spawn.mjs");
+  const brokenFs = Object.create(fs);
+  brokenFs.fsyncSync = () => {
+    throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+  };
+  const broken = { ...s.host, fs: brokenFs };
+  const state = openState(s.config, s.host);
+  assert.throws(() => idsFor(s.config, broken, state, "alice"), /disk is full/);
+  assert.deepEqual(state.members, {});
+  const fresh = openState(s.config, s.host);
+  const bob = idsFor(s.config, s.host, fresh, "bob");
+  const alice = idsFor(s.config, s.host, fresh, "alice");
+  assert.equal(bob.uid, MEMBER_UID);
+  assert.notEqual(alice.uid, bob.uid);
+});
+
+test("a member home that was never recorded is refused at start", async (t) => {
+  const s = await serve(t);
+  s.instance.server.close();
+  mkdirSync(join(s.config.homesRoot, "ghost"));
+  assert.throws(
+    () => createServer(s.config, s.host, { proof: { challenge: async () => true } }),
+    /no recorded uid/,
+  );
+});
+
+test("a home owned by another uid than its record is refused at start", async (t) => {
+  const s = await serve(t);
+  assert.equal((await run(s, ["/bin/sh", "-c", "true"])).exit.code, 0);
+  s.instance.server.close();
+  const other = testHost({
+    root: s.root,
+    bin: s.bin,
+    accounts: accounts(),
+    memberUids: { alice: MEMBER_UID + 7 },
+  });
+  assert.throws(
+    () => createServer(s.config, other, { proof: { challenge: async () => true } }),
+    /not its recorded uid/,
+  );
+});
+
+test("a state file with two members on one slot is refused", async (t) => {
+  const s = await serve(t);
+  s.instance.server.close();
+  writeFileSync(
+    s.config.state,
+    JSON.stringify({
+      v: 1,
+      uidStart: MEMBER_UID,
+      uidCount: 8,
+      gidStart: MEMBER_GID,
+      members: { alice: 0, bob: 0 },
+    }),
+  );
+  assert.throws(
+    () => createServer(s.config, s.host, { proof: { challenge: async () => true } }),
+    /bad slot/,
+  );
 });

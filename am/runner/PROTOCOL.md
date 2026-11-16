@@ -77,6 +77,10 @@ A client exits with the member's code; a signal exits 128 plus the signal number
 - One member maps to one stable uid in the runner user's subordinate range. The mapping lives in a
   runner-owned state file, mode 0600. A new member takes the next uid; a slot is never reused,
   moved or freed. With no slot left the request is refused with `RANGE_FULL`.
+- An assignment is used only after it is written to the state file and synced, and after the
+  state folder's own sync. A write failure refuses the request and hands out no uid. On start the
+  runner refuses a state file with two members on one slot, a member folder with no recorded uid,
+  and a folder whose owner is not its recorded uid.
 - The runner refuses to start when its own uid or DSH's uid lies inside the range, or when the
   state file was made for another range: moving a range would put members onto each other's files.
 - One mode only: a rootless user namespace through `newuidmap`/`newgidmap`, with util-linux
@@ -91,8 +95,13 @@ A client exits with the member's code; a signal exits 128 plus the signal number
 
 Each member's `HOME` is its own folder, owned by that member's uid, mode 0700, never a shared
 folder. `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`
-and `TMPDIR` all sit under it, each mode 0700 and owned by the member. The runner refuses a shell
-when any of these checks fails (owner, mode, path, or a symbolic link where a folder belongs).
+and `TMPDIR` all sit under it, each mode 0700 and owned by the member.
+
+The runner makes these folders itself, through handles it opened: it creates a folder, opens it
+with no symlink following, and sets its owner and mode through that handle. An existing folder is
+checked and refused when it is not the member's own 0700 folder, and a path swapped for a link
+between create and change is refused. Every shell start checks the whole set again (owner, mode,
+path, or a symbolic link where a folder belongs).
 
 The member's work area is the same-path root's `<root>/<member>`, owned by the member, mode 0700.
 Only that area is in reach: the root is the members' work area, never all of DSH's data folder.
@@ -141,6 +150,8 @@ holds:
 - the state file is unreadable, malformed, or was made for another range;
 - the homes root or the work root is not the runner's or sits under a folder writable by group or
   others;
+- a member folder has no recorded uid, two members share a slot, or a folder's owner is not its
+  recorded uid;
 - `unshare` is older than 2.39 or a tool the runner needs is missing.
 
 ## For the template

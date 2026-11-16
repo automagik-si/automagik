@@ -221,4 +221,7 @@ test("the runner refuses to run as root, and the allowlist is fixed", (t) => {
   const content = readFileSync(new URL("../runner/proto.mjs", import.meta.url), "utf8");
   assert.match(content, /DEFAULT_ENV_ALLOW = \["PATH", "LANG", "LC_ALL", "TERM", "TZ"\]/);
   assert.equal(plain({ code: "EACCES", message: "denied" }), "EACCES: denied");
+  assert.equal(plain(new Error("a\nb\tc")), "a\\x0ab\\x09c");
+  assert.equal(plain({ code: "EACCES", message: "x\ny" }), "EACCES: x\\x0ay");
+  assert.ok(!plain(new Error("one\ntwo")).includes("\n"), "one plain line");
 });

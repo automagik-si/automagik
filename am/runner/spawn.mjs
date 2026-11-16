@@ -11,10 +11,11 @@
 // area under the same-path work root. Each shell runs in its own systemd scope, with MemoryMax and
 // TasksMax, and in its own pid and network namespaces. A refusal exits 125.
 
+import * as nodeFs from "node:fs";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { dirname, join, resolve as resolvePath, sep } from "node:path";
-import { Refusal, plain } from "./proto.mjs";
+import { Refusal, oneLine, plain } from "./proto.mjs";
 import { checkFolderChain, lstatOr } from "./locks.mjs";
 
 export const DEFAULT_CHILD_PATH = "/usr/local/bin:/usr/bin:/bin";
@@ -30,44 +31,179 @@ export const TMP_REL = "tmp";
  * home, XDG folders, TMPDIR and work area, owned by the member's uid, mode 0700. Paths are
  * arguments, never spliced into the script. Exit 3 to 8 name the failure the runner reports.
  */
-const PROVISION_SCRIPT = [
-  "set -eu",
-  "umask 077",
-  'home=$1; area=$2; uid=$3; gid=$4; shift 4',
-  '[ ! -L "$home" ] || { echo "the home is a symbolic link"; exit 3; }',
-  '[ ! -e "$home" ] || [ -d "$home" ] || { echo "the home is not a folder"; exit 4; }',
-  'mkdir -p -- "$home"',
-  'for rel in "$@"; do',
-  '  p="$home/$rel"',
-  '  [ ! -L "$p" ] || { echo "a home folder is a symbolic link"; exit 5; }',
-  '  [ ! -e "$p" ] || [ -d "$p" ] || { echo "a home folder is not a folder"; exit 6; }',
-  '  mkdir -p -- "$p"',
-  'done',
-  '[ ! -L "$area" ] || { echo "the work area is a symbolic link"; exit 7; }',
-  '[ ! -e "$area" ] || [ -d "$area" ] || { echo "the work area is not a folder"; exit 8; }',
-  'mkdir -p -- "$area"',
-  'chown "$uid:$gid" -- "$home" "$area"',
-  'for rel in "$@"; do chown "$uid:$gid" -- "$home/$rel"; done',
-  'chmod 0700 -- "$home" "$area"',
-  'for rel in "$@"; do chmod 0700 -- "$home/$rel"; done',
-].join("\n");
+/** How the provisioning helper is started inside the member's user namespace. */
+const PROVISION_ENTRY =
+  `import { provisionCli } from ${JSON.stringify(new URL("./spawn.mjs", import.meta.url).href)};` +
+  " provisionCli(process.argv.slice(1));";
+
+/** One provisioning refusal: a message and the exit code the runner maps to HOME_INVALID/BAD_CWD. */
+export class ProvisionRefusal extends Error {
+  constructor(message, code = 1) {
+    super(message);
+    this.name = "ProvisionRefusal";
+    this.code = code;
+  }
+}
+
+const provisionFail = (message, code = 1) => {
+  throw new ProvisionRefusal(message, code);
+};
+
+/**
+ * Makes a member's HOME, its XDG folders and TMPDIR, and its work area, owned by the member's uid
+ * and mode 0700, working only on folders it opened itself: mkdir, then open with
+ * O_NOFOLLOW|O_DIRECTORY, then fchown/fchmod through that handle. A path swapped for a link
+ * between create and chmod is refused, and no folder outside the member's own can be changed.
+ * With `root` false (a test), ownership is not set; the caller checks it.
+ */
+export function provisionFolders({
+  home,
+  area,
+  uid,
+  gid,
+  cwd,
+  rels = PROVISION_RELS,
+  fs = nodeFs,
+  root = process.getuid() === 0,
+}) {
+  const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW } = fs.constants;
+  const flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW;
+  const open = new Set();
+  const close = (fd) => {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+    open.delete(fd);
+  };
+  const fdPath = (fd) => `/proc/self/fd/${fd}`;
+  const openDir = (path, label, create) => {
+    let created = false;
+    if (create) {
+      try {
+        fs.mkdirSync(path, 0o700);
+        created = true;
+      } catch (error) {
+        if (error?.code !== "EEXIST") provisionFail(`the folder ${label}: ${plain(error)}`, 9);
+      }
+    }
+    let fd;
+    try {
+      fd = fs.openSync(path, flags);
+    } catch (error) {
+      provisionFail(`the folder ${label} is not a real folder (${error?.code ?? "error"})`, 9);
+    }
+    open.add(fd);
+    return { fd, created };
+  };
+  const inspect = (fd, label) => {
+    let info;
+    try {
+      info = fs.fstatSync(fd);
+    } catch (error) {
+      provisionFail(`the folder ${label} could not be checked: ${plain(error)}`, 9);
+    }
+    if (typeof info.isDirectory !== "function" || !info.isDirectory()) {
+      provisionFail(`the folder ${label} is not a folder`, 9);
+    }
+    if ((info.mode & 0o7777) !== 0o700) {
+      provisionFail(`the folder ${label} is mode ${(info.mode & 0o7777).toString(8)}, not 700`, 9);
+    }
+    if (root && (info.uid !== uid || info.gid !== gid)) {
+      provisionFail(`the folder ${label} is not the member's`, 9);
+    }
+  };
+  const settle = (fd, label, created) => {
+    if (!created) return inspect(fd, label); // an existing folder must already be right
+    if (root) {
+      try {
+        fs.fchownSync(fd, uid, gid);
+      } catch (error) {
+        provisionFail(`the folder ${label} could not be given to the member: ${plain(error)}`, 9);
+      }
+    }
+    try {
+      fs.fchmodSync(fd, 0o700);
+    } catch (error) {
+      provisionFail(`the folder ${label} could not be mode 0700: ${plain(error)}`, 9);
+    }
+    inspect(fd, label);
+  };
+  const walk = (baseFd, baseLabel, rel) => {
+    let fd = baseFd;
+    let held = null;
+    for (const part of rel.split("/").filter(Boolean)) {
+      const label = `${baseLabel}/${part}`;
+      const next = openDir(`${fdPath(fd)}/${part}`, label, true);
+      settle(next.fd, label, next.created);
+      if (held !== null) close(held);
+      held = next.fd;
+      fd = next.fd;
+    }
+    if (held !== null) close(held);
+  };
+  try {
+    const homeDir = openDir(home, home, true);
+    settle(homeDir.fd, home, homeDir.created);
+    const homeFd = homeDir.fd;
+    const areaDir = openDir(area, area, true);
+    settle(areaDir.fd, area, areaDir.created);
+    const areaFd = areaDir.fd;
+    for (const rel of rels) walk(homeFd, home, rel);
+    if (cwd !== area) {
+      const prefix = `${area}/`;
+      if (!cwd.startsWith(prefix)) provisionFail("the cwd is outside the member's area", 12);
+      let fd = areaFd;
+      for (const part of cwd.slice(prefix.length).split("/").filter(Boolean)) {
+        let next;
+        try {
+          next = fs.openSync(`${fdPath(fd)}/${part}`, flags);
+        } catch (error) {
+          if (error?.code === "ELOOP" || error?.code === "ENOTDIR") {
+            provisionFail("the cwd is a symbolic link or not a real folder", 10);
+          }
+          provisionFail("the cwd is not a folder", 11);
+        }
+        open.add(next);
+        if (fd !== areaFd) close(fd);
+        fd = next;
+      }
+      if (fd !== areaFd) close(fd);
+    }
+  } finally {
+    for (const fd of [...open]) close(fd);
+  }
+}
+
+/** The helper's command line: exit 1 (or 9) for a folder problem, 10 to 12 for a cwd problem. */
+export function provisionCli(argv) {
+  const [home, area, uidText, gidText, cwd, ...rels] = argv;
+  try {
+    provisionFolders({ home, area, uid: Number(uidText), gid: Number(gidText), cwd, rels });
+  } catch (error) {
+    process.stderr.write(`${plain(error)}\n`);
+    process.exit(typeof error?.code === "number" ? error.code : 1);
+  }
+}
 
 /** A user namespace for the member's own uid, unshare's newuidmap/newgidmap path. */
-export function provisionArgs(host, ids, home, area) {
+export function provisionArgs(host, ids, home, area, cwd) {
   return [
     `--map-users=0:${host.uid}:1`,
     `--map-users=${ids.uid}:${ids.uid}:1`,
     `--map-groups=0:${host.gid}:1`,
     `--map-groups=${ids.gid}:${ids.gid}:1`,
     "--",
-    "/bin/sh",
-    "-c",
-    PROVISION_SCRIPT,
-    "am-provision",
+    process.execPath,
+    "--input-type=module",
+    "-e",
+    PROVISION_ENTRY,
     home,
     area,
     String(ids.uid),
     String(ids.gid),
+    cwd,
     ...PROVISION_RELS,
   ];
 }
@@ -109,6 +245,18 @@ export function childEnvironment(layout, requestEnv) {
 function withUser(layout, member) {
   return { ...layout, user: member };
 }
+
+/**
+ * The child enters cwd after the uid switch, in the member's own identity, and checks the resolved
+ * directory against the member's work area before it runs anything. A symlink out is refused with
+ * exit 125, even if one is swapped in after provisioning.
+ */
+export const CWD_GUARD = [
+  'area=$1; target=$2; shift 2',
+  'cd -P -- "$target" || exit 125',
+  'case "$(pwd -P)" in "$area"|"$area"/*) ;; *) exit 125 ;; esac',
+  'exec "$@"',
+].join("\n");
 
 /** The tool paths, resolved once from the runner's own PATH. */
 export function resolveTools(host) {
@@ -221,7 +369,12 @@ export function writeState(config, host, state) {
       fs.closeSync(fd);
     }
     fs.renameSync(tmp, config.state);
-    fs.chmodSync(config.state, 0o600);
+    const folder = fs.openSync(dirname(config.state), "r");
+    try {
+      fs.fsyncSync(folder);
+    } finally {
+      fs.closeSync(folder);
+    }
   } catch (error) {
     try {
       fs.unlinkSync(tmp);
@@ -241,8 +394,11 @@ export function idsFor(config, host, state, member) {
   if (next >= config.uidCount) {
     throw new Refusal("RANGE_FULL", `no free uid left in the range for member ${member}`);
   }
-  state.members[member] = next;
-  writeState(config, host, state);
+  // The uid is used only after its assignment is durable. A failed write leaves the state in
+  // memory untouched and refuses the request; it never hands out a uid that was not recorded.
+  const candidate = { ...state, members: { ...state.members, [member]: next } };
+  writeState(config, host, candidate);
+  state.members = candidate.members;
   return { uid: config.uidStart + next, gid: config.gidStart + next };
 }
 
@@ -276,6 +432,45 @@ export function ensureRoots(config, host) {
   }
 }
 
+/**
+ * On start, the homes and work areas on disk must agree with the recorded state: a member folder
+ * with no recorded uid means a uid was used unrecorded, and a folder of another uid means the
+ * recorded member and the files disagree. Either refuses the start.
+ */
+export function checkHomes(config, host, state) {
+  const fs = host.fs;
+  for (const [label, root] of [
+    ["home", config.homesRoot],
+    ["work area", config.workRoot],
+  ]) {
+    let entries;
+    try {
+      entries = fs.readdirSync(root);
+    } catch (error) {
+      throw new Refusal("STATE_INVALID", `the ${label} root ${root}: ${plain(error)}`);
+    }
+    for (const entry of entries) {
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(entry)) continue;
+      const path = join(root, entry);
+      const info = lstatOr(fs, path);
+      if (info === null || info.isSymbolicLink() || !info.isDirectory()) {
+        throw new Refusal("STATE_INVALID", `the ${label} ${path} is not a real folder`);
+      }
+      const slot = state.members[entry];
+      if (slot === undefined) {
+        throw new Refusal("STATE_INVALID", `member ${entry} has a ${label} but no recorded uid`);
+      }
+      const expected = config.uidStart + slot;
+      if (info.uid !== expected) {
+        throw new Refusal(
+          "STATE_INVALID",
+          `the ${label} ${path} is owned by uid ${info.uid}, not its recorded uid ${expected}`,
+        );
+      }
+    }
+  }
+}
+
 /** A member folder after provisioning: a real folder, the member's, exactly 0700. */
 export function checkHome(fs, path, uid, label = "home") {
   const info = lstatOr(fs, path);
@@ -301,17 +496,17 @@ export function checkCwd(config, member, cwd) {
 
 /** The provisioning refusal message for the script's own exit codes. */
 function provisionFailure(result) {
-  const said = String(result?.stderr ?? "").trim().split("\n")[0];
-  if (said !== "") return said;
+  const said = oneLine(String(result?.stderr ?? "").trim().split("\n")[0]);
   const why = {
-    3: "the home is a symbolic link",
-    4: "the home is not a folder",
-    5: "a home folder is a symbolic link",
-    6: "a home folder is not a folder",
-    7: "the work area is a symbolic link",
-    8: "the work area is not a folder",
+    9: "a member folder is not the member's 0700 folder",
+    10: "the cwd is a symbolic link",
+    11: "the cwd is not a folder",
+    12: "the cwd does not resolve inside the member's area",
   };
-  return why[result?.status] ?? `the member's folders could not be prepared (exit ${result?.status ?? "?"})`;
+  const status = result?.status;
+  const code = status >= 10 && status <= 12 ? "BAD_CWD" : "HOME_INVALID";
+  if (said !== "") return { code, message: said };
+  return { code, message: why[status] ?? `the member's folders could not be prepared (exit ${status ?? "?"})` };
 }
 
 /**
@@ -327,21 +522,25 @@ export function createRunner(config, host) {
   const tools = resolveTools(host);
   const state = openState(config, host);
   ensureRoots(config, host);
+  checkHomes(config, host, state);
   const run = host.spawnSync ?? nodeSpawnSync;
   const startSpawn = host.spawn ?? nodeSpawn;
 
   const idsForMember = (member) => idsFor(config, host, state, member);
 
   /** Makes and checks the member's home, XDG folders, TMPDIR and work area. */
-  const provision = (member, ids) => {
+  const provision = (member, ids, cwd) => {
     const layout = withUser(layoutOf(config, member), member);
-    const result = run(tools.unshare, provisionArgs(host, ids, layout.home, layout.area), {
+    const result = run(tools.unshare, provisionArgs(host, ids, layout.home, layout.area, cwd), {
       encoding: "utf8",
       env: { PATH: DEFAULT_SAFE_PATH, LC_ALL: "C" },
       timeout: PROVISION_TIMEOUT_MS,
     });
     if (result?.error) throw new Refusal("HOME_INVALID", `the member's folders: ${plain(result.error)}`);
-    if (result?.status !== 0) throw new Refusal("HOME_INVALID", provisionFailure(result));
+    if (result?.status !== 0) {
+      const failure = provisionFailure(result);
+      throw new Refusal(failure.code, failure.message);
+    }
     checkHome(host.fs, layout.home, ids.uid);
     checkHome(host.fs, layout.area, ids.uid, "work area");
     return layout;
@@ -357,7 +556,21 @@ export function createRunner(config, host) {
     const assignments = Object.keys(env)
       .sort()
       .map((key) => `${key}=${env[key]}`);
-    const inner = [tools.setpriv, "--no-new-privs", "--", tools.env, "-i", "-C", cwd, ...assignments, ...request.argv];
+    const inner = [
+      tools.setpriv,
+      "--no-new-privs",
+      "--",
+      tools.env,
+      "-i",
+      ...assignments,
+      "/bin/sh",
+      "-c",
+      CWD_GUARD,
+      "am-enter",
+      layout.area,
+      cwd,
+      ...request.argv,
+    ];
     const unshare = [
       `--map-users=${ids.uid}:${ids.uid}:1`,
       `--map-groups=${ids.gid}:${ids.gid}:1`,

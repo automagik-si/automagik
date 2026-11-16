@@ -80,6 +80,10 @@ export function accounts({
   };
 }
 
+/** The member uid and gid the tests inject: never the test process's own uid. */
+export const MEMBER_UID = 9001;
+export const MEMBER_GID = 9001;
+
 const FAKE_UNSHARE = `#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo "unshare from util-linux 2.39.3"
@@ -132,10 +136,6 @@ export function fakeBin(t) {
   write("unshare", FAKE_UNSHARE);
   write("setpriv", FAKE_SETPRIV);
   write("systemd-run", FAKE_SYSTEMD_RUN);
-  write("chown", `#!/bin/sh
-printf '%s\\n' "===" "$@" >> "$(dirname "$0")/chown.args"
-exit 0
-`);
   write("newuidmap", "#!/bin/sh\nexit 0\n");
   write("newgidmap", "#!/bin/sh\nexit 0\n");
   return {
@@ -210,7 +210,17 @@ export function testHost({
 }
 
 /** The config the runner tests serve from; every path is inside `root`. */
-export function testConfig(root, { dshUid = 2000, uidStart = 1000, uidCount = 8, gidStart = 1000, gidCount = 8, ...extra } = {}) {
+export function testConfig(
+  root,
+  {
+    dshUid = 2000,
+    uidStart = MEMBER_UID,
+    uidCount = 8,
+    gidStart = MEMBER_GID,
+    gidCount = 8,
+    ...extra
+  } = {},
+) {
   return {
     socket: join(root, "sock", "runner.sock"),
     proofs: join(root, "proofs"),

@@ -15,12 +15,17 @@ export class Refusal extends Error {
   }
 }
 
-/** The one plain line a caught error becomes: never a stack trace. */
+/** Escapes control characters so a caught error is always one plain line. */
+export function oneLine(text) {
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, (ch) => `\\x${ch.charCodeAt(0).toString(16).padStart(2, "0")}`);
+}
+
+/** The one plain line a caught error becomes: never a stack trace, never a second line. */
 export function plain(error) {
-  if (error instanceof Refusal) return error.message;
+  if (error instanceof Refusal) return oneLine(error.message);
   const message = typeof error?.message === "string" && error.message !== "" ? error.message : String(error);
   const code = typeof error?.code === "string" ? error.code : "";
-  return code && !message.startsWith(code) ? `${code}: ${message}` : message;
+  return oneLine(code && !message.startsWith(code) ? `${code}: ${message}` : message);
 }
 
 export const PROTOCOL_VERSION = 1;

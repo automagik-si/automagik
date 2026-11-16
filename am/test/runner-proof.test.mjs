@@ -148,21 +148,10 @@ test("prepare refuses when the proof folder or its marker cannot be made", (t) =
   );
 });
 
-/** One fault on the peer path: a plain refusal line, a one-line log, no stack. */
-async function fault(t, { patch, create, stray }) {
-  const root = base(t);
-  const proofs = join(root, "proofs");
-  mkdirSync(proofs);
-  chmodSync(proofs, 0o1730);
-  const lines = [];
-  const proof = new PeerProof({ dir: proofs, dshUid: process.getuid(), ttlMs: 120, fs, log: (line) => lines.push(line) });
-  proof.prepare();
-  if (stray) writeFileSync(join(proofs, "stray-file"), "");
-  const api = Object.create(fs);
-  Object.assign(api, patch(proofs));
-  proof.fs = api;
+/** A connection stand-in for the proof unit tests: it records writes and fires events. */
+function fakeConn() {
   const handlers = {};
-  const conn = {
+  return {
     destroyed: false,
     writes: [],
     ended: false,
@@ -185,6 +174,49 @@ async function fault(t, { patch, create, stray }) {
       handlers[event]?.(value);
     },
   };
+}
+
+test("a proof past its deadline is refused even when its timer has not fired", async (t) => {
+  const root = base(t);
+  const proofs = join(root, "proofs");
+  mkdirSync(proofs);
+  chmodSync(proofs, 0o1730);
+  let clock = 100;
+  const proof = new PeerProof({
+    dir: proofs,
+    dshUid: process.getuid(),
+    ttlMs: 5000,
+    now: () => clock,
+    fs,
+    log: () => {},
+  });
+  proof.prepare();
+  const conn = fakeConn();
+  const running = proof.challenge(conn);
+  const name = conn.writes.find((text) => !text.startsWith("refused:"))?.trim();
+  assert.match(name, /^[a-f0-9]{48}$/);
+  writeFileSync(join(proofs, name), "");
+  clock += 6000;
+  conn.fire("data", Buffer.from("done\n"));
+  assert.equal(await running, false);
+  const refused = conn.writes.filter((text) => text.startsWith("refused:"));
+  assert.equal(refused[0], "refused: name expired or used\n");
+});
+
+/** One fault on the peer path: a plain refusal line, a one-line log, no stack. */
+async function fault(t, { patch, create, stray }) {
+  const root = base(t);
+  const proofs = join(root, "proofs");
+  mkdirSync(proofs);
+  chmodSync(proofs, 0o1730);
+  const lines = [];
+  const proof = new PeerProof({ dir: proofs, dshUid: process.getuid(), ttlMs: 120, fs, log: (line) => lines.push(line) });
+  proof.prepare();
+  if (stray) writeFileSync(join(proofs, "stray-file"), "");
+  const api = Object.create(fs);
+  Object.assign(api, patch(proofs));
+  proof.fs = api;
+  const conn = fakeConn();
   const running = proof.challenge(conn);
   const name = conn.writes.find((text) => !text.startsWith("refused:"))?.trim();
   if (create && name !== undefined) {
@@ -222,6 +254,9 @@ test("every peer-path file system call is caught into a plain refusal, never a s
     ["the stray sweep's rm", { patch: (p) => ({ rmSync: (path) => {
       if (path.startsWith(p + "/")) throw new Error("rm failed");
     } }), create: true, stray: true }],
+    ["a multi-line error", { patch: () => ({ utimesSync: () => {
+      throw new Error("first line\nsecond line");
+    } }) }],
   ];
   for (const [label, options] of cases) {
     const result = await fault(t, options);

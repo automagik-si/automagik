@@ -175,6 +175,8 @@ in the process's groups. The outsider runs without it. `A` and `B` are member na
 | 22 | runner | a copy of the config with `socket: /tmp/runner.sock` and `proofs: /tmp/proofs`, root-owned 0644, run as runner | `member-runner: refused to start: ... writable by group or others`, exit 125 |
 | 23 | dsh | the same root-owned 0644 config as row 22, run as dsh | `refused to start: DSH's uid is the runner's own uid`, exit 125 |
 | 24 | root | `usermod -aG dshsock dsh2`, `systemctl restart am-member-runner`, then `gpasswd -d dsh2 dshsock` | the unit fails with `refused to start: the socket group dshsock must have DSH's uid as its only member`; start it again after removing dsh2 |
+| 25 | dsh | row 2 as A with `sh -c 'chmod 0755 "$HOME/.config"'`, then row 2 again | `HOME_INVALID`, `... is mode 755, not 700`, exit 125 |
+| 26 | dsh | row 2 as A with `sh -c 'ln -s /etc escape'`, then row 2 with cwd `$W/alice/escape` | `BAD_CWD`, exit 125 |
 
 Rows 7, 10, 15 and 16 need `dsh2` in `dshsock`; the lock refuses a group with a second member, so
 add it with `usermod -aG dshsock dsh2` after the runner started (the socket's mode is the gate at
