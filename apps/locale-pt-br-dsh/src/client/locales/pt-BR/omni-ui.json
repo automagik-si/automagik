@@ -2768,5 +2768,17 @@
   "The folder on {host} holds no Hermes settings or server record.": "A pasta em {host} não tem configurações nem registro do servidor do Hermes.",
   "Point at the folder that holds Hermes, or choose another computer.": "Aponte para a pasta que contém o Hermes ou escolha outro computador.",
   "The folder must be on the remote computer, such as /srv/hermes.": "A pasta deve estar no computador remoto, por exemplo /srv/hermes.",
-  "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "O registro do serve está numa pasta compartilhada com outra pasta do Hermes, então não pode ser escolhido aqui. Outra pasta ao lado deste Hermes parece uma pasta do Hermes. Dê a este Hermes uma pasta própria: mova o Hermes, ou mova a outra pasta, depois adicione essa pasta com Adicionar outro Hermes."
+  "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "O registro do serve está numa pasta compartilhada com outra pasta do Hermes, então não pode ser escolhido aqui. Outra pasta ao lado deste Hermes parece uma pasta do Hermes. Dê a este Hermes uma pasta própria: mova o Hermes, ou mova a outra pasta, depois adicione essa pasta com Adicionar outro Hermes.",
+  "Settings: {title}": "Configurações: {title}",
+  "Open in Settings": "Abrir nas Configurações",
+  "This page is not in this window's Settings.": "Esta página não está nas Configurações desta janela.",
+  "Model default": "Padrão do modelo",
+  "(empty)": "(vazio)",
+  "That Bot is no longer on the team.": "Esse Bot não está mais na equipe.",
+  "Applied": "Aplicada",
+  "Proposed change to {name}": "Alteração proposta para {name}",
+  "Proposed change": "Alteração proposta",
+  "Changes": "Alterações",
+  "Applying…": "Aplicando…",
+  "Apply": "Aplicar"
 }
