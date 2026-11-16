@@ -36,6 +36,13 @@ const checkVersion = (label, output, expected) => {
 }
 
 async function main() {
+  // docker exec inherits the container-creation env, not the entrypoint's later mutations.
+  // am and hc require an absolute HC_TERMINAL_SOCKET and do not derive it from HC_SESSION, so
+  // derive it here from the session/runtime we were given, before the first am or hc call.
+  const coreSession = process.env.HC_SESSION || SMOKE_HC_SESSION
+  const coreRuntime = process.env.HC_RUNTIME || HC_RUNTIME
+  const coreSocket = herdrCoreSocket(coreSession, coreRuntime)
+  process.env.HC_TERMINAL_SOCKET = coreSocket
   // The commands. am is the release tarball's command through its literal path; hc and
   // herdr-core are the same pinned binary (hc is the link); pnpm is the literal absolute path
   // AUTOMAGIK_PNPM names; node is the distroless runtime.
@@ -52,12 +59,6 @@ async function main() {
   // The Code side's terminals live in the supervised herdr-core on the contract socket. The
   // same env reaches dsh, am and hc; here the core must answer both its status and its list.
   check(process.env.HERDR_APP_HOME === HERDR_APP_HOME, `HERDR_APP_HOME is ${process.env.HERDR_APP_HOME ?? 'unset'}, not ${HERDR_APP_HOME}`)
-  const coreSession = process.env.HC_SESSION || SMOKE_HC_SESSION
-  const coreRuntime = process.env.HC_RUNTIME || HC_RUNTIME
-  const coreSocket = herdrCoreSocket(coreSession, coreRuntime)
-  // docker exec inherits the container-creation env, not the entrypoint's later mutations:
-  // derive here from the session/runtime we were given, then give the derived value to hc/am.
-  process.env.HC_TERMINAL_SOCKET = coreSocket
   check(process.env.XDG_RUNTIME_DIR === XDG_RUNTIME_DIR, `XDG_RUNTIME_DIR is ${process.env.XDG_RUNTIME_DIR ?? 'unset'}, not ${XDG_RUNTIME_DIR}`)
   check(coreSession === SMOKE_HC_SESSION, `HC_SESSION is ${coreSession}, not ${SMOKE_HC_SESSION}`)
   check(coreRuntime === HC_RUNTIME, `HC_RUNTIME is ${coreRuntime}, not ${HC_RUNTIME}`)
