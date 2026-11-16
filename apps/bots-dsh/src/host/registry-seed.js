@@ -210,6 +210,9 @@ export function planHome(path, project, homeBot, text) {
     if (entries[0].machine !== undefined) {
       throw new SeedError(`Not seeded: ${path} lists this project on machine ${JSON.stringify(entries[0].machine)}; seed it on that machine, or remove that entry first`, 'seed/conflict')
     }
+    // The same project written another way (`/x/` for `/x`): keep one entry and its fields, with
+    // the spelling the main Bot and the readers resolve.
+    entries[0].folder = project
   } else projects.push({ folder: project })
   const existingMain = raw.bots.find(bot => sameFolder(bot) && bot.main === true && bot.id !== homeBot.id)
   if (existingMain) {

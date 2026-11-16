@@ -313,9 +313,12 @@ test('a home entry for the same project is matched around a trailing slash, not 
   const merged = json(homePath)
   assert.equal(result.home.action, 'updated')
   assert.equal(merged.projects.length, 1)
-  assert.equal(merged.projects[0].folder, `${project}/`)
+  assert.equal(merged.projects[0].folder, project)
   assert.equal(merged.bots.length, 1)
   assert.equal(merged.bots[0].folder, project)
+  const again = await seedRegistry({ project, home })
+  assert.equal(again.home.action, 'unchanged')
+  assert.equal(again.repo.action, 'unchanged')
 })
 
 test('the command runs with the same report and exits 0, 1 on a conflict and 2 on bad usage', async (t) => {
