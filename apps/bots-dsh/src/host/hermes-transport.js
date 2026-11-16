@@ -592,7 +592,7 @@ export class RemoteChat {
     if (event.method !== 'approval') { this.transport.answer(event.id, undefined, true); return }
     let choice = 'deny'
     try { choice = await this.question(event.params, asking.signal) } catch {}
-    if (this.reconciling || this.cancelledQuestions.has(event.id) || generation !== this.generation || epoch !== this.transport.epoch
+    if (this.reconciling || this.released || this.cancelledQuestions.has(event.id) || generation !== this.generation || epoch !== this.transport.epoch
       || (epoch && this.identity.epoch && epoch !== this.identity.epoch)) return
     this.transport.answer(event.id, { choice: choice === 'once' ? 'once' : 'deny' })
   }
@@ -777,6 +777,7 @@ export class RemoteChat {
   }
 
   async stop() {
+    if (this.released && !this.stopping) return
     if (this.stopping) return this.stopping
     this.stopping = this.stopOnce()
     return this.stopping
@@ -810,6 +811,23 @@ export class RemoteChat {
     this.dispose()
   }
 
+  /**
+   * Close a replaced run with the same detach as close(), but stop listening first so
+   * the old socket cannot change the shared identity or answer questions during detach.
+   */
+  async release() {
+    if (this.released || this.closed) return
+    this.released = true
+    if (this.stopping) {
+      await this.stopping.catch(() => {})
+      return
+    }
+    this.closed = true
+    this.quiet()
+    await this.detach()
+    this.dispose()
+  }
+
   async detach() {
     if (this.detached || this.transport.attached !== true) return
     this.detached = true
@@ -819,12 +837,18 @@ export class RemoteChat {
     try { await this.transport.request('session.detach', { session_id: sessionId, subscription_id: subscriptionId }, this.transport.deadlines?.control) } catch {}
   }
 
-  dispose() {
-    if (this.disposed) return
-    this.disposed = true
+  quiet() {
+    if (this.quieted) return
+    this.quieted = true
     this.transport.listeners.delete(this.off)
     for (const asking of this.questions.values()) asking.abort?.()
     for (const tool of this.tools.values()) { if (tool.status === 'running') tool.status = 'unknown'; tool.done?.() }
+  }
+
+  dispose() {
+    if (this.disposed) return
+    this.disposed = true
+    this.quiet()
     this.transport.close()
   }
 }
