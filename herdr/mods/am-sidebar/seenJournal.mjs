@@ -1,8 +1,12 @@
 // The persistent seen-ids journal behind `am notify`: the event ids the shim has queued, kept
 // across executions so a restart dedupes instead of queuing an event twice. One JSON string per
 // line (an id), oldest first; the newest `capacity` ids are kept (1000 by default), the oldest
-// evicted, so the file cannot grow without bound. The file is 0600 (an existing broader file is
-// tightened) and is rewritten atomically (a sibling temp file, then a rename) after every add.
+// evicted, so the file cannot grow without bound. The file is written 0600 (an existing broader
+// file is tightened when it is written), atomically (a sibling temp file, then a rename) and
+// fsynced with its directory, so a crash cannot tear a line; a crash can still roll back the last
+// adds, and the next run queues those again. A symlinked path is refused: the rename would replace
+// the link. One writer is assumed (the harness serializes notify runs); two at once are not
+// guarded, and last-rename-wins can lose an id.
 //
 // has/add keep createSeenJournal's semantics: the shim calls add only after a queued result, so a
 // refused, paused, stopped, suppressed or failed line is never written. A missing file is empty;
@@ -12,7 +16,7 @@
 // One writer is assumed (the harness runs one notify at a time); the atomic rename keeps a reader
 // from ever seeing a partial file. Apache-2.0.
 
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 
 export const SEEN_CAPACITY = 1000;
@@ -61,6 +65,7 @@ export function openSeenJournal(path, options = {}) {
   };
 
   if (existsSync(path)) {
+    if (lstatSync(path).isSymbolicLink()) throw new SeenJournalError(`${path} is a symlink; refusing a symlinked journal`, "read");
     let text;
     try {
       text = readFileSync(path, "utf8");
@@ -75,17 +80,13 @@ export function openSeenJournal(path, options = {}) {
       throw e;
     }
     for (const id of loaded) remember(id);
-    try {
-      if ((statSync(path).mode & 0o777) !== 0o600) chmodSync(path, 0o600);
-    } catch (e) {
-      throw new SeenJournalError(`cannot set 0600 on ${path}: ${e.code ?? e.message}`, "read");
-    }
   }
 
   const persist = () => {
     let tmp;
+    const dir = dirname(path);
     try {
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
       tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
       const fd = openSync(tmp, "w", 0o600);
       try {
@@ -97,6 +98,12 @@ export function openSeenJournal(path, options = {}) {
       chmodSync(tmp, 0o600);
       renameSync(tmp, path);
       chmodSync(path, 0o600);
+      const dfd = openSync(dir, "r");
+      try {
+        fsyncSync(dfd);
+      } finally {
+        closeSync(dfd);
+      }
     } catch (e) {
       if (tmp) {
         try { unlinkSync(tmp); } catch { /* nothing to clean, or already renamed */ }

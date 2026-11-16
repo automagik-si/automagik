@@ -7633,7 +7633,7 @@ export async function cmdNotify(opts, rest, io = {}) {
   try {
     seen = openSeenJournal(journalPath);
   } catch {
-    stderr.write(`am notify: the seen journal at ${journalPath} is unreadable or corrupt; nothing was read or delivered.\n`);
+    stderr.write(`am notify: the seen journal at ${journalPath} cannot be used (unreadable, corrupt or a symlink); nothing was read or delivered.\n`);
     exitAfter.code = NOTIFY_EXIT.io;
     return PRINTED;
   }
@@ -7652,7 +7652,8 @@ export async function cmdNotify(opts, rest, io = {}) {
   });
   if (result.code === NOTIFY_EXIT.io) {
     if (result.error instanceof SeenJournalError && result.error.kind === "write") {
-      stderr.write(`am notify: the seen journal could not be written; ${result.lines} receipt line(s) written.\n`);
+      const event = result.unrecordedId === undefined ? "" : ` event ${result.unrecordedId} was queued but is unrecorded (a later run may queue it again);`;
+      stderr.write(`am notify: the seen journal could not be written;${event} ${result.lines} receipt line(s) written.\n`);
     } else {
       stderr.write(`am notify: stdin could not be read to the end; ${result.lines} receipt line(s) written.\n`);
     }

@@ -100,6 +100,8 @@ export async function runNotify(options = {}) {
   let code = NOTIFY_EXIT.ok;
   let lines = 0;
   let failure;
+  let unrecorded;
+  let unrecordedId;
   const raise = (next) => {
     if (SEVERITY.get(next) > SEVERITY.get(code)) code = next;
   };
@@ -118,6 +120,9 @@ export async function runNotify(options = {}) {
         if (!receipt) {
           const result = await deliver({ event, threadId, queue, seen, run, readControl, threadCurrent, threadExists, now });
           receipt = result.receipt;
+          if (result.unrecorded) {
+            unrecorded = result;
+          }
         }
       }
       write(`${receiptLine(receipt)}\n`);
@@ -125,11 +130,20 @@ export async function runNotify(options = {}) {
       if (receipt.decision === "refused") raise(NOTIFY_EXIT.refused);
       if (receipt.decision === "failed") raise(NOTIFY_EXIT.failed);
       if (run.stopped) break;
+      if (unrecorded) {
+        failure = unrecorded.error;
+        unrecordedId = unrecorded.id;
+        raise(NOTIFY_EXIT.io);
+        break;
+      }
     }
   } catch (error) {
     failure = error;
     raise(NOTIFY_EXIT.io);
   }
   const journalFailure = failure && failure.name === "SeenJournalError" && failure.kind === "write";
-  return journalFailure ? { code, lines, stopped: run.stopped, error: failure } : { code, lines, stopped: run.stopped };
+  if (!journalFailure) return { code, lines, stopped: run.stopped };
+  return unrecordedId === undefined
+    ? { code, lines, stopped: run.stopped, error: failure }
+    : { code, lines, stopped: run.stopped, error: failure, unrecordedId };
 }

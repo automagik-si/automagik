@@ -335,8 +335,16 @@ export async function deliver(options = {}) {
   if (exit !== 0) {
     return { status: "failed", exit, receipt: makeReceipt(notice.id, "failed", queueId, null, at()) };
   }
-  seenSet.add(notice.id);
-  return { status: "queued", id: notice.id, receipt: makeReceipt(notice.id, "queued", queueId, null, at()) };
+  const receipt = makeReceipt(notice.id, "queued", queueId, null, at());
+  try {
+    seenSet.add(notice.id);
+  } catch (error) {
+    // The queue call succeeded, so the event went out; the store that should remember its id
+    // failed. Return the queued receipt and the error: the caller writes the receipt, then
+    // reports the id as unrecorded and exits io.
+    return { status: "queued", id: notice.id, unrecorded: true, error, receipt };
+  }
+  return { status: "queued", id: notice.id, receipt };
 }
 
 export function receiptLine(receipt) {
