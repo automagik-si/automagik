@@ -20,11 +20,12 @@ holder_started=
 holder_pid=
 holder_real_pid=
 holder_info() {
-  holder_token= holder_owner= holder_started= holder_pid= holder_real_pid=
+  holder_token='' holder_owner='' holder_started='' holder_pid='' holder_real_pid=''
   [ -e "$lock" ] || return 0
   first=
-  IFS= read -r first <"$lock" || true
-  for field in $first; do
+  second=
+  { IFS= read -r first; IFS= read -r second; } <"$lock" || true
+  for field in $first $second; do
     case "$field" in
       token=*) holder_token=${field#token=} ;;
       owner=*) holder_owner=${field#owner=} ;;
@@ -57,14 +58,14 @@ if [ -n "$inherited" ] && [ -e "$lock" ]; then
   exec 8>&-
 fi
 holder_info
-printf 'wait pid=%s owner=%s holder_owner=%s age=%s wait=%s\n' "$$" "$owner" "${holder_owner:-none}" "$(lock_age)" "$wait_seconds" >>"$log"
+printf 'wait pid=%s owner=%s holder_owner=%s holder_pid=%s holder_real_pid=%s age=%s wait=%s\n' "$$" "$owner" "${holder_owner:-none}" "${holder_pid:-none}" "${holder_real_pid:-none}" "$(lock_age)" "$wait_seconds" >>"$log"
 exec 9<>"$lock"
 if ! /usr/bin/flock -w "$wait_seconds" 9; then
   holder_info
   age=$(lock_age)
   message="failed, lock held by ${holder_owner:-unknown} for ${age}s"
   printf '%s\n' "$message" >&2
-  printf 'refused pid=%s owner=%s holder_owner=%s age=%s wait=%s message=%s\n' "$$" "$owner" "${holder_owner:-none}" "$age" "$wait_seconds" "$message" >>"$log"
+  printf 'refused pid=%s owner=%s holder_owner=%s holder_pid=%s holder_real_pid=%s age=%s wait=%s message=%s\n' "$$" "$owner" "${holder_owner:-none}" "${holder_pid:-none}" "${holder_real_pid:-none}" "$age" "$wait_seconds" "$message" >>"$log"
   printf '{"owner":"%s","ageSeconds":"%s","message":"%s","waitSeconds":"%s"}\n' "${holder_owner:-unknown}" "$age" "$message" "$wait_seconds" >/data/run/pnpm-admission-refusal
   exit 1
 fi
