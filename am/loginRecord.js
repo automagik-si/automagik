@@ -125,7 +125,9 @@ export function resolveLogin({ vendor, env = {}, memoryPath, io, log = () => {},
   if (typeof dir !== "string" || !dir.startsWith("/") || dir === "/" || /[\u0000-\u001f\u007f]/.test(dir)) {
     return refusal("path-invalid");
   }
-  if (!Number.isSafeInteger(value.sequence) || value.sequence < 0) return refusal("sequence-invalid");
+  // The sequence is advisory: an unusable record value is "no usable memory", never a refusal.
+  const usableSequence = Number.isSafeInteger(value.sequence) && value.sequence >= 0;
+  const sequence = usableSequence ? value.sequence : null;
 
   const pointerPath = joinPath(current, vendor);
   const pointerRead = readText(io, pointerPath);
@@ -141,24 +143,29 @@ export function resolveLogin({ vendor, env = {}, memoryPath, io, log = () => {},
   if (!folder.isDirectory?.()) return refusal("folder-not-directory");
   if ((Number(folder.mode) & 0o777) !== 0o700) return refusal("folder-mode");
 
-  // The sequence is advisory: a hard check never depends on it, and it never vetoes.
+  // The sequence is advisory: a hard check never depends on it, and it never vetoes. An unusable
+  // record value is accepted, logged once, and neither stored nor allowed to replace the memory.
+  if (!usableSequence) {
+    log("record sequence is not a usable number; accepted because the hard checks passed");
+    return { state: "ready", dir, generation, sequence: null };
+  }
   const memory = memoryPath ? readMemory(io, memoryPath) : undefined;
   const remember = () => {
     if (readOnly || !memoryPath || typeof io.writeAtomic !== "function") return;
     try {
-      io.writeAtomic(memoryPath, `${value.sequence}\n`);
+      io.writeAtomic(memoryPath, `${sequence}\n`);
     } catch {
       // The number is advisory; a state write that fails must not refuse a good launch.
     }
   };
   if (memory === undefined) {
-    log(`record sequence ${value.sequence} accepted`);
+    log(`record sequence ${sequence} accepted`);
     remember();
-  } else if (memory > value.sequence) {
+  } else if (memory > sequence) {
     log(BACKWARDS_LINE);
     remember();
   } else {
     remember();
   }
-  return { state: "ready", dir, generation, sequence: value.sequence };
+  return { state: "ready", dir, generation, sequence };
 }

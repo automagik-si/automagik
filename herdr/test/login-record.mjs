@@ -15,7 +15,7 @@ const U2 = "22222222-2222-4222-8222-222222222222";
 const CLAUDE_DIR = "/bot/generations/one/.claude";
 const CODEX_DIR = "/bot/generations/two/.codex";
 const CURRENT = "/bot/cli-homes/current";
-const MEMORY = "/bot/app/automagik-herdr/login-sequence.json";
+const MEMORY = "/bot/app/automagik-herdr/login-sequence";
 const RECORD = {
   version: 1, sequence: 7,
   claude: { generation: U1, configDir: CLAUDE_DIR },
@@ -74,7 +74,7 @@ function disk(t, { claudeMode = 0o700, codexMode = 0o700 } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "login-record-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const current = join(root, "current"), claudeDir = join(root, "claude-home"), codexDir = join(root, "codex-home");
-  const app = join(root, "app"), memory = join(app, "automagik-herdr", "login-sequence.json");
+  const app = join(root, "app"), memory = join(app, "automagik-herdr", "login-sequence");
   mkdirSync(current, { recursive: true }); mkdirSync(claudeDir); mkdirSync(codexDir); mkdirSync(app);
   chmodSync(claudeDir, claudeMode); chmodSync(codexDir, codexMode);
   writeFileSync(join(current, "generation.json"), JSON.stringify({ ...RECORD,
@@ -140,8 +140,21 @@ export function loginRecordTests(cli) {
     assert.equal(codeOf(run(world({ record: { ...RECORD, claude: { generation: "v1", configDir: CLAUDE_DIR } } }))), "generation-invalid");
     assert.equal(codeOf(run(world({ record: { ...RECORD, claude: { generation: U1, configDir: "relative" } } }))), "path-invalid");
     assert.equal(codeOf(run(world({ record: { ...RECORD, claude: { generation: U1, configDir: "/" } } }))), "path-invalid");
-    assert.equal(codeOf(run(world({ record: { ...RECORD, sequence: "7" } }))), "sequence-invalid");
     assert.equal(codeOf(run(world({ pointerText: U2 }))), "generation-mismatch");
+  });
+
+  test("an unusable sequence never refuses: accepted, not stored, logged once", () => {
+    for (const sequence of ["7", -1, null, 1.5]) {
+      const w = world({ record: { ...RECORD, sequence }, memory: 3 });
+      const lines = [];
+      const result = run(w, "claude", { log: (line) => lines.push(line) });
+      assert.equal(result.state, "ready", `sequence ${JSON.stringify(sequence)}`);
+      assert.equal(result.sequence, null);
+      assert.deepEqual(w.writes, [], "an unusable record value is never stored");
+      assert.equal(w.files.get(MEMORY), "3", "the prior usable memory is left alone");
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /not a usable number/);
+    }
   });
 
   test("the folder must exist, be a real directory and be exactly 0700", () => {
