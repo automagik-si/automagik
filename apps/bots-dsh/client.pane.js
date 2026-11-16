@@ -11666,6 +11666,7 @@ var ZH = {
   "Screen only: this agent has no transcript reader, so these are its last screens.": "只有屏幕：这个 agent 没有对话记录读取器，所以这里显示的是它最近的屏幕。",
   "Read from this seat’s own transcript. This view never runs or types into it.": "读取自这个席位自己的对话记录。这个视图绝不运行它，也不向它输入。",
   "Choose a seat in the team bar to read its chat.": "在团队栏里选一个席位，读它的聊天。",
+  "This seat is not running on this computer, so its terminal cannot open.": "这个席位没有在这台电脑上运行，所以无法打开它的终端。",
   "Back to the team": "返回团队",
   "Reading the seat…": "正在读取席位…",
   "No transcript rows yet. The seat is quiet.": "还没有对话记录。这个席位很安静。",

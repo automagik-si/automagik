@@ -263,6 +263,15 @@ test('the endpoints are reads, served for the window and never as a tool', () =>
   assert.equal(registered.size, 0)
 })
 
+test('the seat Terminal adds no endpoint: it opens the Code side the app already serves', () => {
+  assert.deepEqual([...SEAT_ENDPOINTS].sort(), ['seat-chat-close', 'seat-chat-list', 'seat-chat-open', 'seat-chat-read'])
+  const client = readFileSync(join(HERE, '..', 'src', 'client', 'seat-chat.js'), 'utf8')
+  assert.match(client, /from '\.\/code-side\.js'/, 'the seat reuses the Code side, never a second store')
+  assert.doesNotMatch(client, /seat-chat-(?:terminal|tree|stream)|code\/stream/, 'the seat names no route of its own')
+  const host = readFileSync(join(HERE, '..', 'src', 'host', 'seat-chat.js'), 'utf8')
+  assert.doesNotMatch(host, /code\/stream|code-tree/, 'the seat host serves no Code route')
+})
+
 test('a host with no herdr-core spawns no engine and lists no seat', () => {
   assert.equal(hcAvailable('/nonexistent/omni-seat-chat/hc'), false)
   // A program that answers `--version` stands in for one that does, without a live Herdr.
