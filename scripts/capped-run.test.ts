@@ -143,6 +143,16 @@ async function processGoneWithin(pid: number, milliseconds: number): Promise<boo
   return false;
 }
 
+async function endStarted(proc: ChildProcess): Promise<void> {
+  const pid = proc.pid;
+  if (pid === undefined) return;
+  if (safeKill(pid, 'SIGTERM')) {
+    if (!(await processGoneWithin(pid, 3_000))) {
+      safeKill(pid, 'SIGKILL');
+    }
+  }
+}
+
 function shmHasRoom(): boolean {
   if (!existsSync('/dev/shm')) return false;
   const df = spawnSync('df', ['-k', '/dev/shm'], { encoding: 'utf8' });
@@ -623,6 +633,19 @@ describe('capped-run', () => {
     }
   });
 
+  test('endStarted ends a process the test started', async () => {
+    const child = spawn('sleep', ['30'], { stdio: 'ignore' });
+    const pid = child.pid ?? 0;
+    noteStarted(pid);
+    expect(Number.isInteger(pid) && pid > 1).toBe(true);
+    try {
+      await endStarted(child);
+    } finally {
+      safeKill(pid, 'SIGKILL');
+    }
+    expect(await processGoneWithin(pid, 3_000)).toBe(true);
+  });
+
   test.skipIf(!scope)('a very short run (under 100 ms) leaves no peak file in the state folder', () => {
     const state = scratch('short-state');
     const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], { state });
@@ -776,6 +799,7 @@ describe('capped-run', () => {
           stdio: ['ignore', 'ignore', 'pipe'],
         },
       );
+      noteStarted(wrapper.pid);
       let stderr = '';
       wrapper.stderr?.on('data', chunk => {
         stderr += chunk.toString();
@@ -833,11 +857,7 @@ describe('capped-run', () => {
         expect(unitLog).toContain('MESSAGE=Started');
         expect(unitLog).toContain(`capped-run: bun (${name})`);
       } finally {
-        if (safeKill(wrapper.pid, 'SIGTERM')) {
-          if (!(await processGoneWithin(wrapper.pid, 3_000))) {
-            safeKill(wrapper.pid, 'SIGKILL');
-          }
-        }
+        await endStarted(wrapper);
       }
 
     },
@@ -864,6 +884,7 @@ describe('capped-run', () => {
           stdio: ['ignore', 'ignore', 'pipe'],
         },
       );
+      noteStarted(wrapper.pid);
       let stderr = '';
       wrapper.stderr?.on('data', chunk => {
         stderr += chunk.toString();
@@ -925,11 +946,7 @@ describe('capped-run', () => {
         expect(unitLog).toContain('MESSAGE=Started');
         expect(unitLog).toContain(`capped-run: bun (${name})`);
       } finally {
-        if (safeKill(wrapper.pid, 'SIGTERM')) {
-          if (!(await processGoneWithin(wrapper.pid, 3_000))) {
-            safeKill(wrapper.pid, 'SIGKILL');
-          }
-        }
+        await endStarted(wrapper);
       }
 
     },
