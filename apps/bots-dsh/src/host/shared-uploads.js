@@ -14,6 +14,18 @@ const SEARCH_TOOLS = ['glob', 'grep']
 const SHELL_TOOLS = ['bash', 'pwsh', 'terminal_open', 'terminal_send']
 const strings = value => (typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : [])
 const hexOf = ref => /^sha256:[a-f0-9]{64}$/.test(ref?.attachmentId) ? ref.attachmentId.slice(7) : undefined
+// Windows and macOS file systems ignore case, so a Bot's id does too; on linux two names in
+// different case are two different folders, as they are for a path.
+const fold = text => (process.platform === 'linux' ? text : text.toLowerCase())
+// The words a shell command spells out that look like a path. The check that uses them is
+// best effort, not a fence: a word carrying a shell character is left alone, so a path the
+// shell builds or expands ($VAR, $(...), a glob, ~), a folder the command changes into
+// first, and a file a script opens are known misses. Only the words written out are resolved.
+const shellPathWord = /[\\/]/
+const shellExpanded = /[$`(){}[\]*?~]/
+const shellPaths = text => text.replace(/\\/g, '/').split(/[\s;&|<>]+/)
+  .flatMap(part => part.replace(/["']/g, '').split('='))
+  .filter(word => shellPathWord.test(word) && !shellExpanded.test(word) && !word.includes('://'))
 
 export function uploadLeaf(ref, kind) {
   const name = ref.name ?? (kind === 'image' ? `image.${extensions[ref.mediaType]}` : 'file')
@@ -309,8 +321,11 @@ export function install(rt) {
     } catch { return false }
   }
 
-  // This is a tool-level guard, like private Bots. It does not inspect indirect shell
-  // paths or tools a coding agent runs itself, and does not forbid parent-folder walks.
+  // This is a tool-level guard, like private Bots: the file tools are checked by real path,
+  // and shell commands get a best-effort check of the path words they spell out. A path a
+  // command builds or expands, a folder it changes into, and a file a script opens are not
+  // seen, so this narrows the gap and never claims to be a fence. Tools a coding agent runs
+  // itself and parent-folder walks are outside it too.
   ctx.on('tools/execute', async (exec, next) => {
     const caller = rt.botOfSession(exec.agent?.session?.id ?? exec.agent?.id, exec.agent)
     if (!caller) return next()
@@ -318,6 +333,32 @@ export function install(rt) {
     const flatten = text => text.replace(/["']/g, '').replace(/\\/g, '/').replace(/\/+/g, '/')
       .replace(/\/(?:\.\/)+/g, '/')
     const raw = flatten(strings(args).join('\n'))
+    // The folder words the guard uses for another Bot's own folder, plus the limit of this
+    // shell check, which must not claim to be a fence.
+    const closedShell = () => {
+      throw refusal(`That is another Bot's own folder, which ${caller.name} does not open. Ask the user, or that Bot, to share what you need. Shell commands get a best-effort path check, not a fence: a path a command builds, a variable or glob it expands, or a file a script opens can still reach it.`)
+    }
+    // A case variant can name the same Bot on a case-insensitive host.
+    const botWithId = id => rt.botOf?.(id) ?? (process.platform === 'linux' ? undefined
+      : Object.values(rt.state?.bots ?? {}).find(bot => fold(bot.id) === fold(id)))
+    // Before a shell command runs, real-path every word that looks like a path, from the
+    // folder the command runs in. See shellPaths for the known misses: best effort, not a fence.
+    async function checkShellPaths() {
+      if (!SHELL_TOOLS.includes(exec.name)) return
+      const base = rt.sessionFolder(exec.agent?.session ?? exec.agent) ?? '.'
+      for (const word of shellPaths(strings(args).join('\n'))) {
+        const absolute = resolve(base, word)
+        const real = rt.realBeyond ? await rt.realBeyond(absolute) : absolute
+        // The path as written, then where links lead, as the file tools check them.
+        for (const candidate of new Set([flatten(absolute), flatten(real)])) {
+          for (const found of candidate.matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) {
+            if (fold(found[1]) === fold(caller.id) || botWithId(found[1]) === undefined) continue
+            closedShell()
+          }
+        }
+      }
+    }
+    await checkShellPaths()
     const storePath = hex => {
       try {
         const host = ctx.get('attachments')?.imageHostPath?.({ attachmentId: `sha256:${hex}` })

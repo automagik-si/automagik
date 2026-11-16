@@ -60,6 +60,14 @@ const mutants = [
     file: 'test/agent-redaction.test.js',
     test: 'environment PGPASSWORD is redacted across SDK reads, arguments and audit',
   },
+  {
+    name: 'shell path words are not resolved',
+    source: '../src/host/shared-uploads.js',
+    from: 'const real = rt.realBeyond ? await rt.realBeyond(absolute) : absolute',
+    to: 'const real = absolute',
+    file: 'test/upload-access.test.js',
+    test: "a shell path word through a link into another Bot's folder is refused as best effort",
+  },
 ]
 for (const mutant of mutants) {
   const source = new URL(mutant.source ?? accessSource.href, import.meta.url)

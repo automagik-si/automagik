@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { install as uploads } from '../src/host/shared-uploads.js'
 import { install as tools } from '../src/host/tools.js'
@@ -57,12 +57,22 @@ async function fixture(t, { withTools = true } = {}) {
       approval,
     })[name] }
   const owners = new Map([['ga', { roomId: 'g', botId: 'a' }], ['gb', { roomId: 'g', botId: 'b' }]])
+  // The real path of the deepest part that exists, with the rest after it, as folders.js does.
+  const realBeyond = async path => {
+    const rest = []
+    for (let at = resolve(path); ; at = dirname(at)) {
+      const found = await realpath(at).catch(() => undefined)
+      if (found !== undefined) return join(found, ...rest)
+      if (dirname(at) === at) return resolve(path)
+      rest.unshift(basename(at))
+    }
+  }
   const rt = { ctx, state, home: join(folder, 'home'), dshHome: join(folder, 'dsh'), statePath: join(folder, 'state.json'), teamTools: [], live: new Map(), groupOwners: owners,
     botOf: id => bots[id], selfOf: id => bots[id]?.id ?? owners.get(id)?.botId,
     botOfSession: id => bots[id] ?? bots[owners.get(id)?.botId], chatOf: id => bots[id]?.sessionId,
     roomOf: id => rooms[id], findBot: name => Object.values(bots).find(bot => bot.name === name),
     workDirOf: ({ botId }) => bots[botId]?.workDir, teamFolder: () => folder, defaultTeamFolder: () => folder,
-    sessionFolder: session => bots[session?.id]?.workDir ?? folder, realBeyond: async path => resolve(path),
+    sessionFolder: session => bots[session?.id]?.workDir ?? folder, realBeyond,
     groupSessionsOf: id => id === 'a' ? ['ga'] : id === 'b' ? ['gb'] : [], isMain: () => false,
     own: (value, key) => Object.hasOwn(value, key) ? value[key] : undefined,
     load: async () => {}, save: async () => {}, readOnly: () => undefined, warn() {},
@@ -99,7 +109,7 @@ test('a picture belongs only to its recipient; all direct tools and shell spelli
   assert.equal(await f.rt.sharedUploads.holds('b', hex), false)
   for (const candidate of [path, join(f.folder, '.automagik/uploads', hex, f.ref.name), f.storePath(f.ref)]) {
     for (const [name, args] of [['read', { file_path: candidate }], ['bash', { command: `cat ${JSON.stringify(candidate)}` }], ['custom_tool', { text: candidate }]]) {
-      await assert.rejects(f.guard('b', name, args), /not sent to the test Bot b/)
+      await assert.rejects(f.guard('b', name, args), /not sent to the test Bot b|another Bot's own folder/)
       assert.equal(await f.guard('a', name, args), 'ran')
     }
   }
@@ -110,7 +120,7 @@ test('a picture belongs only to its recipient; all direct tools and shell spelli
     await assert.rejects(f.guard('b', name, { path: join(f.folder, '.automagik/bots'), pattern: `${path}*` }), /not sent/)
     assert.equal(await f.guard('b', name, { path: join(f.folder, '.automagik/bots') }), 'ran')
   }
-  for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) await assert.rejects(f.guard('b', name, { command: `cat .automagik/bots/a/uploads/${hex}/picture.png` }), /not sent/)
+  for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) await assert.rejects(f.guard('b', name, { command: `cat .automagik/bots/a/uploads/${hex}/picture.png` }), /not sent to the test Bot b|another Bot's own folder/)
   uploads(f.rt) // fresh in-memory grants; the own-chat directory is the durable holding.
   assert.equal(f.rt.sharedUploads.grantedTo('a').size, 0)
   assert.equal(await f.rt.sharedUploads.holds('a', hex), true)
@@ -438,7 +448,7 @@ for (const spelling of ['.automagik/bots/a', '.Automagik/Bots/a', '.AUTOMAGIK/BO
   test(`guard ends Bot ids at shell punctuation and whitespace: ${spelling}`, async t => {
     const f = await fixture(t, { withTools: false })
     for (const command of [`cp -r ${spelling} /tmp/x`, `cp -r "${spelling}" /tmp/x`, `cat ${spelling}; true`, `cat ${spelling}|cat`, `cat ${spelling}\ntrue`]) {
-      await assert.rejects(f.guard('b', 'bash', { command }), /not sent/)
+      await assert.rejects(f.guard('b', 'bash', { command }), /not sent to the test Bot b|another Bot's own folder/)
       assert.equal(await f.guard('a', 'bash', { command }), 'ran')
     }
     // A longer id cannot be mistaken for the caller's id.
@@ -486,7 +496,7 @@ for (const spelling of [
   test(`shell guard normalizes Bot path segments: ${spelling}`, async t => {
     const f = await fixture(t, { withTools: false })
     for (const command of [`cat ${spelling}/uploads/picture.png`, `cp -r ${spelling} /tmp/test-copy`]) {
-      await assert.rejects(f.guard('b', 'bash', { command }), /not sent/)
+      await assert.rejects(f.guard('b', 'bash', { command }), /not sent to the test Bot b|another Bot's own folder/)
       assert.equal(await f.guard('a', 'bash', { command }), 'ran')
     }
   })
@@ -507,4 +517,66 @@ test('shell store guards match object ids in home-relative, quoted and cd-relati
   for (const command of commands) await assert.rejects(f.guard('b', 'bash', { command }), /not sent/)
   await f.show('a')
   for (const command of commands) assert.equal(await f.guard('a', 'bash', { command }), 'ran')
+})
+
+// A link the Bot can make outside the team folder can lead into another Bot's own folder.
+// The shell path check resolves the words a command spells out from the folder it runs in;
+// it is best effort, not a fence, and the rows below keep both its refusals and its misses
+// tested. `link` points at another Bot's folder, `mine` at this Bot's own, and `shared` and
+// `team` at shared folders.
+async function shellLinks(t) {
+  const f = await fixture(t, { withTools: false })
+  const work = await mkdtemp(join(tmpdir(), 'upload-access-work-'))
+  t.after(() => rm(work, { recursive: true, force: true }))
+  f.bots.b.workDir = work
+  const kind = process.platform === 'win32' ? 'junction' : 'dir'
+  const other = join(f.folder, '.automagik', 'bots', 'a', 'uploads')
+  await mkdir(other, { recursive: true })
+  await writeFile(join(other, 'notes.txt'), 'another Bot’s note')
+  const own = join(f.folder, '.automagik', 'bots', 'b', 'uploads')
+  await mkdir(own, { recursive: true })
+  await writeFile(join(own, 'notes.txt'), 'this Bot’s note')
+  const shared = join(f.folder, '.automagik', 'bots', 'workspace')
+  await mkdir(shared, { recursive: true })
+  await writeFile(join(shared, 'notes.txt'), 'a shared note')
+  await writeFile(join(f.folder, 'team-notes.txt'), 'a team note')
+  await symlink(other, join(work, 'link'), kind)
+  await symlink(own, join(work, 'mine'), kind)
+  await symlink(shared, join(work, 'shared'), kind)
+  await symlink(f.folder, join(work, 'team'), kind)
+  return { f, work }
+}
+
+test("a shell path word through a link into another Bot's folder is refused as best effort", async t => {
+  const { f, work } = await shellLinks(t)
+  for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) {
+    for (const command of ['cat link/x', 'cp link/x y', 'ls link/', `cat ${join(work, 'link/x')}`]) {
+      await assert.rejects(f.guard('b', name, { command }), /another Bot's own folder/, `${name}: ${command}`)
+    }
+  }
+})
+
+test('the shell path check leaves the own folder, shared folders and parent walks open', async t => {
+  const { f } = await shellLinks(t)
+  for (const command of [
+    'cat mine/notes.txt', 'cat shared/notes.txt', 'cat team/team-notes.txt',
+    'cat sub/../notes.txt', 'cat ./notes/../notes.txt', 'ls ../',
+  ]) assert.equal(await f.guard('b', 'bash', { command }), 'ran', command)
+  // The owner's own folder, and a path that walks out of it harmlessly, stay open.
+  assert.equal(await f.guard('a', 'bash', { command: 'cat .automagik/bots/a/uploads/notes.txt' }), 'ran')
+})
+
+test('the shell path check misses what it documents, and the rows say so', async t => {
+  const { f, work } = await shellLinks(t)
+  await writeFile(join(work, 'open-link.sh'), 'cat link/x\n')
+  // Known limits: the shell builds or expands these paths, the command changes folder
+  // before it reads, or a script opens them on its own. Asserted so the limit is tested
+  // rather than accidental, and so no change here starts claiming to be a fence.
+  for (const command of [
+    'cat "$LINK/x"',
+    'cat "$(printf \'link/x\')"',
+    'cd link && cat x',
+    'cat link/*',
+    'sh ./open-link.sh',
+  ]) assert.equal(await f.guard('b', 'bash', { command }), 'ran', command)
 })
