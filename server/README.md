@@ -211,7 +211,7 @@ three reviewed pins are recorded in `bots/model-pin-state.json`. The health repo
 `modelPins: pending` (a missing or corrupt state reads `unknown`, never `applied`), and no task is handed to a pending team. A later boot or the CLI install
 completion applies the pins with `am edit` and patches the v2 copies; the pending state clears
 only after all pins resolve (applied or explicitly superseded by a person's own model) and
-`verifySurfaces` passes, and then the state is `ready` with a verified receipt naming the three roster models. A second apply is a reported no-op, and a person's model is never
+`verifySurfaces` passes, and then the state is `ready` with a verified receipt naming the current team's roster models (3, 6 or 9, or an accepted person supersession). A second apply is a reported no-op, and a person's model is never
 overwritten.
 
 ## Build and smoke

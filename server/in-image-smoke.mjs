@@ -132,7 +132,7 @@ async function main() {
   const pinStateFile = join(HOME, 'bots', 'model-pin-state.json')
   const pinState = existsSync(pinStateFile) ? JSON.parse(readFileSync(pinStateFile, 'utf8')) : { state: 'unknown', pins: [] }
   if (pinState.state === 'pending') {
-    check(Array.isArray(pinState.pins) && pinState.pins.length === TRIAD.length, `pending state has ${pinState.pins?.length ?? 0} pins`)
+    check(Array.isArray(pinState.pins) && pinState.pins.length === v1Registry.bots.length, `pending state has ${pinState.pins?.length ?? 0} pins for ${v1Registry.bots.length} bots`)
     check(v1Registry.bots.every((bot) => /model pin pending/i.test(bot.instructions)), 'a pending team has a Bot without the model pin pending marker')
     check(repoRegistry.bots.every((bot) => /model pin pending/i.test(bot.instructions)), 'the v2 repo lacks the model pin pending marker')
     check(/model pin pending/i.test(homeMain.instructions), 'the v2 home main lacks the model pin pending marker')

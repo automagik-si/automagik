@@ -159,3 +159,45 @@ test('ready requires a verified receipt and all three current rosters', async t 
   assert.equal(mismatch.modelPins.state, 'failed')
   assert.equal(mismatch.healthy, true)
 })
+
+
+test('ready accepts a coherent later six-bot team and an accepted supersession', async t => {
+  const f = fixture(t), dsh = await listener(t)
+  const data = join(f.root, 'data'), workspace = join(data, 'workspace')
+  const names = ['Purpose', 'Dogfooder', 'Fixer', 'Scout', 'Writer', 'Operator']
+  const models = ['gpt-6-astra', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6.1-terra', 'gpt-6.1-sol']
+  const bots = names.map((name, index) => ({ id: `b-${'a'.repeat(9)}${index}`, name, model: models[index], kind: index === 0 ? 'main' : 'member' }))
+  const v1 = { version: 1, categories: [], bots }
+  const repo = { version: 2, bots: bots.map(({ id, name, model }, index) => ({ id, name, model, main: index === 0 })) }
+  const home = { version: 2, projects: [{ folder: workspace }], bots: [{ ...bots[0], main: true, folder: workspace }] }
+  mkdirSync(join(workspace, '.herdr'), { recursive: true })
+  mkdirSync(join(workspace, '.automagik', 'bots'), { recursive: true })
+  mkdirSync(join(data, 'bots'), { recursive: true })
+  writeFileSync(join(workspace, '.herdr', 'bots.json'), JSON.stringify(v1))
+  writeFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), JSON.stringify(repo))
+  writeFileSync(join(data, 'bots', 'bots.json'), JSON.stringify(home))
+  const receipt = { version: 1, verifiedAt: '2026-11-16T00:00:00.000Z', v1: v1.bots.map(({ id, name, model }) => ({ id, name, model })), repo: repo.bots.map(({ id, name, model }) => ({ id, name, model })), home: [home.bots[0]].map(({ id, name, model }) => ({ id, name, model })) }
+  writeFileSync(join(data, 'bots', 'model-pin-state.json'), JSON.stringify({ version: 1, state: 'ready', pins: [], receipt }))
+  const ready = await report(f, dsh.port, { AUTOMAGIK_HOME: data, AUTOMAGIK_WORKSPACE: workspace })
+  assert.equal(ready.modelPins.state, 'ready')
+  assert.equal(ready.healthy, true)
+  // A person's accepted model on one Bot must stay ready, not return to the creation trio.
+  v1.bots[1].model = 'gpt-6.1-sol'; repo.bots[1].model = 'gpt-6.1-sol'
+  writeFileSync(join(workspace, '.herdr', 'bots.json'), JSON.stringify(v1))
+  writeFileSync(join(workspace, '.automagik', 'bots', 'bots.json'), JSON.stringify(repo))
+  const supersededReceipt = { ...receipt, v1: v1.bots.map(({ id, name, model }) => ({ id, name, model })), repo: repo.bots.map(({ id, name, model }) => ({ id, name, model })) }
+  writeFileSync(join(data, 'bots', 'model-pin-state.json'), JSON.stringify({ version: 1, state: 'ready', pins: [], receipt: supersededReceipt }))
+  const superseded = await report(f, dsh.port, { AUTOMAGIK_HOME: data, AUTOMAGIK_WORKSPACE: workspace })
+  assert.equal(superseded.modelPins.state, 'ready')
+  assert.equal(superseded.healthy, true)
+})
+
+test('ready with a missing v1 roster is failed evidence, not a throw', async t => {
+  const f = fixture(t), dsh = await listener(t)
+  const data = join(f.root, 'data'), workspace = join(data, 'workspace')
+  mkdirSync(join(data, 'bots'), { recursive: true })
+  writeFileSync(join(data, 'bots', 'model-pin-state.json'), JSON.stringify({ version: 1, state: 'ready', pins: [], receipt: { version: 1, verifiedAt: '2026-11-16T00:00:00.000Z', v1: [], repo: [], home: [] } }))
+  const r = await report(f, dsh.port, { AUTOMAGIK_HOME: data, AUTOMAGIK_WORKSPACE: workspace })
+  assert.equal(r.modelPins.state, 'failed')
+  assert.equal(r.healthy, true)
+})

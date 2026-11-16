@@ -562,6 +562,12 @@ export function runFirstBoot(options = {}) {
       try {
         const prior = readModelPinState(home)
         writeModelPinState(home, 'failed', { pins: prior.pins ?? [], superseded: prior.superseded ?? [], conflicts: prior.conflicts ?? [], error: message })
+        const marker = join(home, FIRST_BOOT_MARKER)
+        if (existsSync(marker)) {
+          const record = JSON.parse(readFileSync(marker, 'utf8'))
+          record.pins = 'failed'
+          writeFileSync(marker, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
+        }
       } catch { /* the health report will say unknown */ }
     }
     warn(`first boot: ${message}; the server starts and the team/seed retry on a later boot`)
@@ -573,6 +579,20 @@ export function runFirstBoot(options = {}) {
       pins: home ? readModelPinState(home) : { state: 'unknown', pins: [] },
       error: message,
     }
+  }
+}
+
+function currentModelsPresent({ home, workspace }) {
+  try {
+    const v1 = readJson(rosterOf(workspace))
+    const repo = existsSync(repoRegistryOf(workspace)) ? readJson(repoRegistryOf(workspace)) : null
+    const homeRegistry = existsSync(homeRegistryOf(home)) ? readJson(homeRegistryOf(home)) : null
+    const v1Bots = Array.isArray(v1?.bots) ? v1.bots : []
+    const repoBots = Array.isArray(repo?.bots) ? repo.bots : []
+    const homeMain = (Array.isArray(homeRegistry?.bots) ? homeRegistry.bots : []).filter((bot) => bot?.folder === workspace && bot?.main === true)
+    return v1Bots.length > 0 && v1Bots.every((bot) => bot?.model) && repoBots.every((bot) => bot?.model) && homeMain.length === 1 && Boolean(homeMain[0].model)
+  } catch {
+    return false
   }
 }
 
@@ -609,7 +629,9 @@ function boot({
   if (!fs.existsSync(homeFile)) {
     team = ensureTeam({ home, workspace, env, am, run, log, warn })
     if (team.state === 'created') {
-      if (team.pendingPins?.length) writeModelPinState(home, 'pending', { pins: team.pendingPins })
+      // A fresh team has a known pending state even when am already pinned it: the empty pins
+      // list means no deferral, and verification below will turn it ready. Never leave it absent.
+      writeModelPinState(home, 'pending', { pins: team.pendingPins ?? [] })
     }
     registry = seedRegistry({ home, workspace, profile, env, run, vendorRoot, log, warn })
     log(`first boot: registry ${registry.state} from ${registry.script.source}${registry.script.commit ? ` @ ${registry.script.commit}` : ''}`)
@@ -621,6 +643,7 @@ function boot({
   // A pending pin is a known state: apply it before verification, so a person's model change
   // can be reported and the v2 copies synced, then verify the result. The file is cleared only
   // after verifySurfaces passes.
+  const priorState = readModelPinState(home).state
   const pins = applyPendingPins({ home, workspace, env, am, run, log, warn })
   if (pins.conflicts.length) {
     writeModelPinState(home, 'failed', {
@@ -634,8 +657,21 @@ function boot({
     ...(team.state === 'created' ? { expectedIds: team.bots.map((bot) => bot.id) } : {}),
   })
   if (!pins.conflicts.length) {
-    if (pins.pending.length) writeModelPinState(home, 'pending', { pins: pins.pending, superseded: pins.superseded })
-    else writeModelPinState(home, 'ready', { pins: [], superseded: pins.superseded, receipt: modelPinReceipt({ home, workspace, now }) })
+    const models = currentModelsPresent({ home, workspace })
+    if (models) {
+      writeModelPinState(home, 'ready', { pins: [], superseded: pins.superseded, receipt: modelPinReceipt({ home, workspace, now }) })
+    } else if (priorState === 'failed' || priorState === 'conflict') {
+      const prior = readModelPinState(home)
+      writeModelPinState(home, 'failed', { pins: prior.pins ?? [], superseded: prior.superseded ?? [], conflicts: prior.conflicts ?? [], error: prior.error ?? 'model pin resolution is not verified' })
+    } else if (priorState === 'ready') {
+      writeModelPinState(home, 'failed', { pins: [], error: 'ready state has no verified model evidence' })
+    } else if (pins.pending.length) {
+      writeModelPinState(home, 'pending', { pins: pins.pending, superseded: pins.superseded })
+    } else if (priorState === 'unknown' || pins.state === 'unknown') {
+      writeModelPinState(home, 'unknown', { pins: [] })
+    } else {
+      writeModelPinState(home, 'unknown', { pins: [] })
+    }
   }
   log(`first boot: v1 ${surfaces.v1.file} (${surfaces.v1.bots} bots, ${surfaces.v1.mains} main); v2 home ${surfaces.home.file} (${surfaces.home.bots} bots, ${surfaces.home.projects} project); v2 repo ${surfaces.repo.file} (${surfaces.repo.bots} bots, ${surfaces.repo.mains} main)`)
   log(`first boot: coherent ids: v1 [${surfaces.v1.ids.join(' ')}] main ${surfaces.v1.mainId}; v2 home [${surfaces.home.ids.join(' ')}] main ${surfaces.home.mainId}; v2 repo [${surfaces.repo.ids.join(' ')}] main ${surfaces.repo.mainId}`)
@@ -660,15 +696,18 @@ function boot({
       warn(`first boot: ${marker} was not written: ${error?.message ?? error}`)
     }
     log(`first boot: skill ${record.skill}, team ${record.team.state}, registry ${record.registry}`)
-  } else if (fs.existsSync(marker) && readModelPinState(home).state === 'ready') {
+  } else if (fs.existsSync(marker)) {
     try {
+      const state = readModelPinState(home).state
       const record = JSON.parse(fs.readFileSync(marker, 'utf8'))
-      record.pins = readModelPinState(home).state
-      delete record.pendingPins
-      if (pins.superseded.length) record.supersededPins = pins.superseded
-      else delete record.supersededPins
-      record.pinsResolvedAt = now()
-      fs.writeFileSync(marker, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
+      if (record.pins !== state) {
+        record.pins = state
+        delete record.pendingPins
+        if (pins.superseded.length) record.supersededPins = pins.superseded
+        else delete record.supersededPins
+        if (state === 'ready') record.pinsResolvedAt = now()
+        fs.writeFileSync(marker, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 })
+      }
     } catch (error) {
       warn(`first boot: ${marker} pin state was not updated: ${error?.message ?? error}`)
     }

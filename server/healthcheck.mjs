@@ -6,7 +6,6 @@ import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PORT, profileDirOf } from './lib.mjs'
-import { TRIAD } from './first-boot.mjs'
 import { installedPlugins, profileState, readJson, releaseVersion, validBuild } from './profile-state.mjs'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -25,38 +24,49 @@ export function fenceProbe(port) {
   })
 }
 
-const reviewedModels = Object.fromEntries(TRIAD.map((role) => [role.name, role.model]))
-const modelsOf = (bots) => Object.fromEntries((Array.isArray(bots) ? bots : []).map((bot) => [bot?.name, bot?.model]))
-const sameModels = (actual) => Object.keys(reviewedModels).length === Object.keys(actual).length
-  && Object.entries(reviewedModels).every(([name, model]) => actual[name] === model)
+const modelRows = (bots) => (Array.isArray(bots) ? bots : []).map((bot) => ({ id: bot?.id, name: bot?.name, model: bot?.model })).sort((a, b) => String(a.id).localeCompare(String(b.id)))
+const sameRows = (a, b) => JSON.stringify(modelRows(a)) === JSON.stringify(modelRows(b))
+const hasModels = (bots) => (Array.isArray(bots) ? bots : []).length > 0 && bots.every((bot) => typeof bot?.model === 'string' && bot.model.length > 0)
 
-/** Ready is only real when the receipt and all three current rosters show the reviewed trio. */
+/**
+ * Ready is only real when the receipt and all three current rosters agree. The creation recipe
+ * is not re-applied here: a coherent later 3/6/9-bot team or an accepted person supersession is
+ * exactly what verifySurfaces verified, and that is what the receipt records. Missing evidence
+ * is unavailable, never a throw and never a ready claim.
+ */
 function readyRosterEvidence(env, pinState) {
   const home = env.AUTOMAGIK_HOME || '/data'
   const workspace = env.AUTOMAGIK_WORKSPACE || '/data/workspace'
   const read = (file) => { try { return readJson(file) } catch { return null } }
-  const v1 = read(join(workspace, '.herdr', 'bots.json'))
-  const repo = read(join(workspace, '.automagik', 'bots', 'bots.json'))
-  const homeRegistry = read(join(home, 'bots', 'bots.json'))
   const receipt = pinState?.receipt
   if (!receipt || receipt.version !== 1 || typeof receipt.verifiedAt !== 'string') {
     return { ok: false, reason: 'ready state has no verified receipt' }
   }
-  const v1Bots = Array.isArray(v1?.bots) ? v1.bots : []
-  const repoBots = Array.isArray(repo?.bots) ? repo.bots : []
-  const homeBots = Array.isArray(homeRegistry?.bots) ? homeRegistry.bots : []
-  const homeMain = homeBots.filter((bot) => bot?.folder === workspace && bot?.main === true)
-  if (v1.version !== 1 || v1Bots.length !== TRIAD.length || v1Bots.filter((bot) => bot?.kind === 'main').length !== 1) {
-    return { ok: false, reason: 'v1 roster is not the reviewed team' }
+  const v1 = read(join(workspace, '.herdr', 'bots.json'))
+  const repo = read(join(workspace, '.automagik', 'bots', 'bots.json'))
+  const homeRegistry = read(join(home, 'bots', 'bots.json'))
+  if (!v1 || v1.version !== 1 || !Array.isArray(v1.bots)) return { ok: false, reason: 'v1 roster is unavailable' }
+  if (!repo || repo.version !== 2 || !Array.isArray(repo.bots)) return { ok: false, reason: 'v2 repo roster is unavailable' }
+  if (!homeRegistry || homeRegistry.version !== 2 || !Array.isArray(homeRegistry.bots)) return { ok: false, reason: 'v2 home roster is unavailable' }
+  const v1Bots = v1.bots
+  const repoBots = repo.bots
+  const homeBots = homeRegistry.bots.filter((bot) => bot?.folder === workspace)
+  const v1Mains = v1Bots.filter((bot) => bot?.kind === 'main')
+  const repoMains = repoBots.filter((bot) => bot?.main === true)
+  const homeMains = homeBots.filter((bot) => bot?.main === true)
+  if (v1Bots.length === 0 || v1Mains.length !== 1 || repoMains.length !== 1 || homeMains.length !== 1) {
+    return { ok: false, reason: 'rosters do not show one main Bot each' }
   }
-  if (!sameModels(modelsOf(v1Bots)) || !sameModels(modelsOf(repoBots)) || homeMain.length !== 1 || homeMain[0].model !== reviewedModels.Purpose) {
-    return { ok: false, reason: 'roster models do not match the reviewed trio' }
+  if (!hasModels(v1Bots) || !hasModels(repoBots)) return { ok: false, reason: 'a roster still has an unpinned Bot' }
+  if (!sameRows(v1Bots, repoBots)) return { ok: false, reason: 'v1 and v2 repo rosters differ' }
+  if (homeMains[0].id !== v1Mains[0].id || homeMains[0].name !== v1Mains[0].name || homeMains[0].model !== v1Mains[0].model) {
+    return { ok: false, reason: 'v2 home main differs from v1' }
   }
-  const receiptHome = Array.isArray(receipt.home) ? receipt.home : []
-  if (!sameModels(Object.fromEntries((receipt.v1 ?? []).map((bot) => [bot?.name, bot?.model])))
-    || !sameModels(Object.fromEntries((receipt.repo ?? []).map((bot) => [bot?.name, bot?.model])))
-    || receiptHome.length !== 1 || receiptHome[0]?.name !== 'Purpose' || receiptHome[0]?.model !== reviewedModels.Purpose) {
-    return { ok: false, reason: 'receipt does not cover the reviewed trio' }
+  if (!Array.isArray(homeRegistry.projects) || !homeRegistry.projects.some((entry) => entry?.folder === workspace)) {
+    return { ok: false, reason: 'v2 home has no project entry' }
+  }
+  if (!sameRows(receipt.v1, v1Bots) || !sameRows(receipt.repo, repoBots) || !sameRows(receipt.home, homeMains)) {
+    return { ok: false, reason: 'receipt does not match the current rosters' }
   }
   return { ok: true }
 }
