@@ -15,6 +15,7 @@ import { GUARD_DIR, KILL_GUARD_DIR, ledgerPath, readLedger } from "../mods/am-si
 import { AGY_FIXED_DENY, AGY_SHELL_READ, agySettingsDir, agySettingsFile, withoutBriefing } from "../mods/am-sidebar/models.js";
 import { WORKER_LINE, amPartHookCommand } from "../mods/am-sidebar/briefingText.mjs";
 import { restartAnswer } from "../mods/am-sidebar/restart.js";
+import { POINTER_VAR, REQUIRED_VAR } from "../mods/am-sidebar/loginRecord.js";
 // Start and Restart put each bot's briefing in its agent's command (models.js withBriefing);
 // the tests on the rest of the command compare it with those words out.
 const strip = (words) => withoutBriefing("codex", withoutBriefing("claude", words));
@@ -2343,6 +2344,54 @@ test("#805 restart queues working panes, lists, replaces and cancels watchers", 
   assert.match(s.cli(["restart", "Genie", "--cancel"]).out, /No restart is queued/);
   const forced = s.cli(["restart", "Genie", "--force"]);
   assert.equal(forced.code, 0, forced.err);
+});
+
+test("#1509 a queued restart keeps the pointer export and lands on the recorded home", async (t) => {
+  const setup = (s) => {
+    const current = join(s.root, "cli-homes", "current");
+    const login = join(s.root, "generation-login");
+    mkdirSync(current, { recursive: true }); mkdirSync(login);
+    chmodSync(login, 0o700);
+    const generation = "11111111-1111-4111-8111-111111111111";
+    writeFileSync(join(current, "generation.json"), JSON.stringify({ version: 1, sequence: 6,
+      claude: { generation, configDir: login }, codex: null, updatedAt: "2026-11-16T20:00:00.000Z" }));
+    writeFileSync(join(current, "claude"), generation);
+    return { pointer: join(current, "claude"), login };
+  };
+  const queue = (s, env) => {
+    const q = s.cli(["restart", "Genie", "--json"], { env });
+    assert.equal(q.code, 0, q.err);
+    assert.equal(q.json().queued, true, q.out);
+    return { watcher: runCall(s.calls()), entry: JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"))[0] };
+  };
+  const runs = (s) => s.calls().filter((call) => call[0] === "run");
+  const fire = async (s, entry, env) => {
+    const state = s.hcState();
+    state.idleOnWait = "t5";
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+    return s.cliAsync(["restart", ID.main, "--run-queued", entry.id, "--json"], { env });
+  };
+
+  const s = restartScene(t, { status: "working" });
+  const { pointer, login } = setup(s);
+  const first = queue(s, { [POINTER_VAR]: pointer, [REQUIRED_VAR]: "required" });
+  assert.ok(first.watcher.includes(`${POINTER_VAR}=${pointer}`), JSON.stringify(first.watcher));
+  assert.ok(first.watcher.includes(`${REQUIRED_VAR}=required`), JSON.stringify(first.watcher));
+  const fired = await fire(s, first.entry, { [POINTER_VAR]: pointer });
+  assert.equal(fired.code, 0, fired.err);
+  const launch = runs(s).at(-1);
+  assert.ok(launch.includes(`CLAUDE_CONFIG_DIR=${login}`), JSON.stringify(launch));
+
+  // The marker without the pointer refuses at the queued fire; no launch happens.
+  const required = restartScene(t, { status: "working" });
+  setup(required);
+  const second = queue(required, { [REQUIRED_VAR]: "required" });
+  assert.ok(second.watcher.includes(`${REQUIRED_VAR}=required`), JSON.stringify(second.watcher));
+  const before = runs(required).length;
+  const noPointer = await fire(required, second.entry, { [REQUIRED_VAR]: "required" });
+  assert.equal(noPointer.code, 2, noPointer.err);
+  assert.match(noPointer.err, /login-required/);
+  assert.equal(runs(required).length, before, "no launch after the queued refusal");
 });
 
 test("#805 restart queues dialogs and tells the owner to answer", (t) => {

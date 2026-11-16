@@ -56,7 +56,7 @@ import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
 import { agentHomeFor, agentHomeProblem, agentHomeVar, agentHomeWords, chooseLogin } from "../logins.js";
-import { resolveLogin } from "../loginRecord.js";
+import { POINTER_VAR, REQUIRED_VAR, resolveLogin } from "../loginRecord.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
@@ -245,7 +245,7 @@ function agentHomeLogin(agentHome, agent, agents = agentTable()) {
  * one-number sequence memory. Reads only the record, the pointer, the folder's stat, the marker
  * and this file; never a credential file.
  */
-const loginMemoryPath = () => join(appHome(), "automagik-herdr", "login-sequence.json");
+const loginMemoryPath = () => join(appHome(), "automagik-herdr", "login-sequence");
 const loginReaderIo = () => ({
   read: (path) => readFileSync(path, "utf8"),
   lstat: (path) => lstatSync(path),
@@ -4795,6 +4795,7 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan }) {
       ...Object.entries(process.env)
         .filter(([k, v]) => v !== undefined && (
           k.startsWith("AUTOMAGIK_HERDR_") ||
+          k === POINTER_VAR || k === REQUIRED_VAR ||
           ["USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "HERMES_HOME", "VIRTUAL_ENV"].includes(k)
         ))
         .map(([k, v]) => `${k}=${v}`),
