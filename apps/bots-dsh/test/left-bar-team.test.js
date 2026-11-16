@@ -91,6 +91,20 @@ test('a closed Bot carries a channel that needs the person up to its own row', (
   assert.equal(botRowStatus(bot('x', { status: 'idle', channels: [{ ...closed, status: 'connected' }] })), 'idle')
 })
 
+test('a channel that needs its pairing again or fails says so on its row', () => {
+  const pair = { id: 'pair', kind: 'whatsapp', name: 'WhatsApp', status: 'needs-pairing' }
+  const failed = { id: 'fail', kind: 'slack', name: 'Slack', status: 'error' }
+  const tree = render(TeamRows({
+    team: { bots: [{ ...bot('pip'), channels: [pair, failed] }] }, folded: new Set(),
+    renderArt: () => ({ type: 'i', props: {}, children: [] }),
+    renderGlyph: channel => ({ type: 'i', props: { 'data-glyph': channel.kind }, children: [] }),
+  }))
+  const row = key => findAll(tree, node => node.type === 'button' && node.props['data-id'] === key)[0]
+  assert.ok(findAll(row('pair'), hasClass('lb-st-needs')).length === 1, 'needs-pairing says needs you')
+  assert.equal(textOf(row('pair')), 'WhatsAppNeeds you')
+  assert.equal(findAll(row('fail'), node => node.props?.role === 'img')[0].props['aria-label'], 'Error', 'error shows its own mark')
+})
+
 test('a channel stays folded until a source read its chats; its own state speaks meanwhile', () => {
   const unread = { ...HELP, chats: undefined }
   const rows = channelRows({ id: 'pip' }, [unread], new Set())

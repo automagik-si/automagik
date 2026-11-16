@@ -145,12 +145,13 @@ const ROWS = `
 .lb-count{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--bt-hover);color:var(--bt-ink);font:600 10px/1 var(--bt-font)}
 /* A chat's person: the photo, else their initials, on the incoming tone Omni's chat view uses
    for the other side; the owner's own chat adds the outgoing tone as a ring. Every chat mark is
-   one tile, so the initials sit like a photo does. Omni shares --oc-in and --oc-out with the
-   bar; the fallbacks are the formulas its own chat view uses, so a row and that chat agree. */
-.lb-chat-face{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-chat-face);height:var(--lb-chat-face);box-sizing:border-box;border-radius:50%;overflow:hidden;background:var(--oc-in,var(--bt-card));color:var(--bt-ink)}
-body[data-ds-dark-theme] .lb-chat-face{background:var(--oc-in,var(--bt-bubble))}
-.lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card)))}
-body[data-ds-dark-theme] .lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble)))}
+   one tile, so the initials sit like a photo does. Omni shares --oc-in/--oc-out with the bar
+   today, and PR 1777's names --oc-them/--oc-me stand beside them for when it lands; the
+   fallbacks are the formulas its own chat view uses, so a row and that chat agree. */
+.lb-chat-face{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-chat-face);height:var(--lb-chat-face);box-sizing:border-box;border-radius:50%;overflow:hidden;background:var(--oc-in,var(--oc-them,var(--bt-card)));color:var(--bt-ink)}
+body[data-ds-dark-theme] .lb-chat-face{background:var(--oc-in,var(--oc-them,var(--bt-bubble)))}
+.lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,var(--oc-me,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card))))}
+body[data-ds-dark-theme] .lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,var(--oc-me,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble))))}
 .lb-chat-face img{position:absolute;inset:1px;width:calc(100% - 2px);height:calc(100% - 2px);border-radius:50%;object-fit:cover}
 .lb-chat-face-initials{font:600 7.5px/1 var(--bt-head-font,var(--bt-font));letter-spacing:.02em}
 .lb-row-chat .lb-chat-face-initials{color:inherit}
