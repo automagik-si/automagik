@@ -21767,7 +21767,7 @@ function ProjectRail({ projects = [], currentId, onOpen, onAdd, label, addLabel,
       return (0, import_react53.createElement)("button", {
         key: project.id,
         type: "button",
-        className: ["lb-tile", pictured(project) ? "" : "lb-tile-letter", badge ? "lb-tile-badged" : ""].filter(Boolean).join(" "),
+        className: ["lb-tile", onOpen ? "" : "lb-tile-still", pictured(project) ? "" : "lb-tile-letter", badge ? "lb-tile-badged" : ""].filter(Boolean).join(" "),
         "data-id": project.id,
         "aria-current": project.id === currentId ? "true" : void 0,
         "aria-label": badge ? `${project.name}, ${word(badge)}` : project.name,
@@ -22040,7 +22040,10 @@ var RAIL = `
 .lb-rail{flex:none;display:flex;flex-direction:column;align-items:center;gap:var(--lb-rail-gap);width:var(--lb-rail-w);padding:12px 0;box-sizing:border-box;border-right:1px solid var(--lb-line);overflow-y:auto;scrollbar-width:none}
 .lb-tile{position:relative;flex:none;display:block;width:var(--lb-tile);height:var(--lb-tile);margin:0;padding:0;border:0;border-radius:var(--lb-tile-r);background:none;color:var(--bt-ink);font:inherit;cursor:pointer}
 .lb-tile-face{display:grid;place-items:center;width:100%;height:100%;border-radius:inherit;background:var(--lb-tile-ground)}
-.lb-tile:hover .lb-tile-face{background:var(--bt-active)}
+/* The computer mark has no opening; only actionable tiles promise one on hover. */
+.lb-tile:not(.lb-tile-still):hover .lb-tile-face{background:var(--bt-active)}
+/* Keep the focus ring while the resting mark stops offering a pointer action. */
+.lb-tile-still{cursor:default}
 .lb-tile[aria-current]{outline:1.5px solid var(--bt-ink);outline-offset:1.5px}
 .lb-tile[aria-current] .lb-tile-face{background:var(--lb-tile-open)}
 .lb-tile-letter .lb-tile-face,.lb-tile-letter:hover .lb-tile-face,.lb-tile-letter[aria-current] .lb-tile-face{background:color-mix(in srgb,var(--st-lilac,var(--bt-active)) 72%,var(--st-paper,var(--bt-card)));color:var(--st-lilac-ink,var(--bt-ink));font:var(--bt-weight-title,600) 18px/1 var(--bt-head-font,var(--bt-font))}
@@ -22123,8 +22126,10 @@ var HOST = `
 .lb-bar[data-lb-host] .lb-rail{border-right:0}
 .lb-railcol{flex:none;display:flex;flex-direction:column;align-items:center;width:var(--lb-rail-w);min-height:0}
 .lb-railcol .lb-rail{flex:1;min-height:0}
-.lb-railcol .bt-side-collapse{flex:none;width:36px;height:36px;margin:0 0 10px;border:0;border-radius:var(--lb-tile-r);background:none;box-shadow:none;color:var(--lb-muted)}
-.lb-railcol .bt-side-collapse:hover{background:var(--bt-hover);color:var(--bt-ink)}
+/* Both wide and drawer seats use the rail's existing control face. */
+.lb-railcol .bt-side-collapse,.bt-side-collapse.bt-foot-toggle{flex:none;width:36px;height:36px;margin:0 0 10px;border:0;border-radius:var(--lb-tile-r);background:none;box-shadow:none;color:var(--lb-muted)}
+/* The footer seat has the same hover affordance as the drawer's rail control. */
+.lb-railcol .bt-side-collapse:hover,.bt-side-collapse.bt-foot-toggle:hover{background:var(--bt-hover);color:var(--bt-ink)}
 .lb-bar[data-lb-host] .lb-list{flex:1;width:auto}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){position:relative;margin:var(--lb-panel-gap)!important;height:calc(100% - 2 * var(--lb-panel-gap))!important;padding:0!important;border-radius:var(--lb-panel-r);background:var(--lb-ground)!important}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host)::before{content:'';position:absolute;left:calc(var(--lb-rail-w) - 1px);top:0;bottom:0;width:1px;background:var(--lb-line);pointer-events:none}
@@ -22135,6 +22140,14 @@ html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]:has(.lb-
 [class*="_root"]:has(.lb-host) [class*="_scrollArea"]:has(.lb-host){grid-template-columns:0 minmax(0,1fr) 0;grid-template-rows:0 max-content 0 minmax(0,1fr);margin:0}
 [class*="_root"]:has(.lb-host) [class*="_scrollFade"]{display:none}
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
+/* Anchor against the card so footer entries and a scrolling list cannot move the toggle. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.lb-host) .bt-foot-toggle{position:absolute;left:calc(10px - var(--lb-panel-gap));bottom:calc(18px - var(--lb-panel-gap));margin:0}
+/* The rail draws its icons at 18px (DSH's rail spec), so the glyph keeps its size across the fold. */
+.bt-side-collapse.bt-foot-toggle svg{width:18px;height:18px}
+/* Keep the drawer's rail control until a footer seat takes over outside the drawer. */
+[class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.bt-foot-toggle) .lb-railcol .bt-side-collapse{display:none}
+/* The drawer retains its rail control and its existing placement. */
+[class*="_frame"][data-sidebar-drawer] .bt-foot-toggle{display:none}
 .lb-head{flex:none;display:flex;align-items:center;gap:4px;height:52px;padding:0 8px 0 14px;box-sizing:border-box}
 .lb-brand{flex:1;min-width:0;display:flex;align-items:center;overflow:hidden}
 .lb-brand .omni-wordmark{display:block;flex:none;max-width:100%;height:auto}
@@ -23852,6 +23865,34 @@ function FooterAccount(props) {
   if (seated) return null;
   return (0, import_react59.createElement)("span", { className: "bt-foot-account" }, (0, import_react59.createElement)(AccountLauncher, { ...props, seat: false }));
 }
+function RailToggle({ wide, actions }) {
+  const button = (0, import_react59.useRef)(null);
+  const hadFocus = (0, import_react59.useRef)(false);
+  (0, import_react59.useLayoutEffect)(() => {
+    const native = document.querySelector("[data-sidebar-toggle]");
+    if (!wide && hadFocus.current) {
+      hadFocus.current = false;
+      native?.focus({ preventScroll: true });
+    } else if (wide && native === document.activeElement && !document.documentElement.matches("[data-windows-titlebar],[data-platform=darwin]") && !button.current?.closest("[data-sidebar-drawer]")) {
+      button.current?.focus({ preventScroll: true });
+    }
+  }, [wide]);
+  if (!wide) return null;
+  return (0, import_react59.createElement)("button", {
+    ref: button,
+    type: "button",
+    className: "bt-round bt-side-collapse bt-foot-toggle",
+    "aria-label": t("Collapse sidebar"),
+    title: t("Collapse sidebar"),
+    onFocus: () => {
+      hadFocus.current = true;
+    },
+    onBlur: () => {
+      hadFocus.current = false;
+    },
+    onClick: () => actions.toggleSidebar()
+  }, (0, import_react59.createElement)(SidebarIcon));
+}
 function BotReturn({ wide, useSurface, actions }) {
   const mode = useSurface((value) => value.mode);
   if (mode !== "agent") return null;
@@ -23911,6 +23952,22 @@ html[data-automagik-desktop=darwin] .bt-panel{-webkit-app-region:no-drag}
 [class*="_root"][class*="_collapsed"]{margin:6px!important;padding-left:0!important;padding-right:0!important}
 [class*="_collapsed"]>[class*="_logoRow"],[class*="_collapsed"] [class*="_regionArea"]{width:100%;display:flex;justify-content:center}
 [class*="_collapsed"]>[class*="_footArea"]{width:100%;justify-items:center;padding-left:0!important;padding-right:0!important}
+/* The rail's card keeps its 6px inset, so its native toggle shares the footer's viewport box. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"][class*="_collapsed"]{position:relative;height:calc(100% - 12px)}
+/* The toggle leaves the logo row without reserving an empty seat above the Bot list. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_logoRow"]{height:0!important;margin:0!important}
+/* DSH keeps the badge and keyboard hints while the control moves below every footer entry. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"] [data-sidebar-toggle]{position:absolute;left:4px;bottom:12px;margin:0}
+/* Footer entries need a whole control's height above the bottom seat, even on short windows. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_footArea"]{padding-bottom:calc(12px + 36px + var(--lb-rail-gap))!important}
+/* A horizontal rail entrance would move the toggle away from the seat it just replaced. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:bt-rail-toggle-in 150ms var(--ds-ease-in-out) backwards}
+/* Only opacity changes so a mid-animation press still lands on the same control. */
+@keyframes bt-rail-toggle-in{from{opacity:0}}
+/* Quiet motion leaves the native toggle immediately ready in its bottom seat. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) body[data-bt-motion=quiet] [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:none}
+/* Respect the system's motion choice without changing the drawer or caption controls. */
+@media (prefers-reduced-motion:reduce){html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:none}}
 /* rc.2 nests the Bot list in a scrolling grid. Bound its row so only bt-list
    scrolls; the search and sidebar buttons stay above it. Native sessions keep their grid. */
 [class*="_scrollArea"]:has(.bt-side){grid-template-rows:8px max-content 2px minmax(0,1fr);overflow-y:hidden}
@@ -38433,6 +38490,8 @@ function apply(ctx) {
     () => shadow("sidebar.footer.action", { id: "bot-account", order: -200, inject: face }, FooterAccount),
     // Shown only when the team is linked to an Omni without the channels plugin.
     () => shadow("sidebar.footer.action", { id: "bot-channels-moved", order: -100, inject: face }, ChannelsMoved),
+    // The footer keeps the wide toggle below every entry, independent of the Bot list's height.
+    () => shadow("sidebar.footer.action", { id: "bot-rail-toggle", order: 0, inject: face }, RailToggle),
     () => shadow("settings.trigger", { priority: BOT_PRIORITY }, YouAvatar),
     // The whale wins the seat over a shell account plugin's own launcher (the
     // Desktop's "··· More"), which comes back in Agent mode.
