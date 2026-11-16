@@ -502,6 +502,28 @@ describe('capped-run', () => {
     120_000,
   );
 
+  test.skipIf(!scope)(
+    'the peak floor clamps a sample under the limit (test-only fake peak)',
+    () => {
+      const state = scratch('fake-peak-state');
+      const allocator = join(scratch('fake-peak-allocator'), 'alloc.js');
+      writeFileSync(allocator, 'const hold = [];\nfor (;;) hold.push(Buffer.alloc(1 << 20, 1));\n');
+      const outcome = cappedRun(['--mem', '256M', '--', process.execPath, allocator], {
+        state,
+        env: { CAPPED_RUN_TEST_MEM: '256M', CAPPED_RUN_TEST_FAKE_PEAK: '4194304' },
+        timeout: 120_000,
+      });
+      expect(outcome.status).toBe(137);
+      const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
+      expect(capped).toHaveLength(1);
+      // The fake 4 MiB sample is below the 256M limit: the floor clamps to the limit, and the
+      // last sample is still named. Mutant 15 (floor dropped) would print peak>=4.0M here.
+      expect(capped[0]).toContain('limit=256M, peak>=256.0M, last sample 4.0M, command=');
+      expect(capped[0]).not.toMatch(/peak=[0-9.]+M/);
+    },
+    120_000,
+  );
+
   test.skipIf(!scope)('a very short run (under 100 ms) leaves no peak file in the state folder', () => {
     const state = scratch('short-state');
     const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], { state });

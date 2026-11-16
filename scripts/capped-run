@@ -57,7 +57,8 @@
 # Test-only overrides (never set for a real run): CAPPED_RUN_TEST_MEM replaces the default cap
 # (a tiny scope for the cap-kill test), CAPPED_RUN_TEST_STATE overrides the state folder,
 # CAPPED_RUN_TEST_LOCK_WAIT overrides the lock wait in seconds, CAPPED_RUN_TEST_UNREADABLE_EVENTS
-# makes the monitor report the memory-kill cause unreadable. A real run reads none of them beyond
+# makes the monitor report the memory-kill cause unreadable, and CAPPED_RUN_TEST_FAKE_PEAK=<bytes>
+# replaces the monitor's last sample (the peak-floor row). A real run reads none of them beyond
 # that; CAPPED_RUN_LOCK_FILE is the one real override, for another shared lock path.
 #
 # No release job and no build-host cargo build goes through this wrapper.
@@ -372,8 +373,10 @@ command -v ionice >/dev/null 2>&1 && have_ionice=1
 # The payload runs as a shim so a small monitor can read the scope's memory.peak while the
 # promise not to lose the peak still holds: the monitor lives in the scope and keeps the cgroup
 # alive until it has written the final value. It only ever writes the peak (and the final
-# `done` marker) to the run's state folder. `parent` is the shim's PID, which the exec chain
-# keeps, so the monitor can tell when the command has gone.
+# `done` marker) to the run's state folder, and its stderr is /dev/null: no job-status text from
+# the monitor (a `Killed` from one of its children under memory pressure) can reach the wrapper.
+# `parent` is the shim's PID, which the exec chain keeps, so the monitor can tell when the
+# command has gone.
 # shellcheck disable=SC2016
 SHIM='
 peek=$1
@@ -385,6 +388,7 @@ if [ -n "$peek" ]; then
     peakf=/sys/fs/cgroup$cg/memory.peak
     eventsf=/sys/fs/cgroup$cg/memory.events
     (
+      exec 2>/dev/null
       umask 077
       peak=
       oom=unknown
@@ -569,6 +573,12 @@ code=$?
 capped_oom=0
 if [ "$capped" = 1 ]; then
   read_peak
+  # Test-only: replace the monitor's last sample so the peak-floor row can exercise a sample
+  # under the limit (a real OOM kill always leaves memory.peak at the limit). Never set in a run.
+  case ${CAPPED_RUN_TEST_FAKE_PEAK:-} in
+    '' | *[!0-9]*) ;;
+    *) peak=$CAPPED_RUN_TEST_FAKE_PEAK ;;
+  esac
   case ${oom_state:-} in
     '' | unknown | *[!0-9]*) capped_oom=0 ;;
     *) capped_oom=$oom_state ;;
