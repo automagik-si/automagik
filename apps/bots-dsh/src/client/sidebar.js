@@ -20,7 +20,7 @@ import { approvalCount, approvalDetail, useApproval } from './approvals.js'
 import { WorkCodeSwitch } from './work-code-switch.js'
 import { BotPills, pillLabels } from './capability-pills.js'
 import { LeftBar } from './left-bar.js'
-import { useSeats } from './seat-chat.js'
+import { seatBotId, seatChatView, seatWithFreshPane, useSeats } from './seat-chat.js'
 
 // -------------------------------------------------------------------------
 // Sidebar
@@ -392,7 +392,16 @@ export function TeamSidebar(props) {
   useLayoutEffect(() => { closing.current = false })
   const roster = useRoster(value => value)
   // The seats on this computer (RFC 0022 1L): the registry's orchestrators as the bar's rows.
-  const seats = useSeats(actions.seatList, wide)
+  // An open seat keeps polling even where the bar is a narrow rail, so its switch learns a
+  // pane that starts or stops while the panel stays open.
+  const openSeat = useSyncExternalStore(seatChatView.subscribe, seatChatView.getSnapshot).seat
+  const seats = useSeats(actions.seatList, wide || openSeat !== null)
+  useEffect(() => {
+    if (openSeat === null) return
+    const fresh = seats.find(candidate => candidate.id === seatBotId(openSeat))
+    const next = seatWithFreshPane(openSeat, fresh)
+    if (next !== null) seatChatView.set({ seat: next })
+  }, [seats, openSeat])
   const markedUnread = useUi(value => value.unread)
   const bootFailed = useUi(value => value.bootFailed === true)
   props.useRegistry(value => value)
