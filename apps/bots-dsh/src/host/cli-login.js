@@ -514,9 +514,12 @@ export function install(rt) {
       const code = error?.code ?? ''
       // acp-dsh's own fixed sentence first (more precise, and its text is the allowlist), then a
       // code the team knows, then the failure class, then the one line. What the CLI printed never
-      // reaches the person: the sentence is only taken from a fixed set.
+      // reaches the person: the sentence is only taken from a fixed set. Both code tables are read
+      // through Object.hasOwn: `error.code` can name Object.prototype ('toString', '__proto__'),
+      // and a plain index would hand back a function or an object in place of the one line.
       const sentence = ACCOUNT_FIXED.get(error?.message)
-        ?? (Object.hasOwn(ERRORS, code) ? ERRORS[code] : ACCOUNT_SENTENCES[code])
+        ?? (Object.hasOwn(ERRORS, code) ? ERRORS[code]
+          : Object.hasOwn(ACCOUNT_SENTENCES, code) ? ACCOUNT_SENTENCES[code] : undefined)
       throw failed(sentence ?? unmappedFailure(error), Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
     }
     if (action === 'current' && (value === undefined || value === null)) {

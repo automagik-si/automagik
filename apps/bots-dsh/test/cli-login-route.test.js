@@ -185,6 +185,19 @@ test('a prototype name as a code is refused like any other, not turned into an i
   }
 })
 
+// The sign-in action path reads both of its code tables as own properties, not just the one for
+// codes it knows: a code such as '__proto__' handed the row an inherited value instead.
+test('a prototype name as a sign-in failure code gets the one line, not an inherited value', async (t) => {
+  const h = await fixture(t)
+  for (const code of ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    h.acp.loginStart = async () => { throw Object.assign(new Error('private-cli-output'), { code }) }
+    const { result } = await h.call('cli-login-start', h.payload)
+    assert.equal(result.error.code, 'bot/refused', code)
+    assert.equal(result.error.message, 'Could not continue this sign-in. Try again.', code)
+    assert.doesNotMatch(JSON.stringify(result), /\[object Object\]|native code|private-cli-output/, code)
+  }
+})
+
 test('only an acp failure namespace is said as a class', async (t) => {
   const h = await fixture(t)
   for (const code of ['Users/example-user', 'home/example-user', 'Bearer/fake-tok-000000', 'ACP-net/unreachable', 'filesystem/enoent']) {
