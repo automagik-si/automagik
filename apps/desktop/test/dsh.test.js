@@ -528,6 +528,7 @@ import { writeFileSync } from 'node:fs'
 export async function runCli(options = {}) {
   const manager = options.packageManager
   writeFileSync(process.env.LAUNCHER_FACTS, JSON.stringify(manager ?? null))
+  writeFileSync(process.env.LAUNCHER_ARGV, process.argv[1])
   if (!manager) throw new Error('dsh was given no package manager')
   const version = execFileSync(manager.command, [...manager.args, '--version'], {
     encoding: 'utf8', env: { ...process.env, ...manager.env },
@@ -541,13 +542,14 @@ export async function runCli(options = {}) {
 `)
   const calls = join(root, 'pnpm-calls.txt')
   const facts = join(root, 'launcher-facts.json')
+  const argvFile = join(root, 'launcher-argv.txt')
   const port = await freePort()
   const running = await startDsh({
     node: process.execPath, bin: entry, launcher: LAUNCHER, bundledPnpm: bundled,
     env: {
       ...process.env,
       PATH: [pathDir, process.env.PATH].filter(Boolean).join(delimiter),
-      PNPM_CALLS: calls, LAUNCHER_FACTS: facts,
+      PNPM_CALLS: calls, LAUNCHER_FACTS: facts, LAUNCHER_ARGV: argvFile,
     },
     port, cwd: root,
   })
@@ -555,6 +557,8 @@ export async function runCli(options = {}) {
   assert.equal(running.url, `http://127.0.0.1:${port}/?token=pnpm`)
   assert.equal(existsSync(pathMarker), false, 'the pnpm first on PATH never ran')
   assert.equal(readFileSync(calls, 'utf8'), 'bundled --version\n')
+  // argv[1] names dsh's entry, as a direct start did: the Bot team's update check reads it.
+  assert.equal(readFileSync(argvFile, 'utf8'), entry)
   assert.deepEqual(JSON.parse(readFileSync(facts, 'utf8')), {
     command: process.execPath,
     args: [bundled],
@@ -1313,6 +1317,9 @@ test('main.js guards the origin as it is now, and loads only the URL pageUrlOf h
   assert.match(main, /guard: \(\) => harden\(\(\) => dshOrigin\)/)
   assert.match(main, /const url = pageUrlOf\(running, dshOrigin\)[\s\S]{0,120}loadURL\(url\)/)
   assert.match(main, /serveDsh\(\{\s*run: dshProcess,/)
+  // Every start binds the plugin manager to the app's own pnpm: losing these props would bring
+  // back #1466 with the rest of the suite still green.
+  assert.match(main, /bundledPnpm: resources\.pnpm, launcher: resources\.launcher,/)
   assert.match(main, /urlFile/)
   assert.equal(/stopDsh\(|dshChild/.test(main), false, 'every way out stops dshProcess, the current dsh')
 })

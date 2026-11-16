@@ -24,6 +24,11 @@ if (!existsSync(ENTRY)) missing("the app's dsh entry", ENTRY)
 if (!PNPM) missing("the app's bundled pnpm", '(not named)')
 if (!existsSync(PNPM)) missing("the app's bundled pnpm", PNPM)
 
+// dsh and its plugins may read the entry script from argv (the Bot team's update check walks up
+// from it for the runtime's version): name the dsh bin there, as a direct start did, not this
+// launcher. runCli reads its own arguments from argv.slice(2), which does not change.
+process.argv[1] = ENTRY
+
 async function main() {
   const { runCli } = await import(pathToFileURL(ENTRY).href)
   if (typeof runCli !== 'function') throw new Error(`the installed dsh does not export runCli (${ENTRY})`)

@@ -227,6 +227,11 @@ export async function main({ env = process.env, stdin = process.stdin, stdout = 
 
   let running
   try {
+    // Not the desktop's bundled-pnpm launcher (src/dsh-launch.cjs): this guest launcher is not
+    // wired into main.js and ships nothing yet. The image's fixed PATH runs its own
+    // /usr/local/bin/pnpm shim, which execs the same bundled pnpm 10 (Dockerfile), so plugin
+    // installs here are pinned too. When WSLC starts from the app, pass bundledPnpm and launcher
+    // as main.js does.
     running = await startDsh({
       node: process.execPath,
       bin: config.bin,
