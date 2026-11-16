@@ -40,7 +40,7 @@ new Function('module', 'exports', 'require', bundle.outputFiles[0].text)(module,
 
 const {
   EMPTY_FACE, QUIET, SeatChatPanel, SeatRow, WaitingCard, WORDED, codeStore, mergeFace, renderArt, seatAgentName, seatBotId, seatChatView,
-  seatClientId, seatSourceNote, seatTerminalWhy, seatWordOf, teamOf, word,
+  seatClientId, seatSourceNote, seatTerminalWhy, seatWithFreshPane, seatWordOf, teamOf, word,
 } = module.exports
 
 /** An element with its function components drawn, down to tags and text. */
@@ -261,6 +261,34 @@ test('a live seat shows the switch; Terminal opens that registry Bot pane; Chat 
   assert.equal(backs, 0, 'Back stays on the seat while Terminal is open')
   buttons(renderSeat(onBack)).find(button => button.props.className === 'bt-seat-back').props.onClick()
   assert.equal(backs, 1, 'in Chat, Back leaves the seat')
+})
+
+test('the bar poll updates the open seat only when its live facts change', () => {
+  const fresh = { ...seat, id: 'b-aaaaaaaaaa' }
+  assert.equal(seatWithFreshPane(seatRow, fresh), null, 'the same facts do not re-render')
+  const started = seatWithFreshPane(seatRow, { ...fresh, terminal: 't2', status: 'working' })
+  assert.equal(started.terminal, 't2')
+  assert.equal(started.id, 'seat:b-aaaaaaaaaa', 'the row identity stays')
+  assert.equal(started.artId, 'b-aaaaaaaaaa')
+  assert.equal(seatWithFreshPane(seatRow, { ...fresh, terminal: null, status: 'off' }).terminal, null)
+  assert.equal(seatWithFreshPane(seatRow, null), null, 'a row the poll no longer has changes nothing')
+})
+
+test('the open seat learns a pane that stops and starts while the panel stays open', () => {
+  seatChatView.set({ seat: seatRow })
+  try {
+    let tree = renderSeat(() => {})
+    assert.equal(part(tree, 'terminal').props['aria-disabled'], undefined)
+    seatChatView.set({ seat: { ...seatRow, terminal: null, status: 'off' } })
+    tree = renderSeat(() => {})
+    assert.equal(part(tree, 'terminal').props['aria-disabled'], 'true')
+    assert.match(textOf(tree), /not running on this computer/)
+    seatChatView.set({ seat: { ...seatRow, terminal: 't2', status: 'working' } })
+    tree = renderSeat(() => {})
+    assert.equal(part(tree, 'terminal').props['aria-disabled'], undefined, 'a started seat can open again')
+  } finally {
+    seatChatView.set({ seat: null })
+  }
 })
 
 test('a seat with no live pane keeps Terminal, says why, and opens nothing', (t) => {

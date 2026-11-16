@@ -2868,6 +2868,7 @@ const HOST_ZH = {
   '{n} projects': '{n} 个项目',
   'Reading…': '读取中…',
   'Code team': '代码团队',
+  'Global Bots': '全局 Bot',
   'The Code side could not read this computer’s team.': '代码端无法读取本机的团队。',
   'No project has a Bot on this computer yet.': '本机还没有任何项目包含 Bot。',
   'Reading this computer’s team…': '正在读取本机的团队…',

@@ -72,62 +72,67 @@ const STATUS_RANK = { 'needs-you': 0, working: 1, idle: 2, 'not-running': 3 }
  * @returns {{ v: number, machine: { name: string, core: string }, projects: any[] }}
  */
 export function buildCodeTree({ bots = [], projects = [], attach, workers, terminals, core }) {
-  const local = bots.filter(bot => typeof bot.id === 'string' && typeof bot.name === 'string' && typeof bot.folder === 'string' && bot.folder !== '')
+  const local = bots.filter(bot => typeof bot.id === 'string' && typeof bot.name === 'string')
+  const inProject = local.filter(bot => typeof bot.folder === 'string' && bot.folder !== '')
+  // RFC 0014's global Bots have no folder; RFC 0022 lists them as seats. They are this
+  // computer's Bots too, so the Code side carries them in a project-less group of their own.
+  const globalBots = local.filter(bot => typeof bot.folder !== 'string' || bot.folder === '')
   const folders = new Map()
   for (const project of Array.isArray(projects) ? projects : []) {
     if (typeof project?.folder !== 'string' || !isAbsolute(project.folder)) continue
     folders.set(resolve(project.folder), { folder: resolve(project.folder) })
   }
-  for (const bot of local) folders.set(resolve(bot.folder), { folder: resolve(bot.folder) })
-  const built = []
-  for (const { folder } of [...folders.values()].slice(0, MAX_PROJECTS)) {
-    const projectBots = local.filter(bot => resolve(bot.folder) === folder)
-    if (projectBots.length === 0) continue
-    const rows = projectBots.map((bot) => {
-      const binding = heldIn(attach.fold, bot.id, null)
-      const terminal = binding ? terminals.get(String(binding.terminal)) : undefined
-      // The row must name this computer's core as well: a terminal id reused after a core
-      // wipe is not the binding the ledger wrote.
-      const live = Boolean(binding) && binding.core === core.id && terminal?.created_ms === binding.created_ms
-      const size = live ? sizeOf(terminal) : null
-      const seen = workersOf(workers, bot.id)
-        .filter(worker => worker.core === core.id)
-        .map((worker) => {
-          const running = terminals.get(worker.terminal)
-          if (!running || running.created_ms !== worker.created_ms) return null
-          return {
-            terminal: worker.terminal,
-            role: worker.role,
-            agent: worker.agent,
-            model: worker.model,
-            branch: worker.branch,
-            worktree: worker.worktree,
-            session: worker.session,
-            status: statusWord(running),
-          }
-        })
-        .filter(Boolean)
-        .sort((a, b) => (STATUS_RANK[a.status] - STATUS_RANK[b.status]) || String(a.role ?? '').localeCompare(String(b.role ?? '')) || a.terminal.localeCompare(b.terminal))
-      return {
-        id: bot.id,
-        name: bot.name,
-        role: typeof bot.role === 'string' ? bot.role : null,
-        agent: typeof bot.agent === 'string' ? bot.agent : null,
-        main: bot.main === true,
-        status: live ? statusWord(terminal) : 'not-running',
-        terminal: live && size ? { id: binding.terminal, cols: size.cols, rows: size.rows } : null,
-        workers: seen,
-      }
-    })
+  for (const bot of inProject) folders.set(resolve(bot.folder), { folder: resolve(bot.folder) })
+  const rowsOf = projectBots => projectBots.map((bot) => {
+    const binding = heldIn(attach.fold, bot.id, null)
+    const terminal = binding ? terminals.get(String(binding.terminal)) : undefined
+    // The row must name this computer's core as well: a terminal id reused after a core
+    // wipe is not the binding the ledger wrote.
+    const live = Boolean(binding) && binding.core === core.id && terminal?.created_ms === binding.created_ms
+    const size = live ? sizeOf(terminal) : null
+    const seen = workersOf(workers, bot.id)
+      .filter(worker => worker.core === core.id)
+      .map((worker) => {
+        const running = terminals.get(worker.terminal)
+        if (!running || running.created_ms !== worker.created_ms) return null
+        return {
+          terminal: worker.terminal,
+          role: worker.role,
+          agent: worker.agent,
+          model: worker.model,
+          branch: worker.branch,
+          worktree: worker.worktree,
+          session: worker.session,
+          status: statusWord(running),
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => (STATUS_RANK[a.status] - STATUS_RANK[b.status]) || String(a.role ?? '').localeCompare(String(b.role ?? '')) || a.terminal.localeCompare(b.terminal))
+    return {
+      id: bot.id,
+      name: bot.name,
+      role: typeof bot.role === 'string' ? bot.role : null,
+      agent: typeof bot.agent === 'string' ? bot.agent : null,
+      main: bot.main === true,
+      status: live ? statusWord(terminal) : 'not-running',
+      terminal: live && size ? { id: binding.terminal, cols: size.cols, rows: size.rows } : null,
+      workers: seen,
+    }
+  })
+  // The main Bot of a group comes first; a global group has no main Bot unless one is marked.
+  const ordered = (rows) => {
     const main = rows.find(row => row.main) ?? rows[0]
     const others = rows.filter(row => row !== main).sort((a, b) => (STATUS_RANK[a.status] - STATUS_RANK[b.status]) || byName(a, b))
-    built.push({
-      folder,
-      name: projectName(folder),
-      bots: [{ ...main, main: true }, ...others],
-    })
+    return [{ ...main, main: true }, ...others]
+  }
+  const built = []
+  for (const { folder } of [...folders.values()].slice(0, MAX_PROJECTS)) {
+    const projectBots = inProject.filter(bot => resolve(bot.folder) === folder)
+    if (projectBots.length === 0) continue
+    built.push({ folder, name: projectName(folder), bots: ordered(rowsOf(projectBots)) })
   }
   built.sort((a, b) => String(a.name ?? a.folder).localeCompare(String(b.name ?? b.folder)))
+  if (globalBots.length > 0) built.unshift({ folder: null, name: null, global: true, bots: ordered(rowsOf(globalBots)) })
   return { v: TREE_VERSION, machine: { name: core.name, core: core.id }, projects: built }
 }
 
@@ -160,16 +165,16 @@ export function readRegistryTree({ env = process.env, readFile = readFileSync, w
   const seen = new Set()
   for (const bot of readHome.file.bots ?? []) {
     if (bot.machine !== undefined) continue
-    if (typeof bot.folder !== 'string') continue
     if (seen.has(bot.id)) continue
     seen.add(bot.id)
-    bots.push({ id: bot.id, name: bot.name, role: bot.role, agent: bot.agent, main: bot.main === true, folder: bot.folder })
+    // A home-file Bot with no folder is a global Bot (RFC 0014), and a seat (RFC 0022).
+    bots.push({ id: bot.id, name: bot.name, role: bot.role, agent: bot.agent, main: bot.main === true, folder: typeof bot.folder === 'string' && bot.folder !== '' ? bot.folder : undefined })
   }
   const folders = new Set()
   for (const project of readHome.file.projects ?? []) {
     if (typeof project?.folder === 'string' && isAbsolute(project.folder)) folders.add(resolve(project.folder))
   }
-  for (const bot of bots) folders.add(resolve(bot.folder))
+  for (const bot of bots) if (typeof bot.folder === 'string') folders.add(resolve(bot.folder))
   const projects = [...folders].map(folder => ({ folder }))
   for (const folder of folders) {
     const readRepo = readRegistry(join(folder, REPO_PATH), 'repo', readFile)

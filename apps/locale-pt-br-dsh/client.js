@@ -2772,6 +2772,7 @@ const pack = createPack({
     "Latest": "Mais recente",
     "1 project": "1 projeto",
     "Code team": "Equipe de código",
+    "Global Bots": "Bots globais",
     "No project has a Bot on this computer yet.": "Nenhum projeto tem um Bot neste computador ainda.",
     "No terminal chosen": "Nenhum terminal escolhido",
     "Opening the terminal…": "Abrindo o terminal…",

@@ -77,6 +77,19 @@ test('the listing joins the registry to this computer\'s terminals, never anothe
   assert.equal(seats[1].project, null)
 })
 
+test('a finished terminal is not a live seat pane', async (t) => {
+  const fixture = homeWith({ bots: [{ id: ONE, name: 'Orchestrator One' }] })
+  t.after(fixture.stop)
+  const { chat, stop } = seatChat(fixture.home, {
+    registryPath: fixture.registryPath,
+    terminals: [{ ...terminal('t1', ONE), state: 'finished' }],
+  })
+  t.after(stop)
+  const seats = await chat.list()
+  assert.deepEqual(seats.map(seat => [seat.id, seat.terminal, seat.status]), [[ONE, null, 'off']])
+  await assert.rejects(() => chat.open('win-1', 't1'), /not a seat/)
+})
+
 test('a seat opens as its transcript rows, read only, and a remote or unknown terminal is refused', async (t) => {
   const fixture = homeWith({ bots: [{ id: ONE, name: 'Orchestrator One' }] })
   t.after(fixture.stop)

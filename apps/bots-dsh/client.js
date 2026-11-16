@@ -2922,6 +2922,7 @@ var HOST_ZH = {
   "{n} projects": "{n} 个项目",
   "Reading…": "读取中…",
   "Code team": "代码团队",
+  "Global Bots": "全局 Bot",
   "The Code side could not read this computer’s team.": "代码端无法读取本机的团队。",
   "No project has a Bot on this computer yet.": "本机还没有任何项目包含 Bot。",
   "Reading this computer’s team…": "正在读取本机的团队…",
@@ -22562,6 +22563,19 @@ function seatBotId(seat) {
   return id === "" ? null : id;
 }
 var seatTerminalWhy = (seat) => seat === null ? null : typeof seat.terminal === "string" && seat.terminal !== "" ? null : t("This seat is not running on this computer, so its terminal cannot open.");
+function seatWithFreshPane(seat, fresh) {
+  if (seat === null || fresh === null || fresh === void 0) return null;
+  const next = {
+    ...seat,
+    name: fresh.name ?? seat.name,
+    project: fresh.project ?? null,
+    terminal: fresh.terminal ?? null,
+    agent: fresh.agent ?? null,
+    chat: fresh.chat ?? null,
+    status: fresh.status ?? seat.status
+  };
+  return next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal && next.agent === seat.agent && next.chat === seat.chat && next.status === seat.status ? null : next;
+}
 var NO_SEATS = Object.freeze([]);
 function useSeats(list, enabled = true) {
   const [seats, setSeats] = (0, import_react58.useState)(NO_SEATS);
@@ -23249,7 +23263,14 @@ function TeamSidebar(props) {
     closing.current = false;
   });
   const roster = useRoster((value) => value);
-  const seats = useSeats(actions.seatList, wide);
+  const openSeat = (0, import_react59.useSyncExternalStore)(seatChatView.subscribe, seatChatView.getSnapshot).seat;
+  const seats = useSeats(actions.seatList, wide || openSeat !== null);
+  (0, import_react59.useEffect)(() => {
+    if (openSeat === null) return;
+    const fresh = seats.find((candidate) => candidate.id === seatBotId(openSeat));
+    const next = seatWithFreshPane(openSeat, fresh);
+    if (next !== null) seatChatView.set({ seat: next });
+  }, [seats, openSeat]);
   const markedUnread = useUi((value) => value.unread);
   const bootFailed = useUi((value) => value.bootFailed === true);
   props.useRegistry((value) => value);

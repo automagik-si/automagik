@@ -75,6 +75,26 @@ export const seatTerminalWhy = seat => (seat === null
     ? null
     : t('This seat is not running on this computer, so its terminal cannot open.'))
 
+/**
+ * The open seat after the bar's next poll: the row's own identity stays, its live facts follow.
+ * Null when the row is gone or nothing changed, so the panel does not re-render every poll.
+ */
+export function seatWithFreshPane(seat, fresh) {
+  if (seat === null || fresh === null || fresh === undefined) return null
+  const next = {
+    ...seat,
+    name: fresh.name ?? seat.name,
+    project: fresh.project ?? null,
+    terminal: fresh.terminal ?? null,
+    agent: fresh.agent ?? null,
+    chat: fresh.chat ?? null,
+    status: fresh.status ?? seat.status,
+  }
+  return next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal
+    && next.agent === seat.agent && next.chat === seat.chat && next.status === seat.status
+    ? null : next
+}
+
 /** No seats: one frozen empty list, so an empty reply never changes state or re-renders. */
 const NO_SEATS = Object.freeze([])
 
