@@ -1,6 +1,7 @@
 // Revive over plain data (#939): which bots a reboot left without their agent, the order they
 // come back in, the session an agent that takes no id at launch (dsh-TUI, Antigravity, Codex, Kimi) left on
-// disk for a pane, the one report the project's main bot gets, and the login service's unit.
+// disk for a pane, the one report the project's main bot gets, and the login service's unit
+// with the caller's PATH kept (#1418).
 // The CLI's `revive` runs it with hc and the files. Pure: no `herdr`, no `node:` import, so
 // `node --test` runs it. Apache-2.0.
 
@@ -302,17 +303,34 @@ export const UNIT_MARK = "# Automagik Herdr: brings the bots back after a restar
 /** How long the service waits for herdr-core before it gives up, in seconds. */
 export const SERVICE_WAIT_S = 600;
 
+/** The caller's PATH kept for login (#1418), without pane guards or project-local bins. */
+export function servicePath(path, { binDir, venv = null, drop = () => false } = {}) {
+  const dirs = new Set();
+  const venvBin = venv ? `${venv.replace(/\/+$/, "")}/bin` : null;
+  for (const dir of path.split(":")) {
+    if (!dir.startsWith("/") || /[\x00-\x1f\x7f-\x9f]/.test(dir)) continue;
+    const clean = dir.replace(/\/+$/, "");
+    if (drop(dir) || /\/node_modules\/\.bin$/.test(clean) || clean === venvBin) continue;
+    dirs.add(dir);
+  }
+  for (const dir of [binDir, "/usr/bin", "/bin"]) if (dir) dirs.add(dir);
+  return [...dirs].join(":");
+}
+
 /** `w` inside a systemd ExecStart: quoted, `%` and `$` doubled, `\` and `"` escaped. */
 const unitWord = (w) => `"${String(w).replace(/[\\"]/g, "\\$&").replace(/%/g, "%%").replace(/\$/g, "$$$$")}"`;
+
+/** Environment= expands `%` specifiers, but leaves `$` literal. */
+const envWord = (w) => `"${String(w).replace(/[\\"]/g, "\\$&").replace(/%/g, "%%")}"`;
 
 /**
  * The systemd user unit: once per login, after the session is up, `<runner> revive --boot
  * --wait <s>` (the CLI's launcher, bin/run.sh, which finds Node itself). The CLI waits for
- * herdr-core, so the unit names no core unit. `env`: variables the run needs ({ HERDR_APP_HOME }
- * when it isn't the default).
+ * herdr-core, so the unit names no core unit. `env`: the kept PATH (#1418) and HERDR_APP_HOME
+ * when it isn't the default.
  */
 export function unitText({ runner, env = {}, wait = SERVICE_WAIT_S }) {
-  const vars = Object.entries(env).filter(([, v]) => typeof v === "string" && v).map(([k, v]) => `Environment=${unitWord(`${k}=${v}`)}`);
+  const vars = Object.entries(env).filter(([, v]) => typeof v === "string" && v).map(([k, v]) => `Environment=${envWord(`${k}=${v}`)}`);
   return [UNIT_MARK, "[Unit]", "Description=Automagik Herdr: bring the bots back after a restart", "",
     "[Service]", "Type=oneshot", ...vars,
     `ExecStart=${unitWord(runner)} revive --boot --wait ${wait}`,
@@ -323,6 +341,9 @@ export function unitText({ runner, env = {}, wait = SERVICE_WAIT_S }) {
 
 /** Whether `text` (a unit file's) is one this pack wrote. */
 export const unitIsOurs = (text) => typeof text === "string" && text.startsWith(`${UNIT_MARK}\n`);
+
+/** Whether the unit keeps the PATH it was installed with (#1418). */
+export const unitKeepsPath = (text) => typeof text === "string" && /^Environment="PATH=/m.test(text);
 
 /** Two boot times (ms) are one boot: os.uptime() jitters by a second or so. */
 export const sameBoot = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 60_000;
