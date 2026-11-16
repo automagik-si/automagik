@@ -47,6 +47,11 @@ type Host interface {
 	Close(s Session, a config.Automation) error
 }
 
+// Noter returns the run's note and forgets it.
+type Noter interface {
+	Note(s Session) string
+}
+
 // ErrCancelled means the run's workspace was closed while it was working.
 // Closing it is the gesture for calling a run off, so the run is reported
 // cancelled rather than failed.
