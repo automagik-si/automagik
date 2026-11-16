@@ -82,6 +82,106 @@ function cappedRun(args: string[], options: RunOptions = {}): Outcome {
   };
 }
 
+// A dd writing to /dev/shm keeps its pages charged to the scope but not in its RSS, so the
+// kernel can take the in-scope monitor as a second victim and the wrapper prints the honest
+// monitor-ended line instead of CAPPED (the documented limit, #1465). The cap rows retry a
+// bounded number of times: a silent 137, a wrong line, two lines or three attempts without a
+// CAPPED line still fail.
+async function cappedKillAttempt(args: string[], options: RunOptions = {}): Promise<Outcome> {
+  const state = options.state ?? scratch('state');
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    CAPPED_RUN_TEST_STATE: state,
+    ...options.env,
+  };
+  if (options.path) env.PATH = options.path;
+  const started = Date.now();
+  const child = spawn('sh', [SCRIPT, ...args], {
+    cwd: options.cwd ?? work,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  noteStarted(child.pid);
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', chunk => {
+    stdout += chunk.toString();
+  });
+  child.stderr?.on('data', chunk => {
+    stderr += chunk.toString();
+  });
+  const timer = setTimeout(() => {
+    void endStarted(child);
+  }, options.timeout ?? 30_000);
+  let status = -1;
+  try {
+    status = (await closeCode(child)) ?? -1;
+  } finally {
+    clearTimeout(timer);
+    await endStarted(child);
+  }
+  const logPath = join(state, 'runs.log');
+  const log = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+  return {
+    status,
+    stdout,
+    stderr,
+    milliseconds: Date.now() - started,
+    log,
+    logPath,
+    lines: () => log.trim().split('\n').filter(Boolean),
+  };
+}
+
+type CappedKillDecision = 'pass' | 'retry' | 'fail';
+
+const RETRY_BUDGET = 2;
+let fileRetries = 0;
+
+function cappedKillDecision(
+  outcome: Outcome,
+  expectedComm: string,
+  retries: number,
+): CappedKillDecision {
+  if (outcome.status !== 137) return 'fail';
+  const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
+  const ended = outcome.stderr
+    .split('\n')
+    .filter(line => line.startsWith('exit 137: the memory monitor ended before its final read;'));
+  if (capped.length === 1 && ended.length === 0) return 'pass';
+  if (ended.length === 1 && capped.length === 0) {
+    const expected = `exit 137: the memory monitor ended before its final read; the run may have hit the memory limit (command=${expectedComm})`;
+    if (ended[0] !== expected || !outcome.log.includes(expected)) return 'fail';
+    return retries < RETRY_BUDGET ? 'retry' : 'fail';
+  }
+  return 'fail';
+}
+
+afterAll(() => {
+  expect(fileRetries).toBeLessThanOrEqual(RETRY_BUDGET);
+});
+
+async function cappedKillOutcome(
+  args: string[],
+  options: RunOptions,
+  expectedComm: string,
+): Promise<Outcome> {
+  const state = options.state ?? scratch('state');
+  let last: Outcome | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) rmSync(join(state, 'runs.log'), { force: true });
+    const outcome = await cappedKillAttempt(args, { ...options, state });
+    last = outcome;
+    const decision = cappedKillDecision(outcome, expectedComm, fileRetries);
+    if (decision !== 'retry') return outcome;
+    fileRetries++;
+    console.log(
+      `capped-run test retry ${fileRetries}/3 (${expectedComm}-like cap-kill): the honest monitor-ended line, known second-victim limit #1465`,
+    );
+  }
+  return last ?? (await cappedKillAttempt(args, { ...options, state }));
+}
+
 // A real user scope is needed for the cap itself: cgroup v2, a user manager and systemd-run
 // that accepts the scope's memory properties. Everything else runs UNCAPPED by design.
 function userScopeWorks(): boolean {
@@ -481,24 +581,27 @@ describe('capped-run', () => {
 
   test.skipIf(!scope)(
     'a memory kill exits 137, prints one CAPPED line with a labelled peak floor of at least 90 percent of the cap, and logs it before exiting',
-    () => {
+    async () => {
       const state = scratch('cap-state');
       const lock = join(work, 'cap.lock');
       const allocator = join(scratch('allocator'), 'argv-leak-marker-alloc.js');
       writeFileSync(allocator, 'const hold = [];\nfor (;;) hold.push(Buffer.alloc(1 << 20, 1));\n');
 
-      const outcome = cappedRun(['--mem', '256M', '--lock', '--', process.execPath, allocator], {
-        state,
-        env: {
-          CAPPED_RUN_LOCK_FILE: lock,
-          CAPPED_RUN_TEST_MEM: '256M',
-          HC_TERMINAL_ID: 'pane-name',
-          LEAK_ENV_MARKER: 'env-leak-marker',
-        },
-        timeout: 120_000,
-      });
-
       const command = basename(process.execPath);
+      const outcome = await cappedKillOutcome(
+        ['--mem', '256M', '--lock', '--', process.execPath, allocator],
+        {
+          state,
+          env: {
+            CAPPED_RUN_LOCK_FILE: lock,
+            CAPPED_RUN_TEST_MEM: '256M',
+            HC_TERMINAL_ID: 'pane-name',
+            LEAK_ENV_MARKER: 'env-leak-marker',
+          },
+          timeout: 120_000,
+        },
+        command,
+      );
       expect(outcome.status).toBe(137);
       const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
       expect(capped).toHaveLength(1);
@@ -544,13 +647,14 @@ describe('capped-run', () => {
 
   test.skipIf(!scope || !dd || !shmHasRoom())(
     'a dd-like allocation killed at the cap reports a labelled peak floor of at least 90 percent of the cap',
-    () => {
+    async () => {
       const state = scratch('dd-state');
       const file = join('/dev/shm', `capped-run-dd-${process.pid}-${Date.now()}`);
       try {
-        const outcome = cappedRun(
+        const outcome = await cappedKillOutcome(
           ['--mem', '256M', '--', 'dd', 'if=/dev/zero', `of=${file}`, 'bs=1M', 'count=512', 'status=none'],
           { state, env: { CAPPED_RUN_TEST_MEM: '256M' }, timeout: 120_000 },
+          'dd',
         );
         expect(outcome.status).toBe(137);
         const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
@@ -593,6 +697,30 @@ describe('capped-run', () => {
     expect(result.stdout.trim()).toBe(
       'CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=256.0M, last sample unknown, command=sh)',
     );
+  });
+
+  test('the cap-kill retry decision respects the file budget (pure)', () => {
+    const capped =
+      'CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=256.0M, last sample 256.0M, command=dd)';
+    const ended =
+      'exit 137: the memory monitor ended before its final read; the run may have hit the memory limit (command=dd)';
+    const fake = (status: number, stderr: string, log: string): Outcome => ({
+      status,
+      stdout: '',
+      stderr,
+      milliseconds: 0,
+      log,
+      logPath: '',
+      lines: () => log.trim().split('\n').filter(Boolean),
+    });
+    // A silent 137 and two lines fail at once; the CAPPED line passes.
+    expect(cappedKillDecision(fake(137, '', ''), 'dd', 0)).toBe('fail');
+    expect(cappedKillDecision(fake(137, `${capped}\n${ended}`, `${capped}\n${ended}`), 'dd', 0)).toBe('fail');
+    expect(cappedKillDecision(fake(137, capped, capped), 'dd', 0)).toBe('pass');
+    // Three attempts without CAPPED fail at the third: the file budget is two retries.
+    expect(cappedKillDecision(fake(137, ended, ended), 'dd', 0)).toBe('retry');
+    expect(cappedKillDecision(fake(137, ended, ended), 'dd', 1)).toBe('retry');
+    expect(cappedKillDecision(fake(137, ended, ended), 'dd', 2)).toBe('fail');
   });
 
   test('the payload shim text is valid sh and bash', () => {
