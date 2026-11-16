@@ -554,6 +554,12 @@ test("a shell path word through a link into another Bot's folder is refused as b
       await assert.rejects(f.guard('b', name, { command }), /another Bot's own folder/, `${name}: ${command}`)
     }
   }
+  // The refusal keeps the guard's folder words and says what this check is not.
+  await assert.rejects(f.guard('b', 'bash', { command: 'cat link/x' }), error => {
+    assert.match(error.message, /^That is another Bot's own folder, which the test Bot b does not open\./)
+    assert.match(error.message, /best-effort path check, not a fence/)
+    return true
+  })
 })
 
 test('the shell path check leaves the own folder, shared folders and parent walks open', async t => {
@@ -564,6 +570,7 @@ test('the shell path check leaves the own folder, shared folders and parent walk
   ]) assert.equal(await f.guard('b', 'bash', { command }), 'ran', command)
   // The owner's own folder, and a path that walks out of it harmlessly, stay open.
   assert.equal(await f.guard('a', 'bash', { command: 'cat .automagik/bots/a/uploads/notes.txt' }), 'ran')
+  assert.equal(await f.guard('b', 'bash', { command: 'cat .automagik/bots/b/uploads/notes.txt' }), 'ran')
 })
 
 test('the shell path check misses what it documents, and the rows say so', async t => {

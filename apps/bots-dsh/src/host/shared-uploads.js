@@ -333,8 +333,8 @@ export function install(rt) {
     const flatten = text => text.replace(/["']/g, '').replace(/\\/g, '/').replace(/\/+/g, '/')
       .replace(/\/(?:\.\/)+/g, '/')
     const raw = flatten(strings(args).join('\n'))
-    // The folder words the guard uses for another Bot's own folder, plus the limit of this
-    // shell check, which must not claim to be a fence.
+    // Another Bot's own folder gets the folder words, with this shell check's limit: it is
+    // best effort, not a fence.
     const closedShell = () => {
       throw refusal(`That is another Bot's own folder, which ${caller.name} does not open. Ask the user, or that Bot, to share what you need. Shell commands get a best-effort path check, not a fence: a path a command builds, a variable or glob it expands, or a file a script opens can still reach it.`)
     }
