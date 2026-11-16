@@ -1079,7 +1079,7 @@ describe('capped-run', () => {
     () => {
       const state = scratch('grandchild-state');
       const file = join('/dev/shm', `capped-run-grandchild-${process.pid}-${Date.now()}`);
-      const script = `dd if=/dev/zero of=${file} bs=1M count=512 status=none & wait; exit 1`;
+      const script = `( echo 1000 >/proc/self/oom_score_adj; exec dd if=/dev/zero of=${file} bs=1M count=512 status=none ) & wait; exit 1`;
       try {
         const outcome = cappedRun(['--mem', '256M', '--', 'sh', '-c', script], {
           state,
