@@ -225,15 +225,6 @@ function mainCheckout(): string {
   return first ? first.slice('worktree '.length).trim() : join(import.meta.dir, '..');
 }
 
-function sharedLockWritable(): boolean {
-  try {
-    mkdirSync(join(mainCheckout(), '.automagik', 'locks'), { recursive: true, mode: 0o700 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function closeCode(child: ChildProcess): Promise<number | null> {
   return new Promise(resolve => child.on('close', code => resolve(code)));
 }
@@ -408,9 +399,11 @@ describe('capped-run', () => {
     const state = scratch('lock-state');
     const lock = join(work, 'held.lock');
     const ready = join(work, 'held.ready');
-    const holder = spawn('flock', ['-x', lock, 'sh', '-c', ': >"$1"; sleep 1', 'sh', ready], {
-      stdio: 'ignore',
-    });
+    const holder = spawn(
+      'sh',
+      ['-c', 'exec 9>"$1"; flock -x 9; : >"$2"; exec sleep 1', 'sh', lock, ready],
+      { stdio: 'ignore' },
+    );
     noteStarted(holder.pid);
     try {
       expect(await waitFor(ready, 5_000)).toBe(true);
@@ -463,9 +456,11 @@ describe('capped-run', () => {
     const state = scratch('nolock-state');
     const lock = join(work, 'unused.lock');
     const ready = join(work, 'unused.ready');
-    const holder = spawn('flock', ['-x', lock, 'sh', '-c', ': >"$1"; sleep 2', 'sh', ready], {
-      stdio: 'ignore',
-    });
+    const holder = spawn(
+      'sh',
+      ['-c', 'exec 9>"$1"; flock -x 9; : >"$2"; exec sleep 2', 'sh', lock, ready],
+      { stdio: 'ignore' },
+    );
     noteStarted(holder.pid);
     try {
       expect(await waitFor(ready, 5_000)).toBe(true);
@@ -1054,32 +1049,27 @@ describe('capped-run', () => {
     60_000,
   );
 
-  test.skipIf(process.platform !== 'linux' || !flock || !sharedLockWritable() || !scratchLockReady())(
-    "the file's own lock rows do not wait on the outer full-gate lock",
-    async () => {
-      const { root, script, lock } = scratchCheckout();
+  test.skipIf(process.platform !== 'linux' || !flock || !scratchLockReady())(
+    'a scratch-checkout run locks its own path, never the real main checkout lock',
+    () => {
+      const { root, script } = scratchCheckout();
       const realLock = join(mainCheckout(), '.automagik', 'locks', 'full-gate.lock');
-      // Hold the real lock if we can; when the outer run already holds it the non-blocking probe
-      // just fails, and the real lock is held anyway. Either way the scratch run must not wait.
-      const holder = spawn('flock', ['-n', '-x', realLock, 'sh', '-c', 'sleep 5'], {
-        stdio: 'ignore',
+      // A test must never take the real full-gate lock: another gate may be waiting on it. The
+      // scratch checkout's own path is enough to prove the resolution.
+      const outcome = spawnSync('sh', [script, '--lock', '--', 'sh', '-c', 'exit 0'], {
+        cwd: root,
+        env: { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '10' },
+        encoding: 'utf8',
+        timeout: 15_000,
       });
-      noteStarted(holder.pid);
-      await Bun.sleep(300);
-      try {
-        const started = Date.now();
-        const outcome = spawnSync('sh', [script, '--lock', '--', 'sh', '-c', 'exit 0'], {
-          cwd: root,
-          env: { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '10' },
-          encoding: 'utf8',
-          timeout: 15_000,
-        });
-        expect(outcome.status).toBe(0);
-        expect(Date.now() - started).toBeLessThan(10_000);
-        expect((outcome.stderr ?? '').split('\n')[0]).toContain(`path=${lock} dev=`);
-      } finally {
-        await endStarted(holder);
-      }
+      expect(outcome.status).toBe(0);
+      const lockLine = (outcome.stderr ?? '').split('\n')[0] ?? '';
+      const match = /^LOCK: path=(\S+) dev=/.exec(lockLine);
+      expect(match).not.toBeNull();
+      const lockPath = match?.[1] ?? '';
+      expect(lockPath.startsWith(`${root}/`)).toBe(true);
+      expect(lockPath).not.toBe(realLock);
+      expect(lockPath).toContain('/.automagik/locks/full-gate.lock');
     },
     30_000,
   );
