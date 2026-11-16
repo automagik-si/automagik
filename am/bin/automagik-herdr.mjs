@@ -45,7 +45,7 @@ import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, ledgerRivals,
-  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText, uuidV7Ms } from "../revive.js";
+  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
@@ -57,6 +57,7 @@ import { botHistory, historyLines } from "../inspect.js";
 import { chooseLogin } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
+import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
 import { approveProject, approvedProxyEnabled, approvedProxyState, approvedSettingsDir, parseApprovedRecord,
@@ -7084,9 +7085,11 @@ async function reviveService(opts, verb, more = []) {
   const said = (r) => (r.stderr || r.stdout).trim().split("\n")[0] || `exit ${r.code}`;
   if (verb === "status") {
     const enabled = process.platform === "linux" && text !== null ? (await systemctl(["is-enabled", UNIT_NAME])).code === 0 : false;
-    const out = { path: unit, installed: text !== null, ours: unitIsOurs(text), enabled };
+    const out = { path: unit, installed: text !== null, ours: unitIsOurs(text), enabled,
+      ...(text !== null ? { path_kept: unitKeepsPath(text) } : {}) };
     return opts.json ? out : !out.installed ? `The revive login service isn't installed (${unit}).`
-      : `${unit}: ${out.ours ? "Automagik Herdr's" : "not one Automagik Herdr wrote"}, ${enabled ? "enabled" : "not enabled"}.`;
+      : `${unit}: ${out.ours ? "Automagik Herdr's" : "not one Automagik Herdr wrote"}, ${enabled ? "enabled" : "not enabled"}.`
+        + (out.ours && !out.path_kept ? " It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install." : "");
   }
   if (process.platform !== "linux") {
     throw new CliError("The revive login service is built for Linux (a systemd user unit) so far; macOS (launchd) is the next delivery of #939. "
@@ -7105,14 +7108,18 @@ async function reviveService(opts, verb, more = []) {
   // The command as people run it (the link install.sh makes, which an update keeps), else the wrapper beside this file.
   const link = join(binDirOf(), "automagik-herdr");
   const runner = existsSync(link) ? link : join(dirname(fileURLToPath(import.meta.url)), "automagik-herdr");
-  const unitBody = unitText({ runner, env: process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}, wait: SERVICE_WAIT_S });
+  // A pane's guard folders (this copy's, am's, or an older version's) never become the boot pass's.
+  const guardWord = (dir) => isGuardFolder(dir) || looksLikeGuardFolder(dir);
+  const keptPath = servicePath(process.env.PATH ?? "", { binDir: binDirOf(), venv: process.env.VIRTUAL_ENV ?? null, drop: guardWord });
+  const unitBody = unitText({ runner, env: { ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}), PATH: keptPath }, wait: SERVICE_WAIT_S });
   mkdirSync(dirname(unit), { recursive: true });
   writeFileSync(unit, unitBody, { mode: 0o644 });
   const reload = await systemctl(["daemon-reload"]);
   const on = reload.code === 0 ? await systemctl(["enable", UNIT_NAME]) : reload;
   if (on.code !== 0) notes.push(`The unit is written but not enabled (systemctl --user: ${said(on)}); enable it with: systemctl --user daemon-reload && systemctl --user enable ${UNIT_NAME}`);
   notes.push("It runs at your next login after a restart of this computer. For bots that come back before anyone logs in: loginctl enable-linger.");
-  return opts.json ? { path: unit, installed: true, enabled: on.code === 0, runner, notes }
+  notes.push("The unit keeps this PATH to find the agents and hc; rerunning am revive service install refreshes it.");
+  return opts.json ? { path: unit, installed: true, enabled: on.code === 0, runner, kept_path: keptPath, notes }
     : [`Installed the revive login service (${unit}): after a restart it runs ${runner} revive --boot.`, ...notes].join("\n");
 }
 

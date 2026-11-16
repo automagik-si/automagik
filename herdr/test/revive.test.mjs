@@ -16,6 +16,7 @@ import { AGENTS } from "../mods/am-sidebar/models.js";
 import { FIRST_SESSION_MS, KEEP_DOWN, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
   pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
 import { readJsonLines } from "./log-lines.mjs";
+import { servicePath, unitKeepsPath } from "../mods/am-sidebar/revive.js";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir, kimiCandidates, kimiHomeOf, kimiIndexPath, uuidV7Ms } from "../mods/am-sidebar/revive.js";
 
@@ -876,4 +877,104 @@ test("#1417: a Kimi session folder that is a symlink, or is gone, is never taken
   const r = s.cli(["revive", "--json"]);
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", KID]], "only the real folder counts");
+});
+
+// ---- #1418: the login service keeps the PATH it was installed with ----
+
+/** The PATH an installed unit keeps, read back as systemd would hand it to the boot pass. */
+const keptPathOf = (text) => {
+  const line = text.split("\n").find((l) => l.startsWith('Environment="PATH='));
+  return line ? line.slice('Environment="PATH='.length, -1).replace(/%%/g, "%").replace(/\\(["\\])/g, "$1") : null;
+};
+/** The pane PATH an `hc run` gave its program (the env wrapper's PATH word). */
+const panePathOf = (run) => wordsOf(run).find((w) => w.startsWith("PATH="))?.slice(5) ?? null;
+/** The first folder of `path` that holds an executable `name`: what the pane's own lookup runs. */
+const firstOnPath = (path, name) => {
+  for (const dir of path.split(":")) {
+    try { if (statSync(join(dir, name)).mode & 0o111) return join(dir, name); } catch { /* next */ }
+  }
+  return null;
+};
+
+test("servicePath: the caller's PATH, absolute words only, once each, without guard folders, node_modules/.bin or the venv's bin; ~/.local/bin and /usr/bin:/bin always there (#1418)", () => {
+  const drop = (d) => /(^|\/)(guard|hc-kill)\/?$/.test(d);
+  assert.equal(servicePath("/opt/agents/bin:/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin", { binDir: "/home/u/.local/bin" }),
+    "/opt/agents/bin:/home/u/.local/bin:/usr/local/bin:/usr/bin:/bin", "already whole: unchanged, binDir never moved");
+  assert.equal(servicePath("/home/u/.automagik/parts/automagik.am/3.149.9/hc-kill:/pack/guard/:/opt/a:relative/bin::/opt/a:/p/node_modules/.bin:/p/node_modules/.bin/:/venv/bin:/opt/b",
+    { binDir: "/home/u/.local/bin", venv: "/venv/", drop }),
+  "/opt/a:/opt/b:/home/u/.local/bin:/usr/bin:/bin");
+  assert.equal(servicePath("", { binDir: "/home/u/.local/bin" }), "/home/u/.local/bin:/usr/bin:/bin", "no PATH at all still finds the CLI's link and the system's tools");
+  assert.equal(servicePath("/ok:/bad\nword:/tab\there", { binDir: "/b" }), "/ok:/b:/usr/bin:/bin", "a word with a control character never reaches the unit");
+});
+
+test("unitText: a kept PATH is its own Environment= line; % doubled, \" and \\ escaped, $ and spaces left as they are (#1418)", () => {
+  const text = unitText({ runner: "/home/u/.local/bin/automagik-herdr", env: { HERDR_APP_HOME: "/a", PATH: '/opt/my tools/bin:/opt/$x:/opt/100%:/opt/q"t' }, wait: 600 });
+  assert.ok(text.split("\n").includes('Environment="PATH=/opt/my tools/bin:/opt/$x:/opt/100%%:/opt/q\\"t"'), text);
+  assert.equal(keptPathOf(text), '/opt/my tools/bin:/opt/$x:/opt/100%:/opt/q"t', "read back word for word");
+  assert.match(text, /^ExecStart="\/home\/u\/\.local\/bin\/automagik-herdr" revive --boot --wait 600$/m, "ExecStart as before");
+  assert.equal(unitKeepsPath(text), true);
+  assert.equal(unitKeepsPath(unitText({ runner: "/r", env: { HERDR_APP_HOME: "/a" } })), false, "a unit from before #1418 keeps none");
+  assert.equal(unitKeepsPath(null), false);
+});
+
+test("revive service install keeps the installer's PATH, without the pack's guard folders; status says when a unit keeps none (#1418)", { skip: process.platform !== "linux" }, (t) => {
+  const s = world(t);
+  // A pane's PATH: the kill shim's folder (beside an hcGuard.mjs) first, a project's node_modules/.bin, then the person's own.
+  const shim = join(s.root, "parts/automagik.am/3.0.0/hc-kill");
+  mkdirSync(shim, { recursive: true });
+  writeFileSync(join(s.root, "parts/automagik.am/3.0.0/hcGuard.mjs"), "// an older copy\n");
+  exe(join(shim, "hc"), "#!/bin/sh\nexit 0\n");
+  const tools = join(s.root, "tools");
+  mkdirSync(tools);
+  const r = s.cli(["revive", "service", "install", "--json"], { env: { PATH: `${shim}:${join(s.project, "node_modules/.bin")}:${tools}:${s.env.PATH}` } });
+  assert.equal(r.code, 0, r.err);
+  const out = r.json();
+  assert.equal(out.path, unitPath(s.home), "--json's path is still the unit's");
+  const text = readFileSync(unitPath(s.home), "utf8");
+  const kept = keptPathOf(text);
+  assert.equal(out.kept_path, kept);
+  const words = kept.split(":");
+  assert.equal(words[0], tools, kept);
+  assert.ok(!words.includes(shim), "a pane's versioned shim folder is never the boot pass's");
+  assert.ok(!words.some((w) => w.includes("node_modules")), kept);
+  assert.ok(words.includes(join(s.home, ".local/bin")) && words.includes("/usr/bin") && words.includes("/bin"), kept);
+  assert.ok(text.includes(`Environment="HERDR_APP_HOME=${s.app}"`), text);
+  const status = s.cli(["revive", "service", "status", "--json"]);
+  assert.equal(status.json().path_kept, true);
+  assert.doesNotMatch(s.cli(["revive", "service", "status"]).out, /keeps no PATH/);
+  // A unit written before #1418: status says so, and how to refresh it.
+  writeFileSync(unitPath(s.home), unitText({ runner: "/r", env: { HERDR_APP_HOME: s.app } }));
+  assert.equal(s.cli(["revive", "service", "status", "--json"]).json().path_kept, false);
+  assert.match(s.cli(["revive", "service", "status"]).out, /It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install\./);
+});
+
+test("revive with the unit's kept PATH starts the agent the person's terminal starts, not an older one a minimal PATH finds first (#1418)", { skip: process.platform !== "linux" }, (t) => {
+  const make = () => world(t, { file: team({ main: { agent: "codex" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, argv: ["codex"], labels: { "herdr.space": "sp9", "herdr.tab": "tb3" } })] });
+  const setup = (s) => {
+    // An old global codex (no status reports) where systemd's minimal PATH looks first, and the
+    // person's current codex earlier on their own PATH.
+    const system = join(s.root, "usr-local-bin"), mine = join(s.root, "home-local-bin");
+    for (const dir of [system, mine]) { mkdirSync(dir); exe(join(dir, "codex"), "#!/bin/sh\nexit 0\n"); }
+    return { system, mine };
+  };
+  // Installed from the person's terminal: their PATH is kept.
+  const s = make();
+  const { system, mine } = setup(s);
+  const install = s.cli(["revive", "service", "install"], { env: { PATH: `${mine}:${s.env.PATH}:${system}` } });
+  assert.equal(install.code, 0, install.err);
+  const kept = keptPathOf(readFileSync(unitPath(s.home), "utf8"));
+  assert.ok(kept.startsWith(`${mine}:`), kept);
+  // The boot pass runs with exactly that PATH.
+  const r = s.cli(["revive", "--json"], { env: { PATH: kept } });
+  assert.equal(r.code, 0, r.err);
+  const runs = runsOf(s);
+  assert.equal(runs.length, 1, JSON.stringify(runs));
+  assert.equal(firstOnPath(panePathOf(runs[0]), "codex"), join(mine, "codex"), runs[0].join(" "));
+  // Contrast, the unit before #1418: the boot pass under a minimal PATH starts the old one.
+  const before = make();
+  const old = setup(before);
+  const b = before.cli(["revive", "--json"], { env: { PATH: `${old.system}:${before.env.PATH}` } });
+  assert.equal(b.code, 0, b.err);
+  assert.equal(firstOnPath(panePathOf(runsOf(before)[0]), "codex"), join(old.system, "codex"), "what #1418 saw: another agent than the person's");
 });
