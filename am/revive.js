@@ -293,6 +293,26 @@ export function reportLine(project, results) {
   return parts.join(" ").replace(/\s*\n\s*/g, " ");
 }
 
+/**
+ * `revive --last` (#1419): the record revive-last.json keeps, as text. `record`: { at, boot_ms, boot,
+ * projects: [{ project, report, sent, unsent }], stopped?: { at, boot, reason } } or null (none);
+ * `path`: where it is kept. An older record has no `boot`: then neither the boot nor by hand is said.
+ */
+export function lastText(record, path) {
+  if (!record) return `No revive pass is on record on this computer (${path}). To see whether the login service that runs it after a restart is installed: am revive service status.`;
+  const stopped = record.stopped ?? null;
+  const at = record.at ?? stopped?.at ?? "an unknown time";
+  const boot = typeof record.at === "string" ? record.boot : stopped?.boot;
+  const lines = [`Last revive pass: ${at}${boot === true ? ", the login service's pass (--boot)" : boot === false ? ", run by hand" : ""}.`];
+  for (const p of record.projects ?? []) {
+    lines.push(p.report ?? `Project ${p.project ?? "(no project)"}: no report.`);
+    lines.push(`  ${p.sent ? `Sent to the main bot (${p.sent}).` : `Not sent: ${p.unsent ?? "no reason given"}.`}`);
+  }
+  if (stopped) lines.push(`A pass stopped early (${stopped.at ?? "an unknown time"}${stopped.boot === true ? ", --boot" : ""}): ${stopped.reason ?? "no reason given"}.`);
+  else if (!record.projects?.length) lines.push("Nothing to bring back: every bot the ledger named ran its agent.");
+  return lines.join("\n");
+}
+
 // ---- the login service ----
 
 export const UNIT_NAME = "automagik-herdr-revive.service";

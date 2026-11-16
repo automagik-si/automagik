@@ -978,3 +978,133 @@ test("revive with the unit's kept PATH starts the agent the person's terminal st
   assert.equal(b.code, 0, b.err);
   assert.equal(firstOnPath(panePathOf(runsOf(before)[0]), "codex"), join(old.system, "codex"), "what #1418 saw: another agent than the person's");
 });
+
+// ---- #1419: every pass is recorded, one that stops early too, and `revive --last` shows it ----
+
+import { lastText } from "../mods/am-sidebar/revive.js";
+
+const hcDown = (s) => exe(join(s.root, "bin", "hc"), "#!/bin/sh\necho 'core is not running' >&2\nexit 1\n");
+const hcUp = (s) => exe(join(s.root, "bin", "hc"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_HC}" "$@"\n`);
+const recordPath = (s) => join(s.app, "automagik-herdr/revive-last.json");
+const stampPath = (s) => join(s.app, "automagik-herdr/revive-boot.json");
+const CHIEF = team({ main: { name: "Chief" } });
+
+test("lastText: the last pass, by the login service or by hand, each report and whether it was sent; one that stopped early; none on record", () => {
+  assert.match(lastText(null, "/x/revive-last.json"), /^No revive pass is on record on this computer \(\/x\/revive-last\.json\)\. .*am revive service status\.$/);
+  const sent = lastText({ at: "2026-11-16T10:00:00.000Z", boot: true, projects: [{ project: "/p", report: "Revive after a restart of this computer, project /p.", sent: "t9", unsent: null }] }, "/x");
+  assert.equal(sent, "Last revive pass: 2026-11-16T10:00:00.000Z, the login service's pass (--boot).\nRevive after a restart of this computer, project /p.\n  Sent to the main bot (t9).");
+  const unsent = lastText({ at: "2026-11-16T10:00:00.000Z", boot: false, projects: [{ project: "/p", report: "R.", sent: null, unsent: "Main has no pane" }] }, "/x");
+  assert.match(unsent, /, run by hand\.\nR\.\n {2}Not sent: Main has no pane\.$/);
+  // An older record has no `boot`: neither is said. Nothing came back: said so.
+  assert.equal(lastText({ at: "2026-11-16T10:00:00.000Z", projects: [] }, "/x"), "Last revive pass: 2026-11-16T10:00:00.000Z.\nNothing to bring back: every bot the ledger named ran its agent.");
+  // Stopped early: the reason, never "nothing to bring back"; a project with no report yet is named.
+  const stopped = lastText({ boot_ms: 1, projects: [{ project: "/p", report: null, sent: null, unsent: "the pass stopped early" }],
+    stopped: { at: "2026-11-16T11:00:00.000Z", boot: true, reason: "herdr-core isn't answering 600s on (down). Nothing was started." } }, "/x");
+  assert.match(stopped, /^Last revive pass: 2026-11-16T11:00:00\.000Z, the login service's pass \(--boot\)\.\nProject \/p: no report\.\n {2}Not sent: the pass stopped early\.\nA pass stopped early \(2026-11-16T11:00:00\.000Z, --boot\): herdr-core isn't answering/);
+  assert.doesNotMatch(stopped, /Nothing to bring back/);
+});
+
+test("revive --boot with herdr-core not answering keeps a record that says it stopped early, stamps nothing, and the next boot pass runs", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const env = { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) };
+  hcDown(s);
+  const r = s.cli(["revive", "--boot", "--wait", "1"], { env });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /herdr-core isn't answering 1s on \(core is not running\)\. Nothing was started\./);
+  const rec = s.lastReport();
+  assert.equal(statSync(recordPath(s)).mode & 0o777, 0o600);
+  assert.deepEqual(rec.projects, []);
+  assert.equal(rec.stopped.boot, true);
+  assert.match(rec.stopped.reason, /^herdr-core isn't answering 1s on/);
+  assert.ok(!JSON.stringify(rec).includes("at "), "no stack in the record");
+  assert.equal(existsSync(stampPath(s)), false, "an aborted pass never stamps the boot");
+  const last = s.cli(["revive", "--last"]);
+  assert.equal(last.code, 0, last.err);
+  assert.match(last.out, /A pass stopped early \(.*, --boot\): herdr-core isn't answering 1s on/);
+  // herdr-core answers again: the same boot's pass runs, records, stamps.
+  hcUp(s);
+  const again = s.cli(["revive", "--boot", "--json"], { env });
+  assert.equal(again.code, 0, again.err);
+  assert.equal(again.json().ran, true);
+  assert.equal(s.lastReport().boot, true);
+  assert.equal(s.lastReport().stopped, undefined);
+  assert.ok(existsSync(stampPath(s)));
+});
+
+test("a pass that stops early keeps the report this boot's pass couldn't send, under its own stop", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t6", { bot: ID.cap, cwd: p, labels: { "agent.session": SID2 } })] });
+  const env = { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) };
+  const r = s.cli(["revive"], { env });
+  assert.equal(r.code, 0, r.err);
+  const before = s.lastReport();
+  assert.equal(before.boot, false);
+  assert.equal(before.projects[0].unsent, "Chief has no pane");
+  hcDown(s);
+  assert.equal(s.cli(["revive", "--wait", "1"], { env }).code, 1);
+  const after = s.lastReport();
+  assert.deepEqual(after.projects, before.projects);
+  assert.equal(after.at, before.at);
+  assert.equal(after.stopped.boot, false);
+  const last = s.cli(["revive", "--last"]).out;
+  assert.match(last, /, run by hand\.\nRevive after a restart of this computer, project .*Captain \(t100\).*\n {2}Not sent: Chief has no pane\.\nA pass stopped early/);
+});
+
+test("a second boot pass while herdr-core is down says it already ran and leaves the record as it is", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const env = { AUTOMAGIK_HERDR_BOOT_MS: String(Date.now() - 60_000) };
+  assert.equal(s.cli(["revive", "--boot"], { env }).code, 0);
+  const record = readFileSync(recordPath(s), "utf8");
+  const stamp = readFileSync(stampPath(s), "utf8");
+  hcDown(s);
+  const r = s.cli(["revive", "--boot", "--json", "--wait", "1"], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), { ran: false, reason: "already ran for this boot" });
+  assert.equal(readFileSync(recordPath(s), "utf8"), record);
+  assert.equal(readFileSync(stampPath(s), "utf8"), stamp);
+});
+
+test("the main bot's report goes only to a pane this core bound: a binding of another core is no pane of its own", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, front: ["claude"], status: "idle" }), pane("t6", { bot: ID.cap, cwd: p, labels: { "agent.session": SID2 } })],
+    attach: () => [{ bot: ID.main, terminal: "t5", created_ms: 1, core: "othercore000" }, { bot: ID.cap, terminal: "t6", created_ms: 1 }] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(s.hcState().sent, undefined, "nothing typed into another core's pane");
+  assert.equal(r.json().projects[0].unsent, "Chief has no pane");
+  assert.equal(s.lastReport().projects[0].unsent, "Chief has no pane");
+});
+
+test("revive --last shows the last pass and whether its report was sent, asks hc nothing and writes nothing; --json gives the record", (t) => {
+  const s = world(t, { file: CHIEF, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const none = s.cli(["revive", "--last"]);
+  assert.equal(none.code, 0, none.err);
+  assert.match(none.out, /^No revive pass is on record on this computer \(.*revive-last\.json\)\. To see whether the login service that runs it after a restart is installed: am revive service status\./);
+  assert.deepEqual(s.cli(["revive", "--last", "--json"]).json(), { path: recordPath(s), record: null });
+  assert.equal(s.cli(["revive"]).code, 0);
+  const files = [recordPath(s), attachPath(s.app)].map((f) => readFileSync(f, "utf8"));
+  const calls = s.calls().length;
+  hcDown(s);
+  const r = s.cli(["revive", "--last"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /^Last revive pass: .*, run by hand\.\nRevive after a restart of this computer, project .*Resumed where they were: Chief \(t100\)\..*\n {2}Sent to the main bot \(t100\)\.\n?$/);
+  assert.ok(!r.out.includes(SID) && !r.err.includes(SID), r.out);
+  const j = s.cli(["revive", "--last", "--json"]).json();
+  assert.equal(j.path, recordPath(s));
+  assert.equal(j.record.projects[0].sent, "t100");
+  assert.equal(s.calls().length, calls, "no hc call");
+  assert.deepEqual([recordPath(s), attachPath(s.app)].map((f) => readFileSync(f, "utf8")), files);
+  assert.equal(existsSync(stampPath(s)), false);
+});
+
+test("revive --last: a record that isn't JSON exits 1 and says so; --last with a pass's options or a verb is a usage mistake", (t) => {
+  const s = world(t, { file: CHIEF });
+  writeFileSync(recordPath(s), "{ not json");
+  const r = s.cli(["revive", "--last"]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /The revive record isn't valid JSON \(.*revive-last\.json\)\./);
+  for (const args of [["revive", "--last", "--boot"], ["revive", "--last", "--wait", "0"], ["revive", "--last", "--dry-run"], ["revive", "service", "install", "--last"]]) {
+    const u = s.cli(args);
+    assert.equal(u.code, 2, args.join(" "));
+    assert.match(u.err, /revive --last \[--json\]/, args.join(" "));
+  }
+  assert.deepEqual(s.sysCalls(), [], "service install never ran");
+});
