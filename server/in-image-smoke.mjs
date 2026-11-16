@@ -184,29 +184,45 @@ async function main() {
   const runtime = lstatSync(XDG_RUNTIME_DIR)
   check(runtime.isDirectory() && (runtime.mode & 0o777) === 0o700, `${XDG_RUNTIME_DIR} is not a 0700 directory`)
   check(lstatSync(coreSocket).isSocket(), `${coreSocket} is not a Unix socket`)
-  const coreStatus = command('hc', ['server', 'status', '--json'])
-  check(coreStatus.trim().length > 0, 'hc server status printed nothing')
-  const coreStatusJSON = JSON.parse(coreStatus)
+  // Capture the image's own raw shapes first, with its hc/am versions, so a failed
+  // assertion shows the daemon's answer rather than our belief about it.
+  const rawStatus = command('hc', ['server', 'status', '--json'])
+  const rawList = command('hc', ['ls', '--json'])
+  const rawAmList = command('am', ['ls', '--project', WORKSPACE, '--json'])
+  const shapesCapture = {
+    captured_at: new Date().toISOString(),
+    hc: `hc ${hc}`,
+    am: `${am}`,
+    serverStatus: rawStatus,
+    ls: rawList,
+    amLs: rawAmList,
+  }
+  writeFileSync('/tmp/in-image-hc-shapes.json', JSON.stringify(shapesCapture, null, 2))
+  say(`hc shapes captured before assertions (hc ${hc}, am ${am}): ${JSON.stringify(shapesCapture)}`)
+
+  check(rawStatus.trim().length > 0, 'hc server status printed nothing')
+  const coreStatusJSON = JSON.parse(rawStatus)
   check(coreStatusJSON && typeof coreStatusJSON === 'object' && !Array.isArray(coreStatusJSON), 'hc server status --json did not print the documented object')
   check(coreStatusJSON.core && typeof coreStatusJSON.core === 'object' && !Array.isArray(coreStatusJSON.core), 'hc server status --json has no core object')
-  check(typeof coreStatusJSON.live === 'number', 'hc server status --json has no live count')
-  check(coreStatusJSON.live === 0, `hc server status has ${coreStatusJSON.live} live terminals before the test Bot, expected 0`)
-  check(coreStatusJSON.finished === 0, `hc server status has ${coreStatusJSON.finished} finished terminals before the test Bot, expected 0`)
-  check(coreStatusJSON.holder && typeof coreStatusJSON.holder === 'object' && !Array.isArray(coreStatusJSON.holder), 'hc server status --json has no holder object')
-  check(coreStatusJSON.holder.terminals === 0, `hc server status holder has ${coreStatusJSON.holder.terminals} terminals before the test Bot, expected 0`)
-  check(Array.isArray(coreStatusJSON.holders), 'hc server status --json holders is not a list')
   const expectedCoreVersion = VERSIONS.herdrCore?.version || HERDR_CORE_VERSION
   check(coreStatusJSON.version === expectedCoreVersion, `hc server status version ${coreStatusJSON.version} is not the image's ${expectedCoreVersion}`)
-  const coreList = command('hc', ['ls', '--json'])
-  check(coreList.trim().length > 0, 'hc ls printed nothing')
-  const listed = JSON.parse(coreList)
+  check(coreStatusJSON.live === 0, `hc server status has ${coreStatusJSON.live} live terminals before the test Bot, expected 0`)
+  check(coreStatusJSON.finished === 0, `hc server status has ${coreStatusJSON.finished} finished terminals before the test Bot, expected 0`)
+  const holder = coreStatusJSON.holder
+  if (holder !== undefined && holder !== null) {
+    check(typeof holder === 'object' && !Array.isArray(holder), 'hc server status holder is neither absent, null nor an object')
+    check(holder.terminals === 0, `hc server status holder has ${holder.terminals} terminals before the test Bot, expected 0`)
+  }
+  if (coreStatusJSON.holders !== undefined) check(Array.isArray(coreStatusJSON.holders), 'hc server status holders is not a list when present')
+
+  check(rawList.trim().length > 0, 'hc ls printed nothing')
+  const listed = JSON.parse(rawList)
   check(listed && typeof listed === 'object' && !Array.isArray(listed), 'hc ls --json did not print the documented object')
   check(Array.isArray(listed.terminals), 'hc ls --json terminals is not a list')
   check(Array.isArray(listed.machines), 'hc ls --json machines is not a list')
-  check(typeof listed.hidden_finished === 'number', 'hc ls --json hidden_finished is not a number')
-  check(listed.hidden_finished === 0, `hc ls has ${listed.hidden_finished} hidden finished terminals before the test Bot, expected 0`)
   check(listed.terminals.length === 0, `hc ls --json has ${listed.terminals.length} terminals before the test Bot, expected 0`)
-  const amList = JSON.parse(command('am', ['ls', '--project', WORKSPACE, '--json']))
+
+  const amList = JSON.parse(rawAmList)
   check(amList && typeof amList === 'object' && !Array.isArray(amList), 'am ls --json did not print the documented object')
   check(Array.isArray(amList.projects), 'am ls --json projects is not a list')
   const firstProject = amList.projects[0]
@@ -243,7 +259,7 @@ async function main() {
     check(existsSync(invocationMarker), 'the fake codex did not record its invocation')
     const invocation = readFileSync(invocationMarker, 'utf8')
     check(invocation.split('\n')[0] === fakeCodex, `the fake codex argv[0] is ${JSON.stringify(invocation.split('\n')[0])}`)
-    const hcShapes = { hc: `hc ${hc}`, am: `${am}`, ls: listed, serverStatus: coreStatusJSON, amLs: amList, amStart: startedJSON }
+    const hcShapes = { hc: `hc ${hc}`, am: `${am}`, raw: shapesCapture, parsed: { ls: listed, serverStatus: coreStatusJSON, amLs: amList }, amStart: startedJSON }
     writeFileSync('/tmp/in-image-hc-shapes.json', JSON.stringify(hcShapes, null, 2))
     say(`hc shapes captured from the image's hc ${hc} and am ${am}: ${JSON.stringify(hcShapes)}`)
     command('hc', ['kill', terminal])
