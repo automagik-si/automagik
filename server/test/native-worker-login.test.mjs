@@ -30,7 +30,7 @@ function fixture() {
   return { home, root, pointers }
 }
 
-test('one export locates current/, and the same export launches both vendors on their recorded homes', () => {
+test('bounded unit: one helper export derives both vendor pointers and their fixture homes', () => {
   const { home, root, pointers } = fixture()
   try {
     const exported = nativeWorkerEnv({ AUTOMAGIK_HOME: home })
@@ -66,7 +66,7 @@ test('one export locates current/, and the same export launches both vendors on 
   }
 })
 
-test('the export reaches the core and a pane it spawns; the reader carries it into the env -i re-run', () => {
+test('bounded unit: a Node core-shaped child and its pane, and the copied env -i allowlist', () => {
   const { home, root, pointers } = fixture()
   try {
     const exported = nativeWorkerEnv({ AUTOMAGIK_HOME: home })
