@@ -221,6 +221,15 @@ test("M4: switch off keeps the complete worker argv byte for byte against C1", (
     .split(GUARD_DIR).join("<guard>")), baseline);
 });
 
+test("#1509 no pointer leaves the vendor env exactly as it was", (t) => {
+  const s = scene(t);
+  const r = s.cli(["worker", "no pointer task", "--branch", "feat/no-pointer", "--agent", "claude", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = s.runs().at(-1);
+  assert.equal(run.some((word) => word.startsWith("CLAUDE_CONFIG_DIR=")), false);
+  assert.equal(run.some((word) => word.startsWith("CODEX_HOME=")), false);
+});
+
 test("one exported pointer resolves BOTH vendors to their recorded homes (#1509)", (t) => {
   const s = scene(t);
   const current = join(s.root, "cli-homes", "current");

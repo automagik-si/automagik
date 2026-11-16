@@ -116,6 +116,11 @@ export function loginRecordTests(cli) {
     assert.equal(codex.reads.includes(`${CURRENT}/claude`), false);
   });
 
+  test("unknown fields are ignored; only the documented checks refuse", () => {
+    const unknown = world({ record: { ...RECORD, future: { anything: true }, claude: { ...RECORD.claude, extra: "x" } } });
+    assert.deepEqual(run(unknown), { state: "ready", dir: CLAUDE_DIR, generation: U1, sequence: 7 });
+  });
+
   test("the other vendor's null or bad field does not affect this launch", () => {
     const claudeNull = { ...RECORD, claude: null };
     assert.deepEqual(run(world({ record: claudeNull }), "codex"), { state: "ready", dir: CODEX_DIR, generation: U2, sequence: 7 });
@@ -191,6 +196,11 @@ export function loginRecordTests(cli) {
       return clean !== `${CURRENT}/generation.json` && clean !== `${CURRENT}/claude` && clean !== CLAUDE_DIR && clean !== MEMORY;
     });
     assert.deepEqual(unexpected, []);
+  });
+
+  test("one function, two launch call sites: worker and launchSeat both use botLogin (M18)", () => {
+    const source = readFileSync(cli, "utf8");
+    assert.ok((source.match(/\bbotLogin\(/g) ?? []).length >= 3, "the definition and both launch call sites are present");
   });
 
   test("one CLI, one export: login --check hides paths, login-env prints only the assignment", (t) => {
