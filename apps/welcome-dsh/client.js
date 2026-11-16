@@ -10080,7 +10080,7 @@ function Stage({ title, speech, at: at2, glitching, hero, mark = "AUTOMAGIK", wi
 // src/client/companion.js
 var import_react3 = require("react");
 var IDEAS = ["a sleepy cyan fox with a lantern tail", "a tiny robot made of moonlight", "a round jellyfish that wears headphones"];
-var NAMES = ["Pip", "Nova", "Mochi", "Echo", "Biscuit"];
+var NAMES = ["Pirlim", "Nova", "Mochi", "Echo", "Biscuit"];
 var NAME_RULE = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u;
 var AVATAR_SIZE = 256;
 var MAX_AVATAR = 16e4;
