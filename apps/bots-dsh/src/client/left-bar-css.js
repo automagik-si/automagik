@@ -244,14 +244,18 @@ html[data-automagik-desktop=darwin] .lb-head :is(a,button,input,[role=button],[a
 .bt-you .bt-person{display:block}
 .lb-tile-add[aria-expanded=true] .lb-tile-face{background:var(--bt-hover);color:var(--bt-ink)}
 .lb-note{position:fixed;z-index:200;width:max-content;max-width:min(260px,calc(100vw - 24px));padding:10px 12px;box-sizing:border-box;border-radius:12px;background:var(--st-paper,var(--bt-main));border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.12),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);font:400 13px/1.45 var(--bt-font)}
-/* At a phone's width the view header carries the bar's Chat / Terminal switch beside the shell's
-   controls: the Details control keeps its icon and drops its word there, so the switch is never
-   cut at the left edge. */
-@media (max-width:620px){
-html body header[class*="_header"] .bt-head{gap:6px;padding:0 10px}
-html body header[class*="_header"] .bt-head .lb-face{margin-right:2px}
-html body header[class*="_header"] .bt-head-word{display:none}
-}
+/* A phone's view header carries the bar's Chat / Terminal switch beside one More disclosure:
+   the Bot's plugin buttons, Live, the right sidebar and Details fold into it, so nothing
+   pushes the switch off the left edge. The panel is a quiet card under the button. */
+.bt-head-more{position:relative;flex:none;pointer-events:auto}
+.bt-head-more>summary{list-style:none;cursor:pointer}
+.bt-head-more>summary::-webkit-details-marker{display:none}
+.bt-head-more>summary::marker{content:''}
+.bt-head-more-pop{position:absolute;top:46px;right:0;z-index:40;display:flex;flex-direction:column;align-items:stretch;gap:6px;min-width:190px;padding:8px;box-sizing:border-box;border-radius:12px;background:var(--st-paper,var(--bt-main));border:.5px solid var(--bt-line-2);box-shadow:0 12px 28px -8px rgba(0,0,0,.3);pointer-events:auto}
+.bt-head-more-pop .bt-head-details{width:100%;min-width:0;height:34px;justify-content:flex-start;gap:8px;padding:0 12px;border:0;border-radius:10px;background:none;box-shadow:none;font-size:13px}
+.bt-head-more-pop .bt-head-details:hover{background:var(--bt-hover)}
+.bt-head-more-pop .bt-head-word{display:inline}
+.bt-head-more-pop .os-head-btn{width:100%;justify-content:flex-start;height:34px}
 `
 
 export const LEFT_BAR_CSS = `
