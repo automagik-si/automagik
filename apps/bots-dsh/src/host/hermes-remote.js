@@ -57,6 +57,21 @@ const CONNECTION_ERRORS = Object.freeze({
 })
 const FAILURE_LIFETIME = 10 * 60_000
 const text = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value) ? value : undefined
+const profileText = value => text(value, 100) && value.trim() === value && !/[\/\\]/.test(value) ? value : undefined
+function profileOf(value) {
+  const id = profileText(value?.id), name = profileText(value?.name)
+  return id ? { id, ...(name && name !== id ? { name } : {}) } : undefined
+}
+function savedProfileOf(config) {
+  const id = profileText(config?.profile)
+  const row = id && Array.isArray(config?.profiles) ? config.profiles.find(row => row?.id === id) : undefined
+  return profileOf({ id, name: row?.name })
+}
+function attachProfileRefusal(profile) {
+  if (!profile) return fail(CONNECTION_ERRORS['bot/hermes-attach-profile'], 'attach-profile')
+  const label = profile.name ? `${profile.name} (${profile.id})` : profile.id
+  return Object.assign(fail(`This connection’s saved Hermes profile “${label}” is not served there. Choose a profile again before connecting.`, 'attach-profile'), { hermesProfile: profile })
+}
 const NO_ALIAS = '(none)'
 const strings = value => Array.isArray(value) ? value.filter(name => typeof name === 'string' && name.length > 0 && name.length <= 255).slice(0, 16) : []
 const lines = value => Array.isArray(value) ? value.filter(line => typeof line === 'string').slice(-8).map(line => line.slice(0, 240)) : []
@@ -65,6 +80,8 @@ const lines = value => Array.isArray(value) ? value.filter(line => typeof line =
 function failureView(error, alias, elapsedMs, stage) {
   const detail = error?.sshDetail ?? {}, code = typeof error?.code === 'string' ? error.code : 'bot/refused'
   const view = { code, kind: text(error?.sshError, 40) ?? (code.replace(/^bot\/(?:hermes-?)?/, '') || 'unknown'), stage, alias, elapsedMs }
+  const profile = profileOf(error?.hermesProfile)
+  if (profile) { view.profile = profile.id; if (profile.name) view.profileName = profile.name }
   if (Number.isSafeInteger(detail.exit)) view.exit = detail.exit
   for (const key of ['ssh', 'hermes']) if (lines(detail[key]).length) view[key] = lines(detail[key])
   for (const key of ['keyType', 'fingerprint', 'fault']) if (text(detail[key], 100)) view[key] = detail[key]
@@ -87,11 +104,15 @@ const failureLine = view => [`Remote Hermes SSH failed: alias=${view.alias} stag
 function storedView(view, ssh, origin) {
   const names = { alias: view.alias === NO_ALIAS ? undefined : view.alias, hosts: strings(origin?.sshNames?.hosts), users: [...strings(origin?.sshNames?.users), ...strings([ssh?.user])] }
   const stored = { ...view, alias: names.alias ? '<alias>' : NO_ALIAS }
+  // Profile labels belong on the person's screen, never in the SSH report.
+  delete stored.profile; delete stored.profileName
   for (const key of ['ssh', 'hermes']) if (view[key]) stored[key] = view[key].map(line => redactSshNames(line, names))
   return stored
 }
 const connectionFailure = (error, native = false) => error?.cleanupUnknown === true
   ? refusal(CONNECTION_ERRORS['bot/hermes-ssh-cleanup'], { code: 'bot/hermes-ssh-cleanup' })
+  : error?.code === 'bot/hermes-attach-profile'
+  ? attachProfileRefusal(profileOf(error.hermesProfile))
   : Object.hasOwn(CONNECTION_ERRORS, error?.code)
   ? refusal(CONNECTION_ERRORS[error.code], { code: error.code })
   : refusal(native && error?.code === 'bot/hermes' ? error.message : 'Remote Hermes could not connect.')
@@ -258,7 +279,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     const row = profiles.find(profile => profile.id === config.profile)
     // A saved profile the serve no longer offers is a refusal, not a silent move to the
     // first profile: that could join a different Bot's forever-chat.
-    if (!row) return Promise.reject(fail('This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.', 'attach-profile'))
+    if (!row) return Promise.reject(attachProfileRefusal(savedProfileOf(config)))
     const models = [attachedModelOf(row)]
     const bots = Object.values(state.bots ?? {})
     const botsStale = bots.some(bot => ['model', 'appliedModel'].some(key => typeof bot?.[key] === 'string'

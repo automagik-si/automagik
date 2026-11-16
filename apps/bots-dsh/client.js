@@ -265,6 +265,10 @@ var ZH = {
   "The saved profile is not served there": "保存的配置在该机器上不可用",
   "Choose this Hermes profile again": "请重新选择 Hermes 配置",
   "This connection’s saved Hermes profile is not served on that machine.": "此连接保存的 Hermes 配置在该机器上不可用。",
+  "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.": "此连接保存的 Hermes 配置“{profile}”在该机器上不可用。请重新选择配置后再连接。",
+  "Hermes on {host} no longer serves the profile “{profile}”": "{host} 上的 Hermes 不再提供配置“{profile}”",
+  "This connection saved the Hermes profile “{profile}”, which is not served on that machine.": "此连接保存了 Hermes 配置“{profile}”，但该机器不提供此配置。",
+  "Saved profile": "保存的配置",
   "Open the connection setup and choose a profile that Hermes serves there.": "打开连接设置，选择 Hermes 在该机器上提供的配置。",
   "Hermes is not running there": "Hermes 在那里没有运行",
   "Start Hermes on {host}": "在 {host} 上启动 Hermes",
@@ -3028,6 +3032,7 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 var HOST_TEMPLATES = [
+  "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
   "This step is hard to undo: {step}. Allow it once?",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?",
   "Turn on {connection} in Settings → Claude Code and Codex before using this model.",
@@ -6060,6 +6065,7 @@ function SshHostPicker({ host, onPick }) {
   );
 }
 var shortText = (value, max = 255) => typeof value === "string" && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value) ? value : "";
+var profileText = (value) => shortText(value, 100) && value.trim() === value && !/[\/\\]/.test(value) ? value : "";
 var lineRows = (value) => (Array.isArray(value) ? value : []).map((line) => shortText(line, 240)).filter(Boolean).slice(-8);
 var release = (value) => /^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(value ?? "") ? value : "";
 function updateStep(install, host) {
@@ -6094,6 +6100,8 @@ function failureFacts(value) {
     hermes: lineRows(value.hermes),
     unsaved: value.unsaved === true,
     mismatch: value.mismatch === true,
+    profile: profileText(value.profile),
+    profileName: profileText(value.profileName),
     version: release(value.version),
     minimum: release(value.minimum),
     install: /^[a-z0-9-]{1,32}$/.test(value.install ?? "") ? value.install : ""
@@ -6117,6 +6125,10 @@ function errorFor(error, draft, detail, minimum) {
   const facts = failureFacts(detail);
   if (!facts.minimum) facts.minimum = release(minimum);
   const base = screenFor(code, draft, facts);
+  if (code === "bot/hermes-attach-profile" && !detail && !facts.profile && typeof error?.message === "string" && error.message) {
+    const plain = "This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.";
+    if (error.message !== plain && error.message !== hostText(plain)) base.text = error.message;
+  }
   if (!base.ssh) return base;
   const host = shortText(draft?.ssh?.host?.trim?.() ?? "");
   const rows2 = [...base.rows ?? []];
@@ -6152,13 +6164,17 @@ function screenFor(code, draft, facts) {
       ssh: true
     };
   }
-  if (code === "bot/hermes-attach-profile") return {
-    heading: t("The saved profile is not served there"),
-    title: t("Choose this Hermes profile again"),
-    text: t("This connection’s saved Hermes profile is not served on that machine."),
-    hint: t("Open the connection setup and choose a profile that Hermes serves there."),
-    ssh: true
-  };
+  if (code === "bot/hermes-attach-profile") {
+    const profile = facts.profileName && facts.profileName !== facts.profile ? `${facts.profileName} (${facts.profile})` : facts.profile;
+    return {
+      heading: t("The saved profile is not served there"),
+      title: facts.profile ? t("Hermes on {host} no longer serves the profile “{profile}”", { host, profile }) : t("Choose this Hermes profile again"),
+      text: facts.profile ? t("This connection saved the Hermes profile “{profile}”, which is not served on that machine.", { profile }) : t("This connection’s saved Hermes profile is not served on that machine."),
+      hint: t("Open the connection setup and choose a profile that Hermes serves there."),
+      ...facts.profile ? { rows: [{ label: t("Saved profile"), value: profile }] } : {},
+      ssh: true
+    };
+  }
   if (code === "bot/hermes-attach-not-running" || code === "bot/hermes-attach-record") return { heading: t("Hermes is not running there"), title: t("Start Hermes on {host}", { host }), text: t("Hermes is not running on {host}. Start it there with “hermes serve”, then try again.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.", { host }), ssh: true };
   if (code === "bot/hermes-attach-gateway") return { heading: t("Hermes is running there as a gateway"), title: t("Start “hermes serve” on {host}", { host }), text: t("The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.", { host }), ssh: true };
   if (code === "bot/hermes-attach-profiles") return { heading: t("Hermes’s profiles could not be read"), title: t("Hermes on {host} did not list its profiles", { host }), text: t("Hermes is running on {host}, but its own profile list could not be read.", { host }), hint: t("Run “hermes profile list” on {host}, then try again.", { host }), ssh: true };
@@ -35505,6 +35521,9 @@ function ModelSwitchNotice({ sessionId, useRoster }) {
   const [fresh, setFresh] = (0, import_react94.useState)(false);
   const [said, setSaid] = (0, import_react94.useState)("");
   const line = mismatch === void 0 ? "" : t("This chat is running on {running} instead of {saved}.", { running: mismatch.running, saved: mismatch.saved });
+  (0, import_react94.useEffect)(() => {
+    setSaid("");
+  }, [bot?.id]);
   (0, import_react94.useEffect)(() => {
     if (!known2) return;
     const next = switchSeen(memo.current, bot.id, key);

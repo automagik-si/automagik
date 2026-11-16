@@ -166,3 +166,90 @@ test('the entrance reuses keyframes the shell installs', async () => {
   const index = await readFile(new URL('../src/client/index.js', import.meta.url), 'utf8')
   assert.match(index, /shadow\('conversation\.input\.dock', \{ id: 'bot-model-switch', order: -70, inject: face \}, ModelSwitchNotice\)/)
 })
+
+test('changing Bots clears a populated status and preserves the pulse state', () => {
+  const { render } = harness()
+  render(rosterOf('provider/saved'))
+  const first = render(rosterOf('provider/flash'))
+  assert.equal(saidOf(first), 'This chat is running on flash instead of saved.')
+  assert.equal(rowOf(first).props.key, 1)
+  assert.equal(rowOf(first).props['data-fresh'], '')
+
+  const roster = rosterOf('provider/other')
+  roster.byId['part-2'].id = 'bot-2'
+  const next = render(roster)
+  assert.equal(saidOf(next), '')
+  assert.equal(rowOf(next).children[0].children[0], 'This chat is running on other instead of saved.')
+  assert.equal(rowOf(next).props.key, 1)
+  assert.equal(rowOf(next).props['data-fresh'], rowOf(first).props['data-fresh'])
+})
+
+test('another Bot with an unknown reading stays silent until its later mismatch changes', () => {
+  const { render } = harness()
+  render(rosterOf('provider/saved'))
+  const first = render(rosterOf('provider/flash'))
+  assert.equal(saidOf(first), 'This chat is running on flash instead of saved.')
+  assert.equal(rowOf(first).props.key, 1)
+
+  const unknownRoster = rosterOf(undefined)
+  unknownRoster.byId['part-2'].id = 'bot-2'
+  const unknown = render(unknownRoster)
+  assert.equal(saidOf(unknown), '')
+  assert.equal(rowOf(unknown), null)
+
+  const knownRoster = rosterOf('provider/flash')
+  knownRoster.byId['part-2'].id = 'bot-2'
+  const known = render(knownRoster)
+  assert.equal(saidOf(known), '')
+  assert.equal(rowOf(known).props.key, rowOf(first).props.key)
+
+  const switchedRoster = rosterOf('provider/other')
+  switchedRoster.byId['part-2'].id = 'bot-2'
+  const switched = render(switchedRoster)
+  assert.equal(saidOf(switched), 'This chat is running on other instead of saved.')
+  assert.equal(rowOf(switched).props.key, rowOf(known).props.key + 1)
+  assert.equal(rowOf(switched).props['data-fresh'], '')
+  assert.equal(rowOf(render(switchedRoster)).props.key, rowOf(switched).props.key)
+})
+
+test('a completed entrance stays completed when the Bot changes', () => {
+  const { render } = harness()
+  render(rosterOf('provider/saved'))
+  const first = render(rosterOf('provider/flash'))
+  assert.equal(rowOf(first).props['data-fresh'], '')
+  rowOf(first).props.onAnimationEnd()
+  const completed = render(rosterOf('provider/flash'))
+  assert.equal(rowOf(completed).props['data-fresh'], undefined)
+
+  const roster = rosterOf('provider/other')
+  roster.byId['part-2'].id = 'bot-2'
+  const next = render(roster)
+  assert.equal(rowOf(next).props['data-fresh'], undefined)
+  assert.equal(rowOf(next).props.key, rowOf(completed).props.key)
+  assert.equal(saidOf(next), '')
+})
+
+test('the same Bot losing its running-model reading keeps a populated status', () => {
+  const { render } = harness()
+  render(rosterOf('provider/saved'))
+  const first = render(rosterOf('provider/flash'))
+  assert.equal(saidOf(first), 'This chat is running on flash instead of saved.')
+
+  const unknown = render(rosterOf(undefined))
+  assert.equal(rowOf(unknown), null)
+  assert.equal(saidOf(unknown), 'This chat is running on flash instead of saved.')
+})
+
+test('a non-Bot round trip clears the status without pulsing an unchanged mismatch', () => {
+  const { render } = harness()
+  render(rosterOf('provider/saved'))
+  const first = render(rosterOf('provider/flash'))
+  assert.equal(saidOf(first), 'This chat is running on flash instead of saved.')
+  assert.equal(rowOf(first).props.key, 1)
+  assert.equal(render({ byId: {} }), null)
+
+  const returned = render(rosterOf('provider/flash'))
+  assert.equal(saidOf(returned), '')
+  assert.equal(rowOf(returned).props.key, rowOf(first).props.key)
+  assert.equal(rowOf(returned).props['data-fresh'], rowOf(first).props['data-fresh'])
+})

@@ -549,8 +549,8 @@ the real check of the image; the workflow runs the scan on the real rootfs befor
 ## Gate foundation (C2.1, #907)
 
 The image also carries `gate-entrypoint.mjs`, a separate plain Node process. It is disabled by
-default. When enabled, it uses the self-hosted claim and passkeys below, or the optional Access
-mode. Cloud workspace tokens (#909) are a later delivery. The single-container run above still works.
+default. When enabled, it uses the self-hosted claim and passkeys below, the optional Access
+mode, or the Cloud mode for workspace tokens. The single-container run above still works.
 
 `compose.gate.yml` describes the opt-in two-container topology. Set `AUTOMAGIK_SERVER_IMAGE`
 to the same reviewed digest for both services, `AUTOMAGIK_GATE_ENABLED=1` and
@@ -624,7 +624,8 @@ checks the two-volume topology and gate `401`; CI builds, smokes and scans the i
 
 ## Self-hosted claim, passkeys and recovery (#908)
 
-Leave all three `AUTOMAGIK_GATE_ACCESS_*` settings unset to use this mode. It makes no outside
+Leave all three `AUTOMAGIK_GATE_ACCESS_*` settings and all six `AUTOMAGIK_GATE_CLOUD_*` settings
+unset to use this mode. It makes no outside
 authentication connection. The verifier is the maintained, MIT-licensed
 [`@simplewebauthn/server` 14.1.0](https://github.com/MasterKale/SimpleWebAuthn/releases/tag/v14.1.0),
 pinned exactly with its transitive Bun lock. It supports the image's Node 24 runtime. Registrations
@@ -727,6 +728,67 @@ The tests use fresh keys in a software authenticator against the real WebAuthn v
 cover wrong RP/origin/port/challenge/signature, verification flags, replay, expiry, concurrent
 claims, recovery, revocation, the private reset socket and actual listener addresses. The image
 smoke checks private claim output and host control in the built runtime.
+
+## Cloud mode: workspace tokens (#909)
+
+A Cloud workspace's gate takes no claim and no passkey. A person opens the workspace from the
+Cloud rail, and the gate turns that open into its own session. It follows RFC 0024 (g) and the
+[version 1 contracts](../docs/cloud/contracts-v1.md), sections 4 and 5. Delivery state: the
+gate side is built and tested against a fake Cloud service; the Cloud service's side (minting
+open codes and tokens) is not built yet.
+
+Set all six values on the gate container, with your own values on the host:
+
+| Setting | Value |
+|---|---|
+| `AUTOMAGIK_GATE_CLOUD_ISSUER` | `{cloud-issuer}`, the exact `iss` of workspace tokens, an HTTPS URL |
+| `AUTOMAGIK_GATE_CLOUD_IDENTITY_ISSUER` | `{identity-service-issuer}`, the principal's `issuer` |
+| `AUTOMAGIK_GATE_CLOUD_WORKSPACE` | `{workspace-id}`, this workspace's id: the only audience it accepts |
+| `AUTOMAGIK_GATE_CLOUD_KEYS_URL` | the HTTPS URL of the Cloud service's published key set |
+| `AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL` | the HTTPS URL of the Cloud service's open-code exchange |
+| `AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN` | the exact HTTPS origin of the Cloud rail page that opens workspaces |
+
+All six unset leaves the other modes unchanged and opens no Cloud connection. Some but not all
+of them refuses startup and names the missing settings, never their values. Cloud and Access
+together refuse startup. In Cloud mode no claim, passkey route, recovery or host reset socket
+exists, and no owner record is read or written. None of the values is a secret: the workspace
+holds no Cloud credential.
+
+**Opening a workspace.** The rail posts a form to `POST /_gate/cloud/open` on the workspace's
+origin, with one field, `code`: the single-use open code. The gate accepts it only from the
+configured rail origin, as `application/x-www-form-urlencoded`, with no query string. It sends
+the code and its own workspace id to the exchange URL itself, server to server, and receives the
+workspace token there. The browser never sees the token. A code or token in a URL gets `400`;
+a token in a header or a form field is refused. A code is single use: the gate refuses a code it
+has already seen without asking the Cloud service, and the Cloud service refuses any replay.
+At most 8 exchanges run at once; more get `429` and leave their code unused. Refusals log
+only a status and a generated request id, never a code or a token.
+
+**The token.** The gate checks that the token is signed with EdDSA (Ed25519) by a key the
+published key set names, with the token's key id. The set holds one or two keys: the
+signing key, and the next or previous one during a rotation, as RFC 0011 rotates lane keys. A set
+with more than two keys, a private key, or a duplicate key id is refused whole. Key locations
+come only from the setting, never from the token. The key set is fetched on the first open, not
+at startup, kept at most 5 minutes, and refetched for an unknown key id at most every 30 seconds.
+A failed fetch keeps no key. The claims must be `ver` 1, the configured `iss`, `aud` equal to
+this workspace and to `workspace`, a `sub`, and `exp - iat` of at most 300 seconds, with 30
+seconds of clock skew allowed only on `iat` and `nbf`. A token for another workspace is refused
+even when its signature is valid.
+
+**Who may open.** RFC 0024 Decided 26 keeps Cloud workspaces owner-only until the three
+safeguards of (f) hold. The gate admits a token only when its roles include `owner` or `admin`;
+`member` and `guest` are refused, and unknown roles are ignored. The principal sent to DSH is
+`{ issuer: <identity issuer>, subject: sub, roles, workspace }`.
+
+**The session.** The gate sets its usual `__Host-automagik-session` cookie on its own origin.
+The session ends when the token does, and never more than 5 minutes after the open. Renewal
+rotates the cookie but never extends that end. Cloud sessions are kept in memory only; a gate
+restart ends them. To keep working, the person opens the workspace from the rail again; a new
+open replaces the browser's previous session. The session list and "sign out everywhere" cover
+only the signed-in person's own sessions.
+
+Not in this mode yet: the Cloud service's revocation call and its poll fallback. Until they land,
+the 5-minute session bound is what ends a removed person's access.
 
 ## Interim Cloudflare Access sign-in
 

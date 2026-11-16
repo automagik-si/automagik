@@ -205,6 +205,10 @@ const ZH = {
   "The saved profile is not served there": "保存的配置在该机器上不可用",
   "Choose this Hermes profile again": "请重新选择 Hermes 配置",
   "This connection’s saved Hermes profile is not served on that machine.": "此连接保存的 Hermes 配置在该机器上不可用。",
+  "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.": "此连接保存的 Hermes 配置“{profile}”在该机器上不可用。请重新选择配置后再连接。",
+  "Hermes on {host} no longer serves the profile “{profile}”": "{host} 上的 Hermes 不再提供配置“{profile}”",
+  "This connection saved the Hermes profile “{profile}”, which is not served on that machine.": "此连接保存了 Hermes 配置“{profile}”，但该机器不提供此配置。",
+  "Saved profile": "保存的配置",
   "Open the connection setup and choose a profile that Hermes serves there.": "打开连接设置，选择 Hermes 在该机器上提供的配置。",
   "Hermes is not running there": "Hermes 在那里没有运行",
   "Start Hermes on {host}": "在 {host} 上启动 Hermes",
@@ -2990,6 +2994,7 @@ export function t(key, params) {
 // a model switch DSH turned down, roster.js): the template is the dictionary key, worded with
 // the values the message carried.
 const HOST_TEMPLATES = [
+  'This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.',
   'This step is hard to undo: {step}. Allow it once?',
   '{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?',
   'Turn on {connection} in Settings → Claude Code and Codex before using this model.',

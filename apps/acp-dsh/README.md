@@ -406,12 +406,16 @@ check means drawing is available; it does not establish that this draw can selec
 The internal `isolated=true` flag means the resolved grants passed and the mode was acknowledged;
 it does not prove that the hosted image tool reads through that profile.
 
-The draw hashes the home's config bytes before the check and again after mode acknowledgement,
-and checks at both points that the scratch has no `.codex` entry (including a dangling symlink).
-Changed or unreadable bytes, or a scratch `.codex` entry, take the same fallback/refusal path.
-A process that can already write the Bot's Codex home can change and restore it inside that
-window, or change it after acknowledgement if Codex rereads its config mid-session. That process
-already controls this Codex's configuration; the image lock cannot defend against it.
+The draw fingerprints the local config sources Codex reads for the session before the check
+and again after mode acknowledgement. These are the home's `config.toml`; on Linux and macOS,
+also `/etc/codex/config.toml`, `/etc/codex/managed_config.toml`, `/etc/codex/requirements.toml`,
+and each scratch ancestor's `.codex/config.toml` and `.git` marker. It checks at both points
+that the scratch has no `.codex` entry (including a dangling symlink). Changed or unreadable
+sources, or a scratch `.codex` entry, take the same fallback/refusal path. Change and restore
+inside that window, and changes after acknowledgement, are not covered. Neither are macOS
+managed preferences (MDM), cloud requirements or cloud-managed config. A process that can
+already write these sources controls this Codex's configuration; the image lock cannot defend
+against it.
 
 **Input ownership.** Drawing sends only prompt text. An edit takes the person's uploaded
 PNG, JPEG or WebP from DSH's verified attachment store: bots-dsh resolves it in that Bot's own
