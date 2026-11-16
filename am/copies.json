@@ -62,6 +62,10 @@
       "to": "am/dshTui.mjs"
     },
     {
+      "from": "herdr/mods/am-sidebar/eventNotice.mjs",
+      "to": "am/eventNotice.mjs"
+    },
+    {
       "from": "herdr/mods/am-sidebar/guard/hc",
       "to": "am/guard/hc"
     },
@@ -140,6 +144,10 @@
     {
       "from": "herdr/mods/am-sidebar/models.js",
       "to": "am/models.js"
+    },
+    {
+      "from": "herdr/mods/am-sidebar/notify.mjs",
+      "to": "am/notify.mjs"
     },
     {
       "from": "herdr/mods/am-sidebar/pack-keys.json",

@@ -65,6 +65,8 @@ import { approveProject, approvedProxyEnabled, approvedProxyState, approvedSetti
 import { hooksNotice } from "../migrateHooks.mjs";
 import { SPACE_LABEL, plan as tidyPlan, planText } from "../tidy.js";
 import { fixNonVisual, readState, spacesOf } from "./state.mjs";
+import { deliverArgv } from "../eventNotice.mjs";
+import { NOTIFY_EXIT, runNotify } from "../notify.mjs";
 
 /**
  * A refusal or a usage mistake: printed on stderr, exit `code`. `detail`: fields a --json run
@@ -1221,6 +1223,7 @@ const OPTIONS = {
   revive: { type: "boolean" }, boot: { type: "boolean" }, wait: { type: "string" }, "dry-run": { type: "boolean" },
   machine: { type: "string" }, linked: { type: "boolean" }, local: { type: "boolean" },
   "from-hc": { type: "boolean" }, "squad-label": { type: "string" }, apply: { type: "boolean" },
+  thread: { type: "string" },
 };
 
 export const USAGE = `am: Automagik Herdr's bots and updates from the command line
@@ -1445,6 +1448,14 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 every exit but 0: anything but 0 or 3 is a failure. A name is
                                 1-128 of A-Z a-z 0-9 . _ -, not . or .. (hc may refuse more).
                                 Made for mods: their exec has no stdin to speak hc connect with.
+  notify --thread <uuid>        JSON lines on stdin, one event each, through the event-notice
+                                shim: one receipt line (JSON) per line on stdout, never the
+                                line's text. Exit 0: every line queued, deduped, suppressed,
+                                paused or stopped (or no lines); 1: a line refused, with no
+                                queue call for it; 2: a usage mistake; 3: stdin could not be
+                                read to the end; 4: a queue call failed. A stop ends the run.
+                                This build is a dry run: no queue is wired, so each valid line
+                                is paused and nothing is called.
   launch-path <program>         where a launch finds <program> (PATH, ~/.local/bin, this CLI's
                                 node folder) and the PATH its pane gets, as one line of JSON:
                                 {"program": null, "path": null} when none has it. For the
@@ -7587,10 +7598,38 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
   return PRINTED;
 }
 
+/**
+ * `notify --thread <uuid>`: JSON lines on stdin through the event-notice shim (notify.mjs holds
+ * the loop and the exit codes). The queue, the control read, the thread check and the clock come
+ * from `io`; with no `io.queue` it is a dry run: every valid line is paused, nothing is called.
+ */
+export async function cmdNotify(opts, rest, io = {}) {
+  if (rest.length) throw new CliError("notify takes no arguments: JSON lines on stdin and --thread <uuid>.", NOTIFY_EXIT.usage);
+  if (opts.thread === undefined) throw new CliError("notify needs --thread <the chat's thread id>.", NOTIFY_EXIT.usage);
+  if (!Array.isArray(deliverArgv(opts.thread, "-"))) throw new CliError("notify: --thread must be a lowercase uuid.", NOTIFY_EXIT.usage);
+  const stdout = io.stdout ?? process.stdout;
+  const stderr = io.stderr ?? process.stderr;
+  const live = typeof io.queue === "function";
+  if (!live) stderr.write("am notify: dry run: no queue in this build; each valid line is paused, nothing is called.\n");
+  const result = await runNotify({
+    input: io.stdin ?? process.stdin,
+    write: (text) => stdout.write(text),
+    queue: live ? io.queue : () => ({ exit: 1 }),
+    threadId: opts.thread,
+    readControl: live ? io.readControl : () => "paused",
+    threadCurrent: io.threadCurrent,
+    threadExists: io.threadExists,
+    now: io.now,
+  });
+  if (result.code === NOTIFY_EXIT.io) stderr.write(`am notify: stdin could not be read to the end; ${result.lines} receipt line(s) written.\n`);
+  exitAfter.code = result.code;
+  return PRINTED;
+}
+
 const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
   tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
-  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive };
+  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive, notify: cmdNotify };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 
 /** Runs one command line; resolves with the exit code. Output goes to stdout, problems to stderr. */
@@ -7621,7 +7660,7 @@ export async function main(argv = process.argv.slice(2), io = {}) {
       throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, rm, category, start, restart, attach, detach, whois, meter, machines and doc.`, 2);
     }
     exitAfter.code = 0;
-    const out = command === "proxy" ? await run(opts, rest, io) : await run(opts, rest);
+    const out = command === "proxy" || command === "notify" ? await run(opts, rest, io) : await run(opts, rest);
     if (out === PRINTED) return exitAfter.code;
     if (opts.json) process.stdout.write(unprinted(`${JSON.stringify(out, null, 2)}\n`));
     else if (out) process.stdout.write(unprinted(`${out}\n`));
