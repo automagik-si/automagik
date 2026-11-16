@@ -1,6 +1,6 @@
 {
   "name": "@automagik/bots-dsh",
-  "version": "3.148.1",
+  "version": "3.149.0",
   "description": "Omni for DeepSeek Harness: a team of long-lived Bots with Omni as the Main Bot; its channels and canvases come with @automagik/omni-channels-dsh and @automagik/omni-canvas-dsh",
   "keywords": [
     "dsh-plugin",
@@ -35,6 +35,7 @@
     "src/shared/",
     "src/office/",
     "client.js",
+    "client.pane.js",
     "office.js",
     "locale/",
     "web-search.js",
@@ -84,7 +85,9 @@
     "esbuild": "0.28.2",
     "@xmldom/xmldom": "0.9.12",
     "qrcode-generator": "2.0.4",
-    "quickjs-emscripten-core": "0.32.0"
+    "quickjs-emscripten-core": "0.32.0",
+    "@xterm/xterm": "6.0.0",
+    "@xterm/addon-fit": "0.11.0"
   },
   "engines": {
     "dsh": ">=0.2.2-rc.2 <0.3.0-0",
