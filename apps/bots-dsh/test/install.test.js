@@ -203,6 +203,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: api route',
     'route POST /api/omni-ui',
     'effect omni-ui: load state',
+    'effect omni-ui: seat chat',
     'on agent/created',
     'effect ds-bot: remote Hermes',
     // Auto's judge, after every module, so it runs first (auto-judge.js installAhead).

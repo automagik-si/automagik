@@ -332,6 +332,30 @@ test('Unfold shows only in its own instance, read-only', async (t) => {
   assert.equal(await card(page).getAttribute('aria-label'), 'Omni, Genie and Unfold')
 })
 
+test('the bar asks for seats only with a source, only while shown, and once', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  const seatCalls = () => page.evaluate(() => window.calls.filter(call => call.endpoint === 'seat-chat-list').length)
+  // The page's zero-host-call contract: with no seat source the bar asks for none, and a
+  // rerender does not start asking.
+  await page.evaluate(() => window.mount({ width: 300 }))
+  await page.waitForTimeout(700)
+  await page.evaluate(() => window.setRoster({ bots: [{ id: 'pip', name: 'Pip', createdAt: 1 }] }))
+  await page.waitForTimeout(400)
+  assert.equal(await seatCalls(), 0, 'without the shell action, nothing is asked')
+  // With the shell's source: one ask on mount; a rerender must not ask again (the poll is 4 s).
+  await page.evaluate(() => window.mount({ width: 300, seatList: true }))
+  await page.waitForTimeout(700)
+  assert.equal(await seatCalls(), 1, 'one ask when the bar opens')
+  await page.evaluate(() => window.setRoster({ bots: [{ id: 'pip', name: 'Pip', createdAt: 1 }, { id: 'otto', name: 'Otto', createdAt: 2 }] }))
+  await page.waitForTimeout(400)
+  assert.equal(await seatCalls(), 1, 'a rerender does not re-ask')
+  // The rail is not the bar's Team list: no seats are asked for there.
+  await page.evaluate(() => window.mount({ width: 300, wide: false, seatList: true }))
+  await page.waitForTimeout(700)
+  assert.equal(await seatCalls(), 1, 'seats load only where the bar shows them')
+})
+
 test('a tool that throws is left out, and the row stays', async (t) => {
   const page = await fixture(t)
   if (!page) return

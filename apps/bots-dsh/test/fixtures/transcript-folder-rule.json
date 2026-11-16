@@ -1,0 +1,536 @@
+{
+  "version": 1,
+  "about": "RFC 0015 folder rule: a transcript path is used only inside the agent's own transcript folder under the machine's home, and both the given path and its real path end in .jsonl. Read by herdr/mods/pocket-link/chat/folder-rule.test.mjs and by herdr/test/transcriptFolder.test.mjs (am-sidebar's copy); both must pass every case they run. {home} is a temp home the runner makes (and realpaths) per run, then creates setup.dirs, setup.files (empty) and setup.symlinks. local: the path is resolved with realpath and must be a regular file. remote: textual only, home is given; an accepted path comes back home-relative. reason names the first check that refuses, in this order: agent, empty, control (C0 or DEL, NUL included), backslash, extension; then local: home, relative, segment, missing, outside, extension (of the real path), not-file; remote: home, outside (not under the home), segment, outside (not in the folder). Only chat/'s test asserts reason.",
+  "folders": {
+    "claude": ".claude/projects",
+    "codex": ".codex/sessions",
+    "omp": ".omp/agent/sessions"
+  },
+  "cases": [
+    {
+      "name": "claude transcript in its project folder",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/-home-u-proj/00000000-0000-4000-8000-000000000001.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/-home-u-proj/00000000-0000-4000-8000-000000000001.jsonl"
+        ]
+      },
+      "expect": "accept",
+      "resolved": "{home}/.claude/projects/-home-u-proj/00000000-0000-4000-8000-000000000001.jsonl"
+    },
+    {
+      "name": "codex rollout in its dated folder",
+      "mode": "local",
+      "agent": "codex",
+      "path": "{home}/.codex/sessions/2026/11/03/rollout-2026-11-03T10-00-00-0000.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.codex/sessions/2026/11/03/rollout-2026-11-03T10-00-00-0000.jsonl"
+        ]
+      },
+      "expect": "accept",
+      "resolved": "{home}/.codex/sessions/2026/11/03/rollout-2026-11-03T10-00-00-0000.jsonl"
+    },
+    {
+      "name": "omp session in its default folder",
+      "mode": "local",
+      "agent": "omp",
+      "path": "{home}/.omp/agent/sessions/-home-u-proj/2026-11-03T10-00-00_0000.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.omp/agent/sessions/-home-u-proj/2026-11-03T10-00-00_0000.jsonl"
+        ]
+      },
+      "expect": "accept",
+      "resolved": "{home}/.omp/agent/sessions/-home-u-proj/2026-11-03T10-00-00_0000.jsonl"
+    },
+    {
+      "name": "a symlink that stays inside the folder is followed",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/a/link.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/b/real.jsonl"
+        ],
+        "symlinks": [
+          {
+            "at": "{home}/.claude/projects/a/link.jsonl",
+            "to": "{home}/.claude/projects/b/real.jsonl"
+          }
+        ]
+      },
+      "expect": "accept",
+      "resolved": "{home}/.claude/projects/b/real.jsonl"
+    },
+    {
+      "name": "the agent's own folder may itself be a symlink (dotfiles)",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/s.jsonl",
+      "setup": {
+        "files": [
+          "{home}/dotfiles/claude/projects/p/s.jsonl"
+        ],
+        "symlinks": [
+          {
+            "at": "{home}/.claude",
+            "to": "{home}/dotfiles/claude"
+          }
+        ]
+      },
+      "expect": "accept",
+      "resolved": "{home}/dotfiles/claude/projects/p/s.jsonl"
+    },
+    {
+      "name": "ssh private key",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.ssh/id_ed25519",
+      "setup": {
+        "files": [
+          "{home}/.ssh/id_ed25519"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "extension"
+    },
+    {
+      "name": "dot-dot out of the folder",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/../../.ssh/id_ed25519",
+      "setup": {
+        "files": [
+          "{home}/.ssh/id_ed25519"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "extension"
+    },
+    {
+      "name": "dot-dot that lands back inside is still refused",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/../p/s.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/p/s.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "segment"
+    },
+    {
+      "name": "symlink out of .claude/projects",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/evil.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.ssh/id_ed25519"
+        ],
+        "symlinks": [
+          {
+            "at": "{home}/.claude/projects/p/evil.jsonl",
+            "to": "{home}/.ssh/id_ed25519"
+          }
+        ]
+      },
+      "expect": "refuse",
+      "reason": "outside"
+    },
+    {
+      "name": "symlinked project folder pointing out",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/s.jsonl",
+      "setup": {
+        "files": [
+          "{home}/elsewhere/s.jsonl"
+        ],
+        "symlinks": [
+          {
+            "at": "{home}/.claude/projects/p",
+            "to": "{home}/elsewhere"
+          }
+        ]
+      },
+      "expect": "refuse",
+      "reason": "outside"
+    },
+    {
+      "name": "a folder name that only starts like the agent folder",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects-evil/p/s.jsonl",
+      "setup": {
+        "dirs": [
+          "{home}/.claude/projects"
+        ],
+        "files": [
+          "{home}/.claude/projects-evil/p/s.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "outside"
+    },
+    {
+      "name": "another agent's folder",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.codex/sessions/2026/11/03/rollout-x.jsonl",
+      "setup": {
+        "dirs": [
+          "{home}/.claude/projects"
+        ],
+        "files": [
+          "{home}/.codex/sessions/2026/11/03/rollout-x.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "outside"
+    },
+    {
+      "name": "not .jsonl",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/s.json",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/p/s.json"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "extension"
+    },
+    {
+      "name": "the folder itself",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/p/s.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "extension"
+    },
+    {
+      "name": "a missing file",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/missing.jsonl",
+      "expect": "refuse",
+      "reason": "missing"
+    },
+    {
+      "name": "a relative path on this computer",
+      "mode": "local",
+      "agent": "claude",
+      "path": ".claude/projects/p/s.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/p/s.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "relative"
+    },
+    {
+      "name": "an agent folder under another root",
+      "mode": "local",
+      "agent": "claude",
+      "path": "/nonexistent-root/.claude/projects/p/s.jsonl",
+      "expect": "refuse",
+      "reason": "missing"
+    },
+    {
+      "name": "an unknown agent",
+      "mode": "local",
+      "agent": "gemini",
+      "path": "{home}/.claude/projects/p/s.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/p/s.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "agent"
+    },
+    {
+      "name": "empty path",
+      "mode": "local",
+      "agent": "claude",
+      "path": "",
+      "expect": "refuse",
+      "reason": "empty"
+    },
+    {
+      "name": "a NUL byte in the path",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/s.jsonl\u0000.txt",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/p/s.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "control"
+    },
+    {
+      "name": "a NUL byte inside a .jsonl name",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/s\u0000x.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/p/s"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "control"
+    },
+    {
+      "name": "a newline inside a .jsonl name",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/s\nx.jsonl",
+      "expect": "refuse",
+      "reason": "control"
+    },
+    {
+      "name": "dot-dot to a .jsonl outside the folder",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/../../.ssh/k.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.ssh/k.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "segment"
+    },
+    {
+      "name": "a directory named like a transcript",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/x.jsonl",
+      "setup": {
+        "dirs": [
+          "{home}/.claude/projects/p/x.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "not-file"
+    },
+    {
+      "name": "a backslash in the path",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p\\..\\x.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/p\\..\\x.jsonl"
+        ]
+      },
+      "expect": "refuse",
+      "reason": "backslash"
+    },
+    {
+      "name": "a .jsonl link to a file inside the folder that is not .jsonl",
+      "mode": "local",
+      "agent": "claude",
+      "path": "{home}/.claude/projects/p/s.jsonl",
+      "setup": {
+        "files": [
+          "{home}/.claude/projects/p/s.txt"
+        ],
+        "symlinks": [
+          {
+            "at": "{home}/.claude/projects/p/s.jsonl",
+            "to": "{home}/.claude/projects/p/s.txt"
+          }
+        ]
+      },
+      "expect": "refuse",
+      "reason": "extension"
+    },
+    {
+      "name": "remote: absolute path under the given home",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": "/home/u/.claude/projects/-home-u-proj/00000000-0000-4000-8000-000000000001.jsonl",
+      "expect": "accept",
+      "relative": ".claude/projects/-home-u-proj/00000000-0000-4000-8000-000000000001.jsonl"
+    },
+    {
+      "name": "remote: already home-relative",
+      "mode": "remote",
+      "agent": "codex",
+      "home": "/home/u",
+      "path": ".codex/sessions/2026/11/03/rollout-2026-11-03T10-00-00-0000.jsonl",
+      "expect": "accept",
+      "relative": ".codex/sessions/2026/11/03/rollout-2026-11-03T10-00-00-0000.jsonl"
+    },
+    {
+      "name": "remote: omp under a macOS-style home",
+      "mode": "remote",
+      "agent": "omp",
+      "home": "/Users/u",
+      "path": "/Users/u/.omp/agent/sessions/-Users-u-proj/2026-11-03T10-00-00_0000.jsonl",
+      "expect": "accept",
+      "relative": ".omp/agent/sessions/-Users-u-proj/2026-11-03T10-00-00_0000.jsonl"
+    },
+    {
+      "name": "remote: home given with a trailing slash",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u/",
+      "path": "/home/u/.claude/projects/p/s.jsonl",
+      "expect": "accept",
+      "relative": ".claude/projects/p/s.jsonl"
+    },
+    {
+      "name": "remote: ssh private key",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": "/home/u/.ssh/id_ed25519",
+      "expect": "refuse",
+      "reason": "extension"
+    },
+    {
+      "name": "remote: dot-dot",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": ".claude/projects/../../.ssh/id_ed25519",
+      "expect": "refuse",
+      "reason": "extension"
+    },
+    {
+      "name": "remote: dot-dot that lands back inside",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": "/home/u/.claude/projects/p/../p/s.jsonl",
+      "expect": "refuse",
+      "reason": "segment"
+    },
+    {
+      "name": "remote: empty segment",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": ".claude/projects//s.jsonl",
+      "expect": "refuse",
+      "reason": "segment"
+    },
+    {
+      "name": "remote: dot segment",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": ".claude/projects/./p/s.jsonl",
+      "expect": "refuse",
+      "reason": "segment"
+    },
+    {
+      "name": "remote: another account's home",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": "/home/ada/.claude/projects/p/s.jsonl",
+      "expect": "refuse",
+      "reason": "outside"
+    },
+    {
+      "name": "remote: a home that only starts like the given one",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": "/home/u2/.claude/projects/p/s.jsonl",
+      "expect": "refuse",
+      "reason": "outside"
+    },
+    {
+      "name": "remote: tilde is not expanded",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": "~/.claude/projects/p/s.jsonl",
+      "expect": "refuse",
+      "reason": "outside"
+    },
+    {
+      "name": "remote: a folder name that only starts like the agent folder",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": ".claude/projects-evil/p/s.jsonl",
+      "expect": "refuse",
+      "reason": "outside"
+    },
+    {
+      "name": "remote: another agent's folder",
+      "mode": "remote",
+      "agent": "omp",
+      "home": "/home/u",
+      "path": ".claude/projects/p/s.jsonl",
+      "expect": "refuse",
+      "reason": "outside"
+    },
+    {
+      "name": "remote: not .jsonl",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": ".claude/projects/p/s.txt",
+      "expect": "refuse",
+      "reason": "extension"
+    },
+    {
+      "name": "remote: a backslash segment",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": ".claude/projects/p\\..\\..\\.ssh/s.jsonl",
+      "expect": "refuse",
+      "reason": "backslash"
+    },
+    {
+      "name": "remote: a NUL byte",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": ".claude/projects/p/s.jsonl\u0000",
+      "expect": "refuse",
+      "reason": "control"
+    },
+    {
+      "name": "remote: a relative home is refused",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "home/u",
+      "path": "/home/u/.claude/projects/p/s.jsonl",
+      "expect": "refuse",
+      "reason": "home"
+    },
+    {
+      "name": "remote: a newline",
+      "mode": "remote",
+      "agent": "claude",
+      "home": "/home/u",
+      "path": ".claude/projects/p/s\nx.jsonl",
+      "expect": "refuse",
+      "reason": "control"
+    }
+  ]
+}

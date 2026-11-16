@@ -30,8 +30,10 @@ const SAID = {
 export const WORDS = Object.freeze(Object.keys(SAID))
 export const word = name => SAID[name]()
 
-// The statuses that show their word, and the ones a row does not draw at all.
-export const WORDED = Object.freeze(['needs'])
+// The statuses that show their word, and the ones a row does not draw at all. `off` says its
+// word because the hollow ring alone would read as another kind of idle; one set serves Bots
+// and seats alike.
+export const WORDED = Object.freeze(['needs', 'off'])
 export const QUIET = Object.freeze(['idle'])
 
 // One status for several (a folded channel's chats): what asks for the owner first, then
