@@ -79,7 +79,9 @@ async function main() {
   await docker(['volume', 'create', volume])
   // No network: first boot must still seed and fence, and the vendor-CLI download is never
   // part of this smoke (its store path is rehearsed in-image below).
-  await docker(['run', '--detach', '--name', name, '--network', 'none', '--volume', `${volume}:/data`,
+  await docker(['run', '--detach', '--name', name, '--network', 'none',
+    '--env', 'XDG_RUNTIME_DIR=/data/run/user', '--env', 'HC_SESSION=automagik-server-smoke',
+    '--volume', `${volume}:/data`,
     '--health-interval', '2s', '--health-timeout', '2s', '--health-retries', '60', '--health-start-period', '0s', image])
 
   const startTo401 = await waitForFence()

@@ -20,6 +20,10 @@ export const HERDR_CORE_URL = `https://releases.herdr.dev/core/${HERDR_CORE_VERS
 /** The Arca contract's app home and the core socket, both on the data volume. */
 export const HERDR_APP_HOME = '/data/herdr-app'
 export const HERDR_CORE_SOCKET = '/data/run/herdr-core/default.sock'
+/** Container-local runtime and session; the in-image smoke overrides the session name. */
+export const XDG_RUNTIME_DIR = '/data/run/user'
+export const HC_SESSION = 'automagik-server'
+export const SMOKE_HC_SESSION = 'automagik-server-smoke'
 
 /** The reviewed session-absorption skill, byte-pinned; its two files are the whole payload. */
 export const SKILL_NAME = 'session-absorption'

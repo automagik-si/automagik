@@ -102,13 +102,17 @@ async function main() {
   const appHome = env.HERDR_APP_HOME || join(home, 'herdr-app')
   const socketPath = env.HC_TERMINAL_SOCKET || join(home, 'run', 'herdr-core', 'default.sock')
   const coreDir = dirname(socketPath)
-  const dirs = [dshHome, botsHome, workspace, join(dshHome, 'pnpm-store'), join(home, 'secrets'), appHome, coreDir]
+  const runtimeDir = env.XDG_RUNTIME_DIR || join(home, 'run', 'user')
+  const session = env.HC_SESSION || 'automagik-server'
+  const dirs = [dshHome, botsHome, workspace, join(dshHome, 'pnpm-store'), join(home, 'secrets'), appHome, coreDir, runtimeDir]
   try {
     prepareWorkspace(workspace, { uid: 1000 })
     ensureDataDirs(dirs, { uid: 1000 })
     mkdirSync(appHome, { recursive: true, mode: 0o755 })
     mkdirSync(coreDir, { recursive: true, mode: 0o700 })
     chmodSync(coreDir, 0o700)
+    mkdirSync(runtimeDir, { recursive: true, mode: 0o700 })
+    chmodSync(runtimeDir, 0o700)
   } catch (error) {
     warn(error.message)
     process.exit(1)
@@ -119,6 +123,8 @@ async function main() {
   env.AUTOMAGIK_HOME = home
   env.HERDR_APP_HOME = appHome
   env.HC_TERMINAL_SOCKET = socketPath
+  env.XDG_RUNTIME_DIR = runtimeDir
+  env.HC_SESSION = session
 
   const build = versions()
   log(`profile ${PROFILE}: automagik ${build.automagik ?? 'unknown'}, dsh ${build.dsh ?? 'unknown'}`)

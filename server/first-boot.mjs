@@ -192,8 +192,8 @@ export function ensureTeam({
       try { result = JSON.parse(output) } catch { throw new Error(`${am} create ${role.name} printed no JSON: ${String(output).trim().slice(0, 300)}`) }
       if (!BOT_ID.test(result?.id ?? '')) throw new Error(`${am} create ${role.name} minted no b- id`)
       if (role.kind === 'main') lead = result.id
-      made.push({ name: role.name, id: result.id, kind: role.kind })
-      log(`team: created ${role.name} (${role.kind}) ${result.id}`)
+      made.push({ name: role.name, id: result.id, kind: role.kind, role: role.role })
+      log(`team: created by am create: ${role.name} (${role.kind}) ${result.id} role="${role.role}"`)
     }
     const v1 = readJson(roster)
     const mains = Array.isArray(v1.bots) ? v1.bots.filter((bot) => bot?.kind === 'main') : []
@@ -304,10 +304,10 @@ export function verifySurfaces({ home, workspace } = {}) {
   }
   if (problems.length) throw new Error(`first boot: registry verifier failed: ${problems.join('; ')}`)
   return {
-    v1: { file: rosterOf(workspace), bots: v1Bots.length, mains: v1Mains.length, id: mainId },
-    home: { file: homeFile, bots: homeBots.length, projects: homeRegistry.projects.length, mains: homeMains.length },
-    repo: { file: repoFile, bots: repoBots.length, mains: repoMains.length },
-    bots: v1Bots.map((bot) => ({ id: bot.id, name: bot.name, kind: bot.kind })),
+    v1: { file: rosterOf(workspace), bots: v1Bots.length, mains: v1Mains.length, id: mainId, mainId, ids: v1Bots.map((bot) => bot.id) },
+    home: { file: homeFile, bots: homeBots.length, projects: homeRegistry.projects.length, mains: homeMains.length, mainId: homeMains[0]?.id, ids: homeBots.map((bot) => bot.id) },
+    repo: { file: repoFile, bots: repoBots.length, mains: repoMains.length, mainId: repoMains[0]?.id, ids: repoBots.map((bot) => bot.id) },
+    bots: v1Bots.map((bot) => ({ id: bot.id, name: bot.name, kind: bot.kind, role: bot.role })),
   }
 }
 
@@ -352,6 +352,7 @@ export function runFirstBoot({
     surfaces = verifySurfaces({ home, workspace })
     log(`first boot: registry ${registry.state} from ${registry.script.source}${registry.script.commit ? ` @ ${registry.script.commit}` : ''}`)
     log(`first boot: v1 ${surfaces.v1.file} (${surfaces.v1.bots} bots, ${surfaces.v1.mains} main); v2 home ${surfaces.home.file} (${surfaces.home.bots} bots, ${surfaces.home.projects} project); v2 repo ${surfaces.repo.file} (${surfaces.repo.bots} bots, ${surfaces.repo.mains} main)`)
+    log(`first boot: coherent ids: v1 [${surfaces.v1.ids.join(' ')}] main ${surfaces.v1.mainId}; v2 home [${surfaces.home.ids.join(' ')}] main ${surfaces.home.mainId}; v2 repo [${surfaces.repo.ids.join(' ')}] main ${surfaces.repo.mainId}`)
   } else {
     team = { state: 'present' }
     registry = { state: 'present', homeFile }

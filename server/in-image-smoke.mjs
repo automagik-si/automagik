@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { dryRunVendorClis } from './cli-store.mjs'
 import { FIRST_BOOT_MARKER, TRIAD, runFirstBoot, seedRegistry, seedScript, sha256File, SKILL_LINKS, verifySurfaces } from './first-boot.mjs'
 import { profileDirOf } from './lib.mjs'
-import { HERDR_APP_HOME, HERDR_CORE_SOCKET, HERDR_CORE_VERSION, PNPM_PATH, REGISTRY_SEED_SHA256, REGISTRY_SEED_VENDOR, SKILL_NAME, SKILL_ROOT, SKILL_SHA256 } from './toolchain.mjs'
+import { HERDR_APP_HOME, HERDR_CORE_SOCKET, HERDR_CORE_VERSION, PNPM_PATH, REGISTRY_SEED_SHA256, REGISTRY_SEED_VENDOR, SKILL_NAME, SKILL_ROOT, SKILL_SHA256, SMOKE_HC_SESSION, XDG_RUNTIME_DIR } from './toolchain.mjs'
 
 const ROOT = '/opt/automagik'
 const HOME = process.env.AUTOMAGIK_HOME || '/data'
@@ -53,6 +53,10 @@ async function main() {
   // same env reaches dsh, am and hc; here the core must answer both its status and its list.
   check(process.env.HERDR_APP_HOME === HERDR_APP_HOME, `HERDR_APP_HOME is ${process.env.HERDR_APP_HOME ?? 'unset'}, not ${HERDR_APP_HOME}`)
   check(process.env.HC_TERMINAL_SOCKET === HERDR_CORE_SOCKET, `HC_TERMINAL_SOCKET is ${process.env.HC_TERMINAL_SOCKET ?? 'unset'}, not ${HERDR_CORE_SOCKET}`)
+  check(process.env.XDG_RUNTIME_DIR === XDG_RUNTIME_DIR, `XDG_RUNTIME_DIR is ${process.env.XDG_RUNTIME_DIR ?? 'unset'}, not ${XDG_RUNTIME_DIR}`)
+  check(process.env.HC_SESSION === SMOKE_HC_SESSION, `HC_SESSION is ${process.env.HC_SESSION ?? 'unset'}, not ${SMOKE_HC_SESSION}`)
+  const runtime = lstatSync(XDG_RUNTIME_DIR)
+  check(runtime.isDirectory() && (runtime.mode & 0o777) === 0o700, `${XDG_RUNTIME_DIR} is not a 0700 directory`)
   check(lstatSync(HERDR_CORE_SOCKET).isSocket(), `${HERDR_CORE_SOCKET} is not a Unix socket`)
   const coreStatus = command('hc', ['server', 'status', '--json'])
   check(coreStatus.trim().length > 0, 'hc server status printed nothing')
