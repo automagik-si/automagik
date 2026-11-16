@@ -3,7 +3,7 @@
 // switch of either vendor, on a reset, and once at start when it is absent or stale.
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { test } from 'node:test'
@@ -197,6 +197,23 @@ test('the record write fsyncs the file, renames, then fsyncs the directory',
     assert.deepEqual(calls.map(([kind]) => kind), ['fsync', 'rename', 'fsync'])
     assert.equal(calls[1][2], recordPath(cliHome))
     assert.equal(dirname(calls[1][1]), dirname(calls[1][2]))
+  })
+
+test('the record and the temp file it renames are private (0600)',
+  { skip: process.platform === 'win32' }, t => {
+    const { cliHome, generations } = place(t)
+    const tempModes = []
+    const rename = generations.rename
+    generations.rename = (from, to) => {
+      tempModes.push([statSync(from).mode & 0o777, to])
+      return rename(from, to)
+    }
+    generations.select('claude', randomUUID())
+    assert.deepEqual(tempModes.map(([mode]) => mode), [0o600],
+      'the temp file is private before the rename')
+    assert.equal(tempModes[0][1], recordPath(cliHome))
+    assert.equal(statSync(recordPath(cliHome)).mode & 0o777, 0o600,
+      'the record the reader opens is private')
   })
 
 test('start writes an absent record once and leaves a matching record untouched', t => {
