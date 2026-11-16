@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { HC_SESSION, HERDR_APP_HOME, HERDR_CORE_SHA256, HERDR_CORE_SOCKET, HERDR_CORE_VERSION, PNPM_PATH, XDG_RUNTIME_DIR } from '../toolchain.mjs'
+import { HC_RUNTIME, HC_SESSION, HERDR_APP_HOME, HERDR_CORE_SHA256, HERDR_CORE_SOCKET, HERDR_CORE_VERSION, PNPM_PATH, XDG_RUNTIME_DIR } from '../toolchain.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const dockerfile = readFileSync(join(ROOT, 'server/Dockerfile'), 'utf8')
@@ -18,6 +18,7 @@ test('the image sets the Arca app home, core socket, runtime and session on the 
   assert.match(dockerfile, new RegExp(`HERDR_APP_HOME=${HERDR_APP_HOME}`))
   assert.match(dockerfile, new RegExp(`HC_TERMINAL_SOCKET=${HERDR_CORE_SOCKET}`))
   assert.match(dockerfile, new RegExp(`XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}`))
+  assert.match(dockerfile, new RegExp(`HC_RUNTIME=${HC_RUNTIME}`))
   assert.match(dockerfile, new RegExp(`HC_SESSION=${HC_SESSION}`))
 })
 

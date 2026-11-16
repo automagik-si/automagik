@@ -21,7 +21,8 @@ export const HERDR_CORE_URL = `https://releases.herdr.dev/core/${HERDR_CORE_VERS
 export const HERDR_APP_HOME = '/data/herdr-app'
 export const HERDR_CORE_SOCKET = '/data/run/herdr-core/default.sock'
 /** Container-local runtime and session; the in-image smoke overrides the session name. */
-export const XDG_RUNTIME_DIR = '/data/run/user'
+export const XDG_RUNTIME_DIR = '/data/run'
+export const HC_RUNTIME = '/data/run/herdr-core'
 export const HC_SESSION = 'automagik-server'
 export const SMOKE_HC_SESSION = 'automagik-server-smoke'
 

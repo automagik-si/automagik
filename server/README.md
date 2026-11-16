@@ -187,9 +187,10 @@ store from the seeded profile (into `$AUTOMAGIK_HOME/acp/clis`), with `AUTOMAGIK
 `AUTOMAGIK_CLI_INSTALL=off` skips that background install for an operator who manages the CLIs
 elsewhere.
 
-The image sets `HERDR_APP_HOME=/data/herdr-app` and
+The image sets `HERDR_APP_HOME=/data/herdr-app`, `XDG_RUNTIME_DIR=/data/run`,
+`HC_RUNTIME=/data/run/herdr-core` and
 `HC_TERMINAL_SOCKET=/data/run/herdr-core/default.sock`. The entrypoint creates
-`/data/run/herdr-core` as uid 1000 with mode 0700 and starts `herdr-core serve` as a supervised
+`/data/run` and `/data/run/herdr-core` as uid 1000 with mode 0700 and starts `herdr-core serve` as a supervised
 child before DSH, with the same environment dsh and `hc` receive. If either child exits, the
 entrypoint stops the other and exits so the container's restart policy applies to both;
 `SIGTERM`, `SIGINT` and `SIGHUP` stop both cleanly. The in-image smoke checks that the socket is

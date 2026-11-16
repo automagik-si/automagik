@@ -6,7 +6,7 @@
 // dsh binds 127.0.0.1:3081 in the container (the production host's layout); publish it with
 // --network host or a proxy in the same network namespace, not -p.
 import { spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   ensureDataDirs,
@@ -100,17 +100,20 @@ async function main() {
   const botsHome = env.AUTOMAGIK_BOTS_HOME || join(home, 'bots')
   const workspace = env.AUTOMAGIK_WORKSPACE || join(home, 'workspace')
   const appHome = env.HERDR_APP_HOME || join(home, 'herdr-app')
-  const socketPath = env.HC_TERMINAL_SOCKET || join(home, 'run', 'herdr-core', 'default.sock')
+  const runtimeDir = env.XDG_RUNTIME_DIR || join(home, 'run')
+  const coreRuntime = env.HC_RUNTIME || join(runtimeDir, 'herdr-core')
+  const socketPath = env.HC_TERMINAL_SOCKET || join(coreRuntime, 'default.sock')
   const coreDir = dirname(socketPath)
-  const runtimeDir = env.XDG_RUNTIME_DIR || join(home, 'run', 'user')
   const session = env.HC_SESSION || 'automagik-server'
-  const dirs = [dshHome, botsHome, workspace, join(dshHome, 'pnpm-store'), join(home, 'secrets'), appHome, coreDir, runtimeDir]
+  const dirs = [dshHome, botsHome, workspace, join(dshHome, 'pnpm-store'), join(home, 'secrets'), appHome, coreDir, coreRuntime, runtimeDir]
   try {
     prepareWorkspace(workspace, { uid: 1000 })
     ensureDataDirs(dirs, { uid: 1000 })
     mkdirSync(appHome, { recursive: true, mode: 0o755 })
     mkdirSync(coreDir, { recursive: true, mode: 0o700 })
     chmodSync(coreDir, 0o700)
+    mkdirSync(coreRuntime, { recursive: true, mode: 0o700 })
+    chmodSync(coreRuntime, 0o700)
     mkdirSync(runtimeDir, { recursive: true, mode: 0o700 })
     chmodSync(runtimeDir, 0o700)
   } catch (error) {
@@ -123,6 +126,7 @@ async function main() {
   env.AUTOMAGIK_HOME = home
   env.HERDR_APP_HOME = appHome
   env.HC_TERMINAL_SOCKET = socketPath
+  env.HC_RUNTIME = coreRuntime
   env.XDG_RUNTIME_DIR = runtimeDir
   env.HC_SESSION = session
 
@@ -197,6 +201,9 @@ async function main() {
     stopping = true
     stopCore()
     warn(error.message)
+    for (const dir of [coreRuntime, runtimeDir]) {
+      try { warn(`${dir}: ${readdirSync(dir).join(', ') || '(empty)'}`) } catch { /* missing */ }
+    }
     process.exit(1)
   }
 

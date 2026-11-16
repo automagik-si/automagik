@@ -76,7 +76,7 @@ const harness = `
 `
 
 function run(value, dir, followResult = 'owner-managed') {
-  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir, HERDR_APP_HOME: join(dir, 'herdr-app'), HC_TERMINAL_SOCKET: join(dir, 'run', 'herdr-core', 'default.sock'), XDG_RUNTIME_DIR: join(dir, 'run', 'user'), HC_SESSION: 'test-entrypoint', DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult }
+  const env = { ...process.env, DSH_HOME: dir, AUTOMAGIK_HOME: dir, AUTOMAGIK_WORKSPACE: dir, HERDR_APP_HOME: join(dir, 'herdr-app'), HC_TERMINAL_SOCKET: join(dir, 'run', 'herdr-core', 'default.sock'), XDG_RUNTIME_DIR: join(dir, 'run'), HC_RUNTIME: join(dir, 'run', 'herdr-core'), HC_SESSION: 'test-entrypoint', DEEPSEEK_API_KEY: 'test-only', TEST_FOLLOW_RESULT: followResult }
   delete env.AUTOMAGIK_PUBLIC_URL
   if (value !== undefined) env.AUTOMAGIK_PUBLIC_URL = value
   const result = spawnSync(process.execPath, ['--input-type=module', '--eval', harness], {
