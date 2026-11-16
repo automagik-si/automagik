@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 const SCRIPT = join(import.meta.dir, 'capped-run');
+const WORDING = join(import.meta.dir, 'capped-run-wording.sh');
 const work = mkdtempSync(join(tmpdir(), 'capped-run-test-'));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 
@@ -189,6 +190,7 @@ function scratchCheckout(): LockScratch {
   const script = join(root, 'scripts', 'capped-run');
   mkdirSync(dirname(script), { recursive: true });
   cpSync(SCRIPT, script);
+  cpSync(WORDING, join(root, 'scripts', 'capped-run-wording.sh'));
   const init = spawnSync('git', ['init', '-q', root], { encoding: 'utf8' });
   if (init.status !== 0) throw new Error('git init failed for the lock scratch checkout');
   lockScratch = { root, script, lock: join(root, '.automagik', 'locks', 'full-gate.lock') };
@@ -434,7 +436,7 @@ describe('capped-run', () => {
       expect(outcome.status).toBe(137);
       const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
       expect(capped).toHaveLength(1);
-      expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256M, peak>=');
+      expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=');
       // Labelled peak bound: the floor is at least 90 percent of the cap, the measured last
       // sample is named, and a bare peak=<limit> (mutants 15 and 18) fails here.
       const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
@@ -487,7 +489,7 @@ describe('capped-run', () => {
         expect(outcome.status).toBe(137);
         const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
         expect(capped).toHaveLength(1);
-        expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256M, peak>=');
+        expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=');
         const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
         expect(Number.isFinite(floorMib)).toBe(true);
         expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
@@ -502,27 +504,17 @@ describe('capped-run', () => {
     120_000,
   );
 
-  test.skipIf(!scope)(
-    'the peak floor clamps a sample under the limit (test-only fake peak)',
-    () => {
-      const state = scratch('fake-peak-state');
-      const allocator = join(scratch('fake-peak-allocator'), 'alloc.js');
-      writeFileSync(allocator, 'const hold = [];\nfor (;;) hold.push(Buffer.alloc(1 << 20, 1));\n');
-      const outcome = cappedRun(['--mem', '256M', '--', process.execPath, allocator], {
-        state,
-        env: { CAPPED_RUN_TEST_MEM: '256M', CAPPED_RUN_TEST_FAKE_PEAK: '4194304' },
-        timeout: 120_000,
-      });
-      expect(outcome.status).toBe(137);
-      const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
-      expect(capped).toHaveLength(1);
-      // The fake 4 MiB sample is below the 256M limit: the floor clamps to the limit, and the
-      // last sample is still named. Mutant 15 (floor dropped) would print peak>=4.0M here.
-      expect(capped[0]).toContain('limit=256M, peak>=256.0M, last sample 4.0M, command=');
-      expect(capped[0]).not.toMatch(/peak=[0-9.]+M/);
-    },
-    120_000,
-  );
+  test('the capped line clamps a sample under the limit (pure wording)', () => {
+    const result = spawnSync(
+      'sh',
+      ['-c', '. "$1"; capped_run_capped_line 268435456 4194304 4194304 sh', 'sh', WORDING],
+      { encoding: 'utf8' },
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(
+      'CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=256.0M, last sample 4.0M, command=sh)',
+    );
+  });
 
   test.skipIf(!scope)('a very short run (under 100 ms) leaves no peak file in the state folder', () => {
     const state = scratch('short-state');
@@ -724,7 +716,7 @@ describe('capped-run', () => {
         expect(outcome.status).toBe(1);
         const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
         expect(capped).toHaveLength(1);
-        expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256M, peak>=');
+        expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=');
         const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
         expect(Number.isFinite(floorMib)).toBe(true);
         expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
