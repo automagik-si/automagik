@@ -94,22 +94,26 @@ How they fit:
   | Group admin | Manage its own group only (name, notice, members, reply mode) |
   | Member | Speak in the group, `@` another member, and post into its groups from outside them |
 
-- **Shell access**: each Bot either has a shell or does not. A new private-folder Bot
-  starts without one; an existing Bot keeps what it had, and only the user changes the
-  switch in its settings. A Bot without a shell gets no `bash`, `pwsh` or terminal tool,
+- **Shell access**: each Bot either has a shell or does not. Every new Bot states its
+  capability; a new private-folder Bot states off, and a Bot saved before it existed has
+  no field and reads as a shell, with no migration. Only the user changes the switch in
+  its settings. A Bot without a shell gets no `bash`, `pwsh` or terminal tool,
   and no tool that runs a command or starts one for it: a DSH task (`start_task`), an ACP
   agent's execute call (`acp_tool`; its reads and edits stay), a local CLI's command
   approval (`approve_agent_action`), an MCP server that would start a command
   (`save_capability`, `attach_capability`) and the computer-use tools (`cua`,
   `cua_driver_native__*`). The rule holds on the Bot's own chat, a group Session, a task, a
-  subagent, a renamed or aliased tool, and a skill. It is enforced where DSH grants tools,
-  so an absent tool is absent, not forbidden by an instruction. A Bot with shell access
-  can read what the operating-system user can read: that is the honest limit of the folder
-  fence for shell commands. Three routes stay outside this plugin: a Bot whose model is a
-  local coding CLI can run that CLI's own tools, a remote Hermes profile runs its own tools,
-  and an MCP server mounted before the shell was turned off keeps running, though a command
-  tool it exposes is refused. A shell-less Bot can still ask another Bot that has a shell
-  to run something: the capability is per Bot, not a fence around the team.
+  subagent (delegation stays, its child is bound to the parent's fence), a renamed or
+  aliased tool, and a skill. It is enforced where DSH grants tools — the tools are removed,
+  not forbidden by an instruction — and not with an operating-system sandbox. A Bot with
+  shell access can read what the operating-system user can read: that is the honest limit
+  of the folder fence for shell commands. Three routes stay outside this plugin: a Bot
+  whose model is a local coding CLI can run that CLI's own tools, a remote Hermes profile
+  runs its own tools, and an MCP server mounted before the shell was turned off keeps
+  running, though a command tool it exposes is refused. A shell-less Bot can still ask
+  another Bot that has a shell to run something: the two are different principals, the
+  recipient's own capability and approvals govern what it runs, and a message carries no
+  intent this plugin can judge, so closing it would mean refusing ordinary team messages.
 - **Scheduled tasks and restricted Bots**: a Bot with a deny list or no shell cannot create
   or edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
   layer binds; the tasks it already armed are paused and their record stays. A

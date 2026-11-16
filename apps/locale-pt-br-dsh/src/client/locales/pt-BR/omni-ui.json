@@ -1655,6 +1655,7 @@
   "Tools": "Ferramentas",
   "Shell access": "Acesso ao shell",
   "A Bot with shell access can read what the operating-system user can read.": "Um Bot com acesso ao shell pode ler o que quem usa o sistema operacional pode ler.",
+  "The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.": "O time de Bots aplica isso na concessão das ferramentas: as ferramentas são removidas; o shell não vai para um ambiente isolado do sistema operacional.",
   "Denied tools": "Ferramentas bloqueadas",
   "Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.": "Nomes exatos de ferramentas, um por linha ou separados por vírgula, diferenciando maiúsculas de minúsculas. Vazio permite todas as ferramentas.",
   "Saved level: {level}, set for the group": "Nível salvo: {level}, definido para o grupo",

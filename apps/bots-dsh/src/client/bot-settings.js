@@ -208,6 +208,8 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
         on: bot.shell !== false,
         onChange: value => save({ shell: value }),
       }),
+      h('div', { className: 'bt-bs-shell-note' },
+        t('The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.')),
       h(Row, {
         label: t('Denied tools'),
         hint: t('Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.'),
@@ -264,6 +266,7 @@ export const BOT_SETTINGS_CSS = ADVANCED_SETTINGS_CSS + `
 .bt-bs-sub{font-size:13px;line-height:18px;color:var(--bt-ink-2)}
 .bt-bs .bt-avedit{left:0;transform:none;width:min(284px,calc(100vw - 32px))}
 .bt-bs-row{min-height:48px}
+.bt-bs-shell-note{font-size:12px;line-height:16px;padding:0 16px 12px;color:color-mix(in srgb,var(--bt-ink-2) 50%,var(--bt-ink-3))}
 label.bt-bs-row{cursor:text}
 .bt-bs-row>.bt-set-copy{flex:1 1 auto}
 .bt-bs-label{font-size:13px;line-height:18px;font-weight:500}

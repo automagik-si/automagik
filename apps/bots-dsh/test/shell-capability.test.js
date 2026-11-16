@@ -39,6 +39,13 @@ function definitionsOf() {
     ['cua_driver_native__launch_app', schema('cua_driver_native__launch_app', { app: { type: 'string' } }, ['app'])],
     ['read', schema('read', { file_path: { type: 'string' } }, ['file_path'])],
     ['write', schema('write', { file_path: { type: 'string' } }, ['file_path'])],
+    ['edit', schema('edit', { file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, ['file_path', 'old_string', 'new_string'])],
+    ['grep', schema('grep', { pattern: { type: 'string' }, path: { type: 'string' } }, ['pattern'])],
+    ['glob', schema('glob', { pattern: { type: 'string' }, path: { type: 'string' } }, ['pattern'])],
+    ['read_image', schema('read_image', { file_path: { type: 'string' } }, ['file_path'])],
+    ['str_replace_editor', schema('str_replace_editor', { path: { type: 'string' }, old_str: { type: 'string' }, new_str: { type: 'string' } }, ['path'])],
+    ['working_directory', schema('working_directory', { cd: { type: 'string' } }, ['cd'])],
+    ['session_search', schema('session_search', { query: { type: 'string' } }, ['query'])],
     ['message_bot', schema('message_bot', { to: { type: 'string' }, message: { type: 'string' } }, ['to', 'message'])],
     ['schedule_create', schema('schedule_create', { title: { type: 'string' }, prompt: { type: 'string' } }, ['title', 'prompt'])],
     ['schedule_edit', schema('schedule_edit', { id: { type: 'string' } }, ['id'])],
@@ -54,6 +61,7 @@ const SCOPED = [
   'attach_capability',
   'approve_agent_action',
   'acp_tool',
+  'subagent',
 ]
 
 function scopedDefinitionsOf() {
@@ -65,6 +73,7 @@ function scopedDefinitionsOf() {
     ['attach_capability', schema('attach_capability', { name: { type: 'string' } }, ['name'])],
     ['approve_agent_action', schema('approve_agent_action', { action: { type: 'string' }, detail: { type: 'string' } }, ['action'])],
     ['acp_tool', schema('acp_tool', { id: { type: 'string' }, title: { type: 'string' }, kind: { type: 'string' }, input: { type: 'object' } }, ['title', 'kind', 'input'])],
+    ['subagent', schema('subagent', { prompt: { type: 'string' }, description: { type: 'string' } }, ['prompt'])],
   ])
 }
 
@@ -259,6 +268,29 @@ test('a new private Bot gets no shell on its own chat', async (t) => {
   await allowed(guard(), 'read', { id: bot.id }, { file_path: '/tmp/notes.txt' })
 })
 
+test('a shell-less Bot keeps its file, search and path tools', async (t) => {
+  const { create, guard, restrictionFor } = team(t)
+  const bot = await create({ shell: false })
+  await flush()
+  const deny = new Set(restrictionFor(bot.id).deny)
+  const kept = [
+    ['read', { file_path: '/tmp/a' }],
+    ['write', { file_path: '/tmp/a' }],
+    ['edit', { file_path: '/tmp/a', old_string: 'a', new_string: 'b' }],
+    ['grep', { pattern: 'x' }],
+    ['glob', { pattern: '*.md' }],
+    ['read_image', { file_path: '/tmp/a.png' }],
+    ['str_replace_editor', { path: '/tmp/a', old_str: 'a', new_str: 'b' }],
+    ['working_directory', { cd: '/tmp' }],
+    ['session_search', { query: 'notes' }],
+  ]
+  // Only command-taking surfaces disappear; the file, search and path tools stay.
+  for (const [name, args] of kept) {
+    assert.equal(deny.has(name), false, `${name} stays available`)
+    await allowed(guard(), name, { id: bot.id }, args)
+  }
+})
+
 test('a group Session of a shell-less Bot has no shell', async (t) => {
   const { rt, create, guard, restrictionFor } = team(t)
   const bot = await create({ shell: false })
@@ -288,9 +320,11 @@ test('a worker task of a shell-less Bot has no shell', async (t) => {
   await refused(guard(), 'bash', { id: 'task-run-1' }, { command: 'id' })
 })
 
-test('a subagent of a shell-less Bot has no shell', async (t) => {
+test('a shell-less Bot cannot reach a shell by delegating to a subagent', async (t) => {
   const { ctx, rt, create, guard, restrictionFor, sessions } = team(t)
   const bot = await create({ shell: false })
+  // Delegation itself stays; the child is bound to the parent's fence by its header lineage.
+  await allowed(guard(), 'subagent', { id: bot.id }, { prompt: 'inspect the folder' })
   const childId = 'child-run-1'
   sessions.set(childId, Session.create(childId, [], {
     version: SESSION_FORMAT_VERSION, id: childId, createdAt: Date.now(), cwd: '/tmp',
@@ -320,6 +354,16 @@ test('a shell-less Bot cannot start a worker, an agent CLI or a terminal route',
   await refused(exec, 'approve_agent_action', { id: bot.id }, { action: 'Run id', detail: 'id' })
   await refused(exec, 'save_capability', { id: bot.id }, { name: 'shell', kind: 'mcp', command: '/bin/sh' })
   await refused(exec, 'attach_capability', { id: bot.id }, { name: 'shell' })
+})
+
+test('asking another Bot with a shell is a named per-Bot limit', async (t) => {
+  const { create, guard } = team(t)
+  const shellLess = await create({ shell: false })
+  const withShell = await create({ name: 'Runner' })
+  // The shell-less Bot may ask: the recipient is a different Bot, and its own capability,
+  // approvals and guard govern what it runs. bots-dsh cannot see the intent in a message.
+  await allowed(guard(), 'message_bot', { id: shellLess.id }, { to: withShell.name, message: 'run id and tell me' })
+  await allowed(guard(), 'bash', { id: withShell.id }, { command: 'id' })
 })
 
 test('a renamed or aliased command tool is denied without naming it', async (t) => {
@@ -353,7 +397,7 @@ test('a skill cannot give a shell-less Bot a shell', async (t) => {
   await refused(guard(), 'bash', { id: bot.id }, { command: 'id' })
 })
 
-test('an existing stored Bot keeps its shell', async (t) => {
+test('a stored Bot with no field reads shell on', async (t) => {
   const { rt, home, guard } = team(t, { storedTeam: storedBefore() })
   await rt.load()
   const stored = rt.botOf('old')
@@ -365,13 +409,13 @@ test('an existing stored Bot keeps its shell', async (t) => {
   assert.equal(saved.bots.old.shell, undefined)
 })
 
-test('a new public Bot keeps a shell', async (t) => {
+test('a new non-private Bot states shell on and is otherwise unchanged', async (t) => {
   const { rt, create, guard } = team(t)
   const bot = await create()
-  assert.equal(Object.hasOwn(bot, 'shell'), false)
+  assert.equal(bot.shell, true)
   await allowed(guard(), 'bash', { id: bot.id }, { command: 'id' })
   const saved = JSON.parse(readFileSync(join(rt.home, 'state.json'), 'utf8'))
-  assert.equal(saved.bots[bot.id].shell, undefined)
+  assert.equal(saved.bots[bot.id].shell, true)
 })
 
 test('only the user changes a shell, and a change applies at once', async (t) => {
@@ -379,23 +423,23 @@ test('only the user changes a shell, and a change applies at once', async (t) =>
   const bot = await create()
   await assert.rejects(() => rt.updateBot(bot.id, { shell: false }, bot.id), /Only the user/)
   await assert.rejects(() => rt.updateBot(bot.id, { shell: 'off' }), /shell is true or false/)
-  assert.equal(bot.shell, undefined)
+  assert.equal(bot.shell, true)
   await rt.updateBot(bot.id, { shell: false })
   assert.equal(bot.shell, false)
   assert.ok(restrictionFor(bot.id).deny.includes('bash'))
   await refused(guard(), 'bash', { id: bot.id }, { command: 'id' })
   await rt.updateBot(bot.id, { shell: true })
-  assert.equal(bot.shell, undefined)
+  assert.equal(bot.shell, true)
   await allowed(guard(), 'bash', { id: bot.id }, { command: 'id' })
 })
 
 test('turning a Bot private never changes its stored shell', async (t) => {
   const { rt, create, guard, folder } = team(t)
   const bot = await create({ workDir: folder() })
-  assert.equal(bot.shell, undefined)
+  assert.equal(bot.shell, true)
   await rt.updateBot(bot.id, { private: true })
   assert.equal(bot.private, true)
-  assert.equal(bot.shell, undefined)
+  assert.equal(bot.shell, true)
   await allowed(guard(), 'bash', { id: bot.id }, { command: 'id' })
   // The same Bot made private and then given a shell keeps it when it is opened again.
   await rt.updateBot(bot.id, { shell: false })
@@ -409,6 +453,6 @@ test('a private Bot created with an explicit shell keeps it', async (t) => {
   const { rt, create, guard, folder } = team(t)
   const bot = await create({ private: true, workDir: folder(), shell: true })
   assert.equal(bot.private, true)
-  assert.equal(bot.shell, undefined)
+  assert.equal(bot.shell, true)
   await allowed(guard(), 'bash', { id: bot.id }, { command: 'id' })
 })

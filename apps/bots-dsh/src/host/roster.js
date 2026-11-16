@@ -359,8 +359,9 @@ export function install(rt) {
         // A private-folder Bot. Its shell defaults to off; changing `private` later never
         // changes a stored Bot's shell (updateBot).
         ...(isPrivate ? { private: true } : {}),
-        // Absent means a shell; only an explicit off is stored, so existing Bots keep theirs.
-        ...(shellOff ? { shell: false } : {}),
+        // Every new Bot states its capability. Readers still treat an absent field (a Bot
+        // saved before this existed) as a shell, so nothing is migrated.
+        shell: !shellOff,
         // The tools this Bot never gets, enforced on every Session it speaks from.
         ...(denied ? { denyTools: denied } : {}),
         ...(resolvedSecId ? { sectionId: resolvedSecId } : {}),
@@ -690,12 +691,9 @@ export function install(rt) {
       if (denyTools === null) delete bot.denyTools
       else bot.denyTools = denyTools
     }
-    // Only an explicit off is stored: absent keeps a shell, including for every Bot saved
-    // before the capability existed. Turning it back on removes the mark.
-    if (shell !== undefined) {
-      if (shell === false) bot.shell = false
-      else delete bot.shell
-    }
+    // A change states the capability on the record. An absent field still reads as a
+    // shell: that is how every Bot saved before this capability existed keeps its own.
+    if (shell !== undefined) bot.shell = shell
     if (flag === true) bot.private = true
     else if (flag === false) delete bot.private
     if (patch.section !== undefined || patch.sectionId !== undefined) {

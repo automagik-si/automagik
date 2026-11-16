@@ -53,6 +53,22 @@ const mutants = [
     test: 'environment AUTOMAGIK_REVIEW_ENDPOINT is redacted across SDK reads, arguments and audit',
   },
   {
+    name: 'shell classifier lets an unknown command tool through',
+    source: '../src/host/tool-deny.js',
+    from: 'if (Object.keys(properties).some(key => COMMAND_PARAMS.has(key))) return rememberShell(definition, true)',
+    to: 'if (false) return rememberShell(definition, true)',
+    file: 'test/shell-capability.test.js',
+    test: 'a renamed or aliased command tool is denied without naming it',
+  },
+  {
+    name: 'shell classifier lets an unknown agent call through',
+    source: '../src/host/tool-deny.js',
+    from: "return typeof args.kind !== 'string' || !ACP_SAFE_KINDS.has(args.kind)",
+    to: 'return false',
+    file: 'test/shell-capability.test.js',
+    test: 'a shell-less Bot cannot start a worker, an agent CLI or a terminal route',
+  },
+  {
     name: 'shell capability checked only in the UI',
     source: '../src/host/tool-deny.js',
     from: 'const noShell = bot => bot?.shell === false',

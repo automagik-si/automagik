@@ -1231,6 +1231,7 @@ const ZH = {
   Tools: '工具',
   'Shell access': 'Shell 访问',
   'A Bot with shell access can read what the operating-system user can read.': '有 shell 访问权限的 Bot 可以读取操作系统用户能读取的内容。',
+  'The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.': 'Bot 团队在授予工具时执行此设置：它会移除这些工具，而不会把 shell 放进操作系统沙箱。',
   'Denied tools': '禁止使用的工具',
   'Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.': '精确的工具名，每行一个或用逗号分隔，区分大小写。留空表示允许所有工具。',
   'What this Bot does': '这个 Bot 做什么',

@@ -73,6 +73,11 @@ test('the Shell switch shows what shell access reaches and saves the capability'
   const off = settings({ ...bot, shell: false }).find(node => node.props?.label === 'Shell access')
   assert.equal(off.props.on, false)
   assert.equal(off.props.hint, sentence)
+  // The card says where the fence lives: the tool grant, not an operating-system sandbox.
+  const note = settings(bot).find(node => node.props?.className === 'bt-bs-shell-note')
+  assert.equal([].concat(note.props.children).join(''),
+    'The Bot team enforces this at the tool grant: it removes the tools; '
+      + 'it does not put a shell in an operating-system sandbox.')
 
   const calls = []
   const roster = { mainBotIds: [], mainBotId: null, rooms: [], models: [], memory: false }
