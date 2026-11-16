@@ -966,10 +966,12 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
   }
   // The version rolled away from is never installed on its own again (auto-update waits for a
   // newer one). Recorded before the swap: a run that dies after it still leaves the skip; one
-  // whose swap fails leaves that version installed, where the skip changes nothing.
+  // whose swap fails leaves that version installed, where the skip changes nothing. The cause
+  // goes with it: this restore is a check that judged a mod failed (`mods`); a rollback a person
+  // asked for keeps none. `am update --retry-skipped` clears the record.
   const recordSkip = () => {
     if (!/^\d+\.\d+\.\d+$/.test(record.version ?? "") || record.version === UNRELEASED) return;
-    try { writeAutoHeld(modsDir, { skip: record.version }); } catch (error) {
+    try { writeAutoHeld(modsDir, { skip: record.version, skipCause: restore ? "mods" : null }); } catch (error) {
       throw new Error(`the rollback could not be recorded in ${autoFileOf(modsDir)} (${error.message}): nothing rolled back`);
     }
   };
@@ -1326,7 +1328,9 @@ export function placeLayout({ modsDir, tgzDir, record, log = () => {} }) {
  * `herdr-app check` on each of `mods`, its whole output shown on a failure. Returns `{ failed,
  * checked, unavailable }`: the mods whose check failed, whether the check ran at all, and why it
  * could not run (herdr-app not on PATH, or the program could not start or finish: a spawn error,
- * not a mod that failed to load). `checked` false means no mod was judged.
+ * not a mod that failed to load). Exit 126 or 127 is the program loader saying it never started
+ * the check (a missing shared library, a not-executable file): no mod was judged, whatever the
+ * check would have said. `checked` false means no mod was judged.
  */
 /**
  * The record's mods `herdr-app check` should load: all but the ones switched off (in
@@ -1345,6 +1349,17 @@ export function checkMods({ modsDir, mods, log = () => {}, herdrApp = "herdr-app
       execFileSync(herdrApp, ["check", join(modsDir, m)], { stdio: "pipe", timeout: CHECK_TIMEOUT_MS });
       log(`check passed: ${m}`);
     } catch (error) {
+      // The program loader could not start the check (a missing shared library, a not-executable
+      // file): exit 126 or 127 means no mod was judged, whatever the check would have said. The
+      // loader's own words are the reason when it printed them; the status alone is enough, and
+      // the same words on another status are a real failure below.
+      if (error.status === 126 || error.status === 127) {
+        haveHerdr = false;
+        const said = String(error.stderr || error.stdout || "").trim().split("\n")[0];
+        unavailable = `the herdr-app check could not run (exit ${error.status}${said ? `: ${said}` : ""})`;
+        log(`${unavailable}: no mod was checked`);
+        break;
+      }
       // A check that ran and said no: the mod does not load (a non-zero exit, its output shown).
       if (typeof error.status === "number") {
         failed.push(m);
@@ -1469,9 +1484,11 @@ export const olderSequence = (record, pack) =>
  * is another one by now, nothing is downloaded: `{ ..., installed: null, refused: { expected, latest } }`.
  * `auto`: the mod installing on its own. Under the lock, before any download, the setting and the
  * record are read again: when autoHold says no, or another update or rollback runs, nothing is
- * downloaded: `{ ..., installed: null, held: why }`.
+ * downloaded: `{ ..., installed: null, held: why }`. `retrySkipped`: the person asked for the
+ * release this pack rolled away from (`am update --retry-skipped`): its skip is cleared once the
+ * tarball is here and about to be swapped in.
  */
-export async function installUpdate({ fetch = globalThis.fetch, env = process.env, modsDir = defaultModsDir(env), keys, log, binDir = null, window = false, expect = null, auto = false, herdrApp = "herdr-app", projectDir, hcRun } = {}) {
+export async function installUpdate({ fetch = globalThis.fetch, env = process.env, modsDir = defaultModsDir(env), keys, log, binDir = null, window = false, expect = null, auto = false, retrySkipped = false, herdrApp = "herdr-app", projectDir, hcRun } = {}) {
   const found = await checkForUpdate({ fetch, env, modsDir, keys, projectDir, hcRun });
   if (!found.update) return { ...found, installed: null };
   if (expect && found.update.version !== expect) return { ...found, installed: null, refused: { expected: expect, latest: found.update.version } };
@@ -1488,7 +1505,7 @@ export async function installUpdate({ fetch = globalThis.fetch, env = process.en
     if (late) return { ...found, current: late.current, update: null, installed: null };
     const hold = auto ? autoHold(found.update.version, autoStatus(modsDir)) : null;
     if (hold) return { ...found, auto: autoStatus(modsDir), installed: null, held: hold };
-    const done = await downloadAndApply(found, { fetch, modsDir, log, binDir, window, herdrApp, projectDir, hcRun });
+    const done = await downloadAndApply(found, { fetch, modsDir, log, binDir, window, herdrApp, projectDir, hcRun, retrySkipped });
     // On its own, an install whose record wasn't written is a failure: the record still names the
     // old version, and the next check would install it again. A restore has rewritten its own.
     if (auto && done.installed?.recorded === false && !done.installed?.restored) {
@@ -1668,12 +1685,17 @@ function checkUpdated({ modsDir, mods, version, log = () => {}, herdrApp = "herd
   }
 }
 
-async function downloadAndApply(found, { fetch, modsDir, log, binDir, window, herdrApp, projectDir, hcRun }) {
+async function downloadAndApply(found, { fetch, modsDir, log, binDir, window, herdrApp, projectDir, hcRun, retrySkipped = false }) {
   const dir = mkdtempSync(join(tmpdir(), "automagik-herdr-"));
   try {
     const tgzPath = await downloadUpdate(found.update, { fetch, dir });
     const before = oldSidebarHere(modsDir);
     clearNotes(modsDir); // a previous update's notes are not this one's
+    // An explicit retry (`am update --retry-skipped`) asks for the release this pack rolled away
+    // from: its skip is cleared here, once the verified tarball is here and the swap is next, so
+    // a download that fails keeps the record. Nothing else clears a skip; a retry that fails the
+    // check again records a fresh one.
+    if (retrySkipped && readAuto(modsDir).skip === found.update.version) writeAutoHeld(modsDir, { skip: null, skipCause: null });
     const installed = await applyUpdate({ tgzPath, version: found.update.version, sequence: found.update.sequence, modsDir, log });
     // The swap is the point an update becomes live: check it before anything else touches the home.
     const checked = checkUpdated({ modsDir, mods: installed.mods, version: found.update.version, log, herdrApp, binDir, window, projectDir, hcRun });
@@ -1683,8 +1705,8 @@ async function downloadAndApply(found, { fetch, modsDir, log, binDir, window, he
     if (checked.warnings?.length) installed.warnings.push(...checked.warnings);
     if (!checked.checked) {
       try {
-        saveCheck(modsDir, { version: found.update.version, from: found.current ?? null,
-          unavailable: checked.unavailable, at: Date.now() });
+        saveCheck(modsDir, { version: found.update.version, from: found.current ?? null, failed: [],
+          checked: false, unavailable: checked.unavailable, at: Date.now() });
       } catch (error) { log(`warning: the check note was not saved (${error.message})`); }
     }
     if (checked.restored) {

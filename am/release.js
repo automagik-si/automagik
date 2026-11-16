@@ -290,10 +290,14 @@ export const noticeText = (update) =>
 
 /**
  * The pack's own update setting and state, beside its record:
- * `<app home>/automagik-herdr/auto-update.json`, `{ "auto": true | false, "skip": "X.Y.Z" }`.
+ * `<app home>/automagik-herdr/auto-update.json`,
+ * `{ "auto": true | false, "skip": "X.Y.Z", "skipCause": "mods" | "runner" }`.
  * `auto`: install verified releases on their own (on unless it says false). `skip`: the version
  * `automagik-herdr update --rollback` rolled away from; auto-update never installs it again and
- * waits for a newer one. The mod, update.mjs and the CLI all read it through parseAuto.
+ * waits for a newer one. `skipCause`: why it was rolled away from, when that was recorded: `mods`
+ * (a mod that does not load) or `runner` (a check that could not start); absent on a manual
+ * rollback and on a skip written before causes were kept. `am update --retry-skipped` clears it.
+ * The mod, update.mjs and the CLI all read it through parseAuto.
  */
 export const AUTO_FILE = "auto-update.json";
 /**
@@ -313,22 +317,29 @@ export const HELD_FILE = "held-mods.json";
  */
 export const RESTORE_FILE = "restored-mods.json";
 /**
- * Beside the record: `{ version, from, unavailable, at }` when herdr-app could not judge the pack
- * an update just installed (it is kept). The new build reads it at load, since the build that ran
- * the update is usually reloaded away before its answer arrives; it says the update was not checked.
+ * Beside the record: `{ version, from, failed, checked, unavailable, at }` when herdr-app could
+ * not judge the pack an update just installed (it is kept): `checked` false, no mod in `failed`,
+ * `unavailable` why. The new build reads it at load, since the build that ran the update is usually
+ * reloaded away before its answer arrives; it says the update was not checked.
  */
 export const CHECK_FILE = "unchecked-mods.json";
 
-/** The setting as `{ on, skip }`: on unless the file says `"auto": false`; skip a version or null. */
+/**
+ * The setting as `{ on, skip }`, plus `skipCause` when one was recorded: on unless the file says
+ * `"auto": false`; skip a version or null; the cause, `mods` or `runner`, only for a skip that has
+ * one (a manual rollback, and a skip written before causes were kept, carry none).
+ */
 export function parseAuto(text) {
   let value = null;
   try { value = JSON.parse(text); } catch {}
   const o = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  return { on: o.auto !== false, skip: typeof o.skip === "string" && /^\d+\.\d+\.\d+$/.test(o.skip) ? o.skip : null };
+  const skip = typeof o.skip === "string" && /^\d+\.\d+\.\d+$/.test(o.skip) ? o.skip : null;
+  const skipCause = skip && (o.skipCause === "mods" || o.skipCause === "runner") ? o.skipCause : null;
+  return { on: o.auto !== false, skip, ...(skipCause ? { skipCause } : {}) };
 }
 
-export const formatAuto = ({ on = true, skip = null } = {}) =>
-  `${JSON.stringify({ auto: on !== false, ...(skip ? { skip } : {}) }, null, 2)}\n`;
+export const formatAuto = ({ on = true, skip = null, skipCause = null } = {}) =>
+  `${JSON.stringify({ auto: on !== false, ...(skip ? { skip, ...(skipCause ? { skipCause } : {}) } : {}) }, null, 2)}\n`;
 
 /**
  * Why auto-update leaves `version` alone, or null when it may install it. `auto`: `{ on, skip,
