@@ -55,10 +55,30 @@ export const OUTCOME_TTL_MS = 60_000
 const METHODS = { start: 'loginStart', current: 'loginCurrent', status: 'loginStatus', answer: 'loginAnswer', cancel: 'loginCancel' }
 export const CODE_HINT = 'Paste the complete code shown by Claude, including the part after #.'
 export const CODE_REFUSED = 'This message contains a sign-in code, so it was not sent. Paste the code only in the sign-in step.'
-const DEVICE_FAILURES = new Set([
-  'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.',
-  'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.',
+const DEVICE_ACCESS = 'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.'
+const DEVICE_START = 'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.'
+const DEVICE_FAILURES = new Set([DEVICE_ACCESS, DEVICE_START])
+// Why an attempt failed, as fixed words. acp-dsh computes one cause from a closed set it never
+// fills with CLI output (its own words: what the CLI printed is never kept), so a failed row can
+// say what happened instead of one dead end. A host from before the cause existed carries only
+// its fixed message; the two this side already knew are still recognized.
+const CODE_NOT_READY = 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'
+const FAILED_REASONS = new Map([
+  ['no CLI found', CODE_NOT_READY],
+  ['no sign-in link in time', 'The CLI did not offer a sign-in link in time. Try again.'],
+  ['the CLI could not be started', 'The CLI could not be started. Run it once in a terminal, then try again.'],
+  ['unsupported sign-in link', 'The CLI returned an old sign-in link. Update it, then try again.'],
+  ['the CLI did not confirm the sign-in', 'The CLI did not confirm the sign-in. Try again.'],
+  ['the CLI exited', 'The CLI exited before the sign-in finished. Try again.'],
 ])
+const DEVICE_CAUSES = new Map([['device-code login is not enabled', DEVICE_ACCESS], ['device sign-in did not start', DEVICE_START]])
+const failedMessageOf = (value, provider) => {
+  const cause = typeof value?.cause === 'string' ? value.cause : ''
+  if (provider === 'acp-codex' && DEVICE_CAUSES.has(cause)) return DEVICE_CAUSES.get(cause)
+  if (FAILED_REASONS.has(cause)) return FAILED_REASONS.get(cause)
+  if (value?.message === 'Install the CLI before signing in.') return CODE_NOT_READY
+  return provider === 'acp-codex' && DEVICE_FAILURES.has(value?.message) ? value.message : 'Sign-in did not finish. Try again.'
+}
 const ERRORS = {
   'acp-account/unverified-login': ACCOUNT_RECOVERY_HINT,
   'acp-login/invalid': 'This sign-in request is no longer valid. Start again.',
@@ -126,9 +146,7 @@ export function cliLoginView(value, provider, attemptId) {
     }
     if (value.checking === true) view.checking = true
   }
-  if (value.status === 'failed') view.message = value.message === 'Install the CLI before signing in.'
-    ? 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'
-    : provider === 'acp-codex' && DEVICE_FAILURES.has(value.message) ? value.message : 'Sign-in did not finish. Try again.'
+  if (value.status === 'failed') view.message = failedMessageOf(value, provider)
   if (value.status === 'expired') view.message = 'This sign-in expired. Start again.'
   if (value.status === 'cancelled') view.message = 'Sign-in cancelled.'
   return view
