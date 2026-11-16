@@ -220,6 +220,8 @@ async function world(options: { whatsapp?: boolean } = {}) {
     outboundService: async () => { throw new Error('Unexpected outbound network request'); },
     bindings: {
       BETTER_AUTH_URL: origin,
+      // Local runs only: a passkey for localhost works on localhost and nowhere else.
+      PASSKEY_RP_ID: 'localhost',
       BETTER_AUTH_SECRET: 'test-only-auth-secret-placeholder-never-deployed',
       // The service's own test values: with both set, it offers WhatsApp.
       ...(options.whatsapp ? { WHATSAPP_RECEIVING_NUMBER: RECEIVING, OMNI_INBOUND_TOKEN: INBOUND_TOKEN } : {}),

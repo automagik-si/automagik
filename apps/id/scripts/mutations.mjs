@@ -76,6 +76,26 @@ const mutations = [
     edits: [['src/index.ts', 'if (directPage(url.pathname)) return', 'if (false) return']],
   },
   {
+    name: 'take the passkey site name from the service host',
+    test: 'registration and sign-in options carry the site name automagik.si',
+    edits: [['src/auth.ts', '        rpID,', '        rpID: new URL(origin).hostname,']],
+  },
+  {
+    name: 'start on a host outside the passkey site name',
+    test: 'a host outside the site name is refused',
+    edits: [['src/site.ts', 'if (!hostUnderSiteName(host, siteName))', 'if (false)']],
+  },
+  {
+    name: 'accept a look-alike host ending in the site name',
+    test: 'a host outside the site name is refused',
+    edits: [['src/site.ts', 'host.endsWith(`.${siteName}`)', 'host.endsWith(siteName)']],
+  },
+  {
+    name: 'let configure accept a workers.dev origin',
+    test: 'a host outside automagik.si, a workers.dev one included, is refused',
+    edits: [['scripts/configure.ts', '!hostUnderSiteName(origin.hostname, PASSKEY_SITE_NAME)', 'false']],
+  },
+  {
     name: 'let CI skip the page browser tests',
     test: 'the CI job runs the browser tests',
     edits: [['../../.github/workflows/ci.yml', 'ID_PAGES_BROWSER: required', 'ID_PAGES_BROWSER: optional']],
