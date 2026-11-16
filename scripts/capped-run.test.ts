@@ -781,55 +781,65 @@ describe('capped-run', () => {
         stderr += chunk.toString();
       });
       const done = closeCode(wrapper);
-      let unit = '';
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const list = spawnSync(
-          'systemctl',
-          ['--user', 'list-units', '--all', '--plain', '--no-legend', `capped-run-${name}-*`],
+
+      try {
+        let unit = '';
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          const list = spawnSync(
+            'systemctl',
+            ['--user', 'list-units', '--all', '--plain', '--no-legend', `capped-run-${name}-*`],
+            { encoding: 'utf8' },
+          );
+          const first = (list.stdout ?? '').trim().split('\n')[0] ?? '';
+          unit = first.trim().split(/\s+/)[0] ?? '';
+          if (unit) break;
+          await Bun.sleep(100);
+        }
+        expect(unit).not.toBe('');
+        const shown = spawnSync('systemctl', ['--user', 'show', '-p', 'Description', '--value', unit], {
+          encoding: 'utf8',
+        });
+        expect(shown.status).toBe(0);
+        expect(shown.stdout ?? '').toContain('bun');
+        expect(shown.stdout ?? '').not.toContain(marker);
+        expect(await done).toBe(0);
+        // Nothing was killed: no CAPPED line and no monitor-ended line.
+        expect(stderr.split('\n').filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
+        expect(stderr).not.toContain('exit 137:');
+        const log = existsSync(join(state, 'runs.log')) ? readFileSync(join(state, 'runs.log'), 'utf8') : '';
+        expect(log).not.toContain(marker);
+        await Bun.sleep(200);
+        const journal = spawnSync(
+          'journalctl',
+          ['--user', '--unit', unit, '--no-pager', '--output', 'verbose'],
           { encoding: 'utf8' },
         );
-        const first = (list.stdout ?? '').trim().split('\n')[0] ?? '';
-        unit = first.trim().split(/\s+/)[0] ?? '';
-        if (unit) break;
-        await Bun.sleep(100);
+        expect(journal.status).toBe(0);
+        // journalctl --unit already scopes these lines and the verbose entries come back to back
+        // on this host, so no entry split is needed: the whole read is the unit's own journal.
+        const unitLog = journal.stdout ?? '';
+        const unitField = `USER_UNIT=${unit}`;
+        const systemdField = `_SYSTEMD_UNIT=${unit}`;
+        expect(unitLog.includes(unitField) || unitLog.includes(systemdField)).toBe(true);
+        expect(unitLog).not.toContain(marker);
+        const started =
+          unitLog.includes('MESSAGE=Started') && unitLog.includes(`capped-run: bun (${name})`);
+        if (!started) {
+          // Bun 1.4.4 refuses test.skip() inside a test, so fail with the plain reason instead of
+          // passing vacuously when the host's journal has no Started line for this unit.
+          throw new Error('journal has no Started line for the unit on this host');
+        }
+        expect(unitLog).toContain('MESSAGE=Started');
+        expect(unitLog).toContain(`capped-run: bun (${name})`);
+      } finally {
+        if (safeKill(wrapper.pid, 'SIGTERM')) {
+          if (!(await processGoneWithin(wrapper.pid, 3_000))) {
+            safeKill(wrapper.pid, 'SIGKILL');
+          }
+        }
       }
-      expect(unit).not.toBe('');
-      const shown = spawnSync('systemctl', ['--user', 'show', '-p', 'Description', '--value', unit], {
-        encoding: 'utf8',
-      });
-      expect(shown.status).toBe(0);
-      expect(shown.stdout ?? '').toContain('bun');
-      expect(shown.stdout ?? '').not.toContain(marker);
-      expect(await done).toBe(0);
-      // Nothing was killed: no CAPPED line and no monitor-ended line.
-      expect(stderr.split('\n').filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
-      expect(stderr).not.toContain('exit 137:');
-      const log = existsSync(join(state, 'runs.log')) ? readFileSync(join(state, 'runs.log'), 'utf8') : '';
-      expect(log).not.toContain(marker);
-      await Bun.sleep(200);
-      const journal = spawnSync(
-        'journalctl',
-        ['--user', '--unit', unit, '--no-pager', '--output', 'verbose'],
-        { encoding: 'utf8' },
-      );
-      expect(journal.status).toBe(0);
-      // systemd versions differ: the unit is USER_UNIT on this host's user manager and
-      // _SYSTEMD_UNIT on older ones. Take the unit's own entries by either field.
-      const unitEntries = (journal.stdout ?? '')
-        .split(/\n\s*\n/)
-        .filter(entry => entry.includes(`USER_UNIT=${unit}`) || entry.includes(`_SYSTEMD_UNIT=${unit}`));
-      expect(unitEntries.join('\n\n')).not.toContain(marker);
-      const started = unitEntries.find(
-        entry => entry.includes('MESSAGE=Started') && entry.includes(`capped-run: bun (${name})`),
-      );
-      if (!started) {
-        // Bun 1.4.4 refuses test.skip() inside a test, so fail with the plain reason instead of
-        // passing vacuously when the host's journal has no Started line for this unit.
-        throw new Error('journal has no Started line for the unit on this host');
-      }
-      expect(started).toContain('MESSAGE=Started');
-      expect(started).toContain(`capped-run: bun (${name})`);
+
     },
     120_000,
   );
@@ -859,59 +869,69 @@ describe('capped-run', () => {
         stderr += chunk.toString();
       });
       const done = closeCode(wrapper);
-      let unit = '';
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const list = spawnSync(
-          'systemctl',
-          ['--user', 'list-units', '--all', '--plain', '--no-legend', `capped-run-${name}-*`],
+
+      try {
+        let unit = '';
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          const list = spawnSync(
+            'systemctl',
+            ['--user', 'list-units', '--all', '--plain', '--no-legend', `capped-run-${name}-*`],
+            { encoding: 'utf8' },
+          );
+          const first = (list.stdout ?? '').trim().split('\n')[0] ?? '';
+          unit = first.trim().split(/\s+/)[0] ?? '';
+          if (unit) break;
+          await Bun.sleep(100);
+        }
+        expect(unit).not.toBe('');
+        const shown = spawnSync('systemctl', ['--user', 'show', '-p', 'Description', '--value', unit], {
+          encoding: 'utf8',
+        });
+        expect(shown.status).toBe(0);
+        expect(shown.stdout ?? '').not.toContain(marker);
+        expect(await done).toBe(137);
+        const capped = stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
+        const ended = stderr
+          .split('\n')
+          .filter(line => line.startsWith('exit 137: the memory monitor ended before its final read;'));
+        // Either honest line, exactly one: never both and never silence.
+        expect(capped.length + ended.length).toBe(1);
+        const line = capped[0] ?? ended[0];
+        expect(line).not.toContain(marker);
+        const log = existsSync(join(state, 'runs.log')) ? readFileSync(join(state, 'runs.log'), 'utf8') : '';
+        expect(log).not.toContain(marker);
+        await Bun.sleep(200);
+        const journal = spawnSync(
+          'journalctl',
+          ['--user', '--unit', unit, '--no-pager', '--output', 'verbose'],
           { encoding: 'utf8' },
         );
-        const first = (list.stdout ?? '').trim().split('\n')[0] ?? '';
-        unit = first.trim().split(/\s+/)[0] ?? '';
-        if (unit) break;
-        await Bun.sleep(100);
+        expect(journal.status).toBe(0);
+        // journalctl --unit already scopes these lines and the verbose entries come back to back
+        // on this host, so no entry split is needed: the whole read is the unit's own journal.
+        const unitLog = journal.stdout ?? '';
+        const unitField = `USER_UNIT=${unit}`;
+        const systemdField = `_SYSTEMD_UNIT=${unit}`;
+        expect(unitLog.includes(unitField) || unitLog.includes(systemdField)).toBe(true);
+        expect(unitLog).not.toContain(marker);
+        const started =
+          unitLog.includes('MESSAGE=Started') && unitLog.includes(`capped-run: bun (${name})`);
+        if (!started) {
+          // Bun 1.4.4 refuses test.skip() inside a test, so fail with the plain reason instead of
+          // passing vacuously when the host's journal has no Started line for this unit.
+          throw new Error('journal has no Started line for the unit on this host');
+        }
+        expect(unitLog).toContain('MESSAGE=Started');
+        expect(unitLog).toContain(`capped-run: bun (${name})`);
+      } finally {
+        if (safeKill(wrapper.pid, 'SIGTERM')) {
+          if (!(await processGoneWithin(wrapper.pid, 3_000))) {
+            safeKill(wrapper.pid, 'SIGKILL');
+          }
+        }
       }
-      expect(unit).not.toBe('');
-      const shown = spawnSync('systemctl', ['--user', 'show', '-p', 'Description', '--value', unit], {
-        encoding: 'utf8',
-      });
-      expect(shown.status).toBe(0);
-      expect(shown.stdout ?? '').not.toContain(marker);
-      expect(await done).toBe(137);
-      const capped = stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
-      const ended = stderr
-        .split('\n')
-        .filter(line => line.startsWith('exit 137: the memory monitor ended before its final read;'));
-      // Either honest line, exactly one: never both and never silence.
-      expect(capped.length + ended.length).toBe(1);
-      const line = capped[0] ?? ended[0];
-      expect(line).not.toContain(marker);
-      const log = existsSync(join(state, 'runs.log')) ? readFileSync(join(state, 'runs.log'), 'utf8') : '';
-      expect(log).not.toContain(marker);
-      await Bun.sleep(200);
-      const journal = spawnSync(
-        'journalctl',
-        ['--user', '--unit', unit, '--no-pager', '--output', 'verbose'],
-        { encoding: 'utf8' },
-      );
-      expect(journal.status).toBe(0);
-      // systemd versions differ: the unit is USER_UNIT on this host's user manager and
-      // _SYSTEMD_UNIT on older ones. Take the unit's own entries by either field.
-      const unitEntries = (journal.stdout ?? '')
-        .split(/\n\s*\n/)
-        .filter(entry => entry.includes(`USER_UNIT=${unit}`) || entry.includes(`_SYSTEMD_UNIT=${unit}`));
-      expect(unitEntries.join('\n\n')).not.toContain(marker);
-      const started = unitEntries.find(
-        entry => entry.includes('MESSAGE=Started') && entry.includes(`capped-run: bun (${name})`),
-      );
-      if (!started) {
-        // Bun 1.4.4 refuses test.skip() inside a test, so fail with the plain reason instead of
-        // passing vacuously when the host's journal has no Started line for this unit.
-        throw new Error('journal has no Started line for the unit on this host');
-      }
-      expect(started).toContain('MESSAGE=Started');
-      expect(started).toContain(`capped-run: bun (${name})`);
+
     },
     120_000,
   );
