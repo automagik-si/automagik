@@ -824,6 +824,7 @@ function realTimers(t, run) {
 }
 
 test('400 ms async tables allow detached TERM, KILL and stop proof', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
   const output = [
     `${process.pid} 1 20 Fri Nov 6 13:14:15 2026`,
     '42 1 42 Fri Nov 6 13:14:15 2026',
@@ -848,7 +849,15 @@ test('400 ms async tables allow detached TERM, KILL and stop proof', async t => 
   run.dispose()
   assert.equal(run.detached.length, 1)
   assert.deepEqual(signals, [], 'TERM waits for its async identity check')
-  await run.stop()
+  const stopping = run.stop()
+  let outcome
+  stopping.then(() => { outcome = { ok: true } }, error => { outcome = { error } })
+  for (let advanced = 0; !outcome && advanced < 10000; advanced++) {
+    t.mock.timers.tick(1)
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.ok(outcome, 'stop did not settle within 10000 virtual ms')
+  if (outcome.error) throw outcome.error
   assert.equal(alive, false)
   assert.deepEqual(signals.map(([pid, signal]) => [pid, signal]), [
     [-44, 'SIGTERM'], [44, 'SIGTERM'], [-44, 'SIGKILL'],

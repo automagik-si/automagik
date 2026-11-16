@@ -2,6 +2,7 @@
 import { redactSshText } from './hermes-redact.js'
 export const HERMES_DEADLINES = Object.freeze({ start: 60_000, control: 15_000, cancel: 5000 })
 export const LOST = 'Connection lost; remote outcome unknown'
+export const REPLAY_GAP = 'Some remote Hermes events could not be replayed after reconnecting. Reconnect and reconcile to see the current remote state.'
 // The oldest Desktop contract this wire speaks. A newer one that still answers is not an error.
 export const OLDEST_CONTRACT = 8
 export const OUTDATED = 'Remote Hermes is too old for this connection. Update Hermes, then connect again.'
@@ -465,6 +466,8 @@ export class RemoteChat {
     this.save = save
     this.question = question
     this.queue = []
+    this.recovered = []
+    this.joinGap = false
     this.tools = new Map()
     this.questions = new Map()
     this.cancelledQuestions = new Set()
@@ -474,6 +477,12 @@ export class RemoteChat {
   }
 
   push(row) { this.queue.push(row); this.wake?.(); this.wake = undefined }
+
+  takeRecovered() {
+    const recovered = this.recovered
+    this.recovered = []
+    return recovered
+  }
 
   async next() {
     if (!this.queue.length) await new Promise(resolve => { this.wake = resolve })
@@ -495,6 +504,7 @@ export class RemoteChat {
     if (sid !== this.identity.runtimeSessionId && sid !== this.identity.storedSessionId) return
     if (event.kind === 'question') { if (this.question) void this.control(event); return }
     if (Number.isInteger(event.seq)) {
+      this.joining?.add(event.seq)
       if (event.seq <= (this.identity.lastSeq ?? 0)) return
       this.identity.lastSeq = event.seq
     }
@@ -582,34 +592,60 @@ export class RemoteChat {
   }
 
   async prepare(model) {
+    this.joinGap = false
     await this.save()
     let snapshot = await this.transport.session(this.identity, model)
     if (this.transport.attached === true) {
       // The attach JOIN is resume -> activate -> the gap: activate returns the
       // authoritative snapshot and the viewer subscription, which detach later releases.
-      snapshot = this.transport.check(await this.transport.request('session.activate', { session_id: snapshot.session_id }, this.transport.deadlines?.control))
-      const replay = await this.transport.request('session.events.since', {
-        session_id: snapshot.session_id, last_seen: this.identity.lastSeq ?? 0, replay_epoch: this.identity.epoch,
-      }, this.transport.deadlines?.control)
-      const changedEpoch = typeof replay?.epoch === 'string' && replay.epoch !== this.identity.epoch
-      // A reloaded session (new runtime) or a sequence that went backwards is the same
-      // reset as a restart even when the epoch string did not change: the new events start
-      // near zero and receive would drop them all against the old, larger lastSeq.
-      const reloaded = this.identity.runtimeSessionId !== undefined && this.identity.runtimeSessionId !== snapshot.session_id
-      const rewound = Number.isSafeInteger(replay?.latest_seq) && Number.isSafeInteger(this.identity.lastSeq) && replay.latest_seq < this.identity.lastSeq
-      if (changedEpoch || reloaded || rewound) {
-        // A restarted serve has a new epoch and sequence numbers near zero. Taking the new
-        // latest_seq (not max with the old) is what reconcile does; otherwise submit sees
-        // equal epochs, never resets, and receive drops every new event.
-        this.resetStream()
-        if (typeof replay?.epoch === 'string') this.identity.epoch = replay.epoch
-        if (typeof replay?.epoch === 'string') this.transport.epoch = replay.epoch
-        this.identity.lastSeq = Number.isSafeInteger(replay?.latest_seq) ? replay.latest_seq : 0
-      } else if (typeof replay?.epoch === 'string') {
-        this.identity.epoch = replay.epoch
-        this.transport.epoch = replay.epoch
-        if (Number.isSafeInteger(replay.latest_seq)) this.identity.lastSeq = Math.max(this.identity.lastSeq ?? 0, replay.latest_seq)
-      }
+      const cursor = this.identity.lastSeq ?? 0
+      this.joining = new Set()
+      try {
+        snapshot = this.transport.check(await this.transport.request('session.activate', { session_id: snapshot.session_id }, this.transport.deadlines?.control))
+        const replay = await this.transport.request('session.events.since', {
+          session_id: snapshot.session_id, last_seen: cursor, replay_epoch: this.identity.epoch,
+        }, this.transport.deadlines?.control)
+        const changedEpoch = typeof replay?.epoch === 'string' && replay.epoch !== this.identity.epoch
+        // A reloaded session (new runtime) or a sequence that went backwards is the same
+        // reset as a restart even when the epoch string did not change: the new events start
+        // near zero and receive would drop them all against the old, larger lastSeq.
+        const reloaded = this.identity.runtimeSessionId !== undefined && this.identity.runtimeSessionId !== snapshot.session_id
+        const rewound = Number.isSafeInteger(replay?.latest_seq) && Number.isSafeInteger(this.identity.lastSeq) && replay.latest_seq < this.identity.lastSeq
+        const gap = replay.truncated === true || Boolean((changedEpoch || reloaded || rewound) && this.identity.epoch && cursor > 0)
+        if (changedEpoch || reloaded || rewound) {
+          // A restarted serve has a new epoch and sequence numbers near zero. Taking the new
+          // latest_seq (not max with the old) is what reconcile does; otherwise submit sees
+          // equal epochs, never resets, and receive drops every new event.
+          this.resetStream()
+          if (typeof replay?.epoch === 'string') this.identity.epoch = replay.epoch
+          if (typeof replay?.epoch === 'string') this.transport.epoch = replay.epoch
+          this.identity.lastSeq = Number.isSafeInteger(replay?.latest_seq) ? replay.latest_seq : 0
+        } else if (typeof replay?.epoch === 'string') {
+          const events = (replay.events ?? []).filter(event => Number.isInteger(event.seq) && event.seq > cursor
+            && !this.joining.has(event.seq) && (event.epoch === undefined || event.epoch === replay.epoch)
+            && (event.session_id === snapshot.session_id || event.session_id === snapshot.stored_session_id)).sort((a, b) => a.seq - b.seq)
+          let deltas = ''
+          // Recovered completions are text only: a terminal row would end the new turn.
+          for (const event of events) {
+            const payload = event.payload ?? {}
+            if (event.type === 'message.delta' && typeof payload.text === 'string') deltas += payload.text
+            if (event.type === 'message.complete') {
+              if (typeof payload.text === 'string') {
+                const text = this.transport.text(payload.text || deltas, true)
+                if (text) this.recovered.push(text)
+              }
+              deltas = ''
+            }
+          }
+          this.identity.epoch = replay.epoch
+          this.transport.epoch = replay.epoch
+          if (Number.isSafeInteger(replay.latest_seq)) this.identity.lastSeq = Math.max(this.identity.lastSeq ?? 0, replay.latest_seq)
+        }
+        if (gap) {
+          this.joinGap = true
+          this.recovered.push(REPLAY_GAP)
+        }
+      } finally { this.joining = undefined }
     }
     Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
     if (typeof snapshot.subscription_id === 'string' && snapshot.subscription_id) this.identity.subscriptionId = snapshot.subscription_id
@@ -643,11 +679,13 @@ export class RemoteChat {
     this.reconciling = []
     try {
       await this.prepare()
+      const joinGap = this.joinGap
+      this.recovered = []
       const replay = await this.transport.request('session.events.since', {
         session_id: this.identity.runtimeSessionId, last_seen: this.identity.lastSeq ?? 0, replay_epoch: this.identity.epoch,
       })
       const changedEpoch = this.identity.epoch !== replay.epoch
-      const gap = replay.truncated || Boolean(this.identity.epoch && changedEpoch)
+      const gap = replay.truncated || Boolean(this.identity.epoch && changedEpoch) || joinGap
       this.resetStream()
       this.identity.epoch = replay.epoch
       this.transport.epoch = replay.epoch

@@ -662,9 +662,17 @@ export function install(rt) {
           || (header.delegationDepth ?? 0) > 0) {
           refuse('bot/adopt-root', `${sessionLabel} is not a root Session (it is a subagent, delegated, or owned by another Session), so it cannot join ${botLabel}. Open the project's own root Session instead.`)
         }
-        // dsh 0.2.2 deprecates ctx.sessionProjections.stateOf(session, key); the loop
-        // registry owns this unit and exposes it directly.
-        const boundary = ctx.agents?.turnBoundaryOf?.(session)
+        // dsh 0.2.2 deprecates ctx.sessionProjections.stateOf(session, key); the agent
+        // registry exposes it directly. The optional service needs an explicit lookup.
+        let agents
+        try { agents = ctx.get?.('agents') } catch {}
+        let boundary
+        try {
+          if (agents === undefined) agents = ctx.agents
+          boundary = agents?.turnBoundaryOf?.(session)
+        } catch {
+          boundary = undefined
+        }
         const blank = boundary !== undefined && boundary.openTurnStartSeq === null && boundary.lastTurn === 0
         const fork = header.parentSession === sourceSessionId && header.isSeeded === true
         if (!blank && !fork) {
