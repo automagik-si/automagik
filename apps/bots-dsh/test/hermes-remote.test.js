@@ -266,6 +266,78 @@ test('reconnect resumes stored ID, refreshes runtime ID and replaces a replay ga
   assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
 })
 
+test('attached reconcile flags an epoch gap with a pending submit and zero cursor', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    pendingSubmit: true,
+  })
+  await f.wire.connect()
+  const result = await f.run.reconcile()
+  assert.equal(result.gap, true)
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+  assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
+})
+
+test('attached reconcile flags an epoch gap with an uncertain turn and zero cursor', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    uncertain: true,
+  })
+  await f.wire.connect()
+  const result = await f.run.reconcile()
+  assert.equal(result.gap, true)
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+  assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
+})
+
+test('attached prepare has no epoch gap at zero cursor with nothing waiting', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    pendingSubmit: false, uncertain: false,
+  })
+  await f.wire.connect()
+  await f.run.prepare()
+  assert.equal(f.run.joinGap, false)
+  assert.deepEqual(f.run.takeRecovered(), [])
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+})
+
+test('attached prepare has no gap for a waiting turn in the same epoch and runtime', async t => {
+  for (const waiting of ['pendingSubmit', 'uncertain']) {
+    const f = fixture(t, { attached: true, replay: { epoch: 'epoch-a', latest_seq: 0 } })
+    Object.assign(f.identity, {
+      canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+      runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+      [waiting]: true,
+    })
+    await f.wire.connect()
+    await f.run.prepare()
+    assert.equal(f.run.joinGap, false, waiting)
+    assert.deepEqual(f.run.takeRecovered(), [], waiting)
+    assert.equal(f.identity[waiting], true)
+    assert.equal(f.identity.epoch, 'epoch-a')
+    assert.equal(f.identity.runtimeSessionId, f.snapshot.session_id)
+  }
+})
+
 test('a normal turn resets the watermark when an owned SSH backend starts a new replay epoch', async t => {
   const f = fixture(t, { ready: { replay_epoch: 'epoch-b' } })
   Object.assign(f.identity, { storedSessionId: f.snapshot.stored_session_id, runtimeSessionId: f.snapshot.session_id, lastSeq: 100, epoch: 'epoch-a', pendingSubmit: false })
