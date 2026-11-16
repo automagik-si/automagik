@@ -31,6 +31,7 @@ import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../ag
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
 import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, defaultModel, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+  codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -3420,7 +3421,8 @@ const localWhere = () => codexWhere({ home: home(), appHome: appHome(), resolve:
 async function localCodexGrantPlan(cwd) {
   const out = cwd ? await git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd) : null;
   const [gitDir, gitCommonDir] = (out ?? "").split("\n").map((l) => l.trim());
-  return codexGrantPlan({ where: localWhere(), home: home(), env: process.env, gitDir: gitDir || null, gitCommonDir: gitCommonDir || null, isDir: dirHere });
+  return { ...codexGrantPlan({ where: localWhere(), home: home(), env: process.env, gitDir: gitDir || null, gitCommonDir: gitCommonDir || null, isDir: dirHere }),
+    gitDir: gitDir || null, gitCommonDir: gitCommonDir || null };
 }
 
 /** codexGrantPlan's isDir here (#1142): true, false when it isn't there (or isn't a folder), null when stat fails otherwise. */
@@ -6703,6 +6705,25 @@ async function cmdWorker(opts, rest) {
     const codexWithheld = codexPlan && !plan.template ? localCodexWarning(agents.codex?.run, codexPlan) : null;
     if (codexWithheld) warnings.push(codexWithheld);
     workerArgv = codexPlan ? withCodexGrants(launchArgv, codexPlan.dirs) : launchArgv;
+    // #1420: worker starts alone get a per-launch trust word, after checking the person's settings.
+    // The proxy and templates keep their commands; no config is written and no prompt is answered.
+    if (plan.template && runs === "codex") {
+      warnings.push(codexTrustKeptWarning(`${bot.name}'s Codex worker`, `template ${plan.template} owns its command`));
+    } else if (plan.agent === "codex" && proxied && !plan.template) {
+      warnings.push(codexTrustKeptWarning(`${bot.name}'s Codex worker`, "proxy"));
+    } else if (plan.agent === "codex" && !proxied && !plan.template && codexPlan) {
+      const codexHome = process.env.CODEX_HOME || join(home(), ".codex");
+      const configs = isAbsolute(codexHome)
+        ? ["/etc/codex/config.toml", "/etc/codex/managed_config.toml", join(codexHome, "config.toml")].map((path) => {
+          try { return { text: readFileSync(path, "utf8") }; } catch (error) { return { error }; }
+        }) : [{ error: { code: "EINVAL" } }];
+      // The common dir's parent, and the project's main checkout too (a git dir kept elsewhere): one more only withholds.
+      const roots = codexPlan.gitCommonDir ? [...new Set([realDir(dirname(codexPlan.gitCommonDir)) ?? dirname(codexPlan.gitCommonDir),
+        realDir(project.key) ?? project.key].filter(Boolean))] : null;
+      const trust = codexTrustPlan({ folder: place.worktree, roots, configs, run: agents.codex?.run, home: home(), realpath: realDir });
+      if (trust.args.length) workerArgv = withCodexTrust(workerArgv, place.worktree);
+      else warnings.push(codexTrustWarning(`${bot.name}'s Codex worker`, trust.withheld));
+    }
     const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
       agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task, template: plan.template,
       templateArgv,
