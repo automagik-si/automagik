@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { HC_RUNTIME, HC_SESSION, HERDR_APP_HOME, HERDR_CORE_SHA256, HERDR_CORE_SOCKET, HERDR_CORE_VERSION, PNPM_PATH, XDG_RUNTIME_DIR, herdrCoreSocket } from '../toolchain.mjs'
+import { HC_RUNTIME, HC_SESSION, HERDR_APP_HOME, HERDR_CORE_SHA256, HERDR_CORE_SOCKET, HERDR_CORE_VERSION, PNPM_PATH, TINI_PATH, TINI_SHA256, TINI_URL, TINI_VERSION, XDG_RUNTIME_DIR, herdrCoreSocket } from '../toolchain.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const dockerfile = readFileSync(join(ROOT, 'server/Dockerfile'), 'utf8')
@@ -22,6 +22,17 @@ test('the image sets the Arca app home, runtime and session; the socket derives 
   assert.match(dockerfile, new RegExp(`HC_SESSION=${HC_SESSION}`))
   assert.equal(HERDR_CORE_SOCKET, herdrCoreSocket())
   assert.equal(herdrCoreSocket('other-session'), `${HC_RUNTIME}/other-session.sock`)
+})
+
+test('the image runs the app under a pinned tini so it is never PID 1', () => {
+  assert.match(dockerfile, new RegExp(`^ARG TINI_VERSION=${TINI_VERSION}$`, 'm'))
+  assert.match(dockerfile, new RegExp(`^ARG TINI_SHA256=${TINI_SHA256}$`, 'm'))
+  assert.ok(TINI_URL.endsWith(`/v${TINI_VERSION}/tini-static`))
+  assert.match(dockerfile, /curl -fsSL --proto '=https' -o \/tmp\/tini-static/)
+  assert.match(dockerfile, /echo "\$\{TINI_SHA256\}  \/tmp\/tini-static" \| sha256sum -c -/)
+  assert.match(dockerfile, new RegExp(`^COPY --from=tools /out/bin/tini ${TINI_PATH}$`, 'm'))
+  assert.match(dockerfile, /^STOPSIGNAL SIGTERM$/m)
+  assert.match(dockerfile, /^ENTRYPOINT \["\/usr\/local\/bin\/tini", "--", "\/nodejs\/bin\/node", "\/opt\/automagik\/entrypoint\.mjs"\]$/m)
 })
 
 test('the final image carries both hc and herdr-core at literal paths', () => {

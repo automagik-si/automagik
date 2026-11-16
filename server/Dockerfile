@@ -66,6 +66,9 @@ FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d
 # runs it here, on the same glibc family as the distroless base, before copying the binary.
 ARG HERDR_CORE_VERSION=0.1.18
 ARG HERDR_CORE_SHA256=5b2f97cb4b2a9d7a6b2cc5942628203ed9fbb7cc0c2b4b09ad8a6f5648e246b7
+# The app must not be PID 1: ownership records reject pid <= 1. Tini is the container's init.
+ARG TINI_VERSION=0.19.0
+ARG TINI_SHA256=c5b0666b4cb676901f90dfcb37106783c5fe2077b04590973b885950611b30ee
 
 # The distroless rootfs, stripped here where coreutils exist, before it is copied into the final
 # image. No man pages or changelogs (nothing reads them, and their .gz files are archives the
@@ -91,7 +94,12 @@ RUN set -eux; \
     cp -a /usr/lib/git-core /out/git-core; \
     cp -a /usr/share/git-core /out/git-core-share; \
     cp -a /etc/ssl/certs /out/certs; \
-    mkdir -p /out/licenses/herdr-core; \
+    mkdir -p /out/licenses/herdr-core /out/licenses/tini; \
+    curl -fsSL --proto '=https' -o /tmp/tini-static "https://github.com/krallin/tini/releases/download/v${TINI_VERSION}/tini-static"; \
+    echo "${TINI_SHA256}  /tmp/tini-static" | sha256sum -c -; \
+    install -m 0755 /tmp/tini-static /out/bin/tini; \
+    rm -f /tmp/tini-static; \
+    curl -fsSL --proto '=https' -o /out/licenses/tini/LICENSE "https://raw.githubusercontent.com/krallin/tini/v${TINI_VERSION}/LICENSE"; \
     curl -fsSL --proto '=https' -o /tmp/herdr-core.tar.gz "https://releases.herdr.dev/core/${HERDR_CORE_VERSION}/herdr-core-linux-x86_64.tar.gz"; \
     echo "${HERDR_CORE_SHA256}  /tmp/herdr-core.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/herdr-core.tar.gz -C /tmp herdr-core LICENSE THIRD-PARTY-NOTICES; \
@@ -147,6 +155,7 @@ COPY --from=tools /out/bin/find /usr/bin/find
 COPY --from=tools /out/git-core /usr/lib/git-core
 COPY --from=tools /out/git-core-share /usr/share/git-core
 COPY --from=tools /out/certs /etc/ssl/certs
+COPY --from=tools /out/bin/tini /usr/local/bin/tini
 COPY --from=tools /out/bin/herdr-core /usr/local/bin/herdr-core
 COPY --from=tools /out/bin/hc /usr/local/bin/hc
 COPY --from=tools /out/licenses /opt/automagik/licenses
@@ -191,5 +200,6 @@ WORKDIR /opt/automagik
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
   CMD ["/nodejs/bin/node", "/opt/automagik/healthcheck.mjs"]
 
-ENTRYPOINT ["/nodejs/bin/node", "/opt/automagik/entrypoint.mjs"]
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/tini", "--", "/nodejs/bin/node", "/opt/automagik/entrypoint.mjs"]
 CMD []

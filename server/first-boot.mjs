@@ -791,6 +791,29 @@ export const managedProgram = (run, home) => Array.isArray(run) && run.length ==
  * logged and the ACP plugin's own store retries on its normal schedule. Never called at build
  * time, and never with a CLI tarball baked into the image.
  */
+/**
+ * Remove only an instance record the store can prove is this process's own (its pid, birth and
+ * exact bytes), after a publish failed before the store's owned map held it. A foreign, legacy
+ * or pid<=1 record is left alone: the proof is the store's own ownership snapshot, not a path.
+ */
+export function cleanupOwnInstanceRecords({ homes, vendor, ownershipAt, sameOwnership } = {}) {
+  const instance = homes?.instance
+  const generations = homes?.generations
+  if (!instance || !generations) return []
+  const candidates = [[join(generations.instances(vendor), instance), 'root']]
+  try { candidates.push([join(homes.home(vendor), 'instances', instance), 'home']) } catch { /* no home */ }
+  const removed = []
+  for (const [path, legacy] of candidates) {
+    try {
+      // An owned record is not an orphan; the store's dispose will release it.
+      if (homes.generations.owned?.has(path)) continue
+      const snapshot = ownershipAt(path, { legacy })
+      if (snapshot && sameOwnership(snapshot)) { rmSync(path); removed.push(path) }
+    } catch { /* not our record, or already gone */ }
+  }
+  return removed
+}
+
 export async function installVendorClis({
   home,
   profile,
@@ -806,6 +829,7 @@ export async function installVendorClis({
   }
   const { CliStore } = await import(pathToFileURL(clisFile).href)
   const { AGENTS } = await import(pathToFileURL(agentsFile).href)
+  const { ownershipAt, sameOwnership } = await import(pathToFileURL(join(dirname(clisFile), 'cli-generations.js')).href)
   const store = new CliStore({
     env: { ...env, AUTOMAGIK_HOME: home, AUTOMAGIK_PNPM: env.AUTOMAGIK_PNPM || PNPM_PATH },
     log: (message) => log(`vendor CLIs: ${message}`),
@@ -827,6 +851,8 @@ export async function installVendorClis({
           results[id].bridge = bridge.reason
         }
       } catch (error) {
+        const removed = cleanupOwnInstanceRecords({ homes: store.versionHomes, vendor: spec.key, ownershipAt, sameOwnership })
+        if (removed.length) warn(`vendor CLIs: removed ${removed.length} own instance record${removed.length === 1 ? '' : 's'} after the failed publish`)
         results[id] = { state: 'failed', error: String(error?.message ?? error) }
         warn(`vendor CLIs: ${spec.defaultName} was not installed: ${error?.message ?? error}`)
       }

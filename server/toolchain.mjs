@@ -11,6 +11,12 @@ export const PNPM_PATH = '/usr/local/bin/pnpm'
 /** The major the CLI store documents; the exact version comes from the runtime lock. */
 export const PNPM_MAJOR = 10
 
+/** The minimal init that keeps the app off PID 1; its ownership records need a real pid. */
+export const TINI_VERSION = '0.19.0'
+export const TINI_SHA256 = 'c5b0666b4cb676901f90dfcb37106783c5fe2077b04590973b885950611b30ee'
+export const TINI_URL = `https://github.com/krallin/tini/releases/download/v${TINI_VERSION}/tini-static`
+export const TINI_PATH = '/usr/local/bin/tini'
+
 /** herdr-core's supported release channel, pinned to the version and sha256 its manifest names. */
 export const HERDR_CORE_VERSION = '0.1.18'
 export const HERDR_CORE_SHA256 = '5b2f97cb4b2a9d7a6b2cc5942628203ed9fbb7cc0c2b4b09ad8a6f5648e246b7'
