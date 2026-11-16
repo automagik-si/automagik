@@ -252,7 +252,16 @@ export class RemoteChatAdapter extends LlmAdapter {
         const toolCallId = last.role === 'tool' ? last.message.toolCallId : undefined
         continuing = last.role === 'tool' && entry?.calls.has(toolCallId)
       } catch { failed = true }
-      if (!continuing && entry) { entry.run.dispose(); this.live.delete(request.sessionId); entry = undefined }
+      if (!continuing && entry) {
+        // A replaced chat detaches like a closed one. Waiting for it keeps the old socket's
+        // SSH lease release ahead of the new open, as a plain dispose did. A refused
+        // (unreadable) request opens nothing, so it only disposes.
+        const old = entry
+        this.live.delete(request.sessionId)
+        entry = undefined
+        if (failed) old.run.dispose()
+        else await old.run.release().catch(() => {})
+      }
       if (failed) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
       if (!continuing) {
         try { prompt = { text: RemoteChatAdapter.promptText(messages, last) } } catch { prompt = { failed: true } }
