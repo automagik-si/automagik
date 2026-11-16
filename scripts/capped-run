@@ -20,13 +20,18 @@
 #   - Anywhere else (macOS, CI runners, a distroless image, a failing systemd-run) it runs the
 #     command UNCAPPED after one `UNCAPPED: <reason>` line on stderr, and keeps its exit status.
 #     A missing cap never fails a gate, and a capped run is never reported as a pass.
-#   - When the scope is killed for memory, the exit status is 137 and one line on stderr says
-#     `CAPPED: ...`: the limit, the peak and the command name (the basename only). A kill means
-#     the scope reached its MemoryMax, so the printed peak is at least the limit (the sampled
-#     peak is a lower bound, labelled by the limit on the same line). The line is appended to the
-#     run log and read back from it before the wrapper says CAPPED (a log that did not take it is
-#     reported as `log=unwritten`), and no argv and no environment value ever reaches that line
-#     or the log.
+#   - CAPPED is claimed only when the kernel says the scope hit its memory limit: the monitor
+#     keeps reading the scope's memory.events oom_kill count every tick, so the cause survives
+#     the scope. On such a kill the exit status is 137 and one line on stderr says
+#     `CAPPED: ...`: `limit=`, the peak floor `peak>=` (a kill means the scope reached
+#     MemoryMax, so the measured value is only a lower bound) with the measured `last sample`
+#     named, and the command name (the basename only) -- never the limit as a bare `peak=`
+#     measurement. The line is appended to the run log and read back from it before the wrapper
+#     says CAPPED (a log that did not take it is reported as `log=unwritten`), and no argv and
+#     no environment value ever reaches that line or the log. Any other exit 137 passes through
+#     with no CAPPED line; when even the oom_kill cause could not be read (the scope went away
+#     before the monitor saw it), the wrapper prints one line `exit 137: could not read the
+#     memory-kill cause (scope gone, command=<comm>)` instead.
 #   - A signal from outside (INT, TERM, HUP) stops this run's own scope and removes its scratch
 #     folders and peak file before the wrapper exits.
 #   - With --lock, the log also gets one line at the start and one at the end of every run:
@@ -45,7 +50,8 @@
 # Test-only overrides (never set for a real run): CAPPED_RUN_TEST_MEM replaces the default cap
 # (a tiny scope for the cap-kill test), CAPPED_RUN_TEST_STATE overrides the state folder,
 # CAPPED_RUN_TEST_LOCK overrides the lock file, CAPPED_RUN_TEST_LOCK_WAIT overrides the lock
-# wait in seconds. A real run reads none of them beyond that.
+# wait in seconds, CAPPED_RUN_TEST_UNREADABLE_EVENTS makes the monitor report the memory-kill
+# cause unreadable. A real run reads none of them beyond that.
 #
 # No release job and no build-host cargo build goes through this wrapper.
 #
@@ -329,20 +335,30 @@ if [ -n "$peek" ]; then
   cg=$(sed -n "s/^0:://p" /proc/self/cgroup 2>/dev/null)
   if [ -n "$cg" ] && [ -r "/sys/fs/cgroup$cg/memory.peak" ]; then
     peakf=/sys/fs/cgroup$cg/memory.peak
+    eventsf=/sys/fs/cgroup$cg/memory.events
     (
       umask 077
       peak=
+      oom=unknown
       while kill -0 "$parent" 2>/dev/null; do
         p=$(cat "$peakf" 2>/dev/null) || break
         if [ -n "$p" ]; then
           peak=$p
-          printf "peak %s\n" "$p" >"$peek.tmp" && mv "$peek.tmp" "$peek"
+          if [ -z "${CAPPED_RUN_TEST_UNREADABLE_EVENTS:-}" ]; then
+            o=$(sed -n "s/^oom_kill //p" "$eventsf" 2>/dev/null)
+            [ -n "$o" ] && oom=$o
+          fi
+          printf "peak %s %s\n" "$p" "$oom" >"$peek.tmp" && mv "$peek.tmp" "$peek"
         fi
         sleep 0.1
       done
       p=$(cat "$peakf" 2>/dev/null)
       [ -n "$p" ] && peak=$p
-      printf "done %s\n" "$peak" >"$peek.tmp" && mv "$peek.tmp" "$peek"
+      if [ -z "${CAPPED_RUN_TEST_UNREADABLE_EVENTS:-}" ]; then
+        o=$(sed -n "s/^oom_kill //p" "$eventsf" 2>/dev/null)
+        [ -n "$o" ] && oom=$o
+      fi
+      printf "done %s %s\n" "$peak" "$oom" >"$peek.tmp" && mv "$peek.tmp" "$peek"
     ) &
   fi
 fi
@@ -398,22 +414,25 @@ run_uncapped() {
 # Reads the monitor's last value, waiting a bounded moment for its final `done` line.
 read_peak() {
   peak=
+  oom_state=
   tries=0
   if [ -n "$peek" ]; then
     while [ "$tries" -lt 30 ]; do
       if [ -r "$peek" ]; then
-        if read -r kind bytes <"$peek" 2>/dev/null; then
-          if [ "$kind" = "done" ]; then
-            peak=$bytes
-            return 0
-          fi
+        if read -r kind bytes oom <"$peek" 2>/dev/null; then
           [ -n "$bytes" ] && peak=$bytes
+          case ${oom:-} in
+            '' | unknown | *[!0-9]*) oom_state=unknown ;;
+            *) oom_state=$oom ;;
+          esac
+          [ "$kind" = "done" ] && return 0
         fi
       fi
       sleep 0.1
       tries=$((tries + 1))
     done
   fi
+  [ -n "${oom_state:-}" ] || oom_state=unknown
   return 0
 }
 
@@ -499,24 +518,35 @@ code=$?
 
 if [ "$capped" = 1 ] && [ "$code" = 137 ]; then
   read_peak
-  # A kill means the scope reached MemoryMax; the monitor's last sample is a lower bound, so the
-  # printed peak is at least the limit. Mutant 15 drops this floor and the peak test fails.
-  limit_bytes=$((mib * 1048576))
-  case ${peak:-} in
-    '' | *[!0-9]*) peak_bytes=$limit_bytes ;;
-    *) if [ "$peak" -lt "$limit_bytes" ]; then peak_bytes=$limit_bytes; else peak_bytes=$peak; fi ;;
-  esac
-  peak_text=$(peak_label "$peak_bytes")
-  capped_line=$(printf 'CAPPED: killed at the memory limit (limit=%s, peak=%s, command=%s)' \
-    "$mem_label" "$peak_text" "$cmd_comm")
-  # Logged and read back BEFORE the wrapper says CAPPED: the report may only claim the log it
-  # actually holds. A log that could not take the line is reported honestly.
-  log_capped "$capped_line"
-  if grep -qxF "$capped_line" "$log_file" 2>/dev/null; then
-    printf '%s\n' "$capped_line" >&2
-  else
-    printf 'CAPPED: killed at the memory limit (limit=%s, peak=%s, command=%s, log=unwritten)\n' \
-      "$mem_label" "$peak_text" "$cmd_comm" >&2
+  if [ "${oom_state:-}" = unknown ]; then
+    # The kernel's cause could not be read (the scope was gone before the monitor saw it): no
+    # CAPPED, just one honest line with the command name.
+    printf 'exit 137: could not read the memory-kill cause (scope gone, command=%s)\n' \
+      "$cmd_comm" >&2
+  elif [ "${oom_state:-0}" -gt 0 ]; then
+    # A kernel-confirmed kill means the scope reached MemoryMax. The line says what the number
+    # is: the floor (peak>=, at least the limit) and the measured last sample, never the limit as
+    # a bare peak. Mutants 15, 18 and 19 break this; the wording and cause rows fail.
+    limit_bytes=$((mib * 1048576))
+    case ${peak:-} in
+      '' | *[!0-9]*) sample_text=unknown; peak_bytes=$limit_bytes ;;
+      *)
+        sample_text=$(peak_label "$peak")
+        if [ "$peak" -lt "$limit_bytes" ]; then peak_bytes=$limit_bytes; else peak_bytes=$peak; fi
+        ;;
+    esac
+    peak_text=$(peak_label "$peak_bytes")
+    capped_line=$(printf 'CAPPED: killed at the memory limit (limit=%s, peak>=%s, last sample %s, command=%s)' \
+      "$mem_label" "$peak_text" "$sample_text" "$cmd_comm")
+    # Logged and read back BEFORE the wrapper says CAPPED: the report may only claim the log it
+    # actually holds. A log that could not take the line is reported honestly.
+    log_capped "$capped_line"
+    if grep -qxF "$capped_line" "$log_file" 2>/dev/null; then
+      printf '%s\n' "$capped_line" >&2
+    else
+      printf 'CAPPED: killed at the memory limit (limit=%s, peak>=%s, last sample %s, command=%s, log=unwritten)\n' \
+        "$mem_label" "$peak_text" "$sample_text" "$cmd_comm" >&2
+    fi
   fi
 fi
 
@@ -525,9 +555,11 @@ fi
 if [ "$capped" = 1 ] && [ -n "$peek" ]; then
   if [ "$code" != 137 ]; then
     tries=0
-    while [ "$tries" -lt 20 ] && [ -r "$peek" ]; do
-      if read -r kind bytes <"$peek" 2>/dev/null && [ "$kind" = "done" ]; then
-        break
+    while [ "$tries" -lt 20 ]; do
+      if [ -r "$peek" ]; then
+        if read -r kind bytes oom <"$peek" 2>/dev/null && [ "$kind" = "done" ]; then
+          break
+        fi
       fi
       sleep 0.1
       tries=$((tries + 1))

@@ -330,7 +330,7 @@ describe('capped-run', () => {
   });
 
   test.skipIf(!scope)(
-    'a memory kill exits 137, prints one CAPPED line with a peak at least 90 percent of the cap, and logs it before exiting',
+    'a memory kill exits 137, prints one CAPPED line with a labelled peak floor of at least 90 percent of the cap, and logs it before exiting',
     () => {
       const state = scratch('cap-state');
       const lock = join(work, 'cap.lock');
@@ -352,14 +352,15 @@ describe('capped-run', () => {
       expect(outcome.status).toBe(137);
       const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
       expect(capped).toHaveLength(1);
-      expect(capped[0]).toContain('CAPPED: killed at the memory limit (limit=256M, peak=');
-      expect(capped[0]).toMatch(/peak=[^,)]+/);
+      expect(capped[0]).toContain('CAPPED: killed at the memory limit (limit=256M, peak>=');
+      // Labelled peak bound: the floor is at least 90 percent of the cap, the measured last
+      // sample is named, and a bare peak=<limit> (mutants 15 and 18) fails here.
+      const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
+      expect(Number.isFinite(floorMib)).toBe(true);
+      expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
+      expect(capped[0]).toMatch(/last sample (?:[0-9.]+M|unknown)/);
+      expect(capped[0]).not.toMatch(/peak=[0-9.]+M/);
       expect(capped[0]).toContain(`command=${command})`);
-      // Labelled peak bound: a kill at the 256M cap must print at least 90 percent of it, never
-      // the last in-scope sample (mutant 15 fails here).
-      const peakMib = Number((capped[0].match(/peak=([0-9.]+)M/) ?? [])[1]);
-      expect(Number.isFinite(peakMib)).toBe(true);
-      expect(peakMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
       expect(outcome.stderr).not.toContain('argv-leak-marker');
       expect(outcome.stderr).not.toContain('env-leak-marker');
 
@@ -369,6 +370,8 @@ describe('capped-run', () => {
       // ends, which is exactly what the brief asks for and cannot be told apart from the outside.
       const lines = outcome.lines();
       expect(lines.filter(line => line.startsWith('CAPPED: '))).toHaveLength(1);
+      // The log line is the same text as the one on stderr.
+      expect(lines.find(line => line.startsWith('CAPPED: '))).toBe(capped[0]);
       expect(lines.findIndex(line => line.startsWith('CAPPED: '))).toBeLessThan(
         lines.findIndex(line => line.includes(' end owner=')),
       );
@@ -388,7 +391,7 @@ describe('capped-run', () => {
   );
 
   test.skipIf(!scope || !dd || !shmHasRoom())(
-    'a dd-like allocation killed at the cap reports a peak at least 90 percent of the cap',
+    'a dd-like allocation killed at the cap reports a labelled peak floor of at least 90 percent of the cap',
     () => {
       const state = scratch('dd-state');
       const file = join('/dev/shm', `capped-run-dd-${process.pid}-${Date.now()}`);
@@ -400,9 +403,11 @@ describe('capped-run', () => {
         expect(outcome.status).toBe(137);
         const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
         expect(capped).toHaveLength(1);
-        const peakMib = Number((capped[0].match(/peak=([0-9.]+)M/) ?? [])[1]);
-        expect(Number.isFinite(peakMib)).toBe(true);
-        expect(peakMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
+        const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
+        expect(Number.isFinite(floorMib)).toBe(true);
+        expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
+        expect(capped[0]).toMatch(/last sample (?:[0-9.]+M|unknown)/);
+        expect(capped[0]).not.toMatch(/peak=[0-9.]+M/);
       } finally {
         rmSync(file, { force: true });
       }
@@ -410,7 +415,7 @@ describe('capped-run', () => {
     120_000,
   );
 
-  test.skipIf(!scope)('a short run leaves no peak file in the state folder', () => {
+  test.skipIf(!scope)('a very short run (under 100 ms) leaves no peak file in the state folder', () => {
     const state = scratch('short-state');
     const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], { state });
     expect(outcome.status).toBe(0);
@@ -458,4 +463,30 @@ describe('capped-run', () => {
     },
     90_000,
   );
+
+  test.skipIf(!scope)('a 137 that is not a memory kill passes through with no CAPPED line', () => {
+    const state = scratch('selfkill-state');
+    const lock = join(work, 'selfkill.lock');
+    const outcome = cappedRun(['--lock', '--', 'sh', '-c', 'kill -9 $$'], {
+      state,
+      env: { CAPPED_RUN_TEST_LOCK: lock },
+    });
+    expect(outcome.status).toBe(137);
+    expect(outcome.stderr.trim()).toBe('');
+    const lines = outcome.lines();
+    expect(lines.filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
+    expect(lines.filter(line => / end owner=\S+ comm=sh exit=137$/.test(line))).toHaveLength(1);
+  });
+
+  test.skipIf(!scope)('a 137 with an unreadable cause prints one line and no CAPPED', () => {
+    const state = scratch('unknown-state');
+    const outcome = cappedRun(['--', 'sh', '-c', 'kill -9 $$'], {
+      state,
+      env: { CAPPED_RUN_TEST_UNREADABLE_EVENTS: '1' },
+    });
+    expect(outcome.status).toBe(137);
+    const lines = outcome.stderr.trim().split('\n').filter(Boolean);
+    expect(lines.filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
+    expect(lines).toEqual(['exit 137: could not read the memory-kill cause (scope gone, command=sh)']);
+  });
 });
