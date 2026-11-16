@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
+import { coreStatus, inTestRoots } from "../coreSocket.mjs";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId,
@@ -146,7 +147,7 @@ const commandKeyOf = async (opts) => {
 };
 
 async function hc(args, { timeout } = {}) {
-  const r = await runProgram(programPath("hc") ?? "hc", args, { timeout });
+  const r = await runProgram(hcExecutable(programPath("hc")), args, { timeout });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   return r;
 }
@@ -220,6 +221,18 @@ const modelIo = () => ({ home: home(), appHome: appHome(), read: (p) => { try { 
 /** The agents Herdr can start: its shipped table with the app home's programs.json applied. */
 const agentTable = () => withOverrides(readText(`${appHome()}/programs.json`));
 
+function checkedHcPath(file) {
+  if (!inTestRoots(file) && !isGuardFolder(dirname(file))) {
+    throw new CliError(`test guard: ${file} is outside AUTOMAGIK_HERDR_TEST_ROOTS; nothing was run.`);
+  }
+  return file;
+}
+function hcExecutable(file) {
+  if (file) return checkedHcPath(file);
+  if (process.env.AUTOMAGIK_HERDR_TEST_ROOTS) throw new CliError("hc (herdr-core) is not on PATH.");
+  return "hc";
+}
+
 /**
  * Where `program` runs from: PATH, then two folders a PATH may lack when the sidebar runs this
  * CLI with Herdr's own (~/.local/bin, where hc and Claude Code install, and the folder of the
@@ -230,7 +243,8 @@ function programPath(program) {
   const dirs = [...(process.env.PATH ?? "").split(":"), `${home()}/.local/bin`, dirname(process.execPath)];
   for (const dir of dirs) {
     if (!dir) continue;
-    try { accessSync(`${dir}/${program}`, constants.X_OK); return `${dir}/${program}`; } catch { /* next */ }
+    try { accessSync(`${dir}/${program}`, constants.X_OK); } catch { continue; }
+    return program === "hc" ? checkedHcPath(`${dir}/${program}`) : `${dir}/${program}`;
   }
   return null;
 }
@@ -263,13 +277,13 @@ function realHcPath() {
     const file = `${dir}/hc`;
     try {
       accessSync(file, constants.X_OK);
-      return file;
-    } catch { /* next */ }
+    } catch { continue; }
+    return checkedHcPath(file);
   }
   return null;
 }
 async function hcReal(args, { timeout } = {}) {
-  const r = await runProgram(realHcPath() ?? "hc", args, { timeout });
+  const r = await runProgram(hcExecutable(realHcPath()), args, { timeout });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   return r;
 }
@@ -792,7 +806,13 @@ let coreOnce = null;
  */
 function coreId() {
   coreOnce ??= workerTransport().then(async (transport) => {
-    const status = transport || await hcRealJson(["server", "status"]);
+    let status = transport;
+    if (!status) {
+      const r = await coreStatus();
+      if (r.none) throw new CliError(`hc server status failed: herdr-core isn't answering on this computer (tried ${r.tried.join(", ") || "no socket"}); nothing was started.`);
+      if (r.error !== undefined) throw new CliError(`hc server status failed: ${r.error}`);
+      status = r.status;
+    }
     const id = status?.core?.id;
     if (typeof id !== "string" || !id) throw new CliError("hc server status gave no core id.");
     return id;
@@ -6933,9 +6953,11 @@ async function coreUp(seconds) {
   for (;;) {
     let why;
     try {
-      const r = await hc(["server", "status", "--json"], { timeout: 10_000 });
-      if (r.code === 0) return;
-      why = (r.stderr || r.stdout).trim() || `exit ${r.code}`;
+      // Each poll asks the socket straight (never hc, which would start a core), bound as the
+      // old hc call was: 10 s each, so the last poll still reports why, not a cut-short wait.
+      const r = await coreStatus(process.env, { timeoutMs: 10_000 });
+      if (Object.hasOwn(r, "status")) return;
+      why = r.none ? `core is not running (no socket answers: ${r.tried.join(", ") || "no socket"})` : r.error;
     } catch (e) { why = e?.message ?? String(e); }
     if (Date.now() >= until) throw new CliError(`herdr-core isn't answering${seconds ? ` ${seconds}s on` : ""} (${why.split("\n")[0]}). Nothing was started.`);
     await later(Math.min(2000, Math.max(100, until - Date.now())));
@@ -7202,7 +7224,7 @@ async function reviveService(opts, verb, more = []) {
 const hcProgram = () => realHcPath();
 /** meterFleet.js's runner: on a linked machine through `hc exec`, else here from the home folder. */
 const meterRun = (argv, { on, timeout }) => (on
-  ? runProgram(hcProgram() ?? "hc", hcExecArgs(on, argv, timeout), { timeout: (timeout + 15) * 1000 }).then((r) => decodeExec(r, timeout))
+  ? runProgram(hcExecutable(hcProgram()), hcExecArgs(on, argv, timeout), { timeout: (timeout + 15) * 1000 }).then((r) => decodeExec(r, timeout))
   : runProgram(argv[0], argv.slice(1), { cwd: home(), timeout: timeout * 1000 }));
 
 /** The linked machines (`{ name, connected }`), or `{ why }` when hc can't say. */
@@ -7640,7 +7662,7 @@ export async function cmdDoc(opts, [verb, name, ...rest]) {
   if (rest.length) throw new CliError(`doc get takes one name (got ${[name, ...rest].join(" ")}).`, 2);
   let value;
   try {
-    value = await docGet(name, { machine: opts.machine, hc: realHcPath() ?? "hc" });
+    value = await docGet(name, { machine: opts.machine, hc: hcExecutable(realHcPath()) });
   } catch (e) {
     if (e instanceof DocError) throw new CliError(e.message, e.code);
     throw e;
