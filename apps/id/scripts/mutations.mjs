@@ -1,5 +1,13 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+
+// node_modules files may be hard links into the package manager's cache: replace, never rewrite.
+const PLUGIN = 'node_modules/@better-auth/oauth-provider/dist/authorize-PV1rSogq.mjs';
+async function replaceFile(file, text) {
+  const temporary = `${file}.mutation-tmp`;
+  await writeFile(temporary, text);
+  await rename(temporary, file);
+}
 
 const mutations = [
   {
@@ -100,6 +108,52 @@ const mutations = [
     test: 'the CI job runs the browser tests',
     edits: [['../../.github/workflows/ci.yml', 'ID_PAGES_BROWSER: required', 'ID_PAGES_BROWSER: optional']],
   },
+  {
+    name: 'lengthen the access token lifetime',
+    test: 'token lifetimes are 15 minutes',
+    edits: [['src/auth.ts', 'ACCESS_TOKEN_TTL = 15 * 60;', 'ACCESS_TOKEN_TTL = 60 * 60;']],
+  },
+  {
+    name: 'lengthen the ID token lifetime',
+    test: 'token lifetimes are 15 minutes',
+    edits: [['src/auth.ts', 'ID_TOKEN_TTL = 15 * 60;', 'ID_TOKEN_TTL = 10 * 60 * 60;']],
+  },
+  {
+    name: 'lengthen the refresh token lifetime',
+    test: 'token lifetimes are 15 minutes',
+    edits: [['src/auth.ts', 'REFRESH_TOKEN_TTL = 30 * 24', 'REFRESH_TOKEN_TTL = 90 * 24']],
+  },
+  {
+    name: 'let a rotated refresh token be replayed for an hour',
+    test: 'refreshing rotates',
+    edits: [['src/auth.ts', 'REFRESH_TOKEN_REUSE_INTERVAL = 0;', 'REFRESH_TOKEN_REUSE_INTERVAL = 3600;']],
+  },
+  // The pinned plugin's own refresh checks: a version bump that drops one must fail a test.
+  {
+    name: 'issue a refresh token without offline_access',
+    test: 'issued only with offline_access',
+    edits: [[PLUGIN, '(existingRefreshToken?.scopes?.includes("offline_access") || scopes.includes("offline_access"))', 'true']],
+  },
+  {
+    name: 'stop retiring a rotated refresh token',
+    test: 'refreshing rotates',
+    edits: [[PLUGIN, 'revoked: rotatedAt,', 'revoked: null,']],
+  },
+  {
+    name: 'accept an expired refresh token',
+    test: 'an expired refresh token fails',
+    edits: [[PLUGIN, 'if (refreshToken.expiresAt < /* @__PURE__ */ new Date())', 'if (false)']],
+  },
+  {
+    name: 'drop the refresh token client binding',
+    test: 'a refresh token is bound to its client',
+    edits: [[PLUGIN, 'if (refreshToken.clientId !== client_id)', 'if (false)']],
+  },
+  {
+    name: 'ignore refresh token revocation',
+    test: 'revoking a refresh token makes it fail',
+    edits: [[PLUGIN, 'set: { revoked: /* @__PURE__ */ new Date(iat * 1e3) }', 'set: {}']],
+  },
 ];
 
 const selectedMutation = process.env.ID_MUTATION;
@@ -117,7 +171,7 @@ for (const [index, mutation] of mutations.entries()) {
       const current = await readFile(file, 'utf8');
       if (!originals.has(file)) originals.set(file, current);
       if (current.split(before).length !== 2) throw new Error(`Ambiguous mutation in ${file}`);
-      await writeFile(file, current.replace(before, after));
+      await replaceFile(file, current.replace(before, after));
     }
     const result = spawnSync('bun', ['run', 'test', '--', '-t', mutation.test], {
       encoding: 'utf8', timeout: 60000,
@@ -129,6 +183,6 @@ for (const [index, mutation] of mutations.entries()) {
     }
     process.stdout.write(`${mutation.name}: KILLED (assertion failed)\n`);
   } finally {
-    for (const [file, original] of originals) await writeFile(file, original);
+    for (const [file, original] of originals) await replaceFile(file, original);
   }
 }
