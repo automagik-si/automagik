@@ -7,7 +7,9 @@ set -eu
 real=${1:?missing pnpm real path}
 shift
 umask 077
-mkdir -p /data/run
+if [ ! -d /data/run ]; then
+  /nodejs/bin/node -e 'require("node:fs").mkdirSync("/data/run", { recursive: true, mode: 0o700 })' || exit 1
+fi
 lock=/data/run/pnpm-admission.lock
 log=/data/run/pnpm-admission.log
 owner=${AUTOMAGIK_PNPM_OWNER:-unknown}
@@ -43,7 +45,7 @@ lock_age() {
 inherited=${AUTOMAGIK_PNPM_ADMISSION_TOKEN:-}
 if [ -n "$inherited" ] && [ -e "$lock" ]; then
   exec 8<>"$lock"
-  if ! flock -n 8; then
+  if ! /usr/bin/flock -n 8; then
     holder_info
     if [ "$holder_token" = "$inherited" ]; then
       printf 'reentry pid=%s ppid=%s owner=%s token=%s real=%s\n' "$$" "$PPID" "$owner" "$inherited" "$real" >>"$log"
@@ -57,7 +59,7 @@ fi
 holder_info
 printf 'wait pid=%s owner=%s holder_owner=%s age=%s wait=%s\n' "$$" "$owner" "${holder_owner:-none}" "$(lock_age)" "$wait_seconds" >>"$log"
 exec 9<>"$lock"
-if ! flock -w "$wait_seconds" 9; then
+if ! /usr/bin/flock -w "$wait_seconds" 9; then
   holder_info
   age=$(lock_age)
   message="failed, lock held by ${holder_owner:-unknown} for ${age}s"

@@ -236,6 +236,13 @@ async function main() {
     throw new Error('herdr-core exited during the first boot')
   }
 
+  let dshVendorFailure = null
+  const noteDsh = (line) => {
+    if (!dshVendorFailure && /(?:pnpm install failed|install failed \(exit \d+\)|update check failed)/i.test(line)) {
+      dshVendorFailure = line
+      warn(`vendor CLIs: DSH reported: ${line}`)
+    }
+  }
   child = spawn(process.execPath, [DSH_BIN, '--profile', PROFILE, '--no-open', '--host', '127.0.0.1', '--port', String(PORT), ...publicArgs], {
     env,
     stdio: ['inherit', 'pipe', 'pipe'],
@@ -247,7 +254,7 @@ async function main() {
   })
   if (env.AUTOMAGIK_CLI_INSTALL !== 'off') {
     log('vendor CLIs: checking Claude Code and Codex and refreshing the launch bridge in the background')
-    void installVendorClis({ home: env.AUTOMAGIK_HOME, profile: seeded.target, env, log, warn })
+    void installVendorClis({ home: env.AUTOMAGIK_HOME, profile: seeded.target, env, log, warn, failure: () => dshVendorFailure })
       .then((result) => {
         if (result.state !== 'ready') warn(`vendor CLIs: ${result.state}; the ACP plugin will retry`)
         try {
@@ -271,8 +278,8 @@ async function main() {
       warn(`startup: dsh is up, but the launch URL could not be written: ${error.message}`)
     }
   }
-  pipeRedacted(child.stdout, process.stdout, onLine)
-  pipeRedacted(child.stderr, process.stderr, onLine)
+  pipeRedacted(child.stdout, process.stdout, (line) => { onLine(line); noteDsh(line) })
+  pipeRedacted(child.stderr, process.stderr, (line) => { onLine(line); noteDsh(line) })
 
   child.on('exit', (code, signal) => {
     const exitCode = coreExit ?? code ?? (signal ? 0 : 1)

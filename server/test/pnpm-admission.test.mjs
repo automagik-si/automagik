@@ -8,6 +8,13 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 
+test('the admission wrapper uses only commands the distroless image ships', () => {
+  const shell = readFileSync(join(ROOT, '..', 'bin', 'pnpm-admission'), 'utf8')
+  assert.doesNotMatch(shell, /^[\t ]*mkdir\b/m)
+  assert.match(shell, /mkdirSync/)
+  assert.match(shell, /\/usr\/bin\/flock/)
+})
+
 test('the build wraps every runtime and profile pnpm.cjs and records it', () => {
   const out = mkdtempSync(join(tmpdir(), 'automagik-pnpm-admission-'))
   const runtime = join(out, 'runtime', 'node_modules', 'pnpm', 'bin')

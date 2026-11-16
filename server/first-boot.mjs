@@ -911,6 +911,7 @@ export async function installVendorClis({
   log = console.log,
   warn = console.warn,
   timeout = 1_900_000,
+  failure = () => undefined,
 } = {}) {
   const clisFile = join(profile, CLI_STORE_RELATIVE)
   const agentsFile = join(profile, AGENTS_RELATIVE)
@@ -938,11 +939,20 @@ export async function installVendorClis({
       log(`vendor CLIs: observing the DSH-owned install of ${spec.defaultName} (${startedAt})`)
       let found
       const started = Date.now()
+      let reported
       while (!found && Date.now() - started < timeout) {
+        reported = failure()
+        if (reported) break
         found = store.binOf(spec.cliPackage, spec)
         if (!found) await sleep(2000)
       }
       const endedAt = new Date().toISOString()
+      if (reported) {
+        results[id] = { state: 'failed', startedAt, endedAt, error: String(reported) }
+        warn(`vendor CLIs: ${spec.defaultName} failed: ${reported}`)
+        writeState()
+        continue
+      }
       if (found) {
         results[id] = { state: 'ready', version: found.version, path: found.path, managed: Boolean(found.managed), startedAt, endedAt }
         log(`vendor CLIs: observed ${spec.defaultName} ${found.version} at ${found.path}`)

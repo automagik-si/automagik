@@ -28,6 +28,12 @@ const command = (file, args, options = {}) => execFileSync(file, args, {
   encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, ...options,
 }).trim()
 const versionIn = (text) => /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/.exec(text)?.[1]
+
+// The admission wrapper is the one path every pnpm call takes. Prove it can run before any
+// long vendor wait; a broken wrapper must cost a preflight, not forty minutes.
+const admissionVersion = command('/usr/local/bin/pnpm', ['--version'], { timeout: 30_000 })
+check(/^\d+\.\d+\.\d+/.test(admissionVersion), `pnpm admission preflight failed: ${admissionVersion}`)
+say(`pnpm admission preflight: ${admissionVersion}`)
 const checkVersion = (label, output, expected) => {
   const actual = versionIn(output)
   check(actual, `${label} --version printed no version: ${output}`)
