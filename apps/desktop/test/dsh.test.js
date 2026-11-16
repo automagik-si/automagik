@@ -590,6 +590,59 @@ test('a start without the app\'s bundled pnpm fails clearly and never falls back
   assert.match(carrier.stderr, /the app's bundled pnpm is missing at .*pnpm\.cjs/)
 })
 
+test('an entry with a direct-run guard starts once, with the package manager', async (t) => {
+  const scope = scratch(t, 'omni-desktop-launcher-guard-')
+  const { root } = scope
+  const bundled = join(root, 'bundled-pnpm.cjs')
+  writeFileSync(bundled, "console.log('10.34.6')\n")
+  const calls = join(root, 'launcher-calls.txt')
+  const facts = join(root, 'launcher-facts.json')
+  // A stand-in entry that runs itself when argv names it, as an installed bin may.
+  const entry = join(root, 'guarded-dsh.mjs')
+  writeFileSync(entry, `
+import { appendFileSync, writeFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+export async function runCli(options = {}) {
+  appendFileSync(process.env.LAUNCHER_CALLS, JSON.stringify({ manager: options.packageManager !== undefined }) + '\\n')
+  if (!options.packageManager) return
+  writeFileSync(process.env.LAUNCHER_FACTS, JSON.stringify(options.packageManager))
+  const args = process.argv.slice(2)
+  const port = args[args.indexOf('--port') + 1]
+  setTimeout(() => console.log('dsh web: http://127.0.0.1:' + port + '/?token=guard'), 50)
+  setInterval(() => {}, 1000)
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await runCli()
+`)
+  const port = await freePort()
+  const running = await startDsh({
+    node: process.execPath, bin: entry, launcher: LAUNCHER, bundledPnpm: bundled,
+    env: { ...process.env, LAUNCHER_CALLS: calls, LAUNCHER_FACTS: facts },
+    port, cwd: root,
+  })
+  scope.stop = () => stopDsh(running.child)
+  assert.equal(running.url, `http://127.0.0.1:${port}/?token=guard`)
+  // argv[1] is named only after the import: the guard must not start dsh a second time.
+  assert.equal(readFileSync(calls, 'utf8'), '{"manager":true}\n')
+  assert.deepEqual(JSON.parse(readFileSync(facts, 'utf8')), {
+    command: process.execPath,
+    args: [bundled],
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+  })
+})
+
+test('a launcher without the app\'s bundled pnpm is refused, never a direct start', async (t) => {
+  const scope = scratch(t, 'omni-desktop-launcher-alone-')
+  let spawned = false
+  await assert.rejects(
+    startDsh({
+      node: process.execPath, bin: join(scope.root, 'fake-dsh.mjs'), launcher: LAUNCHER,
+      env: process.env, port: 1, cwd: scope.root, spawn: () => { spawned = true },
+    }),
+    /the dsh launcher needs the app's bundled pnpm/,
+  )
+  assert.equal(spawned, false)
+})
+
 test('the launcher that binds the bundled pnpm ships outside the asar', () => {
   const prepare = readFileSync(new URL('../scripts/prepare-runtime.mjs', import.meta.url), 'utf8')
   assert.match(prepare, /cpSync\(join\(APP, 'src', 'dsh-launch\.cjs'\)/)

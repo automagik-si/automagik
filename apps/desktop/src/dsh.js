@@ -63,12 +63,14 @@ const batchQuote = text => `"${String(text).replaceAll('%', '%%')}"`
 export const toolFileOf = (dir, name, platform = process.platform) => join(dir, platform === 'win32' ? `${name}.cmd` : name)
 
 /**
- * Write `node` and `pnpm` into `dir` for dsh's PATH: dsh's plugin manager installs plugins
- * (the market, Settings → Plugins) with pnpm, and nothing guarantees a machine has Node or
- * pnpm. Both run on `node`, the app's own binary as Node (ELECTRON_RUN_AS_NODE). Checked at
- * every launch, since the app's path changes with each install; a file that already says the
- * same, and can run, is left as it is. On Windows they are batch files, `node.cmd` and
- * `pnpm.cmd`, which PATH finds by PATHEXT.
+ * Write `node` and `pnpm` into `dir` for dsh's PATH: dsh's commands and the agent CLIs a plugin
+ * starts run with them, and nothing guarantees a machine has Node or pnpm. Plugin installs,
+ * updates and removals do not resolve them here: the app starts dsh through src/dsh-launch.cjs,
+ * which gives the plugin manager the bundled pnpm by absolute path (#1466). Both tools run on
+ * `node`, the app's own binary as Node (ELECTRON_RUN_AS_NODE). Checked at every launch, since
+ * the app's path changes with each install; a file that already says the same, and can run, is
+ * left as it is. On Windows they are batch files, `node.cmd` and `pnpm.cmd`, which PATH finds
+ * by PATHEXT.
  */
 export function writeTools({ dir, node, pnpm, platform = process.platform }) {
   mkdirSync(dir, { recursive: true })
@@ -885,6 +887,9 @@ export function startDsh({
   // build without them says what is missing instead of dsh starting and failing on PATH.
   if (bundledPnpm !== undefined && launcher === undefined) {
     return Promise.reject(new Error('startDsh: bundledPnpm needs the dsh launcher'))
+  }
+  if (launcher !== undefined && bundledPnpm === undefined) {
+    return Promise.reject(new Error("startDsh: the dsh launcher needs the app's bundled pnpm"))
   }
   if (bundledPnpm !== undefined && !existsSync(bundledPnpm)) {
     return Promise.reject(new Error(`the app's bundled pnpm is missing at ${bundledPnpm}`))
