@@ -1497,7 +1497,12 @@ changed since it was read is never overwritten); its panes run there (M/tN). A p
 reports no status to hc can't say it is waiting for an approval: restart refuses it unless
 --force, which still sends it no keys. restart --tree works on this computer and, with
 --machine, on that machine (there it needs --force, since it runs at once); a bot whose helpers
-end with its pane there is refused until each helper's pane is ended (hc kill M/tN).`;
+end with its pane there is refused until each helper's pane is ended (hc kill M/tN).
+
+For a code agent: the am skill teaches these commands,
+https://github.com/automagik-si/automagik/blob/dev/skills/am/SKILL.md
+Install it: npx skills add automagik-si/automagik --skill am
+Report what am cannot do: https://github.com/automagik-si/automagik/issues`;
 
 /** `proxy approve`'s own help: the residual is part of the command's contract. */
 export const PROXY_USAGE = `usage: am proxy approve --project <dir>
