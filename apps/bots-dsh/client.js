@@ -10897,7 +10897,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   const [asTable, setAsTable] = (0, import_react24.useState)(false);
   const [copied, setCopied] = (0, import_react24.useState)(false);
   const labelId = (0, import_react24.useId)();
-  const menuKey = (0, import_react24.useId)();
+  const menuKey2 = (0, import_react24.useId)();
   const table = (0, import_react24.useRef)(asTable);
   table.current = asTable;
   const shown = series.map((_, index) => !hidden.includes(index));
@@ -10938,7 +10938,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   action.current = { label: menuLabel, copy: copy2, save: () => {
     if (svg2.current) saveImage(svg2.current, "chart.png");
   }, toggleTable };
-  (0, import_react24.useEffect)(() => registerChart?.(menuKey, {
+  (0, import_react24.useEffect)(() => registerChart?.(menuKey2, {
     get label() {
       return action.current.label;
     },
@@ -10948,7 +10948,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
     toggleTable: () => action.current.toggleTable(),
     copy: () => action.current.copy(),
     save: () => action.current.save()
-  }), [registerChart, menuKey]);
+  }), [registerChart, menuKey2]);
   (0, import_react24.useEffect)(() => refreshCharts?.(), [refreshCharts, asTable, menuLabel]);
   const legend = isDonut ? (0, import_react24.createElement)("div", { className: "dv-chart-legend dv-chart-legend-list" }, categories.map((name, at) => (0, import_react24.createElement)(
     "div",
@@ -32000,16 +32000,27 @@ function SettingsDialog({ page, id, roster, actions, useUpdate, leaving = false 
 
 // src/client/context-menu.js
 var import_react88 = require("react");
-function useConfirmStep() {
-  const [asking, setAsking] = (0, import_react88.useState)(false);
+function useConfirmStep(target, leaving) {
+  const [ask, setAsk] = (0, import_react88.useState)(null);
+  const [scope, setScope] = (0, import_react88.useState)({ target, leaving });
+  if (scope.target !== target || scope.leaving !== leaving) {
+    setScope({ target, leaving });
+    if (leaving || scope.target !== target) setAsk(null);
+  }
   (0, import_react88.useEffect)(() => {
-    if (!asking) return void 0;
-    const timer = setTimeout(() => setAsking(false), 4e3);
+    if (!ask) return void 0;
+    const timer = setTimeout(() => setAsk(null), 4e3);
     return () => clearTimeout(timer);
-  }, [asking]);
+  }, [ask]);
+  const asking = ask !== null && ask.target === target && !leaving;
   return [asking, () => {
-    if (asking) return true;
-    setAsking(true);
+    if (leaving) return false;
+    if (ask !== null && ask.target === target) {
+      if (ask.confirmed) return false;
+      setAsk({ target, confirmed: true });
+      return true;
+    }
+    setAsk({ target, confirmed: false });
     return false;
   }];
 }
@@ -32052,7 +32063,7 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
     };
   }, []);
   const [place, setPlace] = (0, import_react88.useState)({ left: menu.x, top: menu.y });
-  const [confirmingDelete, readyToDelete] = useConfirmStep();
+  const [confirmingDelete, readyToDelete] = useConfirmStep(`${menu.kind ?? ""}:${menu.id ?? ""}`, leaving);
   const tick = useViewport();
   (0, import_react88.useLayoutEffect)(() => {
     const box = ref.current?.getBoundingClientRect();
@@ -32121,13 +32132,16 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
       index > 0 ? (0, import_react88.createElement)("div", { className: "bt-menu-sep", role: "separator" }) : null,
       // `ask` is the item's own confirmation: it returns false on the click that only asks,
       // and the menu stays open with the item now naming what it would lose.
-      group.map(([label, Icon, run2, danger, checked, describedBy, ask]) => (0, import_react88.createElement)("button", {
-        key: label,
+      // The key is the item's place in the group, never its label: the confirmation changes
+      // the label, and a new key would unmount the focused button (and its screen-reader node).
+      group.map(([label, Icon, run2, danger, checked, describedBy, ask], item) => (0, import_react88.createElement)("button", {
+        key: `item-${item}`,
         type: "button",
         role: "menuitem",
         className: danger ? "bt-danger" : void 0,
         "aria-describedby": describedBy,
         onClick: () => {
+          if (leaving) return;
           if (ask && !ask()) return;
           actions.closeMenu();
           void Promise.resolve(run2()).catch((error) => actions.reportError(error, "menu"));
@@ -32306,7 +32320,7 @@ function AgentMenu({ menu, roster, actions, leaving }) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
   const [place, setPlace] = (0, import_react88.useState)({ left: menu.x, top: menu.y });
-  const [confirmingRemove, readyToRemove] = useConfirmStep();
+  const [confirmingRemove, readyToRemove] = useConfirmStep(`${menu.kind ?? ""}:${menu.id ?? ""}`, leaving);
   const tick = useViewport();
   (0, import_react88.useLayoutEffect)(() => {
     const box = ref.current?.getBoundingClientRect();
@@ -32342,13 +32356,14 @@ function AgentMenu({ menu, roster, actions, leaving }) {
       import_react88.Fragment,
       { key: index },
       index > 0 ? (0, import_react88.createElement)("div", { className: "bt-menu-sep", role: "separator" }) : null,
-      group.map(([label, Icon, run2, danger, checked, describedBy, ask]) => (0, import_react88.createElement)("button", {
-        key: label,
+      group.map(([label, Icon, run2, danger, checked, describedBy, ask], item) => (0, import_react88.createElement)("button", {
+        key: `item-${item}`,
         type: "button",
         role: "menuitem",
         className: danger ? "bt-danger" : void 0,
         "aria-describedby": describedBy,
         onClick: () => {
+          if (leaving) return;
           if (ask && !ask()) return;
           actions.closeMenu();
           void Promise.resolve(run2()).catch((error) => actions.reportError(error, "menu"));
@@ -34431,6 +34446,16 @@ var import_react93 = require("react");
 var import_react_dom16 = require("react-dom");
 var DIALOG_EXIT_MS = 160;
 var MENU_EXIT_MS3 = 120;
+var menuKeys = /* @__PURE__ */ new WeakMap();
+var nextMenuKey = 0;
+function menuKey(menu) {
+  let key = menuKeys.get(menu);
+  if (key === void 0) {
+    key = ++nextMenuKey;
+    menuKeys.set(menu, key);
+  }
+  return key;
+}
 function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity, useWork, useRegistry, useBrowserPages, useBrowserTabs, useBrowserHolds, useComputer, useUpdate, useFrame, actions }) {
   const roster = useRoster((value) => value);
   const ui2 = useUi((value) => value);
@@ -34479,7 +34504,7 @@ function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity
     ui2.palette ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(CommandPalette, { key: ui2.palette.token, start: ui2.palette.query, token: ui2.palette.token, roster, actions, useSessions }), document.body) : null,
     ui2.exchange ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(ExchangeDialog, { pair: ui2.exchange, roster, actions }), document.body) : null,
     ui2.voice ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(VoiceMode, { key: ui2.voice, sessionId: ui2.voice, roster, actions, useSessions, useSessionStatus }), document.body) : null,
-    menu ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(ContextMenu, { key: `${menu.kind ?? ""}:${menu.id}:${menu.x}:${menu.y}`, menu, roster, actions, useWork, leaving: menuLeaving }), document.body) : null,
+    menu ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(ContextMenu, { key: menuKey(menu), menu, roster, actions, useWork, leaving: menuLeaving }), document.body) : null,
     settings ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(SettingsDialog, { page: settings.page, id: settings.id, roster, actions, useUpdate, leaving: settingsLeaving }), document.body) : null,
     owner ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(MemoryDialog, { key: owner.id, owner, actions, leaving: memoryLeaving }), document.body) : null
   );

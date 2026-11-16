@@ -9,17 +9,36 @@ import { stepMenuFocus, useViewport, viewBottom } from './motion.js'
 import { t } from './i18n.js'
 
 // A destructive menu item asks first, like Settings' delete does: the first click only names
-// what would be lost, the second one acts. The menu's own lifetime bounds the ask — closing
-// it unmounts the menu and forgets the confirmation — and a forgotten ask lapses anyway.
-function useConfirmStep() {
-  const [asking, setAsking] = useState(false)
+// what would be lost, the second one acts. The ask belongs to one item in one menu: the click
+// that acts spends it, another target starts clean, and the menu closing (even for its exit
+// linger) forgets it, so a reopen cannot inherit a confirmation. A forgotten ask lapses anyway.
+function useConfirmStep(target, leaving) {
+  const [ask, setAsk] = useState(null)
+  const [scope, setScope] = useState({ target, leaving })
+  // React's "adjust state on prop change" pattern: the reset lands before this render commits,
+  // so no click can answer a confirmation that belongs to the previous target or a closed menu.
+  if (scope.target !== target || scope.leaving !== leaving) {
+    setScope({ target, leaving })
+    if (leaving || scope.target !== target) setAsk(null)
+  }
   useEffect(() => {
-    if (!asking) return undefined
-    const timer = setTimeout(() => setAsking(false), 4000)
+    if (!ask) return undefined
+    const timer = setTimeout(() => setAsk(null), 4000)
     return () => clearTimeout(timer)
-  }, [asking])
-  // True when this click may act; false on the click that only asks.
-  return [asking, () => { if (asking) return true; setAsking(true); return false }]
+  }, [ask])
+  const asking = ask !== null && ask.target === target && !leaving
+  // True when this click may act; false on the click that only asks, on every click after the
+  // one that acted, and while the menu is leaving.
+  return [asking, () => {
+    if (leaving) return false
+    if (ask !== null && ask.target === target) {
+      if (ask.confirmed) return false
+      setAsk({ target, confirmed: true })
+      return true
+    }
+    setAsk({ target, confirmed: false })
+    return false
+  }]
 }
 
 const SECTION_COLORS = ['blue', 'orange', 'green', 'violet', 'rose']
@@ -59,7 +78,7 @@ export function ContextMenu({ menu, roster, actions, useWork, leaving = false })
     return () => { window.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey, true) }
   }, [])
   const [place, setPlace] = useState({ left: menu.x, top: menu.y })
-  const [confirmingDelete, readyToDelete] = useConfirmStep()
+  const [confirmingDelete, readyToDelete] = useConfirmStep(`${menu.kind ?? ''}:${menu.id ?? ''}`, leaving)
   const tick = useViewport()
   useLayoutEffect(() => {
     const box = ref.current?.getBoundingClientRect()
@@ -131,10 +150,13 @@ export function ContextMenu({ menu, roster, actions, useWork, leaving = false })
       index > 0 ? h('div', { className: 'bt-menu-sep', role: 'separator' }) : null,
       // `ask` is the item's own confirmation: it returns false on the click that only asks,
       // and the menu stays open with the item now naming what it would lose.
-      group.map(([label, Icon, run, danger, checked, describedBy, ask]) => h('button', {
-        key: label, type: 'button', role: 'menuitem', className: danger ? 'bt-danger' : undefined,
+      // The key is the item's place in the group, never its label: the confirmation changes
+      // the label, and a new key would unmount the focused button (and its screen-reader node).
+      group.map(([label, Icon, run, danger, checked, describedBy, ask], item) => h('button', {
+        key: `item-${item}`, type: 'button', role: 'menuitem', className: danger ? 'bt-danger' : undefined,
         'aria-describedby': describedBy,
         onClick: () => {
+          if (leaving) return
           if (ask && !ask()) return
           actions.closeMenu()
           void Promise.resolve(run()).catch(error => actions.reportError(error, 'menu'))
@@ -247,7 +269,7 @@ function AgentMenu({ menu, roster, actions, leaving }) {
     return () => window.removeEventListener('keydown', onKey, true)
   }, [])
   const [place, setPlace] = useState({ left: menu.x, top: menu.y })
-  const [confirmingRemove, readyToRemove] = useConfirmStep()
+  const [confirmingRemove, readyToRemove] = useConfirmStep(`${menu.kind ?? ''}:${menu.id ?? ''}`, leaving)
   const tick = useViewport()
   useLayoutEffect(() => {
     const box = ref.current?.getBoundingClientRect()
@@ -281,10 +303,11 @@ function AgentMenu({ menu, roster, actions, leaving }) {
   return h('div', { ref, className: 'bt-menu', role: 'menu', 'aria-label': menu.kind === 'agent' ? (agent.kind === 'tasks' ? t('Tasks') : agent.name) : t('Session actions'), style: place, 'data-leaving': leaving || undefined },
     groups.map((group, index) => h(Fragment, { key: index },
       index > 0 ? h('div', { className: 'bt-menu-sep', role: 'separator' }) : null,
-      group.map(([label, Icon, run, danger, checked, describedBy, ask]) => h('button', {
-        key: label, type: 'button', role: 'menuitem', className: danger ? 'bt-danger' : undefined,
+      group.map(([label, Icon, run, danger, checked, describedBy, ask], item) => h('button', {
+        key: `item-${item}`, type: 'button', role: 'menuitem', className: danger ? 'bt-danger' : undefined,
         'aria-describedby': describedBy,
         onClick: () => {
+          if (leaving) return
           if (ask && !ask()) return
           actions.closeMenu()
           void Promise.resolve(run()).catch(error => actions.reportError(error, 'menu'))
