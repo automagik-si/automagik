@@ -258,7 +258,7 @@ html[data-automagik-desktop=darwin] .lb-head :is(a,button,input,[role=button],[a
 .bt-head-more-pop .bt-head-details:hover{background:var(--bt-hover)}
 .bt-head-more-pop .bt-head-word{display:inline}
 .bt-head-more-pop .os-head-btn{display:flex;align-items:center;width:100%;height:34px;justify-content:flex-start;gap:8px}
-.bt-head-more-pop .os-head-count{flex:none;min-width:18px;padding:0 6px;box-sizing:border-box;border-radius:9px;background:var(--bt-hover);color:var(--bt-ink);font:600 11px/18px var(--bt-font);text-align:center}
+.bt-head-more-pop .os-head-count{flex:none;min-width:18px;padding:0 6px;box-sizing:border-box;border-radius:10px;background:var(--bt-hover);color:var(--bt-ink);font:600 11px/18px var(--bt-font);text-align:center}
 `
 
 export const LEFT_BAR_CSS = `
