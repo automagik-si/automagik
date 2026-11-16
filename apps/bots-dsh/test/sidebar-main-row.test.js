@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
@@ -138,6 +139,26 @@ test('a Bot whose plugin is not installed says so, in the bar and in the rail', 
   assert.match(row.props['aria-label'], /Not installed/)
   assert.match(JSON.stringify(row), /Not installed/)
   assert.match(JSON.stringify(row), /plugin is missing/)
+})
+
+test('the wide bar row carries the reason, and the dead missing-preview line is gone', () => {
+  const missing = { ...omni, installed: false, reason: 'the @automagik/omni-channels-dsh plugin is missing from this DSH' }
+  const team = { ...roster, bots: [pip, missing], byId: { pip, missing } }
+  const rows = sidebar({ team }).teamRows()
+  // The bar draws its rows through TeamRows; call it as React would.
+  const list = rows.type(rows.props)
+  const [row] = find(list, node => node.type === 'button' && node.props?.['data-id'] === 'omni')
+  assert.match(row.props['aria-label'], /Not installed/)
+  assert.match(row.props['aria-label'], /plugin is missing/)
+  // The mark's own title says why too, where a pointer or a reader arrives at it.
+  const [status] = find(row, node => node.type?.name === 'Status')
+  assert.equal(status.type(status.props).props.title, `Not installed · ${missing.reason}`)
+  // BotRow's wide-only preview was never reachable: the bar does not draw that class.
+  assert.equal(find(list, node => String(node.props?.className).includes('bt-row-preview-missing')).length, 0)
+  const barSource = readFileSync(new URL('../src/client/sidebar.js', import.meta.url), 'utf8')
+  assert.equal(barSource.includes('bt-row-preview-missing'), false, 'the dead preview branch is gone')
+  const sheet = readFileSync(new URL('../src/client/styles.js', import.meta.url), 'utf8')
+  assert.equal(sheet.includes('bt-row-preview-missing'), false, 'its sheet rule is gone too')
 })
 
 test('a DSH bot row wears DSH\'s blue whale, not a generic terminal mark', () => {

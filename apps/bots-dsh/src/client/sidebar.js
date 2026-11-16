@@ -120,8 +120,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
     h('span', { className: 'bt-row-name' }, h('span', { className: 'bt-row-title' }, bot.name), bot.engine ? h(AgentBadge, { engine: bot.engine }) : null, role ? h('span', { className: 'bt-role' }, role) : null, pinned ? h(PinMark) : null),
     // What to ask this Bot for, on a line of its own: the name line has no room for it.
     h(BotPills, { roster, bot, className: 'bt-row-caps' }),
-    notInstalledText ? h('span', { className: 'bt-row-preview bt-row-preview-missing' }, notInstalledText)
-      : blockedLine || stoppedLine ? h('span', { className: 'bt-row-preview bt-row-preview-ask' }, blockedLine || stoppedLine)
+    blockedLine || stoppedLine ? h('span', { className: 'bt-row-preview bt-row-preview-ask' }, blockedLine || stoppedLine)
       : runningLine ? h('span', { className: 'bt-row-preview' }, runningLine)
         : awayLine ? h('span', { className: 'bt-row-preview' }, awayLine)
           : waitsFor ? h('span', { className: 'bt-row-preview' }, waitsFor)

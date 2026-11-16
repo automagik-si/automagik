@@ -2957,7 +2957,12 @@ Object.assign(ZH, {
   "This step is hard to undo: {step}. Allow it once?": "这一步难以撤销：{step}。允许这一次吗？",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?": "{name} 在本轮被拒绝了 {count} 次，最近一次是 {tool}。让它继续工作吗？",
   "Let it keep working?": "让它继续工作吗？",
-  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。"
+  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。",
+  // The roster's not-installed reasons (installed.js), worded with the plugin or its error code.
+  "the {name} plugin is missing from this DSH": "这个 DSH 里没有 {name} 插件",
+  "the {name} plugin is switched off in this DSH": "这个 DSH 里已关闭 {name} 插件",
+  "the {name} plugin did not load in this DSH": "{name} 插件在这个 DSH 里没有加载",
+  "the {name} plugin did not load in this DSH ({code})": "{name} 插件在这个 DSH 里没有加载（{code}）"
 });
 Object.assign(ZH, HOST_ZH);
 var fill = (text2, params) => params ? text2.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text2;
@@ -3011,6 +3016,12 @@ var HOST_TEMPLATES = [
   { template: "Session {session} cannot join {bot} because this window cannot change the Bot team now. {reason}", host: ["reason"] },
   '{bot} changed while Session {session} was joining it (another window or an edit). For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.',
   '{bot} changed while Session {session} was being saved. For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.',
+  // The roster's not-installed reasons (installed.js): the plugin name, and the load error's
+  // code when DSH gave one, are values in the message.
+  "the {name} plugin is missing from this DSH",
+  "the {name} plugin is switched off in this DSH",
+  "the {name} plugin did not load in this DSH ({code})",
+  "the {name} plugin did not load in this DSH",
   // Auto's refusals that name the Bot (auto.js setBotAuto).
   "{name}'s permissions changed meanwhile, so nothing was saved. Look again and choose.",
   "Auto is not offered for {name} here."
@@ -19751,7 +19762,6 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .bt-drawer-caps{flex-wrap:wrap;justify-content:center;max-width:100%;margin-top:8px}
 .bt-row-preview{font-size:13px;line-height:18px;color:var(--bt-ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bt-row-preview-ask{color:var(--st-warn-strong,var(--st-warn,var(--bt-ink-2)));font-weight:500}
-.bt-row-preview-missing{color:var(--bt-ink-3)}
 .bt-unread{width:8px;height:8px;border-radius:50%;background:var(--bt-accent);flex:none;margin-right:2px;animation:bt-fade .13s cubic-bezier(.22,1,.36,1)}
 .bt-unread-wait{background:var(--bt-star)}
 .bt-rail{align-items:center;padding:0 0 8px}
@@ -21704,20 +21714,21 @@ var SHAPES2 = {
     (0, import_react52.createElement)("path", { key: "slash", d: "M3.2 8.8l5.6-5.6", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round" })
   ]
 };
-function StatusMark({ status, named = true }) {
+function StatusMark({ status, named = true, detail = "" }) {
   const kind = statusOr(status);
-  const says = word(kind);
+  const says = detail === "" ? word(kind) : `${word(kind)} · ${detail}`;
   return (0, import_react52.createElement)("span", {
     className: `lb-mark lb-mark-${kind}`,
     "data-status": kind,
     ...named ? { role: "img", "aria-label": says, title: says } : { "aria-hidden": true }
   }, (0, import_react52.createElement)("svg", { viewBox: "0 0 12 12", "aria-hidden": true, focusable: "false" }, ...SHAPES2[kind]()));
 }
-function Status({ status, worded = WORDED, quiet: quiet2 = QUIET }) {
+function Status({ status, worded = WORDED, quiet: quiet2 = QUIET, detail = "" }) {
   const kind = statusOr(status);
   if (quiet2.includes(kind)) return null;
-  if (!worded.includes(kind)) return (0, import_react52.createElement)(StatusMark, { status: kind });
-  return (0, import_react52.createElement)("span", { className: `lb-st lb-st-${kind}`, "data-status": kind }, (0, import_react52.createElement)(StatusMark, { status: kind, named: false }), word(kind));
+  const says = detail === "" ? word(kind) : `${word(kind)} · ${detail}`;
+  if (!worded.includes(kind)) return (0, import_react52.createElement)(StatusMark, { status: kind, detail });
+  return (0, import_react52.createElement)("span", { className: `lb-st lb-st-${kind}`, "data-status": kind, title: says }, (0, import_react52.createElement)(StatusMark, { status: kind, named: false }), word(kind));
 }
 
 // src/client/left-bar-rail.js
@@ -21868,7 +21879,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
   const { art, duo } = useArtSizes(ref, skin, rows2.length);
   const edges = useScrollEdges(ref, rows2.length);
   const press = (row) => onOpen ? () => onOpen(row) : void 0;
-  const status = (row) => (0, import_react54.createElement)(Status, { status: row.status, worded, quiet: quiet2 });
+  const status = (row, detail = "") => (0, import_react54.createElement)(Status, { status: row.status, worded, quiet: quiet2, detail });
   const button = (row, className, extra, ...children) => (0, import_react54.createElement)("button", {
     key: row.key,
     type: "button",
@@ -21888,15 +21899,17 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
     if (row.kind === "section") return (0, import_react54.createElement)("div", { key: row.key, className: classes("lb-sec", row.first && "lb-sec-first") }, row.label);
     if (row.kind === "bot") {
       const state2 = row.bot.state ?? stateOfStatus(statusOr(row.bot.status));
+      const reason = row.bot?.installed === false && typeof row.bot.reason === "string" ? hostText(row.bot.reason) : "";
+      const says = reason === "" ? null : { "aria-label": [row.name, t("Not installed"), reason].join(" · ") };
       return button(
         row,
         classes(row.unread && "lb-row-unread", row.status === "off" && "lb-row-off"),
-        null,
+        says,
         (0, import_react54.createElement)("span", { className: "lb-art" }, renderArt2(row.bot, art, state2)),
         (0, import_react54.createElement)("span", { className: "lb-name" }, row.name),
         row.unread ? (0, import_react54.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
         renderEnd ? renderEnd(row) : null,
-        status(row)
+        status(row, reason)
       );
     }
     if (row.kind === "channel") {
@@ -22734,7 +22747,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
       (0, import_react57.createElement)("span", { className: "bt-row-name" }, (0, import_react57.createElement)("span", { className: "bt-row-title" }, bot.name), bot.engine ? (0, import_react57.createElement)(AgentBadge, { engine: bot.engine }) : null, role ? (0, import_react57.createElement)("span", { className: "bt-role" }, role) : null, pinned ? (0, import_react57.createElement)(PinMark) : null),
       // What to ask this Bot for, on a line of its own: the name line has no room for it.
       (0, import_react57.createElement)(BotPills, { roster, bot, className: "bt-row-caps" }),
-      notInstalledText ? (0, import_react57.createElement)("span", { className: "bt-row-preview bt-row-preview-missing" }, notInstalledText) : blockedLine || stoppedLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview bt-row-preview-ask" }, blockedLine || stoppedLine) : runningLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, runningLine) : awayLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, awayLine) : waitsFor ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, waitsFor) : threadsLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, threadsLine) : preview ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, preview) : null
+      blockedLine || stoppedLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview bt-row-preview-ask" }, blockedLine || stoppedLine) : runningLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, runningLine) : awayLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, awayLine) : waitsFor ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, waitsFor) : threadsLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, threadsLine) : preview ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, preview) : null
     ) : null,
     // Badges other Omni plugins add (extend.js): Omni's row counts the automation runs waiting for you.
     wide ? (0, import_react57.createElement)(RowBadges, { bot, roster, useWork }) : null,

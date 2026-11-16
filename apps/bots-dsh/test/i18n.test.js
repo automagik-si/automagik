@@ -62,6 +62,43 @@ test('copy follows the DSH language and stays English without a locale service',
 })
 
 
+test('the four not-installed reasons are worded in Chinese and Portuguese', () => {
+  const GENIE = '@automagik/genie-dsh'
+  const reasons = [
+    `the ${GENIE} plugin is missing from this DSH`,
+    `the ${GENIE} plugin is switched off in this DSH`,
+    `the ${GENIE} plugin did not load in this DSH`,
+    `the ${GENIE} plugin did not load in this DSH (incompatible-version)`,
+  ]
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    assert.deepEqual(reasons.map(hostText), [
+      `这个 DSH 里没有 ${GENIE} 插件`,
+      `这个 DSH 里已关闭 ${GENIE} 插件`,
+      `${GENIE} 插件在这个 DSH 里没有加载`,
+      `${GENIE} 插件在这个 DSH 里没有加载（incompatible-version）`,
+    ])
+  } finally { off() }
+  // The pt-BR pack words the same templates; hostText goes through its binding.
+  const pt = JSON.parse(readFileSync(new URL('../../locale-pt-br-dsh/src/client/locales/pt-BR/omni-ui.json', import.meta.url), 'utf8'))
+  const offPack = installLocale({
+    register: () => () => {},
+    bind: () => (key, params) => {
+      const text = pt[key] ?? key
+      return params ? text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match)) : text
+    },
+    getLocale: () => ({ active: 'pt' }),
+  })
+  try {
+    assert.deepEqual(reasons.map(hostText), [
+      `o plugin ${GENIE} não está instalado neste DSH`,
+      `o plugin ${GENIE} está desativado neste DSH`,
+      `o plugin ${GENIE} não carregou neste DSH`,
+      `o plugin ${GENIE} não carregou neste DSH (incompatible-version)`,
+    ])
+  } finally { offPack() }
+})
+
 test('D client: host ladder templates translate to Chinese', async () => {
   const { askText, questionText } = await import('../src/host/ladder.js')
   const off = installLocale(fakeLocale('zh'))

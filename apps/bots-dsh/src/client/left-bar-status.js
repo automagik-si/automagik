@@ -77,9 +77,9 @@ const SHAPES = {
 }
 
 /** One status mark. Alone, it carries its word as a title and a name; `named: false` is the mark beside its own word. */
-export function StatusMark({ status, named = true }) {
+export function StatusMark({ status, named = true, detail = '' }) {
   const kind = statusOr(status)
-  const says = word(kind)
+  const says = detail === '' ? word(kind) : `${word(kind)} · ${detail}`
   return h('span', {
     className: `lb-mark lb-mark-${kind}`,
     'data-status': kind,
@@ -88,9 +88,10 @@ export function StatusMark({ status, named = true }) {
 }
 
 /** A row's status: nothing for a quiet one, the mark and its word for a worded one, else the mark. */
-export function Status({ status, worded = WORDED, quiet = QUIET }) {
+export function Status({ status, worded = WORDED, quiet = QUIET, detail = '' }) {
   const kind = statusOr(status)
   if (quiet.includes(kind)) return null
-  if (!worded.includes(kind)) return h(StatusMark, { status: kind })
-  return h('span', { className: `lb-st lb-st-${kind}`, 'data-status': kind }, h(StatusMark, { status: kind, named: false }), word(kind))
+  const says = detail === '' ? word(kind) : `${word(kind)} · ${detail}`
+  if (!worded.includes(kind)) return h(StatusMark, { status: kind, detail })
+  return h('span', { className: `lb-st lb-st-${kind}`, 'data-status': kind, title: says }, h(StatusMark, { status: kind, named: false }), word(kind))
 }

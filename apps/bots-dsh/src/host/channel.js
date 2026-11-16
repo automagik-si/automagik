@@ -128,6 +128,10 @@ export function install(rt) {
       const running = runningOf(bot)
       return running.runningModel === undefined ? '' : `${bot.id}=${running.runningModel}:${running.runningEffort ?? ''}`
     }).join(','),
+    // What installed.js last said about each Bot's crew plugin (below): a change there is a
+    // new view even when the team's revision and the models did not move. Each window keeps
+    // its own modelsKey, so every window catches up, and a restarted host compares it too.
+    installationKey(),
   ].join('|')
   // What the client draws for each Bot: the saved Bot plus what DSH says about the plugin
   // that runs it (installed.js). A crew Bot whose plugin is missing is not an idle Bot.
@@ -135,7 +139,6 @@ export function install(rt) {
     const installation = rt.installationOf?.(bot)
     return `${bot.id}:${installation?.installed === false ? `0:${installation.reason}` : '1'}`
   }).join('|')
-  let shownInstallation
   const view = () => ({
     revision: state.revision,
     workspaceId: state.workspaceId ?? null,
@@ -499,16 +502,12 @@ export function install(rt) {
           await rt.loadSecrets()
           // The roster's `installed` is read now, at most once per installed.js's own TTL:
           // the client must not keep drawing an idle Bot after its plugin was removed, nor a
-          // missing one after it was installed. A change in that answer is a new view even
-          // when the team's revision did not move.
+          // missing one after it was installed. modelsKey carries that answer, so a change in
+          // it is a new view even when the team's revision did not move (and each window, and
+          // a host restarted under an open window, compares the same key).
           await rt.refreshInstallation?.()
-          const installation = installationKey()
-          // A restarted host has no earlier answer to compare: its first poll keeps the
-          // unchanged shortcut, and the next one (installed.js's TTL) catches a change.
-          const installationChanged = shownInstallation !== undefined && installation !== shownInstallation
-          shownInstallation = installation
           const answer = liveAnswer()
-          if (!installationChanged && body.since === state.revision && (body.models === undefined || body.models === modelsKey())) {
+          if (body.since === state.revision && (body.models === undefined || body.models === modelsKey())) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })
             return ok({ revision: state.revision, unchanged: true, liveKey: answer.key, ...answer.value })
           }

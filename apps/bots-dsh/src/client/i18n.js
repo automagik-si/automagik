@@ -2903,7 +2903,12 @@ Object.assign(ZH, {
   "This step is hard to undo: {step}. Allow it once?": "这一步难以撤销：{step}。允许这一次吗？",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?": "{name} 在本轮被拒绝了 {count} 次，最近一次是 {tool}。让它继续工作吗？",
   "Let it keep working?": "让它继续工作吗？",
-  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。"
+  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。",
+  // The roster's not-installed reasons (installed.js), worded with the plugin or its error code.
+  'the {name} plugin is missing from this DSH': '这个 DSH 里没有 {name} 插件',
+  'the {name} plugin is switched off in this DSH': '这个 DSH 里已关闭 {name} 插件',
+  'the {name} plugin did not load in this DSH': '{name} 插件在这个 DSH 里没有加载',
+  'the {name} plugin did not load in this DSH ({code})': '{name} 插件在这个 DSH 里没有加载（{code}）'
 })
 Object.assign(ZH, HOST_ZH)
 
@@ -2973,6 +2978,12 @@ const HOST_TEMPLATES = [
   { template: 'Session {session} cannot join {bot} because this window cannot change the Bot team now. {reason}', host: ['reason'] },
   '{bot} changed while Session {session} was joining it (another window or an edit). For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.',
   '{bot} changed while Session {session} was being saved. For the Bot team: Nothing was changed; try again. The native preset of Session {session} was set to "{preset}" before this refusal.',
+  // The roster's not-installed reasons (installed.js): the plugin name, and the load error's
+  // code when DSH gave one, are values in the message.
+  'the {name} plugin is missing from this DSH',
+  'the {name} plugin is switched off in this DSH',
+  'the {name} plugin did not load in this DSH ({code})',
+  'the {name} plugin did not load in this DSH',
   // Auto's refusals that name the Bot (auto.js setBotAuto).
   "{name}'s permissions changed meanwhile, so nothing was saved. Look again and choose.",
   'Auto is not offered for {name} here.',
