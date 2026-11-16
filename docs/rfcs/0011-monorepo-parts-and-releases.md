@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (process in use; delivery unverified: open work #207 and #215; #250 Play flavor deferred to Pocket; #190, #203 and #210 merged 2026-11-03; the owner OKd one version and the jump; amendment accepted 2026-11-16: the member runner's carrier, inside am under am's key (Felipe's direction)) |
+| Status | Accepted (process in use; delivery unverified: open work #207 and #215; #250 Play flavor deferred to Pocket; #190, #203 and #210 merged 2026-11-03; the owner OKd one version and the jump; amendment accepted 2026-11-16 by the owner: the member runner's carrier, inside am under am's key) |
 | Delivered | |
 | Milestone | n/a (process) |
 | Lanes | herdr (3.N.P), added here; pocket (3.N.P), added by Pocket's import |
@@ -521,7 +521,7 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
 
 ## Amendment: the member runner's carrier (2026-11-16, accepted)
 
-**Accepted 2026-11-16, by Felipe (via Sofia): "Inside am, under am's key."** The member wall's
+**Accepted 2026-11-16, by the owner: "Inside am, under am's key."** The member wall's
 privileged runner ([RFC 0024](0024-automagik-cloud.md), (f)) ships inside am's tarball, signed by
 am's lane key, when members are allowed. It turns nothing on: members stay off until the whole
 wall, its three safeguards and the isolation review hold (Decided 26 and (f)), and this adds no
