@@ -1,0 +1,40 @@
+The pure event-notice shim
+==========================
+
+The queue stores the notice as a USER-INPUT text item, not as a data item, so
+data-not-instruction is a convention of the strict shapes, the fixed template
+and the chat's own rule, never a property of the queue; the boundary is
+behavioural. The source line is a hint, not authentication.
+
+The event id appears once in the template text; that is a property of the text,
+not a count of anything the chat did. The receipt counts user-input items, not
+mentions.
+
+This is a text queue with staged evidence from two sources (the queue call and
+the chat's own session record), not a structured event bus.
+
+STARTED, FINISHED and HEARD are observed, separate receipts. Each names its
+source, identifier and timestamp; each is unknown when the evidence is missing
+or the read window closed. The started observer reports at most one input item
+observed per event id: zero is unknown, one is started, two or more is unproven
+with the count. FINISHED is the next assistant message after the item, whether
+or not that message names the event id. HEARD is a person's word or playback
+telemetry and is unknown by default.
+
+The queue confirms queued only; no other stage is inferred from the queue call.
+Dedupe reduces repeats through a bounded journal; an evicted id is queued again.
+
+A value outside the schema is refused before the queue call. An event that
+carries an unknown key is refused with a reason naming the key, and free event
+text never becomes an instruction.
+
+Rehearsal facts (a synthetic event, one Codex thread, closed): an idle chat took
+the strict-template notice as one user-input item and answered in about 4 s; a
+busy chat held the item in the queue and drained it after the turn as one
+user-input item; a free-form event is not a template result and is never cited
+as one; the closed chat was not tested for real, because the shim refuses it by
+its own thread check.
+
+The live driver is reviewed code under herdr/test/fixtures/, not a line first
+seen in a runbook. It is a dry run by default; LIVE=1 spawns the queue argv
+array without a shell. Its sha256 is quoted by the runbook.
