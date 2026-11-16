@@ -5108,3 +5108,110 @@ test("#805 a busy parent's doomed helpers still refuse before queueing", (t) => 
   assert.equal(r.json().refused, "helpers");
   assert.equal(runCall(s.calls()), undefined);
 });
+
+// ---- #1411: a Codex bot's own reasoning effort and service tier ----
+
+/** The fake home's Codex model list (what `--model` pins from), and its global config when given. */
+function codexHome(s, text = null) {
+  mkdirSync(join(s.home, ".codex"), { recursive: true });
+  writeFileSync(join(s.home, ".codex/models_cache.json"),
+    JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }, { slug: "gpt-6.1-terra" }, { slug: "gpt-6-astra" }] }));
+  const config = join(s.home, ".codex/config.toml");
+  if (text !== null) writeFileSync(config, text);
+  return config;
+}
+const codexSeatWords = (run) => codexWords(agentWords(run));
+
+test("#1411: create stores a Codex bot's effort and tier; start and restart pass them; show reports each with its source", (t) => {
+  const s = scene(t);
+  const config = codexHome(s);
+  const made = s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "fast", "--json"]);
+  assert.equal(made.code, 0, made.err);
+  assert.deepEqual([s.bots().bots[0].effort, s.bots().bots[0].tier], ["high", "fast"], "stored on the bot's record");
+  const shown = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([shown.effort, shown.effortSource, shown.tier, shown.tierSource, shown.pinnedEffort, shown.pinnedTier],
+    ["high", "roster", "fast", "roster", "high", "fast"]);
+  assert.match(s.cli(["show", "Genie"]).out, /effort {7}high \(roster\)/);
+  // Start: the record's words come after the agent's own, and the global Codex config is never written.
+  const started = s.cli(["start", "Genie", "--json"]);
+  assert.equal(started.code, 0, started.err);
+  assert.deepEqual(codexSeatWords(runCall(s.calls())).slice(-6),
+    ["--model", "gpt-6.1-sol", "-c", "model_reasoning_effort=high", "-c", "service_tier=priority"]);
+  assert.equal(existsSync(config), false, "no global config file was made");
+  // A live pane: show reports what it really runs, detected on its command line.
+  const live = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([live.effort, live.effortSource, live.tier, live.tierSource], ["high", "detected", "fast", "detected"]);
+  // Restart keeps both, from the record.
+  const restarted = s.cli(["restart", "Genie", "--force", "--json"]);
+  assert.equal(restarted.code, 0, restarted.err);
+  assert.deepEqual(codexSeatWords(s.calls().filter((c) => c[0] === "run").at(-1)).slice(-6),
+    ["--model", "gpt-6.1-sol", "-c", "model_reasoning_effort=high", "-c", "service_tier=priority"]);
+  assert.equal(existsSync(config), false);
+});
+
+test("#1411: two Codex bots on one host run different tiers; one that stores none inherits the profile, which is never written", (t) => {
+  const s = scene(t);
+  const text = 'model = "gpt-6-astra"\nmodel_reasoning_effort = "low"\nservice_tier = "priority"\n';
+  const config = codexHome(s, text);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "standard", "--json"]).code, 0);
+  assert.equal(s.cli(["create", "--name", "Captain", "--agent", "codex", "--model", "gpt-6.1-sol", "--json"]).code, 0);
+  assert.equal(s.cli(["start", "Genie", "--json"]).code, 0);
+  assert.equal(s.cli(["start", "Captain", "--json"]).code, 0);
+  const [genie, captain] = s.calls().filter((c) => c[0] === "run").slice(0, 2).map(codexSeatWords);
+  // The first bot's own Standard beats the host's Fast; the second adds nothing and gets the host's pair.
+  assert.deepEqual(genie.slice(-6), ["--model", "gpt-6.1-sol", "-c", "model_reasoning_effort=high", "-c", "service_tier=default"]);
+  assert.equal(captain.some((w) => w.startsWith("service_tier=")), false, "no tier stored: the host's config applies");
+  assert.equal(captain.some((w) => w.startsWith("model_reasoning_effort=")), false);
+  const shown = s.cli(["show", "Captain", "--json"]).json();
+  assert.deepEqual([shown.effort, shown.effortSource, shown.tier, shown.tierSource, shown.pinnedEffort, shown.pinnedTier],
+    ["low", "profile", "fast", "profile", null, null]);
+  assert.equal(readFileSync(config, "utf8"), text, "the global Codex config is never written");
+});
+
+test("#1411: a Fast model changed to a standard one doesn't keep Fast; --tier with the model picks the new tier; empty clears", (t) => {
+  const s = scene(t);
+  codexHome(s);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "fast", "--json"]).code, 0);
+  // Sol -> Astra naming no tier: the stored Fast goes, with one line saying why.
+  const changed = s.cli(["edit", "Genie", "--model", "gpt-6-astra"]);
+  assert.equal(changed.code, 0, changed.err);
+  assert.match(changed.err, /service tier doesn't carry over to a new model; pass --tier fast or --tier standard with --model/);
+  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier, s.bots().bots[0].effort], ["gpt-6-astra", undefined, "high"]);
+  // The launch carries no service_tier word: a standard model never inherits Fast from the record.
+  assert.equal(s.cli(["start", "Genie", "--json"]).code, 0);
+  assert.equal(codexSeatWords(runCall(s.calls())).some((w) => w.startsWith("service_tier=")), false);
+  // Naming the tier with the model stores the new choice, and the next restart passes it.
+  assert.equal(s.cli(["edit", "Genie", "--model", "gpt-6.1-terra", "--tier", "fast"]).code, 0);
+  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier], ["gpt-6.1-terra", "fast"]);
+  assert.equal(s.cli(["restart", "Genie", "--force", "--json"]).code, 0);
+  assert.deepEqual(codexSeatWords(s.calls().filter((c) => c[0] === "run").at(-1)).slice(-2), ["-c", "service_tier=priority"]);
+  // An empty value clears one; a value this pack has no word for, or an effort off the shape, is a usage mistake.
+  assert.equal(s.cli(["edit", "Genie", "--tier="]).code, 0);
+  assert.equal(s.bots().bots[0].tier, undefined);
+  assert.equal(s.cli(["edit", "Genie", "--tier", "flex"]).code, 2);
+  const badEffort = s.cli(["edit", "Genie", "--effort", "banana"]);
+  assert.equal(badEffort.code, 2);
+  assert.match(badEffort.err, /--effort: reasoning effort "banana" isn't one of low, medium, high, xhigh, max, ultra\./);
+  assert.equal(s.cli(["edit", "Genie", "--effort", "high value"]).code, 2, "an effort is one word");
+  assert.equal(s.cli(["edit", "Genie", "--effort="]).code, 0);
+  assert.equal(s.bots().bots[0].effort, undefined);
+});
+
+test("#1411: effort and tier are a Codex bot's: moving to another agent clears them, and another agent refuses them", (t) => {
+  const s = scene(t);
+  codexHome(s);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--effort", "high", "--tier", "fast", "--json"]).code, 0);
+  const moved = s.cli(["edit", "Genie", "--agent", "claude"]);
+  assert.equal(moved.code, 0, moved.err);
+  assert.match(moved.err, /its reasoning effort and service tier were cleared/);
+  assert.deepEqual([s.bots().bots[0].agent, s.bots().bots[0].effort, s.bots().bots[0].tier], ["claude", undefined, undefined]);
+  const badTier = s.cli(["edit", "Genie", "--tier", "fast"]);
+  assert.equal(badTier.code, 2);
+  assert.match(badTier.err, /--effort and --tier are a Codex bot's; Genie runs claude/);
+  const badEffort = s.cli(["create", "--name", "Second", "--agent", "claude", "--effort", "high"]);
+  assert.equal(badEffort.code, 2);
+  const unknown = s.cli(["create", "--name", "Second", "--agent", "codex", "--effort", "banana"]);
+  assert.equal(unknown.code, 2);
+  assert.match(unknown.err, /--effort: reasoning effort "banana" isn't one of/);
+  assert.equal(s.bots().bots.length, 1, "nothing written");
+});

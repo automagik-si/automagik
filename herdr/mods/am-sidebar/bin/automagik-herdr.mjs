@@ -30,7 +30,7 @@ import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, co
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, defaultModel, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexDefaultsFrom, codexEffortProblem, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -1022,6 +1022,21 @@ function localProjectsFor(project, appHomeDir = appHome(), extraKeys = []) {
   });
 }
 
+/**
+ * A Codex setting as ls and show report it (#1411): what the bot's live pane runs (detected:
+ * a stored value a restart hasn't applied yet isn't what runs), else the bot's own stored value
+ * (roster), else the one its global config gives (profile or default), else null. `map` turns
+ * Codex's id into the roster's word (a service tier: priority is fast).
+ */
+function shownCodexSetting({ argv, pinned, fallback, fallbackSource = "profile", key, map = (v) => v }) {
+  if (Array.isArray(argv)) {
+    const detected = codexConfigValue(argv, key);
+    if (detected !== null) return { value: map(detected), source: "detected" };
+  } else if (pinned) return { value: pinned, source: "roster" };
+  if (fallback !== null && fallback !== undefined) return { value: map(fallback), source: fallbackSource };
+  return { value: null, source: null };
+}
+
 /** One bot as ls and show print it. With hc failing, the bot is still shown, its pane unknown. */
 function describe(project, bot, view, hcError, projects = null) {
   const { file } = project;
@@ -1032,8 +1047,21 @@ function describe(project, bot, view, hcError, projects = null) {
     ? effectiveLead(file, bot.id, { project: project.key, projects: projectsMap })
     : { lead: "", leadProject: null, leadBot: null, warning: null };
   const leadName = lead.leadBot?.name ?? (!lead.leadProject && lead.lead ? file.bots.find((b) => b.id === lead.lead)?.name ?? null : null);
-  const fallback = bot.agent ? defaultModel(bot.agent, modelIo()) : null;
+  const agentKey = bot.agent ? resolveAgent(bot.agent, agentTable()) : null;
+  const io = modelIo();
+  const texts = agentKey ? configTexts(io.home, io.read) : {};
+  const fallback = bot.agent ? defaultModelFrom(bot.agent, texts) : null;
   const shown = shownModel({ argv: live?.foreground?.argv, agentKey: bot.agent, pinned: bot.model, fallback });
+  // #1411: the Codex reasoning effort and service tier this bot runs now (its pane's command
+  // line), else its own record when it isn't running, else the one its global config gives.
+  const inherited = codexDefaultsFrom(agentKey, texts);
+  const shownEffort = agentKey === "codex"
+    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.effort, fallback: inherited.effort, key: "model_reasoning_effort" })
+    : { value: null, source: null };
+  const shownTier = agentKey === "codex"
+    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.tier, fallback: inherited.tier ?? "default",
+      fallbackSource: inherited.tier === null ? "default" : "profile", key: "service_tier", map: tierName })
+    : { value: null, source: null };
   // The workers' Antigravity mode is shown as the default (auto) when their agent is Antigravity.
   const worker = bot.worker && typeof bot.worker === "object" ? { ...bot.worker } : null;
   if (worker && resolveAgent(worker.agent ?? bot.agent) === "antigravity") worker.agyMode = agyModeOf(worker.agyMode);
@@ -1061,6 +1089,8 @@ function describe(project, bot, view, hcError, projects = null) {
     category: bot.kind === "member" && !lead.leadProject && lead.lead === mainBotOf(file)?.id ? (bot.category ?? null) : null,
     planned: bot.planned ?? null, agent: bot.agent ?? null,
     model: shown.model, modelSource: shown.source, pinnedModel: bot.model ?? null,
+    effort: shownEffort.value, effortSource: shownEffort.source, pinnedEffort: bot.effort ?? null,
+    tier: shownTier.value, tierSource: shownTier.source, pinnedTier: bot.tier ?? null,
     agyMode: bot.agent === "antigravity" ? agyModeOf(bot.agyMode) : (typeof bot.agyMode === "string" && bot.agyMode ? bot.agyMode : null),
     terminal: held?.binding.terminal ?? null, status, duplicate: false, since: held?.binding.at ?? null,
     role: bot.role, rank: bot.rank ?? null, code: bot.code !== false, look: bot.look,
@@ -1211,7 +1241,7 @@ const OPTIONS = {
   check: { type: "boolean" }, rollback: { type: "boolean" }, auto: { type: "string" },
   "worker-agent": { type: "string" }, "worker-model": { type: "string" }, "worker-effort": { type: "string" },
   "worker-template": { type: "string" }, template: { type: "string" },
-  branch: { type: "string" }, worktree: { type: "string" }, base: { type: "string" }, effort: { type: "string" },
+  branch: { type: "string" }, worktree: { type: "string" }, base: { type: "string" }, effort: { type: "string" }, tier: { type: "string" },
   task: { type: "string" }, bot: { type: "string" }, move: { type: "boolean" },
   queued: { type: "boolean" }, cancel: { type: "boolean" }, "run-queued": { type: "string" },
   fresh: { type: "boolean" }, force: { type: "boolean" }, save: { type: "boolean" }, tree: { type: "boolean" }, "fresh-shared": { type: "boolean" },
@@ -1232,12 +1262,16 @@ Usage: am <command> [options]                   (every command takes --json and 
 
   ls [--all]                    bots with kind, lead, category, rank, agent, model, pane, status
                                plus planned waves, code opt-outs and Antigravity modes
-  show <bot>                    one bot in full
+  show <bot>                    one bot in full (--json: the effective effort and tier,
+                                and where each comes from)
   create --name N --agent A [--kind main|member] [--role R]
          [--code true|false]            false omits the worker instruction; default true
          [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
          [--cross-member BOT@DIR]...   reciprocal cross-project member(s) reporting to this lead
          [--character C --colour K | --omni] [--model M] [--rank R]
+         [--effort E] [--tier fast|standard]   Codex: the bot's own reasoning effort (low,
+                                       medium, high, xhigh, max, ultra) and tier; empty on
+                                       edit clears them
          [--hermes-home DIR --hermes-profile NAME]  pair an existing Hermes Bot Chat
          [--no-hermes]                   remove a pairing (does not delete the Hermes Bot)
          [--agy-mode accept-edits|auto|plan]   Antigravity's --mode; default auto
@@ -1252,10 +1286,16 @@ Usage: am <command> [options]                   (every command takes --json and 
                                        (review the diff), then restart to apply or roll back
          [--worker-template T]          (an hc template: owns the command, so it wins)
   edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category]
-             [--no-lead-project] [--no-cross-members] [--rank=]
+             [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
              [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
              [--agy-mode=auto] [--worker-agy-mode=auto]   (empty: cleared; auto is the default)
              [--agy-allow=] [--agy-deny=] [--no-agy-permissions] [--cross-member=]   (empty: cleared)
+  Effort and tier (Codex): --effort E and --tier fast|standard store the bot's own reasoning
+  effort and service tier; every start, restart and revive passes them as per-launch Codex
+  overrides, and the global Codex config is never written. What wins: the bot's record, then
+  the hc template it runs, then its Codex profile, then the global config. A --model change
+  drops a stored tier unless --tier is given in the same call, so a standard model never keeps
+  Fast. am show --json reports the effective values and their source.
   rm <bot>
   category ls | add --title T [--sub S] [--id ID] | edit <id> [--title T] [--sub S]
            | rm <id> | order <id>...
@@ -1668,6 +1708,39 @@ export function entryFrom(opts, base, project, { creating }) {
   if (opts.model !== undefined) { checkModel(entry.agent, opts.model); entry.model = opts.model; }
   else if (entry.model && opts.agent !== undefined && !modelList(entry.agent, entry.model).includes(entry.model)) {
     throw new CliError(`${entry.name} is pinned to ${entry.model}, which ${entry.agent} doesn't list; pass --model or --no-model.`);
+  }
+  // #1411: a bot's own reasoning effort and service tier (Codex's), passed on every launch as
+  // its own overrides. Empty clears. A service tier belongs to the model choice: a --model
+  // change that names no --tier drops a stored one, so a Fast model swapped for a standard one
+  // never keeps Fast.
+  const modelChanged = (opts.model !== undefined || opts["no-model"]) && (opts.model || undefined) !== base.model;
+  const givenEffort = opts.effort !== undefined && opts.effort !== "";
+  const givenTier = opts.tier !== undefined && opts.tier !== "";
+  if (givenEffort) {
+    const why = codexEffortProblem(opts.effort);
+    if (why) throw new CliError(`--effort: ${why}.`, 2);
+    entry.effort = opts.effort;
+  }
+  if (givenTier) {
+    const why = tierProblem(opts.tier);
+    if (why) throw new CliError(`--tier: ${why} (or --tier= to clear).`, 2);
+    entry.tier = opts.tier;
+  }
+  if (opts.effort === "") entry.effort = "";
+  if (opts.tier === "") entry.tier = "";
+  const storedEffort = entry.effort !== undefined && entry.effort !== "";
+  const storedTier = entry.tier !== undefined && entry.tier !== "";
+  const codexBot = entry.agent ? resolveAgent(entry.agent, agentTable()) === "codex" : false;
+  if ((storedEffort || storedTier) && !codexBot) {
+    if (givenEffort || givenTier) {
+      throw new CliError(`--effort and --tier are a Codex bot's; ${entry.name} runs ${entry.agent || "no agent"}.`, 2);
+    }
+    entry.effort = "";
+    entry.tier = "";
+    report([`${entry.name}: its reasoning effort and service tier were cleared, since they are a Codex bot's and it runs ${entry.agent || "no agent"}.`]);
+  } else if (opts.tier === undefined && modelChanged && storedTier) {
+    entry.tier = "";
+    report([`${entry.name}: its service tier doesn't carry over to a new model; pass --tier fast or --tier standard with --model to keep one.`]);
   }
   // Antigravity's execution mode: applied at launch (auto unless another is stored), so the
   // default is written as no field at all and auto clears a stored one.
@@ -2130,6 +2203,10 @@ async function cmdShow(opts, [ref]) {
     ...(info.category ? [`  category     ${info.category}`] : []),
     ...(info.planned ? [`  planned      wave ${info.planned.wave}${info.planned.note ? ` · ${info.planned.note}` : ""}`] : []),
     `  agent        ${info.agent ?? "-"}`, `  model        ${info.model ? `${info.model} (${info.modelSource})` : "-"}${info.pinnedModel && info.modelSource !== "pinned" ? `, pinned ${info.pinnedModel}` : ""}`,
+    ...(info.effort !== null || info.tier !== null ? [
+      `  effort       ${info.effort ? `${info.effort} (${info.effortSource})` : "-"}`,
+      `  tier         ${info.tier ? `${info.tier} (${info.tierSource})` : "-"}`,
+    ] : []),
     ...(info.agyMode ? [`  agy mode     ${info.agyMode}`] : []),
     ...(info.autoMode ? [`  auto mode    ${info.autoMode.args.length ? `${info.autoMode.args.join(" ")} (${info.autoMode.note})` : `none: ${info.autoMode.note}`}`] : []),
     ...(info.autoMode?.sandbox && info.autoMode.sandbox.state !== "available"
@@ -2997,7 +3074,8 @@ async function seatOnMachine(project, bot, over = {}) {
   // of the seat's session. A command that picks its own session keeps it; a restart's plan
   // (over.argv) brings its own id, in its argv and its carried label.
   // A Codex --add-dir is left for that machine to weigh (codexOn, #1142): only it can resolve it.
-  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, codexWhereThere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model)];
+  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, codexWhereThere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model),
+    ...seatSettingsArgs(agentKey, bot)];
   const chosen = !over.argv && choosesSession(agentKey) && !ownsSession(source) ? newSessionId() : null;
   const command = agyGuarded(agentKey, withAgySettings(agentKey, chosen ? [...source, ...sessionIdArgs(agentKey, chosen)] : source, agySettings?.path));
   // #612: a local absolute override that isn't there falls back to the shipped run when that is.
@@ -3356,7 +3434,7 @@ async function restartOnMachine(opts, project, bot, entry) {
   if (opts.save) {
     const now = await loadRemoteProject(key, machine);
     const stored = now.raw.bots.find((b) => b?.id === bot.id);
-    if (stored) { await saveProject(now, applyBotEdit(now.raw, { ...stored, agent: entry.agent, ...(entry.model ? { model: entry.model } : { model: undefined }) })); saved = true; }
+    if (stored) { await saveProject(now, applyBotEdit(now.raw, { ...stored, agent: entry.agent, ...(entry.model ? { model: entry.model } : { model: undefined }), effort: entry.effort, tier: entry.tier })); saved = true; }
   }
   if (!opts.json) report([`${bot.name}: ${old ? `${seat.address} replaces ${old.address}, ${restartText(plan, session)}` : `${bot.name} wasn't running; started in ${seat.address}`}${saved ? `; ${BOTS_PATH} now says ${plan.agent}` : ""}.`]);
   return opts.json ? { ...seatOnJson(bot, seat), warnings, replaced: old ? held.binding.terminal : null, mode: old ? plan.mode : "start",
@@ -3610,7 +3688,8 @@ async function launchSeat(project, bot, over = {}) {
   const labels = { ...paneLabels(file, bot.id, carry, lead ? leadPane(await liveRows(lead))?.labels ?? null : null), ...carry }; // A16
   const taken = new Set(rowsOf(await hcJson(["ls"])).map((r) => r?.name).filter(Boolean));
   // A Start's command, on a new session whose id Herdr chooses (Claude), unless it picks its own.
-  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, localWhere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model)];
+  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, localWhere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model),
+    ...seatSettingsArgs(agentKey, bot)];
   const chosen = !over.argv && choosesSession(agentKey) && !ownsSession(source) ? newSessionId() : null;
   const session = over.argv ? (over.session ?? null) : chosen;
   if (session && agentKey === "claude") labels[SESSION_LABEL] = session;
@@ -4951,7 +5030,7 @@ async function cmdRestart(opts, [ref]) {
     const now = loadProject(key, await writeDirOf(opts, key));
     const stored = now.raw.bots.find((b) => b?.id === bot.id);
     if (stored) {
-      await saveProject(now, applyBotEdit(now.raw, { ...stored, agent: entry.agent, ...(entry.model ? { model: entry.model } : { model: undefined }) }), { list: false });
+      await saveProject(now, applyBotEdit(now.raw, { ...stored, agent: entry.agent, ...(entry.model ? { model: entry.model } : { model: undefined }), effort: entry.effort, tier: entry.tier }), { list: false });
       saved = true;
     } else {
       // A worktree branched before the bot was added: its file has no entry to change.

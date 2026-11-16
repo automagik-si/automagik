@@ -171,14 +171,19 @@ export function detectModel(argv, agentKey) {
   return model;
 }
 
-// Top-level `model = "…"` of a TOML text: before the first [section] (profiles carry their own).
-function tomlTopModel(text) {
+// Top-level `key = "…"` of a TOML text: before the first [section] (profiles carry their own).
+function tomlTopValue(text, key) {
   for (const line of String(text).split("\n")) {
     if (/^\s*\[/.test(line)) break;
-    const m = /^\s*model\s*=\s*(["'])(.*?)\1\s*(#.*)?$/.exec(line);
-    if (m) return m[2];
+    const m = /^\s*([A-Za-z0-9_-]+)\s*=\s*(["'])(.*?)\2\s*(#.*)?$/.exec(line);
+    if (m && m[1] === key) return m[3];
   }
   return null;
+}
+
+// Top-level `model = "…"` (defaultModelFrom).
+function tomlTopModel(text) {
+  return tomlTopValue(text, "model");
 }
 
 /**
@@ -197,7 +202,7 @@ export function configPaths(home) {
 }
 
 // Every config text (null when missing) through a synchronous `read(path)`.
-function textsOf(home, read) {
+export function configTexts(home, read) {
   const out = {};
   for (const [name, path] of Object.entries(configPaths(home))) {
     try { out[name] = read(path) ?? null; } catch { out[name] = null; }
@@ -229,7 +234,7 @@ export function defaultModelFrom(agentKey, texts = {}) {
 
 /** defaultModelFrom over a synchronous `read(path) => string | null` under `home` (the CLI). */
 export function defaultModel(agentKey, { home, read }) {
-  return defaultModelFrom(agentKey, textsOf(home, read));
+  return defaultModelFrom(agentKey, configTexts(home, read));
 }
 
 // Claude Code: the aliases `claude --help` names ("an alias for the latest model (e.g.
@@ -318,7 +323,7 @@ export function knownModelsFrom(agentKey, texts = {}) {
  * model cache under `appHome`. No reader: the static list (Claude's), and no Antigravity list.
  */
 export function knownModels(agentKey, { home, read, appHome } = {}) {
-  const texts = read && home ? textsOf(home, read) : {};
+  const texts = read && home ? configTexts(home, read) : {};
   if (read && appHome) {
     try { texts.antigravityModels = read(agModelsPath(appHome)) ?? null; } catch { texts.antigravityModels = null; }
   }
@@ -382,6 +387,93 @@ export const hasEffortFlag = (agentKey) => Boolean(EFFORT[agentKey]);
 export function effortArgs(agentKey, effort) {
   if (!effort || !EFFORT[agentKey]) return [];
   return EFFORT[agentKey](effort);
+}
+
+// ---- A bot's own reasoning effort and service tier (#1411) ----
+//
+// Codex reads both from its own config (`model_reasoning_effort` and `service_tier`) and from
+// `-c key=value` on its command line, the later word winning. A bot's record therefore stores
+// the two and the pack passes them on every launch as per-launch overrides, never in the
+// person's global config, so two bots on one host can differ. The catalog of the Codex CLI this
+// pack starts names the tier `priority` as Fast and the plain one `default` (Standard); the
+// roster stores the menu's words.
+
+/** The service tiers a bot may store: the Fast one and Standard. */
+export const TIERS = Object.freeze(["fast", "standard"]);
+
+/** The reasoning efforts the Codex CLI's catalog lists for its seat models (codex-cli 0.167.0). */
+export const CODEX_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]);
+
+/** Why `effort` can't be stored for a Codex bot, or null (absent or one of CODEX_EFFORTS: fine). */
+export const codexEffortProblem = (effort) => (effort === undefined || effort === null ? null
+  : CODEX_EFFORTS.includes(effort) ? null : `reasoning effort ${JSON.stringify(effort)} isn't one of ${CODEX_EFFORTS.join(", ")}`);
+
+/** Codex's own name for a stored tier: Fast is `priority`, Standard `default`. */
+export const serviceTierId = (tier) => (tier === "fast" ? "priority" : tier === "standard" ? "default" : null);
+
+/** The stored tier for a Codex service-tier id; an id this pack has no word for is itself. */
+export const tierName = (id) => (id === "priority" ? "fast" : id === "default" ? "standard" : id ?? null);
+
+/** Why `tier` can't be stored, or null (absent or one of TIERS: fine). One line. */
+export const tierProblem = (tier) => (tier === undefined || tier === null
+  ? null : TIERS.includes(tier) ? null : `service tier ${JSON.stringify(tier)} isn't fast or standard`);
+
+/** The arguments that start `agentKey` on service tier `tier`, [] when none is given or not Codex. */
+export function tierArgs(agentKey, tier) {
+  const id = serviceTierId(tier);
+  return agentKey === "codex" && id ? ["-c", `service_tier=${id}`] : [];
+}
+
+/**
+ * The words a bot's own reasoning effort and service tier add to a Codex launch (#1411):
+ * effortArgs then tierArgs, [] for every other agent and for a Codex bot with neither stored.
+ * They go after the agent's own words, so they win over its profile and global config, and
+ * after a template's own words, so the roster wins there too. Workers never take them: their
+ * agent, model and effort come from the worker defaults or a template.
+ */
+export function seatSettingsArgs(agentKey, bot) {
+  if (agentKey !== "codex" || !bot) return [];
+  return [...effortArgs("codex", bot.effort), ...tierArgs("codex", bot.tier)];
+}
+
+/**
+ * The value a Codex argv gives config key `key` in its own `-c key=value` words (the last one
+ * wins), or null. Any word form Codex takes: `-c k=v`, `-ck=v`, `-c=k=v`, `--config k=v`,
+ * `--config=k=v`; nothing after `--` is read, and only the exact key counts.
+ */
+export function codexConfigValue(argv, key) {
+  const words = Array.isArray(argv) ? argv : [];
+  let value = null;
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i];
+    if (w === "--") break;
+    let text = null;
+    if (w === "-c" || w === "--config") text = words[i + 1] ?? null;
+    else if (w.startsWith("--config=")) text = w.slice("--config=".length);
+    else if (w.startsWith("-c") && w.length > 2) text = w.slice(w[2] === "=" ? 3 : 2);
+    if (text === null) continue;
+    const eq = text.indexOf("=");
+    if (eq < 0 || text.slice(0, eq).trim() !== key) continue;
+    value = text.slice(eq + 1).trim().replace(/^(["'])(.*)\1$/, "$2");
+  }
+  return value;
+}
+
+/**
+ * The reasoning effort and service tier a Codex launch inherits when its roster stores neither:
+ * its top-level `model_reasoning_effort` and `service_tier` from `~/.codex/config.toml` (a
+ * profile's own values are not read: a bot that names a profile still inherits nothing here).
+ * The tier is Codex's id (`priority`, `default`, `flex`), null when the key is absent.
+ */
+export function codexDefaultsFrom(agentKey, texts = {}) {
+  if (agentKey !== "codex" || typeof texts.codexConfig !== "string") return { effort: null, tier: null };
+  return { effort: tomlTopValue(texts.codexConfig, "model_reasoning_effort"),
+    tier: tomlTopValue(texts.codexConfig, "service_tier") };
+}
+
+/** codexDefaultsFrom over a synchronous `read(path)` under `home` (the CLI). */
+export function codexDefaults(agentKey, { home, read }) {
+  return codexDefaultsFrom(agentKey, configTexts(home, read));
 }
 
 // agy 1.5.3's execution mode (`--mode accept-edits|auto|plan`): the pack names one on every

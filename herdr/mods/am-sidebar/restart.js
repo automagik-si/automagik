@@ -4,7 +4,7 @@
 // sidebar's Restart runs the CLI. Pure: no `herdr`, so `node --test` runs it. Apache-2.0.
 
 import { agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeProblem, agySettingsArgs, agySettingsDir, agySettingsPlan, canResume, codexClean, effortArgs, launchRun,
-  modelArgs, ownsSession, resumeArgs, resumesById, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
+  modelArgs, ownsSession, resumeArgs, resumesById, seatSettingsArgs, sessionIdArgs, withCodexGrants, withoutAgySettings, withoutBriefing, withoutResume } from "./models.js";
 import { SQUAD_LABEL, SQUAD_MARK } from "./launchArgs.js";
 import { ENV, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, codexCommandCheck,
   codexTemplateRefusal, codexTemplateWarning, templateAgent } from "./workers.js";
@@ -156,9 +156,16 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
     ? agySettingsPlan({ bot, scope: "seat", folder: agy.folder ?? "", settingsDir: agySettingsDir(agy.appHomeDir),
       realpath: agy.realpath ?? null, homeDir: agy.homeDir ?? null }) : null;
   const settingsWords = agySettingsArgs(key, settings?.path);
+  // #1411: the bot's own reasoning effort and service tier (Codex's), after its own words so
+  // they win over a profile, and after a template's own words so the roster wins there too. A
+  // stored tier goes with the model it was picked for: a restart's model swap (the one path that
+  // changes the model with no tier option) doesn't carry it, so a standard model never keeps Fast.
+  const storedModel = typeof bot.model === "string" && bot.model ? bot.model : null;
+  const modelSwitch = model !== undefined && (model || null) !== storedModel;
+  const seatWords = seatSettingsArgs(key, modelSwitch ? { ...bot, tier: undefined } : bot);
   // The source a pane's launch is compared with names no settings file: that one is this
   // launch's own, never a change a restart should report.
-  const source = [...run, ...modeWords, ...modelArgs(key, pin)];
+  const source = [...run, ...modeWords, ...modelArgs(key, pin), ...seatWords];
   // A template owns its command only when it runs the bot's own agent, whatever the pane's
   // foreground says (unknown included): a template for another agent, a swap or a pane on
   // another agent starts from the agent row (the template would cross them).
@@ -182,9 +189,9 @@ export function restartPlan({ bot, run, runningAgent = null, session = null, fre
   // fresh and say why, as a helper does.
   const blocked = "its template's command ends in a separator or a comment, so it can't take resume words";
   const plan = (mode, extra = [], note = null) => {
-    if (!tpl) return { mode, agent: key, model: pin, resume: extra, argv: [...run, ...modeWords, ...settingsWords, ...extra, ...modelArgs(key, pin)],
+    if (!tpl) return { mode, agent: key, model: pin, resume: extra, argv: [...run, ...modeWords, ...settingsWords, ...extra, ...modelArgs(key, pin), ...seatWords],
       source, template: null, agySettings: settings, note, templateNote, granted: false };
-    const words = [...codexWords, ...settingsWords, ...extra];
+    const words = [...codexWords, ...settingsWords, ...extra, ...seatWords];
     const argv = commandArgv({ shell: tpl.command }, words);
     if (argv) return { mode, agent: key, model: null, resume: extra, argv, source, template: tpl.name, agySettings: settings, note, templateNote, granted };
     // Nothing past the template's own command: neither the permission list nor resume words.
