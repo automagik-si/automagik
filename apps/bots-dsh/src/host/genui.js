@@ -169,11 +169,24 @@ export function install(rt) {
       batches.set(id, batch)
     }
     // A republish updates that chat's row: a field this event does not carry keeps what
-    // the row already said (a completion need not repeat every count). The row goes to the
-    // end of the map, so the least recently changed is first and leaves first.
+    // the row already said (a completion need not repeat every count). The counts and the
+    // coverage merge field by field for the same reason; an explicit null clears the field
+    // (the plugin says the end, or the coverage, is over), while an omitted or invalid one
+    // leaves it. The row goes to the end of the map, so the least recently changed leaves
+    // first.
     const previous = batch.rows.get(row.chatId)
+    let merged = previous === undefined ? row : { ...previous, ...row }
+    if (previous !== undefined && row.counts !== undefined && previous.counts !== undefined) {
+      merged.counts = { ...previous.counts, ...row.counts }
+    }
+    if (previous !== undefined && row.coverage !== undefined && previous.coverage !== undefined) {
+      merged.coverage = { ...previous.coverage, ...row.coverage }
+    }
+    if (run.outcome === null) delete merged.outcome
+    if (run.counts === null) delete merged.counts
+    if (run.coverage === null) delete merged.coverage
     batch.rows.delete(row.chatId)
-    batch.rows.set(row.chatId, previous === undefined ? row : { ...previous, ...row })
+    batch.rows.set(row.chatId, merged)
     // Over the cap, a finished row leaves before a running one.
     while (batch.rows.size > GENUI_MAX_ROWS) {
       const entries = [...batch.rows.entries()]

@@ -290,6 +290,49 @@ test('a row is only what the kit knows: labels cut, control characters gone, kno
   assert.equal(rt.hooks.genui.read('bad id!'), undefined)
 })
 
+test('a partial count update keeps the counts it does not repeat, the total included', async t => {
+  const { rt } = await bench(t)
+  // A backfill reports cumulative counters, but a row may publish only what changed.
+  rt.hooks.genui.publish('partial', {
+    chatId: 'chat-1', chat: 'Ana', state: 'fetching',
+    counts: { fetched: 10, total: 20, reactions: 3, mediaDownloaded: 2 },
+  })
+  rt.hooks.genui.publish('partial', { chatId: 'chat-1', counts: { fetched: 12 } })
+  assert.deepEqual(rt.hooks.genui.read('partial').rows[0].counts,
+    { fetched: 12, total: 20, reactions: 3, mediaDownloaded: 2 },
+    'a count the update does not name keeps what the row already said')
+  // The same contract for a coverage update: only the named field changes.
+  rt.hooks.genui.publish('partial', { chatId: 'chat-1', coverage: { count: 20, deletedCount: 3 } })
+  rt.hooks.genui.publish('partial', { chatId: 'chat-1', coverage: { count: 21 } })
+  assert.deepEqual(rt.hooks.genui.read('partial').rows[0].coverage, { count: 21, deletedCount: 3 })
+  // A null clears what an earlier publish set, rather than keeping it.
+  rt.hooks.genui.publish('partial', { chatId: 'chat-1', coverage: null })
+  assert.equal(rt.hooks.genui.read('partial').rows[0].coverage, undefined)
+})
+
+test('an explicit null outcome clears a finished status, so a resumed row reads by its state', async t => {
+  const { rt } = await bench(t)
+  // A cancelled row that stopped: its word is Stopped, its dot the stopped one.
+  rt.hooks.genui.publish('partial', { chatId: 'chat-1', chat: 'Ana', state: 'cancelled', outcome: 'stopped' })
+  let view = rowView(rt.hooks.genui.read('partial').rows[0])
+  assert.equal(view.word, 'Stopped')
+  assert.equal(view.state, 'stopped')
+  // The row is read again: outcome:null is the plugin saying the end is over, not a state.
+  rt.hooks.genui.publish('partial', { chatId: 'chat-1', state: 'reading', outcome: null })
+  let row = rt.hooks.genui.read('partial').rows[0]
+  assert.equal(row.outcome, undefined, 'an explicit null outcome clears the one before')
+  view = rowView(row)
+  assert.equal(view.word, 'Reading')
+  assert.equal(view.state, 'work', 'a running row never wears a finished dot')
+  // A done outcome is cleared the same way, without leaving Reading beside a done dot.
+  rt.hooks.genui.publish('partial', { chatId: 'chat-1', state: 'done', outcome: 'done' })
+  rt.hooks.genui.publish('partial', { chatId: 'chat-1', state: 'reading', outcome: null })
+  row = rt.hooks.genui.read('partial').rows[0]
+  assert.equal(row.outcome, undefined)
+  assert.equal(rowView(row).word, 'Reading')
+  assert.equal(rowView(row).state, 'work')
+})
+
 test('the media route serves a registered source\'s bytes and refuses a page, an unknown source and a failure', async t => {
   const { rt, media } = await bench(t)
   const bytes = new Uint8Array([137, 80, 78, 71])

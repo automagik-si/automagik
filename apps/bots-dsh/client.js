@@ -37120,7 +37120,7 @@ function CoverageRow({ coverage }) {
   return line === "" ? null : (0, import_react97.createElement)("div", { className: "bt-genui-what" }, line);
 }
 function PersonCard({ chatId, load, revision }) {
-  const [state2, setState] = (0, import_react97.useState)({ data: void 0, error: void 0, loading: true });
+  const [state2, setState] = (0, import_react97.useState)({ chatId: void 0, data: void 0, error: void 0, loading: true });
   const [tries, setTries] = (0, import_react97.useState)(0);
   const loader = (0, import_react97.useRef)(load ?? loadReadingNote);
   loader.current = load ?? loadReadingNote;
@@ -37129,22 +37129,23 @@ function PersonCard({ chatId, load, revision }) {
     if (typeof chatId !== "string" || chatId === "") return void 0;
     const mine = ++order.current;
     let live = true;
-    setState((current) => ({ ...current, loading: true, error: void 0 }));
+    setState((current) => current.chatId === chatId ? { ...current, loading: true, error: void 0 } : { chatId, data: void 0, error: void 0, loading: true });
     Promise.resolve().then(() => loader.current(chatId)).then((data) => {
-      if (live && mine === order.current) setState({ data, error: void 0, loading: false });
+      if (live && mine === order.current) setState({ chatId, data, error: void 0, loading: false });
     }).catch((error) => {
-      if (live && mine === order.current) setState((current) => ({ data: current.data, error, loading: false }));
+      if (live && mine === order.current) setState({ chatId, data: void 0, error, loading: false });
     });
     return () => {
       live = false;
     };
   }, [chatId, revision, tries]);
   const retry = (0, import_react97.useCallback)(() => setTries((count) => count + 1), []);
-  const view = personView(state2.data);
-  const answered = state2.data !== void 0;
+  const shown = state2.chatId === chatId ? state2 : { chatId, data: void 0, error: void 0, loading: true };
+  const view = personView(shown.data);
+  const answered = shown.data !== void 0;
   return (0, import_react97.createElement)(
     "section",
-    { className: "bt-q bt-genui-person", "aria-busy": state2.loading ? "true" : void 0 },
+    { className: "bt-q bt-genui-person", "aria-busy": shown.loading ? "true" : void 0 },
     (0, import_react97.createElement)(
       "div",
       { className: "bt-q-head" },
@@ -37170,9 +37171,9 @@ function PersonCard({ chatId, load, revision }) {
       "div",
       { className: "bt-genui-foot" },
       view.readThrough !== "" ? (0, import_react97.createElement)("span", { className: "bt-genui-read" }, t("Read through {date}", { date: view.readThrough })) : null,
-      state2.loading ? (0, import_react97.createElement)("span", { className: "bt-genui-muted" }, t("Reading the note…")) : null,
-      state2.error === void 0 ? null : (0, import_react97.createElement)("span", { className: "bt-genui-muted" }, t("The note could not be read.")),
-      state2.error === void 0 ? null : (0, import_react97.createElement)("button", { type: "button", className: "bt-genui-retry", onClick: retry }, t("Try again"))
+      shown.loading ? (0, import_react97.createElement)("span", { className: "bt-genui-muted" }, t("Reading the note…")) : null,
+      shown.error === void 0 ? null : (0, import_react97.createElement)("span", { className: "bt-genui-muted" }, t("The note could not be read.")),
+      shown.error === void 0 ? null : (0, import_react97.createElement)("button", { type: "button", className: "bt-genui-retry", onClick: retry }, t("Try again"))
     )
   );
 }

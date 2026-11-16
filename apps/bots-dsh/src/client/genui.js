@@ -70,7 +70,10 @@ export function CoverageRow({ coverage }) {
  * slice's revision); `load` replaces the default `omni-reading-note` read.
  */
 export function PersonCard({ chatId, load, revision }) {
-  const [state, setState] = useState({ data: undefined, error: undefined, loading: true })
+  // The answer is bound to the chat it belongs to. A card is mounted once and may be handed
+  // another chat; nothing of the old one (name, note, coverage) may show under the new one,
+  // while its read is pending, after it fails, or when the id is cleared.
+  const [state, setState] = useState({ chatId: undefined, data: undefined, error: undefined, loading: true })
   const [tries, setTries] = useState(0)
   // A plugin may pass an inline loader: the ref keeps a re-render from refetching by itself.
   const loader = useRef(load ?? loadReadingNote)
@@ -80,20 +83,28 @@ export function PersonCard({ chatId, load, revision }) {
     if (typeof chatId !== 'string' || chatId === '') return undefined
     const mine = ++order.current
     let live = true
-    setState(current => ({ ...current, loading: true, error: undefined }))
+    // A refresh of the same chat keeps its answer while the read runs; another chat starts empty.
+    setState(current => (current.chatId === chatId
+      ? { ...current, loading: true, error: undefined }
+      : { chatId, data: undefined, error: undefined, loading: true }))
     Promise.resolve().then(() => loader.current(chatId)).then((data) => {
-      if (live && mine === order.current) setState({ data, error: undefined, loading: false })
+      if (live && mine === order.current) setState({ chatId, data, error: undefined, loading: false })
     }).catch((error) => {
-      if (live && mine === order.current) setState(current => ({ data: current.data, error, loading: false }))
+      // A failed read drops the answer, also the one this same chat had: a card never shows a
+      // note it no longer knows is current.
+      if (live && mine === order.current) setState({ chatId, data: undefined, error, loading: false })
     })
     return () => { live = false }
   }, [chatId, revision, tries])
   const retry = useCallback(() => setTries(count => count + 1), [])
-  const view = personView(state.data)
+  // The state is only drawn for the chat the card is for now; a switch hides it at once,
+  // before the effect that starts the new read runs.
+  const shown = state.chatId === chatId ? state : { chatId, data: undefined, error: undefined, loading: true }
+  const view = personView(shown.data)
   // The plain state only once the read has answered: loading or a failed read says so in
   // the foot, never "not read yet" over an answer that may still come.
-  const answered = state.data !== undefined
-  return h('section', { className: 'bt-q bt-genui-person', 'aria-busy': state.loading ? 'true' : undefined },
+  const answered = shown.data !== undefined
+  return h('section', { className: 'bt-q bt-genui-person', 'aria-busy': shown.loading ? 'true' : undefined },
     h('div', { className: 'bt-q-head' },
       h('div', { className: 'bt-q-text' },
         h('p', { className: 'bt-q-title' }, view.title),
@@ -107,9 +118,9 @@ export function PersonCard({ chatId, load, revision }) {
     view.coverage === undefined ? null : h(CoverageRow, { coverage: view.coverage }),
     h('div', { className: 'bt-genui-foot' },
       view.readThrough !== '' ? h('span', { className: 'bt-genui-read' }, t('Read through {date}', { date: view.readThrough })) : null,
-      state.loading ? h('span', { className: 'bt-genui-muted' }, t('Reading the note…')) : null,
-      state.error === undefined ? null : h('span', { className: 'bt-genui-muted' }, t('The note could not be read.')),
-      state.error === undefined ? null : h('button', { type: 'button', className: 'bt-genui-retry', onClick: retry }, t('Try again'))))
+      shown.loading ? h('span', { className: 'bt-genui-muted' }, t('Reading the note…')) : null,
+      shown.error === undefined ? null : h('span', { className: 'bt-genui-muted' }, t('The note could not be read.')),
+      shown.error === undefined ? null : h('button', { type: 'button', className: 'bt-genui-retry', onClick: retry }, t('Try again'))))
 }
 
 // The kit's own surface: the same card, hairline and muted text as the team's question
