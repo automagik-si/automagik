@@ -186,11 +186,31 @@ async function main() {
   check(lstatSync(coreSocket).isSocket(), `${coreSocket} is not a Unix socket`)
   const coreStatus = command('hc', ['server', 'status', '--json'])
   check(coreStatus.trim().length > 0, 'hc server status printed nothing')
+  const coreStatusJSON = JSON.parse(coreStatus)
+  check(coreStatusJSON && typeof coreStatusJSON === 'object' && !Array.isArray(coreStatusJSON), 'hc server status --json did not print the documented object')
+  check(coreStatusJSON.core && typeof coreStatusJSON.core === 'object' && !Array.isArray(coreStatusJSON.core), 'hc server status --json has no core object')
+  check(typeof coreStatusJSON.live === 'number', 'hc server status --json has no live count')
+  check(coreStatusJSON.live === 0, `hc server status has ${coreStatusJSON.live} live terminals before the test Bot, expected 0`)
+  check(coreStatusJSON.finished === 0, `hc server status has ${coreStatusJSON.finished} finished terminals before the test Bot, expected 0`)
+  check(coreStatusJSON.holder && typeof coreStatusJSON.holder === 'object' && !Array.isArray(coreStatusJSON.holder), 'hc server status --json has no holder object')
+  check(coreStatusJSON.holder.terminals === 0, `hc server status holder has ${coreStatusJSON.holder.terminals} terminals before the test Bot, expected 0`)
+  check(Array.isArray(coreStatusJSON.holders), 'hc server status --json holders is not a list')
+  const expectedCoreVersion = VERSIONS.herdrCore?.version || HERDR_CORE_VERSION
+  check(coreStatusJSON.version === expectedCoreVersion, `hc server status version ${coreStatusJSON.version} is not the image's ${expectedCoreVersion}`)
   const coreList = command('hc', ['ls', '--json'])
   check(coreList.trim().length > 0, 'hc ls printed nothing')
   const listed = JSON.parse(coreList)
-  check(Array.isArray(listed), 'hc ls --json did not print a list')
+  check(listed && typeof listed === 'object' && !Array.isArray(listed), 'hc ls --json did not print the documented object')
+  check(Array.isArray(listed.terminals), 'hc ls --json terminals is not a list')
+  check(Array.isArray(listed.machines), 'hc ls --json machines is not a list')
+  check(typeof listed.hidden_finished === 'number', 'hc ls --json hidden_finished is not a number')
+  check(listed.hidden_finished === 0, `hc ls has ${listed.hidden_finished} hidden finished terminals before the test Bot, expected 0`)
+  check(listed.terminals.length === 0, `hc ls --json has ${listed.terminals.length} terminals before the test Bot, expected 0`)
   const amList = JSON.parse(command('am', ['ls', '--project', WORKSPACE, '--json']))
+  check(amList && typeof amList === 'object' && !Array.isArray(amList), 'am ls --json did not print the documented object')
+  check(Array.isArray(amList.projects), 'am ls --json projects is not a list')
+  const firstProject = amList.projects[0]
+  check(firstProject && typeof firstProject === 'object' && !Array.isArray(firstProject) && Array.isArray(firstProject.bots), 'am ls --json project has no bots list')
   const seenBots = (amList?.projects ?? []).flatMap((project) => project.bots ?? [])
   check(amList?.projects?.[0]?.hcError === undefined, `am ls could not see the core: ${amList?.projects?.[0]?.hcError}`)
   check(seenBots.length === TRIAD.length, `am ls sees ${seenBots.length} bots, not ${TRIAD.length}`)
@@ -213,7 +233,9 @@ async function main() {
     const started = spawnSync('am', ['start', 'Proof', '--project', startProject, '--json'], { encoding: 'utf8', env: startEnv, timeout: 60_000 })
     check(started.status === 0, `am start failed: ${started.stderr || started.stdout}`)
     check(!/gets no per-turn briefing/.test(started.stderr), `am start still warns about the briefing: ${started.stderr}`)
-    const terminal = JSON.parse(started.stdout).terminal
+    const startedJSON = JSON.parse(started.stdout)
+    check(startedJSON && typeof startedJSON === 'object' && !Array.isArray(startedJSON), 'am start --json did not print the documented object')
+    const terminal = startedJSON.terminal
     check(typeof terminal === 'string' && terminal.length > 0, `am start returned no terminal: ${started.stdout}`)
     for (let attempt = 0; attempt < 50 && !existsSync(invocationMarker); attempt += 1) {
       execFileSync('/nodejs/bin/node', ['-e', 'setTimeout(() => {}, 100)'])
@@ -221,6 +243,9 @@ async function main() {
     check(existsSync(invocationMarker), 'the fake codex did not record its invocation')
     const invocation = readFileSync(invocationMarker, 'utf8')
     check(invocation.split('\n')[0] === fakeCodex, `the fake codex argv[0] is ${JSON.stringify(invocation.split('\n')[0])}`)
+    const hcShapes = { hc: `hc ${hc}`, am: `${am}`, ls: listed, serverStatus: coreStatusJSON, amLs: amList, amStart: startedJSON }
+    writeFileSync('/tmp/in-image-hc-shapes.json', JSON.stringify(hcShapes, null, 2))
+    say(`hc shapes captured from the image's hc ${hc} and am ${am}: ${JSON.stringify(hcShapes)}`)
     command('hc', ['kill', terminal])
     say('am start: /usr/bin/env, the briefing hook and the fake codex own invocation all work')
   } finally {
