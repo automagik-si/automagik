@@ -8,6 +8,7 @@
 import { spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   ensureDataDirs,
   launchUrlOf,
@@ -64,25 +65,32 @@ function recordLaunch(dshHome, url) {
   return target
 }
 
-function pipeRedacted(stream, into, onLine) {
+const SAFE_LINE_MAX = 4096
+export const safeDshLine = (line) => {
+  const redacted = redactTokens(line)
+  return redacted.length > SAFE_LINE_MAX ? `${redacted.slice(0, SAFE_LINE_MAX)}…` : redacted
+}
+export function pipeRedacted(stream, into, onLine, onRawLine) {
   let pending = ''
   stream.setEncoding('utf8')
+  const emit = (line) => {
+    const safe = safeDshLine(line)
+    onLine?.(safe)
+    onRawLine?.(line)
+    into.write(`${safe}\n`)
+  }
   stream.on('data', (chunk) => {
     pending += chunk
     let end = pending.indexOf('\n')
     while (end !== -1) {
       const line = pending.slice(0, end)
       pending = pending.slice(end + 1)
-      onLine(line)
-      into.write(`${redactTokens(line)}\n`)
+      emit(line)
       end = pending.indexOf('\n')
     }
   })
   stream.on('end', () => {
-    if (pending) {
-      onLine(pending)
-      into.write(redactTokens(pending))
-    }
+    if (pending) emit(pending)
   })
 }
 
@@ -236,12 +244,13 @@ async function main() {
     throw new Error('herdr-core exited during the first boot')
   }
 
-  let dshVendorFailure = null
+  const dshVendorFailures = new Map()
   const noteDsh = (line) => {
-    if (!dshVendorFailure && /(?:pnpm install failed|install failed \(exit \d+\)|update check failed)/i.test(line)) {
-      dshVendorFailure = line
-      warn(`vendor CLIs: DSH reported: ${line}`)
-    }
+    if (!/(?:pnpm install failed|install failed \(exit \d+\)|update check failed)/i.test(line)) return
+    const vendor = /claude/i.test(line) ? 'claude' : /codex/i.test(line) ? 'codex' : null
+    if (!vendor || dshVendorFailures.has(vendor)) return
+    dshVendorFailures.set(vendor, line)
+    warn(`vendor CLIs: DSH reported (${vendor}): ${line}`)
   }
   child = spawn(process.execPath, [DSH_BIN, '--profile', PROFILE, '--no-open', '--host', '127.0.0.1', '--port', String(PORT), ...publicArgs], {
     env,
@@ -254,7 +263,7 @@ async function main() {
   })
   if (env.AUTOMAGIK_CLI_INSTALL !== 'off') {
     log('vendor CLIs: checking Claude Code and Codex and refreshing the launch bridge in the background')
-    void installVendorClis({ home: env.AUTOMAGIK_HOME, profile: seeded.target, env, log, warn, failure: () => dshVendorFailure })
+    void installVendorClis({ home: env.AUTOMAGIK_HOME, profile: seeded.target, env, log, warn, failureFor: (spec) => dshVendorFailures.get(spec.key) })
       .then((result) => {
         if (result.state !== 'ready') warn(`vendor CLIs: ${result.state}; the ACP plugin will retry`)
         try {
@@ -267,7 +276,7 @@ async function main() {
   }
 
   let announced = false
-  const onLine = (line) => {
+  const onLaunchLine = (line) => {
     const url = launchUrlOf(line)
     if (!url || announced) return
     announced = true
@@ -278,8 +287,9 @@ async function main() {
       warn(`startup: dsh is up, but the launch URL could not be written: ${error.message}`)
     }
   }
-  pipeRedacted(child.stdout, process.stdout, (line) => { onLine(line); noteDsh(line) })
-  pipeRedacted(child.stderr, process.stderr, (line) => { onLine(line); noteDsh(line) })
+  const onSafeLine = (line) => noteDsh(line)
+  pipeRedacted(child.stdout, process.stdout, onSafeLine, onLaunchLine)
+  pipeRedacted(child.stderr, process.stderr, onSafeLine, onLaunchLine)
 
   child.on('exit', (code, signal) => {
     const exitCode = coreExit ?? code ?? (signal ? 0 : 1)
@@ -290,7 +300,11 @@ async function main() {
   })
 }
 
-main().catch((error) => {
-  warn(`failed to start: ${error?.stack ?? error}`)
-  process.exit(1)
-})
+const launchedFromCli = (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url)
+  || process.execArgv.includes('--eval')
+if (launchedFromCli) {
+  main().catch((error) => {
+    warn(`failed to start: ${error?.stack ?? error}`)
+    process.exit(1)
+  })
+}

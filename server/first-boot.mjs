@@ -911,7 +911,7 @@ export async function installVendorClis({
   log = console.log,
   warn = console.warn,
   timeout = 1_900_000,
-  failure = () => undefined,
+  failureFor = () => undefined,
 } = {}) {
   const clisFile = join(profile, CLI_STORE_RELATIVE)
   const agentsFile = join(profile, AGENTS_RELATIVE)
@@ -941,10 +941,11 @@ export async function installVendorClis({
       const started = Date.now()
       let reported
       while (!found && Date.now() - started < timeout) {
-        reported = failure()
-        if (reported) break
         found = store.binOf(spec.cliPackage, spec)
-        if (!found) await sleep(2000)
+        if (found) break
+        reported = failureFor(spec)
+        if (reported) break
+        await sleep(2000)
       }
       const endedAt = new Date().toISOString()
       if (reported) {
