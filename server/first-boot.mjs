@@ -9,7 +9,7 @@
 // #1428's head (vendored under server/vendor/registry-seed); once the installed plugin carries
 // it, seedScript() prefers that path. A seed failure (exit 1 or 2) fails the boot: the whole
 // point is a team whose roster and both readers agree.
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync,
   cpSync,
@@ -17,6 +17,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   renameSync,
   rmSync,
@@ -829,6 +830,7 @@ export const managedProgram = (run, home) => Array.isArray(run) && run.length ==
  */
 export function runVendorChild(command, args, { env = process.env, cwd, timeout = 840_000, maxOutput = 16 * 1024 * 1024 } = {}) {
   const spawn = process.getBuiltinModule('node:child_process').spawn
+  const token = env.AUTOMAGIK_VENDOR_INSTALL_TOKEN ?? null
   return new Promise((resolve) => {
     const started = Date.now()
     let stdout = ''
@@ -837,11 +839,43 @@ export function runVendorChild(command, args, { env = process.env, cwd, timeout 
     let timedOut = false
     let outputOver = false
     let timer
-    const finish = (result) => {
+    let grace
+    let stopped = false
+    const reap = async () => {
+      if (!token) return { reaped: [], remaining: [] }
+      const killed = new Set()
+      // The token is inherited by pnpm and any detached descendant; only those processes carry
+      // it, so this is an ownership-proven subtree walk, not a process-name sweep.
+      let remaining = []
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        remaining = []
+        for (const name of readdirSync('/proc')) {
+          if (!/^\d+$/.test(name)) continue
+          try {
+            const environ = readFileSync(`/proc/${name}/environ`, 'utf8')
+            if (!environ.split('\0').includes(`AUTOMAGIK_VENDOR_INSTALL_TOKEN=${token}`)) continue
+            remaining.push(Number(name))
+            try { process.kill(Number(name), 'SIGKILL'); killed.add(Number(name)) } catch {}
+          } catch { /* not ours, gone, or not readable */ }
+        }
+        if (!remaining.length) return { reaped: [...killed], remaining: [] }
+        await new Promise((done) => setTimeout(done, 100))
+      }
+      return { reaped: [...killed], remaining }
+    }
+    const finish = async (result) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve({ ...result, stdout, stderr, timedOut, outputOver, durationMs: Date.now() - started })
+      clearTimeout(grace)
+      const reaped = await reap()
+      resolve({ ...result, stdout, stderr, timedOut, outputOver, reaped: reaped.reaped, remaining: reaped.remaining, durationMs: Date.now() - started })
+    }
+    const stop = () => {
+      if (stopped) return
+      stopped = true
+      child.kill('SIGTERM')
+      grace = setTimeout(() => child.kill('SIGKILL'), 5000)
     }
     const child = spawn(command, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] })
     const take = (chunk, stream) => {
@@ -850,26 +884,33 @@ export function runVendorChild(command, args, { env = process.env, cwd, timeout 
       else stderr += text
       if (!outputOver && stdout.length + stderr.length > maxOutput) {
         outputOver = true
-        child.kill('SIGKILL')
+        stop()
       }
     }
     child.stdout.on('data', (chunk) => take(chunk, 'out'))
     child.stderr.on('data', (chunk) => take(chunk, 'err'))
-    child.on('error', (error) => finish({ status: null, signal: null, error }))
-    child.on('close', (status, signal) => finish({ status, signal, error: null }))
+    child.on('error', (error) => { void finish({ status: null, signal: null, error }) })
+    child.on('close', (status, signal) => { void finish({ status, signal, error: null }) })
     timer = setTimeout(() => {
       timedOut = true
-      child.kill('SIGKILL')
+      stop()
     }, timeout)
   })
 }
 
+
+/**
+ * DSH's own CliStore is the product installer: its startup `required()`/`refresh()` installs
+ * both vendors. The entrypoint must not duplicate that install. It observes the shared store,
+ * waits for the binaries, and writes the programs.json bridge. One owner, one admission queue.
+ */
 export async function installVendorClis({
   home,
   profile,
   env = process.env,
   log = console.log,
   warn = console.warn,
+  timeout = 840_000,
 } = {}) {
   const clisFile = join(profile, CLI_STORE_RELATIVE)
   const agentsFile = join(profile, AGENTS_RELATIVE)
@@ -877,70 +918,49 @@ export async function installVendorClis({
     warn(`vendor CLIs: the shipped CLI store is not in ${profile}; left for the ACP plugin`)
     return { state: 'unavailable', results: {} }
   }
+  const { CliStore } = await import(pathToFileURL(clisFile).href)
   const { AGENTS } = await import(pathToFileURL(agentsFile).href)
-  const install = fileURLToPath(new URL('./vendor-install.mjs', import.meta.url))
+  const store = new CliStore({
+    env: { ...env, AUTOMAGIK_HOME: home, AUTOMAGIK_PNPM: env.AUTOMAGIK_PNPM || PNPM_PATH },
+    log: (message) => log(`vendor CLIs: ${message}`),
+  })
   const stateFile = join(home, 'vendor-clis-state.json')
-  const cgroup = () => {
-    const read = (file) => { try { return readFileSync(file, 'utf8').trim() } catch { return null } }
-    const events = read('/sys/fs/cgroup/memory.events') ?? ''
-    const number = (name) => Number((events.match(new RegExp(`^${name} (\\d+)$`, 'm')) ?? [])[1] ?? 0)
-    return { memoryEvents: events || null, oom: number('oom'), oomKill: number('oom_kill'), memoryPeakBytes: Number(read('/sys/fs/cgroup/memory.peak') ?? 0) || null, memoryMaxBytes: Number(read('/sys/fs/cgroup/memory.max') ?? 0) || null }
-  }
   const results = {}
   const writeState = () => {
-    const state = { version: 1, at: new Date().toISOString(), limitBytes: cgroup().memoryMaxBytes, results }
-    writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
+    writeFileSync(stateFile, `${JSON.stringify({ version: 1, at: new Date().toISOString(), results }, null, 2)}\n`, { mode: 0o600 })
     chmodSync(stateFile, 0o600)
   }
-  for (const [id, spec] of Object.entries(AGENTS)) {
-    if (!spec.cliPackage) continue
-    const startedAt = new Date().toISOString()
-    log(`vendor CLIs: ${spec.defaultName} install start ${startedAt}`)
-    const child = await runVendorChild(process.execPath, [install, '--profile', profile, '--vendor', spec.key, '--home', home], {
-      env: {
-        ...env,
-        HOME: env.HOME || home,
-        AUTOMAGIK_HOME: home,
-        HERDR_APP_HOME: env.HERDR_APP_HOME || join(home, 'herdr-app'),
-        AUTOMAGIK_PNPM: env.AUTOMAGIK_PNPM || PNPM_PATH,
-        NODE_OPTIONS: [env.NODE_OPTIONS, '--max-old-space-size=1024'].filter(Boolean).join(' '),
-        npm_config_child_concurrency: '1',
-        npm_config_network_concurrency: '2',
-      },
-      cwd: home,
-    })
-    const endedAt = new Date().toISOString()
-    for (const line of String(child.stderr ?? '').split('\n').filter(Boolean)) log(`vendor CLIs: ${line}`)
-    let result
-    try { result = JSON.parse(String(child.stdout ?? '').trim()) } catch {
-      result = {
-        state: 'failed',
-        error: child.timedOut ? 'install timed out' : child.outputOver ? 'install output exceeded the bound' : String(child.error?.message ?? `install child exited ${child.status ?? child.signal ?? 'unknown'}`),
-        signal: child.signal ?? null, status: child.status ?? null,
+  const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
+  try {
+    for (const [id, spec] of Object.entries(AGENTS)) {
+      if (!spec.cliPackage) continue
+      const startedAt = new Date().toISOString()
+      log(`vendor CLIs: observing the DSH-owned install of ${spec.defaultName} (${startedAt})`)
+      let found
+      const started = Date.now()
+      while (!found && Date.now() - started < timeout) {
+        found = store.binOf(spec.cliPackage, spec)
+        if (!found) await sleep(2000)
       }
-    }
-    if (result.state === 'failed' && !result.memoryEvents) Object.assign(result, cgroup())
-    result.startedAt = startedAt
-    result.endedAt = endedAt
-    result.durationMs = child.durationMs
-    results[id] = result
-    writeState()
-    log(`vendor CLIs: ${spec.defaultName} install end ${endedAt} duration=${child.durationMs}ms status=${child.status ?? 'null'} signal=${child.signal ?? 'none'}${child.timedOut ? ' timeout=yes' : ''}`)
-    if (result.state === 'ready') {
-      log(`vendor CLIs: ${spec.defaultName} ${result.version} at ${result.path}`)
-      if (result.managed) {
-        const bridge = writeProgramsBridge({
-          home, appHome: env.HERDR_APP_HOME || join(home, 'herdr-app'),
-          agent: spec.key, path: result.path, log, warn,
-        })
-        results[id].bridge = bridge.reason
-        writeState()
+      const endedAt = new Date().toISOString()
+      if (found) {
+        results[id] = { state: 'ready', version: found.version, path: found.path, managed: Boolean(found.managed), startedAt, endedAt }
+        log(`vendor CLIs: observed ${spec.defaultName} ${found.version} at ${found.path}`)
+        if (found.managed) {
+          const bridge = writeProgramsBridge({
+            home, appHome: env.HERDR_APP_HOME || join(home, 'herdr-app'),
+            agent: spec.key, path: found.path, log, warn,
+          })
+          results[id].bridge = bridge.reason
+        }
+      } else {
+        results[id] = { state: 'failed', startedAt, endedAt, error: 'the DSH-owned CLI store did not install it within the observation window; see pnpm-admission.log' }
+        warn(`vendor CLIs: ${spec.defaultName} was not installed by the DSH-owned store within ${Math.round(timeout / 1000)}s; see /data/run/pnpm-admission.log`)
       }
-    } else if (result.state === 'failed') {
-      warn(`vendor CLIs: ${spec.defaultName} was not installed: ${result.error} (signal=${result.signal ?? 'none'}, oom_kill=${result.oomKill ?? 0}, memory.peak=${result.memoryPeakBytes ?? 'unknown'})`)
-    } else {
-      warn(`vendor CLIs: ${spec.defaultName} is missing`)
+      writeState()
     }
+  } finally {
+    store.dispose?.()
   }
   const states = Object.values(results).map((entry) => entry.state)
   return { state: states.length > 0 && states.every((state) => state === 'ready') ? 'ready' : 'failed', results, stateFile }

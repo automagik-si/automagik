@@ -28,6 +28,12 @@ test('the runtime carries the per-vendor install child for bounded, serialized i
   assert.match(dockerfile, /^COPY server\/entrypoint\.mjs .*server\/vendor-install\.mjs .*\/opt\/automagik\/$/m)
 })
 
+test('every shipped pnpm entry is wrapped by the one admission script', () => {
+  assert.match(dockerfile, /^RUN node \/build\/server\/install-pnpm-admission\.mjs \/build\/out$/m)
+  assert.match(dockerfile, /^COPY --from=builder \/build\/out\/pnpm-admission\.json \/opt\/automagik\/pnpm-admission\.json$/m)
+  assert.match(dockerfile, /^COPY --chmod=0755 server\/bin\/dsh server\/bin\/pnpm server\/bin\/pnpm-admission server\/bin\/am \/usr\/local\/bin\/$/m)
+})
+
 test('the image runs the app under a pinned tini so it is never PID 1', () => {
   assert.match(dockerfile, new RegExp(`^ARG TINI_VERSION=${TINI_VERSION}$`, 'm'))
   assert.match(dockerfile, new RegExp(`^ARG TINI_SHA256=${TINI_SHA256}$`, 'm'))
@@ -54,7 +60,7 @@ test('the final image carries both hc and herdr-core at literal paths', () => {
 
 test('the final image carries am from the fetched release tarball and its command shim', () => {
   assert.match(dockerfile, /^COPY --from=builder \/build\/out\/am \/opt\/automagik\/am$/m)
-  assert.match(dockerfile, /^COPY --chmod=0755 server\/bin\/dsh server\/bin\/pnpm server\/bin\/am \/usr\/local\/bin\/$/m)
+  assert.match(dockerfile, /^COPY --chmod=0755 server\/bin\/dsh server\/bin\/pnpm server\/bin\/pnpm-admission server\/bin\/am \/usr\/local\/bin\/$/m)
   assert.doesNotMatch(dockerfile, /COPY .*automagik-am-.*\.tgz/)
 })
 

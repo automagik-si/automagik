@@ -136,6 +136,7 @@ async function main() {
   env.HC_RUNTIME = coreRuntime
   env.XDG_RUNTIME_DIR = runtimeDir
   env.HC_SESSION = session
+  env.AUTOMAGIK_PNPM_OWNER = env.AUTOMAGIK_PNPM_OWNER || 'dsh'
 
   const build = versions()
   log(`profile ${PROFILE}: automagik ${build.automagik ?? 'unknown'}, dsh ${build.dsh ?? 'unknown'}`)

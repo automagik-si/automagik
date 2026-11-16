@@ -37,11 +37,24 @@ const failure = (error, state = {}) => ({
   ...state,
 })
 let store
+let reported = false
+const output = (result) => {
+  if (reported) return
+  reported = true
+  process.stdout.write(`${JSON.stringify(result)}\n`)
+}
+const stop = () => {
+  try { store?.dispose?.() } catch {}
+  output(failure(new Error('install cancelled'), { cancelled: true }))
+  process.exit(143)
+}
+process.on('SIGTERM', stop)
+process.on('SIGINT', stop)
 try {
   const { CliStore } = await import(pathToFileURL(join(profile, CLI_STORE_RELATIVE)).href)
   const { AGENTS } = await import(pathToFileURL(join(profile, AGENTS_RELATIVE)).href)
   const spec = Object.values(AGENTS).find((candidate) => candidate?.key === vendor)
-  if (!spec) { process.stdout.write(`${JSON.stringify(failure(`unknown vendor ${vendor}`))}\n`); process.exit(0) }
+  if (!spec) { output(failure(`unknown vendor ${vendor}`)); process.exitCode = 1; process.exit(1) }
   store = new CliStore({
     env: { ...process.env, AUTOMAGIK_HOME: home, AUTOMAGIK_PNPM: process.env.AUTOMAGIK_PNPM || PNPM_PATH },
     log: (message) => process.stderr.write(`vendor CLIs: ${message}\n`),
@@ -50,9 +63,11 @@ try {
   const result = found
     ? { state: 'ready', version: found.version, path: found.path, managed: Boolean(found.managed), ...cgroup() }
     : { state: 'missing', ...cgroup() }
-  process.stdout.write(`${JSON.stringify(result)}\n`)
+  output(result)
+  if (result.state !== 'ready') process.exitCode = 1
 } catch (error) {
-  process.stdout.write(`${JSON.stringify(failure(error))}\n`)
+  output(failure(error))
+  process.exitCode = 1
 } finally {
   try { store?.dispose?.() } catch {}
 }

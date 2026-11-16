@@ -56,6 +56,10 @@ RUN node /build/server/assemble.mjs \
       --repository "$AUTOMAGIK_REPOSITORY" \
       --input-kind "$INPUT_KIND" --event "$INPUT_EVENT" --input-manifest "$INPUT_MANIFEST"
 
+# One admission point for every pnpm entry the image ships (runtime, profile and .bin paths):
+# the real pnpm.cjs is renamed beside each wrapper, and the wrapper shares one lock.
+RUN node /build/server/install-pnpm-admission.mjs /build/out
+
 # The shell tools Bots need, prepared for the distroless base: the binaries, the shared-library
 # closure ldd names for them, and the /data ownership. Git core only: perl-based git
 # subcommands are not shipped. Debian 12 here matches
@@ -167,6 +171,7 @@ COPY --from=gate-deps /gate/node_modules /opt/automagik/node_modules
 COPY --from=builder /build/out/runtime /opt/automagik/runtime
 COPY --from=builder /build/out/profile /opt/automagik/profile
 COPY --from=builder /build/out/versions.json /opt/automagik/versions.json
+COPY --from=builder /build/out/pnpm-admission.json /opt/automagik/pnpm-admission.json
 COPY --from=builder /build/out/offline-store /opt/automagik/offline-store
 COPY --from=builder /build/out/am /opt/automagik/am
 COPY server/skills /opt/automagik/skills
@@ -175,7 +180,7 @@ COPY server/entrypoint.mjs server/healthcheck.mjs server/lib.mjs server/gate*.mj
 # No /home/<user> in the image's account record: the distroless nonroot home is replaced with
 # the uid the image actually runs as. The scanner's home check then has nothing to excuse.
 COPY server/passwd /etc/passwd
-COPY --chmod=0755 server/bin/dsh server/bin/pnpm server/bin/am /usr/local/bin/
+COPY --chmod=0755 server/bin/dsh server/bin/pnpm server/bin/pnpm-admission server/bin/am /usr/local/bin/
 
 ENV AUTOMAGIK_GATE_IMAGE=1 \
     HOME=/data \

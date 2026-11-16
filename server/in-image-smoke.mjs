@@ -3,7 +3,7 @@
 // (am, hc, pnpm, node), the shipped CLI store's install path without a download, the real
 // #1424 seed against the real first-boot team and against a copy of that v1 roster, and the
 // skill hashes. Run by server/smoke.mjs with `docker exec`; it writes only under /tmp.
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -65,6 +65,51 @@ async function main() {
   check(existsSync(briefingLink), `am self install did not create ${briefingLink}`)
   check(command('/usr/bin/env', ['/bin/sh', '-c', 'printf env-ok']) === 'env-ok', '/usr/bin/env did not run /bin/sh')
   check(command('/usr/bin/printenv', ['PATH']).length > 0, 'printenv printed no PATH')
+
+  // Every shipped pnpm entry reaches the same admission script, lock and owner log.
+  const admissionOwner = 'smoke-admission'
+  const admissionEnv = { ...process.env, AUTOMAGIK_PNPM_OWNER: admissionOwner }
+  const pnpmCjs = '/opt/automagik/runtime/node_modules/pnpm/bin/pnpm.cjs'
+  const pnpmCalls = [
+    [pnpmCjs, ['--version']],
+    ['/usr/local/bin/pnpm', ['--version']],
+    ['/nodejs/bin/node', [pnpmCjs, '--version']],
+  ]
+  const profilePnpm = join(PROFILE, 'node_modules', '.bin', 'pnpm')
+  if (existsSync(profilePnpm)) pnpmCalls.push([profilePnpm, ['--version']])
+  const pnpmVersions = pnpmCalls.map(([file, args]) => command(file, args, { env: admissionEnv }))
+  check(new Set(pnpmVersions).size === 1, `pnpm versions differ across entries: ${JSON.stringify(pnpmVersions)}`)
+  const admissions = readFileSync('/data/run/pnpm-admission.log', 'utf8').split('\n').filter((line) => line.includes(`owner=${admissionOwner}`))
+  check(admissions.length === pnpmCalls.length, `admission log has ${admissions.length} entries for ${pnpmCalls.length} calls`)
+  say(`pnpm admission: ${pnpmCalls.length} entry paths, one owner and version ${pnpmVersions[0]}`)
+  const admissionLog = () => readFileSync('/data/run/pnpm-admission.log', 'utf8')
+  const rowDir = mkdtempSync(join(tmpdir(), 'automagik-pnpm-admission-'))
+  try {
+    const outerReal = join(rowDir, 'outer.mjs')
+    writeFileSync(outerReal, "import { execFileSync } from 'node:child_process'\nexecFileSync('/usr/local/bin/pnpm', ['--version'], { stdio: 'inherit', env: process.env })\n")
+    command('/bin/sh', ['/usr/local/bin/pnpm-admission', outerReal], {
+      env: { ...process.env, AUTOMAGIK_PNPM_OWNER: 'smoke-reentry' }, timeout: 30_000,
+    })
+    check(/reentry .*owner=smoke-reentry/.test(admissionLog()), 'the nested pnpm was serialized instead of re-entering')
+    say('pnpm admission re-entry: the nested call finished under the holder token')
+
+    const deadReal = join(rowDir, 'dead.mjs')
+    writeFileSync(deadReal, 'setTimeout(() => {}, 60000)\n')
+    const holder = spawn('/bin/sh', ['/usr/local/bin/pnpm-admission', deadReal], {
+      env: { ...process.env, AUTOMAGIK_PNPM_OWNER: 'smoke-dead' }, stdio: 'ignore',
+    })
+    for (let attempt = 0; attempt < 100 && !/owner=smoke-dead/.test(admissionLog()); attempt += 1) {
+      execFileSync('/nodejs/bin/node', ['-e', 'setTimeout(() => {}, 50)'])
+    }
+    check(/owner=smoke-dead/.test(admissionLog()), 'the dead-holder row never acquired the lock')
+    process.kill(holder.pid, 'SIGKILL')
+    const started = Date.now()
+    command('/usr/local/bin/pnpm', ['--version'], { env: admissionEnv, timeout: 15_000 })
+    check(Date.now() - started < 5000, `the lock outlived its holder for ${Date.now() - started} ms`)
+    say(`pnpm admission dead holder: next waiter ran in ${Date.now() - started} ms`)
+  } finally {
+    rmSync(rowDir, { recursive: true, force: true })
+  }
   check(process.env.XDG_RUNTIME_DIR === XDG_RUNTIME_DIR, `XDG_RUNTIME_DIR is ${process.env.XDG_RUNTIME_DIR ?? 'unset'}, not ${XDG_RUNTIME_DIR}`)
   check(coreSession === SMOKE_HC_SESSION, `HC_SESSION is ${coreSession}, not ${SMOKE_HC_SESSION}`)
   check(coreRuntime === HC_RUNTIME, `HC_RUNTIME is ${coreRuntime}, not ${HC_RUNTIME}`)

@@ -1,3 +1,4 @@
 #!/bin/sh
-# The pnpm dsh's plugin manager installs with: the runtime's pinned pnpm 10, not a global.
-exec /nodejs/bin/node /opt/automagik/runtime/node_modules/pnpm/bin/pnpm.cjs "$@"
+# AUTOMAGIK_PNPM and the image's first pnpm: the shared admission lock and bounded env, then the
+# runtime's real pnpm. The runtime .cjs is wrapped too for callers that invoke it through node.
+exec /bin/sh /usr/local/bin/pnpm-admission /opt/automagik/runtime/node_modules/pnpm/bin/pnpm-real.cjs "$@"
