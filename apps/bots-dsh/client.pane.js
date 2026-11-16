@@ -9063,6 +9063,7 @@ var ZH = {
   "The folder on {host} holds no Hermes settings or server record.": "{host} 上的该文件夹没有 Hermes 设置或服务器记录。",
   "Point at the folder that holds Hermes, or choose another computer.": "请指向包含 Hermes 的文件夹，或选择另一台电脑。",
   "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "它的 serve 记录位于与另一个 Hermes 数据目录共享的文件夹中，因此无法在此选择。旁边的另一个文件夹看起来像 Hermes 数据目录。请给这个 Hermes 一个自己的文件夹：移动它，或移动另一个文件夹，然后用“添加另一个 Hermes”添加该文件夹。",
+  "Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.": "它的 serve 记录位于与 {folders} 共享的文件夹中，因此无法在此选择。{folders} 有 config.yaml 和名称像 Hermes 数据目录的文件夹，但没有 SOUL.md 或 state.db，因此 Automagik 无法判断它是否是另一个 Hermes。如果它不是 Hermes，请将它移到另一个父文件夹，然后按“再次检查”。如果它是另一个 Hermes，两者需要不同的父文件夹。",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",

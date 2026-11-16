@@ -130,6 +130,7 @@ var ZH = {
   "The folder on {host} holds no Hermes settings or server record.": "{host} 上的该文件夹没有 Hermes 设置或服务器记录。",
   "Point at the folder that holds Hermes, or choose another computer.": "请指向包含 Hermes 的文件夹，或选择另一台电脑。",
   "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "它的 serve 记录位于与另一个 Hermes 数据目录共享的文件夹中，因此无法在此选择。旁边的另一个文件夹看起来像 Hermes 数据目录。请给这个 Hermes 一个自己的文件夹：移动它，或移动另一个文件夹，然后用“添加另一个 Hermes”添加该文件夹。",
+  "Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.": "它的 serve 记录位于与 {folders} 共享的文件夹中，因此无法在此选择。{folders} 有 config.yaml 和名称像 Hermes 数据目录的文件夹，但没有 SOUL.md 或 state.db，因此 Automagik 无法判断它是否是另一个 Hermes。如果它不是 Hermes，请将它移到另一个父文件夹，然后按“再次检查”。如果它是另一个 Hermes，两者需要不同的父文件夹。",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",
@@ -5975,6 +5976,8 @@ var botRows = (rows2) => {
     const home = text2(row.home, 4096), id = text2(row.id, 100);
     if (!home.startsWith("/") || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(id)) return [];
     const running2 = row.running === true;
+    const blocked = !running2 && row.blocked === "shared-beside" ? "shared-beside" : "";
+    const besides = blocked && Array.isArray(row.besides) && row.besides.length >= 1 && row.besides.length <= 4 && row.besides.every((value) => text2(value, 4096).startsWith("/")) && new Set(row.besides).size === row.besides.length ? row.besides : void 0;
     const recordDir = running2 ? text2(row.recordDir, 4096) : "";
     const port = running2 && Number.isSafeInteger(row.port) && row.port > 0 && row.port < 65536 ? row.port : 0;
     const key = `${home}
@@ -5992,7 +5995,8 @@ ${id}`;
       provider: text2(row.provider, 100),
       recordDir: recordDir.startsWith("/") && !recordDir.split("/").includes("..") ? recordDir : "",
       port,
-      blocked: !running2 && row.blocked === "shared-beside" ? "shared-beside" : "",
+      blocked,
+      ...besides ? { besides } : {},
       start: text2(row.start, 500)
     }];
   });
@@ -6639,8 +6643,8 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
           { className: "bt-hw-bot-copy" },
           (0, import_react15.createElement)("strong", null, item.name),
           item.model ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-model" }, `${t("Model")}: ${botModelLine(item)}`) : null,
-          item.blocked === "shared-beside" ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-blocked" }, t("Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.")) : null,
-          !item.running && item.gateway ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Its gateway is running, but no “hermes serve” is. Start it with “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.", { command: item.start || "hermes serve", host })) : !item.running && item.start ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.", { command: item.start, host })) : null
+          item.blocked === "shared-beside" ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-blocked" }, item.besides?.length ? t("Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.", { folders: item.besides.join(", ") }) : t("Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.")) : null,
+          !item.blocked && !item.running && item.gateway ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Its gateway is running, but no “hermes serve” is. Start it with “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.", { command: item.start || "hermes serve", host })) : !item.blocked && !item.running && item.start ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.", { command: item.start, host })) : null
         ),
         (0, import_react15.createElement)("span", { className: `bt-hw-bot-state${item.running ? " bt-hw-bot-ok" : ""}` }, item.running ? t("Running") : item.gateway ? t("Gateway running") : t("Not running"))
       ))),

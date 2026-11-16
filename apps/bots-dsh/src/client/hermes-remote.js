@@ -48,6 +48,8 @@ const botRows = rows => {
     const home = text(row.home, 4096), id = text(row.id, 100)
     if (!home.startsWith('/') || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(id)) return []
     const running = row.running === true
+    const blocked = !running && row.blocked === 'shared-beside' ? 'shared-beside' : ''
+    const besides = blocked && Array.isArray(row.besides) && row.besides.length >= 1 && row.besides.length <= 4 && row.besides.every(value => text(value, 4096).startsWith('/')) && new Set(row.besides).size === row.besides.length ? row.besides : undefined
     const recordDir = running ? text(row.recordDir, 4096) : ''
     const port = running && Number.isSafeInteger(row.port) && row.port > 0 && row.port < 65536 ? row.port : 0
     const key = `${home}\n${id}`
@@ -60,7 +62,7 @@ const botRows = rows => {
       model: text(row.model, 200),
       provider: text(row.provider, 100),
       recordDir: recordDir.startsWith('/') && !recordDir.split('/').includes('..') ? recordDir : '',
-      port, blocked: !running && row.blocked === 'shared-beside' ? 'shared-beside' : '', start: text(row.start, 500),
+      port, blocked, ...(besides ? { besides } : {}), start: text(row.start, 500),
     }]
   })
 }
@@ -599,9 +601,9 @@ export function HermesRemoteConnect({ onClose, onConnected, edit = false, more =
         }, h('span', { className: 'bt-hw-radio' }),
         h('span', { className: 'bt-hw-bot-copy' }, h('strong', null, item.name),
           item.model ? h('small', { className: 'bt-hw-bot-model' }, `${t('Model')}: ${botModelLine(item)}`) : null,
-          item.blocked === 'shared-beside' ? h('small', { className: 'bt-hw-bot-blocked' }, t('Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.')) : null,
-          !item.running && item.gateway ? h('small', { className: 'bt-hw-bot-start' }, t('Its gateway is running, but no “hermes serve” is. Start it with “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.', { command: item.start || 'hermes serve', host })) :
-          !item.running && item.start ? h('small', { className: 'bt-hw-bot-start' }, t('Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.', { command: item.start, host })) : null),
+          item.blocked === 'shared-beside' ? h('small', { className: 'bt-hw-bot-blocked' }, item.besides?.length ? t('Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.', { folders: item.besides.join(', ') }) : t('Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.')) : null,
+          !item.blocked && !item.running && item.gateway ? h('small', { className: 'bt-hw-bot-start' }, t('Its gateway is running, but no “hermes serve” is. Start it with “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.', { command: item.start || 'hermes serve', host })) :
+          !item.blocked && !item.running && item.start ? h('small', { className: 'bt-hw-bot-start' }, t('Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.', { command: item.start, host })) : null),
         h('span', { className: `bt-hw-bot-state${item.running ? ' bt-hw-bot-ok' : ''}` }, item.running ? t('Running') : item.gateway ? t('Gateway running') : t('Not running'))))),
       h('div', { className: 'bt-hw-profile-tools' }, h('span', null, t('{count} bots on {host}', { count: bots.length, host })),
         h('button', { type: 'button', disabled: status === 'refreshing' || status === 'saving', onClick: () => findBots() }, t('Check again'))))
