@@ -60,6 +60,30 @@ const mutants = [
     file: 'test/agent-redaction.test.js',
     test: 'environment PGPASSWORD is redacted across SDK reads, arguments and audit',
   },
+  {
+    name: 'Bot folder ids match only their exact case',
+    source: '../src/host/shared-uploads.js',
+    from: "const fold = text => (process.platform === 'linux' ? text : text.toLowerCase())",
+    to: 'const fold = text => text',
+    file: 'test/upload-access.test.js',
+    test: 'Bot ids fold like the file system off linux',
+  },
+  {
+    name: 'shell text keeps parent segments under the bots root',
+    source: '../src/host/shared-uploads.js',
+    from: 'const parentSegment = /\\/(?!\\.\\.?(?:\\/|$))[^/]+\\/\\.\\.(?=\\/|$)/g',
+    to: 'const parentSegment = /(?!)/g',
+    file: 'test/upload-access.test.js',
+    test: 'shell text collapses parent segments under the bots root',
+  },
+  {
+    name: 'a link outside the bots root is not resolved',
+    source: '../src/host/shared-uploads.js',
+    from: '      if (rt.realBeyond) await check(await rt.realBeyond(absolute))',
+    to: '      // mutant: the real path is not checked',
+    file: 'test/upload-access.test.js',
+    test: 'a link outside the bots root into another Bot folder is refused',
+  },
 ]
 for (const mutant of mutants) {
   const source = new URL(mutant.source ?? accessSource.href, import.meta.url)

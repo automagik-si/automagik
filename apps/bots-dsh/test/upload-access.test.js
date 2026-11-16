@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { install as uploads } from '../src/host/shared-uploads.js'
 import { install as tools } from '../src/host/tools.js'
@@ -57,12 +57,22 @@ async function fixture(t, { withTools = true } = {}) {
       approval,
     })[name] }
   const owners = new Map([['ga', { roomId: 'g', botId: 'a' }], ['gb', { roomId: 'g', botId: 'b' }]])
+  // The real path of the deepest part that exists, with the rest after it, as folders.js does.
+  const realBeyond = async path => {
+    const rest = []
+    for (let at = resolve(path); ; at = dirname(at)) {
+      const found = await realpath(at).catch(() => undefined)
+      if (found !== undefined) return join(found, ...rest)
+      if (dirname(at) === at) return resolve(path)
+      rest.unshift(basename(at))
+    }
+  }
   const rt = { ctx, state, home: join(folder, 'home'), dshHome: join(folder, 'dsh'), statePath: join(folder, 'state.json'), teamTools: [], live: new Map(), groupOwners: owners,
     botOf: id => bots[id], selfOf: id => bots[id]?.id ?? owners.get(id)?.botId,
     botOfSession: id => bots[id] ?? bots[owners.get(id)?.botId], chatOf: id => bots[id]?.sessionId,
     roomOf: id => rooms[id], findBot: name => Object.values(bots).find(bot => bot.name === name),
     workDirOf: ({ botId }) => bots[botId]?.workDir, teamFolder: () => folder, defaultTeamFolder: () => folder,
-    sessionFolder: session => bots[session?.id]?.workDir ?? folder, realBeyond: async path => resolve(path),
+    sessionFolder: session => bots[session?.id]?.workDir ?? folder, realBeyond,
     groupSessionsOf: id => id === 'a' ? ['ga'] : id === 'b' ? ['gb'] : [], isMain: () => false,
     own: (value, key) => Object.hasOwn(value, key) ? value[key] : undefined,
     load: async () => {}, save: async () => {}, readOnly: () => undefined, warn() {},
@@ -464,6 +474,21 @@ for (const spelling of ['.automagik/bots/a', '.Automagik/Bots/a', '.AUTOMAGIK/BO
   })
 }
 
+test('Bot ids fold like the file system off linux', async t => {
+  const f = await fixture(t, { withTools: false })
+  const candidate = join(f.folder, '.automagik', 'bots', 'Outside', 'uploads', 'notes.txt')
+  // On linux the folder name is exact, so another case is not this Bot's folder.
+  if (process.platform === 'linux') assert.equal(await f.guard('b', 'read', { file_path: candidate }), 'ran')
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  try {
+    Object.defineProperty(process, 'platform', { value: 'darwin' })
+    await assert.rejects(f.guard('b', 'read', { file_path: candidate }), /another Bot's own folder/)
+    assert.equal(await f.guard('outside', 'read', { file_path: candidate }), 'ran')
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+  }
+})
+
 for (const kind of ['tool-result', 'channel', 'handoff']) {
   test(`own-history ${kind} stored files remain readable before and after prompt projection`, async t => {
     const f = await fixture(t, { withTools: false })
@@ -509,6 +534,28 @@ for (const spelling of [
     }
   })
 }
+
+test('shell text collapses parent segments under the bots root', async t => {
+  const f = await fixture(t, { withTools: false })
+  for (const command of ['cat .automagik/bots/learning/../outside/notes.txt', 'cat .automagik/bots/b/../outside/notes.txt']) {
+    for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) {
+      await assert.rejects(f.guard('b', name, { command }), /another Bot's own folder/)
+      assert.equal(await f.guard('outside', name, { command }), 'ran')
+    }
+  }
+})
+
+test('a link outside the bots root into another Bot folder is refused', async t => {
+  const f = await fixture(t, { withTools: false })
+  const target = join(f.folder, '.automagik', 'bots', 'outside')
+  await mkdir(target, { recursive: true })
+  const link = join(f.folder, 'outside-shortcut')
+  await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+  const path = join(link, 'uploads', 'notes.txt')
+  await assert.rejects(f.guard('b', 'read', { file_path: path }), /another Bot's own folder/)
+  await assert.rejects(f.guard('b', 'grep', { path: link, pattern: 'notes' }), /another Bot's own folder/)
+  assert.equal(await f.guard('outside', 'read', { file_path: path }), 'ran')
+})
 
 test('shell store guards match object ids in home-relative, quoted and cd-relative paths', async t => {
   const f = await fixture(t, { withTools: false })
