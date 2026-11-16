@@ -2769,7 +2769,7 @@
   "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "O registro do serve está numa pasta compartilhada com outra pasta do Hermes, então não pode ser escolhido aqui. Outra pasta ao lado deste Hermes parece uma pasta do Hermes. Dê a este Hermes uma pasta própria: mova o Hermes, ou mova a outra pasta, depois adicione essa pasta com Adicionar outro Hermes.",
   "Could not continue this sign-in ({kind}). Try again.": "Não foi possível continuar este login ({kind}). Tente de novo.",
   "The account could not be confirmed ({kind}). Try again.": "Não foi possível confirmar a conta ({kind}). Tente de novo.",
-  "This coding agent signs in from its own terminal. Run its sign-in command there, then try again.": "Este agente de código entra pelo próprio terminal. Rode o comando de login dele lá e tente de novo.",
+  "This coding agent signs in from its own terminal. Run its sign-in command there, then try again.": "Este agente de código entra pelo próprio terminal. Rode o comando de login por lá e tente de novo.",
   "The CLI did not offer a sign-in link in time. Try again.": "O CLI não ofereceu um link de login a tempo. Tente de novo.",
   "The CLI could not be started. Run it once in a terminal, then try again.": "Não foi possível iniciar o CLI. Rode-o uma vez no terminal e tente de novo.",
   "The CLI returned an old sign-in link. Update it, then try again.": "O CLI devolveu um link de login antigo. Atualize-o e tente de novo.",
