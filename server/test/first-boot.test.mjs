@@ -221,7 +221,7 @@ test('mutant FIRST_BOOT_PRESENT_HOME_SKIPS_VERIFY is killed: a partial home is n
   assert.equal(marker.registry, 'seeded')
   assert.equal(marker.seedCommit, REGISTRY_SEED_COMMIT)
 
-  // The recovery state g9 reproduced: a home file, no v1 roster, no repo v2, no marker.
+  // The recovery state a review machine reproduced: a home file, no v1 roster, no repo v2, no marker.
   // The present-home early return would accept it and write a marker for the unchecked state.
   const homeFile = join(home, 'bots', 'bots.json')
   const homeBefore = readFileSync(homeFile, 'utf8')

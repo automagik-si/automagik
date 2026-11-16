@@ -445,8 +445,8 @@ test('a subagent child of a group Session carries that group; a child of the own
 test('a group Session indexed during the call is found when the task starts', async (t) => {
   const { rt, call, presets, settle, toolCall, wish } = team(t, { bots: { m1: { permission: FULL } }, room: { permission: WRITE } })
   await call('state', {})
-  const task = await toolCall('g9', async () => {
-    rt.groupOwners.set('g9', { botId: 'm1', roomId: 'r1' })
+  const task = await toolCall('group-9', async () => {
+    rt.groupOwners.set('group-9', { botId: 'm1', roomId: 'r1' })
     return wish()
   })
   await settle()

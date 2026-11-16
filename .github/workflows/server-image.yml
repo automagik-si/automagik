@@ -36,7 +36,7 @@ name: Server image
 #
 # The scan (server/secrecy.mjs) extracts the built rootfs and the image config before any login
 # and fails the job on a provider key, a token= or JSON token field, a private-key block with a
-# real body, a .env or launch-url file, bot/team state under /data, a home or /mnt/ai path, a git
+# real body, a .env or launch-url file, bot/team state under /data, a home or owner host path, a git
 # credential, an archive, a hit from the repository's own privacy grep, or a secret-looking env
 # name. The only exceptions are exact reviewed entries in server/secrecy-allowlist.json (one
 # file, one rule, the exact match; keys, /data, our own code, /etc and config may never be

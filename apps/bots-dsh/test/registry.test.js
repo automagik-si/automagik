@@ -31,7 +31,7 @@ const homeFile = () => ({
       pet: { source: 'builtin', id: 'genie-clay' }, dsh: { model: 'deepseek/v4', effort: 'high', color: 'teal' } },
     { id: ID.main, name: 'Remote', folder: '/srv/repo', machine: 'khal-labs' },
   ],
-  projects: [{ folder: '/Users/me/repo' }, { folder: '/srv/repo', machine: 'g9' }],
+  projects: [{ folder: '/Users/me/repo' }, { folder: '/srv/repo', machine: 'box-1' }],
   shown: [{ project: null, bots: [ID.dsh] }, { project: '/Users/me/repo', bots: [ID.main] }],
 })
 const text = (raw, indent = 2) => `${JSON.stringify(raw, null, indent)}\n`
@@ -103,7 +103,7 @@ test('parse: a repo file with two main Bots warns and the first counts', () => {
 
 test('a repo file cannot set folder, machine, dsh, shown or projects', () => {
   const raw = repoFile()
-  Object.assign(raw.bots[0], { folder: '/', machine: 'g9', dsh: { model: 'x' } })
+  Object.assign(raw.bots[0], { folder: '/', machine: 'box-1', dsh: { model: 'x' } })
   raw.shown = [{ project: null, bots: [ID.main] }]
   raw.projects = [{ folder: '/etc' }]
   const parsed = parseRegistry(text(raw), { kind: 'repo' })
@@ -136,7 +136,7 @@ test('check: what a write refuses', () => {
   bad.bots[0].pet = { source: 'codex', id: 'x' }
   bad.bots[1].machine = '-oProxyCommand'
   bad.shown.push({ project: '/x', bots: ['nope'] })
-  bad.projects.push({ machine: 'g9' })
+  bad.projects.push({ machine: 'box-1' })
   // Each refusal names the entry (its place and id) and the field, so it can be fixed by hand.
   assert.deepEqual(checkRegistry(bad, { kind: 'home' }).sort(), [
     `bots[0] (${ID.dsh}): pet source "codex" is not builtin or team`,
