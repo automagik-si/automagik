@@ -387,6 +387,7 @@ describe('capped-run', () => {
     expect(passing.status).toBe(0);
     expect(passing.stdout).toBe('pass');
     expect(passing.stderr.split('\n').filter(line => line.startsWith('CAPPED: '))).toHaveLength(0);
+    expect(passing.stderr.split('\n').filter(line => line.startsWith('exit '))).toHaveLength(0);
 
     const failing = cappedRun(['--', 'sh', '-c', 'exit 3']);
     expect(failing.status).toBe(3);
@@ -881,6 +882,50 @@ describe('capped-run', () => {
     },
     60_000,
   );
+
+  test.skipIf(!scope)(
+    'a 1 exit after the in-scope monitor is killed prints the monitor-ended line and passes 1',
+    () => {
+      const state = scratch('monitor-killed-one-state');
+      const script = join(scratch('monitor-killed-one'), 'kill-monitor.sh');
+      writeFileSync(
+        script,
+        [
+          'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
+          '[ -n "$cg" ] || exit 1',
+          'for pid in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do',
+          '  case $pid in "" | *[!0-9]*) continue ;; esac',
+          '  [ "$pid" -gt 1 ] || continue',
+          '  [ "$pid" = "$$" ] || kill -9 "$pid" 2>/dev/null',
+          'done',
+          'exit 1',
+        ].join('\n'),
+      );
+      const outcome = cappedRun(['--', 'sh', script], { state, timeout: 30_000 });
+      const line =
+        'exit 1: the memory monitor ended before its final read; the run may have hit the memory limit (command=sh)';
+      expect(outcome.status).toBe(1);
+      expect(outcome.stderr.trim().split('\n').filter(Boolean)).toEqual([line]);
+      expect(outcome.log.trim().split('\n')).toContain(line);
+    },
+    60_000,
+  );
+
+  test.skipIf(!scope)('a clean run prints neither the CAPPED nor the monitor-ended line', () => {
+    const state = scratch('clean-state');
+    const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], { state });
+    expect(outcome.status).toBe(0);
+    expect(outcome.stderr).toBe('');
+    expect(outcome.log).toBe('');
+  });
+
+  test.skipIf(!scope)('a non-zero exit with a live monitor prints neither line', () => {
+    const state = scratch('live-monitor-state');
+    const outcome = cappedRun(['--', 'sh', '-c', 'exit 3'], { state });
+    expect(outcome.status).toBe(3);
+    expect(outcome.stderr).toBe('');
+    expect(outcome.log).toBe('');
+  });
 
   test.skipIf(!scope || inheritedOomScore >= 1000)(
     'the payload raises strictly above the monitor (skipped when the inherited oom_score_adj is 1000 or more)',

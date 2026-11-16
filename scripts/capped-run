@@ -44,9 +44,11 @@
 #     log. A 137 with no oom_kill prints nothing extra. When the monitor wrote its final word with
 #     the cause unreadable, the wrapper prints one line `exit 137: could not read the memory-kill
 #     cause (scope gone, command=<comm>)`; when the monitor ended before writing its final word,
-#     the line is `exit 137: the memory monitor ended before its final read; the run may have hit
-#     the memory limit (command=<comm>)`. Both go to the log too, and the command's own exit code
-#     passes through. The CAPPED line's text is built by the pure function in
+#     the line is `exit <code>: the memory monitor ended before its final read; the run may have
+#     hit the memory limit (command=<comm>)` for the command's real exit code, whatever it is:
+#     the run is never silent when the monitor dies, and a normal run (which always gets the
+#     monitor's done word) prints neither. Both lines go to the log too, and the command's own
+#     exit code passes through. The CAPPED line's text is built by the pure function in
 #     `capped-run-wording.sh` next to this script (the tests source it too); the payload shim
 #     text is the function in `capped-run-shim.sh`, checked by the tests with sh -n and bash -n.
 #   - A signal from outside (INT, TERM, HUP) stops this run's own scope and removes its scratch
@@ -144,7 +146,7 @@ while [ $# -gt 0 ]; do
         '  --mem SIZE  raise the memory cap (default 4G, ceiling 8G)' \
         '  --lock      take the full-gate lock for the run' \
         '  --name N    name the scope unit' \
-        '  CAPPED is certain only while the monitor survives; otherwise the run reports that the monitor ended before its final read'
+        '  CAPPED is certain only while the monitor survives; the run is never silent when the monitor dies'
       exit 0
       ;;
     --mem)
@@ -580,15 +582,21 @@ if [ "$capped" = 1 ] && [ "$capped_oom" -gt 0 ]; then
   else
     printf '%s, log=unwritten)\n' "${capped_line%?}" >&2
   fi
-elif [ "$capped" = 1 ] && [ "$code" = 137 ] && [ "${oom_state:-}" = unknown ]; then
+elif [ "$capped" = 1 ] && [ "${oom_state:-}" = unknown ]; then
   # No CAPPED claim without the kernel's word: one honest line, and the log keeps it too.
   if [ "${read_done:-0}" = 1 ]; then
-    cause_line=$(printf 'exit 137: could not read the memory-kill cause (scope gone, command=%s)' "$cmd_comm")
+    if [ "$code" = 137 ]; then
+      cause_line=$(printf 'exit 137: could not read the memory-kill cause (scope gone, command=%s)' "$cmd_comm")
+      printf '%s\n' "$cause_line" >&2
+      log_capped "$cause_line"
+    fi
   else
-    cause_line=$(printf 'exit 137: the memory monitor ended before its final read; the run may have hit the memory limit (command=%s)' "$cmd_comm")
+    # The monitor ended before its final word: say so whatever the command's exit code. A
+    # normal run always gets the done word (read_peak waits for it), so this stays quiet there.
+    cause_line=$(printf 'exit %s: the memory monitor ended before its final read; the run may have hit the memory limit (command=%s)' "$code" "$cmd_comm")
+    printf '%s\n' "$cause_line" >&2
+    log_capped "$cause_line"
   fi
-  printf '%s\n' "$cause_line" >&2
-  log_capped "$cause_line"
 fi
 
 # read_peak above already waited for the monitor's last word; the scratch file goes now.
