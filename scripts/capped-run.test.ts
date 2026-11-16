@@ -399,7 +399,7 @@ describe('capped-run', () => {
       expect(outcome.status).toBe(137);
       const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
       expect(capped).toHaveLength(1);
-      expect(capped[0]).toContain('CAPPED: killed at the memory limit (limit=256M, peak>=');
+      expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256M, peak>=');
       // Labelled peak bound: the floor is at least 90 percent of the cap, the measured last
       // sample is named, and a bare peak=<limit> (mutants 15 and 18) fails here.
       const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
@@ -408,6 +408,8 @@ describe('capped-run', () => {
       expect(capped[0]).toMatch(/last sample (?:[0-9.]+M|unknown)/);
       expect(capped[0]).not.toMatch(/peak=[0-9.]+M/);
       expect(capped[0]).toContain(`command=${command})`);
+      // No stray "Killed" or other line on stderr: the LOCK line, then the one CAPPED line.
+      expect(outcome.stderr.trim().split('\n').filter(line => !line.startsWith('LOCK: '))).toEqual([capped[0]]);
       expect(outcome.stderr).not.toContain('argv-leak-marker');
       expect(outcome.stderr).not.toContain('env-leak-marker');
 
@@ -450,11 +452,14 @@ describe('capped-run', () => {
         expect(outcome.status).toBe(137);
         const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
         expect(capped).toHaveLength(1);
+        expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256M, peak>=');
         const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
         expect(Number.isFinite(floorMib)).toBe(true);
         expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
         expect(capped[0]).toMatch(/last sample (?:[0-9.]+M|unknown)/);
         expect(capped[0]).not.toMatch(/peak=[0-9.]+M/);
+        // The one line is all stderr says: no shell "Killed" leak.
+        expect(outcome.stderr.trim()).toBe(capped[0]);
       } finally {
         rmSync(file, { force: true });
       }
@@ -600,5 +605,34 @@ describe('capped-run', () => {
       }
     },
     60_000,
+  );
+
+  test.skipIf(!scope || !dd || !shmHasRoom())(
+    'a grandchild OOM kill prints one CAPPED line and the child exit 1 passes through',
+    () => {
+      const state = scratch('grandchild-state');
+      const file = join('/dev/shm', `capped-run-grandchild-${process.pid}-${Date.now()}`);
+      const script = `dd if=/dev/zero of=${file} bs=1M count=512 status=none & wait; exit 1`;
+      try {
+        const outcome = cappedRun(['--mem', '256M', '--', 'sh', '-c', script], {
+          state,
+          env: { CAPPED_RUN_TEST_MEM: '256M' },
+          timeout: 120_000,
+        });
+        expect(outcome.status).toBe(1);
+        const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
+        expect(capped).toHaveLength(1);
+        expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256M, peak>=');
+        const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
+        expect(Number.isFinite(floorMib)).toBe(true);
+        expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
+        expect(capped[0]).toMatch(/last sample (?:[0-9.]+M|unknown)/);
+        expect(capped[0]).toContain('command=sh)');
+        expect(outcome.log.trim().split('\n')).toContain(capped[0]);
+      } finally {
+        rmSync(file, { force: true });
+      }
+    },
+    120_000,
   );
 });
