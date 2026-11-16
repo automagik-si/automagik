@@ -63,7 +63,7 @@ async function main() {
   check(process.env.HERDR_APP_HOME === HERDR_APP_HOME, `HERDR_APP_HOME is ${process.env.HERDR_APP_HOME ?? 'unset'}, not ${HERDR_APP_HOME}`)
   const briefingLink = join(HERDR_APP_HOME, 'automagik-herdr', 'briefing.mjs')
   check(existsSync(briefingLink), `am self install did not create ${briefingLink}`)
-  command('/usr/bin/env', ['true'])
+  check(command('/usr/bin/env', ['/bin/sh', '-c', 'printf env-ok']) === 'env-ok', '/usr/bin/env did not run /bin/sh')
   check(command('/usr/bin/printenv', ['PATH']).length > 0, 'printenv printed no PATH')
   check(process.env.XDG_RUNTIME_DIR === XDG_RUNTIME_DIR, `XDG_RUNTIME_DIR is ${process.env.XDG_RUNTIME_DIR ?? 'unset'}, not ${XDG_RUNTIME_DIR}`)
   check(coreSession === SMOKE_HC_SESSION, `HC_SESSION is ${coreSession}, not ${SMOKE_HC_SESSION}`)
@@ -91,7 +91,8 @@ async function main() {
   mkdirSync(startProject, { recursive: true })
   mkdirSync(fakeBin, { recursive: true })
   const fakeCodex = join(fakeBin, 'codex')
-  writeFileSync(fakeCodex, '#!/bin/sh\nexec /nodejs/bin/node -e \'setTimeout(() => {}, 30000)\'\n')
+  const invocationMarker = join(startDir, 'fake-codex-invocation')
+  writeFileSync(fakeCodex, `#!/bin/sh\n{ printf '%s\\n' "$0"; printf '%s\\n' "$@"; } > ${JSON.stringify(invocationMarker)}\nwhile :; do :; done\n`)
   chmodSync(fakeCodex, 0o755)
   const startEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ''}` }
   try {
@@ -101,10 +102,14 @@ async function main() {
     check(!/gets no per-turn briefing/.test(started.stderr), `am start still warns about the briefing: ${started.stderr}`)
     const terminal = JSON.parse(started.stdout).terminal
     check(typeof terminal === 'string' && terminal.length > 0, `am start returned no terminal: ${started.stdout}`)
-    const selected = JSON.parse(command('hc', ['get', terminal, '--json']))
-    check(Array.isArray(selected?.foreground?.argv) && selected.foreground.argv[0] === fakeCodex, `am start foreground is ${JSON.stringify(selected?.foreground?.argv)}`)
+    for (let attempt = 0; attempt < 50 && !existsSync(invocationMarker); attempt += 1) {
+      execFileSync('/nodejs/bin/node', ['-e', 'setTimeout(() => {}, 100)'])
+    }
+    check(existsSync(invocationMarker), 'the fake codex did not record its invocation')
+    const invocation = readFileSync(invocationMarker, 'utf8')
+    check(invocation.split('\n')[0] === fakeCodex, `the fake codex argv[0] is ${JSON.stringify(invocation.split('\n')[0])}`)
     command('hc', ['kill', terminal])
-    say('am start: /usr/bin/env, the briefing hook and the exact fake codex argv all work')
+    say('am start: /usr/bin/env, the briefing hook and the fake codex own invocation all work')
   } finally {
     rmSync(startDir, { recursive: true, force: true })
   }
