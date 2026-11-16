@@ -11817,7 +11817,7 @@ var HOST_ZH = {
   "Taking the pane…": "正在接管终端…",
   "Typing is open in another window · view only": "另一个窗口正在输入 · 只读",
   "Your session ended · view only": "你的会话已结束 · 只读",
-  "Line breaks were removed: this terminal has no bracketed paste": "已移除换行：此终端未启用括号粘贴",
+  "Line breaks were removed from the paste": "已移除粘贴内容中的换行",
   "Control characters were removed from the paste": "已从粘贴内容中移除控制字符",
   "Operating": "在操作",
   "You have the computer": "你在操作",
@@ -14266,29 +14266,15 @@ var STATUS_WORDS = Object.freeze(["working", "needs-you", "idle", "not-running"]
 var statusKey = (status) => STATUS_WORDS.includes(status) ? status : "idle";
 
 // src/client/code-side-paste.js
-var BRACKET_PASTE_ON = "\x1B[?2004h";
-var BRACKET_PASTE_OFF = "\x1B[?2004l";
-var PASTE_START = "\x1B[200~";
-var PASTE_END = "\x1B[201~";
 var encoder = () => new TextEncoder();
 var bytesOf = (text) => encoder().encode(text);
 var CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f]/g;
-function bracketedState(current, bytes) {
-  const text = typeof bytes === "string" ? bytes : new TextDecoder().decode(bytes);
-  const on2 = text.lastIndexOf(BRACKET_PASTE_ON);
-  const off = text.lastIndexOf(BRACKET_PASTE_OFF);
-  if (on2 < 0 && off < 0) return current === true;
-  return on2 > off;
-}
-function pasteBytes(text, bracketed) {
+function pasteBytes(text) {
   const raw = typeof text === "string" ? text : "";
   if (raw === "") return { bytes: new Uint8Array(), note: null };
   const value = raw.replace(CONTROL, "");
   const controls = value !== raw;
   const lineBreaks = /[\r\n]/.test(value);
-  if (bracketed === true) {
-    return { bytes: bytesOf(`${PASTE_START}${value.replace(/\r\n?/g, "\n")}${PASTE_END}`), note: controls ? "controls-stripped" : null };
-  }
   if (!lineBreaks) return { bytes: bytesOf(value), note: controls ? "controls-stripped" : null };
   return { bytes: bytesOf(value.replace(/\r\n|\r|\n/g, " ")), note: controls ? "controls-stripped" : "line-breaks-stripped" };
 }
@@ -14633,7 +14619,6 @@ function TerminalPane({ botId, worker, title }) {
   const [mode, setMode] = (0, import_react2.useState)("view");
   const [pasteNote, setPasteNote] = (0, import_react2.useState)(false);
   const modeRef = (0, import_react2.useRef)("view");
-  const bracketedRef = (0, import_react2.useRef)(false);
   const sessionRef = (0, import_react2.useRef)(null);
   const termRef = (0, import_react2.useRef)(null);
   const takeRef = (0, import_react2.useRef)(null);
@@ -14786,7 +14771,7 @@ function TerminalPane({ botId, worker, title }) {
         event.preventDefault();
         event.stopImmediatePropagation();
         if (modeRef.current !== "typing" || !sessionRef.current) return;
-        const pasted = pasteBytes(event.clipboardData?.getData("text/plain") ?? "", bracketedRef.current);
+        const pasted = pasteBytes(event.clipboardData?.getData("text/plain") ?? "");
         setPasteNote(pasted.note ?? false);
         if (pasted.bytes.length === 0) return;
         queueRef.current.push(pasted.bytes);
@@ -14807,7 +14792,6 @@ function TerminalPane({ botId, worker, title }) {
       source.addEventListener("data", (event) => {
         if (disposed || !event.data) return;
         const bytes = decode(event.data);
-        bracketedRef.current = bracketedState(bracketedRef.current, bytes);
         if (term) term.write(bytes);
       });
       source.addEventListener("close", () => {
@@ -14853,7 +14837,7 @@ function TerminalPane({ botId, worker, title }) {
       { className: "cs-pane-head" },
       (0, import_react2.createElement)("span", { className: "cs-pane-title", title }, title),
       (0, import_react2.createElement)("span", { className: "cs-pane-note", role: "status", "data-mode": mode }, stateWord),
-      pasteNote ? (0, import_react2.createElement)("span", { className: "cs-paste-note", role: "status" }, pasteNote === "controls-stripped" ? t("Control characters were removed from the paste") : t("Line breaks were removed: this terminal has no bracketed paste")) : null,
+      pasteNote ? (0, import_react2.createElement)("span", { className: "cs-paste-note", role: "status" }, pasteNote === "controls-stripped" ? t("Control characters were removed from the paste") : t("Line breaks were removed from the paste")) : null,
       retryable ? (0, import_react2.createElement)("button", { type: "button", className: "cs-btn", onClick: () => {
         setPhase({ kind: "connecting" });
         setAttempt((value) => value + 1);

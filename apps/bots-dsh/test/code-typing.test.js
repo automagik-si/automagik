@@ -7,9 +7,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { Context } from '@deepseek-ai/cordis'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import { createTypingService, typingRoutes } from '../src/host/code-typing.js'
+import { connectCore } from '../src/host/code-core.js'
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-hc-core.mjs', import.meta.url))
 const LEAD = 'b-aaaaaaaaaa'
@@ -22,7 +22,8 @@ const TERMINALS = [
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'automagik-code-typing-'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
+  // A plugin's own writes can still be in flight when the test ends: retry the tree removal.
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))
   const project = join(root, 'project')
   mkdirSync(project, { recursive: true })
   const automagikHome = join(root, 'automagik')
@@ -72,7 +73,7 @@ const wait = async (check, ms = 5000) => {
   }
   return false
 }
-const service = (f, { admit = () => ({}) } = {}) => createTypingService({ env: f.env, admit, recordPath: f.recordPath, warn: () => {} })
+const service = (f, { admit = () => ({}), ...more } = {}) => createTypingService({ env: f.env, admit, recordPath: f.recordPath, warn: () => {}, ...more })
 const request = () => ({ headers: new Headers({ 'content-type': 'application/json', host: '127.0.0.1' }) })
 
 test('take, type one batch, release: the keys reach the core and appear in no record', async (t) => {
@@ -214,34 +215,84 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
       else process.env[key] = saved[key]
     }
   })
-  const { apply } = await import('../index.js')
+  // The plugin is applied for real: a real Cordis Context, its inject list satisfied with
+  // stand-ins for DSH's services only, and the plugin loaded as a plugin.
+  const { Context } = await import('@deepseek-ai/cordis')
+  const plugin = await import('../index.js')
   const { fakeContext } = await import('./fake-ctx.js')
-  const outer = new Context()
   const stub = fakeContext({})
+  const root = new Context()
+  const services = {
+    tools: stub.tools,
+    systemPrompt: stub.systemPrompt,
+    llm: stub.llm,
+    connection: Object.assign(stub.connection, { admit: () => ({}) }),
+    sessions: { list: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} }, flush: async () => {} },
+    sessionController: {},
+    sessionTitle: {},
+    workspaceRegistry: { list: () => [] },
+  }
+  for (const [name, value] of Object.entries(services)) root.provide(name, value)
   let takeRoute = null
+  let releaseRoute = null
   const register = stub.connection.fetch.register
   stub.connection.fetch.register = (options) => {
     if (options.path === '/api/omni-ui/code/take') takeRoute = options
+    if (options.path === '/api/omni-ui/code/release') releaseRoute = options
     return register(options)
   }
-  stub.connection.admit = () => ({})
-  const innerGet = stub.get
-  stub.get = name => (name === 'connection' ? stub.connection : innerGet(name))
-  const fork = outer.plugin({
-    apply(c) {
-      stub.effect = (...args) => c.effect(...args)
-      stub.on = (...args) => c.on(...args)
-      apply(stub, { home: team, browserPlugin: false })
-    },
-  })
+  const fork = root.plugin(plugin, { home: team, browserPlugin: false })
   await fork
-  assert.ok(takeRoute, 'the take route is registered in the real scope')
+  assert.ok(takeRoute, 'the take route is registered in the real plugin scope')
   const response = await takeRoute.fetch(new Request('http://127.0.0.1/api/omni-ui/code/take', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ bot: LEAD, viewer: 'viewer-1' }),
   }))
   assert.equal(response.status, 200)
+  const taken = await response.json()
   await fork.dispose()
-  assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2)), 'stopping the plugin scope sends CLOSE for the typing attach')
+  const closed = await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2))
+  // A scope that does not stop its typing attach would leave an open core; let it go before
+  // failing with the reason.
+  if (!closed && releaseRoute) await releaseRoute.fetch(new Request('http://127.0.0.1/api/omni-ui/code/release', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session: taken.session }) })).catch(() => {})
+  assert.ok(closed, 'stopping the real plugin scope sends CLOSE for the typing attach')
+  await new Promise(resolve => setTimeout(resolve, 100))
+})
+
+test('two takes racing for one pane: exactly one wins, one 409, one attach', async (t) => {
+  const f = fixture(t)
+  // A slow connect holds both takes between the one-typer check and the reservation, the
+  // window the reviewer used to get two winners.
+  const typing = service(f, { connect: async (options) => { await new Promise(resolve => setTimeout(resolve, 60)); return connectCore(options) } })
+  t.after(() => typing.dispose())
+  const takes = await Promise.all([
+    typing.take({ request: request(), bot: LEAD, viewer: 'viewer-1' }),
+    typing.take({ request: request(), bot: LEAD, viewer: 'viewer-2' }),
+  ])
+  assert.deepEqual(takes.map(taken => taken.status).sort(), [200, 409], 'one take wins, the other is refused')
+  assert.equal(takes.filter(taken => taken.status === 200).length, 1)
+  assert.equal(readLog(f.log).filter(row => row.type === 'call' && row.method === 'terminal.attach').length, 1, 'the core gets one typing attach')
+})
+
+test('a quiet window lets its typing attach go on its own (idle lease)', async (t) => {
+  const f = fixture(t)
+  const typing = service(f, { idleMs: 150 })
+  t.after(() => typing.dispose())
+  const taken = await typing.take({ request: request(), bot: LEAD, viewer: 'viewer-1' })
+  assert.equal(taken.status, 200)
+  // DSH's own admission refuses a request with no owner cookie before the plugin's route
+  // runs; that request never reaches the service. The lease alone must let the attach go.
+  const receiver = Object.create(HostConnectionService.prototype)
+  receiver.trustedHosts = []
+  receiver.disposed = false
+  receiver.owner = { get: () => ({ host: '127.0.0.1', protocol: 'http:' }) }
+  receiver.browserAuth = { isAuthenticated: () => false, authenticateApi: () => undefined }
+  receiver.browserPeer = { id: 'owner' }
+  receiver.peers = new Map()
+  assert.equal(HostConnectionService.prototype.admit.call(receiver, { headers: { host: '127.0.0.1' } }).rejection, 401, 'the real admit refuses a batch with no owner cookie')
+  assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2)), 'the idle lease sends the core its CLOSE')
+  assert.equal(typing.sessions().length, 0)
+  const after = await typing.input({ request: request(), session: taken.body.session, data: Buffer.from('x', 'utf8').toString('base64') })
+  assert.equal(after.status, 409, 'a later owner batch no longer types')
 })

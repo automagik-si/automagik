@@ -48,8 +48,11 @@ function sessionOf({ viewer, pane, core, channel }) {
  * @param {{ env?: NodeJS.ProcessEnv, connect?: typeof connectCore, readFile?: Function,
  *   admit?: (request: any) => { rejection?: number }, recordPath?: string, warn?: Function }} options
  */
-export function createTypingService({ env = process.env, connect = connectCore, readFile, admit, recordPath, warn = () => {} } = {}) {
+export function createTypingService({ env = process.env, connect = connectCore, readFile, admit, recordPath, warn = () => {}, idleMs = 60_000 } = {}) {
   const byPane = new Map()
+  // Claimed before any wait: two windows racing for one pane must not both get in. The
+  // reservation is per Bot and worker (the pane those name), held until the take answers.
+  const pending = new Set()
   const byId = new Map()
   const byViewer = new Map()
   let recordQueue = Promise.resolve()
@@ -72,12 +75,21 @@ export function createTypingService({ env = process.env, connect = connectCore, 
   const close = async (session, reason) => {
     if (!session || session.closed) return
     session.closed = true
+    clearTimeout(session.idle)
     byPane.delete(session.pane.key)
     byId.delete(session.id)
     if (byViewer.get(session.viewer) === session) byViewer.delete(session.viewer)
     try { session.core.detach(session.channel) } catch { /* going */ }
     try { session.core.close() } catch { /* going */ }
     await record({ event: 'release', session: session.id, bot: session.pane.botId, worker: session.pane.worker, terminal: session.pane.terminal, at: new Date().toISOString(), reason })
+  }
+
+  // The attach is let go on its own: a session with no accepted batch for one idle span ends,
+  // so a page whose cookie died (DSH answers 401 before the route) cannot keep typing open.
+  const armLease = (session) => {
+    clearTimeout(session.idle)
+    session.idle = setTimeout(() => { void close(session, 'idle') }, Math.max(1, idleMs))
+    session.idle.unref?.()
   }
 
   const admitted = (request) => {
@@ -103,43 +115,50 @@ export function createTypingService({ env = process.env, connect = connectCore, 
       if (held) await close(held, 'moved')
       const key = `${bot}\0${worker ?? ''}`
       if (byPane.has(key)) return refuse(409, 'typing-elsewhere')
-      const pane = await resolvePane({ botId: bot, worker: worker ?? null, env, connect, readFile, warn })
-      if (!pane) return refuse(404, 'no-pane')
-      let core
+      if (pending.has(key)) return refuse(409, 'typing-elsewhere')
+      pending.add(key)
       try {
-        core = await connect({ env })
-      } catch {
-        return refuse(503, 'no-core')
+        const pane = await resolvePane({ botId: bot, worker: worker ?? null, env, connect, readFile, warn })
+        if (!pane) return refuse(404, 'no-pane')
+        let core
+        try {
+          core = await connect({ env })
+        } catch {
+          return refuse(503, 'no-core')
+        }
+        let attached
+        try {
+          // Not a watcher: this viewer may type. The size is the terminal's own, and no RESIZE
+          // frame is ever sent: the app does not resize a terminal.
+          attached = await core.attach({ terminal: pane.terminal, cols: pane.cols, rows: pane.rows, history: 0, observe: false })
+        } catch (error) {
+          core.close()
+          warn(`the typing attach was refused: ${error?.kind ?? error?.message ?? error}`)
+          return refuse(409, 'attach-refused')
+        }
+          const session = sessionOf({ viewer, pane: { ...pane, key, worker: worker ?? null }, core, channel: attached.channel })
+        // The attach's own output is drained and credited so the core keeps the stream healthy;
+        // its bytes are thrown away here (the watch pane already draws them) and never logged. The
+        // first paint marks the stream ready, so a batch sent right after taking is not dropped.
+        let ready
+        const painted = new Promise((resolve) => { ready = resolve })
+        core.watch(attached.channel, {
+          onData: bytes => {
+            ready()
+            try { core.credit(attached.channel, bytes.length) } catch { /* going */ }
+          },
+          onClose: reason => { ready(); void close(session, reason || 'ended') },
+        })
+        await Promise.race([painted, new Promise(resolve => { const timer = setTimeout(resolve, 500); timer.unref?.() })])
+        byPane.set(key, session)
+        byId.set(session.id, session)
+        byViewer.set(viewer, session)
+        armLease(session)
+        await record({ event: 'take', session: session.id, bot, worker: worker ?? null, terminal: pane.terminal, core: pane.core, at: session.at })
+        return ok({ session: session.id, mode: 'typing', bot, worker: worker ?? null, terminal: pane.terminal })
+      } finally {
+        pending.delete(key)
       }
-      let attached
-      try {
-        // Not a watcher: this viewer may type. The size is the terminal's own, and no RESIZE
-        // frame is ever sent: the app does not resize a terminal.
-        attached = await core.attach({ terminal: pane.terminal, cols: pane.cols, rows: pane.rows, history: 0, observe: false })
-      } catch (error) {
-        core.close()
-        warn(`the typing attach was refused: ${error?.kind ?? error?.message ?? error}`)
-        return refuse(409, 'attach-refused')
-      }
-      const session = sessionOf({ viewer, pane: { ...pane, key, worker: worker ?? null }, core, channel: attached.channel })
-      // The attach's own output is drained and credited so the core keeps the stream healthy;
-      // its bytes are thrown away here (the watch pane already draws them) and never logged. The
-      // first paint marks the stream ready, so a batch sent right after taking is not dropped.
-      let ready
-      const painted = new Promise((resolve) => { ready = resolve })
-      core.watch(attached.channel, {
-        onData: bytes => {
-          ready()
-          try { core.credit(attached.channel, bytes.length) } catch { /* going */ }
-        },
-        onClose: reason => { ready(); void close(session, reason || 'ended') },
-      })
-      await Promise.race([painted, new Promise(resolve => { const timer = setTimeout(resolve, 500); timer.unref?.() })])
-      byPane.set(key, session)
-      byId.set(session.id, session)
-      byViewer.set(viewer, session)
-      await record({ event: 'take', session: session.id, bot, worker: worker ?? null, terminal: pane.terminal, core: pane.core, at: session.at })
-      return ok({ session: session.id, mode: 'typing', bot, worker: worker ?? null, terminal: pane.terminal })
     },
 
     /** One keystroke batch, base64. Re-admitted every time: a dropped session refuses at once. */
@@ -160,6 +179,7 @@ export function createTypingService({ env = process.env, connect = connectCore, 
         await close(held, 'ended')
         return refuse(409, 'not-typing')
       }
+      armLease(held)
       // Deliberately no record and no log here: keystrokes never leave this call.
       return { status: 204, body: null }
     },

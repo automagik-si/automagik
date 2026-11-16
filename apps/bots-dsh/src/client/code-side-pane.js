@@ -10,7 +10,7 @@ import { createElement as h, useEffect, useRef, useState, useSyncExternalStore }
 import { t } from './i18n.js'
 import { installStyles } from './styles.js'
 import { botRowOf, statusKey } from './code-side-model.js'
-import { bracketedState, pasteBytes } from './code-side-paste.js'
+import { pasteBytes } from './code-side-paste.js'
 import XTERM_CSS from '@xterm/xterm/css/xterm.css'
 
 const WORD = { working: () => t('Working'), 'needs-you': () => t('Needs you'), idle: () => t('Idle'), 'not-running': () => t('Not running') }
@@ -72,7 +72,6 @@ export function TerminalPane({ botId, worker, title }) {
   const [mode, setMode] = useState('view')
   const [pasteNote, setPasteNote] = useState(false)
   const modeRef = useRef('view')
-  const bracketedRef = useRef(false)
   const sessionRef = useRef(null)
   const termRef = useRef(null)
   const takeRef = useRef(null)
@@ -196,14 +195,14 @@ export function TerminalPane({ botId, worker, title }) {
         queueRef.current.push(new TextEncoder().encode(data))
         if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
       })
-      // A paste never goes through xterm's own paste path (which turns newlines into Enter
-      // unless the program asked for bracketed paste): the clipboard text is queued byte for
-      // byte, so a pasted line keeps its newline and presses nothing.
+      // A paste never goes through xterm's own paste path (which turns newlines into Enter):
+      // the clipboard text is queued with no CR and no LF at all, so nothing in a paste can
+      // press Enter, whatever the program's bracketed-paste state.
       const onPaste = (event) => {
         event.preventDefault()
         event.stopImmediatePropagation()
         if (modeRef.current !== 'typing' || !sessionRef.current) return
-        const pasted = pasteBytes(event.clipboardData?.getData('text/plain') ?? '', bracketedRef.current)
+        const pasted = pasteBytes(event.clipboardData?.getData('text/plain') ?? '')
         setPasteNote(pasted.note ?? false)
         if (pasted.bytes.length === 0) return
         queueRef.current.push(pasted.bytes)
@@ -221,8 +220,6 @@ export function TerminalPane({ botId, worker, title }) {
       source.addEventListener('data', (event) => {
         if (disposed || !event.data) return
         const bytes = decode(event.data)
-        // The program says whether a paste may use its bracketed-paste markers.
-        bracketedRef.current = bracketedState(bracketedRef.current, bytes)
         if (term) term.write(bytes)
       })
       source.addEventListener('close', () => {
@@ -260,7 +257,7 @@ export function TerminalPane({ botId, worker, title }) {
     h('div', { className: 'cs-pane-head' },
       h('span', { className: 'cs-pane-title', title }, title),
       h('span', { className: 'cs-pane-note', role: 'status', 'data-mode': mode }, stateWord),
-      pasteNote ? h('span', { className: 'cs-paste-note', role: 'status' }, pasteNote === 'controls-stripped' ? t('Control characters were removed from the paste') : t('Line breaks were removed: this terminal has no bracketed paste')) : null,
+      pasteNote ? h('span', { className: 'cs-paste-note', role: 'status' }, pasteNote === 'controls-stripped' ? t('Control characters were removed from the paste') : t('Line breaks were removed from the paste')) : null,
       retryable ? h('button', { type: 'button', className: 'cs-btn', onClick: () => { setPhase({ kind: 'connecting' }); setAttempt(value => value + 1) } }, t('Reconnect')) : null),
     h('div', { ref: host, className: 'cs-screen', role: 'button', tabIndex: 0, 'aria-label': stateWord, 'data-code-mode': mode, onClick: () => { if (modeRef.current === 'view' || modeRef.current === 'elsewhere') void takeRef.current?.() } }))
 }

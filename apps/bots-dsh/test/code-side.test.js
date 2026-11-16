@@ -10,7 +10,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
-import { apply } from '../index.js'
+import * as plugin from '../index.js'
 import { fakeContext } from './fake-ctx.js'
 import { foldAttach, readAttach } from '../src/shared/attach-record.js'
 import { foldWorkers, readWorkers } from '../src/shared/workers-journal.js'
@@ -32,7 +32,8 @@ const TERMINALS = [
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'automagik-code-side-'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
+  // A plugin's own writes can still be in flight when the test ends: retry the tree removal.
+  t.after(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))
   const project = join(root, 'project')
   mkdirSync(project, { recursive: true })
   const automagikHome = join(root, 'automagik')
@@ -417,32 +418,41 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
       else process.env[key] = saved[key]
     }
   })
-  // A real Cordis scope owns the plugin's effects; only the DSH services are stand-ins.
-  const outer = new Context()
+  // The plugin is applied for real: a real Cordis Context, its inject list satisfied with
+  // stand-ins for DSH's services, and no fake plugin context. Stopping the plugin is a real
+  // scope stop.
   const stub = fakeContext({})
+  const root = new Context()
+  const services = {
+    tools: stub.tools,
+    systemPrompt: stub.systemPrompt,
+    llm: stub.llm,
+    connection: stub.connection,
+    sessions: { list: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} }, flush: async () => {} },
+    sessionController: {},
+    sessionTitle: {},
+    workspaceRegistry: { list: () => [] },
+  }
+  for (const [name, value] of Object.entries(services)) root.provide(name, value)
   let route = null
   const register = stub.connection.fetch.register
   stub.connection.fetch.register = (options) => {
     if (options.path === '/api/omni-ui/code/stream') route = options
     return register(options)
   }
-  const innerGet = stub.get
-  stub.get = name => (name === 'connection' ? stub.connection : innerGet(name))
-  const fork = outer.plugin({
-    apply(c) {
-      stub.effect = (...args) => c.effect(...args)
-      stub.on = (...args) => c.on(...args)
-      apply(stub, { home: team, browserPlugin: false })
-    },
-  })
+  const fork = root.plugin(plugin, { home: team, browserPlugin: false })
   await fork
-  assert.ok(route, 'the Code stream route is registered in the real scope')
+  assert.ok(route, 'the Code stream route is registered in the real plugin scope')
   const response = await route.fetch(new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${LEAD}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } }))
   assert.equal(response.status, 200)
   const reader = response.body.getReader()
   await reader.read()
   await fork.dispose()
-  assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2)), 'stopping the plugin scope sends CLOSE to the core')
+  const closed = await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2))
+  // A scope that does not stop its stream would leave this test hanging on an open core; let
+  // the reader go first, then fail with the reason.
+  if (!closed) await reader.cancel().catch(() => {})
+  assert.ok(closed, 'stopping the real plugin scope sends CLOSE to the core')
   let ended = false
   const until = Date.now() + 2000
   while (Date.now() < until) {
@@ -450,6 +460,7 @@ test('a real Cordis plugin stop closes an open stream and its core attach', asyn
     if (next.done) { ended = true; break }
   }
   assert.equal(ended, true, 'and the response stream ends')
+  await new Promise(resolve => setTimeout(resolve, 100))
   for (const key of Object.keys(saved)) {
     if (saved[key] === undefined) delete process.env[key]
     else process.env[key] = saved[key]
