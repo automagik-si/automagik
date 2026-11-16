@@ -727,10 +727,10 @@ back:
   from a restart of the computer. To keep a bot down across restarts, detach it
   (`am detach <bot>`): a detached bot is never brought back. Every report says so.
 
-Session ids. Claude gets its id from Herdr at launch. dsh-TUI and Antigravity take none at
+Session ids. Claude gets its id from Herdr at launch. dsh-TUI, Antigravity, Codex and Kimi take none at
 launch, so the pack reads the id from what each leaves on disk (DSH's session folders for the
-pane's folder, Antigravity's prompt history: only its time, folder and conversation id) and
-records it as it does Claude's: a session row in the workers ledger and the pane's
+pane's folder, Antigravity's prompt history, Codex's rollout session_meta, Kimi's session index:
+only ids, folders and times) and records it as it does Claude's: a session row in the workers ledger and the pane's
 `agent.session` label. Anyone can leave a session in that folder with no pane the pack knows (a
 terminal of your own, DSH Desktop), so the pack takes only a pane's first conversation: the one
 session born within two minutes after the pane started. It records none, and the bot comes back
@@ -740,7 +740,13 @@ launch the workers ledger names) started within two minutes before the pane or b
 session. A session born later is never taken, and a recorded id is never replaced. What stays
 unknowable: a session someone started outside hc in that folder inside those two minutes, when
 the pane's own agent left none. A conversation started later inside the pane is not followed:
-the bot resumes its first one. DSH's home is `$DSH_HOME`, else `~/.dsh`.
+the bot resumes its first one. Codex's UUIDv7 dates its thread's creation at launch, even if its
+first turn writes the rollout days later; the pack looks in every dated folder from the launch's
+local day minus one onward. DSH's home is `$DSH_HOME`, else `~/.dsh`; Codex's is `$CODEX_HOME`, else
+`~/.codex`; Kimi's is `$KIMI_CODE_HOME`, else `~/.kimi-code` (only absolute overrides count).
+Revive never guesses Codex's or Kimi's latest conversation: with no id of its own, it starts a
+new conversation and the report says why. Manual `am restart` keeps its existing fallback.
+Kimi's index format comes from the 2.5.0 package and has not been verified live.
 
 The login service. `install.sh --revive` (or a yes when it asks; `--yes` never installs it)
 runs `am revive service install`: on Linux a systemd user unit,

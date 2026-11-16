@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
@@ -16,6 +17,11 @@ import { FIRST_SESSION_MS, KEEP_DOWN, UNIT_MARK, UNIT_NAME, agyCandidates, agyHi
   pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
 import { readJsonLines } from "./log-lines.mjs";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
+import { codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir, kimiCandidates, kimiHomeOf, kimiIndexPath, uuidV7Ms } from "../mods/am-sidebar/revive.js";
+
+// #1417: every CLI run below reads Codex's and Kimi's homes under its scratch home only.
+delete process.env.CODEX_HOME;
+delete process.env.KIMI_CODE_HOME;
 
 const SID = "0f3c2a4e-1b2d-4c5e-9f60-718293a4b5c6";
 const SID2 = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
@@ -650,4 +656,239 @@ test("#1411: revive passes a Codex seat's own effort and tier to its replacement
   assert.ok(hasSeq(words, ["-c", "service_tier=priority"]), run.join(" "));
   assert.ok(hasSeq(words, ["resume", SID]), "resumed by its own id");
   assert.equal(r.out.includes(SID), false, "no session id printed");
+});
+
+// ---- #1417: Codex and Kimi, whose ids are found on disk after the launch ----
+
+/** A version-7 UUID whose time is `ms`, as Codex makes its thread ids. */
+const v7 = (ms, tail = "8abc-0123456789ab") => { const h = Math.trunc(ms).toString(16).padStart(12, "0"); return `${h.slice(0, 8)}-${h.slice(8, 12)}-7def-${tail}`; };
+const KID = "session_3f2e1d0c-9b8a-4c7d-8e6f-5a4b3c2d1e0f";
+const KID2 = "session_7a6b5c4d-3e2f-4a1b-9c8d-7e6f5a4b3c2d";
+const localDay = (ms) => { const d = new Date(ms); return `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`; };
+
+/** Writes a Codex rollout under `codexHome` (default ~/.codex): its first line a session_meta for `cwd`, filed under day `dayMs`. */
+function codexRollout(s, { id, cwd, dayMs = Date.now(), codexHome = join(s.home, ".codex"), firstLine = null, rest = "" }) {
+  const dir = join(codexSessionsDir(codexHome), localDay(dayMs));
+  mkdirSync(dir, { recursive: true });
+  const meta = firstLine ?? JSON.stringify({ timestamp: new Date(dayMs).toISOString(), type: "session_meta",
+    payload: { id, session_id: id, timestamp: new Date(uuidV7Ms(id) ?? dayMs).toISOString(), cwd, base_instructions: { text: "the bot's briefing" } } });
+  writeFileSync(join(dir, `rollout-2026-11-16T12-00-00-${id}.jsonl`), `${meta}\n${rest}`);
+}
+
+/** Writes Kimi's session index under `kimiHome` (default ~/.kimi-code), each row's session folder born at `at`. */
+function kimiIndex(s, rows, kimiHome = join(s.home, ".kimi-code")) {
+  mkdirSync(kimiHome, { recursive: true });
+  const lines = [];
+  for (const { id, at, workDir = s.project, deleted = false } of rows) {
+    if (deleted) { lines.push(JSON.stringify({ sessionId: id, deleted: true })); continue; }
+    const sessionDir = join(kimiHome, "sessions", "ws1", id);
+    mkdirSync(sessionDir, { recursive: true });
+    utimesSync(sessionDir, at / 1000, at / 1000);
+    lines.push(JSON.stringify({ sessionId: id, sessionDir, workDir }));
+  }
+  writeFileSync(kimiIndexPath(kimiHome), `${lines.join("\n")}\n`);
+}
+const kimiBin = (s) => exe(join(s.root, "bin", "kimi"), "#!/bin/sh\nexit 0\n");
+
+test("codexHomeOf, kimiHomeOf, uuidV7Ms, codexRolloutId: where Codex and Kimi keep their sessions, and the time a Codex id carries", () => {
+  assert.equal(codexHomeOf("/home/u/", {}), "/home/u/.codex");
+  assert.equal(codexHomeOf("/home/u", { CODEX_HOME: "/data/codex" }), "/data/codex", "an absolute $CODEX_HOME wins");
+  assert.equal(codexHomeOf("/home/u", { CODEX_HOME: "relative" }), "/home/u/.codex");
+  assert.equal(codexSessionsDir("/home/u/.codex/"), "/home/u/.codex/sessions");
+  assert.equal(kimiHomeOf("/home/u", {}), "/home/u/.kimi-code");
+  assert.equal(kimiHomeOf("/home/u", { KIMI_CODE_HOME: "/data/kimi" }), "/data/kimi");
+  assert.equal(kimiHomeOf("/home/u", { KIMI_CODE_HOME: "kimi" }), "/home/u/.kimi-code");
+  assert.equal(kimiIndexPath("/home/u/.kimi-code"), "/home/u/.kimi-code/session_index.jsonl");
+  // Seen from codex-cli 0.169.0: the id's time is its session_meta timestamp.
+  assert.equal(uuidV7Ms("01a1e509-07dc-7621-b3f2-733a5a470bdd"), Date.parse("2026-11-16T15:45:36.732Z"));
+  assert.equal(uuidV7Ms(SID), null, "a version-4 UUID carries no time");
+  assert.equal(uuidV7Ms("not-an-id"), null);
+  const id = v7(1794843936732);
+  assert.equal(codexRolloutId(`rollout-2026-11-16T12-45-36-${id}.jsonl`), id);
+  assert.equal(codexRolloutId(`rollout-2026-11-16T12-45-36-${id}.json`), null);
+  assert.equal(codexRolloutId("notes.jsonl"), null);
+});
+
+test("codexCandidate: a session_meta for one of the folders gives its id and its birth; another folder's is null; anything unreadable is undefined", () => {
+  const id = v7(5_000_000);
+  const meta = (payload, extra = {}) => JSON.stringify({ timestamp: "2026-11-16T15:45:36.813Z", type: "session_meta", payload, ...extra });
+  assert.deepEqual(codexCandidate(meta({ id, timestamp: "2026-11-16T15:45:36.733Z", cwd: "/p", base_instructions: "secret" }), ["/p", "/q"]), { id, born: 5_000_000 });
+  assert.equal(codexCandidate(meta({ id, timestamp: "2026-11-16T15:45:36.733Z", cwd: "/elsewhere" }), ["/p"]), null);
+  // A version-4 id: the payload's timestamp, else the line's own.
+  assert.deepEqual(codexCandidate(meta({ id: SID, timestamp: "2026-11-16T15:45:36.733Z", cwd: "/p" }), ["/p"]), { id: SID, born: Date.parse("2026-11-16T15:45:36.733Z") });
+  assert.deepEqual(codexCandidate(meta({ id: SID, cwd: "/p" }), ["/p"]), { id: SID, born: Date.parse("2026-11-16T15:45:36.813Z") });
+  for (const bad of ["{torn", "", meta({ id: "--last", cwd: "/p" }), meta({ cwd: "/p" }), JSON.stringify({ type: "response_item", payload: { id, cwd: "/p" } })]) {
+    assert.equal(codexCandidate(bad, ["/p"]), undefined, bad);
+  }
+  assert.ok(!JSON.stringify(codexCandidate(meta({ id, cwd: "/p", base_instructions: "secret" }), ["/p"])).includes("secret"), "only id and time are kept");
+});
+
+test("kimiCandidates: the index replayed in order, a deleted id dropped, other folders' and bad ids left out, a session folder only under Kimi's own sessions", () => {
+  const home = "/home/u/.kimi-code";
+  const row = (o) => JSON.stringify(o);
+  const text = [
+    row({ sessionId: KID, sessionDir: `${home}/sessions/w/${KID}`, workDir: "/p" }),
+    row({ sessionId: KID2, sessionDir: `${home}/sessions/w/${KID2}`, workDir: "/p" }),
+    row({ sessionId: KID2, deleted: true }),
+    row({ sessionId: KID, sessionDir: `${home}/sessions/w2/${KID}`, workDir: "/p" }), // a later row for the same id wins
+    row({ sessionId: "session_nope", sessionDir: `${home}/sessions/w/x`, workDir: "/p" }),
+    row({ sessionId: `session_${SID}`, sessionDir: `${home}/sessions/w/s`, workDir: "/q" }),
+    row({ sessionId: `session_${SID2}`, sessionDir: `${home}/sessions/../../.ssh`, workDir: "/p" }),
+    row({ sessionId: `session_${SID3}`, sessionDir: "/tmp/elsewhere", workDir: "/p" }),
+    row({ sessionId: `session_${SID4}`, sessionDir: `${home}/sessions`, workDir: "/p" }),
+    "{torn", "",
+  ].join("\n");
+  assert.deepEqual(kimiCandidates(text, ["/p"], home), [{ id: KID, sessionDir: `${home}/sessions/w2/${KID}` }]);
+  assert.deepEqual(kimiCandidates(text, ["/q"], home), [{ id: `session_${SID}`, sessionDir: `${home}/sessions/w/s` }]);
+  assert.deepEqual(kimiCandidates("", ["/p"], home), []);
+});
+
+test("pickSession takes Kimi's session_<uuid> ids as it takes UUIDs, and no other shape", () => {
+  assert.equal(pickSession({ createdMs: 1_000_000, candidates: [{ id: KID, born: 1_001_000 }] }), KID);
+  for (const id of ["session_nope", "session-" + SID, `x${KID}`, "--last"]) assert.equal(pickSession({ createdMs: 1_000_000, candidates: [{ id, born: 1_001_000 }] }), null, id);
+});
+
+test("#1417 revive: a Codex bot at a bare shell is resumed by the id its rollout holds, though its first turn wrote it a day after the launch; the id is never printed", (t) => {
+  const born = Date.now() - 2 * 86_400_000;
+  const id = v7(born + 3000);
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"], labels: { "herdr.space": "sp1" } })] });
+  codexRollout(s, { id, cwd: s.project, dayMs: born + 86_400_000 });
+  // Another folder's thread from the same moment, and an older one of this folder: never this pane's.
+  codexRollout(s, { id: v7(born + 4000, "9abc-0123456789ab"), cwd: "/elsewhere", dayMs: born + 86_400_000 });
+  codexRollout(s, { id: v7(born - 86_400_000), cwd: s.project, dayMs: born - 86_400_000 });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", id]]);
+  assert.deepEqual(s.ledger().filter((x) => x.event === "session").map((x) => [x.terminal, x.session, x.agent]), [["t5", id, "codex"], ["t100", id, "codex"]]);
+  const run = runsOf(s)[0];
+  assert.ok(hasSeq(wordsOf(run), ["resume", id]), run.join(" "));
+  assert.ok(!wordsOf(run).includes("--last"), run.join(" "));
+  assert.ok(run.includes(`agent.session=${id}`), "the next restart finds it on the new pane");
+  assert.deepEqual(r.json().projects[0].results.map((x) => [x.name, x.outcome]), [["Lead", "resumed"]]);
+  for (const text of [r.out, r.err, s.hcState().sent[0].text, JSON.stringify(s.lastReport())]) assert.ok(!text.includes(id), text);
+});
+
+test("#1417 revive: a Codex bot whose pane is gone whole comes back by its seat row and its rollout, under $CODEX_HOME when it is set", (t) => {
+  const born = Date.now() - 3_600_000;
+  const id = v7(born + 5000);
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }), attach: () => [{ bot: ID.main, terminal: "t5", created_ms: born }] });
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "seat", terminal: "t5", botId: ID.main, project: s.project, worktree: s.project,
+    agent: "codex", core: CORE, created_ms: born, at: new Date(born).toISOString() })}\n`, { mode: 0o600 });
+  const codexHome = join(s.root, "codex-home");
+  codexRollout(s, { id, cwd: s.project, codexHome });
+  codexRollout(s, { id: v7(born + 6000, "9abc-0123456789ab"), cwd: s.project }); // ~/.codex is not Codex's home here
+  const r = s.cli(["revive", "--json"], { env: { CODEX_HOME: codexHome } });
+  assert.equal(r.code, 0, r.err);
+  const run = runsOf(s)[0];
+  assert.ok(hasSeq(wordsOf(run), ["resume", id]), run.join(" "));
+  assert.equal(cwdOf(run), s.project);
+  assert.deepEqual(r.json().projects[0].results.map((x) => [x.name, x.outcome, x.terminal]), [["Lead", "resumed", "t100"]]);
+});
+
+test("#1417 revive: a Kimi bot at a bare shell is resumed by the session its index ties to the folder (--session=), never another's", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "kimi", name: "Lead" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["kimi"] })] });
+  kimiBin(s);
+  kimiIndex(s, [{ id: KID2, at: born - 86_400_000 }, { id: KID, at: born + 4000 }, { id: `session_${SID}`, at: born + 4500, workDir: "/elsewhere" }]);
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", KID]]);
+  const run = runsOf(s)[0];
+  assert.ok(wordsOf(run).includes(`--session=${KID}`), run.join(" "));
+  assert.ok(!wordsOf(run).includes("--continue"), run.join(" "));
+  assert.deepEqual(r.json().projects[0].results.map((x) => [x.name, x.outcome]), [["Lead", "resumed"]]);
+  for (const text of [r.out, r.err, s.hcState().sent[0].text, JSON.stringify(s.lastReport())]) assert.ok(!text.includes(KID), text);
+});
+
+test("#1417 revive: two Codex bots started together in one folder can't be told apart: no id is recorded and each comes back on a new conversation, said", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" }, cap: { agent: "codex" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"] }), pane("t6", { bot: ID.cap, cwd: p, created: born + 500, argv: ["codex"] })] });
+  writeFileSync(ledgerPath(s.app), [["t5", ID.main, born], ["t6", ID.cap, born + 500]].map(([terminal, botId, created_ms]) =>
+    `${JSON.stringify({ event: "start", kind: "seat", terminal, botId, project: s.project, worktree: s.project, agent: "codex", core: CORE, created_ms, at: new Date(created_ms).toISOString() })}\n`).join(""), { mode: 0o600 });
+  codexRollout(s, { id: v7(born + 1500), cwd: s.project });
+  codexRollout(s, { id: v7(born + 2500, "9abc-0123456789ab"), cwd: s.project });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s), [], "no id guessed");
+  for (const run of runsOf(s)) assert.ok(!wordsOf(run).includes("resume") && !wordsOf(run).includes("--last"), run.join(" "));
+  const results = r.json().projects[0].results;
+  assert.deepEqual(results.map((x) => [x.name, x.outcome]), [["Lead", "fresh"], ["Captain", "fresh"]]);
+  assert.match(results[0].why, /no Codex conversation of its own could be identified for t5/);
+});
+
+test("#1417 revive never guesses a Codex or Kimi bot's latest conversation: alone in its folder with no session of its own, it starts new and says so", (t) => {
+  const born = Date.now() - 3_600_000;
+  for (const agent of ["codex", "kimi"]) {
+    const s = world(t, { file: team({ main: { agent, name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: [agent] })] });
+    if (agent === "kimi") kimiBin(s);
+    const r = s.cli(["revive", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const run = runsOf(s)[0];
+    // codex's -c is --config; kimi's -c is --continue.
+    for (const w of agent === "codex" ? ["resume", "--last"] : ["--continue", "-c"]) assert.ok(!wordsOf(run).includes(w), `${agent}: ${run.join(" ")}`);
+    assert.ok(!wordsOf(run).some((w) => w.startsWith("--session")), `${agent}: ${run.join(" ")}`);
+    const res = r.json().projects[0].results[0];
+    assert.deepEqual([res.name, res.outcome], ["Lead", "fresh"]);
+    assert.match(res.why, new RegExp(`no ${agent === "codex" ? "Codex" : "Kimi"} conversation of its own could be identified for t5, so its folder's latest one was not guessed`));
+    assert.match(s.hcState().sent[0].text, /Back on a new conversation: Lead \(t100\), no .* conversation of its own could be identified/);
+  }
+});
+
+test("#1417: a restart by hand keeps its fallback for a Codex bot alone in its folder with no id (resume --last)", (t) => {
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: Date.now() - 3_600_000, front: ["codex"], argv: ["codex"], status: "idle" })] });
+  const r = s.cli(["restart", "Lead", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.ok(hasSeq(wordsOf(runsOf(s)[0]), ["resume", "--last"]), runsOf(s)[0].join(" "));
+});
+
+test("#1417 fails closed: an unreadable or oversized rollout of the launch's moment, or an oversized Kimi index, records nothing", (t) => {
+  const born = Date.now() - 3_600_000;
+  for (const firstLine of ["{torn", `{"type":"session_meta","payload":{"id":"x","pad":"${"y".repeat(1024 * 1024 + 10)}"}}`]) {
+    const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"] })] });
+    codexRollout(s, { id: v7(born + 1000), cwd: s.project });
+    codexRollout(s, { id: v7(born + 2000, "9abc-0123456789ab"), cwd: s.project, firstLine }); // may be a rival's: nothing is taken
+    const r = s.cli(["revive", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(sessionLabels(s), []);
+    assert.deepEqual(r.json().projects[0].results.map((x) => x.outcome), ["fresh"]);
+  }
+  // A rollout far from the launch is never opened: its torn line changes nothing.
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"] })] });
+  const id = v7(born + 1000);
+  codexRollout(s, { id, cwd: s.project });
+  codexRollout(s, { id: v7(born + 900_000, "9abc-0123456789ab"), cwd: s.project, firstLine: "{torn" });
+  const ok = s.cli(["revive", "--json"]);
+  assert.equal(ok.code, 0, ok.err);
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", id]]);
+  // Kimi's index over its 16 MiB cap.
+  const k = world(t, { file: team({ main: { agent: "kimi", name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["kimi"] })] });
+  kimiBin(k);
+  kimiIndex(k, [{ id: KID, at: born + 4000 }]);
+  writeFileSync(kimiIndexPath(join(k.home, ".kimi-code")), `\n${" ".repeat(16 * 1024 * 1024)}`, { flag: "a" });
+  const rk = k.cli(["revive", "--json"]);
+  assert.equal(rk.code, 0, rk.err);
+  assert.deepEqual(sessionLabels(k), []);
+  assert.deepEqual(rk.json().projects[0].results.map((x) => x.outcome), ["fresh"]);
+});
+
+test("#1417: a Kimi session folder that is a symlink, or is gone, is never taken", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "kimi", name: "Lead" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["kimi"] })] });
+  kimiBin(s);
+  const kimiHome = join(s.home, ".kimi-code");
+  kimiIndex(s, [{ id: KID, at: born + 4000 }]);
+  const real = join(s.root, "elsewhere-session");
+  mkdirSync(real);
+  utimesSync(real, (born + 3000) / 1000, (born + 3000) / 1000);
+  const linked = join(kimiHome, "sessions", "ws1", KID2);
+  symlinkSync(real, linked);
+  writeFileSync(kimiIndexPath(kimiHome), `${JSON.stringify({ sessionId: KID2, sessionDir: linked, workDir: s.project })}\n`
+    + `${JSON.stringify({ sessionId: `session_${SID}`, sessionDir: join(kimiHome, "sessions", "ws1", "gone"), workDir: s.project })}\n`, { flag: "a" });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", KID]], "only the real folder counts");
 });

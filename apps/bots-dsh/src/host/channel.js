@@ -90,6 +90,9 @@ export function install(rt) {
   const runningOf = (bot) => {
     try {
       if (rt.hostOwned?.(bot)) return {}
+      // A pick names the model before the Session takes it. This reading would show a switch
+      // the person did not see the chat make (#1319).
+      if (rt.pickingModel?.(bot.id) || rt.switchingChat?.(bot.id)) return {}
       const sessionId = rt.chatOf(bot.id)
       const agent = ctx.get?.('agents')?.get?.(sessionId)
       let selection

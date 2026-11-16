@@ -238,8 +238,10 @@ export function defaultModel(agentKey, { home, read }) {
 }
 
 // Claude Code: the aliases `claude --help` names ("an alias for the latest model (e.g.
-// 'sonnet' or 'opus')") and the current model ids of the Claude 5 family (2026-11-01).
-const CLAUDE_MODELS = ["opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+// 'sonnet' or 'opus')") and the current model ids of the Claude 5 family (2026-11-16). A `[1m]`
+// id is Claude Code's 1M-context form, passed to --model as is. An older id stays listed so a
+// bot pinned to it still starts.
+const CLAUDE_MODELS = ["opus", "sonnet", "haiku", "claude-fable-5-2", "claude-fable-5-2[1m]", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
 
 /** Where the cache lives under an app home; the folder holds the pack's ledgers too. */
 export const AG_MODELS_FILE = "automagik-herdr/antigravity-models.json";
@@ -1666,6 +1668,8 @@ export const promptByMessage = (agentKey) => promptArgs(agentKey, "x").length ==
 // agent in the folder, Restart starts fresh instead (#328). codex resume
 // is a subcommand, which still goes after `run` (its top-level options come before it). An
 // agent missing here has no resume this pack knows: Restart starts it fresh.
+// dsh-TUI, Antigravity, Codex and Kimi have their ids found after launch (revive.js DISCOVERED).
+// Revive never guesses the latest conversation for Codex or Kimi when their own id isn't known.
 const RESUME = {
   claude: (session) => (session ? ["--resume", session] : ["--continue"]),
   codex: (session) => ["resume", session ?? "--last"],
@@ -1712,6 +1716,7 @@ export function resumeArgs(agentKey, session = null) {
 // that pass it: Claude Code 2.1.319 `--session-id <uuid>` ("Use a specific session ID for the
 // conversation (must be a valid UUID)", read from `claude --help` on 2026-11-09). Claude refuses
 // it beside --continue or --resume (unless --fork-session), so it goes only on a fresh launch.
+// dsh-TUI, Antigravity, Codex and Kimi instead have their ids found after launch (revive.js DISCOVERED).
 const SESSION_ID = {
   claude: (id) => ["--session-id", id],
 };

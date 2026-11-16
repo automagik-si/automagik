@@ -492,3 +492,18 @@ test("#1411: the Codex profile a launch names is one file beside the global conf
   assert.deepEqual(codexSettingsFrom('[profiles.work]\nmodel_reasoning_effort = "low"\nservice_tier = "default"\n'),
     { effort: null, tier: null }, "a section's keys aren't the file's top-level pair");
 });
+
+test("#1415 Claude lists both Fable 5.2 forms and the older pin without relying on its default", () => {
+  for (const models of [
+    knownModelsFrom("claude"),
+    knownModelsFrom("claude", { claudeSettings: JSON.stringify({ model: "claude-opus-5-5" }) }),
+  ]) {
+    for (const id of ["claude-fable-5-2", "claude-fable-5-2[1m]", "claude-fable-5-1"]) {
+      assert.ok(models.includes(id), `${id} is offered with an absent or differing default`);
+    }
+  }
+});
+
+test("#1415 Claude's 1M-context Fable id is passed unchanged in modelArgs", () => {
+  assert.deepEqual(modelArgs("claude", "claude-fable-5-2[1m]"), ["--model", "claude-fable-5-2[1m]"]);
+});
