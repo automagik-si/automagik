@@ -429,3 +429,31 @@ test('#1404 when the login names another default home, ~/.hermes is started by i
   assert.equal(bots.find(bot => bot.home === account).start, `HERMES_HOME=${account} hermes --profile default serve`)
   assert.equal(bots.find(bot => bot.home === team).start, 'hermes serve', 'the login’s own default needs no HERMES_HOME')
 })
+
+// --------------------------------------- #1383: the look-alike folders a blocked bot names
+test('#1383 a blocked bot keeps the folders it names; a bot that is not blocked keeps none', async () => {
+  const ssh = fakeSsh([
+    { type: 'home', home, state: 'stopped', sandbox: false, blocked: 'shared-beside', serve: null },
+    { type: 'home', home: '/srv/other-hermes', state: 'stopped', sandbox: false, serve: null },
+    { type: 'bot', home, id: 'default', name: 'Sample', model: '', provider: '', running: false, recordDir: '', port: 0, blocked: 'shared-beside', besides: ['/srv/other-tool'], start: 'hermes serve' },
+    { type: 'bot', home: '/srv/other-hermes', id: 'default', name: 'Other', model: '', provider: '', running: false, recordDir: '', port: 0, besides: ['/srv/other-tool'], start: 'hermes serve' },
+    { type: 'ready', homes: 2, bots: 2, hermes: true },
+  ])
+  const found = await detectHermesBots({ host: 'example.invalid' }, { spawn: ssh.spawn })
+  assert.deepEqual(found.bots.map(row => [row.home, row.blocked, row.besides]), [[home, 'shared-beside', ['/srv/other-tool']], ['/srv/other-hermes', '', undefined]])
+  assert.ok(!('besides' in found.homes[0]), 'home entries do not carry the folders')
+})
+
+test('#1383 one bad folder drops the whole list, never the row or its block', async () => {
+  for (const besides of [['/srv/a-tool', 'relative/tool'], ['/srv/a-tool', '/srv/bad\ntool'], ['/srv/a-tool', '/srv/a-tool'], ['/a', '/b', '/c', '/d', '/e'], [], '/srv/a-tool', ['/srv/a-tool', 7]]) {
+    const ssh = fakeSsh([
+      { type: 'home', home, state: 'stopped', sandbox: false, blocked: 'shared-beside', serve: null },
+      { type: 'bot', home, id: 'default', name: 'Sample', model: '', provider: '', running: false, recordDir: '', port: 0, blocked: 'shared-beside', besides, start: 'hermes serve' },
+      { type: 'ready', homes: 1, bots: 1, hermes: true },
+    ])
+    const found = await detectHermesBots({ host: 'example.invalid' }, { spawn: ssh.spawn })
+    assert.equal(found.bots.length, 1, JSON.stringify(besides))
+    assert.equal(found.bots[0].blocked, 'shared-beside')
+    assert.ok(!('besides' in found.bots[0]), JSON.stringify(besides))
+  }
+})

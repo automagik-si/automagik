@@ -331,6 +331,29 @@ def has_hermes_sibling(home):
             continue
     return False
 
+def hermes_siblings(home):
+    path = os.path.normpath(home)
+    parent, name = os.path.dirname(path), os.path.basename(path)
+    try:
+        entries = list(os.scandir(parent))
+        own = os.path.realpath(path)
+    except OSError:
+        return []
+    siblings = []
+    for entry in entries:
+        if entry.name == name:
+            continue
+        try:
+            if not is_hermes_home(entry.path):
+                continue
+            if os.path.realpath(entry.path) != own:
+                own_marks = (os.path.isfile(os.path.join(entry.path, "SOUL.md")) or
+                             os.path.isfile(os.path.join(entry.path, "state.db")))
+                siblings.append((entry.path, own_marks))
+        except OSError:
+            continue
+    return siblings
+
 def normalized_home(path):
     """One spelling per home: resolve, drop trailing/double/dot segments, follow symlinks."""
     if not isinstance(path, str) or not path.startswith("/"):
@@ -584,6 +607,27 @@ try:
         # A home whose only record can be in a beside folder shared with another home
         # cannot be resolved; say why instead of a silent Not running.
         blocked = "shared-beside" if home in ambiguous and not attributed[home] else ""
+        besides = []
+        if blocked:
+            siblings, eligible = {}, True
+            for folder, spelled in beside_entries.get(home, []):
+                key = os.path.realpath(folder)
+                if key not in ambiguous_folders:
+                    continue
+                if len(beside_owners.get(key, set())) != 1:
+                    eligible = False
+                    break
+                for path, own_marks in sorted(hermes_siblings(spelled)):
+                    real = os.path.realpath(path)
+                    if (own_marks or real in homes or not os.path.isabs(path) or len(path) > 4096 or
+                            re.search(r"[\x00-\x1f\x7f]", path)):
+                        eligible = False
+                        break
+                    siblings.setdefault(real, path)
+                if not eligible:
+                    break
+            if eligible and 1 <= len(siblings) <= 4:
+                besides = sorted(siblings.values())
         emit("home", home=home, state="running" if live else "stopped", sandbox=sandbox, blocked=blocked,
              serve={"port": live[0]["port"], "recordDir": live[0]["recordDir"],
                     "served": live[0].get("profiles") or []} if live else None)
@@ -600,7 +644,8 @@ try:
                  recordDir=served_by[0]["recordDir"] if running else "",
                  port=served_by[0]["port"] if running else 0,
                  blocked=blocked if not running else "",
-                 start=start_command(home, ident, bool(attributed[home])))
+                 start=start_command(home, ident, bool(attributed[home])),
+                 **({"besides": besides} if blocked and not running and besides else {}))
             emitted += 1
     emit("ready", homes=len(homes), bots=emitted, hermes=bool(hermes))
 except Fault as error:
@@ -624,6 +669,7 @@ function botOf(value) {
   if (!homePath(value.home)) return undefined
   const running = value.running === true
   const blocked = !running && value.blocked === 'shared-beside' ? 'shared-beside' : ''
+  const besides = blocked && Array.isArray(value.besides) && value.besides.length >= 1 && value.besides.length <= 4 && value.besides.every(homePath) && new Set(value.besides).size === value.besides.length ? value.besides : undefined
   const chosen = running && recordFolder(value.recordDir) && Number.isSafeInteger(value.port) && value.port > 0 && value.port < 65536
   // A running bot without its own record folder and port is not a shape this reader emits.
   if (running && !chosen) return undefined
@@ -636,6 +682,7 @@ function botOf(value) {
     gateway: !running && value.gateway === true,
     recordDir: chosen ? value.recordDir : '', port: chosen ? value.port : 0,
     blocked,
+    ...(besides ? { besides } : {}),
     start: clean(value.start, 500) ? value.start : '',
   }
 }
