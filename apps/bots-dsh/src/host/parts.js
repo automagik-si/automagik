@@ -1381,7 +1381,13 @@ export function install(rt) {
       try { await takeBack(freshId, old) } catch (error) { rt.warn('ds-bot: input of the fresh part of %s not taken back: %s', bot.name, error) }
     } else rt.warn('ds-bot: the part %s came from could not be loaded; its input stays in the fresh part', bot.name)
     const picked = await freshRoute(bot, old?.session)
-    if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
+    if (picked !== undefined && await rt.keepsCarriedRoute?.(entry.oldId, picked.ref) === true) {
+      // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
+      bot.appliedModel = picked.ref
+      if (picked.effort === undefined) delete bot.appliedEffort
+      else bot.appliedEffort = picked.effort
+      await rt.save()
+    } else if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
     if (old !== undefined) partBase.set(entry.oldId, tokensOf(old.session) ?? 0)
     rt.renewMemory(entry.oldId)
     rt.warn('ds-bot: the first call in the fresh part of %s failed before any answer; it is back on the part it came from, which was not archived', bot.name)
