@@ -110,7 +110,7 @@ cd apps/locale-pt-br-dsh && node scripts/build-client.mjs --check
 ## CI
 
 - **Conventional commits: FAIL.** O check acusou linhas >100 nos corpos de `9794d9e30`, `1db807835` (o commit do #1430, que veio junto por a branch ser empilhada) e `772bc6bf`. Conforme a instrução do wish, **não houve amend nem force-push**; fica registrado aqui.
-- `bots-dsh (plugin tests)` e `locale-pt-br-dsh (plugin tests)`: o locale passou; o bots-dsh ainda estava pendente quando este relatório foi escrito.
+- `bots-dsh (plugin tests)` e `locale-pt-br-dsh (plugin tests)`: ambos passaram (bots-dsh em 4m27s).
 - O restante dos checks estava verde ou pendente no momento da escrita; o link do PR tem o estado ao vivo.
 
 ## Onde parei / o que falta
