@@ -1257,6 +1257,26 @@ export function install(rt) {
     return job
   }
 
+  // A goal belongs to the Session, so the part that takes over starts with none. An active
+  // goal moves with the conversation, carrying what is left of its round budget, or a long
+  // loop ends at the first handoff. A group's goal is Omni's own (group_goal) and never a
+  // goal on the Session, so a group part carries none.
+  const carryGoal = (from, to, room, nameOfBot) => {
+    if (room !== undefined || from === undefined || to === undefined) return
+    const service = ctx.get?.('goals')
+    if (typeof service?.get !== 'function' || typeof service?.create !== 'function') return
+    try {
+      const goal = service.get(from)
+      if (goal?.phase !== 'active' || typeof goal.objective !== 'string' || goal.objective === '') return
+      const started = typeof goal.roundsStarted === 'number' ? goal.roundsStarted : 0
+      const left = typeof goal.maxGoalRounds === 'number' ? goal.maxGoalRounds - started : undefined
+      if (left !== undefined && left <= 0) return
+      service.create(to, { objective: goal.objective, ...(left === undefined ? {} : { maxGoalRounds: left }) })
+    } catch (error) {
+      rt.warn('omni-ui: the goal of %s did not move to its fresh part: %s', nameOfBot ?? 'a Bot', error)
+    }
+  }
+
   async function runSwitch(agent, job) {
     // Marks the part while the switch runs; it stays marked whenever input was put
     // back, so a restart knows where to look without resolving every earlier part.
@@ -1632,6 +1652,8 @@ export function install(rt) {
       const text = job.fresh ? freshPackage({ room, number: number + 1 }) : handoffPackage({ room, self: bot === undefined, segment, lines: carried, number: number + 1, resume, overflow: job.overflow, cutoff: job.cutoff, failed: job.failed, bare: job.bare, folder, manual: job.manual, target: job.target })
       freshParts.set(freshId, estimateTokens(text))
       fresh.followup(createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
+      // Before the flush, so the goal's own record is written with the part it belongs to.
+      carryGoal(agent, fresh, room, name)
       await ctx.sessions.flush(fresh.session)
       carry.push(...job.carry.splice(0))
       await forward(job, [...carry, ...held])

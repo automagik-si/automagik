@@ -2777,12 +2777,14 @@ const pack = createPack({
     "Screen only: this agent has no transcript reader, so these are its last screens.": "Somente tela: este agente não tem leitor de transcrição, então estas são as telas mais recentes.",
     "Read from this seat’s own transcript. This view never runs or types into it.": "Lido da própria transcrição deste assento. Esta visão apenas lê: nunca executa nem digita.",
     "Choose a seat in the team bar to read its chat.": "Escolha um assento na barra do time para ler o chat.",
+    "This seat is not running on this computer, so its terminal cannot open.": "Este assento não está rodando neste computador, então o terminal não pode abrir.",
     "Back to the team": "Voltar ao time",
     "Reading the seat…": "Lendo o assento…",
     "No transcript rows yet. The seat is quiet.": "Ainda não há linhas de transcrição. O assento está quieto.",
     "Latest": "Mais recente",
     "1 project": "1 projeto",
     "Code team": "Equipe de código",
+    "Global Bots": "Bots globais",
     "No project has a Bot on this computer yet.": "Nenhum projeto tem um Bot neste computador ainda.",
     "No terminal chosen": "Nenhum terminal escolhido",
     "Opening the terminal…": "Abrindo o terminal…",
@@ -2837,7 +2839,8 @@ const pack = createPack({
     "The folder on {host} holds no Hermes settings or server record.": "A pasta em {host} não tem configurações nem registro do servidor do Hermes.",
     "Point at the folder that holds Hermes, or choose another computer.": "Aponte para a pasta que contém o Hermes ou escolha outro computador.",
     "The folder must be on the remote computer, such as /srv/hermes.": "A pasta deve estar no computador remoto, por exemplo /srv/hermes.",
-    "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "O registro do serve está numa pasta compartilhada com outra pasta do Hermes, então não pode ser escolhido aqui. Outra pasta ao lado deste Hermes parece uma pasta do Hermes. Dê a este Hermes uma pasta própria: mova o Hermes, ou mova a outra pasta, depois adicione essa pasta com Adicionar outro Hermes."
+    "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "O registro do serve está numa pasta compartilhada com outra pasta do Hermes, então não pode ser escolhido aqui. Outra pasta ao lado deste Hermes parece uma pasta do Hermes. Dê a este Hermes uma pasta própria: mova o Hermes, ou mova a outra pasta, depois adicione essa pasta com Adicionar outro Hermes.",
+    "Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.": "O registro do serve está numa pasta compartilhada com {folders}, então não pode ser escolhido aqui. {folders} tem um config.yaml e pastas com nomes típicos de uma pasta do Hermes, mas não tem SOUL.md nem state.db, então o Automagik não consegue distinguir essa pasta de outro Hermes. Se não for um Hermes, mova essa pasta para outra pasta mãe e pressione Verificar de novo. Se for outro Hermes, os dois precisam de pastas mãe diferentes."
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

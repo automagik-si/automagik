@@ -9063,6 +9063,7 @@ var ZH = {
   "The folder on {host} holds no Hermes settings or server record.": "{host} 上的该文件夹没有 Hermes 设置或服务器记录。",
   "Point at the folder that holds Hermes, or choose another computer.": "请指向包含 Hermes 的文件夹，或选择另一台电脑。",
   "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "它的 serve 记录位于与另一个 Hermes 数据目录共享的文件夹中，因此无法在此选择。旁边的另一个文件夹看起来像 Hermes 数据目录。请给这个 Hermes 一个自己的文件夹：移动它，或移动另一个文件夹，然后用“添加另一个 Hermes”添加该文件夹。",
+  "Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.": "它的 serve 记录位于与 {folders} 共享的文件夹中，因此无法在此选择。{folders} 有 config.yaml 和名称像 Hermes 数据目录的文件夹，但没有 SOUL.md 或 state.db，因此 Automagik 无法判断它是否是另一个 Hermes。如果它不是 Hermes，请将它移到另一个父文件夹，然后按“再次检查”。如果它是另一个 Hermes，两者需要不同的父文件夹。",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",
@@ -11678,6 +11679,7 @@ var ZH = {
   "Screen only: this agent has no transcript reader, so these are its last screens.": "只有屏幕：这个 agent 没有对话记录读取器，所以这里显示的是它最近的屏幕。",
   "Read from this seat’s own transcript. This view never runs or types into it.": "读取自这个席位自己的对话记录。这个视图绝不运行它，也不向它输入。",
   "Choose a seat in the team bar to read its chat.": "在团队栏里选一个席位，读它的聊天。",
+  "This seat is not running on this computer, so its terminal cannot open.": "这个席位没有在这台电脑上运行，所以无法打开它的终端。",
   "Back to the team": "返回团队",
   "Reading the seat…": "正在读取席位…",
   "No transcript rows yet. The seat is quiet.": "还没有对话记录。这个席位很安静。",
@@ -11866,6 +11868,7 @@ var HOST_ZH = {
   "{n} projects": "{n} 个项目",
   "Reading…": "读取中…",
   "Code team": "代码团队",
+  "Global Bots": "全局 Bot",
   "The Code side could not read this computer’s team.": "代码端无法读取本机的团队。",
   "No project has a Bot on this computer yet.": "本机还没有任何项目包含 Bot。",
   "Reading this computer’s team…": "正在读取本机的团队…",
@@ -14963,32 +14966,36 @@ function CodeBody({ code }) {
     else code.selectPane({ botId, worker: null });
   };
   const projects = tree?.projects ?? [];
-  const projectCount = projects.length === 1 ? t("1 project") : t("{n} projects", { n: projects.length });
-  const treeRows = projects.map((project) => (0, import_react2.createElement)(
-    "section",
-    { key: project.folder, className: "cs-project" },
-    (0, import_react2.createElement)("div", { className: "cs-project-name", title: project.folder }, project.name ?? project.folder),
-    project.bots.map((bot) => (0, import_react2.createElement)(
-      "div",
-      { key: bot.id, className: "cs-bot" },
-      (0, import_react2.createElement)(TreeRow, {
-        label: bot.name,
-        status: bot.status,
-        current: current.selected?.botId === bot.id && !current.selected?.worker,
-        note: bot.main ? t("lead") : null,
-        onClick: () => choose(bot.id)
-      }),
-      bot.workers.map((worker) => (0, import_react2.createElement)(TreeRow, {
-        key: worker.terminal,
-        label: worker.role ?? worker.agent ?? worker.terminal,
-        status: worker.status,
-        depth: 1,
-        current: current.selected?.botId === bot.id && current.selected?.worker === worker.terminal,
-        title: [worker.role, worker.branch?.replace(/^refs\/heads\//, "")].filter(Boolean).join(" · "),
-        onClick: () => choose(bot.id, worker.terminal)
-      }))
-    ))
-  ));
+  const realProjects = projects.filter((project) => project.global !== true);
+  const projectCount = realProjects.length === 1 ? t("1 project") : t("{n} projects", { n: realProjects.length });
+  const treeRows = projects.map((project) => {
+    const label = project.global === true ? t("Global Bots") : project.name ?? project.folder;
+    return (0, import_react2.createElement)(
+      "section",
+      { key: project.global === true ? "global" : project.folder, className: "cs-project" },
+      (0, import_react2.createElement)("div", { className: "cs-project-name", title: project.global === true ? label : project.folder }, label),
+      project.bots.map((bot) => (0, import_react2.createElement)(
+        "div",
+        { key: bot.id, className: "cs-bot" },
+        (0, import_react2.createElement)(TreeRow, {
+          label: bot.name,
+          status: bot.status,
+          current: current.selected?.botId === bot.id && !current.selected?.worker,
+          note: bot.main ? t("lead") : null,
+          onClick: () => choose(bot.id)
+        }),
+        bot.workers.map((worker) => (0, import_react2.createElement)(TreeRow, {
+          key: worker.terminal,
+          label: worker.role ?? worker.agent ?? worker.terminal,
+          status: worker.status,
+          depth: 1,
+          current: current.selected?.botId === bot.id && current.selected?.worker === worker.terminal,
+          title: [worker.role, worker.branch?.replace(/^refs\/heads\//, "")].filter(Boolean).join(" · "),
+          onClick: () => choose(bot.id, worker.terminal)
+        }))
+      ))
+    );
+  });
   return (0, import_react2.createElement)(
     "div",
     { className: "cs-host" },

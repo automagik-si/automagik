@@ -4010,17 +4010,42 @@ var call = (name, args) => {
 };
 var finish = (answer, error) => send({ type: "done", answer, error });
 var started = false;
+var pendingStart;
+var startTimer;
 var receive = async (message) => {
   if (message?.type === "start") {
     if (started || typeof message.body !== "string" || !Array.isArray(message.names) || !(message.wait > 0)) return;
     started = true;
     waitLimit = message.wait;
-    deadline = performance.now() + waitLimit + GRACE;
-    setTimeout(() => process.exit(0), waitLimit + GRACE);
+    if (message.ready === true) {
+      startTimer = setTimeout(() => process.exit(0), 2 * waitLimit + GRACE);
+    } else {
+      deadline = performance.now() + waitLimit + GRACE;
+      setTimeout(() => process.exit(0), waitLimit + GRACE);
+    }
     const overdue = () => performance.now() >= deadline ? `Script ran longer than ${waitLimit / 1e3} seconds.` : void 0;
     try {
       sandbox = await openSandbox({ call, finish, overdue });
-      sandbox.start(message.names, message.body);
+      if (message.ready === true) {
+        send({ type: "ready" });
+        pendingStart = message;
+      } else {
+        sandbox.start(message.names, message.body);
+      }
+    } catch {
+      finish(null, "Script failed.");
+    }
+    return;
+  }
+  if (message?.type === "go") {
+    if (pendingStart === void 0) return;
+    const start = pendingStart;
+    pendingStart = void 0;
+    clearTimeout(startTimer);
+    deadline = performance.now() + waitLimit + GRACE;
+    setTimeout(() => process.exit(0), waitLimit + GRACE);
+    try {
+      sandbox.start(start.names, start.body);
     } catch {
       finish(null, "Script failed.");
     }
