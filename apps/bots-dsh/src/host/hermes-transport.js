@@ -27,6 +27,15 @@ function remoteReason(...values) {
   }
   return undefined
 }
+
+// tui_gateway/methods_prompt.py at 3bcd071226d3d605a2bb3b4f3933e7d583e189d6:
+// refusals say "Nothing was sent"; unconfirmed "may already be queued".
+function refusedSubmit(error) {
+  const remote = error?.remote
+  return Boolean(remote && ([4004, 4009, 4091, 4120, 4121, 4124, 5035].includes(remote.code)
+    || remote.code === 4090 && ['SESSION_OWNER_BUSY', 'SESSION_NOT_OWNED'].includes(remote.reason)))
+}
+
 const localFailures = new WeakSet()
 const failure = (message, code = 'bot/hermes') => {
   const error = Object.assign(new Error(message), { code })
@@ -360,8 +369,12 @@ export class HermesTransport {
     if (!frame.error && !resultShape(pending.method, frame.result)) throw failure(INVALID_FRAME, 'bot/hermes-protocol')
     this.pending.delete(frame.id)
     clearTimeout(pending.timer)
-    if (frame.error) pending.reject(failure('Remote Hermes refused a control request. Check the remote session.'))
-    else pending.resolve(this.redact(frame.result))
+    if (frame.error) {
+      const remote = this.redact(frame.error)
+      pending.reject(Object.assign(failure('Remote Hermes refused a control request. Check the remote session.'), {
+        remote: { code: remote.code, reason: typeof remote.data?.reason === 'string' ? remote.data.reason : undefined, message: remoteReason(remote.message) },
+      }))
+    } else pending.resolve(this.redact(frame.result))
   }
 
   request(method, params = {}, ms = this.deadlines.control) {
@@ -572,6 +585,7 @@ export class RemoteChat {
     }
     if (event.type === 'error') {
       this.identity.uncertain = true
+      if (this.identity.pendingSubmit) this.remoteFailed = true
       void this.save().catch(() => {})
       const reason = remoteReason(payload.message, payload.detail)
       this.push({ kind: 'error', text: reason ? `Remote Hermes reported a turn failure: ${reason}` : TURN_FAILURE })
@@ -790,7 +804,13 @@ export class RemoteChat {
       const result = await this.transport.request('prompt.submit', { session_id: this.identity.runtimeSessionId, text })
       if (result.admission_id) this.identity.admissionId = result.admission_id
       await this.save()
-    } catch {
+    } catch (error) {
+      if (refusedSubmit(error)) {
+        this.identity.pendingSubmit = false
+        await this.save()
+        const message = error.remote.message
+        throw failure(message ? `Remote Hermes refused this message: ${message}` : 'Remote Hermes refused this message. Nothing was sent; send it again.', 'bot/hermes')
+      }
       this.identity.uncertain = true
       await this.save()
       throw failure(LOST)
@@ -815,6 +835,10 @@ export class RemoteChat {
         if (this.identity.pendingSubmit) await new Promise(resolve => { this.stopped = resolve })
       })(), this.transport.deadlines.cancel, LOST)
     } catch { this.push({ kind: 'error', text: LOST }) }
+    if (this.remoteFailed && this.identity.uncertain && !this.transport.lostNotified && !this.transport.closed) {
+      // Only the remote's settled snapshot can clear a nonterminal failure.
+      try { await this.transport.bounded(this.reconcile(), this.transport.deadlines.control, LOST) } catch {}
+    }
     await this.save()
     // Closing detaches this viewer; it says nothing about remote children.
     await this.close()
