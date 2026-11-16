@@ -4377,9 +4377,42 @@ fn put_hourly(
     machine: &str,
     events: i64,
 ) {
+    put_hourly_row(
+        s,
+        "claude-code",
+        model,
+        repo,
+        branch,
+        hour,
+        (tokens, 0),
+        machine,
+        events,
+    );
+}
+
+/// The general hourly row: it names the harness and writes the unsplit column. A row with unsplit
+/// tokens is written as `total_only` (its split columns stay 0), as sync writes one; any other
+/// row is `exact`.
+#[allow(clippy::too_many_arguments)]
+fn put_hourly_row(
+    s: &scenes::Scene,
+    harness: &str,
+    model: &str,
+    repo: Option<&str>,
+    branch: Option<&str>,
+    hour: &str,
+    (tokens, unsplit): ([i64; 5], i64),
+    machine: &str,
+    events: i64,
+) {
     use meter::event::{Precision, RollupKey};
+    let precision = if unsplit > 0 {
+        Precision::TotalOnly
+    } else {
+        Precision::Exact
+    };
     let key = RollupKey {
-        harness: "claude-code".into(),
+        harness: harness.into(),
         model: model.into(),
         machine: machine.into(),
         repo: repo.map(Into::into),
@@ -4391,11 +4424,13 @@ fn put_hourly(
         .conn
         .execute(
             "INSERT INTO usage(id, hour_ms, harness, model, machine, repo, branch, input_uncached,
-               cache_read, cache_write_5m, cache_write_1h, output, precision, events, updated_ms)
-             VALUES(?1, ?2, 'claude-code', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'exact', ?12, 0)",
+               cache_read, cache_write_5m, cache_write_1h, output, unsplit, precision, events,
+               updated_ms)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0)",
             params![
-                key.id(Precision::Exact),
+                key.id(precision),
                 key.hour_ms,
+                harness,
                 model,
                 machine,
                 repo,
@@ -4405,6 +4440,8 @@ fn put_hourly(
                 tokens[2],
                 tokens[3],
                 tokens[4],
+                unsplit,
+                if unsplit > 0 { "total_only" } else { "exact" },
                 events
             ],
         )
@@ -4539,7 +4576,42 @@ fn a_column_over_the_calls_counts_alone_and_a_second_model_counts_too() {
     );
     let v = ask(&s, "branch", since, until, &[]);
     assert_eq!(figures(&v), (390, 390), "{v}");
+    // The harness is in the key: another harness's hourly-only row of the same model counts in
+    // full, and the calls above the first harness's hourly row cancel none of it.
+    put_hourly_row(
+        &s,
+        "codex",
+        CLAUDE_MODEL,
+        Some(REPO),
+        None,
+        since,
+        ([0, 70, 0, 0, 0], 0),
+        "",
+        0,
+    );
+    let v = ask(&s, "branch", since, until, &[]);
+    assert_eq!(figures(&v), (460, 460), "{v}");
     assert_eq!(v["rows"][0]["tokens"]["total"], 1650);
+}
+
+#[test]
+fn an_unsplit_hourly_row_counts_in_both_figures() {
+    // A total_only hourly row (unsplit tokens, no split columns) in a whole hour of the interval.
+    let s = excess_scene();
+    let (since, until) = ("2026-11-08T11:00:00Z", "2026-11-08T12:00:00Z");
+    put_hourly_row(
+        &s,
+        "claude-code",
+        CLAUDE_MODEL,
+        Some(REPO),
+        None,
+        since,
+        ([0; 5], 500),
+        "",
+        0,
+    );
+    let v = ask(&s, "branch", since, until, &[]);
+    assert_eq!(figures(&v), (500, 500), "{v}");
 }
 
 #[test]

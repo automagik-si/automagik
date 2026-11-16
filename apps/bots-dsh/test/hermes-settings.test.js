@@ -39,7 +39,13 @@ async function waitFor(predicate, description) {
   }
 }
 
-async function renderSettings(t, call, { component = 'HermesRemoteSettings', props = {}, menu = false, abortResponses = false, sshHosts = async () => ({ aliases: [], knownHosts: [] }) } = {}) {
+async function renderSettings(t, call, { component = 'HermesRemoteSettings', props = {}, menu = false, abortResponses = false, sshHosts = async () => ({ aliases: [], knownHosts: [] }), detect } = {}) {
+  // One detected Hermes on the computer unless a test asks for its own list: the wizard then
+  // continues to the one bot it can use, exactly as before detection existed.
+  const detection = detect ?? (async payload => {
+    const home = payload?.ssh?.hermesHome || '/remote/hermes'
+    return { bots: [{ home, id: 'sample', name: 'Sample', model: 'sample-model', provider: 'sample-provider', running: true, recordDir: `${home}/.local/state/hermes/gateway-locks`, port: 9119, start: 'hermes serve' }] }
+  })
   const dom = new JSDOM('<div id="root"></div>')
   const keys = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'MutationObserver']
   const saved = keys.map(key => Object.getOwnPropertyDescriptor(globalThis, key))
@@ -50,7 +56,7 @@ async function renderSettings(t, call, { component = 'HermesRemoteSettings', pro
   runInNewContext(source.outputFiles[0].text, { module, exports: module.exports, require: nativeRequire, window: dom.window, document: dom.window.document, navigator: dom.window.navigator, console, setTimeout, clearTimeout, AbortController, crypto: globalThis.crypto, getComputedStyle: dom.window.getComputedStyle.bind(dom.window), requestAnimationFrame: fn => setTimeout(fn, 0), cancelAnimationFrame: clearTimeout,
     fetch: async (_url, init) => ({ ok: true, json: async () => {
       const result = (async () => {
-        try { const request = JSON.parse(init.body); return { ok: true, value: request.endpoint === 'hermes-remote-ssh-hosts' ? await sshHosts(request.payload, init.signal) : await call(request, init.signal) } }
+        try { const request = JSON.parse(init.body); return { ok: true, value: request.endpoint === 'hermes-remote-ssh-hosts' ? await sshHosts(request.payload, init.signal) : request.endpoint === 'hermes-remote-detect' ? await detection(request.payload, init.signal) : await call(request, init.signal) } }
         catch (error) { return { ok: false, error: { code: error.code, message: 'Sample connection refused.' } } }
       })()
       if (!abortResponses || !init.signal) return result
@@ -405,7 +411,7 @@ test('first use is three things: pick an SSH host, Connect, and the chat opens',
   } finally { saving.resolve(connectedView()) }
   const tested = calls.find(call => call.endpoint === 'hermes-remote-test').payload
   assert.equal(tested.mode, 'ssh')
-  assert.deepEqual(tested.ssh, { host: 'sample-box', user: 'sample-user', port: 2200, identityFile: '', hermesPath: '', hermesHome: '' })
+  assert.deepEqual(tested.ssh, { host: 'sample-box', user: 'sample-user', port: 2200, identityFile: '', hermesPath: '', hermesHome: '/remote/hermes', recordDir: '/remote/hermes/.local/state/hermes/gateway-locks' })
   assert.deepEqual(Object.keys(calls.find(call => call.endpoint === 'hermes-remote-save').payload).sort(), ['profile', 'testId'])
   assert.equal(calls.find(call => call.endpoint === 'hermes-remote-save').payload.profile, 'sample-profile')
   assert.equal(opened[0].modelRef, 'hermes-remote/sample-model')
@@ -520,7 +526,7 @@ test('a typed host starts from its own SSH defaults, not the user and port of a 
   await waitFor(() => calls.some(call => call.endpoint === 'hermes-remote-test'), 'the connection request')
   const tested = calls.find(call => call.endpoint === 'hermes-remote-test').payload
   assert.equal(tested.mode, 'ssh')
-  assert.deepEqual(tested.ssh, { host: 'typed-box', user: '', identityFile: '', hermesPath: '', hermesHome: '' })
+  assert.deepEqual(tested.ssh, { host: 'typed-box', user: '', identityFile: '', hermesPath: '', hermesHome: '/remote/hermes', recordDir: '/remote/hermes/.local/state/hermes/gateway-locks' })
 })
 
 test('dashboard sign-in is masked and a refused test clears the password before editing', async t => {
@@ -1031,7 +1037,7 @@ test('the computer list shows fourteen searchable aliases and keeps the larger k
   await render.click('Connect')
   await waitFor(() => render.calls.some(call => call.endpoint === 'hermes-remote-test'), 'manually typed SSH test')
   // A typed host carries nothing over from a host picked before it.
-  assert.deepEqual(render.calls.find(call => call.endpoint === 'hermes-remote-test').payload.ssh, { host: 'manual.example.invalid', user: '', identityFile: '', hermesPath: '', hermesHome: '' })
+  assert.deepEqual(render.calls.find(call => call.endpoint === 'hermes-remote-test').payload.ssh, { host: 'manual.example.invalid', user: '', identityFile: '', hermesPath: '', hermesHome: '/remote/hermes', recordDir: '/remote/hermes/.local/state/hermes/gateway-locks' })
   assert.ok(!JSON.stringify(render.calls.find(call => call.endpoint === 'hermes-remote-test').payload).includes('knownHosts'))
 })
 
@@ -1046,7 +1052,7 @@ test('the SSH host picker projects only four fields and never takes an identity 
   await render.click('Connect')
   await waitFor(() => render.calls.some(call => call.endpoint === 'hermes-remote-test'), 'selected alias test')
   const draft = render.calls.find(call => call.endpoint === 'hermes-remote-test').payload
-  assert.deepEqual(draft.ssh, { host: 'sample-alias', user: 'sample-user', port: 2200, identityFile: '', hermesPath: '', hermesHome: '' })
+  assert.deepEqual(draft.ssh, { host: 'sample-alias', user: 'sample-user', port: 2200, identityFile: '', hermesPath: '', hermesHome: '/remote/hermes', recordDir: '/remote/hermes/.local/state/hermes/gateway-locks' })
   assert.ok(!JSON.stringify(draft).includes(forbidden))
 })
 

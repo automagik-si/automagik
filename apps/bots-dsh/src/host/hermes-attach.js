@@ -60,15 +60,8 @@ def locate(hermes_path, timeout):
             return path
     raise Fault("hermes-not-found")
 
-def state_folder():
-    home = os.path.expanduser("~")
-    root = os.environ.get("HERMES_GATEWAY_LOCK_DIR", "").strip()
-    if root:
-        return root
-    state = os.environ.get("XDG_STATE_HOME", "").strip() or os.path.join(home, ".local", "state")
-    return os.path.join(state, "hermes", "gateway-locks")
-
-def read_record(folder):
+def records_of(folder):
+    """(record, why) for one folder; why names a gateway record or a home mismatch."""
     try:
         with open(os.path.join(folder, "host-serve.json"), "r", encoding="utf-8-sig") as handle:
             record = json.load(handle)
@@ -77,14 +70,205 @@ def read_record(folder):
     if not isinstance(record, dict):
         # Only a running serve publishes this record. A gateway's record is not read: this
         # app opens host-serve.json and host-serve.token, and nothing else in that folder.
-        raise Fault("serve-not-running")
+        return None, ""
+    if record.get("role") == "gateway":
+        return None, "gateway"
     if record.get("role") != "serve":
-        raise Fault("serve-gateway" if record.get("role") == "gateway" else "serve-not-running")
+        return None, ""
     port = record.get("port")
     pid = record.get("pid")
     if not isinstance(port, int) or port <= 0 or port >= 65536 or not isinstance(pid, int) or pid <= 0:
-        raise Fault("serve-not-running")
-    return record
+        return None, ""
+    return record, ""
+
+def inside(folder, home):
+    if not isinstance(folder, str) or not folder or not isinstance(home, str) or not home:
+        return False
+    try:
+        return os.path.commonpath([os.path.realpath(folder), os.path.realpath(home)]) == os.path.realpath(home)
+    except (OSError, ValueError):
+        return False
+
+def same_home(record, launch_home):
+    """Strict: the record names THIS existing home. A nameless or unknown path is none."""
+    recorded = record.get("home")
+    if not isinstance(recorded, str) or not recorded.startswith("/") or not launch_home:
+        return False
+    if not isinstance(launch_home, str) or not launch_home.startswith("/"):
+        return False
+    # A sandbox names a path inside itself; it cannot be compared to a host home, so a
+    # record that does not name this host path is never used without a picked folder.
+    if not os.path.isdir(recorded) or not os.path.isdir(launch_home):
+        return False
+    return os.path.realpath(recorded) == os.path.realpath(launch_home)
+
+def default_home():
+    env = os.environ.get("HERMES_HOME", "").strip()
+    if env.startswith("/"):
+        return env
+    return os.path.join(os.path.expanduser("~"), ".hermes")
+
+def is_default_home(home):
+    if not isinstance(home, str) or not home.startswith("/"):
+        return False
+    try:
+        return os.path.realpath(home) == os.path.realpath(default_home())
+    except OSError:
+        return home == default_home()
+
+def is_hermes_home(path):
+    # A Hermes home by its own marks, never by a generic folder alone:
+    # (i) SOUL.md, seeded by initialize_home -> _ensure_default_soul_md on every load;
+    # (ii) config.yaml plus at least two of Hermes's skeleton folders (sessions, memories,
+    #      cron, logs), which initialize_home creates even for a fresh home;
+    # (iii) config.yaml plus state.db, Hermes's own state file (_HERMES_HOME_MARKERS).
+    # A bare config.yaml, a bare gateway-locks, or config.yaml plus one generic folder is an
+    # unrelated tool and never makes a beside folder ambiguous.
+    if not os.path.isdir(path):
+        return False
+    if os.path.isfile(os.path.join(path, "SOUL.md")):
+        return True
+    if not os.path.isfile(os.path.join(path, "config.yaml")):
+        return False
+    skeleton = sum(1 for name in ("sessions", "memories", "cron", "logs")
+                   if os.path.isdir(os.path.join(path, name)))
+    return skeleton >= 2 or os.path.isfile(os.path.join(path, "state.db"))
+
+def has_hermes_sibling(home):
+    """Any other Hermes home in the same parent, following links.
+
+    The same on-disk fact detection uses: beside a home that shares its parent with
+    another Hermes home, gateway-locks is ambiguous and is never this home's record.
+    """
+    path = os.path.normpath(home)
+    parent, name = os.path.dirname(path), os.path.basename(path)
+    try:
+        entries = list(os.scandir(parent))
+        own = os.path.realpath(path)
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.name == name:
+            continue
+        try:
+            if not is_hermes_home(entry.path):
+                continue
+            if os.path.realpath(entry.path) != own:
+                return True
+        except OSError:
+            continue
+    return False
+
+def home_spellings(launch_home):
+    written = os.path.normpath(launch_home)
+    homes = [written]
+    try:
+        real = os.path.realpath(written)
+    except OSError:
+        real = written
+    if real not in homes:
+        homes.append(real)
+    return homes
+
+def beside_spellings(folder, launch_home):
+    """The spellings of this home whose own parent holds this beside folder."""
+    folder = os.path.normpath(folder)
+    if os.path.basename(folder) != "gateway-locks":
+        return []
+    matches = []
+    try:
+        own = os.path.realpath(launch_home)
+    except OSError:
+        own = ""
+    for home in home_spellings(launch_home):
+        if os.path.dirname(folder) == os.path.dirname(home) and home not in matches:
+            matches.append(home)
+    # A hand-made call may name the real path while the folder is beside a LINK to it.
+    try:
+        for entry in os.scandir(os.path.dirname(folder)):
+            try:
+                if entry.is_symlink() and own and os.path.realpath(entry.path) == own:
+                    if entry.path not in matches:
+                        matches.append(entry.path)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return matches
+
+
+def state_folder(explicit, launch_home):
+    """The chosen serve's own record folder.
+
+    An explicit folder comes from detection and is the only one read. Without one, the
+    home's OWN state folders always win; a shared account or gateway folder is consulted
+    only when the home has no own record, and then only a record that names this exact
+    existing home. A nameless or sandbox-only home is never another home's fallback.
+    """
+    if explicit:
+        if not isinstance(explicit, str) or not explicit.startswith("/"):
+            raise Fault("serve-record")
+        # The folder came from detection, which tied it to the picked home's own tree.
+        # The record's home is the serve's own report, never a reason to refuse it.
+        record, why = records_of(explicit)
+        if record is None and why == "gateway":
+            raise Fault("serve-gateway")
+        if record is None:
+            raise Fault("serve-not-running")
+        # A beside folder is ambiguous when any spelling whose parent holds it shares
+        # that parent with another Hermes home, including a link spelling found beside
+        # the folder. Decide on the resolved home, whatever spelling the call used.
+        if isinstance(launch_home, str) and launch_home.startswith("/"):
+            spellings = beside_spellings(explicit, launch_home)
+            if spellings and any(has_hermes_sibling(home) for home in spellings):
+                raise Fault("serve-record")
+        return explicit, record
+    own, shared = [], []
+    def add(folder, target):
+        if isinstance(folder, str) and folder.startswith("/") and folder not in target:
+            target.append(folder)
+    if isinstance(launch_home, str) and launch_home.startswith("/"):
+        # The home as written and, when it is a symlink, the home it points at. A
+        # home moved to another disk keeps its record beside the link, and a real
+        # home keeps its own beside folder; each is taken only when it is the single
+        # Hermes home under that parent.
+        for home in home_spellings(launch_home):
+            if not has_hermes_sibling(home):
+                add(os.path.join(os.path.dirname(home), "gateway-locks"), own)
+            add(os.path.join(home, "gateway-locks"), own)
+            add(os.path.join(home, ".local", "state", "hermes", "gateway-locks"), own)
+            add(os.path.join(home, "state", "hermes", "gateway-locks"), own)
+            add(os.path.join(home, ".state", "hermes", "gateway-locks"), own)
+    root = os.environ.get("HERMES_GATEWAY_LOCK_DIR", "").strip()
+    if root:
+        add(root, own if inside(root, launch_home) else shared)
+    home = os.path.expanduser("~")
+    state = os.environ.get("XDG_STATE_HOME", "").strip()
+    if not state.startswith("/"):
+        state = os.path.join(home, ".local", "state")
+    account = os.path.join(state, "hermes", "gateway-locks")
+    add(account, own if inside(account, launch_home) else shared)
+    gateway = False
+    # The home's own valid record always wins, even if a shared folder is listed first.
+    for folder in own:
+        record, why = records_of(folder)
+        gateway = gateway or why == "gateway"
+        if record is not None:
+            return folder, record
+    for folder in shared:
+        record, why = records_of(folder)
+        gateway = gateway or why == "gateway"
+        if record is None:
+            continue
+        if not launch_home or same_home(record, launch_home):
+            return folder, record
+        # The serve writes no home field; a nameless (or sandbox-only) record in the
+        # shared account folder belongs to the DEFAULT home, never to another one.
+        named = record.get("home")
+        unknown = not (isinstance(named, str) and named.startswith("/") and os.path.isdir(named))
+        if unknown and is_default_home(launch_home):
+            return folder, record
+    raise Fault("serve-gateway" if gateway else "serve-not-running")
 
 def read_token(folder, record):
     path = os.path.join(folder, "host-serve.token")
@@ -272,8 +456,7 @@ try:
     version = ".".join(str(int(part)) for part in release.groups())
     if tuple(int(part) for part in release.groups()) < minimum:
         raise Fault("update-required", version=version, minimum=wanted)
-    folder = state_folder()
-    record = read_record(folder)
+    folder, record = state_folder(options.get("stateDir"), options.get("hermesHome"))
     token = read_token(folder, record)
     # The CLI must read the same data root the owner was launched from: the record says
     # which HERMES_HOME that is, and every read below is scoped to it.
@@ -345,10 +528,15 @@ function profilesOf(value) {
     const model = text(item.model) ? item.model.trim().slice(0, 200) : ''
     const provider = text(item.provider) ? item.provider.trim().slice(0, 100) : ''
     if (model && !/^[\x20-\x7e]+$/.test(model)) continue
+    // A serve may name the profile model's capacity (camelCase here, snake_case from the
+    // remote record). It is forwarded when present; attachedModelOf supplies the floor.
+    const contextWindow = Number.isInteger(item.contextWindow) && item.contextWindow > 0 ? item.contextWindow
+      : Number.isInteger(item.context_window) && item.context_window > 0 ? item.context_window : undefined
     rows.push({
       id: item.id,
       name: text(item.name) && item.name.trim() ? item.name.trim().slice(0, 100) : item.id,
       model, provider, running: item.running === true,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
     })
   }
   return rows
@@ -498,7 +686,7 @@ export async function startHermesAttach(ssh, {
       }
     })
     const startMs = Math.max(1, Math.floor(limits.start - Math.min(limits.control / 2, limits.start * 0.15)))
-    remote.stdin.write(`${JSON.stringify({ nonce, hermesPath: config.hermesPath, hermesHome: config.hermesHome, minVersion: minimum, startMs, controlMs: limits.control })}\n`)
+    remote.stdin.write(`${JSON.stringify({ nonce, hermesPath: config.hermesPath, hermesHome: config.hermesHome, stateDir: config.recordDir, minVersion: minimum, startMs, controlMs: limits.control })}\n`)
     const port = await bounded(ready.promise, until - Date.now())
     if (!credential || !profiles.length) throw hermesSshFailure('serve-profiles')
     const localPort = await bounded(Promise.resolve(allocatePort()), Math.min(limits.control, until - Date.now()))

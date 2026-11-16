@@ -458,7 +458,7 @@ test('generate_image on a Codex account that waits for the person says so, and n
   const credentials = () => ({ readRecord: async () => undefined, modifyRecord: async () => undefined, resolve: async () => undefined })
   const images = createImageGen({ credentials, codex: () => codex, folder: () => dir })
   assert.equal(await images.access(), null)
-  await assert.rejects(images.generate({ prompt: 'a fox', callId: 'acct' }), /has not confirmed its account for Bots.*confirm it in a Bot's chat.*OpenAI key/)
+  await assert.rejects(images.generate({ prompt: 'a fox', callId: 'acct' }), /has not confirmed its account for Bots.*confirm it in a Bot's chat/)
   assert.deepEqual(calls, [])
 })
 

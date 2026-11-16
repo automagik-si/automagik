@@ -10,6 +10,7 @@ import { OCR_CACHE_MAX, OCR_PROMPT, OCR_RETRY_MS, OCR_TIMEOUT_MS } from './const
 import { replaceFile } from './files.js'
 import { splitRef } from './text.js'
 import { freezeLoopRequest } from './secrets.js'
+import { pictureGrant } from './shared-uploads.js'
 
 export function offloadTargets(session, beforeSeq) {
   const targets = []
@@ -174,6 +175,7 @@ export function install(rt) {
   }
 
   async function withImagesAsText(messages, sessionId) {
+    if (!messages.some(liveImages)) return messages
     await loadOcr()
     const images = new Map()
     for (const message of messages) {
@@ -194,18 +196,31 @@ export function install(rt) {
   }
 
   ctx.on('llm/stream', (options, next) => {
-    if (options.sessionId === undefined || rt.ownRequest(options) || !(options.messages ?? []).some(liveImages)) return next()
+    if (options.sessionId === undefined || rt.ownRequest(options) || !(options.messages ?? []).some(message => Array.isArray(message?.content) && message.content.some(block => block?.type === 'image'))) return next()
     return (async function* imagesAsTextOrPass() {
       await rt.load()
-      if (rt.roomOf(options.sessionId) !== undefined || await readsImages(options.provider, options.model)) {
+      let messages = options.messages
+      const bot = rt.sharedUploads && rt.botOfSession(options.sessionId)
+      if (bot) {
+        const grants = rt.sharedUploads.grantedTo(options.sessionId)
+        for (const message of messages) {
+          if (!pictureGrant(rt, message, bot)) continue
+          for (const block of Array.isArray(message.content) ? message.content : []) {
+            if (block?.type === 'image' && /^sha256:[a-f0-9]{64}$/.test(block.attachment?.attachmentId)) grants.add(block.attachment.attachmentId.slice(7))
+          }
+        }
+        if (options.provider !== 'hermes-remote') messages = await rt.sharedUploads.withPaths(messages, options.sessionId, options.provider, options.signal)
+      }
+      const textOnly = rt.roomOf(options.sessionId) === undefined && !(await readsImages(options.provider, options.model))
+      if ((!textOnly || !messages.some(liveImages)) && messages === options.messages) {
         yield* next()
         return
       }
       // `next` cannot take new messages, so the rewritten request starts over; it
-      // carries no image, so this listener lets it through.
+      // already carries path prefixes and no live image needing OCR, so it passes.
       const request = {
         ...options,
-        messages: await withImagesAsText(options.messages, options.sessionId),
+        messages: textOnly ? await withImagesAsText(messages, options.sessionId) : messages,
       }
       if (isAgentLoopRequest(options)) markAgentLoopRequest(freezeLoopRequest(request))
       yield* ctx.llm.stream(request)

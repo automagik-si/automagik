@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import { configArgs, imageOverrides, imageProfile } from '../src/host/image.js'
+import { configArgs, IMAGE_PROFILE_DESCRIPTION, IMAGE_PROFILE_GRANTS } from '../src/host/image.js'
 
 const CODEX = process.env.AUTOMAGIK_TEST_CODEX
 const RUNTIME_IMAGE = process.env.AUTOMAGIK_TEST_CODEX_RUNTIME_IMAGE
@@ -41,12 +41,10 @@ test('real Codex helper: scratch containment includes runtime reads', { skip }, 
   symlinkSync(outside, join(cwd, 'escape.png'))
   symlinkSync(root, join(cwd, 'escape-dir'))
   const binary = realpathSync(CODEX)
-  const profile = imageProfile()
-  mkdirSync(join(cwd, '.codex'), { mode: 0o700 })
+  const profile = { id: `automagik-image-${'a'.repeat(32)}` }
   // The helper itself adds these grants in Codex 0.167.1. The sandbox CLI does not;
   // reproduce them explicitly while retaining the production profile's actual rules.
-  const config = profile.config + `':minimal' = 'read'\n${JSON.stringify(binary)} = 'read'\n`
-  writeFileSync(join(cwd, '.codex', 'config.toml'), config, { mode: 0o600 })
+  const config = { default_permissions: profile.id, permissions: { [profile.id]: { description: IMAGE_PROFILE_DESCRIPTION, filesystem: { ...IMAGE_PROFILE_GRANTS, ':minimal': 'read', [binary]: 'read' } } } }
   const env = {
     PATH: process.env.PATH, HOME: join(root, 'home'), CODEX_HOME: join(root, 'codex'),
     TMPDIR: join(root, 'tmp'), NO_COLOR: '1',
@@ -54,7 +52,7 @@ test('real Codex helper: scratch containment includes runtime reads', { skip }, 
   const read = (uri, sandbox = true) => {
     const args = sandbox ? [
       'sandbox', '-P', profile.id, '-C', cwd,
-      ...configArgs({ projects: imageOverrides({ project: cwd }).projects }),
+      ...configArgs(config),
       '--', binary, '--codex-run-as-fs-helper',
     ] : ['--codex-run-as-fs-helper']
     const result = spawnSync(binary, args, {

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted (process in use; delivery unverified: open work #207 and #215; #250 Play flavor deferred to Pocket; #190, #203 and #210 merged 2026-11-03; the owner OKd one version and the jump) |
+| Status | Accepted (process in use; delivery unverified: open work #207 and #215; #250 Play flavor deferred to Pocket; #190, #203 and #210 merged 2026-11-03; the owner OKd one version and the jump; amendment accepted 2026-11-16 by the owner: the member runner's carrier, inside am under am's key) |
 | Delivered | |
 | Milestone | n/a (process) |
 | Lanes | herdr (3.N.P), added here; pocket (3.N.P), added by Pocket's import |
@@ -414,6 +414,78 @@ No `part.json` comes with this import. The names it adds are the lane kind `pock
 `parts.json` field or an `am` verb, so `apps/pocket/part.json` can take its own id and name this
 artifact later.
 
+## Follow Arca
+
+Added 2026-11-15, on the owner's direction. Arca's plugins test a faster release path than Follow
+Omni's desktop carry: they ride this repository's signed plugin lane, so a plugin-only Arca change
+reaches installed apps as a plugin patch, with no desktop release, no app download and no
+restart.
+
+Arca's Automagik app, a DSH plugin set, is not a part of this repository. Arca's public
+repository (`automagik-si/arca`) will own it, the way Omni's repository owns Omni's channels and
+canvases. Arca already tags its releases `v<version>`. The rest is planned on Arca's side and not
+on its `dev` today: one folder per plugin under `apps/*-dsh` (each `package.json` version the
+Arca release of that folder's last change), its own market index at `marketplace/automagik.json`,
+and a release workflow that dispatches to this repository when it publishes.
+
+### The path
+
+- Arca's release will dispatch this repository. The run reads Arca's releases itself; the dispatch's
+  payload is a hint only.
+- The boot gate boots the exact bytes the lane would carry, not dev's newest plugins.
+- Only when it boots does a plugin-only patch go out on the existing plugin lane, signed with
+  this repository's plugin key. There is no new key, publisher or rotation.
+- The same rule as `scripts/lane.ts` applies: an Arca release with install-field, dependency or
+  DSH changes is carried by a full release, never by a lane patch. `lane.ts` does not classify
+  Arca's releases yet; the bootstrap adds that.
+- A failing gate moves no pointer. A bad plugin is fixed forward by a new Arca release.
+- The once-a-UTC-day hold (#371) belongs to Follow Omni's full-release carries. Arca's lane
+  patches are plugin-only and are not held, the two-week test included: a held patch would leave T
+  unmeasured. The hold stays on Follow Omni's carries for now.
+
+### Bootstrap
+
+The lane reader is compiled into the app: the plugin names a lane may replace are fixed in the
+build. So one desktop release comes first. It carries Arca's plugins in the desktop profile and
+allows their names on the lane, teaches `scripts/lane.ts` to classify an Arca release by the
+rule above, and changes three app policies:
+
+- An app update keeps a newer lane plugin over the build's pin: a new build never copies its own
+  older Arca plugin back over the lane's newer one.
+- Before a lane plugin installs, the app checks its `engines.omni` and its peer ranges, so one
+  that needs what the app lacks is refused rather than installed and broken.
+- The app keeps a last-known-good copy of each lane plugin to go back to.
+
+### Fast, as one number
+
+T is the median minutes from Arca's release tag to a verified lane pointer that installed apps
+read, counting only releases whose boot gate passed before the pointer moved, over the last 20
+Arca releases. The path ships when T is at most 10 minutes, the pass rate is at least 95 percent,
+and no pointer ever moved without a green gate. Installed apps poll the lane every 15 minutes, so
+a person's wait (T plus that poll) is reported beside T, not as the target.
+
+### Repairs
+
+Beside the lane path, three repairs make Follow Omni's carries more reliable while they stay as
+they are. They ship now, as their own small PR, not with the bootstrap:
+
+- After a failed publish, the desktop build and its feed are retried, so a release is never left
+  without a feed.
+- The daily cut is triggered from a clock this repository controls, so a held carry does not slip
+  for hours.
+- The app's release lookups read past the newest 50 releases.
+
+### Order
+
+1. The bootstrap desktop release, with the three app policies above.
+2. Two weeks of Arca on this path, measuring T and the pass rate.
+3. Then Omni on the same path.
+4. Only then is the once-a-UTC-day hold (#371) dropped for Omni's carries, once they ride the
+   lane.
+
+Apart from the repairs, nothing is built until this section merges and Arca has published a
+first plugin release worth carrying.
+
 ## Open questions
 
 1. `herdr/catalog/repos.json` lists Pocket Link as an external entry at `automagik-dev/automagik-pocket`,
@@ -446,3 +518,91 @@ Ledger pass (2026-11-10): the board links this RFC from its file.
 - Open issues: #207, #215.
 - Deferred to Pocket: #250 (Play distribution) - RFC 0011 Open question 2.
 - Merged changes that cite this RFC: #190, #203, #210, #278, #791, #806 (last merged 2026-11-09).
+
+## Amendment: the member runner's carrier (2026-11-16, accepted)
+
+**Accepted 2026-11-16, by the owner: "Inside am, under am's key."** The member wall's
+privileged runner ([RFC 0024](0024-automagik-cloud.md), (f)) ships inside am's tarball, signed by
+am's lane key, when members are allowed. It turns nothing on: members stay off until the whole
+wall, its three safeguards and the isolation review hold (Decided 26 and (f)), and this adds no
+setting. This amendment carries the carrier decision only; no code and no delivery here.
+
+**The decision.** The runner is plain JavaScript on am's Node floor (22.7), so it ships
+inside `automagik-am-<v>.tgz` and rides the signed `am-lane` pointer every release already
+carries: no new artifact, key, lane or release kind. Arca's template installs am as the runner's
+own user, verifies the pointer against am's public keys, records its sequence, and starts the
+runner from that user's store. No other install starts it; am's installer never enables it.
+
+**The key's weight.** This is the decision's price. am's lane key would also sign the member wall's
+runner, which runs members' shells under other host uids: a stolen am key would reach the wall, not
+only each person's own am. The named alternative's separate key is the shape that keeps the two
+signing authorities apart. Rotation stays RFC 0011's two phases, but the template must trust the new
+key before the first am release signed with it: a space still pinning only the old key keeps its old
+runner and takes no am update, so the wait between the phases covers the spaces too.
+
+**Options.** am's tarball is the decision: every release already signs and carries am, and am
+installs per user, so its bytes can sit under the runner's user, out of DSH's write reach. A DSH
+plugin's tarball: rejected, because plugin bytes live in DSH's profile, writable by the user the
+runner guards. Its own artifact and lane: the named alternative if a condition below fails,
+since a separate signing key and update path keep the two authorities apart for a file that is
+inert until started.
+
+**What the decision needs.**
+
+1. **Who installs am, and as which user (the mount).** Arca's template, as the runner's own user on
+   the space's machine (outside DSH's container), from the signed pointer — not DSH's user. The
+   runner's am store, state folder and unit are out of DSH's write reach; DSH reaches the runner
+   only through the socket's folder, and the socket's file mode, set by the template, is the gate.
+   If the template can only install as DSH's user, the decision breaks and the named alternative is
+   the shape. One gap to close: am has no first install through the pointer today (`am self install`
+   takes a local extract and records the version's own sequence, unsigned); the delivery adds that
+   path.
+2. **Update, restart and rollback.** am's update stages beside the current version, verifies the
+   pointer and sequence, and swaps; the template's unit restarts the runner, and member shells
+   end with the old process. With no socket they fail closed: no fallback uid. The pointer never
+   goes down; the only downgrade is explicit — `am rollback automagik.am` restores the kept
+   previous signed version, and the unit restarts it; the recorded sequence stays the highest
+   taken.
+3. **What the template pins (the signature).** The pointer's location, am's public keys (a copy
+   of `am/am-keys.json`) and the recorded sequence; the pointer is verified as
+   `am.json`/`am.json.sig` (ed25519, am's key), and the tarball against its sha256 and size —
+   never a hand-copied hash or a version's URL, never `member-runner.mjs` from a spike. Keys
+   rotate in two phases: the template trusts both before a release signs with the new one.
+4. **Is a meter-style held lane safer while members stay off?** No. The meter is held because
+   its binaries are a new artifact that must never ship unsigned; here there is no new artifact
+   and no new key, and the file does nothing unless started. A held lane would hold all of am
+   or create the lane the decision avoids. The equivalent is a held start: the bytes ship inert,
+   nothing but the template's unit starts them, and only after the wall and its review. As a
+   requirement, no am verb, installer, pack path, hook or boot path may start the runner or
+   write its unit; am's verbs are tested for it. If any other path can start it, this answer
+   flips and the named alternative is the shape.
+
+**Gate and tests.** The runner sits at `am/runner/member-runner.mjs`, its test at
+`am/test/member-runner.test.mjs`. `am/**` already makes it an am patch, so `part.json` needs no new
+id, path, artifact or `writes` entry and `lane.ts` no new kind; `scripts/lane.test.ts` gains a case
+pinning `am/runner/**` alone as an am patch. The am job's test glob picks the test up; add
+`runner/*.mjs` to its syntax step (CI and `AGENTS.md`). The test covers protocol frames and
+refusals, uid mapping from a supplied subordinate-id range, socket-mode checks and timeout/exit
+codes. A second test pins that for am's verbs: each run in a scratch home writes no runner unit
+and starts no runner process; only the template writes its unit and starts it. CI keeps the
+privileged proof out: it stays the VM test with a real second user, on the same tarball; the Pack am
+step asserts the tarball carries the runner and no runner test.
+
+**The honest test story.** The spike proved the shape, not the shipment. On the spike's test VM the
+subuid path passed: the member's uid in range and not DSH's, its read of the owner-only canary
+denied while DSH's user read it, no effective capability, DSH's side not root and holding no docker
+socket. Docker mode and a real headless DSH turn (faked model) passed locally, refusals and exit
+codes included. Not proved: first install through the pointer, update/restart/rollback of a running
+runner, a real member session, client/runner skew, per-member homes and resource limits (subuid mode
+has none), the template's socket mount and mode, multi-member isolation. Docker mode is
+root-equivalent, only where subuid cannot run. The setting stays off; the spike's hash is test-only;
+a green unit run is not proof.
+
+**What the runner needs from the member-wall pieces.** It is not the boundary: whoever can open the
+socket can ask to run as any member, so the wall's authorization and the socket's mode are the gate.
+It needs the DSH-side client and provider at a shared protocol version, refusing a mismatch, since
+the two update on different lanes; the member's identity from the unforgeable principal channel,
+never a name the client invents (the runner maps a member to a uid, not the reverse); the template's
+runner user, Node, subordinate-id range, workspace root and socket mount; and the isolation review's
+mount rules for DSH's container. Until those and the three safeguards hold, the unit is not
+installed.

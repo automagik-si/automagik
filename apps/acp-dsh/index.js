@@ -29,7 +29,7 @@ import { canRunProfile, ensureChatProfiles } from './src/host/codex-chat-profile
 import { CONSENT_FILE, ConsentStore } from './src/host/consent.js'
 import { adaptersHome, AdapterStore, CHECK_TICK_MS, homeRelativeText, redactInstallerOutput } from './src/host/install.js'
 import { handshake } from './src/host/handshake.js'
-import { drawImage, imageRefusal, imageSupport, SIGNED_OUT, UNAVAILABLE, unsupported } from './src/host/image.js'
+import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNAVAILABLE, unsupported } from './src/host/image.js'
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
@@ -1153,7 +1153,7 @@ export function apply(ctx, config = {}, {
   // and the tools it would offer: no session, no model request) and remembered per Codex. A
   // Codex that does not take it is not ready, so the caller goes on to its next image source.
   const IMAGE_AGENT = 'acp-codex'
-  const imageSupported = imageSupport({ ...(imageSetup ? { setup: imageSetup } : {}), log: line => warn(ctx, line) })
+  const imageSupported = imageSupport({ ...(imageSetup ? { setup: imageSetup } : {}), log: line => imageWarn(ctx, line) })
   const imageAccess = async () => {
     const version = authVersions.get(IMAGE_AGENT) ?? 0
     const changed = () => disposed || (authVersions.get(IMAGE_AGENT) ?? 0) !== version
@@ -1184,8 +1184,8 @@ export function apply(ctx, config = {}, {
           ...(support.reason === 'unsupported' ? { unsupported: true } : {}) }
       : { ready: true, signedIn, ...(homes ? { accountGeneration: version } : {}) }
   }
-  const generateImage = async ({ prompt, size, quality, background, signal, timeoutMs,
-    accountGeneration } = {}) => {
+  const makeImage = async ({ prompt, size, quality, background, signal, timeoutMs,
+    accountGeneration } = {}, input) => {
     const version = authVersions.get(IMAGE_AGENT) ?? 0
     if (disposed || (accountGeneration !== undefined && accountGeneration !== version)) {
       throw imageRefusal(SIGNED_OUT, 'The Bot account changed. Start the image again.')
@@ -1197,11 +1197,11 @@ export function apply(ctx, config = {}, {
       }
     }
     checkAccount()
-    if (!access.ready && access.reason === 'account') throw imageRefusal(UNAVAILABLE, 'Codex is signed in on this computer, but you have not confirmed its account for Automagik. Confirm it in a Bot\'s chat (choose a Codex model there), or add an OpenAI key, then try again.')
+    if (!access.ready && access.reason === 'account') throw imageRefusal(UNAVAILABLE, 'Codex is signed in on this computer, but you have not confirmed its account for Automagik. Confirm it in a Bot\'s chat (choose a Codex model there), then try again.')
     // A Codex config that does not load, or a check that keeps breaking, may have been put
     // right since it was remembered: the draw's own check answers for those.
     if (!access.ready && access.reason !== 'config' && access.reason !== 'unreadable') {
-      if (access.signedIn === false) throw imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, or add an OpenAI key, then try again.')
+      if (access.signedIn === false) throw imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, then try again.')
       if (access.unsupported === true) throw unsupported()
       throw imageRefusal(UNAVAILABLE, 'Codex cannot draw images here yet: it is off, not installed, or its sign-in could not be checked.')
     }
@@ -1209,14 +1209,34 @@ export function apply(ctx, config = {}, {
       return await drawImage({ spawn: () => {
         checkAccount()
         return agents.get(IMAGE_AGENT).spawn()
-      }, prompt, size, quality, background, signal,
+      }, prompt, size, quality, background, signal, ...(input ? { input } : {}),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
-      name: AGENTS[IMAGE_AGENT].defaultName, log: line => warn(ctx, line) })
+      name: AGENTS[IMAGE_AGENT].defaultName, log: line => imageWarn(ctx, line) })
     } catch (error) {
       // A run refused as signed out says the CLI's sign-in ended: the next check asks again.
       if (error?.code === SIGNED_OUT) { signIns.delete(IMAGE_AGENT); signInChecks.delete(IMAGE_AGENT) }
       throw error
     }
+  }
+
+  const generateImage = request => makeImage(request)
+  const editImage = (request = {}) => {
+    const image = request.image
+    const invalid = () => imageRefusal(UNAVAILABLE, 'The picture to edit is not a valid PNG, JPEG or WebP image.')
+    if (!image || typeof image !== 'object' ||
+        !['image/png', 'image/jpeg', 'image/webp'].includes(image.mimeType) ||
+        typeof image.base64 !== 'string' || image.base64.length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3)) {
+      return Promise.reject(invalid())
+    }
+    const data = Buffer.from(image.base64, 'base64')
+    const magic = image.mimeType === 'image/png'
+      ? data.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
+      : image.mimeType === 'image/jpeg'
+        ? data.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))
+        : data.length >= 12 && data.subarray(0, 4).equals(Buffer.from('RIFF')) && data.subarray(8, 12).equals(Buffer.from('WEBP'))
+    if (data.length === 0 || data.length > MAX_IMAGE_BYTES ||
+        data.toString('base64') !== image.base64 || !magic) return Promise.reject(invalid())
+    return makeImage(request, { data, mimeType: image.mimeType })
   }
 
   // Only proved stops release the locks. Paused homes stay paused for the next sign-in.
@@ -1327,6 +1347,12 @@ export function apply(ctx, config = {}, {
      * message to show as it is.
      */
     generateImage,
+    /**
+     * Edits one uploaded picture with Codex: generateImage's fields plus
+     * image: { base64, mimeType }, accountGeneration? -> { base64, mimeType }.
+     * Refusals carry an `acp/image-*` code and a message to show as it is.
+     */
+    editImage,
     /** Read only the Bot that owns this Session. Returns this registration's disposer. */
     botIdentity(reader) {
       if (typeof reader !== 'function') return () => {}
@@ -1542,6 +1568,11 @@ function warn(ctx, message) {
   try {
     ctx.logger?.warn?.(`acp-dsh: ${message}`)
   } catch {}
+}
+
+function imageWarn(ctx, line) {
+  warn(ctx, line)
+  try { console.error(`[acp-dsh] ${line}`) } catch {}
 }
 
 function info(ctx, message) {

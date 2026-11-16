@@ -3,7 +3,9 @@ import { ROLE_MAX } from '../shared/bot-profile.js'
 // Roster: creating, changing, and deleting Bots and group chats, the Main Bot role, and
 // the first Main Bot of a new team.
 import { randomUUID } from 'node:crypto'
-import { mkdir } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { access, mkdir } from 'node:fs/promises'
+import { osBlocked } from './folder-access.js'
 import { refusal } from './refusal.js'
 import { MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOTICE_MAX, SECTION_COLORS, SECTION_NAME_MAX, inUnfoldInstance } from './constants.js'
 import { currentColor, isColor, normalize, unquote } from './text.js'
@@ -93,7 +95,9 @@ export function install(rt) {
       return state.workspaceId
     }
     const path = rt.defaultTeamFolder()
-    await mkdir(path, { recursive: true })
+    let blocked
+    await mkdir(path, { recursive: true }).catch(error => { if (!osBlocked(error)) throw error; blocked = error })
+    await rt.checkFolderAccess?.(path, blocked, { cached: true })
     const workspace = await ctx.workspaceRegistry.resolveByPath(path) ?? await ctx.workspaceRegistry.create(path, 'Omni')
     state.workspaceId = workspace.id
     await rt.save()
@@ -115,6 +119,19 @@ export function install(rt) {
     return served.some(preset => preset.id === 'standard') ? { agentPreset: 'standard' } : {}
   }
 
+  // A write refusal is a note, not a reason to move a Session. Check read/enter access
+  // afresh even when a successful write probe is cached.
+  async function sessionFolderUsable(path) {
+    await rt.checkFolderAccess?.(path, undefined, { cached: true })
+    try {
+      await access(path, constants.R_OK | constants.X_OK)
+    } catch (error) {
+      if (osBlocked(error)) await rt.checkFolderAccess?.(path, error)
+      return false
+    }
+    return rt.isFolder(path)
+  }
+
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
@@ -123,11 +140,25 @@ export function install(rt) {
     // belong to no saved Bot.
     const readOnly = rt.readOnly()
     if (readOnly !== undefined) throw refusal(readOnly)
-    const usable = dir !== undefined && await rt.isFolder(dir)
-    if (dir !== undefined && !usable) rt.warn('ds-bot: the working folder %s is gone; %s starts in the team workspace', dir, title)
+    const usable = dir !== undefined && await sessionFolderUsable(dir)
+    if (dir !== undefined && !usable) rt.warn('ds-bot: the working folder %s is unavailable; %s starts in the team workspace', dir, title)
     const known = usable ? await ctx.workspaceRegistry.resolveByPath(dir) : undefined
-    const place = known !== undefined ? { workspaceId: known.id } : usable ? { cwd: dir } : { workspaceId: await ensureWorkspace() }
+    let place = known !== undefined ? { workspaceId: known.id } : usable ? { cwd: dir } : { workspaceId: await ensureWorkspace() }
+    let blockedFolder = !usable && rt.folderWarning?.(dir) ? dir : undefined
+    if (!usable) {
+      const team = rt.teamFolder()
+      if (team !== undefined && !await sessionFolderUsable(team)) {
+        blockedFolder ??= rt.folderWarning?.(team) ? team : undefined
+        const fallback = rt.defaultTeamFolder()
+        await mkdir(fallback, { recursive: true })
+        if (!await sessionFolderUsable(fallback)) {
+          throw refusal('The team workspace is unavailable. Allow Automagik to read and enter it before starting a session.')
+        }
+        place = { cwd: fallback }
+      }
+    }
     const { sessionId } = await ctx.sessionController.create({ ...place, ...await botPreset(profile) })
+    if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
     return sessionId
@@ -276,9 +307,13 @@ export function install(rt) {
     const creator = rt.botOf(createdBy)
     const carried = Array.isArray(creator?.denyTools) ? creator.denyTools : []
     const denied = carried.length === 0 ? denyTools : cleanDenyTools([...new Set([...carried, ...(denyTools ?? [])])])
+    // Keep the existing unset representation when the profile already starts at
+    // Workspace; store an override when the person's default differs from it.
+    const personDefault = rt.newBotPermission?.()
+    const personPermission = state.prefs.permission ?? (personDefault !== rt.permissionCatalog?.()?.defaultPreset ? personDefault : undefined)
     const permission = existingSessionId !== undefined ? undefined
       : creator !== undefined ? rt.inheritedPermission(creator, opener) ?? state.prefs.permission
-        : state.prefs.permission
+        : personPermission
     // A host adapter may already own a configured root Session. Adopt it without creating
     // another Session or moving its workspace; this option is internal, not a user payload.
     const id = existingSessionId ?? await createSession(cleanName, { dir })

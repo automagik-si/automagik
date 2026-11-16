@@ -240,7 +240,7 @@ function PermissionsSection({ roster, actions, run }) {
   return h(SetSection, { title: t('Permissions') },
     h(SetRow, { label: t('New Bots start with'), hint: t('Bots you already have keep their own.') }),
     h('div', { className: 'bt-set-row bt-bs-row bt-bs-stack bt-drawer-permission' },
-      h(PermissionPicker, { catalog, saved: saved ?? catalog.defaultPreset, repick: saved === undefined, confirmFull: true, onPick: permission => run(actions.setPrefs({ permission })) }),
+      h(PermissionPicker, { catalog, saved: saved ?? roster.newBotPermission ?? catalog.defaultPreset, repick: saved === undefined, confirmFull: true, onPick: permission => run(actions.setPrefs({ permission })) }),
       h(PermissionFallback, { fallback: saved === AUTO && !offered ? AUTO_FALLBACK : undefined }),
       h(PermissionExplanations, { catalog }),
       h('div', { className: 'bt-note' }, t('Auto is not a choice here: it is turned on for one Bot at a time, in its chat or Details, when its model offers it.'))))

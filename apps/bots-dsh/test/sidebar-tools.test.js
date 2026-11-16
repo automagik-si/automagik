@@ -39,12 +39,19 @@ const sidebar = wide => TeamSidebar({
   wide, actions,
   useRoster: pick => pick(roster), useUi: pick => pick({ unread: {} }), useRegistry: pick => pick({}),
   useSessions: pick => pick({ ids: [], byId: {} }), useUpdate: () => ({}),
+  useSessionStatus: pick => pick(new Map()), useActivity: pick => pick({}),
 })
+// Fragments drawn in place, so a row reads as the buttons it shows.
+const flat = nodes => [nodes].flat(Infinity).flatMap(node => (node?.type === react.Fragment ? flat(node.props.children) : [node])).filter(Boolean)
 const nameOf = node => node?.type?.name || node?.props?.['aria-label'] || node?.props?.className
-// The top row (wide) or the rail's buttons, in order.
+// The new left bar's head (wide: left-bar.js, the wordmark then its buttons) or the rail's
+// buttons, in order.
 const rowOf = (wide) => {
   const tree = sidebar(wide)
-  return [tree.props.children].flat()[0].props.children
+  if (!wide) return [tree.props.children].flat()[0].props.children
+  const side = tree.type(tree.props)
+  const list = flat(flat(side.props.children)[0].props.children)[1]
+  return flat(flat(list.props.children)[0].props.children)
 }
 // What the SidebarTools element draws: one isolated entry per tool.
 const drawn = (row) => {
@@ -56,7 +63,7 @@ test('tools draw between the update cloud and Search, and in the rail under the 
   const Tool = () => null
   const off = sidebarTools.register({ id: 'power', Component: Tool })
   const wideRow = rowOf(true).map(nameOf)
-  assert.deepEqual(wideRow.slice(2, 5), ['UpdateButton', 'SidebarTools', 'Search'])
+  assert.deepEqual(wideRow.slice(1, 4), ['UpdateButton', 'SidebarTools', 'Search'])
   assert.deepEqual(rowOf(false).map(nameOf), ['UpdateButton', 'SidebarTools', 'New…'])
   const { outlet, entries } = drawn(rowOf(true))
   assert.equal(entries.length, 1)

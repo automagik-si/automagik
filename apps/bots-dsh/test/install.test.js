@@ -68,6 +68,8 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on tools/result',
     'on session/event',
     'effect omni-ui: lost hand-offs',
+    'effect ds-bot: folder access context',
+    'prompt context ds-bot:folder-access 650',
     'effect ds-bot: agent tool restrict retry',
     'on agent/created',
     'on session/event',
@@ -138,6 +140,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     // A CLI sign-in's chosen model, dropped by a turn on another, applied on ready (cli-login.js).
     'on session/event',
     'on acp-dsh/login-ready',
+    'on tools/execute',
     'on llm/stream',
     'on agent/status',
     'on tools/execute',
@@ -179,6 +182,15 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect ds-bot: live feed route',
     'route GET /api/omni-ui/feed',
     'effect ds-bot: live feed',
+    'effect omni-ui: code typing releases',
+    'effect omni-ui: code typing /api/omni-ui/code/take',
+    'route POST /api/omni-ui/code/take',
+    'effect omni-ui: code typing /api/omni-ui/code/input',
+    'route POST /api/omni-ui/code/input',
+    'effect omni-ui: code typing /api/omni-ui/code/release',
+    'route POST /api/omni-ui/code/release',
+    'effect omni-ui: code pane stream',
+    'route GET /api/omni-ui/code/stream',
     'effect ds-bot: agent access',
     'effect ds-bot: pet route',
     'route GET /api/omni-ui/pet',
@@ -191,11 +203,13 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'effect omni-ui: api route',
     'route POST /api/omni-ui',
     'effect omni-ui: load state',
+    'effect omni-ui: seat chat',
     'on agent/created',
     'effect ds-bot: remote Hermes',
     // Auto's judge, after every module, so it runs first (auto-judge.js installAhead).
     'on approval/request (prepend)',
     'provide omniTeam',
+    'effect omni-ui: stop the team modules',
   ])
 })
 

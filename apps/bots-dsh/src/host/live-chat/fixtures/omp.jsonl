@@ -1,0 +1,9 @@
+{"type":"session","version":3,"id":"00000000-0000-4000-8000-000000000003","timestamp":"2026-11-03T10:00:00.000Z","cwd":"/home/u/proj"}
+{"type":"model_change","id":"rec-0a","timestamp":"2026-11-03T10:00:00.050Z","provider":"test-provider","modelId":"test-model"}
+{"type":"message","id":"rec-1","parentId":null,"timestamp":"2026-11-03T10:00:00.100Z","message":{"role":"user","content":[{"type":"text","text":"What is in package.json?"}]}}
+{"type":"message","id":"rec-2","parentId":"rec-1","timestamp":"2026-11-03T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Read the file."},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"package.json"}}],"provider":"test-provider","model":"test-model","usage":{"input":120,"output":8,"cacheRead":0,"cacheWrite":0},"stopReason":"toolUse"}}
+{"type":"message","id":"rec-3","parentId":"rec-2","timestamp":"2026-11-03T10:00:02.000Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"read","content":[{"type":"text","text":"{\"name\":\"demo\"}"}],"isError":false}}
+{"type":"message","id":"rec-4","parentId":"rec-3","timestamp":"2026-11-03T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"It names the package `demo`."}],"provider":"test-provider","model":"test-model","usage":{"input":140,"output":9,"cacheRead":100,"cacheWrite":0},"stopReason":"stop"}}
+{"type":"message","id":"rec-5","parentId":"rec-4","timestamp":"2026-11-03T10:00:04.000Z","message":{"role":"bashExecution","command":"false","output":"","exitCode":1}}
+{"type":"custom_message","id":"rec-6","parentId":"rec-5","timestamp":"2026-11-03T10:00:05.000Z","customType":"state","display":false,"content":"hidden"}
+{"type":"compaction","id":"rec-7","parentId":"rec-6","timestamp":"2026-11-03T10:00:06.000Z","summary":"...","tokensBefore":1000}

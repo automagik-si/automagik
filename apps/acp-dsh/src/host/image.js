@@ -14,11 +14,12 @@
 //   `features.<name>` without a word;
 // - the same overrides, from the same object, go to the session through codex-acp's
 //   CODEX_CONFIG. CODEX_HOME is the Bot's isolated Codex home, supplied by cli-homes.js;
-// - a fresh permission profile requests scratch reads only. Codex's filesystem helper adds
-//   runtime read grants: this is containment, not a scratch-only boundary (README, #870).
+// - the Bot home's image profile is also passed in the run's overrides. The check reads
+//   Codex's resolved profile: root deny, scratch read and at most its own helper folder.
 //   An adapter without that mode falls back to read-only with a warning;
 // - the agent starts in an empty scratch folder with no MCP servers. The checks
-//   run in that same folder, trusted the way codex-acp trusts it for the session. Every
+//   run in that same folder with the same trust override, which Codex ignores from session
+//   flags. The image profile comes from the Bot's isolated Codex home. Every
 //   permission the agent asks for is cancelled, and one that is not about the image call
 //   refuses the draw (codex-acp asks none for an image). ACP's server list is
 //   empty; the person's own servers are each turned off by name
@@ -37,9 +38,9 @@
 // What this does not close is in the README ("Images through Codex", residual risk): first of
 // all that the read-only fallback leaves the image tool's local-file input unrestricted.
 import { execFile } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
-import { statSync } from 'node:fs'
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentRun } from './acp.js'
@@ -83,17 +84,19 @@ const off = names => Object.fromEntries(names.map(name => [name, false]))
  * search disabled, each of the person's own MCP servers and skills turned off by name. It is
  * the one source of both the session's CODEX_CONFIG (`imageConfig`) and the `-c` arguments the
  * checks run with (`configArgs`).
- * `project` is the run's scratch folder: codex-acp trusts a session's folder as a project, so
- * the checks are made with the same trust (codex-acp then writes the same entry itself).
- * @param {{ servers?: readonly string[], extras?: readonly string[], skills?: readonly string[], project?: string }} [names]
+ * `project` is the run's scratch folder: checks and session get the same trust override,
+ * but Codex ignores project trust from session flags. The Bot home's image table is repeated
+ * here and selected by `profile`; the check reads Codex's resolved profile before the session starts.
+ * @param {{ servers?: readonly string[], extras?: readonly string[], skills?: readonly string[], project?: string, profile?: { id: string, mode: string } }} [names]
  */
-export function imageOverrides({ servers = [], extras = [], skills = [], project } = {}) {
+export function imageOverrides({ servers = [], extras = [], skills = [], project, profile } = {}) {
   return {
     features: { [IMAGE_FEATURE_ON]: true, ...off(IMAGE_FEATURES_OFF), ...off(extras) },
     web_search: 'disabled',
     mcp_servers: Object.fromEntries(servers.map(name => [name, { enabled: false }])),
     skills: { bundled: { enabled: false }, config: skills.map(name => ({ name, enabled: false })) },
     ...(project === undefined ? {} : { projects: { [project]: { trust_level: 'trusted' } } }),
+    ...(profile === undefined ? {} : { default_permissions: profile.id, permissions: { [profile.id]: { description: IMAGE_PROFILE_DESCRIPTION, filesystem: { ...IMAGE_PROFILE_GRANTS } } } }),
   }
 }
 /**
@@ -133,34 +136,29 @@ const MCP_NAME = /^[A-Za-z0-9_.-]{1,128}$/
 export const IMAGE_MODE = 'read-only'
 // Owner policy: keep drawing on adapters that cannot select the narrow profile.
 const ALLOW_IMAGE_READ_ONLY_FALLBACK = true
+const EDIT_NEEDS_ISOLATION = true
 
-// The config omits network, inherited profiles and minimal roots. Codex's filesystem helper
-// still adds :minimal and helper-executable reads; omitting them here cannot deny those reads.
-/** The scratch project's entire config, before Codex adds its runtime grants. */
-export function imageProfile(id = `automagik-image-${randomBytes(16).toString('hex')}`) {
-  return {
-    id,
-    mode: `permission-profile:${id}`,
-    config: [
-      `default_permissions = ${toToml(id)}`,
-      `[permissions.${toToml(id)}]`,
-      `description = ${toToml('Draw one image in the scratch folder')}`,
-      `[permissions.${toToml(id)}.filesystem]`,
-      `${toToml(':root')} = ${toToml('deny')}`,
-      `${toToml(':workspace_roots')} = ${toToml('read')}`,
-      '',
-    ].join('\n'),
-  }
+export const IMAGE_PROFILE_DESCRIPTION = 'Draw one image in the scratch folder'
+// Exactly these two rules. No network table, no `extends`, no :minimal, no runtime or skills root.
+export const IMAGE_PROFILE_GRANTS = Object.freeze({ ':root': 'deny', ':workspace_roots': 'read' })
+/** The Bot home's image profile, from the chat profiles' per-home suffix; else undefined. */
+export function imageProfileFor(profileModes) {
+  const mode = profileModes?.['read-only']
+  const hex = typeof mode === 'string' ? /^permission-profile:automagik-read-([0-9a-f]{32})$/.exec(mode)?.[1] : undefined
+  if (hex === undefined) return undefined
+  const id = `automagik-image-${hex}`
+  return { id, mode: `permission-profile:${id}` }
 }
 
-async function imageMode(run, profile, log, signal) {
+async function imageMode(run, profile, log, signal, { reason, stable }) {
   if (signal?.aborted || run.disposed) throw stoppedCheck()
-  let reason = profile ? 'profile mode not offered' : 'profile config refused'
+  if (profile) reason = 'profile mode not offered'
   if (profile && run.modes?.availableModes?.some(mode => mode.id === profile.mode)) {
     try {
       // A successful setMode response is the adapter's acknowledgement.
       await run.setMode(profile.mode, { force: true, signal })
-      return true
+      if (stable?.() !== false) return true
+      reason = 'profile config changed'
     } catch (error) {
       if (signal?.aborted || run.disposed) throw error
       reason = 'profile mode selection rejected'
@@ -170,6 +168,48 @@ async function imageMode(run, profile, log, signal) {
   try { log?.(`the Codex image run is not isolated (${reason}); falling back to read-only`) } catch {}
   await run.setMode(IMAGE_MODE, { force: true, signal })
   return false
+}
+
+/** Read only the measured permission-profile grammar from Codex's prompt-input messages. */
+export function readProfile(stdout) {
+  let items
+  try { items = JSON.parse(String(stdout ?? '')) } catch { return undefined }
+  if (!Array.isArray(items)) return undefined
+  const text = items.filter(item => item?.type === 'message').flatMap(item =>
+    Array.isArray(item.content) ? item.content.filter(part => ['input_text', 'output_text', 'text'].includes(part?.type) && typeof part.text === 'string').map(part => part.text) : []).join('\n')
+  if ((text.match(/<permission_profile\b/g) ?? []).length !== 1 || (text.match(/<\/permission_profile>/g) ?? []).length !== 1) return undefined
+  const block = /<permission_profile\b[\s\S]*?<\/permission_profile>/.exec(text)?.[0]
+  const match = /^<permission_profile type="([^"<>&]+)"><file_system type="([^"<>&]+)">([\s\S]*)<\/file_system><\/permission_profile>$/.exec(block ?? '')
+  if (!match) return undefined
+  const entries = []
+  let rest = match[3]
+  const entities = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
+  while (rest !== '') {
+    const entry = /^<entry access="([^"<>&]+)"(?: escalatable="(true|false)")?><(special|path)>([^<>]*)<\/\3><\/entry>/.exec(rest)
+    if (!entry || /&(?!amp;|lt;|gt;|quot;|apos;)/.test(entry[4])) return undefined
+    const value = entry[4].replace(/&(amp|lt|gt|quot|apos);/g, (_, name) => entities[name])
+    entries.push({ access: entry[1], escalatable: entry[2], special: entry[3] === 'special' ? value : undefined, path: entry[3] === 'path' ? value : undefined })
+    rest = rest.slice(entry[0].length)
+  }
+  return { type: match[1], fileSystem: match[2], entries }
+}
+
+/** Accept exactly root deny, the resolved scratch read, and at most Codex's own arg0 helper. */
+export function checkProfile(resolved, { scratch, codexHome }) {
+  if (resolved?.type !== 'managed' || resolved.fileSystem !== 'restricted' || !Array.isArray(resolved.entries) || typeof scratch !== 'string' || typeof codexHome !== 'string') return false
+  const escaped = codexHome.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const helper = new RegExp(`^${escaped}/tmp/arg0-[a-z0-9]+/codex-arg0[A-Za-z0-9]+$`)
+  let root = 0
+  let work = 0
+  let arg0 = 0
+  for (const entry of resolved.entries) {
+    if (!entry || Object.keys(entry).some(key => !['access', 'escalatable', 'special', 'path'].includes(key))) return false
+    if (entry.access === 'deny' && entry.special === ':root' && entry.path === undefined && (entry.escalatable === undefined || entry.escalatable === 'false')) root += 1
+    else if (entry.access === 'read' && entry.special === undefined && entry.escalatable === undefined && entry.path === scratch) work += 1
+    else if (entry.access === 'read' && entry.special === undefined && entry.escalatable === undefined && typeof entry.path === 'string' && helper.test(entry.path)) arg0 += 1
+    else return false
+  }
+  return root === 1 && work === 1 && arg0 <= 1
 }
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47])
@@ -466,7 +506,7 @@ export function checkOffered({ tools, nested }) {
  * stopped by `signal`, or all of them together take longer than `deadlineMs`.
  * @param {{ command: string, args?: string[], env?: Record<string, string> }} launch
  */
-export async function imageSetup(launch, { run = execFile, timeoutMs = MCP_LIST_TIMEOUT_MS, deadlineMs = IMAGE_CHECKS_TIMEOUT_MS, now = Date.now, cwd, signal, listServers = mcpServerNames, required = IMAGE_FEATURES_OFF, also = IMAGE_FEATURES_ALSO_OFF } = {}) {
+export async function imageSetup(launch, { run = execFile, timeoutMs = MCP_LIST_TIMEOUT_MS, deadlineMs = IMAGE_CHECKS_TIMEOUT_MS, now = Date.now, cwd, signal, listServers = mcpServerNames, required = IMAGE_FEATURES_OFF, also = IMAGE_FEATURES_ALSO_OFF, profile } = {}) {
   // Codex resolves a folder before it matches it against `projects`, while codex-acp keys the
   // session's trust by the cwd it is given. Resolve once, so the checks, the trust entry and the
   // session name the same folder (the macOS temp folder is reached through a symlink).
@@ -489,11 +529,19 @@ export async function imageSetup(launch, { run = execFile, timeoutMs = MCP_LIST_
   // skills; they are turned off by name and the tools are read again under that config.
   let skills = []
   for (let pass = 0; ; pass += 1) {
-    const overrides = imageOverrides({ servers, extras, skills, project })
-    const offered = readOffered(await cli(['debug', 'prompt-input', ...configArgs(overrides)], 'the offered tools'))
+    const overrides = imageOverrides({ servers, extras, skills, project, profile })
+    const stdout = await cli(['debug', 'prompt-input', ...configArgs(overrides)], 'the offered tools')
+    const offered = readOffered(stdout)
     checkOffered(offered)
     const more = offered.skills.filter(name => !skills.includes(name))
-    if (more.length === 0 || pass === 1) return { servers, extras, skills, overrides }
+    if (more.length === 0 || pass === 1) {
+      if (profile) {
+        let codexHome
+        try { codexHome = realpathSync(launch.env.CODEX_HOME) } catch {}
+        if (!checkProfile(readProfile(stdout), { scratch: project, codexHome })) throw checkError('profile', 'Codex resolved a wider image profile')
+      }
+      return { servers, extras, skills, overrides }
+    }
     skills = [...skills, ...more]
   }
 }
@@ -553,8 +601,8 @@ export const FAILED = 'acp/image-failed'
 export const STOPPED = 'acp/image-stopped'
 export const REFUSED = 'acp/image-refused'
 
-const signedOut = () => imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, or add an OpenAI key, then try again.')
-const usageLimit = () => imageRefusal(USAGE_LIMIT, 'Codex has reached its usage limit on this ChatGPT plan. Try again when the limit resets, or add an OpenAI key.')
+const signedOut = () => imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, then try again.')
+const usageLimit = () => imageRefusal(USAGE_LIMIT, 'Codex has reached its usage limit on this ChatGPT plan. Try again when the limit resets.')
 const USAGE_TEXT = /usage limit|usage_limit|quota/i
 
 /** What the agent is asked: one call of its image tool, the size and background in words. */
@@ -567,6 +615,19 @@ export function imagePrompt({ prompt, size, quality, background } = {}) {
   if (background === 'transparent') lines.push('Background: transparent, a cut-out with no backdrop.')
   else if (background === 'opaque') lines.push('Background: opaque, filled to the edges.')
   lines.push('', 'The image:', String(prompt ?? ''))
+  return lines.join('\n')
+}
+
+/** Ask for an edit using the verified copy inside this run's scratch folder. */
+export function editPrompt({ prompt, size, quality, background, file } = {}) {
+  const lines = [
+    `Use your image generation tool exactly once to edit the picture saved as ./${file} in the current folder (it is also attached): use it as the reference image and change only what is described below. Do not run commands, read or write any other file, or browse; do not ask questions; do not describe the image afterwards.`,
+  ]
+  if (SIZE_WORDS[size]) lines.push(`Size: ${SIZE_WORDS[size]}.`)
+  if (QUALITY_WORDS[quality]) lines.push(`Detail: ${QUALITY_WORDS[quality]}.`)
+  if (background === 'transparent') lines.push('Background: transparent, a cut-out with no backdrop.')
+  else if (background === 'opaque') lines.push('Background: opaque, filled to the edges.')
+  lines.push('', 'The change:', String(prompt ?? ''))
   return lines.join('\n')
 }
 
@@ -620,10 +681,10 @@ class ImageRun extends AgentRun {
 
 /** The refusal of a Codex that does not take the lockdown, for a caller that knew beforehand. */
 export const unsupported = () => imageRefusal(UNAVAILABLE, CHECK_TEXT.unsupported)
-const notIsolated = () => imageRefusal(UNAVAILABLE, 'The Codex image run could not be isolated, so the image was not started. Update Automagik, or add an OpenAI key.')
+const notIsolated = () => imageRefusal(UNAVAILABLE, 'The Codex image run could not be isolated, so the image was not started. Update Automagik and try again.')
 const CHECK_TEXT = {
-  unsupported: 'Codex here offers tools the image run could not turn off, so the image was not started. Update Automagik, or add an OpenAI key.',
-  config: 'Codex could not load its own configuration, so the image was not started. Fix Codex\'s config file, or add an OpenAI key.',
+  unsupported: 'Codex here offers tools the image run could not turn off, so the image was not started. Update Automagik and try again.',
+  config: 'Codex could not load its own configuration, so the image was not started. Fix Codex\'s config file and try again.',
   unreadable: 'Codex could not be checked for safe drawing, so the image was not started. Try again.',
 }
 
@@ -632,21 +693,21 @@ const CHECK_TEXT = {
  * may throw when its connector is not installed yet. Resolves { base64, mimeType }; rejects with
  * an `imageRefusal` (signed out, usage limit, timeout, stopped, failed, refused, unavailable).
  * `log` is told, in one line with no private content, why a check stopped the draw.
- * @param {{ spawn: () => { command: string, args?: string[], env?: Record<string, string> }, prompt: string, size?: string, quality?: string, background?: string, signal?: AbortSignal, timeoutMs?: number, checkTimeoutMs?: number, name?: string, scratch?: () => Promise<string>, Run?: typeof AgentRun, listServers?: typeof mcpServerNames, log?: (line: string) => void }} request
+ * @param {{ spawn: () => { command: string, args?: string[], env?: Record<string, string> }, prompt: string, size?: string, quality?: string, background?: string, input?: { data: Uint8Array, mimeType: string }, signal?: AbortSignal, timeoutMs?: number, checkTimeoutMs?: number, name?: string, scratch?: () => Promise<string>, Run?: typeof AgentRun, listServers?: typeof mcpServerNames, log?: (line: string) => void }} request
  */
-export async function drawImage({ spawn, prompt, size, quality, background, signal, timeoutMs = IMAGE_TIMEOUT_MS, checkTimeoutMs = MCP_LIST_TIMEOUT_MS, name = 'Codex', scratch = async () => realpath(await mkdtemp(join(tmpdir(), 'automagik-image-'))), Run = ImageRun, listServers = mcpServerNames, log }) {
+export async function drawImage({ spawn, prompt, size, quality, background, signal, timeoutMs = IMAGE_TIMEOUT_MS, checkTimeoutMs = MCP_LIST_TIMEOUT_MS, name = 'Codex', scratch = async () => realpath(await mkdtemp(join(tmpdir(), 'automagik-image-'))), Run = ImageRun, listServers = mcpServerNames, log, input }) {
   if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
   // The draw holds the event loop from start to cleanup: the run lets go of it once a turn ends,
   // and its close and cancel guards must not be cut short by a process with nothing else alive.
   const keepAlive = setInterval(() => {}, 1 << 30)
   try {
-    return await draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log })
+    return await draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log, input })
   } finally {
     clearInterval(keepAlive)
   }
 }
 
-async function draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log }) {
+async function draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log, input }) {
   let launch
   try {
     launch = spawn()
@@ -656,12 +717,24 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
   // The lockdown is checked against this Codex before anything of it starts, in the folder
   // the session would get: no session and no model request exist when a check does not hold.
   const dir = await scratch()
-  let profile = imageProfile()
+  const file = input ? `input.${{ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[input.mimeType]}` : undefined
+  let profile = imageProfileFor(launch.profileModes)
+  if (typeof launch.env?.CODEX_HOME !== 'string') profile = undefined
+  let reason = 'profile unavailable'
+  let fingerprint
+  const homeHash = () => {
+    try { return createHash('sha256').update(readFileSync(join(launch.env.CODEX_HOME, 'config.toml'))).digest('hex') } catch { return undefined }
+  }
+  const stable = () => {
+    try {
+      return fingerprint !== undefined && homeHash() === fingerprint
+        && lstatSync(join(dir, '.codex'), { throwIfNoEntry: false }) === undefined
+    } catch { return false }
+  }
   let setup
   let listed = false
   try {
-    await mkdir(join(dir, '.codex'), { mode: 0o700 })
-    await writeFile(join(dir, '.codex', 'config.toml'), profile.config, { mode: 0o600, flag: 'wx' })
+    if (input) await writeFile(join(dir, file), input.data, { flag: 'wx', mode: 0o400 })
   } catch {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
     if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
@@ -669,13 +742,17 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
     throw imageRefusal(UNAVAILABLE, 'The scratch folder could not be prepared, so the image was not started. Try again.')
   }
   try {
-    const check = () => imageSetup(launch, { timeoutMs: checkTimeoutMs, cwd: dir, signal, listServers: async (...args) => { const names = await listServers(...args); listed = true; return names } })
+    const check = () => imageSetup(launch, { profile, timeoutMs: checkTimeoutMs, cwd: dir, signal, listServers: async (...args) => { const names = await listServers(...args); listed = true; return names } })
+    if (profile) {
+      fingerprint = homeHash()
+      if (fingerprint === undefined) { profile = undefined; reason = 'profile unavailable' }
+    }
     try {
       setup = await check()
     } catch (error) {
-      if (signal?.aborted || error?.stopped || error?.kind !== 'config') throw error
+      if (signal?.aborted || error?.stopped || !profile || !['config', 'profile'].includes(error?.kind)) throw error
       if (!ALLOW_IMAGE_READ_ONLY_FALLBACK) throw notIsolated()
-      await rm(join(dir, '.codex'), { recursive: true, force: true })
+      reason = error.kind === 'config' ? 'profile config refused' : 'profile wider than requested'
       profile = undefined
       listed = false
       setup = await check()
@@ -740,7 +817,7 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
     timer = setTimeout(() => wake(), timeoutMs)
     timer.unref?.()
     let isolated = false
-    const started = run.start().then(async () => { isolated = await imageMode(run, profile, log, modeSignal) })
+    const started = run.start().then(async () => { isolated = await imageMode(run, profile, log, modeSignal, { reason, stable }) })
     started.catch(() => {})
     try {
       await Promise.race([started, settled.then(() => { throw undefined })])
@@ -751,9 +828,17 @@ async function draw({ spawn, prompt, size, quality, background, signal, timeoutM
       if (error?.code === UNAVAILABLE) throw error
       throw imageRefusal(UNAVAILABLE, `Codex did not start: ${String(error?.message ?? error).slice(0, 200)}`)
     }
+    if (input && EDIT_NEEDS_ISOLATION && isolated !== true) {
+      throw Object.assign(imageRefusal(UNAVAILABLE, 'Codex can edit a picture only inside its locked image run, which could not be set up on this computer, so the picture was not edited.'), { reason: 'edit-not-isolated' })
+    }
     let said = ''
     let ended
-    const prompting = run.prompt([{ type: 'text', text: imagePrompt({ prompt, size, quality, background }) }])
+    const blocks = input ? [
+      ...(run.init?.agentCapabilities?.promptCapabilities?.image === true
+        ? [{ type: 'image', data: Buffer.from(input.data).toString('base64'), mimeType: input.mimeType }] : []),
+      { type: 'text', text: editPrompt({ prompt, size, quality, background, file }) },
+    ] : [{ type: 'text', text: imagePrompt({ prompt, size, quality, background }) }]
+    const prompting = run.prompt(blocks)
     // The agent's words are read only for a usage-limit notice; they are kept nowhere.
     const reading = (async () => {
       for (;;) {

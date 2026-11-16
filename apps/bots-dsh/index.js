@@ -51,6 +51,7 @@ import * as images from './src/host/images.js'
 import * as avatarLibrary from './src/host/avatar-library.js'
 import * as browser from './src/host/browser.js'
 import * as imagegen from './src/host/imagegen.js'
+import * as sharedUploads from './src/host/shared-uploads.js'
 import * as browserPlugins from './src/host/browser-plugins.js'
 import * as computer from './src/host/computer/index.js'
 import * as secrets from './src/host/secrets.js'
@@ -64,10 +65,12 @@ import * as dshUpdate from './src/host/dsh-update.js'
 import * as thinking from './src/host/thinking.js'
 import * as fallback from './src/host/fallback.js'
 import * as channel from './src/host/channel.js'
+import * as codeSide from './src/host/code-side.js'
 import * as agentSpace from './src/host/agent-space.js'
 import * as feed from './src/host/feed.js'
 import * as appManifest from './src/host/app-manifest.js'
 import * as pocketChat from './src/host/pocket-chat.js'
+import * as seatChat from './src/host/seat-chat.js'
 import * as hermesRemote from './src/host/hermes-remote.js'
 import * as officeSkills from './src/host/office-skills.js'
 import * as goalSkills from './src/host/goal-skills.js'
@@ -86,9 +89,9 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
   turns, steer, handoffs, requests, delivery, roster, folders, agents, toolDeny, privateBots, prompt, timeContext,
-  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, images, imagegen,
+  tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
-  update, dshUpdate, thinking, agentSpace, feed, channel, appManifest, pocketChat, hermesRemote, officeSkills, goalSkills,
+  update, dshUpdate, thinking, agentSpace, feed, codeSide, channel, appManifest, pocketChat, seatChat, hermesRemote, officeSkills, goalSkills,
 ]
 
 // Other Omni plugins inject the runtime as `omniTeam` and add to it through rt.hooks
@@ -97,6 +100,10 @@ const MODULES = [
 export function apply(ctx, config = {}) {
   const rt = createRuntime(ctx, config)
   ctx.provide('omniTeam', rt)
+  // The plugin's own scope owns the team's end: when this plugin stops (a reload, the app
+  // closing, the host unloading), every module lets go — the Code side's streams send their
+  // CLOSE to herdr-core there.
+  ctx.effect(() => () => rt.dispose(), 'omni-ui: stop the team modules')
 }
 
 // A team kept elsewhere before (config.importHome, e.g. ~/.dsh/bot) is copied in once,
@@ -126,7 +133,19 @@ export function createRuntime(ctx, config = {}) {
       mainRole: config.mainRole ?? 'Orchestrator',
     },
   }
-  for (const module of MODULES) module.install(rt)
+  const disposers = []
+  for (const module of MODULES) {
+    const dispose = module.install(rt)
+    if (typeof dispose === 'function') disposers.push(dispose)
+  }
+  let disposed = false
+  rt.dispose = () => {
+    if (disposed) return
+    disposed = true
+    for (const dispose of disposers.reverse()) {
+      try { dispose() } catch (error) { rt.warn?.('omni-ui: a module did not stop cleanly: %s', error?.message ?? error) }
+    }
+  }
   // After every module: cordis runs prepended listeners newest first, so Auto's judge decides an approval before Pocket
   // (pocket-chat.js) or approvals.js could show it as the person's to answer (auto-judge.js installAhead).
   autoJudge.installAhead(rt)

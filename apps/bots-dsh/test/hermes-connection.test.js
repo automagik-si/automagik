@@ -4,13 +4,28 @@ import { test } from 'node:test'
 import { mkdtemp, writeFile, readFile, rm, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { prepareHermesConnection, refreshHermesProfiles } from '../src/host/hermes-connection.js'
+import { ATTACHED_CONTEXT_WINDOW, attachedModelOf, prepareHermesConnection, refreshHermesProfiles } from '../src/host/hermes-connection.js'
 import { install } from '../src/host/hermes-remote.js'
 import { HermesTransport, RemoteChat } from '../src/host/hermes-transport.js'
 import { fakeContext } from './fake-ctx.js'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 
 const deadlines = { start: 300, control: 100, cancel: 10 }
+
+test('the attached model row always carries a positive contextWindow', () => {
+  const plain = attachedModelOf({ id: 'default', model: 'gpt-6-astra', provider: 'openai-codex' })
+  assert.equal(plain.id, 'attach')
+  assert.equal(plain.name, 'gpt-6-astra (openai-codex)')
+  assert.equal(plain.contextWindow, ATTACHED_CONTEXT_WINDOW)
+  assert.ok(Number.isInteger(plain.contextWindow) && plain.contextWindow > 0)
+  // A serve that reports the profile model's own capacity wins over the floor.
+  assert.equal(attachedModelOf({ model: 'gpt-6-astra', provider: 'openai-codex', contextWindow: 400_000 }).contextWindow, 400_000)
+  assert.equal(attachedModelOf({ model: 'gpt-6-astra', provider: 'openai-codex', context_window: 800_000 }).contextWindow, 800_000)
+  // A broken value is never forwarded: the row still has a usable window.
+  for (const broken of [0, -1, 1.5, '400000', null]) {
+    assert.equal(attachedModelOf({ model: 'gpt-6-astra', provider: 'openai-codex', contextWindow: broken }).contextWindow, ATTACHED_CONTEXT_WINDOW)
+  }
+})
 async function until(predicate, what) {
   const deadline = Date.now() + 3000
   while (!predicate()) {
@@ -1282,4 +1297,219 @@ test('one recovery action clears only a carried-over turn, leaving a current-con
   const currentView = view.sessions.find(session => session.sessionId === 'current')
   assert.equal(currentView?.pendingSubmit, true)
   assert.ok(h.snapshots.length >= 1, 'the cleared old state is saved')
+})
+
+// Include every field that recovery must remove, plus a field it must keep.
+const recoveryTurn = (overrides = {}) => ({
+  createKey: 'sample', storedSessionId: 'sample-stored', runtimeSessionId: 'sample-runtime',
+  pendingSubmit: true, uncertain: true, epoch: 'epoch-a', lastSeq: 12, subscriptionId: 'sample-sub',
+  ...overrides,
+})
+const clearedRecoveryTurn = { createKey: 'sample', pendingSubmit: false, uncertain: false }
+function assertConnectOnlyRecoveryProbe(wire) {
+  assert.equal(wire.closed, true, 'the recovery probe releases its wire')
+  assert.deepEqual(wire.sessionIdentities, [], 'token recovery never looks up Bot Chat')
+  assert.deepEqual(wire.sent, [], 'token recovery never prepares, activates or replays a session')
+  assert.equal(wire.modelsCalled, false)
+}
+async function checkTokenRecoveryEpochs(h, f, paired = false) {
+  const key = paired ? 'bot:bot1' : 'sample'
+  for (const age of ['current', 'older', 'missing']) {
+    const turn = recoveryTurn({ ...(paired ? { canonicalBot: true } : {}), epoch: age === 'older' ? 'sample-old-epoch' : 'epoch-a' })
+    if (age === 'missing') { delete turn.epoch; turn.pendingSubmit = false }
+    const idle = recoveryTurn({ epoch: 'sample-old-epoch', pendingSubmit: false, uncertain: false })
+    const unidentified = recoveryTurn({ epoch: 'sample-old-epoch' })
+    delete unidentified.storedSessionId
+    h.rt.state.hermesSessions = { [key]: turn, idle, unidentified }
+    const before = structuredClone(h.rt.state), saves = h.snapshots.length, wires = h.wires.length
+    const expected = structuredClone(before)
+    if (age === 'older') expected.hermesSessions[key] = { ...clearedRecoveryTurn, ...(paired ? { canonicalBot: true } : {}) }
+    const view = await h.endpoints.get('hermes-remote-recover')()
+    assert.deepEqual(h.rt.state, expected, `${age}: only a recorded older epoch is cleared`)
+    assert.equal(h.snapshots.length, saves + (age === 'older' ? 1 : 0), `${age}: save only a changed identity`)
+    if (age === 'older') assert.deepEqual(JSON.parse(h.snapshots.at(-1)), expected)
+    assert.equal(view.sessions.find(session => session.sessionId === key)?.pendingSubmit, age === 'current')
+    assert.equal(h.wires.length, wires + 1)
+    assert.equal(h.wires.at(-1).epoch, 'epoch-a')
+    assert.equal(h.wires.at(-1).options.credential, f.credential, 'the probe uses the saved token')
+    assertConnectOnlyRecoveryProbe(h.wires.at(-1))
+    assert.equal(h.secretCalls.length, 0, 'recovery never rewrites the credential')
+  }
+}
+
+test('recovery token: keep current and missing epochs, clear only an older recorded epoch without Bot Chat lookup', async t => {
+  const f = dashboard(), h = runtime(t, f, { onConnect: wire => { wire.epoch = 'epoch-a' } })
+  savedToken(h, f)
+  await checkTokenRecoveryEpochs(h, f)
+})
+
+test('recovery paired token: preserve canonical Bot current and missing epochs and clear its older epoch', async t => {
+  const f = dashboard(), h = runtime(t, f, { onConnect: wire => { wire.epoch = 'epoch-a' } })
+  savedToken(h, f)
+  h.rt.state.prefs.hermesRemote.pairedBotId = 'bot1'
+  h.rt.state.bots = { bot1: { id: 'bot1', name: 'Bot', model: 'hermes-remote/sample:model' } }
+  await checkTokenRecoveryEpochs(h, f, true)
+})
+
+test('recovery legacy raw token: keep current and missing epochs and clear only an older recorded epoch', async t => {
+  const f = dashboard(), h = runtime(t, f, { onConnect: wire => { wire.epoch = 'epoch-a' } })
+  h.secrets.set('SAMPLE', f.credential)
+  h.rt.state.prefs.hermesRemote = {
+    enabled: true, address: f.address, profile: 'sample-profile', credentialRef: 'SAMPLE', models: [],
+  }
+  assert.equal(Object.hasOwn(h.rt.state.prefs.hermesRemote, 'setupVersion'), false)
+  await checkTokenRecoveryEpochs(h, f)
+})
+
+test('recovery attached: keep current-epoch non-Bot-Chat and Bot Chat turns, clear the older non-Bot-Chat turn once', async t => {
+  const f = dashboard(), profiles = [{ id: 'default', name: 'Bot', model: 'sample/model', provider: 'sample', running: true }]
+  const h = runtime(t, f, {
+    onConnect: wire => { wire.epoch = 'epoch-a' },
+    startSsh: async () => ({
+      attached: true, address: 'http://127.0.0.1:23456', credential: f.credential,
+      authHeaders: { Authorization: `Bearer ${f.credential}` }, profiles, defaultProfile: 'default', close: async () => {},
+    }),
+  })
+  // Fully normalized so opening the probe cannot cause a migration save or clear.
+  h.secrets.set('SAMPLE', JSON.stringify({ kind: 'attach', credential: f.credential }))
+  h.rt.state.prefs.hermesRemote = {
+    enabled: true, mode: 'ssh', attached: true, ssh: { host: 'example.invalid' }, address: '',
+    profile: 'default', setupVersion: 1, credentialRef: 'SAMPLE', profiles, models: [attachedModelOf(profiles[0])],
+  }
+  h.rt.state.hermesSessions = {
+    current: recoveryTurn({ storedSessionId: 'sample-current' }),
+    older: recoveryTurn({ epoch: 'sample-old-epoch' }),
+    bot: recoveryTurn({ canonicalBot: true, storedSessionId: 'stored-session', epoch: 'sample-old-epoch' }),
+  }
+  const expected = structuredClone(h.rt.state)
+  expected.hermesSessions.older = { ...clearedRecoveryTurn }
+  await h.endpoints.get('hermes-remote-recover')()
+  assert.deepEqual(h.rt.state, expected, 'both protections retain every field; only the older private turn loses its fields')
+  assert.equal(h.snapshots.length, 1)
+  assert.deepEqual(JSON.parse(h.snapshots[0]), expected)
+  await h.endpoints.get('hermes-remote-recover')()
+  assert.deepEqual(h.rt.state, expected)
+  assert.equal(h.snapshots.length, 1, 'an unchanged recovery does not save again')
+  for (const wire of h.wires) {
+    assert.equal(wire.closed, true)
+    assert.equal(wire.sessionIdentities.length, 1)
+    assert.equal(wire.sessionIdentities[0].canonicalBot, true)
+    assert.ok(wire.sent.some(call => call.method === 'session.detach'))
+  }
+  assert.deepEqual(h.secretCalls, [1, 2].map(() => ({
+    endpoint: 'secret-set', name: 'SAMPLE', value: JSON.stringify({ kind: 'attach', credential: f.credential }),
+    scope: [], purpose: 'Remote Hermes attached serve token',
+  })), 'each SSH probe refreshes its credential separately from recovery state saves')
+})
+
+test('recovery token without a probe epoch refuses and leaves every identity and save untouched', async t => {
+  const f = dashboard(), h = runtime(t, f)
+  savedToken(h, f)
+  h.rt.state.hermesSessions = { sample: recoveryTurn({ epoch: 'sample-old-epoch' }) }
+  const before = structuredClone(h.rt.state)
+  await assert.rejects(h.endpoints.get('hermes-remote-recover')(), {
+    code: 'bot/hermes-pairing',
+    message: 'The current Hermes session could not be identified; reconcile in Hermes before clearing old turns.',
+  })
+  assert.deepEqual(h.rt.state, before)
+  assert.equal(h.snapshots.length, 0)
+  assert.equal(h.wires.length, 1)
+  assertConnectOnlyRecoveryProbe(h.wires[0])
+})
+
+test('recovery probe connect failure leaves every identity and save untouched', async t => {
+  const f = dashboard(), h = runtime(t, f, { onConnect: () => { throw Error('Sample connect failure') } })
+  savedToken(h, f)
+  h.rt.state.hermesSessions = { sample: recoveryTurn({ epoch: 'sample-old-epoch' }) }
+  const before = structuredClone(h.rt.state)
+  await assert.rejects(h.endpoints.get('hermes-remote-recover')())
+  assert.deepEqual(h.rt.state, before)
+  assert.equal(h.snapshots.length, 0)
+  assert.equal(h.wires.length, 1)
+  assertConnectOnlyRecoveryProbe(h.wires[0])
+})
+
+test('recovery mutation queue: wait for an in-flight connect before opening a probe or clearing a turn (#1345)', async t => {
+  const f = dashboard(), gate = barrier()
+  let connects = 0
+  const h = runtime(t, f, { deadlines: { start: 3000, control: 1000, cancel: 100 }, onConnect: async wire => {
+    wire.epoch = 'epoch-a'
+    if (++connects === 1) { gate.reach(); await gate.held }
+  } })
+  savedToken(h, f)
+  h.rt.state.hermesSessions = { sample: recoveryTurn({ epoch: 'sample-old-epoch' }) }
+  const before = structuredClone(h.rt.state.hermesSessions)
+  const connecting = h.endpoints.get('hermes-remote-connect')({})
+  await gate.entered
+  const recovering = h.endpoints.get('hermes-remote-recover')()
+  let recovered = false
+  void recovering.then(() => { recovered = true }, () => {})
+  try {
+    for (let i = 0; i < 5; i++) await eventTurn()
+    assert.equal(h.wires.length, 1, 'the queued recovery has not opened a second wire')
+    assert.equal(recovered, false)
+    assert.deepEqual(h.rt.state.hermesSessions, before)
+    assert.equal(h.snapshots.length, 0)
+  } finally { gate.release(); await Promise.allSettled([connecting, recovering]) }
+  await connecting; await recovering
+  assert.equal(h.wires.length, 2)
+  assert.deepEqual(h.rt.state.hermesSessions, { sample: clearedRecoveryTurn })
+  assert.equal(h.snapshots.length, 2, 'one connect save followed by one recovery save')
+  assert.deepEqual(JSON.parse(h.snapshots[0]).hermesSessions, before)
+  assert.deepEqual(JSON.parse(h.snapshots[1]).hermesSessions, { sample: clearedRecoveryTurn })
+  assertConnectOnlyRecoveryProbe(h.wires[1])
+})
+
+test('recovery late cancellation: reject during the probe and never clear or save after it drains', async t => {
+  const f = dashboard(), gate = barrier(), controller = new AbortController()
+  let probeReturned = false
+  const h = runtime(t, f, { deadlines: { start: 3000, control: 1000, cancel: 100 }, onConnect: async wire => {
+    wire.epoch = 'epoch-a'; gate.reach(); await gate.held; probeReturned = true
+  } })
+  savedToken(h, f)
+  h.rt.state.prefs.hermesRemote.models = [{ id: 'sample:model', name: 'Bot' }]
+  h.rt.state.hermesSessions = { sample: recoveryTurn({ epoch: 'sample-old-epoch' }) }
+  const before = structuredClone(h.rt.state)
+  const recovering = h.endpoints.get('hermes-remote-recover')({}, controller.signal)
+  const rejected = assert.rejects(recovering, { code: 'bot/hermes-timeout' })
+  await gate.entered
+  try {
+    controller.abort()
+    await rejected
+    assert.equal(probeReturned, false, 'the caller rejects while connect is still blocked')
+    assert.deepEqual(h.rt.state, before)
+    assert.equal(h.snapshots.length, 0)
+  } finally { gate.release(); await Promise.allSettled([recovering, rejected]) }
+  // Queue behind the cancelled action to drain late work without another wire or save.
+  await h.endpoints.get('hermes-remote-connect')({ cached: true })
+  for (let i = 0; i < 5; i++) await eventTurn()
+  assert.equal(probeReturned, true)
+  assert.deepEqual(h.rt.state, before)
+  assert.equal(h.snapshots.length, 0)
+  assert.equal(h.wires.length, 1)
+  assertConnectOnlyRecoveryProbe(h.wires[0])
+})
+
+test('recovery chat becomes live during the probe: refuse busy and leave all identities and saves untouched', async t => {
+  const f = dashboard(), gate = barrier()
+  const h = runtime(t, f, { deadlines: { start: 3000, control: 1000, cancel: 100 }, onConnect: async wire => {
+    wire.epoch = 'epoch-a'; gate.reach(); await gate.held
+  } })
+  savedToken(h, f)
+  h.rt.state.hermesSessions = { sample: recoveryTurn({ epoch: 'sample-old-epoch' }) }
+  const before = structuredClone(h.rt.state)
+  assert.equal(h.rt.hermesRemote.adapter.live.size, 0)
+  const recovering = h.endpoints.get('hermes-remote-recover')()
+  const rejected = assert.rejects(recovering, { code: 'bot/hermes-busy' })
+  await gate.entered
+  // Model an adapter admission becoming visible after the initial busy check.
+  h.rt.hermesRemote.adapter.live.set('sample', { run: { stop: async () => {} } })
+  try {
+    gate.release(); await rejected
+    for (let i = 0; i < 5; i++) await eventTurn()
+    assert.deepEqual(h.rt.state, before)
+    assert.equal(h.snapshots.length, 0)
+    assert.equal(h.wires.length, 1)
+    assertConnectOnlyRecoveryProbe(h.wires[0])
+  } finally { gate.release(); h.rt.hermesRemote.adapter.live.delete('sample') }
 })

@@ -123,7 +123,7 @@ for (const [name, codex] of [
     assert.equal((await drawing.handle('companion')).value.generate, null)
     const reply = await drawing.handle('companion-generate', { description: 'a fox' })
     assert.equal(reply.error.code, 'omni-ai/refused')
-    assert.match(reply.error.message, /Sign in to Codex or add an OpenAI key/)
+    assert.match(reply.error.message, /Sign in to Codex first/)
     assert.equal(reads.includes(CODEX_RECORD), false)
     assert.equal(drawing.requests.length, 0)
     assert.deepEqual(codex?.calls ?? [], [])
@@ -216,7 +216,7 @@ test('a ChatGPT plan draws through the Codex images endpoint; a key through Open
 
 test('drawing is refused without a source, with a stale sign-in, or when the service says no', async () => {
   const none = host()
-  assert.match((await none.handle('companion-generate', { description: 'a fox' })).error.message, /Sign in to Codex or add an OpenAI key/)
+  assert.match((await none.handle('companion-generate', { description: 'a fox' })).error.message, /Sign in to Codex first/)
   assert.equal(none.requests.length, 0)
   const stale = host({ recordValues: grant(1_000), codex: codexOf({ ready: false, authScope: 'shared' }) })
   assert.match((await stale.handle('companion-generate', { description: 'a fox' })).error.message, /has run out/)

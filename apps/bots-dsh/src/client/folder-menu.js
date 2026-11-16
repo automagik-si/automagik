@@ -1,8 +1,9 @@
-import { createElement as h, Fragment, useState } from 'react'
+import { createElement as h, Fragment, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, FolderIcon, PencilIcon } from './icons.js'
 import { Caret, useAnchoredMenu } from './model-menu.js'
 import { t } from './i18n.js'
+import { FOLDER_ACCESS_NOTE } from '../shared/folder-access.js'
 
 // The last segment of a host path, Windows or POSIX; a root keeps its own spelling.
 export const folderName = path => String(path).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(path)
@@ -15,6 +16,13 @@ const Tick = ({ on }) => h('span', { className: 'bt-model-tick', 'aria-hidden': 
 // itself, which has no default.
 export function FolderMenu({ value, group = false, team = false, actions, run, onPick, wide = false, disabled = false }) {
   const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu()
+  const [warning, setWarning] = useState(null)
+  useEffect(() => {
+    let active = true
+    if (group && !value) { setWarning(null); return }
+    Promise.resolve(actions.folderProbe?.(value)).then(note => { if (active) setWarning(note) }, () => { if (active) setWarning(null) })
+    return () => { active = false }
+  }, [value, group, actions.folderProbe])
   const [info, setInfo] = useState(null)
   const [view, setView] = useState('list')
   const [draft, setDraft] = useState('')
@@ -90,6 +98,7 @@ export function FolderMenu({ value, group = false, team = false, actions, run, o
       h('span', { className: 'bt-model-name' }, value ? folderName(value) : fallback),
       value ? h('span', { className: 'bt-model-provider' }, value) : null),
     h(Caret)),
+    warning ? h('div', { className: 'bt-note', role: 'status' }, t(FOLDER_ACCESS_NOTE, { folder: JSON.stringify(warning.folder) })) : null,
     shownPlace ? createPortal(h('div', { ref: menu, className: `bt-menu bt-model-menu bt-folder-menu${shownPlace.bottom !== undefined ? ' bt-menu-up' : ''}`, role: 'menu', 'aria-label': team ? t('Team workspace') : t('Working folder'), style: shownPlace, 'data-leaving': leaving || undefined },
       shownView,
       problem ? h('div', { className: 'bt-folder-error', role: 'alert' }, problem) : null), document.body) : null)

@@ -39,6 +39,16 @@ const refOf = route => (typeof route?.provider === 'string' && route.provider !=
   ? `${route.provider}/${route.model}`
   : undefined)
 
+// The attached serve answers on its one row whatever ref the request names (models.js
+// applyModel keeps a carried chat's route; remote-chat-adapter.js serves rows[0]). An
+// answer there belongs to the Bot's pick, the row id, not to the carried-over ref: recording
+// it under the old ref would keep the switch unconfirmed, label the answer with a model the
+// Bot is no longer on, and let a later switch failure move the pick back.
+const ATTACHED_REF = 'hermes-remote/attach'
+const answeredRef = (bot, ref) => bot?.model === ATTACHED_REF && typeof ref === 'string' && ref.startsWith('hermes-remote/')
+  ? ATTACHED_REF
+  : ref
+
 /** Whether a Bot's last explicit model change has not been confirmed by an answer yet. */
 export const switchPending = bot => typeof bot?.previousModel === 'string' && typeof bot?.model === 'string' && bot.model !== bot.previousModel
 
@@ -102,14 +112,14 @@ export function install(rt) {
     if (bot === undefined) return
     switch (event?.type) {
       case 'request/header': {
-        const ref = refOf(event.data?.header?.config)
+        const ref = answeredRef(bot, refOf(event.data?.header?.config))
         if (ref !== undefined) stateOf(botId).requestStarted = { ref, at: event.time ?? Date.now() }
         break
       }
       case 'assistant/message': {
         // A stopped answer is part of one, not the route's answer.
         if (event.data?.interrupted === true) break
-        const ref = refOf(event.data?.message?.source)
+        const ref = answeredRef(bot, refOf(event.data?.message?.source))
         if (ref === undefined) break
         const entry = stateOf(botId)
         entry.lastAnswer = { ref, at: event.time ?? Date.now() }

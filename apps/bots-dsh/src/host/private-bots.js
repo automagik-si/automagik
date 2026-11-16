@@ -1,8 +1,10 @@
 // Private Bots. A private Bot reads the team like any Bot, but no other Bot reads it, and
-// what it sends out waits for the user. DSH does not fence reads, so this closes the
+// ordinary outbound messages wait for the user; picture forwards need the Main Bot.
+// DSH does not fence reads, so this closes the
 // tools Omni owns and checks the paths that the file tools and the shell are given;
 // a shell can still reach any file the account can (see docs/plans).
 import { join, resolve } from 'node:path'
+import { install as installPrivateForward } from './private-forward.js'
 import { within } from './folders.js'
 import { refusal } from './refusal.js'
 import { unquote } from './text.js'
@@ -26,6 +28,7 @@ const asShell = (path) => {
 
 export function install(rt) {
   const { ctx, state } = rt
+  installPrivateForward(rt)
 
   const isPrivate = id => rt.botOf(id)?.private === true
   const privateBots = () => Object.values(state.bots).filter(bot => bot.private === true)
@@ -167,8 +170,8 @@ export function install(rt) {
   // The Bot a tool argument names, as the tools and the memory scopes read it.
   const botNamed = ref => (typeof ref === 'string' && ref !== '' ? rt.findBot(ref) ?? rt.findBot(unquote(ref)) : undefined)
 
-  // Tools between Bots. Other Bots may not reach a private Bot; what a private Bot sends
-  // to them is the user's to allow. A private Bot is no member of a group, which the
+  // Tools between Bots. A deliberate picture forward can reach a private Bot; other
+  // messages cannot. Ordinary outbound messages are the user's to allow. A private Bot is no member of a group, which the
   // roster checks as the members are written.
   async function guardTeam(exec, self) {
     const args = exec.arguments ?? {}
@@ -179,7 +182,10 @@ export function install(rt) {
     switch (exec.name) {
       case 'message_bot': {
         const bot = target(args.to)
-        if (bot) throw new Error(`Not sent: ${bot.name} is a private Bot, and other Bots cannot message it. Ask the user to pass it on.`)
+        // Only an explicit picture forward may reach a private Bot. Its text still
+        // needs the person's approval when the sender is private.
+        const forwarding = Array.isArray(args.images) && args.images.length > 0
+        if (bot && !forwarding) throw new Error(`Not sent: ${bot.name} is a private Bot, and other Bots cannot message it. Ask the user to pass it on.`)
         const to = botNamed(args.to)
         if (isPrivate(self) && to !== undefined) await approve(exec, { en: `Let ${rt.botOf(self).name} send this to ${to.name}?\n\n${String(args.message ?? '')}`, zh: `允许 ${rt.botOf(self).name} 把下面的内容发给 ${to.name} 吗？\n\n${String(args.message ?? '')}` })
         return
