@@ -115,7 +115,7 @@ conn.on('data', (chunk) => {
     const line = buf.slice(0, nl); buf = buf.slice(nl + 1)
     if (stage === 'name') {
       stage = 'proof'
-      const file = attack === 'wrong-name' ? `${line}x` : `${proofs}/${line}`
+      const file = `${proofs}/${line}${attack === 'wrong-name' ? 'x' : ''}`
       if (attack === 'silent') continue
       if (attack === 'late') { setTimeout(() => { writeFileSync(file, ''); conn.write('done\n') }, 4000); continue }
       if (attack === 'symlink') symlinkSync('/etc/hostname', file)
@@ -158,18 +158,18 @@ in the process's groups. The outsider runs without it. `A` and `B` are member na
 | 5 | dsh | same, `sh -c 'ls /proc'` | its own processes only: no host pids |
 | 6 | dsh | same, `sh -c 'pwd; stat -c "%u %a" "$HOME" "$XDG_CONFIG_HOME" "$TMPDIR"'` | `$W/alice`, then `200000 700` three times |
 | 7 | dsh2 (in dshsock) | `setpriv --reuid dsh2 --regid dsh2 --init-groups -- node $B/client.mjs $S $P alice $W/alice none sh -c 'id -u'` | `refused: the proof is owned by uid $DSH2_UID`, exit 125 |
-| 8 | outsider | `setpriv --reuid outsider --regid outsider -- node $B/client.mjs $S $P alice $W/alice none sh -c 'id -u'` | `client: EACCES` (or `EPERM`), exit 125 |
+| 8 | outsider | `setpriv --reuid outsider --regid outsider --clear-groups -- node $B/client.mjs $S $P alice $W/alice none sh -c 'id -u'` | `client: EACCES` (or `EPERM`), exit 125 |
 | 9 | dsh | row 2, attack `symlink` | `refused: the proof is not a regular file`, 125 |
 | 10 | dsh2 | row 2, attack `hardlink:$B/hard-target` (a file dsh owns) | link denied, or `refused: the proof has more than one link`, 125 |
 | 11 | dsh | row 2, attack `wrong-name` | `refused: no proof file`, 125 |
 | 12 | dsh | row 2, attack `silent` | `refused: no proof in time`, 125 |
 | 13 | dsh | row 2, attack `late` | `refused: no proof in time`, 125 |
 | 14 | dsh | row 2, attack `nonempty` | `refused: the proof is not empty`, 125 |
-| 15 | outsider | `ls $B/proofs; touch $B/proofs/x` | both denied |
+| 15 | outsider | `setpriv --reuid outsider --regid outsider --clear-groups -- ls "$P"; setpriv --reuid outsider --regid outsider --clear-groups -- touch "$P/x"` | both denied |
 | 16 | dsh2 | `ls $B/proofs` | denied (group has no read) |
-| 17 | dsh | `echo canary > $B/owner-canary; chmod 600 $B/owner-canary`, then row 2 with `sh -c 'cat $B/owner-canary'` | `Permission denied`; dsh reads it itself |
+| 17 | root, then dsh | `install -m 0600 -o dsh -g dsh /dev/null "$B/owner-canary"; printf 'canary\n' > "$B/owner-canary"`, then row 2 with `sh -c 'cat $B/owner-canary'` | `Permission denied` for the member; dsh reads it itself |
 | 18 | dsh | row 2 as A plants `$HOME/.npmrc`, then as B `sh -c 'cat $B/homes/alice/.npmrc'` | `Permission denied`, even with the path known |
-| 19 | dsh | row 2, `sh -c 'p=$(cut -d: -f3 /proc/self/cgroup); cat /sys/fs/cgroup$p/memory.max /sys/fs/cgroup$p/tasks.max'` | `536870912` and `128` |
+| 19 | dsh | row 2, `sh -c 'p=$(cut -d: -f3 /proc/self/cgroup); cat /sys/fs/cgroup$p/memory.max /sys/fs/cgroup$p/pids.max'` | `536870912` and `128` |
 | 20 | dsh | row 2 with `sh -c 'exit 7'` | client exits `7` |
 | 21 | dsh | `node $B/client.mjs $S $P Alice $W/Alice none sh -c true` | `runner refused BAD_REQUEST`, exit 125 |
 | 22 | runner | a copy of the config with `socket: /tmp/runner.sock` and `proofs: /tmp/proofs`, root-owned 0644, run as runner | `member-runner: refused to start: ... writable by group or others`, exit 125 |

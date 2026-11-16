@@ -242,6 +242,9 @@ export function checkLocks(config, host) {
   });
   const socketDir = dirname(config.socket);
   checkFolderChain(fs, dirname(socketDir), "the socket folder chain");
+  // A world-writable socket folder is reported as what it is, before its owner or mode: that is
+  // the danger the chain lock names, and a folder like /tmp is also someone else's.
+  if (lstatOr(fs, socketDir) !== null) checkFolderChain(fs, socketDir, "the socket folder");
   ensureSocketFolder(fs, socketDir, host.uid, group.gid);
   checkFolderChain(fs, socketDir, "the socket folder");
   checkFolderChain(fs, dirname(config.proofs), "the proof folder chain");

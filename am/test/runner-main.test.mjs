@@ -13,11 +13,11 @@ import { accounts, base, fakeBin, fakePath, prepareDirs, testConfig } from "./ru
 
 const MAIN = fileURLToPath(new URL("../runner/main.mjs", import.meta.url));
 
-function startFixture(t, { accountText } = {}) {
+function startFixture(t, { accountText, socketFolder = true } = {}) {
   const root = base(t);
   const bin = fakeBin(t);
   const config = testConfig(root, { uidStart: 200000, gidStart: 200000 });
-  prepareDirs(config);
+  prepareDirs(config, { socketFolder });
   const logs = [];
   const host = {
     uid: process.getuid(),
@@ -72,15 +72,22 @@ test("start refuses a symlinked ancestor before the path is made real", async (t
   assert.equal(existsSync(config.socket), false);
 });
 
-test("start makes a missing socket folder, mode 0750, and opens the socket", async (t) => {
-  const f = startFixture(t);
-  rmSync(join(f.root, "sock"), { recursive: true, force: true });
+test("start from a fresh layout with no socket folder makes it and listens", async (t) => {
+  const f = startFixture(t, { socketFolder: false });
+  assert.equal(existsSync(join(f.root, "sock")), false);
   const instance = await start(f.config, f.host);
   t.after(() => instance.close());
   const folder = statSync(join(f.root, "sock"));
   assert.equal(folder.mode & 0o7777, 0o750);
   assert.equal(folder.gid, process.getgid());
   assert.equal(statSync(f.config.socket).mode & 0o7777, 0o660);
+});
+
+test("start reports a world-writable socket folder as writable, before its owner", async (t) => {
+  const f = startFixture(t, { socketFolder: false });
+  mkdirSync(join(f.root, "sock"));
+  chmodSync(join(f.root, "sock"), 0o1777);
+  await assert.rejects(start(f.config, f.host), /writable by group or others/);
 });
 
 test("start refuses a proof folder that is a symbolic link", async (t) => {

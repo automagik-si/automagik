@@ -92,14 +92,33 @@ test("a symlinked folder in the chain is refused", (t) => {
   chmodSync(real, 0o750);
   symlinkSync(real, join(f.root, "link"));
   f.config.socket = join(f.root, "link", "runner.sock");
-  assert.match(refusal(() => checkLocks(f.config, f.host)), /socket folder .* is not a real folder/);
+  assert.match(refusal(() => checkLocks(f.config, f.host)), /is a symbolic link|is not a real folder/);
 });
 
 test("a socket folder with the wrong mode is refused", (t) => {
-  for (const mode of [0o700, 0o755, 0o770, 0o2750]) {
+  for (const mode of [0o700, 0o755, 0o2750]) {
     const f = fixture(t, { mode });
     assert.match(refusal(() => checkLocks(f.config, f.host)), /socket folder .* is mode/);
   }
+  for (const mode of [0o770, 0o777, 0o1777]) {
+    const f = fixture(t, { mode });
+    assert.match(refusal(() => checkLocks(f.config, f.host)), /writable by group or others/);
+  }
+});
+
+test("a world-writable socket folder is reported writable even when it is another uid's", (t) => {
+  const f = fixture(t, { mode: 0o1777 });
+  const realLstat = fs.lstatSync;
+  const wrapped = Object.create(fs);
+  wrapped.lstatSync = (path, options) => {
+    const info = realLstat(path, options);
+    if (path !== join(f.root, "sock")) return info;
+    const copy = Object.create(info);
+    Object.defineProperty(copy, "uid", { value: 0, enumerable: true });
+    return copy;
+  };
+  f.host.fs = wrapped;
+  assert.match(refusal(() => checkLocks(f.config, f.host)), /writable by group or others/);
 });
 
 test("a proof folder with the wrong mode is refused", (t) => {

@@ -242,9 +242,14 @@ export function testConfig(
 }
 
 /** Makes the socket folder, proofs, homes and work roots the tests serve from. */
-export function prepareDirs(config, { socketMode = 0o750, proofMode = 0o1730, groupGid = process.getgid() } = {}) {
-  mkdirSync(join(config.socket, ".."), { recursive: true, mode: socketMode });
-  chmodSync(join(config.socket, ".."), socketMode);
+export function prepareDirs(
+  config,
+  { socketMode = 0o750, proofMode = 0o1730, groupGid = process.getgid(), socketFolder = true } = {},
+) {
+  if (socketFolder) {
+    mkdirSync(join(config.socket, ".."), { recursive: true, mode: socketMode });
+    chmodSync(join(config.socket, ".."), socketMode);
+  }
   mkdirSync(config.proofs, { recursive: true, mode: proofMode });
   chmodSync(config.proofs, proofMode);
   for (const path of [config.homesRoot, config.workRoot]) {
@@ -253,7 +258,7 @@ export function prepareDirs(config, { socketMode = 0o750, proofMode = 0o1730, gr
   }
   if (groupGid !== process.getgid()) {
     const { chownSync } = fs;
-    chownSync(join(config.socket, ".."), process.getuid(), groupGid);
+    if (socketFolder) chownSync(join(config.socket, ".."), process.getuid(), groupGid);
     chownSync(config.proofs, process.getuid(), groupGid);
   }
 }
