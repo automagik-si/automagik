@@ -266,6 +266,18 @@ function groupGone(pid) {
     return true
   }
 }
+// The stop path kills what it captured at KILL_AFTER_MS. A loaded host can delay that SIGKILL,
+// its identity check and the process-table proof past stop()'s own 5 s deadline, so these cases
+// wait for the death itself with a bound of their own. If the deadline fired first, the
+// product's contract is to try again: the retry proves the tree it has already killed.
+const GONE_MS = 10_000
+async function confirmedStop(run, stopFailure, dead, ms) {
+  await until(() => dead.every(([pid, birth]) => processState(pid, birth) === 'dead'), ms)
+  const error = await stopFailure
+  if (error === undefined) return
+  assert.match(error.message, /has not stopped/)
+  await run.stop()
+}
 
 for (const stubborn of ['no', 'yes']) {
   test(`dispose ends a detached grandchild (ignores TERM: ${stubborn})`, linuxOnly, async t => {
@@ -374,16 +386,18 @@ test('stop kills a captured leader that moved to another captured group', linuxO
     },
   }
   const stopped = run.stop()
+  const stopFailure = stopped.then(() => undefined, error => error)
   assert.deepEqual(run.detached.map(record => record.pid).sort((a, b) => a - b), [h, l])
   for (const record of run.detached) assert.equal(record.pgid, record.pid)
   await until(() => {
     const stat = readFileSync(`/proc/${l}/stat`, 'utf8')
     return parseProcStat(l, stat)?.pgid === h
-  })
-  await until(() => processState(h, observed.get(h)) === 'dead')
+  }, GONE_MS)
+  await until(() => processState(h, observed.get(h)) === 'dead', GONE_MS)
   assert.equal(processState(l, observed.get(l)), 'live')
   assert.equal(groupGone(l), true)
-  await stopped
+  await confirmedStop(run, stopFailure, [[h, observed.get(h)], [l, observed.get(l)]],
+    KILL_AFTER_MS + GONE_MS)
   assert.ok(signals.some(([pid, signal]) => pid === -l && signal === 'SIGKILL'))
   assert.ok(signals.some(([pid, signal]) => pid === l && signal === 'SIGKILL'))
   assert.equal(processState(l, observed.get(l)), 'dead')
@@ -473,18 +487,20 @@ test('stop kills a moved leader while its child stays in the old group', linuxOn
     },
   }
   const stopped = run.stop()
+  const stopFailure = stopped.then(() => undefined, error => error)
   const groups = new Map(run.detached.map(record => [record.pid, record.pgid]))
   assert.deepEqual(groups, new Map([[h, h], [l, l], [m, l]]))
   await until(() => {
     const stat = readFileSync(`/proc/${l}/stat`, 'utf8')
     return parseProcStat(l, stat)?.pgid === h
-  })
-  await until(() => processState(h, observed.get(h)) === 'dead')
+  }, GONE_MS)
+  await until(() => processState(h, observed.get(h)) === 'dead', GONE_MS)
   assert.equal(processState(l, observed.get(l)), 'live')
   assert.equal(processState(m, observed.get(m)), 'live')
   assert.equal(parseProcStat(m, readFileSync(`/proc/${m}/stat`, 'utf8')).pgid, l)
   assert.equal(groupGone(l), false)
-  await stopped
+  await confirmedStop(run, stopFailure, [[h, observed.get(h)], [l, observed.get(l)],
+    [m, observed.get(m)]], KILL_AFTER_MS + GONE_MS)
   assert.ok(signals.some(([pid, signal]) => pid === -l && signal === 'SIGKILL'))
   assert.ok(signals.some(([pid, signal]) => pid === l && signal === 'SIGKILL'))
   assert.equal(processState(l, observed.get(l)), 'dead')
