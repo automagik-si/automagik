@@ -9,6 +9,48 @@ export const LOGINS_FILE = "claude-logins.json";
 export const CONFIG_VAR = "CLAUDE_CONFIG_DIR";
 export const DEFAULT_LOGIN = "default";
 
+/** The vendor config-directory variable this pack can point at a login home, by agent (#1208). */
+export const AGENT_HOME_VARS = Object.freeze({ claude: CONFIG_VAR, codex: "CODEX_HOME" });
+
+/** The variable `--agent-home` sets for `agent`, or null when this pack knows none. */
+export const agentHomeVar = (agent) => (typeof agent === "string" && Object.hasOwn(AGENT_HOME_VARS, agent) ? AGENT_HOME_VARS[agent] : null);
+
+/**
+ * Why `dir` is not an `--agent-home` folder: absolute, no control character, not the filesystem
+ * root, and an existing directory. Null when it is. `isDir` is injected so this stays pure.
+ */
+export function agentHomeProblem(dir, { isDir } = {}) {
+  if (typeof dir !== "string" || !dir) return "has no folder";
+  if (!dir.startsWith("/")) return `folder ${shown(dir)} is not an absolute path`;
+  if (/[\u0000-\u001f\u007f]/.test(dir)) return `folder ${shown(dir)} has a control character`;
+  if (dir === "/") return `folder ${shown(dir)} is not a login home`;
+  let folder = false;
+  try { folder = typeof isDir === "function" && isDir(dir); } catch { folder = false; }
+  return folder ? null : `folder ${shown(dir)} is not a folder`;
+}
+
+/** The env words that point `agent`'s launch at `dir`; [] when `agent` has no such variable (agentHomeVar). */
+export function agentHomeWords(agent, dir) {
+  const name = agentHomeVar(agent);
+  return name ? [`${name}=${dir}`] : [];
+}
+
+/**
+ * `--agent-home` checked for one launch: { words } with the single env assignment when `dir` is
+ * an absolute existing folder and `agent` has a vendor config variable, else { error } with the
+ * reason. The caller refuses on `error`; no launch runs on a fallback home.
+ */
+export function agentHomeFor(agent, dir, { isDir } = {}) {
+  const problem = agentHomeProblem(dir, { isDir });
+  if (problem) return { error: problem };
+  const name = agentHomeVar(agent);
+  if (!name) {
+    return { error: `agent ${agent ?? "(unknown)"} has no vendor config folder this pack can set `
+      + `(Claude: ${AGENT_HOME_VARS.claude}, Codex: ${AGENT_HOME_VARS.codex})` };
+  }
+  return { words: [`${name}=${dir}`] };
+}
+
 /** The record's path in app home `appHome`: its top level, never a mod's own folder. */
 export const loginsPath = (appHome) => `${String(appHome).replace(/\/+$/, "")}/${LOGINS_FILE}`;
 
