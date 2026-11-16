@@ -758,16 +758,22 @@ const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
  * RFC 0021: `core` (this computer's hc core id) and `created_ms` (the terminal's, from hc get)
  * key the launch with `terminal`, since hc reuses terminal ids; `squad` (model.js squadOf, frozen
  * here at launch); `session`: the Claude session the launch runs (the id Herdr chose with
- * --session-id, or the one it resumed), else null. A seat's worker fields are null or false.
+ * --session-id, or the one it resumed), else null. `env`: #1490's launch home, the absolute
+ * HOME/DSH_HOME/CODEX_HOME/KIMI_CODE_HOME the seat was started with, so a search for the
+ * conversation it left on disk uses its own root and never the reviving process's; null when the
+ * launch named none (the search then fails closed). A seat's worker fields are null or false.
  */
 export function startRow({ kind, terminal, pid, botId, task, branch, project, lead, worktree, base, created, agent, model, effort,
-  template, role, swap, override, overrideRequested, core, createdMs, squad, session, at }) {
+  template, role, swap, override, overrideRequested, core, createdMs, squad, session, env, at }) {
   const requested = overrideRequested && Object.keys(overrideRequested).length ? { ...overrideRequested } : null;
+  const home = env && typeof env === "object" && !Array.isArray(env)
+    ? Object.fromEntries(Object.entries(env).filter(([, v]) => typeof v === "string" && v)) : null;
   return { event: "start", kind, terminal, pid: Number.isInteger(pid) ? pid : null, botId, task: orNull(task),
     worktree: orNull(worktree), agent: orNull(agent), model: orNull(model), effort: orNull(effort), template: orNull(template),
     role: orNull(role), branch: orNull(branch), project: orNull(project), lead: orNull(lead), base: orNull(base),
     created: created === true, swap: swap === true, override: override === true, override_requested: requested,
-    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session), at: stamp(at) };
+    core: orNull(core), created_ms: msOrNull(createdMs), squad: orNull(squad), session: orNull(session),
+    ...(home && Object.keys(home).length ? { env: home } : {}), at: stamp(at) };
 }
 
 /**

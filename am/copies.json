@@ -170,6 +170,10 @@
       "to": "am/revive.js"
     },
     {
+      "from": "herdr/mods/am-sidebar/sessionFiles.mjs",
+      "to": "am/sessionFiles.mjs"
+    },
+    {
       "from": "herdr/mods/am-sidebar/tidy.js",
       "to": "am/tidy.js"
     },

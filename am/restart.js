@@ -643,13 +643,16 @@ export function helperCwd({ get, worker = null, realpath = null }) {
  * `hc run` arguments for a helper Restart --tree runs again: in the background, its name (null:
  * hc picks), folder and labels, a child of the bot's new pane, its PATH as a seat's (`path`).
  * `login`: a Claude helper's login words (logins.js chooseLogin), before its argv or its `sh -c`.
+ * `env`: home variables the helper's own launch named (#1490: HOME, DSH_HOME, CODEX_HOME or
+ * KIMI_CODE_HOME), after its PATH, so the replacement records where its session belongs.
  */
-export function helperArgs({ name, cwd, labels = {}, parent, argv, path = null, login = [] }) {
+export function helperArgs({ name, cwd, labels = {}, parent, argv, path = null, login = [], env: more = {} }) {
   const args = ["run", "--bg", "--json"];
   if (name) args.push("--name", name);
   args.push("--cwd", cwd);
   for (const [k, v] of Object.entries(labels)) if (typeof v === "string" && v) args.push("--label", `${k}=${v}`);
-  const env = envWords(path ? [`PATH=${path}`] : [], login);
+  const home = Object.entries(more ?? {}).filter(([, v]) => typeof v === "string" && v).map(([k, v]) => `${k}=${v}`);
+  const env = envWords([...(path ? [`PATH=${path}`] : []), ...home], login);
   return [...args, "--parent", parent, "--", ...(env.length ? [ENV, ...env] : []), ...argv];
 }
 

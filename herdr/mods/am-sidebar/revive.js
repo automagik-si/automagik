@@ -108,7 +108,11 @@ export const kimiHomeOf = (home, env = {}) => (typeof env.KIMI_CODE_HOME === "st
 /** Kimi's append-only session index. */
 export const kimiIndexPath = (kimiHome) => `${String(kimiHome).replace(/\/+$/, "")}/session_index.jsonl`;
 
-/** Kimi's last index row per id, in these folders and strictly under its own sessions root. */
+/**
+ * Kimi's last index row per id, in these folders and strictly under its own sessions root: the
+ * folder must be named by the id it holds (#1490), so a row can't point one conversation's
+ * birth time at another folder.
+ */
 export function kimiCandidates(indexText, folders, kimiHome) {
   const here = new Set(Array.isArray(folders) ? folders : [folders]);
   const by = new Map();
@@ -126,7 +130,10 @@ export function kimiCandidates(indexText, folders, kimiHome) {
   const out = [];
   for (const [id, row] of by) {
     const sessionDir = normalized(row.sessionDir);
-    if (here.has(row.workDir) && root && sessionDir?.startsWith(`${root}/`)) out.push({ id, sessionDir });
+    if (!here.has(row.workDir) || !root || !sessionDir?.startsWith(`${root}/`)) continue;
+    // The folder's own name is the id: a row that points elsewhere isn't this conversation's.
+    if (sessionDir.split("/").pop() !== id) continue;
+    out.push({ id, sessionDir });
   }
   return out;
 }
@@ -143,12 +150,14 @@ export const FIRST_SESSION_MS = 120_000;
  * Desktop), so only the pane's first conversation is ever taken, and only when nothing else
  * could be it. `candidates`: that agent's sessions in the pane's folder, [{ id, born }] (ms);
  * `claimed`: the ids another terminal's label or ledger row holds; `rivals`: the other panes and
- * launches of that agent in that folder (hc's live panes, and the ledger's launches not known to
- * have ended before this one), [{ created_ms }].
+ * launches of that agent in that folder (hc's live panes, `live: true`, and the ledger's
+ * launches not known to have ended before this one), [{ created_ms, live }].
  * The pick: the one session born between the pane's start and FIRST_SESSION_MS after it. Two
  * born then, none, or a rival that started between FIRST_SESSION_MS before the pane and that
  * birth (or at a time not known): null. A session born later (a new conversation started inside
- * the pane, or anyone's) is never taken.
+ * the pane, or anyone's) is never taken. A live rival is stronger (#1490): it may start a new
+ * conversation at any time, so an unclaimed session in the folder is ambiguous whenever one is
+ * live, whatever the launch gap.
  */
 export function pickSession({ createdMs, candidates = [], claimed = new Set(), rivals = [] }) {
   if (!Number.isSafeInteger(createdMs)) return null;
@@ -156,10 +165,86 @@ export function pickSession({ createdMs, candidates = [], claimed = new Set(), r
     && c.born >= createdMs - BORN_SLACK_MS && c.born <= createdMs + FIRST_SESSION_MS);
   if (mine.length !== 1) return null;
   const first = mine[0];
-  const near = rivals.some((r) => !Number.isSafeInteger(r?.created_ms)
-    || (r.created_ms >= createdMs - FIRST_SESSION_MS && r.created_ms <= first.born + BORN_SLACK_MS));
-  return near ? null : first.id;
+  const ambiguous = rivals.some((r) => {
+    // A live pane of the agent in the folder may start a new conversation at any time, whatever
+    // the launch gap: an unclaimed session born while one runs can't be proven this pane's.
+    if (r?.live === true) return true;
+    // A launch record that started after the session was born can't own it: its process wasn't there.
+    if (Number.isSafeInteger(r?.created_ms) && r.created_ms > first.born + BORN_SLACK_MS) return false;
+    return !Number.isSafeInteger(r?.created_ms)
+      || (r.created_ms >= createdMs - FIRST_SESSION_MS && r.created_ms <= first.born + BORN_SLACK_MS);
+  });
+  return ambiguous ? null : first.id;
 }
+
+// ---- the home a seat's own launch names ----
+
+/** The variable each agent's disk search may take instead of the person's home (Antigravity's history lives under it). */
+export const SEAT_HOME_VARS = Object.freeze({ "dsh-tui": "DSH_HOME", antigravity: null, codex: "CODEX_HOME", kimi: "KIMI_CODE_HOME" });
+const HOME_KEYS = ["HOME", "DSH_HOME", "CODEX_HOME", "KIMI_CODE_HOME"];
+/** An absolute folder env value, its trailing slashes dropped, or null. */
+const absoluteDir = (v) => {
+  if (typeof v !== "string" || !v.startsWith("/")) return null;
+  return v.length > 1 ? v.replace(/\/+$/, "") || "/" : v;
+};
+
+/**
+ * The HOME/DSH_HOME/CODEX_HOME/KIMI_CODE_HOME a launch argv's leading `env [-u NAME…] K=V…`
+ * names: the seat's recorded launch environment (#1490). Only the prefix before the program is
+ * read; any other env option leaves it unread. Keys absent from the launch are absent here.
+ */
+export function launchEnvOf(argv) {
+  const words = Array.isArray(argv) ? argv : [];
+  const at = words.findIndex((w) => base(w) === "env");
+  if (at < 0) return {};
+  let i = at + 1;
+  for (;;) {
+    const w = words[i];
+    if (w === "-u" || w === "--unset") i += 2;
+    else if (w === "-i" || w === "-" || w === "--ignore-environment" || /^(-u.|--unset=)/.test(w ?? "")) i += 1;
+    else break;
+  }
+  const out = {};
+  for (; i < words.length; i += 1) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(typeof words[i] === "string" ? words[i] : "");
+    if (!m) break;
+    if (HOME_KEYS.includes(m[1])) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+/** The home variables a launch of `agentKey` records, from `env` (the launching environment): absolute ones only. */
+export function launchHomeEnv(agentKey, env = {}) {
+  const out = {};
+  const home = absoluteDir(env.HOME);
+  if (home) out.HOME = home;
+  const key = SEAT_HOME_VARS[agentKey];
+  const own = key ? absoluteDir(env[key]) : null;
+  if (own) out[key] = own;
+  return out;
+}
+
+/**
+ * The search root a seat's own launch names, for `agentKey`, or null: { home, env } where `home`
+ * is the person's home (for Antigravity and every default) and `env` the agent's recorded
+ * override. `argv`: the pane's launch argv (hc get's, the `env` prefix read); `record`: its
+ * workers-ledger start row (the launch record a gone pane has left). The argv's own words win
+ * over the row's. A home the launch doesn't name is unknown: never the reviving process's
+ * (#1490), and the search then fails closed.
+ */
+export function seatHomeOf(agentKey, { argv = null, record = null } = {}) {
+  const recorded = record?.env && typeof record.env === "object" && !Array.isArray(record.env) ? record.env : {};
+  const merged = { ...recorded, ...launchEnvOf(argv) };
+  const home = absoluteDir(merged.HOME);
+  const key = SEAT_HOME_VARS[agentKey];
+  const own = key ? absoluteDir(merged[key]) : null;
+  if (!home && !own) return null;
+  return { home: home ?? own, env: { ...(home ? { HOME: home } : {}), ...(own ? { [key]: own } : {}) } };
+}
+
+/** Whether any start row records a seat's launch home (#1490): with none, there is nothing a search could trust. */
+export const seatHomesRecorded = (rows) => (rows ?? []).some((r) => r?.event === "start"
+  && r.env && typeof r.env === "object" && HOME_KEYS.some((k) => absoluteDir(r.env[k])));
 
 /**
  * pickSession's `rivals` and `claimed` from the workers ledger's rows, for the launch on

@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { symlinkSync } from "node:fs";
 import { join } from "node:path";
 
@@ -13,8 +13,9 @@ import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { helperPlan } from "../mods/am-sidebar/restart.js";
 import { AGENTS } from "../mods/am-sidebar/models.js";
-import { FIRST_SESSION_MS, KEEP_DOWN, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
-  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
+import { FIRST_SESSION_MS, KEEP_DOWN, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, launchEnvOf, launchHomeEnv, ledgerRivals,
+  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
+import { firstLine as firstLineTrusted } from "../mods/am-sidebar/sessionFiles.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 import { codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir, kimiCandidates, kimiHomeOf, kimiIndexPath, uuidV7Ms } from "../mods/am-sidebar/revive.js";
@@ -221,9 +222,25 @@ const team = (over = {}) => ({ version: 1, categories: [], bots: [
   bot(ID.dev, "member", { name: "Dev", lead: ID.cap, ...over.dev }),
 ] });
 /** An hc pane: `front` is what runs in front (["zsh"]: the bare shell hc keeps), `argv` its launch command. */
-const pane = (address, { bot: b, front = ["zsh"], argv = ["claude"], cwd, created = 1, labels = {}, parent = null, status = "working", die = Boolean(parent) } = {}) => ({
+const pane = (address, { bot: b, front = ["zsh"], argv = ["claude"], cwd, created = 1, labels = {}, parent = null, status = "working", die = Boolean(parent),
+  launchEnv = null, noHome = false } = {}) => ({
   address, name: address, cwd, state: "live", parent, die_with_parent: die, created_ms: created, argv, labels: { ...(b ? { bot: b } : {}), ...labels },
-  foreground: { argv: front, cwd }, status: { app: "claude-code", state: status } });
+  foreground: { argv: front, cwd }, status: { app: "claude-code", state: status }, ...(launchEnv ? { launchEnv } : {}), ...(noHome ? { noHome } : {}) });
+
+/** The program a pane's launch argv runs, past a leading `env [-u NAME…] K=V…` wrapper. */
+function programOf(argv = []) {
+  let i = 0;
+  if (argv[i] === "env" || String(argv[i] ?? "").endsWith("/env")) {
+    i += 1;
+    for (;;) {
+      if (argv[i] === "-u" || argv[i] === "--unset") { i += 2; continue; }
+      if (argv[i] === "-i" || argv[i] === "--ignore-environment" || /^(-u.|--unset=)/.test(argv[i] ?? "")) { i += 1; continue; }
+      break;
+    }
+    while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[i] ?? "")) i += 1;
+  }
+  return argv[i] ?? null;
+}
 
 function world(t, { file = team(), terminals = () => [], attach = null, hcExtra = {} } = {}) {
   const root = scratchRoot(t, "hb-revive-");
@@ -247,7 +264,14 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
   mkdirSync(join(project, ".herdr"), { recursive: true });
   writeFileSync(join(project, ".herdr/bots.json"), `${JSON.stringify(file, null, 2)}\n`);
   const statePath = join(root, "hc.json"), logPath = join(root, "hc.log");
-  const terms = terminals(project);
+  // #1490: a discovered agent's pane records its launch home, as the pack's own launch does. A
+  // row can opt out (`noHome`: an unknown home) or name another (`launchEnv`: { HOME, DSH_HOME… }).
+  const terms = terminals(project, { root, home }).map(({ noHome = false, launchEnv = null, ...x }) => {
+    if (noHome || !["dsh-tui", "agy", "codex", "kimi"].includes(programOf(x.argv))) return x;
+    if (launchEnvOf(x.argv).HOME) return x;
+    const recorded = Object.entries({ HOME: home, ...(launchEnv ?? {}) }).filter(([, v]) => typeof v === "string" && v).map(([k, v]) => `${k}=${v}`);
+    return { ...x, argv: ["/usr/bin/env", ...recorded, ...x.argv] };
+  });
   writeFileSync(statePath, JSON.stringify({ terminals: terms, next: 100, ...hcExtra }));
   writeFileSync(logPath, "");
   const appState = join(root, "herdr-app.json"), appLog = join(root, "herdr-app.log");
@@ -261,7 +285,7 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog, AGY_FAKE_LOG: join(root, "agy.log"), GIT_CEILING_DIRECTORIES: root,
     AUTOMAGIK_HERDR_TAB_WAIT_MS: "100", AUTOMAGIK_HERDR_RESTART_STABLE_MS: "200", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "3000",
     AUTOMAGIK_HERDR_TREE_TURN_WAIT_MS: "1000", AUTOMAGIK_HERDR_REVIVE_SETTLE_MS: "0" };
-  for (const k of ["HC_TERMINAL_ID", "HC_SOCKET", "HERMES_HOME", "AUTOMAGIK_HERDR_BOOT_MS", "CLAUDE_CONFIG_DIR"]) delete env[k];
+  for (const k of ["HC_TERMINAL_ID", "HC_SOCKET", "HERMES_HOME", "AUTOMAGIK_HERDR_BOOT_MS", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "DSH_HOME"]) delete env[k];
   const cli = (args, { env: extra = {}, cwd = project } = {}) => {
     const r = spawnSync(RUNTIME, [CLI, ...args], { cwd, env: { ...env, ...extra }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
@@ -279,6 +303,10 @@ const wordsOf = (run) => run.slice(run.indexOf("--") + 1);
 const cwdOf = (run) => run[run.indexOf("--cwd") + 1];
 const changes = (s) => s.calls().filter((c) => ["run", "kill", "label", "send"].includes(c[0]));
 const hasSeq = (words, seq) => words.some((_, i) => seq.every((w, j) => words[i + j] === w));
+/** The run that started bot `botId` (its hc labels name it). */
+const runFor = (s, botId) => runsOf(s).find((run) => run.includes(`bot=${botId}`));
+/** The run `name` was given (a helper keeps its old pane's name when hc still has it free). */
+const runNamed = (s, name) => runsOf(s).find((run) => run[run.indexOf("--name") + 1] === name);
 
 test("revive: after a reboot each bot at a bare shell is restarted in its place, the main bot first and a member after its lead, resumed by id; a running bot is never touched; the main bot gets one report", (t) => {
   const s = world(t, { terminals: (p) => [
@@ -610,13 +638,17 @@ test("a recorded session is never replaced: a pane that holds an agent.session l
   assert.ok(hasSeq(wordsOf(runsOf(s)[0]), ["--resume", SID3]), runsOf(s)[0].join(" "));
 });
 
-test("DSH's sessions are read under $DSH_HOME when it is set", (t) => {
+test("#1490: DSH's sessions are read under the seat's own $DSH_HOME, never the reviving process's", (t) => {
   const born = Date.now() - 3_600_000;
-  const s = world(t, { file: team({ main: { agent: "dsh-tui" } }), terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["dsh-tui"] })] });
-  const dshHome = join(s.root, "dsh-home");
+  const root = scratchRoot(t, "hb-revive-");
+  const dshHome = join(root, "dsh-home");
+  const decoyHome = join(root, "decoy-dsh");
+  const s = world(t, { file: team({ main: { agent: "dsh-tui" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["dsh-tui"], launchEnv: { DSH_HOME: dshHome } })] });
   dshSessions(s, [[SID, born + 5000]], dshHome);
   dshSessions(s, [[SID2, born + 6000]]); // ~/.dsh is not DSH's home here
-  const r = s.cli(["revive", "--json"], { env: { DSH_HOME: dshHome } });
+  dshSessions(s, [[SID3, born + 5000]], decoyHome); // the reviving process's $DSH_HOME: never this
+  const r = s.cli(["revive", "--json"], { env: { DSH_HOME: decoyHome } });
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(sessionLabels(s), [["t5", SID]]);
 });
@@ -717,14 +749,15 @@ test("kimiCandidates: the index replayed in order, a deleted id dropped, other f
     row({ sessionId: KID2, deleted: true }),
     row({ sessionId: KID, sessionDir: `${home}/sessions/w2/${KID}`, workDir: "/p" }), // a later row for the same id wins
     row({ sessionId: "session_nope", sessionDir: `${home}/sessions/w/x`, workDir: "/p" }),
-    row({ sessionId: `session_${SID}`, sessionDir: `${home}/sessions/w/s`, workDir: "/q" }),
+    row({ sessionId: `session_${SID}`, sessionDir: `${home}/sessions/w/session_${SID}`, workDir: "/q" }),
     row({ sessionId: `session_${SID2}`, sessionDir: `${home}/sessions/../../.ssh`, workDir: "/p" }),
     row({ sessionId: `session_${SID3}`, sessionDir: "/tmp/elsewhere", workDir: "/p" }),
     row({ sessionId: `session_${SID4}`, sessionDir: `${home}/sessions`, workDir: "/p" }),
+    row({ sessionId: "session_22222222-3333-4444-8555-666666666666", sessionDir: `${home}/sessions/w/another`, workDir: "/p" }),
     "{torn", "",
   ].join("\n");
   assert.deepEqual(kimiCandidates(text, ["/p"], home), [{ id: KID, sessionDir: `${home}/sessions/w2/${KID}` }]);
-  assert.deepEqual(kimiCandidates(text, ["/q"], home), [{ id: `session_${SID}`, sessionDir: `${home}/sessions/w/s` }]);
+  assert.deepEqual(kimiCandidates(text, ["/q"], home), [{ id: `session_${SID}`, sessionDir: `${home}/sessions/w/session_${SID}` }], "a folder not named by its id is refused");
   assert.deepEqual(kimiCandidates("", ["/p"], home), []);
 });
 
@@ -754,16 +787,16 @@ test("#1417 revive: a Codex bot at a bare shell is resumed by the id its rollout
   for (const text of [r.out, r.err, s.hcState().sent[0].text, JSON.stringify(s.lastReport())]) assert.ok(!text.includes(id), text);
 });
 
-test("#1417 revive: a Codex bot whose pane is gone whole comes back by its seat row and its rollout, under $CODEX_HOME when it is set", (t) => {
+test("#1417 revive: a Codex bot whose pane is gone whole comes back by its seat row and its rollout, under the seat's own $CODEX_HOME", (t) => {
   const born = Date.now() - 3_600_000;
   const id = v7(born + 5000);
   const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }), attach: () => [{ bot: ID.main, terminal: "t5", created_ms: born }] });
-  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "seat", terminal: "t5", botId: ID.main, project: s.project, worktree: s.project,
-    agent: "codex", core: CORE, created_ms: born, at: new Date(born).toISOString() })}\n`, { mode: 0o600 });
   const codexHome = join(s.root, "codex-home");
+  writeFileSync(ledgerPath(s.app), `${JSON.stringify({ event: "start", kind: "seat", terminal: "t5", botId: ID.main, project: s.project, worktree: s.project,
+    agent: "codex", core: CORE, created_ms: born, env: { HOME: s.home, CODEX_HOME: codexHome }, at: new Date(born).toISOString() })}\n`, { mode: 0o600 });
   codexRollout(s, { id, cwd: s.project, codexHome });
   codexRollout(s, { id: v7(born + 6000, "9abc-0123456789ab"), cwd: s.project }); // ~/.codex is not Codex's home here
-  const r = s.cli(["revive", "--json"], { env: { CODEX_HOME: codexHome } });
+  const r = s.cli(["revive", "--json"], { env: { CODEX_HOME: join(s.root, "decoy-codex") } });
   assert.equal(r.code, 0, r.err);
   const run = runsOf(s)[0];
   assert.ok(hasSeq(wordsOf(run), ["resume", id]), run.join(" "));
@@ -872,8 +905,219 @@ test("#1417: a Kimi session folder that is a symlink, or is gone, is never taken
   const linked = join(kimiHome, "sessions", "ws1", KID2);
   symlinkSync(real, linked);
   writeFileSync(kimiIndexPath(kimiHome), `${JSON.stringify({ sessionId: KID2, sessionDir: linked, workDir: s.project })}\n`
-    + `${JSON.stringify({ sessionId: `session_${SID}`, sessionDir: join(kimiHome, "sessions", "ws1", "gone"), workDir: s.project })}\n`, { flag: "a" });
+    + `${JSON.stringify({ sessionId: `session_${SID}`, sessionDir: join(kimiHome, "sessions", "ws1", `session_${SID}`), workDir: s.project })}\n`, { flag: "a" });
   const r = s.cli(["revive", "--json"]);
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", KID]], "only the real folder counts");
+});
+
+// ---- #1490: a seat claims only its own launch's conversation; the search root is its own ----
+
+test("#1490 launchEnvOf, seatHomeOf, launchHomeEnv, seatHomesRecorded: the search root is the seat's own launch record", () => {
+  const launch = ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR", "PATH=/bin", "HOME=/home/u", "CODEX_HOME=/data/codex", "codex"];
+  assert.deepEqual(launchEnvOf(launch), { HOME: "/home/u", CODEX_HOME: "/data/codex" });
+  assert.deepEqual(launchEnvOf(["/usr/bin/env", "PATH=/bin", "codex", "--home=/elsewhere"]), {}, "only the env prefix is read");
+  assert.deepEqual(launchEnvOf(["codex"]), {});
+  assert.deepEqual(seatHomeOf("codex", { argv: launch }), { home: "/home/u", env: { HOME: "/home/u", CODEX_HOME: "/data/codex" } });
+  // The launch record stands in when the pane's argv names none; the argv's own words win.
+  assert.deepEqual(seatHomeOf("kimi", { argv: ["kimi"], record: { env: { HOME: "/r", KIMI_CODE_HOME: "/k" } } }),
+    { home: "/r", env: { HOME: "/r", KIMI_CODE_HOME: "/k" } });
+  assert.deepEqual(seatHomeOf("kimi", { argv: ["/usr/bin/env", "HOME=/a", "kimi"], record: { env: { HOME: "/r" } } }).env, { HOME: "/a" });
+  // Antigravity's history lives under HOME alone: another agent's override isn't its search root.
+  assert.equal(seatHomeOf("antigravity", { argv: ["/usr/bin/env", "CODEX_HOME=/c", "agy"] }), null);
+  // Unknown (relative or absent) is unknown: the search fails closed.
+  assert.equal(seatHomeOf("codex", { argv: ["/usr/bin/env", "CODEX_HOME=relative", "codex"] }), null);
+  assert.equal(seatHomeOf("codex", { argv: ["codex"], record: null }), null);
+  assert.deepEqual(launchHomeEnv("codex", { HOME: "/home/u/", CODEX_HOME: "relative", DSH_HOME: "/d" }), { HOME: "/home/u" });
+  assert.deepEqual(launchHomeEnv("dsh-tui", { HOME: "/h", DSH_HOME: "/d/" }), { HOME: "/h", DSH_HOME: "/d" });
+  assert.equal(seatHomesRecorded([{ event: "start", env: { HOME: "/h" } }]), true);
+  assert.equal(seatHomesRecorded([{ event: "start", env: { HOME: "relative" } }, { event: "session", session: SID }]), false);
+});
+
+test("#1490 pickSession: a live rival makes an unclaimed session born while it runs ambiguous, whatever the launch gap", () => {
+  const c = (id, born) => ({ id, born });
+  const T = 10_000_000;
+  // A rival live in the folder long before may start a new conversation at any time.
+  assert.equal(pickSession({ createdMs: T, candidates: [c(SID, T + 800)], rivals: [{ created_ms: T - 10 * FIRST_SESSION_MS, live: true }] }), null);
+  // Whatever the launch gap: a live rival in the folder is enough.
+  assert.equal(pickSession({ createdMs: T, candidates: [c(SID, T + 800)], rivals: [{ created_ms: T + 60_000, live: true }] }), null);
+  // A launch record (not a live pane) that started after the birth can't own it.
+  assert.equal(pickSession({ createdMs: T, candidates: [c(SID, T + 800)], rivals: [{ created_ms: T + 60_000 }] }), SID);
+  // A claimed id is never taken, even with no rival at all.
+  assert.equal(pickSession({ createdMs: T, candidates: [c(SID, T + 800)], claimed: new Set([SID]) }), null);
+});
+
+test("#1490 a session file is read only when it is a regular file and didn't change under the read", (t) => {
+  const root = scratchRoot(t, "hb-revive-");
+  const text = `${JSON.stringify({ type: "session_meta", payload: { id: SID } })}\n`;
+  const file = join(root, "rollout-a.jsonl");
+  writeFileSync(file, text);
+  assert.equal(firstLineTrusted(file), JSON.stringify({ type: "session_meta", payload: { id: SID } }));
+  // A symlink is refused, never followed.
+  const link = join(root, "rollout-link.jsonl");
+  symlinkSync(file, link);
+  assert.equal(firstLineTrusted(link), null);
+  // A file renamed over the path under the read is refused.
+  const swapped = join(root, "rollout-b.jsonl");
+  writeFileSync(swapped, text);
+  const replacement = join(root, "rollout-new.jsonl");
+  writeFileSync(replacement, "other\n");
+  assert.equal(firstLineTrusted(swapped, { afterOpen: () => renameSync(replacement, swapped) }), null);
+  // A file rewritten shorter under the read is refused too.
+  const rewritten = join(root, "rollout-c.jsonl");
+  writeFileSync(rewritten, text);
+  assert.equal(firstLineTrusted(rewritten, { afterOpen: () => writeFileSync(rewritten, "x\n") }), null);
+});
+
+test("#1490 revive: two Codex seats far apart in one folder; a later thread of one is never the other's", (t) => {
+  const born = Date.now() - 3_600_000;
+  const aId = v7(born + 1000, "8abc-0123456789ab");
+  const newId = v7(born + 200_000, "9abc-0123456789ab"); // A's /new, born inside B's window
+  const s = world(t, { file: team({ main: { agent: "codex", name: "A" }, cap: { agent: "codex", name: "B" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"], labels: { "agent.session": aId } }),
+      pane("t6", { bot: ID.cap, cwd: p, created: born + 180_000, argv: ["codex"] }),
+    ] });
+  codexRollout(s, { id: aId, cwd: s.project, dayMs: born });
+  codexRollout(s, { id: newId, cwd: s.project, dayMs: born + 200_000 });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const aRun = runFor(s, ID.main), bRun = runFor(s, ID.cap);
+  assert.ok(hasSeq(wordsOf(aRun), ["resume", aId]), aRun.join(" "));
+  assert.ok(!wordsOf(bRun).includes("resume") && !wordsOf(bRun).includes("--last"), bRun.join(" "));
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => ["t6", "t101"].includes(terminal)), [], "B takes no id");
+  assert.ok(!sessionLabels(s).some(([, id]) => id === newId), "the later thread is never recorded");
+  const results = r.json().projects[0].results;
+  assert.deepEqual(results.map((x) => [x.name, x.outcome]), [["A", "resumed"], ["B", "fresh"]]);
+  assert.match(results[1].why, /no Codex conversation of its own could be identified for t6/);
+  for (const text of [r.out, r.err, JSON.stringify(s.lastReport())]) assert.ok(!text.includes(newId), text);
+});
+
+test("#1490 revive: a rival's recorded id is never claimed by another seat", (t) => {
+  const born = Date.now() - 3_600_000;
+  const rivalId = v7(born + 1000, "8abc-0123456789ab");
+  const s = world(t, { file: team({ main: { agent: "codex", name: "A" }, cap: { agent: "codex", name: "B" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"], labels: { "agent.session": rivalId } }),
+      pane("t6", { bot: ID.cap, cwd: p, created: born + 500, argv: ["codex"] }),
+    ] });
+  codexRollout(s, { id: rivalId, cwd: s.project, dayMs: born + 1000 }); // born inside B's window
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.ok(!sessionLabels(s).some(([terminal, id]) => ["t6", "t101"].includes(terminal) && id === rivalId));
+  assert.ok(!wordsOf(runFor(s, ID.cap)).includes(rivalId));
+  assert.deepEqual(r.json().projects[0].results.map((x) => [x.name, x.outcome]), [["A", "resumed"], ["B", "fresh"]]);
+});
+
+test("#1490 revive --tree: a Codex and a Kimi helper with no recorded id start fresh, never the folder's latest; a manual restart keeps its fallback", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "claude", name: "Lead" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, labels: { "agent.session": SID } }),
+      pane("t8", { cwd: p, created: born + 1000, parent: "t5", front: ["codex"], argv: ["codex"], status: "idle",
+        labels: { "worker.of": ID.main, "worker.role": "dev" } }),
+      pane("t9", { cwd: p, created: born + 2000, parent: "t5", front: ["kimi"], argv: ["kimi"], status: "idle",
+        labels: { "worker.of": ID.main, "worker.role": "review" } }),
+    ] });
+  kimiBin(s);
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const helpers = r.json().projects[0].results[0].helpers;
+  assert.deepEqual(helpers.map((h) => [h.name, h.outcome]), [["t8", "fresh"], ["t9", "fresh"]], r.json().projects[0].results[0].why);
+  const codexRun = runNamed(s, "t8"), kimiRun = runNamed(s, "t9");
+  assert.ok(codexRun && kimiRun, JSON.stringify(runsOf(s)));
+  assert.ok(!wordsOf(codexRun).includes("resume") && !wordsOf(codexRun).includes("--last"), codexRun.join(" "));
+  assert.ok(!wordsOf(kimiRun).includes("--continue") && !wordsOf(kimiRun).includes("-c"), kimiRun.join(" "));
+  assert.match(helpers[0].why ?? "", /no Codex conversation of its own could be identified for t8/);
+  assert.match(helpers[1].why ?? "", /no Kimi conversation of its own could be identified for t9/);
+
+  // A manual restart (not revive) keeps the pre-existing fallback: codex resume --last.
+  const m = world(t, { file: team({ main: { agent: "claude", name: "Lead" } }),
+    terminals: (p) => [
+      pane("t5", { bot: ID.main, cwd: p, created: born, front: ["claude"], argv: ["claude"], status: "idle", labels: { "agent.session": SID } }),
+      pane("t8", { cwd: p, created: born + 1000, parent: "t5", front: ["codex"], argv: ["codex"], status: "idle",
+        labels: { "worker.of": ID.main, "worker.role": "dev" } }),
+    ] });
+  const mr = m.cli(["restart", "Lead", "--tree", "--json"]);
+  assert.equal(mr.code, 0, mr.err + mr.out);
+  const manualRun = runNamed(m, "t8");
+  assert.ok(manualRun && hasSeq(wordsOf(manualRun), ["resume", "--last"]), manualRun?.join(" "));
+});
+
+test("#1490 revive: the search root is the seat's own recorded launch, not the reviving process's; an unknown home fails closed", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }),
+    terminals: (p, ctx) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"], launchEnv: { HOME: join(ctx.root, "other-home") } })] });
+  const otherHome = join(s.root, "other-home");
+  const own = v7(born + 2000, "8abc-0123456789ab"), decoy = v7(born + 3000, "9abc-0123456789ab");
+  codexRollout(s, { id: own, cwd: s.project, codexHome: join(otherHome, ".codex"), dayMs: born + 2000 });
+  codexRollout(s, { id: decoy, cwd: s.project, dayMs: born + 3000 }); // the reviver's home: never searched
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s).filter(([terminal]) => terminal === "t5"), [["t5", own]]);
+  const run = runFor(s, ID.main);
+  assert.ok(hasSeq(wordsOf(run), ["resume", own]), run.join(" "));
+  assert.ok(run.includes(`HOME=${otherHome}`), "the replacement keeps the seat's own home");
+  assert.ok(!r.out.includes(decoy) && !r.err.includes(decoy), r.out + r.err);
+
+  // A pane whose launch names no home: nothing is searched, even under the reviver's own home.
+  const u = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }),
+    terminals: (p) => [{ ...pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"] }), noHome: true }] });
+  codexRollout(u, { id: decoy, cwd: u.project, dayMs: born + 3000 });
+  const ur = u.cli(["revive", "--json"]);
+  assert.equal(ur.code, 0, ur.err);
+  assert.deepEqual(sessionLabels(u), []);
+  const urun = runFor(u, ID.main);
+  assert.ok(!wordsOf(urun).includes("resume") && !wordsOf(urun).includes("--last"), urun.join(" "));
+  assert.match(ur.json().projects[0].results[0].why, /no Codex conversation of its own could be identified for t5/);
+});
+
+test("#1490 revive: a Kimi index row whose folder isn't named by its id is refused", (t) => {
+  const born = Date.now() - 3_600_000;
+  const s = world(t, { file: team({ main: { agent: "kimi", name: "Lead" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["kimi"] })] });
+  kimiBin(s);
+  const kimiHome = join(s.home, ".kimi-code");
+  const dir = join(kimiHome, "sessions", "ws1", "not-the-id");
+  mkdirSync(dir, { recursive: true });
+  utimesSync(dir, (born + 4000) / 1000, (born + 4000) / 1000);
+  writeFileSync(kimiIndexPath(kimiHome), `${JSON.stringify({ sessionId: KID, sessionDir: dir, workDir: s.project })}\n`);
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s), []);
+  const run = runFor(s, ID.main);
+  assert.ok(!wordsOf(run).some((w) => w.startsWith("--session") || w === "--continue" || w === "-c"), run.join(" "));
+  assert.deepEqual(r.json().projects[0].results.map((x) => x.outcome), ["fresh"]);
+});
+
+test("#1490 revive: a rollout whose file-name id differs from the id inside is refused", (t) => {
+  const born = Date.now() - 3_600_000;
+  const fileId = v7(born + 1000, "8abc-0123456789ab"), contentId = v7(born + 2000, "9abc-0123456789ab");
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"] })] });
+  codexRollout(s, { id: fileId, cwd: s.project, dayMs: born + 1000, firstLine: JSON.stringify({ timestamp: new Date(born + 2000).toISOString(),
+    type: "session_meta", payload: { id: contentId, session_id: contentId, timestamp: new Date(born + 2000).toISOString(), cwd: s.project } }) });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s), []);
+  for (const id of [fileId, contentId]) assert.ok(!runsOf(s).some((run) => wordsOf(run).includes(id)), id);
+  assert.deepEqual(r.json().projects[0].results.map((x) => x.outcome), ["fresh"]);
+});
+
+test("#1490 revive: a symlinked rollout file is refused, never followed", (t) => {
+  const born = Date.now() - 3_600_000;
+  const id = v7(born + 1000, "8abc-0123456789ab");
+  const s = world(t, { file: team({ main: { agent: "codex", name: "Lead" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, created: born, argv: ["codex"] })] });
+  const real = join(s.root, "real-rollout.jsonl");
+  writeFileSync(real, `${JSON.stringify({ timestamp: new Date(born + 1000).toISOString(), type: "session_meta",
+    payload: { id, session_id: id, timestamp: new Date(born + 1000).toISOString(), cwd: s.project } })}\n`);
+  const dir = join(codexSessionsDir(join(s.home, ".codex")), localDay(born + 1000));
+  mkdirSync(dir, { recursive: true });
+  symlinkSync(real, join(dir, `rollout-2026-11-16T12-00-00-${id}.jsonl`));
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(sessionLabels(s), []);
+  assert.ok(!wordsOf(runFor(s, ID.main)).includes(id));
+  assert.deepEqual(r.json().projects[0].results.map((x) => x.outcome), ["fresh"]);
 });

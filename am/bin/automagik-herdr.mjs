@@ -44,8 +44,9 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
-  countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, ledgerRivals,
-  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText, uuidV7Ms } from "../revive.js";
+  countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchEnvOf, launchHomeEnv, ledgerRivals,
+  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, seatHomeOf, seatHomesRecorded, sweptSince, unitIsOurs, unitPath, unitText, uuidV7Ms } from "../revive.js";
+import { firstLine as rolloutFirstLine, regularIdentity, wholeText } from "../sessionFiles.mjs";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
@@ -3576,8 +3577,9 @@ const seatJson = (bot, seat) => ({ id: bot.id, terminal: seat.terminal, parent: 
  * binding: hc run alone, past the "already running" check; the attach rows are restart's, once
  * the new pane has stayed up, and the seat row is left to `logSeat(createdMs)`), `session` (the
  * session the restart's command runs: the id it chose with --session-id, or the one it resumes;
- * Claude's goes on the pane as its agent.session label and in the seat row). A Start of a Claude
- * bot whose command picks no session of its own (ownsSession) runs on a session id chosen here
+ * Claude's goes on the pane as its agent.session label and in the seat row), `sessionEnv` (the
+ * home env the old launch recorded, #1490: kept on the replacement and in its seat row). A Start
+ * of a Claude bot whose command picks no session of its own (ownsSession) runs on a session id chosen here
  * (RFC 0021 (f) 2). A pane of a CLI that
  * runs with HERDR_APP_HOME set also gets it as an env word (#650), as a linked machine's pane
  * gets the project's pane-env one. Resolves { terminal,
@@ -3653,8 +3655,13 @@ async function launchSeat(project, bot, over = {}) {
   const proxyOn = agentKey === "dsh-tui" && proxyEnabled(
     approvedProxyState({ project: key, bot }), process.platform,
     (warning) => briefed.warnings.push(warning));
+  // #1490: a discovered agent's launch records its own home (HOME, DSH_HOME, CODEX_HOME or
+  // KIMI_CODE_HOME) in its seat row, and a restart keeps the home the old launch recorded: the
+  // replacement runs where that launch did, never where the reviving process happens to run. A
+  // Start adds no env word (herdr-core's own environment is the launch's, as before).
+  const homeEnv = discoversSession(agentKey) ? (over.sessionEnv ?? launchHomeEnv(agentKey, process.env)) : null;
   const env = { ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}),
-    ...briefed.env, ...hermesPairEnv(bot) };
+    ...briefed.env, ...hermesPairEnv(bot), ...(discoversSession(agentKey) && over.sessionEnv ? over.sessionEnv : {}) };
   const args = startArgs({ botId: bot.id, name: hcName(bot.name, bot.id, taken), cwd, space: place?.space, tab: place?.tab, parent, argv, labels, path,
     env, login, agent: agentKey, project: key, sandbox: proxyOn });
   // The hook goes in before the session starts, so Claude Code reads it at startup.
@@ -3693,7 +3700,7 @@ async function launchSeat(project, bot, over = {}) {
   const tags = seatTags(file, bot.id);
   const logSeat = async (createdMs = started.created_ms) => {
     const unlogged = appendLedger(startRow({ kind: "seat", terminal, pid: started.pid ?? await pidOf(terminal), botId: bot.id, worktree: cwd,
-      project: key, agent: agentKey, model, ...tags, core: await rowCore(), createdMs, session: agentKey === "claude" ? session : null }));
+      project: key, agent: agentKey, model, ...tags, core: await rowCore(), createdMs, env: homeEnv, session: agentKey === "claude" ? session : null }));
     if (unlogged) { hook.warnings.push(unlogged); report([unlogged]); }
   };
   if (!over.replacing) await logSeat();
@@ -3877,13 +3884,18 @@ function workerLedgerRows() {
   try { return readLedger(readText(ledgerPath(appHome())) ?? ""); } catch { return []; }
 }
 
-/** The workers ledger's last seat row for `botId` in project `key`, as the pane it stood for: { address, created_ms, cwd, labels }, or null. */
+/**
+ * The workers ledger's last seat row for `botId` in project `key`, as the pane it stood for:
+ * { address, created_ms, cwd, labels, env }, or null. `env` is the launch home the row recorded
+ * (#1490): a gone pane's only record of where its agent ran.
+ */
 function lastSeat(rows, botId, key) {
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const r = rows[i];
     if (r?.event !== "start" || r.kind !== "seat" || r.botId !== botId || !(r.project == null || r.project === key)) continue;
     if (typeof r.terminal !== "string" || !r.terminal) return null;
-    return { address: r.terminal, created_ms: Number.isSafeInteger(r.created_ms) ? r.created_ms : null, cwd: typeof r.worktree === "string" ? r.worktree : null, labels: {} };
+    return { address: r.terminal, created_ms: Number.isSafeInteger(r.created_ms) ? r.created_ms : null,
+      cwd: typeof r.worktree === "string" ? r.worktree : null, labels: {}, env: r.env && typeof r.env === "object" ? r.env : null };
   }
   return null;
 }
@@ -3900,13 +3912,38 @@ function sessionBorn(dir) {
 const sessionsOnDisk = () => existsSync(join(dshHomeOf(home(), process.env), "sessions")) || existsSync(agyHistoryPath(home()))
   || existsSync(codexSessionsDir(codexHomeOf(home(), process.env))) || existsSync(kimiIndexPath(kimiHomeOf(home(), process.env)));
 
-// One read per path per pass (recordSessions, or one restart and its helpers): emptied at the
-// start of each, so a long-lived queued restart never acts on an old listing.
+// One read per path per pass (recordSessions, or one restart and its helpers), and only while
+// the path still names the file that was read: a file replaced mid-pass isn't trusted (#1490).
 const sessionDiscovery = new Map();
+const sessionListings = new Map();
+function resetSessionDiscovery() {
+  sessionDiscovery.clear();
+  sessionListings.clear();
+}
+/** A folder listing once per pass; a listing that can't be read is null, and the caller fails closed. */
+function onceListing(key, read) {
+  if (!sessionListings.has(key)) sessionListings.set(key, read());
+  return sessionListings.get(key);
+}
+/**
+ * A file read once per pass, trusted only while the path still names the same regular file: a
+ * rollout or index replaced mid-pass is read again (and refused if it can't be trusted).
+ */
+function onceFile(key, read) {
+  const hit = sessionDiscovery.get(key);
+  if (hit) {
+    if (regularIdentity(key) === hit.identity) return hit.value;
+    sessionDiscovery.delete(key);
+    return null;
+  }
+  const value = read();
+  sessionDiscovery.set(key, { value, identity: regularIdentity(key) });
+  return value;
+}
 
 /** Codex's existing YYYY/MM/DD folders, or null when their listing can't be read. */
 function codexFolders(dir) {
-  if (!sessionDiscovery.has(dir)) {
+  return onceListing(dir, () => {
     let days = null;
     try {
       days = [];
@@ -3920,52 +3957,18 @@ function codexFolders(dir) {
         }
       }
     } catch { days = null; }
-    sessionDiscovery.set(dir, days);
-  }
-  return sessionDiscovery.get(dir);
+    return days;
+  });
 }
 
-/** A rollout's first line, at most 1 MiB; null when unreadable or longer. */
+/** A rollout's first line, at most 1 MiB; null when unreadable, oversized, a symlink or swapped under the read. */
 function codexFirstLine(file) {
-  if (!sessionDiscovery.has(file)) {
-    let line = null, fd = null;
-    try {
-      fd = openSync(file, "r");
-      if (fstatSync(fd).isFile()) {
-        const cap = 1024 * 1024;
-        const bytes = Buffer.alloc(cap + 1);
-        let used = 0, end = -1;
-        while (used < bytes.length) {
-          const n = readSync(fd, bytes, used, Math.min(64 * 1024, bytes.length - used), null);
-          if (!n) break;
-          end = bytes.indexOf(10, used);
-          used += n;
-          if (end >= 0 && end < used) break;
-          end = -1;
-        }
-        if (end >= 0 || used <= cap) line = bytes.subarray(0, end >= 0 ? end : used).toString("utf8");
-      }
-    } catch { line = null; }
-    finally { if (fd !== null) closeSync(fd); }
-    sessionDiscovery.set(file, line);
-  }
-  return sessionDiscovery.get(file);
+  return onceFile(file, () => rolloutFirstLine(file));
 }
 
-/** Kimi's whole index, at most 16 MiB; null when unreadable or larger. */
+/** Kimi's whole index, at most 16 MiB; null when unreadable, larger, a symlink or swapped under the read. */
 function kimiIndexText(file) {
-  if (!sessionDiscovery.has(file)) {
-    let text = null;
-    try {
-      const cap = 16 * 1024 * 1024;
-      if (statSync(file).size <= cap) {
-        const bytes = readFileSync(file);
-        if (bytes.length <= cap) text = bytes.toString("utf8");
-      }
-    } catch { text = null; }
-    sessionDiscovery.set(file, text);
-  }
-  return sessionDiscovery.get(file);
+  return onceFile(file, () => wholeText(file));
 }
 
 /** hc's live panes on this computer, as hc get answers them ([] when hc can't say): discoveredSession's rivals come from them. */
@@ -3981,12 +3984,14 @@ async function livePanes() {
  * takes no session id at launch, read from what that agent left under the home: DSH's session
  * folders, Antigravity's prompt history, Codex's session_meta first line, or Kimi's index.
  * Only ids, folders and times are read. revive.js pickSession decides, right or nothing;
- * `ledger`: the workers ledger's rows (the other launches there, and the ids already tied to one). Null when there
- * is none, or it can't be told from another pane's. The id is held: never printed.
+ * `ledger`: the workers ledger's rows (the other launches there, and the ids already tied to one);
+ * `seat`: the search root the pane's own launch names (revive.js seatHomeOf: { home, env }), and
+ * with none nothing is searched at all: never the reviving process's home (#1490). Null when
+ * there is none, or it can't be told from another pane's. The id is held: never printed.
  */
-function discoveredSession(agentKey, get, ledger, panes) {
+function discoveredSession(agentKey, get, ledger, panes, seat) {
   // `panes` (livePanes): null when hc couldn't list them, and then nothing is picked.
-  if (!discoversSession(agentKey) || !Number.isSafeInteger(get?.created_ms) || !Array.isArray(panes)) return null;
+  if (!discoversSession(agentKey) || !seat || !Number.isSafeInteger(get?.created_ms) || !Array.isArray(panes)) return null;
   const cwd = get.cwd ?? get.foreground?.cwd ?? null;
   if (typeof cwd !== "string" || !cwd.startsWith("/")) return null;
   const folders = [...new Set([cwd, realDir(cwd)].filter(Boolean))];
@@ -3994,7 +3999,7 @@ function discoveredSession(agentKey, get, ledger, panes) {
   try {
     if (agentKey === "dsh-tui") {
       for (const folder of folders) {
-        const dir = dshSessionsDir(dshHomeOf(home(), process.env), folder);
+        const dir = dshSessionsDir(dshHomeOf(seat.home, seat.env), folder);
         let names = [];
         try { names = readdirSync(dir); } catch { names = []; }
         for (const name of names) {
@@ -4004,9 +4009,9 @@ function discoveredSession(agentKey, get, ledger, panes) {
           if (born !== null) candidates.push({ id, born });
         }
       }
-    } else if (agentKey === "antigravity") candidates = agyCandidates(readText(agyHistoryPath(home())) ?? "", folders);
+    } else if (agentKey === "antigravity") candidates = agyCandidates(readText(agyHistoryPath(seat.home)) ?? "", folders);
     else if (agentKey === "codex") {
-      const dir = codexSessionsDir(codexHomeOf(home(), process.env));
+      const dir = codexSessionsDir(codexHomeOf(seat.home, seat.env));
       const days = codexFolders(dir);
       if (days === null) return null;
       const launch = new Date(get.created_ms);
@@ -4015,33 +4020,39 @@ function discoveredSession(agentKey, get, ledger, panes) {
       for (const day of days) {
         if (day < since) continue;
         const folder = join(dir, day);
-        if (!sessionDiscovery.has(folder)) {
-          let names = null;
-          try { names = readdirSync(folder); } catch { names = null; }
-          sessionDiscovery.set(folder, names);
-        }
-        const names = sessionDiscovery.get(folder);
+        const names = onceListing(folder, () => {
+          try { return readdirSync(folder); } catch { return null; }
+        });
         if (names === null) return null;
         for (const name of names) {
           if (!/^rollout-.*\.jsonl$/.test(name)) continue;
           const id = codexRolloutId(name);
+          // A rollout's file name must name the id inside it (#1490): a file that doesn't is refused.
+          if (!id) return null;
           const born = uuidV7Ms(id);
           if (born !== null && (born < get.created_ms - BORN_SLACK_MS || born > get.created_ms + FIRST_SESSION_MS)) continue;
           const first = codexFirstLine(join(folder, name));
           if (first === null) return null;
           const candidate = codexCandidate(first, folders);
           if (candidate === undefined) return null;
-          if (candidate) candidates.push(candidate);
+          if (!candidate) continue;
+          if (candidate.id !== id) return null;
+          candidates.push(candidate);
         }
       }
     } else if (agentKey === "kimi") {
-      const kimiHome = kimiHomeOf(home(), process.env);
+      const kimiHome = kimiHomeOf(seat.home, seat.env);
       const index = kimiIndexText(kimiIndexPath(kimiHome));
       if (index === null) return null;
+      const root = realDir(`${String(kimiHome).replace(/\/+$/, "")}/sessions`);
       for (const c of kimiCandidates(index, folders, kimiHome)) {
         let dir = null;
         try { dir = lstatSync(c.sessionDir); } catch { dir = null; }
         if (!dir?.isDirectory()) continue;
+        // The folder must resolve under Kimi's own sessions root (#1490): a symlinked parent
+        // can't point the row's birth time at a folder elsewhere.
+        const real = realDir(c.sessionDir);
+        if (!root || !real || (real !== root && !real.startsWith(`${root}/`))) continue;
         const born = sessionBorn(c.sessionDir);
         if (born !== null) candidates.push({ id: c.id, born });
       }
@@ -4050,12 +4061,13 @@ function discoveredSession(agentKey, get, ledger, panes) {
   const { rivals, claimed } = ledgerRivals(ledger, { terminal: get.address, createdMs: get.created_ms, agentKey, folders });
   // Every other live pane on that agent in the folder is a rival too, whoever started it (as
   // sharersOf counts them): by the program in front, or its launch command (a bare shell hc kept).
+  // A live rival makes an unclaimed session born while it runs ambiguous (#1490).
   const agents = agentTable();
   const inFolder = (d) => typeof d === "string" && d !== "" && (folders.includes(d) || folders.includes(realDir(d) ?? d));
   for (const p of panes) {
     if (p.address === get.address || !(inFolder(p.cwd) || inFolder(p.foreground?.cwd))) continue;
     if (agentKeyOfArgv(unwrapKeep(p.foreground?.argv), agents) !== agentKey && agentKeyOfArgv(paneCommand(p)?.argv, agents) !== agentKey) continue;
-    rivals.push({ terminal: p.address, created_ms: Number.isSafeInteger(p.created_ms) ? p.created_ms : null });
+    rivals.push({ terminal: p.address, created_ms: Number.isSafeInteger(p.created_ms) ? p.created_ms : null, live: true });
     for (const k of [SESSION_LABEL, "revive.session"]) if (typeof p.labels?.[k] === "string" && p.labels[k]) claimed.add(p.labels[k]);
   }
   const id = sessionFor(agentKey, pickSession({ createdMs: get.created_ms, candidates, claimed, rivals }));
@@ -4071,11 +4083,12 @@ function discoveredSession(agentKey, get, ledger, panes) {
  */
 async function recordSessions() {
   let recorded = 0;
-  sessionDiscovery.clear();
-  if (!sessionsOnDisk()) return recorded;
+  resetSessionDiscovery();
+  const ledger = workerLedgerRows();
+  // Nothing under this process's homes and no launch that recorded its own home: nothing to look for.
+  if (!sessionsOnDisk() && !seatHomesRecorded(ledger)) return recorded;
   try {
     const agents = agentTable();
-    const ledger = workerLedgerRows();
     const gets = await livePanes();
     for (const get of gets ?? []) {
       if (!get.labels?.[BOT_LABEL] && !get.labels?.[WORKER_OF_LABEL]) continue;
@@ -4084,7 +4097,9 @@ async function recordSessions() {
       const agentKey = agentKeyOfArgv(unwrapKeep(get.foreground?.argv), agents) ?? start?.agent ?? agentKeyOfArgv(paneCommand(get)?.argv, agents) ?? null;
       if (!discoversSession(agentKey)) continue;
       if (get.labels?.[SESSION_LABEL] || get.labels?.["revive.session"] || ledgerSession(ledger, get.address, agentKey, get.created_ms)) continue;
-      const found = discoveredSession(agentKey, { ...get, cwd: start?.worktree ?? get.cwd }, ledger, gets);
+      // #1490: the search root is the seat's own launch (the pane's argv, else its start row), never ours.
+      const seat = seatHomeOf(agentKey, { argv: get.argv, record: start });
+      const found = discoveredSession(agentKey, { ...get, cwd: start?.worktree ?? get.cwd }, ledger, gets, seat);
       if (!found) continue;
       const unlogged = appendLedger(sessionRow({ terminal: get.address, session: found, transcript: null, agent: agentKey,
         core: await rowCore(), createdMs: get.created_ms }));
@@ -4294,7 +4309,7 @@ const shellWord = (w) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${String(w)
 function byHand(p, parent) {
   const loginWarnings = [];
   const args = helperArgs({ name: p.name, cwd: p.cwd, labels: p.labels, parent, ...helperCommand(p),
-    login: claudeLogin(p.argv, loginWarnings) });
+    login: claudeLogin(p.argv, loginWarnings), env: p.env });
   const notes = [p.session ? `# resumes its session by id: put the id where *** stands; hc get ${p.replaced} shows it (its agent.session `
     + "or revive.session label), and so does the workers ledger"
     : "# no session id known: it resumes its folder's latest conversation"];
@@ -4372,7 +4387,7 @@ async function rerunHelpers(plans, parent, say) {
       try { writeAgySettingsFile(p.agySettings, { name: p.name ?? p.replaced }); }
       catch (e) { failed(e.message); continue; }
     }
-    const r = await hc(helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login }));
+    const r = await hc(helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login, env: p.env }));
     let address = null;
     try { address = JSON.parse(r.stdout).address ?? null; } catch { address = null; }
     if (r.code !== 0 || !address) { failed(`hc run failed (${(r.stderr || r.stdout).trim()})`); continue; }
@@ -4401,7 +4416,7 @@ async function rerunHelpers(plans, parent, say) {
       const unlogged = appendLedger(startRow({ kind: "worker", terminal: address, pid: await pidOf(address), botId: w.botId, task: w.task, branch: w.branch,
         project: w.project, lead: w.lead, worktree: w.worktree, base: w.base, created: false, agent: w.agent, model: w.model, effort: w.effort,
         template: w.template, role: w.role, swap: w.swap, override: w.override, overrideRequested: w.override_requested,
-        core, createdMs, squad, session: p.agent === "claude" ? p.session : null }));
+        core, createdMs, squad, env: p.env, session: p.agent === "claude" ? p.session : null }));
       if (unlogged) say(unlogged);
     }
     if (p.binding) {
@@ -4424,7 +4439,7 @@ async function rerunHelpers(plans, parent, say) {
       let tags = seatTags(null, b.bot);
       try { tags = seatTags(loadProject(b.project).file, b.bot); } catch { /* its file can't be read now: no tags */ }
       const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: await pidOf(address), botId: b.bot, worktree: p.cwd, project: b.project,
-        agent: p.agent, model: null, ...tags, core, createdMs, session: p.agent === "claude" ? p.session : null }));
+        agent: p.agent, model: null, ...tags, core, createdMs, env: p.env, session: p.agent === "claude" ? p.session : null }));
       if (unlogged) say(unlogged);
     }
     // A session id carried onto the new terminal, any harness (RFC 0021 (f) 5): a session row.
@@ -4489,10 +4504,19 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     const agyBot = [binding?.bot, worker?.botId].map((id) => project.file.bots.find((b) => b.id === id)).find(Boolean)
       ?? project.file.bots.find((b) => b.id === bot.id) ?? bot;
     for (const k of ["agent.session", "revive.session"]) holdId(h.labels?.[k]);
-    holdId(knownSession(h, agentKey)?.session);
+    const known = knownSession(h, agentKey)?.session ?? null;
+    holdId(known);
+    // #1490: the helper's own launch names its home; its replacement keeps it. A helper whose
+    // launch names none records none: the search for it fails closed, never to this process's.
+    const seat = agentKey ? seatHomeOf(agentKey, { argv: h.argv, record: worker }) : null;
+    const homeEnv = agentKey && discoversSession(agentKey) ? seat?.env ?? null : null;
+    // #1490: a revive helper follows the bot's never-guess rule. Codex and Kimi must have a
+    // conversation of their own recorded; with none it starts fresh, never the folder's latest.
+    const neverGuess = revive && !known && (agentKey === "codex" || agentKey === "kimi")
+      ? `no ${agents[agentKey]?.name ?? agentKey} conversation of its own could be identified for ${h.address}, so its folder's latest one was not guessed` : fresh;
     const grantPlan = grantsAt.get(helperCwd({ get: h, worker, realpath: realDir })) ?? null;
-    const planned = helperPlan({ get: h, worker, session: knownSession(h, agentKey)?.session ?? null,
-      agents, fresh, bot: agyBot, agy: { appHomeDir: appHome(), bot: agyBot, realpath: realDir, homeDir: home() },
+    const planned = helperPlan({ get: h, worker, session: known,
+      agents, fresh: neverGuess, bot: agyBot, agy: { appHomeDir: appHome(), bot: agyBot, realpath: realDir, homeDir: home() },
       launchAgent: revive && isBareShell(h), grants: grantPlan?.dirs ?? [], where: localWhere() });
     // #1142: a Codex helper run in the launch mode says what its launch withheld; a template
     // worker runs its own command as written and gets nothing of the pack's.
@@ -4500,7 +4524,7 @@ async function treePlans({ project, bot, old, helpers, view, ledger, agents, kno
     const codexWithheld = agentKey === "codex" && !planned.error && !templateWorker && grantPlan
       ? localCodexWarning(worker || h.labels?.[WORKER_OF_LABEL] ? agents.codex?.run : paneCommand(h)?.argv, grantPlan) : null;
     return { ...planned, codexWithheld,
-      worker, binding, proxyIdentity,
+      worker, binding, proxyIdentity, env: homeEnv,
       createdMs: Number.isSafeInteger(h.created_ms) ? h.created_ms : null };
   };
   let tree = doomed.map((h) => planOf(h));
@@ -4817,16 +4841,23 @@ async function cmdRestart(opts, [ref]) {
   // The session to resume: the old pane's agent.session label (or a reviver's revive.session),
   // else the ledger's last session row for that terminal (the Claude hook writes them), for
   // every agent that resumes by id.
-  // hc's live panes, asked only when a session may have to be found on disk (#939): its rivals.
-  sessionDiscovery.clear();
-  const panesNow = sessionsOnDisk() && (discoversSession(runningAgent ?? bot.agent) || helpers.length) ? await livePanes() : [];
+  // The launch record a live pane was started with (its terminal and created_ms key it), the
+  // one the search for a session on disk must read its own home from (#1490).
+  const startOf = (get) => (get ? ledger.findLast((r) => r?.event === "start" && r.terminal === get.address
+    && r.created_ms === get.created_ms) ?? null : null);
+  // hc's live panes whenever a session may have to be found on disk (#939): its rivals. Asked
+  // even when this process's homes hold no sessions: the seat's own home may (#1490).
+  resetSessionDiscovery();
+  const panesNow = discoversSession(runningAgent ?? bot.agent) || helpers.length ? await livePanes() : [];
   const knownSession = (get, agentKey) => {
     const id = paneSession(get, agentKey);
     if (id) return { session: id, transcript: null };
     const row = resumesById(agentKey) ? ledgerSession(ledger, get.address, agentKey, get.created_ms) : null;
     if (row) return row;
     // #939: an agent that takes no id at launch (dsh-TUI, Antigravity, Codex, Kimi) left its session on disk.
-    const found = discoveredSession(agentKey, get, ledger, panesNow);
+    // #1490: only under the home its own launch names (a gone pane's last seat row stands in for it).
+    const seat = seatHomeOf(agentKey, { argv: get.argv, record: get === ghost ? ghost : startOf(get) });
+    const found = discoveredSession(agentKey, get, ledger, panesNow, seat);
     return found ? { session: found, transcript: null } : null;
   };
   // #939, revive only: the bot's pane is gone whole (a reboot took it). Its last seat row stands
@@ -4898,6 +4929,10 @@ async function cmdRestart(opts, [ref]) {
     plan = { ...restartPlan({ ...planned, fresh: true }), note };
     sharedNote = note;
   }
+  // #1490: the replacement keeps the old launch's own home when it recorded one (a resume found
+  // under it must be found under it again); a launch with no record starts under this one's.
+  const seatLaunch = known || was ? seatHomeOf(plan.agent, { argv: old?.argv, record: old ? startOf(old) : ghost }) : null;
+  const sessionEnv = discoversSession(plan.agent) && seatLaunch ? seatLaunch.env : undefined;
   const { tree, treeWarnings } = old && opts.tree
     ? await treePlans({ project, bot, old, helpers, view, ledger, agents, knownSession, force: opts.force, freshShared: opts["fresh-shared"], revive: Boolean(opts.revive),
       run: { who: bot.name, agent: plan.agent, cwd, session: resumeId, mode: plan.mode } })
@@ -4921,7 +4956,7 @@ async function cmdRestart(opts, [ref]) {
     });
     if (!consumed) return PRINTED;
   }
-  let seat = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
+  let seat = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
     carry: { ...carry, ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, resumeId),
     replacing: old ? held.binding : null, granted: plan.granted });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
@@ -4984,7 +5019,7 @@ async function cmdRestart(opts, [ref]) {
       plan = { ...restartPlan({ ...planned, fresh: true }), note };
       resumeId = null;
       say(`${bot.name} starts on a new conversation: ${note}.`);
-      const again = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
+      const again = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place, sessionEnv,
         carry: { ...carriedLabels(old), ...(plan.template ? { [WORKER_TEMPLATE_LABEL]: plan.template } : {}),
           ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, null), replacing: held.binding,
         granted: plan.granted });
@@ -5215,9 +5250,11 @@ async function cmdAttach(opts, [ref, terminal]) {
   if (!decided.already && !at.machine) {
     const argv = get.foreground?.argv;
     const seatAgent = agentKeyOfArgv(argv, agentTable()) ?? (claude ? "claude" : bot.agent ?? null);
+    // #1490: a discovered agent's launch argv names its home; record it, as a pack launch does.
+    const seatHome = discoversSession(seatAgent) ? seatHomeOf(seatAgent, { argv: get.argv })?.env ?? null : null;
     const unlogged = appendLedger(startRow({ kind: "seat", terminal: address, pid: get.foreground?.pid ?? get.pid ?? null, botId: bot.id,
       worktree: sessionFolder, project: key, agent: seatAgent, model: detectModel(argv, seatAgent), ...seatTags(file, bot.id),
-      core: await rowCore(), createdMs: get.created_ms }));
+      core: await rowCore(), createdMs: get.created_ms, env: seatHome }));
     if (unlogged) hook.warnings.push(unlogged);
   }
   if (hook.written) hook.warnings.push(`${bot.name}'s briefing hook was added while its Claude session was running. If its next prompt brings no briefing, restart the bot: am restart ${bot.id} (or the bot row's Restart).`);
@@ -6597,6 +6634,9 @@ async function cmdWorker(opts, rest) {
   const launchArgv = session ? [...plan.argv, ...sessionIdArgs(plan.agent, session)] : plan.argv;
   // The argv the worker runs, set once its worktree is known (a Codex worker's grants come from it).
   let workerArgv = launchArgv;
+  // #1490: a discovered agent's worker row records its launch home, so a search for its
+  // conversation reads the same root. A template runs its own command, and records none.
+  const homeEnv = !plan.template && discoversSession(plan.agent) ? launchHomeEnv(plan.agent, process.env) : null;
   // Held across a fetch and git worktree add (60 s each) and the hc calls, so a second call on
   // this worktree waits for the first's start rather than failing; kept fresh while held. A
   // task's worker takes its name's lock first (taskLock), so a second call for the task on
@@ -6728,7 +6768,7 @@ async function cmdWorker(opts, rest) {
   const { pid, createdMs } = await launchOf(terminal);
   const unlogged = appendLedger(startRow({ kind: "worker", terminal, pid, botId: bot.id, task: taskId, branch: place.branch,
     project: project.key, lead, worktree, base, created: place.created, agent: plan.agent, model: plan.model, effort: plan.effort,
-    template: plan.template, role, swap, override, overrideRequested, core: await rowCore(), createdMs, squad: squadOf(project.file, bot.id),
+    template: plan.template, role, swap, override, overrideRequested, core: await rowCore(), createdMs, env: homeEnv, squad: squadOf(project.file, bot.id),
     session }));
   if (unlogged) warnings.push(unlogged);
   // An agent that takes no first prompt on its command line (kimi, #1032) started bare: its task
