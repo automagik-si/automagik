@@ -740,42 +740,60 @@ export function install(rt) {
     }
   }
 
+  const picking = new Map()
+  async function whilePicking(bot, run) {
+    picking.set(bot.id, (picking.get(bot.id) ?? 0) + 1)
+    try {
+      return await run()
+    } finally {
+      const remaining = picking.get(bot.id) - 1
+      if (remaining === 0) picking.delete(bot.id)
+      else picking.set(bot.id, remaining)
+    }
+  }
+
   // An accepted switch undone because the rest of its update was refused: the old fields back,
   // and the old selection on the Bot's Sessions again (applyModel saves the record it restores).
   async function restoreModel(bot, before) {
-    putModelFields(bot, before)
-    try {
-      await rt.applyModel(bot, { force: true })
-    } catch (error) {
-      rt.warn('ds-bot: the model of %s was not selected again: %s', bot.name, error?.message ?? error)
-    }
-    putModelFields(bot, before)
+    return whilePicking(bot, async () => {
+      putModelFields(bot, before)
+      try {
+        await rt.applyModel(bot, { force: true })
+      } catch (error) {
+        rt.warn('ds-bot: the model of %s was not selected again: %s',
+          bot.name, error?.message ?? error)
+      }
+      putModelFields(bot, before)
+    })
   }
 
   async function switchModel(bot, patch, modelRef, effortId) {
     const before = modelFields(bot)
     const blockedBefore = bot.blocked
-    if (patch.model !== undefined) {
-      rt.noteModelChoice?.(bot, modelRef ?? undefined)
-      // A failure that blocked the Bot was its old model's (turns.js).
-      if ((modelRef ?? undefined) !== bot.model) delete bot.blocked
-      if (modelRef === null) delete bot.model
-      else bot.model = modelRef
-    }
-    if (patch.effort !== undefined) {
-      if (effortId === null) delete bot.effort
-      else bot.effort = effortId
-    }
-    try {
-      await rt.applyModel(bot, { force: true })
-    } catch (error) {
-      putModelFields(bot, before)
-      if (blockedBefore !== undefined) bot.blocked = blockedBefore
-      rt.warn('ds-bot: the model of %s was not changed: %s', bot.name, error?.message ?? error)
-      if (typeof error?.code === 'string' && error.code.startsWith('bot/')) throw error
-      const wanted = patch.model === undefined ? 'this thinking level' : modelRef ?? 'no model'
-      throw refusal(`${bot.name} could not switch to ${wanted}. It stays on ${before.model ?? 'its current model'}.`, { cause: error })
-    }
+    return whilePicking(bot, async () => {
+      if (patch.model !== undefined) {
+        rt.noteModelChoice?.(bot, modelRef ?? undefined)
+        // A failure that blocked the Bot was its old model's (turns.js).
+        if ((modelRef ?? undefined) !== bot.model) delete bot.blocked
+        if (modelRef === null) delete bot.model
+        else bot.model = modelRef
+      }
+      if (patch.effort !== undefined) {
+        if (effortId === null) delete bot.effort
+        else bot.effort = effortId
+      }
+      try {
+        await rt.applyModel(bot, { force: true })
+      } catch (error) {
+        putModelFields(bot, before)
+        if (blockedBefore !== undefined) bot.blocked = blockedBefore
+        rt.warn('ds-bot: the model of %s was not changed: %s', bot.name, error?.message ?? error)
+        if (typeof error?.code === 'string' && error.code.startsWith('bot/')) throw error
+        const wanted = patch.model === undefined ? 'this thinking level' : modelRef ?? 'no model'
+        throw refusal(`${bot.name} could not switch to ${wanted}. `
+          + `It stays on ${before.model ?? 'its current model'}.`, { cause: error })
+      }
+    })
   }
 
   async function setFlags(id, { pinned, hidden, sectionId }) {
@@ -1391,6 +1409,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
+    pickingModel: id => picking.has(id), whilePicking,
     ensureWorkspace, keepTeamFolder, createSession, createBot, duplicateBot, updateBot, setFlags,
     saveSection, reorderSections, deleteSection,
     roomBusy, autoRoomName, retitleRoom, createRoom, updateRoom, deleteRoom,

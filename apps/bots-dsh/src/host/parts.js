@@ -2263,13 +2263,17 @@ export function install(rt) {
     try { said = saidSomething(agent.session.deriveMessages()) } catch {}
     if (!said) {
       rt.noteModelChoice?.(bot, target)
-      putRoute()
-      try {
-        await rt.applyModel(bot, { force: true })
-      } catch (error) {
-        restore()
-        throw error
+      const takeRoute = async () => {
+        putRoute()
+        try {
+          await rt.applyModel(bot, { force: true })
+        } catch (error) {
+          restore()
+          throw error
+        }
       }
+      if (rt.whilePicking) await rt.whilePicking(bot, takeRoute)
+      else await takeRoute()
       await rt.save()
       return { id: botId, model: target, ...(effortId === null ? {} : { effort: effortId }), status: 'switched' }
     }
