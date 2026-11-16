@@ -6,8 +6,8 @@ import { dirname, join, resolve } from 'node:path'
 import test, { after } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
-  FIRST_BOOT_MARKER, TRIAD, ensureTeam, installSkill, runFirstBoot, seedRegistry, seedScript,
-  sha256File, skillProblems, verifySurfaces,
+  FIRST_BOOT_MARKER, TRIAD, ensureTeam, installSkill, managedProgram, runFirstBoot, seedRegistry, seedScript,
+  sha256File, skillProblems, verifySurfaces, writeProgramsBridge,
 } from '../first-boot.mjs'
 import { REGISTRY_SEED_COMMIT, REGISTRY_SEED_SHA256, SKILL_NAME, SKILL_SHA256 } from '../toolchain.mjs'
 
@@ -281,4 +281,63 @@ test('the role briefs carry the Claude-only UI and opposite-provider review rule
 test('the pinned skill hashes are the reviewed bytes', () => {
   assert.equal(createHash('sha256').update(readFileSync(join(SOURCE, SKILL_NAME, 'SKILL.md'))).digest('hex'), SKILL_SHA256['SKILL.md'])
   assert.equal(createHash('sha256').update(readFileSync(join(SOURCE, SKILL_NAME, 'references', 'packet.md'))).digest('hex'), SKILL_SHA256['references/packet.md'])
+})
+
+const storeBinary = (home, agent, version) => join(home, 'acp', 'clis', agent === 'claude' ? '@anthropic-ai__claude-code' : '@openai__codex', `${version}-00000000-0000-0000-0000-000000000000`, 'node_modules', agent === 'claude' ? 'claude' : 'codex')
+
+test('mutant WRITER_SKIPS_MANAGED_ENTRY is killed: the managed entries point at the store', () => {
+  const home = temp()
+  const appHome = join(home, 'herdr-app')
+  const claude = storeBinary(home, 'claude', '1.2.3')
+  const codex = storeBinary(home, 'codex', '4.5.6')
+  assert.equal(writeProgramsBridge({ home, appHome, agent: 'claude', path: claude, ...silence }).changed, true)
+  assert.equal(writeProgramsBridge({ home, appHome, agent: 'codex', path: codex, ...silence }).changed, true)
+  const programs = JSON.parse(readFileSync(join(appHome, 'programs.json'), 'utf8')).programs
+  assert.deepEqual(programs.claude.run, [claude])
+  assert.deepEqual(programs.codex.run, [codex])
+  assert.equal(managedProgram(programs.claude.run, home), true)
+  assert.equal(managedProgram(programs.codex.run, home), true)
+})
+
+test('mutants WRITER_DROPS_PERSONAL_OVERRIDES and WRITER_OVERWRITES_PERSONAL_RUN are killed: a person\'s overrides survive', () => {
+  const home = temp()
+  const appHome = join(home, 'herdr-app')
+  mkdirSync(appHome, { recursive: true })
+  const personal = {
+    programs: {
+      claude: { run: ['/opt/person/claude'] },
+      hermes: { run: ['hermes', '--tui'] },
+    },
+    keep: 'me',
+  }
+  writeFileSync(join(appHome, 'programs.json'), `${JSON.stringify(personal, null, 2)}\n`)
+  const warnings = []
+  const claude = writeProgramsBridge({ home, appHome, agent: 'claude', path: storeBinary(home, 'claude', '1.2.3'), log: () => {}, warn: (message) => warnings.push(message) })
+  assert.equal(claude.changed, false)
+  assert.match(warnings.join('\n'), /person's own override/)
+  writeProgramsBridge({ home, appHome, agent: 'codex', path: storeBinary(home, 'codex', '4.5.6'), ...silence })
+  const after = JSON.parse(readFileSync(join(appHome, 'programs.json'), 'utf8'))
+  assert.deepEqual(after.programs.claude, { run: ['/opt/person/claude'] })
+  assert.deepEqual(after.programs.hermes, { run: ['hermes', '--tui'] })
+  assert.equal(after.keep, 'me')
+  assert.deepEqual(after.programs.codex.run, [storeBinary(home, 'codex', '4.5.6')])
+})
+
+test('mutant WRITER_STALE_VERSION is killed: a version-id change refreshes the managed entry', () => {
+  const home = temp()
+  const appHome = join(home, 'herdr-app')
+  const first = storeBinary(home, 'claude', '1.2.3')
+  const next = storeBinary(home, 'claude', '1.2.4')
+  writeProgramsBridge({ home, appHome, agent: 'claude', path: first, ...silence })
+  const refreshed = writeProgramsBridge({ home, appHome, agent: 'claude', path: next, ...silence })
+  assert.equal(refreshed.changed, true)
+  const programs = JSON.parse(readFileSync(join(appHome, 'programs.json'), 'utf8')).programs
+  assert.deepEqual(programs.claude.run, [next])
+  assert.equal(writeProgramsBridge({ home, appHome, agent: 'claude', path: next, ...silence }).changed, false)
+})
+
+test('mutant WRITER_WRITES_UNMANAGED_PATH is killed: a path outside the store is refused', () => {
+  const home = temp()
+  assert.throws(() => writeProgramsBridge({ home, appHome: join(home, 'herdr-app'), agent: 'claude', path: '/opt/person/claude', ...silence }), /not in this instance's CLI store/)
+  assert.equal(existsSync(join(home, 'herdr-app', 'programs.json')), false)
 })

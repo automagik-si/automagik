@@ -18,11 +18,13 @@ import {
   mkdirSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   AGENTS_RELATIVE,
@@ -424,6 +426,76 @@ export function runFirstBoot({
 }
 
 /**
+ * The supported launch bridge: a `programs.json` run override in the app home. am reads it
+ * through withOverrides (am/models.js), so a store-installed absolute binary is what a Bot
+ * starts. Only an entry whose run points into this instance's CLI store is managed here; a
+ * person's own override is never deleted or rewritten. The file stays under the data volume.
+ */
+export function writeProgramsBridge({
+  home,
+  appHome = join(home, 'herdr-app'),
+  agent,
+  path,
+  log = console.log,
+  warn = console.warn,
+} = {}) {
+  const storeRoot = `${resolve(join(home, 'acp', 'clis'))}${sep}`
+  const target = resolve(path ?? '')
+  if (!target.startsWith(storeRoot) || !isAbsolute(target)) {
+    throw new Error(`programs.json bridge path is not in this instance's CLI store: ${path}`)
+  }
+  const file = join(appHome, 'programs.json')
+  let current = {}
+  if (existsSync(file)) {
+    try {
+      current = JSON.parse(readFileSync(file, 'utf8'))
+    } catch (error) {
+      warn(`programs.json: ${file} is not JSON (${error?.message ?? error}); left as it is`)
+      return { file, changed: false, reason: 'invalid' }
+    }
+  }
+  if (current === null || typeof current !== 'object' || Array.isArray(current)) {
+    warn(`programs.json: ${file} is not an object; left as it is`)
+    return { file, changed: false, reason: 'invalid' }
+  }
+  const programs = current.programs === undefined ? {} : current.programs
+  if (programs === null || typeof programs !== 'object' || Array.isArray(programs)) {
+    warn(`programs.json: ${file}: programs is not an object; left as it is`)
+    return { file, changed: false, reason: 'invalid' }
+  }
+  const existing = programs[agent]
+  if (existing !== undefined) {
+    if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) {
+      warn(`programs.json: ${file}: ${agent} is not an object; left as it is`)
+      return { file, changed: false, reason: 'personal' }
+    }
+    const run = existing.run
+    const managed = Array.isArray(run) && run.length === 1 && typeof run[0] === 'string'
+      && isAbsolute(run[0]) && `${resolve(run[0])}${sep}`.startsWith(storeRoot)
+    if (!managed) {
+      warn(`programs.json: ${file}: ${agent} is a person's own override; left as it is`)
+      return { file, changed: false, reason: 'personal' }
+    }
+  }
+  const next = {
+    ...current,
+    programs: { ...programs, [agent]: { ...(existing ?? {}), run: [target] } },
+  }
+  if (JSON.stringify(next) === JSON.stringify(current)) return { file, changed: false, reason: 'current' }
+  mkdirSync(appHome, { recursive: true })
+  const mode = existsSync(file) ? statSync(file).mode & 0o777 : 0o644
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode })
+  renameSync(tmp, file)
+  log(`programs.json: ${agent} -> ${target}`)
+  return { file, changed: true, reason: 'written' }
+}
+
+/** Whether a run entry is this instance's managed CLI store path. */
+export const managedProgram = (run, home) => Array.isArray(run) && run.length === 1 && typeof run[0] === 'string'
+  && isAbsolute(run[0]) && `${resolve(run[0])}${sep}`.startsWith(`${resolve(join(home, 'acp', 'clis'))}${sep}`)
+
+/**
  * Install Claude Code and Codex through the shipped CLI store, into the data volume. This runs
  * after DSH starts so a slow first download never holds the auth fence closed; a failure is
  * logged and the ACP plugin's own store retries on its normal schedule. Never called at build
@@ -457,6 +529,13 @@ export async function installVendorClis({
         if (!found) { results[id] = { state: 'missing' }; continue }
         results[id] = { state: 'ready', version: found.version, path: found.path }
         log(`vendor CLIs: ${spec.defaultName} ${found.version} at ${found.path}`)
+        if (found.managed) {
+          const bridge = writeProgramsBridge({
+            home, appHome: env.HERDR_APP_HOME || join(home, 'herdr-app'),
+            agent: spec.key, path: found.path, log, warn,
+          })
+          results[id].bridge = bridge.reason
+        }
       } catch (error) {
         results[id] = { state: 'failed', error: String(error?.message ?? error) }
         warn(`vendor CLIs: ${spec.defaultName} was not installed: ${error?.message ?? error}`)
