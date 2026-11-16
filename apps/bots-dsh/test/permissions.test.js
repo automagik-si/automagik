@@ -689,8 +689,9 @@ test('an undeclared pickModel cannot alter the model choice', async (t) => {
   assert.equal(picky.waiting, undefined)
 })
 
-// The Reviewer's probe: a read-only creator hands every undeclared option at once, a live
-// full-access Session among them. The Bot still starts read-only, on a Session of its own.
+// The Reviewer's probe: a read-only creator hands every option at once, a live
+// full-access Session and a kind among them. The Bot still starts read-only, on a
+// Session of its own.
 test('a read-only creator\'s create_bot yields a read-only Bot whatever else it passes', async (t) => {
   const { ctx, rt, call, service, presets, settle } = team(t, { custom: READ_ONLY, bots: { m1: { permission: 'careful' } } })
   service.set({ id: 'live' }, 'danger-full-access')
@@ -703,7 +704,8 @@ test('a read-only creator\'s create_bot yields a read-only Bot whatever else it 
   assert.equal(probe.permission, 'careful')
   assert.notEqual(probe.id, 'live')
   assert.equal(probe.createdBy, 'm1')
-  assert.equal(probe.kind, undefined)
+  // Kind is a declared choice now; it still changes nothing about the level.
+  assert.equal(probe.kind, 'omni')
   assert.equal(probe.color, undefined)
   assert.equal(rt.isMain(probe.id), false)
   await settle()
@@ -714,21 +716,25 @@ test('a read-only creator\'s create_bot yields a read-only Bot whatever else it 
 
 // #343 F1: the declared parameters are the whole of what createBot receives. An
 // undeclared option a model adds — an adoption, a Main Bot, a held model, a copy, a level,
-// a color, a kind — is dropped at the boundary, alone and all at once.
+// a color — is dropped at the boundary, alone and all at once. Kind is a declared choice.
 test('create_bot hands createBot only its declared parameters', async (t) => {
   const { ctx, rt } = team(t, { custom: READ_ONLY, bots: { m1: { permission: 'careful' } } })
   const calls = []
   const create = rt.createBot
   rt.createBot = async options => { calls.push(options); return create(options) }
-  const declared = ['avatar', 'brief', 'createdBy', 'effort', 'instructions', 'model', 'name', 'role', 'section', 'workDir']
+  const declared = ['avatar', 'brief', 'createdBy', 'effort', 'instructions', 'kind', 'model', 'name', 'role', 'section', 'workDir']
   const undeclared = {
     existingSessionId: 'live', main: true, pickModel: true, copyOf: 'b2',
-    permission: 'danger-full-access', color: 'red', kind: 'omni',
+    permission: 'danger-full-access', color: 'red',
   }
   for (const [index, [key, value]] of Object.entries(undeclared).entries()) {
     await createBotTool(ctx, { name: `Alone ${index}`, [key]: value })
   }
   await createBotTool(ctx, { name: 'Together', ...undeclared })
-  assert.equal(calls.length, Object.keys(undeclared).length + 1)
-  for (const options of calls) assert.deepEqual(Object.keys(options).sort(), declared)
+  await createBotTool(ctx, { name: 'Kinded', kind: 'omni' })
+  assert.equal(calls.length, Object.keys(undeclared).length + 2)
+  const withoutKind = declared.filter(key => key !== 'kind')
+  for (const options of calls.slice(0, -1)) assert.deepEqual(Object.keys(options).sort(), withoutKind)
+  assert.deepEqual(Object.keys(calls.at(-1)).sort(), declared)
+  assert.equal(calls.at(-1).kind, 'omni')
 })

@@ -640,6 +640,60 @@ test('UI DSH creation adds native team membership usable by roster, messages, gr
   assert.equal(await rt.teamTools.find(d => d.name === 'browser_native_test').execute({}, { agent: { id: bot.id }, signal: new AbortController().signal }), 'native browser ready')
 })
 
+test('create_bot kind dsh takes the UI DSH path: native preset and wiring, not a prompt', async (t) => {
+  const { call, stop, ctx, created } = start(TEAM)
+  t.after(stop)
+  await call('state', {})
+  const rt = ctx.provided.get('omniTeam')
+  ctx.provided.set('agentPresets', { list: async () => [{ id: 'cordis' }] })
+  const create = args => rt.teamTools.find(d => d.name === 'create_bot').execute(args, { agent: { id: 'm1' } })
+  const answer = await create({
+    name: 'DSH Captain', role: 'CPT', instructions: 'A generic prompt that must not become the persona.',
+    kind: 'dsh', profile: 'cordis',
+  })
+  assert.match(answer, /^Created DSH Captain/)
+  const bot = rt.findBot('DSH Captain')
+  assert.ok(bot, 'create_bot made no DSH Captain')
+  // The kind the caller named, and the native registration behind it.
+  assert.equal(bot.kind, 'dsh')
+  assert.equal(bot.profile, 'cordis')
+  const agent = Object.values(rt.state.agents).find(entry => entry.adoptedBotId === bot.id)
+  assert.ok(agent, 'create_bot made no adopted native DSH registration')
+  assert.equal(agent.kind, 'dsh')
+  assert.equal(agent.profile, 'cordis')
+  assert.equal(bot.dshAgentId, agent.id)
+  // The preset reaches DSH's own Session creation, as the UI's path does.
+  assert.equal(created.at(-1).agentPreset, 'cordis')
+  // Nothing of a common Bot's prompt was laid over the preset's persona.
+  assert.equal(bot.instructions, '')
+  assert.equal(bot.role, '')
+  // It is a team member, not a standalone DSH bot listed twice.
+  assert.deepEqual(rt.dshBots.list(), [])
+  // The same final shape New DSH bot gives in the UI.
+  const ui = (await call('add-agent', { name: 'UI Captain', profile: 'cordis', teamMember: true })).value
+  const uiBot = rt.findBot('UI Captain')
+  assert.equal(ui.adoptedBotId, uiBot.id)
+  for (const field of ['kind', 'profile', 'role', 'instructions', 'workDir', 'model']) {
+    assert.equal(bot[field], uiBot[field], `DSH Captain and UI Captain differ on ${field}`)
+  }
+})
+
+test('create_bot takes plain, omni and genie kinds, and refuses one it does not know', async (t) => {
+  const { call, stop, ctx } = start(TEAM)
+  t.after(stop)
+  await call('state', {})
+  const rt = ctx.provided.get('omniTeam')
+  const create = args => rt.teamTools.find(d => d.name === 'create_bot').execute(args, { agent: { id: 'm1' } })
+  for (const kind of ['omni', 'genie']) {
+    assert.match(await create({ name: `${kind} helper`, role: 'K', instructions: 'Help.', kind }), new RegExp(`^Created ${kind} helper`))
+    assert.equal(rt.findBot(`${kind} helper`).kind, kind)
+  }
+  assert.match(await create({ name: 'Plain helper', role: 'P', instructions: 'Help.', kind: 'plain' }), /^Created Plain helper/)
+  assert.equal(rt.findBot('Plain helper').kind, undefined)
+  await assert.rejects(create({ name: 'Mystery', role: 'M', instructions: 'Help.', kind: 'whale' }), /"kind" must be one of/)
+  assert.equal(rt.findBot('Mystery'), undefined)
+})
+
 test('UI DSH creation fails without leaving a plain orphan if membership cannot be saved', async (t) => {
   const { call, stop, ctx, archived, home } = start(TEAM)
   t.after(stop)

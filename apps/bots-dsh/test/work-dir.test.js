@@ -333,7 +333,7 @@ test('a new Bot with a folder starts its Session there; others start in the team
   assert.deepEqual(created.at(-1), { cwd: project })
 })
 
-test('a Bot another Omni plugin adds keeps its kind; a model making a Bot cannot give one', async (t) => {
+test('a Bot another Omni plugin adds keeps its kind; create_bot takes the kind it names and refuses an unknown one', async (t) => {
   const { ctx, state, tool, stop } = await start()
   t.after(stop)
   const rt = ctx.provided.get('omniTeam')
@@ -341,10 +341,14 @@ test('a Bot another Omni plugin adds keeps its kind; a model making a Bot cannot
   assert.equal(state().bots[omni.id].kind, 'omni')
   const odd = await rt.createBot({ name: 'Odd', kind: 'wizard', pickModel: true })
   assert.equal(state().bots[odd.id].kind, undefined)
+  // The tool is declared with the kinds a model may name, so it passes the one it is given.
   await tool('create_bot', { name: 'Sneaky', role: 'Sneak', instructions: 'Be sneaky.', kind: 'omni' }, 'a')
   const sneaky = Object.values(state().bots).find(bot => bot.name === 'Sneaky')
   assert.ok(sneaky)
-  assert.equal(sneaky.kind, undefined)
+  assert.equal(sneaky.kind, 'omni')
+  // A kind outside the declared list never reaches the Bots.
+  await assert.rejects(tool('create_bot', { name: 'Mystery', role: 'M', instructions: 'M', kind: 'wizard' }, 'a'), /"kind" must be one of/)
+  assert.equal(Object.values(state().bots).some(bot => bot.name === 'Mystery'), false)
 })
 
 test('the Unfold Bot keeps its kind unfold; any other unknown kind is still dropped', async (t) => {

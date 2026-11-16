@@ -355,7 +355,7 @@ export function install(rt) {
 
   rt.teamTools.push(defineTool({
     name: 'create_bot',
-    description: 'Main Bot only. Create a new Bot on the user\'s team. It appears in the sidebar and greets the user.',
+    description: 'Main Bot only. Create a new Bot on the user\'s team and put it in the sidebar. A plain Bot greets the user; a kind dsh Bot is the UI\'s New DSH bot: a native DSH identity on its preset, with the team tools.',
     parameters: {
       name: { type: 'string', required: true, description: 'Short display name, e.g. "Researcher" or "Editor"' },
       role: { type: 'string', required: true, description: 'Two-to-four character role label shown under the name' },
@@ -363,6 +363,11 @@ export function install(rt) {
       brief: { type: 'string', description: 'Why the user wants it, passed to the new Bot as its first context' },
       model: { type: 'string', description: 'Model the Bot runs on, as provider/model or a model id. Only when the user names one; otherwise the team default model from Omni settings, or the model you run on.' },
       effort: { type: 'string', description: 'Thinking level for the model, as list_bot_models shows it. Only when the user names one.' },
+      kind: {
+        type: 'string', enum: ['plain', 'dsh', 'omni', 'genie'],
+        description: 'What the Bot is. "plain" (the default): an ordinary Bot on a DSH model. "dsh": a native DSH Bot, made as New DSH bot in the UI makes one — its preset\'s persona and plugin wiring and DSH\'s default model, the whale; instructions, role, model, effort, avatar and section do not apply. "omni" or "genie": that plugin\'s kind of Bot.',
+      },
+      profile: { type: 'string', description: 'For kind dsh, the DSH agent preset id that carries its persona and plugin wiring (the UI\'s Preset); DSH\'s default preset when left out. Ignored by the other kinds.' },
       work_dir: WORK_DIR_PARAM,
       section: SECTION_PARAM,
       avatar: AVATAR_PARAM,
@@ -374,10 +379,26 @@ export function install(rt) {
       await rt.load()
       if (!rt.isMain(rt.selfOf(exec.agent?.id))) return 'Only the Main Bot can create Bots. Ask the Main Bot instead.'
       try {
-        const avatar = args.avatar ? await readAvatar(String(args.avatar), { baseDir: rt.sessionFolder?.(exec.agent?.session ?? exec.agent), isData: rt.inData }) : undefined
+        const kind = args.kind === undefined || args.kind === 'plain' ? undefined : args.kind
         const workDir = args.work_dir ? await rt.cleanWorkDir(args.work_dir) : undefined
         const name = String(args.name ?? '').trim()
         await rt.approveFolder(exec, { path: workDir, who: { en: `the new Bot ${name}`, zh: `新 Bot ${name} ` } })
+        // A DSH Bot is the UI's New DSH bot: a native DSH identity on its preset, adopted
+        // into the team. Reuse that one path (agents.js) rather than build a common Bot
+        // and lay a prompt over it, so the persona, plugin wiring and defaults are the
+        // same. Its name is all a native identity keeps; the preset owns the rest.
+        if (kind === 'dsh') {
+          const agent = await rt.addAgent({
+            name,
+            ...(workDir === undefined ? {} : { workDir }),
+            ...(typeof args.profile === 'string' && args.profile.trim() !== '' ? { profile: args.profile.trim() } : {}),
+            teamMember: true,
+          })
+          const bot = rt.botOf(agent.adoptedBotId) ?? rt.findBot(name)
+          if (bot === undefined) throw new Error('the new DSH Bot did not join the team')
+          return `Created ${bot.name}${workDir ? `, working in ${workDir}` : ''}. It runs on its DSH preset.`
+        }
+        const avatar = args.avatar ? await readAvatar(String(args.avatar), { baseDir: rt.sessionFolder?.(exec.agent?.session ?? exec.agent), isData: rt.inData }) : undefined
         // Without a named model the team's default applies; without one the new Bot
         // takes its creator's: the DSH default may be a provider that has no key, and
         // then the new Bot fails on its first reply.
@@ -388,8 +409,8 @@ export function install(rt) {
         const denyTools = args.deny_tools ?? args.denyTools
         const inheritAuto = rt.autoOpener?.()
         // Only the parameters declared above reach createBot. Its other options (an
-        // existing Session to adopt, a Main Bot, a copy, a held model, a kind) are the
-        // host's and the user's to give, never a model's: an undeclared argument is dropped.
+        // existing Session to adopt, a Main Bot, a copy, a held model) are the host's
+        // and the user's to give, never a model's: an undeclared argument is dropped.
         const bot = await rt.createBot({
           name: args.name,
           role: args.role,
@@ -401,6 +422,8 @@ export function install(rt) {
           section: args.section,
           avatar: avatar === undefined ? undefined : { image: avatar },
           createdBy: creator?.id,
+          // The kinds whose persona another plugin owns; dsh took the native path above.
+          ...(kind === 'omni' || kind === 'genie' ? { kind } : {}),
           ...(inheritAuto === undefined ? {} : { inheritAuto }),
           // Only when asked: an older call keeps the exact payload it had.
           ...(denyTools === undefined ? {} : { denyTools }),
