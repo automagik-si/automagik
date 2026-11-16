@@ -110,15 +110,25 @@ export function install(rt) {
   // where group_relay is directly callable. A Bot's own chat asks for no preset at all
   // and so inherits DSH's default, as a DSH bot made from the UI does.
   async function botPreset(profile, { group = false } = {}) {
+    // Both ask for no preset whatever the service answers, so a missing or failing
+    // preset service still makes their Session (fix-first #1438).
+    if (profile === null) return {} // Adopted default DSH preset, not the team's standard.
+    if (profile === undefined && !group) return {}
     const presets = ctx.get?.('agentPresets')
     if (presets === undefined) return {}
-    const served = (await presets.list()).filter(preset => preset.broken === undefined)
+    // A list that cannot be read leaves the Session on DSH's default instead of failing
+    // it: a group loses the standard pin, never its Session.
+    let served = []
+    try {
+      const listed = await presets.list?.()
+      served = (Array.isArray(listed) ? listed : []).filter(preset => preset?.broken === undefined)
+    } catch (error) {
+      rt.warn('ds-bot: the agent presets could not be listed; the Session keeps DSH\'s default: %s', error?.message ?? error)
+    }
     if (profile !== undefined) {
-      if (profile === null) return {} // Adopted default DSH preset, not the team's standard.
       if (!served.some(preset => preset.id === profile)) throw refusal(`The preset ${profile} is not available in this DSH`)
       return { agentPreset: profile }
     }
-    if (!group) return {}
     return served.some(preset => preset.id === 'standard') ? { agentPreset: 'standard' } : {}
   }
 
