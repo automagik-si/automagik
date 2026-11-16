@@ -192,7 +192,7 @@ export const ALLOWLIST = [
   ["herdr/mods/am-sidebar/bin/dsh-sandbox.mjs", "unlinkSync(tmp)", 1, "the sibling temp file of dsh-sandbox's atomic profile write: never mods/ or layouts/"],
   ["am/runner/locks.mjs", "unlinkSync(path)", 1, "the member runner's own stale socket, at the socket path its template config names under the runner's own folder: the runner is not a Herdr mod and holds no mods/ or layouts/ path"],
   ["am/runner/locks.mjs", "rmSync(join(this.dir, entry), { recursive: true, force: true })", 1, "a stray file the socket peer proof left in the member runner's own proof folder (mode 1730), swept by the runner that owns it: never mods/ or layouts/"],
-  ["am/runner/locks.mjs", "unlinkSync(file)", 1, "the one empty proof file the peer just made in the member runner's own proof folder, removed after its uid is checked: never mods/ or layouts/"],
+  ["am/runner/locks.mjs", "unlinkSync(file)", 1, "the one empty proof file the peer just made in the member runner's own proof folder: it is captured by lstat and removed before the captured stat is checked (a refused proof leaves nothing behind), never mods/ or layouts/"],
   ["am/runner/main.mjs", "unlinkSync(resolved.socket)", 2, "the member runner's own socket, removed when listen fails and when it stops: never mods/ or layouts/"],
   ["am/runner/spawn.mjs", "renameSync(tmp, config.state)", 1, "the member runner's own member-to-uid state: a temp file beside the state path its template config names is renamed onto it, never mods/ or layouts/"],
   ["am/runner/spawn.mjs", "unlinkSync(tmp)", 1, "the member runner's own state temp file, removed after a failed write or sync: never mods/ or layouts/"],
