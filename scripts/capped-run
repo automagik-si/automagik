@@ -27,11 +27,14 @@
 #     UTC time, owner (the terminal id in the environment, name only), command name, start or
 #     end, and the exit code at the end. The same log always stays 0600.
 #   - The command never inherits HC_SCOPE, HC_SOCKET, HC_TERMINAL_SOCKET, HC_SESSION or
-#     HC_TERMINAL_ID, and never the real XDG_RUNTIME_DIR: it gets a fresh 0700 scratch folder
-#     per run (removed after the run), so a test that starts herdr-core or `hc server` inside a
-#     gate cannot reach the live core's sockets. systemd-run itself keeps the real
-#     XDG_RUNTIME_DIR to reach the user manager. PATH is untouched (a test's fake-first PATH
-#     belongs to the test).
+#     HC_TERMINAL_ID, and never the real XDG_RUNTIME_DIR: it gets fresh 0700 scratch folders per
+#     run for XDG_RUNTIME_DIR and TMPDIR (removed after the run), so a test that starts
+#     herdr-core or `hc server` inside a gate cannot reach the live core's sockets. The TMPDIR
+#     folder sits under a scratch root outside any git work tree (checked with git rev-parse;
+#     another root is tried when it is inside one): a gate runs with TMPDIR outside any git
+#     tree, because the herdr suite builds temp homes under it and 70 tests fail inside one.
+#     systemd-run itself keeps the real XDG_RUNTIME_DIR to reach the user manager. PATH is
+#     untouched (a test's fake-first PATH belongs to the test).
 #
 # Test-only overrides (never set for a real run): CAPPED_RUN_TEST_MEM replaces the default cap
 # (a tiny scope for the cap-kill test), CAPPED_RUN_TEST_STATE overrides the state folder,
@@ -198,15 +201,35 @@ log_event() {
   return 0
 }
 
-# The child's own runtime folder: a fresh 0700 scratch folder per run, never the real one, so a
-# test that starts herdr-core or `hc server` inside a gate cannot open the live core's sockets.
-# Removed after the run.
-runtime_root=${TMPDIR:-/tmp}
+# The child's own TMPDIR and runtime folder: fresh 0700 folders under a scratch root outside any
+# git work tree. The probe folder picks the root; when it is inside a work tree another candidate
+# is tried. Both folders are removed after the run.
+scratch_root=
+tmp_dir=
+runtime_dir=
 
-cleanup_runtime() {
-  [ -n "${runtime_dir:-}" ] || return 0
-  case $runtime_dir in
-    "$runtime_root"/capped-run-rt.*) rm -rf "${runtime_dir:?}" 2>/dev/null ;;
+try_scratch_root() {
+  [ -z "${scratch_root:-}" ] || return 0
+  [ -n "${1:-}" ] && [ -d "$1" ] || return 1
+  probe=$(mktemp -d "$1/capped-run-probe.XXXXXX" 2>/dev/null) || return 1
+  chmod 700 "$probe" 2>/dev/null
+  if git -C "$probe" rev-parse --show-toplevel >/dev/null 2>&1; then
+    rm -rf "${probe:?}" 2>/dev/null
+    return 1
+  fi
+  rm -rf "${probe:?}" 2>/dev/null
+  scratch_root=$1
+  return 0
+}
+
+cleanup_scratch() {
+  case ${tmp_dir:-} in
+    '') ;;
+    "$scratch_root"/capped-run-tmp.*) rm -rf "${tmp_dir:?}" 2>/dev/null ;;
+  esac
+  case ${runtime_dir:-} in
+    '') ;;
+    "$scratch_root"/capped-run-rt.*) rm -rf "${runtime_dir:?}" 2>/dev/null ;;
   esac
   return 0
 }
@@ -331,20 +354,20 @@ run_systemd() {
   systemd-run "$@"
 }
 
-# The shim, then the payload's own environment: no live-core variables, and a scratch
-# XDG_RUNTIME_DIR in place of the real one (unset when no scratch folder could be made).
+# The shim, then the payload's own environment: no live-core variables, and fresh TMPDIR and
+# XDG_RUNTIME_DIR in place of the real ones (both unset when no scratch folder could be made).
 run_capped() {
   if [ "$have_ionice" = 1 ]; then
     set -- sh -c "$SHIM" capped-run-shim "$peek" nice -n 10 ionice -c 3 "$@"
   else
     set -- sh -c "$SHIM" capped-run-shim "$peek" nice -n 10 "$@"
   fi
-  if [ -n "$runtime_dir" ]; then
+  if [ -n "$tmp_dir" ] && [ -n "$runtime_dir" ]; then
     set -- env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_SESSION \
-      -u HC_TERMINAL_ID XDG_RUNTIME_DIR="$runtime_dir" "$@"
+      -u HC_TERMINAL_ID TMPDIR="$tmp_dir" XDG_RUNTIME_DIR="$runtime_dir" "$@"
   else
     set -- env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_SESSION \
-      -u HC_TERMINAL_ID -u XDG_RUNTIME_DIR "$@"
+      -u HC_TERMINAL_ID -u TMPDIR -u XDG_RUNTIME_DIR "$@"
   fi
   run_systemd "$@"
 }
@@ -355,12 +378,12 @@ run_uncapped() {
   else
     set -- nice -n 10 "$@"
   fi
-  if [ -n "$runtime_dir" ]; then
+  if [ -n "$tmp_dir" ] && [ -n "$runtime_dir" ]; then
     env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_SESSION \
-      -u HC_TERMINAL_ID XDG_RUNTIME_DIR="$runtime_dir" "$@"
+      -u HC_TERMINAL_ID TMPDIR="$tmp_dir" XDG_RUNTIME_DIR="$runtime_dir" "$@"
   else
     env -u HC_SCOPE -u HC_SOCKET -u HC_TERMINAL_SOCKET -u HC_SESSION \
-      -u HC_TERMINAL_ID -u XDG_RUNTIME_DIR "$@"
+      -u HC_TERMINAL_ID -u TMPDIR -u XDG_RUNTIME_DIR "$@"
   fi
 }
 
@@ -411,11 +434,25 @@ if [ "$use_lock" = 1 ]; then
   log_event start ''
 fi
 
-runtime_dir=
-if command -v mktemp >/dev/null 2>&1; then
-  runtime_dir=$(mktemp -d "$runtime_root/capped-run-rt.XXXXXX" 2>/dev/null) || runtime_dir=
+try_scratch_root "${CAPPED_RUN_SCRATCH_ROOT:-}"
+try_scratch_root "${TMPDIR:-}"
+try_scratch_root /tmp
+repo_top=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null)
+[ -n "$repo_top" ] && try_scratch_root "${repo_top%/*}"
+try_scratch_root "${HOME:-}/.cache"
+ensure_state && try_scratch_root "$state_dir"
+if [ -n "$scratch_root" ]; then
+  tmp_dir=$(mktemp -d "$scratch_root/capped-run-tmp.XXXXXX" 2>/dev/null) || tmp_dir=
+  runtime_dir=$(mktemp -d "$scratch_root/capped-run-rt.XXXXXX" 2>/dev/null) || runtime_dir=
+  if [ -z "$tmp_dir" ] || [ -z "$runtime_dir" ]; then
+    [ -n "$tmp_dir" ] && rm -rf "${tmp_dir:?}" 2>/dev/null
+    [ -n "$runtime_dir" ] && rm -rf "${runtime_dir:?}" 2>/dev/null
+    tmp_dir=
+    runtime_dir=
+  fi
+  [ -n "$tmp_dir" ] && chmod 700 "$tmp_dir" 2>/dev/null
+  [ -n "$runtime_dir" ] && chmod 700 "$runtime_dir" 2>/dev/null
 fi
-[ -n "$runtime_dir" ] && chmod 700 "$runtime_dir" 2>/dev/null
 
 capped=0
 peek=
@@ -467,5 +504,5 @@ if [ "$locked" = 1 ]; then
   log_event end " exit=$code"
 fi
 
-cleanup_runtime
+cleanup_scratch
 exit "$code"

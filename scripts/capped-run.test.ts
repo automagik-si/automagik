@@ -46,6 +46,7 @@ interface RunOptions {
   state?: string;
   path?: string;
   timeout?: number;
+  cwd?: string;
 }
 
 function cappedRun(args: string[], options: RunOptions = {}): Outcome {
@@ -58,7 +59,7 @@ function cappedRun(args: string[], options: RunOptions = {}): Outcome {
   if (options.path) env.PATH = options.path;
   const started = Date.now();
   const result: SpawnSyncReturns<string> = spawnSync('sh', [SCRIPT, ...args], {
-    cwd: work,
+    cwd: options.cwd ?? work,
     env,
     encoding: 'utf8',
     timeout: options.timeout ?? 30_000,
@@ -177,6 +178,34 @@ describe('capped-run', () => {
     expect(lines[2]).toBe('drwx------');
     // The scratch folder is per run and goes away with the run.
     expect(existsSync(runtime)).toBe(false);
+  });
+
+  test('the child gets a TMPDIR outside any git work tree, from inside the repo', () => {
+    const repoRoot = join(import.meta.dir, '..');
+    const parentTmpdir = mkdtempSync(join(repoRoot, 'tmpdir-in-repo-'));
+    const child = [
+      'printf "tmpdir:%s\\n" "${TMPDIR-}"',
+      'if [ -n "${TMPDIR-}" ]; then ls -ld "$TMPDIR" | cut -c1-10; else echo missing; fi',
+      'if [ -n "${TMPDIR-}" ]; then git -C "$TMPDIR" rev-parse --show-toplevel >/dev/null 2>&1; echo "git:$?"; else echo git:127; fi',
+    ].join('; ');
+    try {
+      // The run starts inside the repo and the parent's TMPDIR is inside it too: the wrapper must
+      // still hand the child a fresh TMPDIR that is not inside a work tree, and remove it.
+      const outcome = cappedRun(['--', 'sh', '-c', child], {
+        cwd: repoRoot,
+        env: { TMPDIR: parentTmpdir },
+      });
+      expect(outcome.status).toBe(0);
+      const lines = outcome.stdout.trim().split('\n');
+      const tmpdir = lines[0].slice('tmpdir:'.length);
+      expect(tmpdir).not.toBe('');
+      expect(tmpdir).not.toBe(parentTmpdir);
+      expect(lines[1]).toBe('drwx------');
+      expect(lines[2]).not.toBe('git:0');
+      expect(existsSync(tmpdir)).toBe(false);
+    } finally {
+      rmSync(parentTmpdir, { recursive: true, force: true });
+    }
   });
 
   // One rule with mutant 4: --mem only raises. 256M is below the 4G default and must leave the
