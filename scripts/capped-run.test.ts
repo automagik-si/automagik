@@ -153,6 +153,35 @@ function shmHasRoom(): boolean {
 
 const dd = spawnSync('dd', ['--version'], { encoding: 'utf8' }).status === 0;
 
+const inheritedOomScore = (() => {
+  try {
+    return Number(readFileSync('/proc/self/oom_score_adj', 'utf8').trim());
+  } catch {
+    return 0;
+  }
+})();
+
+function compareAdjScript(): string {
+  const script = join(scratch('oom-score'), 'compare-adj.sh');
+  writeFileSync(
+    script,
+    [
+      'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
+      'self_adj=$(cat /proc/self/oom_score_adj 2>/dev/null)',
+      'monitor_adj=',
+      'for pid in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do',
+      '  [ "$pid" = "$$" ] && continue',
+      '  comm=$(cat "/proc/$pid/comm" 2>/dev/null) || continue',
+      '  case $comm in',
+      '    sh | dash | bash | ash | busybox) monitor_adj=$(cat "/proc/$pid/oom_score_adj" 2>/dev/null) ;;',
+      '  esac',
+      'done',
+      'printf "%s %s\\n" "$self_adj" "${monitor_adj:-missing}"',
+    ].join('\n'),
+  );
+  return script;
+}
+
 function mainCheckout(): string {
   const git = spawnSync('git', ['-C', join(import.meta.dir, '..'), 'worktree', 'list', '--porcelain'], {
     encoding: 'utf8',
@@ -631,31 +660,34 @@ describe('capped-run', () => {
     60_000,
   );
 
-  test.skipIf(!scope)('the payload runs with an oom_score_adj above the monitor', () => {
-    const state = scratch('oom-score-state');
-    const script = join(scratch('oom-score'), 'compare-adj.sh');
-    writeFileSync(
-      script,
-      [
-        'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
-        'self_adj=$(cat /proc/self/oom_score_adj 2>/dev/null)',
-        'monitor_adj=',
-        'for pid in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do',
-        '  [ "$pid" = "$$" ] && continue',
-        '  comm=$(cat "/proc/$pid/comm" 2>/dev/null) || continue',
-        '  case $comm in',
-        '    sh | dash | bash | ash | busybox) monitor_adj=$(cat "/proc/$pid/oom_score_adj" 2>/dev/null) ;;',
-        '  esac',
-        'done',
-        'printf "%s %s\\n" "$self_adj" "${monitor_adj:-missing}"',
-      ].join('\n'),
-    );
-    const outcome = cappedRun(['--', 'sh', script], { state, timeout: 30_000 });
-    expect(outcome.status).toBe(0);
-    const [selfAdj, monitorAdj] = outcome.stdout.trim().split(' ');
-    expect(Number(selfAdj)).toBeGreaterThanOrEqual(500);
-    expect(Number.isFinite(Number(monitorAdj))).toBe(true);
-    expect(Number(monitorAdj)).toBeLessThan(Number(selfAdj));
+  test.skipIf(!scope || inheritedOomScore >= 1000)(
+    'the payload raises strictly above the monitor (skipped when the inherited oom_score_adj is 1000 or more)',
+    () => {
+      const state = scratch('oom-score-state');
+      const script = compareAdjScript();
+      const outcome = cappedRun(['--', 'sh', script], { state, timeout: 30_000 });
+      expect(outcome.status).toBe(0);
+      const [selfAdj, monitorAdj] = outcome.stdout.trim().split(' ');
+      expect(Number.isFinite(Number(selfAdj))).toBe(true);
+      expect(Number.isFinite(Number(monitorAdj))).toBe(true);
+      expect(Number(selfAdj)).toBeGreaterThan(Number(monitorAdj));
+    },
+  );
+
+  test.skipIf(!scope)('the payload raises above the monitor when the session starts at 500', () => {
+    const original = readFileSync('/proc/self/oom_score_adj', 'utf8').trim();
+    writeFileSync('/proc/self/oom_score_adj', '500');
+    try {
+      const state = scratch('oom-score-500-state');
+      const script = compareAdjScript();
+      const outcome = cappedRun(['--', 'sh', script], { state, timeout: 30_000 });
+      expect(outcome.status).toBe(0);
+      const [selfAdj, monitorAdj] = outcome.stdout.trim().split(' ');
+      expect(Number(selfAdj)).toBe(1000);
+      expect(Number(monitorAdj)).toBe(500);
+    } finally {
+      writeFileSync('/proc/self/oom_score_adj', original);
+    }
   });
 
   test.skipIf(!scope)(

@@ -20,9 +20,10 @@
 #     limit is the kill at MemoryMax (a MemoryHigh would quietly throttle a run that is allowed
 #     to reach the cap). OOMPolicy=continue keeps the in-scope monitor alive after the kernel's
 #     OOM kill so it can read the cause (the default stop policy kills the monitor first). Before
-#     exec the payload raises its own oom_score_adj to 500 (the monitor is forked first and keeps
-#     the lower inherited value), so the kernel prefers the payload even when a tmpfs payload's
-#     pages are not its RSS. The unit Description (what the user journal shows as "Started ...")
+#     exec the payload raises its own oom_score_adj by 500 over what it inherits (capped at 1000,
+#     never lowered); the monitor is forked first and keeps the inherited value, so the kernel
+#     prefers the payload even when a tmpfs payload's pages are not its RSS, unless the inherited
+#     value is already 1000 (then there is no edge and the wrapper just runs). The unit Description (what the user journal shows as "Started ...")
 #     is the command name and the run name only, never argv: a gate's argv may carry a token.
 #     systemd-run execs the command itself, so the wrapper sees the command's exit status and
 #     the scope's memory kill (137).
@@ -435,10 +436,18 @@ if [ -n "$peek" ]; then
     ) &
   fi
 fi
-# The payload exec path only: the monitor was forked above and keeps the lower inherited
-# oom_score_adj, so the kernel prefers this process when the pages of a tmpfs payload are not its RSS.
+# The payload exec path only: raise 500 over what this process inherits, capped at 1000, and
+# never lower (an unprivileged process may only raise). The monitor was forked above and keeps
+# the inherited value, so the payload is strictly above it unless the inherited value is 1000.
+inherited=$(cat /proc/self/oom_score_adj 2>/dev/null)
+case $inherited in
+  '' | *[!0-9-]*) inherited=0 ;;
+esac
+raised=$((inherited + 500))
+[ "$raised" -gt 1000 ] && raised=1000
+[ "$raised" -lt "$inherited" ] && raised=$inherited
 if [ -w /proc/self/oom_score_adj ]; then
-  printf "500\n" > /proc/self/oom_score_adj 2>/dev/null || :
+  printf "%s\n" "$raised" > /proc/self/oom_score_adj 2>/dev/null || :
 fi
 exec "$@"
 '
