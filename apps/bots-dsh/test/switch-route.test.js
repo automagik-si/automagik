@@ -12,8 +12,8 @@ const NOTE = [
   '## Next step', '- none', '## Where to look', '- none',
 ].join('\n')
 
-function bench() {
-  const calls = { notes: 0, created: [], selected: [], archived: [], notesAsked: [] }
+function bench({ goal, withGoals = true } = {}) {
+  const calls = { notes: 0, created: [], selected: [], archived: [], notesAsked: [], goals: [] }
   const session = {
     id: 's1',
     requestHeader: () => ({ config: { provider: 'deepseek', model: 'v4', maxTokens: 1000 } }),
@@ -30,7 +30,12 @@ function bench() {
     inbox: { nextStep: [], nextTurn: [], remove() {}, unshift() {} },
     followup() {}, inject() {}, send() {},
   }
-  const ctx = fakeContext({ services: { tokenMeter: { measure: () => ({ totalTokens: 1000 }) } } })
+  // DSH's goal service: the goal belongs to the Session the Agent runs.
+  const goals = {
+    get: agent => (goal !== undefined && agent?.session?.id === 's1' ? goal : undefined),
+    create: (agent, request) => { calls.goals.push([agent.session.id, request]); return { id: 'goal-2', revision: 1, phase: 'active', ...request } },
+  }
+  const ctx = fakeContext({ services: { tokenMeter: { measure: () => ({ totalTokens: 1000 }) }, ...(withGoals ? { goals } : {}) } })
   ctx.sessions = { list: () => [session], flush: async () => {} }
   ctx.llm = {
     resolveModelInfo: async () => ({ context: { contextWindow: 100000 }, defaultMaxTokens: 1000 }),
@@ -86,6 +91,40 @@ function bench() {
   ctx.emit('agent/created', { agent })
   return { rt, ctx, agent, bot, calls }
 }
+
+// A goal is the Session's, so the part that takes over starts with none: an active one moves
+// with the conversation, carrying the rounds it has left, or a long loop ends at the handoff.
+test('an active goal moves to the fresh part with the rounds it has left', async () => {
+  const b = bench({ goal: { id: 'goal-1', revision: 4, objective: 'ship the release', phase: 'active', maxGoalRounds: 256, roundsStarted: 6 } })
+  const started = await b.rt.switchRoute('b1', 'acp-claude/default')
+  assert.equal(started.status, 'switching')
+  await waitFor(() => b.calls.goals.length === 1)
+  assert.deepEqual(b.calls.goals, [['s2', { objective: 'ship the release', maxGoalRounds: 250 }]])
+})
+
+test('a goal that is not active, or a part with no goal, carries nothing', async () => {
+  for (const scenario of [
+    { name: 'paused', goal: { id: 'goal-1', revision: 2, objective: 'ship', phase: 'paused', maxGoalRounds: 256, roundsStarted: 1 } },
+    { name: 'complete', goal: { id: 'goal-1', revision: 2, objective: 'ship', phase: 'complete', maxGoalRounds: 256, roundsStarted: 9 } },
+    { name: 'spent', goal: { id: 'goal-1', revision: 2, objective: 'ship', phase: 'active', maxGoalRounds: 9, roundsStarted: 9 } },
+    { name: 'none', goal: undefined },
+  ]) {
+    const b = bench({ goal: scenario.goal })
+    const started = await b.rt.switchRoute('b1', 'acp-claude/default')
+    assert.equal(started.status, 'switching', scenario.name)
+    await waitFor(() => b.calls.created.length === 1)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.deepEqual(b.calls.goals, [], scenario.name)
+  }
+})
+
+test('a host without the goal service still moves the part', async () => {
+  const b = bench({ withGoals: false })
+  const started = await b.rt.switchRoute('b1', 'acp-claude/default')
+  assert.equal(started.status, 'switching')
+  await waitFor(() => b.calls.created.length === 1)
+  assert.deepEqual(b.calls.goals, [])
+})
 
 const waitFor = async (check, timeout = 2000) => {
   const at = Date.now()
