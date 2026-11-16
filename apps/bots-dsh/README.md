@@ -532,6 +532,22 @@ The chats themselves are dsh Sessions and are not in `bot/`: they are in `~/.dsh
 
 **dsh Web and Desktop at the same time**: by default both use the same `~/.dsh`. The dsh that loads the team first takes `bot/state.lock` and can change the team. The other one is read-only: it shows the team and follows changes to the file, but refuses changes (`bot/read-only`, "open in another dsh"), and its Bots cannot start new Sessions. When the first one exits, the other one takes over on its next request. To change the team from both at once, give one of them a different `DSH_HOME` (two separate teams).
 
+## Seed the shared Bot registry (RFC 0014)
+
+The Code side and the left bar's seats read the shared Bot registry, version 2: `$AUTOMAGIK_HOME/bots/bots.json` (the home file: `projects[]` and the project's main Bot as its seat) and `<project>/.automagik/bots/bots.json` (the repo file: that project's Bots). Herdr keeps a project's roster in `.herdr/bots.json`, version 1; the plugin ships the readers but does not convert it by itself. This seed writes both version 2 files from a roster that already exists:
+
+```sh
+node apps/bots-dsh/scripts/seed-registry.mjs --project <project> --home <automagik-home>
+```
+
+`--project` defaults to the current folder; `--home` defaults to `$AUTOMAGIK_HOME`, else `~/.automagik`. The second is the Automagik home, not the team's `AUTOMAGIK_BOTS_HOME`: it is where `bots/bots.json` lives (`~/.automagik/bots/bots.json` by default). The image ships the same script inside the installed plugin:
+
+```sh
+node /opt/automagik/profile/node_modules/@automagik/bots-dsh/scripts/seed-registry.mjs --project /data/workspace --home /data
+```
+
+It creates a missing file, leaves an identical one untouched (so re-running is safe), and refuses an existing file that differs rather than overwriting it. It never mints Bot ids: a project with no `.herdr/bots.json` is refused, because creating a team and its ids is Herdr's job. It keeps unknown fields, checks that the roster has exactly one main Bot, and removes `sessionId`, `sessions` and `segments` at every depth (including under `dsh`) before writing. The report it prints is the read-back: both files' Bot counts, any parser warnings and each file's `sha256`.
+
 ## Development
 
 You need Node 24 (DSH and the tests run on it), Bun (installs), pnpm and a deepseek-harness checkout with its dependencies installed, next to this repository (`../deepseek-harness`, or set `DSH_HARNESS`). The Desktop test bench also needs `xvfb-run` and `ffmpeg`. Web screenshots need Chrome or Chromium (`CHROME_BIN`; by default `google-chrome` or `chromium`).

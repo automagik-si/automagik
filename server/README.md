@@ -206,6 +206,14 @@ healthy `401` says the fence is up, not that a model is configured.
 | `/data/workspace` | the working directory dsh gives its Sessions |
 | `/data/secrets/deepseek-api-key` | optional model key, `0400` |
 
+When the project under `/data/workspace` already has a version 1 Herdr roster (for example, a copied team), seed the version 2 registry the Code side and the seats read with the plugin's own seed. It is idempotent and refuses a file that differs:
+
+```sh
+docker exec automagik /nodejs/bin/node \
+  /opt/automagik/profile/node_modules/@automagik/bots-dsh/scripts/seed-registry.mjs \
+  --project /data/workspace --home /data
+```
+
 `/opt/automagik` is read-only code. The image bakes nothing into `/data`: the profile is seeded
 at first start. An image-managed seed follows newer image releases on subsequent starts, as
 described below; a profile whose `package.json` the owner changed stays owner-managed.
