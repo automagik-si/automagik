@@ -3,7 +3,7 @@ import { headerButtons, useEntries } from './extend.js'
 import { FaceSwitch } from './left-bar-faces.js'
 import { createPortal } from 'react-dom'
 import { currentPart, latestMemoryChange } from './text.js'
-import { ArrowUpIcon, CloseIcon, ArrowDownIcon, GoalIcon, InfoIcon, MemoryIcon } from './icons.js'
+import { ArrowUpIcon, CloseIcon, ArrowDownIcon, DotsIcon, GoalIcon, InfoIcon, MemoryIcon } from './icons.js'
 import { botState, BotAvatar, RoomAvatar } from './mark.js'
 import { useApproval } from './approvals.js'
 import { AgentBadge } from './agent-badge.js'
@@ -13,6 +13,7 @@ import { GoalIsland, goalView } from './goal.js'
 import { viewBottom } from './motion.js'
 import { t } from './i18n.js'
 import { detailsSubject } from './sources.js'
+import { useNarrow } from './narrow.js'
 
 // -------------------------------------------------------------------------
 // Conversation header
@@ -168,23 +169,32 @@ export function HeaderPill({ sessionId, useRoster, useSessions, useSessionStatus
     goalShown && view?.number !== undefined ? h('span', { className: 'bt-pill-count' }, `${view.number}/${view.count}`) : null,
     h(MemoryNotice, { shown: memoryNotice }),
     h('span', { className: 'bt-pill-go', 'aria-hidden': true }, h(GoArrow))) : null
+  const narrow = useNarrow()
+  const headButtons = bot ? h(HeaderButtons, { bot, roster, actions, useWork }) : null
+  const liveButtons = actions.hasRightSidebar?.() ? h(Fragment, null,
+    h('button', { type: 'button', className: 'bt-head-details', title: t('Live'), 'aria-label': t('Open Live'), onClick: () => actions.openLive() }, t('Live')),
+    !native ? h('button', { type: 'button', className: 'bt-head-details', 'data-bt-right-sidebar': '', title: t('Right sidebar'), 'aria-label': t('Toggle right sidebar'), onClick: () => actions.toggleRightSidebar() }, h(GoArrow), h('span', { className: 'bt-head-more-word' }, t('Right sidebar'))) : null) : null
+  const details = !away && (bot || room) ? h('button', {
+    type: 'button', className: 'bt-head-details', 'aria-label': t('View conversation details'), title: t('Details'),
+    'aria-expanded': detailsOpen, 'aria-controls': 'bt-conversation-panel', 'data-details-subject': sessionId,
+    // Focus the trigger first (Safari does not on click), so the panel returns focus to it.
+    onClick: (event) => { event.currentTarget.focus(); actions.toggleDetails(sessionId) },
+  }, h(InfoIcon), h('span', { className: 'bt-head-word' }, t('Details'))) : null
+  // A phone has no room for the switch beside every control the Bot's plugins add: there the
+  // controls fold into one "More" disclosure, and the switch stays whole.
+  const folded = headButtons || liveButtons || details
+  const more = narrow && folded ? h('details', { className: 'bt-head-more' },
+    h('summary', { className: 'bt-head-details bt-head-more-btn', 'aria-label': t('More'), title: t('More') }, h(DotsIcon)),
+    h('div', { className: 'bt-head-more-pop', role: 'group', 'aria-label': t('More'), onClick: event => event.currentTarget.closest('details')?.removeAttribute('open') },
+      headButtons, liveButtons, details)) : null
   return h('div', { className: native ? 'bt-native-head' : 'bt-head' },
     showGoal ? h(GoalIsland, { room, goal, view, open: goalOpen, composing: goalCompose, roomWork, roster, actions, pill }) : pill,
     h('span', { className: 'bt-sr', role: 'status' }, memoryNotice ? t('Memory updated') : ''),
     // The open Bot's two faces (left-bar-faces.js). No Bot has a terminal of its own to show
     // until the Code side lands, so Terminal says so and opens nothing; no shell is started.
     bot && !away && !native ? h(FaceSwitch, { face: 'chat', unavailable: { terminal: t('No terminal for this Bot yet') } }) : null,
-    bot ? h(HeaderButtons, { bot, roster, actions, useWork }) : null,
+    narrow ? more : h(Fragment, null, headButtons, liveButtons, details),
     native && bot ? h('button', { type: 'button', className: 'bt-head-details', 'aria-label': t('Bot settings'), title: t('Bot settings'), onClick: () => actions.openSettings('bots', bot.id) }, h(InfoIcon)) : null,
-    actions.hasRightSidebar?.() ? h(Fragment, null,
-      h('button', { type: 'button', className: 'bt-head-details', title: t('Live'), 'aria-label': t('Open Live'), onClick: () => actions.openLive() }, t('Live')),
-      !native ? h('button', { type: 'button', className: 'bt-head-details', 'data-bt-right-sidebar': '', title: t('Right sidebar'), 'aria-label': t('Toggle right sidebar'), onClick: () => actions.toggleRightSidebar() }, h(GoArrow)) : null) : null,
-    !away && (bot || room) ? h('button', {
-      type: 'button', className: 'bt-head-details', 'aria-label': t('View conversation details'), title: t('Details'),
-      'aria-expanded': detailsOpen, 'aria-controls': 'bt-conversation-panel', 'data-details-subject': sessionId,
-      // Focus the trigger first (Safari does not on click), so the panel returns focus to it.
-      onClick: (event) => { event.currentTarget.focus(); actions.toggleDetails(sessionId) },
-    }, h(InfoIcon), t('Details')) : null,
     h(NewMessagePills, { key: sessionId, sessionId, useSessions, useUi, useTurnClock }),
     h(ActivityIndicator, { key: `activity:${sessionId}`, sessionId, useRoster, useSessionStatus, useSession, useLive, useWork, actions }))
 }

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { build } from 'esbuild'
 import { browserGuard } from './browser-guard.js'
+import { LEFT_BAR_CSS } from '../src/client/left-bar-css.js'
 
 const plugin = dirname(dirname(fileURLToPath(import.meta.url)))
 const harness = join(process.env.DSH_HARNESS, 'node_modules/@deepseek-ai')
@@ -267,6 +268,46 @@ test('the list says when rows lie above or below it; a press reaches the caller'
   await page.getByRole('button', { name: 'Create or join a space' }).click()
   await page.getByRole('button', { name: 'Help desk' }).click()
   assert.deepEqual(await page.evaluate(() => window.opened), ['chat:pip/ch-help/tess', 'project:genie', 'add', 'channel:pip/ch-help'])
+})
+
+test('the phone drawer keeps DSH\'s own 280 whatever the wide width was', async (t) => {
+  // DSH sizes its drawer from the same stored width the wide column uses, so a wide window
+  // narrowed to a phone would open a 336 (or kept 392) drawer. The bar's sheet keeps the
+  // drawer at DSH's 280; leaving drawer mode lets the remembered wide width show again.
+  const guard = await browserGuard()
+  if (guard.skip) { t.skip(guard.skip); return null }
+  const browser = await guard.chromium.launch({ executablePath: guard.executablePath, headless: true })
+  t.after(() => browser.close())
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 })
+  const width = async (wide, drawer = true) => {
+    await page.setContent(`<style>${LEFT_BAR_CSS}</style><div class="_frame" ${drawer ? 'data-sidebar-drawer' : ''}><div class="_sidebarCol" style="width:${wide}px;height:200px"><div data-slot="sidebar"><div class="_root"><div class="lb-bar lb-host"></div></div></div></div></div>`)
+    return Math.round(await page.locator('._sidebarCol').evaluate(node => node.getBoundingClientRect().width))
+  }
+  assert.equal(await width(336), 280, 'a wide 336 narrowed to 390 opens DSH\'s 280 drawer')
+  assert.equal(await width(392), 280, 'a kept 392 opens 280 too')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  assert.equal(await width(336, false), 336, 'widening again brings the remembered 336 back')
+  assert.equal(await width(392, false), 392, 'and a kept 392 comes back unchanged')
+})
+
+test('a phone header keeps the switch whole beside one More, and its panel in the window', async (t) => {
+  const guard = await browserGuard()
+  if (guard.skip) { t.skip(guard.skip); return null }
+  const browser = await guard.chromium.launch({ executablePath: guard.executablePath, headless: true })
+  t.after(() => browser.close())
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
+  await page.setContent(`<style>${LEFT_BAR_CSS}</style><header class="_header"><div class="bt-head" style="width:346px"><div class="lb-face"><button class="lb-face-part">Chat</button><button class="lb-face-part">Terminal</button></div><details class="bt-head-more"><summary class="bt-head-details bt-head-more-btn">⋯</summary><div class="bt-head-more-pop"><button class="os-head-btn">Automations<span class="os-head-count">2</span></button><button class="bt-head-details">Live</button><button class="bt-head-details" data-bt-right-sidebar><span class="bt-head-more-word">Right sidebar</span></button><button class="bt-head-details">Details</button></div></details></div></header>`)
+  await page.evaluate(() => document.querySelector('.bt-head-more')?.setAttribute('open', ''))
+  const layout = await page.evaluate(() => {
+    const box = node => { if (!node) return null; const r = node.getBoundingClientRect(); return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width), height: Math.round(r.height) } }
+    const rows = [...document.querySelectorAll('.bt-head-more-pop > *')]
+    return { face: box(document.querySelector('.lb-face')), pop: box(document.querySelector('.bt-head-more-pop')), rows: rows.map(box), word: getComputedStyle(document.querySelector('.bt-head-more-word')).display, count: getComputedStyle(document.querySelector('.os-head-count')).borderRadius }
+  })
+  assert.ok(layout.face && layout.face.left >= 0, 'the switch is not cut at the left edge')
+  assert.ok(layout.pop && layout.pop.left >= 0 && layout.pop.right <= 390, 'the panel stays inside the window')
+  assert.deepEqual(layout.rows.map(row => row.height), [34, 34, 34, 34], 'every row is one height')
+  assert.equal(layout.word, 'inline', 'the side panel row says its word')
+  assert.equal(layout.count, '10px', 'the count is its own badge')
 })
 
 test('the view\'s switch reads Chat and Terminal, the open face raised, on both themes', async (t) => {

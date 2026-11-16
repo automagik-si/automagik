@@ -52,6 +52,9 @@ export function installBarWidth({ doc = globalThis.document, storage = globalThi
   let frame = 0
   let sized = null
   let watched = null
+  // The width a press already started from: a handle whose release leaves the column there must
+  // not be pressed again every frame. A fold and reopen, or a real drag, starts the drive fresh.
+  let tried = null
   const parts = () => {
     const shell = doc.querySelector(FRAME)
     return { shell, column: shell?.querySelector(COLUMN), handle: shell?.querySelector(HANDLE) }
@@ -61,14 +64,22 @@ export function installBarWidth({ doc = globalThis.document, storage = globalThi
     const { shell, column, handle } = parts()
     if (!shell || !column) return
     watch(shell, column)
+    const width = column.getBoundingClientRect().width
+    const collapsed = shell.hasAttribute('data-sidebar-collapsed')
+    // A fold and reopen puts the column back at DSH's own width: the drive may try once more.
+    if (collapsed) tried = null
     const move = widthMove({
-      width: column.getBoundingClientRect().width,
+      width,
       kept: keptWidth(storage),
       drawer: shell.hasAttribute('data-sidebar-drawer'),
-      collapsed: shell.hasAttribute('data-sidebar-collapsed'),
+      collapsed,
       dragging: shell.hasAttribute('data-dragging') || shell.hasAttribute('data-animating'),
     })
     if (move === 0 || !handle) return
+    // One press per stay at this width: a handle that flips its state on press and release wakes
+    // the bar again, and without this it would be pressed every frame.
+    if (tried === Math.round(width)) return
+    tried = Math.round(width)
     // DSH's handle (AppFrame.tsx DragHandle): a press, then a release `move` px away, sets the
     // column through the layout's own setSidebar, so the right column and the composer follow.
     const x = handle.getBoundingClientRect().left + 4
@@ -101,6 +112,9 @@ export function installBarWidth({ doc = globalThis.document, storage = globalThi
     view.requestAnimationFrame(() => {
       const { shell, column } = parts()
       if (!shell || !column || shell.hasAttribute('data-sidebar-drawer') || shell.hasAttribute('data-sidebar-collapsed')) return
+      // A drag the person makes is theirs: it may put the column back at DSH's width, and the
+      // drive may then try once more (a kept 280 still wins in widthMove).
+      tried = null
       try { storage?.setItem(WIDTH_KEY, String(Math.round(column.getBoundingClientRect().width))) } catch {}
     })
   }

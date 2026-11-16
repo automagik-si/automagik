@@ -533,3 +533,189 @@ test('the wire accepts a message.start event with no payload', async () => {
   assert.equal(hermesEventShape({ type: 'session.info', session_id: 'runtime', seq: 2, payload: { approval_mode: 'smart', model: 'm', provider: 'p', yolo: false, running: false, lazy: false } }), true)
   assert.equal(hermesEventShape({ type: 'session.info', session_id: 'runtime', seq: 2, payload: {} }), true, 'info fields are optional on a live legacy session')
 })
+
+test('#1351 attached prepare recovers a completed reply exactly once without queueing a turn', async t => {
+  const transport = new HermesTransport({ address: 'http://127.0.0.1:40123', profile: 'sample', credential: token, allowLoopback: true, attached: true })
+  const snapshot = desktop8Session('runtime', 'stored').live
+  const events = [
+    { session_id: 'runtime', seq: 11, type: 'message.delta', payload: { text: 'Hel' } },
+    { session_id: 'runtime', seq: 12, type: 'message.delta', payload: { text: 'lo' } },
+    { session_id: 'runtime', seq: 13, type: 'message.complete', payload: { text: 'Hello' } },
+  ]
+  transport.request = async (method, params) => {
+    if (method === 'session.list') return { sessions: [{ id: 'stored', title: 'Bot Chat' }] }
+    if (method === 'session.resume' || method === 'session.activate') return snapshot
+    if (method === 'session.events.since') {
+      assert.deepEqual(params, { session_id: 'runtime', last_seen: 10, replay_epoch: 'epoch-a' })
+      return { events, latest_seq: 13, epoch: 'epoch-a', truncated: false, count: events.length, open_requests: [] }
+    }
+    throw Error(method)
+  }
+  const run = new RemoteChat(transport, { identity: { canonicalBot: true, runtimeSessionId: 'runtime', storedSessionId: 'stored', epoch: 'epoch-a', lastSeq: 10 } })
+  t.after(() => run.dispose())
+  const pushed = []
+  const push = run.push.bind(run)
+  run.push = row => { pushed.push(row); push(row) }
+
+  await run.prepare()
+
+  assert.deepEqual(run.takeRecovered(), ['Hello'])
+  assert.deepEqual(run.takeRecovered(), [])
+  assert.equal(run.identity.lastSeq, 13)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(pushed, [], 'replayed completions never push a terminal row for a new turn')
+  assert.deepEqual(run.queue, [])
+})
+
+test('attached prepare does not recover a completion already delivered live during activate', async t => {
+  const transport = new HermesTransport({ address: 'http://127.0.0.1:40123', profile: 'sample', credential: token, allowLoopback: true, attached: true })
+  const snapshot = desktop8Session('runtime', 'stored').live
+  const live = { kind: 'event', session_id: 'runtime', epoch: 'epoch-a', seq: 11, type: 'message.complete', payload: { text: 'Live reply' } }
+  transport.request = async (method, params) => {
+    if (method === 'session.list') return { sessions: [{ id: 'stored', title: 'Bot Chat' }] }
+    if (method === 'session.resume') return snapshot
+    if (method === 'session.activate') {
+      run.receive(live)
+      return snapshot
+    }
+    if (method === 'session.events.since') {
+      assert.equal(params.last_seen, 10, 'replay uses the cursor captured before activate')
+      return { events: [live], latest_seq: 11, epoch: 'epoch-a', truncated: false, count: 1, open_requests: [] }
+    }
+    throw Error(method)
+  }
+  const run = new RemoteChat(transport, { identity: { canonicalBot: true, runtimeSessionId: 'runtime', storedSessionId: 'stored', epoch: 'epoch-a', lastSeq: 10 } })
+  t.after(() => run.dispose())
+
+  await run.prepare()
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(run.takeRecovered(), [])
+  assert.deepEqual(run.takeRecovered(), [])
+  assert.deepEqual(run.queue, [{ kind: 'text', text: 'Live reply' }, { kind: 'done' }])
+  assert.equal(run.identity.lastSeq, 11)
+})
+
+test('#1344 truncated attached replay appends exactly one replay gap after recovered text', async t => {
+  const { REPLAY_GAP } = await import('../src/host/hermes-transport.js')
+  const transport = new HermesTransport({ address: 'http://127.0.0.1:40123', profile: 'sample', credential: token, allowLoopback: true, attached: true })
+  const snapshot = desktop8Session('runtime', 'stored').live
+  transport.request = async method => {
+    if (method === 'session.list') return { sessions: [{ id: 'stored', title: 'Bot Chat' }] }
+    if (method === 'session.resume' || method === 'session.activate') return snapshot
+    if (method === 'session.events.since') return {
+      events: [{ session_id: 'runtime', seq: 11, type: 'message.complete', payload: { text: 'Recovered reply' } }],
+      latest_seq: 11, epoch: 'epoch-a', truncated: true, count: 1, open_requests: [],
+    }
+    throw Error(method)
+  }
+  const run = new RemoteChat(transport, { identity: { canonicalBot: true, runtimeSessionId: 'runtime', storedSessionId: 'stored', epoch: 'epoch-a', lastSeq: 10 } })
+  t.after(() => run.dispose())
+
+  await run.prepare()
+
+  const recovered = run.takeRecovered()
+  assert.deepEqual(recovered, ['Recovered reply', REPLAY_GAP])
+  assert.equal(recovered.at(-1), REPLAY_GAP)
+  assert.equal(recovered.filter(text => text === REPLAY_GAP).length, 1)
+  assert.deepEqual(run.takeRecovered(), [])
+  assert.deepEqual(run.queue, [])
+})
+
+test('#1344 complete same-epoch attached replay has no replay gap', async t => {
+  const { REPLAY_GAP } = await import('../src/host/hermes-transport.js')
+  const transport = new HermesTransport({ address: 'http://127.0.0.1:40123', profile: 'sample', credential: token, allowLoopback: true, attached: true })
+  const snapshot = desktop8Session('runtime', 'stored').live
+  transport.request = async method => {
+    if (method === 'session.list') return { sessions: [{ id: 'stored', title: 'Bot Chat' }] }
+    if (method === 'session.resume' || method === 'session.activate') return snapshot
+    if (method === 'session.events.since') return {
+      events: [{ session_id: 'runtime', seq: 11, type: 'message.complete', payload: { text: 'Recovered reply' } }],
+      latest_seq: 11, epoch: 'epoch-a', truncated: false, count: 1, open_requests: [],
+    }
+    throw Error(method)
+  }
+  const run = new RemoteChat(transport, { identity: { canonicalBot: true, runtimeSessionId: 'runtime', storedSessionId: 'stored', epoch: 'epoch-a', lastSeq: 10 } })
+  t.after(() => run.dispose())
+
+  await run.prepare()
+
+  const recovered = run.takeRecovered()
+  assert.deepEqual(recovered, ['Recovered reply'])
+  assert.equal(recovered.includes(REPLAY_GAP), false)
+  assert.deepEqual(run.queue, [])
+})
+
+test('#1344 an attached replay epoch change reports a gap without recovering old-cursor text', async t => {
+  const { REPLAY_GAP } = await import('../src/host/hermes-transport.js')
+  const transport = new HermesTransport({ address: 'http://127.0.0.1:40123', profile: 'sample', credential: token, allowLoopback: true, attached: true })
+  const snapshot = desktop8Session('runtime', 'stored').live
+  transport.request = async (method, params) => {
+    if (method === 'session.list') return { sessions: [{ id: 'stored', title: 'Bot Chat' }] }
+    if (method === 'session.resume' || method === 'session.activate') return snapshot
+    if (method === 'session.events.since') {
+      assert.deepEqual(params, { session_id: 'runtime', last_seen: 5, replay_epoch: 'epoch-a' })
+      return {
+        events: [{ session_id: 'runtime', seq: 6, type: 'message.complete', payload: { text: 'Old cursor reply' } }],
+        latest_seq: 6, epoch: 'epoch-b', truncated: false, count: 1, open_requests: [],
+      }
+    }
+    throw Error(method)
+  }
+  const run = new RemoteChat(transport, { identity: { canonicalBot: true, runtimeSessionId: 'runtime', storedSessionId: 'stored', epoch: 'epoch-a', lastSeq: 5 } })
+  t.after(() => run.dispose())
+
+  await run.prepare()
+
+  assert.deepEqual(run.takeRecovered(), [REPLAY_GAP])
+  assert.deepEqual(run.takeRecovered(), [])
+  assert.equal(run.identity.epoch, 'epoch-b')
+  assert.equal(transport.epoch, 'epoch-b')
+  assert.equal(run.identity.lastSeq, 6)
+  assert.deepEqual(run.queue, [])
+})
+
+test('attached adapter yields recovered text before the new reply and completes the new turn', { timeout: 5000 }, async t => {
+  const { markAgentLoopRequest } = await import('@deepseek-ai/dsh-llm')
+  const { RemoteChatAdapter } = await import('../src/host/remote-chat-adapter.js')
+  const transport = new HermesTransport({ address: 'http://127.0.0.1:40123', profile: 'sample', credential: token, allowLoopback: true, attached: true })
+  const snapshot = desktop8Session('runtime', 'stored').live
+  const calls = []
+  transport.request = async (method, params) => {
+    calls.push({ method, params })
+    if (method === 'session.list') return { sessions: [{ id: 'stored', title: 'Bot Chat' }] }
+    if (method === 'session.resume' || method === 'session.activate') return { ...snapshot, subscription_id: 'subscription' }
+    if (method === 'session.events.since') return {
+      events: [{ session_id: 'runtime', seq: 11, type: 'message.complete', payload: { text: 'Recovered reply' } }],
+      latest_seq: 11, epoch: 'epoch-a', truncated: false, count: 1, open_requests: [],
+    }
+    if (method === 'prompt.submit') {
+      run.receive({ kind: 'event', session_id: 'runtime', epoch: 'epoch-a', seq: 12, type: 'message.complete', payload: { text: 'New reply' } })
+      return { status: 'streaming' }
+    }
+    if (method === 'session.detach') return { detached: true }
+    throw Error(method)
+  }
+  const identity = { canonicalBot: true, runtimeSessionId: 'runtime', storedSessionId: 'stored', epoch: 'epoch-a', lastSeq: 10 }
+  const run = new RemoteChat(transport, { identity })
+  t.after(() => run.dispose())
+  const agent = { session: { id: 'sample-chat' }, ctx: { tools: { register: () => () => {} } } }
+  const rt = { ctx: { get: name => name === 'agents' ? { get: () => agent, list: () => [agent] } : undefined, on() {} } }
+  const adapter = new RemoteChatAdapter(rt, {
+    enabled: () => true, attached: () => true,
+    models: () => [{ id: 'sample:model', model: 'sample-model', provider: 'sample' }],
+    identity: () => identity, save: async () => {}, open: async () => run,
+  })
+  t.after(() => adapter.dispose())
+  const chunks = []
+
+  for await (const chunk of adapter.stream(markAgentLoopRequest({ provider: 'hermes-remote', model: 'sample:model', sessionId: agent.session.id, messages: [{ role: 'user', content: 'New prompt' }] }))) chunks.push(chunk)
+
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text), ['Recovered reply', 'New reply'])
+  assert.deepEqual(chunks.filter(chunk => chunk.type === 'finish'), [{ type: 'finish', reason: { kind: 'stop' } }])
+  assert.equal(chunks.at(-1).type, 'finish')
+  assert.deepEqual(calls.filter(call => call.method === 'prompt.submit').map(call => call.params), [{ session_id: 'runtime', text: 'New prompt' }])
+  assert.equal(identity.pendingSubmit, false)
+  assert.equal(identity.lastSeq, 12)
+  assert.deepEqual(run.takeRecovered(), [])
+})
