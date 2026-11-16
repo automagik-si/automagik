@@ -141,15 +141,16 @@ function cappedKillDecision(
   outcome: Outcome,
   expectedComm: string,
   retries: number,
+  expectedStatus = 137,
 ): CappedKillDecision {
-  if (outcome.status !== 137) return 'fail';
+  if (outcome.status !== expectedStatus) return 'fail';
   const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
   const ended = outcome.stderr
     .split('\n')
-    .filter(line => line.startsWith('exit 137: the memory monitor ended before its final read;'));
+    .filter(line => line.startsWith(`exit ${expectedStatus}: the memory monitor ended before its final read;`));
   if (capped.length === 1 && ended.length === 0) return 'pass';
   if (ended.length === 1 && capped.length === 0) {
-    const expected = `exit 137: the memory monitor ended before its final read; the run may have hit the memory limit (command=${expectedComm})`;
+    const expected = `exit ${expectedStatus}: the memory monitor ended before its final read; the run may have hit the memory limit (command=${expectedComm})`;
     if (ended[0] !== expected || !outcome.log.includes(expected)) return 'fail';
     return retries < RETRY_BUDGET ? 'retry' : 'fail';
   }
@@ -164,6 +165,7 @@ async function cappedKillOutcome(
   args: string[],
   options: RunOptions,
   expectedComm: string,
+  expectedStatus = 137,
 ): Promise<Outcome> {
   const state = options.state ?? scratch('state');
   let last: Outcome | undefined;
@@ -171,7 +173,7 @@ async function cappedKillOutcome(
     if (attempt > 0) rmSync(join(state, 'runs.log'), { force: true });
     const outcome = await cappedKillAttempt(args, { ...options, state });
     last = outcome;
-    const decision = cappedKillDecision(outcome, expectedComm, fileRetries);
+    const decision = cappedKillDecision(outcome, expectedComm, fileRetries, expectedStatus);
     if (decision !== 'retry') return outcome;
     fileRetries++;
     console.log(
@@ -346,7 +348,7 @@ let lockScratch: LockScratch | null = null;
 
 function scratchCheckout(): LockScratch {
   if (lockScratch) return lockScratch;
-  const root = mkdtempSync(join('/dev/shm', 'capped-run-lockrepo-'));
+  const root = mkdtempSync(join('/dev/shm', `capped-run-lockrepo-${process.pid}-`));
   const script = join(root, 'scripts', 'capped-run');
   mkdirSync(dirname(script), { recursive: true });
   cpSync(SCRIPT, script);
@@ -367,9 +369,6 @@ function scratchLockReady(): boolean {
   }
 }
 
-afterAll(() => {
-  if (lockScratch) rmSync(lockScratch.root, { recursive: true, force: true });
-});
 
 const unshareWorks = (() => {
   if (process.platform !== 'linux') return false;
@@ -801,6 +800,13 @@ describe('capped-run', () => {
     expect(cappedKillDecision(fake(137, '', ''), 'dd', 0)).toBe('fail');
     expect(cappedKillDecision(fake(137, `${capped}\n${ended}`, `${capped}\n${ended}`), 'dd', 0)).toBe('fail');
     expect(cappedKillDecision(fake(137, capped, capped), 'dd', 0)).toBe('pass');
+    const cappedOne =
+      'CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=256.0M, last sample 256.0M, command=sh)';
+    const endedOne =
+      'exit 1: the memory monitor ended before its final read; the run may have hit the memory limit (command=sh)';
+    expect(cappedKillDecision(fake(1, cappedOne, cappedOne), 'sh', 0, 1)).toBe('pass');
+    expect(cappedKillDecision(fake(1, endedOne, endedOne), 'sh', 0, 1)).toBe('retry');
+    expect(cappedKillDecision(fake(137, cappedOne, cappedOne), 'sh', 0, 1)).toBe('fail');
     // Three attempts without CAPPED fail at the third: the file budget is two retries.
     expect(cappedKillDecision(fake(137, ended, ended), 'dd', 0)).toBe('retry');
     expect(cappedKillDecision(fake(137, ended, ended), 'dd', 1)).toBe('retry');
@@ -1360,32 +1366,41 @@ describe('capped-run', () => {
     30_000,
   );
 
-  test.skipIf(!scope || !dd || !shmHasRoom())(
+  test.skipIf(!scope)(
     'a grandchild OOM kill prints one CAPPED line and the child exit 1 passes through',
-    () => {
+    async () => {
       const state = scratch('grandchild-state');
-      const file = join('/dev/shm', `capped-run-grandchild-${process.pid}-${Date.now()}`);
-      const script = `( echo 1000 >/proc/self/oom_score_adj; exec dd if=/dev/zero of=${file} bs=1M count=512 status=none ) & wait; exit 1`;
-      try {
-        const outcome = cappedRun(['--mem', '256M', '--', 'sh', '-c', script], {
-          state,
-          env: { CAPPED_RUN_TEST_MEM: '256M' },
-          timeout: 120_000,
-        });
-        expect(outcome.status).toBe(1);
-        const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
-        expect(capped).toHaveLength(1);
-        expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=');
-        const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
-        expect(Number.isFinite(floorMib)).toBe(true);
-        expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
-        expect(capped[0]).toMatch(/last sample (?:[0-9.]+M|unknown)/);
-        expect(capped[0]).toContain('command=sh)');
-        expect(outcome.log.trim().split('\n')).toContain(capped[0]);
-      } finally {
-        rmSync(file, { force: true });
-      }
+      const allocator = join(scratch('grandchild-allocator'), 'alloc.js');
+      writeFileSync(allocator, 'const hold = [];\nfor (;;) hold.push(Buffer.alloc(1 << 20, 1));\n');
+      // Anonymous memory: the kernel kills the allocator and the pages are freed, so the
+      // waiting shell survives and exits 1; the subshell raises its own priority so the
+      // grandchild, not the shell, is the victim.
+      const script = `( echo 1000 >/proc/self/oom_score_adj; exec ${process.execPath} ${allocator} ) & wait; exit 1`;
+      const outcome = await cappedKillOutcome(
+        ['--mem', '256M', '--', 'sh', '-c', script],
+        { state, env: { CAPPED_RUN_TEST_MEM: '256M' }, timeout: 120_000 },
+        'sh',
+        1,
+      );
+      expect(outcome.status).toBe(1);
+      const capped = outcome.stderr.split('\n').filter(line => line.startsWith('CAPPED: '));
+      expect(capped).toHaveLength(1);
+      expect(capped[0]).toContain('CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=');
+      const floorMib = Number((capped[0].match(/peak>=([0-9.]+)M/) ?? [])[1]);
+      expect(Number.isFinite(floorMib)).toBe(true);
+      expect(floorMib * 1024 * 1024).toBeGreaterThanOrEqual(0.9 * 256 * 1024 * 1024);
+      expect(capped[0]).toMatch(/last sample (?:[0-9.]+M|unknown)/);
+      expect(capped[0]).toContain('command=sh)');
+      expect(outcome.log.trim().split('\n')).toContain(capped[0]);
     },
     120_000,
   );
+});
+afterAll(() => {
+  if (lockScratch) rmSync(lockScratch.root, { recursive: true, force: true });
+  if (!existsSync('/dev/shm')) return;
+  const leftovers = readdirSync('/dev/shm').filter(
+    name => name.startsWith('capped-run-') && name.includes(`-${process.pid}-`),
+  );
+  expect(leftovers).toEqual([]);
 });
