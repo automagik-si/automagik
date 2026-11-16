@@ -518,7 +518,7 @@ node server/secrecy.mjs --rootfs /tmp/rootfs --inventory secrecy
 | `Dockerfile`, `Dockerfile.dockerignore` | the builder, tools and distroless runtime stages |
 | `assemble.mjs` | builder stage: runtime, release tarballs, profile, prune |
 | `fetch-plugins.mjs` | downloads and verifies the pinned release's tarballs |
-| `entrypoint.mjs`, `lib.mjs` | seed `/data`, key file, pnpm store, dsh, redacted log |
+| `entrypoint.mjs`, `native-worker-login.mjs`, `lib.mjs` | seed `/data`, key file, pnpm store, dsh, redacted log; the one pointer export and the required marker |
 | `profile-follow.mjs`, `profile-state.mjs` | ownership, staged offline update, backup and live version state |
 | `plugin-payload.mjs`, `offline-store.mjs` | local install inputs from scanned files; build-only dependency-cache preparation |
 | `healthcheck.mjs` | compact Docker health check and keeper JSON report |
