@@ -737,6 +737,7 @@ var ZH = {
   "Waiting for {names}": "等 {names} 交回",
   "Unread activity": "有未读",
   "Not read yet": "未读",
+  "Not installed": "未安装",
   Search: "搜索",
   "New chat": "新对话",
   "Back to chat": "返回对话",
@@ -4615,6 +4616,7 @@ var ROW_OF_STATE = Object.freeze({
   review: "review",
   done: "jumping",
   failed: "failed",
+  "not-installed": "idle",
   poked: "waving",
   sleeping: "idle"
 });
@@ -4689,10 +4691,11 @@ function useLook(ref, enabled) {
 function PetSprite({ pet, size, state: state2 = "idle", live = false, gaze = false, onOnce }) {
   const ref = (0, import_react6.useRef)(null);
   const asleep = state2 === "sleeping" && pet.sleep !== void 0;
+  const off = state2 === "not-installed";
   const row = petRowOf(state2);
   const [frame, setFrame] = (0, import_react6.useState)(0);
   const look = useLook(ref, live && gaze && pet.version === 2);
-  const resting = row === "idle" && !asleep;
+  const resting = row === "idle" && !asleep && !off;
   const direction = resting && look !== void 0 ? look : void 0;
   const onceRef = (0, import_react6.useRef)(onOnce);
   onceRef.current = onOnce;
@@ -4700,7 +4703,7 @@ function PetSprite({ pet, size, state: state2 = "idle", live = false, gaze = fal
     setFrame(0);
   }, [row, asleep]);
   (0, import_react6.useEffect)(() => {
-    if (!live || direction !== void 0) return void 0;
+    if (!live || off || direction !== void 0) return void 0;
     const { ms } = asleep ? SLEEP : ROWS[row];
     if (quiet()) {
       if (asleep || !ONCE.includes(row)) return void 0;
@@ -4717,7 +4720,7 @@ function PetSprite({ pet, size, state: state2 = "idle", live = false, gaze = fal
       setFrame(next % ms.length);
     }, ms[frame % ms.length] * slow);
     return () => clearTimeout(timer);
-  }, [live, row, asleep, frame, direction, state2]);
+  }, [live, off, row, asleep, frame, direction, state2]);
   const scale = size / CELL.height;
   const width = CELL.width * scale;
   const cell = cellOf(row, frame, direction);
@@ -4842,9 +4845,9 @@ function genieTint(color) {
 
 // src/client/mark.js
 var import_react7 = require("react");
-var STATES = ["idle", "thinking", "searching", "working", "sending", "orbit", "waiting", "alert", "done", "failed", "review", "sleeping"];
+var STATES = ["idle", "thinking", "searching", "working", "sending", "orbit", "waiting", "alert", "done", "failed", "review", "not-installed", "sleeping"];
 var WORK = ["thinking", "searching", "working", "sending", "orbit"];
-var botState = (running2, activity, alert, { failed = false, unread = false } = {}) => alert ? "alert" : running2 ? WORK.includes(activity) ? activity : "working" : failed ? "failed" : activity === "waiting" ? "waiting" : unread ? "review" : "idle";
+var botState = (running2, activity, alert, { failed = false, unread = false, notInstalled = false, installed } = {}) => notInstalled === true || installed === false ? "not-installed" : alert ? "alert" : running2 ? WORK.includes(activity) ? activity : "working" : failed ? "failed" : activity === "waiting" ? "waiting" : unread ? "review" : "idle";
 var toolState = (name) => /^(message_bot|stop_bot|create_bot|update_bot|delete_bot|create_group|update_group|delete_group|post_to_group)$/.test(name) ? "sending" : /search|fetch|browse|read|grep|glob|list|recall/i.test(name) ? "searching" : "working";
 function useGaze(ref, enabled) {
   (0, import_react7.useEffect)(() => {
@@ -5036,13 +5039,18 @@ function Crown() {
 function BotAvatar({ bot, size, state: state2 = "idle", count, main, admin, crown = false, badge = true, live = true, gaze = false, pokeable = false }) {
   const settled = useSettled(state2);
   if (bot === void 0) return (0, import_react7.createElement)(BotMark, { size });
-  const badgeKind = !badge ? null : state2 === "alert" ? "alert" : WORK.includes(state2) ? "working" : admin ? "admin" : main && !crown ? "main" : null;
+  const badgeKind = !badge ? null : state2 === "not-installed" ? "missing" : state2 === "alert" ? "alert" : WORK.includes(state2) ? "working" : admin ? "admin" : main && !crown ? "main" : null;
   return (0, import_react7.createElement)(
     "span",
     { className: "bt-mark", style: { width: size, height: size, "--bt-size": `${size}px` } },
     (0, import_react7.createElement)(BotMark, { bot, size, state: settled ? "done" : state2, live, gaze, pokeable }),
     crown ? (0, import_react7.createElement)(Crown) : null,
     badgeKind === "working" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-working", "aria-label": t("Working"), role: "img" }) : null,
+    badgeKind === "missing" ? (0, import_react7.createElement)(
+      "span",
+      { className: "bt-badge bt-badge-missing", "aria-label": t("Not installed"), role: "img" },
+      (0, import_react7.createElement)("svg", { viewBox: "0 0 12 12", "aria-hidden": true }, (0, import_react7.createElement)("circle", { cx: 6, cy: 6, r: 4.2, fill: "none", stroke: "currentColor", strokeWidth: 1.6 }), (0, import_react7.createElement)("path", { d: "M3.4 3.4l5.2 5.2", stroke: "currentColor", strokeWidth: 1.6 }))
+    ) : null,
     badgeKind === "alert" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-alert", "aria-label": count > 0 ? count === 1 ? t("1 approval waiting") : t("{count} approvals waiting", { count }) : t("Waiting for your answer"), role: "img" }, count > 0 ? count > 9 ? "9+" : String(count) : "?") : null,
     badgeKind === "admin" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-admin", "aria-label": t("Admin"), role: "img" }, (0, import_react7.createElement)(StarIcon)) : null,
     badgeKind === "main" ? (0, import_react7.createElement)("span", { className: "bt-badge bt-badge-main", "aria-label": t("Main Bot"), role: "img" }, (0, import_react7.createElement)(MainStar)) : null
@@ -19688,6 +19696,10 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .bt-badge-main path{fill:var(--bt-star);stroke:var(--bt-sidebar);stroke-width:2.6;stroke-linejoin:round;paint-order:stroke}
 .bt-badge-alert{background:color-mix(in srgb,var(--bt-accent) 78%,var(--bt-sidebar));color:var(--bt-accent-ink,#fff);font-size:8.5px;line-height:12px;font-weight:600;font-family:var(--bt-font)}
 .bt-badge-working{background:color-mix(in srgb,var(--bt-green) 82%,var(--bt-sidebar));width:8px;height:8px;right:1px;bottom:1px}
+.bt-badge-missing{background:color-mix(in srgb,var(--bt-ink-3) 82%,var(--bt-sidebar));color:var(--bt-sidebar)}
+.bt-badge-missing svg{width:8px;height:8px}
+.bt-mark[data-state=not-installed]{filter:grayscale(1);opacity:.62}
+.bt-mark[data-state=not-installed] :is(.bt-b,.bt-eye,.bt-eyes,.bt-pet-cell){animation:none!important}
 .bt-cluster{position:relative;display:inline-block;flex:none;line-height:0}
 .bt-cluster>*{position:absolute}
 .bt-cluster-more,.bt-cluster-you{display:inline-flex;align-items:center;justify-content:center;border-radius:50%;background:var(--bt-active);color:var(--bt-ink-3);font-family:var(--bt-font);font-weight:500;line-height:1;font-variant-numeric:tabular-nums}
@@ -19739,6 +19751,7 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .bt-drawer-caps{flex-wrap:wrap;justify-content:center;max-width:100%;margin-top:8px}
 .bt-row-preview{font-size:13px;line-height:18px;color:var(--bt-ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bt-row-preview-ask{color:var(--st-warn-strong,var(--st-warn,var(--bt-ink-2)));font-weight:500}
+.bt-row-preview-missing{color:var(--bt-ink-3)}
 .bt-unread{width:8px;height:8px;border-radius:50%;background:var(--bt-accent);flex:none;margin-right:2px;animation:bt-fade .13s cubic-bezier(.22,1,.36,1)}
 .bt-unread-wait{background:var(--bt-star)}
 .bt-rail{align-items:center;padding:0 0 8px}
@@ -20044,6 +20057,7 @@ html[data-windows-titlebar]:not([data-fullscreen]) :is(.bt-pane,.bt-panel)::befo
 .bt-input:focus{border-color:var(--bt-line-2)}
 .bt-input-area{height:auto;min-height:96px;padding:8px 10px;line-height:18px;resize:vertical}
 .bt-note{font-size:12px;line-height:16px;color:var(--bt-ink-3)}
+.bt-note-missing{color:var(--bt-ink-2)}
 .bt-soft-sm{height:28px;padding:0 12px;font-size:12px}
 .bt-set-avatar{display:flex;justify-content:center;padding:4px 0}
 .bt-avatar-anchor{position:relative}
@@ -21635,7 +21649,7 @@ function BotPills({ roster, bot, className = "" }) {
 
 // src/client/left-bar-status.js
 var import_react52 = require("react");
-var STATUSES = Object.freeze(["working", "needs", "idle", "error", "off"]);
+var STATUSES = Object.freeze(["working", "needs", "idle", "error", "off", "not-installed"]);
 var statusOr = (status) => STATUSES.includes(status) ? status : "idle";
 var SAID = {
   working: () => t("Working"),
@@ -21643,6 +21657,7 @@ var SAID = {
   error: () => t("Error"),
   idle: () => t("Idle"),
   off: () => t("Not running"),
+  "not-installed": () => t("Not installed"),
   team: () => t("Team"),
   projects: () => t("Spaces"),
   add: () => t("Create or join a space"),
@@ -21650,13 +21665,14 @@ var SAID = {
 };
 var WORDS = Object.freeze(Object.keys(SAID));
 var word = (name) => SAID[name]();
-var WORDED = Object.freeze(["needs", "off"]);
+var WORDED = Object.freeze(["needs", "off", "not-installed"]);
 var QUIET = Object.freeze(["idle"]);
-var FIRST = ["needs", "error", "working"];
+var FIRST = ["needs", "error", "not-installed", "working"];
 var worstStatus = (statuses) => FIRST.find((status) => statuses.includes(status)) ?? "idle";
 var OF_STATE = Object.freeze({
   alert: "needs",
   failed: "error",
+  "not-installed": "not-installed",
   thinking: "working",
   searching: "working",
   working: "working",
@@ -21665,7 +21681,7 @@ var OF_STATE = Object.freeze({
   waiting: "working"
 });
 var statusOfState = (state2) => OF_STATE[state2] ?? "idle";
-var STATE_OF = Object.freeze({ working: "working", needs: "alert", error: "failed" });
+var STATE_OF = Object.freeze({ working: "working", needs: "alert", error: "failed", "not-installed": "not-installed" });
 var stateOfStatus = (status) => STATE_OF[status] ?? "idle";
 var ring = () => [(0, import_react52.createElement)("circle", { key: "ring", cx: 6, cy: 6, r: 3.75, fill: "none", stroke: "currentColor", strokeWidth: 1.5 })];
 var SHAPES2 = {
@@ -21682,7 +21698,11 @@ var SHAPES2 = {
     (0, import_react52.createElement)("path", { key: "glyph", className: "lb-mark-glyph", d: "M4 4l4 4M8 4l-4 4", fill: "none", strokeWidth: 1.7, strokeLinecap: "round" })
   ],
   idle: ring,
-  off: ring
+  off: ring,
+  "not-installed": () => [
+    (0, import_react52.createElement)("circle", { key: "ring", cx: 6, cy: 6, r: 4.5, fill: "none", stroke: "currentColor", strokeWidth: 1.4, strokeDasharray: "2 2.2" }),
+    (0, import_react52.createElement)("path", { key: "slash", d: "M3.2 8.8l5.6-5.6", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round" })
+  ]
 };
 function StatusMark({ status, named = true }) {
   const kind = statusOr(status);
@@ -22052,12 +22072,14 @@ var MARKS2 = `
 .lb-st{flex:none;display:inline-flex;align-items:center;gap:6px;font:400 12px/1 var(--bt-font);color:var(--lb-muted);white-space:nowrap;text-transform:lowercase}
 .lb-st-needs{color:var(--lb-needs-ink)}
 .lb-st-error{color:var(--st-bad-strong,var(--bt-danger))}
+.lb-st-not-installed{color:var(--lb-muted)}
 .lb-mark{flex:none;display:block;width:var(--lb-mark);height:var(--lb-mark)}
 .lb-mark svg{display:block;width:100%;height:100%;overflow:visible}
 .lb-mark-working{color:var(--st-work,var(--bt-accent))}
 .lb-mark-needs{color:var(--st-warndot,var(--bt-star,var(--bt-accent)))}
 .lb-mark-error rect{fill:var(--st-bad,var(--bt-danger))}
 .lb-mark-idle,.lb-mark-off{color:var(--lb-muted);opacity:.7}
+.lb-mark-not-installed{color:var(--lb-muted);opacity:.85}
 .lb-mark-needs .lb-mark-glyph{stroke:var(--lb-mark-ink)}
 .lb-mark-error .lb-mark-glyph{stroke:var(--bt-main)}
 .lb-mark-arc{transform-origin:6px 6px;transform:rotate(-25deg);animation:lb-turn 1.1s linear infinite}
@@ -22141,7 +22163,8 @@ var import_react55 = require("react");
 var import_react_dom9 = require("react-dom");
 var LOCAL_SPACE = "local";
 var pack = (value) => JSON.stringify(value);
-function botStatus({ question, pending, approval, failed, running: running2, away }) {
+function botStatus({ question, pending, approval, failed, running: running2, away, notInstalled = false }) {
+  if (notInstalled) return "not-installed";
   if (question || pending || approval) return "needs";
   if (failed) return "error";
   if (running2 || away) return "working";
@@ -22171,10 +22194,11 @@ function useTeamStatus({ roster, useSessionStatus, useWork }) {
     Object.values(value.rooms ?? {}).some((entries2) => entries2.some((entry) => entry.botId === id))
   ]))) : "[]");
   const byWork = new Map(work.map(([id, approval, failed, away]) => [id, { approval, failed, away }]));
+  const notInstalled = new Map(roster.bots.map((bot) => [bot.id, bot.installed === false]));
   const bots = new Map(sessions.bots.map(([id, running2, pending, unread]) => {
     const part = parts.find(([bot]) => bot === id)?.[1];
     const { approval = false, failed = false, away = false } = byWork.get(id) ?? {};
-    return [id, { status: botStatus({ question: roster.questions?.[part] !== void 0, pending, approval, failed, running: running2, away: away && !running2 }), unread }];
+    return [id, { status: botStatus({ question: roster.questions?.[part] !== void 0, pending, approval, failed, running: running2, away: away && !running2, notInstalled: notInstalled.get(id) === true }), unread }];
   }));
   const dsh = new Map(sessions.agents.map(([id, running2, unread]) => [id, { status: running2 ? "working" : "idle", unread }]));
   const asked2 = new Map(roomWork.map(([id, approval, working]) => [id, approval ? "needs" : working ? "working" : "idle"]));
@@ -22672,7 +22696,9 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const away = !running2 && groups.length > 0;
   const failed = useWork ? useWork((work) => work.failed?.[id] !== void 0) : false;
   const replied = useSessionStatus((map) => map.get(part)?.completionUnread === true) && !active;
-  const state2 = botState(running2 || away, doing, alert, { failed, unread: replied });
+  const notInstalled = bot.installed === false;
+  const notInstalledText = notInstalled ? [t("Not installed"), bot.reason ? hostText(bot.reason) : ""].filter(Boolean).join(" · ") : "";
+  const state2 = botState(running2 || away, doing, alert, { failed, unread: replied, notInstalled });
   const runningLine = running2 && doing ? doingLine(doing) : null;
   const awayLine = away ? workLine(roster.roomsById[groups[0].id]?.name ?? t("a group chat"), groups[0], groups.length - 1) : null;
   const waits = workKeys(useWork ? useWork((work) => JSON.stringify(work.waiting?.[id] ?? null)) : "null");
@@ -22686,7 +22712,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   };
   const pinned = bot.pinned === true && !crowned;
   const role = crowned ? bot.role : "";
-  const label = [bot.name, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", running2 || away ? t("Working") : "", waitsFor, stoppedLine, approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
+  const label = [bot.name, role, main ? t("Main Bot") : "", ...pillLabels(roster, bot), pinned ? t("Pinned") : "", notInstalled ? notInstalledText : running2 || away ? t("Working") : "", notInstalled ? "" : waitsFor, notInstalled ? "" : stoppedLine, notInstalled ? "" : approval ? waitingLabel(waitingCount) : alert ? t("Waiting for your answer") : "", unread ? t("Unread activity") : ""].filter(Boolean).join(", ");
   return (0, import_react57.createElement)(
     "button",
     {
@@ -22708,7 +22734,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
       (0, import_react57.createElement)("span", { className: "bt-row-name" }, (0, import_react57.createElement)("span", { className: "bt-row-title" }, bot.name), bot.engine ? (0, import_react57.createElement)(AgentBadge, { engine: bot.engine }) : null, role ? (0, import_react57.createElement)("span", { className: "bt-role" }, role) : null, pinned ? (0, import_react57.createElement)(PinMark) : null),
       // What to ask this Bot for, on a line of its own: the name line has no room for it.
       (0, import_react57.createElement)(BotPills, { roster, bot, className: "bt-row-caps" }),
-      blockedLine || stoppedLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview bt-row-preview-ask" }, blockedLine || stoppedLine) : runningLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, runningLine) : awayLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, awayLine) : waitsFor ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, waitsFor) : threadsLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, threadsLine) : preview ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, preview) : null
+      notInstalledText ? (0, import_react57.createElement)("span", { className: "bt-row-preview bt-row-preview-missing" }, notInstalledText) : blockedLine || stoppedLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview bt-row-preview-ask" }, blockedLine || stoppedLine) : runningLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, runningLine) : awayLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, awayLine) : waitsFor ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, waitsFor) : threadsLine ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, threadsLine) : preview ? (0, import_react57.createElement)("span", { className: "bt-row-preview" }, preview) : null
     ) : null,
     // Badges other Omni plugins add (extend.js): Omni's row counts the automation runs waiting for you.
     wide ? (0, import_react57.createElement)(RowBadges, { bot, roster, useWork }) : null,
@@ -33180,6 +33206,8 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
   const running2 = useSessionStatus((map) => map.get(part)?.running === true);
   const doing = useActivity((map) => map[bot?.id ?? sessionId]);
   const failed = useWork ? useWork((work) => work.failed?.[bot?.id ?? ""] !== void 0) : false;
+  const notInstalled = bot?.installed === false;
+  const notInstalledText = notInstalled ? [t("Not installed"), bot.reason ? hostText(bot.reason) : ""].filter(Boolean).join(" · ") : "";
   const approval = useApproval(useWork, (entry) => entry.botId !== void 0 && entry.botId === bot?.id);
   const transcript = useSessions((list) => transcriptOf(list, part, bot?.name ?? room2?.name ?? t("Bot"), roster.exchangeTurns[part]));
   const usage = useSessions((list) => usageOf(list, [part, ...bot?.parts ?? room2?.parts ?? []]));
@@ -33250,7 +33278,7 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
     (0, import_react91.createElement)(
       "div",
       { key: "id", className: "bt-drawer-id", "data-move": side },
-      bot ? (0, import_react91.createElement)(BotAvatar, { bot, size: 64, state: botState(running2, doing, roster.questions?.[part] !== void 0 || approval, { failed }), main: isMainBot, badge: false, gaze: true, pokeable: true }) : (0, import_react91.createElement)(MemberPile, { room: room2, roster }),
+      bot ? (0, import_react91.createElement)(BotAvatar, { bot, size: 64, state: botState(running2, doing, roster.questions?.[part] !== void 0 || approval, { failed, notInstalled }), main: isMainBot, badge: false, gaze: true, pokeable: true }) : (0, import_react91.createElement)(MemberPile, { room: room2, roster }),
       editing ? (0, import_react91.createElement)("input", {
         className: "bt-drawer-name-input",
         autoFocus: true,
@@ -33289,6 +33317,7 @@ function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, roster, a
       room2 && tab === "details" ? (0, import_react91.createElement)(GroupOverview, { room: room2, roster, actions, usage, useWork, openSettings: () => setView("settings") }) : null,
       bot && tab === "computer" ? (0, import_react91.createElement)(ComputerView, { bot, actions, hooks: { useComputer } }) : null,
       bot && tab === "details" ? [
+        notInstalledText ? (0, import_react91.createElement)("div", { key: "missing", className: "bt-note bt-note-missing", role: "status" }, notInstalledText) : null,
         (0, import_react91.createElement)(RunStats, { key: "stats", bot, part, running: running2, actions }),
         (0, import_react91.createElement)(
           "div",

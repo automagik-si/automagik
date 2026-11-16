@@ -120,6 +120,7 @@ const pack = createPack({
     "Waiting for {names}": "Aguardando {names}",
     "Unread activity": "Atividade não lida",
     "Not read yet": "Ainda não lida",
+    "Not installed": "Não instalado",
     "Search": "Buscar",
     "New chat": "Novo chat",
     "Back to chat": "Voltar ao chat",

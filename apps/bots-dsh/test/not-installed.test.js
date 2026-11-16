@@ -46,16 +46,25 @@ function start({ bundles = [] } = {}) {
       archiveSession: async () => {},
     },
   })
+  // The client channel's POST route, so a test can read the same view the sidebar draws.
+  let route
+  const register = ctx.connection.fetch.register
+  ctx.connection.fetch.register = (options) => { route = options; return register(options) }
   apply(ctx, { home })
   const rt = ctx.provided.get('omniTeam')
   const listBots = async (agent = 'chief') => ctx.registeredTools.get('list_bots').execute({}, { agent: { id: agent } })
   const message = (args, agent = 'chief') => ctx.registeredTools.get('message_bot').execute(args, { agent: { id: agent } })
   const spaceBots = async () => (await rt.spaceReads.read('space-bots', {}, async () => ({ ok: false }))).items
+  const call = async (endpoint, payload) => {
+    const response = await route.fetch(new Request('http://localhost/api/omni-ui', { method: 'POST', body: JSON.stringify({ endpoint, payload }) }))
+    return response.json()
+  }
   return {
     rt,
     listBots,
     message,
     spaceBots,
+    call,
     stop: async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) },
   }
 }
@@ -82,6 +91,17 @@ test('a Bot whose plugin is missing is not idle, in list_bots and in the space r
   assert.equal(genie.status, 'not-installed')
   assert.equal(genie.reason, `the ${GENIE} plugin is missing from this DSH`)
   assert.equal(rows.find(row => row.id === 'writer').status, 'idle')
+})
+
+test('a crew Bot whose plugin is missing carries that in the client view', async (t) => {
+  const { call, stop } = start({ bundles: [] })
+  t.after(stop)
+  const view = (await call('state', {})).value
+  const genie = view.bots.find(row => row.id === 'genie')
+  assert.equal(genie.installed, false)
+  assert.equal(genie.reason, `the ${GENIE} plugin is missing from this DSH`)
+  // A plain DSH Bot is not run by a crew plugin and stays installed.
+  assert.equal(view.bots.find(row => row.id === 'writer').installed, true)
 })
 
 test('a crew Bot of a plugin that is installed and on still reports as before', async (t) => {

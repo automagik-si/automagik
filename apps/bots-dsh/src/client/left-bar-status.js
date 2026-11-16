@@ -11,7 +11,7 @@ import { t } from './i18n.js'
 // The Bot team's sidebar draws these (left-bar.js, through sidebar.js's TeamSidebar).
 
 // `off` is a Bot that is not running: an idle mark, on a row drawn grey.
-export const STATUSES = Object.freeze(['working', 'needs', 'idle', 'error', 'off'])
+export const STATUSES = Object.freeze(['working', 'needs', 'idle', 'error', 'off', 'not-installed'])
 export const statusOr = status => (STATUSES.includes(status) ? status : 'idle')
 
 // The bar's words, all in the dictionary (i18n.js). `projects` names the rail, a tile per space;
@@ -22,6 +22,7 @@ const SAID = {
   error: () => t('Error'),
   idle: () => t('Idle'),
   off: () => t('Not running'),
+  'not-installed': () => t('Not installed'),
   team: () => t('Team'),
   projects: () => t('Spaces'),
   add: () => t('Create or join a space'),
@@ -32,23 +33,23 @@ export const word = name => SAID[name]()
 
 // The statuses that show their word, and the ones a row does not draw at all. `off` says its
 // word because the hollow ring alone would read as another kind of idle; one set serves Bots
-// and seats alike.
-export const WORDED = Object.freeze(['needs', 'off'])
+// and seats alike. `not-installed` says its word too: it is why the Bot cannot answer.
+export const WORDED = Object.freeze(['needs', 'off', 'not-installed'])
 export const QUIET = Object.freeze(['idle'])
 
 // One status for several (a folded channel's chats): what asks for the owner first, then
-// what failed, then what runs.
-const FIRST = ['needs', 'error', 'working']
+// what failed, then what cannot run, then what runs.
+const FIRST = ['needs', 'error', 'not-installed', 'working']
 export const worstStatus = statuses => FIRST.find(status => statuses.includes(status)) ?? 'idle'
 
 // The mascot states of mark.js (botState), as the bar's statuses.
 const OF_STATE = Object.freeze({
-  alert: 'needs', failed: 'error',
+  alert: 'needs', failed: 'error', 'not-installed': 'not-installed',
   thinking: 'working', searching: 'working', working: 'working', sending: 'working', orbit: 'working', waiting: 'working',
 })
 export const statusOfState = state => OF_STATE[state] ?? 'idle'
 // And back, for the art beside the mark: the Bot's character plays its status.
-const STATE_OF = Object.freeze({ working: 'working', needs: 'alert', error: 'failed' })
+const STATE_OF = Object.freeze({ working: 'working', needs: 'alert', error: 'failed', 'not-installed': 'not-installed' })
 export const stateOfStatus = status => STATE_OF[status] ?? 'idle'
 
 // Each mark in a 12 by 12 box. Working: a turning ring. Needs you: a disc with "!". Error: a
@@ -69,6 +70,10 @@ const SHAPES = {
   ],
   idle: ring,
   off: ring,
+  'not-installed': () => [
+    h('circle', { key: 'ring', cx: 6, cy: 6, r: 4.5, fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeDasharray: '2 2.2' }),
+    h('path', { key: 'slash', d: 'M3.2 8.8l5.6-5.6', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
+  ],
 }
 
 /** One status mark. Alone, it carries its word as a title and a name; `named: false` is the mark beside its own word. */

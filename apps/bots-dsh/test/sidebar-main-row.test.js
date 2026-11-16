@@ -126,6 +126,20 @@ test('in the narrow rail the crowned row keeps the crown at the rail size', () =
   assert.equal(row.props.title, 'Pip')
 })
 
+test('a Bot whose plugin is not installed says so, in the bar and in the rail', () => {
+  const missing = { ...omni, installed: false, reason: 'the @automagik/omni-channels-dsh plugin is missing from this DSH' }
+  const team = { ...roster, bots: [pip, missing], byId: { pip, missing } }
+  // The wide bar's left-bar status is not idle.
+  const barRow = sidebar({ team }).teamRows().props.team.bots.find(bot => bot.id === 'omni')
+  assert.equal(barRow.status, 'not-installed')
+  // The narrow rail's row says it in its accessible name and its line, with the reason.
+  const { rows, render } = sidebar({ wide: false, team })
+  const row = render(rows[1])
+  assert.match(row.props['aria-label'], /Not installed/)
+  assert.match(JSON.stringify(row), /Not installed/)
+  assert.match(JSON.stringify(row), /plugin is missing/)
+})
+
 test('a DSH bot row wears DSH\'s blue whale, not a generic terminal mark', () => {
   const brain = { id: 'brain', kind: 'dsh', name: 'Cogna Brain', sessions: ['session-brain'], createdAt: 3 }
   const team = { ...roster, agents: [brain], agentsById: { brain } }

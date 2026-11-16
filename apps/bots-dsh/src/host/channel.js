@@ -129,6 +129,13 @@ export function install(rt) {
       return running.runningModel === undefined ? '' : `${bot.id}=${running.runningModel}:${running.runningEffort ?? ''}`
     }).join(','),
   ].join('|')
+  // What the client draws for each Bot: the saved Bot plus what DSH says about the plugin
+  // that runs it (installed.js). A crew Bot whose plugin is missing is not an idle Bot.
+  const installationKey = () => Object.values(state.bots).map((bot) => {
+    const installation = rt.installationOf?.(bot)
+    return `${bot.id}:${installation?.installed === false ? `0:${installation.reason}` : '1'}`
+  }).join('|')
+  let shownInstallation
   const view = () => ({
     revision: state.revision,
     workspaceId: state.workspaceId ?? null,
@@ -144,10 +151,12 @@ export function install(rt) {
     // what failed it. `blocked`: the facts of a failure only the user can fix (turns.js).
     // `adoptionHistoryMatches` (adopted originals only): rollback's history guard
     // (agents.js rollbackAdoption) would pass, so the menu offers rollback only then.
+    // `installed`/`reason` come from installed.js: a false `installed` means the plugin
+    // that runs this kind is missing, switched off or did not load, and the Bot cannot run.
     bots: Object.values(state.bots).map(({ segments, kickoff, ...bot }) => {
       const tail = rt.chatTail(rt.chatOf(bot.id))
       return {
-        ...bot, sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
+        ...bot, ...(rt.installationOf?.(bot) ?? { installed: true }), sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
         ...(bot.dshAgentId === undefined ? {} : { adoptionHistoryMatches: rt.adoptionHistoryMatches(bot.id) }),
         ...rt.permissionFallbackOf('bot', bot),
         ...rt.autoViewOf?.(bot),
@@ -488,8 +497,18 @@ export function install(rt) {
           if (readOnly === undefined) await rt.bootstrap()
           await rt.catalog()
           await rt.loadSecrets()
+          // The roster's `installed` is read now, at most once per installed.js's own TTL:
+          // the client must not keep drawing an idle Bot after its plugin was removed, nor a
+          // missing one after it was installed. A change in that answer is a new view even
+          // when the team's revision did not move.
+          await rt.refreshInstallation?.()
+          const installation = installationKey()
+          // A restarted host has no earlier answer to compare: its first poll keeps the
+          // unchanged shortcut, and the next one (installed.js's TTL) catches a change.
+          const installationChanged = shownInstallation !== undefined && installation !== shownInstallation
+          shownInstallation = installation
           const answer = liveAnswer()
-          if (body.since === state.revision && (body.models === undefined || body.models === modelsKey())) {
+          if (!installationChanged && body.since === state.revision && (body.models === undefined || body.models === modelsKey())) {
             if (body.live === answer.key) return ok({ revision: state.revision, unchanged: true, liveKey: answer.key })
             return ok({ revision: state.revision, unchanged: true, liveKey: answer.key, ...answer.value })
           }

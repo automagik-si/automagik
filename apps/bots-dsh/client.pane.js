@@ -9670,6 +9670,7 @@ var ZH = {
   "Waiting for {names}": "等 {names} 交回",
   "Unread activity": "有未读",
   "Not read yet": "未读",
+  "Not installed": "未安装",
   Search: "搜索",
   "New chat": "新对话",
   "Back to chat": "返回对话",
@@ -12890,6 +12891,10 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .bt-badge-main path{fill:var(--bt-star);stroke:var(--bt-sidebar);stroke-width:2.6;stroke-linejoin:round;paint-order:stroke}
 .bt-badge-alert{background:color-mix(in srgb,var(--bt-accent) 78%,var(--bt-sidebar));color:var(--bt-accent-ink,#fff);font-size:8.5px;line-height:12px;font-weight:600;font-family:var(--bt-font)}
 .bt-badge-working{background:color-mix(in srgb,var(--bt-green) 82%,var(--bt-sidebar));width:8px;height:8px;right:1px;bottom:1px}
+.bt-badge-missing{background:color-mix(in srgb,var(--bt-ink-3) 82%,var(--bt-sidebar));color:var(--bt-sidebar)}
+.bt-badge-missing svg{width:8px;height:8px}
+.bt-mark[data-state=not-installed]{filter:grayscale(1);opacity:.62}
+.bt-mark[data-state=not-installed] :is(.bt-b,.bt-eye,.bt-eyes,.bt-pet-cell){animation:none!important}
 .bt-cluster{position:relative;display:inline-block;flex:none;line-height:0}
 .bt-cluster>*{position:absolute}
 .bt-cluster-more,.bt-cluster-you{display:inline-flex;align-items:center;justify-content:center;border-radius:50%;background:var(--bt-active);color:var(--bt-ink-3);font-family:var(--bt-font);font-weight:500;line-height:1;font-variant-numeric:tabular-nums}
@@ -12941,6 +12946,7 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .bt-drawer-caps{flex-wrap:wrap;justify-content:center;max-width:100%;margin-top:8px}
 .bt-row-preview{font-size:13px;line-height:18px;color:var(--bt-ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bt-row-preview-ask{color:var(--st-warn-strong,var(--st-warn,var(--bt-ink-2)));font-weight:500}
+.bt-row-preview-missing{color:var(--bt-ink-3)}
 .bt-unread{width:8px;height:8px;border-radius:50%;background:var(--bt-accent);flex:none;margin-right:2px;animation:bt-fade .13s cubic-bezier(.22,1,.36,1)}
 .bt-unread-wait{background:var(--bt-star)}
 .bt-rail{align-items:center;padding:0 0 8px}
@@ -13246,6 +13252,7 @@ html[data-windows-titlebar]:not([data-fullscreen]) :is(.bt-pane,.bt-panel)::befo
 .bt-input:focus{border-color:var(--bt-line-2)}
 .bt-input-area{height:auto;min-height:96px;padding:8px 10px;line-height:18px;resize:vertical}
 .bt-note{font-size:12px;line-height:16px;color:var(--bt-ink-3)}
+.bt-note-missing{color:var(--bt-ink-2)}
 .bt-soft-sm{height:28px;padding:0 12px;font-size:12px}
 .bt-set-avatar{display:flex;justify-content:center;padding:4px 0}
 .bt-avatar-anchor{position:relative}
