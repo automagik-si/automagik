@@ -24,6 +24,7 @@ import { basename, dirname, join } from 'node:path';
 
 const SCRIPT = join(import.meta.dir, 'capped-run');
 const WORDING = join(import.meta.dir, 'capped-run-wording.sh');
+const SHIM_FILE = join(import.meta.dir, 'capped-run-shim.sh');
 const work = mkdtempSync(join(tmpdir(), 'capped-run-test-'));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 
@@ -129,7 +130,7 @@ async function goneWithin(path: string, milliseconds: number): Promise<boolean> 
 }
 
 async function processGoneWithin(pid: number, milliseconds: number): Promise<boolean> {
-  if (!pid) return true;
+  if (!Number.isInteger(pid) || pid <= 1) return true;
   const deadline = Date.now() + milliseconds;
   while (Date.now() < deadline) {
     try {
@@ -160,6 +161,28 @@ const inheritedOomScore = (() => {
     return 0;
   }
 })();
+
+const journalReadable =
+  spawnSync('journalctl', ['--user', '--no-pager', '--output', 'cat', '-n', '0'], {
+    encoding: 'utf8',
+  }).status === 0;
+
+const startedPids = new Set<number>();
+
+function noteStarted(pid: number | undefined): void {
+  if (typeof pid === 'number' && Number.isInteger(pid) && pid > 1) startedPids.add(pid);
+}
+
+function safeKill(pid: number | undefined, signal: NodeJS.Signals = 'SIGTERM'): boolean {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 1) return false;
+  if (!startedPids.has(pid)) return false;
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function compareAdjScript(): string {
   const script = join(scratch('oom-score'), 'compare-adj.sh');
@@ -220,6 +243,7 @@ function scratchCheckout(): LockScratch {
   mkdirSync(dirname(script), { recursive: true });
   cpSync(SCRIPT, script);
   cpSync(WORDING, join(root, 'scripts', 'capped-run-wording.sh'));
+  cpSync(SHIM_FILE, join(root, 'scripts', 'capped-run-shim.sh'));
   const init = spawnSync('git', ['init', '-q', root], { encoding: 'utf8' });
   if (init.status !== 0) throw new Error('git init failed for the lock scratch checkout');
   lockScratch = { root, script, lock: join(root, '.automagik', 'locks', 'full-gate.lock') };
@@ -377,6 +401,7 @@ describe('capped-run', () => {
     const holder = spawn('flock', ['-x', lock, 'sh', '-c', ': >"$1"; sleep 1', 'sh', ready], {
       stdio: 'ignore',
     });
+    noteStarted(holder.pid);
     expect(await waitFor(ready, 5_000)).toBe(true);
 
     const outcome = cappedRun(['--lock', '--', 'sh', '-c', 'exit 0', 'argv-leak-marker'], {
@@ -384,7 +409,7 @@ describe('capped-run', () => {
       env: { CAPPED_RUN_LOCK_FILE: lock, HC_TERMINAL_ID: 'pane-name', LEAK_ENV_MARKER: 'env-leak-marker' },
       timeout: 30_000,
     });
-    holder.kill();
+    safeKill(holder.pid);
 
     expect(outcome.status).toBe(0);
     expect(outcome.milliseconds).toBeGreaterThan(400);
@@ -428,6 +453,7 @@ describe('capped-run', () => {
     const holder = spawn('flock', ['-x', lock, 'sh', '-c', ': >"$1"; sleep 2', 'sh', ready], {
       stdio: 'ignore',
     });
+    noteStarted(holder.pid);
     expect(await waitFor(ready, 5_000)).toBe(true);
 
     const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], {
@@ -435,7 +461,7 @@ describe('capped-run', () => {
       env: { CAPPED_RUN_LOCK_FILE: lock },
       timeout: 30_000,
     });
-    holder.kill();
+    safeKill(holder.pid);
 
     expect(outcome.status).toBe(0);
     expect(outcome.milliseconds).toBeLessThan(1_500);
@@ -558,6 +584,45 @@ describe('capped-run', () => {
     );
   });
 
+  test('the payload shim text is valid sh and bash', () => {
+    const generated = spawnSync('sh', ['-c', '. "$1"; capped_run_shim', 'sh', SHIM_FILE], {
+      encoding: 'utf8',
+    });
+    expect(generated.status).toBe(0);
+    const file = join(scratch('shim-syntax'), 'shim.sh');
+    writeFileSync(file, generated.stdout);
+    for (const shell of ['sh', 'bash']) {
+      const checked = spawnSync(shell, ['-n', file], { encoding: 'utf8' });
+      expect(checked.status).toBe(0);
+    }
+  });
+
+  test('safeKill refuses invalid or unstarted pids without signalling', () => {
+    const original = process.kill;
+    let calls = 0;
+    Object.defineProperty(process, 'kill', {
+      configurable: true,
+      writable: true,
+      value: ((..._args: unknown[]) => {
+        calls++;
+        return true;
+      }) as typeof process.kill,
+    });
+    try {
+      expect(safeKill(0)).toBe(false);
+      expect(safeKill(1)).toBe(false);
+      expect(safeKill(-1)).toBe(false);
+      expect(safeKill(Number.NaN)).toBe(false);
+      expect(safeKill(1.5)).toBe(false);
+      expect(safeKill('5' as unknown as number)).toBe(false);
+      expect(safeKill(process.pid)).toBe(false);
+      expect(safeKill(999999)).toBe(false);
+      expect(calls).toBe(0);
+    } finally {
+      Object.defineProperty(process, 'kill', { configurable: true, writable: true, value: original });
+    }
+  });
+
   test.skipIf(!scope)('a very short run (under 100 ms) leaves no peak file in the state folder', () => {
     const state = scratch('short-state');
     const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], { state });
@@ -577,12 +642,14 @@ describe('capped-run', () => {
         env: { ...process.env, CAPPED_RUN_TEST_STATE: state },
         stdio: 'ignore',
       });
+      noteStarted(wrapper.pid);
       let pid = 0;
       try {
         expect(await waitFor(info, 20_000)).toBe(true);
         const [pidText, tmpdir, runtime] = readFileSync(info, 'utf8').trim().split('\n');
         pid = Number(pidText);
-        wrapper.kill('SIGTERM');
+        noteStarted(pid);
+        safeKill(wrapper.pid, 'SIGTERM');
         const ended = await new Promise<{ code: number | null; signal: string | null }>(resolve => {
           const timer = setTimeout(() => resolve({ code: null, signal: null }), 20_000);
           wrapper.on('close', (code, signal) => {
@@ -596,12 +663,8 @@ describe('capped-run', () => {
         expect(await processGoneWithin(pid, 10_000)).toBe(true);
         expect(readdirSync(state).filter(name => name.startsWith('peak'))).toEqual([]);
       } finally {
-        try {
-          process.kill(pid, 'SIGKILL');
-        } catch {
-          // already gone
-        }
-        wrapper.kill('SIGKILL');
+        safeKill(pid, 'SIGKILL');
+        safeKill(wrapper.pid, 'SIGKILL');
       }
     },
     90_000,
@@ -644,6 +707,10 @@ describe('capped-run', () => {
           'cg=$(sed -n "s/^0:://p" /proc/self/cgroup)',
           '[ -n "$cg" ] || kill -9 $$',
           'for pid in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do',
+          '  case $pid in',
+          '    "" | *[!0-9]*) continue ;;',
+          '  esac',
+          '  [ "$pid" -gt 1 ] || continue',
           '  [ "$pid" = "$$" ] || kill -9 "$pid" 2>/dev/null',
           'done',
           'kill -9 $$',
@@ -690,8 +757,8 @@ describe('capped-run', () => {
     }
   });
 
-  test.skipIf(!scope)(
-    'the unit Description and journal carry the command name only, never argv',
+  test.skipIf(!scope || !journalReadable)(
+    'the unit Description and journal carry the command name only, never argv (skipped when the user journal is unreadable)',
     async () => {
       const state = scratch('description-state');
       const name = `desc-${process.pid}-${Date.now()}`;
@@ -741,16 +808,22 @@ describe('capped-run', () => {
       const log = existsSync(join(state, 'runs.log')) ? readFileSync(join(state, 'runs.log'), 'utf8') : '';
       expect(log).not.toContain(marker);
       await Bun.sleep(200);
-      const journal = spawnSync('journalctl', ['--user', '--unit', unit, '--no-pager', '--output', 'cat'], {
-        encoding: 'utf8',
-      });
-      expect(journal.stdout ?? '').not.toContain(marker);
+      const journal = spawnSync(
+        'journalctl',
+        ['--user', '--unit', unit, '--no-pager', '--output', 'verbose'],
+        { encoding: 'utf8' },
+      );
+      expect(journal.status).toBe(0);
+      const journalText = journal.stdout ?? '';
+      expect(journalText).toContain(`_SYSTEMD_UNIT=${unit}`);
+      expect(journalText).toContain(`MESSAGE=Started capped-run: bun (${name}).`);
+      expect(journalText).not.toContain(marker);
     },
     120_000,
   );
 
-  test.skipIf(!scope)(
-    'an OOM-killed run with the marker argument prints one honest line without it',
+  test.skipIf(!scope || !journalReadable)(
+    'an OOM-killed run with the marker argument prints one honest line without it (skipped when the user journal is unreadable)',
     async () => {
       const state = scratch('description-killed-state');
       const name = `desc-kill-${process.pid}-${Date.now()}`;
@@ -805,10 +878,16 @@ describe('capped-run', () => {
       const log = existsSync(join(state, 'runs.log')) ? readFileSync(join(state, 'runs.log'), 'utf8') : '';
       expect(log).not.toContain(marker);
       await Bun.sleep(200);
-      const journal = spawnSync('journalctl', ['--user', '--unit', unit, '--no-pager', '--output', 'cat'], {
-        encoding: 'utf8',
-      });
-      expect(journal.stdout ?? '').not.toContain(marker);
+      const journal = spawnSync(
+        'journalctl',
+        ['--user', '--unit', unit, '--no-pager', '--output', 'verbose'],
+        { encoding: 'utf8' },
+      );
+      expect(journal.status).toBe(0);
+      const journalText = journal.stdout ?? '';
+      expect(journalText).toContain(`_SYSTEMD_UNIT=${unit}`);
+      expect(journalText).toContain(`MESSAGE=Started capped-run: bun (${name}).`);
+      expect(journalText).not.toContain(marker);
     },
     120_000,
   );
@@ -904,6 +983,7 @@ describe('capped-run', () => {
       const holder = spawn('flock', ['-n', '-x', realLock, 'sh', '-c', 'sleep 5'], {
         stdio: 'ignore',
       });
+      noteStarted(holder.pid);
       await Bun.sleep(300);
       try {
         const started = Date.now();
@@ -917,7 +997,7 @@ describe('capped-run', () => {
         expect(Date.now() - started).toBeLessThan(10_000);
         expect((outcome.stderr ?? '').split('\n')[0]).toContain(`path=${lock} dev=`);
       } finally {
-        holder.kill();
+        safeKill(holder.pid);
       }
     },
     30_000,

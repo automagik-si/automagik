@@ -47,7 +47,8 @@
 #     the line is `exit 137: the memory monitor ended before its final read; the run may have hit
 #     the memory limit (command=<comm>)`. Both go to the log too, and the command's own exit code
 #     passes through. The CAPPED line's text is built by the pure function in
-#     `capped-run-wording.sh` next to this script (the tests source it too).
+#     `capped-run-wording.sh` next to this script (the tests source it too); the payload shim
+#     text is the function in `capped-run-shim.sh`, checked by the tests with sh -n and bash -n.
 #   - A signal from outside (INT, TERM, HUP) stops this run's own scope and removes its scratch
 #     folders and peak file before the wrapper exits.
 #   - With --lock, the log also gets one line at the start and one at the end of every run:
@@ -105,6 +106,10 @@ script_dir=$( ( unset CDPATH; cd -- "$script_dir" && pwd ) )
   fail 'cannot find capped-run-wording.sh next to this script'
 # shellcheck disable=SC1091
 . "$script_dir/capped-run-wording.sh"
+[ -r "$script_dir/capped-run-shim.sh" ] ||
+  fail 'cannot find capped-run-shim.sh next to this script'
+# shellcheck disable=SC1091
+. "$script_dir/capped-run-shim.sh"
 
 # Turns a size (4G, 4096M, 512K, any case) into whole MiB in `mib`; fails on anything else.
 size_to_mib() {
@@ -397,60 +402,9 @@ command -v ionice >/dev/null 2>&1 && have_ionice=1
 # the monitor (a `Killed` from one of its children under memory pressure) can reach the wrapper.
 # `parent` is the shim's PID, which the exec chain keeps, so the monitor can tell when the
 # command has gone.
-# shellcheck disable=SC2016
-SHIM='
-peek=$1
-shift
-parent=$$
-if [ -n "$peek" ]; then
-  cg=$(sed -n "s/^0:://p" /proc/self/cgroup 2>/dev/null)
-  if [ -n "$cg" ] && [ -r "/sys/fs/cgroup$cg/memory.peak" ]; then
-    peakf=/sys/fs/cgroup$cg/memory.peak
-    eventsf=/sys/fs/cgroup$cg/memory.events
-    (
-      exec 2>/dev/null
-      umask 077
-      peak=
-      oom=unknown
-      while kill -0 "$parent" 2>/dev/null; do
-        p=$(cat "$peakf" 2>/dev/null) || break
-        if [ -n "$p" ]; then
-          peak=$p
-          if [ -z "${CAPPED_RUN_TEST_UNREADABLE_EVENTS:-}" ]; then
-            o=$(sed -n "s/^oom_kill //p" "$eventsf" 2>/dev/null)
-            [ -n "$o" ] && oom=$o
-          fi
-          printf "peak %s %s\n" "$p" "$oom" >"$peek.tmp" && mv "$peek.tmp" "$peek"
-        fi
-        sleep 0.1
-      done
-      # The final read is explicit: once the payload has ended (the parent is gone), read
-      # memory.peak and memory.events once more, then write done; no tick can lose the cause.
-      p=$(cat "$peakf" 2>/dev/null)
-      [ -n "$p" ] && peak=$p
-      if [ -z "${CAPPED_RUN_TEST_UNREADABLE_EVENTS:-}" ]; then
-        o=$(sed -n "s/^oom_kill //p" "$eventsf" 2>/dev/null)
-        [ -n "$o" ] && oom=$o
-      fi
-      printf "done %s %s\n" "$peak" "$oom" >"$peek.tmp" && mv "$peek.tmp" "$peek"
-    ) &
-  fi
-fi
-# The payload exec path only: raise 500 over what this process inherits, capped at 1000, and
-# never lower (an unprivileged process may only raise). The monitor was forked above and keeps
-# the inherited value, so the payload is strictly above it unless the inherited value is 1000.
-inherited=$(cat /proc/self/oom_score_adj 2>/dev/null)
-case $inherited in
-  '' | *[!0-9-]*) inherited=0 ;;
-esac
-raised=$((inherited + 500))
-[ "$raised" -gt 1000 ] && raised=1000
-[ "$raised" -lt "$inherited" ] && raised=$inherited
-if [ -w /proc/self/oom_score_adj ]; then
-  printf "%s\n" "$raised" > /proc/self/oom_score_adj 2>/dev/null || :
-fi
-exec "$@"
-'
+# The payload shim text lives in capped-run-shim.sh: the wrapper captures it here and the tests
+# source the same function to check it with sh -n and bash -n.
+SHIM=$(capped_run_shim)
 
 run_systemd() {
   # Extra options come first, then the scope properties, then the payload after --.
@@ -545,7 +499,10 @@ log_capped() {
 on_signal() {
   trap - INT TERM HUP
   [ -n "${unit_name:-}" ] && systemctl --user stop "${unit_name}.scope" >/dev/null 2>&1
-  [ -n "${child:-}" ] && kill "$child" 2>/dev/null
+  case ${child:-} in
+    '' | *[!0-9]* | 0 | 1) ;;
+    *) kill "$child" 2>/dev/null ;;
+  esac
   [ "${locked:-0}" = 1 ] && log_event end " exit=$1"
   cleanup_scratch
   [ -n "${peek:-}" ] && rm -f "$peek" "$peek.tmp" 2>/dev/null
