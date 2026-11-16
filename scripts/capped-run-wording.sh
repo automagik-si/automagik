@@ -7,7 +7,8 @@
 #
 # The floor is max(sampled peak, limit): a memory kill means the scope reached its MemoryMax, so
 # the printed peak is at least the limit even when the last sample is lower. The limit and the
-# samples are printed in MiB with one decimal; a missing sample prints "unknown".
+# samples are printed in MiB with one decimal. A missing last sample prints "unknown", never
+# 0.0M; the sampled peak may stay 0 for the floor.
 capped_run_mib() {
   case ${1:-} in
     '' | *[!0-9]*) printf 'unknown' ;;
@@ -18,7 +19,8 @@ capped_run_mib() {
 capped_run_capped_line() {
   limit=${1:-0}
   sampled=${2:-0}
-  last=${3:-0}
+  # No default on the last sample: an empty value is a missing sample, not 0.
+  last=${3-}
   comm=${4:-?}
   case $limit in '' | *[!0-9]*) limit=0 ;; esac
   case $sampled in '' | *[!0-9]*) sampled=0 ;; esac

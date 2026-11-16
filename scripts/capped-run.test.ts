@@ -516,6 +516,19 @@ describe('capped-run', () => {
     );
   });
 
+  test('the capped line says unknown for an empty last sample (pure wording)', () => {
+    const result = spawnSync(
+      'sh',
+      ['-c', '. "$1"; capped_run_capped_line 268435456 4194304 "" sh', 'sh', WORDING],
+      { encoding: 'utf8' },
+    );
+    expect(result.status).toBe(0);
+    // An empty sample is missing, not zero: the floor still clamps to the limit.
+    expect(result.stdout.trim()).toBe(
+      'CAPPED: a process in the run was killed at the memory limit (limit=256.0M, peak>=256.0M, last sample unknown, command=sh)',
+    );
+  });
+
   test.skipIf(!scope)('a very short run (under 100 ms) leaves no peak file in the state folder', () => {
     const state = scratch('short-state');
     const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], { state });
