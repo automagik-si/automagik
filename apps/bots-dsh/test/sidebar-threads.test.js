@@ -69,15 +69,28 @@ function sidebar({ tasks, waiting = [], approvals = [], stops = [], wide = true,
     useActivity: pick => pick({}),
     useWork: pick => pick({ approvals, stops, rooms: {}, waiting: {} }),
   })
-  const threadsOf = id => find(tree, named('BotThreads')).find(node => node.props.bot.id === id)
+  // The open sidebar is the new left bar: what hangs under a row comes from its renderAfter,
+  // and a row's one status from the rows it draws. The narrow rail still draws today's rows.
+  const bar = tree?.type?.name === 'LeftBar' ? tree : null
+  const after = (id, bot = {}) => bar.props.renderAfter({ kind: 'bot', id, bot })
+  const threadsOf = id => find(bar ? after(id) : tree, named('BotThreads')).find(node => node.props.bot.id === id)
   const rowOf = id => find(tree, named('BotRow')).find(node => node.props.bot.id === id)
-  return { tree, opened, threadsOf, rowOf }
+  // A DSH bot's or the Tasks record's row, drawn whole (head and Session list) from the props
+  // the bar hangs under it.
+  const agentRows = () => (bar
+    ? agents.map(agent => after(agent.id, { dsh: 'agent' })).filter(Boolean).map(node => ({ type: node.type, props: { ...node.props, bare: false } }))
+    : find(tree, named('AgentRow')))
+  const statusOf = (id) => {
+    const rows = find(bar.type(bar.props), named('TeamRows'))[0]
+    return rows.props.team.bots.find(bot => bot.id === id)?.status
+  }
+  return { tree, opened, threadsOf, rowOf, agentRows, statusOf }
 }
 
 const task = (from, title, minutes, status = 'working') => ({ from, title, at: NOW - minutes * 60_000, status })
 
 test('a Bot\'s running tasks hang under its row: spinner while working, amber while waiting for you', () => {
-  const { threadsOf, rowOf, opened } = sidebar({
+  const { threadsOf, opened } = sidebar({
     tasks: {
       'session-a': task('pip', 'Plan the launch week', 4),
       'session-b': task('pip', 'Approve: send summary to Ana?', 0),
@@ -103,9 +116,6 @@ test('a Bot\'s running tasks hang under its row: spinner while working, amber wh
   // The Omni Bot has its own.
   const omniRows = find(threadsOf('omni').type(threadsOf('omni').props), node => node.props?.className === 'bt-thread')
   assert.equal(omniRows.length, 1)
-  // The row says how many things the Bot is on.
-  const row = rowOf('pip').type(rowOf('pip').props)
-  assert.equal(textOf(find(row, node => node.props?.className === 'bt-row-preview')), 'Working on 2 things')
 })
 
 test('past three threads the rest fold into a count, which unfolds them', () => {
@@ -189,11 +199,11 @@ test('a task a Bot started is listed under that Bot, not under Tasks; a DSH bot 
       'from-gone': task('gone', 'Old chore', 5, 'done'),
     },
   })
-  const rows = find(team([tasks, site]).tree, named('AgentRow')).map(row => row.type(row.props).props.children)
+  const rows = team([tasks, site]).agentRows().map(row => row.type(row.props).props.children)
   const listed = Object.fromEntries(rows.map(([head, list]) => [head.props['aria-label'], find(list, named('AgentSessionRow')).map(node => node.props.session.id).sort()]))
   assert.deepEqual(listed, { Tasks: ['from-gone'], Site: ['one', 'two'] })
   // Without a Session no other list shows, there is no Tasks row.
-  const [alone] = find(team([{ ...tasks, sessions: ['from-pip'] }]).tree, named('AgentRow'))
+  const [alone] = team([{ ...tasks, sessions: ['from-pip'] }]).agentRows()
   assert.equal(alone.type(alone.props), null)
 })
 
@@ -206,7 +216,7 @@ test('a stopped task past the Live rail is listed under Tasks, by its record, sa
     broke: ended('Broke', 8, 'failed'), running: task('pip', 'Still on it', 5),
   }
   const record = { id: 'tasks', kind: 'tasks', name: 'Tasks', sessions: Object.keys(tasks), createdAt: 3 }
-  const [row] = find(sidebar({ tasks, agents: [record] }).tree, named('AgentRow'))
+  const [row] = sidebar({ tasks, agents: [record] }).agentRows()
   const rows = find(row.type(row.props), named('AgentSessionRow'))
   assert.deepEqual(rows.map(node => node.props.session.id), ['fourth', 'old', 'broke'])
   const line = (node) => {
@@ -249,25 +259,19 @@ test('a blank Session opened on purpose stays on screen; a blank one nobody open
   assert.equal(staysInView('picked', true, roster, transitioning), false)
 })
 
-test('an open stop previews in amber without changing the face; a task approval wins', () => {
-  const draw = options => {
-    const { rowOf } = sidebar({ tasks: {}, ...options })
-    const node = rowOf('pip')
-    return node.type(node.props)
-  }
-  const stopped = draw({ stops: [{ botId: 'pip', open: true }] })
-  const idle = draw({ stops: [{ botId: 'pip', open: false }] })
-  assert.equal(textOf(find(stopped, node => node.props?.className === 'bt-row-preview bt-row-preview-ask')), 'A step stopped on a permission')
-  assert.match(stopped.props['aria-label'], /A step stopped on a permission/)
-  assert.doesNotMatch(idle.props['aria-label'], /A step stopped/)
-  assert.equal(find(stopped, named('BotAvatar'))[0].props.state, find(idle, named('BotAvatar'))[0].props.state)
-  const waiting = draw({ stops: [{ botId: 'pip', open: true }], approvals: [{ id: 'x', botId: 'pip', taskId: 'x' }] })
-  assert.equal(textOf(find(waiting, node => node.props?.className === 'bt-row-preview bt-row-preview-ask')), 'A task needs your approval')
+test('an open stop marks the Bot as needing the person; a closed one does not; a task approval does too', () => {
+  const status = options => sidebar({ tasks: {}, ...options }).statusOf('pip')
+  assert.equal(status({ stops: [{ botId: 'pip', open: true }] }), 'needs')
+  assert.equal(status({ stops: [{ botId: 'pip', open: false }] }), 'idle')
+  assert.equal(status({ stops: [{ botId: 'pip', open: true }], approvals: [{ id: 'x', botId: 'pip', taskId: 'x' }] }), 'needs')
 })
 
 test('Bot badges count approvals, cap at 9+ and preserve the uncounted question badge', () => {
   for (const count of [1, 3, 12]) {
-    const { rowOf } = sidebar({ tasks: {}, approvals: Array.from({ length: count }, (_, i) => ({ id: `a${i}`, botId: 'pip' })) })
+    const approvals = Array.from({ length: count }, (_, i) => ({ id: `a${i}`, botId: 'pip' }))
+    // The open bar shows one mark, needs you; the narrow rail's face keeps the count.
+    assert.equal(sidebar({ tasks: {}, approvals }).statusOf('pip'), 'needs')
+    const { rowOf } = sidebar({ tasks: {}, approvals, wide: false })
     const node = rowOf('pip')
     const row = node.type(node.props)
     assert.match(row.props['aria-label'], new RegExp(count === 1 ? 'Waiting for your approval.*1 approval waiting' : `${count} approvals waiting`))
@@ -308,19 +312,21 @@ test('a waiting thread and task card name the one ask they wait on, never a gues
   assert.ok(!said(one, ask).includes('bun test --filter api'))
 })
 
-test('room rows count their approvals in the existing tag and retain the waiting dot', () => {
+test('a group with approvals is marked as needing the person; the narrow rail says how many', () => {
   const room = { id: 'room', name: 'Ops', members: ['pip'] }
   const approvals = [{ roomId: 'room' }, { roomId: 'elsewhere' }, { roomId: 'room' }]
   const roster = { bots: [pip], rooms: [room], agents: [], byId: { pip }, roomsById: { room }, agentOf: {}, mainBotIds: ['pip'], questions: {}, ready: true, tasks: {} }
-  const tree = TeamSidebar({
-    wide: true, actions: {}, useRoster: pick => pick(roster), useUi: pick => pick({ unread: {} }), useRegistry: pick => pick({}),
+  const draw = wide => TeamSidebar({
+    wide, actions: {}, useRoster: pick => pick(roster), useUi: pick => pick({ unread: {} }), useRegistry: pick => pick({}),
     useSessions: pick => pick({ ids: [], byId: {} }), useUpdate: () => ({}), useSessionStatus: pick => pick(new Map()),
     useSessionRetainInfo: (_id, pick) => pick(undefined), useActivity: pick => pick({}),
     useWork: pick => pick({ approvals, rooms: {}, waiting: {} }),
   })
-  const node = find(tree, named('RoomRow'))[0]
-  const row = node.type(node.props)
-  assert.match(row.props['aria-label'], /2 approvals waiting/)
-  assert.equal(textOf(find(row, node => node.props?.className === 'bt-tag')), '2')
-  assert.equal(find(row, node => node.props?.className === 'bt-unread bt-unread-wait').length, 1)
+  // The open bar marks the group as needing the person.
+  const bar = draw(true)
+  const rows = find(bar.type(bar.props), named('TeamRows'))[0]
+  assert.equal(rows.props.team.groups.find(group => group.id === 'room').status, 'needs')
+  // The narrow rail's row says the count.
+  const node = find(draw(false), named('RoomRow'))[0]
+  assert.match(node.type(node.props).props['aria-label'], /2 approvals waiting/)
 })
