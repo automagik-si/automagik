@@ -1229,13 +1229,14 @@ test('a paused group parks every member an @all called, in a new round', async (
   const post = sent.find(entry => entry.sessionId === room.id && entry.message.source.role === 'post')
   await emit(room.id, { type: 'user/message', data: { source: post.message.source, content: post.message.content } })
   const held = relay(room.id, 'relay-1')
-  await settle()
+  // The paused relay opens no round and ends after parking; check its final state.
+  // Awaiting it is bounded by the package's 120 s per-test timeout.
+  await held
   assert.equal(sent.filter(entry => entry.message.source.role === 'room').length, 0, 'a paused room opens no round')
   assert.deepEqual((state().paused ?? []).map(entry => [entry.name, entry.note, entry.idle]), [
     ['Writer', 'Omni called everyone', true],
     ['Tester', 'Omni called everyone', true],
   ], 'every member @all called waits for the user')
-  await held
 
   // The user's message brings them back.
   sent.length = 0
