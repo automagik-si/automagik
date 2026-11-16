@@ -518,8 +518,11 @@ export class AgentRun {
       let running = child.exitCode === null && child.signalCode === null
       if (this.grouped) {
         try { process.kill(-child.pid, 0); running = true } catch (error) {
-          if (error.code !== 'ESRCH') throw new Error('The Bot process could not be stopped.')
-          running = false
+          // Only ESRCH proves the group gone. EPERM means a member we may not signal (on macOS,
+          // a zombie not yet reaped), so the wait goes on within the deadline.
+          if (error.code === 'ESRCH') running = false
+          else if (error.code === 'EPERM') running = true
+          else throw new Error('The Bot process could not be stopped.')
         }
       }
       const states = this.grouped ? await treeStates(this.detached ?? [], this.treeDeps) : []
@@ -570,8 +573,9 @@ export class AgentRun {
       try {
         process.kill(-child.pid, name)
         return true
-      } catch {
-        return false
+      } catch (error) {
+        // EPERM means the group is still there; keep the SIGKILL timer.
+        return error?.code === 'EPERM'
       }
     }
     if (!signal('SIGTERM')) {
