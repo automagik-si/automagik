@@ -66,6 +66,9 @@ const ERRORS = {
   'acp-login/not-found': 'This sign-in has ended. Start again.',
   'acp-login/unavailable': 'This CLI cannot sign in yet. Check its installation and try again.',
   'acp-login/disposed': 'The connection restarted. Start sign-in again.',
+  // This agent signs in from its own terminal; acp-dsh says which command, but the row says
+  // the shape of it without naming a path a person has to paste anywhere.
+  'acp-login/terminal': 'This coding agent signs in from its own terminal. Run its sign-in command there, then try again.',
 }
 // The page branches on these two, never on their (translated) wording: an ended attempt asks the
 // agent's own sign-in first (rule 4), a restart interrupts the row.
@@ -81,6 +84,15 @@ const ACCOUNT_ERRORS = {
   'acp-account/signed-out': ['This coding agent is not signed in any more. Sign in to use it.', 'bot/account-signed-out'],
 }
 const failed = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
+// A native failure the team has no sentence for: the CLI's own words never reach the person
+// (a CLI may print an account name or a secret, #970), but its failure class does. The class is
+// a bounded identifier, so the row can say which kind of failure it was instead of one dead end.
+const FAILURE_CLASS = /^[a-z][a-z0-9-]{0,31}\/[a-z0-9-]{1,40}$/i
+const failureClassOf = error => (typeof error?.code === 'string' && FAILURE_CLASS.test(error.code) ? error.code : '')
+const unmappedFailure = (error) => {
+  const kind = failureClassOf(error)
+  return kind === '' ? 'Could not continue this sign-in. Try again.' : `Could not continue this sign-in (${kind}). Try again.`
+}
 const invalid = () => failed('This sign-in request is not valid.', 'bot/invalid')
 
 // Keep the browser link on a provider's official authorization page: Claude's must ask for
@@ -330,7 +342,8 @@ export function install(rt) {
     try {
       await service.accountConfirm(body.provider, body.ref === undefined ? {} : { ref: body.ref })
     } catch (error) {
-      const [message, code] = ACCOUNT_ERRORS[error?.code] ?? ['The account could not be confirmed. Try again.', 'bot/refused']
+      const [message, code] = ACCOUNT_ERRORS[error?.code]
+        ?? [`The account could not be confirmed${failureClassOf(error) === '' ? '' : ` (${failureClassOf(error)})`}. Try again.`, 'bot/refused']
       throw failed(message, code)
     }
     const choice = choiceOf(body.botId, body.provider)
@@ -438,7 +451,9 @@ export function install(rt) {
       value = await service[method](...args)
     } catch (error) {
       const code = error?.code ?? ''
-      throw failed(Object.hasOwn(ERRORS, code) ? ERRORS[code] : 'Could not continue this sign-in. Try again.', Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
+      // A code the team knows says what it means; any other says which kind of failure it was,
+      // never what the CLI printed.
+      throw failed(Object.hasOwn(ERRORS, code) ? ERRORS[code] : unmappedFailure(error), Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
     }
     if (action === 'current' && (value === undefined || value === null)) {
       const choice = choiceOf(body.botId, body.provider)

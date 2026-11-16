@@ -100,6 +100,36 @@ test('a native failure cannot echo the authorization answer or enter the diagnos
   assert.doesNotMatch(JSON.stringify({ result, state: h.rt.state, logged: h.logged }), /private-authorization-code|expected_state/)
 })
 
+test('a failure with no sentence of its own says which kind it was, never what the CLI printed', async (t) => {
+  const h = await fixture(t)
+  h.acp.loginStart = async () => { throw Object.assign(new Error('private-cli-output token-secret'), { code: 'acp-net/unreachable' }) }
+  const { result } = await h.call('cli-login-start', h.payload)
+  assert.equal(result.error.code, 'bot/refused')
+  assert.equal(result.error.message, 'Could not continue this sign-in (acp-net/unreachable). Try again.')
+  assert.doesNotMatch(JSON.stringify(result), /private-cli-output|token-secret/)
+  // A code that is not a class (a shell error, a pasted shape) is not put in the row.
+  for (const code of ['EACCES', 'weird code with spaces', 'x'.repeat(80), '']) {
+    h.acp.loginStart = async () => { throw Object.assign(new Error('private-cli-output'), { code }) }
+    const { result: failed } = await h.call('cli-login-start', h.payload)
+    assert.equal(failed.error.message, 'Could not continue this sign-in. Try again.', code)
+  }
+})
+
+test('an agent that signs in from its terminal says so', async (t) => {
+  const h = await fixture(t)
+  h.acp.loginStart = async () => { throw Object.assign(new Error('run the CLI'), { code: 'acp-login/terminal' }) }
+  const { result } = await h.call('cli-login-start', h.payload)
+  assert.equal(result.error.message, 'This coding agent signs in from its own terminal. Run its sign-in command there, then try again.')
+})
+
+test('an account confirmation failure says which kind it was, never the CLI text', async (t) => {
+  const h = await fixture(t)
+  h.acp.accountConfirm = async () => { throw Object.assign(new Error('private-cli-output'), { code: 'acp-account/mismatch' }) }
+  const { result } = await h.call('cli-login-confirm', { botId: 'first', provider: 'acp-claude', ref: 'account-ref' })
+  assert.equal(result.error.message, 'The account could not be confirmed (acp-account/mismatch). Try again.')
+  assert.doesNotMatch(JSON.stringify(result), /private-cli-output/)
+})
+
 test('owner sign-in and account controls preserve a safe recovery action without native details',
   async t => {
     const h = await fixture(t)
