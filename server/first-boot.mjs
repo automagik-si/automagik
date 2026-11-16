@@ -172,9 +172,10 @@ export function readModelPinState(home) {
   }
 }
 
-/** The pins still owed; a ready state has none. */
+/** The pins still owed; null means unknown/corrupt, [] means verified ready. */
 export function readPendingPins(home) {
   const state = readModelPinState(home)
+  if (state.state === 'unknown') return null
   return state.state === 'ready' ? [] : state.pins
 }
 
@@ -259,6 +260,10 @@ export function applyPendingPins({
   warn = console.warn,
 } = {}) {
   const pending = readPendingPins(home)
+  if (pending === null) {
+    log('pins: model-pin state is unknown; no roster is written')
+    return { state: 'unknown', applied: [], superseded: [], pending: [], conflicts: [], noList: false }
+  }
   if (!pending.length) {
     log('pins: no pending model pins; no-op')
     return { state: 'none', applied: [], superseded: [], pending: [], conflicts: [], noList: false }
@@ -619,7 +624,7 @@ function boot({
   const pins = applyPendingPins({ home, workspace, env, am, run, log, warn })
   if (pins.conflicts.length) {
     writeModelPinState(home, 'failed', {
-      pins: readPendingPins(home), superseded: pins.superseded, conflicts: pins.conflicts,
+      pins: readPendingPins(home) ?? [], superseded: pins.superseded, conflicts: pins.conflicts,
       error: 'model pin conflicts: a roster surface was edited and was not overwritten',
     })
     warn(`first boot: model pin conflicts on ${pins.conflicts.map((entry) => entry.surface).join(', ')}; person edits were kept`)
