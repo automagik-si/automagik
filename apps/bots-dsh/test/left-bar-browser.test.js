@@ -140,7 +140,9 @@ test('every status in one list, on both skins', async (t) => {
     const at = await measure(page)
     assert.deepEqual(at.cut, [])
     const said = await page.evaluate(() => [...document.querySelectorAll('.lb-row[data-kind=bot]')].map(row => [row.querySelector('.lb-name').textContent, row.querySelector('[data-status]')?.getAttribute('data-status') ?? null, row.querySelector('.lb-st')?.textContent ?? null]))
-    assert.deepEqual(said.slice(0, 5), [['Working', 'working', null], ['Needs you', 'needs', 'Needs you'], ['Idle', null, null], ['Error', 'error', null], ['Not running', 'off', null]], skin)
+    // One mark set (Chat's ruling): idle draws nothing, needs you and not running say their word
+    // beside the mark, working and error keep the mark alone.
+    assert.deepEqual(said.slice(0, 5), [['Working', 'working', null], ['Needs you', 'needs', 'Needs you'], ['Idle', null, null], ['Error', 'error', null], ['Not running', 'off', 'Not running']], skin)
     // The long name gives way to its mark and word, which stay whole.
     const long = await page.evaluate(() => { const row = [...document.querySelectorAll('.lb-row[data-kind=bot]')].at(-1); const r = row.getBoundingClientRect(); const s = row.querySelector('.lb-st').getBoundingClientRect(); return { inside: s.right <= r.right, ellipsis: row.querySelector('.lb-name').scrollWidth > row.querySelector('.lb-name').clientWidth } })
     assert.deepEqual(long, { inside: true, ellipsis: true }, `${skin}: a long name ends in an ellipsis before the mark`)

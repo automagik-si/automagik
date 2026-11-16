@@ -192,7 +192,7 @@ test('the rows wear what they are: unread, not running, groups and labels', () =
   assert.ok(hasClass('lb-row-unread')(unread))
   const off = row(tree, 'off')
   assert.ok(hasClass('lb-row-off')(off))
-  assert.equal(findAll(off, node => node.props?.role === 'img')[0].props['aria-label'], 'Not running')
+  assert.match(textOf(off), /Not running/, 'not running is said in words, never a bare hollow ring')
   // A Bot whose chat asks still plays "alert": the row is quiet, the character is not.
   assert.equal(findAll(row(tree, 'pip'), node => node.props?.['data-art'])[0].props['data-state'], 'alert')
   const crew = row(tree, 'crew')

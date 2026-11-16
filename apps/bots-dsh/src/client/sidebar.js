@@ -20,6 +20,7 @@ import { approvalCount, approvalDetail, useApproval } from './approvals.js'
 import { WorkCodeSwitch } from './work-code-switch.js'
 import { BotPills, pillLabels } from './capability-pills.js'
 import { LeftBar } from './left-bar.js'
+import { useSeats } from './seat-chat.js'
 
 // -------------------------------------------------------------------------
 // Sidebar
@@ -390,6 +391,8 @@ export function TeamSidebar(props) {
   const closing = useRef(false)
   useLayoutEffect(() => { closing.current = false })
   const roster = useRoster(value => value)
+  // The seats on this computer (RFC 0022 1L): the registry's orchestrators as the bar's rows.
+  const seats = useSeats(actions.seatList, wide)
   const markedUnread = useUi(value => value.unread)
   const bootFailed = useUi(value => value.bootFailed === true)
   props.useRegistry(value => value)
@@ -446,15 +449,18 @@ export function TeamSidebar(props) {
   if (wide) {
     // The new left bar (left-bar.js): the rail, the Team rows, the same openings as below.
     const byId = id => roster.byId[id] ?? roster.roomsById?.[id] ?? (roster.agents ?? []).find(agent => agent.id === id)
-    const open = row => (row.kind === 'chat' ? row.source?.open?.(row.id)
-      : row.kind === 'group' ? rowActions.openSession(row.id)
-        : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
+    const open = row => (row.bot?.seat ? rowActions.openSeat(row.bot)
+      : row.kind === 'chat' ? row.source?.open?.(row.id)
+        : row.kind === 'group' ? rowActions.openSession(row.id)
+          : row.bot?.dsh ? rowActions.openAgent(row.id) : row.kind === 'bot' ? rowActions.openSession(row.id) : undefined)
     const menu = (row, event) => {
+      // A seat is read here and run in Herdr: it has no Bot settings or context menu.
+      if (row.bot?.seat) return
       const kind = row.kind === 'group' ? 'room' : row.bot?.dsh ? 'agent' : 'bot'
       if (byId(row.id)) actions.openMenu({ kind, id: row.id, x: event.clientX, y: event.clientY })
     }
     const renderAfter = (row) => {
-      if (row.kind !== 'bot') return null
+      if (row.kind !== 'bot' || row.bot?.seat) return null
       if (row.bot.dsh) {
         const agent = (roster.agents ?? []).find(candidate => candidate.id === row.id)
         return agent ? h(AgentRow, { ...rowProps, agent, bare: true, marked: markedUnread[agent.id] === true }) : null
@@ -466,7 +472,7 @@ export function TeamSidebar(props) {
       return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), children) : null
     }
     return h(LeftBar, {
-      roster, order, marked: markedUnread, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
+      roster, order, marked: markedUnread, seats, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
       open, menu, renderAfter, notice, onKeyDown: typeToSearch,
       // Badges other Omni plugins add at the end of a Bot's row (extend.js), as on today's rows.
       renderEnd: (row) => {

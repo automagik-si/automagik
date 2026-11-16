@@ -1,0 +1,5 @@
+╭─── bash ─────────────
+│ (no output)
+╰─── Wall: 0.02s · Timeout: 60s ────────────
+ model   /home/u/proj  $0.00 ─1%──────────
+╰─ half typed words
