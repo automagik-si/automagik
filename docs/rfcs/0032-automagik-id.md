@@ -131,21 +131,21 @@ Content-Security-Policy. Without the `PAGES` binding both routes answer 501.
   present and disabled.
 - **The pages contract.** `apps/id/PAGES-CONTRACT.md`: the endpoints the pages call,
   the opaque `oauth_query` they carry, and the error shapes.
-- **Token lifetimes.** None is set in our config today; all come from the pinned
-  Better Auth defaults:
+- **Token lifetimes.** Delivery 2 pins them in config (#1512) and tests each one, so a
+  library upgrade cannot change them silently:
 
-  | Item | Lifetime today | Gap |
+  | Item | Lifetime | Where it is set |
   |---|---|---|
-  | Authorization code | 10 minutes | not pinned in config |
-  | Access token | 1 hour | not pinned in config |
-  | ID token | 10 hours | not pinned; longer than products need |
-  | Refresh token | 30 days, rotated on use | not pinned; no test yet (delivery 2) |
-  | Browser session | 7 days, renewed daily | no absolute maximum; no list or revoke route |
-  | Signing key | no rotation | no rotation schedule (delivery 2 ops plan) |
+  | Authorization code | 10 minutes, single use | library default |
+  | Access token | 15 minutes | config (#1512) |
+  | ID token | 15 minutes | config (#1512); the library default was 10 hours |
+  | Refresh token | 30 days; each refresh starts a new 30 days | config (#1512) |
+  | Refresh rotation | a new token on every use, reuse window 0 | config (#1512) |
+  | Browser session | 7 days, renewed daily | library default; no absolute maximum |
+  | Signing key | no rotation | gap: delivery 2 ops plan |
   | WhatsApp challenge | 5 minutes | set in code |
 
-  Delivery 2 pins each value in config and tests it, so a library upgrade cannot
-  change it silently.
+  Until #1512 merges, the library defaults apply (access 1 hour, ID token 10 hours).
 
 ## Threat model
 
@@ -198,6 +198,15 @@ Content-Security-Policy. Without the `PAGES` binding both routes answer 501.
 - No signing-key rotation, and no written plan to rotate `BETTER_AUTH_SECRET`.
 - The free Workers plan, no named D1 region, no backup routine and no alerting.
 - Leaking `BETTER_AUTH_SECRET` with a D1 copy lets an attacker sign tokens for anyone.
+- Presenting an already-rotated refresh token makes the library revoke every refresh
+  token that person holds for that client, and the access tokens issued from them, not
+  only one rotation family. A replay therefore also ends the person's other sessions on
+  the same client; other clients are unaffected. This fails safe, is pinned by a test
+  (#1512) and is accepted.
+- `offline_access` is granted to the two first-party clients without a consent prompt,
+  although OpenID Connect expects `prompt=consent` for it, because those clients skip
+  consent by decision. This is accepted for first-party clients only: a third-party
+  client must never skip consent.
 
 ## Deliveries
 
@@ -220,7 +229,7 @@ real account; 3 and 4 after 2; 5 after 3.
    - a session list and revoke, for the person's own sessions;
    - refresh-token tests: rotation, reuse of an old token, revoke, expiry;
    - orphan cleanup: users with no passkey and no phone after a short window;
-   - token lifetimes pinned in config;
+   - token lifetimes pinned in config (#1512);
    - ops: the paid Workers plan, a named D1 location, Time Travel restore tested,
      alerting on errors and 429 spikes, and a written rotation plan for the signing
      keys, `BETTER_AUTH_SECRET` and `OMNI_INBOUND_TOKEN`.
