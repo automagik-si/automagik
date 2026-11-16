@@ -241,6 +241,7 @@ export class RemoteChatAdapter extends LlmAdapter {
         if (request.signal?.aborted) return yield finish('aborted', 'Stopped before a remote submit.')
         if (identity.pendingSubmit || identity.uncertain) {
           const reconciled = await run.reconcile({ answerQuestions: true })
+          run.takeRecovered?.()
           yield* textBlocks('Resuming the existing remote turn. This new message was not submitted.', index++)
           if (reconciled.snapshot.inflight?.assistant) {
             run.streamed = reconciled.snapshot.inflight.assistant
@@ -265,6 +266,7 @@ export class RemoteChatAdapter extends LlmAdapter {
         if (!text) return yield finish('error', 'Remote Hermes accepts text in this delivery.')
         // Prompts never contain the standing credential or a transient ticket.
         await run.submit(run.transport.redact(text), model)
+        for (const text of run.takeRecovered?.() ?? []) yield* textBlocks(text, index++)
         }
       }
       for (;;) {

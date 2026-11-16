@@ -198,12 +198,15 @@ const HOST = `
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){position:relative;margin:var(--lb-panel-gap)!important;height:calc(100% - 2 * var(--lb-panel-gap))!important;padding:0!important;border-radius:var(--lb-panel-r);background:var(--lb-ground)!important}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host)::before{content:'';position:absolute;left:calc(var(--lb-rail-w) - 1px);top:0;bottom:0;width:1px;background:var(--lb-line);pointer-events:none}
 html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){margin:0!important;height:100%!important;border-radius:0}
+/* The phone's drawer is DSH's own 280 whatever the wide width was: the wide width stays in
+   DSH's state and comes back the moment the frame leaves drawer mode. */
+html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]:has(.lb-host){width:min(280px,calc(100vw - 48px))!important}
 [class*="_root"]:has(.lb-host) [class*="_scrollArea"]:has(.lb-host){grid-template-columns:0 minmax(0,1fr) 0;grid-template-rows:0 max-content 0 minmax(0,1fr);margin:0}
 [class*="_root"]:has(.lb-host) [class*="_scrollFade"]{display:none}
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
 .lb-head{flex:none;display:flex;align-items:center;gap:4px;height:52px;padding:0 8px 0 14px;box-sizing:border-box}
 .lb-brand{flex:1;min-width:0;display:flex;align-items:center;overflow:hidden}
-.lb-brand .omni-wordmark{display:block;flex:none}
+.lb-brand .omni-wordmark{display:block;flex:none;max-width:100%;height:auto}
 .lb-head .bt-round{flex:none;width:30px;height:30px;background:none;box-shadow:none;color:var(--bt-ink)}
 .lb-head .bt-round:hover{background:var(--bt-hover)}
 html[data-automagik-desktop] .lb-brand{visibility:hidden}
@@ -223,6 +226,21 @@ html[data-automagik-desktop=darwin] .lb-head :is(a,button,input,[role=button],[a
 .bt-you .bt-person{display:block}
 .lb-tile-add[aria-expanded=true] .lb-tile-face{background:var(--bt-hover);color:var(--bt-ink)}
 .lb-note{position:fixed;z-index:200;width:max-content;max-width:min(260px,calc(100vw - 24px));padding:10px 12px;box-sizing:border-box;border-radius:12px;background:var(--st-paper,var(--bt-main));border:.5px solid var(--bt-line-2);box-shadow:0 10px 20px -3px rgba(0,0,0,.12),0 4px 6px -4px rgba(0,0,0,.1);color:var(--bt-ink);font:400 13px/1.45 var(--bt-font)}
+/* A phone's view header carries the bar's Chat / Terminal switch beside one More disclosure:
+   the Bot's plugin buttons, Live, the right sidebar and Details fold into it, so nothing
+   pushes the switch off the left edge. The panel is a quiet card under the button. */
+.bt-head-more{position:relative;flex:none;pointer-events:auto}
+.bt-head-more>summary{list-style:none;cursor:pointer}
+.bt-head-more>summary::-webkit-details-marker{display:none}
+.bt-head-more>summary::marker{content:''}
+.bt-head-more-pop{position:absolute;top:46px;right:0;z-index:40;display:flex;flex-direction:column;align-items:stretch;gap:6px;min-width:190px;padding:8px;box-sizing:border-box;border-radius:12px;background:var(--st-paper,var(--bt-main));border:.5px solid var(--bt-line-2);box-shadow:0 12px 28px -8px rgba(0,0,0,.3);pointer-events:auto}
+.bt-head-more-pop .bt-head-details{width:100%;min-width:0;height:34px;justify-content:flex-start;gap:8px;padding:0 12px;border:0;border-radius:10px;background:none;box-shadow:none;color:var(--bt-ink);font-size:13px}
+.bt-head-more-word{display:none}
+.bt-head-more-pop .bt-head-more-word{display:inline}
+.bt-head-more-pop .bt-head-details:hover{background:var(--bt-hover)}
+.bt-head-more-pop .bt-head-word{display:inline}
+.bt-head-more-pop .os-head-btn{display:flex;align-items:center;width:100%;height:34px;justify-content:flex-start;gap:8px}
+.bt-head-more-pop .os-head-count{flex:none;min-width:18px;padding:0 6px;box-sizing:border-box;border-radius:10px;background:var(--bt-hover);color:var(--bt-ink);font:600 11px/18px var(--bt-font);text-align:center}
 `
 
 export const LEFT_BAR_CSS = `

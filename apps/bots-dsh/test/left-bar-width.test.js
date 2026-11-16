@@ -37,7 +37,7 @@ test('a kept width is read only when DSH would take it', () => {
 
 // The shell's frame as DSH draws it (AppFrame.tsx), with the column's width set by hand: jsdom
 // lays nothing out.
-function shell({ width = 280, handle = true, attrs = '' } = {}) {
+function shell({ width = 280, handle = true, attrs = '', stuck = false } = {}) {
   const dom = new JSDOM(`<!doctype html><body><div class="x_frame" ${attrs}><div class="x_sidebarCol"></div>${handle ? '<div class="x_handle" data-side="sidebar"></div>' : ''}<div class="x_handle" data-side="rightbar"></div></div></body>`, { pretendToBeVisual: true })
   const doc = dom.window.document
   doc.querySelector('.x_sidebarCol').getBoundingClientRect = () => ({ width, left: 0 })
@@ -45,6 +45,13 @@ function shell({ width = 280, handle = true, attrs = '' } = {}) {
   for (const node of doc.querySelectorAll('.x_handle')) {
     node.getBoundingClientRect = () => ({ left: width, width: 8 })
     for (const type of ['pointerdown', 'pointerup']) node.addEventListener(type, event => presses.push([node.dataset.side, type, event.clientX, event.button]))
+  }
+  // A handle that flips DSH's drag state on press and release but leaves the column where it
+  // was: the wake its flip causes must not become another press.
+  if (stuck) for (const node of doc.querySelectorAll('.x_handle[data-side="sidebar"]')) {
+    const frame = doc.querySelector('.x_frame')
+    node.addEventListener('pointerdown', () => frame.setAttribute('data-dragging', ''))
+    node.addEventListener('pointerup', () => frame.removeAttribute('data-dragging'))
   }
   return { dom, doc, presses }
 }
@@ -60,6 +67,19 @@ test('the bar presses DSH\'s sidebar handle once and lets go 56 px further', asy
   await settle(dom)
   off()
   assert.deepEqual(presses, [['sidebar', 'pointerdown', 284, 0], ['sidebar', 'pointerup', 340, 0]])
+})
+
+test('a handle that ignores its release is pressed once, not every frame', async () => {
+  // DSH's own handle flips its drag state on press and release. A later 0.2.x may stop sizing
+  // the column on release; without a bound, every flip wakes the bar and it presses again, a
+  // press per frame forever (60 presses in 60 frames at bc50d0134).
+  const { dom, doc, presses } = shell({ stuck: true })
+  const off = installBarWidth({ doc, storage: memory() })
+  for (let i = 0; i < 60; i += 1) await settle(dom)
+  off()
+  const sidebar = presses.filter(([side]) => side === 'sidebar')
+  assert.equal(sidebar.filter(([, type]) => type === 'pointerdown').length, 1, 'one press')
+  assert.equal(sidebar.length, 2, 'one press pair, then quiet')
 })
 
 test('a kept width is restored instead of the bar\'s', async () => {
