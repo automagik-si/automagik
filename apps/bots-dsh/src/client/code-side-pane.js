@@ -75,6 +75,7 @@ export function TerminalPane({ botId, worker, title }) {
   const sessionRef = useRef(null)
   const termRef = useRef(null)
   const takeRef = useRef(null)
+  const takingRef = useRef(false)
   const queueRef = useRef([])
   const timerRef = useRef(0)
   const flushingRef = useRef(null)
@@ -143,20 +144,30 @@ export function TerminalPane({ botId, worker, title }) {
       if (outside) { document.removeEventListener('pointerdown', outside, true); outside = null }
       return flush().then(() => (session ? post('release', { session }).catch(() => {}) : undefined))
     }
-    const take = async () => {
-      if (modeRef.current === 'typing') return
+    // A take, and a retake after the idle lease ended typing: the same watch, no navigating.
+    const take = async (pending = null) => {
+      if (takingRef.current || modeRef.current === 'typing') return
+      takingRef.current = true
       setModeNow('taking')
       const answer = await post('take', { bot: botId, worker: worker ?? null, viewer: VIEWER }).catch(() => ({ status: 0 }))
+      takingRef.current = false
       if (disposed) return
       if (answer.status === 200 && answer.body?.session) {
         sessionRef.current = answer.body.session
         setModeNow('typing')
         if (term) { term.options.disableStdin = false; term.focus() }
-        outside = (event) => { if (!element.contains(event.target)) void stopTyping('left') }
-        document.addEventListener('pointerdown', outside, true)
+        if (!outside) {
+          outside = (event) => { if (!element.contains(event.target)) void stopTyping('left') }
+          document.addEventListener('pointerdown', outside, true)
+        }
+        // The key that woke typing up is not lost: it goes in the first batch.
+        if (pending?.length) {
+          queueRef.current.push(pending)
+          if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
+        }
         return
       }
-      setModeNow(answer.status === 409 ? 'elsewhere' : 'view')
+      setModeNow(answer.status === 409 ? 'elsewhere' : 'ended')
     }
     takeRef.current = take
     const start = async () => {
@@ -191,9 +202,13 @@ export function TerminalPane({ botId, worker, title }) {
         return true
       })
       term.onData((data) => {
-        if (modeRef.current !== 'typing' || !sessionRef.current) return
-        queueRef.current.push(new TextEncoder().encode(data))
-        if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
+        if (modeRef.current === 'typing' && sessionRef.current) {
+          queueRef.current.push(new TextEncoder().encode(data))
+          if (!timerRef.current) timerRef.current = setTimeout(() => { timerRef.current = 0; void flush() }, 20)
+        } else if (modeRef.current === 'ended') {
+          // The lease ended typing; the owner's next key takes it again in place.
+          void takeRef.current?.(new TextEncoder().encode(data))
+        }
       })
       // A paste never goes through xterm's own paste path (which turns newlines into Enter):
       // the clipboard text is queued with no CR and no LF at all, so nothing in a paste can
@@ -259,7 +274,7 @@ export function TerminalPane({ botId, worker, title }) {
       h('span', { className: 'cs-pane-note', role: 'status', 'data-mode': mode }, stateWord),
       pasteNote ? h('span', { className: 'cs-paste-note', role: 'status' }, pasteNote === 'controls-stripped' ? t('Control characters were removed from the paste') : t('Line breaks were removed from the paste')) : null,
       retryable ? h('button', { type: 'button', className: 'cs-btn', onClick: () => { setPhase({ kind: 'connecting' }); setAttempt(value => value + 1) } }, t('Reconnect')) : null),
-    h('div', { ref: host, className: 'cs-screen', role: 'button', tabIndex: 0, 'aria-label': stateWord, 'data-code-mode': mode, onClick: () => { if (modeRef.current === 'view' || modeRef.current === 'elsewhere') void takeRef.current?.() } }))
+    h('div', { ref: host, className: 'cs-screen', role: 'button', tabIndex: 0, 'aria-label': stateWord, 'data-code-mode': mode, onClick: () => { if (modeRef.current === 'view' || modeRef.current === 'elsewhere' || modeRef.current === 'ended') void takeRef.current?.() } }))
 }
 
 const TreeRow = ({ label, status, depth = 0, current, note, title, onClick }) => h('button', {

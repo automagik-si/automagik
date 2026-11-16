@@ -14622,6 +14622,7 @@ function TerminalPane({ botId, worker, title }) {
   const sessionRef = (0, import_react2.useRef)(null);
   const termRef = (0, import_react2.useRef)(null);
   const takeRef = (0, import_react2.useRef)(null);
+  const takingRef = (0, import_react2.useRef)(false);
   const queueRef = (0, import_react2.useRef)([]);
   const timerRef = (0, import_react2.useRef)(0);
   const flushingRef = (0, import_react2.useRef)(null);
@@ -14708,10 +14709,12 @@ function TerminalPane({ botId, worker, title }) {
       return flush().then(() => session ? post("release", { session }).catch(() => {
       }) : void 0);
     };
-    const take = async () => {
-      if (modeRef.current === "typing") return;
+    const take = async (pending = null) => {
+      if (takingRef.current || modeRef.current === "typing") return;
+      takingRef.current = true;
       setModeNow("taking");
       const answer = await post("take", { bot: botId, worker: worker ?? null, viewer: VIEWER }).catch(() => ({ status: 0 }));
+      takingRef.current = false;
       if (disposed) return;
       if (answer.status === 200 && answer.body?.session) {
         sessionRef.current = answer.body.session;
@@ -14720,13 +14723,22 @@ function TerminalPane({ botId, worker, title }) {
           term.options.disableStdin = false;
           term.focus();
         }
-        outside = (event) => {
-          if (!element.contains(event.target)) void stopTyping("left");
-        };
-        document.addEventListener("pointerdown", outside, true);
+        if (!outside) {
+          outside = (event) => {
+            if (!element.contains(event.target)) void stopTyping("left");
+          };
+          document.addEventListener("pointerdown", outside, true);
+        }
+        if (pending?.length) {
+          queueRef.current.push(pending);
+          if (!timerRef.current) timerRef.current = setTimeout(() => {
+            timerRef.current = 0;
+            void flush();
+          }, 20);
+        }
         return;
       }
-      setModeNow(answer.status === 409 ? "elsewhere" : "view");
+      setModeNow(answer.status === 409 ? "elsewhere" : "ended");
     };
     takeRef.current = take;
     const start = async () => {
@@ -14760,12 +14772,15 @@ function TerminalPane({ botId, worker, title }) {
         return true;
       });
       term.onData((data) => {
-        if (modeRef.current !== "typing" || !sessionRef.current) return;
-        queueRef.current.push(new TextEncoder().encode(data));
-        if (!timerRef.current) timerRef.current = setTimeout(() => {
-          timerRef.current = 0;
-          void flush();
-        }, 20);
+        if (modeRef.current === "typing" && sessionRef.current) {
+          queueRef.current.push(new TextEncoder().encode(data));
+          if (!timerRef.current) timerRef.current = setTimeout(() => {
+            timerRef.current = 0;
+            void flush();
+          }, 20);
+        } else if (modeRef.current === "ended") {
+          void takeRef.current?.(new TextEncoder().encode(data));
+        }
       });
       const onPaste = (event) => {
         event.preventDefault();
@@ -14844,7 +14859,7 @@ function TerminalPane({ botId, worker, title }) {
       } }, t("Reconnect")) : null
     ),
     (0, import_react2.createElement)("div", { ref: host, className: "cs-screen", role: "button", tabIndex: 0, "aria-label": stateWord, "data-code-mode": mode, onClick: () => {
-      if (modeRef.current === "view" || modeRef.current === "elsewhere") void takeRef.current?.();
+      if (modeRef.current === "view" || modeRef.current === "elsewhere" || modeRef.current === "ended") void takeRef.current?.();
     } })
   );
 }

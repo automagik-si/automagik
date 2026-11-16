@@ -161,7 +161,9 @@ export function createTypingService({ env = process.env, connect = connectCore, 
       }
     },
 
-    /** One keystroke batch, base64. Re-admitted every time: a dropped session refuses at once. */
+    /** One keystroke batch, base64. Re-admitted every time: a dropped session refuses at once.
+     * Typing ends after 60 s with no accepted batch (the idle lease) or when the window closes;
+     * the pane takes it again in place with the next click or key. */
     async input({ request, session, data } = {}) {
       if (!admitted(request)) {
         const held = byId.get(String(session ?? ''))
