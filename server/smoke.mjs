@@ -137,7 +137,16 @@ async function main() {
   // The toolchain smoke runs inside the image: am, hc, pnpm and node on PATH, the shipped
   // CLI store's install path without a download, and the first-boot skill and registry seed
   // in a temporary home. It never publishes or starts a service.
-  const inImage = (await docker(['exec', name, '/nodejs/bin/node', '/opt/automagik/in-image-smoke.mjs'])).stdout.trim()
+  let inImage
+  try {
+    inImage = (await docker(['exec', name, '/nodejs/bin/node', '/opt/automagik/in-image-smoke.mjs'])).stdout.trim()
+  } catch (error) {
+    // Capturing the shape is useless if the failed path hides it; print both streams first.
+    for (const line of `${error.stdout ?? ''}${error.stderr ?? ''}`.split('\n').filter(Boolean)) {
+      say(line.replace(/^\[in-image\] /, ''))
+    }
+    throw error
+  }
   for (const line of inImage.split('\n').filter(Boolean)) say(line.replace(/^\[in-image\] /, ''))
 
   // The distroless base is older glibc than the builder: exercise both native modules.

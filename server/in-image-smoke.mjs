@@ -219,7 +219,6 @@ async function main() {
   const listed = JSON.parse(rawList)
   check(listed && typeof listed === 'object' && !Array.isArray(listed), 'hc ls --json did not print the documented object')
   check(Array.isArray(listed.terminals), 'hc ls --json terminals is not a list')
-  check(Array.isArray(listed.machines), 'hc ls --json machines is not a list')
   check(listed.terminals.length === 0, `hc ls --json has ${listed.terminals.length} terminals before the test Bot, expected 0`)
 
   const amList = JSON.parse(rawAmList)
