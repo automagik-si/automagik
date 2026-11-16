@@ -18767,7 +18767,11 @@ function renderCall(call2, { sessionId, roster, actions, useUi, useWork, useSess
     }
     case "message_bot": {
       const target = findBot2(arg("to")) ?? { name: arg("to") ?? "…", color: "gray" };
-      if (done && call2.isError) return (0, import_react46.createElement)("div", { className: "bt-event" }, t("Couldn't message {name}", { name: target.name }));
+      if (done) {
+        const refused = call2.meta?.sent === false ? call2.meta.reason ?? contentText(call2.content) : "";
+        if (refused !== "") return (0, import_react46.createElement)("div", { className: "bt-event bt-event-error", role: "status" }, refused);
+        if (call2.isError) return (0, import_react46.createElement)("div", { className: "bt-event" }, t("Couldn't message {name}", { name: target.name }));
+      }
       return (0, import_react46.createElement)(EventLine, { prefix: t("Messaged"), bots: [target], onOpen: (bot) => bot.id && actions.openExchange(self?.id ?? sessionId, bot.id), whole: true });
     }
     case "stop_bot": {

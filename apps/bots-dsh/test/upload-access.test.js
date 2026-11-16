@@ -137,7 +137,7 @@ test('explicit forwards deliver the stored refs, merge unread pictures and bind 
   assert.deepEqual(merged.content.filter(block => block.type === 'image').map(block => block.attachment.name).sort(), [f.other.name, f.ref.name].sort())
   assert.equal(merged.source.forwarded.v, 1)
   const count = f.rows('b').length
-  assert.match(await f.call('a', 'message_bot', { ...args, request_id: 'absent', images: ['never-given.png'] }), /"never-given.png".*No picture the user attached in this chat matches that/)
+  assert.match((await f.call('a', 'message_bot', { ...args, request_id: 'absent', images: ['never-given.png'] })).text, /"never-given.png".*No picture the user attached in this chat matches that/)
   assert.equal(f.rows('b').length, count)
 })
 
@@ -181,7 +181,8 @@ test('group lines grant only shown members; channel relays, tool rows and handof
   assert.equal(await f.rt.sharedUploads.holds('outside', f.ref.attachmentId.slice(7)), false)
   await assert.rejects(f.guard('outside', 'read', { file_path: f.storePath(f.ref) }), /not sent/)
   assert.match(await f.call('ga', 'generate_image', { image: f.ref.name, prompt: 'edit' }), /group chat is not available/)
-  assert.equal(await f.call('ga', 'message_bot', { to: f.bots.b.name, message: 'picture', images: [f.ref.name] }), 'Not sent: forward pictures from your own chat.')
+  const forwarded = await f.call('ga', 'message_bot', { to: f.bots.b.name, message: 'picture', images: [f.ref.name] })
+  assert.deepEqual(forwarded, { text: 'Not sent: forward pictures from your own chat.', sent: false, reason: 'Not sent: forward pictures from your own chat.' })
   for (const row of [
     { role: 'user', source: { kind: 'bot', form: 'relay', role: 'request', senderSessionId: 'a' } },
     { role: 'user', source: { kind: 'user', handoff: true } },
@@ -197,7 +198,7 @@ test('group lines grant only shown members; channel relays, tool rows and handof
 test('message_bot refuses more than four pictures without delivering anything', async t => {
   const f = await fixture(t)
   f.person('a', f.ref)
-  assert.match(await f.call('a', 'message_bot', { to: f.bots.b.name, message: 'pictures', images: Array(5).fill(f.ref.name) }), /at most 4 pictures/)
+  assert.match((await f.call('a', 'message_bot', { to: f.bots.b.name, message: 'pictures', images: Array(5).fill(f.ref.name) })).text, /at most 4 pictures/)
   assert.equal(f.rows('b').length, 0)
 })
 
@@ -341,7 +342,7 @@ test('paths and copied files alone cannot authorise an edit or a forward', async
   f.append('b', { source: { kind: 'user' }, content: [{ type: 'text', text: `Please edit ${saved.path}` }] })
   const input = createEditInput({ rt: f.rt, ctx: f.rt.ctx })
   await assert.rejects(input.resolve({ agent: f.agentOf('b') }, saved.path), /No picture the user attached in this chat matches that/)
-  assert.match(await f.call('b', 'message_bot', { to: f.bots.outside.name, message: 'Edit this', images: [saved.path] }), /No picture the user attached in this chat matches that/)
+  assert.match((await f.call('b', 'message_bot', { to: f.bots.outside.name, message: 'Edit this', images: [saved.path] })).text, /No picture the user attached in this chat matches that/)
   assert.equal(f.rows('outside').length, 0)
   assert.equal(f.edits(), 0)
 })
@@ -362,7 +363,7 @@ test('a model switch keeps the earlier image only in its owning Bot’s parts', 
 test('unselected or unresolvable pictures make an entire forward unsent', async t => {
   const f = await fixture(t)
   f.person('a', f.ref)
-  assert.match(await f.call('a', 'message_bot', { to: f.bots.b.name, message: 'Both pictures', images: [f.ref.name, f.other.name] }), /No picture the user attached in this chat matches that/)
+  assert.match((await f.call('a', 'message_bot', { to: f.bots.b.name, message: 'Both pictures', images: [f.ref.name, f.other.name] })).text, /No picture the user attached in this chat matches that/)
   assert.equal(f.rows('b').length, 0)
   assert.equal(await f.rt.sharedUploads.holds('b', f.ref.attachmentId.slice(7)), false)
   await assert.rejects(lstat(join(f.folder, '.automagik/bots/b')), { code: 'ENOENT' })
@@ -392,7 +393,7 @@ test('forward selectors keep history ambiguity checks and accept sha256 without 
   f.person('a', f.ref)
   f.person('a', { ...f.other, name: f.ref.name, mediaType: 'image/gif' })
   const args = { to: f.bots.b.name, message: 'Describe the selected picture' }
-  assert.match(await f.call('a', 'message_bot', { ...args, images: [f.ref.name] }), /More than one picture matches/)
+  assert.match((await f.call('a', 'message_bot', { ...args, images: [f.ref.name] })).text, /More than one picture matches/)
   assert.equal(f.rows('b').length, 0)
   assert.match(await f.call('a', 'message_bot', { ...args, images: [f.other.attachmentId] }), /with 1 picture/)
   assert.deepEqual(f.rows('b').at(-1).content.filter(block => block.type === 'image').map(block => block.attachment.attachmentId), [f.other.attachmentId])
