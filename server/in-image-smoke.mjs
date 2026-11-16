@@ -8,7 +8,7 @@ import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { dryRunVendorClis } from './cli-store.mjs'
-import { FIRST_BOOT_MARKER, TRIAD, runFirstBoot, seedRegistry, seedScript, sha256File, SKILL_LINKS, verifySurfaces } from './first-boot.mjs'
+import { FIRST_BOOT_MARKER, TRIAD, installVendorClis, runFirstBoot, seedRegistry, seedScript, sha256File, SKILL_LINKS, verifySurfaces } from './first-boot.mjs'
 import { profileDirOf } from './lib.mjs'
 import { HC_RUNTIME, HERDR_APP_HOME, HERDR_CORE_VERSION, PNPM_PATH, REGISTRY_SEED_SHA256, REGISTRY_SEED_VENDOR, SKILL_NAME, SKILL_ROOT, SKILL_SHA256, SMOKE_HC_SESSION, XDG_RUNTIME_DIR, herdrCoreSocket } from './toolchain.mjs'
 
@@ -93,20 +93,66 @@ async function main() {
     check(/reentry .*owner=smoke-reentry/.test(admissionLog()), 'the nested pnpm was serialized instead of re-entering')
     say('pnpm admission re-entry: the nested call finished under the holder token')
 
-    const deadReal = join(rowDir, 'dead.mjs')
-    writeFileSync(deadReal, 'setTimeout(() => {}, 60000)\n')
-    const holder = spawn('/bin/sh', ['/usr/local/bin/pnpm-admission', deadReal], {
-      env: { ...process.env, AUTOMAGIK_PNPM_OWNER: 'smoke-dead' }, stdio: 'ignore',
-    })
-    for (let attempt = 0; attempt < 100 && !/owner=smoke-dead/.test(admissionLog()); attempt += 1) {
-      execFileSync('/nodejs/bin/node', ['-e', 'setTimeout(() => {}, 50)'])
+    const startHolder = (name, ms) => {
+      const real = join(rowDir, `${name}.mjs`)
+      writeFileSync(real, `setTimeout(() => {}, ${ms})\n`)
+      const holder = spawn('/bin/sh', ['/usr/local/bin/pnpm-admission', real], {
+        env: { ...process.env, AUTOMAGIK_PNPM_OWNER: name }, stdio: 'ignore',
+      })
+      let fields = {}
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        try {
+          const lines = readFileSync('/data/run/pnpm-admission.lock', 'utf8').split('\n')
+          fields = Object.fromEntries((lines[0] ?? '').split(' ').filter(Boolean).map((kv) => {
+            const at = kv.indexOf('=')
+            return [kv.slice(0, at), kv.slice(at + 1)]
+          }))
+          const realLine = lines.find((line) => line.startsWith('real_pid='))
+          if (realLine) fields.real_pid = realLine.split('=')[1]
+          if (fields.owner === name && fields.real_pid) break
+        } catch { /* lock not written yet */ }
+        execFileSync('/nodejs/bin/node', ['-e', 'setTimeout(() => {}, 50)'])
+      }
+      check(fields.owner === name && fields.real_pid, `holder ${name} never took the lock: ${JSON.stringify(fields)}`)
+      return { holder, fields }
     }
-    check(/owner=smoke-dead/.test(admissionLog()), 'the dead-holder row never acquired the lock')
-    process.kill(holder.pid, 'SIGKILL')
-    const started = Date.now()
+
+    const whole = startHolder('smoke-subtree', 60000)
+    process.kill(Number(whole.fields.pid), 'SIGKILL')
+    process.kill(Number(whole.fields.real_pid), 'SIGKILL')
+    let started = Date.now()
     command('/usr/local/bin/pnpm', ['--version'], { env: admissionEnv, timeout: 15_000 })
-    check(Date.now() - started < 5000, `the lock outlived its holder for ${Date.now() - started} ms`)
-    say(`pnpm admission dead holder: next waiter ran in ${Date.now() - started} ms`)
+    check(Date.now() - started < 5000, `whole-subtree kill did not free the lock in ${Date.now() - started} ms`)
+    say(`pnpm admission whole-subtree kill: next waiter ran in ${Date.now() - started} ms`)
+
+    const wrapper = startHolder('smoke-wrapper-held', 3000)
+    process.kill(Number(wrapper.fields.pid), 'SIGKILL')
+    started = Date.now()
+    command('/usr/local/bin/pnpm', ['--version'], { env: admissionEnv, timeout: 15_000 })
+    const waited = Date.now() - started
+    check(waited >= 2000, `wrapper-only kill let the next waiter start early (${waited} ms)`)
+    check(/wait .*holder_owner=smoke-wrapper-held/.test(admissionLog()), 'the wait was not logged with the lock owner')
+    say(`pnpm admission wrapper-only kill: next waiter held for ${waited} ms until the install exited`)
+
+    const refusing = startHolder('smoke-refuse', 60000)
+    const refused = spawnSync('/usr/local/bin/pnpm', ['--version'], {
+      encoding: 'utf8', timeout: 15_000,
+      env: { ...process.env, AUTOMAGIK_PNPM_OWNER: 'smoke-waiter', AUTOMAGIK_PNPM_LOCK_WAIT: '2' },
+    })
+    check(refused.status === 1, `the waiter did not refuse in the bound: ${JSON.stringify({ status: refused.status, stderr: refused.stderr })}`)
+    const sentence = /failed, lock held by smoke-refuse for \d+s/.exec(refused.stderr ?? '')
+    check(sentence, `the refusal did not name the owner and age: ${refused.stderr}`)
+    const refusal = JSON.parse(readFileSync('/data/run/pnpm-admission-refusal', 'utf8'))
+    check(refusal.owner === 'smoke-refuse' && refusal.message === sentence[0], `the refusal record differs: ${JSON.stringify(refusal)}`)
+    const refusalHome = join(rowDir, 'vendor-home')
+    mkdirSync(refusalHome, { recursive: true })
+    await installVendorClis({ home: refusalHome, profile: PROFILE, timeout: 0, log: () => {}, warn: () => {} })
+    const refusalState = JSON.parse(readFileSync(join(refusalHome, 'vendor-clis-state.json'), 'utf8'))
+    const recorded = Object.values(refusalState.results)[0]
+    check(recorded?.state === 'failed' && recorded.error === sentence[0], `vendor state lacks the refusal: ${JSON.stringify(recorded)}`)
+    process.kill(Number(refusing.fields.pid), 'SIGKILL')
+    process.kill(Number(refusing.fields.real_pid), 'SIGKILL')
+    say('pnpm admission refusal: waiter returned and both records name the owner and age')
   } finally {
     rmSync(rowDir, { recursive: true, force: true })
   }

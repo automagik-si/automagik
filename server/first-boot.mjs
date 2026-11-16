@@ -910,7 +910,7 @@ export async function installVendorClis({
   env = process.env,
   log = console.log,
   warn = console.warn,
-  timeout = 840_000,
+  timeout = 1_900_000,
 } = {}) {
   const clisFile = join(profile, CLI_STORE_RELATIVE)
   const agentsFile = join(profile, AGENTS_RELATIVE)
@@ -954,8 +954,13 @@ export async function installVendorClis({
           results[id].bridge = bridge.reason
         }
       } else {
-        results[id] = { state: 'failed', startedAt, endedAt, error: 'the DSH-owned CLI store did not install it within the observation window; see pnpm-admission.log' }
-        warn(`vendor CLIs: ${spec.defaultName} was not installed by the DSH-owned store within ${Math.round(timeout / 1000)}s; see /data/run/pnpm-admission.log`)
+        let error = 'the DSH-owned CLI store did not install it within the observation window; see pnpm-admission.log'
+        try {
+          const refusal = JSON.parse(readFileSync('/data/run/pnpm-admission-refusal', 'utf8'))
+          if (typeof refusal.message === 'string' && refusal.message.length > 0) error = refusal.message
+        } catch { /* no refusal record */ }
+        results[id] = { state: 'failed', startedAt, endedAt, error }
+        warn(`vendor CLIs: ${spec.defaultName} failed: ${error}`)
       }
       writeState()
     }
