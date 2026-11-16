@@ -84,6 +84,12 @@ function rows({ roster = team(), wide = true } = {}) {
     useActivity: pick => pick({}),
     useWork: pick => pick({ approvals: [], rooms: {}, waiting: {} }),
   })
+  // The open sidebar is the new left bar: its whole tree, rows and what hangs under them.
+  if (tree?.type?.name === 'LeftBar') {
+    const bar = tree.type(tree.props)
+    const after = roster.bots.map(bot => tree.props.renderAfter({ kind: 'bot', id: bot.id, bot: {} }))
+    return { bar: [bar, after, find(bar, named('TeamRows')).map(node => node.type(node.props))] }
+  }
   return Object.fromEntries(find(tree, named('BotRow')).map(row => [row.props.bot.id, row.type(row.props)]))
 }
 
@@ -96,13 +102,9 @@ const profile = (id, roster = team()) => DetailsDrawer({
 
 const LINKED = { pip: ['channels', 'leads'], omni: ['channels'], genie: ['computer'], writer: ['computer'] }
 
-test('with an Omni linked, each sidebar row shows exactly the pills its Bot has, with their tooltips', () => {
-  const shown = rows()
-  assert.deepEqual(Object.keys(shown).sort(), ['genie', 'omni', 'pip', 'writer'])
-  for (const [id, keys] of Object.entries(LINKED)) assert.deepEqual(pillsIn(shown[id]), expected(keys), id)
-  // The row's own label names them too, for a screen reader.
-  assert.match(shown.pip.props['aria-label'], /^Pip, Orchestrator, Main Bot, Channels, Leads the team/)
-  assert.match(shown.genie.props['aria-label'], /^Genie, Computer/)
+test('the open bar draws no pills on its rows: what a Bot can do is in its profile', () => {
+  assert.equal(find(rows().bar, named('BotPills')).length, 0)
+  assert.equal(find(rows({ roster: team({ omniLinked: false }) }).bar, named('BotPills')).length, 0)
 })
 
 test('with an Omni linked, each profile shows the same pills under the name', () => {
@@ -111,19 +113,15 @@ test('with an Omni linked, each profile shows the same pills under the name', ()
 
 test('with no Omni linked, nothing takes the computer away and no Bot works in channels', () => {
   const roster = team({ omniLinked: false })
-  const shown = rows({ roster })
   const unlinked = { pip: ['computer', 'leads'], omni: ['computer'], genie: ['computer'], writer: ['computer'] }
-  for (const [id, keys] of Object.entries(unlinked)) {
-    assert.deepEqual(pillsIn(shown[id]), expected(keys), `row ${id}`)
-    assert.deepEqual(pillsIn(profile(id, roster)), expected(keys), `profile ${id}`)
-  }
+  for (const [id, keys] of Object.entries(unlinked)) assert.deepEqual(pillsIn(profile(id, roster)), expected(keys), `profile ${id}`)
 })
 
 test('no pill means no pill box, and the narrow rail shows no pills', () => {
   // Every Bot of today's teams has a computer or works in channels, so an empty list comes
   // only from what the client cannot read as a Bot; it draws nothing.
   assert.deepEqual([...pillsOf(team(), undefined)], [])
-  const [box] = find(rows().writer, named('BotPills'))
+  const [box] = find(profile('writer'), named('BotPills'))
   assert.equal(box.type({ ...box.props, bot: undefined }), null)
   // An answer without omniLinked (before the first state answer) reads as no Omni linked.
   assert.deepEqual([...pillsOf(team({ omniLinked: undefined }), pip)], ['computer', 'leads'])

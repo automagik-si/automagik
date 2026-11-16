@@ -84,7 +84,7 @@ window.mount = ({ wide = true, width = 300, tool = true, throwing = false, onboa
 // The top row fits when nothing reaches past its edges and no button was squeezed below its
 // size (a flex row shrinks its items before it overflows).
 window.rowCheck = () => {
-  const row = document.querySelector('.bt-side-top')
+  const row = document.querySelector('.lb-head')
   const edge = row.getBoundingClientRect()
   const out = []
   for (const node of row.children) {
