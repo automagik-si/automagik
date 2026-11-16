@@ -109,7 +109,9 @@ body[data-ds-dark-theme] .lb-tile .lb-on-light,body:not([data-ds-dark-theme]) .l
 // rows lie under it, the line runs the list's whole width and the rows fade over their last
 // --lb-edge-fade before it, so a row cut by the edge reads as scrolling on, not as a row that
 // was sliced. The upper edge does the same once the list has moved. --lb-inset and --lb-chat-inset are where a
-// channel's and a chat's name start: they follow the art by default, and either can be set.
+// channel's and a chat's name start: they follow the art by default, and either can be set. A
+// chat starts one step under its channel: its person's face stands where the channel's name
+// begins, so its own name sits under that.
 const ROWS = `
 .lb-scroll{position:relative;flex:1;display:flex;flex-direction:column;min-height:0}
 .lb-scroll::before,.lb-scroll::after{content:'';position:absolute;left:8px;right:8px;height:14px;pointer-events:none}
@@ -138,7 +140,8 @@ const ROWS = `
 .lb-row-off .lb-art{filter:grayscale(1);opacity:.55}
 .lb-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
-.lb-row-chat{height:var(--lb-chat-h);gap:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
+.lb-row-chat{height:var(--lb-chat-h);gap:7px;padding-right:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph) + 8px))}
+.lb-row-chat .lb-st{gap:5px}
 /* A chat's person: the photo, else their initials, on the tone Omni's chat view gives that side
    of the conversation. Omni shares --oc-in and --oc-out with the bar; the fallbacks are the
    formulas its own chat view uses for them, so a row and that chat agree either way. */

@@ -21810,7 +21810,8 @@ var ROWS2 = `
 .lb-row-off .lb-art{filter:grayscale(1);opacity:.55}
 .lb-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
-.lb-row-chat{height:var(--lb-chat-h);gap:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
+.lb-row-chat{height:var(--lb-chat-h);gap:7px;padding-right:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph) + 8px))}
+.lb-row-chat .lb-st{gap:5px}
 /* A chat's person: the photo, else their initials, on the tone Omni's chat view gives that side
    of the conversation. Omni shares --oc-in and --oc-out with the bar; the fallbacks are the
    formulas its own chat view uses for them, so a row and that chat agree either way. */
@@ -21933,6 +21934,19 @@ function botStatus({ question, pending, approval, failed, running: running2, awa
   if (running2 || away) return "working";
   return "idle";
 }
+var NARROW = 620;
+var NO_WORDS = Object.freeze([]);
+function useNarrow() {
+  const [narrow, setNarrow] = (0, import_react55.useState)(() => typeof window !== "undefined" && window.innerWidth < NARROW);
+  (0, import_react55.useEffect)(() => {
+    if (typeof window === "undefined" || typeof window.addEventListener !== "function") return void 0;
+    const read = () => setNarrow(window.innerWidth < NARROW);
+    read();
+    window.addEventListener("resize", read);
+    return () => window.removeEventListener("resize", read);
+  }, []);
+  return narrow;
+}
 function useTeamStatus({ roster, useSessionStatus, useWork }) {
   const parts = roster.bots.map((bot) => [bot.id, currentPart(bot)]);
   const agents = (roster.agents ?? []).map((agent) => [agent.id, agent.sessions ?? []]);
@@ -22045,6 +22059,7 @@ function LeftBar({ roster, order, marked, useSessions, useSessionStatus, useWork
   (0, import_react55.useEffect)(() => {
     if (currentId && marked?.[currentId] === true) actions.clearUnread(currentId);
   }, [currentId, marked?.[currentId]]);
+  const narrow = useNarrow();
   const [note, setNote] = (0, import_react55.useState)(null);
   useEntries(botChannels);
   const [folded, setFolded] = (0, import_react55.useState)(() => /* @__PURE__ */ new Set());
@@ -22094,7 +22109,7 @@ function LeftBar({ roster, order, marked, useSessions, useSessionStatus, useWork
           (0, import_react55.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("New…"), title: t("New…"), onClick: () => actions.openNewChat("new") }, (0, import_react55.createElement)(PlusIcon))
         ),
         notice,
-        team.bots.length === 0 && empty ? empty : (0, import_react55.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, label: t("Bot list") }),
+        team.bots.length === 0 && empty ? empty : (0, import_react55.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : void 0, label: t("Bot list") }),
         foot ? (0, import_react55.createElement)("div", { className: "lb-foot" }, foot) : null
       )
     ),

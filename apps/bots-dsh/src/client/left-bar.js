@@ -67,6 +67,22 @@ export function botStatus({ question, pending, approval, failed, running, away }
   return 'idle'
 }
 
+// The bar is narrow in the phone's drawer (DSH keeps it at 280): a status keeps its mark there,
+// with its word in the tooltip and the accessible name, so the name on the row keeps the room.
+const NARROW = 620
+const NO_WORDS = Object.freeze([])
+function useNarrow() {
+  const [narrow, setNarrow] = useState(() => typeof window !== 'undefined' && window.innerWidth < NARROW)
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+    const read = () => setNarrow(window.innerWidth < NARROW)
+    read()
+    window.addEventListener('resize', read)
+    return () => window.removeEventListener('resize', read)
+  }, [])
+  return narrow
+}
+
 function useTeamStatus({ roster, useSessionStatus, useWork }) {
   const parts = roster.bots.map(bot => [bot.id, currentPart(bot)])
   const agents = (roster.agents ?? []).map(agent => [agent.id, agent.sessions ?? []])
@@ -202,6 +218,7 @@ export function LeftBar({ roster, order, marked, useSessions, useSessionStatus, 
   useEffect(() => {
     if (currentId && marked?.[currentId] === true) actions.clearUnread(currentId)
   }, [currentId, marked?.[currentId]])
+  const narrow = useNarrow()
   const [note, setNote] = useState(null)
   // Sources may load after the bar is up (a plugin's shell installer); draw their rows then.
   useEntries(botChannels)
@@ -241,7 +258,7 @@ export function LeftBar({ roster, order, marked, useSessions, useSessionStatus, 
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon))),
         notice,
         team.bots.length === 0 && empty ? empty
-          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, label: t('Bot list') }),
+          : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : undefined, label: t('Bot list') }),
         foot ? h('div', { className: 'lb-foot' }, foot) : null)),
     note ? h(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null)
 }
