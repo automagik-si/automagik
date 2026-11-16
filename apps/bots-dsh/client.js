@@ -22324,26 +22324,36 @@ function seatWordOf(status) {
   return status === null ? "off" : "idle";
 }
 var SEAT_MACHINE = () => t("This computer");
-function useSeats(list = () => call("seat-chat-list")) {
-  const [seats, setSeats] = (0, import_react56.useState)([]);
+var NO_SEATS = Object.freeze([]);
+function useSeats(list, enabled = true) {
+  const [seats, setSeats] = (0, import_react56.useState)(NO_SEATS);
   (0, import_react56.useEffect)(() => {
+    const empty = () => setSeats((now) => now.length === 0 ? now : NO_SEATS);
+    if (!enabled || typeof list !== "function") {
+      empty();
+      return void 0;
+    }
     let alive = true;
     let timer;
     const tick = async () => {
+      let next = NO_SEATS;
       try {
         const value = await list();
-        if (alive) setSeats(Array.isArray(value?.seats) ? value.seats : []);
+        next = Array.isArray(value?.seats) ? value.seats : NO_SEATS;
       } catch {
-        if (alive) setSeats((now) => now.length === 0 ? now : []);
+        next = NO_SEATS;
       }
-      if (alive) timer = setTimeout(tick, LIST_MS);
+      if (!alive) return;
+      if (next.length === 0) empty();
+      else setSeats(next);
+      timer = setTimeout(tick, LIST_MS);
     };
     tick();
     return () => {
       alive = false;
       clearTimeout(timer);
     };
-  }, [list]);
+  }, [list, enabled]);
   return seats;
 }
 var EMPTY_FACE = Object.freeze({ terminal: null, rows: [], screen: [], status: null, approval: null, question: null, loading: false, error: null });
@@ -22974,7 +22984,7 @@ function TeamSidebar(props) {
     closing.current = false;
   });
   const roster = useRoster((value) => value);
-  const seats = useSeats(actions.seatList);
+  const seats = useSeats(actions.seatList, wide);
   const markedUnread = useUi((value) => value.unread);
   const bootFailed = useUi((value) => value.bootFailed === true);
   props.useRegistry((value) => value);

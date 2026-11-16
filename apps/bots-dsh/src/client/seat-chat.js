@@ -53,25 +53,44 @@ export function seatWordOf(status) {
 /** Where the seat runs, as the header says it: this view exists only for this computer. */
 export const SEAT_MACHINE = () => t('This computer')
 
-/** The bar's seats, polled: `[{ id, name, project, terminal, agent, chat, status, order }]`. */
-export function useSeats(list = () => call('seat-chat-list')) {
-  const [seats, setSeats] = useState([])
+/** No seats: one frozen empty list, so an empty reply never changes state or re-renders. */
+const NO_SEATS = Object.freeze([])
+
+/**
+ * The bar's seats, polled: `[{ id, name, project, terminal, agent, chat, status, order }]`.
+ *
+ * `list` is the shell's own stable action (it asks the host); without it nothing is fetched at
+ * all, and nothing is fetched when the bar is not the shown one (`enabled`). Depending on a
+ * default made here would make a new function every render, and an empty reply stored as a new
+ * array would re-render and ask again: the fixture page that has no seat source must see no call.
+ */
+export function useSeats(list, enabled = true) {
+  const [seats, setSeats] = useState(NO_SEATS)
   useEffect(() => {
+    const empty = () => setSeats(now => (now.length === 0 ? now : NO_SEATS))
+    if (!enabled || typeof list !== 'function') {
+      empty()
+      return undefined
+    }
     let alive = true
     let timer
     const tick = async () => {
+      let next = NO_SEATS
       try {
         const value = await list()
-        if (alive) setSeats(Array.isArray(value?.seats) ? value.seats : [])
+        next = Array.isArray(value?.seats) ? value.seats : NO_SEATS
       } catch {
         // A host that cannot read seats (no Herdr, an old plugin) lists none; the team is unchanged.
-        if (alive) setSeats(now => (now.length === 0 ? now : []))
+        next = NO_SEATS
       }
-      if (alive) timer = setTimeout(tick, LIST_MS)
+      if (!alive) return
+      if (next.length === 0) empty()
+      else setSeats(next)
+      timer = setTimeout(tick, LIST_MS)
     }
     tick()
     return () => { alive = false; clearTimeout(timer) }
-  }, [list])
+  }, [list, enabled])
   return seats
 }
 

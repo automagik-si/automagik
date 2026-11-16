@@ -392,7 +392,7 @@ export function TeamSidebar(props) {
   useLayoutEffect(() => { closing.current = false })
   const roster = useRoster(value => value)
   // The seats on this computer (RFC 0022 1L): the registry's orchestrators as the bar's rows.
-  const seats = useSeats(actions.seatList)
+  const seats = useSeats(actions.seatList, wide)
   const markedUnread = useUi(value => value.unread)
   const bootFailed = useUi(value => value.bootFailed === true)
   props.useRegistry(value => value)
