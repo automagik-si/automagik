@@ -6,12 +6,13 @@ import { createAuth, type Env } from './auth';
 import { getCookies } from 'better-auth/cookies';
 import { inbound, readChallenge, whatsappEnabled } from './whatsapp';
 import { passkeySiteName } from './site';
+import { cleanupOrphanUsers } from './cleanup';
 
-function publicData(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(publicData);
+function publicData(value: unknown, hidden: readonly string[] = ['email', 'emailVerified']): unknown {
+  if (Array.isArray(value)) return value.map(entry => publicData(entry, hidden));
   if (value && typeof value === 'object') return Object.fromEntries(
-    Object.entries(value).filter(([key]) => key !== 'email' && key !== 'emailVerified')
-      .map(([key, entry]) => [key, publicData(entry)]));
+    Object.entries(value).filter(([key]) => !hidden.includes(key))
+      .map(([key, entry]) => [key, publicData(entry, hidden)]));
   if (typeof value === 'string' && value.endsWith('@id.invalid')) return 'Automagik user';
   return value;
 }
@@ -93,6 +94,7 @@ export default {
     const path = url.pathname.replace(/^\/api\/auth/, '');
     const allowed = new Set([
       '/get-session', '/sign-out', '/jwks',
+      '/list-sessions', '/revoke-session', '/revoke-sessions',
       '/passkey/generate-register-options', '/passkey/verify-registration',
       '/passkey/generate-authenticate-options', '/passkey/verify-authentication',
       '/oauth2/authorize', '/oauth2/token', '/oauth2/userinfo', '/oauth2/revoke',
@@ -118,13 +120,36 @@ export default {
       headers.delete('authorization');
       request = new Request(request, { headers });
     }
+    if (path === '/revoke-session' && request.method === 'POST') {
+      // The session list carries ids, never tokens, so a page names the session by id. The
+      // token is looked up here; Better Auth still checks that it belongs to the caller.
+      let id: unknown;
+      try { ({ id } = await request.clone().json() as { id?: unknown }); } catch { id = undefined; }
+      if (typeof id !== 'string' || !id) {
+        return Response.json({ code: 'INVALID_SESSION_ID', message: 'A session id is required' },
+          { status: 400 });
+      }
+      const row = await env.DB.prepare('SELECT token FROM session WHERE id = ?').bind(id)
+        .first<{ token: string }>();
+      // An unknown id still reaches Better Auth, so a signed-out caller gets the same 401.
+      const token = row?.token ?? crypto.randomUUID();
+      const headers = new Headers(request.headers);
+      headers.delete('content-length');
+      headers.set('content-type', 'application/json');
+      request = new Request(url, { method: 'POST', headers, body: JSON.stringify({ token }) });
+    }
     const response = await auth.handler(request);
     if (response.headers.get('content-type')?.includes('application/json')) {
       const text = await response.text();
       if (!text) return new Response(null, response);
-      const body = publicData(JSON.parse(text));
+      // The list holds the person's other sessions: their tokens would let a script take them over.
+      const body = publicData(JSON.parse(text),
+        path === '/list-sessions' ? ['email', 'emailVerified', 'token'] : undefined);
       return new Response(JSON.stringify(body), response);
     }
     return response;
+  },
+  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await cleanupOrphanUsers(env.DB);
   },
 } satisfies ExportedHandler<Env>;

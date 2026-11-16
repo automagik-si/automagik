@@ -96,6 +96,31 @@ const mutations = [
     edits: [['scripts/configure.ts', '!hostUnderSiteName(origin.hostname, PASSKEY_SITE_NAME)', 'false']],
   },
   {
+    name: 'let cleanup ignore the passkey condition',
+    test: 'cleanup keeps young passkeyless users',
+    edits: [['src/cleanup.ts', 'AND NOT EXISTS (SELECT 1 FROM passkey p WHERE p.userId = u.id)', '']],
+  },
+  {
+    name: 'let cleanup ignore the age cutoff',
+    test: 'cleanup keeps young passkeyless users',
+    edits: [['src/cleanup.ts', 'WHERE u.createdAt < ?1', 'WHERE ?1 IS NOT NULL']],
+  },
+  {
+    name: 'let cleanup remove phone accounts',
+    test: 'cleanup keeps young passkeyless users',
+    edits: [['src/cleanup.ts', 'AND u.phoneNumber IS NULL', '']],
+  },
+  {
+    name: 'let cleanup ignore the batch limit',
+    test: 'cleanup is bounded per run',
+    edits: [['src/cleanup.ts', 'LIMIT ?2', 'LIMIT -1 + 0 * ?2']],
+  },
+  {
+    name: 'return session tokens in the session list',
+    test: 'list sessions shows only',
+    edits: [['src/index.ts', "['email', 'emailVerified', 'token']", 'undefined']],
+  },
+  {
     name: 'let CI skip the page browser tests',
     test: 'the CI job runs the browser tests',
     edits: [['../../.github/workflows/ci.yml', 'ID_PAGES_BROWSER: required', 'ID_PAGES_BROWSER: optional']],

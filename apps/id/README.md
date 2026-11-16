@@ -40,6 +40,16 @@ for the account owning the verified number, or creates a separate phone account.
 The browser's existing passkey account is never selected or modified. The
 receiving number, sender, code and secret are never logged.
 
+A signed-in person can list their own sessions and sign out of one or all of them
+(`/api/auth/list-sessions`, `/revoke-session`, `/revoke-sessions`; see
+PAGES-CONTRACT.md). The list never carries a session token; one session is named
+by its id, and Better Auth refuses to touch a session of another person.
+
+Requesting passkey registration options creates the user row before a passkey
+exists. A scheduled run (hourly cron in `wrangler.toml`, `src/cleanup.ts`) removes
+up to 100 such users per run once they are a day old and still have no passkey,
+phone number or OAuth client, with their sessions, accounts and challenges.
+
 Sessions, WebAuthn and WhatsApp challenges, OAuth codes, grants, signing keys,
 and rate limits live in D1. There is no secondary storage or session cookie cache.
 Only Cloudflare's replaced `cf-connecting-ip` header supplies the limiter's IP.
@@ -102,8 +112,9 @@ Mutation checks drop inbound authentication or timestamp checks, permit proof
 reuse, select the current session account, restore the session JWT header, disable
 PKCE, relax redirects, enable public registration, move rate limits to memory,
 serve a page file directly as `.html`, take the passkey site name from the host,
-start on (or configure) a host outside it, accept a look-alike host and let CI
-skip the page browser tests,
+start on (or configure) a host outside it, accept a look-alike host, let CI
+skip the page browser tests, return tokens in the session list, and let the cleanup
+ignore the passkey, age, phone-number or batch-size condition,
 one at a time. Each must fail its targeted test; source files are restored
 afterward. Announcements and results are printed to stdout.
 `bun scripts/generate-migration.ts` regenerates the initial schema for review;

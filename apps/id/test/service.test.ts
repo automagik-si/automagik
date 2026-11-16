@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { createLocalJWKSet, jwtVerify } from 'jose';
 import { clientSeedSQL } from '../scripts/client-seed';
 import { SoftwareAuthenticator } from './authenticator';
+import { ORPHAN_BATCH_LIMIT, ORPHAN_MIN_AGE_MS } from '../src/cleanup';
 
 // The service runs on a subdomain of the passkey site name, as it does for real.
 const origin = 'https://id.automagik.si';
@@ -864,5 +865,172 @@ describe('passkey site name', () => {
       expect(response.status, value).toBe(500);
       expect(await response.text()).toContain(message);
     }
+  });
+});
+
+describe('session management', () => {
+  // Signs in again with an existing passkey, returning the new session's cookie jar.
+  async function signIn(authenticator: SoftwareAuthenticator) {
+    cookie = '';
+    const options = await jsonOK(await request('/api/auth/passkey/generate-authenticate-options'));
+    await jsonOK(await request('/api/auth/passkey/verify-authentication', {
+      response: authenticator.authenticate(options, origin),
+    }));
+    return cookie;
+  }
+  async function sessionOf(jar: string) {
+    return jsonOK(await request('/api/auth/get-session', undefined, { cookie: jar }));
+  }
+  async function tokens() {
+    const db = await runtime.getD1Database('DB');
+    return (await db.prepare('SELECT id, token, userId FROM session').all<{
+      id: string; token: string; userId: string;
+    }>()).results;
+  }
+
+  test('list sessions shows only the caller\'s own sessions, without any token', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const a2 = await signIn(a.authenticator);
+    cookie = '';
+    const b = await signup();
+    expect((await request('/api/auth/list-sessions', undefined, { cookie: '' })).status).toBe(401);
+    const response = await request('/api/auth/list-sessions', undefined, { cookie: a2 });
+    const text = await response.clone().text();
+    const listed = await jsonOK(response) as Array<Record<string, unknown>>;
+    const stored = await tokens();
+    expect(listed.map(session => session.id).sort()).toEqual(
+      stored.filter(row => row.userId === a.userId).map(row => row.id).sort());
+    expect(listed).toHaveLength(2);
+    for (const session of listed) {
+      expect(session.userId).toBe(a.userId);
+      expect(session).not.toHaveProperty('token');
+      expect(session.ipAddress).toBeTruthy();
+    }
+    expect(stored.some(row => row.userId === b.userId)).toBe(true);
+    for (const row of stored) expect(text).not.toContain(row.token);
+    expect((await sessionOf(a1)).user.id).toBe(a.userId);
+  });
+
+  test('revoking one session by id ends it and keeps the others', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const a2 = await signIn(a.authenticator);
+    const first = (await sessionOf(a1)).session.id;
+    expect(await jsonOK(await request('/api/auth/revoke-session', { id: first }, { cookie: a2 })))
+      .toEqual({ status: true });
+    expect(await sessionOf(a1)).toBeNull();
+    expect((await sessionOf(a2)).user.id).toBe(a.userId);
+    const left = await jsonOK(await request('/api/auth/list-sessions', undefined, { cookie: a2 }));
+    expect(left.map((session: { id: string }) => session.id)).not.toContain(first);
+    expect(left).toHaveLength(1);
+  });
+
+  test('revoke-sessions ends every session of the caller and no one else\'s', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const a2 = await signIn(a.authenticator);
+    cookie = '';
+    await signup();
+    const b1 = cookie;
+    expect(await jsonOK(await request('/api/auth/revoke-sessions', {}, { cookie: a1 })))
+      .toEqual({ status: true });
+    expect(await sessionOf(a1)).toBeNull();
+    expect(await sessionOf(a2)).toBeNull();
+    expect((await tokens()).some(row => row.userId === a.userId)).toBe(false);
+    expect((await sessionOf(b1)).user).toBeTruthy();
+    expect((await request('/api/auth/revoke-sessions', {}, { cookie: '' })).status).toBe(401);
+  });
+
+  test('another user\'s session cannot be revoked, by id or by token', async () => {
+    const a = await signup();
+    const a1 = cookie;
+    const target = (await sessionOf(a1)).session.id;
+    const token = (await tokens()).find(row => row.id === target)!.token;
+    cookie = '';
+    await signup();
+    const b1 = cookie;
+    // Better Auth answers the same for a session it will not touch; the session must survive.
+    expect((await request('/api/auth/revoke-session', { id: target }, { cookie: b1 })).status).toBe(200);
+    expect((await request('/api/auth/revoke-session', { id: target, token }, { cookie: b1 })).status)
+      .toBe(200);
+    expect((await request('/api/auth/revoke-session', { token }, { cookie: b1 })).status).toBe(400);
+    expect((await request('/api/auth/revoke-session', { id: target }, { cookie: '' })).status).toBe(401);
+    expect((await request('/api/auth/revoke-session', { id: 'unknown' }, { cookie: '' })).status).toBe(401);
+    expect((await sessionOf(a1)).user.id).toBe(a.userId);
+    expect((await sessionOf(b1)).user).toBeTruthy();
+  });
+});
+
+describe('orphan account cleanup', () => {
+  const hour = 60 * 60 * 1000;
+  const iso = (age: number) => new Date(Date.now() - age).toISOString();
+  async function cleanup() {
+    const worker = await runtime.getWorker();
+    await worker.scheduled({ cron: '17 * * * *', scheduledTime: new Date() });
+  }
+  async function insertUser(id: string, age: number, phoneNumber: string | null = null) {
+    const db = await runtime.getD1Database('DB');
+    await db.prepare(`INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt,
+      phoneNumber) VALUES (?, 'Automagik user', ?, 0, ?, ?, ?)`)
+      .bind(id, `${id}@id.invalid`, iso(age), iso(age), phoneNumber).run();
+  }
+  async function count(sql: string, ...values: unknown[]) {
+    const db = await runtime.getD1Database('DB');
+    return (await db.prepare(sql).bind(...values).first<{ n: number }>())!.n;
+  }
+  async function age(userId: string, by: number) {
+    const db = await runtime.getD1Database('DB');
+    await db.prepare('UPDATE "user" SET createdAt = ? WHERE id = ?').bind(iso(by), userId).run();
+  }
+
+  test('cleanup removes an old passkeyless user with its sessions, accounts and challenges', async () => {
+    // A real abandoned ceremony: options were requested, no passkey was ever verified.
+    await jsonOK(await request('/api/auth/passkey/generate-register-options'));
+    const db = await runtime.getD1Database('DB');
+    const user = (await db.prepare('SELECT id, createdAt FROM "user"').first<{
+      id: string; createdAt: string;
+    }>())!;
+    expect(user.createdAt).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    expect(await count(`SELECT count(*) AS n FROM verification
+      WHERE json_extract(value, '$.userData.id') = ?`, user.id)).toBe(1);
+    await age(user.id, ORPHAN_MIN_AGE_MS + hour);
+    const now = iso(0);
+    await db.prepare(`INSERT INTO session (id, expiresAt, token, createdAt, updatedAt, userId)
+      VALUES ('s-orphan', ?, 't-orphan', ?, ?, ?)`).bind(now, now, now, user.id).run();
+    await db.prepare(`INSERT INTO account (id, accountId, providerId, userId, createdAt, updatedAt)
+      VALUES ('a-orphan', ?, 'passkey', ?, ?, ?)`).bind(user.id, user.id, now, now).run();
+    await db.prepare(`INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt)
+      VALUES ('v-other', 'other', 'not json', ?, ?, ?)`).bind(now, now, now).run();
+    await cleanup();
+    expect(await count('SELECT count(*) AS n FROM "user" WHERE id = ?', user.id)).toBe(0);
+    expect(await count('SELECT count(*) AS n FROM session WHERE userId = ?', user.id)).toBe(0);
+    expect(await count('SELECT count(*) AS n FROM account WHERE userId = ?', user.id)).toBe(0);
+    expect(await count(`SELECT count(*) AS n FROM verification
+      WHERE json_valid(value) AND json_extract(value, '$.userData.id') = ?`, user.id)).toBe(0);
+    expect(await count("SELECT count(*) AS n FROM verification WHERE id = 'v-other'")).toBe(1);
+  });
+
+  test('cleanup keeps young passkeyless users, old users with a passkey and old phone accounts', async () => {
+    const owner = await signup();
+    await age(owner.userId, ORPHAN_MIN_AGE_MS * 30);
+    await insertUser('young', ORPHAN_MIN_AGE_MS - hour);
+    await insertUser('phone', ORPHAN_MIN_AGE_MS * 30, '+15555550127');
+    await cleanup();
+    for (const id of [owner.userId, 'young', 'phone']) {
+      expect(await count('SELECT count(*) AS n FROM "user" WHERE id = ?', id), id).toBe(1);
+    }
+    expect(await count('SELECT count(*) AS n FROM passkey WHERE userId = ?', owner.userId)).toBe(1);
+    expect((await jsonOK(await request('/api/auth/get-session'))).user.id).toBe(owner.userId);
+  });
+
+  test('cleanup is bounded per run and finishes the backlog over later runs', async () => {
+    for (let index = 0; index < ORPHAN_BATCH_LIMIT + 5; index++) {
+      await insertUser(`orphan-${String(index).padStart(4, '0')}`, ORPHAN_MIN_AGE_MS + hour + index);
+    }
+    await cleanup();
+    expect(await count('SELECT count(*) AS n FROM "user"')).toBe(5);
+    await cleanup();
+    expect(await count('SELECT count(*) AS n FROM "user"')).toBe(0);
   });
 });
