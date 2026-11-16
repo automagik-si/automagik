@@ -201,6 +201,37 @@ function cliSetup(id) {
   return findAll(tree, node => node.type === 'button' && node.props.role !== 'switch').map(textOf)
 }
 
+test('not-ready tool cards show their names and Em breve in pt-BR', () => {
+  locale.setLocale('pt-BR')
+  try {
+    const tree = render(flow.MigrateView({ phase: 'choosing' }))
+    const soon = findAll(tree, byClass('oai-mig-is-soon'))
+    const expected = [
+      ['OpenClaw', 'OpenClaw'],
+      ['Grok bot', 'Grok botxAI'],
+      ['Muse', 'MuseMeta'],
+    ]
+    assert.equal(soon.length, expected.length)
+    for (const [index, [name, label]] of expected.entries()) {
+      const card = soon[index]
+      const who = findAll(card, byClass('oai-mig-who'))
+      assert.equal(who.length, 1)
+      assert.equal(textOf(who[0]), label)
+      const pills = findAll(card, byClass('oai-soon'))
+      assert.equal(pills.length, 1)
+      assert.equal(textOf(pills[0]), 'Em breve')
+      assert.doesNotMatch(textOf(card), /Bot do Telegram|mapeando/)
+      assert.equal(card.props['aria-label'], `${name}: em breve`)
+    }
+    const ready = findAll(tree, byClass('oai-mig-is-ready'))
+    assert.equal(ready.length, 1)
+    const who = findAll(ready[0], byClass('oai-mig-who'))[0]
+    assert.equal(textOf(findAll(who, node => node.type === 'span')[0]), 'Bot do Telegram')
+  } finally {
+    locale.setLocale('en')
+  }
+})
+
 test('the move from another tool renders in pt-BR, restart and all', () => {
   locale.setLocale('pt-BR')
   try {
