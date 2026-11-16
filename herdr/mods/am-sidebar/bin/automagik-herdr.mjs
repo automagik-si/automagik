@@ -55,7 +55,8 @@ import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, ent
 import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
-import { agentHomeFor, agentHomeProblem, agentHomeVar, chooseLogin } from "../logins.js";
+import { agentHomeFor, agentHomeProblem, agentHomeVar, agentHomeWords, chooseLogin } from "../logins.js";
+import { resolveLogin } from "../loginRecord.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
@@ -237,6 +238,43 @@ function agentHomeLogin(agentHome, agent, agents = agentTable()) {
     throw new CliError(`--agent-home: ${who} ${checked.error}.`, 2);
   }
   return checked.words;
+}
+
+/**
+ * The Bot login record (#1509): the reader's injected filesystem and this installation's
+ * one-number sequence memory. Reads only the record, the pointer, the folder's stat, the marker
+ * and this file; never a credential file.
+ */
+const loginMemoryPath = () => join(appHome(), "automagik-herdr", "login-sequence.json");
+const loginReaderIo = () => ({
+  read: (path) => readFileSync(path, "utf8"),
+  lstat: (path) => lstatSync(path),
+  writeAtomic: (path, text) => {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const fresh = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(fresh, text, { mode: 0o600 });
+    chmodSync(fresh, 0o600);
+    renameSync(fresh, path);
+  },
+});
+
+/** The refusal a launch shows: one effect-only sentence and the stable code, never a path. */
+const loginRefusal = (record) => new CliError(`${record.reason} (${record.code})`, 2);
+
+/**
+ * The login a launch of `vendor` must use, from the pointer record, or null when the pointer is
+ * absent and the pilot marker is not set (today's behaviour). An explicit --agent-home may only
+ * agree with the record; a different home refuses rather than silently using a second login.
+ */
+function botLogin(vendor, { agentHome = null, log = () => {}, readOnly = false } = {}) {
+  if (agentHomeVar(vendor) === null) return null;
+  const resolved = resolveLogin({ vendor, env: process.env, memoryPath: loginMemoryPath(), io: loginReaderIo(), log, readOnly });
+  if (resolved.state === "absent") return null;
+  if (resolved.code) throw loginRefusal(resolved);
+  if (agentHome !== null && agentHome !== resolved.dir) {
+    throw new CliError("The Bot login record names a different login; --agent-home cannot override it. Sign in again. (agent-home-differs)", 2);
+  }
+  return { ...resolved, words: agentHomeWords(vendor, resolved.dir) };
 }
 
 const modelIo = () => ({ home: home(), appHome: appHome(), read: (p) => { try { return readText(p); } catch { return null; } } });
@@ -1376,6 +1414,10 @@ Usage: am <command> [options]                   (every command takes --json and 
   history <bot>                 what the bot did, by the attach and workers ledgers: its panes,
                                 starts, sessions (and the newest transcript) and workers
   brief <bot>                   print the bot's briefing with its team's live state, as it is now
+  login --check <claude|codex>  the Bot login generation this computer resolves, and a folder
+                                name; read-only, never a path or an account
+  login-env <claude|codex>      the one vendor config assignment a raw launch wrapper needs,
+                                or nothing; stdout only
   tidy                          what drifted in the window, labels and project list, as a plan;
                                 changes nothing (--json: the plan's actions)
   forget <project>              take a project's folder off this CLI's project list; its folder,
@@ -3686,10 +3728,11 @@ async function launchSeat(project, bot, over = {}) {
     const seen = await windowSpaces();
     place = spaceOnly(await windowPlace(key, await placementOf(key, seen), seen));
   }
-  // The Claude login this launch uses (#453): read from claude-logins.json now, Claude only.
-  // A restart's --agent-home replaces that choice with its one vendor assignment (#1208).
-  const login = agentHome === null ? claudeLogin(argv, briefed.warnings)
-    : (over.agentHomeLoginWords ?? agentHomeLogin(agentHome, agentKey, agentTable()));
+  // The pointer record (#1509) wins when the entrypoint exported it; otherwise the Claude
+  // login record (#453) or an explicit --agent-home (#1208) chooses, exactly as before.
+  const readerLogin = botLogin(agentKey, { agentHome, log: (line) => briefed.warnings.push(line) });
+  const login = readerLogin ? readerLogin.words
+    : agentHome === null ? claudeLogin(argv, briefed.warnings) : agentHomeLogin(agentHome, agentKey, agentTable());
   const proxyOn = agentKey === "dsh-tui" && proxyEnabled(
     approvedProxyState({ project: key, bot }), process.platform,
     (warning) => briefed.warnings.push(warning));
@@ -4909,7 +4952,9 @@ async function cmdRestart(opts, [ref]) {
     newSession: newSessionId(),
   };
   let plan = restartPlan(planned);
-  const agentHomeLoginWords = agentHomeLogin(agentHome, plan.agent, agents);
+  // The agent-side validation stays before any queue; the pointer record is resolved at the
+  // launch itself (launchSeat), where the env and the chosen agent are both final.
+  agentHomeLogin(agentHome, plan.agent, agents);
   if (old && !opts.force && !isPaneIdle(old, screen)
     && (["working", "blocked"].includes(old.status?.state) || pendingDialog(screen))) {
     return queueRestart({ bot, key, old, screen, opts, wanted, plan });
@@ -4972,7 +5017,7 @@ async function cmdRestart(opts, [ref]) {
   }
   let seat = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
     carry: { ...carry, ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, resumeId),
-    replacing: old ? held.binding : null, granted: plan.granted, agentHome, agentHomeLoginWords });
+    replacing: old ? held.binding : null, granted: plan.granted, agentHome });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   // A direct restart supersedes a queued one only once it really started: its watcher must not
   // start a second replacement while this one hands the bot over.
@@ -6631,8 +6676,19 @@ async function cmdWorker(opts, rest) {
     const list = plan.model ? modelList(plan.agent, plan.model) : [];
     if (list.length && !list.includes(plan.model)) warnings.push(`${plan.model} isn't on ${plan.agent}'s model list; started with it anyway.`);
   }
-  // --agent-home: the vendor config folder that agent's CLI reads; every other launch word stays as it was.
-  const agentHomeLoginWords = agentHomeLogin(agentHome, runs, agents);
+  // The pointer record (#1509) rules when the entrypoint set it; otherwise #1208's explicit
+  // --agent-home does, and otherwise the launch is exactly as it was.
+  const readerLogin = botLogin(runs, { agentHome, log: (line) => warnings.push(line) });
+  const agentHomeLoginWords = readerLogin ? readerLogin.words : agentHomeLogin(agentHome, runs, agents);
+  // A Codex template needs commandArgv when any chosen home must ride the launch: hc's template
+  // form carries no environment. The Claude path above already built its argv.
+  if (plan.template && runs === "codex" && agentHomeLoginWords && !templateArgv) {
+    templateArgv = templateCommand ? commandArgv({ shell: templateCommand }, [task]) : null;
+    if (!templateArgv) {
+      const why = templateCommand ? "its command ends in a separator or a comment, so it can't take the task" : "hc gave no command for it";
+      throw new CliError(`Template ${plan.template} runs Codex, but ${why}; it can't be started on the chosen Codex login home. Not started.`);
+    }
+  }
   // Where it works: --worktree's, the branch's worktree, or the folder a new one gets (made
   // below, once the check passes). Nothing is made yet.
   let place = opts.worktree !== undefined ? await givenWorktree(opts.worktree, project.key, bot)
@@ -7716,10 +7772,47 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
   return PRINTED;
 }
 
+/** The two vendor logins the reader serves. */
+const LOGIN_VENDORS = new Set(["claude", "codex"]);
+function loginVendor(rest, what) {
+  const [vendor, extra] = rest;
+  if (extra || !LOGIN_VENDORS.has(vendor)) throw new CliError(`${what} takes one vendor: claude or codex.`, 2);
+  return vendor;
+}
+
+/** What `am login --check <vendor>` may show: the generation id and a folder NAME, never a path. */
+function loginReport(vendor) {
+  const resolved = resolveLogin({ vendor, env: process.env, memoryPath: loginMemoryPath(), io: loginReaderIo(), readOnly: true });
+  if (resolved.state === "absent") return { vendor, state: "absent" };
+  if (resolved.code) throw loginRefusal(resolved);
+  return { vendor, generation: resolved.generation, folder: String(resolved.dir).replace(/\/+$/, "").split("/").pop(), sequence: resolved.sequence };
+}
+
+/** `am login --check <vendor>`: read-only; prints only the generation id and folder name. */
+function cmdLogin(opts, rest) {
+  if (!opts.check) throw new CliError("login needs --check: am login --check <claude|codex>.", 2);
+  const vendor = loginVendor(rest, "login --check");
+  const report = loginReport(vendor);
+  if (opts.json) return report;
+  return report.state === "absent" ? "No Bot login pointer is set; launches keep their current login."
+    : `generation ${report.generation}, folder ${report.folder}, sequence ${report.sequence}`;
+}
+
+/** `am login-env <vendor>`: the one assignment a raw launch wrapper needs, stdout only. */
+function cmdLoginEnv(opts, rest) {
+  const vendor = loginVendor(rest, "login-env");
+  const resolved = resolveLogin({ vendor, env: process.env, memoryPath: loginMemoryPath(), io: loginReaderIo(), readOnly: false,
+    log: (line) => process.stderr.write(`${line}\n`) });
+  if (resolved.state === "absent") return PRINTED;
+  if (resolved.code) throw loginRefusal(resolved);
+  process.stdout.write(`${agentHomeVar(vendor)}=${resolved.dir}\n`);
+  return PRINTED;
+}
+
 const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
   tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
-  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive };
+  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive, login: cmdLogin, "login-env": cmdLoginEnv };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 
 /** Runs one command line; resolves with the exit code. Output goes to stdout, problems to stderr. */

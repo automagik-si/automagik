@@ -98,6 +98,10 @@
       "to": "am/layoutSafe.mjs"
     },
     {
+      "from": "herdr/mods/am-sidebar/loginRecord.js",
+      "to": "am/loginRecord.js"
+    },
+    {
       "from": "herdr/mods/am-sidebar/logins.js",
       "to": "am/logins.js"
     },
