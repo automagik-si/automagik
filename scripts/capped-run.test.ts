@@ -143,7 +143,7 @@ async function processGoneWithin(pid: number, milliseconds: number): Promise<boo
   return false;
 }
 
-async function endStarted(proc: ChildProcess): Promise<void> {
+async function endStarted(proc: { pid?: number }): Promise<void> {
   const pid = proc.pid;
   if (pid === undefined) return;
   if (safeKill(pid, 'SIGTERM')) {
@@ -412,30 +412,33 @@ describe('capped-run', () => {
       stdio: 'ignore',
     });
     noteStarted(holder.pid);
-    expect(await waitFor(ready, 5_000)).toBe(true);
+    try {
+      expect(await waitFor(ready, 5_000)).toBe(true);
 
-    const outcome = cappedRun(['--lock', '--', 'sh', '-c', 'exit 0', 'argv-leak-marker'], {
-      state,
-      env: { CAPPED_RUN_LOCK_FILE: lock, HC_TERMINAL_ID: 'pane-name', LEAK_ENV_MARKER: 'env-leak-marker' },
-      timeout: 30_000,
-    });
-    safeKill(holder.pid);
+      const outcome = cappedRun(['--lock', '--', 'sh', '-c', 'exit 0', 'argv-leak-marker'], {
+        state,
+        env: { CAPPED_RUN_LOCK_FILE: lock, HC_TERMINAL_ID: 'pane-name', LEAK_ENV_MARKER: 'env-leak-marker' },
+        timeout: 30_000,
+      });
 
-    expect(outcome.status).toBe(0);
-    expect(outcome.milliseconds).toBeGreaterThan(400);
-    // The first output line under --lock proves the resolved path and the file it locked.
-    const lockLine = outcome.stderr.split('\n')[0];
-    expect(lockLine).toContain(`path=${lock} dev=`);
-    expect(lockLine).toMatch(/ dev=\S+ ino=\S+$/);
-    const lines = outcome.lines();
-    expect(lines.filter(line => / start owner=\S+ comm=sh$/.test(line))).toHaveLength(1);
-    expect(lines.filter(line => / end owner=\S+ comm=sh exit=0$/.test(line))).toHaveLength(1);
-    expect(outcome.log).not.toContain('argv-leak-marker');
-    expect(outcome.log).not.toContain('env-leak-marker');
-    expect(statSync(outcome.logPath).mode & 0o777).toBe(0o600);
-    // The lock file stays 0600 and its folder 0700.
-    expect(statSync(lock).mode & 0o777).toBe(0o600);
-    expect(statSync(work).mode & 0o777).toBe(0o700);
+      expect(outcome.status).toBe(0);
+      expect(outcome.milliseconds).toBeGreaterThan(400);
+      // The first output line under --lock proves the resolved path and the file it locked.
+      const lockLine = outcome.stderr.split('\n')[0];
+      expect(lockLine).toContain(`path=${lock} dev=`);
+      expect(lockLine).toMatch(/ dev=\S+ ino=\S+$/);
+      const lines = outcome.lines();
+      expect(lines.filter(line => / start owner=\S+ comm=sh$/.test(line))).toHaveLength(1);
+      expect(lines.filter(line => / end owner=\S+ comm=sh exit=0$/.test(line))).toHaveLength(1);
+      expect(outcome.log).not.toContain('argv-leak-marker');
+      expect(outcome.log).not.toContain('env-leak-marker');
+      expect(statSync(outcome.logPath).mode & 0o777).toBe(0o600);
+      // The lock file stays 0600 and its folder 0700.
+      expect(statSync(lock).mode & 0o777).toBe(0o600);
+      expect(statSync(work).mode & 0o777).toBe(0o700);
+    } finally {
+      await endStarted(holder);
+    }
   });
 
   test.skipIf(!flock)('the start line is in the log before the command runs', async () => {
@@ -464,18 +467,21 @@ describe('capped-run', () => {
       stdio: 'ignore',
     });
     noteStarted(holder.pid);
-    expect(await waitFor(ready, 5_000)).toBe(true);
+    try {
+      expect(await waitFor(ready, 5_000)).toBe(true);
 
-    const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], {
-      state,
-      env: { CAPPED_RUN_LOCK_FILE: lock },
-      timeout: 30_000,
-    });
-    safeKill(holder.pid);
+      const outcome = cappedRun(['--', 'sh', '-c', 'exit 0'], {
+        state,
+        env: { CAPPED_RUN_LOCK_FILE: lock },
+        timeout: 30_000,
+      });
 
-    expect(outcome.status).toBe(0);
-    expect(outcome.milliseconds).toBeLessThan(1_500);
-    expect(outcome.log).toBe('');
+      expect(outcome.status).toBe(0);
+      expect(outcome.milliseconds).toBeLessThan(1_500);
+      expect(outcome.log).toBe('');
+    } finally {
+      await endStarted(holder);
+    }
   });
 
   test.skipIf(!scope)(
@@ -644,6 +650,9 @@ describe('capped-run', () => {
       safeKill(pid, 'SIGKILL');
     }
     expect(await processGoneWithin(pid, 3_000)).toBe(true);
+    for (const startedPid of startedPids) {
+      expect(await processGoneWithin(startedPid, 3_000)).toBe(true);
+    }
   });
 
   test.skipIf(!scope)('a very short run (under 100 ms) leaves no peak file in the state folder', () => {
@@ -686,8 +695,8 @@ describe('capped-run', () => {
         expect(await processGoneWithin(pid, 10_000)).toBe(true);
         expect(readdirSync(state).filter(name => name.startsWith('peak'))).toEqual([]);
       } finally {
-        safeKill(pid, 'SIGKILL');
-        safeKill(wrapper.pid, 'SIGKILL');
+        await endStarted(wrapper);
+        await endStarted({ pid });
       }
     },
     90_000,
@@ -962,22 +971,25 @@ describe('capped-run', () => {
       writeFileSync(child, 'printf "start\\n" >> "$1"\nsleep 0.5\nprintf "end\\n" >> "$1"\n');
       const env = { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '60' };
       let firstErr = '';
+      const first = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
+        cwd: root,
+        env,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      noteStarted(first.pid);
+      first.stderr?.on('data', chunk => {
+        firstErr += chunk.toString();
+      });
+      const firstDone = closeCode(first);
+      let second: ChildProcess | undefined;
       try {
-        const first = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
-          cwd: root,
-          env,
-          stdio: ['ignore', 'ignore', 'pipe'],
-        });
-        first.stderr?.on('data', chunk => {
-          firstErr += chunk.toString();
-        });
-        const firstDone = closeCode(first);
         expect(await waitFor(seq, 20_000)).toBe(true);
-        const second = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
+        second = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
           cwd: root,
           env,
           stdio: 'ignore',
         });
+        noteStarted(second.pid);
         const secondDone = closeCode(second);
         expect(await Promise.all([firstDone, secondDone])).toEqual([0, 0]);
         expect(readFileSync(seq, 'utf8').trim().split('\n')).toEqual(['start', 'end', 'start', 'end']);
@@ -987,6 +999,8 @@ describe('capped-run', () => {
         expect(statSync(lock).mode & 0o777).toBe(0o600);
         expect(statSync(dirname(lock)).mode & 0o777).toBe(0o700);
       } finally {
+        await endStarted(first);
+        if (second) await endStarted(second);
         rmSync(seq, { force: true });
         rmSync(child, { force: true });
       }
@@ -1004,29 +1018,35 @@ describe('capped-run', () => {
       const env = { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '60' };
       const inner = 'mount -t tmpfs tmpfs /tmp && exec sh "$1" --lock -- sh "$2" "$3"';
       let firstErr = '';
+      const first = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
+        cwd: root,
+        env,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      noteStarted(first.pid);
+      first.stderr?.on('data', chunk => {
+        firstErr += chunk.toString();
+      });
+      const firstDone = closeCode(first);
+      let second: ChildProcess | undefined;
       try {
-        const first = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
-          cwd: root,
-          env,
-          stdio: ['ignore', 'ignore', 'pipe'],
-        });
-        first.stderr?.on('data', chunk => {
-          firstErr += chunk.toString();
-        });
-        const firstDone = closeCode(first);
         expect(await waitFor(seq, 20_000)).toBe(true);
         // The second run mounts its own tmpfs on /tmp: the scratch checkout's lock must still be
         // the same file, or the two runs overlap (mutant 20 fails here).
-        const second = spawn('unshare', ['-rm', 'sh', '-c', inner, 'sh', script, child, seq], {
+        second = spawn('unshare', ['-rm', 'sh', '-c', inner, 'sh', script, child, seq], {
           cwd: root,
           env,
           stdio: 'ignore',
         });
+        // unshare's pid; its child (the inner wrapper) is expected to die with it.
+        noteStarted(second.pid);
         const secondDone = closeCode(second);
         expect(await Promise.all([firstDone, secondDone])).toEqual([0, 0]);
         expect(readFileSync(seq, 'utf8').trim().split('\n')).toEqual(['start', 'end', 'start', 'end']);
         expect(firstErr.split('\n')[0]).toContain(`path=${lock} dev=`);
       } finally {
+        await endStarted(first);
+        if (second) await endStarted(second);
         rmSync(seq, { force: true });
         rmSync(child, { force: true });
       }
@@ -1058,7 +1078,7 @@ describe('capped-run', () => {
         expect(Date.now() - started).toBeLessThan(10_000);
         expect((outcome.stderr ?? '').split('\n')[0]).toContain(`path=${lock} dev=`);
       } finally {
-        safeKill(holder.pid);
+        await endStarted(holder);
       }
     },
     30_000,
