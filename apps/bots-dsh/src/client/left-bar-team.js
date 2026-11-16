@@ -36,7 +36,12 @@ const chatStatuses = bot => (bot.channels ?? []).flatMap(channel => (channel.cha
 // row, or its folded channel's, is where the owner goes.
 export function botRowStatus(bot) {
   const status = statusOr(bot.status)
-  return status === 'needs' && chatStatuses(bot).includes('needs') ? 'idle' : status
+  if (status === 'needs' && chatStatuses(bot).includes('needs')) return 'idle'
+  // A closed Bot's chats are not read yet; a channel that needs the person still reaches the
+  // row he sees all day, so it is not only one line down and inside a Bot he did not open.
+  const channels = bot.channels ?? []
+  const closed = channels.length > 0 && channels.every(channel => channel.chats === undefined)
+  return closed && channels.some(channel => channelStatusOf(channel) === 'needs') ? worstStatus([status, 'needs']) : status
 }
 
 const NO_FOLDS = new Set()
@@ -72,7 +77,7 @@ export function channelRows(bot, channels = [], folded = NO_FOLDS) {
     for (const chat of chats) {
       rows.push({
         kind: 'chat', key: `chat:${bot.id}/${channel.id}/${chat.id}`, id: chat.id, botId: bot.id, channelId: channel.id,
-        name: chat.name, chat, who: chat.who, status: chatStatusOf(chat), unread: Number(chat.unread) > 0, source: bot.channelSource,
+        name: chat.name, chat, who: chat.who, status: chatStatusOf(chat), unread: Number(chat.unread) > 0, unreadCount: Math.max(0, Math.floor(Number(chat.unread) || 0)), source: bot.channelSource,
       })
     }
   }
@@ -191,7 +196,7 @@ function BotArt({ bot, size, state }) {
 }
 /** A Bot's character for a row, as the bar draws it by default. */
 export const drawBot = (bot, size, state) => h(BotArt, { bot, size, state })
-const Chevron = () => h('svg', { className: 'lb-chev', width: 13, height: 13, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'M7.5 4.5L13 10l-5.5 5.5' }))
+const Chevron = ({ open = false }) => h('svg', { className: open ? 'lb-chev lb-chev-open' : 'lb-chev', width: 13, height: 13, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: 'M7.5 4.5L13 10l-5.5 5.5' }))
 const classes = (...names) => names.filter(Boolean).join(' ')
 // A name the row cuts shows in full on hover. Only the laid-out row can tell, so it is
 // measured as the pointer enters.
@@ -280,13 +285,14 @@ export function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd
         h('span', { className: 'lb-name' }, row.name),
         row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,
         status(row),
-        row.folded ? h(Chevron) : null)
+        h(Chevron, { open: !row.folded }))
     }
     if (row.kind === 'chat') {
       return button(row, classes('lb-row-chat', row.status !== 'idle' && 'lb-row-hot', row.unread && 'lb-row-unread'), null,
         h(ChatFace, { who: row.who }),
         h('span', { className: 'lb-name' }, row.name),
         row.unread ? h('span', { className: 'lb-sr' }, t('Unread activity')) : null,
+        row.unreadCount > 0 ? h('span', { className: 'lb-count', 'aria-hidden': true }, row.unreadCount > 99 ? '99+' : String(row.unreadCount)) : null,
         status(row))
     }
     const [first, second] = row.members

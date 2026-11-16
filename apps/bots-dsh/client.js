@@ -21446,7 +21446,10 @@ var chatStatusOf = (chat) => statusOr(CHAT_STATUS[chat?.status] ?? chat?.status)
 var chatStatuses = (bot) => (bot.channels ?? []).flatMap((channel) => (channel.chats ?? []).map(chatStatusOf));
 function botRowStatus(bot) {
   const status = statusOr(bot.status);
-  return status === "needs" && chatStatuses(bot).includes("needs") ? "idle" : status;
+  if (status === "needs" && chatStatuses(bot).includes("needs")) return "idle";
+  const channels = bot.channels ?? [];
+  const closed = channels.length > 0 && channels.every((channel) => channel.chats === void 0);
+  return closed && channels.some((channel) => channelStatusOf(channel) === "needs") ? worstStatus([status, "needs"]) : status;
 }
 var NO_FOLDS = /* @__PURE__ */ new Set();
 var chatsOf = (channel) => [...channel.chats ?? []].sort((a, b) => (b.lastAt ?? 0) - (a.lastAt ?? 0));
@@ -21486,6 +21489,7 @@ function channelRows(bot, channels = [], folded = NO_FOLDS) {
         who: chat.who,
         status: chatStatusOf(chat),
         unread: Number(chat.unread) > 0,
+        unreadCount: Math.max(0, Math.floor(Number(chat.unread) || 0)),
         source: bot.channelSource
       });
     }
@@ -21575,7 +21579,7 @@ function BotArt({ bot, size, state }) {
   );
 }
 var drawBot = (bot, size, state) => (0, import_react54.createElement)(BotArt, { bot, size, state });
-var Chevron = () => (0, import_react54.createElement)("svg", { className: "lb-chev", width: 13, height: 13, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, (0, import_react54.createElement)("path", { d: "M7.5 4.5L13 10l-5.5 5.5" }));
+var Chevron = ({ open = false }) => (0, import_react54.createElement)("svg", { className: open ? "lb-chev lb-chev-open" : "lb-chev", width: 13, height: 13, viewBox: "0 0 20 20", fill: "none", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true }, (0, import_react54.createElement)("path", { d: "M7.5 4.5L13 10l-5.5 5.5" }));
 var classes = (...names) => names.filter(Boolean).join(" ");
 var nameIfCut = (event) => {
   const row = event.currentTarget;
@@ -21653,7 +21657,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
         (0, import_react54.createElement)("span", { className: "lb-name" }, row.name),
         row.unread ? (0, import_react54.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
         status(row),
-        row.folded ? (0, import_react54.createElement)(Chevron) : null
+        (0, import_react54.createElement)(Chevron, { open: !row.folded })
       );
     }
     if (row.kind === "chat") {
@@ -21664,6 +21668,7 @@ function TeamRows({ team, current, onOpen, onMenu, renderAfter, renderEnd, label
         (0, import_react54.createElement)(ChatFace, { who: row.who }),
         (0, import_react54.createElement)("span", { className: "lb-name" }, row.name),
         row.unread ? (0, import_react54.createElement)("span", { className: "lb-sr" }, t("Unread activity")) : null,
+        row.unreadCount > 0 ? (0, import_react54.createElement)("span", { className: "lb-count", "aria-hidden": true }, row.unreadCount > 99 ? "99+" : String(row.unreadCount)) : null,
         status(row)
       );
     }
@@ -21812,13 +21817,15 @@ var ROWS2 = `
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
 .lb-row-chat{height:var(--lb-chat-h);gap:7px;padding-right:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph) + 8px))}
 .lb-row-chat .lb-st{gap:5px}
-/* A chat's person: the photo, else their initials, on the tone Omni's chat view gives that side
-   of the conversation. Omni shares --oc-in and --oc-out with the bar; the fallbacks are the
-   formulas its own chat view uses for them, so a row and that chat agree either way. */
+.lb-count{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--bt-hover);color:var(--bt-ink);font:600 10px/1 var(--bt-font)}
+/* A chat's person: the photo, else their initials, on the incoming tone Omni's chat view uses
+   for the other side; the owner's own chat adds the outgoing tone as a ring. Every chat mark is
+   one tile, so the initials sit like a photo does. Omni shares --oc-in and --oc-out with the
+   bar; the fallbacks are the formulas its own chat view uses, so a row and that chat agree. */
 .lb-chat-face{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-chat-face);height:var(--lb-chat-face);box-sizing:border-box;border-radius:50%;overflow:hidden;background:var(--oc-in,var(--bt-card));color:var(--bt-ink)}
 body[data-ds-dark-theme] .lb-chat-face{background:var(--oc-in,var(--bt-bubble))}
-.lb-chat-face[data-self]{background:var(--oc-out,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card)))}
-body[data-ds-dark-theme] .lb-chat-face[data-self]{background:var(--oc-out,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble)))}
+.lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card)))}
+body[data-ds-dark-theme] .lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble)))}
 .lb-chat-face img{position:absolute;inset:1px;width:calc(100% - 2px);height:calc(100% - 2px);border-radius:50%;object-fit:cover}
 .lb-chat-face-initials{font:600 7.5px/1 var(--bt-head-font,var(--bt-font));letter-spacing:.02em}
 .lb-row-chat .lb-chat-face-initials{color:inherit}
@@ -21828,6 +21835,7 @@ body[data-ds-dark-theme] .lb-chat-face[data-self]{background:var(--oc-out,color-
 .lb-glyph{flex:none;display:grid;place-items:center;width:var(--lb-glyph);height:var(--lb-glyph);color:var(--lb-muted)}
 .lb-glyph svg{display:block;width:100%;height:100%}
 .lb-chev{flex:none;display:block;color:var(--lb-muted);opacity:.8}
+.lb-chev-open{transform:rotate(90deg)}
 .lb-sec{flex:none;display:flex;align-items:flex-end;height:var(--lb-label-h);padding:0 10px 5px;box-sizing:border-box;font:var(--bt-weight-title,600) 10.5px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:.16em;text-transform:uppercase;color:var(--lb-muted)}
 .lb-sec-first{margin-top:var(--lb-label-first-gap)}
 `;

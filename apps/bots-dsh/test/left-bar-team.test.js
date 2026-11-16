@@ -83,6 +83,14 @@ test('Omni\'s channel and chat words, and a channel that is not running', () => 
   assert.equal(rows.get('pair').status, 'needs')
 })
 
+test('a closed Bot carries a channel that needs the person up to its own row', () => {
+  const closed = { ...HELP, status: 'needs-pairing', chats: undefined }
+  assert.equal(botRowStatus(bot('x', { status: 'idle', channels: [closed] })), 'needs', 'the row he sees all day says so')
+  assert.equal(botRowStatus(bot('x', { status: 'working', channels: [closed] })), 'needs', 'needs asks first')
+  assert.equal(botRowStatus(bot('x', { status: 'idle', channels: [HELP] })), 'idle', 'an open Bot leaves it to the chat rows')
+  assert.equal(botRowStatus(bot('x', { status: 'idle', channels: [{ ...closed, status: 'connected' }] })), 'idle')
+})
+
 test('a channel stays folded until a source read its chats; its own state speaks meanwhile', () => {
   const unread = { ...HELP, chats: undefined }
   const rows = channelRows({ id: 'pip' }, [unread], new Set())
@@ -129,14 +137,16 @@ test('a Bot\'s channels run newest chat first, each with its own mark', () => {
   assert.ok(hasClass('lb-row-channel')(help))
   assert.equal(help.props['aria-expanded'], true)
   assert.equal(findAll(help, node => node.props?.['data-glyph'])[0].props['data-glyph'], 'whatsapp')
-  assert.equal(findAll(help, hasClass('lb-chev')).length, 0, 'an open channel has no chevron')
+  assert.equal(findAll(help, hasClass('lb-chev')).length, 1, 'an open channel still says it can fold')
+  assert.ok(hasClass('lb-chev-open')(findAll(help, hasClass('lb-chev'))[0]), 'open: the chevron points down')
   const store = row(tree, 'store')
   assert.equal(store.props['aria-expanded'], false)
   assert.equal(findAll(store, hasClass('lb-chev')).length, 1)
+  assert.equal(hasClass('lb-chev-open')(findAll(store, hasClass('lb-chev'))[0]), false, 'folded: the chevron points right')
   assert.equal(findAll(store, node => node.props?.role === 'img')[0].props['aria-label'], 'Error')
   const asking = row(tree, 'b')
   assert.ok(hasClass('lb-row-chat')(asking) && hasClass('lb-row-hot')(asking), 'a chat with a status is in ink')
-  assert.equal(textOf(asking), 'TAChat bUnread activityNeeds you')
+  assert.equal(textOf(asking), 'TAChat bUnread activity2Needs you')
   assert.equal(hasClass('lb-row-hot')(row(tree, 'a')), true, 'answering is work, in ink')
   assert.equal(hasClass('lb-row-hot')(row(tree, 's')), false, 'an idle chat stays quiet')
   // A paused chat draws no mark of its own.
@@ -158,14 +168,22 @@ test('a chat row shows its person: the photo, initials when there is none, and t
   assert.equal(textOf(findAll(mine, hasClass('lb-chat-face-initials'))[0]), 'MN')
 })
 
-test('a chat\'s unread is said and weighs its name; a folded channel wears it', () => {
+test('a chat\'s unread is said, counted and weighs its name; a folded channel wears it', () => {
   const tree = draw()
   const unread = row(tree, 'b')
   assert.ok(hasClass('lb-row-unread')(unread))
   assert.equal(textOf(findAll(unread, hasClass('lb-sr'))[0]), 'Unread activity', 'unread is said, not only shown in weight')
+  assert.equal(textOf(findAll(unread, hasClass('lb-count'))[0]), '2', 'its count is drawn')
   assert.equal(hasClass('lb-row-unread')(row(tree, 'a')), false)
   assert.ok(hasClass('lb-row-unread')(row(tree, 'help')), 'a channel says one of its chats is unread')
   assert.equal(hasClass('lb-row-unread')(row(tree, 'store')), false)
+  const many = channelRows({ id: 'b' }, [{ ...HELP, chats: [chat('m', 'idle', { unread: 150 })] }], new Set())
+  assert.equal(many[1].unreadCount, 150)
+  const capped = render(TeamRows({
+    team: { bots: [{ ...bot('c'), channels: [{ ...HELP, chats: [chat('m', 'idle', { unread: 150 })] }] }] },
+    renderArt: () => ({ type: 'i', props: {}, children: [] }),
+  }))
+  assert.equal(textOf(findAll(capped, hasClass('lb-count'))[0]), '99+', 'past 99 it counts no further')
 })
 
 test('the rows wear what they are: unread, not running, groups and labels', () => {

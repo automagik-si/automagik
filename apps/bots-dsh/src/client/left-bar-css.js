@@ -142,13 +142,15 @@ const ROWS = `
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
 .lb-row-chat{height:var(--lb-chat-h);gap:7px;padding-right:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph) + 8px))}
 .lb-row-chat .lb-st{gap:5px}
-/* A chat's person: the photo, else their initials, on the tone Omni's chat view gives that side
-   of the conversation. Omni shares --oc-in and --oc-out with the bar; the fallbacks are the
-   formulas its own chat view uses for them, so a row and that chat agree either way. */
+.lb-count{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--bt-hover);color:var(--bt-ink);font:600 10px/1 var(--bt-font)}
+/* A chat's person: the photo, else their initials, on the incoming tone Omni's chat view uses
+   for the other side; the owner's own chat adds the outgoing tone as a ring. Every chat mark is
+   one tile, so the initials sit like a photo does. Omni shares --oc-in and --oc-out with the
+   bar; the fallbacks are the formulas its own chat view uses, so a row and that chat agree. */
 .lb-chat-face{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-chat-face);height:var(--lb-chat-face);box-sizing:border-box;border-radius:50%;overflow:hidden;background:var(--oc-in,var(--bt-card));color:var(--bt-ink)}
 body[data-ds-dark-theme] .lb-chat-face{background:var(--oc-in,var(--bt-bubble))}
-.lb-chat-face[data-self]{background:var(--oc-out,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card)))}
-body[data-ds-dark-theme] .lb-chat-face[data-self]{background:var(--oc-out,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble)))}
+.lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card)))}
+body[data-ds-dark-theme] .lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble)))}
 .lb-chat-face img{position:absolute;inset:1px;width:calc(100% - 2px);height:calc(100% - 2px);border-radius:50%;object-fit:cover}
 .lb-chat-face-initials{font:600 7.5px/1 var(--bt-head-font,var(--bt-font));letter-spacing:.02em}
 .lb-row-chat .lb-chat-face-initials{color:inherit}
@@ -158,6 +160,7 @@ body[data-ds-dark-theme] .lb-chat-face[data-self]{background:var(--oc-out,color-
 .lb-glyph{flex:none;display:grid;place-items:center;width:var(--lb-glyph);height:var(--lb-glyph);color:var(--lb-muted)}
 .lb-glyph svg{display:block;width:100%;height:100%}
 .lb-chev{flex:none;display:block;color:var(--lb-muted);opacity:.8}
+.lb-chev-open{transform:rotate(90deg)}
 .lb-sec{flex:none;display:flex;align-items:flex-end;height:var(--lb-label-h);padding:0 10px 5px;box-sizing:border-box;font:var(--bt-weight-title,600) 10.5px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:.16em;text-transform:uppercase;color:var(--lb-muted)}
 .lb-sec-first{margin-top:var(--lb-label-first-gap)}
 `

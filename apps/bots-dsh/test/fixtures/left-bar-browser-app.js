@@ -63,8 +63,8 @@ const portrait = (hue, hair) => `data:image/svg+xml,${encodeURIComponent(`<svg x
 const person = (name, photo = null, more = {}) => ({ name, photo, self: false, ...more })
 const chat = (id, name, status = 'idle', more = {}) => ({ id, name, status, who: person(name), ...more })
 const HELP = { id: 'ch-help', kind: 'whatsapp', name: 'Help desk', status: 'connected', chats: [
-  chat('mika', 'Mika', 'answering', { lastAt: 3, who: person('Mika', portrait(196, 30)) }),
-  chat('tess', 'Tess Alves', 'needs-someone', { lastAt: 4, unread: 2, who: person('Tess Alves', portrait(340, 26)) }),
+  chat('mika', 'Mika', 'answering', { lastAt: 3, unread: 4, who: person('Mika', portrait(196, 30)) }),
+  chat('tess', 'Tess Alves', 'needs-someone', { lastAt: 4, who: person('Tess Alves', portrait(340, 26)) }),
   chat('notes', 'Me (notes)', 'idle', { lastAt: 2, who: person('Me (notes)', null, { self: true }) }),
 ] }
 const STORE = { id: 'ch-store', kind: 'telegram', name: 'Storefront', status: 'connected', chats: [chat('order', 'Order 1042', 'idle', { lastAt: 1, who: person('Order 1042', portrait(150, 32)) })] }
