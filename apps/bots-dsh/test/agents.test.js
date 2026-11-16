@@ -678,6 +678,19 @@ test('create_bot kind dsh takes the UI DSH path: native preset and wiring, not a
   }
 })
 
+test('create_bot kind dsh keeps the creator\'s tool deny list too', async (t) => {
+  const { call, stop, ctx, restricted } = start({ ...TEAM, bots: { m1: { ...TEAM.bots.m1, denyTools: ['write'] } } })
+  t.after(stop)
+  await call('state', {})
+  const rt = ctx.provided.get('omniTeam')
+  const answer = await rt.teamTools.find(d => d.name === 'create_bot').execute({ name: 'Crew Captain', role: 'C', instructions: 'C', kind: 'dsh' }, { agent: { id: 'm1' } })
+  assert.match(answer, /^Created Crew Captain/)
+  const bot = rt.findBot('Crew Captain')
+  assert.deepEqual(bot.denyTools, ['write'])
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.ok(restricted.some(entry => entry.sessionId === bot.id && entry.filter.deny.includes('write')), JSON.stringify(restricted))
+})
+
 test('create_bot takes plain, omni and genie kinds, and refuses one it does not know', async (t) => {
   const { call, stop, ctx } = start(TEAM)
   t.after(stop)

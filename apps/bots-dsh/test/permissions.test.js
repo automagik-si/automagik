@@ -517,6 +517,20 @@ test('a Bot made by a full-access Bot starts at full access and is told so', asy
   assert.deepEqual(presets(writer.id), ['danger-full-access'])
 })
 
+// Reusing the UI's dsh creation path must not drop the narrowing every create_bot makes:
+// a read-only Main Bot cannot make a DSH Bot that runs wider than itself.
+test('create_bot kind dsh still starts at its creator\'s level', async (t) => {
+  const { ctx, call, service, presets, settle } = team(t, { custom: READ_ONLY, bots: { m1: { permission: 'careful' } } })
+  const answer = await createBotTool(ctx, { name: 'Native Captain', kind: 'dsh' })
+  assert.match(answer, /^Created Native Captain/)
+  const bot = await botNamed(call, 'Native Captain')
+  assert.equal(bot.kind, 'dsh')
+  assert.equal(bot.permission, 'careful')
+  await settle()
+  assert.deepEqual(presets(bot.id), ['careful'])
+  assert.equal(service.current({ id: bot.id }), 'careful')
+})
+
 test('a Bot made by a read-only Bot starts read-only, and one by a Bot without a level at the default', async (t) => {
   const custom = { careful: { sandbox: 'read-only', approval: 'ask' } }
   const { ctx, call, presets, settle } = team(t, { custom, bots: { m1: { permission: 'careful' } } })

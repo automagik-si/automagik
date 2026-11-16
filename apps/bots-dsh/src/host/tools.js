@@ -388,6 +388,13 @@ export function install(rt) {
         // and lay a prompt over it, so the persona, plugin wiring and defaults are the
         // same. Its name is all a native identity keeps; the preset owns the rest.
         if (kind === 'dsh') {
+          // Narrowing is not part of the dsh identity, so it stays: a read-only or
+          // tool-limited Main Bot must not open a wider native Session. The level is read
+          // before the Bot exists, so one that cannot be given refuses the create with
+          // nothing to clean up; the already-open Session takes both now.
+          const creator = callerBot(exec)
+          const permission = creator === undefined ? undefined
+            : rt.inheritedPermission(creator, { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }) ?? state.prefs.permission
           const agent = await rt.addAgent({
             name,
             ...(workDir === undefined ? {} : { workDir }),
@@ -396,6 +403,12 @@ export function install(rt) {
           })
           const bot = rt.botOf(agent.adoptedBotId) ?? rt.findBot(name)
           if (bot === undefined) throw new Error('the new DSH Bot did not join the team')
+          const carried = Array.isArray(creator?.denyTools) ? creator.denyTools : []
+          if (permission !== undefined) bot.permission = permission
+          if (carried.length > 0) bot.denyTools = [...carried]
+          if (permission !== undefined || carried.length > 0) await rt.save({ required: true })
+          if (permission !== undefined) await rt.applyPermission(bot, bot.id).catch(error => rt.warn('ds-bot: permission for %s not applied: %s', bot.name, error))
+          if (carried.length > 0) await rt.applyToolDeny(bot).catch(error => rt.warn('ds-bot: the denied tools of %s not applied: %s', bot.name, error))
           return `Created ${bot.name}${workDir ? `, working in ${workDir}` : ''}. It runs on its DSH preset.`
         }
         const avatar = args.avatar ? await readAvatar(String(args.avatar), { baseDir: rt.sessionFolder?.(exec.agent?.session ?? exec.agent), isData: rt.inData }) : undefined
