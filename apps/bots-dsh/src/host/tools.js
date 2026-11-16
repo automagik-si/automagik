@@ -15,7 +15,7 @@ import { checkShownView, showViewDescription, showViewParameters } from 'deep-vi
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
 export const GROUP_REF = { type: 'string', required: true, description: 'Exact group chat name from list_bots' }
 const BLOCKING_QUESTION_TOOL = 'ask_user_question'
-// A Bot's own chat runs DSH's goal: the loop Felipe asked for is this one, and
+// A Bot's own chat runs DSH's goal: the loop the team asked for is this one, and
 // create_goal/update_goal are how the Bot reports its round and finishes. A group
 // Session hides them, because Omni has its own group goals.
 const GOAL_TOOLS = ['create_goal', 'update_goal', 'get_goal']

@@ -225,7 +225,7 @@ test('a goal started in a group Session is blocked; a Bot\'s own chat and elsewh
   await new Promise(resolve => setTimeout(resolve, 20))
   assert.deepEqual(goals.blocked.map(entry => entry.sessionId), ['room', 'room-writer'])
   for (const entry of goals.blocked) assert.deepEqual([entry.code, entry.message], ['not-supported', "A group Session does not run /goal: set the group's goal with Set a goal in its + menu, or with the group_goal tool."])
-  // The loop Felipe asked for: a Bot's own chat keeps its goal, and so does a DSH Agent Session.
+  // The loop the team asked for: a Bot's own chat keeps its goal, and so does a DSH Agent Session.
   for (const id of ['writer', 'plain']) assert.equal(goals.current.get(id).phase, 'active')
 })
 
