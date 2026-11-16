@@ -80,17 +80,17 @@ export function SettingsCall({ args, done, content, isError, roster, actions }) 
 }
 
 export const SETTINGS_CARD_CSS = `
-.bt-setcard{width:100%;max-width:640px;border:1px solid var(--bt-line);border-radius:12px;background:var(--bt-card,var(--bt-bg));overflow:hidden}
-.bt-setcard-head{display:flex;align-items:center;gap:8px;padding:8px 10px 8px 6px}
-.bt-setcard-toggle{all:unset;cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;min-width:0;padding:2px 4px;border-radius:10px}
-.bt-setcard-toggle:focus-visible{outline:2px solid var(--bt-accent)}
-.bt-setcard-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:8px;background:var(--bt-hover);color:var(--bt-ink-2);flex:none}
+.bt-setcard{width:100%;max-width:640px;border:1px solid var(--st-line,var(--bt-line));border-radius:var(--st-r-dialog,24px);background:var(--st-paper,var(--bt-card));overflow:hidden}
+.bt-setcard-head{display:flex;align-items:center;gap:8px;padding:10px 14px 10px 10px}
+.bt-setcard-toggle{all:unset;cursor:pointer;display:flex;align-items:center;gap:10px;flex:1;min-width:0;padding:2px 4px;border-radius:var(--st-r-menu,14px)}
+.bt-setcard-toggle:focus-visible{outline:3px solid var(--st-ring,var(--bt-accent));outline-offset:3px}
+.bt-setcard-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:var(--st-r-seg,8px);background:var(--bt-hover);color:var(--bt-ink-2);flex:none}
 .bt-setcard-text{display:flex;flex-direction:column;min-width:0}
 .bt-setcard-kicker{font-size:11px;color:var(--bt-ink-3)}
 .bt-setcard-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bt-setcard-note{font-size:12px;color:var(--bt-ink-2)}
 .bt-setcard-chev{margin-left:auto;color:var(--bt-ink-3);transition:transform .15s}
 .bt-setcard[data-open] .bt-setcard-chev{transform:rotate(90deg)}
-.bt-setcard-body{border-top:1px solid var(--bt-line);padding:12px 14px;max-height:480px;overflow:auto}
+.bt-setcard-body{border-top:1px solid var(--st-line,var(--bt-line));padding:12px 14px;max-height:480px;overflow:auto}
 .bt-setcard-missing{margin:0;color:var(--bt-ink-2)}
 `
