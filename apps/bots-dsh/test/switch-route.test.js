@@ -102,6 +102,14 @@ test('an active goal moves to the fresh part with the rounds it has left', async
   assert.deepEqual(b.calls.goals, [['s2', { objective: 'ship the release', maxGoalRounds: 250 }]])
 })
 
+// "New session" in a Bot's chat takes the same path with no model call, so the goal follows too.
+test('a manual new part carries the goal as well', async () => {
+  const b = bench({ goal: { id: 'goal-1', revision: 1, objective: 'ship the release', phase: 'active', maxGoalRounds: 40, roundsStarted: 2 } })
+  assert.equal(await b.rt.newPart('s1'), true)
+  await waitFor(() => b.calls.goals.length === 1)
+  assert.deepEqual(b.calls.goals, [['s2', { objective: 'ship the release', maxGoalRounds: 38 }]])
+})
+
 test('a goal that is not active, or a part with no goal, carries nothing', async () => {
   for (const scenario of [
     { name: 'paused', goal: { id: 'goal-1', revision: 2, objective: 'ship', phase: 'paused', maxGoalRounds: 256, roundsStarted: 1 } },
