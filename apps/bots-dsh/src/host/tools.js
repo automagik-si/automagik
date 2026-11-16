@@ -11,6 +11,7 @@ import { NAME_MAX } from './requests.js'
 import { unquote } from './text.js'
 import { mentionSpans } from '../shared/mentions.js'
 import { checkShownView, showViewDescription, showViewParameters } from 'deep-view/core'
+import { SHOWABLE_PAGES, isShowablePage } from '../shared/settings-pages.js'
 
 export const output = { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] }
 export const GROUP_REF = { type: 'string', required: true, description: 'Exact group chat name from list_bots' }
@@ -854,6 +855,47 @@ export function install(rt) {
       rt.cardShown?.(id, 'view', title)
       exec.concludeTurn?.()
       return 'The view is on screen; the user\'s answer arrives as their next message.'
+    },
+  }))
+
+  // A page of the team's Settings as a card in the Bot's own chat (settings-card.js): the
+  // same page the Settings dialog draws, live, saving through the same actions. It changes
+  // nothing itself, and every change on it is the user's click: a Bot can show a setting
+  // only the user may change, such as the tools it is denied, but never change it.
+  rt.teamTools.push(defineTool({
+    name: 'show_settings',
+    description: 'Show the user a page of the team\'s Settings as a card in your own chat, so they can see and change it without leaving the chat. The card is the real Settings page, live: what they change there is saved as in Settings, and only their own clicks change it. Use it when the user wants to see or change something set up in Automagik, and for what only the user may change (the tools a Bot is denied, who may send, keys, permissions). Name a Bot to open its own settings (page bots), its scheduled tasks (schedules) or its usage (usage); name a group to open its settings (page groups). A page another plugin adds is plugin:<id>. It does not end your turn.',
+    parameters: {
+      page: { type: 'string', required: true, description: `Which page: ${SHOWABLE_PAGES.join(', ')}, or plugin:<id> for a page another plugin adds` },
+      bot: { type: 'string', description: 'Exact Bot name from list_bots, for page bots, schedules or usage' },
+      group: { type: 'string', description: 'Exact group chat name, for page groups' },
+      note: { type: 'string', description: 'One short line shown on the card: what to look at or change there' },
+    },
+    output,
+    async execute(args, exec) {
+      await rt.load()
+      const id = exec.agent?.id
+      if (rt.groupOwners.has(id)) return 'Settings cards only work in your own chat. In a group, say where the setting is instead.'
+      if (!rt.chatOwners.has(id)) return 'Only Bots on the team can use show_settings.'
+      const page = String(args.page ?? '').trim()
+      if (!isShowablePage(page)) return `No Settings page named ${JSON.stringify(page)}. Pick one of ${SHOWABLE_PAGES.join(', ')}, or plugin:<id>.`
+      const named = []
+      if (args.bot !== undefined && String(args.bot).trim() !== '') {
+        if (!['bots', 'schedules', 'usage'].includes(page)) return 'Name a Bot only with page bots, schedules or usage.'
+        const bot = rt.findBot(String(args.bot))
+        if (bot === undefined) return `No Bot named ${args.bot}.`
+        named.push(bot.name)
+      }
+      if (args.group !== undefined && String(args.group).trim() !== '') {
+        if (page !== 'groups') return 'Name a group only with page groups.'
+        const rooms = rt.findRooms(String(args.group))
+        if (rooms.length === 0) return `No group chat named ${args.group}.`
+        if (rooms.length > 1) return `More than one group chat is named ${args.group}; ask the user which one.`
+        named.push(rooms[0].name)
+      }
+      const note = String(args.note ?? '').trim()
+      if (note.length > 200) return 'Keep the note to one short line (200 characters at most).'
+      return `Showing Settings → ${page}${named.length ? ` (${named.join(', ')})` : ''} in the chat. The user changes it there; nothing has changed yet.`
     },
   }))
 

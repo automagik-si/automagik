@@ -350,6 +350,10 @@ const ZH = {
   'Its own tools run there under its own rules; this computer’s sandbox does not protect that machine.': '它的工具按照它的规则在那台电脑上运行；本机沙箱无法保护那台电脑。',
   'Chat with a Hermes agent on another computer.': '与另一台电脑上的 Hermes 智能体聊天。',
   'Remote Hermes': '远程 Hermes',
+  // The show_settings card (settings-card.js)
+  'Settings: {title}': '设置：{title}',
+  'Open in Settings': '在设置中打开',
+  "This page is not in this window's Settings.": '此窗口的设置中没有这个页面。',
   'Off by default. Set up Remote Hermes in Bot settings.': '默认关闭。请在 Bot 设置中设置远程 Hermes。',
   'No models are known for this connection yet. Manage the connection to list them.': '此连接尚不清楚有哪些模型。请管理连接以列出模型。',
   'Manage connection…': '管理连接…',

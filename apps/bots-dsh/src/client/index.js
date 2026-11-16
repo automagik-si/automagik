@@ -49,6 +49,8 @@ import { headerNavigation, installHeaderNavigation } from './header-navigation.j
 import { AssistantCell, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
+import { SETTINGS_CARD_CSS, setSettingsPages } from './settings-card.js'
+import { PAGE_ICONS, PageBoundary, SettingsPage } from './settings.js'
 import { createBotBrowsers, serveBrowserReads } from './bot-browsers.js'
 import { BROWSER_CSS } from './browser-pane.js'
 import { SECRET_CSS, SecretDock } from './secret-card.js'
@@ -1180,6 +1182,8 @@ export function apply(ctx) {
     () => installCompiledStyles(GOAL_CSS, 'goal'),
     () => installCompiledStyles(USER_MESSAGE_CSS, 'user-messages'),
     () => installCompiledStyles(TASK_CSS, 'tasks'),
+    () => installCompiledStyles(SETTINGS_CARD_CSS, 'settings-card'),
+    () => setSettingsPages({ PAGE_ICONS, PageBoundary, SettingsPage }),
     () => installCompiledStyles(DESKTOP_UPDATE_CSS, 'desktop-update'),
     () => installCompiledStyles(WORK_CODE_SWITCH_CSS, 'work-code-switch'),
     () => installCompiledStyles(PRIVACY_CSS, 'privacy'),

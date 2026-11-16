@@ -31,6 +31,7 @@ import { layoutOf, thinkingShown } from './themes.js'
 import { hasCanvas, splitCanvases } from './canvas-text.js'
 import { CanvasSlot } from './canvas-slot.js'
 import { TaskCard, endLabel } from './task-card.js'
+import { SettingsCall } from './settings-card.js'
 import { toolCards } from './extend.js'
 
 export { clockLabel }
@@ -1138,7 +1139,7 @@ function GroupReplies({ sessionId, callId, done, content, roster, actions, useUi
 // its sub-calls, so a call draws by its own name wherever it sits in the tree.
 // Another Omni plugin's tools draw when they register a card (extend.js).
 const isComputerCall = name => name === 'cua' || name?.startsWith('cua_driver_native__') === true
-const DRAWN = new Set(['start_task', 'message_bot', 'stop_bot', 'create_bot', 'update_bot', 'delete_bot', 'group_relay', 'create_group', 'update_group', 'delete_group', 'post_to_group', 'ask_user', 'request_secret', 'request_connector', 'mail_send', 'ask_user_question', 'show_view', 'browser_handoff', 'read_group_chat', 'remember', 'forget', 'generate_image'])
+const DRAWN = new Set(['start_task', 'message_bot', 'stop_bot', 'create_bot', 'update_bot', 'delete_bot', 'group_relay', 'create_group', 'update_group', 'delete_group', 'post_to_group', 'ask_user', 'request_secret', 'request_connector', 'mail_send', 'ask_user_question', 'show_view', 'show_settings', 'browser_handoff', 'read_group_chat', 'remember', 'forget', 'generate_image'])
 // Calls whose card a dock above the composer carries when the call is not drawn.
 const CARDS = new Set(['ask_user', 'request_secret', 'request_connector', 'mail_send', 'show_view', 'browser_handoff', 'computer_handoff'])
 // An image an agent makes with its own tool draws as the image card (image-cell.js).
@@ -1252,6 +1253,8 @@ function renderCall(call, { sessionId, roster, actions, useUi, useWork, useSessi
     }
     case 'show_view':
       return h(WidgetCell, { sessionId, callId: call.callId, args: { text: arg, value: argValue }, done, isError: call.isError, roster, actions, heldCards })
+    case 'show_settings':
+      return h(SettingsCall, { args: { text: arg, value: argValue }, done, content: done ? contentText(call.content) : '', isError: call.isError, roster, actions })
     case 'generate_image':
       // The chat's own Bot paints (image-cell.js painterOf); a group chat has none, so the mark does.
       return h(ImageCell, { bot: self, callId: call.callId, prompt: arg('prompt'), size: arg('size'), done, content: done ? contentText(call.content) : '', isError: call.isError, onAsk: askHere })
