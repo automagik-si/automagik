@@ -31,7 +31,14 @@ const drawn = (name: string) => clients.some((text) => new RegExp(`className:[^,
 describe('boot-check waits only for what a client draws', () => {
   test('it waits for the welcome, the team rows and the Connect AI list', () => {
     expect(waited.length).toBeGreaterThanOrEqual(4);
-    expect(classes).toEqual(expect.arrayContaining(['oai-stage', 'bt-row', 'lb-row', 'oai-acp']));
+    expect(classes).toEqual(expect.arrayContaining(['oai-stage', 'lb-row', 'oai-acp']));
+  });
+
+  test('every onboarding step it marks done is one the welcome knows', () => {
+    const steps = JSON.parse(script.match(/const DONE_STEPS = (\[[^\]]*\])/)![1].replaceAll("'", '"'));
+    const host = readFileSync(join(APPS, 'welcome-dsh', 'src', 'host', 'endpoint.js'), 'utf8');
+    const flags = Object.keys(JSON.parse(host.match(/export const FLAGS = (\{[^}]*\})/)![1].replaceAll("'", '"')));
+    expect([...steps].sort()).toEqual([...flags].sort());
   });
 
   for (const name of classes) {

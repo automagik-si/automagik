@@ -26,6 +26,9 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(join(ROOT, 'package.json'))
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, arg, i, all) => (arg.startsWith('--') ? [...pairs, [arg.slice(2), all[i + 1]]] : pairs), []))
+// The welcome's onboarding steps (welcome-dsh host endpoint.js FLAGS): marking each done is what
+// finishing it does, so the second page is the app after onboarding.
+const DONE_STEPS = ['omni-companion', 'omni-team', 'omni-welcome', 'omni-migrate', 'omni-connect', 'omni-connect-ai']
 const say = line => console.log(`[boot-check] ${line}`)
 const readJson = file => JSON.parse(readFileSync(file, 'utf8'))
 const env = { ...process.env, DO_NOT_TRACK: '1', npm_config_fund: 'false', npm_config_audit: 'false', npm_config_update_notifier: 'false' }
@@ -197,7 +200,7 @@ async function acpShots(browser, url, dir, problems) {
   // After onboarding: Settings → Claude Code and Codex.
   const page = await open(ACP_STATES.ready, { companionDone: true, teamDone: true, connectOmniSkipped: true, connectAiDone: true, welcomeDone: true })
   try {
-    await page.locator('.bt-row, .lb-row').first().waitFor({ timeout: 90_000 })
+    await page.locator('.lb-row').first().waitFor({ timeout: 90_000 })
     await page.waitForTimeout(3000)
     // DSH's own onboarding steps (its Preview Notice, a DeepSeek sign-in) go first.
     for (let i = 0; i < 4; i++) {
@@ -317,10 +320,10 @@ try {
       if (message.type() === 'error' && /client-modules|did not activate|not loaded because/.test(message.text())) problems.push(`console: ${message.text()}`)
     })
     await page.goto(url)
-    // The welcome's stage (first run: stage.js, every onboarding step) or the Bot team's sidebar:
-    // the narrow rail's rows or the new left bar's. scripts/boot-check-selectors.test.ts keeps
-    // every class waited on here drawn by a client, so a rename fails a test, not the boot.
-    await page.locator('.oai-stage, .bt-row, .lb-row').first().waitFor({ timeout: 90_000 }).catch(() => problems.push('neither the welcome nor the Bot team showed'))
+    // Two pages, each checked on its own. First run: the welcome's stage (stage.js, every
+    // onboarding step). scripts/boot-check-selectors.test.ts keeps every class waited on here
+    // drawn by a client, so a rename fails a test, not the boot.
+    await page.locator('.oai-stage').first().waitFor({ timeout: 90_000 }).catch(() => problems.push('the first-run welcome did not show'))
     await page.waitForTimeout(3000)
     const entries = await page.evaluate(() => (window.__DSH_BOOT__?.entries ?? []).map(row => row.id ?? row.name))
     const body = await page.evaluate(() => document.body.innerText)
@@ -330,6 +333,22 @@ try {
     say(`client graph: ${entries.filter(id => id.startsWith('@automagik/')).join(', ')}`)
     await checkAcp(page, problems)
     if (args['acp-shots']) await acpShots(browser, url, resolve(args['acp-shots']), problems)
+    // After onboarding: every step marked done through the welcome's own call (stage.js
+    // request('done'), what finishing a step sends), in this run's scratch home; then the open
+    // sidebar must show the team's rows in the new left bar (the window is wide, so the narrow
+    // rail is not drawn).
+    const marked = await page.evaluate(ids => Promise.all(ids.map(stepId => fetch('api/omni-ai', {
+      method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ endpoint: 'done', payload: { stepId } }),
+    }).then(response => response.json()).then(answer => answer.ok === true, () => false))), DONE_STEPS)
+    if (!marked.every(Boolean)) problems.push(`onboarding could not be marked done: ${DONE_STEPS.filter((_, i) => !marked[i]).join(', ')}`)
+    await page.reload()
+    const team = await page.locator('.lb-row').first().waitFor({ timeout: 90_000 }).then(() => true, () => false)
+    if (!team) problems.push('after onboarding the Bot team did not show')
+    await page.waitForTimeout(1500)
+    if (await page.locator('.oai-stage').count() > 0) problems.push('after onboarding the welcome still shows')
+    if (args.shot) await page.screenshot({ path: resolve(args.shot).replace(/(\.png)?$/, '-team.png') })
+    if (team) say('after onboarding: the Bot team showed')
     // A host-only plugin shows no trace in the page when its apply throws; DSH's log does.
     for (const line of log.split('\n')) if (/acp-dsh/.test(line) && /error|fail|throw/i.test(line)) problems.push(`dsh log: ${line.trim().slice(0, 300)}`)
     for (const problem of problems) say(`FAIL ${problem}`)
