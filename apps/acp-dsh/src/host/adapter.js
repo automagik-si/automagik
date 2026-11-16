@@ -227,18 +227,30 @@ function roomUploads(row, saved, session, ctx) {
   if (!fresh(row) || !fresh(saved) || uploads?.v !== 1 ||
       typeof uploads.roomId !== 'string' || !Array.isArray(uploads.items) ||
       !isDeepStrictEqual(saved.source.uploads, uploads)) return []
-  let group
+  const groups = []
   try {
     if (!ownsRoomUploads(ctx, session, uploads.roomId)) return []
-    group = ctx.agents?.get(uploads.roomId)?.session?.deriveMessages?.()
+    const team = ctx.get('omniTeam')
+    const room = team.roomOf(uploads.roomId)
+    // room.id stays fixed while room.sessionId follows the current part.
+    const current = typeof team.sessionOfRoom === 'function' ? team.sessionOfRoom(room) : (room.sessionId ?? room.id)
+    const parts = Array.isArray(room.parts) ? room.parts.map(part => part?.sessionId).reverse() : []
+    const ids = new Set([current, ...parts, room.id].filter(id => typeof id === 'string'))
+    for (const id of ids) {
+      const group = ctx.agents?.get(id)?.session?.deriveMessages?.()
+      if (Array.isArray(group)) groups.push(group)
+    }
   } catch { return [] }
-  if (!Array.isArray(group)) return []
   return uploads.items.flatMap(item => {
     if (!item || typeof item.messageId !== 'string' ||
         typeof item.attachmentId !== 'string' ||
         !Number.isInteger(item.blockIndex) || item.blockIndex < 0 ||
         !['file', 'image'].includes(item.kind)) return []
-    const person = group.find(message => message.id === item.messageId)
+    let person
+    for (const group of groups) {
+      person = group.find(message => message.id === item.messageId)
+      if (person) break
+    }
     if (person?.source?.kind !== 'user' || person.source.handoff ||
         !Array.isArray(person.content) || item.blockIndex >= person.content.length) return []
     const block = person.content[item.blockIndex]
