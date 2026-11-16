@@ -1691,6 +1691,50 @@ test("am update --retry-skipped with no skip set just updates", async () => {
   } finally { h.done(); }
 });
 
+test("a legacy cause-less skip: auto waits, a newer release moves past, am update installs, --retry-skipped clears", async () => {
+  /** The state the old updater left after a rollback: a skip with no cause, and its restore receipt. */
+  const legacySkip = (mods, version = "0.2.0") => {
+    writeAuto(mods, { skip: version });
+    writeFileSync(join(stateDirOf(mods), RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: version,
+      mod: "am-tabs", failed: ["am-tabs"], checked: true, at: Date.now() }));
+  };
+  const first = autoHome(["0.2.0"]);
+  try {
+    legacySkip(first.mods);
+    // (a) An automatic update still refuses the very version the skip names.
+    const auto = await installUpdate({ keys, fetch: fakeFetch(first.table), env: {}, modsDir: first.mods,
+      expect: "0.2.0", auto: true });
+    assert.equal(auto.installed, null);
+    assert.match(auto.held, /0\.2\.0 was rolled back here/);
+    assert.equal(readVersion(join(first.mods, "am-sidebar")), "0.1.0");
+    assert.deepEqual(readAuto(first.mods), { on: true, skip: "0.2.0" }, "an automatic update leaves the skip");
+    // (b) A newer release is past the skip and installs on its own.
+    first.serve("0.3.0");
+    const newer = await installUpdate({ keys, fetch: fakeFetch(first.table), env: {}, modsDir: first.mods,
+      expect: "0.3.0", auto: true });
+    assert.equal(newer.installed.version, "0.3.0");
+    assert.equal(readVersion(join(first.mods, "am-sidebar")), "0.3.0");
+  } finally { first.done(); }
+  const second = autoHome(["0.2.0"]);
+  try {
+    legacySkip(second.mods);
+    // (c) Asked for by hand, the skipped release installs; the record stays as it was.
+    const plain = await installUpdate({ keys, fetch: fakeFetch(second.table), env: {}, modsDir: second.mods, expect: "0.2.0" });
+    assert.equal(plain.installed.version, "0.2.0");
+    assert.deepEqual(readAuto(second.mods), { on: true, skip: "0.2.0" }, "a plain update leaves the record");
+  } finally { second.done(); }
+  const third = autoHome(["0.2.0"]);
+  try {
+    legacySkip(third.mods);
+    // (d) The explicit retry clears the record and installs the release the old code skipped.
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: third.mods, env: {}, keys, fetch: fakeFetch(third.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.equal(readVersion(join(third.mods, "am-sidebar")), "0.2.0");
+    assert.deepEqual(readAuto(third.mods), { on: true, skip: null }, "the cause-less skip is cleared");
+    assert.equal(existsSync(join(stateDirOf(third.mods), RESTORE_FILE)), false, "and the old receipt is gone");
+  } finally { third.done(); }
+});
+
 test("a judged failed mod wins over a later killed check: restore and one notice", async () => {
   const h = autoHome(["0.2.0"]);
   const app = fakeCheckFailThenKill(join(h.home, "mixed"));
