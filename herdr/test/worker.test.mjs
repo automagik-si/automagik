@@ -220,6 +220,23 @@ test("M4: switch off keeps the complete worker argv byte for byte against C1", (
     .split(GUARD_DIR).join("<guard>")), baseline);
 });
 
+test("worker --agent-home puts the agent's vendor config folder on the launch and nothing else (#1208)", (t) => {
+  const s = scene(t);
+  const home = join(s.root, "codex-home");
+  mkdirSync(home);
+  const plain = s.cli(["worker", "do the plain task", "--branch", "feat/plain", "--json"]);
+  assert.equal(plain.code, 0, plain.err);
+  const withHome = s.cli(["worker", "do the home task", "--branch", "feat/with-home", "--agent-home", home, "--json"]);
+  assert.equal(withHome.code, 0, withHome.err);
+  const runs = s.runs();
+  const without = runs[runs.length - 2];
+  const pointed = runs[runs.length - 1];
+  // The bot's worker default is Codex, so the one variable is CODEX_HOME.
+  assert.equal(without.some((word) => word.startsWith("CODEX_HOME=")), false, JSON.stringify(without));
+  assert.deepEqual(pointed.filter((word) => word.startsWith("CODEX_HOME=")), [`CODEX_HOME=${home}`], JSON.stringify(pointed));
+  assert.equal(pointed.some((word) => word.startsWith("CLAUDE_CONFIG_DIR=")), false);
+});
+
 test("M7: fixture pane edits cannot disable the approved switch at the next worker start",
   { skip: process.platform !== "linux" }, (t) => {
   for (const remove of [false, true]) {

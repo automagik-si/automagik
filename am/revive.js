@@ -7,6 +7,17 @@
 
 import { unwrapKeep } from "./launchArgs.js";
 
+/**
+ * The `restart` command revive runs for one bot: its pane and helpers, resumed. `agentHome` is
+ * passed on when the pass was given `--agent-home`, so every launch it makes uses that login
+ * home; `fresh` is the second try after a resume refusal. Pure, so the flag's carry-through is
+ * tested without hc.
+ */
+export function reviveRestartArgs({ botId, project, agentHome = null, fresh = false }) {
+  return ["restart", botId, "--project", project, "--tree", "--revive", ...(agentHome ? ["--agent-home", agentHome] : []),
+    ...(fresh ? ["--fresh"] : []), "--json"];
+}
+
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "fish", "ksh"]);
 const base = (p) => String(p ?? "").split("/").pop();
 

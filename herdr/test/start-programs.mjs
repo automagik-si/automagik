@@ -111,6 +111,23 @@ export function startProgramsTests(cli) {
       assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
     });
   }
+  for (const agent of ["codex"]) test(`restart --agent-home: a local ${agent} launch points at the chosen home`, (t) => {
+    const s = scene(t, cli, agent, false, false);
+    s.live();
+    const home = join(s.root, `${agent}-home`);
+    mkdirSync(home);
+    const r = s.run(["restart", id, "--agent-home", home]);
+    assert.equal(r.status, 0, r.stderr);
+    const launch = s.calls().filter((call) => call[0] === "run").at(-1);
+    const variable = agent === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
+    assert.ok(launch.includes(`${variable}=${home}`), JSON.stringify(launch));
+    assert.equal(launch.filter((word) => word.startsWith(`${variable}=`)).length, 1);
+    if (agent === "claude") {
+      assert.equal(launch.includes("-u"), false, "the chosen home is set, never unset");
+      assert.equal(launch.filter((word) => word.startsWith("CODEX_HOME=")).length, 0);
+    }
+  });
+
   for (const mode of ["tree", "end", "partial"]) test(`programs fixture: linked paired helper restart ${mode}`, (t) => {
     const tree = mode !== "end";
     const s = scene(t, cli, "hermes", true, true);
