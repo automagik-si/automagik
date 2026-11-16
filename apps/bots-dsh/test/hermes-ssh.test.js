@@ -329,17 +329,49 @@ test('a version that names no release is reported as it is, not guessed', async 
   }
 })
 
-test('our supervisor bounds the remote lease with heartbeats even when SSH stdin stays open', async t => {
+test('our supervisor bounds the remote lease with heartbeats even when SSH stdin stays open', { timeout: 30000 }, async t => {
   const f = await fixture(t, 'runtime-ready')
   const hermesPath = await fakeRuntime(f)
   const { spawn } = await import('node:child_process')
+  const opened = performance.now()
+  let resolveClosed
+  const closedFrame = new Promise(resolve => { resolveClosed = resolve })
   const connection = await f.open({ ...f.config, hermesPath }, { spawn: (...args) => {
     const child = spawn(...args)
+    let stopped = false, received = '', closed = false
+    const errors = []
+    // A local stop also closes the start script, so record every way to request one.
+    for (const [target, method] of [[child.stdin, 'end'], [child.stdin, 'destroy'], [child, 'kill']]) {
+      const original = target[method].bind(target)
+      target[method] = (...values) => { stopped = true; return original(...values) }
+    }
     const write = child.stdin.write.bind(child.stdin)
-    child.stdin.write = (data, ...rest) => data === 'ping\n' ? true : write(data, ...rest)
+    child.stdin.write = (data, ...rest) => {
+      if (String(data).includes('close')) stopped = true
+      return data === 'ping\n' ? true : write(data, ...rest)
+    }
+    // Listen before the product: its cleanup may end stdin after this frame arrives.
+    child.stdout.on('data', chunk => {
+      if (closed) return
+      received += String(chunk)
+      let newline
+      while ((newline = received.indexOf('\n')) >= 0) {
+        const line = received.slice(0, newline); received = received.slice(newline + 1)
+        let frame
+        try { frame = JSON.parse(line) } catch { continue }
+        if (frame?.type === 'error') errors.push(frame)
+        if (frame?.type === 'closed') {
+          closed = true
+          resolveClosed({ stopped, errors: [...errors] })
+          return
+        }
+      }
+    })
     return child
   } })
-  await waitFor(async () => (await f.records()).some(record => record.event === 'runtime-stop'))
+  const [, ended] = await Promise.all([f.untilRecord(records => records.some(record => record.role === 'supervisor' && record.event === 'closed')), closedFrame])
+  assert.ok(performance.now() - opened < 15000, 'the start script stopped on the handed 3000 ms lease, not on its 15 s default')
+  assert.deepEqual(ended, { stopped: false, errors: [] }, 'the lease alone ended the start script: no local stop and no fault frame before its closed frame')
   await connection.close()
   for (const { pid } of (await f.records()).filter(record => record.event === 'spawn' || record.event === 'runtime-start')) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
 })

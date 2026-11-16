@@ -4,7 +4,7 @@ import { call as api } from './api.js'
 import { HermesMark, HERMES_MARK_CSS } from './hermes-mark.js'
 import { CheckIcon, CloseIcon, ShieldIcon } from './icons.js'
 import { useEscape } from './overlay-hooks.js'
-import { t } from './i18n.js'
+import { hostText, t } from './i18n.js'
 
 const EMPTY_SSH = { host: '', user: '', port: '', identityFile: '', hermesPath: '', hermesHome: '' }
 // SSH is the way in unless a connection by address was saved.
@@ -106,6 +106,7 @@ function SshHostPicker({ host, onPick }) {
 // What the host kept of one failed SSH connection, for its own screen. Every field is
 // shaped again here: a value the page cannot show safely is dropped, never rendered.
 const shortText = (value, max = 255) => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value) ? value : ''
+const profileText = value => shortText(value, 100) && value.trim() === value && !/[\/\\]/.test(value) ? value : ''
 const lineRows = value => (Array.isArray(value) ? value : []).map(line => shortText(line, 240)).filter(Boolean).slice(-8)
 const release = value => /^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(value ?? '') ? value : ''
 // How Hermes is updated where it runs, by the install kind its own "--version" names
@@ -130,6 +131,7 @@ function failureFacts(value) {
     identities: (Array.isArray(value.identities) ? value.identities : []).filter(name => /^[\w.@+-]{1,64}$/.test(name ?? '')).slice(0, 6),
     agentKeys: count('agentKeys') ?? 0, port: count('port'), exit: count('exit'), errno: count('errno'), line: count('line'),
     ssh: lineRows(value.ssh), hermes: lineRows(value.hermes), unsaved: value.unsaved === true, mismatch: value.mismatch === true,
+    profile: profileText(value.profile), profileName: profileText(value.profileName),
     version: release(value.version), minimum: release(value.minimum), install: /^[a-z0-9-]{1,32}$/.test(value.install ?? '') ? value.install : '',
   }
 }
@@ -147,6 +149,11 @@ function errorFor(error, draft, detail, minimum) {
   const facts = failureFacts(detail)
   if (!facts.minimum) facts.minimum = release(minimum)
   const base = screenFor(code, draft, facts)
+  // A failed status read must not hide the named refusal the API already translated.
+  if (code === 'bot/hermes-attach-profile' && !detail && !facts.profile && typeof error?.message === 'string' && error.message) {
+    const plain = 'This connection’s saved Hermes profile is not served there. Choose a profile again before connecting.'
+    if (error.message !== plain && error.message !== hostText(plain)) base.text = error.message
+  }
   if (!base.ssh) return base
   const host = shortText(draft?.ssh?.host?.trim?.() ?? '')
   const rows = [...(base.rows ?? [])]
@@ -175,12 +182,16 @@ function screenFor(code, draft, facts) {
   }
   // Attach: the app never starts or restarts Hermes, so it says what is missing and how
   // the person starts it there.
-  if (code === 'bot/hermes-attach-profile') return {
-    heading: t('The saved profile is not served there'),
-    title: t('Choose this Hermes profile again'),
-    text: t('This connection’s saved Hermes profile is not served on that machine.'),
-    hint: t('Open the connection setup and choose a profile that Hermes serves there.'),
-    ssh: true,
+  if (code === 'bot/hermes-attach-profile') {
+    const profile = facts.profileName && facts.profileName !== facts.profile ? `${facts.profileName} (${facts.profile})` : facts.profile
+    return {
+      heading: t('The saved profile is not served there'),
+      title: facts.profile ? t('Hermes on {host} no longer serves the profile “{profile}”', { host, profile }) : t('Choose this Hermes profile again'),
+      text: facts.profile ? t('This connection saved the Hermes profile “{profile}”, which is not served on that machine.', { profile }) : t('This connection’s saved Hermes profile is not served on that machine.'),
+      hint: t('Open the connection setup and choose a profile that Hermes serves there.'),
+      ...(facts.profile ? { rows: [{ label: t('Saved profile'), value: profile }] } : {}),
+      ssh: true,
+    }
   }
   if (code === 'bot/hermes-attach-not-running' || code === 'bot/hermes-attach-record') return { heading: t('Hermes is not running there'), title: t('Start Hermes on {host}', { host }), text: t('Hermes is not running on {host}. Start it there with “hermes serve”, then try again.', { host }), hint: t('Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.', { host }), ssh: true }
   if (code === 'bot/hermes-attach-gateway') return { heading: t('Hermes is running there as a gateway'), title: t('Start “hermes serve” on {host}', { host }), text: t('The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.', { host }), hint: t('Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.', { host }), ssh: true }

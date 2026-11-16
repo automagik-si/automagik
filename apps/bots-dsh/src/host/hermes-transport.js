@@ -1,5 +1,6 @@
 // Native Hermes wire. Its public boundary is rows, questions and durable identities; no ACP SDK.
 import { redactSshText } from './hermes-redact.js'
+import { headOf } from './text.js'
 export const HERMES_DEADLINES = Object.freeze({ start: 60_000, control: 15_000, cancel: 5000 })
 export const LOST = 'Connection lost; remote outcome unknown'
 export const REPLAY_GAP = 'Some remote Hermes events could not be replayed after reconnecting. Reconnect and reconcile to see the current remote state.'
@@ -22,7 +23,7 @@ function remoteReason(...values) {
     if (typeof value !== 'string') continue
     const line = redactSshText(value).replace(/\s+/g, ' ').trim()
     if (!line) continue
-    return line.length > REASON_LIMIT ? `${line.slice(0, REASON_LIMIT - 1)}…` : line
+    return line.length > REASON_LIMIT ? `${headOf(line, REASON_LIMIT - 1)}…` : line
   }
   return undefined
 }
