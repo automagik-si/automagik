@@ -891,7 +891,9 @@ export function install(rt) {
     for (const id of picked) {
       const from = tasks()[id]?.from
       const bot = from === undefined ? undefined : state.bots?.[from]
-      if (!Array.isArray(bot?.denyTools) || bot.denyTools.length === 0) continue
+      const restricted = bot?.shell === false
+        || (Array.isArray(bot?.denyTools) && bot.denyTools.length > 0)
+      if (!restricted) continue
       try {
         await rt.revokeNewSchedules?.(from, [id])
       } catch (error) {

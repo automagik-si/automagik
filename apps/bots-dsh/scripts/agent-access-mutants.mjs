@@ -53,6 +53,14 @@ const mutants = [
     test: 'environment AUTOMAGIK_REVIEW_ENDPOINT is redacted across SDK reads, arguments and audit',
   },
   {
+    name: 'shell capability checked only in the UI',
+    source: '../src/host/tool-deny.js',
+    from: 'const noShell = bot => bot?.shell === false',
+    to: 'const noShell = () => false',
+    file: 'test/shell-capability.test.js',
+    test: 'a new private Bot gets no shell on its own chat',
+  },
+  {
     name: 'require a boundary before full credential words',
     source: '../src/host/agent-redaction.js',
     from: 'longSecretEnv.test(name)',

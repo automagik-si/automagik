@@ -63,3 +63,27 @@ test('a private Bot can always turn privacy off, and cannot become Main or be du
   assert.equal(tree.find(node => node.props?.label === 'Main Bot').props.disabled, true)
   assert.equal(tree.some(node => node.props?.onClick && node.props.className === 'bt-set-row bt-bs-row' && JSON.stringify(node).includes('Duplicate')), false)
 })
+
+test('the Shell switch shows what shell access reaches and saves the capability', () => {
+  const sentence = 'A Bot with shell access can read what the operating-system user can read.'
+  const on = settings(bot).find(node => node.props?.label === 'Shell access')
+  assert.equal(on.props.on, true)
+  assert.equal(on.props.hint, sentence)
+  assert.equal(on.props.disabled, undefined)
+  const off = settings({ ...bot, shell: false }).find(node => node.props?.label === 'Shell access')
+  assert.equal(off.props.on, false)
+  assert.equal(off.props.hint, sentence)
+
+  const calls = []
+  const roster = { mainBotIds: [], mainBotId: null, rooms: [], models: [], memory: false }
+  const tree = walk(BotSettingsForm({
+    bot,
+    roster,
+    actions: { updateBot: (id, patch) => { calls.push({ id, patch }); return Promise.resolve() } },
+    run: fn => fn,
+  }))
+  tree.find(node => node.props?.label === 'Shell access').props.onChange(false)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].id, 'b')
+  assert.equal(calls[0].patch.shell, false)
+})

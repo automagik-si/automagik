@@ -1653,6 +1653,8 @@
   "Sign-in cancelled.": "Login cancelado.",
   "The model could not be selected.": "Não foi possível selecionar o modelo.",
   "Tools": "Ferramentas",
+  "Shell access": "Acesso ao shell",
+  "A Bot with shell access can read what the operating-system user can read.": "Um Bot com acesso ao shell pode ler o que o usuário do sistema operacional pode ler.",
   "Denied tools": "Ferramentas bloqueadas",
   "Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.": "Nomes exatos de ferramentas, um por linha ou separados por vírgula, diferenciando maiúsculas de minúsculas. Vazio permite todas as ferramentas.",
   "Saved level: {level}, set for the group": "Nível salvo: {level}, definido para o grupo",

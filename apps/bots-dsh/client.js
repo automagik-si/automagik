@@ -1273,6 +1273,8 @@ var ZH = {
   "A few words on what it does.": "用几个词说明它做什么。",
   "Research, admin…": "研究、行政…",
   Tools: "工具",
+  "Shell access": "Shell 访问",
+  "A Bot with shell access can read what the operating-system user can read.": "有 shell 访问权限的 Bot 可以读取操作系统用户能读取的内容。",
   "Denied tools": "禁止使用的工具",
   "Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.": "精确的工具名，每行一个或用逗号分隔，区分大小写。留空表示允许所有工具。",
   "What this Bot does": "这个 Bot 做什么",
@@ -15317,6 +15319,12 @@ function BotSettingsForm({ bot, roster, actions, run: run2 }) {
     (0, import_react40.createElement)(
       Card2,
       { title: t("Tools") },
+      (0, import_react40.createElement)(SwitchRow, {
+        label: t("Shell access"),
+        hint: t("A Bot with shell access can read what the operating-system user can read."),
+        on: bot.shell !== false,
+        onChange: (value) => save({ shell: value })
+      }),
       (0, import_react40.createElement)(Row, {
         label: t("Denied tools"),
         hint: t("Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool."),

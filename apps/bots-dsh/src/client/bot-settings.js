@@ -202,6 +202,12 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
         h(InlineText, { label: t('Instructions'), value: bot.instructions, multiline: true, placeholder: t('What this Bot is responsible for…'), onSave: instructions => save({ instructions }) }))),
     h(BotCapabilitiesCard, { bot, roster, actions, run, Card, SwitchRow }),
     h(Card, { title: t('Tools') },
+      h(SwitchRow, {
+        label: t('Shell access'),
+        hint: t('A Bot with shell access can read what the operating-system user can read.'),
+        on: bot.shell !== false,
+        onChange: value => save({ shell: value }),
+      }),
       h(Row, {
         label: t('Denied tools'),
         hint: t('Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.'),
