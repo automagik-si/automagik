@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { DICTIONARY, hostTemplateOf } from '../src/client/i18n.js'
+import { DICTIONARY, hostText, hostTemplateOf, installLocale } from '../src/client/i18n.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const ptBR = JSON.parse(readFileSync(join(here, '..', '..', 'locale-pt-br-dsh', 'src', 'client', 'locales', 'pt-BR', 'omni-ui.json'), 'utf8'))
@@ -50,6 +50,36 @@ test('every sign-in sentence this host words is translated in zh and in pt-BR', 
     assert.equal(typeof ptBR[sentence], 'string', `pt-BR: ${sentence}`)
     assert.notEqual(ptBR[sentence], '', `pt-BR: ${sentence}`)
     assert.notEqual(ptBR[sentence], sentence, `pt-BR still English: ${sentence}`)
+  }
+})
+
+// The same check the row makes: with the interface in Chinese, hostText() words the sentence from
+// the dictionary, and the class-carrying one from its template with the class filled in.
+function fakeLocale(active) {
+  const dicts = new Map()
+  return {
+    register: (ns, locale, dict) => { dicts.set(`${ns}:${locale}`, dict); return () => dicts.delete(`${ns}:${locale}`) },
+    bind: ns => (key, params) => {
+      const text = (active === 'zh' ? dicts.get(`${ns}:zh`)?.[key] : undefined) ?? key
+      return params ? text.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match)) : text
+    },
+    getLocale: () => ({ active }),
+  }
+}
+
+test('the row words the new sentences in Chinese instead of falling back to English', () => {
+  const off = installLocale(fakeLocale('zh'))
+  try {
+    for (const sentence of SENTENCES) assert.notEqual(hostText(sentence), sentence, sentence)
+    for (const [message, template] of TEMPLATES) {
+      const filled = hostText(message)
+      assert.notEqual(filled, message, message)
+      // The class travels into the sentence unchanged.
+      assert.ok(filled.includes(message.slice(message.indexOf('(') + 1, message.indexOf(')'))), filled)
+      assert.equal(hostTemplateOf(message), template)
+    }
+  } finally {
+    off()
   }
 })
 
