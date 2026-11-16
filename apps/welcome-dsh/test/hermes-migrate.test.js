@@ -670,3 +670,32 @@ test('the Omni attach is preferred by the probe, and the t.me link only comes fr
   assert.equal(chatUrlOf(''), null)
   assert.equal(chatUrlOf(null), null)
 })
+
+test('a refused attach identifies the move only by comparing Omni\'s channels before and after', async () => {
+  for (const order of ['other-first', 'moved-first']) {
+    const script = fakeScript()
+    const team = fakeTeam()
+    const instances = [{ id: OTHER_CHANNEL, channel: 'telegram', name: 'Telegram' }]
+    const channels = fakeChannels({
+      attach: async () => {
+        const moved = { id: CHANNEL, channel: 'telegram', name: 'Telegram' }
+        if (order === 'other-first') instances.push(moved)
+        else instances.unshift(moved)
+        throw new Error('bad request')
+      },
+      instances,
+    })
+    const actions = install({ script, team, channels })
+    const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
+    assert.equal(done.phase, 'done', order)
+    assert.equal(done.result.channelId, CHANNEL, order)
+    assert.equal(done.result.hermesOff, true, order)
+    assert.ok(!done.error, order)
+    assert.ok(!script.modes.includes('restore'), order)
+    const pairing = channels.calls.filter(([name]) => name === 'omni-channel-pairing')
+    assert.ok(pairing.length > 0, order)
+    assert.ok(pairing.every(([, body]) => body.id === CHANNEL), order)
+    assert.ok(!pairing.some(([, body]) => body.id === OTHER_CHANNEL), order)
+    assert.ok(!channels.calls.some(([name]) => name === 'omni-channel-act'), order)
+  }
+})
