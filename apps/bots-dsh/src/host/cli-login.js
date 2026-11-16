@@ -90,6 +90,42 @@ const ERRORS = {
   // the shape of it without naming a path a person has to paste anywhere.
   'acp-login/terminal': 'This coding agent signs in from its own terminal. Run its sign-in command there, then try again.',
 }
+// acp-dsh refuses the sign-in with its own fixed sentences: an account change another live
+// instance holds, a home that is changing, a Bot account reset, a CLI that is not there. Its
+// sentences never carry what the CLI printed, and several of them name the one thing left to the
+// person, so the exact text is an allowlist here and nothing else is echoed. The code is the
+// fallback for a sentence this side has not seen yet.
+const ACCOUNT_FIXED = new Map([
+  ['Close other Automagik sessions before changing the Bot account.',
+    'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.'],
+  ['The Bot account is already changing. Try again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
+  ['The Bot account is changing. Try again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
+  ['The Bot account is changing. Sign in again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
+  ['The Bot account is changing.', 'The Bot account is already changing. Try again when it finishes.'],
+  ['The Bot account changed. Start this work again after signing in.', 'The Bot account changed. Sign in again.'],
+  ['The account changed since it was shown.', 'The account changed. Check it and confirm again.'],
+  ['This CLI is not signed in any more.', 'This coding agent is not signed in any more. Press Sign in again.'],
+  ['Automagik is restarting.', 'Automagik is restarting. Try again in a moment.'],
+  ['Automagik is restarting. Try again.', 'Automagik is restarting. Try again in a moment.'],
+  ['This installation keeps no account record.',
+    'This installation keeps no record of the Bot account. Sign in again; if it keeps happening, the instance needs its profile repaired.'],
+  ['The Bot account cannot be changed here.', 'The Bot account cannot be changed from this session. Use the app on this computer.'],
+  ['Install the CLI before changing accounts.', 'Install the coding agent before signing in.'],
+  ['Sign-out did not finish. Try again.', 'Signing out of the Bot account did not finish. Try again.'],
+  ['Sign-out could not be verified. Try again.', 'Signing out of the Bot account could not be verified. Try again.'],
+  ['Bot sign-in was reset. Retry sign-in in the app.', 'The Bot account was reset. Press Sign in again.'],
+])
+// The code, for a sentence this side does not know yet: every code acp-dsh can refuse a sign-in
+// with says something a person can act on.
+const ACCOUNT_SENTENCES = {
+  'acp-account/busy': 'The Bot account is busy in another Automagik session on this computer. Close it, then press Sign in again.',
+  'acp-account/unavailable': 'The Bot account cannot be changed from this session. Use the app on this computer.',
+  'acp-account/invalid': 'This sign-in is not available for this Bot.',
+  'acp-account/logout': 'Signing out of the Bot account did not finish. Try again.',
+  'acp-account/disposed': 'Automagik is restarting. Try again in a moment.',
+  'acp-account/changed': 'The account changed. Check it and confirm again.',
+  'acp-account/signed-out': 'This coding agent is not signed in any more. Press Sign in again.',
+}
 // The page branches on these two, never on their (translated) wording: an ended attempt asks the
 // agent's own sign-in first (rule 4), a restart interrupts the row.
 const ERROR_CODES = {
@@ -469,9 +505,12 @@ export function install(rt) {
       value = await service[method](...args)
     } catch (error) {
       const code = error?.code ?? ''
-      // A code the team knows says what it means; any other says which kind of failure it was,
-      // never what the CLI printed.
-      throw failed(Object.hasOwn(ERRORS, code) ? ERRORS[code] : unmappedFailure(error), Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
+      // acp-dsh's own fixed sentence first (more precise, and its text is the allowlist), then a
+      // code the team knows, then the failure class, then the one line. What the CLI printed never
+      // reaches the person: the sentence is only taken from a fixed set.
+      const sentence = ACCOUNT_FIXED.get(error?.message)
+        ?? (Object.hasOwn(ERRORS, code) ? ERRORS[code] : ACCOUNT_SENTENCES[code])
+      throw failed(sentence ?? unmappedFailure(error), Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
     }
     if (action === 'current' && (value === undefined || value === null)) {
       const choice = choiceOf(body.botId, body.provider)
