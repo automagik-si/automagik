@@ -201,6 +201,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     // Auto's judge, after every module, so it runs first (auto-judge.js installAhead).
     'on approval/request (prepend)',
     'provide omniTeam',
+    'effect omni-ui: stop the team modules',
   ])
 })
 

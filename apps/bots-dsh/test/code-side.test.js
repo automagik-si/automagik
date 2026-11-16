@@ -8,7 +8,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
 import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
+import { apply } from '../index.js'
+import { fakeContext } from './fake-ctx.js'
 import { foldAttach, readAttach } from '../src/shared/attach-record.js'
 import { foldWorkers, readWorkers } from '../src/shared/workers-journal.js'
 import { buildCodeTree, readRegistryTree, resolvePane, statusWord } from '../src/host/code-tree.js'
@@ -388,4 +391,65 @@ test('installing the Code side reads no tree: the read starts with the first Ter
   const tree = await endpoint()
   assert.equal(tree.machine.core, CORE)
   assert.ok(connects > 0, 'the first endpoint call is what reads the tree')
+})
+
+test('a real Cordis plugin stop closes an open stream and its core attach', async (t) => {
+  const f = fixture(t)
+  const team = join(f.root, 'team')
+  mkdirSync(team, { recursive: true })
+  const saved = {}
+  const env = {
+    HOME: f.root,
+    AUTOMAGIK_HOME: f.automagikHome,
+    AUTOMAGIK_BOTS_HOME: team,
+    HERDR_APP_HOME: f.appHome,
+    HERDR_HC: FAKE,
+    FAKE_CORE_TERMINALS: f.terminalsFile,
+    FAKE_CORE_LOG: f.log,
+    FAKE_CORE_KEEP_OPEN: '1',
+  }
+  for (const [key, value] of Object.entries(env)) { saved[key] = process.env[key]; process.env[key] = value }
+  t.after(() => {
+    for (const key of Object.keys(saved)) {
+      if (saved[key] === undefined) delete process.env[key]
+      else process.env[key] = saved[key]
+    }
+  })
+  // A real Cordis scope owns the plugin's effects; only the DSH services are stand-ins.
+  const outer = new Context()
+  const stub = fakeContext({})
+  let route = null
+  const register = stub.connection.fetch.register
+  stub.connection.fetch.register = (options) => {
+    if (options.path === '/api/omni-ui/code/stream') route = options
+    return register(options)
+  }
+  const innerGet = stub.get
+  stub.get = name => (name === 'connection' ? stub.connection : innerGet(name))
+  const fork = outer.plugin({
+    apply(c) {
+      stub.effect = (...args) => c.effect(...args)
+      stub.on = (...args) => c.on(...args)
+      apply(stub, { home: team, browserPlugin: false })
+    },
+  })
+  await fork
+  assert.ok(route, 'the Code stream route is registered in the real scope')
+  const response = await route.fetch(new Request(`http://127.0.0.1/api/omni-ui/code/stream?bot=${LEAD}`, { headers: { accept: 'text/event-stream', 'sec-fetch-site': 'same-origin' } }))
+  assert.equal(response.status, 200)
+  const reader = response.body.getReader()
+  await reader.read()
+  await fork.dispose()
+  assert.ok(await wait(() => readLog(f.log).some(row => row.type === 'frame' && row.channel === 7 && row.kind === 2)), 'stopping the plugin scope sends CLOSE to the core')
+  let ended = false
+  const until = Date.now() + 2000
+  while (Date.now() < until) {
+    const next = await reader.read().catch(() => ({ done: true }))
+    if (next.done) { ended = true; break }
+  }
+  assert.equal(ended, true, 'and the response stream ends')
+  for (const key of Object.keys(saved)) {
+    if (saved[key] === undefined) delete process.env[key]
+    else process.env[key] = saved[key]
+  }
 })
