@@ -95,6 +95,7 @@ async function main() {
   check(logs.includes(`automagik-web: herdr-core: serving on ${socket}`), `herdr-core did not start on ${socket}`)
   check(!/(?<![A-Za-z0-9_])token=(?!<redacted>)\S+/.test(logs), 'the launch token is in the log')
   check(/automagik-web: seeded \/data\/dsh\/profiles\/automagik-web/.test(logs), 'the first start did not seed the profile')
+  check(!/gets no per-turn briefing/.test(logs), 'the first boot still warns about the briefing hook')
   check(/automagik-web: profile automagik-web: automagik \d+\.\d+\.\d+, dsh \d+\.\d+\.\d+/.test(logs), 'no version line')
   check(!/failed to import|ERR_MODULE_NOT_FOUND/.test(logs), 'a composed plugin failed to import')
   // The real token from the 0600 launch file must not be in the log, not merely a pattern.

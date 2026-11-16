@@ -3,8 +3,8 @@
 // (am, hc, pnpm, node), the shipped CLI store's install path without a download, the real
 // #1424 seed against the real first-boot team and against a copy of that v1 roster, and the
 // skill hashes. Run by server/smoke.mjs with `docker exec`; it writes only under /tmp.
-import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { dryRunVendorClis } from './cli-store.mjs'
@@ -24,8 +24,8 @@ const say = (message) => console.log(`[in-image] ${message}`)
 const check = (condition, message) => {
   if (!condition) throw new Error(message)
 }
-const command = (file, args) => execFileSync(file, args, {
-  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000,
+const command = (file, args, options = {}) => execFileSync(file, args, {
+  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, ...options,
 }).trim()
 const versionIn = (text) => /\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/.exec(text)?.[1]
 const checkVersion = (label, output, expected) => {
@@ -61,6 +61,10 @@ async function main() {
   // The Code side's terminals live in the supervised herdr-core on the contract socket. The
   // same env reaches dsh, am and hc; here the core must answer both its status and its list.
   check(process.env.HERDR_APP_HOME === HERDR_APP_HOME, `HERDR_APP_HOME is ${process.env.HERDR_APP_HOME ?? 'unset'}, not ${HERDR_APP_HOME}`)
+  const briefingLink = join(HERDR_APP_HOME, 'automagik-herdr', 'briefing.mjs')
+  check(existsSync(briefingLink), `am self install did not create ${briefingLink}`)
+  command('/usr/bin/env', ['true'])
+  check(command('/usr/bin/printenv', ['PATH']).length > 0, 'printenv printed no PATH')
   check(process.env.XDG_RUNTIME_DIR === XDG_RUNTIME_DIR, `XDG_RUNTIME_DIR is ${process.env.XDG_RUNTIME_DIR ?? 'unset'}, not ${XDG_RUNTIME_DIR}`)
   check(coreSession === SMOKE_HC_SESSION, `HC_SESSION is ${coreSession}, not ${SMOKE_HC_SESSION}`)
   check(coreRuntime === HC_RUNTIME, `HC_RUNTIME is ${coreRuntime}, not ${HC_RUNTIME}`)
@@ -78,6 +82,32 @@ async function main() {
   check(amList?.projects?.[0]?.hcError === undefined, `am ls could not see the core: ${amList?.projects?.[0]?.hcError}`)
   check(seenBots.length === TRIAD.length, `am ls sees ${seenBots.length} bots, not ${TRIAD.length}`)
   say(`herdr-core: ${coreSocket} answered server status and ls; am sees ${seenBots.length} team bots`)
+
+  // A test Bot through am start, with a harmless fake codex, proves the image carries /usr/bin/env
+  // for am's launch and the am self-install briefing hook, without downloading a vendor CLI.
+  const startDir = mkdtempSync(join(tmpdir(), 'automagik-am-start-'))
+  const startProject = join(startDir, 'project')
+  const fakeBin = join(startDir, 'bin')
+  mkdirSync(startProject, { recursive: true })
+  mkdirSync(fakeBin, { recursive: true })
+  const fakeCodex = join(fakeBin, 'codex')
+  writeFileSync(fakeCodex, '#!/bin/sh\nexec /nodejs/bin/node -e \'setTimeout(() => {}, 30000)\'\n')
+  chmodSync(fakeCodex, 0o755)
+  const startEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ''}` }
+  try {
+    command('am', ['create', '--project', startProject, '--name', 'Proof', '--agent', 'codex', '--kind', 'main', '--json'], { env: startEnv })
+    const started = spawnSync('am', ['start', 'Proof', '--project', startProject, '--json'], { encoding: 'utf8', env: startEnv, timeout: 60_000 })
+    check(started.status === 0, `am start failed: ${started.stderr || started.stdout}`)
+    check(!/gets no per-turn briefing/.test(started.stderr), `am start still warns about the briefing: ${started.stderr}`)
+    const terminal = JSON.parse(started.stdout).terminal
+    check(typeof terminal === 'string' && terminal.length > 0, `am start returned no terminal: ${started.stdout}`)
+    const selected = JSON.parse(command('hc', ['get', terminal, '--json']))
+    check(Array.isArray(selected?.foreground?.argv) && selected.foreground.argv[0] === fakeCodex, `am start foreground is ${JSON.stringify(selected?.foreground?.argv)}`)
+    command('hc', ['kill', terminal])
+    say('am start: /usr/bin/env, the briefing hook and the exact fake codex argv all work')
+  } finally {
+    rmSync(startDir, { recursive: true, force: true })
+  }
 
   // The reviewed skill is installed read-only in the shared agents folder and linked for both
   // agents on first boot. Both the image payload and the volume copy must match the pins.

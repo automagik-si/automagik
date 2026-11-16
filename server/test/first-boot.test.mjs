@@ -40,6 +40,7 @@ const chars = 'abcdefghijklmnopqrstuvwxyz234567';
 const file = path.join(project, '.herdr', 'bots.json');
 let raw = { version: 1, categories: [], bots: [] };
 try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+if (command === 'self') { process.exit(0); }
 if (command === 'edit') {
   const ref = args[1];
   const bot = raw.bots.find((candidate) => candidate.id === ref || candidate.name === ref);

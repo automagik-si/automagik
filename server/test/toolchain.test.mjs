@@ -35,6 +35,11 @@ test('the image runs the app under a pinned tini so it is never PID 1', () => {
   assert.match(dockerfile, /^ENTRYPOINT \["\/usr\/local\/bin\/tini", "--", "\/nodejs\/bin\/node", "\/opt\/automagik\/entrypoint\.mjs"\]$/m)
 })
 
+test('the runtime carries env and printenv for am launch paths and shebangs', () => {
+  assert.match(dockerfile, /for f in .*\/usr\/bin\/env .*\/usr\/bin\/printenv /)
+  assert.match(dockerfile, /cp .*\/usr\/bin\/env .*\/usr\/bin\/printenv .*\/out\/bin\//)
+})
+
 test('the final image carries both hc and herdr-core at literal paths', () => {
   assert.match(dockerfile, /^COPY --from=tools \/out\/bin\/herdr-core \/usr\/local\/bin\/herdr-core$/m)
   assert.match(dockerfile, /^COPY --from=tools \/out\/bin\/hc \/usr\/local\/bin\/hc$/m)

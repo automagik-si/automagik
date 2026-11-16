@@ -582,6 +582,34 @@ export function runFirstBoot(options = {}) {
   }
 }
 
+/**
+ * am's supported CLI-only host install. It creates the am part store and the stable
+ * <HERDR_APP_HOME>/automagik-herdr/briefing.mjs link; no pack is copied into mods/. A failure is
+ * logged and the server stays up; a later boot retries when the link is still missing.
+ */
+function installAmSelf({ home, appHome, env, am, run, log, warn }) {
+  const link = join(appHome, 'automagik-herdr', 'briefing.mjs')
+  if (existsSync(link)) return { state: 'present', link }
+  const exec = run ?? process.getBuiltinModule('node:child_process').execFileSync
+  const childEnv = {
+    ...env,
+    HOME: env.HOME || home,
+    AUTOMAGIK_HOME: home,
+    HERDR_APP_HOME: appHome,
+  }
+  try {
+    const output = exec(am, ['self', 'install'], {
+      cwd: home, env: childEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000,
+    })
+    const line = String(output ?? '').trim().split('\n').filter(Boolean).at(-1)
+    log(`am self install: ${line || 'installed'}${existsSync(link) ? `; briefing link ${link}` : '; briefing link not created'}`)
+    return { state: existsSync(link) ? 'installed' : 'missing-link', link }
+  } catch (error) {
+    warn(`am self install failed: ${error?.stderr?.trim() || error?.message || error}`)
+    return { state: 'failed', link, error: String(error?.message ?? error) }
+  }
+}
+
 function currentModelsPresent({ home, workspace }) {
   try {
     const v1 = readJson(rosterOf(workspace))
@@ -623,6 +651,8 @@ function boot({
     }
   }
   const homeFile = homeRegistryOf(home)
+  const appHome = env.HERDR_APP_HOME || join(home, 'herdr-app')
+  const amSelf = installAmSelf({ home, appHome, env, am, run, log, warn })
   let team
   let registry
   let surfaces
@@ -685,6 +715,7 @@ function boot({
       team: team.state === 'created' ? { state: team.state, bots: team.bots, mainId: team.mainId } : { state: team.state },
       registry: registry.state,
       pins: readModelPinState(home).state,
+      amSelf: amSelf.state,
       ...(pins.pending.length ? { pendingPins: pins.pending } : {}),
       ...(pins.superseded.length ? { supersededPins: pins.superseded } : {}),
       ...(registry.script ? { seed: registry.script.path, seedSource: registry.script.source, ...(registry.script.commit ? { seedCommit: registry.script.commit } : {}) } : {}),
@@ -712,7 +743,7 @@ function boot({
       warn(`first boot: ${marker} pin state was not updated: ${error?.message ?? error}`)
     }
   }
-  return { fresh, marker, ...(skill ? { skill } : {}), team, registry, pins, ...(surfaces ? { surfaces } : {}) }
+  return { fresh, marker, ...(skill ? { skill } : {}), amSelf, team, registry, pins, ...(surfaces ? { surfaces } : {}) }
 }
 
 /**

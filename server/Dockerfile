@@ -81,7 +81,7 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends bash dash git ripgrep ca-certificates util-linux tar gzip findutils curl; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /out/bin /out/lib /out/data/dsh /out/data/bots /out/data/workspace /out/data/secrets; \
-    for f in /bin/bash /bin/dash /usr/bin/git /usr/bin/rg /usr/bin/flock /bin/tar /bin/gzip /usr/bin/find /usr/lib/git-core/*; do ldd "$f" 2>/dev/null || true; done \
+    for f in /bin/bash /bin/dash /usr/bin/env /usr/bin/printenv /usr/bin/git /usr/bin/rg /usr/bin/flock /bin/tar /bin/gzip /usr/bin/find /usr/lib/git-core/*; do ldd "$f" 2>/dev/null || true; done \
       | awk '/=>/ {print $3}' | sort -u > /tmp/libs; \
     while read -r lib; do \
       case "$lib" in \
@@ -89,7 +89,7 @@ RUN set -eux; \
       esac; \
       cp -L "$lib" /out/lib/; \
     done < /tmp/libs; \
-    cp /bin/bash /bin/dash /usr/bin/git /usr/bin/rg /usr/bin/flock /bin/tar /bin/gzip /usr/bin/find /out/bin/; \
+    cp /bin/bash /bin/dash /usr/bin/env /usr/bin/printenv /usr/bin/git /usr/bin/rg /usr/bin/flock /bin/tar /bin/gzip /usr/bin/find /out/bin/; \
     ln -s /bin/dash /out/bin/sh; \
     cp -a /usr/lib/git-core /out/git-core; \
     cp -a /usr/share/git-core /out/git-core-share; \
