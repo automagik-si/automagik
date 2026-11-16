@@ -227,6 +227,22 @@ test('public views keep the official links only, a fixed code label, and an opti
   assert.equal(cliLoginView({ id: 'acp-codex', attemptId: ATTEMPT, status: 'failed', message: 'Install the CLI before signing in. private-token' }, 'acp-codex').message, 'Sign-in did not finish. Try again.')
 })
 
+test('a failed attempt says why, from acp-dsh’s fixed cause, and never from CLI text', () => {
+  const failed = (extra, provider = 'acp-claude') => ({ id: provider, attemptId: ATTEMPT, status: 'failed', message: 'private-cli-output', ...extra })
+  const message = (value, provider = 'acp-claude') => cliLoginView(value, provider).message
+  assert.equal(message(failed({ cause: 'no CLI found' })), 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.')
+  assert.equal(message(failed({ cause: 'the CLI exited' })), 'The CLI exited before the sign-in finished. Try again.')
+  assert.equal(message(failed({ cause: 'the CLI did not confirm the sign-in' })), 'The CLI did not confirm the sign-in. Try again.')
+  // A device-code cause belongs to Codex only.
+  assert.equal(message(failed({ cause: 'device-code login is not enabled' }, 'acp-codex'), 'acp-codex'), 'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.')
+  assert.equal(message(failed({ cause: 'device-code login is not enabled' })), 'Sign-in did not finish. Try again.')
+  // A host from before the cause existed still gets the two it already knew; anything else keeps
+  // the one line, and an unknown cause never becomes a message.
+  assert.equal(message(failed({ message: 'Install the CLI before signing in.' })), 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.')
+  assert.equal(message(failed({ cause: 'private-cli-output says no' })), 'Sign-in did not finish. Try again.')
+  assert.doesNotMatch(message(failed({ cause: 'private-cli-output says no' })), /private-cli-output/)
+})
+
 test('connections read each CLI’s sign-in through inspect only', async () => {
   const h = fixture()
   const value = await h.actions['cli-login-connections']({})
