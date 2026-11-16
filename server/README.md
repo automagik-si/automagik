@@ -191,9 +191,13 @@ The image sets `HERDR_APP_HOME=/data/herdr-app`, `XDG_RUNTIME_DIR=/data/run`,
 `HC_RUNTIME=/data/run/herdr-core` and `HC_SESSION=automagik-server`. The entrypoint creates
 `/data/run` and `/data/run/herdr-core` as uid 1000 with mode 0700 and derives
 `HC_TERMINAL_SOCKET=${HC_RUNTIME}/${HC_SESSION}.sock` - herdr-core names its socket after the
-session. It starts `herdr-core serve` as a supervised child before DSH, with the same
-environment dsh and `hc` receive, and prints `herdr-core: serving on <path>` only after that
-socket exists; on failure it prints the directory listing, the core's stderr and its exit code.
+session. hc resolves the core socket from `HC_SOCKET`, then the config socket, then
+`$XDG_RUNTIME_DIR/herdr-core/$HC_SESSION.sock` (this image's default); `HC_TERMINAL_SOCKET` is
+the pane/proxy validation environment, not hc's destination override, and `HC_RUNTIME` is not
+read by that resolver. The entrypoint starts `herdr-core serve` as a supervised child before
+DSH, with the same environment dsh and `hc` receive, and prints
+`herdr-core: serving on <path>` only after that socket exists; on failure it prints the
+directory listing, the core's stderr and its exit code.
 If either child exits, the entrypoint stops the other and exits so the container's restart
 policy applies to both; `SIGTERM`, `SIGINT` and `SIGHUP` stop both cleanly. The smoke checks
 that the session socket is a Unix socket, that `hc server status` and `hc ls` answer, and that

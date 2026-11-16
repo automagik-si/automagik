@@ -130,6 +130,8 @@ async function main() {
   env.AUTOMAGIK_BOTS_HOME = botsHome
   env.AUTOMAGIK_HOME = home
   env.HERDR_APP_HOME = appHome
+  // hc's resolver reads HC_SOCKET, then the config socket, then this session path; the
+  // exported HC_TERMINAL_SOCKET is the pane/proxy validation environment, not its override.
   env.HC_TERMINAL_SOCKET = socketPath
   env.HC_RUNTIME = coreRuntime
   env.XDG_RUNTIME_DIR = runtimeDir

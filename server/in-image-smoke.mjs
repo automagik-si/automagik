@@ -37,8 +37,10 @@ const checkVersion = (label, output, expected) => {
 
 async function main() {
   // docker exec inherits the container-creation env, not the entrypoint's later mutations.
-  // am and hc require an absolute HC_TERMINAL_SOCKET and do not derive it from HC_SESSION, so
-  // derive it here from the session/runtime we were given, before the first am or hc call.
+  // hc resolves the core socket from HC_SOCKET, then the config socket, then
+  // $XDG_RUNTIME_DIR/herdr-core/$HC_SESSION.sock; the smoke container sets the last two.
+  // Derive that session path here for the socket check and export HC_TERMINAL_SOCKET for the
+  // pane/proxy validation paths; it is not hc's destination override.
   const coreSession = process.env.HC_SESSION || SMOKE_HC_SESSION
   const coreRuntime = process.env.HC_RUNTIME || HC_RUNTIME
   const coreSocket = herdrCoreSocket(coreSession, coreRuntime)
