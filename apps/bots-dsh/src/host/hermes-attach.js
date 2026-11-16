@@ -214,7 +214,7 @@ def state_folder(explicit, launch_home):
         if record is None and why == "gateway":
             raise Fault("serve-gateway")
         if record is None:
-            raise Fault("serve-not-running")
+            raise Fault("serve-not-running", absent=True)
         # A beside folder is ambiguous when any spelling whose parent holds it shares
         # that parent with another Hermes home, including a link spelling found beside
         # the folder. Decide on the resolved home, whatever spelling the call used.
@@ -268,7 +268,9 @@ def state_folder(explicit, launch_home):
         unknown = not (isinstance(named, str) and named.startswith("/") and os.path.isdir(named))
         if unknown and is_default_home(launch_home):
             return folder, record
-    raise Fault("serve-gateway" if gateway else "serve-not-running")
+    if gateway:
+        raise Fault("serve-gateway")
+    raise Fault("serve-not-running", absent=True)
 
 def read_token(folder, record):
     path = os.path.join(folder, "host-serve.token")
@@ -357,6 +359,11 @@ def parse_list(text):
                      "running": found.group("gateway") == "running", "model": "" if found.group("model") == "—" else found.group("model"),
                      "provider": ""})
     return rows
+
+def gateway_running(hermes, env, timeout):
+    # Hermes's own Gateway column is the diagnosis; no CLI output leaves the remote.
+    code, out, _ = run([hermes, "profile", "list"], timeout, env)
+    return code == 0 and any(row.get("running") is True for row in parse_list(out))
 
 def config_model(hermes, ident, timeout, env=None):
     code, out, _ = run([hermes, "-p", ident, "config", "get", "model", "--json"], timeout, env)
@@ -456,7 +463,23 @@ try:
     version = ".".join(str(int(part)) for part in release.groups())
     if tuple(int(part) for part in release.groups()) < minimum:
         raise Fault("update-required", version=version, minimum=wanted)
-    folder, record = state_folder(options.get("stateDir"), options.get("hermesHome"))
+    try:
+        folder, record = state_folder(options.get("stateDir"), options.get("hermesHome"))
+    except Fault as error:
+        if error.code != "serve-not-running" or error.detail.get("absent") is not True:
+            raise
+        # Only a missing record can be a gateway-only home. A failed owner or token
+        # check must keep its own failure, and an explicit folder cannot guess a home.
+        home = options.get("hermesHome")
+        known_home = isinstance(home, str) and home.startswith("/") and os.path.isdir(home)
+        cli_env = os.environ.copy()
+        if known_home:
+            cli_env["HERMES_HOME"] = home
+        budget = min(control, start_until - time.monotonic() - 0.5)
+        if (known_home or (not home and not options.get("stateDir"))) and budget >= 0.5:
+            if gateway_running(hermes, cli_env, budget):
+                raise Fault("serve-not-running", gateway=True)
+        raise Fault("serve-not-running")
     token = read_token(folder, record)
     # The CLI must read the same data root the owner was launched from: the record says
     # which HERMES_HOME that is, and every read below is scoped to it.
@@ -507,6 +530,7 @@ try:
     emit("token", value=token)
     emit("ready", port=record["port"])
 except Fault as error:
+    error.detail.pop("absent", None)
     emit("error", code=error.code, **error.detail)
 except Exception as error:
     step = error.__traceback__
@@ -678,7 +702,8 @@ export async function startHermesAttach(ssh, {
           if (typeof frame.name === 'string' && /^[A-Za-z_]\w{0,40}$/.test(frame.name)) detail.fault = frame.name
           if (Number.isSafeInteger(frame.line) && frame.line > 0 && frame.line < 10000) detail.line = frame.line
           for (const key of ['version', 'minimum']) if (typeof frame[key] === 'string' && /^\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(frame[key])) detail[key] = frame[key]
-          fail(hermesSshFailure(frame.code, undefined, detail))
+          const kind = frame.code === 'serve-not-running' && frame.gateway === true ? 'serve-gateway-running' : frame.code
+          fail(hermesSshFailure(kind, undefined, detail))
           return
         }
         fail(hermesSshFailure('handshake'))
