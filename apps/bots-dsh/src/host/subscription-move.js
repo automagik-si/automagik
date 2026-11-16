@@ -453,10 +453,12 @@ export function install(rt) {
         else if (route.state === 'waiting') unread = true
         continue
       }
+      let heldOnRoute = false
       for (const bot of bots) {
         // A Bot without a shell cannot move onto a coding CLI that brings its own shell. It
         // stays where it is, its settings say why, and the person is warned once per hold.
         if (bot.shell === false && onRoute(spec, bot)) {
+          heldOnRoute = true
           const held = bot.subscriptionShellHeld
           if (held?.from !== spec.from || held?.to !== spec.to || held?.cli !== spec.cli) {
             bot.subscriptionShellHeld = { from: spec.from, to: spec.to, cli: spec.cli }
@@ -494,8 +496,12 @@ export function install(rt) {
         bot.model = target
         moved.push(bot)
       }
-      done[spec.from] = true
-      changed = true
+      // A route still holding a shell-less Bot is not done: a later pass moves it once the
+      // shell is on, and a Bot placed on the route later is not swallowed.
+      if (!heldOnRoute) {
+        done[spec.from] = true
+        changed = true
+      }
       reasons.delete(spec.from)
       // One look after acp-dsh's kept answer has expired confirms the move or repairs it.
       if (spec.restore === true && bots.some(bot => recordOf(bot, spec) !== undefined)) {

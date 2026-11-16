@@ -403,7 +403,7 @@ test('a skill cannot give a shell-less Bot a shell', async (t) => {
 })
 
 test('a shell-off Bot cannot be paired with a command-capable agent, either way round', async (t) => {
-  const { rt, create } = team(t)
+  const { rt, home, create } = team(t)
   const resolve = rt.resolveModel
   rt.resolveModel = async ref => String(ref)
   try {
@@ -414,10 +414,19 @@ test('a shell-off Bot cannot be paired with a command-capable agent, either way 
     await assert.rejects(() => rt.updateBot(native.id, { model: 'acp-codex/gpt-6.1-sol' }),
       /has no shell, so it cannot run on acp-codex/)
     await assert.rejects(() => rt.switchRoute(native.id, 'acp-claude/opus'), /has no shell/)
-    // The shell switched off under an agent already set.
+    // The shell switched off under an agent already set: refused, with the way out, and the
+    // record keeps both the shell and the CLI where they were.
     const agent = await create({ model: 'acp-claude/opus' })
-    await assert.rejects(() => rt.updateBot(agent.id, { shell: false }),
-      /runs on acp-claude, whose own tools can run commands, so its shell cannot be turned off/)
+    await assert.rejects(() => rt.updateBot(agent.id, { shell: false }), (error) => {
+      assert.match(error.message, /runs on acp-claude, whose own tools can run commands, so its shell cannot be turned off/)
+      assert.match(error.message, /Pick a model that uses DeepSeek Harness's tools first/)
+      return true
+    })
+    assert.equal(agent.shell, true)
+    assert.equal(agent.model, 'acp-claude/opus')
+    const saved = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
+    assert.equal(saved.bots[agent.id].shell, true)
+    assert.equal(saved.bots[agent.id].model, 'acp-claude/opus')
     // A native model with the shell off, and an agent with the shell on, both still work.
     assert.equal(native.shell, false)
     assert.equal(agent.shell, true)

@@ -227,9 +227,12 @@ test('subscription Bots move once to their CLI; key and other Bots stay; the Ses
   )
 })
 
-test('a shell-off Bot stays on its retired plan route, warns once with the reason, and never reaches the CLI', async (t) => {
+test('a shell-off Bot stays on its retired plan route, warns once per Bot per route, and never reaches the CLI', async (t) => {
   const warned = []
-  const team = seed([bot('s1', 'openai-codex/gpt-6.1-sol', { shell: false })])
+  const team = seed([
+    bot('s1', 'openai-codex/gpt-6.1-sol', { shell: false }),
+    bot('s2', 'anthropic/claude-opus-5-5', { shell: false }),
+  ])
   const host = await start(team, {
     prepare: (rt) => {
       const warn = rt.warn
@@ -237,16 +240,39 @@ test('a shell-off Bot stays on its retired plan route, warns once with the reaso
     },
   })
   t.after(host.stop)
-  await until(() => host.saved().bots.s1.subscriptionShellHeld !== undefined, { label: 'the shell hold was recorded' })
+  const shellLines = () => warned.filter(line => /brings its own shell/.test(line))
+  await until(() => host.saved().bots.s1.subscriptionShellHeld?.from === 'openai-codex'
+    && host.saved().bots.s2.subscriptionShellHeld?.from === 'anthropic', { label: 'both shell holds were recorded' })
   await host.pass()
-  const state = host.saved()
-  assert.equal(state.bots.s1.model, 'openai-codex/gpt-6.1-sol')
-  assert.equal(state.bots.s1.subscriptionMoved, undefined)
-  assert.deepEqual(state.bots.s1.subscriptionShellHeld, { from: 'openai-codex', to: 'acp-codex', cli: 'Codex' })
-  const lines = warned.filter(line => /brings its own shell/.test(line))
-  assert.equal(lines.length, 1)
-  assert.match(lines[0], /stays on openai-codex: Codex is a coding CLI that brings its own shell/)
-  // The record is the notice across boots: a restart warns again only if the hold changed.
+  let state = host.saved()
+  const held = {
+    s1: { from: 'openai-codex', to: 'acp-codex', cli: 'Codex' },
+    s2: { from: 'anthropic', to: 'acp-claude', cli: 'Claude Code' },
+  }
+  for (const id of ['s1', 's2']) {
+    // Not moved: the model and the shell setting are exactly what they were.
+    assert.equal(state.bots[id].model, id === 's1' ? 'openai-codex/gpt-6.1-sol' : 'anthropic/claude-opus-5-5')
+    assert.equal(state.bots[id].shell, false)
+    assert.equal(state.bots[id].subscriptionMoved, undefined)
+    assert.deepEqual(state.bots[id].subscriptionShellHeld, held[id])
+  }
+  // Once per Bot, not once per process: two Bots held off two routes give two notices.
+  assert.equal(shellLines().length, 2)
+  assert.ok(shellLines().some(line => /s1 stays on openai-codex: Codex is a coding CLI that brings its own shell/.test(line)))
+  assert.ok(shellLines().some(line => /s2 stays on anthropic: Claude Code is a coding CLI that brings its own shell/.test(line)))
+  // A second retirement is not swallowed: s1 moves onto the second retired plan route, is
+  // held off that one too, and gets its own notice; s2's notice for that route is not repeated.
+  await host.rt.updateBot('s1', { model: 'anthropic/claude-opus-5-5' })
+  await host.pass()
+  await until(() => host.saved().bots.s1.subscriptionShellHeld?.from === 'anthropic', { label: 'the second hold was recorded' })
+  state = host.saved()
+  assert.equal(state.bots.s1.model, 'anthropic/claude-opus-5-5')
+  assert.equal(state.bots.s1.shell, false)
+  assert.deepEqual(state.bots.s1.subscriptionShellHeld, held.s2)
+  assert.equal(shellLines().length, 3)
+  assert.equal(shellLines().filter(line => /s2 stays on anthropic/.test(line)).length, 1)
+  assert.equal(shellLines().filter(line => /s1 stays on anthropic/.test(line)).length, 1)
+  // A restart repeats neither notice: the held records are the memory.
   const again = []
   const second = await start(host.saved(), {
     prepare: (rt) => {
@@ -257,7 +283,8 @@ test('a shell-off Bot stays on its retired plan route, warns once with the reaso
   t.after(second.stop)
   await second.pass()
   assert.equal(again.filter(line => /brings its own shell/.test(line)).length, 0)
-  assert.equal(second.saved().bots.s1.model, 'openai-codex/gpt-6.1-sol')
+  assert.equal(second.saved().bots.s1.model, 'anthropic/claude-opus-5-5')
+  assert.equal(second.saved().bots.s2.model, 'anthropic/claude-opus-5-5')
 })
 
 test('a Claude Bot on an Anthropic API key never moves', async (t) => {
