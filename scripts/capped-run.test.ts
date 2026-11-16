@@ -6,7 +6,7 @@
 // scratch git checkout, so they never lock the real full-gate lock; the outer-lock row only
 // probes that real path non-blockingly. No test touches a live terminal or the network.
 import { afterAll, describe, expect, test } from 'bun:test';
-import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions, type SpawnSyncReturns } from 'node:child_process';
 import {
   chmodSync,
   cpSync,
@@ -96,12 +96,11 @@ async function cappedKillAttempt(args: string[], options: RunOptions = {}): Prom
   };
   if (options.path) env.PATH = options.path;
   const started = Date.now();
-  const child = spawn('sh', [SCRIPT, ...args], {
+  const child = startTracked('sh', [SCRIPT, ...args], {
     cwd: options.cwd ?? work,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  noteStarted(child.pid);
   let stdout = '';
   let stderr = '';
   child.stdout?.on('data', chunk => {
@@ -294,6 +293,14 @@ function safeKill(pid: number | undefined, signal: NodeJS.Signals = 'SIGTERM'): 
   }
 }
 
+function startTracked(command: string, args: string[], options: SpawnOptions = {}): ChildProcess {
+  const child = spawn(command, args, options);
+  noteStarted(child.pid);
+  // Bun may assign the pid just after spawn() returns; the event registers it then.
+  child.once('spawn', () => noteStarted(child.pid));
+  return child;
+}
+
 function compareAdjScript(): string {
   const script = join(scratch('oom-score'), 'compare-adj.sh');
   writeFileSync(
@@ -380,6 +387,84 @@ const unshareWorks = (() => {
   );
   return probe.status === 0 && (probe.stdout ?? '').trim().startsWith(`worktree ${mainCheckout()}`);
 })();
+
+
+const ALLOWED_CHILD_PROCESS_IMPORT =
+  "import { spawn, spawnSync, type ChildProcess, type SpawnOptions, type SpawnSyncReturns } from 'node:child_process';";
+
+const SPAWNSYNC_ALLOWED = [
+  'cappedRun',
+  'dd',
+  'scratchCheckout',
+  'unshareWorks',
+  'userScopeWorks',
+  'flockWorks',
+  'shmHasRoom',
+  'mainCheckout',
+  'journalReadable',
+  'the capped line clamps a sample under the limit (pure wording)',
+  'the capped line says unknown for an empty last sample (pure wording)',
+  'the payload shim text is valid sh and bash',
+  'the unit Description and journal carry the command name only, never argv (skipped when the user journal is unreadable)',
+  'an OOM-killed run with the marker argument prints one honest line without it (skipped when the user journal is unreadable)',
+  'a scratch-checkout run locks its own path, never the real main checkout lock',
+];
+
+function lintProcessCreation(source: string): string[] {
+  const violations: string[] = [];
+  const cpName = 'child_' + 'process';
+  const spawnNeedle = 'sp' + 'awn(';
+  const execNeedle = 'ex' + 'ec(';
+  const execFileNeedle = 'exec' + 'File(';
+  const forkNeedle = 'fo' + 'rk(';
+  const bunSpawnNeedle = 'Bun.' + 'sp' + 'awn(';
+  const spawnSyncNeedle = 'spawn' + 'Sync(';
+  const helperStart = source.indexOf('function startTracked(');
+  const helperEnd = source.indexOf('\n}', helperStart);
+  for (const line of source.split('\n')) {
+    if (!line.includes(cpName)) continue;
+    const trimmed = line.trim();
+    if (trimmed === ALLOWED_CHILD_PROCESS_IMPORT) continue;
+    if (trimmed.startsWith('const ALLOWED_CHILD_PROCESS_IMPORT =')) continue;
+    if (trimmed.startsWith('import') || trimmed.includes('require(') || trimmed.includes('import(')) {
+      violations.push(`import: ${trimmed}`);
+    }
+  }
+  let at = 0;
+  while ((at = source.indexOf(spawnNeedle, at)) >= 0) {
+    if (at < helperStart || at > helperEnd) violations.push('raw-spawn');
+    at += spawnNeedle.length;
+  }
+  for (const needle of [execNeedle, execFileNeedle, forkNeedle]) {
+    let found = 0;
+    while ((found = source.indexOf(needle, found)) >= 0) {
+      if (source[found - 1] !== '.') violations.push(`creator: ${needle}`);
+      found += needle.length;
+    }
+  }
+  if (source.includes(bunSpawnNeedle)) violations.push(`creator: ${bunSpawnNeedle}`);
+  const declared: Array<{ index: number; name: string }> = [];
+  for (const match of source.matchAll(/^(?:async\s+)?function\s+(\w+)/gm)) {
+    declared.push({ index: match.index ?? 0, name: match[1] });
+  }
+  for (const match of source.matchAll(/^const\s+(\w+)\s*=/gm)) {
+    declared.push({ index: match.index ?? 0, name: match[1] });
+  }
+  for (const match of source.matchAll(/^  test(?:\.skipIf\([^\n]*\))?\(\s*'([^']+)'/gm)) {
+    declared.push({ index: match.index ?? 0, name: match[1] });
+  }
+  at = 0;
+  while ((at = source.indexOf(spawnSyncNeedle, at)) >= 0) {
+    const owner = declared
+      .filter(item => item.index < at)
+      .sort((a, b) => b.index - a.index)[0];
+    if (!owner || !SPAWNSYNC_ALLOWED.includes(owner.name)) {
+      violations.push(`spawnSync: ${owner?.name ?? 'unknown'}`);
+    }
+    at += spawnSyncNeedle.length;
+  }
+  return violations;
+}
 
 describe('capped-run', () => {
   test('passes a passing and a failing exit code through unchanged', () => {
@@ -500,12 +585,11 @@ describe('capped-run', () => {
     const state = scratch('lock-state');
     const lock = join(work, 'held.lock');
     const ready = join(work, 'held.ready');
-    const holder = spawn(
+    const holder = startTracked(
       'sh',
       ['-c', 'exec 9>"$1"; flock -x 9; : >"$2"; exec sleep 1', 'sh', lock, ready],
       { stdio: 'ignore' },
     );
-    noteStarted(holder.pid);
     try {
       expect(await waitFor(ready, 5_000)).toBe(true);
 
@@ -557,12 +641,11 @@ describe('capped-run', () => {
     const state = scratch('nolock-state');
     const lock = join(work, 'unused.lock');
     const ready = join(work, 'unused.ready');
-    const holder = spawn(
+    const holder = startTracked(
       'sh',
       ['-c', 'exec 9>"$1"; flock -x 9; : >"$2"; exec sleep 2', 'sh', lock, ready],
       { stdio: 'ignore' },
     );
-    noteStarted(holder.pid);
     try {
       expect(await waitFor(ready, 5_000)).toBe(true);
 
@@ -763,16 +846,54 @@ describe('capped-run', () => {
     }
   });
 
-  test('endStarted ends a process the test started', async () => {
-    const child = spawn('sleep', ['30'], { stdio: 'ignore' });
+  test('the test file has no process creation outside the allowed forms', () => {
+    const source = readFileSync(join(import.meta.dir, 'capped-run.test.ts'), 'utf8');
+    expect(lintProcessCreation(source)).toEqual([]);
+    const cpName = 'child_' + 'process';
+    const spawnNeedle = 'sp' + 'awn(';
+    const spawnSyncNeedle = 'spawn' + 'Sync(';
+    const execNeedle = 'ex' + 'ec(';
+    const sample = [
+      'import * as cp from "node:' + cpName + '";',
+      'const a = cp.' + spawnNeedle + '"sh", ["-c", "exit 0"]);',
+      'function unlisted() { cp.' + spawnSyncNeedle + '"git", ["status"]); }',
+      'function bad() { ' + execNeedle + '"true"); }',
+    ].join('\n');
+    expect(lintProcessCreation(sample).length).toBeGreaterThanOrEqual(4);
+  });
+
+  test('a forced failing row still ends its tracked process', async () => {
+    const child = startTracked('sleep', ['30'], { stdio: 'ignore' });
     const pid = child.pid ?? 0;
-    noteStarted(pid);
+    const ended = closeCode(child);
+    expect(Number.isInteger(pid) && pid > 1).toBe(true);
+    let failed = false;
+    try {
+      const failingBody = () => {
+        throw new Error('forced failure for the cleanup proof');
+      };
+      failingBody();
+    } catch {
+      failed = true;
+    } finally {
+      await endStarted(child);
+    }
+    await ended;
+    expect(failed).toBe(true);
+    expect(await processGoneWithin(pid, 3_000)).toBe(true);
+  });
+
+  test('endStarted ends a process the test started', async () => {
+    const child = startTracked('sleep', ['30'], { stdio: 'ignore' });
+    const pid = child.pid ?? 0;
+    const ended = closeCode(child);
     expect(Number.isInteger(pid) && pid > 1).toBe(true);
     try {
       await endStarted(child);
     } finally {
       safeKill(pid, 'SIGKILL');
     }
+    await ended;
     expect(await processGoneWithin(pid, 3_000)).toBe(true);
     for (const startedPid of startedPids) {
       expect(await processGoneWithin(startedPid, 3_000)).toBe(true);
@@ -793,19 +914,17 @@ describe('capped-run', () => {
       const info = join(work, 'signal-info.txt');
       const childScript =
         'printf "%s\\n%s\\n%s\\n" "$$" "${TMPDIR-}" "${XDG_RUNTIME_DIR-}" > "$0.tmp" && mv "$0.tmp" "$0"; sleep 30';
-      const wrapper = spawn('sh', [SCRIPT, '--', 'sh', '-c', childScript, info], {
+      const wrapper = startTracked('sh', [SCRIPT, '--', 'sh', '-c', childScript, info], {
         cwd: work,
         env: { ...process.env, CAPPED_RUN_TEST_STATE: state },
         stdio: 'ignore',
       });
-      noteStarted(wrapper.pid);
       let pid = 0;
       try {
         expect(await waitFor(info, 20_000)).toBe(true);
         const [pidText, tmpdir, runtime] = readFileSync(info, 'utf8').trim().split('\n');
         pid = Number(pidText);
-        noteStarted(pid);
-        safeKill(wrapper.pid, 'SIGTERM');
+            safeKill(wrapper.pid, 'SIGTERM');
         const ended = await new Promise<{ code: number | null; signal: string | null }>(resolve => {
           const timer = setTimeout(() => resolve({ code: null, signal: null }), 20_000);
           wrapper.on('close', (code, signal) => {
@@ -967,7 +1086,7 @@ describe('capped-run', () => {
       // A plain non-killed run: the marker is an argument, the payload only sleeps well under
       // the cap, so there is no OOM (and no chance the kernel also takes the monitor).
       writeFileSync(script, 'await Bun.sleep(2500);\n');
-      const wrapper = spawn(
+      const wrapper = startTracked(
         'sh',
         [SCRIPT, '--name', name, '--', process.execPath, script, marker],
         {
@@ -976,7 +1095,6 @@ describe('capped-run', () => {
           stdio: ['ignore', 'ignore', 'pipe'],
         },
       );
-      noteStarted(wrapper.pid);
       let stderr = '';
       wrapper.stderr?.on('data', chunk => {
         stderr += chunk.toString();
@@ -1052,7 +1170,7 @@ describe('capped-run', () => {
         script,
         'await Bun.sleep(3000);\nconst hold = [];\nfor (;;) hold.push(Buffer.alloc(1 << 20, 1));\n',
       );
-      const wrapper = spawn(
+      const wrapper = startTracked(
         'sh',
         [SCRIPT, '--name', name, '--mem', '256M', '--', process.execPath, script, marker],
         {
@@ -1061,7 +1179,6 @@ describe('capped-run', () => {
           stdio: ['ignore', 'ignore', 'pipe'],
         },
       );
-      noteStarted(wrapper.pid);
       let stderr = '';
       wrapper.stderr?.on('data', chunk => {
         stderr += chunk.toString();
@@ -1139,12 +1256,11 @@ describe('capped-run', () => {
       writeFileSync(child, 'printf "start\\n" >> "$1"\nsleep 0.5\nprintf "end\\n" >> "$1"\n');
       const env = { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '60' };
       let firstErr = '';
-      const first = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
+      const first = startTracked('sh', [script, '--lock', '--', 'sh', child, seq], {
         cwd: root,
         env,
         stdio: ['ignore', 'ignore', 'pipe'],
       });
-      noteStarted(first.pid);
       first.stderr?.on('data', chunk => {
         firstErr += chunk.toString();
       });
@@ -1152,12 +1268,11 @@ describe('capped-run', () => {
       let second: ChildProcess | undefined;
       try {
         expect(await waitFor(seq, 20_000)).toBe(true);
-        second = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
+        second = startTracked('sh', [script, '--lock', '--', 'sh', child, seq], {
           cwd: root,
           env,
           stdio: 'ignore',
         });
-        noteStarted(second.pid);
         const secondDone = closeCode(second);
         expect(await Promise.all([firstDone, secondDone])).toEqual([0, 0]);
         expect(readFileSync(seq, 'utf8').trim().split('\n')).toEqual(['start', 'end', 'start', 'end']);
@@ -1186,12 +1301,11 @@ describe('capped-run', () => {
       const env = { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '60' };
       const inner = 'mount -t tmpfs tmpfs /tmp && exec sh "$1" --lock -- sh "$2" "$3"';
       let firstErr = '';
-      const first = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
+      const first = startTracked('sh', [script, '--lock', '--', 'sh', child, seq], {
         cwd: root,
         env,
         stdio: ['ignore', 'ignore', 'pipe'],
       });
-      noteStarted(first.pid);
       first.stderr?.on('data', chunk => {
         firstErr += chunk.toString();
       });
@@ -1201,13 +1315,12 @@ describe('capped-run', () => {
         expect(await waitFor(seq, 20_000)).toBe(true);
         // The second run mounts its own tmpfs on /tmp: the scratch checkout's lock must still be
         // the same file, or the two runs overlap (mutant 20 fails here).
-        second = spawn('unshare', ['-rm', 'sh', '-c', inner, 'sh', script, child, seq], {
+        second = startTracked('unshare', ['-rm', 'sh', '-c', inner, 'sh', script, child, seq], {
           cwd: root,
           env,
           stdio: 'ignore',
         });
         // unshare's pid; its child (the inner wrapper) is expected to die with it.
-        noteStarted(second.pid);
         const secondDone = closeCode(second);
         expect(await Promise.all([firstDone, secondDone])).toEqual([0, 0]);
         expect(readFileSync(seq, 'utf8').trim().split('\n')).toEqual(['start', 'end', 'start', 'end']);
