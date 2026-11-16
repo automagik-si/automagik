@@ -814,10 +814,22 @@ describe('capped-run', () => {
         { encoding: 'utf8' },
       );
       expect(journal.status).toBe(0);
-      const journalText = journal.stdout ?? '';
-      expect(journalText).toContain(`_SYSTEMD_UNIT=${unit}`);
-      expect(journalText).toContain(`MESSAGE=Started capped-run: bun (${name}).`);
-      expect(journalText).not.toContain(marker);
+      // systemd versions differ: the unit is USER_UNIT on this host's user manager and
+      // _SYSTEMD_UNIT on older ones. Take the unit's own entries by either field.
+      const unitEntries = (journal.stdout ?? '')
+        .split(/\n\s*\n/)
+        .filter(entry => entry.includes(`USER_UNIT=${unit}`) || entry.includes(`_SYSTEMD_UNIT=${unit}`));
+      expect(unitEntries.join('\n\n')).not.toContain(marker);
+      const started = unitEntries.find(
+        entry => entry.includes('MESSAGE=Started') && entry.includes(`capped-run: bun (${name})`),
+      );
+      if (!started) {
+        // Bun 1.4.4 refuses test.skip() inside a test, so fail with the plain reason instead of
+        // passing vacuously when the host's journal has no Started line for this unit.
+        throw new Error('journal has no Started line for the unit on this host');
+      }
+      expect(started).toContain('MESSAGE=Started');
+      expect(started).toContain(`capped-run: bun (${name})`);
     },
     120_000,
   );
@@ -884,10 +896,22 @@ describe('capped-run', () => {
         { encoding: 'utf8' },
       );
       expect(journal.status).toBe(0);
-      const journalText = journal.stdout ?? '';
-      expect(journalText).toContain(`_SYSTEMD_UNIT=${unit}`);
-      expect(journalText).toContain(`MESSAGE=Started capped-run: bun (${name}).`);
-      expect(journalText).not.toContain(marker);
+      // systemd versions differ: the unit is USER_UNIT on this host's user manager and
+      // _SYSTEMD_UNIT on older ones. Take the unit's own entries by either field.
+      const unitEntries = (journal.stdout ?? '')
+        .split(/\n\s*\n/)
+        .filter(entry => entry.includes(`USER_UNIT=${unit}`) || entry.includes(`_SYSTEMD_UNIT=${unit}`));
+      expect(unitEntries.join('\n\n')).not.toContain(marker);
+      const started = unitEntries.find(
+        entry => entry.includes('MESSAGE=Started') && entry.includes(`capped-run: bun (${name})`),
+      );
+      if (!started) {
+        // Bun 1.4.4 refuses test.skip() inside a test, so fail with the plain reason instead of
+        // passing vacuously when the host's journal has no Started line for this unit.
+        throw new Error('journal has no Started line for the unit on this host');
+      }
+      expect(started).toContain('MESSAGE=Started');
+      expect(started).toContain(`capped-run: bun (${name})`);
     },
     120_000,
   );
