@@ -19726,6 +19726,9 @@ body[data-bt-motion=quiet] .bt-mark[data-poke]{cursor:default}
 .bt-side-foot{display:flex;padding-top:8px}
 
 .bt-head{position:relative;display:flex;justify-content:flex-end;align-items:center;gap:8px;height:40px;padding:0 16px;box-sizing:border-box;flex:none;pointer-events:none}
+/* The Chat / Terminal switch sits in this row and must take real clicks: the row lets them
+   through to the shell, so the switch turns them back on for itself and its parts only. */
+.bt-head .lb-face,.bt-head .lb-face-part{pointer-events:auto}
 .bt-head-details{pointer-events:auto;flex:none;display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;border-radius:999px;background:var(--bt-main);border:.5px solid var(--bt-line-2);box-shadow:0 2px 8px -1px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);color:var(--bt-ink-2);cursor:pointer;transition:background-color .12s ease,color .12s ease}
 /* Details is the one labeled pill: its icon-only neighbours keep the 40px circle. */
 .bt-head-details[aria-controls]{width:auto;min-width:40px;gap:7px;padding:0 13px;color:var(--bt-ink);font:inherit;font-size:13px;font-weight:500;white-space:nowrap}
