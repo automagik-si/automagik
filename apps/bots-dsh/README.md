@@ -107,13 +107,18 @@ How they fit:
   aliased tool, and a skill. It is enforced where DSH grants tools — the tools are removed,
   not forbidden by an instruction — and not with an operating-system sandbox. A Bot with
   shell access can read what the operating-system user can read: that is the honest limit
-  of the folder fence for shell commands. Three routes stay outside this plugin: a Bot
-  whose model is a local coding CLI can run that CLI's own tools, a remote Hermes profile
-  runs its own tools, and an MCP server mounted before the shell was turned off keeps
-  running, though a command tool it exposes is refused. A shell-less Bot can still ask
-  another Bot that has a shell to run something: the two are different principals, the
-  recipient's own capability and approvals govern what it runs, and a message carries no
-  intent this plugin can judge, so closing it would mean refusing ordinary team messages.
+  of the folder fence for shell commands.
+
+  A shell-less Bot cannot be paired with a model whose agent runs its own tools: the Bot
+  team refuses it at creation, at the model pick, at a route switch and at the Remote
+  Hermes pairing, both when the shell is switched off and when the agent is set. The
+  automatic move of a Bot off a retired plan route to its coding CLI skips a shell-less
+  Bot, keeps it where it is and says once why (the CLI brings its own shell); if that plan
+  route no longer answers, the Bot asks for a model instead of looking like it works. An
+  MCP server mounted before the shell was turned off keeps running, but a command tool it
+  exposes is refused; a server mounted after the switch is refused too. The settings card
+  says what this capability does not fence: another Bot with a shell, or the
+  operating-system user, can still read files this Bot can read.
 - **Scheduled tasks and restricted Bots**: a Bot with a deny list or no shell cannot create
   or edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
   layer binds; the tasks it already armed are paused and their record stays. A

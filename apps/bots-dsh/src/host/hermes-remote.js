@@ -21,6 +21,7 @@ const sshFields = ssh => Object.fromEntries(['host', 'user', 'port', 'identityFi
 const CONNECTION_ERRORS = Object.freeze({
   'bot/hermes-busy': CHAT_BUSY,
   'bot/hermes-pairing': 'The Hermes Bot pairing could not be verified. Check the selected profile and its existing Bot Chat.',
+  'bot/hermes-shell': 'That Bot has no shell, so it cannot be paired with Remote Hermes, whose own tools can run commands. Turn its shell on first.',
   'bot/hermes-auth': 'Hermes did not accept the saved sign-in. Check the token or sign in again.',
   'bot/hermes-connection': 'Remote Hermes could not connect. Check the connection details and try again.',
   'bot/hermes-profiles': 'Hermes could not open the selected profile. Check its available profiles and try again.',
@@ -933,6 +934,8 @@ export function install(rt, { transport = options => new HermesTransport(options
       return savePair('', signal)
     }
     if (typeof botId !== 'string' || !Object.hasOwn(state.bots ?? {}, botId)) throw fail('Choose an existing Automagik Bot.', 'pairing')
+    // Remote Hermes runs its own tools on the other computer, outside this plugin's guard.
+    if (state.bots[botId].shell === false) throw fail(CONNECTION_ERRORS['bot/hermes-shell'], 'shell')
     if (!state.bots[botId].model?.startsWith(`${HERMES_PROVIDER}/`)) throw fail('Choose Remote Hermes in this Bot’s chat before pairing it.', 'pairing')
     if (record().pairedBotId && record().pairedBotId !== botId) throw fail('This Hermes profile is already paired. Unpair it before choosing another Bot.', 'pairing')
     requireReplaceable()

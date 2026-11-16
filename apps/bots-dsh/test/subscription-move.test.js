@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
+import { format } from 'node:util'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
@@ -224,6 +225,39 @@ test('subscription Bots move once to their CLI; key and other Bots stay; the Ses
     host.selected.map(request => `${request.sessionId}:${request.provider}/${request.model}`).sort(),
     ['a1:acp-claude/opus', 'c1:acp-codex/gpt-6.1-sol', 'c2:acp-codex/default'],
   )
+})
+
+test('a shell-off Bot stays on its retired plan route, warns once with the reason, and never reaches the CLI', async (t) => {
+  const warned = []
+  const team = seed([bot('s1', 'openai-codex/gpt-6.1-sol', { shell: false })])
+  const host = await start(team, {
+    prepare: (rt) => {
+      const warn = rt.warn
+      rt.warn = (...args) => { warned.push(format(...args)); return warn(...args) }
+    },
+  })
+  t.after(host.stop)
+  await until(() => host.saved().bots.s1.subscriptionShellHeld !== undefined, { label: 'the shell hold was recorded' })
+  await host.pass()
+  const state = host.saved()
+  assert.equal(state.bots.s1.model, 'openai-codex/gpt-6.1-sol')
+  assert.equal(state.bots.s1.subscriptionMoved, undefined)
+  assert.deepEqual(state.bots.s1.subscriptionShellHeld, { from: 'openai-codex', to: 'acp-codex', cli: 'Codex' })
+  const lines = warned.filter(line => /brings its own shell/.test(line))
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /stays on openai-codex: Codex is a coding CLI that brings its own shell/)
+  // The record is the notice across boots: a restart warns again only if the hold changed.
+  const again = []
+  const second = await start(host.saved(), {
+    prepare: (rt) => {
+      const warn = rt.warn
+      rt.warn = (...args) => { again.push(format(...args)); return warn(...args) }
+    },
+  })
+  t.after(second.stop)
+  await second.pass()
+  assert.equal(again.filter(line => /brings its own shell/.test(line)).length, 0)
+  assert.equal(second.saved().bots.s1.model, 'openai-codex/gpt-6.1-sol')
 })
 
 test('a Claude Bot on an Anthropic API key never moves', async (t) => {

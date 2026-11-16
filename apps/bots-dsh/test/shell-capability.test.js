@@ -62,6 +62,7 @@ const SCOPED = [
   'approve_agent_action',
   'acp_tool',
   'subagent',
+  'mcp__toolbox__run',
 ]
 
 function scopedDefinitionsOf() {
@@ -74,6 +75,8 @@ function scopedDefinitionsOf() {
     ['approve_agent_action', schema('approve_agent_action', { action: { type: 'string' }, detail: { type: 'string' } }, ['action'])],
     ['acp_tool', schema('acp_tool', { id: { type: 'string' }, title: { type: 'string' }, kind: { type: 'string' }, input: { type: 'object' } }, ['title', 'kind', 'input'])],
     ['subagent', schema('subagent', { prompt: { type: 'string' }, description: { type: 'string' } }, ['prompt'])],
+    // An MCP server mounted before the switch: a command tool under its own prefix.
+    ['mcp__toolbox__run', schema('mcp__toolbox__run', { command: { type: 'string' } }, ['command'])],
   ])
 }
 
@@ -197,7 +200,9 @@ function bench({ storedTeam } = {}) {
   }
   return {
     ctx, rt, home, call, create, folder, guard, restrictionFor, restricted, lifted, warnings,
-    agents, sessions, definitions, addDefinition: (name, definition) => definitions.set(name, definition),
+    agents, sessions, definitions,
+    addDefinition: (name, definition) => definitions.set(name, definition),
+    addScopedDefinition: (name, definition) => scopedDefinitions.set(name, definition),
     stop,
   }
 }
@@ -395,6 +400,68 @@ test('a skill cannot give a shell-less Bot a shell', async (t) => {
   await rt.capabilityEndpoint('bot-capability', { botId: bot.id, name: 'shell-recipe', attached: true })
   assert.ok((rt.botOf(bot.id).capabilities ?? []).includes('shell-recipe'))
   await refused(guard(), 'bash', { id: bot.id }, { command: 'id' })
+})
+
+test('a shell-off Bot cannot be paired with a command-capable agent, either way round', async (t) => {
+  const { rt, create } = team(t)
+  const resolve = rt.resolveModel
+  rt.resolveModel = async ref => String(ref)
+  try {
+    // The agent set on a shell-less Bot, at creation, at update and on a direct route switch.
+    await assert.rejects(() => create({ shell: false, model: 'acp-codex/gpt-6.1-sol' }),
+      /has no shell, so it cannot run on acp-codex, whose own tools can run commands/)
+    const native = await create({ shell: false })
+    await assert.rejects(() => rt.updateBot(native.id, { model: 'acp-codex/gpt-6.1-sol' }),
+      /has no shell, so it cannot run on acp-codex/)
+    await assert.rejects(() => rt.switchRoute(native.id, 'acp-claude/opus'), /has no shell/)
+    // The shell switched off under an agent already set.
+    const agent = await create({ model: 'acp-claude/opus' })
+    await assert.rejects(() => rt.updateBot(agent.id, { shell: false }),
+      /runs on acp-claude, whose own tools can run commands, so its shell cannot be turned off/)
+    // A native model with the shell off, and an agent with the shell on, both still work.
+    assert.equal(native.shell, false)
+    assert.equal(agent.shell, true)
+  } finally {
+    rt.resolveModel = resolve
+  }
+})
+
+test('a shell-off Bot cannot be paired with Remote Hermes', async (t) => {
+  const { rt, create, call } = team(t)
+  const bot = await create()
+  // The pairing boundary refuses even a stored Bot that was put on Hermes before its shell
+  // went off (a state the update path now refuses).
+  bot.model = 'hermes-remote/default'
+  bot.shell = false
+  rt.state.prefs = { ...(rt.state.prefs ?? {}), hermesRemote: { enabled: true, profile: 'p', models: [] } }
+  await rt.save()
+  const refused = await call('hermes-remote-pair', { botId: bot.id })
+  assert.equal(refused.ok, false)
+  assert.match(refused.error.message, /has no shell, so it cannot be paired with Remote Hermes/)
+  // Turning the model on a shell-less Bot is refused earlier, at the model boundary.
+  const other = await create({ shell: false })
+  const resolve = rt.resolveModel
+  rt.resolveModel = async ref => String(ref)
+  try {
+    await assert.rejects(() => rt.updateBot(other.id, { model: 'hermes-remote/default' }),
+      /has no shell, so it cannot run on hermes-remote/)
+  } finally {
+    rt.resolveModel = resolve
+  }
+})
+
+test('an MCP command tool is refused before and after the switch', async (t) => {
+  const { create, guard, addScopedDefinition } = team(t)
+  const bot = await create({ shell: false })
+  // A server mounted before the shell went off: its command tool never reaches the body.
+  await refused(guard(), 'mcp__toolbox__run', { id: bot.id }, { command: 'id' })
+  // A server mounted after the switch registers a command tool: still refused, fail closed,
+  // without another apply or any code that knows the tool's name.
+  addScopedDefinition('mcp__late__run', schema('mcp__late__run', { command: { type: 'string' } }, ['command']))
+  await refused(guard(), 'mcp__late__run', { id: bot.id }, { command: 'id' })
+  // A Bot that keeps its shell can call the same late tool.
+  const free = await create()
+  await allowed(guard(), 'mcp__late__run', { id: free.id }, { command: 'id' })
 })
 
 test('a stored Bot with no field reads shell on', async (t) => {

@@ -454,6 +454,18 @@ export function install(rt) {
         continue
       }
       for (const bot of bots) {
+        // A Bot without a shell cannot move onto a coding CLI that brings its own shell. It
+        // stays where it is, its settings say why, and the person is warned once per hold.
+        if (bot.shell === false && onRoute(spec, bot)) {
+          const held = bot.subscriptionShellHeld
+          if (held?.from !== spec.from || held?.to !== spec.to || held?.cli !== spec.cli) {
+            bot.subscriptionShellHeld = { from: spec.from, to: spec.to, cli: spec.cli }
+            changed = true
+            rt.warn?.('ds-bot: %s stays on %s: %s is a coding CLI that brings its own shell, '
+              + 'so turn the shell on or pick a native model.', bot.name, spec.from, spec.cli)
+          }
+          continue
+        }
         // The model a pending switch would go back to follows too, whatever the Bot is on now.
         const before = bot.previousModel
         const previous = movedRef(before, spec, listed)
@@ -490,6 +502,14 @@ export function install(rt) {
         state.subscriptionMovedAt = { ...state.subscriptionMovedAt, [spec.from]: now }
         lookAgain(CONFIRM_AFTER_MS)
       }
+    }
+    // A hold ends when the Bot leaves the source route or its shell comes back.
+    for (const bot of bots) {
+      if (bot.subscriptionShellHeld === undefined) continue
+      const still = bot.shell === false && SUBSCRIPTION_MOVES.some(source => onRoute(source, bot))
+      if (still) continue
+      delete bot.subscriptionShellHeld
+      changed = true
     }
 
     // Three timed looks at a sign-in or CLI that gives no answer, then events only. Only a pass

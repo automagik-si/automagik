@@ -210,6 +210,8 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
       }),
       h('div', { className: 'bt-bs-shell-note' },
         t('The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.')),
+      h('div', { className: 'bt-bs-shell-note' },
+        t('This removes this Bot\'s own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.')),
       h(Row, {
         label: t('Denied tools'),
         hint: t('Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.'),

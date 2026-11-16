@@ -11,7 +11,7 @@ import { MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOT
 import { currentColor, isColor, normalize, unquote } from './text.js'
 import { nameProblem } from '../shared/mentions.js'
 import { contextPatch } from '../shared/context-policy.js'
-import { crossesHarness } from '../shared/routes.js'
+import { commandCapableAgent, crossesHarness } from '../shared/routes.js'
 import { cleanPetId, shippedPet } from './pets.js'
 import { cleanDenyTools, cleanShell } from './tool-deny.js'
 
@@ -318,6 +318,13 @@ export function install(rt) {
     // A Bot another Bot makes also keeps that creator's shell fence: a shell-less Bot must
     // not give itself one by spawning a Bot that has it. Only the user turns it back on.
     const shellOff = shell === undefined ? isPrivate || creator?.shell === false : shell === false
+    // A command-capable agent runs its tools outside this plugin, so a Bot without a shell
+    // cannot be paired with it: the fence would not reach the agent. Refuse before a Session
+    // exists, with the way out.
+    if (shellOff && commandCapableAgent(modelRef)) {
+      throw refusal(`${cleanName} has no shell, so it cannot run on ${String(modelRef).split('/')[0]}, `
+        + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
+    }
     const carried = Array.isArray(creator?.denyTools) ? creator.denyTools : []
     const denied = carried.length === 0 ? denyTools : cleanDenyTools([...new Set([...carried, ...(denyTools ?? [])])])
     // Keep the existing unset representation when the profile already starts at
@@ -595,6 +602,18 @@ export function install(rt) {
     const modelRef = patch.model === undefined ? undefined
       : patch.model === null || patch.model === '' ? null
       : await rt.resolveModel(patch.model, { checkAccess: true, remember: false, keep: bot.model })
+    // The shell and the model are one boundary: a Bot without a shell cannot run on an
+    // agent whose own tools run commands, and such a Bot's shell cannot be turned off.
+    const nextShell = shell === undefined ? bot.shell : shell
+    const nextModel = modelRef === undefined ? bot.model ?? bot.appliedModel : modelRef
+    if (nextShell === false && commandCapableAgent(nextModel)) {
+      const provider = String(nextModel).split('/')[0]
+      throw refusal(commandCapableAgent(bot.model ?? bot.appliedModel)
+        ? `${bot.name} runs on ${provider}, whose own tools can run commands, so its shell `
+          + 'cannot be turned off. Pick a model that uses DeepSeek Harness\'s tools first.'
+        : `${bot.name} has no shell, so it cannot run on ${provider}, whose own tools can run `
+          + 'commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
+    }
     // A model on another route, or another ACP agent, is a new conversation with a handoff
     // note (RFC 0030, Decided 6 and 10). The menu uses switchRoute for it; a direct update-bot
     // is the same person's pick, so it takes that path too rather than silently carrying the

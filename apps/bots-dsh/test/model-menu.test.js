@@ -759,3 +759,18 @@ test('a reopened menu starts from the default, not the choices of the menu still
   // A click in the reopened menu builds on that empty state, not on the old one.
   assert.deepEqual({ ...toggledGroup(manualFor(previous, 2), 'relay', false) }, { relay: true })
 })
+
+test('a shell-off Bot held off its plan CLI says why, and asks for a model when the plan is gone', () => {
+  const { modelHint, needsModelPick } = module.exports
+  const held = { from: 'openai-codex', to: 'acp-codex', cli: 'Codex' }
+  const bot = { id: 'b', name: 'B', model: 'openai-codex/gpt-6.1-sol', subscriptionShellHeld: held }
+  const served = { ready: true, models: [{ ref: 'openai-codex/gpt-6.1-sol', provider: 'openai-codex', providerName: 'ChatGPT', name: 'GPT-6.1 Sol' }] }
+  // The move notice names why: the CLI brings its own shell.
+  assert.equal(modelHint(bot, served), 'This Bot stays on GPT-6.1 Sol: Codex is a coding CLI that '
+    + "brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.")
+  // The retired route is gone: the Bot asks for a model instead of looking like it works.
+  const gone = { ready: true, models: [{ ref: 'deepseek/deepseek-v4-flash', provider: 'deepseek', providerName: 'DeepSeek', name: 'DeepSeek V4' }] }
+  assert.equal(modelHint(bot, gone), 'This model no longer answers, and this Bot cannot move to Codex '
+    + "while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.")
+  assert.equal(needsModelPick(bot, gone), false)
+})
