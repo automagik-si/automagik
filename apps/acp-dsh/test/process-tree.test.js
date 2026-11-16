@@ -20,6 +20,13 @@ const table = new Map([
   [42, stat(42, 1, 42)], [43, stat(43, 42, 42)], [44, stat(44, 43, 44)],
   [45, stat(45, 44, 44)], [46, stat(46, 1, 46)],
 ])
+// The product never signals its own pid and reads /proc/<pid>/stat to find DSH's group, so a
+// fixture table must not hold the pid this file runs as. A loaded host starts helper processes
+// first, which moves that pid into a fixed fixture range: shift the block clear of it instead.
+const fixturePids = (first, last) => {
+  const shift = process.pid >= first && process.pid <= last ? 1000 : 0
+  return pid => pid + shift
+}
 function fakeDeps(entries = table) {
   return {
     platform: 'linux', list: () => [...entries.keys()].map(String),
@@ -167,10 +174,11 @@ test('failed group sends fall back only to members checked live in this pass', (
 })
 
 test('successful group sends also signal each live member once in the same pass', () => {
+  const at = fixturePids(44, 49)
   const entries = new Map([
-    [44, stat(44, 42, 60)], [45, stat(45, 44, 44)],
-    [46, stat(46, 44, 44, '99999')], [47, 'unreadable identity'],
-    [49, stat(49, 44, 44)],
+    [at(44), stat(at(44), 42, 60)], [at(45), stat(at(45), at(44), at(44))],
+    [at(46), stat(at(46), at(44), at(44), '99999')], [at(47), 'unreadable identity'],
+    [at(49), stat(at(49), at(44), at(44))],
   ])
   const deps = fakeDeps(entries)
   const read = deps.read
@@ -181,16 +189,19 @@ test('successful group sends also signal each live member once in the same pass'
     return read(path)
   }
   deps.kill = (pid, signal) => {
-    if (pid === 48 || pid === 49) {
-      throw Object.assign(new Error('probe failed'), { code: pid === 48 ? 'ESRCH' : 'EPERM' })
+    if (pid === at(48) || pid === at(49)) {
+      throw Object.assign(new Error('probe failed'), { code: pid === at(48) ? 'ESRCH' : 'EPERM' })
     }
     if (signal) signals.push([pid, signal])
   }
-  const records = [44, 45, 46, 47, 48, 49].map(pid => ({ pid, ppid: 42, pgid: 44, birth }))
+  const records = [44, 45, 46, 47, 48, 49]
+    .map(pid => ({ pid: at(pid), ppid: 42, pgid: at(44), birth }))
   signalTree([...records, ...records], 'SIGKILL', deps)
-  assert.deepEqual(signals, [[-44, 'SIGKILL'], [44, 'SIGKILL'], [45, 'SIGKILL']])
-  for (const pid of [44, 45, 46, 47]) assert.equal(reads.get(`/proc/${pid}/stat`), 1)
-  for (const pid of [48, 49]) assert.equal(reads.has(`/proc/${pid}/stat`), false)
+  assert.deepEqual(signals, [
+    [-at(44), 'SIGKILL'], [at(44), 'SIGKILL'], [at(45), 'SIGKILL'],
+  ])
+  for (const pid of [44, 45, 46, 47].map(at)) assert.equal(reads.get(`/proc/${pid}/stat`), 1)
+  for (const pid of [48, 49].map(at)) assert.equal(reads.has(`/proc/${pid}/stat`), false)
 })
 
 const linuxOnly = { skip: process.platform !== 'linux' && 'real process trees need Linux /proc' }
@@ -602,9 +613,11 @@ test('group leaders are checked once and failed checks never authorize their pid
 })
 
 test('macOS uses one table per signal call and per state check batch', async () => {
+  const at = fixturePids(44, 53)
+  const pids = Array.from({ length: 10 }, (_, i) => at(44 + i))
   const output = [
     `${process.pid} 1 20 Fri Nov 6 13:14:15 2026`,
-    ...Array.from({ length: 10 }, (_, i) => `${44 + i} 42 44 Fri Nov 6 13:14:15 2026`),
+    ...pids.map(pid => `${pid} 42 ${at(44)} Fri Nov 6 13:14:15 2026`),
   ].join('\n')
   const records = parsePsTable(output).slice(1)
   let calls = 0
@@ -623,8 +636,8 @@ test('macOS uses one table per signal call and per state check batch', async () 
   await signalTree(records, 'SIGTERM', deps)
   assert.equal(calls, 1)
   // Every known pid is probed before the one table read.
-  assert.deepEqual(probes, Array.from({ length: 10 }, (_, i) => 44 + i))
-  assert.deepEqual(signals, [-44, ...records.map(record => record.pid)])
+  assert.deepEqual(probes, pids)
+  assert.deepEqual(signals, [-at(44), ...pids])
   await signalTree(records, 'SIGKILL', deps)
   assert.equal(calls, 2)
   assert.deepEqual(await treeStates(records, deps), Array(10).fill('live'))
