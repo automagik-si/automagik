@@ -2,12 +2,14 @@
 // scope is impossible; a memory kill is reported as CAPPED with a 0600 log line, the full-gate
 // flock is taken only with --lock, and the child gets neither the live-core variables nor the
 // real runtime folder (it gets a fresh scratch one, removed after the run). Every test uses its
-// own state folder, lock file and (where needed) a stub PATH: no test touches the real lock, a
-// live terminal or the network.
+// own state folder and (where needed) a stub PATH. The lock rows run a copy of the wrapper in a
+// scratch git checkout, so they never lock the real full-gate lock; the outer-lock row only
+// probes that real path non-blockingly. No test touches a live terminal or the network.
 import { afterAll, describe, expect, test } from 'bun:test';
 import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process';
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -18,7 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 const SCRIPT = join(import.meta.dir, 'capped-run');
 const work = mkdtempSync(join(tmpdir(), 'capped-run-test-'));
@@ -172,6 +174,39 @@ function sharedLockWritable(): boolean {
 function closeCode(child: ChildProcess): Promise<number | null> {
   return new Promise(resolve => child.on('close', code => resolve(code)));
 }
+
+interface LockScratch {
+  root: string;
+  script: string;
+  lock: string;
+}
+
+let lockScratch: LockScratch | null = null;
+
+function scratchCheckout(): LockScratch {
+  if (lockScratch) return lockScratch;
+  const root = mkdtempSync(join('/dev/shm', 'capped-run-lockrepo-'));
+  const script = join(root, 'scripts', 'capped-run');
+  mkdirSync(dirname(script), { recursive: true });
+  cpSync(SCRIPT, script);
+  const init = spawnSync('git', ['init', '-q', root], { encoding: 'utf8' });
+  if (init.status !== 0) throw new Error('git init failed for the lock scratch checkout');
+  lockScratch = { root, script, lock: join(root, '.automagik', 'locks', 'full-gate.lock') };
+  return lockScratch;
+}
+
+function scratchLockReady(): boolean {
+  try {
+    scratchCheckout();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+afterAll(() => {
+  if (lockScratch) rmSync(lockScratch.root, { recursive: true, force: true });
+});
 
 const unshareWorks = (() => {
   if (process.platform !== 'linux') return false;
@@ -542,29 +577,39 @@ describe('capped-run', () => {
     expect(lines).toEqual(['exit 137: could not read the memory-kill cause (scope gone, command=sh)']);
   });
 
-  test.skipIf(process.platform !== 'linux' || !flock || !sharedLockWritable())(
-    'two concurrent runs exclude each other on the shared lock (Linux; shared path writable)',
+  test.skipIf(process.platform !== 'linux' || !flock || !scratchLockReady())(
+    'two concurrent runs exclude each other on a scratch checkout lock (Linux; no real lock)',
     async () => {
+      const { root, script, lock } = scratchCheckout();
       const seq = join('/dev/shm', `capped-run-lock-seq-${process.pid}-${Date.now()}`);
       const child = join('/dev/shm', `capped-run-lock-child-${process.pid}-${Date.now()}.sh`);
       writeFileSync(child, 'printf "start\\n" >> "$1"\nsleep 0.5\nprintf "end\\n" >> "$1"\n');
       const env = { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '60' };
+      let firstErr = '';
       try {
-        const first = spawn('sh', [SCRIPT, '--lock', '--', 'sh', child, seq], {
-          cwd: work,
+        const first = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
+          cwd: root,
           env,
-          stdio: 'ignore',
+          stdio: ['ignore', 'ignore', 'pipe'],
+        });
+        first.stderr?.on('data', chunk => {
+          firstErr += chunk.toString();
         });
         const firstDone = closeCode(first);
         expect(await waitFor(seq, 20_000)).toBe(true);
-        const second = spawn('sh', [SCRIPT, '--lock', '--', 'sh', child, seq], {
-          cwd: work,
+        const second = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
+          cwd: root,
           env,
           stdio: 'ignore',
         });
         const secondDone = closeCode(second);
         expect(await Promise.all([firstDone, secondDone])).toEqual([0, 0]);
         expect(readFileSync(seq, 'utf8').trim().split('\n')).toEqual(['start', 'end', 'start', 'end']);
+        // The scratch checkout's own lock was used, with its modes, never the real one.
+        expect(firstErr.split('\n')[0]).toContain(`path=${lock} dev=`);
+        expect(firstErr.split('\n')[0]).toMatch(/ dev=\S+ ino=\S+$/);
+        expect(statSync(lock).mode & 0o777).toBe(0o600);
+        expect(statSync(dirname(lock)).mode & 0o777).toBe(0o700);
       } finally {
         rmSync(seq, { force: true });
         rmSync(child, { force: true });
@@ -573,38 +618,73 @@ describe('capped-run', () => {
     60_000,
   );
 
-  test.skipIf(process.platform !== 'linux' || !flock || !sharedLockWritable() || !unshareWorks)(
-    'a run with its own tmpfs on /tmp still excludes on the shared lock (Linux; unshare -rm)',
+  test.skipIf(process.platform !== 'linux' || !flock || !scratchLockReady() || !unshareWorks)(
+    'a run with its own tmpfs on /tmp still excludes on a scratch checkout lock (Linux; unshare -rm)',
     async () => {
+      const { root, script, lock } = scratchCheckout();
       const seq = join('/dev/shm', `capped-run-unshare-seq-${process.pid}-${Date.now()}`);
       const child = join('/dev/shm', `capped-run-unshare-child-${process.pid}-${Date.now()}.sh`);
       writeFileSync(child, 'printf "start\\n" >> "$1"\nsleep 0.5\nprintf "end\\n" >> "$1"\n');
       const env = { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '60' };
       const inner = 'mount -t tmpfs tmpfs /tmp && exec sh "$1" --lock -- sh "$2" "$3"';
+      let firstErr = '';
       try {
-        const first = spawn('sh', [SCRIPT, '--lock', '--', 'sh', child, seq], {
-          cwd: work,
+        const first = spawn('sh', [script, '--lock', '--', 'sh', child, seq], {
+          cwd: root,
           env,
-          stdio: 'ignore',
+          stdio: ['ignore', 'ignore', 'pipe'],
+        });
+        first.stderr?.on('data', chunk => {
+          firstErr += chunk.toString();
         });
         const firstDone = closeCode(first);
         expect(await waitFor(seq, 20_000)).toBe(true);
-        // The second run mounts its own tmpfs on /tmp: the shared lock must still be the same
-        // file, or the two runs overlap (mutant 20 fails here).
-        const second = spawn('unshare', ['-rm', 'sh', '-c', inner, 'sh', SCRIPT, child, seq], {
-          cwd: join(import.meta.dir, '..'),
+        // The second run mounts its own tmpfs on /tmp: the scratch checkout's lock must still be
+        // the same file, or the two runs overlap (mutant 20 fails here).
+        const second = spawn('unshare', ['-rm', 'sh', '-c', inner, 'sh', script, child, seq], {
+          cwd: root,
           env,
           stdio: 'ignore',
         });
         const secondDone = closeCode(second);
         expect(await Promise.all([firstDone, secondDone])).toEqual([0, 0]);
         expect(readFileSync(seq, 'utf8').trim().split('\n')).toEqual(['start', 'end', 'start', 'end']);
+        expect(firstErr.split('\n')[0]).toContain(`path=${lock} dev=`);
       } finally {
         rmSync(seq, { force: true });
         rmSync(child, { force: true });
       }
     },
     60_000,
+  );
+
+  test.skipIf(process.platform !== 'linux' || !flock || !sharedLockWritable() || !scratchLockReady())(
+    "the file's own lock rows do not wait on the outer full-gate lock",
+    async () => {
+      const { root, script, lock } = scratchCheckout();
+      const realLock = join(mainCheckout(), '.automagik', 'locks', 'full-gate.lock');
+      // Hold the real lock if we can; when the outer run already holds it the non-blocking probe
+      // just fails, and the real lock is held anyway. Either way the scratch run must not wait.
+      const holder = spawn('flock', ['-n', '-x', realLock, 'sh', '-c', 'sleep 5'], {
+        stdio: 'ignore',
+      });
+      await Bun.sleep(300);
+      try {
+        const started = Date.now();
+        const outcome = spawnSync('sh', [script, '--lock', '--', 'sh', '-c', 'exit 0'], {
+          cwd: root,
+          env: { ...process.env, CAPPED_RUN_TEST_LOCK_WAIT: '10' },
+          encoding: 'utf8',
+          timeout: 15_000,
+        });
+        expect(outcome.status).toBe(0);
+        expect(Date.now() - started).toBeLessThan(10_000);
+        expect((outcome.stderr ?? '').split('\n')[0]).toContain(`path=${lock} dev=`);
+      } finally {
+        holder.kill();
+      }
+    },
+    30_000,
   );
 
   test.skipIf(!scope || !dd || !shmHasRoom())(
