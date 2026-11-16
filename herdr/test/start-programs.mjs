@@ -116,6 +116,7 @@ export function startProgramsTests(cli) {
     s.live();
     const home = join(s.root, `${agent}-home`);
     mkdirSync(home);
+    chmodSync(home, 0o700);
     const r = s.run(["restart", id, "--agent-home", home]);
     assert.equal(r.status, 0, r.stderr);
     const launch = s.calls().filter((call) => call[0] === "run").at(-1);

@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -18,16 +18,24 @@ const BOT = "b-aaaaaaaaaa";
 const CLAUDE = "/bin/claude";
 const CODEX = "/bin/codex";
 
-/** A scratch world: a real folder, a file, and a missing path. */
+/** A scratch world: a private folder, a 0755 folder, a 0777 folder, a file, and a missing path. */
 function world(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "agent-home-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home"), app = join(root, "app"), login = join(root, "login");
+  const open = join(root, "open"), wide = join(root, "wide");
   const file = join(root, "not-a-folder");
-  mkdirSync(home); mkdirSync(app); mkdirSync(login);
+  mkdirSync(home); mkdirSync(app); mkdirSync(login); mkdirSync(open); mkdirSync(wide);
+  chmodSync(login, 0o700); chmodSync(open, 0o755); chmodSync(wide, 0o777);
   writeFileSync(file, "x");
-  return { root, home, app, login, file, missing: join(root, "missing") };
+  return { root, home, app, login, open, wide, file, missing: join(root, "missing") };
 }
+
+/** The real stat the CLI uses: a directory check and its permission bits. */
+const STAT = {
+  isDir: (path) => { try { return statSync(path).isDirectory(); } catch { return false; } },
+  mode: (path) => statSync(path).mode,
+};
 
 /** The env assignments `/usr/bin/env` carries in a launch array, before the program. */
 function envOf(args) {
@@ -69,24 +77,37 @@ export function agentHomeTests(cli) {
   });
 
   test("a relative path, a file, a missing folder and the root are refused", (t) => {
-    const { root, login, file, missing } = world(t);
-    assert.equal(agentHomeProblem(login, { isDir: () => true }), null, "a real folder passes");
+    const { login, file, missing } = world(t);
+    assert.equal(agentHomeProblem(login, STAT), null, "a real 0700 folder passes");
     assert.match(agentHomeProblem("relative/login"), /is not an absolute path/);
     assert.match(agentHomeProblem(""), /has no folder/);
-    assert.match(agentHomeProblem(file, { isDir: (p) => p === login }), /is not a folder/);
-    assert.match(agentHomeProblem(missing, { isDir: (p) => p === login }), /is not a folder/);
-    assert.match(agentHomeProblem("/", { isDir: () => true }), /is not a login home/);
-    assert.match(agentHomeProblem("/tmp/a\nb", { isDir: () => true }), /has a control character/);
+    assert.match(agentHomeProblem(file, STAT), /is not a folder/);
+    assert.match(agentHomeProblem(missing, STAT), /is not a folder/);
+    assert.match(agentHomeProblem("/", STAT), /is not a login home/);
+    assert.match(agentHomeProblem("/tmp/a\nb", STAT), /has a control character/);
+  });
+
+  test("a login home must be private: 0700 passes, 0755 and 0777 are refused", (t) => {
+    const { login, open, wide } = world(t);
+    assert.equal(agentHomeProblem(login, STAT), null);
+    assert.match(agentHomeProblem(open, STAT), /is mode 0755; a login home must be 0700/);
+    assert.match(agentHomeProblem(wide, STAT), /is mode 0777; a login home must be 0700/);
+    assert.deepEqual(agentHomeFor("claude", login, STAT), { words: [`CLAUDE_CONFIG_DIR=${login}`] });
+    assert.match(agentHomeFor("codex", open, STAT).error, /must be 0700/);
+    assert.match(agentHomeFor("codex", wide, STAT).error, /must be 0700/);
+    // The validator never chmods the folder it is given.
+    assert.equal(statSync(open).mode & 0o777, 0o755);
+    assert.equal(statSync(wide).mode & 0o777, 0o777);
   });
 
   test("agentHomeFor refuses an agent with no vendor variable and returns exactly one assignment", (t) => {
-    const { login } = world(t);
-    assert.deepEqual(agentHomeFor("claude", login, { isDir: () => true }), { words: [`CLAUDE_CONFIG_DIR=${login}`] });
-    assert.deepEqual(agentHomeFor("codex", login, { isDir: () => true }), { words: [`CODEX_HOME=${login}`] });
-    assert.match(agentHomeFor("dsh-tui", login, { isDir: () => true }).error, /has no vendor config folder/);
-    assert.match(agentHomeFor(undefined, login, { isDir: () => true }).error, /has no vendor config folder/);
-    assert.match(agentHomeFor("claude", "relative", { isDir: () => true }).error, /not an absolute path/);
-    assert.match(agentHomeFor("claude", login, { isDir: () => false }).error, /is not a folder/);
+    const { login, missing } = world(t);
+    assert.deepEqual(agentHomeFor("claude", login, STAT), { words: [`CLAUDE_CONFIG_DIR=${login}`] });
+    assert.deepEqual(agentHomeFor("codex", login, STAT), { words: [`CODEX_HOME=${login}`] });
+    assert.match(agentHomeFor("dsh-tui", login, STAT).error, /has no vendor config folder/);
+    assert.match(agentHomeFor(undefined, login, STAT).error, /has no vendor config folder/);
+    assert.match(agentHomeFor("claude", "relative", STAT).error, /not an absolute path/);
+    assert.match(agentHomeFor("claude", missing, STAT).error, /is not a folder/);
   });
 
   test("a worker launch without the flag is unchanged; with it only the agent's variable is added", () => {
@@ -128,16 +149,16 @@ export function agentHomeTests(cli) {
       ["restart", BOT, "--project", "/p", "--tree", "--revive", "--agent-home", login, "--fresh", "--json"]);
   });
 
-  test("the CLI refuses a relative path, a file and a missing folder before any launch", (t) => {
-    const { root, home, app, login, file, missing } = world(t);
+  test("the CLI refuses a relative path, a file, a missing folder, 0755 and 0777 before any launch", (t) => {
+    const { root, home, app, login, open, wide, file, missing } = world(t);
     const env = { ...process.env, PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app,
       AUTOMAGIK_HERDR_NO_UPDATE: "1", GIT_CEILING_DIRECTORIES: root };
     const run = (args) => spawnSync(process.execPath, [cli, ...args], { cwd: root, env, encoding: "utf8" });
-    for (const bad of ["relative/login", file, missing]) {
+    for (const bad of ["relative/login", file, missing, open, wide]) {
       const worker = run(["worker", "--agent-home", bad, "task", "--branch", "feat/x"]);
       assert.equal(worker.status, 2, `${bad}: ${worker.stderr}`);
       assert.match(worker.stderr, /--agent-home/);
-      assert.match(worker.stderr, /not an absolute path|is not a folder/, bad);
+      assert.match(worker.stderr, /not an absolute path|is not a folder|must be 0700/, bad);
       const restart = run(["restart", BOT, "--agent-home", bad]);
       assert.equal(restart.status, 2, `${bad}: ${restart.stderr}`);
       assert.match(restart.stderr, /--agent-home/);

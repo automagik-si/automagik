@@ -220,10 +220,26 @@ test("M4: switch off keeps the complete worker argv byte for byte against C1", (
     .split(GUARD_DIR).join("<guard>")), baseline);
 });
 
+test("worker --agent-home carries CODEX_HOME through a Codex template (#1208)", (t) => {
+  const s = scene(t);
+  const home = join(s.root, "codex-template-home");
+  mkdirSync(home);
+  chmodSync(home, 0o700);
+  const r = s.cli(["worker", "do the template task", "--branch", "feat/template-home", "--template", "dev-sol",
+    "--agent-home", home, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = s.runs().at(-1);
+  // A Codex template runs through commandArgv when the home is given: hc's template form would
+  // drop the environment, so the launch must carry exactly one CODEX_HOME.
+  assert.deepEqual(run.filter((word) => word.startsWith("CODEX_HOME=")), [`CODEX_HOME=${home}`], JSON.stringify(run));
+  assert.ok(run.includes("worker.template=dev-sol"), JSON.stringify(run));
+});
+
 test("worker --agent-home puts the agent's vendor config folder on the launch and nothing else (#1208)", (t) => {
   const s = scene(t);
   const home = join(s.root, "codex-home");
   mkdirSync(home);
+  chmodSync(home, 0o700);
   const plain = s.cli(["worker", "do the plain task", "--branch", "feat/plain", "--json"]);
   assert.equal(plain.code, 0, plain.err);
   const withHome = s.cli(["worker", "do the home task", "--branch", "feat/with-home", "--agent-home", home, "--json"]);

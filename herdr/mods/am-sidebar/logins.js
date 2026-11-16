@@ -17,16 +17,26 @@ export const agentHomeVar = (agent) => (typeof agent === "string" && Object.hasO
 
 /**
  * Why `dir` is not an `--agent-home` folder: absolute, no control character, not the filesystem
- * root, and an existing directory. Null when it is. `isDir` is injected so this stays pure.
+ * root, an existing directory, and private to its owner (mode 0700, never group or other bits).
+ * Null when it is. `isDir` and `mode` are injected so this stays pure; `mode` is required, so a
+ * caller cannot accept a folder without checking its permissions. Nothing here chmods.
  */
-export function agentHomeProblem(dir, { isDir } = {}) {
+export function agentHomeProblem(dir, { isDir, mode } = {}) {
   if (typeof dir !== "string" || !dir) return "has no folder";
   if (!dir.startsWith("/")) return `folder ${shown(dir)} is not an absolute path`;
   if (/[\u0000-\u001f\u007f]/.test(dir)) return `folder ${shown(dir)} has a control character`;
   if (dir === "/") return `folder ${shown(dir)} is not a login home`;
+  if (typeof isDir !== "function" || typeof mode !== "function") return "cannot be checked as a private folder";
   let folder = false;
-  try { folder = typeof isDir === "function" && isDir(dir); } catch { folder = false; }
-  return folder ? null : `folder ${shown(dir)} is not a folder`;
+  try { folder = isDir(dir); } catch { folder = false; }
+  if (!folder) return `folder ${shown(dir)} is not a folder`;
+  let bits;
+  try { bits = mode(dir); } catch { return `folder ${shown(dir)} cannot be checked for its mode`; }
+  const permissions = Number(bits) & 0o777;
+  if (permissions !== 0o700) {
+    return `folder ${shown(dir)} is mode ${permissions.toString(8).padStart(4, "0")}; a login home must be 0700 (owner-only)`;
+  }
+  return null;
 }
 
 /** The env words that point `agent`'s launch at `dir`; [] when `agent` has no such variable (agentHomeVar). */
@@ -37,11 +47,11 @@ export function agentHomeWords(agent, dir) {
 
 /**
  * `--agent-home` checked for one launch: { words } with the single env assignment when `dir` is
- * an absolute existing folder and `agent` has a vendor config variable, else { error } with the
- * reason. The caller refuses on `error`; no launch runs on a fallback home.
+ * an absolute existing 0700 folder and `agent` has a vendor config variable, else { error } with
+ * the reason. The caller refuses on `error`; no launch runs on a fallback home.
  */
-export function agentHomeFor(agent, dir, { isDir } = {}) {
-  const problem = agentHomeProblem(dir, { isDir });
+export function agentHomeFor(agent, dir, { isDir, mode } = {}) {
+  const problem = agentHomeProblem(dir, { isDir, mode });
   if (problem) return { error: problem };
   const name = agentHomeVar(agent);
   if (!name) {

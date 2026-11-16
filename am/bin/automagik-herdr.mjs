@@ -223,7 +223,7 @@ function claudeLogin(argv, warnings = []) {
  */
 function agentHomeOf(opts) {
   if (opts["agent-home"] === undefined) return null;
-  const why = agentHomeProblem(opts["agent-home"], { isDir });
+  const why = agentHomeProblem(opts["agent-home"], { isDir, mode: (path) => statSync(path).mode });
   if (why) throw new CliError(`--agent-home ${String(opts["agent-home"]).slice(0, 200)}: ${why}.`, 2);
   return opts["agent-home"];
 }
@@ -231,7 +231,7 @@ function agentHomeOf(opts) {
 /** The env words --agent-home puts on a launch of `agent`, or a refusal when this pack sets no vendor variable for it. */
 function agentHomeLogin(agentHome, agent, agents = agentTable()) {
   if (agentHome === null) return null;
-  const checked = agentHomeFor(agent, agentHome, { isDir });
+  const checked = agentHomeFor(agent, agentHome, { isDir, mode: (path) => statSync(path).mode });
   if (checked.error) {
     const who = agent ? (agents[agent]?.name ?? agent) : "this launch's agent";
     throw new CliError(`--agent-home: ${who} ${checked.error}.`, 2);
@@ -1395,8 +1395,8 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 else dev). One writer (dev, test, fix) per worktree, any bot;
                                 --agent-home DIR: the agent's login home, through its vendor
                                 config variable (Claude: CLAUDE_CONFIG_DIR, Codex:
-                                CODEX_HOME); DIR must be absolute and an existing folder, or
-                                nothing starts. restart takes the same flag, and revive
+                                CODEX_HOME); DIR must be absolute and an existing 0700 folder,
+                                or nothing starts. restart takes the same flag, and revive
                                 passes it to each restart; --tree helpers keep their homes.
                                 reviewers run alongside. --task: Genie's short id (gl-231);
                                 the worker is named <id>-<role>, a --branch must contain the
@@ -6615,11 +6615,15 @@ async function cmdWorker(opts, rest) {
     if (lost) throw new CliError(lost);
     const noDaemon = templateCommand ? codexTemplateWarning(plan.template, templateCommand, agents) : null;
     if (noDaemon) warnings.push(noDaemon);
-    if (runs === "claude") {
+    // A Claude template always runs through commandArgv (its login words need /usr/bin/env). A
+    // Codex template does too when --agent-home is given: hc's template form carries no
+    // environment, so without this the chosen CODEX_HOME would be silently dropped.
+    if (runs === "claude" || (agentHome !== null && runs === "codex")) {
       templateArgv = t.command?.trim() ? commandArgv({ shell: t.command }, [task]) : null;
       if (!templateArgv) {
-        throw new CliError(`Template ${plan.template} runs Claude, but ${t.command?.trim() ? "its command ends in a separator or a comment, so it can't take the task"
-          : "hc gave no command for it"}; it can't be started on the chosen Claude login. Not started.`);
+        const why = t.command?.trim() ? "its command ends in a separator or a comment, so it can't take the task" : "hc gave no command for it";
+        throw new CliError(`Template ${plan.template} runs ${runs === "claude" ? "Claude" : "Codex"}, but ${why}; `
+          + `it can't be started on the chosen ${runs === "claude" ? "Claude" : "Codex"} login home. Not started.`);
       }
     }
   } else {
