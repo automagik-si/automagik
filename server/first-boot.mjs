@@ -822,6 +822,48 @@ export const managedProgram = (run, home) => Array.isArray(run) && run.length ==
  * logged and the ACP plugin's own store retries on its normal schedule. Never called at build
  * time, and never with a CLI tarball baked into the image.
  */
+/**
+ * One bounded asynchronous child. The entrypoint's event loop stays free for core/dsh exits,
+ * signals and pipe draining while the install runs. Output is capped; timeout kills the child;
+ * the caller receives the status, signal and timing for the receipt.
+ */
+export function runVendorChild(command, args, { env = process.env, cwd, timeout = 840_000, maxOutput = 16 * 1024 * 1024 } = {}) {
+  const spawn = process.getBuiltinModule('node:child_process').spawn
+  return new Promise((resolve) => {
+    const started = Date.now()
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    let timedOut = false
+    let outputOver = false
+    let timer
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ ...result, stdout, stderr, timedOut, outputOver, durationMs: Date.now() - started })
+    }
+    const child = spawn(command, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+    const take = (chunk, stream) => {
+      const text = chunk.toString('utf8')
+      if (stream === 'out') stdout += text
+      else stderr += text
+      if (!outputOver && stdout.length + stderr.length > maxOutput) {
+        outputOver = true
+        child.kill('SIGKILL')
+      }
+    }
+    child.stdout.on('data', (chunk) => take(chunk, 'out'))
+    child.stderr.on('data', (chunk) => take(chunk, 'err'))
+    child.on('error', (error) => finish({ status: null, signal: null, error }))
+    child.on('close', (status, signal) => finish({ status, signal, error: null }))
+    timer = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGKILL')
+    }, timeout)
+  })
+}
+
 export async function installVendorClis({
   home,
   profile,
@@ -838,7 +880,6 @@ export async function installVendorClis({
   const { AGENTS } = await import(pathToFileURL(agentsFile).href)
   const install = fileURLToPath(new URL('./vendor-install.mjs', import.meta.url))
   const stateFile = join(home, 'vendor-clis-state.json')
-  const exec = process.getBuiltinModule('node:child_process').spawnSync
   const cgroup = () => {
     const read = (file) => { try { return readFileSync(file, 'utf8').trim() } catch { return null } }
     const events = read('/sys/fs/cgroup/memory.events') ?? ''
@@ -853,7 +894,9 @@ export async function installVendorClis({
   }
   for (const [id, spec] of Object.entries(AGENTS)) {
     if (!spec.cliPackage) continue
-    const child = exec(process.execPath, [install, '--profile', profile, '--vendor', spec.key, '--home', home], {
+    const startedAt = new Date().toISOString()
+    log(`vendor CLIs: ${spec.defaultName} install start ${startedAt}`)
+    const child = await runVendorChild(process.execPath, [install, '--profile', profile, '--vendor', spec.key, '--home', home], {
       env: {
         ...env,
         HOME: env.HOME || home,
@@ -864,16 +907,25 @@ export async function installVendorClis({
         npm_config_child_concurrency: '1',
         npm_config_network_concurrency: '2',
       },
-      cwd: home, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 840_000, maxBuffer: 16 * 1024 * 1024,
+      cwd: home,
     })
+    const endedAt = new Date().toISOString()
     for (const line of String(child.stderr ?? '').split('\n').filter(Boolean)) log(`vendor CLIs: ${line}`)
     let result
     try { result = JSON.parse(String(child.stdout ?? '').trim()) } catch {
-      result = { state: 'failed', error: String(child.error?.message ?? `install child exited ${child.status ?? child.signal ?? 'unknown'}`), signal: child.signal ?? null, status: child.status ?? null }
+      result = {
+        state: 'failed',
+        error: child.timedOut ? 'install timed out' : child.outputOver ? 'install output exceeded the bound' : String(child.error?.message ?? `install child exited ${child.status ?? child.signal ?? 'unknown'}`),
+        signal: child.signal ?? null, status: child.status ?? null,
+      }
     }
     if (result.state === 'failed' && !result.memoryEvents) Object.assign(result, cgroup())
+    result.startedAt = startedAt
+    result.endedAt = endedAt
+    result.durationMs = child.durationMs
     results[id] = result
     writeState()
+    log(`vendor CLIs: ${spec.defaultName} install end ${endedAt} duration=${child.durationMs}ms status=${child.status ?? 'null'} signal=${child.signal ?? 'none'}${child.timedOut ? ' timeout=yes' : ''}`)
     if (result.state === 'ready') {
       log(`vendor CLIs: ${spec.defaultName} ${result.version} at ${result.path}`)
       if (result.managed) {
