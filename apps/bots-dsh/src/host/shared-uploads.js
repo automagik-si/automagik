@@ -356,6 +356,9 @@ export function install(rt) {
       if (!SHELL_TOOLS.includes(exec.name)) return
       const base = rt.sessionFolder(exec.agent?.session ?? exec.agent) ?? '.'
       for (const word of shellPaths(strings(args).join('\n'))) {
+        // A word that already spells the bots root is the text check's: it inspects it as
+        // written and collapsed below. This check only adds what a link hides from that text.
+        if (/\.automagik\/bots\//i.test(flatten(word))) continue
         const absolute = resolve(base, word)
         const real = rt.realBeyond ? await rt.realBeyond(absolute) : absolute
         // The path as written, then where links lead, as the file tools check them.
