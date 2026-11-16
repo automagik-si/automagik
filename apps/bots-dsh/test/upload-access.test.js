@@ -630,12 +630,25 @@ async function shellLinks(t) {
   const shared = join(f.folder, '.automagik', 'bots', 'workspace')
   await mkdir(shared, { recursive: true })
   await writeFile(join(shared, 'notes.txt'), 'a shared note')
+  // A path with spaces in both a parent segment and the link itself.
+  const spaced = join(work, 'dir with spaces')
+  await mkdir(spaced)
+  const spacedLink = join(spaced, 'link with spaces')
   await writeFile(join(f.folder, 'team-notes.txt'), 'a team note')
   await symlink(other, join(work, 'link'), kind)
+  await symlink(other, join(work, 'link with spaces'), kind)
+  await symlink(other, join(spaced, 'plain-link'), kind)
+  await symlink(other, spacedLink, kind)
   await symlink(own, join(work, 'mine'), kind)
   await symlink(shared, join(work, 'shared'), kind)
   await symlink(f.folder, join(work, 'team'), kind)
-  return { f, work }
+  // Links inside the shared workspace and inside the caller's own folder.
+  const workspaceLink = join(shared, 'workspace-link')
+  const ownRoot = join(f.folder, '.automagik', 'bots', 'b')
+  const ownLink = join(ownRoot, 'own-link')
+  await symlink(other, workspaceLink, kind)
+  await symlink(other, ownLink, kind)
+  return { f, work, spaced, spacedLink, shared, ownRoot, workspaceLink, ownLink }
 }
 
 test("a shell path word through a link into another Bot's folder is refused as best effort", async t => {
@@ -677,4 +690,50 @@ test('the shell path check misses what it documents, and the rows say so', async
     'cat link/*',
     'sh ./open-link.sh',
   ]) assert.equal(await f.guard('b', 'bash', { command }), 'ran', command)
+})
+
+
+test('quoted and escaped shell paths, paths with spaces and flag values are refused', async t => {
+  const { f, spaced } = await shellLinks(t)
+  const spacedTarget = join(spaced, 'link with spaces')
+  const commands = [
+    'cat "link/x"', "cat 'link/x'",
+    'cat "link with spaces/x"', "cat 'link with spaces/x'",
+    'cat "dir with spaces/plain-link/x"', "cat 'dir with spaces/plain-link/x'",
+    'cat "dir with spaces/link with spaces/x"', "cat 'dir with spaces/link with spaces/x'",
+    'cat "dir with spaces/link with spaces/file with spaces.txt"',
+    'ls "link with spaces/"', 'ls "dir with spaces/link with spaces/"',
+    'cat dir\\ with\\ spaces/link\\ with\\ spaces/x',
+    `cat "${join(spacedTarget, 'x')}"`,
+    'git --file=link/x', 'git --file="link with spaces/x"',
+    'git --file="dir with spaces/link with spaces/x"',
+    `git --file="${join(spacedTarget, 'x')}"`,
+  ]
+  for (const command of commands) {
+    await assert.rejects(f.guard('b', 'bash', { command }), /another Bot's own folder/, command)
+  }
+})
+
+test("a link inside the shared workspace or the caller's own folder is refused", async t => {
+  const { f, workspaceLink, ownRoot, ownLink } = await shellLinks(t)
+  for (const command of [`cat ${join(workspaceLink, 'x')}`, `cat ${join(ownLink, 'x')}`]) {
+    await assert.rejects(f.guard('b', 'bash', { command }), /another Bot's own folder/, command)
+  }
+  // Relative to a command's own working folder inside each place.
+  for (const [folder, link] of [[dirname(workspaceLink), workspaceLink], [ownRoot, ownLink]]) {
+    f.bots.b.workDir = folder
+    for (const command of [`cat ${basename(link)}/x`, `ls ${basename(link)}/`]) {
+      await assert.rejects(f.guard('b', 'bash', { command }), /another Bot's own folder/, command)
+    }
+  }
+})
+
+test('a shell path word relative to the folder the command runs in is refused', async t => {
+  const { f, work } = await shellLinks(t)
+  const sub = join(work, 'sub')
+  await mkdir(sub)
+  f.bots.b.workDir = sub
+  for (const command of ['cat ../link/x', 'ls ../link/', 'cat "../link/x"']) {
+    await assert.rejects(f.guard('b', 'bash', { command }), /another Bot's own folder/, command)
+  }
 })

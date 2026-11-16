@@ -31,8 +31,40 @@ const collapse = text => {
 // first, and a file a script opens are known misses. Only the words written out are resolved.
 const shellPathWord = /[\\/]/
 const shellExpanded = /[$`(){}[\]*?~]/
-const shellPaths = text => text.replace(/\\/g, '/').split(/[\s;&|<>]+/)
-  .flatMap(part => part.replace(/["']/g, '').split('='))
+// Shell-style words: quotes group, and on POSIX a backslash escapes the next character, so a
+// quoted or escaped path with spaces stays one word. Unquoted whitespace or a command
+// separator ends a word.
+const shellWords = text => {
+  const words = []
+  let word = ''
+  let quote = ''
+  const end = () => { if (word !== '') words.push(word); word = '' }
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at]
+    if (quote === "'") {
+      if (char === "'") quote = ''
+      else word += char
+    } else if (quote === '"') {
+      if (char === '"') quote = ''
+      else if (char === '\\' && process.platform !== 'win32' && at + 1 < text.length) word += text[++at]
+      else word += char
+    } else if (char === "'" || char === '"') {
+      quote = char
+    } else if (char === '\\' && process.platform !== 'win32') {
+      if (at + 1 < text.length) word += text[++at]
+    } else if (/[\s;&|<>]/.test(char)) {
+      end()
+    } else {
+      word += char
+    }
+  }
+  end()
+  return words
+}
+// A flag keeps its value as a path too, so --file=<path> is checked like the path itself.
+const shellFlagValue = word => /^-+[^=]+=/.test(word) ? [word, word.slice(word.indexOf('=') + 1)] : [word]
+const shellPaths = text => shellWords(text).flatMap(shellFlagValue)
+  .map(word => word.replace(/\\/g, '/'))
   .filter(word => shellPathWord.test(word) && !shellExpanded.test(word) && !word.includes('://'))
 
 export function uploadLeaf(ref, kind) {
@@ -354,19 +386,19 @@ export function install(rt) {
     // folder the command runs in. See shellPaths for the known misses: best effort, not a fence.
     async function checkShellPaths() {
       if (!SHELL_TOOLS.includes(exec.name)) return
-      const base = rt.sessionFolder(exec.agent?.session ?? exec.agent) ?? '.'
+      const folder = rt.sessionFolder(exec.agent?.session ?? exec.agent) ?? '.'
+      // The folder as the file system has it: a link in the folder's own path is the same
+      // folder for the command, so only a link inside a word can hide where a path leads.
+      const base = rt.realBeyond ? await rt.realBeyond(folder) : folder
       for (const word of shellPaths(strings(args).join('\n'))) {
-        // A word that already spells the bots root is the text check's: it inspects it as
-        // written and collapsed below. This check only adds what a link hides from that text.
-        if (/\.automagik\/bots\//i.test(flatten(word))) continue
         const absolute = resolve(base, word)
         const real = rt.realBeyond ? await rt.realBeyond(absolute) : absolute
-        // The path as written, then where links lead, as the file tools check them.
-        for (const candidate of new Set([flatten(absolute), flatten(real)])) {
-          for (const found of candidate.matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) {
-            if (fold(found[1]) === fold(caller.id) || botOfId(found[1]) === undefined) continue
-            closedShell()
-          }
+        // With no link followed, the text check below sees exactly this path, as written and
+        // collapsed; this check adds only where a link hid the target from that text.
+        if (flatten(real) === flatten(absolute)) continue
+        for (const found of flatten(real).matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) {
+          if (fold(found[1]) === fold(caller.id) || botOfId(found[1]) === undefined) continue
+          closedShell()
         }
       }
     }
