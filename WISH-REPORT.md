@@ -109,10 +109,10 @@ cd apps/locale-pt-br-dsh && node scripts/build-client.mjs --check
 
 ## CI
 
-- **Conventional commits: FAIL.** O check acusou `9794d9e30 has a line over 100 characters` e `1db807835 has a line over 100 characters` (este último é o commit do #1430, que veio junto por a branch ser empilhada). Conforme a instrução do wish, **não houve amend nem force-push**; fica registrado aqui.
+- **Conventional commits: FAIL.** O check acusou linhas >100 nos corpos de `9794d9e30`, `1db807835` (o commit do #1430, que veio junto por a branch ser empilhada) e `772bc6bf`. Conforme a instrução do wish, **não houve amend nem force-push**; fica registrado aqui.
 - `bots-dsh (plugin tests)` e `locale-pt-br-dsh (plugin tests)`: o locale passou; o bots-dsh ainda estava pendente quando este relatório foi escrito.
 - O restante dos checks estava verde ou pendente no momento da escrita; o link do PR tem o estado ao vivo.
 
 ## Onde parei / o que falta
 
-Nada de implementação: o gate local está verde e o PR está aberto contra `dev`, sem merge. O único vermelho é o `Conventional commits`, por linhas >100 no corpo de dois commits (um deles herdado do #1430), mantido sem reescrita de histórico como pedido.
+Nada de implementação: o gate local está verde e o PR está aberto contra `dev`, sem merge. O único vermelho é o `Conventional commits`, por linhas >100 no corpo de commits (um deles herdado do #1430), mantido sem reescrita de histórico como pedido.
