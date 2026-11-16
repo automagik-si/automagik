@@ -246,12 +246,14 @@ def inside(folder, home):
         return False
 
 def start_command(home, ident, has_record):
-    default = os.path.join(os.path.expanduser("~"), ".hermes")
+    default = normalized_home(os.environ.get("HERMES_HOME", "").strip())
+    if not default:
+        default = normalized_home(os.path.join(os.path.expanduser("~"), ".hermes"))
     if same(home, default):
         return default_start(ident, has_record)
     if has_record:
         # This home's serve already runs: this profile joins it by name.
-        return "hermes --profile %s serve" % shlex.quote(ident)
+        return "HERMES_HOME=%s hermes --profile %s serve" % (shlex.quote(home), shlex.quote(ident))
     return "HERMES_HOME=%s hermes serve" % shlex.quote(home)
 
 
@@ -667,6 +669,7 @@ export async function detectHermesBots(ssh, {
   let child, closing, stopping = false, expected = false, stage = 'ssh-sign-in'
   const at = error => { if (error && typeof error === 'object') error.sshStage ??= stage; return error }
   const common = ['-T', '-v', '-o', 'BatchMode=yes', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no', '-o', 'PreferredAuthentications=publickey', '-o', 'StrictHostKeyChecking=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ControlPersist=no', '-o', 'ConnectionAttempts=1', '-o', `ConnectTimeout=${Math.max(1, Math.ceil(limits.control / 1000))}`, '-o', `ServerAliveInterval=${Math.max(1, Math.floor(limits.control / 3000))}`, '-o', 'ServerAliveCountMax=2', ...config.args]
+  if (signal?.aborted) throw hermesSshFailure('unknown', 'SSH connection was cancelled.')
   const timer = setTimeout(() => fail(hermesSshFailure('timeout')), limits.start)
   function fail(error) {
     at(error)
@@ -679,14 +682,15 @@ export async function detectHermesBots(ssh, {
     clearTimeout(timer)
     signal?.removeEventListener('abort', abort)
     closing = (async () => {
+      let timer
       try { child?.stdin.end() } catch {}
       try { child?.kill('SIGTERM') } catch {}
-      try { await Promise.race([ended.promise, new Promise(resolve => setTimeout(resolve, Math.max(1, limits.cancel * 0.8)))]) } catch {}
+      try { await Promise.race([ended.promise, new Promise(resolve => { timer = setTimeout(resolve, Math.max(1, limits.cancel * 0.8)) })]) } catch {}
+      finally { clearTimeout(timer) }
     })()
     return closing
   }
   const abort = () => fail(hermesSshFailure('unknown', 'SSH connection was cancelled.'))
-  if (signal?.aborted) throw hermesSshFailure('unknown', 'SSH connection was cancelled.')
   signal?.addEventListener('abort', abort, { once: true })
   const homes = new Map(), bots = new Map()
   const said = { stderr: '' }
@@ -726,7 +730,7 @@ export async function detectHermesBots(ssh, {
             ? { port: frame.serve.port, recordDir: frame.serve.recordDir,
               served: Array.isArray(frame.serve.served) ? frame.serve.served.filter(item => typeof item === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(item)).slice(0, 50) : [] }
             : undefined
-          if (!homes.has(frame.home)) homes.set(frame.home, { home: frame.home, state: frame.state === 'running' ? 'running' : 'stopped', sandbox: frame.sandbox === true, serve })
+          if (!homes.has(frame.home)) homes.set(frame.home, { home: frame.home, state: frame.state === 'running' ? 'running' : 'stopped', sandbox: frame.sandbox === true, blocked: frame.blocked === 'shared-beside' ? 'shared-beside' : '', serve })
           continue
         }
         if (frame.type === 'bot') {
@@ -753,7 +757,9 @@ export async function detectHermesBots(ssh, {
     const startMs = Math.max(1, Math.floor(limits.start - Math.min(limits.control / 2, limits.start * 0.15)))
     const extras = (Array.isArray(extraHomes) ? extraHomes : []).slice(0, 20).filter(value => homePath(value) && !value.split('/').includes('..'))
     child.stdin.write(`${JSON.stringify({ nonce, hermesPath: config.hermesPath, hermesHome: config.hermesHome, extraHomes: extras, startMs, controlMs: limits.control })}\n`)
-    await Promise.race([ready.promise, new Promise((_, reject) => setTimeout(() => reject(hermesSshFailure('timeout')), Math.max(1, until - Date.now())))])
+    let readyTimer
+    try { await Promise.race([ready.promise, new Promise((_, reject) => { readyTimer = setTimeout(() => reject(hermesSshFailure('timeout')), Math.max(1, until - Date.now())) })]) }
+    finally { clearTimeout(readyTimer) }
     if (stopping) throw hermesSshFailure('unknown', 'SSH connection was cancelled.')
     return { homes: [...homes.values()], bots: [...bots.values()] }
   } catch (error) {
