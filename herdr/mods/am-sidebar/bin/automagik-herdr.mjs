@@ -11,7 +11,7 @@
 import { execFile, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
-  renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
+  readSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, uptime } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -43,8 +43,9 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   workLeft, writesWorktree } from "../workers.js";
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
-import { SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
-  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../revive.js";
+import { BORN_SLACK_MS, FIRST_SESSION_MS, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
+  countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, ledgerRivals,
+  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
@@ -1267,6 +1268,9 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 (restart --tree: same space, tab and folder, resumed where its
                                 agent allows, its helpers under it), the main bot first, each
                                 bot after its lead. A pane whose agent runs is never touched.
+                                dsh-TUI, Antigravity, Codex and Kimi ids are found on disk after
+                                launch. With no id of its own, Codex or Kimi starts a new
+                                conversation; its folder's latest one is never guessed.
                                 Each project's main bot gets one report: who resumed, who is on
                                 a new conversation and why, who isn't back and the command that
                                 brings it back by hand; it is kept in the app home's
@@ -3892,8 +3896,77 @@ function sessionBorn(dir) {
   return Number.isFinite(born) ? born : null;
 }
 
-/** Whether either agent has left sessions under this home: with none, nothing is looked up and hc is asked nothing more. */
-const sessionsOnDisk = () => existsSync(join(dshHomeOf(home(), process.env), "sessions")) || existsSync(agyHistoryPath(home()));
+/** Whether an agent has left sessions under this home: with none, nothing is looked up and hc is asked nothing more. */
+const sessionsOnDisk = () => existsSync(join(dshHomeOf(home(), process.env), "sessions")) || existsSync(agyHistoryPath(home()))
+  || existsSync(codexSessionsDir(codexHomeOf(home(), process.env))) || existsSync(kimiIndexPath(kimiHomeOf(home(), process.env)));
+
+// One read per path per pass (recordSessions, or one restart and its helpers): emptied at the
+// start of each, so a long-lived queued restart never acts on an old listing.
+const sessionDiscovery = new Map();
+
+/** Codex's existing YYYY/MM/DD folders, or null when their listing can't be read. */
+function codexFolders(dir) {
+  if (!sessionDiscovery.has(dir)) {
+    let days = null;
+    try {
+      days = [];
+      for (const y of readdirSync(dir, { withFileTypes: true })) {
+        if (!y.isDirectory() || !/^\d{4}$/.test(y.name)) continue;
+        for (const m of readdirSync(join(dir, y.name), { withFileTypes: true })) {
+          if (!m.isDirectory() || !/^(0[1-9]|1[0-2])$/.test(m.name)) continue;
+          for (const d of readdirSync(join(dir, y.name, m.name), { withFileTypes: true })) {
+            if (d.isDirectory() && /^(0[1-9]|[12]\d|3[01])$/.test(d.name)) days.push(`${y.name}/${m.name}/${d.name}`);
+          }
+        }
+      }
+    } catch { days = null; }
+    sessionDiscovery.set(dir, days);
+  }
+  return sessionDiscovery.get(dir);
+}
+
+/** A rollout's first line, at most 1 MiB; null when unreadable or longer. */
+function codexFirstLine(file) {
+  if (!sessionDiscovery.has(file)) {
+    let line = null, fd = null;
+    try {
+      fd = openSync(file, "r");
+      if (fstatSync(fd).isFile()) {
+        const cap = 1024 * 1024;
+        const bytes = Buffer.alloc(cap + 1);
+        let used = 0, end = -1;
+        while (used < bytes.length) {
+          const n = readSync(fd, bytes, used, Math.min(64 * 1024, bytes.length - used), null);
+          if (!n) break;
+          end = bytes.indexOf(10, used);
+          used += n;
+          if (end >= 0 && end < used) break;
+          end = -1;
+        }
+        if (end >= 0 || used <= cap) line = bytes.subarray(0, end >= 0 ? end : used).toString("utf8");
+      }
+    } catch { line = null; }
+    finally { if (fd !== null) closeSync(fd); }
+    sessionDiscovery.set(file, line);
+  }
+  return sessionDiscovery.get(file);
+}
+
+/** Kimi's whole index, at most 16 MiB; null when unreadable or larger. */
+function kimiIndexText(file) {
+  if (!sessionDiscovery.has(file)) {
+    let text = null;
+    try {
+      const cap = 16 * 1024 * 1024;
+      if (statSync(file).size <= cap) {
+        const bytes = readFileSync(file);
+        if (bytes.length <= cap) text = bytes.toString("utf8");
+      }
+    } catch { text = null; }
+    sessionDiscovery.set(file, text);
+  }
+  return sessionDiscovery.get(file);
+}
 
 /** hc's live panes on this computer, as hc get answers them ([] when hc can't say): discoveredSession's rivals come from them. */
 async function livePanes() {
@@ -3906,9 +3979,9 @@ async function livePanes() {
 /**
  * #939: the session the pane `get` (its address, created_ms and folder) runs on an agent that
  * takes no session id at launch, read from what that agent left under the home: DSH's session
- * folders for the pane's folder, or Antigravity's prompt history (its three fields; a prompt's
- * text is never kept). revive.js pickSession decides, right or nothing; `ledger`: the workers
- * ledger's rows (the other launches there, and the ids already tied to one). Null when there
+ * folders, Antigravity's prompt history, Codex's session_meta first line, or Kimi's index.
+ * Only ids, folders and times are read. revive.js pickSession decides, right or nothing;
+ * `ledger`: the workers ledger's rows (the other launches there, and the ids already tied to one). Null when there
  * is none, or it can't be told from another pane's. The id is held: never printed.
  */
 function discoveredSession(agentKey, get, ledger, panes) {
@@ -3931,7 +4004,48 @@ function discoveredSession(agentKey, get, ledger, panes) {
           if (born !== null) candidates.push({ id, born });
         }
       }
-    } else candidates = agyCandidates(readText(agyHistoryPath(home())) ?? "", folders);
+    } else if (agentKey === "antigravity") candidates = agyCandidates(readText(agyHistoryPath(home())) ?? "", folders);
+    else if (agentKey === "codex") {
+      const dir = codexSessionsDir(codexHomeOf(home(), process.env));
+      const days = codexFolders(dir);
+      if (days === null) return null;
+      const launch = new Date(get.created_ms);
+      launch.setDate(launch.getDate() - 1);
+      const since = `${launch.getFullYear()}/${String(launch.getMonth() + 1).padStart(2, "0")}/${String(launch.getDate()).padStart(2, "0")}`;
+      for (const day of days) {
+        if (day < since) continue;
+        const folder = join(dir, day);
+        if (!sessionDiscovery.has(folder)) {
+          let names = null;
+          try { names = readdirSync(folder); } catch { names = null; }
+          sessionDiscovery.set(folder, names);
+        }
+        const names = sessionDiscovery.get(folder);
+        if (names === null) return null;
+        for (const name of names) {
+          if (!/^rollout-.*\.jsonl$/.test(name)) continue;
+          const id = codexRolloutId(name);
+          const born = uuidV7Ms(id);
+          if (born !== null && (born < get.created_ms - BORN_SLACK_MS || born > get.created_ms + FIRST_SESSION_MS)) continue;
+          const first = codexFirstLine(join(folder, name));
+          if (first === null) return null;
+          const candidate = codexCandidate(first, folders);
+          if (candidate === undefined) return null;
+          if (candidate) candidates.push(candidate);
+        }
+      }
+    } else if (agentKey === "kimi") {
+      const kimiHome = kimiHomeOf(home(), process.env);
+      const index = kimiIndexText(kimiIndexPath(kimiHome));
+      if (index === null) return null;
+      for (const c of kimiCandidates(index, folders, kimiHome)) {
+        let dir = null;
+        try { dir = lstatSync(c.sessionDir); } catch { dir = null; }
+        if (!dir?.isDirectory()) continue;
+        const born = sessionBorn(c.sessionDir);
+        if (born !== null) candidates.push({ id: c.id, born });
+      }
+    }
   } catch { return null; }
   const { rivals, claimed } = ledgerRivals(ledger, { terminal: get.address, createdMs: get.created_ms, agentKey, folders });
   // Every other live pane on that agent in the folder is a rival too, whoever started it (as
@@ -3949,7 +4063,7 @@ function discoveredSession(agentKey, get, ledger, panes) {
 }
 
 /**
- * #939: ties each live dsh-TUI or Antigravity pane of a bot or a worker to the session it started
+ * #939: ties each live dsh-TUI, Antigravity, Codex or Kimi pane of a bot or a worker to the session it started
  * on (discoveredSession), as the briefing hook does for Claude: a session row in the workers
  * ledger and the pane's agent.session label. Once: a pane that has a label, or a session row,
  * is never looked at again, so nothing found later can replace what it holds. Never fails: what
@@ -3957,6 +4071,7 @@ function discoveredSession(agentKey, get, ledger, panes) {
  */
 async function recordSessions() {
   let recorded = 0;
+  sessionDiscovery.clear();
   if (!sessionsOnDisk()) return recorded;
   try {
     const agents = agentTable();
@@ -4703,13 +4818,14 @@ async function cmdRestart(opts, [ref]) {
   // else the ledger's last session row for that terminal (the Claude hook writes them), for
   // every agent that resumes by id.
   // hc's live panes, asked only when a session may have to be found on disk (#939): its rivals.
+  sessionDiscovery.clear();
   const panesNow = sessionsOnDisk() && (discoversSession(runningAgent ?? bot.agent) || helpers.length) ? await livePanes() : [];
   const knownSession = (get, agentKey) => {
     const id = paneSession(get, agentKey);
     if (id) return { session: id, transcript: null };
     const row = resumesById(agentKey) ? ledgerSession(ledger, get.address, agentKey, get.created_ms) : null;
     if (row) return row;
-    // #939: an agent that takes no id at launch (dsh-TUI, Antigravity) left its session on disk.
+    // #939: an agent that takes no id at launch (dsh-TUI, Antigravity, Codex, Kimi) left its session on disk.
     const found = discoveredSession(agentKey, get, ledger, panesNow);
     return found ? { session: found, transcript: null } : null;
   };
@@ -4763,6 +4879,12 @@ async function cmdRestart(opts, [ref]) {
   // --last), for every agent: beside another bot on that agent there, a new conversation, and
   // why (#328: an omp --continue picked up a teammate's). Alone there, the resume as before.
   let sharedNote = null;
+  // #1417, revive only: Codex and Kimi must have a conversation of their own, even alone.
+  if (opts.revive && plan.mode === "resume" && !resumeId && !plan.canonicalBot && ["codex", "kimi"].includes(plan.agent)) {
+    const note = `no ${agentName(plan.agent)} conversation of its own could be identified for ${was.address}, so its folder's latest one was not guessed`;
+    plan = { ...restartPlan({ ...planned, fresh: true }), note };
+    sharedNote = note;
+  }
   if (plan.mode === "resume" && !resumeId && !plan.canonicalBot) {
     const anywhere = continuesAnywhere(plan.agent);
     const sharers = await sharersOf({ view, cwd, botId: bot.id, file, agentKey: plan.agent, ledger, old, anywhere });
@@ -6860,7 +6982,7 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   let seen = await look();
   if (opts.boot && !dry && REVIVE_SETTLE_MS > 0 && seen.targets.length) { await later(REVIVE_SETTLE_MS); seen = await look(); }
   const { states, skipped } = seen;
-  // Sessions first, while each pane still stands: a dsh-TUI or Antigravity pane gets its id recorded.
+  // Sessions first, while each pane still stands: a dsh-TUI, Antigravity, Codex or Kimi pane gets its id recorded.
   if (!dry) await recordSessions();
   const me = process.env.HC_TERMINAL_ID ?? null;
   const projects = new Map();

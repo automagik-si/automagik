@@ -1519,6 +1519,8 @@ export const promptByMessage = (agentKey) => promptArgs(agentKey, "x").length ==
 // agent in the folder, Restart starts fresh instead (#328). codex resume
 // is a subcommand, which still goes after `run` (its top-level options come before it). An
 // agent missing here has no resume this pack knows: Restart starts it fresh.
+// dsh-TUI, Antigravity, Codex and Kimi have their ids found after launch (revive.js DISCOVERED).
+// Revive never guesses the latest conversation for Codex or Kimi when their own id isn't known.
 const RESUME = {
   claude: (session) => (session ? ["--resume", session] : ["--continue"]),
   codex: (session) => ["resume", session ?? "--last"],
@@ -1565,6 +1567,7 @@ export function resumeArgs(agentKey, session = null) {
 // that pass it: Claude Code 2.1.319 `--session-id <uuid>` ("Use a specific session ID for the
 // conversation (must be a valid UUID)", read from `claude --help` on 2026-11-09). Claude refuses
 // it beside --continue or --resume (unless --fork-session), so it goes only on a fresh launch.
+// dsh-TUI, Antigravity, Codex and Kimi instead have their ids found after launch (revive.js DISCOVERED).
 const SESSION_ID = {
   claude: (id) => ["--session-id", id],
 };
