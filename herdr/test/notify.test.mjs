@@ -767,3 +767,15 @@ test("settings row: a settings file over the size cap is refused (exit 3, zero c
   assert.equal(stdout.text(), "");
   assert.match(stderr.text(), /settings at .* cannot be used/);
 });
+
+test("quiet row: the non-wrapping window is half-open at its end (16:59 inside, 17:00 outside)", async () => {
+  const settings = { quiet: { from: "09:00", to: "17:00" } };
+  const inside = await cliRun({ name: "day-in", settings, at: atLocal(16, 59) });
+  assert.equal(inside.code, NOTIFY_EXIT.ok);
+  assert.deepEqual(inside.receipts.map((r) => r.decision), ["paused"]);
+  assert.equal(inside.calls.length, 0);
+  const outside = await cliRun({ name: "day-out", settings, at: atLocal(17, 0) });
+  assert.equal(outside.code, NOTIFY_EXIT.ok);
+  assert.deepEqual(outside.receipts.map((r) => r.decision), ["queued"]);
+  assert.equal(outside.calls.length, 1);
+});
