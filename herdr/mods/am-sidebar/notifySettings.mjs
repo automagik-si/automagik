@@ -10,7 +10,7 @@
 // with from > to wraps midnight, and from == to is empty (never quiet). Only the keys above are
 // read; unknown keys are ignored so a newer writer can add them. Apache-2.0.
 
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 
 /** The settings file is small by design; a larger one is refused, never read whole. */
 export const SETTINGS_MAX = 65536;
@@ -58,14 +58,17 @@ export function parseSettings(text) {
 
 /** The settings at `path`; a missing file is empty, every other read problem is an error. */
 export function readNotifySettings(path) {
-  let size;
+  let stat;
   try {
-    size = statSync(path).size;
+    stat = lstatSync(path);
   } catch (e) {
     if (e.code === "ENOENT") return {};
     throw new NotifySettingsError(`cannot read ${path}: ${e.code ?? e.message}`);
   }
-  if (!Number.isFinite(size) || size > SETTINGS_MAX) throw new NotifySettingsError(`is larger than ${SETTINGS_MAX} bytes`);
+  // The path must be a regular file, checked before any read: a FIFO would block before stdin, a
+  // device could stream past the size cap, and a symlink (or a directory) is not a settings file.
+  if (!stat.isFile()) throw new NotifySettingsError(`${path} must be a regular file (a FIFO, socket, device, directory or symlink is refused)`);
+  if (!Number.isFinite(stat.size) || stat.size > SETTINGS_MAX) throw new NotifySettingsError(`is larger than ${SETTINGS_MAX} bytes`);
   let text;
   try {
     text = readFileSync(path, "utf8");

@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -778,4 +778,56 @@ test("quiet row: the non-wrapping window is half-open at its end (16:59 inside, 
   assert.equal(outside.code, NOTIFY_EXIT.ok);
   assert.deepEqual(outside.receipts.map((r) => r.decision), ["queued"]);
   assert.equal(outside.calls.length, 1);
+});
+
+test("settings row: the settings path must be a regular file (a FIFO, directory or symlink is refused; a FIFO cannot block)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "am-notify-types-"));
+  try {
+    // A FIFO at the path must be refused without reading it: a read would block before stdin.
+    const fifo = join(dir, "fifo.json");
+    execFileSync("mkfifo", [fifo]);
+    const bin = join(dir, "bin");
+    const log = join(dir, "calls.log");
+    const home = join(dir, "home");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    for (const name of ["codex", "hc"]) {
+      const fake = join(bin, name);
+      writeFileSync(fake, `#!/bin/sh\necho "${name} $*" >> "${log}"\nexit 0\n`);
+      chmodSync(fake, 0o755);
+    }
+    const env = {
+      PATH: `${bin}${delimiter}${join(process.execPath, "..")}${delimiter}/usr/bin${delimiter}/bin`,
+      HOME: home,
+      XDG_STATE_HOME: join(home, ".local", "state"),
+      TMPDIR: dir,
+      AUTOMAGIK_NOTIFY_SETTINGS: fifo,
+      AUTOMAGIK_NOTIFY_JOURNAL: join(dir, "seen.jsonl"),
+    };
+    const run = spawnSync(process.execPath, [CLI, "notify", "--thread", THREAD], { env, input: "", encoding: "utf8", timeout: 3000 });
+    assert.equal(run.signal, null, "the CLI must not hang on the FIFO (a hang is a killed child)");
+    assert.equal(run.status, NOTIFY_EXIT.io, run.stderr);
+    assert.match(run.stderr, /settings at .* cannot be used/);
+    assert.equal(existsSync(log) ? readFileSync(log, "utf8") : "", "", "nothing reached codex or hc");
+
+    // A directory and a symlink to a valid settings file are refused too.
+    const target = settingsFile("regular-target", { quiet: { from: "22:00", to: "07:00" } });
+    const link = join(dir, "link.json");
+    symlinkSync(target, link);
+    for (const path of [dir, link]) {
+      const { calls, queue } = fakeQueue();
+      const stdout = capture();
+      const stderr = capture();
+      const code = await runMain(["notify", "--thread", THREAD], {
+        stdin: [`${line()}\n`], stdout, stderr, queue, threadCurrent: () => THREAD,
+        now: () => atLocal(23, 30), settingsPath: path, journalPath: journalPath("types.jsonl"),
+      });
+      assert.equal(code, NOTIFY_EXIT.io, path);
+      assert.equal(calls.length, 0, path);
+      assert.equal(stdout.text(), "", path);
+      assert.match(stderr.text(), /settings at .* cannot be used/, path);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
