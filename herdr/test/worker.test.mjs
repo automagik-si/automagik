@@ -1043,6 +1043,24 @@ test("#1262: an hc run that outlasts its timeout is still recorded: the terminal
   assert.ok(s.hcState().terminals.some((x) => x.address === "t100" && x.state === "live"), "the worker is live");
 });
 
+test("#1262: the late lookup records the worker's own terminal, never a newer one whose name shares its prefix", (t) => {
+  const s = scene(t);
+  // Someone else's newer terminal, named with the worker's prefix: a lookup by prefix (or by the
+  // newest terminal) must not record this one as the worker.
+  const st = s.hcState();
+  st.terminals.push({ address: "t99", name: "e2e-x-helper", cwd: s.project, state: "live", parent: null,
+    created_ms: Date.now() + 1_000_000, labels: {}, foreground: { argv: ["zsh"], cwd: s.project, pid: 4999 },
+    status: { app: "zsh", state: "idle" } });
+  st.runDelayMs = 10_000;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100", "the worker's own terminal, never the newer t99");
+  assert.match(r.err, /hc send t100/);
+});
+
 test("#1262: a timeout with no terminal under the name is a failed start, never a recorded worker", (t) => {
   const s = scene(t);
   // The fake waits before it creates the terminal, so the call's timeout leaves nothing behind.
