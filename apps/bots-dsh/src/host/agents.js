@@ -841,10 +841,13 @@ export function install(rt) {
   // group, where the user saw the request, not to the Bot's own chat.
   // Without one, a task started inside a group Session's tool call keeps that group as
   // `levelRoomId`, which can only narrow its level (permissions.js); the report still goes
-  // to the Bot's own chat.
+  // to the Bot's own chat unless `reportRoomId` chooses a group.
   // Started from inside a task Session's tool call, it keeps that task as `levelTaskId` and
   // never runs wider than it (permissions.js, #1030), with a `roomId` too; without one it
   // also takes the group that task takes its level from.
+  // `reportRoomId` changes only delivery, never the level. The Bot must be a member,
+  // and a different `roomId` is refused. At the end, a missing group or Bot Session
+  // falls back to the Bot's own chat.
   // The task's Session is flagged as starting from the moment it is a task until this
   // returns or throws, whatever fails on the way (permissions.js startingSession).
   async function startTask(args) {
@@ -855,7 +858,7 @@ export function install(rt) {
       started?.()
     }
   }
-  async function startFlagged({ title, text, from, cwd, agentPreset, roomId }, starting) {
+  async function startFlagged({ title, text, from, cwd, agentPreset, roomId, reportRoomId }, starting) {
     // Read before the first await: the tool call this runs in may return before the rest.
     const opener = from === undefined ? undefined : rt.callerLevel?.()
     const autoOpener = rt.autoOpener?.()
@@ -864,11 +867,21 @@ export function install(rt) {
     if (levelTaskId !== undefined) rt.assertTaskDepth(levelTaskId)
     const levelRoomId = roomId || from === undefined ? undefined : rt.callerGroup?.() ?? parent?.levelRoomId ?? parent?.roomId
     const caller = state.bots?.[from]
+    let reportRoom
+    if (reportRoomId !== undefined && reportRoomId !== null) {
+      if (typeof reportRoomId !== 'string' || reportRoomId.trim() === '') throw refusal('The report room must be a group id')
+      const bot = rt.botOf(from)
+      if (bot === undefined) throw refusal('A report room needs the Bot that asks for the task')
+      reportRoom = rt.roomOf(reportRoomId)
+      if (reportRoom === undefined) throw refusal(`There is no group ${reportRoomId} to report to`)
+      if (!reportRoom.members?.includes(from)) throw refusal(`${bot.name} is not a member of "${reportRoom.name}", so the task cannot report there`)
+      if (roomId && roomId !== reportRoom.id) throw refusal('A task asked for in one group cannot report to another')
+    }
     const sessionId = await createTaskSession(title, { cwd: cwd ?? caller?.workDir, agentPreset: agentPreset ?? caller?.profile })
     // Until its start is decided: a re-apply DSH asks for meanwhile must not lower the task
     // in place of the refusal a saved level that is no longer offered gets (permissions.js).
     starting(sessionId)
-    tasks()[sessionId] = { title: String(title).slice(0, AGENT_SESSION_TITLE_MAX), from, at: Date.now(), status: 'working', ...(roomId ? { roomId } : {}), ...(levelRoomId ? { levelRoomId } : {}), ...(levelTaskId ? { levelTaskId } : {}) }
+    tasks()[sessionId] = { title: String(title).slice(0, AGENT_SESSION_TITLE_MAX), from, at: Date.now(), status: 'working', ...(roomId ? { roomId } : {}), ...(reportRoom !== undefined && !roomId ? { reportRoomId: reportRoom.id } : {}), ...(levelRoomId ? { levelRoomId } : {}), ...(levelTaskId ? { levelTaskId } : {}) }
     rt.capTaskByOpener?.(tasks()[sessionId], opener)
     if (autoOpener !== undefined && autoOpener.botId === from && !roomId && !levelRoomId && !levelTaskId) Object.assign(tasks()[sessionId], { auto: autoOpener.route, autoRev: autoOpener.rev })
     // Only TASKS_KEPT ended tasks are remembered for their reports. The ended ones go first,
@@ -978,9 +991,12 @@ export function install(rt) {
         : words || 'It ended without a reply.'
       // A task a group Session asked for reports into that group, where the user saw the
       // request: the report arrives as a group post, not as an orphan in the Bot's own
-      // chat. A group or Session that is gone falls back to the Bot's own chat.
-      const room = task.roomId === undefined ? undefined : rt.roomOf(task.roomId)
+      // chat. A task whose caller named a report group (`reportRoomId`) reports there the
+      // same way. A group or Session that is gone falls back to the Bot's own chat.
+      const roomId = task.reportRoomId ?? task.roomId
+      const room = roomId === undefined ? undefined : rt.roomOf(roomId)
       const inRoom = room !== undefined && room.members?.includes(task.from) ? room.sessions?.[task.from] : undefined
+      if (task.reportRoomId !== undefined && inRoom === undefined) rt.warn('ds-bot: the report of task %s goes to its Bot\'s own chat: the group %s is gone or the Bot has no Session there', task.title, task.reportRoomId)
       void rt.deliver({ toId: task.from, ...(inRoom !== undefined ? { sessionId: inRoom, roomId: room.id } : {}), text: said.slice(0, TASK_REPORT_MAX), role: 'task-done', note: task.title, taskSessionId: id })
         .catch(error => rt.warn('ds-bot: the report of task %s did not reach its Bot: %s', task.title, error?.message ?? error))
     }
