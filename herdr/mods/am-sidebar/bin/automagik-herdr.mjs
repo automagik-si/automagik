@@ -187,6 +187,56 @@ async function hcGet(terminal, { timeout } = {}) {
   if (r.code !== 0) throw new CliError(`hc get ${terminal} failed: ${hcFailure(r)}`);
   return parsed(r, ["get", terminal]);
 }
+/**
+ * How long an `hc run --bg` that starts a worker or a seat may take (#1262): hc answers a run
+ * with a task only after the new terminal reports its first status, and waits 60 s for a program
+ * that never does. Above that wait, so such a start still gets hc's own answer.
+ * AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS, for the tests only.
+ */
+const HC_RUN_TIMEOUT_MS = (() => {
+  const raw = process.env.AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS;
+  const n = raw === undefined || raw === "" ? NaN : Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : 90_000;
+})();
+/**
+ * The terminal a timed-out `hc run` started anyway (#1262): hc creates the terminal first and
+ * then waits for its first status to deliver a task, so the call can end after the terminal
+ * exists. The name is unique among live terminals (the start chose it before the run); null
+ * when no live terminal runs under it.
+ */
+async function runStartedByName(name) {
+  if (!name) return null;
+  const get = await hcGet(name);
+  if (!get || (get.state !== undefined && get.state !== "live")) return null;
+  return { address: get.address ?? name, get };
+}
+/**
+ * `hc run --bg` for a start: { address, late, answer }. A call the timeout ended whose terminal
+ * hc already made is a start the CLI must record (late: true, its task not delivered), never a
+ * failed start; a timeout with no live terminal under `name`, or any other failure, throws.
+ */
+async function hcStartRun(run, args, name) {
+  const r = await run(args, { timeout: HC_RUN_TIMEOUT_MS });
+  let late = null;
+  if (r.killed) {
+    try { late = await runStartedByName(name); } catch (e) {
+      throw new CliError(`hc run didn't answer within ${HC_RUN_TIMEOUT_MS / 1000}s, and the terminal it may have started (${name}) can't be looked up: ${e?.message ?? e}`);
+    }
+  }
+  if (!late && r.code !== 0) {
+    throw new CliError(r.killed
+      ? `hc run didn't answer within ${HC_RUN_TIMEOUT_MS / 1000}s and no live terminal is named ${name}: ${(r.stderr || r.stdout).trim()}`
+      : `hc run failed: ${(r.stderr || r.stdout).trim()}`);
+  }
+  let answer = null;
+  let address = late?.address ?? null;
+  if (!address) {
+    try { answer = JSON.parse(r.stdout); } catch { answer = null; }
+    address = answer?.address ?? null;
+    if (!address) throw new CliError(`hc run gave no terminal address: ${r.stdout.trim()}`);
+  }
+  return { address, late: Boolean(late), answer };
+}
 const local = (address) => typeof address === "string" && !address.includes("/");
 
 function appHome(env = process.env) { return (env.HERDR_APP_HOME || `${homedir()}/.config/herdr-app`).replace(/\/+$/, ""); }
@@ -3664,7 +3714,8 @@ async function launchSeat(project, bot, over = {}) {
     (warning) => briefed.warnings.push(warning));
   const env = { ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}),
     ...briefed.env, ...hermesPairEnv(bot) };
-  const args = startArgs({ botId: bot.id, name: hcName(bot.name, bot.id, taken), cwd, space: place?.space, tab: place?.tab, parent, argv, labels, path,
+  const name = hcName(bot.name, bot.id, taken);
+  const args = startArgs({ botId: bot.id, name, cwd, space: place?.space, tab: place?.tab, parent, argv, labels, path,
     env, login, agent: agentKey, project: key, sandbox: proxyOn });
   // The hook goes in before the session starts, so Claude Code reads it at startup.
   const hook = agentKey === "claude" ? await writeBriefingHook(bot, cwd) : { written: false, warnings: [] };
@@ -3672,11 +3723,15 @@ async function launchSeat(project, bot, over = {}) {
   if (runPath.note) hook.warnings.unshift(runPath.note);
   report(hook.warnings);
   const run = async (ledger) => {
-    const r = await hc(args);
-    if (r.code !== 0) throw new CliError(`hc run failed: ${(r.stderr || r.stdout).trim()}`);
-    let address = null;
-    try { address = JSON.parse(r.stdout).address ?? null; } catch { address = null; }
-    if (!address) throw new CliError(`hc run gave no terminal address: ${r.stdout.trim()}`);
+    // #1262: hc waits 60 s for the new terminal's first status, so the run gets its own timeout
+    // above that wait; a timeout after hc made the terminal is a start looked up by its name
+    // (the attach row is still written), never a failed start.
+    const { address, late } = await hcStartRun(hc, args, name);
+    if (late) {
+      const warning = `${name} started, but hc run didn't answer within ${HC_RUN_TIMEOUT_MS / 1000}s; its start is recorded.`;
+      hook.warnings.push(warning);
+      report([warning]);
+    }
     const get = await hcGet(address).catch(() => null);
     if (ledger) {
       if (!Number.isSafeInteger(get?.created_ms)) {
@@ -6741,11 +6796,22 @@ async function cmdWorker(opts, rest) {
       sandbox: plan.agent === "dsh-tui" && proxyEnabled(
         approvedProxyState({ project: project.key, bot }), process.platform,
         (warning) => warnings.push(warning)) });
-    const r = await (proxied ? hcReal(args) : hc(args));
-    if (r.code !== 0) throw new CliError(`hc run failed: ${(r.stderr || r.stdout).trim()}`);
-    let address = null;
-    try { address = JSON.parse(r.stdout).address ?? null; } catch { address = null; }
-    if (!address) throw new CliError(`hc run gave no terminal address: ${r.stdout.trim()}`);
+    // #1262: hc answers a run with a task only once the new terminal reports its first status,
+    // waiting 60 s for a program that never does; the run gets its own timeout above that wait.
+    // One the timeout still ends after hc made the terminal is a start whose task didn't go in,
+    // never a failed start: the row below is written from the terminal looked up by its name.
+    const started = await hcStartRun(proxied ? hcReal : hc, args, name);
+    const { address } = started;
+    if (started.late) {
+      warnings.push(plan.template
+        ? `${name} started, but its task wasn't delivered: hc run didn't answer within ${HC_RUN_TIMEOUT_MS / 1000}s, `
+          + `and hc types a template's task only after its terminal reports a status. Send it: hc send ${address} "<task>".`
+        : `${name} started, but hc run didn't answer within ${HC_RUN_TIMEOUT_MS / 1000}s; its start is recorded.`);
+    } else if (plan.template && started.answer?.first_message?.sent === false) {
+      const why = String(started.answer.first_message.reason ?? "").trim();
+      warnings.push(`${name} started, but its task wasn't delivered: hc never saw its terminal report a status${why ? ` (${why})` : ""}. `
+        + `Send it: hc send ${address} "<task>".`);
+    }
     return { address, name, proxied };
   }, { wait: Math.max(0, deadline - Date.now()), what: `the worker lock on ${place.worktree}` });
   const started = await (taskName ? withLockAsync(taskLock(lockDir, taskName), inWorktree,

@@ -956,6 +956,18 @@ test("start and attach append a seat row to the ledger", (t) => {
   assert.equal(seat.template, null, "a seat runs no template");
 });
 
+test("#1262: a seat start gets the longer hc run timeout too, and a timed-out run is recorded by name", (t) => {
+  const s = scene(t);
+  const done = join(s.root, "seat-run-answered");
+  hcStateExtra(s, { runDelayMs: 16_000, runDelayDone: done });
+  const r = s.cli(["start", "Genie"], { from: null, env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "20000" } });
+  assert.equal(r.code, 0, r.err);
+  assert.ok(existsSync(done), "the seat's hc run was allowed to answer past the old 15 s timeout");
+  const seat = s.ledger().find((x) => x.kind === "seat");
+  assert.equal(seat.terminal, "t100");
+  assert.equal(seat.botId, ID.main);
+});
+
 // ---- hc templates ----
 
 test("worker --template: hc's template form, a child of the bot's pane in the worktree, labelled; ledger names it", (t) => {
@@ -987,6 +999,69 @@ test("worker --template: hc's template form, a child of the bot's pane in the wo
   assert.equal(text.code, 0, text.err);
   assert.match(text.out, /template  opus-rev \(runs claude\)/);
   assert.ok(existsSync(join(s.project, ".claude/worktrees/feat-review/.claude/settings.local.json")), "a Claude template gets the hook");
+});
+
+// ---- #1262: hc's first-status wait outlasts the old 15 s program timeout ----
+
+/** Puts `fields` on the scene's fake-hc state (a template that reports no status, say). */
+const hcStateExtra = (s, fields) => {
+  const st = s.hcState();
+  Object.assign(st, fields);
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+};
+
+test("#1262: a template worker that reports no status is waited for past hc's 60 s first-status wait and recorded", (t) => {
+  const s = scene(t);
+  // hc itself waits 60 s for a template's new terminal to report a status before it answers.
+  const done = join(s.root, "run-answered");
+  hcStateExtra(s, { runDelayMs: 61_000, runDelayDone: done });
+  const began = Date.now();
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
+  const took = Date.now() - began;
+  assert.equal(r.code, 0, r.err);
+  assert.ok(existsSync(done), "hc's run was allowed to answer, not killed at 15 s");
+  assert.ok(took >= 60_000, `the start waited hc's first-status wait (${took} ms)`);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100");
+  assert.equal(row.template, "mystery");
+  assert.doesNotMatch(r.err, /task wasn't delivered/, "hc answered: the task did go in");
+});
+
+test("#1262: an hc run that outlasts its timeout is still recorded: the terminal it started is found by name", (t) => {
+  const s = scene(t);
+  // The fake hc creates and saves the terminal, then waits far past the call's own timeout, as a
+  // program that never reports a status makes hc wait after the terminal already exists.
+  hcStateExtra(s, { runDelayMs: 10_000 });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /e2e-x started, but its task wasn't delivered/);
+  assert.match(r.err, /hc send t100/);
+  const row = s.ledger().find((x) => x.kind === "worker");
+  assert.equal(row.terminal, "t100");
+  assert.equal(row.template, "mystery");
+  assert.ok(s.hcState().terminals.some((x) => x.address === "t100" && x.state === "live"), "the worker is live");
+});
+
+test("#1262: a timeout with no terminal under the name is a failed start, never a recorded worker", (t) => {
+  const s = scene(t);
+  // The fake waits before it creates the terminal, so the call's timeout leaves nothing behind.
+  hcStateExtra(s, { runDelayBeforeMs: 10_000 });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"],
+    { env: { AUTOMAGIK_HERDR_HC_RUN_TIMEOUT_MS: "800" } });
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /didn't answer within 0.8s and no live terminal is named e2e-x/);
+  assert.equal(s.ledger().some((x) => x.kind === "worker"), false, "no worker row for a terminal that never ran");
+});
+
+test("#1262: hc's first_message sent false is said as started without its task, and the worker is recorded", (t) => {
+  const s = scene(t);
+  hcStateExtra(s, { runFirstMessage: { sent: false, reason: "it never reported its status, so it may be showing a dialog" } });
+  const r = s.cli(["worker", "say hi", "--branch", "e2e/x", "--template", "mystery"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /e2e-x started, but its task wasn't delivered/);
+  assert.match(r.err, /hc send t100/);
+  assert.equal(s.ledger().find((x) => x.kind === "worker").terminal, "t100");
 });
 
 test("worker --template with --agent, --model or --effort is refused; an unknown template too, before any worktree", (t) => {
