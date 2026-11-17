@@ -68,6 +68,7 @@ import { fixNonVisual, readState, spacesOf } from "./state.mjs";
 import { deliverArgv } from "../eventNotice.mjs";
 import { NOTIFY_EXIT, runNotify } from "../notify.mjs";
 import { openSeenJournal, SeenJournalError } from "../seenJournal.mjs";
+import { controlFor, readNotifySettings } from "../notifySettings.mjs";
 
 /**
  * A refusal or a usage mistake: printed on stderr, exit `code`. `detail`: fields a --json run
@@ -1453,11 +1454,17 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 shim: one receipt line (JSON) per line on stdout, never the
                                 line's text. The seen ids persist across runs in a 0600 journal
                                 ($AUTOMAGIK_NOTIFY_JOURNAL, else $XDG_STATE_HOME/automagik/
-                                notify-seen.jsonl; the newest 1000). Exit 0: every line queued,
-                                deduped, suppressed, paused or stopped (or no lines); 1: a line
-                                refused, with no queue call for it; 2: a usage mistake; 3: stdin
-                                could not be read to the end, or the journal could not be read
-                                or written; 4: a queue call failed. A stop ends the run.
+                                notify-seen.jsonl; the newest 1000). Pause, stop and quiet hours
+                                come from a small home settings file ($AUTOMAGIK_NOTIFY_SETTINGS,
+                                else $XDG_STATE_HOME/automagik/notify.json): {"paused", "stop",
+                                "quiet": {"from": "HH:MM", "to": "HH:MM"}}; stop wins over paused,
+                                paused over quiet, and quiet pauses the valid lines inside the
+                                window. A missing file runs; a corrupt, oversized or malformed one
+                                is refused. Exit 0: every line queued, deduped, suppressed, paused
+                                or stopped (or no lines); 1: a line refused, with no queue call for
+                                it; 2: a usage mistake; 3: stdin could not be read to the end, the
+                                settings or the journal could not be read or written; 4: a queue
+                                call failed. A stop ends the run.
                                 This build is a dry run: no queue is wired, so each valid line
                                 is paused and nothing is called.
   launch-path <program>         where a launch finds <program> (PATH, ~/.local/bin, this CLI's
@@ -7608,7 +7615,9 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
  * from `io`; with no `io.queue` it is a dry run: every valid line is paused, nothing is called.
  * The seen ids come from the persistent journal (seenJournal.mjs): it is opened before stdin is
  * read, a corrupt or unreadable one is refused (exit 3), and every queued id is written 0600 so a
- * restart dedupes.
+ * restart dedupes. The pause/stop switches and the quiet-hours window come from the home settings
+ * (notifySettings.mjs), read once before stdin: an invalid one is refused (exit 3) and an injected
+ * `io.readControl` still wins over it.
  */
 export async function cmdNotify(opts, rest, io = {}) {
   if (rest.length) throw new CliError("notify takes no arguments: JSON lines on stdin and --thread <uuid>.", NOTIFY_EXIT.usage);
@@ -7637,6 +7646,29 @@ export async function cmdNotify(opts, rest, io = {}) {
     exitAfter.code = NOTIFY_EXIT.io;
     return PRINTED;
   }
+  const settingsPath = io.settingsPath
+    ?? (env.AUTOMAGIK_NOTIFY_SETTINGS && env.AUTOMAGIK_NOTIFY_SETTINGS.length > 0
+      ? env.AUTOMAGIK_NOTIFY_SETTINGS
+      : stateRoot ? join(stateRoot, "automagik", "notify.json") : undefined);
+  let settings = {};
+  if (settingsPath) {
+    try {
+      settings = readNotifySettings(settingsPath);
+    } catch {
+      stderr.write(`am notify: the settings at ${settingsPath} cannot be used; nothing was read or delivered.\n`);
+      exitAfter.code = NOTIFY_EXIT.io;
+      return PRINTED;
+    }
+  }
+  const settingsControl = () => {
+    let at;
+    try {
+      at = typeof io.now === "function" ? io.now() : undefined;
+    } catch {
+      at = undefined;
+    }
+    return controlFor(settings, at);
+  };
   const live = typeof io.queue === "function";
   if (!live) stderr.write("am notify: dry run: no queue in this build; each valid line is paused, nothing is called.\n");
   const result = await runNotify({
@@ -7645,7 +7677,7 @@ export async function cmdNotify(opts, rest, io = {}) {
     queue: live ? io.queue : () => ({ exit: 1 }),
     seen,
     threadId: opts.thread,
-    readControl: live ? io.readControl : () => "paused",
+    readControl: live ? (io.readControl ?? settingsControl) : () => "paused",
     threadCurrent: io.threadCurrent,
     threadExists: io.threadExists,
     now: io.now,

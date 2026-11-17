@@ -150,6 +150,10 @@
       "to": "am/notify.mjs"
     },
     {
+      "from": "herdr/mods/am-sidebar/notifySettings.mjs",
+      "to": "am/notifySettings.mjs"
+    },
+    {
       "from": "herdr/mods/am-sidebar/pack-keys.json",
       "to": "am/pack-keys.json"
     },

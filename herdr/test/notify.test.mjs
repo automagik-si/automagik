@@ -18,6 +18,11 @@ const CLI = join(HERE, "..", "mods", "am-sidebar", "bin", "automagik-herdr.mjs")
 const JOURNAL_DIR = mkdtempSync(join(tmpdir(), "am-notify-journal-"));
 process.on("exit", () => { try { rmSync(JOURNAL_DIR, { recursive: true, force: true }); } catch { /* best effort */ } });
 const journalPath = (name = "seen.jsonl") => join(JOURNAL_DIR, name);
+const DEFAULT_SETTINGS = journalPath("notify.json");
+// Every CLI row gets a settings path in the temp dir: a run must never read the real home's file.
+function runMain(argv, io = {}) {
+  return main(argv, { settingsPath: DEFAULT_SETTINGS, ...io });
+}
 const THREAD = "3f2a8c1e-9b4d-4e6f-8a20-1c2d3e4f5a6b";
 const NOW = "2026-11-16T18:06:00Z";
 const now = () => NOW;
@@ -334,7 +339,7 @@ test("cli row: am notify with an injected queue writes receipts and returns the 
   const stdout = capture();
   const stderr = capture();
   const io = { stdin: [`${line()}\n`, "oops\n"], stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: journalPath("queue.jsonl") };
-  const code = await main(["notify", "--thread", THREAD], io);
+  const code = await runMain(["notify", "--thread", THREAD], io);
   assert.equal(code, NOTIFY_EXIT.refused);
   assert.equal(calls.length, 1);
   assert.deepEqual(stdout.text().trim().split("\n").map((t) => JSON.parse(t).decision), ["queued", "refused"]);
@@ -345,7 +350,7 @@ test("cli row: a read error says so on stderr and exits 3", async () => {
   const stdout = capture();
   const stderr = capture();
   const { queue } = fakeQueue();
-  const code = await main(["notify", "--thread", THREAD], { stdin: failingInput([line()]), stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: journalPath("read.jsonl") });
+  const code = await runMain(["notify", "--thread", THREAD], { stdin: failingInput([line()]), stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: journalPath("read.jsonl") });
   assert.equal(code, NOTIFY_EXIT.io);
   assert.equal(stderr.text(), "am notify: stdin could not be read to the end; 1 receipt line(s) written.\n");
 });
@@ -353,7 +358,7 @@ test("cli row: a read error says so on stderr and exits 3", async () => {
 test("cli row: with no queue injected it is a dry run: paused, zero calls, one stderr note", async () => {
   const stdout = capture();
   const stderr = capture();
-  const code = await main(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout, stderr, now, journalPath: journalPath("dry.jsonl") });
+  const code = await runMain(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout, stderr, now, journalPath: journalPath("dry.jsonl") });
   assert.equal(code, NOTIFY_EXIT.ok);
   assert.equal(JSON.parse(stdout.text()).decision, "paused");
   assert.equal(stderr.text(), "am notify: dry run: no queue in this build; each valid line is paused, nothing is called.\n");
@@ -361,7 +366,7 @@ test("cli row: with no queue injected it is a dry run: paused, zero calls, one s
   const existing = journalPath("dry-existing.jsonl");
   writeFileSync(existing, `${JSON.stringify("evt-0000")}\n`);
   chmodSync(existing, 0o644);
-  const again = await main(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout: capture(), stderr: capture(), now, journalPath: existing });
+  const again = await runMain(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout: capture(), stderr: capture(), now, journalPath: existing });
   assert.equal(again, NOTIFY_EXIT.ok);
   assert.equal(statSync(existing).mode & 0o777, 0o644, "the dry run does not chmod an existing journal");
   assert.equal(readFileSync(existing, "utf8"), `${JSON.stringify("evt-0000")}\n`, "the dry run writes nothing");
@@ -376,7 +381,7 @@ test("cli row: usage mistakes exit 2 before stdin is read", async () => {
     [["notify", "--thread", "3F2A8C1E-9B4D-4E6F-8A20-1C2D3E4F5A6B"], "am: notify: --thread must be a lowercase uuid.\n"],
     [["notify", "--thread", THREAD, "extra"], "am: notify takes no arguments: JSON lines on stdin and --thread <uuid>.\n"],
   ]) {
-    const { value, stderr } = await quietly(() => main(argv, { stdin, stdout: capture(), stderr: capture(), queue, journalPath: journalPath("usage.jsonl") }));
+    const { value, stderr } = await quietly(() => runMain(argv, { stdin, stdout: capture(), stderr: capture(), queue, journalPath: journalPath("usage.jsonl") }));
     assert.equal(value, NOTIFY_EXIT.usage, argv.join(" "));
     assert.equal(stderr, message);
   }
@@ -387,7 +392,7 @@ test("cli row: usage mistakes exit 2 before stdin is read", async () => {
 });
 
 test("cli row: --machine is refused for notify", async () => {
-  const { value } = await quietly(() => main(["notify", "--thread", THREAD, "--machine", "m1"], { stdin: [], stdout: capture(), stderr: capture() }));
+  const { value } = await quietly(() => runMain(["notify", "--thread", THREAD, "--machine", "m1"], { stdin: [], stdout: capture(), stderr: capture() }));
   assert.equal(value, 2);
 });
 
@@ -432,7 +437,7 @@ test("journal row: a restart sees the journal and dedupes across executions", as
   const stdin = [`${line()}\n`];
   const first = capture();
   const firstErr = capture();
-  const code = await main(["notify", "--thread", THREAD], { stdin, stdout: first, stderr: firstErr, queue, threadCurrent: () => THREAD, now, journalPath: path });
+  const code = await runMain(["notify", "--thread", THREAD], { stdin, stdout: first, stderr: firstErr, queue, threadCurrent: () => THREAD, now, journalPath: path });
   assert.equal(code, NOTIFY_EXIT.ok);
   assert.equal(calls.length, 1);
   assert.equal(JSON.parse(first.text()).decision, "queued");
@@ -440,7 +445,7 @@ test("journal row: a restart sees the journal and dedupes across executions", as
   assert.equal(statSync(path).mode & 0o777, 0o600);
   const second = capture();
   const secondErr = capture();
-  const again = await main(["notify", "--thread", THREAD], { stdin, stdout: second, stderr: secondErr, queue, threadCurrent: () => THREAD, now, journalPath: path });
+  const again = await runMain(["notify", "--thread", THREAD], { stdin, stdout: second, stderr: secondErr, queue, threadCurrent: () => THREAD, now, journalPath: path });
   assert.equal(again, NOTIFY_EXIT.ok);
   assert.equal(calls.length, 1, "the second run calls no queue");
   assert.equal(JSON.parse(second.text()).decision, "deduped");
@@ -454,7 +459,7 @@ test("journal row: the file is 0600 and an existing broader mode is tightened", 
   const { queue } = fakeQueue();
   const stdout = capture();
   const stderr = capture();
-  const code = await main(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: path });
+  const code = await runMain(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: path });
   assert.equal(code, NOTIFY_EXIT.ok);
   assert.equal(stderr.text(), "");
   assert.equal(statSync(path).mode & 0o777, 0o600);
@@ -470,7 +475,7 @@ test("journal row: a corrupt journal is refused before stdin (exit 3, zero calls
   const { calls, queue } = fakeQueue();
   const stdout = capture();
   const stderr = capture();
-  const code = await main(["notify", "--thread", THREAD], { stdin, stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: path });
+  const code = await runMain(["notify", "--thread", THREAD], { stdin, stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: path });
   assert.equal(code, NOTIFY_EXIT.io);
   assert.equal(pulled, false);
   assert.equal(calls.length, 0);
@@ -487,7 +492,7 @@ test("journal row: an unreadable journal is refused the same way", async () => {
     const { calls, queue } = fakeQueue();
     const stdout = capture();
     const stderr = capture();
-    const code = await main(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: path });
+    const code = await runMain(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: path });
     assert.equal(code, NOTIFY_EXIT.io);
     assert.equal(calls.length, 0);
     assert.equal(stdout.text(), "");
@@ -502,14 +507,14 @@ test("journal row: a failed delivery id is not written; a restart delivers it ag
   const first = fakeQueue([{ exit: 1 }]);
   const firstOut = capture();
   const firstErr = capture();
-  const code = await main(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout: firstOut, stderr: firstErr, queue: first.queue, threadCurrent: () => THREAD, now, journalPath: path });
+  const code = await runMain(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout: firstOut, stderr: firstErr, queue: first.queue, threadCurrent: () => THREAD, now, journalPath: path });
   assert.equal(code, NOTIFY_EXIT.failed);
   assert.equal(first.calls.length, 1);
   assert.equal(existsSync(path), false, "a failed delivery writes nothing");
   const second = fakeQueue();
   const secondOut = capture();
   const secondErr = capture();
-  const again = await main(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout: secondOut, stderr: secondErr, queue: second.queue, threadCurrent: () => THREAD, now, journalPath: path });
+  const again = await runMain(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout: secondOut, stderr: secondErr, queue: second.queue, threadCurrent: () => THREAD, now, journalPath: path });
   assert.equal(again, NOTIFY_EXIT.ok);
   assert.equal(second.calls.length, 1, "the retry calls the queue");
   assert.equal(JSON.parse(secondOut.text()).decision, "queued");
@@ -538,7 +543,7 @@ test("journal row: a symlink journal path is refused (exit 3, zero calls)", asyn
     const { calls, queue } = fakeQueue();
     const stdout = capture();
     const stderr = capture();
-    const code = await main(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: link });
+    const code = await runMain(["notify", "--thread", THREAD], { stdin: [`${line()}\n`], stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: link });
     assert.equal(code, NOTIFY_EXIT.io);
     assert.equal(calls.length, 0);
     assert.equal(stdout.text(), "");
@@ -560,7 +565,7 @@ test("journal row: a journal write failure writes the queued receipt first, name
     const stdout = capture();
     const stderr = capture();
     const second = line({ event_id: "evt-0002" });
-    const code = await main(["notify", "--thread", THREAD], { stdin: [`${line()}\n`, `${second}\n`], stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: path });
+    const code = await runMain(["notify", "--thread", THREAD], { stdin: [`${line()}\n`, `${second}\n`], stdout, stderr, queue, threadCurrent: () => THREAD, now, journalPath: path });
     assert.equal(code, NOTIFY_EXIT.io);
     assert.equal(calls.length, 1);
     const receipts = stdout.text().trim().split("\n").map((text) => JSON.parse(text));
@@ -573,4 +578,192 @@ test("journal row: a journal write failure writes the queued receipt first, name
     chmodSync(locked, 0o700);
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- pause/stop and quiet hours (increment 5) ----
+
+// Quiet uses the host's local clock: build the injected time from local hours so the rows do not
+// depend on the suite's TZ.
+const atLocal = (hours, minutes) => new Date(2026, 10, 16, hours, minutes, 0, 0).toISOString();
+
+function settingsFile(name, value) {
+  const path = journalPath(`settings-${name}.json`);
+  writeFileSync(path, typeof value === "string" ? value : `${JSON.stringify(value)}\n`);
+  return path;
+}
+
+async function cliRun({ name, settings, at, input, fake, readControl, live = true }) {
+  const settingsPath = settings === undefined ? journalPath("notify.json") : settingsFile(name, settings);
+  const { calls, queue } = fake ?? fakeQueue();
+  const journal = journalPath(`run-${name}.jsonl`);
+  const stdout = capture();
+  const stderr = capture();
+  const io = {
+    stdin: input ?? [`${line()}\n`], stdout, stderr,
+    threadCurrent: () => THREAD,
+    now: () => at,
+    settingsPath,
+    journalPath: journal,
+  };
+  if (live) io.queue = queue;
+  if (readControl) io.readControl = readControl;
+  const code = await runMain(["notify", "--thread", THREAD], io);
+  const text = stdout.text();
+  const receipts = text.trim() === "" ? [] : text.trim().split("\n").map((line) => JSON.parse(line));
+  return { code, calls, receipts, stderr: stderr.text(), journal, settingsPath };
+}
+
+test("settings row: a missing settings file leaves the run running (a line queues)", async () => {
+  const run = await cliRun({ name: "missing", settings: undefined });
+  assert.equal(run.code, NOTIFY_EXIT.ok);
+  assert.equal(run.calls.length, 1);
+  assert.deepEqual(run.receipts.map((r) => r.decision), ["queued"]);
+  assert.equal(run.stderr, "");
+});
+
+test("quiet row: a line inside the quiet window is paused (zero calls, exit 0, no journal write)", async () => {
+  const run = await cliRun({ name: "quiet-in", settings: { quiet: { from: "22:00", to: "07:00" } }, at: atLocal(23, 30) });
+  assert.equal(run.code, NOTIFY_EXIT.ok);
+  assert.equal(run.calls.length, 0);
+  assert.deepEqual(run.receipts.map((r) => r.decision), ["paused"]);
+  assert.equal(existsSync(run.journal), false, "a paused id is not written");
+});
+
+test("quiet row: a line outside the quiet window queues", async () => {
+  const run = await cliRun({ name: "quiet-out", settings: { quiet: { from: "22:00", to: "07:00" } }, at: atLocal(12, 0) });
+  assert.equal(run.code, NOTIFY_EXIT.ok);
+  assert.equal(run.calls.length, 1);
+  assert.deepEqual(run.receipts.map((r) => r.decision), ["queued"]);
+});
+
+test("quiet row: a window across midnight pauses 23:30 and 06:00, queues 12:00", async () => {
+  const settings = { quiet: { from: "22:00", to: "07:00" } };
+  for (const [name, hours, minutes, expected, calls] of [
+    ["wrap-a", 23, 30, "paused", 0],
+    ["wrap-b", 6, 0, "paused", 0],
+    ["wrap-c", 12, 0, "queued", 1],
+  ]) {
+    const run = await cliRun({ name, settings, at: atLocal(hours, minutes) });
+    assert.equal(run.code, NOTIFY_EXIT.ok, name);
+    assert.deepEqual(run.receipts.map((r) => r.decision), [expected], name);
+    assert.equal(run.calls.length, calls, name);
+  }
+});
+
+test("quiet row: the window is half-open (from minute inside, to minute outside)", async () => {
+  const settings = { quiet: { from: "22:00", to: "07:00" } };
+  const inside = await cliRun({ name: "edge-in", settings, at: atLocal(22, 0) });
+  assert.deepEqual(inside.receipts.map((r) => r.decision), ["paused"]);
+  const outside = await cliRun({ name: "edge-out", settings, at: atLocal(7, 0) });
+  assert.deepEqual(outside.receipts.map((r) => r.decision), ["queued"]);
+});
+
+test("settings row: paused=true pauses every line (zero calls, no journal write, exit 0)", async () => {
+  const run = await cliRun({ name: "paused-flag", settings: { paused: true }, at: atLocal(12, 0), input: [`${line()}\n`, `${line({ event_id: "evt-0002" })}\n`] });
+  assert.equal(run.code, NOTIFY_EXIT.ok);
+  assert.equal(run.calls.length, 0);
+  assert.deepEqual(run.receipts.map((r) => r.decision), ["paused", "paused"]);
+  assert.equal(existsSync(run.journal), false);
+});
+
+test("settings row: stop=true wins over quiet and paused, ends the run after its receipt, later lines not read", async () => {
+  let reads = 0;
+  async function* input() {
+    for (const id of ["evt-0001", "evt-0002"]) {
+      reads += 1;
+      yield `${line({ event_id: id })}\n`;
+    }
+  }
+  const run = await cliRun({
+    name: "stop-flag",
+    settings: { stop: true, paused: true, quiet: { from: "22:00", to: "07:00" } },
+    at: atLocal(23, 30),
+    input: input(),
+  });
+  assert.equal(run.code, NOTIFY_EXIT.ok);
+  assert.equal(run.calls.length, 0);
+  assert.deepEqual(run.receipts.map((r) => r.decision), ["stopped"]);
+  assert.equal(reads, 1, "the line after the stop is never pulled");
+});
+
+test("settings row: a corrupt, unreadable or malformed settings file is refused before stdin (exit 3, zero calls)", async () => {
+  for (const [name, value] of [
+    ["bad-json", "not json"],
+    ["bad-time", { quiet: { from: "25:00", to: "07:00" } }],
+    ["bad-paused", { paused: "yes" }],
+    ["bad-stop", { stop: 1 }],
+  ]) {
+    const path = settingsFile(name, value);
+    let pulled = false;
+    const stdin = { async *[Symbol.asyncIterator]() { pulled = true; yield `${line()}\n`; } };
+    const { calls, queue } = fakeQueue();
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runMain(["notify", "--thread", THREAD], {
+      stdin, stdout, stderr, queue, threadCurrent: () => THREAD,
+      now: () => atLocal(12, 0), settingsPath: path, journalPath: journalPath(`bad-${name}.jsonl`),
+    });
+    assert.equal(code, NOTIFY_EXIT.io, name);
+    assert.equal(pulled, false, name);
+    assert.equal(calls.length, 0, name);
+    assert.equal(stdout.text(), "", name);
+    assert.match(stderr.text(), /settings at .* cannot be used/, name);
+  }
+  const unreadable = settingsFile("unreadable", { paused: true });
+  chmodSync(unreadable, 0o000);
+  try {
+    const { calls, queue } = fakeQueue();
+    const code = await runMain(["notify", "--thread", THREAD], {
+      stdin: [`${line()}\n`], stdout: capture(), stderr: capture(), queue, threadCurrent: () => THREAD,
+      now: () => atLocal(12, 0), settingsPath: unreadable, journalPath: journalPath("bad-unreadable.jsonl"),
+    });
+    assert.equal(code, NOTIFY_EXIT.io);
+    assert.equal(calls.length, 0);
+  } finally {
+    chmodSync(unreadable, 0o600);
+  }
+});
+
+test("settings row: an injected readControl wins over the settings", async () => {
+  const run = await cliRun({
+    name: "injected",
+    settings: { quiet: { from: "22:00", to: "07:00" } },
+    at: atLocal(23, 30),
+    readControl: () => "running",
+  });
+  assert.equal(run.code, NOTIFY_EXIT.ok);
+  assert.equal(run.calls.length, 1);
+  assert.deepEqual(run.receipts.map((r) => r.decision), ["queued"]);
+});
+
+test("settings row: the dry run still pauses with a quiet window outside (and writes no journal)", async () => {
+  const run = await cliRun({ name: "dry-quiet", settings: { quiet: { from: "22:00", to: "07:00" } }, at: atLocal(12, 0), live: false });
+  assert.equal(run.code, NOTIFY_EXIT.ok);
+  assert.equal(run.calls.length, 0);
+  assert.deepEqual(run.receipts.map((r) => r.decision), ["paused"]);
+  assert.match(run.stderr, /dry run/);
+  assert.equal(existsSync(run.journal), false);
+});
+
+test("quiet row: from == to is an empty window (the run stays running)", async () => {
+  const run = await cliRun({ name: "empty-window", settings: { quiet: { from: "12:00", to: "12:00" } }, at: atLocal(23, 30) });
+  assert.equal(run.code, NOTIFY_EXIT.ok);
+  assert.equal(run.calls.length, 1);
+  assert.deepEqual(run.receipts.map((r) => r.decision), ["queued"]);
+});
+
+test("settings row: a settings file over the size cap is refused (exit 3, zero calls)", async () => {
+  const path = journalPath("settings-oversized.json");
+  writeFileSync(path, JSON.stringify({ pad: "x".repeat(70000) }));
+  const { calls, queue } = fakeQueue();
+  const stdout = capture();
+  const stderr = capture();
+  const code = await runMain(["notify", "--thread", THREAD], {
+    stdin: [`${line()}\n`], stdout, stderr, queue, threadCurrent: () => THREAD,
+    now: () => atLocal(12, 0), settingsPath: path, journalPath: journalPath("oversized.jsonl"),
+  });
+  assert.equal(code, NOTIFY_EXIT.io);
+  assert.equal(calls.length, 0);
+  assert.equal(stdout.text(), "");
+  assert.match(stderr.text(), /settings at .* cannot be used/);
 });
