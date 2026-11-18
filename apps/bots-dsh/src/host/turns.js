@@ -10,6 +10,7 @@ import { absoluteLinks } from './links.js'
 import { splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { reminderText } from './schedules.js'
+import { shellHoldText } from '../shared/routes.js'
 
 // What a running tool call is about, for an approval card.
 export const detailOfArgs = raw => {
@@ -1283,6 +1284,9 @@ export function install(rt) {
     const controller = ctx.sessionController
     const admitted = async function (request, ...rest) {
       try {
+        // A Bot held at load for its shell-off coding CLI never starts its own turn.
+        const held = rt.botOf(rt.selfOf(request?.sessionId))
+        if (held?.shellHeld !== undefined) throw Object.assign(new Error(shellHoldText(held)), { code: 'bot/shell' })
         return await prompt.call(this, request, ...rest)
       } catch (error) {
         const id = request?.sessionId

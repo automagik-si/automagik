@@ -1300,6 +1300,7 @@ var ZH = {
   "A Bot with shell access can read what the operating-system user can read.": "有 shell 访问权限的 Bot 可以读取操作系统用户能读取的内容。",
   "This Bot stays on {model}: {cli} is a coding CLI that brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.": "这个 Bot 会继续使用 {model}：{cli} 是自带 shell 的编程 CLI。请打开 shell，或选择一个使用 DeepSeek Harness 工具的模型。",
   "This model no longer answers, and this Bot cannot move to {cli} while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.": "这个模型已不再可用，而在 shell 关闭时这个 Bot 无法迁移到 {cli}。请选择一个使用 DeepSeek Harness 工具的模型，或打开 shell。",
+  "This Bot has no shell, so it cannot run on {cli}, whose own tools can run commands. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.": "这个 Bot 没有 shell，因此不能在 {cli} 上运行，它的工具可以执行命令。请选择一个使用 DeepSeek Harness 工具的模型，或打开 shell。",
   "The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.": "Bot 团队在授予工具时执行此设置：它会移除这些工具，而不会把 shell 放进操作系统沙箱。",
   "This removes this Bot's own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.": "这只会移除这个 Bot 自己的 shell 工具；它不能阻止另一个有 shell 的 Bot，或操作系统用户，读取这个 Bot 能读取的文件。",
   "Denied tools": "禁止使用的工具",
@@ -3741,6 +3742,13 @@ var LEGACY_LOCAL_CLIS = Object.freeze([
   "qwen-code",
   "goose"
 ]);
+function shellHoldOf(bot) {
+  const ref = bot?.model ?? bot?.appliedModel;
+  return bot?.shell === false && commandCapableAgent(ref) ? String(ref).split("/")[0] : void 0;
+}
+function shellHoldText(bot, cli = shellHoldOf(bot)) {
+  return `${bot?.name ?? "This Bot"} has no shell, so it cannot run on ${cli ?? "a coding CLI"}, whose own tools can run commands. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.`;
+}
 function commandCapableAgent(ref) {
   const provider = String(ref ?? "").split("/")[0];
   if (provider === "") return false;
@@ -6993,6 +7001,9 @@ function modelStateLine(state2, roster) {
   return void 0;
 }
 function modelHint(bot, roster, state2) {
+  if (bot.shellHeld !== void 0) {
+    return t("This Bot has no shell, so it cannot run on {cli}, whose own tools can run commands. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.", { cli: bot.shellHeld.cli });
+  }
   const host = roster.hostModels?.[bot.id];
   if (host !== void 0) {
     const answering = host.entries?.find((entry) => entry.answering)?.label;
@@ -19560,7 +19571,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     answerView: (sessionId, viewId, action, values) => after(call2("view-reply", { sessionId: partFor(sessionId), viewId, action, values })),
     dismissView: (sessionId) => after(call2("dismiss-view", { sessionId: partFor(sessionId) })),
     deleteBtw: (sessionId, cardId) => after(call2("btw-delete", { sessionId, cardId })),
-    answerApproval: (id, choice) => after(call2("approval-answer", { id, choice })),
+    answerApproval: (id, choice) => after(call2("approval-answer", { id, choice, client: "web" })),
     computerSetEnabled: (enabled) => after(call2("computer-set-enabled", { enabled })),
     computerSetLevel: (botId, level) => after(call2("computer-set-level", { botId, level })),
     computerRevokeApp: (botId, appKey) => after(call2("computer-revoke-app", { botId, appKey })),

@@ -18,6 +18,7 @@ import { replaceFile } from './files.js'
 import { homeLock } from './home-lock.js'
 import { GENIE_CLAY, shippedPet, shipsPet } from './pets.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
+import { shellHoldOf } from '../shared/routes.js'
 
 // A table read that sees only the keys the table holds itself. Ids that come from
 // outside (a request body, a tool argument, a name a model gives) go through this, so
@@ -215,6 +216,22 @@ export function install(rt) {
       // `bot.computer` holds the computer-use level and Always-grant apps; corrupt values reset.
       if (bot.computer !== undefined && (bot.computer === null || typeof bot.computer !== 'object' || Array.isArray(bot.computer))) delete bot.computer
       else if (bot.computer !== undefined && (bot.computer.apps === null || typeof bot.computer.apps !== 'object' || Array.isArray(bot.computer.apps))) delete bot.computer.apps
+      // A stored Bot whose shell is off while its model is a coding CLI brings its own
+      // shell: the combination no supported path stores, so only a hand-edited file has
+      // it. It is held at load, never started on that route, until a native model or the
+      // shell is the person's choice. The line says so in the log too.
+      const shellCli = shellHoldOf(bot), shellModel = bot.model ?? bot.appliedModel
+      if (shellCli !== undefined) {
+        if (bot.shellHeld?.cli !== shellCli || bot.shellHeld?.model !== shellModel) {
+          bot.shellHeld = { cli: shellCli, model: shellModel }
+          migrated = true
+          warn('ds-bot: %s loads with its shell off on %s, a coding CLI that brings its own shell: '
+            + 'it is held until the shell is turned on or it runs on a model that uses DeepSeek Harness\'s tools.', bot.name, shellCli)
+        }
+      } else if (bot.shellHeld !== undefined) {
+        delete bot.shellHeld
+        migrated = true
+      }
       // LEGACY: Bots saved with a lab ran on that lab's default model; the model they
       // last ran on becomes their own, so dropping the lab changes nothing for them.
       if ('lab' in bot) {

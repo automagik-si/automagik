@@ -511,9 +511,9 @@ test('the title face is the brand\'s: Fredoka from docs/brand, at its three weig
   // Nothing set in the title face carries a weight of its own: a heavier Fredoka is heavier than the logo.
   assert.equal(css.match(/font:[^;}]*var\(--head\)/g).length, 37)
   assert.deepEqual(css.match(/font:[^;}]*var\(--head\)/g).filter(rule => !/^font:var\(--weight-(?:title|strong|label)\) /.test(rule)), [])
-  assert.ok(css.includes('\nh1{font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;letter-spacing:-.02em}\n'))
-  assert.ok(css.includes('\nh2{font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;letter-spacing:-.016em}\n'))
-  assert.ok(css.includes('\nh3{font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;letter-spacing:-.01em}\n'))
+  assert.ok(css.includes('\nh1{font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;letter-spacing:var(--heading-1-letter-spacing)}\n'))
+  assert.ok(css.includes('\nh2{font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;letter-spacing:var(--heading-2-letter-spacing)}\n'))
+  assert.ok(css.includes('\nh3{font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;letter-spacing:var(--heading-3-letter-spacing)}\n'))
   // Fredoka's own word space is wide; the extra word spacing the old face needed is gone.
   assert.doesNotMatch(css, /word-spacing/)
   // Widths counted in the face's own zero: Fredoka's zero is narrower, so the counts grew to keep the same lines.
@@ -526,6 +526,28 @@ test('the title face is the brand\'s: Fredoka from docs/brand, at its three weig
     assert.equal(html.split('<link rel="preload" href="/assets/brand/fredoka-latin.woff2" as="font" type="font/woff2" crossorigin>').length, 2, route)
     assert.doesNotMatch(html, /manrope/i, route)
   }
+})
+
+test('the heading letter spacing comes from the brand tokens, once', () => {
+  const brand = JSON.parse(read('../../docs/brand/tokens/tokens.json')).type
+  const headings = brand.groups.find(group => group.name === 'Headings').styles
+  assert.deepEqual(headings.map(style => style.name), ['heading-1', 'heading-2', 'heading-3'])
+  for (const [index, style] of headings.entries()) {
+    const n = index + 1
+    assert.ok(theme.includes(`--heading-${n}-letter-spacing:${style.letterSpacing};`), `the theme carries heading ${n}'s letter spacing`)
+    assert.ok(css.includes(`letter-spacing:var(--heading-${n}-letter-spacing)`), `h${n} uses the brand's letter spacing`)
+  }
+  // The number lives in tokens.json only: never copied into the stylesheet by hand again.
+  assert.doesNotMatch(css, /(?:^|\n)h[123]\{[^}]*letter-spacing:-?\.0/)
+})
+
+test('the Genie flow step title stays on one line beside its number in the three-column layout', () => {
+  // The counter plaque (30px) and the gap leave the title its column less 36px. At 861px and
+  // up the fluid size keeps "A branch and a test run" on one line; below it the single-column
+  // layout gives the title 560px, and a phone may still wrap it.
+  assert.match(css, /\.flow-steps h3\{[^}]*font-size:clamp\(1\.2rem,1\.1rem \+ \.2vw,1\.3rem\)/)
+  assert.match(css, /\.flow-steps h3\{[^}]*gap:6px/)
+  assert.doesNotMatch(css, /\.flow-steps h3\{[^}]*white-space:nowrap/)
 })
 
 test('the title face never ships without its licence, in the brand folder and on the site', () => {

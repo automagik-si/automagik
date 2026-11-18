@@ -90,6 +90,11 @@ export function modelStateLine(state, roster) {
 
 // The line under a Bot's model in its settings. `state`: the host's model state for this Bot.
 export function modelHint(bot, roster, state) {
+  // A Bot held at load: its shell is off and its model is a coding CLI that brings its own
+  // shell. It does not start until the person picks a native model or turns the shell on.
+  if (bot.shellHeld !== undefined) {
+    return t('This Bot has no shell, so it cannot run on {cli}, whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.', { cli: bot.shellHeld.cli })
+  }
   // A Bot whose model its plugin owns: the DSH model saved on it answers nothing. The hint
   // names what answers now, from the plugin's menu, or says nothing.
   const host = roster.hostModels?.[bot.id]

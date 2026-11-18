@@ -511,6 +511,32 @@ test('a stored Bot with no field reads shell on', async (t) => {
   assert.equal(saved.bots.old.shell, true)
 })
 
+test('a stored shell-off Bot on a coding CLI is held at load, logged, and refuses to start', async (t) => {
+  const stored = storedBefore()
+  stored.bots.cli = {
+    id: 'cli', name: 'CLI Bot', role: '', instructions: '', createdAt: 2, capabilities: [],
+    shell: false, model: 'acp-codex/gpt-6.1-sol', appliedModel: 'acp-codex/gpt-6.1-sol',
+  }
+  const { rt, warnings, guard } = team(t, { storedTeam: stored })
+  await rt.load()
+  const bot = rt.botOf('cli')
+  assert.deepEqual(bot.shellHeld, { cli: 'acp-codex', model: 'acp-codex/gpt-6.1-sol' })
+  const said = warnings.filter(line => /CLI Bot/.test(line) && /acp-codex/.test(line) && /shell/.test(line))
+  assert.equal(said.length, 1, `one line names the Bot, its CLI and its shell: ${JSON.stringify(warnings)}`)
+  // It cannot start work while the shell is off and the model is a coding CLI.
+  await assert.rejects(() => rt.applyPermission(bot, 'cli', undefined, undefined, { start: true }),
+    /has no shell.*acp-codex.*Pick a model that uses DeepSeek Harness's tools, or turn its shell on/)
+  // The held state is part of the saved team, not only of this memory.
+  const saved = JSON.parse(readFileSync(join(rt.home, 'state.json'), 'utf8'))
+  assert.deepEqual(saved.bots.cli.shellHeld, bot.shellHeld)
+  assert.equal(saved.bots.cli.shell, false)
+  // Turning the shell on is the choice the hold asks for, and lifts it.
+  await rt.updateBot('cli', { shell: true })
+  assert.equal(rt.botOf('cli').shellHeld, undefined)
+  await allowed(guard(), 'bash', { id: 'cli' }, { command: 'id' })
+  assert.equal(JSON.parse(readFileSync(join(rt.home, 'state.json'), 'utf8')).bots.cli.shellHeld, undefined)
+})
+
 test('a new non-private Bot states shell on and is otherwise unchanged', async (t) => {
   const { rt, create, guard } = team(t)
   const bot = await create()

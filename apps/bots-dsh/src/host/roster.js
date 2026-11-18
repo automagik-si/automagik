@@ -734,6 +734,8 @@ export function install(rt) {
       else bot[key] = value
     }
     if (!bot.permissionAuto && markOf(bot.model) !== markBefore && bot.permissionRev === revBefore) rt.movePermissionRev(bot)
+    // A load-time shell hold lifts when the person picks a native model or turns the shell on.
+    if (bot.shellHeld !== undefined && (bot.shell === true || !commandCapableAgent(bot.model ?? bot.appliedModel))) delete bot.shellHeld
     await rt.save()
     // The list or the shell changed: every Session of this Bot is lifted and re-set from
     // the new record, so a shell tool added or removed here takes effect at once.
