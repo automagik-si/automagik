@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import { state } from "./use-stubs.mjs";
 import { hcName, parentArgs, startRefusal, startArgs, agentInForeground, isClaude, newest, attachRefusal, parseCommand, freshSpare, shellIdle, spareTab, unwrapKeep } from "../mods/am-sidebar/launchArgs.js";
 import { GUARD_DIR, stableGuardDir, stableHelper, stableRunner } from "../mods/am-sidebar/workers.js";
-const { startBot, attachBot, liveTerminalOf, botOfTerminal, runCli } = await import("../mods/am-sidebar/launch.js");
+const { startBot, attachBot, liveTerminalOf, botOfTerminal, ledgerBindings, runCli } = await import("../mods/am-sidebar/launch.js");
 import { briefingFilePath } from "../mods/am-sidebar/briefingText.mjs";
 import { readJsonLines } from "./log-lines.mjs";
 
@@ -258,6 +258,21 @@ test("the fake hc is the one the CLI runs here: never the real one", async (t) =
   assert.match(stdout.trim(), /automagik-herdr-.*\/bin\/hc\n.*automagik-herdr-.*\/bin\/herdr-app$/);
 });
 
+test("ledgerBindings: the whois --all answer names the panes, and a CLI without it answers null (#223)", async (t) => {
+  const w = await world(t);
+  const mod = join(w.app, "mods/am-sidebar");
+  rmSync(mod, { force: true });
+  mkdirSync(join(mod, "bin"), { recursive: true });
+  const rows = [{ terminal: "t7", core: "c0", created_ms: 1, bot: ID.main, project: w.main, since: "2026-01-01T00:00:00Z",
+    address: "t7", machine: null, state: "live" }];
+  exe(join(mod, "bin/automagik-herdr.mjs"), `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify({ core: "c0", bindings: rows }))});\n`);
+  exe(join(mod, "bin/run.sh"), `#!/bin/sh\nexec "${process.execPath}" "$@"\n`);
+  assert.deepEqual(await ledgerBindings(), rows);
+  // An older CLI refuses --all (exit 2): null, so the sidebar keeps its bot= labels.
+  exe(join(mod, "bin/automagik-herdr.mjs"), `#!/usr/bin/env node\nprocess.exit(2);\n`);
+  assert.equal(await ledgerBindings(), null);
+});
+
 test("startBot runs the CLI: hc run in the project's space, a tab of its own, an attach row by start; the sidebar sets no label", async (t) => {
   const w = await world(t, { terminals: (main) => [term("t7", { bot: ID.cap, cwd: main })] });
   state.spaces = [{ id: "s0", folder: "/elsewhere", machine: null, active: true, tabs: [{ id: "x", active: true }] },
@@ -396,6 +411,49 @@ test("startBot: two bots of one project started at once open one space and both 
   const runs = w.calls().filter((a) => a[0] === "run");
   assert.equal(runs.length, 2);
   assert.ok(runs.every((a) => a.includes("herdr.space=s5")));
+});
+
+test("startBot: a space another start made while this one asked is the one space both use (#217)", async (t) => {
+  const w = await world(t);
+  state.spaces = [{ id: "s0", folder: "/elsewhere", machine: null, active: true, tabs: [{ id: "x", active: true }] }];
+  let looks = 0;
+  // space.new was asked for s5; a CLI start opened s4 on the project in the same moment.
+  const sleep = async () => {
+    if (++looks === 1) {
+      state.spaces = [...state.spaces,
+        { id: "s4", folder: w.main, machine: null, active: false, tabs: [{ id: "t4", active: false }] },
+        { id: "s5", folder: w.main, machine: null, active: true, tabs: [{ id: "t5", active: true }] }];
+      state.panes = [
+        { pane: "p4", terminal: "t-sh4", tab: "t4", program: { key: "shell", shell: true, agent: false } },
+        { pane: "p5", terminal: "t-sh5", tab: "t5", program: { key: "shell", shell: true, agent: false } },
+      ];
+    }
+  };
+  assert.deepEqual(await startBot(w.main, ID.main, { sleep, waitMs: 100, stepMs: 10 }), { terminal: "t100" });
+  const runArgs = w.calls().find((a) => a[0] === "run");
+  assert.ok(runArgs.includes("herdr.space=s4"), runArgs.join(" "));
+  assert.deepEqual(state.runs, [["space.new", { name: "proj", folder: w.main, machine: "" }],
+    ["space.close", { id: "s5", confirmed: true }]], "the duplicate this start made is closed");
+});
+
+test("startBot: a space that shows after the wait is closed when nothing runs there (#217)", async (t) => {
+  const w = await world(t);
+  state.spaces = [{ id: "s0", folder: "/elsewhere", machine: null, active: true, tabs: [{ id: "x", active: true }] }];
+  let looks = 0;
+  // The wait gives up; the space Herdr was making shows after the bot started in the shown one.
+  const sleep = async () => {
+    if (++looks === 14) {
+      state.spaces = [...state.spaces, { id: "s9", folder: w.main, machine: null, active: false, tabs: [{ id: "t9", active: false }] }];
+      state.panes = [{ pane: "p9", terminal: "t-sh9", tab: "t9", program: { key: "shell", shell: true, agent: false } }];
+    }
+  };
+  const r = await startBot(w.main, ID.main, { sleep, waitMs: 100, stepMs: 10, lateWaitMs: 100, lateStepMs: 10 });
+  assert.equal(r.terminal, "t100");
+  // The sweep reads each late space's folder (git), so give it a moment, never a fixed sleep.
+  const until = Date.now() + 2000;
+  while (Date.now() < until && !state.runs.some(([name]) => name === "space.close")) await new Promise((done) => setTimeout(done, 10));
+  assert.deepEqual(state.runs, [["space.new", { name: "proj", folder: w.main, machine: "" }],
+    ["space.close", { id: "s9", confirmed: true }]], "the late space is closed, its shell still alone");
 });
 
 test("startBot: two Starts at once open one pane", async (t) => {

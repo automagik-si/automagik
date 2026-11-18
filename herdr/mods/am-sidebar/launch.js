@@ -132,6 +132,18 @@ export async function botOfTerminal(terminal) {
 }
 
 /**
+ * Every binding the attach ledger holds (`automagik-herdr whois --all --json`, its
+ * bots.whois-all-json@1 answer), rows of { terminal, core, created_ms, bot, project, since,
+ * address, machine, state } with `state` "live" or "unknown" (a machine away), or null when the
+ * CLI can't answer (a CLI without --all, or a failure). The sidebar draws its rows from the
+ * bindings and keeps the bot= labels while it gets null.
+ */
+export async function ledgerBindings() {
+  const r = await runCli(["whois", "--all"]);
+  return r.code === 0 && Array.isArray(r.out?.bindings) ? r.out.bindings : null;
+}
+
+/**
  * The briefing hook for a Claude bot (DESIGN Approach "Group 3", Decision 9): it ties the session
  * to its pane, and gives the briefing once to a pane whose agent wasn't started with it (the CLI's
  * Start and Restart put it in the agent's system prompt). Merges the
@@ -176,12 +188,13 @@ export async function modelTexts() {
 export const sleepOf = (cx) => (cx?.timer ? (ms) => new Promise((done) => cx.timer.after(ms, () => done())) : null);
 
 const localSpaces = () => spaces().filter((s) => !s.machine);
-// The first of `list` whose folder keys to the project.
-async function keyedSpace(list, projectKey) {
+// Every space of `list` whose folder keys to the project, in window order.
+async function keyedSpaces(list, projectKey) {
+  const out = [];
   for (const s of list) {
-    try { if (s.folder && (await keyOf(s.folder)) === projectKey) return s; } catch {}
+    try { if (s.folder && (await keyOf(s.folder)) === projectKey) out.push(s); } catch {}
   }
-  return null;
+  return out;
 }
 
 // Spaces being opened now, one per project: a second Start in that project waits for it.
@@ -205,20 +218,54 @@ const shellIdleIn = (terminal) => {
 };
 
 // A new space on the project, named after its folder: space.new, then (run() answers
-// nothing) looked for in spaces() every stepMs for up to waitMs. Null if it never shows.
-// `spare`: the shell space.new started, alone in the space's first tab (spareTab), or null.
+// nothing) looked for in spaces() every stepMs for up to waitMs. `spare`: the shell space.new
+// started, alone in the space's first tab (spareTab), or null. Two starts at once can each
+// open one: every start then uses the first space on the project, and this one closes the
+// space it opened when it isn't that first one. `late`: the spaces there when this start
+// asked, for a space that shows after the wait (sweepLateSpaces); null when one showed.
 async function openSpace(projectKey, sleep, { waitMs = 5000, stepMs = 100 } = {}) {
   const before = new Set(localSpaces().map((s) => s.id));
   try { run("space.new", { name: projectKey.replace(/\/+$/, "").split("/").pop(), folder: projectKey, machine: "" }); } catch { return null; }
   for (let waited = 0; ; waited += stepMs) {
-    const space = await keyedSpace(localSpaces().filter((s) => !before.has(s.id)), projectKey);
-    if (space) {
-      const [first] = tabsOf(space);
-      const alone = first?.terminals.length === 1 && first.count === 1;
-      return { space, spare: alone ? { space: space.id, tab: first.id, terminal: first.terminals[0] } : null };
+    const here = localSpaces();
+    const fresh = await keyedSpaces(here.filter((s) => !before.has(s.id)), projectKey);
+    if (fresh.length) {
+      const [first] = await keyedSpaces(here, projectKey);
+      for (const s of fresh) if (s.id !== first?.id) closeMadeSpace(s);
+      if (first) return { space: first, spare: before.has(first.id) ? null : spareOf(first), late: null };
     }
-    if (waited >= waitMs) return null;
+    if (waited >= waitMs) return { space: null, spare: null, late: before };
     await sleep(stepMs);
+  }
+}
+
+// The spare shell of a space this start just made, as closeSpare takes it: its one tab holds
+// that shell alone. Null when the window shows no such tab (nothing is ever closed unseen).
+function spareOf(space) {
+  const [first] = tabsOf(space);
+  const alone = first?.terminals.length === 1 && first.count === 1;
+  return alone ? { space: space.id, tab: first.id, terminal: first.terminals[0] } : null;
+}
+
+// A space this start opened that another start's space made superfluous: closed only while it
+// holds space.new's own shell, alone in its one tab and idle. Never a space with a bot in it,
+// and when the window can't say the shell is alone, never closed.
+function closeMadeSpace(space) {
+  const [tab] = tabsOf(space);
+  if (tab?.terminals.length !== 1 || tab.count !== 1 || !shellIdleIn(tab.terminals[0])) return false;
+  try { run("space.close", { id: space.id, confirmed: true }); return true; } catch { return false; }
+}
+
+// A start whose space.new didn't show in time starts in the shown space; the space Herdr was
+// making can still show afterwards. This closes it once it does, while it holds only
+// space.new's shell, alone and idle: a bot that started there is never touched. `before`: the
+// spaces there when this start asked for one.
+async function sweepLateSpaces(projectKey, before, sleep, { waitMs = 60_000, stepMs = 1000 } = {}) {
+  const closed = new Set();
+  for (let waited = 0; waited < waitMs; waited += stepMs) {
+    await sleep(stepMs);
+    const late = await keyedSpaces(localSpaces().filter((s) => !before.has(s.id) && !closed.has(s.id)), projectKey);
+    for (const s of late) if (closeMadeSpace(s)) closed.add(s.id);
   }
 }
 
@@ -246,9 +293,10 @@ async function closeSpare(spare, terminal, sleep, { waitMs = 5000, stepMs = 100 
 // project, else a space opened on it (only with a `sleep` to wait for it by, so a space
 // is never left behind empty), else the shown space; in a tab of its own there (no --tab).
 // `spare`: the new space's spare shell (openSpace), for closeSpare once the bot shows.
+// `late`: the spaces there when opening was asked, for a space that shows after the wait.
 async function placeFor(projectKey, { sleep = null, ...wait } = {}) {
-  let space = await keyedSpace(localSpaces(), projectKey);
-  let spare = null;
+  let space = (await keyedSpaces(localSpaces(), projectKey))[0] ?? null;
+  let spare = null, late = null;
   if (!space && sleep) {
     if (!opening.has(projectKey)) {
       opening.set(projectKey, openSpace(projectKey, sleep, wait).finally(() => opening.delete(projectKey)));
@@ -256,10 +304,11 @@ async function placeFor(projectKey, { sleep = null, ...wait } = {}) {
     const opened = await opening.get(projectKey);
     space = opened?.space ?? null;
     spare = opened?.spare ?? null;
+    late = opened?.late ?? null;
   }
   const mine = localSpaces();
   space ??= mine.find((s) => s.id === focused()?.space) ?? mine.find((s) => s.active) ?? null;
-  return { space: space?.id ?? null, spare };
+  return { space: space?.id ?? null, spare, late };
 }
 
 // Bots being started now: a second click waits for nothing and is refused.
@@ -295,9 +344,14 @@ async function startOn(projectKey, botId, machine) {
 }
 
 async function startOnce(projectKey, botId, place) {
-  const { space, spare } = await placeFor(projectKey, place);
+  const { space, spare, late } = await placeFor(projectKey, place);
   const where = space ? ["--space", space] : [];
   const r = await runCli(["start", botId, "--project", projectKey, ...where]);
+  // A space that showed after openSpace gave up is closed once it holds only its shell.
+  // Started with no --space, the CLI may have used it for the bot: then it holds more.
+  if (late && place.sleep) {
+    sweepLateSpaces(projectKey, late, place.sleep, { waitMs: place.lateWaitMs, stepMs: place.lateStepMs }).catch(() => {});
+  }
   if (r.code !== 0) return refusedBy(r, "start");
   if (r.out?.running) {
     run("agent.focus", { terminal: r.out.running });

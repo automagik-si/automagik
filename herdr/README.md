@@ -419,15 +419,18 @@ a place in a team, and keeps that team in front of every agent and of you.
 The pack replaces Herdr's `spaces` sidebar with one that draws each project's team under its
 space: the main bot as a card, categories as headers, captains with their members folded
 under them, planned bots dimmed with their wave. Each bot shows its character, its role and
-model, its agent's icon and its status. Right-click a bot for its menu: Configure opens the edit
-form (name, agent, model, role, category, lead, worker defaults); Prompt edits its instructions
-in place and saves them as the form does; Run starts it, or focuses its pane when it has one,
-restarts it (Restart runs `am restart`; Restart on… restarts it on another installed
-agent, a new conversation, the bot's definition keeping its agent), attaches it to the focused
-pane or detaches it; What happened shows `am history` for it (its panes, starts,
-sessions, the newest transcript, which a click copies, its workers) and the helpers its pane runs
-now. A planned bot's menu has no Run items. A queued restart waits for its next idle. A busy-pane
-refusal offers "Restart anyway". With helpers, choose "Restart with its helpers" to restart immediately and resume
+model, its agent's icon and its status. The rows and their clicks follow the attach ledger
+(`am whois --all`), not a pane's `bot=` label: after a relabel, a bot is drawn and focused on
+the pane the ledger binds it to (the labels draw the rows only while the CLI can't answer).
+Right-click a bot for its menu: Configure opens the edit form (name, agent, model, role,
+category, lead, worker defaults); Prompt edits its instructions in place and saves them
+as the form does; Run starts it, or focuses its pane when it has one, restarts it (Restart
+runs `am restart`; Restart on… restarts it on another installed agent, a new conversation, the
+bot's definition keeping its agent), attaches it to the focused pane or detaches it; What
+happened shows `am history` for it (its panes, starts, sessions, the newest transcript, which a
+click copies, its workers) and the helpers its pane runs now. A planned bot's menu has no Run
+items. A queued restart waits for its next idle. A busy-pane refusal offers "Restart anyway".
+With helpers, choose "Restart with its helpers" to restart immediately and resume
 those conversations, or "End helpers and restart" to end them. On a linked machine, the first choice
 runs the installed CLI's local `--tree --force` restart on the machine holding the panes, then updates
 this sidebar's attachment. Saved configuration changes use these same choices when you restart to apply
@@ -645,7 +648,10 @@ am dsh-tui install | update | uninstall | doctor
   with the shell itself in front, idle, and no job of its own running (`sleep 99 &` left at
   the prompt keeps it: its child processes are asked with `pgrep -P`, and an answer that
   can't be read keeps it too), so the space is never left empty and nothing else is closed.
-  The sidebar's Start knows the panes. `start` from the command line, `--machine` too, reads
+  The sidebar's Start knows the panes. When another start opens a space on the project in the
+  same moment, every start uses the first one, and the sidebar closes the extra space it
+  opened while that space holds only its own shell; a space that shows only after the wait is
+  closed the same way, as soon as it appears. `start` from the command line, `--machine` too, reads
   them from `herdr-app ls`, which counts no mod pane: it closes the tab only when it saw that
   shell, right after its own `space.new`, as the new space's one tab and that tab's one
   terminal. `AUTOMAGIK_HERDR_TAB_WAIT_MS` sets how long `start` and `worker` wait for Herdr to show
