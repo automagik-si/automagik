@@ -674,7 +674,7 @@ test("#524 an install's warnings ride in the state and the new build's notice", 
   const warning = "removed layouts/mine.json without knowing the layout Herdr shows (Herdr is not asked here): switch layouts, ctrl-shift-l";
   const h = herdr();
   h.answer = (args) => (args[1] === "check" ? h.check() : line({ current: "0.8.0", latest: "0.8.1", update: update("0.8.1"),
-    installed: { version: "0.8.1", warnings: [warning] }, notice: [] }));
+    installed: { version: "0.8.1", notes: [warning] }, notice: [] }));
   const old = h.build();
   assert.equal(old.u.apply(null, "0.8.1"), true);
   await h.flush();

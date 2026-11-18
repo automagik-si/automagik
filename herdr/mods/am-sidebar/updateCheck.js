@@ -191,7 +191,7 @@ const heldOf = (value) => (Array.isArray(value)
   ? value.filter((h) => typeof h?.mod === "string" && Array.isArray(h.layouts) && h.layouts.length > 0 && h.layouts.every((l) => typeof l === "string"))
   : []);
 
-/** An install's warnings (update.mjs's `installed.warnings`), as far as they read (#524). */
+/** An install's warnings or notes (update.mjs's `installed.warnings` / `installed.notes`), as far as they read (#524). */
 const warningsOf = (value) => (Array.isArray(value) ? value.filter((w) => typeof w === "string" && w !== "") : []);
 
 /** The held list in release.js HELD_FILE's `text`, for `version` only: another release's says nothing about this one. */
@@ -264,7 +264,7 @@ export function applyPatch(result, state, now) {
     return { kind: "installed", from: answer.current ?? state.current ?? null, current: version, latest: version, update: null,
       why: null, applyError: null, at: now, restartBots: Array.isArray(answer.notice) && answer.notice.length > 0,
       heldMods: heldOf(answer.installed.held), check: answer.installed.check ?? null,
-      warnings: warningsOf(answer.installed.warnings) };
+      warnings: warningsOf(answer.installed.notes) };
   }
   // An install on its own that update.mjs held back (the setting, a rollback's skip, another run):
   // nothing happened and nothing is wrong; the check's answer stands.

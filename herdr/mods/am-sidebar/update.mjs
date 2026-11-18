@@ -845,7 +845,7 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
       keep = [...plan.replaced, ...plan.retired, ...plan.held.map((h) => h.mod)];
       old = keep.length ? setAside(modsDir) : null;
     };
-    let swapNotes = [];
+    let notes = [];
     try {
       const swap = swapAll(modsDir, moves, rename, {
         needed: "hold", mods: inMods.map((r) => r.mod), exclude: replacedLayout(modsDir), stranded: strandedLayouts, prepare,
@@ -856,8 +856,9 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
       // A linked mods/ (#494): nothing done, prepare never ran.
       if (swap.refused) throw new Error(swap.refused);
       // #524: the layout guard's lines (a retire or rename it could not weigh) are the answer's,
-      // not only stderr's: the sidebar shows the JSON result.
-      swapNotes = Array.isArray(swap.notes) ? swap.notes : [];
+      // not only stderr's: the sidebar shows the JSON result. They are notes, not warnings: the
+      // update finished, so the CLI's exit 4 (a failed step) stays for real warnings.
+      notes = Array.isArray(swap.notes) ? swap.notes : [];
     } catch (error) {
       restoreSet(modsDir, old);
       throw error;
@@ -865,7 +866,7 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
     swapped = true;
     // From here the new folders are live: nothing below undoes them or deletes `next`, and the
     // record is written first so it always names what mods/ holds.
-    const warnings = [...swapNotes];
+    const warnings = [];
     let recorded = true;
     try { writeMarker(modsDir, record); } catch (error) { recorded = false; warnings.push(`the ownership record could not be written (${error.message})`); }
     if (before?.v1) { try { carryV1(modsDir, record, log); writeMarker(modsDir, record); } catch (error) { warnings.push(`v0.2's kept copies stay where they were (${error.message})`); } }
@@ -888,7 +889,8 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
     for (const m of repair ? plan.installed : []) log(`repaired mods/${m}: it was missing; installed ${version}`);
     for (const w of warnings) log(`warning: ${w}`);
     tightenLedgers(dirname(resolve(modsDir)), { log });
-    return { version, mods: record.mods, ...plan, prev: keep.length && !exists(next) ? prevSetOf(modsDir) : null, recorded, warnings };
+    return { version, mods: record.mods, ...plan, prev: keep.length && !exists(next) ? prevSetOf(modsDir) : null, recorded, warnings,
+      ...(notes.length ? { notes } : {}) };
   } finally {
     rmSync(staging, { recursive: true, force: true });
     if (!swapped) rmSync(next, { recursive: true, force: true });
@@ -1020,16 +1022,16 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
     staleLayout = !keptLayout && isFile(packLayout) && !linkedLayout(packLayout) && isFile(layoutRefOf(modsDir))
       && readFileSync(packLayout).equals(readFileSync(layoutRefOf(modsDir)));
   } catch {}
-  let swapNotes = [];
+  let notes = [];
   try {
     const r = swapAll(modsDir, moves, rename, { needed: "refuse", unknown: "warn", then: "roll back", exclude, prepare, log });
     if (r.refused) throw new Error(`nothing rolled back: ${r.refused}`);
-    swapNotes = Array.isArray(r.notes) ? r.notes : [];
+    notes = Array.isArray(r.notes) ? r.notes : [];
   } catch (error) {
     rmSync(next, { recursive: true, force: true });
     throw error;
   }
-  const warnings = [...swapNotes];
+  const warnings = [];
   // A folder the person had, adopted into backup/, comes back where mods/ is free once this
   // rollback drops the pack's copy of it (Group 3, D10): its own name or its renamed twin left
   // mods/; a mod the pack absorbed comes back when the set rolled back to has no am-* mod that
@@ -1084,7 +1086,8 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
       if (gone.length) log(staleLayoutLine(packLayout, gone));
     } catch {}
   }
-  return { pack: modsDir, prev, mods: set.mods, version: set.version, from: record.version ?? null, layout, reverted: reverted.restored, migration, hooks, warnings };
+  return { pack: modsDir, prev, mods: set.mods, version: set.version, from: record.version ?? null, layout, reverted: reverted.restored, migration, hooks, warnings,
+    ...(notes.length ? { notes } : {}) };
 }
 
 /**
