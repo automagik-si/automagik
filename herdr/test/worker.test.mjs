@@ -2271,7 +2271,7 @@ test("worker #1278 cause 3: a GitLab remote asks glab, and its merged MR proves 
   const w = s.cli(["worker", "gitlab work", "--branch", "gl-231-fix", "--task", "gl-231", "--json"]).json();
   git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
   const head = git(w.worktree, "rev-parse", "HEAD").trim();
-  git(s.project, "remote", "set-url", "origin", "git@gitlab.com:group/proj.git");
+  git(s.project, "remote", "set-url", "origin", "https://gitlab.com/group/proj.git");
   s.finish(w.terminal);
   writeFileSync(join(s.root, "glab.json"), JSON.stringify([{
     iid: 7, state: "merged", sha: head, target_branch: "dev",
