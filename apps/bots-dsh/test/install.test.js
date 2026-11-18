@@ -68,6 +68,10 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on tools/result',
     'on session/event',
     'effect omni-ui: lost hand-offs',
+    // Native input and queued-step admission for terminal-only Bots.
+    'on agent/created',
+    'on agent/pre-step (prepend)',
+    'effect omni-ui: terminal-only admission',
     'effect ds-bot: folder access context',
     'prompt context ds-bot:folder-access 650',
     'effect ds-bot: agent tool restrict retry',
