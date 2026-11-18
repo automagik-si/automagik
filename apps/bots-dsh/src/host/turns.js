@@ -453,8 +453,8 @@ export function install(rt) {
   // turn stays visible there and its reply is not routed back to the sender.
   const answersUser = info => info.role === 'request' && info.audience === 'user'
   // Roles whose turn owes the sender a reply: a 'stopped' notice asks the Bot to
-  // acknowledge, exactly like a request.
-  const expectsReply = info => info.role === 'request' || info.role === 'stopped'
+  // acknowledge, exactly like a request; a no-reply request owes nothing.
+  const expectsReply = info => info.role === 'stopped' || (info.role === 'request' && info.noReply !== true)
   // A group Session speaks only in its group, so what its turns write goes there, also
   // for turns that a finished background job or a fresh part starts; a Bot's private
   // message to it is answered privately.
@@ -515,7 +515,9 @@ export function install(rt) {
       entry.joined = info.joined.filter(item => item?.info !== undefined && item.info !== null)
     }
     if (rt.groupOwners.has(sessionId)) return
-    if ((expectsReply(info) && !answersUser(info)) || info.role === 'room' || (info.role === 'handoff' && info.resume !== true)) {
+    // A message that owes no reply is still an exchange between Bots: its turn is
+    // hidden like the others.
+    if (((expectsReply(info) || (info.role === 'request' && info.noReply === true)) && !answersUser(info)) || info.role === 'room' || (info.role === 'handoff' && info.resume !== true)) {
       markExchangeTurn(sessionId, entry.turn)
     }
   }
@@ -946,10 +948,11 @@ export function install(rt) {
           } else if ((expectsReply(source) || source.role === 'room') && !answersUser(source)
             && source.exchangeId !== entry.info?.exchangeId
             && !(entry.joined ?? []).some(joined => joined.info.exchangeId === source.exchangeId)) {
-            // A request that lands inside a running turn steers that work but is
-            // answered in a hidden turn of its own once the work is done, so the
-            // sender never gets the turn's text. A failed-switch resume message
-            // re-sends the trigger's own source; the same exchangeId must not join twice.
+            // A request that lands inside a running turn steers that work and is
+            // answered by that turn's own text once it ends; a turn with nothing to
+            // say hands it back for a turn of its own (see turn/end). A failed-switch
+            // resume message re-sends the trigger's own source; the same exchangeId
+            // must not join twice.
             const text = textOf(event.data.content).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')
             entry.joined = [...(entry.joined ?? []), { info: source, text }]
           }
@@ -1074,6 +1077,9 @@ export function install(rt) {
         // A turn the plugin watched start. A turn/end replayed after a restart, whose
         // turn is settled from the Session's log, is not one (resume.js does that).
         const watched = entry.turn !== undefined
+        // A turn adopted from before this plugin loaded: it may not have read a request
+        // that joined it, so that request still goes back for a turn of its own.
+        const recovered = entry.turn === RECOVERED_TURN
         entry.turn = undefined
         entry.info = undefined
         entry.texts = []
@@ -1215,16 +1221,41 @@ export function install(rt) {
         } else if (!retry && info !== undefined) {
           finish(info, replyText())
         }
+        // What the turn read mid-work is answered by this turn's own text: one answer
+        // covers it, and every request it read gets that answer. A turn with nothing to
+        // say hands the requests it read back as one turn, never one turn each. A group
+        // call still goes back to the Bot for a turn in its own chat, as it did before.
+        const reply = replyText()
+        const handedBack = []
+        // A turn that answers handed-back requests together (or picks such a turn up
+        // after a restart) closes all of them as it closes its trigger, also when it
+        // says nothing: handing them back again would cost a turn each time and drop
+        // the trigger alone.
+        const batch = new Set(info?.deferred === true || info?.resumed === true
+          ? (Array.isArray(info.joined) ? info.joined : []).map(item => item?.info?.exchangeId).filter(Boolean)
+          : [])
         for (const request of joined) {
           if (request.info.role === 'room' && stoppedRoomTurns.delete(request.info.exchangeId)) continue
-          // A failed or stopped turn closes the request like any other; a finished
-          // one hands it back to the Bot to answer next.
+          // A failed or stopped turn closes the request like any other.
           if (failure !== undefined || reason?.kind === 'aborted') {
             if (request.info.role === 'room') {
               if (failure !== undefined) void rt.lateRoomFailure?.(id, request.info, failure)
             } else answer(request.info, '')
             continue
           }
+          if (request.info.role !== 'room' && !recovered && !retry && batch.has(request.info.exchangeId)) {
+            finish(request.info, reply)
+            continue
+          }
+          if (request.info.role === 'room' || recovered || retry || reply === '') {
+            handedBack.push(request)
+            continue
+          }
+          finish(request.info, reply)
+        }
+        const requests = handedBack.filter(request => request.info.role !== 'room')
+        for (const request of handedBack) {
+          if (request.info.role !== 'room') continue
           void rt.deliver({
             fromId: request.info.senderSessionId,
             toId: rt.selfOf(id),
@@ -1232,9 +1263,41 @@ export function install(rt) {
             text: request.text,
             role: request.info.role,
             exchangeId: request.info.exchangeId,
-            ...(request.info.role === 'room' ? { roomId: request.info.roomId, askedBy: request.info.askedBy, note: 'you read this call during your last task; answer it now' } : {}),
+            roomId: request.info.roomId,
+            askedBy: request.info.askedBy,
+            ...(request.info.senderRoomId ? { fromRoomId: request.info.senderRoomId } : {}),
+            note: 'you read this call during your last task; answer it now',
+            deferred: true,
+          }).catch(error => rt.warn('omni-ui: deferred request delivery failed: %s', error))
+        }
+        if (requests.length === 1) {
+          const request = requests[0]
+          void rt.deliver({
+            fromId: request.info.senderSessionId,
+            toId: rt.selfOf(id),
+            sessionId: id,
+            text: request.text,
+            role: request.info.role,
+            exchangeId: request.info.exchangeId,
             ...(request.info.senderRoomId ? { fromRoomId: request.info.senderRoomId } : {}),
             deferred: true,
+          }).catch(error => rt.warn('omni-ui: deferred request delivery failed: %s', error))
+        } else if (requests.length > 1) {
+          // One turn with all of them, so its one answer can close every request.
+          const [first, ...rest] = requests
+          const names = [...new Set(requests.map(request => request.info.senderName).filter(name => typeof name === 'string' && name !== ''))]
+          const text = requests.map(request => `${request.info.senderName ?? 'a Bot'}:\n${request.text}`).join('\n\n')
+          void rt.deliver({
+            fromId: first.info.senderSessionId,
+            ...(names.length > 0 ? { fromName: names.join(', ') } : {}),
+            toId: rt.selfOf(id),
+            sessionId: id,
+            text,
+            role: first.info.role,
+            exchangeId: first.info.exchangeId,
+            ...(first.info.senderRoomId ? { fromRoomId: first.info.senderRoomId } : {}),
+            deferred: true,
+            joined: rest.map(request => ({ info: request.info, text: request.text })),
           }).catch(error => rt.warn('omni-ui: deferred request delivery failed: %s', error))
         }
         if (rt.groupOwners.has(id)) void rt.goalSettled?.(rt.roomOf(rt.groupOwners.get(id).roomId)).catch(error => rt.warn('omni-ui: goal settle in %s failed: %s', id, error))

@@ -1237,15 +1237,29 @@ export function install(rt) {
     if (bot === undefined) throw refusal('Unknown Bot')
     if (main && bot.private === true) throw refusal(`${bot.name} is private, so it cannot be a Main Bot`)
     const others = state.mainBotIds.filter(other => other !== id)
+    if (main && replace !== undefined) {
+      const unavailable = rt.readOnly()
+      if (unavailable !== undefined) throw refusal(unavailable)
+      if (deletions.has(id)) throw refusal('This Bot is being deleted')
+      if (!state.mainBotIds.includes(replace) || rt.botOf(replace) === undefined) throw refusal('Only a Main Bot can be replaced')
+      if (rt.isMain(id)) throw refusal('Choose a Bot that is not already a Main Bot')
+      const next = state.mainBotIds.with(state.mainBotIds.indexOf(replace), id)
+      const apply = team => {
+        team.mainBotIds = next
+        delete team.bots[id].hidden
+        if (team.bots[replace].kickoff?.main) delete team.bots[replace].kickoff
+        if (team.bots[next[0]]) delete team.bots[next[0]].sectionId
+      }
+      // Publish the replacement only after the required copy reaches disk. Other
+      // writes see either the earlier roster or the committed one.
+      await rt.saveCopy(apply, { afterWrite: () => apply(state) })
+      return
+    }
     let next
     if (!main) {
       if (!rt.isMain(id)) return
       if (others.length === 0) throw refusal('The team needs at least one Main Bot')
       next = others
-    } else if (replace !== undefined && replace !== id) {
-      const at = others.indexOf(replace)
-      if (at === -1) throw refusal('Only a Main Bot can be replaced')
-      next = others.with(at, id)
     } else if (primary) {
       next = [id, ...others]
     } else {
