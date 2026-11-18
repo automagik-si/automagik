@@ -21,6 +21,7 @@ import { WorkCodeSwitch } from './work-code-switch.js'
 import { BotPills, pillLabels } from './capability-pills.js'
 import { LeftBar } from './left-bar.js'
 import { seatBotId, seatChatView, seatWithFreshPane, useSeats } from './seat-chat.js'
+import { NATIVE_WORKERS_CSS, NativeWorkers, runningWorkers } from './native-workers.js'
 
 // -------------------------------------------------------------------------
 // Sidebar
@@ -94,8 +95,10 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
   const awayLine = away ? workLine(roster.roomsById[groups[0].id]?.name ?? t('a group chat'), groups[0], groups.length - 1) : null
   const waits = workKeys(useWork ? useWork(work => JSON.stringify(work.waiting?.[id] ?? null)) : 'null')
   const waitsFor = state === 'waiting' ? waitingFor(roster, waits) : ''
-  // Tasks it started that still run hang under the row (BotThreads); the row says how many.
-  const threads = runningTasksOf(roster, id).length
+  // Tasks it started that still run hang under the row (BotThreads), and so do the native
+  // Claude Code subagents of its turn (NativeWorkers); the row says how many still run.
+  const nativeRunning = useWork ? useWork(work => runningWorkers(work, id)) : 0
+  const threads = runningTasksOf(roster, id).length + nativeRunning
   const threadsLine = threads === 0 ? '' : threads === 1 ? t('Working on 1 thing') : t('Working on {n} things', { n: threads })
   if (bot.hidden && !active && !main) return null
   const onContextMenu = (event) => {
@@ -201,6 +204,14 @@ function BotThreads({ bot, roster, actions, useSessions, useSessionStatus, useWo
       h('span', { className: 'bt-thread-age', 'aria-hidden': true }, threadAge(task.at ?? now, now)))
     }),
     more > 0 ? h('button', { type: 'button', className: 'bt-thread bt-thread-more', onClick: () => setOpen(true) }, t('+{n} more', { n: more })) : null)
+}
+
+// Claude Code's native subagents under the row (native-workers.js), their ages ticking like
+// the threads' while there are any.
+function BotWorkers(props) {
+  const any = props.useWork ? props.useWork(work => (work?.native?.[props.bot.id]?.length ?? 0) > 0) : false
+  const now = useMinute(props.wide && any)
+  return h(NativeWorkers, { ...props, age: ms => threadAge(ms, now) })
 }
 
 function RoomRow({ room, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useWork, wide, marked }) {
@@ -474,7 +485,7 @@ export function TeamSidebar(props) {
         return agent ? h(AgentRow, { ...rowProps, agent, bare: true, marked: markedUnread[agent.id] === true }) : null
       }
       const bot = roster.byId[row.id]
-      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotChildren, { ...rowProps, bot })) : null
+      return bot ? h(Fragment, null, h(BotThreads, { ...rowProps, bot }), h(BotWorkers, { ...rowProps, bot }), h(BotChildren, { ...rowProps, bot })) : null
     }
     return h(LeftBar, {
       roster, order, marked: markedUnread, seats, useSessions, useSessionStatus: props.useSessionStatus, useWork: props.useWork, actions: rowActions,
@@ -510,11 +521,13 @@ export function TeamSidebar(props) {
       main ? h(Fragment, { key: main.id },
         h(BotRow, { ...rowProps, bot: main, marked: markedUnread[main.id] === true }),
         h(BotThreads, { ...rowProps, bot: main }),
+        h(BotWorkers, { ...rowProps, bot: main }),
         h(BotChildren, { ...rowProps, bot: main })) : roster.ready ? null : h('div', { className: 'bt-hint' }, bootFailed ? bootHint() : t('Setting up your Main Bot…')),
       order.map(entry => (entry.kind === 'bot'
         ? h(Fragment, { key: entry.item.id },
             h(BotRow, { ...rowProps, bot: entry.item, marked: markedUnread[entry.item.id] === true }),
             h(BotThreads, { ...rowProps, bot: entry.item }),
+            h(BotWorkers, { ...rowProps, bot: entry.item }),
             h(BotChildren, { ...rowProps, bot: entry.item }))
         : entry.kind === 'room'
           ? h(RoomRow, { key: entry.item.id, ...rowProps, room: entry.item, marked: markedUnread[entry.item.id] === true })
@@ -1025,6 +1038,7 @@ html[data-automagik-desktop=darwin]:not([data-automagik-fullscreen]) [class*="_f
 @keyframes bt-thread-spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.bt-thread-spin{animation-duration:3s}}
 body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
+${NATIVE_WORKERS_CSS}
 /* The first Main Bot's crown (mark.js) and its role chip, in clay gold. */
 .bt-crown{position:absolute;left:50%;top:calc(var(--bt-size,36px) * -.27);width:calc(var(--bt-size,36px) * .52);height:calc(var(--bt-size,36px) * .36);transform:translateX(-50%) rotate(-8deg);filter:drop-shadow(0 1.5px 0 var(--bt-gold-edge)) drop-shadow(0 3px 3px color-mix(in srgb,var(--bt-gold-edge) 30%,transparent));pointer-events:none;z-index:1;line-height:0}
 .bt-crown-body{fill:var(--bt-gold);stroke:var(--bt-gold-edge);stroke-width:2;stroke-linejoin:round}

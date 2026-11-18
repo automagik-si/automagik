@@ -2867,7 +2867,16 @@ const pack = createPack({
     "Signing out of the Bot account did not finish. Try again.": "Sair da conta do Bot não terminou. Tente de novo.",
     "Signing out of the Bot account could not be verified. Try again.": "Não foi possível confirmar a saída da conta do Bot. Tente de novo.",
     "The Bot account was reset. Press Sign in again.": "A conta do Bot foi redefinida. Clique em Entrar de novo.",
-    "This sign-in is not available for this Bot.": "Este login não está disponível para este Bot."
+    "This sign-in is not available for this Bot.": "Este login não está disponível para este Bot.",
+    "Subagents {name} started": "Subagentes que {name} iniciou",
+    "{step}…": "{step}…",
+    "Starting…": "Começando…",
+    "Worker details": "Detalhes do worker",
+    "Result: {line}": "Resultado: {line}",
+    "still running": "ainda em andamento",
+    "Steps": "Etapas",
+    "Steps (latest {n})": "Etapas (últimas {n})",
+    "No steps yet.": "Nenhuma etapa ainda."
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

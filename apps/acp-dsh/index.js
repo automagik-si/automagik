@@ -1353,6 +1353,21 @@ export function apply(ctx, config = {}, {
      * Refusals carry an `acp/image-*` code and a message to show as it is.
      */
     editImage,
+    /**
+     * Claude Code's native subagents in each running agent's current prompt, as workers
+     * (acp.js workersOf), by DSH Session id: { [sessionId]: [{ id, title, state: 'running' |
+     * 'done' | 'failed', result?, at?, steps: [{ id, title, tool?, state }], more? }] }. Only
+     * Sessions with a worker are listed. Read-only: it starts, stops and answers nothing.
+     */
+    nativeWorkers: () => {
+      const out = {}
+      for (const [sessionId, state] of adapter.live) {
+        let workers
+        try { workers = state?.run?.workers?.() } catch { workers = undefined }
+        if (Array.isArray(workers) && workers.length > 0) out[sessionId] = workers
+      }
+      return out
+    },
     /** Read only the Bot that owns this Session. Returns this registration's disposer. */
     botIdentity(reader) {
       if (typeof reader !== 'function') return () => {}
