@@ -250,6 +250,26 @@ export class CloudSignIn {
     if (this.isRemoved(opened.principal.subject)) throw refused()
     return opened
   }
+  // Delivery 4 (contracts v2): a renewal carries no single-use code. The gate names the subject
+  // of its own still-valid session and Cloud rechecks that person's role before it answers with
+  // a workspace token, the same answer the open path verifies. A removal, a lost role or a
+  // token over five minutes refuses the renewal; the gate never mints a longer session.
+  async renew(principal) {
+    if (!principal || typeof principal.subject !== 'string' || !principal.subject || principal.subject.length > 256) throw refused()
+    if (this.isRemoved(principal.subject)) throw refused()
+    if (this.inflight >= MAX_EXCHANGES) throw new CloudOpenRefused(429)
+    this.inflight++
+    let reply
+    try {
+      reply = await this.call(this.config.exchange, { version: 2, renew: true, workspace: this.config.workspace, subject: principal.subject })
+    } catch { throw refused() } finally { this.inflight-- }
+    if (!reply || typeof reply !== 'object' || reply.version !== 2 || typeof reply.token !== 'string' ||
+      !Number.isSafeInteger(reply.expires_in) || reply.expires_in < 1 || reply.expires_in > TOKEN_MAX_SECONDS) throw refused()
+    const opened = await this.verify(reply.token)
+    // The answer must be for the same person; its roles are the only roles the new session gets.
+    if (opened.principal.subject !== principal.subject || this.isRemoved(opened.principal.subject)) throw refused()
+    return opened
+  }
   // A removal applies from its effective time; until then a new open is allowed.
   isRemoved(subject) {
     const entry = this.removed.get(subject)

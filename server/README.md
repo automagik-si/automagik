@@ -851,9 +851,10 @@ smoke checks private claim output and host control in the built runtime.
 
 A Cloud workspace's gate takes no claim and no passkey. A person opens the workspace from the
 Cloud rail, and the gate turns that open into its own session. It follows RFC 0024 (g) and the
-[version 1 contracts](../docs/cloud/contracts-v1.md), sections 4, 5 and 6. Delivery state: the
+[version 1 contracts](../docs/cloud/contracts-v1.md), sections 4, 5 and 6, and the
+[version 2 renewal contract](../docs/cloud/contracts-v2.md). Delivery state: the
 gate side is built and tested against a fake Cloud service; the Cloud service's side (minting
-open codes and tokens, and sending revocation) is not built yet.
+open codes and tokens, rechecking a role on renewal, and sending revocation) is not built yet.
 
 Set all seven values on the gate container, with your own values on the host:
 
@@ -863,7 +864,7 @@ Set all seven values on the gate container, with your own values on the host:
 | `AUTOMAGIK_GATE_CLOUD_IDENTITY_ISSUER` | `{identity-service-issuer}`, the principal's `issuer` |
 | `AUTOMAGIK_GATE_CLOUD_WORKSPACE` | `{workspace-id}`, this workspace's id: the only audience it accepts |
 | `AUTOMAGIK_GATE_CLOUD_KEYS_URL` | the HTTPS URL of the Cloud service's published key set |
-| `AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL` | the HTTPS URL of the Cloud service's open-code exchange |
+| `AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL` | the HTTPS URL of the Cloud service's open-code exchange and version 2 role recheck |
 | `AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN` | the exact HTTPS origin of the Cloud rail page that opens workspaces |
 | `AUTOMAGIK_GATE_CLOUD_REVOCATION_URL` | the HTTPS URL of the Cloud service's revocation list |
 
@@ -900,11 +901,24 @@ safeguards of (f) hold. The gate admits a token only when its roles include `own
 `{ issuer: <identity issuer>, subject: sub, roles, workspace }`.
 
 **The session.** The gate sets its usual `__Host-automagik-session` cookie on its own origin.
-The session ends when the token does, and never more than 5 minutes after the open. Renewal
-rotates the cookie but never extends that end. Cloud sessions are kept in memory only; a gate
-restart ends them. To keep working, the person opens the workspace from the rail again; a new
-open replaces the browser's previous session. The session list and "sign out everywhere" cover
-only the signed-in person's own sessions.
+The session ends when the token does, and never more than 5 minutes after the open or the last
+renewal. Cloud sessions are kept in memory only; a gate restart ends them. To keep working, the
+person renews (below) or opens the workspace from the rail again; a new open replaces the
+browser's previous session. The session list and "sign out everywhere" cover only the signed-in
+person's own sessions.
+
+**Renewal (contracts v2).** The page posts `application/json` to `POST /_gate/cloud/renew` on
+the gate's origin, with exactly `{version: 2, renew: true, workspace}` and its current session
+cookie: no single-use code, no token and no `Authorization` header. The gate refuses an expired
+or revoked session, a version 1 body, another version, another workspace or any extra field. For
+a valid request it asks the Cloud service's exchange URL to recheck the person's role, naming the
+session's own subject, server to server. The Cloud service answers with a version 1 workspace
+token carrying the current roles; the gate verifies it exactly as an open does and replaces the
+session with one made from those roles. The old cookie stops working, and the new session ends at
+the earlier of the token's expiry and 5 minutes from the renewal. A refusal by Cloud, a role that
+grants no access, or an answer over 5 minutes is refused whole and issues no session. Nothing in
+the request can lengthen the session or raise a role. `POST /_gate/session/renew` remains the
+plain cookie rotation and still never extends a Cloud session's hard end.
 
 **Revocation.** The Cloud service sends `POST /_gate/cloud/revocation` to the gate's origin as
 `application/json`, with the version 1 call body. The call carries a detached JWS in

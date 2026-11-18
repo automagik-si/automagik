@@ -43,6 +43,7 @@ function detached(body, { kid = 'a', key = slots[kid].privateKey } = {}) {
   return `${header}..${sign(null, Buffer.from(input), key).toString('base64url')}`
 }
 const REVOKE = '/_gate/cloud/revocation'
+const RENEW = '/_gate/cloud/renew'
 const SIGN = 'x-automagik-signature'
 async function waitFor(check, timeout = 2000) {
   const start = Date.now()
@@ -86,6 +87,11 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval
     revocationList: undefined,
     revocationSignature: undefined,
     revocationStatus: 200,
+    renewals: [],
+    renewStatus: 200,
+    renewRoles: ['owner'],
+    renewExp: 300,
+    renewReply: undefined,
   }
   const dir = mkdtempSync(join(tmpdir(), 'automagik-cloud-'))
   const config = cloudConfig(env)
@@ -102,8 +108,25 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval
         let body = ''
         req.on('data', part => { body += part })
         req.on('end', () => {
-          state.exchanges.push({ headers: req.headers, body: JSON.parse(body) })
-          const { code: presented, workspace } = JSON.parse(body)
+          const parsed = JSON.parse(body)
+          // Version 2 is the renewal recheck; version 1 is the unchanged open exchange. One URL,
+          // and each parser refuses the other version before it reads a field.
+          if (parsed.version === 2) {
+            state.renewals.push({ headers: req.headers, body: parsed })
+            if (state.renewStatus !== 200) {
+              res.writeHead(state.renewStatus, { 'content-type': 'application/json' }).end('{"error":"refused"}')
+              return
+            }
+            const iat = Math.floor(state.now / 1000)
+            const token = mint({ ver: 1, iss: ENV.AUTOMAGIK_GATE_CLOUD_ISSUER, aud: 'workspace-a',
+              workspace: 'workspace-a', sub: parsed.subject, roles: state.renewRoles, iat,
+              exp: iat + state.renewExp })
+            res.writeHead(200, { 'content-type': 'application/json' })
+              .end(JSON.stringify(state.renewReply?.(token) ?? { version: 2, token, expires_in: state.renewExp }))
+            return
+          }
+          state.exchanges.push({ headers: req.headers, body: parsed })
+          const { code: presented, workspace } = parsed
           const issued = state.codes.get(presented)
           // Single use, for one workspace: a refusal issues no token and echoes no code.
           if (state.exchangeStatus !== 200 || !issued || issued.used || issued.workspace !== workspace) {
@@ -163,7 +186,11 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval
     return value
   }
   const open = value => request(gatePort, form(new URLSearchParams({ code: value }).toString()))
-  return { state, dir, audit, proxied, sessions, cloud, port: gatePort, issue, open }
+  const renew = (body, cookie, headers = {}) => request(gatePort, {
+    method: 'POST', path: RENEW, body: JSON.stringify(body),
+    headers: { origin: ORIGIN, 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...headers },
+  })
+  return { state, dir, audit, proxied, sessions, cloud, port: gatePort, issue, open, renew }
 }
 
 test('a rail open code becomes a gate session; the token never leaves the server', async t => {
@@ -788,4 +815,139 @@ test('the timer re-admits a removed subject after the last session ends', async 
     'the timer polls with no sessions while a removal is pending')
   await waitFor(() => !f.cloud.removed.size)
   assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+})
+
+test('a v2 renewal rechecks the role and issues a session of at most five minutes', async t => {
+  const f = await fixture(t)
+  const opened = await f.open(f.issue())
+  assert.equal(opened.status, 303)
+  const original = cookieOf(opened)
+  const originalFamily = f.sessions.list()[0].id
+  f.state.now += 60_000
+  const renewed = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, original)
+  assert.equal(renewed.status, 200)
+  const kept = cookieOf(renewed)
+  const maxAge = Number(/Max-Age=(\d+)/.exec(renewed.headers['set-cookie'][0])[1])
+  assert.ok(maxAge > 0 && maxAge <= 300, `Max-Age=${maxAge}`)
+  // The gate rechecks with Cloud, server to server, naming only the authenticated person.
+  assert.equal(f.state.renewals.length, 1)
+  assert.deepEqual(Object.keys(f.state.renewals[0].body).sort(), ['renew', 'subject', 'version', 'workspace'])
+  assert.deepEqual(f.state.renewals[0].body, { version: 2, renew: true, workspace: 'workspace-a', subject: 'person-1' })
+  for (const name of ['authorization', 'cookie']) assert.equal(f.state.renewals[0].headers[name], undefined)
+  // The old secret is rotated out; the session carries the rechecked roles, not the request's.
+  assert.equal((await request(f.port, { headers: { cookie: original } })).status, 401)
+  const page = await request(f.port, { headers: { cookie: kept } })
+  assert.equal(page.status, 200)
+  assert.deepEqual(JSON.parse(page.body).principal.roles, ['owner'])
+  assert.equal(f.sessions.list().length, 1)
+  assert.notEqual(f.sessions.list()[0].id, originalFamily)
+  assert.ok(f.sessions.list()[0].expires_at <= f.state.now + 300_000)
+  // Whatever the request asks for, it cannot name a longer life: unknown fields fail closed.
+  f.state.now += 10_000
+  for (const body of [
+    { version: 2, renew: true, workspace: 'workspace-a', expires_in: 3600 },
+    { version: 2, renew: true, workspace: 'workspace-a', ttl: 600 },
+  ]) {
+    const refused = await f.renew(body, kept)
+    assert.equal(refused.status, 401, JSON.stringify(body))
+    assert.equal(refused.headers['set-cookie'], undefined)
+  }
+  // A Cloud answer over five minutes is refused whole, never clipped to fit.
+  f.state.renewExp = 301
+  assert.equal((await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, kept)).status, 401)
+  f.state.renewExp = 300
+  f.state.renewReply = token => ({ version: 2, token, expires_in: 301 })
+  assert.equal((await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, kept)).status, 401)
+  assert.equal(f.sessions.list().length, 1, 'a refused renewal issues no session')
+  // The renewed session still ends at the five-minute bound it was issued with.
+  f.state.now += 290_000
+  assert.equal((await request(f.port, { headers: { cookie: kept } })).status, 401)
+})
+
+test('a renewal is refused after a revocation or when the role no longer grants access', async t => {
+  const f = await fixture(t)
+  const original = cookieOf(await f.open(f.issue()))
+  // Cloud refuses the recheck: the person is gone.
+  f.state.renewStatus = 403
+  const gone = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, original)
+  assert.equal(gone.status, 401)
+  assert.equal(gone.headers['set-cookie'], undefined)
+  assert.equal(f.state.renewals.length, 1)
+  // Cloud answers with a role that grants no access: its signed answer is rechecked like an open.
+  f.state.renewStatus = 200
+  f.state.renewRoles = ['member']
+  const lowered = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, original)
+  assert.equal(lowered.status, 401)
+  assert.equal(lowered.headers['set-cookie'], undefined)
+  assert.equal(f.sessions.list().length, 1, 'the failed renewal did not issue a second session')
+  // The signed revocation call drops the session; a renewal with it cannot authenticate.
+  f.state.renewRoles = ['owner']
+  const call = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now) })
+  assert.equal((await request(f.port, { method: 'POST', path: REVOKE, body: call,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(call) } })).status, 204)
+  const after = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, original)
+  assert.equal(after.status, 401)
+  assert.equal(f.state.renewals.length, 2, 'an unauthenticated renewal never reaches Cloud')
+})
+
+test('an expired gate session cannot renew', async t => {
+  const f = await fixture(t)
+  // A live session renews, so the refusal below is the expiry, not a missing route.
+  const control = cookieOf(await f.open(f.issue({ sub: 'person-2' })))
+  assert.equal((await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, control)).status, 200)
+  const iat = Math.floor(f.state.now / 1000)
+  const opened = await f.open(f.issue({ claims: { exp: iat + 60 } }))
+  assert.equal(opened.status, 303)
+  const cookie = cookieOf(opened)
+  f.state.now += 60_000
+  const refused = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, cookie)
+  assert.equal(refused.status, 401)
+  assert.equal(refused.headers['set-cookie'], undefined)
+  assert.equal(f.state.renewals.length, 1, 'an expired session is refused before the Cloud recheck')
+  assert.equal(f.sessions.list().length, 1, 'only the live session remains')
+})
+
+test('v1 opens are unchanged and the v1 and v2 parsers never accept each other', async t => {
+  const f = await fixture(t)
+  const value = f.issue()
+  const v1 = await f.open(value)
+  assert.equal(v1.status, 303)
+  assert.match(v1.headers['set-cookie'][0], /Max-Age=300$/)
+  const cookie = cookieOf(v1)
+  assert.deepEqual(f.state.exchanges[0].body, { code: value, version: 1, workspace: 'workspace-a' })
+  assert.equal(f.state.renewals.length, 0, 'the v1 open path never renews')
+  // A v2 request at the v1 open path is not a code: JSON is the wrong shape, a form v2 is refused.
+  const crossJson = await request(f.port, { method: 'POST', path: CLOUD_OPEN_PATH,
+    body: JSON.stringify({ version: 2, renew: true, workspace: 'workspace-a' }),
+    headers: { origin: RAIL, 'content-type': 'application/json' } })
+  assert.equal(crossJson.status, 415)
+  const crossForm = await request(f.port, form(new URLSearchParams({ version: '2', renew: 'true', workspace: 'workspace-a' }).toString()))
+  assert.equal(crossForm.status, 401)
+  assert.equal(f.state.exchanges.length, 1)
+  assert.equal(f.state.renewals.length, 0)
+  // A v1 request at the v2 path is refused before any Cloud call; so is every other shape.
+  for (const body of [
+    { version: 1, renew: true, workspace: 'workspace-a' },
+    { version: 2, renew: false, workspace: 'workspace-a' },
+    { version: '2', renew: true, workspace: 'workspace-a' },
+    { version: 2, renew: true, workspace: 'workspace-b' },
+    { version: 2, renew: true, workspace: 'workspace-a', code: 'x' },
+    { version: 2, renew: true, workspace: 'workspace-a', roles: ['owner'] },
+    { version: 2, renew: true },
+  ]) {
+    const refused = await f.renew(body, cookie)
+    assert.equal(refused.status, 401, JSON.stringify(body))
+    assert.equal(refused.headers['set-cookie'], undefined)
+  }
+  const wrongType = await request(f.port, { method: 'POST', path: RENEW,
+    body: new URLSearchParams({ version: '2', renew: 'true', workspace: 'workspace-a' }).toString(),
+    headers: { origin: ORIGIN, 'content-type': 'application/x-www-form-urlencoded', cookie } })
+  assert.equal(wrongType.status, 415)
+  assert.equal((await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, undefined)).status, 401)
+  assert.equal(f.state.renewals.length, 0, 'no refused request reached the Cloud service')
+  // The one valid v2 request still renews, so the refusals did not weaken it.
+  const good = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, cookie)
+  assert.equal(good.status, 200)
+  assert.equal(f.state.renewals.length, 1)
 })
