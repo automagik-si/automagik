@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { check } from "../scripts/scheduler-pin.mjs";
+import { releaseAssets } from "../scripts/release-assets.mjs";
 import { fakeRelease } from "./fake-release.mjs";
 
 const TAG = "herdr-automations-v0.12.1-am.1";
@@ -95,4 +96,20 @@ test("a public checksums.txt that serves names the public route", async () => {
   assert.equal(r.code, 0, r.errors.join("\n"));
   assert.ok(r.logs.includes("checksums.txt: served by the public release download"), "the public route is named");
   assert.ok(r.requests.every((request) => !request.path.startsWith("/asset/")), "the API was not needed");
+});
+
+// #720 Low 1: a public route that failed retryably is remembered for the rest of the run, so a
+// second asset does not wait another full timeout on it.
+test("#720 one retryable public failure sends the rest of the run straight to the API", async () => {
+  const files = { "checksums.txt": Buffer.from("first\n"), "other.txt": Buffer.from("second\n") };
+  const host = await fakeRelease({ tag: TAG, files, publicStatus: 504 });
+  try {
+    const source = releaseAssets({ base: `${host.origin}/download/${TAG}`, api: `${host.origin}/api`, tag: TAG, log: () => {} });
+    assert.equal((await source.get("checksums.txt")).toString(), "first\n");
+    assert.equal((await source.get("other.txt")).toString(), "second\n");
+    assert.equal(host.requests.filter((r) => r.path.startsWith("/download/")).length, 1, "one public try for the run");
+    assert.equal(host.requests.filter((r) => r.path.startsWith("/asset/")).length, 2, "both assets came from the API");
+  } finally {
+    await host.close();
+  }
 });
