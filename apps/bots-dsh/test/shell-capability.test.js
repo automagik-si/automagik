@@ -469,18 +469,23 @@ test('a shell-off Bot cannot be paired with a command-capable agent, either way 
 })
 
 test('a shell-off Bot cannot be paired with Remote Hermes', async (t) => {
-  const { rt, create, call } = team(t)
-  const bot = await create()
   // A stored Bot put on Hermes before its shell went off (a state the update path now
-  // refuses) is held from the save on (#1488), so the pairing is refused as the hold.
-  bot.model = 'hermes-remote/default'
-  bot.shell = false
-  rt.state.prefs = { ...(rt.state.prefs ?? {}), hermesRemote: { enabled: true, profile: 'p', models: [] } }
-  await rt.save()
-  assert.deepEqual(rt.shellHoldOf(bot.id), { reason: 'shell-off-cli', provider: 'hermes-remote' })
-  const refused = await call('hermes-remote-pair', { botId: bot.id })
+  // refuses): the saved team holds it, and the normal load adopts it held (#1488).
+  const stored = storedBefore()
+  stored.bots.hermes = {
+    id: 'hermes', name: 'Hermes Bot', role: '', instructions: '', createdAt: 2, capabilities: [],
+    shell: false, model: 'hermes-remote/default',
+  }
+  stored.prefs = { hermesRemote: { enabled: true, profile: 'p', models: [] } }
+  const { rt, create, call } = team(t, { storedTeam: stored })
+  await rt.load()
+  assert.deepEqual(rt.botOf('hermes').shellHeld, { cli: 'hermes-remote', model: 'hermes-remote/default' })
+  const refused = await call('hermes-remote-pair', { botId: 'hermes' })
   assert.equal(refused.ok, false)
-  assert.match(refused.error.message, /needs a choice\. Turn on its shell or choose a DeepSeek Harness model before it can run on hermes-remote/)
+  assert.equal(refused.error.code, 'bot/hermes-shell')
+  assert.match(refused.error.message, /has no shell, so it cannot be paired with Remote Hermes, whose own tools can run commands\. Turn its shell on first\./)
+  // Nothing was paired.
+  assert.equal(rt.state.prefs.hermesRemote.pairedBotId, undefined)
   // Turning the model on a shell-less Bot is refused earlier, at the model boundary.
   const other = await create({ shell: false })
   const resolve = rt.resolveModel
@@ -528,6 +533,32 @@ test('a stored Bot with no field reads shell on', async (t) => {
   assert.equal(saved.bots.old.shell, true)
 })
 
+test('a stored shell-off Bot on a coding CLI is held at load, logged, and refuses to start', async (t) => {
+  const stored = storedBefore()
+  stored.bots.cli = {
+    id: 'cli', name: 'CLI Bot', role: '', instructions: '', createdAt: 2, capabilities: [],
+    shell: false, model: 'acp-codex/gpt-6.1-sol', appliedModel: 'acp-codex/gpt-6.1-sol',
+  }
+  const { rt, warnings, guard } = team(t, { storedTeam: stored })
+  await rt.load()
+  const bot = rt.botOf('cli')
+  assert.deepEqual(bot.shellHeld, { cli: 'acp-codex', model: 'acp-codex/gpt-6.1-sol' })
+  const said = warnings.filter(line => /CLI Bot/.test(line) && /acp-codex/.test(line) && /shell/.test(line))
+  assert.equal(said.length, 1, `one line names the Bot, its CLI and its shell: ${JSON.stringify(warnings)}`)
+  // It cannot start work while the shell is off and the model is a coding CLI.
+  await assert.rejects(() => rt.applyPermission(bot, 'cli', undefined, undefined, { start: true }),
+    /has no shell.*acp-codex.*Pick a model that uses DeepSeek Harness's tools, or turn its shell on/)
+  // The held state is part of the saved team, not only of this memory.
+  const saved = JSON.parse(readFileSync(join(rt.home, 'state.json'), 'utf8'))
+  assert.deepEqual(saved.bots.cli.shellHeld, bot.shellHeld)
+  assert.equal(saved.bots.cli.shell, false)
+  // Turning the shell on is the choice the hold asks for, and lifts it.
+  await rt.updateBot('cli', { shell: true })
+  assert.equal(rt.botOf('cli').shellHeld, undefined)
+  await allowed(guard(), 'bash', { id: 'cli' }, { command: 'id' })
+  assert.equal(JSON.parse(readFileSync(join(rt.home, 'state.json'), 'utf8')).bots.cli.shellHeld, undefined)
+})
+
 // #1488: a team saved with a shell-off Bot on a coding CLI (a state the update path refuses)
 // starts nothing for that Bot until the person turns its shell on or picks a native model.
 // Every route here is a name in an inert catalog: no adapter is registered, nothing answers.
@@ -564,7 +595,27 @@ test('a stored shell-off Bot on a coding CLI is held until its shell is on or a 
     held: ['held-chat', 'held-group', 'held-task'], native: ['native-chat'], pinned: ['pinned-chat'], docked: ['docked-chat'],
   }
   const on = ids => calls.filter(entry => ids.includes(entry.sessionId))
-  const holdLines = () => warnings.filter(line => line.includes('holding'))
+  // The owner's load-time line: "<Bot> loads with its shell off on <cli>, ... it is held ...".
+  const holdLines = () => warnings.filter(line => line.includes('loads with its shell off'))
+  const heldOn = { cli: 'acp-fake', model: CLI }
+  // The refusal a held Bot gives: the owner's code, and a message naming both ways out.
+  const shellRefusal = (error) => {
+    assert.equal(error.code, 'bot/shell')
+    assert.match(error.message, /has no shell, so it cannot run on acp-fake, whose own tools can run commands\./)
+    assert.match(error.message, /Pick a model that uses DeepSeek Harness's tools, or turn its shell on\./)
+    return true
+  }
+  // An outside edit of the saved team (the update path refuses a shell-off CLI Bot), adopted
+  // the way the store adopts any outside edit: the next write finds the file changed.
+  const adoptEdit = async (edit) => {
+    await rt.save()
+    const path = join(home, 'state.json')
+    const disk = JSON.parse(readFileSync(path, 'utf8'))
+    edit(disk)
+    writeFileSync(path, JSON.stringify(disk))
+    await rt.save().catch(() => {})
+    await rt.refresh()
+  }
 
   await rt.load()
   // The normal state read (bootstrap, model sync) and the model sync again.
@@ -574,10 +625,7 @@ test('a stored shell-off Bot on a coding CLI is held until its shell is on or a 
   // One ordinary admission per Bot: own chat for each, the group and the worker for `held`.
   const attempt = (toId, sessionId) => rt.deliver({ toId, sessionId, text: 'hello', role: 'request' })
   for (const [toId, sessionId] of [['held'], ['held', 'held-group'], ['held', 'held-task'], ['native'], ['pinned'], ['docked']]) {
-    await assert.rejects(() => attempt(toId, sessionId), (error) => {
-      assert.equal(error.code, 'bot/shell-off-cli')
-      return true
-    })
+    await assert.rejects(() => attempt(toId, sessionId), shellRefusal)
   }
   await rt.applyToolDeny(rt.botOf('held'), ['held-task'])
   await attempt('control')
@@ -589,25 +637,25 @@ test('a stored shell-off Bot on a coding CLI is held until its shell is on or a 
   assert.ok(on(['control-chat']).some(entry => entry.call === 'followup'), 'the control took the message')
   assert.ok(on(['control-group']).some(entry => entry.call === 'followup'))
 
-  // The roster the settings read carries the reason; the held Bots stay in it.
+  // The roster the settings read carries the hold (the record's `shellHeld`: the CLI and the
+  // model that holds it); the held Bots stay in it, pinned ones included.
   const shown = id => state.value.bots.find(entry => entry.id === id)
-  // Every held Bot here, pinned ones included, is DSH-routed, so the native pick is offered.
   for (const id of ['held', 'native', 'pinned', 'docked']) {
-    assert.deepEqual(shown(id).shellHold, { reason: 'shell-off-cli', provider: 'acp-fake', nativeRecovery: true })
-    assert.deepEqual(rt.shellHoldOf(id), { reason: 'shell-off-cli', provider: 'acp-fake' })
+    assert.deepEqual(shown(id).shellHeld, heldOn)
+    assert.deepEqual(rt.botOf(id).shellHeld, heldOn)
   }
-  assert.equal(shown('control').shellHold, undefined)
-  assert.equal(rt.shellHoldOf('old'), undefined)
-  assert.equal(rt.shellHoldOf('loose'), undefined)
+  assert.equal(shown('control').shellHeld, undefined)
+  assert.equal(rt.botOf('old').shellHeld, undefined)
+  assert.equal(rt.botOf('loose').shellHeld, undefined)
   assert.equal(shown('pinned').sessionPinned, true)
   assert.equal(shown('docked').sessionPinned, true)
 
   // One warning per held Bot, each one line, the file's name cleaned; a reload adds none.
   await rt.load()
-  rt.refresh?.()
+  await rt.refresh?.()
   assert.equal(holdLines().length, 4)
   for (const line of holdLines()) assert.doesNotMatch(line, /[\n\r]/)
-  assert.ok(holdLines().some(line => line.includes('Held Bot') && line.includes(CLI)))
+  assert.ok(holdLines().some(line => line.includes('Held Bot') && line.includes('acp-fake')))
 
   // The record is untouched on disk: shell, model, applied model and Session.
   const fields = ({ shell, model, appliedModel, sessionId }) => ({ shell, model, appliedModel, sessionId })
@@ -620,8 +668,9 @@ test('a stored shell-off Bot on a coding CLI is held until its shell is on or a 
   // then takes its CLI model and its message.
   const turnedOn = await call('update-bot', { id: 'held', shell: true })
   assert.equal(turnedOn.ok, true)
-  assert.equal(rt.shellHoldOf('held'), undefined)
+  assert.equal(rt.botOf('held').shellHeld, undefined)
   assert.equal(saved().bots.held.shell, true)
+  assert.equal(saved().bots.held.shellHeld, undefined)
   assert.ok(on(['held-chat']).some(entry => entry.call === 'selectModel' && entry.provider === 'acp-fake'))
   await attempt('held')
   assert.ok(on(['held-chat']).some(entry => entry.call === 'followup'))
@@ -631,7 +680,8 @@ test('a stored shell-off Bot on a coding CLI is held until its shell is on or a 
   const before2 = calls.length
   const picked = await call('switch-route', { id: 'native', model: NATIVE })
   assert.equal(picked.ok, true, picked.error?.message)
-  assert.equal(rt.shellHoldOf('native'), undefined)
+  assert.equal(rt.botOf('native').shellHeld, undefined)
+  assert.equal(saved().bots.native.shellHeld, undefined)
   const moved = rt.botOf('native')
   assert.equal(moved.shell, false)
   assert.equal(moved.model, NATIVE)
@@ -704,7 +754,7 @@ test('a stored shell-off Bot on a coding CLI is held until its shell is on or a 
   const contended = await call('switch-route', { id: 'docked', model: NATIVE })
   assert.equal(contended.ok, false)
   assert.match(contended.error.message, /owned by another Agent or host/)
-  assert.deepEqual(rt.shellHoldOf('docked'), { reason: 'shell-off-cli', provider: 'acp-fake' })
+  assert.deepEqual(rt.botOf('docked').shellHeld, heldOn)
   assert.deepEqual(dockedLog, dockedEarlier)
   assert.deepEqual(fields(saved().bots.docked), fields(before.docked))
   owner = undefined
@@ -712,7 +762,8 @@ test('a stored shell-off Bot on a coding CLI is held until its shell is on or a 
   for (const id of ['pinned', 'docked']) {
     const picked = await call('switch-route', { id, model: NATIVE })
     assert.equal(picked.ok, true, picked.error?.message)
-    assert.equal(rt.shellHoldOf(id), undefined)
+    assert.equal(rt.botOf(id).shellHeld, undefined)
+    assert.equal(saved().bots[id].shellHeld, undefined)
     // Persisted on the same Session: shell still off, still pinned, no earlier part.
     assert.deepEqual(fields(saved().bots[id]), { shell: false, model: NATIVE, appliedModel: NATIVE, sessionId: `${id}-chat` })
     assert.equal(saved().bots[id].sessionPinned, true)
@@ -749,12 +800,14 @@ test('a stored shell-off Bot on a coding CLI is held until its shell is on or a 
   assert.ok(on(['docked-chat']).some(entry => entry.call === 'followup'))
   assert.deepEqual(on(['pinned-chat', 'docked-chat']).filter(entry => entry.provider === 'acp-fake'), [])
 
-  // Leaving and re-entering the hold logs once more. The record is written directly: the
-  // update path refuses this state.
-  rt.botOf('held').shell = false
-  await rt.save()
-  assert.deepEqual(rt.shellHoldOf('held'), { reason: 'shell-off-cli', provider: 'acp-fake' })
+  // Leaving and re-entering the hold logs once more. The saved team is edited outside: the
+  // update path refuses this state, and the store adopts the edit as it adopts any.
+  await adoptEdit((disk) => { disk.bots.held.shell = false })
+  assert.deepEqual(rt.botOf('held').shellHeld, heldOn)
   assert.equal(holdLines().length, 5)
+  for (const line of holdLines()) assert.doesNotMatch(line, /[\n\r]/)
+  // Held again, it takes nothing: the next message is refused the same way.
+  await assert.rejects(() => attempt('held'), shellRefusal)
 })
 
 test('a new non-private Bot states shell on and is otherwise unchanged', async (t) => {

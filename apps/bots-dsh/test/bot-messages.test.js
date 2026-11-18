@@ -1490,16 +1490,25 @@ test('replies moved to a new part that is working wait for that part\'s turn', a
 // A Bot held for a shell choice while replies wait takes none of them: not through the Agent
 // the queue already resolved for its part, nor through a new part a switch gave it.
 test('replies waiting for a Bot that becomes shell-held are not sent, cached Agent or new part', async (t) => {
-  const { agents, emit, stop } = await start(team())
+  const { agents, emit, home, stop } = await start(team())
   t.after(stop)
+  // The update path refuses a shell-off Bot on a coding CLI, so the hold comes from the saved
+  // team: an outside edit of state.json, adopted the way the store adopts any (the next write
+  // finds the file changed), which holds the Bot at adoption.
   const hold = async () => {
-    const bot = rt.botOf('a')
-    bot.shell = false
-    bot.appliedModel = 'acp-fake/m1'
     await rt.save()
-    assert.deepEqual(rt.shellHoldOf('a'), { reason: 'shell-off-cli', provider: 'acp-fake' })
+    const path = join(home, 'state.json')
+    const disk = JSON.parse(readFileSync(path, 'utf8'))
+    Object.assign(disk.bots.a, { shell: false, appliedModel: 'acp-fake/m1' })
+    writeFileSync(path, JSON.stringify(disk))
+    await rt.save().catch(() => {})
+    await rt.refresh()
+    assert.deepEqual(rt.botOf('a').shellHeld, { cli: 'acp-fake', model: 'acp-fake/m1' })
   }
-  const refused = error => error.code === 'bot/shell-off-cli'
+  // The owner's refusal: code bot/shell, and a message naming both ways out.
+  const refused = error => error.code === 'bot/shell'
+    && /has no shell, so it cannot run on acp-fake/.test(error.message)
+    && /Pick a model that uses DeepSeek Harness's tools, or turn its shell on/.test(error.message)
 
   // Same part: the reply resolved and cached the part's Agent before the hold.
   emit('a', 'turn/start', { turn: 1 })
@@ -1512,9 +1521,9 @@ test('replies waiting for a Bot that becomes shell-held are not sent, cached Age
   assert.deepEqual(agents.get('a').calls, [])
 
   // Part switch: the reply was queued for the old part, the hold and the switch came after.
-  rt.botOf('a').shell = true
-  await rt.save()
-  assert.equal(rt.shellHoldOf('a'), undefined)
+  // The person's shell toggle lifts the first hold.
+  await rt.updateBot('a', { shell: true })
+  assert.equal(rt.botOf('a').shellHeld, undefined)
   emit('a', 'turn/start', { turn: 2 })
   const moved = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'the next answer', exchangeId: 'r2', replyTo: 'q2' })
   await delay(60)
