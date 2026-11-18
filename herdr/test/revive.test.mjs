@@ -649,6 +649,21 @@ test("revive --boot prints counts only: no folder and no bot name reaches the us
   assert.equal(s.lastReport().projects[0].project, s.project, "the kept report still names the project");
 });
 
+// #1411: a reboot's recovery rebuilds a Codex seat from its record, the seat's own reasoning
+// effort and service tier included.
+test("#1411: revive passes a Codex seat's own effort and tier to its replacement pane", (t) => {
+  const file = team({ main: { agent: "codex", effort: "high", tier: "fast" } });
+  const s = world(t, { file, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = runsOf(s)[0];
+  const words = wordsOf(run);
+  assert.ok(hasSeq(words, ["-c", "model_reasoning_effort=high"]), run.join(" "));
+  assert.ok(hasSeq(words, ["-c", "service_tier=priority"]), run.join(" "));
+  assert.ok(hasSeq(words, ["resume", SID]), "resumed by its own id");
+  assert.equal(r.out.includes(SID), false, "no session id printed");
+});
+
 // ---- #1417: Codex and Kimi, whose ids are found on disk after the launch ----
 
 /** A version-7 UUID whose time is `ms`, as Codex makes its thread ids. */
