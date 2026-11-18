@@ -357,3 +357,42 @@ for (const code of ['EACCES', 'EPERM']) test(`DSH store ${code} is reported as a
   assert.match(shown[0].content[1].text, new RegExp(`DSH's image store could not be read \\(${code}\\)`))
   assert.doesNotMatch(shown[0].content[1].text, /Privacy & Security|folder writable|refused access to/)
 })
+
+async function fileHandlePrototype() {
+  const handle = await fs.open(process.execPath)
+  try { return Object.getPrototypeOf(handle) } finally { await handle.close() }
+}
+
+test('a same-size rewrite with unchanged timestamps is never served as verified', async t => {
+  // A filesystem whose timestamps do not move between two writes (a coarse granule).
+  const proto = await fileHandlePrototype()
+  const real = proto.stat
+  t.mock.method(proto, 'stat', async function (...args) {
+    const stats = await real.apply(this, args)
+    stats.ctimeMs = stats.mtimeMs = 1_700_000_000_000
+    return stats
+  })
+  const f = await fixture(t)
+  const holds = () => f.rt.sharedUploads.holds(f.bot.id, f.hex)
+  assert.deepEqual(await f.save(), { path: f.path })
+  await chmod(f.path, 0o600)
+  const other = Buffer.alloc(f.data.length, 42)
+  await writeFile(f.path, other)
+  assert.equal((await f.save()).path, undefined)
+  assert.deepEqual(await readFile(f.path), other)
+  assert.equal(await holds(), false)
+  await writeFile(f.path, f.data)
+  assert.equal(await holds(), true)
+  assert.deepEqual(await f.save(), { path: f.path })
+})
+
+test('every check hashes the copy again', async t => {
+  const f = await fixture(t)
+  assert.deepEqual(await f.save(), { path: f.path })
+  const proto = await fileHandlePrototype()
+  const streams = t.mock.method(proto, 'createReadStream')
+  for (const expected of [1, 2]) {
+    assert.equal(await f.rt.sharedUploads.holds(f.bot.id, f.hex), true)
+    assert.equal(streams.mock.callCount(), expected)
+  }
+})
