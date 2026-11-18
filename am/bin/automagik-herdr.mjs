@@ -4916,7 +4916,11 @@ async function labelledPanes(project, bot, bound, carriedBinding = () => null) {
   }
   const gets = await Promise.all([...addresses].map(checkedPane));
   const scoped = await Promise.all(gets.map(async (get) => {
-    if (!get || get.labels?.[BOT_LABEL] !== bot.id) return null;
+    if (!get) return null;
+    if (!get.labels || typeof get.labels !== "object" || Array.isArray(get.labels)) {
+      throw new CliError(`hc get ${get.address} gave no label map; nothing was started.`);
+    }
+    if (get.labels[BOT_LABEL] !== bot.id) return null;
     if (get.address === bound || !get.cwd) return get;
     const recordedProject = carriedBinding(get)?.project;
     if (recordedProject != null) return recordedProject === project.key ? get : null;
