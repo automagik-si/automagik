@@ -515,11 +515,12 @@ am create --name N --agent A [--kind main|member] [--role R] [--code true|false]
        [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
        [--cross-member BOT@DIR]...
        [--character C --colour K | --omni] [--model M] [--rank R]
+       [--effort E] [--tier fast|standard]
        [--agy-mode auto|accept-edits|plan] [--agy-allow RULE]... [--agy-deny RULE]...
        [--planned-wave N [--planned-note T]]
        [--worker-agent A] [--worker-model M] [--worker-effort E] [--worker-agy-mode M]
        [--worker-template T]
-am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=]
+am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
 am rm <bot>
 am category ls | add --title T [--sub S] [--id ID] | edit <id> | rm <id> | order <id>...
 am start <bot> [--space ID] [--tab ID]
@@ -1307,6 +1308,16 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   bot shows the model its pane runs: the one its command line names, else the agent's own
   configured default. A bot that isn't running shows no model in its sidebar row
   ("not running · role"), while `am ls` and `show` print its pin, else that default.
+- `effort` and `tier` are optional Codex settings: the bot's own reasoning effort (`low` …
+  `ultra`) and service tier (`fast` or `standard`). `create|edit --effort E --tier fast|standard`
+  sets them; an empty value clears one. Every start, restart and revive passes them as that
+  launch's own `-c` overrides, after the agent's and its template's own words, so the record wins
+  over a Codex profile and the global config (which is never written). A `--model` change without
+  `--tier` runs the new model on standard, stored and said on the launch line, so a Fast a
+  profile or the host config still names never applies to it. `show` prints both with their
+  source, and `show --json` carries `effort`, `effortSource`, `tier`, `tierSource`,
+  `pinnedEffort` and `pinnedTier`. See
+  [Reasoning effort and service tier](#reasoning-effort-and-service-tier-codex).
 - `codexAuto` is retired (#1125). It used to opt a bot's Codex seat and workers out of Codex's
   auto mode; the owner's ruling (10 and 12 Nov) is that every Codex seat and worker runs in it,
   so `false` no longer opts out: the field is kept as written, ignored, and loading the bots
@@ -1393,6 +1404,46 @@ rule"). So an Antigravity launch gets the flag only beside that file: a launch w
 helper with no bot to write one for, a command that takes no words) has the flag taken out. The
 flag does not answer the folder-trust question; the file's `trustedWorkspaces` does (#953).
 `dsh-tui doctor`'s `agy-sandbox` row and `show` say when this computer can't run `--mode auto`.
+
+### Reasoning effort and service tier (Codex)
+
+A Codex bot may store its own reasoning effort and service tier, so two bots on one host can run
+at different ones without touching the person's global Codex config (#1411):
+
+- `effort` is an optional effort level (`low`, `medium`, `high`, `xhigh`, `max`, `ultra`; whatever
+  the Codex CLI lists for the model), set with `am create|edit ... --effort E`.
+- `tier` is optional, `fast` or `standard`, set with `--tier fast|standard`. It stores the menu's
+  words: Fast is Codex's `priority` service tier, Standard its `default` one.
+
+Both are stored on the bot (`am edit <bot> --effort= --tier=` clears them) and passed on every
+launch as that launch's own overrides: `-c model_reasoning_effort=<effort>` and
+`-c service_tier=<priority|default>`. A start, a restart, a revive after a reboot and a linked
+machine's start all rebuild the command from the bot's record, so all three keep the values. The
+global `~/.codex/config.toml` is read for what a bot with neither inherits, and is never written.
+
+What wins, when more than one names a value:
+
+1. the bot's record (`effort`, `tier`), added after the agent's own words;
+2. the hc template the pane runs, whose own `-c` words come first in the command; the record's go
+   after it, so the record wins when both name one;
+3. the Codex profile the launch names (`-p <profile>`), if any: the file
+   `~/.codex/<profile>.config.toml`, which Codex layers on the global config;
+4. the global Codex config.
+
+Codex reads the last `-c` for a key, so a later word wins. A service tier belongs to the model
+choice: `am edit <bot> --model M` without `--tier` in the same call runs the new model on
+Standard, stored as `standard` and passed as `-c service_tier=default`, so a model swapped for a
+standard one never keeps a Fast that the record, a profile, a template or the host's config still
+names. Workers take their agent, model and effort from the worker defaults or a template, never
+from the seat's `effort`/`tier`.
+
+`am show <bot> --json` reports the effective values and their source: `effort`, `effortSource`,
+`tier` and `tierSource`, beside `pinnedEffort` and `pinnedTier` (what the record stores). A source
+is `detected` (what the live pane's command line runs, a template's own words included), `roster`
+(the bot's own value, when it isn't running), `profile` (the Codex profile the live launch names:
+`-p <name>` layers `~/.codex/<name>.config.toml` on the global config), `global` (that global
+config's top level) or `default` (Codex's own default tier, Standard). The text `am show` prints
+the same two lines.
 
 ### Codex's launch mode
 
@@ -1619,6 +1670,11 @@ repository's own gates (`node --test`, `node --check`, `bun test`, `scripts/priv
 launch lists only `hc ls`, `hc get`, `hc read`, `hc wait`, `hc send`, the 24 read-only shell
 tools, the test checks, the `gh` reads and a short list of git subcommands (`log`, `diff`,
 `show`, `status`, …). No release verb and no `gh pr merge` is in either list.
+
+Run repository tests only in a checkout you trust. Tests execute checkout code with the access
+available to the test process, so give that process only the files and credentials its work
+needs. Before sending a message, check the intended recipient. The proxy restricts which
+destinations are available, and each recipient handles messages with its own permissions.
 
 The fixed deny rules are always present, the same for a seat and for every worker role, and a
 roster's `agyPermissions` can only add to them:

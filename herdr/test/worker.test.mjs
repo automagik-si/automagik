@@ -3374,6 +3374,24 @@ test("worker: a new Claude worker's --session-id is its label and its start row'
   for (const id of s.ledger().map((x) => x.session).filter(Boolean)) assert.equal(`${text.out}${text.err}`.includes(id), false);
 });
 
+// #1411: the seat's own effort and tier are the seat's; a worker's come from its worker defaults
+// or a template, never from the seat's record, so a worker can't inherit Fast by accident.
+test("#1411: a worker never inherits its seat's own reasoning effort or service tier", (t) => {
+  const file = team();
+  file.bots[0] = { ...file.bots[0], agent: "codex", effort: "high", tier: "fast" };
+  const s = scene(t, { file });
+  // A pane of the main bot: the seat the record's values belong to.
+  const st = s.hcState();
+  st.terminals.push({ ...st.terminals[1], address: "t5", name: "t5", labels: { bot: ID.main } });
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(st));
+  const r = s.cli(["worker", "do the task", "--branch", "feat/fast", "--json"], { from: "t5" });
+  assert.equal(r.code, 0, r.err);
+  const words = after(s.runs()[0]);
+  assert.equal(words[0], "codex");
+  assert.equal(words.some((w) => w.startsWith("model_reasoning_effort=")), false, words.join(" "));
+  assert.equal(words.some((w) => w.startsWith("service_tier=")), false, words.join(" "));
+});
+
 // ---- #1420: a Codex worker's folder trust, per launch ----
 
 /** The `-c projects=…` words a worker's argv carries (any of them), as written. */

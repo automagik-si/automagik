@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT = join(ROOT, "catalog", "index.json");
@@ -408,7 +409,25 @@ if (CHECK) {
   process.exit(0);
 }
 
-writeFileSync(OUT, JSON.stringify(index, null, 2) + "\n");
-console.log(`catalog: ${index.repositoryCount} repo(s), ${index.modCount} mod(s) → ${OUT}`);
+let unchanged = false;
+if (!REFRESH) {
+  let previous;
+  try {
+    previous = JSON.parse(readFileSync(OUT, "utf8"));
+  } catch {
+    // A missing or unreadable index is rebuilt below.
+  }
+  const previousPack = previous?.mods?.[0];
+  const pushedAt = previousPack?.pushedAt;
+  if (typeof previous?.generatedAt === "string" && Number.isFinite(Date.parse(previous.generatedAt))
+      && typeof pushedAt === "string" && (Number.isFinite(Date.parse(pushedAt)) || pushedAt === recent)) {
+    // The pack's date records its last indexed update. Changes to other repositories leave it alone.
+    if (isDeepStrictEqual(previousPack, { ...entryForPack, pushedAt })) entryForPack.pushedAt = pushedAt;
+    unchanged = isDeepStrictEqual(previous, { ...index, generatedAt: previous.generatedAt });
+  }
+}
+
+if (!unchanged) writeFileSync(OUT, JSON.stringify(index, null, 2) + "\n");
+console.log(`catalog: ${index.repositoryCount} repo(s), ${index.modCount} mod(s) ${unchanged ? "(unchanged)" : `→ ${OUT}`}`);
 for (const e of entries) console.log(`  ${e.fullName}${e.path ? "/" + e.path : ""}  ${e.license || "?"}  ${e.modNames.join(", ")}`);
 for (const line of refusals) console.log(`  refused: ${line}`);
