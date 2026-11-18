@@ -79,7 +79,6 @@ type Run struct {
 	Error      string         `json:"error,omitempty"`
 	// A command run's: its exit status (absent when it has none), its one
 	// line, the last lines of its stderr, and what became of the report.
-	// An agent run's done may carry a late-start note in Result.
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Result   string `json:"result,omitempty"`
 	Stderr   string `json:"stderr,omitempty"`

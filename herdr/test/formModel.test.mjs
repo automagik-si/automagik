@@ -1,4 +1,3 @@
-import { noCoreEnv } from "./no-core-env.mjs";
 // The Create / Edit form's rules (A13, mockup/create-form.dc.html renderVals): state from a
 // bot, lead options, category visibility, the model line and pin list, validation, the
 // entry a save writes and the matching automagik-herdr line.
@@ -367,7 +366,6 @@ function scratch(t) {
   ] };
   writeFileSync(join(project, ".herdr/bots.json"), `${JSON.stringify(file, null, 2)}\n`);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app };
-  Object.assign(env, { ...noCoreEnv(root, env.PATH) });
   delete env.HC_TERMINAL_ID;
   // Run from the scratch root, not the project: --project must name it.
   const run = (sh, line) => spawnSync(sh, ["-c", line], { cwd: root, env, encoding: "utf8" });

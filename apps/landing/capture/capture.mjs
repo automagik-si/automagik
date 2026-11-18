@@ -122,18 +122,18 @@ async function scenario({ login, env, project }) {
     await card.waitFor({ state: 'hidden' })
     check(true, `The person saved ${bot}'s Workspace permission level`)
   }
-  // Your companion: a bunny named Pirlim.
-  const name = page.getByRole('button', { name: 'Pirlim', exact: true })
+  // Your companion: a bunny named Pip.
+  const name = page.getByRole('button', { name: 'Pip', exact: true })
   await name.waitFor()
   await page.locator('.oai-card button[aria-label="bunny"]').click()
   await page.locator('.oai-card button[aria-label="orange"]').click()
   await name.click()
-  await page.getByRole('button', { name: 'Hatch Pirlim' }).click()
-  // Your team: Pirlim leads, Genie is on the team (its plugin is installed), Omni is off.
-  await page.getByText('Pirlim leads. Who comes along?').waitFor()
+  await page.getByRole('button', { name: 'Hatch Pip' }).click()
+  // Your team: Pip leads, Genie is on the team (its plugin is installed), Omni is off.
+  await page.getByText('Pip leads. Who comes along?').waitFor()
   await page.getByText('On your team').waitFor()
   const team = await page.locator('.oai-card').first().innerText()
-  check(/Grow your team/.test(team) && /Powered off\s+Omni/.test(team) && /Genie\s+On your team/.test(team), 'Team step: Pirlim leads, Genie on the team, Omni powered off')
+  check(/Grow your team/.test(team) && /Powered off\s+Omni/.test(team) && /Genie\s+On your team/.test(team), 'Team step: Pip leads, Genie on the team, Omni powered off')
   await shoot('team-step')
   // Genie works in Northwind: its working folder, as its settings would set it.
   const state = await api('state')
@@ -146,15 +146,15 @@ async function scenario({ login, env, project }) {
   check(await page.getByRole('switch', { name: 'DeepSeek' }).getAttribute('aria-checked') === 'true', 'Connect AI found DeepSeek on')
   await page.getByRole('button', { name: 'Continue →' }).click()
   await page.getByText('What should the team start on?').first().waitFor({ timeout: 60_000 })
-  check(true, 'Pirlim greeted the person as the Main Bot')
-  // The request goes to Pirlim, who hands it to Genie.
+  check(true, 'Pip greeted the person as the Main Bot')
+  // The request goes to Pip, who hands it to Genie.
   const composer = page.getByRole('textbox').last()
   await composer.click()
   await composer.fill('Customers keep asking for their Northwind orders as a spreadsheet. Can Genie add a CSV export to the orders report?')
   await page.keyboard.press('Enter')
   await page.getByText(/Genie granted it/).first().waitFor({ timeout: 90_000 })
-  check(true, 'Pirlim passed the request to Genie and reported the wish running')
-  await keepWorkspace('Pirlim')
+  check(true, 'Pip passed the request to Genie and reported the wish running')
+  await keepWorkspace('Pip')
   // The wish ends: its branch is back in the project with one commit, and Genie reports.
   await procs.until('the wish branch in Northwind', () => {
     const branches = execFileSync('git', ['branch', '--list', 'wish/*', '--format=%(refname:short)'], { cwd: project, env, encoding: 'utf8' }).trim()
@@ -188,7 +188,7 @@ async function scenario({ login, env, project }) {
     await page.setViewportSize(size)
     await anchor.evaluate((node, block) => node.scrollIntoView({ block }), block)
   }
-  await page.getByRole('button', { name: 'Pirlim, Orchestrator, Main Bot' }).click()
+  await page.getByRole('button', { name: 'Pip, Orchestrator, Main Bot' }).click()
   const granted = page.getByText(/running as its own thread on/).last()
   await granted.waitFor()
   await page.getByText('Messaged').first().waitFor()

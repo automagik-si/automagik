@@ -137,15 +137,7 @@ export function createBrowserChannel({ now = Date.now, waitMs = WAIT_MS, staleMs
 
   function setHold(botId, hold) {
     if (hold === null) holds.delete(botId)
-    // `panel` marks a hold the app's own panel drives: unlike a webview takeover it keeps the
-    // Bot's browser (with its page) alive, so the person can open a page and hand it back.
-    else holds.set(botId, {
-      by: hold.by,
-      reason: hold.reason,
-      note: hold.note,
-      ...(typeof hold.callId === 'string' ? { callId: hold.callId.slice(0, 200) } : {}),
-      ...(hold.panel === true ? { panel: true } : {}),
-    })
+    else holds.set(botId, { by: hold.by, reason: hold.reason, note: hold.note, ...(typeof hold.callId === 'string' ? { callId: hold.callId.slice(0, 200) } : {}) })
     holdVersion += 1
     for (const client of clients.values()) client.wake?.()
     for (const listener of holdListeners) {

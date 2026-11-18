@@ -6,12 +6,6 @@ edited afterwards. `screens/manifest.json` records the checkout, the runtime, ea
 pinned source and the SHA-256 of every image; `landing.test.mjs` fails if an image no longer
 matches its digest.
 
-The default companion is now Pirlim. The committed captures were recorded when it was Pip,
-so their descriptions below name Pip; the capture scripts already hatch Pirlim. Regeneration
-waits for a release containing this change, since the fixture accepts only pinned release
-files. Then the images, their descriptions, page alt text, derived art and manifests will be
-updated together.
-
 ## What rendered them
 
 | Part | Version | Source |

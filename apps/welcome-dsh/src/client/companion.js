@@ -9,7 +9,7 @@ import { t } from './i18n.js'
 // connected) or pick one of Omni's characters; then name it. Its copy, the ideas included,
 // follows the DSH language (i18n.js); the name ideas are names, in any language.
 export const IDEAS = ['a sleepy cyan fox with a lantern tail', 'a tiny robot made of moonlight', 'a round jellyfish that wears headphones']
-const NAMES = ['Pirlim', 'Nova', 'Mochi', 'Echo', 'Biscuit']
+const NAMES = ['Pip', 'Nova', 'Mochi', 'Echo', 'Biscuit']
 const NAME_RULE = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u
 // A Bot's avatar holds at most 160 KB, so the drawing is shrunk to a small square for it.
 const AVATAR_SIZE = 256

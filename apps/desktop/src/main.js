@@ -33,7 +33,7 @@ import { findHerdr, herdrStatus } from './herdr.js'
 import { openRequest, pickSpace } from './herdr-space.js'
 import { openLatest } from './herdr-update.js'
 import { laneMissedOf, tableColor, updatePresentation, versionsAnswer, WINDOW_ACTIONS, windowChrome, windowPageLayout } from './frame.js'
-import { PRODUCT, setDataPaths } from './identity.js'
+import { dataPathsOf, PRODUCT } from './identity.js'
 import { LOOK_EVERY_MS, readBusy } from './idle.js'
 import { appMenuTemplate } from './menu.js'
 import { sendPaneClose } from './pane-close.js'
@@ -51,11 +51,8 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 // Before anything reads it (the single-instance lock does): the window's data is filed under
-// the app's own name (identity.js), whatever Electron derives from the running binary — or, when
-// the launch sets AUTOMAGIK_USER_DATA, in the team's own folder: appData, userData, sessionData
-// and the lock Electron keeps in userData all move, so a second copy runs beside the person's
-// app with storage of its own. Without the setting the paths are exactly the ones they were.
-setDataPaths(app, process.env.AUTOMAGIK_USER_DATA)
+// the app's own name (identity.js), whatever Electron derives from the running binary.
+for (const [name, path] of Object.entries(dataPathsOf(app.getPath('appData')))) app.setPath(name, path)
 const root = automagikHome()
 const home = appHome()
 let dsh = null
@@ -347,9 +344,6 @@ function spawnDsh(port, steps) {
   const urlFile = launchUrlFileOf(join(home, 'dsh'))
   return serveDsh({
     run: dshProcess, portFile: portFileOf(home), node: process.execPath, bin: resources.bin, env,
-    // Plugin installs, updates and removals in the profile use the app's own pnpm, never a
-    // pnpm PATH resolves (src/dsh-launch.cjs).
-    bundledPnpm: resources.pnpm, launcher: resources.launcher,
     urlFile, port, onPort, onUnkept, cwd: home, log, privacy: overlay,
     onSpawn: (child) => {
       laneConfirmation.reset()

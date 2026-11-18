@@ -1,4 +1,3 @@
-import { startFakeCore } from "./fake-core.mjs";
 // Start and Attach: the pure argument building and messages (launchArgs.js), then launch.js
 // over the Herdr stand-ins with a scratch git project: it runs the real CLI against a fake hc
 // (test/fake-hc.mjs) first on PATH. The real hc is never run.
@@ -228,13 +227,6 @@ async function world(t, { file = team(), terminals = () => [] } = {}) {
   writeFileSync(logPath, "");
   Object.assign(process.env, { PATH: `${bin}:${saved.PATH}`, HOME: home, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog });
-  const coreKeys = ["AUTOMAGIK_HERDR_CORE_SOCKET", "AUTOMAGIK_HERDR_TEST_ROOTS", "HC_SOCKET", "HC_SESSION"];
-  const coreSaved = Object.fromEntries(coreKeys.map((key) => [key, process.env[key]]));
-  const core = startFakeCore(t, { ...process.env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
-  Object.assign(process.env, { ...core.env, HC_SOCKET: "", HC_SESSION: "" });
-  t.after(() => { for (const [key, value] of Object.entries(coreSaved)) {
-    if (value === undefined) delete process.env[key]; else process.env[key] = value;
-  } });
   delete process.env.HC_TERMINAL_ID;
   delete process.env.HERDR_APP_HOME;
   t.after(() => {

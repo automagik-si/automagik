@@ -38,9 +38,8 @@ export function ProjectRail({ projects = [], currentId, onOpen, onAdd, label, ad
   return h('nav', { className: 'lb-rail', 'aria-label': label ?? word('projects') },
     projects.map((project) => {
       const badge = projectBadge(project, currentId)
-      // A tile with no opening names the current space without promising a pointer action.
       return h('button', {
-        key: project.id, type: 'button', className: ['lb-tile', onOpen ? '' : 'lb-tile-still', pictured(project) ? '' : 'lb-tile-letter', badge ? 'lb-tile-badged' : ''].filter(Boolean).join(' '), 'data-id': project.id,
+        key: project.id, type: 'button', className: ['lb-tile', pictured(project) ? '' : 'lb-tile-letter', badge ? 'lb-tile-badged' : ''].filter(Boolean).join(' '), 'data-id': project.id,
         'aria-current': project.id === currentId ? 'true' : undefined,
         'aria-label': badge ? `${project.name}, ${word(badge)}` : project.name, title: project.name,
         onClick: onOpen ? () => onOpen(project) : undefined,

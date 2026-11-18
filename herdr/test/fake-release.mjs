@@ -1,44 +1,19 @@
 // A fake GitHub release host for the pin tests: the public download route can answer a status (or
-// serve the files), and the API lists the named assets and serves them at /asset/<name> or
-// redirects to a second loopback origin. Every test reaches 127.0.0.1 only, never GitHub.
+// serve the files), the API lists the named assets and serves them at /asset/<name>. Every test
+// reaches 127.0.0.1 only, never GitHub.
 import { createServer } from "node:http";
 
 const origin = (server) => `http://127.0.0.1:${server.address().port}`;
 
-async function listen(handler) {
-  const server = createServer(handler);
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-  return server;
-}
-
-function close(server) {
-  return new Promise((done) => {
-    server.closeAllConnections();
-    server.close(done);
-  });
-}
-
 /**
  * `files` maps an asset name to its bytes. `<origin>/download/<tag>/<name>` serves them when
  * `publicStatus` is 200, otherwise answers that status. `<origin>/api/releases/tags/<tag>` lists
- * every name at `<origin>/asset/<name>`, which serves the bytes or `assetStatus`. With
- * `assetRedirect`, successful asset requests redirect to `/blob/<name>` on a second origin.
- * `requests` records paths and headers on the first origin. `redirects` records paths and
- * whether Authorization was present on the second origin. `close()` stops both listeners.
+ * every name at `<origin>/asset/<name>`, which serves the bytes or `assetStatus`. Records every
+ * request's path and headers; `close()` stops the server.
  */
-export async function fakeRelease({
-  tag, files, publicStatus = 504, apiStatus = 200, assetStatus = 200, assetRedirect = false,
-}) {
+export async function fakeRelease({ tag, files, publicStatus = 504, apiStatus = 200, assetStatus = 200 }) {
   const requests = [];
-  const redirects = [];
-  let redirectServer;
-  const server = await listen((req, res) => {
+  const server = createServer((req, res) => {
     const path = new URL(req.url, "http://127.0.0.1").pathname;
     requests.push({ path, headers: req.headers });
     if (path.startsWith(`/download/${tag}/`)) {
@@ -59,10 +34,7 @@ export async function fakeRelease({
     }
     if (path.startsWith("/asset/")) {
       const name = path.slice("/asset/".length);
-      if (assetRedirect && assetStatus === 200 && files[name]) {
-        res.writeHead(302, { location: `${origin(redirectServer)}/blob/${name}` });
-        res.end();
-      } else if (assetStatus === 200 && files[name]) {
+      if (assetStatus === 200 && files[name]) {
         res.writeHead(200, { "content-type": "application/octet-stream" });
         res.end(files[name]);
       } else {
@@ -74,31 +46,10 @@ export async function fakeRelease({
     res.writeHead(404);
     res.end("not found");
   });
-  if (assetRedirect) {
-    try {
-      redirectServer = await listen((req, res) => {
-        const path = new URL(req.url, "http://127.0.0.1").pathname;
-        redirects.push({ path, authorization: "authorization" in req.headers });
-        if (path.startsWith("/blob/")) {
-          const name = path.slice("/blob/".length);
-          if (files[name]) {
-            res.writeHead(200, { "content-type": "application/octet-stream" });
-            res.end(files[name]);
-            return;
-          }
-        }
-        res.writeHead(404);
-        res.end("not found");
-      });
-    } catch (error) {
-      await close(server);
-      throw error;
-    }
-  }
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
   return {
     requests,
-    redirects,
     origin: origin(server),
-    close: () => redirectServer ? Promise.all([close(server), close(redirectServer)]) : close(server),
+    close: () => new Promise((done) => { server.closeAllConnections(); server.close(done); }),
   };
 }

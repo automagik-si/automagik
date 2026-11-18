@@ -26,7 +26,7 @@ exactly as `startDsh` starts it on macOS and Linux, and the lane's unpack is `la
 |---|---|
 | Base | `node:24.22.2-trixie-slim`, pinned by digest (glibc 2.41) |
 | Node | 24.22.2 (DSH needs 22.19 or later) |
-| pnpm | the runtime's pinned pnpm 10: plugin operations run it by absolute path through `dsh-launch`; `/usr/local/bin/pnpm` is the PATH shim for everything else |
+| pnpm | the runtime's pinned pnpm 10 (`/usr/local/bin/pnpm` runs `runtime/node_modules/pnpm`) |
 | Debian packages | bash, bubblewrap, ca-certificates, coreutils, curl, git, openssh-client, procps, ripgrep, tini |
 | `hc` | herdr-core 0.1.18 for Linux x86_64, checked against its sha256, at `/usr/local/bin/{herdr-core,hc}` |
 | DSH runtime | `/opt/automagik/runtime` (`build/runtime` from `scripts/prepare-runtime.mjs`) |

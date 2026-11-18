@@ -53,9 +53,9 @@ function nodes(tree, match) {
 }
 
 // `harness`: the window has DSH's own settings to send the user to, as the plugin does.
-function dock(models, { model, ready = true, harness = true, routePolicy, botExtra = {} } = {}) {
+function dock(models, { model, ready = true, harness = true, routePolicy } = {}) {
   const picked = []
-  const bot = { id: 'chief', name: 'Omni', model, ...botExtra }
+  const bot = { id: 'chief', name: 'Omni', model }
   const roster = { ready, byId: { chief: bot }, models, defaultModel: models[0]?.ref, ...(routePolicy ? { routePolicy } : {}) }
   const tree = ModelChoiceDock({
     sessionId: bot.id, useRoster: select => select(roster),
@@ -758,36 +758,4 @@ test('a reopened menu starts from the default, not the choices of the menu still
   assert.deepEqual({ ...manualFor(previous, 2) }, {})
   // A click in the reopened menu builds on that empty state, not on the old one.
   assert.deepEqual({ ...toggledGroup(manualFor(previous, 2), 'relay', false) }, { relay: true })
-})
-
-test('a shell-off Bot held off its plan CLI says why, and asks for a model when the plan is gone', () => {
-  const { modelHint, needsModelPick } = module.exports
-  const held = { from: 'openai-codex', to: 'acp-codex', cli: 'Codex' }
-  const bot = { id: 'b', name: 'B', model: 'openai-codex/gpt-6.1-sol', subscriptionShellHeld: held }
-  const served = { ready: true, models: [{ ref: 'openai-codex/gpt-6.1-sol', provider: 'openai-codex', providerName: 'ChatGPT', name: 'GPT-6.1 Sol' }] }
-  // The move notice names why: the CLI brings its own shell.
-  assert.equal(modelHint(bot, served), 'This Bot stays on GPT-6.1 Sol: Codex is a coding CLI that '
-    + "brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.")
-  // The retired route is gone: the Bot asks for a model instead of looking like it works.
-  const gone = { ready: true, models: [{ ref: 'deepseek/deepseek-v4-flash', provider: 'deepseek', providerName: 'DeepSeek', name: 'DeepSeek V4' }] }
-  assert.equal(modelHint(bot, gone), 'This model no longer answers, and this Bot cannot move to Codex '
-    + "while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.")
-  assert.equal(needsModelPick(bot, gone), false)
-})
-
-test('a shell-off Bot whose retired plan route is gone asks for a model, not a start', () => {
-  const held = { from: 'openai-codex', to: 'acp-codex', cli: 'Codex' }
-  const gone = [{ ref: 'deepseek/deepseek-v4-flash', provider: 'deepseek', providerName: 'DeepSeek', name: 'DeepSeek V4' }]
-  // The retired route is no longer served: the chat draws the choice card, not the start card.
-  const { tree } = dock(gone, { model: 'openai-codex/gpt-6.1-sol', botExtra: { subscriptionShellHeld: held } })
-  assert.ok(tree !== null && tree !== undefined)
-  const bubble = nodes(tree, node => node.props?.className === 'bt-bubble')[0]
-  assert.equal(bubble.children[0], 'gpt-6.1-sol is not available anymore. Pick another model for me.')
-  assert.equal(nodes(tree, node => node.props?.className === 'bt-model-start').length, 0)
-  // The model hint says why the move did not happen, and still asks for the choice.
-  const { modelHint } = module.exports
-  const roster = { ready: true, models: gone }
-  assert.equal(modelHint({ id: 'chief', name: 'Omni', model: 'openai-codex/gpt-6.1-sol', subscriptionShellHeld: held }, roster),
-    'This model no longer answers, and this Bot cannot move to Codex while its shell is off. '
-      + "Pick a model that uses DeepSeek Harness's tools, or turn its shell on.")
 })

@@ -74,7 +74,7 @@ The current release is always at [Releases](https://github.com/automagik-si/auto
 
 On another Linux, use the [AppImage](https://github.com/automagik-si/automagik/releases/latest/download/Automagik-Linux.AppImage). Windows is not supported yet.
 
-The app has two things to connect when you are ready: an Omni and an AI account. Both can wait. The full guide, updates, your data and uninstall are in [apps/desktop](apps/desktop/README.md). Code mode installs separately: [herdr](herdr/README.md#install). Pocket: [apps/pocket](apps/pocket/README.md#install). am alone on a host without the Herdr app (install, verify, update, roll back): [am/README.md](am/README.md).
+The app has two things to connect when you are ready: an Omni and an AI account. Both can wait. The full guide, updates, your data and uninstall are in [apps/desktop](apps/desktop/README.md). Code mode installs separately: [herdr](herdr/README.md#install). Pocket: [apps/pocket](apps/pocket/README.md#install).
 
 **For your code agent**: `npx skills add automagik-si/automagik --skill am` adds the skill that teaches it `am`, Automagik's one command.
 

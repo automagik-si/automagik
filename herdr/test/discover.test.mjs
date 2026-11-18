@@ -84,43 +84,14 @@ test("discover: this computer's projects are listed before a slow machine answer
   const updates = [];
   const t0 = Date.now();
   const found = await discover({ spaces }, io, { onUpdate: (list) => updates.push({ at: Date.now() - t0, list }) });
-  // One list per read as it lands, and one when this computer is done.
-  assert.deepEqual(updates.map((u) => u.list.map((p) => p.key)),
-    [["/b"], ["/b", "/d"], ["/b", "/d"], ["/a", "/b", "/d"], ["/a", "/b", "/c", "/d"]]);
-  assert.ok(updates[2].at < 60, `local listed after ${updates[2].at} ms`);
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0].list.map((p) => p.key), ["/b", "/d"]);
+  assert.ok(updates[0].at < 60, `local listed after ${updates[0].at} ms`);
   // Every local call was done before the first remote answer.
   const firstFar = io.done.findIndex(([m]) => m === "far");
   assert.ok(io.done.slice(firstFar).every(([m]) => m === "far"));
   // The full list, in sidebar order.
   assert.deepEqual(found.map((p) => [p.machine, p.key]), [["far", "/a"], [null, "/b"], ["far", "/c"], [null, "/d"]]);
-  // Each read draws as it lands. Held answers, two at once: the listing and /a's read never
-  // answer in time, which on this computer costs their own places only. /b is still read and
-  // drawn on its own, and the rows not read yet (/a's last file, the saved /saved) stay drawn.
-  const hold = {};
-  const held = (name) => new Promise((done, fail) => { hold[name] = { done, fail }; });
-  const settled = () => sleep(1);
-  const drawn = [];
-  const rows = (list) => list.map((p) => [p.key, p.file.bots[0].id]);
-  const pending = discover({ spaces: [{ id: "s1", folder: "/a", machine: null }, { id: "s2", folder: "/b", machine: null }] }, {
-    provisional: () => ["/saved"],
-    listed: () => held("listed"),
-    keyOf: async (folder) => folder,
-    read: (p) => held(p.key),
-    last: (p) => (p.key === "/b" ? undefined : FILE(`last:${p.key}`)),
-  }, { limit: 2, onUpdate: (list) => drawn.push(rows(list)) });
-  await settled();
-  assert.deepEqual(Object.keys(hold), ["listed", "/a"]);
-  hold.listed.fail(new TimedOut(5));
-  await settled();
-  assert.ok(hold["/b"], "a timeout on this computer doesn't skip its other reads");
-  assert.deepEqual(drawn, []);
-  hold["/b"].done(FILE("read:/b"));
-  await settled();
-  const shown = [["/a", "last:/a"], ["/b", "read:/b"], ["/saved", "last:/saved"]];
-  assert.deepEqual(drawn, [shown]);
-  hold["/a"].fail(new TimedOut(5));
-  assert.deepEqual(rows(await pending), shown);
-  assert.deepEqual(drawn, [shown, shown]);
 });
 
 test("discover: a machine that never answers holds back only its own projects, which show their last good file", async () => {
@@ -142,10 +113,7 @@ test("discover: a machine that never answers holds back only its own projects, w
   const took = Date.now() - t0;
   assert.ok(took < 400, `took ${took} ms`);
   // This computer's and far's projects were listed before the dead machine's time ran out.
-  // (One list per read and per machine done but the last: the same two lists, repeated.)
-  assert.equal(updates.length, 6);
-  const lists = updates.map((l) => l.map((p) => p.key));
-  assert.deepEqual(lists.filter((l, i) => i === 0 || l.join() !== lists[i - 1].join()), [["/b", "/k", "/x"], ["/b", "/y", "/k", "/x"]]);
+  assert.deepEqual(updates.map((l) => l.map((p) => p.key)), [["/b", "/k", "/x"], ["/b", "/y", "/k", "/x"]]);
   // In the end: the remembered dead project and /w's (by its known key) with their last good
   // files; /z (never keyed) is skipped.
   assert.deepEqual(found.map((p) => [p.machine, p.key, p.spaces]), [[null, "/b", ["s2"]], ["far", "/y", ["s3"]], ["dead", "/k", ["s5"]], ["dead", "/x", []]]);

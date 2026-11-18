@@ -1256,25 +1256,12 @@ dsh_tui_step() {
   printf '%s\n' "$dsh_out" | sed 's/^/  /'
 }
 # The login service that runs 'automagik-herdr revive --boot' (#939). The unit is the pack CLI's
-# ('automagik-herdr revive service install'); refresh its PATH (#1418), else decide whether to
-# ask. Linux only: on another OS nothing is asked and nothing is written.
+# ('automagik-herdr revive service install'); this step only decides whether to ask. Linux only:
+# on another OS nothing is asked and nothing is written.
 revive_step() {
   [ "$(uname -s)" = Linux ] || return 0
   [ "$REVIVE" = no ] && { say "Left the revive login service alone (--no-revive)."; return 0; }
   [ -x "$LINK" ] || return 0
-  case ":$PATH:" in *":$BIN_DIR:"*) revive_path=$PATH ;; *) revive_path=$PATH:$BIN_DIR ;; esac
-  if [ -f "$REVIVE_UNIT" ] \
-    && sed -n '1p' "$REVIVE_UNIT" 2>/dev/null | grep -q '^# Automagik Herdr: brings the bots back after a restart' \
-    && ! grep -q '^Environment="PATH=' "$REVIVE_UNIT"; then
-    revive_rc=0
-    revive_out=$(PATH=$revive_path "$LINK" revive service install <"/dev/null" 2>&1) || revive_rc=$?
-    if [ "$revive_rc" != 0 ]; then
-      say "Warning: the revive login service was not installed: $(printf '%s\n' "$revive_out" | sed -n '$p')"
-      return 0
-    fi
-    say "Refreshed the revive login service: it now keeps your PATH (#1418)."
-    return 0
-  fi
   if [ -f "$REVIVE_UNIT" ] && [ "$REVIVE" = ask ]; then return 0; fi
   if [ "$REVIVE" = ask ] && [ "$YES" = 1 ]; then
     say "Left the revive login service alone: --yes never changes what runs at login; 'automagik-herdr revive service install' or this installer with --revive adds it."
@@ -1285,7 +1272,7 @@ revive_step() {
     return 0
   fi
   revive_rc=0
-  revive_out=$(PATH=$revive_path "$LINK" revive service install <"/dev/null" 2>&1) || revive_rc=$?
+  revive_out=$("$LINK" revive service install <"/dev/null" 2>&1) || revive_rc=$?
   if [ "$revive_rc" != 0 ]; then
     say "Warning: the revive login service was not installed: $(printf '%s\n' "$revive_out" | sed -n '$p')"
     return 0

@@ -39,9 +39,6 @@ const server = createServer(async (req, res) => {
 const rowDark = used.flatMap(({ mark: [, dark] }) => dark ? [`/assets/brand/used/${dark}`] : [])
 let browser
 const reports = []
-const sampledCaptures = new Set()
-// Midpoint between the lightest dark capture (52) and the darkest light capture (211), on a 0–255 scale.
-const captureLightnessThreshold = 132
 // Layout shift, as the browser itself scores it (shifts right after a click or key do not
 // count). The observer is the test's; the pages' one script is the family drawer's.
 const watchShift = context => context.addInitScript(() => {
@@ -101,7 +98,7 @@ try {
       // App pictures: a dark page shows the dark capture of each view and a light page the
       // light one; the home's speech bubble stays off the app window; and the hero's capture is
       // shown near its real size (a 1100px window, or the 390px one on phone-width screens).
-      const layout = await page.evaluate(sampled => {
+      const layout = await page.evaluate(() => {
         const brokenWords = []
         for (const heading of document.querySelectorAll('h1, h2, h3')) {
           if (!heading.getClientRects().length) continue
@@ -119,28 +116,7 @@ try {
         const film = document.querySelector('[data-film] img')
         // The drawer's pictures are the family piece's own markup: its stylesheet sets their height, and the drawer is out of the page's flow.
         const unsized = [...document.querySelectorAll('img')].filter(image => !image.getAttribute('width') || !image.getAttribute('height')).map(image => image.src || image.dataset.src)
-        const sampledSources = new Set(sampled)
-        const captures = []
-        const themed = [...document.querySelectorAll('picture')].filter(picture => picture.querySelector('source[media*="prefers-color-scheme: dark"]')).map(picture => {
-          const image = picture.querySelector('img')
-          const source = image.currentSrc.replace(location.origin, '')
-          if (/^\/assets\/(?:art\/[^/]+\.webp|screens\/[^/]+\.png)$/.test(source) && !sampledSources.has(source)) {
-            const canvas = document.createElement('canvas')
-            canvas.width = canvas.height = 16
-            const ctx = canvas.getContext('2d')
-            ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
-            const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data
-            let sum = 0, weight = 0
-            for (let i = 0; i < pixels.length; i += 4) {
-              const alpha = pixels[i + 3] / 255
-              sum += alpha * (0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2])
-              weight += alpha
-            }
-            captures.push({ source, lightness: sum / weight })
-            sampledSources.add(source)
-          }
-          return source
-        })
+        const themed = [...document.querySelectorAll('picture')].filter(picture => picture.querySelector('source[media*="prefers-color-scheme: dark"]')).map(picture => picture.querySelector('img').currentSrc.replace(location.origin, ''))
         const box = selector => { const node = document.querySelector(selector); return node ? node.getBoundingClientRect().toJSON() : null }
         // The Open Intelligence tag in the footer: its size, its colour, where it sits in the
         // footer's last row, what its link holds, and the logo it sits with.
@@ -153,8 +129,8 @@ try {
           holds: [...tagLink.childNodes].map(node => node.nodeName), href: tagLink.href, words: tagLink.querySelector('text').textContent,
           font: document.fonts.check('600 18px "IBM Plex Mono"'), logo: document.querySelector('.footer-brand .brand img').getBoundingClientRect().width,
         }
-        return { tag, brokenWords, unsized, film: film ? area(film) : 0, largest: Math.max(0, ...shown.filter(image => !image.closest('[data-film]')).map(area)), themed, captures, bubble: box('.bubble'), heroWindow: box('.scene-window img') }
-      }, [...sampledCaptures])
+        return { tag, brokenWords, unsized, film: film ? area(film) : 0, largest: Math.max(0, ...shown.filter(image => !image.closest('[data-film]')).map(area)), themed, bubble: box('.bubble'), heroWindow: box('.scene-window img') }
+      })
       await page.keyboard.press('Tab')
       const focus = await page.evaluate(() => ({ skip: document.activeElement?.classList.contains('skip'), outline: getComputedStyle(document.activeElement).outlineStyle }))
       await page.keyboard.press('Tab')
@@ -167,10 +143,6 @@ try {
       assert.ok(width > 700 ? layout.tag.right === 0 && layout.tag.beside : layout.tag.left === 0 && layout.tag.under, `The tag ends the footer's last row on a wide screen and sits under it, at the left, on a phone: ${label} ${JSON.stringify(layout.tag)}`)
       assert.ok(layout.tag.logo * 1325 / 1632.34 >= layout.tag.width, `The tag is never bigger than the logo's word: ${label} ${layout.tag.logo}`)
       assert.deepEqual(layout.themed.filter(source => (/(?:-dark(?:-2x)?\.webp|\/automagik-lockup-oi-cream\.svg|\/automagik-lockup-three-colours-cream(?:-header)?\.svg|\/(?:genie-lamp|omni-mark|mykes-clean)(?:-lockup)?-cream(?:-32|-header)?\.svg)$/.test(source) || rowDark.some(file => source.endsWith(file))) !== (colorScheme === 'dark')), [], `App pictures follow the theme: ${label}`)
-      for (const { source, lightness } of layout.captures) {
-        assert.ok(colorScheme === 'dark' ? lightness < captureLightnessThreshold : lightness > captureLightnessThreshold, `App capture lightness follows the theme: ${label} ${source} measured ${lightness.toFixed(1)} (threshold ${captureLightnessThreshold})`)
-        sampledCaptures.add(source)
-      }
       if (route === '/') {
         assert.ok(layout.themed.length >= 4, `The home's app pictures have dark captures: ${label}`)
         assert.ok(layout.bubble.bottom <= layout.heroWindow.top && layout.bubble.left >= 0 && layout.bubble.right <= width, `The speech bubble stays off the app window: ${label} ${JSON.stringify([layout.bubble, layout.heroWindow])}`)

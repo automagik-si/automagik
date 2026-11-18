@@ -96,19 +96,11 @@ func (r *Runner) Run(a config.Automation, trigger history.Trigger) error {
 	r.record(id, a.Name, trigger, history.StatusRunning, session, "")
 
 	timeout := time.Duration(a.TimeoutMinutes) * time.Minute
-	err = r.host.Do(session, a, timeout)
-	note := ""
-	if noter, ok := r.host.(host.Noter); ok {
-		note = noter.Note(session)
-	}
-	if err != nil {
+	if err := r.host.Do(session, a, timeout); err != nil {
 		r.record(id, a.Name, trigger, statusFor(err), session, err.Error())
 		return err
 	}
-	r.write(history.Record{
-		RunID: id, Automation: a.Name, Trigger: trigger, Status: history.StatusDone, At: time.Now(),
-		Session: session.HerdrSession, WorkspaceID: session.WorkspaceID, PaneID: session.PaneID, Result: note,
-	}, "")
+	r.record(id, a.Name, trigger, history.StatusDone, session, "")
 	// After the record: closing is also how a person cancels a run.
 	if a.CloseWorkspace == config.CloseOnSuccess {
 		if err := r.host.Close(session, a); err != nil {

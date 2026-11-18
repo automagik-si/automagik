@@ -1139,25 +1139,3 @@ test('every public page forbids internal delivery and product-team jargon, inclu
   const response = await onRequest({ request: new Request('https://automagik.si/api/waitlist'), env: {} })
   assert.doesNotMatch(await response.text(), forbidden, '/api/waitlist')
 })
-
-// The default companion is Pirlim (#1442): the capture scripts hatch it for the next regeneration.
-// Read as text: importing them would start the capture runtime or browsers.
-test('the capture scripts name the companion Pirlim and hold no Pip word', () => {
-  for (const file of ['capture.mjs', 'scripted-model.mjs', 'theme.mjs']) {
-    const source = read(`capture/${file}`)
-    assert.match(source, /\bPirlim\b/, file)
-    assert.doesNotMatch(source, /\bPip\b/, file)
-  }
-  const capture = read('capture/capture.mjs')
-  assert.match(capture, /name: 'Pirlim', exact: true/)
-  assert.match(capture, /name: 'Hatch Pirlim'/)
-  assert.match(capture, /getByText\('Pirlim leads\. Who comes along\?'\)/)
-  assert.match(capture, /keepWorkspace\('Pirlim'\)/)
-  assert.match(capture, /name: 'Pirlim, Orchestrator, Main Bot'/)
-  const model = read('capture/scripted-model.mjs')
-  assert.ok(model.includes("Hi, I\\'m Pirlim!"))
-  assert.match(model, /who === 'Pirlim'/)
-  const theme = read('capture/theme.mjs')
-  assert.match(theme, /api\('update-bot', \{ id: main\.id, name: 'Pirlim'/)
-  assert.match(theme, /scenario: 'Fictional Pirlim, Rowan and Sage/)
-})

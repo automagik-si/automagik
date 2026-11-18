@@ -436,17 +436,3 @@ test('set-bot-auto accepts a Codex Bot with a deny list', async t => {
   assert.equal(diskOf(w).bots.m1.permissionAuto, 'acp-codex')
   assert.deepEqual(diskOf(w).bots.m1.denyTools, ['bash'])
 })
-test('Auto: a report group (#1294) leaves the mark as the same start without it', async t => {
-  const w = await enabled(t); const id = w.rt.chatOf('m1')
-  const start = (sessionId, extra = {}) => inCall(w, sessionId, 'start_task', () => w.rt.startTask({ title: 'x', text: 'Do x', from: 'm1', ...extra }))
-  for (const sessionId of [id, 'g1']) {
-    const plain = await start(sessionId)
-    const reported = await start(sessionId, { reportRoomId: 'r1' })
-    await w.settle()
-    assert.equal(w.rt.state.tasks[reported].reportRoomId, 'r1')
-    assert.equal(w.rt.state.tasks[reported].auto, w.rt.state.tasks[plain].auto, sessionId)
-    assert.equal(w.rt.state.tasks[reported].autoRev, w.rt.state.tasks[plain].autoRev, sessionId)
-    assert.equal(w.answer(reported), w.answer(plain), sessionId)
-  }
-  assert.equal(w.rt.state.tasks[Object.keys(w.rt.state.tasks).find(key => w.rt.state.tasks[key].reportRoomId && !w.rt.state.tasks[key].levelRoomId)].auto, 'acp-codex')
-})

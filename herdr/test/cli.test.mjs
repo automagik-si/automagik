@@ -1,4 +1,3 @@
-import { startFakeCore } from "./fake-core.mjs";
 // automagik-herdr, the command line (A11): every subcommand run as a program against scratch git
 // projects under $TMPDIR, with a fake `hc` first on PATH (test/fake-hc.mjs) that records
 // each call and answers from a state file, and a fake `herdr-app` (test/fake-herdr-app.mjs; no
@@ -129,17 +128,12 @@ function scene(t, { terminals = [], briefing = true, amPart = false, window = { 
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog, AUTOMAGIK_HERDR_TAB_WAIT_MS: "300", AGY_FAKE_LOG: agyLog, GIT_CEILING_DIRECTORIES: root };
   delete env.HC_TERMINAL_ID;
-  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
-  Object.assign(env, { ...core.env });
-  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   delete env.HERMES_HOME; // a runner's own hermes home must not decide the hermes tests
   const cli = (args, { cwd = project, input, env: extra = {} } = {}) => {
-    core.control({ ...env, ...extra });
     const r = spawnSync(RUNTIME, [CLI, ...args], { cwd, env: { ...env, ...extra }, input, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   const cliAsync = (args, { env: extra = {} } = {}) => new Promise((resolve) => {
-    core.control({ ...env, ...extra });
     execFile(RUNTIME, [CLI, ...args], { cwd: project, env: { ...env, ...extra }, encoding: "utf8" }, (e, out, err) => resolve({ code: e ? e.code : 0, out, err }));
   });
   const calls = () => readJsonLines(logPath);
@@ -5113,47 +5107,4 @@ test("#805 a busy parent's doomed helpers still refuse before queueing", (t) => 
   assert.equal(r.code, 1);
   assert.equal(r.json().refused, "helpers");
   assert.equal(runCall(s.calls()), undefined);
-});
-
-test("#1415 create records a Claude Fable 5.2 pin with an absent or differing default", (t) => {
-  for (const model of [null, "claude-opus-5-5"]) {
-    const s = scene(t);
-    const settings = join(s.home, ".claude/settings.json");
-    if (model === null) rmSync(settings);
-    else writeFileSync(settings, JSON.stringify({ model }));
-    const made = s.cli(["create", "--name", "Primary", "--agent", "claude", "--model", "claude-fable-5-2", "--json"]);
-    assert.equal(made.code, 0, made.err);
-    const saved = s.bots().bots.find((b) => b.id === made.json().id);
-    assert.equal(saved.agent, "claude");
-    assert.equal(saved.model, "claude-fable-5-2");
-  }
-});
-
-test("#1415 edit records Claude's 1M-context Fable pin with an absent or differing default", (t) => {
-  for (const model of [null, "claude-opus-5-5"]) {
-    const s = scene(t);
-    s.seed(team({ bots: [bot(ID.main, "main", { name: "Primary" })] }));
-    const settings = join(s.home, ".claude/settings.json");
-    if (model === null) rmSync(settings);
-    else writeFileSync(settings, JSON.stringify({ model }));
-    const edited = s.cli(["edit", ID.main, "--model", "claude-fable-5-2[1m]"]);
-    assert.equal(edited.code, 0, edited.err);
-    assert.equal(s.bots().bots.find((b) => b.id === ID.main).model, "claude-fable-5-2[1m]");
-  }
-});
-
-test("#1415 --worker-model accepts Claude Fable 5.2 with an explicit worker agent", (t) => {
-  const s = scene(t);
-  s.seed(team({ bots: [bot(ID.main, "main", { name: "Primary" })] }));
-  const edited = s.cli(["edit", "Primary", "--worker-agent", "claude-code", "--worker-model", "claude-fable-5-2", "--worker-effort", "high"]);
-  assert.equal(edited.code, 0, edited.err);
-  assert.deepEqual(s.bots().bots[0].worker, { agent: "claude", model: "claude-fable-5-2", effort: "high" });
-});
-
-test("#1415 an unknown Claude model is refused with Fable 5.2 in the choices", (t) => {
-  const s = scene(t);
-  const refused = s.cli(["create", "--name", "Primary", "--agent", "claude", "--model", "not-a-model"]);
-  assert.equal(refused.code, 1, refused.err);
-  assert.match(refused.err, /isn't a known claude model\. Pick one of: .*claude-fable-5-2(?:,|\.)/);
-  assert.equal(existsSync(s.botsPath), false, "nothing written");
 });

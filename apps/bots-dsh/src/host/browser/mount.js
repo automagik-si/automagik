@@ -133,9 +133,7 @@ export function mountBrowserPlugin(ctx, {
     return next()
   }, { prepend: true })
   const unsubscribeHolds = subscribeHolds?.((botId, hold) => {
-    // A hold from the app panel drives this very browser, so its page must stay; the webview
-    // takeover (no `panel` marker) hands the page to the window instead, and closes it here.
-    if (hold?.by !== 'user' || hold.panel === true) return
+    if (hold?.by !== 'user') return
     const session = sessions.get(botId)
     if (!session) return
     sessions.delete(botId)
@@ -217,59 +215,10 @@ export function mountBrowserPlugin(ctx, {
     }))
   }
 
-  // The person's panel opens a Bot's browser on demand, exactly as the Bot's own first
-  // browser tool call does (same profile, roots, hold hooks and saved tabs).
-  async function ensureSession(botId) {
-    const existing = sessions.get(botId)
-    if (existing !== undefined) return existing
-    const opening = Promise.resolve().then(async () => {
-      const roots = downloadRoots ? await downloadRoots(botId) : undefined
-      return openSession({
-        botId,
-        profileRoot,
-        downloadDir: roots === undefined
-          ? join(downloadRoot ?? join(profileRoot, 'browser-downloads'), botId)
-          : async () => (await downloadRoots(botId))[0],
-        headless,
-        playwrightUrl,
-        executablePath,
-        actionTimeout,
-        connect: connect ? id => connect(id, roots ?? []) : undefined,
-        getHold: () => getHold?.(botId),
-        onHold: hold => onHold?.(botId, hold),
-        uploadRoots: uploadRoots ? () => uploadRoots(botId) : undefined,
-        onTabs: tabs => savedTabs.set(botId, tabs),
-        addressPolicy,
-      })
-    })
-    sessions.set(botId, opening)
-    const forget = () => { if (sessions.get(botId) === opening) sessions.delete(botId) }
-    opening.then(opened => opened.onClosed?.(forget), forget)
-    return opening
-  }
-
   // An object return would be collected as an effect by cordis, so the api is an out-param.
   if (api) {
     api.drop = drop
     api.savedTabs = savedTabsOf
     api.frame = async botId => (await sessions.get(botId))?.frame?.()
-    api.control = async (botId, action, args = {}) => {
-      // Reading never launches a browser; any action of the person's does, so the panel can
-      // open the first page of a Bot that has not browsed yet.
-      const session = action === 'state' ? await sessions.get(botId) : await ensureSession(botId)
-      if (session === undefined) return undefined
-      switch (action) {
-        case 'state': return session.state()
-        case 'navigate': return session.open(String(args.url ?? ''))
-        case 'back': return session.back()
-        case 'forward': return session.forward()
-        case 'reload': return session.reload()
-        case 'click': return session.clickAt(args.x, args.y)
-        case 'type': return session.typeText(args.text)
-        case 'key': return session.pressKey(args.key)
-        case 'wheel': return session.wheel(args.dy)
-        default: throw Object.assign(new Error(`Unknown browser action ${action}`), { code: 'bot/invalid' })
-      }
-    }
   }
 }

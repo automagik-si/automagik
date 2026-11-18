@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { appHome, automagikHome, preloadOf } from '../src/dsh.js'
-import { DATA_NAME, dataPathsOf, PRODUCT, setDataPaths } from '../src/identity.js'
+import { DATA_NAME, dataPathsOf, PRODUCT } from '../src/identity.js'
 
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')
 const builder = read('electron-builder.yml')
@@ -50,54 +50,18 @@ test("Electron's data is filed under Automagik, on every platform", () => {
   for (const appData of ['/Users/me/Library/Application Support', '/home/me/.config', 'C:\\Users\\me\\AppData\\Roaming']) {
     const folder = join(appData, 'Automagik')
     assert.deepEqual(dataPathsOf(appData), { userData: folder, sessionData: folder })
-    // The launch setting blank is no setting: the same folder, and no appData override.
-    assert.deepEqual(dataPathsOf(appData, '  '), { userData: folder, sessionData: folder })
   }
-})
-
-test('AUTOMAGIK_USER_DATA moves the window data, its sessions and the lock to the team folder', (t) => {
-  const root = mkdtempSync(join(tmpdir(), 'automagik-team-'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
-  const team = join(root, 'clean', 'home')
-  const personal = dataPathsOf('/Users/me/Library/Application Support')
-  // appData as the person's app has it; the team's launch sets all three paths, making the folder
-  // first because Electron's setPath refuses one that is not there.
-  const set = []
-  const app = {
-    paths: { appData: '/Users/me/Library/Application Support' },
-    getPath(name) { return this.paths[name] },
-    setPath(name, path) {
-      assert.ok(existsSync(path), `${name} is made before setPath`)
-      this.paths[name] = path
-      set.push([name, path])
-    },
-  }
-  const paths = setDataPaths(app, team)
-  assert.deepEqual(paths, { appData: team, userData: team, sessionData: team })
-  assert.deepEqual(set, [['appData', team], ['userData', team], ['sessionData', team]])
-  // Electron keeps the single-instance lock in userData: the team's copy asks for a lock of its
-  // own and starts beside the person's window, instead of handing off to it.
-  const locks = new Map([[personal.userData, 'the person']])
-  const instance = (data) => {
-    if (locks.has(data.userData)) return locks.get(data.userData)
-    locks.set(data.userData, 'the team')
-    return null
-  }
-  assert.equal(instance(personal), 'the person')
-  assert.equal(instance(paths), null)
-  // A second copy of the team's home is the team's own instance, not the person's.
-  assert.equal(instance(paths), 'the team')
 })
 
 test('main.js pins that folder before anything reads it', () => {
   const main = read('src/main.js')
-  const pin = main.indexOf('setDataPaths(app, process.env.AUTOMAGIK_USER_DATA)')
-  assert.ok(pin > 0, 'main.js pins the window data from the launch setting')
+  const pin = main.indexOf("dataPathsOf(app.getPath('appData'))")
+  assert.ok(pin > 0, 'main.js pins userData')
   // The single-instance lock lives in userData; the paths derived from it are read after.
   for (const later of ['requestSingleInstanceLock()', 'whenReady()', 'appHome()']) {
     assert.ok(pin < main.indexOf(later), `the pin comes before ${later}`)
   }
-  assert.doesNotMatch(main.slice(0, pin), /app\.getPath\('(userData|sessionData|appData)'\)/)
+  assert.doesNotMatch(main.slice(0, pin), /app\.getPath\('(userData|sessionData)'\)/)
 })
 
 test("the app's own home and the preload the CLIs write are in Automagik's home", (t) => {

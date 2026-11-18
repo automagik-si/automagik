@@ -90,9 +90,6 @@ export function install(rt) {
   const runningOf = (bot) => {
     try {
       if (rt.hostOwned?.(bot)) return {}
-      // A pick names the model before the Session takes it. This reading would show a switch
-      // the person did not see the chat make (#1319).
-      if (rt.pickingModel?.(bot.id) || rt.switchingChat?.(bot.id)) return {}
       const sessionId = rt.chatOf(bot.id)
       const agent = ctx.get?.('agents')?.get?.(sessionId)
       let selection
@@ -615,9 +612,7 @@ export function install(rt) {
         }
         case 'create-bot': {
           await rt.bootstrap()
-          // `private` and `shell` are the user's own create fields (no acting Bot here):
-          // a Bot created private starts without a shell unless `shell` says otherwise.
-          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell })
+          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId })
           return ok(bot)
         }
         case 'set-bot-auto':
@@ -993,42 +988,6 @@ export function install(rt) {
           return ok(privacy.view())
         case 'privacy-set':
           return ok(privacy.set(String(body.share ?? ''), body.on === true))
-        case 'browser-state': {
-          if (rt.browserControl === undefined) return fail('Bot browsers are off on this host', 'bot/browser-off')
-          await rt.load()
-          const botId = String(body.botId ?? '')
-          const state = await rt.browserControl(botId, 'state')
-          if (state === undefined) return fail('This Bot has no open browser', 'bot/not-found')
-          const hold = rt.browserChannel?.holdOf(botId) ?? null
-          return ok({ ...state, hold: hold === null ? null : { by: hold.by, note: hold.note } })
-        }
-        // The person driving the page from the app panel: every action of theirs holds the
-        // browser, so the Bot's own browser tools wait until it is given back.
-        case 'browser-control': {
-          if (rt.browserControl === undefined) return fail('Bot browsers are off on this host', 'bot/browser-off')
-          await rt.load()
-          const botId = String(body.botId ?? '')
-          if (!rt.botOf(botId)) return fail('Unknown Bot', 'bot/not-found')
-          const action = String(body.action ?? '')
-          const args = body.args && typeof body.args === 'object' ? body.args : {}
-          // The session refuses an action while a user hold is on (the Bot must wait), so the
-          // person's own action takes the hold off for its duration and puts it back after:
-          // the Bot never sees a window to act between their actions.
-          const previous = rt.browserChannel?.holdOf(botId) ?? null
-          if (rt.browserChannel !== undefined) rt.browserChannel.setHold(botId, null)
-          let value
-          try {
-            value = await rt.browserControl(botId, action, args)
-          } finally {
-            if (rt.browserChannel !== undefined) {
-              rt.browserChannel.setHold(botId, previous !== null && previous.by === 'user'
-                ? previous
-                : { by: 'user', reason: 'takeover', note: 'The user is controlling this browser.', panel: true })
-            }
-          }
-          if (value === undefined) return fail('This Bot has no open browser', 'bot/not-found')
-          return ok({ action, value })
-        }
         case 'browser-takeover': {
           if (rt.browserChannel === undefined) return fail('Bot browsers are off on this host', 'bot/browser-off')
           await rt.load()

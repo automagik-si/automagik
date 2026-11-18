@@ -377,18 +377,3 @@ test("Antigravity #840: default read-only shell tools in writer and read-only --
     assert.equal(perms.allow.some((r) => r.startsWith("write_file(")), false);
   }
 });
-
-test("#1415 Claude lists both Fable 5.2 forms and the older pin without relying on its default", () => {
-  for (const models of [
-    knownModelsFrom("claude"),
-    knownModelsFrom("claude", { claudeSettings: JSON.stringify({ model: "claude-opus-5-5" }) }),
-  ]) {
-    for (const id of ["claude-fable-5-2", "claude-fable-5-2[1m]", "claude-fable-5-1"]) {
-      assert.ok(models.includes(id), `${id} is offered with an absent or differing default`);
-    }
-  }
-});
-
-test("#1415 Claude's 1M-context Fable id is passed unchanged in modelArgs", () => {
-  assert.deepEqual(modelArgs("claude", "claude-fable-5-2[1m]"), ["--model", "claude-fable-5-2[1m]"]);
-});

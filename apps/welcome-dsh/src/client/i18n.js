@@ -347,6 +347,7 @@ export const PT_BR = {
   'Telegram bot': 'Bot do Telegram',
   'Telegram': 'Telegram',
   'Move its Telegram bot to Omni, with the bot you already know.': 'Mova o bot do Telegram do Hermes para o Omni, com o bot que você já conhece.',
+  'We are still mapping how it keeps its bot.': 'Ainda estamos mapeando como essa ferramenta guarda o bot.',
   'Coming soon': 'Em breve',
   '{name}: coming soon': '{name}: em breve',
   'Move {name} to Omni': 'Mover {name} para o Omni',

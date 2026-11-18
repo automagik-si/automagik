@@ -19,6 +19,3 @@ apps/desktop/dist/
 # agents work in live under .claude too, and are never committed.
 /.claude/*
 !/.claude/skills/
-
-# The shared full-gate lock of capped runs (RFC 0014's registry under .automagik/bots/ stays).
-/.automagik/locks/

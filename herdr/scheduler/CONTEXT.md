@@ -39,9 +39,7 @@ model. Its exit status is the run's status.
 
 **Result line** — a command run in one line: the last line of its stdout when
 it exited 0, else the failure and the last line of its stderr. What history
-keeps, the panel shows and `notify:` sends. An agent run's `done` may carry a
-late-start note in the same field, shown in history and the panel. That note
-is not sent to a bot.
+keeps, the panel shows and `notify:` sends.
 
 **Report** — the result line sent to the bot `notify:` names, through
 `hc send`. Never "notification": that word is the toast a failure raises.

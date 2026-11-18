@@ -31,7 +31,7 @@ function turn(messages) {
 // Summary requests (handoff notes, checkpoints, compaction) get a plain short answer.
 const SUMMARY = ['You are now writing a handoff note', 'You are now writing a checkpoint', 'You are now acting as a compaction engine']
 
-// The person's request, as Pirlim passes it on and as Genie grants it.
+// The person's request, as Pip passes it on and as Genie grants it.
 export const REQUEST = 'Customers keep asking for their Northwind orders as a spreadsheet. Can Genie add a CSV export to the orders report?'
 export const WISH = {
   title: 'CSV export',
@@ -77,8 +77,8 @@ function identity(system) {
   return /You are ([^,\n]+), a Bot on the user's team/.exec(system)?.[1]
 }
 
-function pirlim({ asked, calls, results }) {
-  if (asked.startsWith('[Bot team setup]')) return [text('Hi, I\'m Pirlim! I run your team: Genie takes the project work, and whoever you add next takes the rest. Come to me for anything that needs a decision.\n\nWhat should the team start on?')]
+function pip({ asked, calls, results }) {
+  if (asked.startsWith('[Bot team setup]')) return [text('Hi, I\'m Pip! I run your team: Genie takes the project work, and whoever you add next takes the rest. Come to me for anything that needs a decision.\n\nWhat should the team start on?')]
   if (asked.includes('Can Genie add a CSV export')) {
     if (calls.length === 0) return [text('Good one for Genie. Passing it on.'), tool('message_bot', { to: 'Genie', message: `From the user: ${REQUEST} Grant it as a wish in Northwind and tell me when it is running.`, reply_to: 'me' })]
     return [text('Asked Genie. It works in its own copy of Northwind, so nothing changes in your project until you merge. I\'ll tell you when the wish is running.')]
@@ -123,7 +123,7 @@ function decide(body) {
   if (SUMMARY.some(prompt => lastText.includes(prompt))) return [text('## Summary\nNorthwind: the CSV export wish was granted and reported.')]
   const state = turn(messages)
   const who = identity(system)
-  if (who === 'Pirlim') return pirlim(state)
+  if (who === 'Pip') return pip(state)
   if (who === 'Genie') return genie(state)
   if (state.asked.includes('toCsv(orders)') || messages.some(message => textOf(message.content).includes('toCsv(orders)') && message.role === 'user')) return wishThread(tools, state)
   // Titles and anything else unscripted.

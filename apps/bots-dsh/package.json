@@ -1,6 +1,6 @@
 {
   "name": "@automagik/bots-dsh",
-  "version": "3.154.9",
+  "version": "3.149.2",
   "description": "Omni for DeepSeek Harness: a team of long-lived Bots with Omni as the Main Bot; its channels and canvases come with @automagik/omni-channels-dsh and @automagik/omni-canvas-dsh",
   "keywords": [
     "dsh-plugin",
@@ -34,7 +34,6 @@
     "src/host/",
     "src/shared/",
     "src/office/",
-    "scripts/seed-registry.mjs",
     "client.js",
     "client.pane.js",
     "office.js",
@@ -47,7 +46,7 @@
   ],
   "scripts": {
     "build": "node scripts/build-client.mjs && node scripts/build-script-child.mjs",
-    "test": "node ../../scripts/test-guard.mjs --import ./test/harness-resolve.mjs --test --test-timeout=120000 \"test/*.test.js\" \"src/host/live-chat/*.test.mjs\"",
+    "test": "node ../../scripts/test-guard.mjs --import ./test/harness-resolve.mjs --test --test-timeout=120000 --test-concurrency=2 \"test/*.test.js\" \"src/host/live-chat/*.test.mjs\"",
     "lint": "node scripts/lint.mjs",
     "harness": "bun install --cwd dev/harness --no-save --no-summary",
     "check": "sh dev/check.sh",

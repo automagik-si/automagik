@@ -28,10 +28,6 @@ extraResources:
   # and its two local modules, copied by prepare-runtime. Never a second copy in the repository.
   - from: build/dsh-tui
     to: dsh-tui
-  # The launcher that binds dsh's plugin operations to the bundled pnpm (src/dsh-launch.cjs).
-  # It runs as Node, so it stays outside the asar.
-  - from: build/dsh-launch
-    to: dsh-launch
 asar: true
 # automagik:// and omni:// links (src/deeplink.js) open this app: automagik:// is Automagik's
 # own (Herdr's Work button, RFC 0013), omni:// stays as its alias, and an Omni's "Open in the

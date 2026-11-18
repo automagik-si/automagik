@@ -132,9 +132,6 @@ export class AgentRun {
     this.queue = []
     this.waiters = []
     this.tools = new Map()
-    // Told of each question stored for a call (onPermission): a mirror body that waits on
-    // another call hears of it (tool.js, native-tools mode: a subagent's nested calls).
-    this.askListeners = new Set()
     this.turn = new Set()
     this.retired = new Set()
     this.didIgnore = false
@@ -846,7 +843,6 @@ export class AgentRun {
       if (signal?.aborted) return withdraw()
       signal?.addEventListener('abort', withdraw, { once: true })
       for (const listener of tool.listeners) listener()
-      for (const listener of this.askListeners) listener(tool)
     })
   }
 }

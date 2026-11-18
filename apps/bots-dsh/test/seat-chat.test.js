@@ -77,19 +77,6 @@ test('the listing joins the registry to this computer\'s terminals, never anothe
   assert.equal(seats[1].project, null)
 })
 
-test('a finished terminal is not a live seat pane', async (t) => {
-  const fixture = homeWith({ bots: [{ id: ONE, name: 'Orchestrator One' }] })
-  t.after(fixture.stop)
-  const { chat, stop } = seatChat(fixture.home, {
-    registryPath: fixture.registryPath,
-    terminals: [{ ...terminal('t1', ONE), state: 'finished' }],
-  })
-  t.after(stop)
-  const seats = await chat.list()
-  assert.deepEqual(seats.map(seat => [seat.id, seat.terminal, seat.status]), [[ONE, null, 'off']])
-  await assert.rejects(() => chat.open('win-1', 't1'), /not a seat/)
-})
-
 test('a seat opens as its transcript rows, read only, and a remote or unknown terminal is refused', async (t) => {
   const fixture = homeWith({ bots: [{ id: ONE, name: 'Orchestrator One' }] })
   t.after(fixture.stop)
@@ -274,15 +261,6 @@ test('the endpoints are reads, served for the window and never as a tool', () =>
   assert.equal(rt.teamTools, undefined, 'no tool is registered')
   disposed()
   assert.equal(registered.size, 0)
-})
-
-test('the seat Terminal adds no endpoint: it opens the Code side the app already serves', () => {
-  assert.deepEqual([...SEAT_ENDPOINTS].sort(), ['seat-chat-close', 'seat-chat-list', 'seat-chat-open', 'seat-chat-read'])
-  const client = readFileSync(join(HERE, '..', 'src', 'client', 'seat-chat.js'), 'utf8')
-  assert.match(client, /from '\.\/code-side\.js'/, 'the seat reuses the Code side, never a second store')
-  assert.doesNotMatch(client, /seat-chat-(?:terminal|tree|stream)|code\/stream/, 'the seat names no route of its own')
-  const host = readFileSync(join(HERE, '..', 'src', 'host', 'seat-chat.js'), 'utf8')
-  assert.doesNotMatch(host, /code\/stream|code-tree/, 'the seat host serves no Code route')
 })
 
 test('a host with no herdr-core spawns no engine and lists no seat', () => {

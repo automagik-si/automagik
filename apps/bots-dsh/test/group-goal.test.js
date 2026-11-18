@@ -682,7 +682,7 @@ test('a room on its second part relays on the current Session and blocks /goal t
   host.emit('r1p2', 'goal/change', { goal: { phase: 'active' } })
   await settle(() => blocked.length === 1)
   assert.equal(blocked[0].sessionId, 'r1p2')
-  assert.equal(blocked[0].reason.message, "A group Session does not run /goal: set the group's goal with Set a goal in its + menu, or with the group_goal tool.")
+  assert.equal(blocked[0].reason.message, 'Bot chats do not run /goal. To give a group a goal, use Set a goal in its + menu.')
 })
 
 test('a member still working at round end wakes the admin when its work settles', async (t) => {

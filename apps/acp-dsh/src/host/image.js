@@ -42,7 +42,7 @@ import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { AgentRun } from './acp.js'
 import { batchSafe } from './batch-spawn.js'
 import { isAuthRequired } from './names.js'
@@ -210,45 +210,6 @@ export function checkProfile(resolved, { scratch, codexHome }) {
     else return false
   }
   return root === 1 && work === 1 && arg0 <= 1
-}
-
-/** Local config layers and project markers that can affect the scratch session. */
-export function codexConfigSources({ codexHome, scratch, platform = process.platform }) {
-  const sources = [{ path: join(codexHome, 'config.toml'), kind: 'required' }]
-  if (platform === 'win32') return sources
-  for (const name of ['config.toml', 'managed_config.toml', 'requirements.toml']) {
-    sources.push({ path: join('/etc/codex', name), kind: 'file' })
-  }
-  for (let ancestor = dirname(resolve(scratch));;) {
-    sources.push({ path: join(ancestor, '.codex', 'config.toml'), kind: 'file' })
-    sources.push({ path: join(ancestor, '.git'), kind: 'marker' })
-    const parent = dirname(ancestor)
-    if (parent === ancestor) break
-    ancestor = parent
-  }
-  return sources
-}
-
-/** Hash each source's path and state. An unreadable layer makes the profile unavailable. */
-export function configFingerprint(sources, { read = readFileSync, stat = lstatSync } = {}) {
-  const hash = createHash('sha256')
-  for (const { path, kind } of sources) {
-    let state, bytes
-    try {
-      if (kind === 'marker') {
-        state = stat(path, { throwIfNoEntry: false }) === undefined ? 'absent' : 'present'
-      } else {
-        bytes = read(path)
-        state = 'bytes'
-      }
-    } catch (error) {
-      if (kind === 'required' || !['ENOENT', 'ENOTDIR'].includes(error.code)) return undefined
-      state = 'absent'
-    }
-    hash.update(JSON.stringify([path, kind, state, bytes?.length]))
-    if (bytes !== undefined) hash.update(bytes)
-  }
-  return hash.digest('hex')
 }
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47])
@@ -732,40 +693,21 @@ const CHECK_TEXT = {
  * may throw when its connector is not installed yet. Resolves { base64, mimeType }; rejects with
  * an `imageRefusal` (signed out, usage limit, timeout, stopped, failed, refused, unavailable).
  * `log` is told, in one line with no private content, why a check stopped the draw.
- * @param {{
- *   spawn: () => { command: string, args?: string[], env?: Record<string, string> },
- *   prompt: string, size?: string, quality?: string, background?: string,
- *   input?: { data: Uint8Array, mimeType: string }, signal?: AbortSignal,
- *   timeoutMs?: number, checkTimeoutMs?: number, name?: string,
- *   scratch?: () => Promise<string>, Run?: typeof AgentRun,
- *   listServers?: typeof mcpServerNames, configSources?: typeof codexConfigSources,
- *   log?: (line: string) => void
- * }} request
+ * @param {{ spawn: () => { command: string, args?: string[], env?: Record<string, string> }, prompt: string, size?: string, quality?: string, background?: string, input?: { data: Uint8Array, mimeType: string }, signal?: AbortSignal, timeoutMs?: number, checkTimeoutMs?: number, name?: string, scratch?: () => Promise<string>, Run?: typeof AgentRun, listServers?: typeof mcpServerNames, log?: (line: string) => void }} request
  */
-export async function drawImage({
-  spawn, prompt, size, quality, background, signal, timeoutMs = IMAGE_TIMEOUT_MS,
-  checkTimeoutMs = MCP_LIST_TIMEOUT_MS, name = 'Codex',
-  scratch = async () => realpath(await mkdtemp(join(tmpdir(), 'automagik-image-'))),
-  Run = ImageRun, listServers = mcpServerNames, configSources = codexConfigSources, log, input,
-}) {
+export async function drawImage({ spawn, prompt, size, quality, background, signal, timeoutMs = IMAGE_TIMEOUT_MS, checkTimeoutMs = MCP_LIST_TIMEOUT_MS, name = 'Codex', scratch = async () => realpath(await mkdtemp(join(tmpdir(), 'automagik-image-'))), Run = ImageRun, listServers = mcpServerNames, log, input }) {
   if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
   // The draw holds the event loop from start to cleanup: the run lets go of it once a turn ends,
   // and its close and cancel guards must not be cut short by a process with nothing else alive.
   const keepAlive = setInterval(() => {}, 1 << 30)
   try {
-    return await draw({
-      spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs,
-      name, scratch, Run, listServers, configSources, log, input,
-    })
+    return await draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log, input })
   } finally {
     clearInterval(keepAlive)
   }
 }
 
-async function draw({
-  spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs,
-  name, scratch, Run, listServers, configSources, log, input,
-}) {
+async function draw({ spawn, prompt, size, quality, background, signal, timeoutMs, checkTimeoutMs, name, scratch, Run, listServers, log, input }) {
   let launch
   try {
     launch = spawn()
@@ -780,14 +722,12 @@ async function draw({
   if (typeof launch.env?.CODEX_HOME !== 'string') profile = undefined
   let reason = 'profile unavailable'
   let fingerprint
-  const configHash = () => {
-    try {
-      return configFingerprint(configSources({ codexHome: launch.env.CODEX_HOME, scratch: dir }))
-    } catch { return undefined }
+  const homeHash = () => {
+    try { return createHash('sha256').update(readFileSync(join(launch.env.CODEX_HOME, 'config.toml'))).digest('hex') } catch { return undefined }
   }
   const stable = () => {
     try {
-      return fingerprint !== undefined && configHash() === fingerprint
+      return fingerprint !== undefined && homeHash() === fingerprint
         && lstatSync(join(dir, '.codex'), { throwIfNoEntry: false }) === undefined
     } catch { return false }
   }
@@ -804,7 +744,7 @@ async function draw({
   try {
     const check = () => imageSetup(launch, { profile, timeoutMs: checkTimeoutMs, cwd: dir, signal, listServers: async (...args) => { const names = await listServers(...args); listed = true; return names } })
     if (profile) {
-      fingerprint = configHash()
+      fingerprint = homeHash()
       if (fingerprint === undefined) { profile = undefined; reason = 'profile unavailable' }
     }
     try {
