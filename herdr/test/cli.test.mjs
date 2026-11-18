@@ -2230,6 +2230,31 @@ test("start: an edit landing during hc run relabels the new pane; a failed relab
   const r = s.cli(["start", "Dev"]);
   assert.equal(r.code, 0, r.err);
   assert.match(r.err, /t101's labels role=reviewer weren't set\./);
+  // #223: hc's reason, said once; the pane stays Dev's seat with the labels it started with.
+  assert.deepEqual(r.err.split("\n").filter((l) => l.startsWith("am: t101's labels role=reviewer weren't set.")),
+    ["am: t101's labels role=reviewer weren't set. label refused on t101 (exit 1)"], r.err);
+  const seatKept = (address) => {
+    const pane = s.hcState().terminals.find((x) => x.address === address);
+    assert.equal(pane?.state, "live", JSON.stringify(pane));
+    assert.equal(pane.labels.bot, ID.dev);
+    assert.equal(pane.labels.category, "eng");
+    assert.equal(pane.labels.role, undefined, JSON.stringify(pane.labels));
+  };
+  seatKept("t101");
+  // #223: with --json, an hc gone from PATH for the relabel (exit 127, so hc() throws): one
+  // warning that says so, exit 0, the seat kept.
+  s.seed(team());
+  const st3 = s.hcState();
+  st3.terminals = [];
+  st3.failLabel = "t102";
+  st3.failLabelExit = 127;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st3));
+  const j = s.cli(["start", "Dev", "--json"]);
+  assert.equal(j.code, 0, j.err);
+  assert.equal(j.json().terminal, "t102", j.out);
+  assert.deepEqual(j.json().warnings.filter((w) => w.startsWith("t102's labels")),
+    ["t102's labels role=reviewer weren't set. hc (herdr-core) is not on PATH."], j.out);
+  seatKept("t102");
 });
 
 // ---- restart ----
