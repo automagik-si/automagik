@@ -80,32 +80,98 @@ test("refreshAgModels: a missing cache runs `agy models` once, writes the table 
   assert.equal(r.text, written.text);
 });
 
-test("refreshAgModels writes a temp file beside the cache, then renames it into place", async () => {
+test("refreshAgModels writes its own temp file beside the cache, renames it into place, and removes only that file on failure", async () => {
   const path = agModelsPath("/app");
-  const calls = [];
-  const r = await refreshAgModels({
-    appHome: "/app", read: () => null, now: NOW,
-    write: (p, text) => { calls.push(["write", p]); assert.match(text, /"source": "agy models"/); },
-    rename: (from, to) => { calls.push(["rename", from, to]); },
-    exec: () => ({ code: 0, stdout: MODELS, stderr: "" }),
-  });
-  assert.equal(r.refreshed, true);
-  assert.deepEqual(calls, [["write", `${path}.tmp-${NOW}`], ["rename", `${path}.tmp-${NOW}`, path]]);
-  // A rename failure is a failed refresh, keeping the last list, and never a half-written cache.
+  const tmp = `${path}.tmp-${NOW}-t1`;
   const stale = agModelsCacheText(parseAgModelsOutput(MODELS), NOW - AG_MODELS_TTL_MS - 1);
-  const failed = await refreshAgModels({
-    appHome: "/app", read: () => stale, now: NOW, write: () => {}, rename: () => { throw new Error("no rename"); },
-    exec: () => ({ code: 0, stdout: MODELS, stderr: "" }),
-  });
-  assert.deepEqual([failed.refreshed, failed.cache.models.length], [false, 13]);
-  assert.match(failed.why, /couldn't be written/);
-  // The sync path does the same.
-  const syncCalls = [];
-  refreshAgModelsSync({ appHome: "/app", read: () => null, now: NOW,
-    write: (p) => { syncCalls.push(["write", p]); },
-    rename: (from, to) => { syncCalls.push(["rename", from, to]); },
-    exec: () => ({ code: 0, stdout: MODELS, stderr: "" }) });
-  assert.deepEqual(syncCalls, [["write", `${path}.tmp-${NOW}`], ["rename", `${path}.tmp-${NOW}`, path]]);
+  const ok = () => ({ code: 0, stdout: MODELS, stderr: "" });
+  // The form's rename as create.js wraps Herdr's exec("/bin/mv"): a non-zero exit throws.
+  const formMv = async () => {
+    const r = await Promise.resolve({ code: 1, stdout: "", stderr: "mv: cannot move" });
+    if (r?.code !== 0) throw new Error(`mv failed (${r?.stderr || `exit ${r?.code}`})`);
+  };
+  for (const [name, refresh, fail] of [
+    ["async", refreshAgModels, (e) => async () => { throw e; }],
+    ["sync", refreshAgModelsSync, (e) => () => { throw e; }],
+  ]) {
+    const run = async (o) => refresh({ appHome: "/app", now: NOW, exec: ok, token: () => "t1", ...o });
+    // Success: write the owned temp name, rename it onto the cache, never remove.
+    let calls = [];
+    const r = await run({
+      read: () => null,
+      write: (p, text) => { calls.push(["write", p]); assert.match(text, /"source": "agy models"/); },
+      rename: (from, to) => { calls.push(["rename", from, to]); },
+      remove: (p) => { calls.push(["remove", p]); },
+    });
+    assert.equal(r.refreshed, true, name);
+    assert.deepEqual(calls, [["write", tmp], ["rename", tmp, path]], `${name}: success removes nothing`);
+    // Rename fails, the temp write fails, or the cleanup itself fails: the stale list and the
+    // reason are kept, nothing throws, and the one removal is exactly this refresh's temp file.
+    const cases = [
+      ["rename fails", { rename: fail(new Error("no rename")) }],
+      ["temp write fails", { write: (p) => { calls.push(["write", p]); if (name === "async") return Promise.reject(new Error("disk full")); throw new Error("disk full"); } }],
+      ["remove fails", { rename: fail(new Error("no rename")), remove: (p) => { calls.push(["remove", p]); return fail(new Error("no unlink"))(); } }],
+    ];
+    if (name === "async") cases.push(["the form's /bin/mv exits non-zero", { rename: formMv }]);
+    for (const [why, over] of cases) {
+      calls = [];
+      const failed = await run({
+        read: () => stale,
+        write: (p) => { calls.push(["write", p]); },
+        rename: (from, to) => { calls.push(["rename", from, to]); },
+        remove: (p) => { calls.push(["remove", p]); },
+        ...over,
+      });
+      assert.deepEqual([failed.refreshed, failed.cache.models.length, failed.text], [false, 13, stale], `${name}, ${why}: the old list stays`);
+      assert.equal(failed.why, "the model cache couldn't be written", `${name}, ${why}`);
+      const writes = calls.filter(([k]) => k === "write").map(([, p]) => p);
+      assert.deepEqual(writes, [tmp], `${name}, ${why}: only the temp file was written`);
+      assert.deepEqual(calls.filter(([k]) => k === "remove"), [["remove", tmp]], `${name}, ${why}: removed exactly the written temp name`);
+    }
+    // No rename given: the direct write is unchanged and remove is never called.
+    calls = [];
+    const direct = await run({
+      read: () => null, write: (p) => { calls.push(["write", p]); }, remove: (p) => { calls.push(["remove", p]); },
+    });
+    assert.equal(direct.refreshed, true, name);
+    assert.deepEqual(calls, [["write", path]], `${name}: direct write, no removal`);
+    const directFail = await run({
+      read: () => stale, write: () => { throw new Error("disk full"); }, remove: (p) => { calls.push(["remove", p]); },
+    });
+    assert.deepEqual([directFail.refreshed, directFail.why], [false, "the model cache couldn't be written"], name);
+    assert.deepEqual(calls, [["write", path]], `${name}: a failed direct write never removes the cache`);
+    // Ownership with the default token: two refreshes in the same millisecond use different
+    // temp names, and the one that fails removes only its own.
+    const names = [];
+    const removed = [];
+    let n = 0;
+    for (let i = 0; i < 2; i += 1) {
+      await refresh({
+        appHome: "/app", now: NOW, exec: ok, read: () => stale,
+        write: (p) => { names.push(p); },
+        rename: n++ === 0 ? () => {} : fail(new Error("no rename")),
+        remove: (p) => { removed.push(p); },
+      });
+    }
+    assert.equal(new Set(names).size, 2, `${name}: distinct temp names in one millisecond`);
+    for (const p of names) assert.match(p, new RegExp(`^${path.replace(/[.]/g, "\\.")}\\.tmp-${NOW}-\\d+-[a-z0-9]+$`), name);
+    assert.deepEqual(removed, [names[1]], `${name}: the failed refresh removed only its own temp file`);
+  }
+  // Async ordering: the refresh settles only after the removal settles.
+  let release;
+  let settled = false;
+  const pending = refreshAgModels({
+    appHome: "/app", now: NOW, exec: ok, token: () => "t1", read: () => stale, write: () => {},
+    rename: async () => { throw new Error("no rename"); },
+    remove: () => new Promise((go) => { release = go; }),
+  }).then((r) => { settled = true; return r; });
+  for (let i = 0; i < 20 && !release; i += 1) await new Promise((go) => setImmediate(go));
+  assert.equal(typeof release, "function", "remove was called");
+  await new Promise((go) => setImmediate(go));
+  assert.equal(settled, false, "the refresh waits for the removal");
+  release();
+  assert.equal((await pending).why, "the model cache couldn't be written");
+  assert.equal(settled, true);
 });
 
 test("refreshAgModels: agy missing or failing keeps the last list and says why; no list stays none", async () => {

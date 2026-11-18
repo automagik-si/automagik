@@ -7,7 +7,7 @@ import { registerHooks } from "node:module";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -210,6 +210,39 @@ test("Antigravity (#793): a missing model cache is refreshed once with `agy mode
   assert.equal(execs(), 1);
   await open({ form: "edit", bot: AG.id });
   assert.equal(execs(), 1, "once per session");
+  assert.deepEqual(readdirSync(join(state.appHome, "automagik-herdr")).filter((n) => n.startsWith("antigravity-models.json")),
+    ["antigravity-models.json"], "the form's temp file was moved into place");
+  // #809: a failed move keeps the old list, says why, and the form removes only its own temp file.
+  // (1) Herdr's exec rejects /bin/mv. (2) The real /bin/mv exits non-zero: its destination is a
+  // folder already holding a folder of the temp file's name, so the wrapper's non-zero check throws.
+  t.after(() => { state.execFault = undefined; });
+  const temps = (app) => readdirSync(join(app, "automagik-herdr")).filter((n) => n.includes(".tmp-"));
+  for (const [label, fault] of [
+    ["exec rejects", (command) => (command === "/bin/mv" ? new Error("mv was ended") : undefined)],
+    ["mv exits non-zero", (command, args) => {
+      if (command === "/bin/mv") mkdirSync(join(args[1], args[0].split("/").pop()), { recursive: true });
+      return undefined;
+    }],
+  ]) {
+    state.appHome = join(root, `app-mv-${label.replace(/\W+/g, "-")}`);
+    state.calls = [];
+    if (label === "exec rejects") seedAgModels([{ id: "old-model", label: "Old Model" }], "2000-01-01T00:00:00.000Z");
+    else mkdirSync(join(state.appHome, "automagik-herdr"), { recursive: true });
+    state.execFault = fault;
+    const { form: failed } = await open({ form: "edit", bot: AG.id });
+    state.execFault = undefined;
+    const mv = state.calls.filter((c) => c.kind === "exec" && c.command === "/bin/mv");
+    assert.equal(mv.length, 1, `${label}: one move`);
+    assert.match(mv[0].args[0], /antigravity-models\.json\.tmp-\d+-\d+-[a-z0-9]+$/, `${label}: an owned temp name`);
+    assert.equal(failed.modelsWhy, "the model cache couldn't be written", label);
+    assert.deepEqual(temps(state.appHome), [], `${label}: no temp file left`);
+    if (label === "exec rejects") {
+      assert.ok(failed.modelInfo("antigravity").models.includes("old-model"), "the old list stays");
+    } else {
+      assert.deepEqual(readdirSync(join(state.appHome, "automagik-herdr/antigravity-models.json")),
+        [mv[0].args[0].split("/").pop()], "mv refused: only the blocking folder is at the destination");
+    }
+  }
 });
 
 test("Antigravity (#793): a slow refresh updates both forms and preserves edits typed while it runs", async (t) => {
