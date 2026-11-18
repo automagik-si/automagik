@@ -10,7 +10,7 @@ import { AUTO_FILE, CHECK_FILE, HELD_FILE, RESTORE_FILE, formatAuto, parseAuto }
 import {
   FIRST_CHECK_MS, LANDING_WAIT_MS, REQUEST_KEY, RELOAD_GRACE_MS, RETRY_MS, SHOWN_KEY, STATE_KEY, announce, applyNotice, applyPatch,
   applyRefusal, autoFailedNotice, autoFailure, autoPlan, busyOf, checkFrom, checkPatch, claim, coolingDown, finish, heldFrom, heldNotice, landedNotice,
-  landing, nextCheckIn, noReloadNotice, requestAnswer, requestDue, restoreFrom, restoredNotice, restoreFailedNotice, runCheck,
+  landing, landingAnswer, nextCheckIn, noReloadNotice, requestAnswer, requestDue, restoreFrom, restoredNotice, restoreFailedNotice, runCheck,
   seenRequest, shownFrom, stateFrom,
 } from "./updateCheck.js";
 
@@ -157,16 +157,16 @@ export class Updater {
   async arrive(waited = 0) {
     let version = null;
     try { version = (await this.readText(this.version))?.trim() || null; } catch { return; }
-    let state = this.state();
+    const state = this.state();
     if (typeof version !== "string" || state.announced === version) return;
     // The update's own build is usually reloaded away before its answer arrives: update.mjs leaves
     // this note for the restored build, which says the one notice instead (and never repeats it).
     let note = null;
     try { note = restoreFrom(await this.readText(this.restoreFile), version, this.now()); } catch {}
     if (note) {
-      // The update's claim died with the old build: free it here (a later check starts clean), and
-      // answer a request that was queued behind it with the install's result.
-      finish(this.get, this.set, state.busy?.id ?? null, { announced: version, ...requestAnswer(this.state(), state.busy?.request ?? null) });
+      // Free the apply claim for this landing and answer its latest click.
+      const { id, answer } = landingAnswer(state.busy, this.state(), note.restore?.failedVersion ?? version);
+      finish(this.get, this.set, id, { announced: version, ...answer });
       try { this.set(SHOWN_KEY, note.error ? version : note.restore.failedVersion); } catch {}
       try { this.notify(note.error ? restoreFailedNotice(note.error, version) : restoredNotice(note.restore)); } catch {}
       return;
@@ -179,7 +179,8 @@ export class Updater {
       let unchecked = null;
       try { unchecked = checkFrom(await this.readText(this.checkFile), version, this.now()); } catch {}
       if (unchecked) {
-        finish(this.get, this.set, state.busy?.id ?? null, { announced: version, ...requestAnswer(this.state(), state.busy?.request ?? null) });
+        const { id, answer } = landingAnswer(state.busy, this.state(), version);
+        finish(this.get, this.set, id, { announced: version, ...answer });
         try { this.set(SHOWN_KEY, version); } catch {}
         let held = [];
         try { held = heldFrom(await this.readText(this.heldFile), version); } catch {}
@@ -192,11 +193,12 @@ export class Updater {
       return;
     }
     if (!step) return;
-    state = this.state();
-    if (state.announced === version) return;
+    const current = this.state();
+    if (current.announced === version) return;
     if (!step.ready) {
-      finish(this.get, this.set, step.id, { kind: "installed", from: step.from, current: version, latest: version, update: null,
-        why: null, applyError: null, at: this.now(), ...requestAnswer(state, step.request ?? state.busy?.request ?? null) });
+      const { id, answer } = landingAnswer(state.busy, current, version);
+      finish(this.get, this.set, id, { kind: "installed", from: step.from, current: version, latest: version, update: null,
+        why: null, applyError: null, at: this.now(), ...answer });
     }
     this.patch({ announced: version });
     // The old build usually stopped before it could record what the install held: the file says.

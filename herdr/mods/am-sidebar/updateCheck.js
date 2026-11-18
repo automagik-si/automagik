@@ -377,6 +377,16 @@ export function requestAnswer(state, own = null) {
   return { ...(answer ? { request: answer } : {}), queued: null };
 }
 
+/** A reloaded build answers only the same apply claim it found before reading the note.
+ *  With no claim before or after the read, an existing queued click still gets an answer. */
+export function landingAnswer(original, state, target) {
+  const current = state.busy;
+  const matches = typeof original?.id === "string" && original.what === "apply" && original.to === target
+    && current?.id === original.id && current.what === "apply" && current.to === target;
+  if (!matches && (original || current)) return { id: null, answer: {} };
+  return { id: current?.id ?? null, answer: requestAnswer(state, current?.request ?? null) };
+}
+
 // ---- Installing on its own (auto-update) ----
 // After a check that found a newer release, the sidebar installs it through the same applyUpdates
 // path a click takes (the claim, `update.mjs apply --expect <v>`), adding `--auto` so update.mjs
