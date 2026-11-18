@@ -1,0 +1,133 @@
+# am
+
+`am` is Automagik's one command ([RFC 0012](../docs/rfcs/0012-am-cli-and-parts.md)).
+This guide installs am alone on a macOS or Linux host without the Herdr app (standalone,
+or headless). It covers updates, rollback, uninstall, the agent skill and reporting a problem.
+
+Requirements: macOS or Linux; Node 22.7 or later for the verification below; `curl`, `tar`, and `sha256sum`
+or `shasum -a 256`. Once installed, the `am` command runs on Node 22.7+ or Bun (`bin/run.sh`).
+
+## Install and verify
+
+The am-lane pointer is `am.json` with `am.json.sig`: an Ed25519 signature over the exact bytes,
+encoded as base64. Fetch the public keys in `am/am-keys.json` from the official repository's
+`main` branch over HTTPS. `main` is the release branch: a key reaches it with the release that
+ships it. Herdr's install line uses the same branch. Never fetch keys from the pointer's commit
+or tag, which is not verified yet. Do not copy a key into notes: keys rotate in two phases
+([RFC 0011](../docs/rfcs/0011-monorepo-parts-and-releases.md)).
+The repository moved to automagik-si; am still checks the pointer's `repository` and tarball URL
+against https://github.com/automagik-dev/automagik (GitHub redirects), so this block uses that exact URL.
+
+Paste the whole block into a shell. It works in a new empty folder and runs in a subshell, so it
+stops at the first check that fails and leaves your shell as it was.
+
+```sh
+(
+set -eu
+work=$(mktemp -d) && cd "$work"
+curl -fsSLO https://github.com/automagik-dev/automagik/releases/download/am-lane/am.json
+curl -fsSLO https://github.com/automagik-dev/automagik/releases/download/am-lane/am.json.sig
+curl -fsSL -o am-keys.json https://raw.githubusercontent.com/automagik-si/automagik/main/am/am-keys.json
+node -e '
+const { readFileSync } = require("node:fs");
+const { createPublicKey, verify } = require("node:crypto");
+const fail = (why) => { console.error(why); process.exit(1); };
+const bytes = readFileSync("am.json");
+const p = JSON.parse(bytes);
+const keys = JSON.parse(readFileSync("am-keys.json")).keys;
+const key = keys.find((k) => k.keyId === p.keyId);
+let valid = false;
+try {
+  valid = !!key && verify(null, bytes, createPublicKey(key.publicKey),
+    Buffer.from(readFileSync("am.json.sig", "utf8").trim(), "base64"));
+} catch {}
+if (!valid) fail("signature does not verify");
+const repository = "https://github.com/automagik-dev/automagik";
+const t = p.tarball ?? {};
+if (p.schemaVersion !== 1 || p.publisher !== "automagik" || p.part !== "automagik.am"
+    || p.repository !== repository || typeof p.version !== "string" || !/^3\.\d+\.\d+$/.test(p.version)
+    || p.tag !== "v" + p.version || t.name !== "automagik-am-" + p.version + ".tgz"
+    || t.url !== repository + "/releases/download/" + p.tag + "/" + t.name
+    || typeof t.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(t.sha256)
+    || !Number.isSafeInteger(t.size) || t.size <= 0) fail("invalid am pointer");
+console.log(p.version, t.url, t.sha256, t.size);
+' > verified.txt
+read -r V URL SHA SIZE < verified.txt
+curl -fsSLO "$URL"
+archive="automagik-am-$V.tgz"
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "$archive" > checksum.txt
+else
+  shasum -a 256 "$archive" > checksum.txt
+fi
+read -r actual rest < checksum.txt
+test "$actual" = "$SHA" || { echo "sha256 does not match the pointer" >&2; exit 1; }
+test "$(wc -c < "$archive" | tr -d "[:space:]")" = "$SIZE" || { echo "size does not match the pointer" >&2; exit 1; }
+tar -tzf "$archive" > names.txt
+tar -tvzf "$archive" > entries.txt
+node -e '
+const { readFileSync } = require("node:fs");
+const lines = (file) => readFileSync(file, "utf8").split("\n").filter(Boolean);
+const names = lines("names.txt"), entries = lines("entries.txt");
+if (!names.length || names.length !== entries.length || names.some((name, i) =>
+    name.startsWith("/") || name.split("/").includes("..")
+    || !/^[d-]/.test(entries[i]) || entries[i].includes(" link to ")
+    || entries[i].includes(" -> "))) {
+  console.error("unsafe tarball entries"); process.exit(1);
+}
+'
+mkdir "am-$V"
+tar -xzf "$archive" -C "am-$V"
+test "$(cat "am-$V/VERSION")" = "$V" || { echo "VERSION is not $V" >&2; exit 1; }
+sh "am-$V/bin/am" self install
+)
+```
+
+Put `~/.local/bin` on PATH. Run `am --version`, then `am self doctor` (required).
+An `am` or `automagik-herdr` already in `~/.local/bin` that is a file or someone else's link
+is left as it was, and self install still exits 0. Doctor reports it as `FAIL` with the fix.
+Doctor also reports the briefing hook of the folder it runs in.
+
+## What self install does
+
+It copies the folder into `~/.automagik/parts/automagik.am/<version>/` (`AM_HOME` overrides
+`~/.automagik`), links `current`, records it, and links `~/.local/bin/am` and
+`~/.local/bin/automagik-herdr` (the old name, kept as an alias). On a host with Herdr's app home
+(`~/.config/herdr-app` or `HERDR_APP_HOME`), it also links the briefing entry; otherwise it writes
+nothing there. It installs, starts and restarts nothing else: no Herdr app, no herdr-core, no pane.
+
+Without Herdr, am's own commands work: `update`, `rollback`, `self`, `help` and `--version`.
+Bot and worker commands need Herdr (its `hc` and herdr-core).
+[Install Herdr and the pack](https://github.com/automagik-si/automagik/blob/dev/herdr/README.md#install).
+
+## Update and roll back
+
+`am update --check automagik.am` checks for an update. `am update automagik.am` installs it:
+am checks the signed pointer with its own `am-keys.json`, then the tarball's sha256 and size.
+It refuses a pointer older than the newest this machine took and keeps the replaced copy.
+`am update` alone also updates the herdr pack where one is installed.
+
+`am rollback automagik.am` swaps back to the kept previous copy. With none, it says so and
+exits 1. `am update` moves forward again. The bootstrap above is for a first install:
+use `am update` to move an installed am. A hand-run self install or a rollback is not checked
+against older versions.
+
+## Uninstall
+
+`am self uninstall` hands the links back to the pack's CLI when the pack is installed,
+otherwise removes them. The store stays. `am self uninstall --purge` also deletes
+`~/.automagik/parts/automagik.am` (under `AM_HOME` if set).
+
+## The agent skill
+
+[The am skill](https://github.com/automagik-si/automagik/blob/dev/skills/am/SKILL.md) teaches a code agent the commands.
+For Claude Code and Codex, run `npx skills add automagik-si/automagik --skill am -a claude-code -a codex`.
+Add `-g` for every project. It reads the repository's default branch; the skills CLI needs Node 22.20+.
+Codex reads `.agents/skills/am` (global `~/.agents/skills/am`); Claude Code reads
+`.claude/skills/am` (global `~/.claude/skills/am`). Or copy `SKILL.md` by hand into one of those
+folders. No release installs it. `npx skills update` refreshes it.
+
+## Report a problem
+
+If am does not support an operation or refuses unexpectedly, [open an issue](https://github.com/automagik-si/automagik/issues)
+with the command, its output, `am --version` and `am self doctor --json`.

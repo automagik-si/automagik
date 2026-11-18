@@ -1,3 +1,4 @@
+import { startFakeCore as startStatusCore } from "./fake-core.mjs";
 // `automagik-herdr worker` (bot workers): a bot starts one worker per task, an hc child of its
 // pane, in the task's worktree. Run as a program against scratch git projects under $TMPDIR,
 // with the fake `hc` first on PATH (test/fake-hc.mjs). The real hc is never run.
@@ -85,6 +86,9 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   writeFileSync(appLog, "");
   const env = { ...process.env, XDG_DATA_HOME: join(root, "data"), PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog, AUTOMAGIK_HERDR_TAB_WAIT_MS: "300", GIT_CEILING_DIRECTORIES: root };
+  const core = startStatusCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SESSION: "" });
   // Worker transport discovery must never inherit a host socket into a fixture scene.
   env.HC_SOCKET = join(root, "unproxied.sock");
   env.HC_TERMINAL_SOCKET = env.HC_SOCKET;
@@ -118,17 +122,20 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
     assert.ok(CLI.endsWith("/herdr/mods/am-sidebar/bin/automagik-herdr.mjs"));
   };
   const cli = (args, { from = "t1", cwd = project, env: extra = {} } = {}) => {
+    core.control({ ...env, ...extra });
     preflight(extra, cwd);
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd, env: { ...env, ...extra, ...(from ? { HC_TERMINAL_ID: from } : {}) }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   const cliAsync = (args, { from = "t1", env: extra = {} } = {}) => new Promise((resolve) => {
+    core.control({ ...env, ...extra });
     preflight(extra);
     execFile(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...extra, HC_TERMINAL_ID: from }, encoding: "utf8" },
       (e, out, err) => resolve({ code: e ? e.code : 0, out, err }));
   });
   /** The CLI as a child process, its stderr readable as it comes. */
   const spawnCli = (args, { from = "t1", env: extra = {} } = {}) => {
+    core.control({ ...env, ...extra });
     preflight(extra);
     return spawn(process.execPath, [CLI, ...args],
       { cwd: project, env: { ...env, ...extra, HC_TERMINAL_ID: from },

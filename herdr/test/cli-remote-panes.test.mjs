@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // automagik-herdr's pane commands on a linked machine (automagik#206 part b): start, attach,
 // detach, restart and whois with --machine, against fake-hc's linked machine "vm" (a scratch
 // home; its terminals are "vm/tN"). Shaped on the Atlas bot on lab: a Hermes pane under hc's
@@ -63,9 +64,13 @@ function scene(t, { terminals = [], tui = true } = {}) {
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog,
     AUTOMAGIK_HERDR_RESTART_STABLE_MS: "300", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "4000", AUTOMAGIK_HERDR_TAB_WAIT_MS: "300",
     GIT_CEILING_DIRECTORIES: root };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   // Run from a pane (t1), as a bot would: hc run's default parent is the calling terminal.
   env.HC_TERMINAL_ID = "t1";
   const cli = (args, more = {}) => {
+    core.control({ ...env, ...more });
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: root, env: { ...env, ...more }, encoding: "utf8" });
     // #955: vm in this scene has no automagik-herdr on its pane PATH, so a start of any agent but
     // dsh-tui adds the "no hc kill shim there" warning. json() leaves that one line out, so each

@@ -373,7 +373,8 @@ function removeLayout(ctx) {
  * together as the kept set (with --purge: deleted, with the older set), adopted folders come back,
  * the layout goes while it is the one this install added, the briefing hooks and their entry
  * point go, the pack's keys and its command links go, then the record. Your bots, Herdr's
- * settings (shared.json, data/), Pocket Link and usagemeter stay.
+ * settings (shared.json, data/), Pocket Link and usagemeter stay. A successful uninstall may
+ * return the layout guard's logged lines in order as `notes: string[]`.
  */
 function uninstallPack(ctx, { purge }) {
   const record = readMarker(ctx.modsDir);
@@ -415,6 +416,7 @@ function uninstallPack(ctx, { purge }) {
     skip: dropLayout ? [basename(PACK_LAYOUT)] : [], log: ctx.log, prepare: () => mkdirSync(next, { recursive: true }),
   });
   if (r.refused) throw new Error(r.refused);
+  const notes = r.notes;
   if (dropLayout && r.left.includes(live)) lines.unshift(leftLine(live));
   else if (dropLayout) lines.unshift(`removed ${live}; if Herdr shows it, switch back: herdr-app do layout.switch '{"name":"main"}'`);
   // A folder already kept (one a rollback moved out) stays kept beside them.
@@ -467,7 +469,8 @@ function uninstallPack(ctx, { purge }) {
     lines.push("left usagemeter where it is (~/.local/bin/usagemeter, and linked machines): it is its own part");
   }
   for (const l of lines) ctx.log(l);
-  return { ok: true, changed: true, detail: `the pack ${record.version} is uninstalled${purge ? " (--purge)" : ""}; your bots and Herdr's settings are untouched` };
+  const detail = `the pack ${record.version} is uninstalled${purge ? " (--purge)" : ""}; your bots and Herdr's settings are untouched`;
+  return { ok: true, changed: true, detail, ...(notes.length ? { notes } : {}) };
 }
 
 /** am's parts store (RFC 0012): `$AM_HOME/parts/`, AM_HOME being $AUTOMAGIK_HOME, else ~/.automagik. */
@@ -509,7 +512,11 @@ export function sidebarCarries(ctx) {
 const carriesText = (reasons) => `mods/${PACK_NAME} still carries ${reasons.join(" and ")}: switched off, they would stop working. `
   + "`am uninstall herdr.pack` removes the whole pack; the sidebar switches off on its own once the am part carries them";
 
-/** `uninstall <id> [--purge]`: idempotent. Returns `{ ok, changed, detail }`; throws on a failure. */
+/**
+ * `uninstall <id> [--purge]`: idempotent. Returns `{ ok, changed, detail }`; throws on a failure.
+ * A successful `herdr.pack` uninstall may also return the layout guard's logged lines in order as
+ * `notes: string[]`.
+ */
 export function uninstall(ctx, part, { purge = false } = {}) {
   if (part.kind === "pack") return uninstallPack(ctx, { purge });
   if (part.kind === "mod") {
