@@ -1286,7 +1286,7 @@ const OPTIONS = {
   "planned-wave": { type: "string" }, "planned-note": { type: "string" }, unplanned: { type: "boolean" },
   space: { type: "string" }, tab: { type: "string" },
   title: { type: "string" }, sub: { type: "string" }, id: { type: "string" },
-  check: { type: "boolean" }, rollback: { type: "boolean" }, auto: { type: "string" },
+  check: { type: "boolean" }, rollback: { type: "boolean" }, "retry-skipped": { type: "boolean" }, auto: { type: "string" },
   "worker-agent": { type: "string" }, "worker-model": { type: "string" }, "worker-effort": { type: "string" },
   "worker-template": { type: "string" }, template: { type: "string" },
   branch: { type: "string" }, worktree: { type: "string" }, base: { type: "string" }, effort: { type: "string" }, tier: { type: "string" },
@@ -1481,10 +1481,13 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 unknown ownership, missing checkouts, dirty work or uncertain
                                 proof, with a reason. No broad prune. A worktree only given to
                                 a worker (--worktree, a branch's existing one) is never removed
-  update [--check | --rollback] install the latest release (checksum verified), only report
+  update [--check | --rollback | --retry-skipped]
+                                install the latest release (checksum verified), only report
                                 current and latest (--check), or put the replaced pack back;
-                                an update then runs meter install where you agreed to it
-                                (install.sh, or an earlier meter install); nobody asked: nowhere
+                                --retry-skipped: install the release this pack rolled back from,
+                                clearing that record first (an automatic update still waits for a
+                                newer release); an update then runs meter install where you agreed
+                                to it (install.sh, or an earlier meter install); nobody asked: nowhere
   update --auto on|off|status   Install updates automatically (on by default): Herdr installs
                                 each newer verified release on its own; a version you rolled
                                 back is skipped until a newer one is out. Only for a pack
@@ -7297,16 +7300,24 @@ const heldLines = (installed) => (installed.held ?? []).map((h) => `\n${heldModL
 
 /**
  * `update`: install the latest release, `--check` only reports, `--rollback` swaps the kept
- * pack back. `io` is injected by the tests (fetch, env, modsDir, binDir); the pack is the installed
- * one under $HERDR_APP_HOME/mods, never this checkout (update.mjs). The CLI link (~/.local/bin) and
- * the open spaces are looked at only for this computer's own pack: with `io.modsDir`, only `io.binDir`.
+ * pack back, `--retry-skipped` clears the rollback skip for the release it installs. `io` is
+ * injected by the tests (fetch, env, modsDir, binDir); the pack is the installed one under
+ * $HERDR_APP_HOME/mods, never this checkout (update.mjs). The CLI link (~/.local/bin) and the
+ * open spaces are looked at only for this computer's own pack: with `io.modsDir`, only `io.binDir`.
  */
 export async function cmdUpdate(opts, _rest = [], io = {}) {
-  if (opts.auto !== undefined) return autoSetting(opts, io);
+  if (opts.auto !== undefined) {
+    if (opts["retry-skipped"]) throw new CliError("Give --retry-skipped with am update, not --auto.", 2);
+    return autoSetting(opts, io);
+  }
   if (opts.check && opts.rollback) throw new CliError("Give --check or --rollback, not both.", 2);
+  if (opts["retry-skipped"] && (opts.check || opts.rollback)) {
+    throw new CliError("Give --retry-skipped only when installing an update, not with --check or --rollback.", 2);
+  }
   const host = io.modsDir ? { binDir: io.binDir ?? null, window: false }
     : { binDir: io.binDir ?? binDirOf(io.env ?? process.env), window: liveHome(`${appHome(io.env ?? process.env)}/mods`) };
-  const where = { ...(io.env ? { env: io.env } : {}), ...(io.fetch ? { fetch: io.fetch } : {}), ...(io.keys ? { keys: io.keys } : {}), ...(io.modsDir ? { modsDir: io.modsDir } : {}), ...host };
+  const where = { ...(io.env ? { env: io.env } : {}), ...(io.fetch ? { fetch: io.fetch } : {}), ...(io.keys ? { keys: io.keys } : {}), ...(io.modsDir ? { modsDir: io.modsDir } : {}), ...host,
+    ...(opts["retry-skipped"] ? { retrySkipped: true } : {}) };
   const failed = (what, e) => new CliError(`${what}: ${String(e?.message ?? e).split("\n")[0]}`);
   // The pack just swapped (or one an older CLI installed) may name its CLI otherwise
   // (bin/automagik-herdr, or only the .mjs before it): the ~/.local/bin link follows, so a
