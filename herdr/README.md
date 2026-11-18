@@ -530,7 +530,7 @@ am restart <bot> [--fresh] [--agent A] [--model M [--save]] [--force]
 am attach <bot> <terminal> [--move]
 am detach <bot>
 am import --from-hc [--squad-label L] [--apply]
-am whois <terminal> | whois --bot <bot>
+am whois <terminal> | whois --bot <bot> | whois --all
 am history <bot>
 am brief <bot>
 am forget <project>
@@ -807,14 +807,21 @@ am whois <terminal> --json
   { "terminal", "core", "created_ms", "bot", "project", "since" }   or   { "terminal", "core", "created_ms", "bot": null }
 am whois --bot <bot> --json
   the same, or { "terminal": null, "core", "created_ms": null, "bot", "project": null, "since": null }
+am whois --all --json
+  { "core", "bindings": [ { "terminal", "core", "created_ms", "bot", "project", "since",
+                            "address", "machine", "state" } ] }
 ```
 
-`since` is the attach row's `at`; `created_ms` is hc's. Both forms fold and confirm with hc first.
+`since` is the attach row's `at`; `created_ms` is hc's. Both single forms fold and confirm with
+hc first. `--all` lists every binding the ledger holds, live or on a machine that is away
+(`state` is `live` or `unknown`), with the hc address and the machine's name; it is the
+interface for tools that draw a bot beside a terminal without reading labels (`bots.whois-all-json@1`).
 
 **The first run.** With no file yet, the first command that reads it imports today's labels
 once: each live pane on this computer carrying `bot=<id>` of a bot some project here defines
 becomes an attach row with `by: "import"` (one pane per bot: an agent in front, then the
-newest). The file is then made, even empty, so this happens once. The briefing hook reads the
+newest). "Defines" means a folder this run names or remembers, or a project the sidebar knows
+from its project list, a sibling folder, or a cross-project reference. The file is then made, even empty, so this happens once. The briefing hook reads the
 file and never writes it; before the file exists it goes by the label.
 
 ## Workers
