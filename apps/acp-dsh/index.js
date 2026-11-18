@@ -41,10 +41,11 @@ export const name = 'acp-dsh'
 export const inject = ['llm', 'agents']
 
 // The bridge, its DSH approval, the drift detector and live switching: an absent key takes the
-// per-agent default for the bridge (Claude on; Codex only on an explicit true), the transcript
-// replay reaches both agents unless the key is false (plan A-5), and false is the kill switch.
+// per-agent default, which is on for every ACP agent that can run the bridge (Codex included,
+// #1544) and off only for a row that declares no bridge (the native agents), the transcript
+// replay reaches every agent unless the key is false (plan A-5), and false is the kill switch.
 // The key is public (installed teams keep it in their profile patch). DSH_TOOLS_DEFAULT is the
-// Claude/service view used for the bridge probe, crossings and effort carry; it is not a schema
+// service view used for the bridge probe, crossings and effort carry; it is not a schema
 // default, so an absent key still reaches the adapter as absent.
 export const DSH_TOOLS_DEFAULT = true
 
@@ -66,20 +67,21 @@ export const Config = z.object({
     model: z.string().required(),
   }).default({ ...SIDE_MODEL }).volatile().description("The model that writes a Session's title when the Session is on an agent and DSH's default model is an agent too. Never an agent."),
   fakeAgent: z.string().description('Tests only: a script that speaks ACP, served as the acp-fake model. The command comes from these host settings, never from a client route.'),
-  // No schema default: absent is the per-agent default (Claude Code on, because only its
-  // adapter can drop the built-in tool set; Codex off, so it never runs two tool sets), and an
+  // No schema default: absent is the per-agent default (on for every ACP agent that can run
+  // the bridge, Codex included; off for a native agent row, which declares no bridge), and an
   // explicit true/false is the person's word. False is also the kill switch and the 2026-11-03
   // behaviour. A schema default would materialise true and erase the difference. Hidden from
   // settings forms (`.hidden()`): it is a rollback lever, not a preference, and stays writable
   // through DSH's settings service and the profile patch.
   dshTools: z.boolean().volatile().hidden().description([
     "Hand DSH's own tools to the agent over a per-session MCP bridge named dsh (the Session's",
-    "preset, filtered by its level), approve every DSH tool call in DSH whatever the agent's own",
-    "rules say, and turn the agent's built-in tools off where its adapter allows. On by default",
-    "for Claude Code; an agent whose adapter cannot drop its own tools (Codex) bridges only on an",
-    'explicit true. The transcript reaches either agent when a Session moves to it, whatever the',
-    'bridge, unless this is false. False is the kill switch and the behaviour without it: each',
-    'agent keeps its own tools and approvals, and sees only its own session.',
+    "preset and level, exactly the set a native DSH step is offered), approve every DSH tool",
+    'call in DSH whatever the agent\'s own rules say, and turn the built-in tools off where the',
+    "adapter allows. On by default for every ACP agent that can run the bridge, Codex included:",
+    'a Bot keeps its team, its browser and its other tools whichever agent answers. The',
+    'transcript reaches the agent when a Session moves to it, whatever the bridge, unless this',
+    'is false. False is the kill switch and the behaviour without it: each agent keeps its own',
+    'tools and approvals, and sees only its own session.',
   ].join(' ')),
 })
 
@@ -173,8 +175,8 @@ export function apply(ctx, config = {}, {
       // Tests only: keep a test of the missing-bridge failure from waiting the real grace period.
       ...(Number(process.env.ACP_BRIDGE_READY_MS) > 0 ? { bridgeReadyMs: Number(process.env.ACP_BRIDGE_READY_MS) } : {}),
       catalog: new Catalog({ id: 'acp-fake', name: 'Fake agent', defaultName: 'Fake agent', fallback: [{ id: DEFAULT_MODEL, name: 'Fake agent' }], key: () => config.fakeAgent, spawn, log }),
-      // The fake stands in for Claude Code where the bridge default is concerned: it declares
-      // the adapter switch that drops its own built-in tool set.
+      // It declares the adapter switch that drops its own built-in tool set, as Claude Code
+      // does; the bridge default no longer depends on it (#1544).
       disableBuiltInTools: true,
       spawn,
     })

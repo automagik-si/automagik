@@ -222,7 +222,9 @@ test('the recorder reads the dshTools setting no more often than the adapter alo
       const chunks = shape(await step(h.adapter, said('hi')))
       if (diagnostics !== undefined) {
         const read = diagnostics.read('s1')
-        assert.deepEqual({ on: read.bridge.on, why: read.bridge.why }, { on: false, why: 'agent-default' })
+        // The setting is false and the agent's own default is on (#1544), so the decision is the
+      // person's, not the agent's default.
+      assert.deepEqual({ on: read.bridge.on, why: read.bridge.why }, { on: false, why: 'setting' })
       }
       return { chunks, reads }
     } finally {

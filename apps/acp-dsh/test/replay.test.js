@@ -1,13 +1,14 @@
 // Plan A-5: the chat reaches an agent independent of the bridge. The `dshTools` table, per CLI:
 //
 // | dshTools | Claude: tools | Claude: replay | Codex: tools        | Codex: replay |
-// | absent   | DSH bridge    | yes            | its own only        | yes           |
+// | absent   | DSH bridge    | yes            | DSH bridge and own  | yes           |
 // | true     | DSH bridge    | yes            | DSH bridge and own  | yes           |
 // | false    | its own only  | no             | its own only        | no            |
 //
-// Plus what A-5 adds beyond a crossing: the turns a resumed live session missed (Codex -> API
-// -> Codex), a new session in a chat that already has answers (a restart), and a Bot part's
-// handoff package reaching the agent on the part's first turn. The fake agent stands in for both
+// Plus what A-5 adds beyond a crossing: a move off a bridged agent ends its session and the move
+// back starts a new one with the chat (Codex -> API -> Codex), a new session in a chat that
+// already has answers (a restart), and a Bot part's handoff package reaching the agent on the
+// part's first turn. The fake agent stands in for both
 // CLIs: Claude is the agent whose adapter drops its own tools (`disableBuiltInTools`), Codex the
 // one that forks to refresh (`refresh: 'fork'`). What an agent received is read from its own
 // prompt trace, never from its answer.
@@ -98,7 +99,7 @@ const TABLE = [
   ['claude', undefined, true, true],
   ['claude', true, true, true],
   ['claude', false, false, false],
-  ['codex', undefined, false, true],
+  ['codex', undefined, true, true],
   ['codex', true, true, true],
   ['codex', false, false, false],
 ]
@@ -135,33 +136,27 @@ for (const [cli, toolsOn, bridged, replayed] of TABLE) {
   })
 }
 
-test('Codex -> API -> Codex: the resumed session gets the turns it missed, redacted, with a row', async () => {
+test('Codex -> API -> Codex: the move off ends the bridged session, and the new one gets the chat', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-a5-codex-'))
   const h = fixture({ cli: 'codex', toolsOn: undefined, dir })
   try {
     const messages = []
     await agentTurn(h, messages, 'plain first')
-    // A move off Codex keeps its session (no bridge to revoke by default), as before.
+    // #1544: Codex is bridged by default, so a move off ends its agent session and revokes the
+    // bridge; the move back starts a new one with the whole chat, not a resumed old session.
     h.adapter.noteEvent(h.session, { type: 'model/selection', data: { provider: 'deepseek-official' } })
-    assert.equal(h.adapter.live.size, 1)
+    assert.equal(h.adapter.live.size, 0)
     messages.push(user('ask the api'), answer('api answer hunter2'))
     const back = await agentTurn(h, messages, 'plain back')
-    // The same agent session goes on (its second turn), and its prompt carries what it missed.
-    assert.match(textIn(back), /turn 2/)
+    assert.match(textIn(back), /turn 1/)
     const last = prompts(h).at(-1)
-    assert.match(last.text, /The chat since your last answer here, while DSH answered:/)
+    assert.match(last.text, /The chat so far, moved from DSH to Fake agent:/)
     assert.match(last.text, /User: ask the api/)
     assert.match(last.text, /Assistant: api answer \[secret:TOKEN\]/)
     assert.equal(last.text.includes('hunter2'), false)
-    // Only what it missed: its own earlier turn is in its session already.
-    assert.equal(last.text.includes('plain first'), false)
-    assert.ok(last.text.endsWith('plain back'))
-    assert.equal(rows(h, BOUNDARY_KIND).length, 1)
-    assert.match(rows(h, BOUNDARY_KIND)[0].data.source.summary, /Switching to Fake agent \(acp-fake\)/)
-    // The next turn on Codex missed nothing: the person's words only, and no further row.
-    await agentTurn(h, messages, 'plain again')
-    assert.equal(prompts(h).at(-1).text, 'plain again')
-    assert.equal(rows(h, BOUNDARY_KIND).length, 1)
+    // One row for the move off (Switching to DSH) and one for the move back.
+    assert.equal(rows(h, BOUNDARY_KIND).length, 2)
+    assert.match(rows(h, BOUNDARY_KIND)[1].data.source.summary, /Switching to Fake agent \(acp-fake\)/)
   } finally {
     h.close()
     rmSync(dir, { recursive: true, force: true })

@@ -350,6 +350,17 @@ function uploadBlocks(messages, redact, session, ctx) {
   return { blocks, roomIds: [...relays].map(row => row.source.uploads.roomId) }
 }
 
+// #1544: an ACP Bot never sees DSH's team prompt — the agent answers from its own system
+// prompt — so the one instruction that decides where a browser request goes travels with the
+// identity. The tool descriptions carry it too (bots-dsh browser_open); this reaches an agent
+// before it has read any tool list.
+export const BOT_BROWSER_RULE = '\n\n## Where browser work goes\n'
+  + 'When the user asks you to open a page or to use the Bot Browser, use the browser tools this '
+  + 'conversation offers (browser_open and the rest): they open this Bot\'s own browser. Never '
+  + 'launch the system Chrome or another browser from a command. If this conversation offers no '
+  + 'browser tools, hand the task to the Bot named "browse" with message_bot when the team has '
+  + 'one, and tell the user what you handed over; its answer comes back to you here.'
+
 /** Where a Session title on an agent's chat goes when DSH's default model is an agent too. */
 export const SIDE_MODEL = Object.freeze({ provider: 'deepseek-official', model: 'deepseek-flash' })
 const TITLE_PURPOSE = 'session-title'
@@ -695,13 +706,14 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   /**
-   * Whether DSH's tools reach this agent when the setting says nothing. Only an adapter that
-   * can drop its own built-in tools is in the default: today that is Claude Code's. Codex keeps
-   * its own tool set, so bridging it by default would run two tool sets; an explicit true
-   * still does it.
+   * Whether DSH's tools reach this agent when the setting says nothing. Every ACP agent that
+   * can run the bridge is in the default, whether or not its adapter can drop its built-in
+   * tools (#1544): a Bot on `acp-codex` gets the team's tools, its own browser and the rest on
+   * a normal install. A row that declares no bridge (`bridge: false`, the native agents) is
+   * never in it, and an explicit false is the kill switch.
    */
   bridgeDefault(agent) {
-    return agent?.disableBuiltInTools === true
+    return agent?.bridge !== false
   }
 
   /**
@@ -995,16 +1007,22 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   /**
-   * The runtime drift detector, an allowlist (RFC 0003, amendment, delivery 6). With `dshTools`
-   * on and the agent's built-in tools off, every structured call name must be an MCP name — the
-   * bridge's `mcp__dsh__<tool>` or a server the session was given, `mcp__<server>__<tool>` — or
+   * The runtime drift detector, an allowlist (RFC 0003, amendment, delivery 6). With the
+   * bridge on, every structured call name must be an MCP name — the bridge's
+   * `mcp__dsh__<tool>` or a server the session was given, `mcp__<server>__<tool>` — or
    * `ToolSearch`, the deferred-tool loader the adapter keeps with `tools: []`. Anything else is
    * a built-in file or shell tool and drift: it DETECTS and CANCELS. It cannot prevent the call
    * that triggered it (the update arrives after the call started), so the turn is cancelled on
    * the same trace and the record says what ran.
+   *
+   * The detector follows the bridge, not the adapter's built-in switch (#1544). An agent whose
+   * adapter cannot drop its own tools (Codex) must not run one twice silently: a structured
+   * non-MCP call there is still recorded as toolset drift and the turn cancelled. An adapter
+   * that gives its MCP calls no structured name (codex-acp today) has nothing to hold to the
+   * allowlist, so no name is guessed from a title or a kind.
    */
   checkDrift(sessionId, agent, tool) {
-    if (!this.bridgeOn(agent) || agent.drift !== true || tool.drift === true) return
+    if (!this.bridgeOn(agent) || tool.drift === true) return
     const name = tool.structuredName
     if (name === undefined || name.startsWith('mcp__') || name === 'ToolSearch') return
     // Every drifted call stays cardless, but the record and the cancel belong to the turn: a
@@ -1328,6 +1346,7 @@ export class AcpAdapter extends LlmAdapter {
                   + `You are ${name}, a Bot on the user's team.`
                   + (role ? ` Your role: ${role}.` : '')
                   + (instructions ? `\n\n${instructions}` : '')
+                  + BOT_BROWSER_RULE
               },
               // Which way the Bot's identity went (never its text), for the log.
               onIdentity: takesIdentity ? delivery => {
@@ -1429,7 +1448,7 @@ export class AcpAdapter extends LlmAdapter {
       // A preset or level change since the last turn: the bridge serves the new set, and an
       // agent that ignores `tools/list_changed` gets the list through a fork instead.
       if (live.bridge !== undefined && this.bridgeOn(agent)) {
-        const changed = this.backchannel.refresh(live.bridge)
+        const changed = await this.backchannel.refresh(live.bridge)
         if (changed && agent.refresh === 'fork') {
           if (live.sessionFileMode) {
             this.endSession(sessionId)

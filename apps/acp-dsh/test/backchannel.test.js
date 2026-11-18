@@ -20,7 +20,7 @@ const TOOLS = [
   { name: 'read', description: 'Read a file', parameters: { type: 'object', properties: { file_path: { type: 'string' } } } },
 ]
 
-function host({ sandbox = 'workspace-write', policy = 'ask', policyThrows = false, answer = 'allowed-once', tools = TOOLS, preset = 'standard', definitions = tools, turn = 3, fail, content, attachments } = {}) {
+function host({ sandbox = 'workspace-write', policy = 'ask', policyThrows = false, answer = 'allowed-once', tools = TOOLS, preset = 'standard', definitions = tools, when = {}, turn = 3, fail, content, attachments } = {}) {
   const session = Session.create('s1')
   session.append('turn/start', { turn })
   session.append('step/start', { turn, step: 1 })
@@ -35,8 +35,18 @@ function host({ sandbox = 'workspace-write', policy = 'ask', policyThrows = fals
     get: (name) => {
       if (name === 'tools') {
         return {
-          definitions: () => definitions,
-          executable: toolName => definitions.find(definition => definition.name === toolName),
+          definitions: (_scope, toolSet) => (toolSet === undefined ? definitions : [...toolSet.view(agent).values()]),
+          executable: (toolName, scope, toolSet) => (toolSet !== undefined
+            ? toolSet.view(scope).get(toolName)
+            : (when[toolName] === undefined ? definitions.find(definition => definition.name === toolName) : undefined)),
+          // DSH's step admission: a `when` condition is evaluated for the step's model.
+          resolve: async ({ modelSelection }) => {
+            const admitted = new Map()
+            for (const definition of definitions) {
+              if (when[definition.name] === undefined || await when[definition.name]({ agent, modelSelection })) admitted.set(definition.name, definition)
+            }
+            return Object.freeze({ view: scope => (scope === agent ? admitted : new Map()), dispose: () => {} })
+          },
           execute: async ({ calls }) => {
             executed.push({ name: calls[0].name, arguments: calls[0].arguments })
             if (fail !== undefined) throw fail
@@ -305,31 +315,36 @@ test('a request without a credential, with another Session\'s, or after revocati
   }
 })
 
-test('the bridge lists the preset\'s tools, never the mirror, and hides file writers in read-only', async () => {
+test('the bridge lists the preset\'s tools, never the mirror, and admits a conditional tool DSH admits', async () => {
   const h = await serve()
   try {
     const listed = await h.post('list')
     assert.deepEqual(listed.body.tools.map(tool => tool.name), ['bash', 'write', 'read'])
+    // A read-only level does not remove a file writer from the list: DSH's own pipeline refuses
+    // the write when it runs, exactly as a native model is answered.
     const readOnly = host({ sandbox: 'read-only', definitions: [...TOOLS, { name: TOOL_NAME, description: 'mirror', parameters: { type: 'object' } }] })
-    assert.deepEqual(offeredTools(readOnly.ctx, readOnly.agent).map(tool => tool.name), ['bash', 'read'])
-    // A conditional tool has no call outside a model step, so it is not offered either.
+    assert.deepEqual((await offeredTools(readOnly.ctx, readOnly.agent)).map(tool => tool.name), ['bash', 'write', 'read'])
+    // A conditional tool DSH admits for the Session's model is offered; one its `when` refuses
+    // is not, exactly as on a native step.
     const conditional = { ...TOOLS[0], name: 'web_search' }
-    const withCondition = host()
-    withCondition.ctx.get('tools').executable = name => (name === 'web_search' ? undefined : TOOLS.find(tool => tool.name === name))
-    withCondition.ctx.get('tools').definitions = () => [...TOOLS, conditional]
-    assert.deepEqual(offeredTools(withCondition.ctx, withCondition.agent).map(tool => tool.name), ['bash', 'write', 'read'])
+    const admitted = host({ definitions: [...TOOLS, conditional], when: { web_search: () => true } })
+    assert.deepEqual((await offeredTools(admitted.ctx, admitted.agent)).map(tool => tool.name), ['bash', 'write', 'read', 'web_search'])
+    const refused = host({ definitions: [...TOOLS, conditional], when: { web_search: () => false } })
+    assert.deepEqual((await offeredTools(refused.ctx, refused.agent)).map(tool => tool.name), ['bash', 'write', 'read'])
   } finally {
     h.bc.dispose()
   }
 })
 
-test('read-only ACP hides Office outputs and user-terminal observations', () => {
+test('read-only ACP lists Office outputs and user-terminal observations, and DSH refuses them when they run', async () => {
+  // The bridge no longer has a second opinion on a read-only Session (#1544): the native list
+  // keeps them, and the Bot team's pre-execute checks or DSH's pipeline refuse the call.
   const names = ['office_convert', 'office_recalculate', 'office_render', 'user_terminal_list', 'user_terminal_read']
   const definitions = names.map(name => ({ name, description: name, parameters: { type: 'object' } }))
   const readonly = host({ sandbox: 'read-only', definitions })
-  assert.deepEqual(offeredTools(readonly.ctx, readonly.agent).map(tool => tool.name), [])
+  assert.deepEqual((await offeredTools(readonly.ctx, readonly.agent)).map(tool => tool.name), names)
   const writable = host({ sandbox: 'workspace-write', definitions })
-  assert.deepEqual(offeredTools(writable.ctx, writable.agent).map(tool => tool.name), names)
+  assert.deepEqual((await offeredTools(writable.ctx, writable.agent)).map(tool => tool.name), names)
 })
 
 test('a DSH tool call asks DSH before it runs, then writes the call and its result rows', async () => {
@@ -992,19 +1007,20 @@ test('a changed preset or level is a new signature, a new generation, and a wait
       return original(name)
     }
     const before = h.record.generation
-    // No change: the signature is stable.
-    assert.equal(h.bc.refresh(h.record), false)
+    // No change: the signature is stable. The first read is not a change either: it is the set
+    // the bridge is about to list.
+    assert.equal(await h.bc.refresh(h.record), false)
     const waiting = h.post('wait', { generation: h.record.generation, timeoutMs: 5_000 })
     // A level change reaches the bridge as a new list.
     mode = 'read-only'
-    assert.equal(h.bc.refresh(h.record), true)
+    assert.equal(await h.bc.refresh(h.record), true)
     const woken = await waiting
     assert.ok(woken.body.generation > before)
     assert.ok((await h.post('list')).body.generation > before)
     // The preset is part of the same fingerprint: creator mode's cordis preset is a change too.
     preset = 'cordis'
-    assert.equal(h.bc.refresh(h.record), true)
-    assert.equal(signatureOf(h.ctx, h.agent), h.record.signature)
+    assert.equal(await h.bc.refresh(h.record), true)
+    assert.equal(await signatureOf(h.ctx, h.agent), h.record.signature)
   } finally {
     h.bc.dispose()
   }

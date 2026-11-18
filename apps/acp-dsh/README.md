@@ -32,22 +32,33 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   about it, with no second dialog; this holds in a subagent child too. These still ask as before:
   a later question, a call the agent changed after its review (in its question or after it), an
   agent that offers no `allow_once`, and a level that changed since the call.
-- **DSH's own tools over the bridge (`dshTools`).** On, the agent gets the Session's preset tool
-  set (standard, or cordis in creator mode) over one stdio MCP server per ACP session, named
-  `dsh` and spawned by the adapter with that session's arguments. The bridge has no port; it
-  reaches this plugin over a loopback back-channel with a per-session credential
-  (`DSH_BRIDGE_CREDENTIAL`), which binds a request to its Session and is revoked with the
-  bridge. Every DSH tool call is approved in DSH under the Session's level before it runs,
-  whatever the agent's own allow rules or hooks say, and the bridge writes the `tool/call` and
-  `tool/result` rows the chat shows. `acp-claude` runs with its built-in tools off
+- **DSH's own tools over the bridge (`dshTools`).** On — the default for every ACP agent that
+  can run the bridge, Codex included (#1544) — the agent gets the very tool set a native DSH
+  step is offered for the same Bot, preset and level, minus only the bridge's own `acp_tool`
+  mirror, over one stdio MCP server per ACP session, named `dsh` and spawned by the adapter
+  with that session's arguments. The bridge has no port; it reaches this plugin over a loopback
+  back-channel with a per-session credential (`DSH_BRIDGE_CREDENTIAL`), which binds a request
+  to its Session and is revoked with the bridge. Every DSH tool call is approved in DSH under
+  the Session's level before it runs, whatever the agent's own allow rules or hooks say, and
+  the bridge writes the `tool/call` and `tool/result` rows the chat shows. The team's tools
+  (`message_bot` and the rest) and a Bot's own browser (`browser_*`) are in that set; a Bot
+  told to open the Bot Browser is instructed to use its browser tools — never the system
+  Chrome — or to hand the task to the Bot named browse with `message_bot` when it has none.
+  A conditional registration (`tools.register(..., { when })`) is resolved exactly as DSH
+  resolves a step's admission for the Session's current model: a tool the Bot can run
+  (`grant_wish` on a preset that grants it, a connector's tool) is offered, and one DSH does
+  not admit is not listed. Read-only does not remove a file writer from the list either: DSH's
+  own pipeline refuses the write when it runs, as it does for a native model. A call for a
+  conditional tool that arrived after its condition stopped holding is answered in words, not
+  as an unknown tool. `acp-claude` runs with its built-in tools off
   (`_meta.disableBuiltInTools`); a structured call that is not an MCP name is recorded as
   `plugin:acp-dsh/toolset-drift` and its turn is cancelled — the detector runs at every session
-  start, and it detects and cancels because the update arrives after the call began.
+  start, and it detects and cancels because the update arrives after the call began. It follows
+  the bridge, not Claude's switch: an agent whose adapter cannot drop its built-in tools
+  (Codex) is still held to the same allowlist, so it cannot act twice silently. Until a
+  structured name is proven in Codex's tool calls, it draws no ACP card for an MCP call.
   DSH's `read_image` works for Claude Code because acp-dsh declares its models as taking images;
-  other ACP agents keep no declaration.
-  `acp-codex` has no such switch, so it is bridged only with an explicit `dshTools: true`;
-  absent or `false` means no bridge and its built-ins stay its own tool set. Until a structured
-  name is proven in its tool calls, it draws no ACP card for an MCP call. The person's
+  other ACP agents keep no declaration. The person's
   own MCP servers load beside the bridge with their own tools and sign-ins: DSH hands the session
   only the `dsh` bridge, so any other `mcp__<server>__<tool>` is the CLI's own user-scope config
   (claude-agent-acp merges the person's settings MCP servers into the session), it passes the
@@ -231,12 +242,12 @@ differs from Claude Code and Codex:
   a model switch reaches them like any agent.
 
 `dshTools` (live, no schema default) is the bridge, its DSH approval, the drift detector and live
-switching above. Absent means the per-agent default: `acp-claude` bridges because its adapter can
-drop its own built-in tools; `acp-codex` does not, because it cannot. Codex is bridged only with
-an explicit `true`; absent or `false` means no bridge, and Codex keeps its own built-in tools as
-its only tool set. An explicit `false` is the kill switch for Claude too: the 2026-11-03
-behaviour, where each agent keeps its own tools and its own approvals. The key is public and
-stays writable through
+switching above. Absent means the per-agent default: every ACP agent that can run the bridge
+bridges, `acp-codex` included (#1544), because a Bot must keep its team, its browser and the
+rest whichever agent answers. Only a row that declares no bridge — the native Hermes,
+Antigravity and omp agents — is never bridged. An explicit `false` is the kill switch for every
+other agent: the 2026-11-03 behaviour, where each agent keeps its own tools and its own
+approvals. The key is public and stays writable through
 DSH's settings service or the profile patch, but it is hidden from settings forms (`.hidden()`):
 it is a rollback lever, not a preference. Flipping it either way ends the running agent sessions
 and revokes their bridges at once; the DSH Session keeps its transcript and the next turn starts
@@ -253,17 +264,18 @@ The transcript replay is independent of the bridge: only an explicit `false` tur
 
 | `dshTools` | Claude Code: tools | Claude Code: replay | Codex: tools | Codex: replay |
 |---|---|---|---|---|
-| absent | DSH bridge, its own off | yes | its own only | yes |
+| absent | DSH bridge, its own off | yes | DSH bridge and its own | yes |
 | `true` | DSH bridge | yes | DSH bridge and its own | yes |
 | `false` | its own only | no | its own only | no |
 
-So with `dshTools` absent Codex sees the chat but not the team's tools; those need an explicit
-`true` (two tool sets). A replay reaches an agent in each of these cases, redacted and capped at
+So a Codex Bot gets the team's tools, its browser and the rest on a normal install, with nobody
+setting `dshTools`; its own built-in tools stay beside them and a structured call that is not an
+MCP name is recorded as toolset drift. A native agent row still takes no bridge, even with
+`dshTools: true`. A replay reaches an agent in each of these cases, redacted and capped at
 120,000 characters, the oldest messages dropped first with a marker: a move from another
 provider (with its "Switching to X" row); a new agent session in a chat that already has answers
 (after a restart, or a session a crossing or a flip ended), with no row since the chat stayed on
-that agent; and a live session resumed after the chat answered elsewhere (a move off Codex keeps
-its session), which gets only the turns it missed, from its own last answer on, with the row. A
+that agent. A
 Bot part's handoff package (a relay marked `handoff`) is carried as the record it is: in the
 part's first turn it stays in the prompt beside the person's words, and once the Bot team has
 answered that turn itself, the next new session gets it in the replay. Both pass the redactor.

@@ -926,21 +926,41 @@ const cordisTools = () => [
 // `preset` is the Session's DSH preset (RFC 0003): `standard` normally, `cordis` when the
 // Session is in creator mode. DSH records it in the creation header; its `agentPreset`
 // projection reads it back, which the fixture models directly.
-function dshHost({ env = {}, answer = 'allowed-once', sandbox = 'workspace-write', redactor, spec: extra = {}, trace, toolsOn = true, preset = 'standard' } = {}) {
+function dshHost({ env = {}, answer = 'allowed-once', sandbox = 'workspace-write', redactor, spec: extra = {}, trace, toolsOn = true, preset = 'standard', tools: toolList, when: whenMap = {} } = {}) {
   const session = Session.create('s1', undefined, preset === 'standard' ? undefined : { version: 4, id: 's1', createdAt: 0, isSeeded: false, agentPreset: preset })
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 0 })
-  const definitions = preset === 'cordis' ? [...bridgeTools(), ...cordisTools()] : bridgeTools()
+  // A step's own tool list, as DSH resolves it: a registration with no `when` is admitted, and
+  // one with a condition only while that condition says so for this model selection. The mirror
+  // is the bridge's own conditional tool (adapter.js registerMirror).
+  const definitions = toolList ?? (preset === 'cordis' ? [...bridgeTools(), ...cordisTools()] : bridgeTools())
+  const mirror = { name: TOOL_NAME, description: 'mirror', parameters: { type: 'object' } }
+  const visibleTools = () => [...definitions, mirror]
   const asked = []
   const executed = []
   const agent = { session, ctx: { tools: { register: () => () => {} } } }
+  const admitted = async (modelSelection) => {
+    const admittedTools = new Map()
+    for (const definition of visibleTools()) {
+      const condition = whenMap[definition.name]
+        ?? (definition.name === TOOL_NAME ? ({ modelSelection: selection }) => selection?.provider === 'acp-fake' : undefined)
+      if (condition === undefined || await condition({ agent, modelSelection })) admittedTools.set(definition.name, definition)
+    }
+    return admittedTools
+  }
   const ctx = {
     agents: { get: () => agent, turnBoundaryOf: () => ({ lastTurn: 1 }) },
     get: (name) => {
       if (name === 'tools') {
         return {
-          definitions: () => [...definitions, { name: TOOL_NAME, description: 'mirror', parameters: { type: 'object' } }],
-          executable: toolName => definitions.find(definition => definition.name === toolName),
+          definitions: (_scope, toolSet) => (toolSet === undefined ? visibleTools() : [...toolSet.view(agent).values()]),
+          executable: (toolName, scope, toolSet) => (toolSet !== undefined
+            ? toolSet.view(scope).get(toolName)
+            : (whenMap[toolName] === undefined && toolName !== TOOL_NAME ? visibleTools().find(tool => tool.name === toolName) : undefined)),
+          resolve: async ({ modelSelection }) => {
+            const admittedTools = await admitted(modelSelection)
+            return Object.freeze({ view: scope => (scope === agent ? admittedTools : new Map()), dispose: () => {} })
+          },
           execute: async ({ calls }) => {
             executed.push(calls[0].name)
             return { results: [{ callId: calls[0].id, result: { content: [{ type: 'text', text: `ran ${calls[0].name}` }], isError: false } }] }
@@ -1199,7 +1219,7 @@ test('probe (delivery 6): a fork lists its bridge before the session answer, and
     const next = h.adapter.live.get('s1').bridge
     await waitFor(() => next.waiters.size > 0)
     h.definitions.push({ name: 'late', description: 'Late', parameters: { type: 'object', properties: {} } })
-    assert.equal(h.backchannel.refresh(next), true)
+    assert.equal(await h.backchannel.refresh(next), true)
     assert.equal(traceEvents(trace).some(event => event.event === 'fork-answer'), false, 'the change landed before the fork answered')
     const second = await running
     assert.equal(second.at(-1).reason.kind, 'stop')
@@ -1301,8 +1321,8 @@ test('the bridge offers the Session preset: standard normally, cordis in creator
     // no cordis tool outside creator mode, and the cordis preset's tool inside it.
     assert.equal(presetOf(standard.ctx, standard.agent.session), 'standard')
     assert.equal(presetOf(creator.ctx, creator.agent.session), 'cordis')
-    assert.deepEqual(offeredTools(standard.ctx, standard.agent).map(tool => tool.name), ['bash', 'write'])
-    assert.deepEqual(offeredTools(creator.ctx, creator.agent).map(tool => tool.name), ['bash', 'write', 'cordis_inspect_query'])
+    assert.deepEqual((await offeredTools(standard.ctx, standard.agent)).map(tool => tool.name), ['bash', 'write'])
+    assert.deepEqual((await offeredTools(creator.ctx, creator.agent)).map(tool => tool.name), ['bash', 'write', 'cordis_inspect_query'])
     // The real bridge serves that set, and the creator-only tool runs through DSH.
     await step(standard.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'plain' }] }])
     const chunks = await step(creator.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'bridge cordis_inspect_query' }] }])
@@ -1315,6 +1335,126 @@ test('the bridge offers the Session preset: standard normally, cordis in creator
   } finally {
     standard.close()
     creator.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// #1544: an ACP Bot must be offered the tool set a native DSH step gets for the same Bot,
+// preset and level, minus only the bridge's own mirror tool. The list is read from the wire:
+// the repository's fake ACP agent connects the real `dsh` MCP server, which asks the real
+// back-channel for `tools/list`. No assertion below calls offeredTools to decide what the
+// bridge listed.
+const parityTools = () => [
+  ...bridgeTools(),
+  { name: 'message_bot', description: 'Send a message to another Bot', parameters: { type: 'object', properties: { to: { type: 'string' } } } },
+  { name: 'browser_open', description: 'Open a URL in this Bot\'s own browser', parameters: { type: 'object', properties: { url: { type: 'string' } } } },
+  { name: 'browser_click', description: 'Click an element', parameters: { type: 'object', properties: { ref: { type: 'string' } } } },
+  { name: 'grant_wish', description: 'Grant a wish in its own worktree', parameters: { type: 'object', properties: { wish: { type: 'string' } } } },
+  { name: 'web_search', description: 'Search the web', parameters: { type: 'object', properties: { query: { type: 'string' } } } },
+]
+const parityWhen = () => ({
+  // Admitted for this Bot: the preset grants it, as Genie's grant_wish does for a Genie Bot.
+  grant_wish: () => true,
+  // Refused by DSH's own step admission: the agent's provider serves no DSH web search.
+  web_search: () => false,
+})
+
+test('#1544: a bridged Session is offered the native step\'s tools, minus only the bridge\'s own', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-parity-'))
+  const trace = join(dir, 'parity.ndjson')
+  const tools = parityTools()
+  const h = dshHost({ trace, sandbox: 'read-only', tools, when: parityWhen(), spec: { disableBuiltInTools: true } })
+  try {
+    // The native list: DSH resolves the same Session's tools for a native model selection, the
+    // way dsh-agent-loop's preStep does. This is what a native DSH model would be offered.
+    const toolsService = h.ctx.get('tools')
+    const nativeSet = await toolsService.resolve({ agent: h.agent, modelSelection: { provider: 'deepseek-official', model: 'deepseek-flash' } })
+    const native = toolsService.definitions(h.agent, nativeSet).map(tool => tool.name)
+    nativeSet.dispose()
+    // The bridge's list, over the fake agent's real MCP `tools/list`.
+    await step(h.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'plain' }] }])
+    const listed = traceEvents(trace).find(event => event.event === 'mcp-list' && event.server === 'dsh')
+    assert.ok(listed, 'the fake agent connected the bridge and listed its tools')
+    assert.deepEqual(listed.tools, native)
+    assert.ok(!listed.tools.includes(TOOL_NAME))
+    // The team's tools and the Bot's browser reach an ACP Bot, at a read-only level too.
+    for (const name of ['message_bot', 'browser_open', 'browser_click']) assert.ok(listed.tools.includes(name), `${name} is offered`)
+    // A conditional tool DSH admits for this Bot is offered; one it refuses is not. The old
+    // `tools.executable(name, agent)` filter saw no `when` registration at all and dropped both.
+    assert.equal(toolsService.executable('grant_wish', h.agent), undefined)
+    assert.ok(listed.tools.includes('grant_wish'))
+    assert.ok(!listed.tools.includes('web_search'))
+    // A read-only sandbox does not remove a tool the native step still offers; DSH's own
+    // pipeline refuses the write when it runs.
+    assert.ok(listed.tools.includes('write'))
+    // The schema the bridge serves is the definition's own, not a re-shaped copy.
+    const served = await offeredTools(h.ctx, h.agent)
+    for (const tool of served) {
+      const definition = tools.find(entry => entry.name === tool.name)
+      assert.deepEqual(tool.inputSchema, definition.parameters, `${tool.name}'s schema`)
+    }
+  } finally {
+    h.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('#1544: an ACP agent that cannot drop its built-ins is bridged with no dshTools setting', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-default-'))
+  const trace = join(dir, 'default.ndjson')
+  // An agent row as codex-acp is: no built-in-tool switch, its tool list arrives by fork.
+  const h = dshHost({ trace, toolsOn: () => undefined, spec: { refresh: 'fork', disableBuiltInTools: undefined } })
+  try {
+    assert.equal(h.adapter.bridgeOn(h.spec), true)
+    await step(h.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'plain' }] }])
+    const listed = traceEvents(trace).find(event => event.event === 'mcp-list' && event.server === 'dsh')
+    assert.ok(listed, 'the bridge is on with nobody setting dshTools')
+    assert.deepEqual(listed.tools, ['bash', 'write'])
+    // An explicit false is still the kill switch, and a native agent row still takes no bridge.
+    const off = dshHost({ trace: join(dir, 'off.ndjson'), toolsOn: false, spec: { refresh: 'fork' } })
+    try {
+      assert.equal(off.adapter.bridgeOn(off.spec), false)
+      assert.equal(h.adapter.bridgeOn({ ...h.spec, bridge: false }), false)
+    } finally {
+      off.close()
+    }
+  } finally {
+    h.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('#1544: a bridged agent that keeps its built-ins records a structured non-MCP call as drift', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-default-drift-'))
+  const trace = join(dir, 'drift.ndjson')
+  // No `drift: true` on the row: the detector follows the bridge, so an adapter that cannot
+  // drop its built-ins cannot run one twice without a record and a cancelled turn.
+  const h = dshHost({ trace, spec: { refresh: 'fork' } })
+  try {
+    const chunks = await step(h.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'drift' }] }])
+    assert.equal(chunks.at(-1).reason.kind, 'aborted')
+    assert.equal(chunks.some(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call'), false)
+    const records = h.session.snapshotEvents().filter(event => event.type === 'plugin:acp-dsh/toolset-drift').map(pluginRecordOf)
+    assert.equal(records.length, 1)
+    assert.equal(records[0].data.name, 'Bash')
+  } finally {
+    h.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('#1544: a call to a conditional tool DSH does not admit is refused in words, not as an unknown tool', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-refusal-'))
+  const trace = join(dir, 'refusal.ndjson')
+  const h = dshHost({ trace, tools: parityTools(), when: parityWhen(), spec: { disableBuiltInTools: true } })
+  try {
+    const chunks = await step(h.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'bridge web_search' }] }])
+    assert.equal(chunks.at(-1).reason.kind, 'stop')
+    assert.match(textIn(chunks), /not available in this Session/)
+    assert.match(textIn(chunks), /condition|model|provider/i)
+    assert.deepEqual(h.executed, [])
+  } finally {
+    h.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -1516,7 +1656,7 @@ test('the plugin wiring carries effort both ways on a model selection', async ()
   }
 })
 
-test('a real config with no dshTools keeps Codex out and bridges Claude', async () => {
+test('a real config with no dshTools bridges every ACP agent (#1544)', async () => {
   // Through resolveConfig and the plugin's own agent objects, the way DSH builds them.
   const { resolveConfig } = await import('@deepseek-ai/cordis')
   const plugin = await import('../index.js')
@@ -1554,9 +1694,13 @@ test('a real config with no dshTools keeps Codex out and bridges Claude', async 
   assert.equal(claude.disableBuiltInTools, true)
   assert.equal(claude.drift, true)
   assert.equal(codex.refresh, 'fork')
-  // No schema default: absent stays absent, so each agent's own switch decides.
+  // No schema default: absent stays absent, and the per-agent default bridges every ACP agent
+  // that can run the bridge, Codex included.
   assert.equal(unset.bridgeOn(claude), true)
-  assert.equal(unset.bridgeOn(codex), false)
+  assert.equal(unset.bridgeOn(codex), true)
+  // A native agent row declares no bridge, whatever the setting says.
+  assert.equal(unset.bridgeOn({ bridge: false }), false)
+  assert.equal(adapterFor({ dshTools: true }).bridgeOn({ bridge: false }), false)
   // The person's word still wins both ways.
   const forced = adapterFor({ dshTools: true })
   assert.equal(forced.bridgeOn(forced.agents.get('acp-codex')), true)
@@ -1564,35 +1708,36 @@ test('a real config with no dshTools keeps Codex out and bridges Claude', async 
   assert.equal(off.bridgeOn(off.agents.get('acp-claude')), false)
 })
 
-test('the bridge default is per agent: Claude on, Codex off until explicitly asked', async () => {
+test('the bridge default bridges every ACP agent; false is the kill switch (#1544)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-agent-default-'))
   const trace = name => join(dir, `${name}.ndjson`)
-  // Claude Code declares the adapter switch that drops its own tools: the default bridges it.
+  // Claude Code declares the adapter switch that drops its own tools.
   const claude = dshHost({
     toolsOn: () => undefined, spec: { disableBuiltInTools: true }, trace: trace('claude'),
   })
-  // Codex has no such switch: its default is the old path, so it never runs two tool sets.
+  // Codex has no such switch; with nobody setting dshTools it is bridged all the same.
   const codex = dshHost({
     toolsOn: () => undefined, spec: { refresh: 'fork' }, trace: trace('codex'),
   })
-  // An explicit true still bridges Codex (the person asked for two tool sets).
-  const forced = dshHost({ toolsOn: () => true, spec: { refresh: 'fork' }, trace: trace('forced') })
+  // A native agent row declares no bridge: it takes none even with the setting on.
+  const native = dshHost({
+    toolsOn: () => true, spec: { bridge: false }, trace: trace('native'),
+  })
+  // The kill switch still takes the bridge away from every agent.
+  const off = dshHost({ toolsOn: false, spec: { refresh: 'fork' }, trace: trace('off') })
   try {
     const ask = [{
       role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'plain' }],
     }]
-    await step(claude.adapter, ask)
-    await step(codex.adapter, ask)
-    await step(forced.adapter, ask)
+    for (const host of [claude, codex, native, off]) await step(host.adapter, ask)
     const servers = name => traceEvents(trace(name))
       .find(event => event.event === 'new-session').servers
     assert.deepEqual(servers('claude'), ['dsh'])
-    assert.deepEqual(servers('codex'), [])
-    assert.deepEqual(servers('forced'), ['dsh'])
+    assert.deepEqual(servers('codex'), ['dsh'])
+    assert.deepEqual(servers('native'), [])
+    assert.deepEqual(servers('off'), [])
   } finally {
-    claude.close()
-    codex.close()
-    forced.close()
+    for (const host of [claude, codex, native, off]) host.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -1925,8 +2070,9 @@ test('probe (delivery 6): codex\'s unstructured MCP calls stay unmatched — no 
   assert.equal(structuredNameOf({ sessionUpdate: 'tool_call', toolCallId: 'x', name: 'mcp__dsh__bash' }), 'mcp__dsh__bash')
   assert.equal(structuredNameOf({ _meta: { claudeCode: { toolName: 'mcp__dsh__bash' } } }), 'mcp__dsh__bash')
   assert.equal(structuredNameOf({ sessionUpdate: 'tool_call', toolCallId: 'x', name: null, _meta: { is_mcp_tool_call: true } }), undefined)
-  // The declaration behind that: acp-codex has no built-in-tool switch and no drift detector,
-  // because a name it could match is not proven; a refresh there is a fork.
+  // The declaration behind that: acp-codex has no built-in-tool switch, and the bridge's drift
+  // detector has no name to hold its call to until its adapter proves one; a refresh there is
+  // a fork.
   assert.equal(AGENTS['acp-codex'].disableBuiltInTools, undefined)
   assert.equal(AGENTS['acp-codex'].drift, undefined)
   assert.equal(AGENTS['acp-codex'].refresh, 'fork')
@@ -1947,8 +2093,8 @@ test('probe (delivery 6): codex\'s unstructured MCP calls stay unmatched — no 
   } finally {
     h.close()
   }
-  // Even a run that declares the drift detector records nothing here: with no structured name
-  // there is nothing to hold the call to, and inventing one would soften the declaration.
+  // Even a run with the bridge's detector records nothing here: with no structured name there
+  // is nothing to hold the call to, and inventing one would soften the declaration.
   const drift = dshHost({ spec: { refresh: 'fork', drift: true } })
   try {
     const chunks = await step(drift.adapter, [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'mcp-call' }] }])

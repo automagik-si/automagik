@@ -154,9 +154,11 @@ export const AGENTS = Object.freeze({
     // index.js supplies the chat profile modes after writing the isolated home's profiles.
     // DSH's Auto is Codex's auto review. Most wanted first, the strict mode last (see above).
     modeFor: level => (level.full ? ['agent-full-access', 'workspace-write'] : level.auto ? ['agent', 'workspace-write'] : level.sandbox === 'read-only' ? ['read-only'] : ['workspace-write']),
-    // codex-acp has no switch for its built-in tools, so they stay and are named in the turn;
-    // it ignores `tools/list_changed` and a new server list on resume, so a changed tool set
-    // arrives by fork (session/fork with the new servers, then session/close on the source).
+    // codex-acp has no switch for its built-in tools, so they stay beside DSH's over the
+    // bridge (on by default, #1544) and are named in the turn; a structured call that is not an
+    // MCP name is drift (adapter.js checkDrift), so it cannot act twice silently. Codex ignores
+    // `tools/list_changed` and a new server list on resume, so a changed tool set arrives by
+    // fork (session/fork with the new servers, then session/close on the source).
     refresh: 'fork',
   }),
   // Agents whose CLI is itself an ACP server (#959): `launch` is how it starts (kind `native`,

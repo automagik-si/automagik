@@ -191,7 +191,7 @@ for (const kind of kinds) {
           assertCopies(h, attachments, image)
           assert.equal(h.launches.length, 1)
           const live = h.adapter.live.get(h.session.id)
-          assert.equal(Boolean(live.bridge), kind.disableBuiltInTools === true)
+          assert.equal(Boolean(live.bridge), kind.bridge !== false)
           assert.equal(live.run.spec.sessionMeta?.disableBuiltInTools,
             kind.disableBuiltInTools)
           const strict = kind.sessionFiles === true &&

@@ -6,13 +6,13 @@ import { test } from 'node:test'
 import { markAgentLoopRequest } from '@deepseek-ai/dsh-llm'
 import { apply } from '../index.js'
 import { AgentRun } from '../src/host/acp.js'
-import { AcpAdapter } from '../src/host/adapter.js'
+import { AcpAdapter, BOT_BROWSER_RULE } from '../src/host/adapter.js'
 import { AGENTS } from '../src/host/agents.js'
 
 const FAKE = join(import.meta.dirname, 'fixtures', 'identity-agent.mjs')
 const identity = { name: 'Ada', role: 'Reviewer', instructions: 'Check files.' }
 const text = "# Your identity\nYou are Ada, a Bot on the user's team."
-  + ' Your role: Reviewer.\n\nCheck files.'
+  + ' Your role: Reviewer.\n\nCheck files.' + BOT_BROWSER_RULE
 const append = value => ({ mode: 'append', content: [{ type: 'text', text: value }] })
 const content = value => [{ type: 'text', text: value }]
 
@@ -77,6 +77,10 @@ for (const provider of ['acp-claude', 'acp-codex']) {
     await h.step('ada', 'Hello', [{ role: 'system', content: 'Native team rules and tools.' }])
     assert.deepEqual(h.rows('new')[0].systemPrompt, append(text))
     assert.deepEqual(h.rows('prompt')[0].prompt, content('Hello'))
+    // #1544: the ACP Bot is told where browser work goes before it reads any tool description.
+    assert.match(text, /Never launch the system Chrome or another browser from a command/)
+    assert.match(text, /message_bot/)
+    assert.match(text, /Bot named "browse"/)
     assert.deepEqual(h.reads, ['ada'])
     assert.ok(h.warnings.some(line => line.endsWith('Bot identity: systemPrompt')))
     assert.ok(h.warnings.every(line => !line.includes('Check files.')))
@@ -162,7 +166,7 @@ test("another Bot's identity and native tool policy never cross", async t => {
   await h.step('someone')
   assert.deepEqual(h.rows('new').map(row => row.systemPrompt), [
     append(text),
-    append("# Your identity\nYou are Someone, a Bot on the user's team.\n\nWrite notes."),
+    append("# Your identity\nYou are Someone, a Bot on the user's team.\n\nWrite notes." + BOT_BROWSER_RULE),
   ])
 })
 

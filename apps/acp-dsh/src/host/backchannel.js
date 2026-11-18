@@ -37,13 +37,10 @@ const REVIEW_TIMEOUT_MS = 120_000
 // Events that can change the Session's level while a review is pending.
 const LEVEL_EVENTS = new Set(['permission/preset', 'sandbox/mode', 'approval/policy'])
 
-// Tools that only write files: a Session in DSH's read-only sandbox cannot run them, so they
-// are not offered. Shell tools stay (read-only commands are legitimate; the sandbox denies the
-// writes) and every other tool is DSH's own decision at execution time.
-export const MUTATING_TOOLS = Object.freeze(new Set(['write', 'edit', 'apply_patch', 'str_replace_editor', 'office_convert', 'office_recalculate', 'office_render']))
-// User-owned terminals are outside the Session's read-only filesystem boundary.
-export const READ_ONLY_DENIED_TOOLS = new Set([...MUTATING_TOOLS, 'user_terminal_list', 'user_terminal_read'])
-
+// A read-only Session's file writers and user-terminal observations are NOT hidden from the
+// bridge's list: DSH's own pipeline and the Bot team's pre-execute checks refuse them when they
+// run, which is the same answer a native model gets. Filtering them here was a second, silent
+// opinion that made the ACP list differ from the native one (#1544).
 const textOf = (content) => {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
@@ -163,29 +160,68 @@ export function presetOf(ctx, session) {
   }
 }
 
+const bridgeShape = (definition) => ({
+  name: definition.name,
+  description: typeof definition.description === 'string' ? definition.description : '',
+  inputSchema: definition.parameters ?? { type: 'object', properties: {} },
+})
+
 /**
- * What the bridge offers this Session right now: its preset's visible tools, without the mirror
- * tool, and without output tools or user-terminal access when the Session is read-only.
+ * What the bridge offers this Session right now: exactly the tool set a native DSH step gets
+ * for the same Session, preset and level, without the bridge's own mirror tool.
+ *
+ * DSH admits a step's tools through `tools.resolve`: an unconditional registration is offered,
+ * and a conditional one (`tools.register(..., { when })`) only while its condition holds for
+ * that step's model. Outside a model step `tools.executable(name, agent)` knows no `when`
+ * registration at all, so filtering by it silently dropped every conditional tool a Bot can
+ * run (`grant_wish`, a preset's own gated tools). This resolves the conditions the same way
+ * dsh-agent-loop's preStep does, against the Session's current model selection.
+ *
+ * Nothing else filters the list. A conditional tool DSH does not admit is not listed, exactly
+ * as on a native step; a call for one that arrives anyway is refused in words by `call`.
+ * Read-only does not hide file writers here either: DSH's own pipeline refuses the write when
+ * it runs, which is the same answer a native model gets.
  * @param {{ get?: (name: string) => any }} ctx
  * @param {any} agent the DSH Agent the Session runs
- * @returns {Array<{ name: string, description: string, inputSchema: object }>}
+ * @returns {Promise<Array<{ name: string, description: string, inputSchema: object }>>}
  */
-export function offeredTools(ctx, agent) {
+export async function offeredTools(ctx, agent) {
   const tools = ctx?.get?.('tools')
   if (tools?.definitions === undefined || agent === undefined) return []
-  const level = levelOf(ctx?.get?.('approval'), agent.session, ctx?.get?.('sandboxPolicy'), ctx?.get?.('permissionPresets'))
-  return tools.definitions(agent)
-    .filter((definition) => definition.name !== TOOL_NAME)
-    // A conditional tool (step admission via `when`) has no call outside a model step; DSH's
-    // own tools here run outside the agent's loop, so only unconditionally executable ones are
-    // offered.
-    .filter((definition) => typeof tools.executable !== 'function' || tools.executable(definition.name, agent) !== undefined)
-    .filter((definition) => level.sandbox !== 'read-only' || !READ_ONLY_DENIED_TOOLS.has(definition.name))
-    .map((definition) => ({
-      name: definition.name,
-      description: typeof definition.description === 'string' ? definition.description : '',
-      inputSchema: definition.parameters ?? { type: 'object', properties: {} },
-    }))
+  const visible = tools.definitions(agent).filter((definition) => definition.name !== TOOL_NAME)
+  if (typeof tools.resolve !== 'function') return visible.map(bridgeShape)
+  const selection = selectionOf(agent)
+  const controller = new AbortController()
+  let toolSet
+  try {
+    toolSet = await tools.resolve({ agent, modelSelection: selection, signal: controller.signal })
+    return tools.definitions(agent, toolSet)
+      .filter((definition) => definition.name !== TOOL_NAME)
+      .map(bridgeShape)
+  } catch {
+    // No live Agent selection (a bridge probe opens no agent session) or a condition DSH could
+    // not settle: the visible definitions are what remains, never a silently smaller list. A
+    // call still resolves its own conditions and is refused in words when they do not hold.
+    return visible.map(bridgeShape)
+  } finally {
+    toolSet?.dispose?.()
+  }
+}
+
+/**
+ * The model selection DSH would resolve a step's conditions against: the Agent's current
+ * selection, else the Session's logged request. Undefined before either exists (a probe).
+ * @returns {{ provider: string, model: string } | undefined}
+ */
+function selectionOf(agent) {
+  try {
+    const current = agent?.model?.current?.()
+    if (typeof current?.provider === 'string' && typeof current?.model === 'string') {
+      return { provider: current.provider, model: current.model }
+    }
+  } catch {}
+  const route = routeOf(agent?.session)
+  return route.provider === undefined ? undefined : route
 }
 
 /**
@@ -202,7 +238,7 @@ function routeOf(session) {
 }
 
 /** A stable fingerprint of what the bridge would list: preset, level (Auto and Full included) and every tool's schema. */
-export function signatureOf(ctx, agent) {
+export async function signatureOf(ctx, agent) {
   const level = levelOf(ctx?.get?.('approval'), agent?.session, ctx?.get?.('sandboxPolicy'), ctx?.get?.('permissionPresets'))
   return JSON.stringify({
     preset: presetOf(ctx, agent?.session),
@@ -210,7 +246,7 @@ export function signatureOf(ctx, agent) {
     approval: level.policy ?? null,
     auto: level.auto === true,
     full: level.full === true,
-    tools: offeredTools(ctx, agent).map((tool) => [tool.name, tool.description, tool.inputSchema]),
+    tools: (await offeredTools(ctx, agent)).map((tool) => [tool.name, tool.description, tool.inputSchema]),
   })
 }
 
@@ -465,7 +501,9 @@ export class Backchannel {
       name: name ?? 'agent',
       promptRunning,
       generation: 0,
-      signature: signatureOf(this.ctx, agent),
+      // Read on the first refresh, before the bridge's first list: resolving a step's
+      // conditions is async and a mint is not.
+      signature: undefined,
       announced: false,
       listed: false,
       closed: false,
@@ -525,9 +563,15 @@ export class Backchannel {
    * and, when it changed, let a waiting bridge announce it.
    * @returns {boolean} whether the list changed
    */
-  refresh(record) {
+  async refresh(record) {
     if (record === undefined || record.closed) return false
-    const signature = signatureOf(this.ctx, record.agent)
+    const signature = await signatureOf(this.ctx, record.agent)
+    if (record.closed) return false
+    // The first read is not a change: it is the set the bridge is about to list.
+    if (record.signature === undefined) {
+      record.signature = signature
+      return false
+    }
     if (signature === record.signature) return false
     record.signature = signature
     record.generation++
@@ -595,13 +639,13 @@ export class Backchannel {
     }
     const op = body?.op
     if (op === 'hello') {
-      this.refresh(record)
+      await this.refresh(record)
       return reply(200, { generation: record.generation })
     }
     if (op === 'list') {
-      this.refresh(record)
+      await this.refresh(record)
       record.listed = true
-      return reply(200, { tools: offeredTools(this.ctx, record.agent), generation: record.generation })
+      return reply(200, { tools: await offeredTools(this.ctx, record.agent), generation: record.generation })
     }
     if (op === 'call') {
       // The bridge puts no deadline on a call (a long wait, a slow command and an open approval
@@ -804,8 +848,22 @@ export class Backchannel {
         if (record.closed && record.controllers.size === 0) record.guard?.release()
       }
     }
-    const offered = offeredTools(this.ctx, record.agent)
-    if (!offered.some((tool) => tool.name === name)) return error(`Tool "${name}" is not offered to this Session.`)
+    const visible = tools.definitions(record.agent) ?? []
+    // A service with no step resolution (an older DSH, a probe) has no conditions to settle;
+    // its visible definitions are the offered set. Keeping that branch synchronous leaves the
+    // approval bookkeeping below before the call's first await, as it was.
+    const offered = typeof tools.resolve === 'function'
+      ? (await offeredTools(this.ctx, record.agent)).some((tool) => tool.name === name)
+      : visible.some((definition) => definition.name === name && definition.name !== TOOL_NAME)
+    if (!offered) {
+      // A conditional tool DSH did not admit for this step is not listed, exactly as on a
+      // native step. A call for one that arrives anyway says why, instead of reading as a tool
+      // that never existed.
+      if (name !== TOOL_NAME && visible.some((definition) => definition.name === name)) {
+        return error(`Tool "${name}" is not available in this Session: DSH's condition for it is not met by the Session's model or preset, so a native DSH step would not offer it either. Nothing ran.`)
+      }
+      return error(`Tool "${name}" is not offered to this Session.`)
+    }
     const raw = JSON.stringify(args ?? {})
     const approval = this.ctx?.get?.('approval')
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
@@ -1039,12 +1097,37 @@ export class Backchannel {
         return await settle([{ type: 'text', text: `Auto review cannot finish ${name}: the permission level changed.` }], true, { name: 'AutoReviewUnavailableError', code: 'AUTO_REVIEW_LEVEL_CHANGED' })
       }
       const signal = controller === undefined ? stopped : AbortSignal.any([stopped, controller.signal])
+      // A conditional tool runs outside the agent's model step, so its admission is resolved
+      // here, against the same Session and model selection, and handed to the executor. Without
+      // this the pipeline would answer UNKNOWN_TOOL for a call DSH had just offered.
+      let toolSet
+      try {
+        if (typeof tools.resolve === 'function') {
+          toolSet = await tools.resolve({ agent: record.agent, modelSelection: selectionOf(record.agent), signal })
+          if (toolSet?.view !== undefined && toolSet.view(record.agent).has(name) !== true) {
+            toolSet.dispose?.()
+            toolSet = undefined
+            return await settle([{ type: 'text', text: `Tool "${name}" is not available in this Session: DSH's condition for it is no longer met. Nothing ran.` }], true, { name: 'ToolConditionError', code: 'TOOL_CONDITION_UNAVAILABLE' })
+          }
+          if (own.signal.aborted) {
+            toolSet?.dispose?.()
+            toolSet = undefined
+            return await cancelled()
+          }
+        }
+      } catch {
+        toolSet?.dispose?.()
+        toolSet = undefined
+        if (own.signal.aborted) return await cancelled()
+        return await settle([{ type: 'text', text: `Tool "${name}" is not available in this Session: its DSH condition could not be settled. Nothing ran.` }], true, { name: 'ToolConditionError', code: 'TOOL_CONDITION_UNAVAILABLE' })
+      }
       let settled
       try {
         settled = await tools.execute({
           calls: [{ id, name, arguments: raw }],
           agent: record.agent,
           signal,
+          ...(toolSet === undefined ? {} : { toolSet }),
         })
       } catch (cause) {
         if (record.closed || record.abort.signal.aborted) {
@@ -1066,6 +1149,8 @@ export class Backchannel {
         const info = { name: typeof cause?.name === 'string' ? cause.name : 'Error' }
         if (typeof cause?.code === 'string') info.code = cause.code
         return await settle([{ type: 'text', text }], true, info)
+      } finally {
+        toolSet?.dispose?.()
       }
       // A revocation, a timeout or a level change during the review wins over its result: the
       // body must not be reported as executed under a level or credential that no longer holds.

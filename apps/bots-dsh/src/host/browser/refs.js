@@ -22,8 +22,11 @@ export const toolDefs = [
     description: 'Open a URL in this Bot\'s own browser and return the page snapshot. '
       + 'It is not a tab in the user\'s right-panel Browser. Outside the Automagik app this is a '
       + 'separate browser window the person can see (headless only on Linux without a display); in '
-      + 'the Automagik app the Bot\'s browser panel shows the same tabs. Call browser_handoff when '
-      + 'the person needs to take over.',
+      + 'the Automagik app the Bot\'s browser panel shows the same tabs. Use this tool for every '
+      + 'page the user asks you to open; never launch the system Chrome or another browser from a '
+      + 'command. If this conversation offers no browser tools, hand the task to the Bot named '
+      + 'browse with message_bot (the team shows it in list_bots) and tell the user. Call '
+      + 'browser_handoff when the person needs to take over.',
     parameters: {
       url: { type: 'string', required: true, description: 'URL to open' },
     },

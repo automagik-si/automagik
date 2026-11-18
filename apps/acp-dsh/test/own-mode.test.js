@@ -434,7 +434,7 @@ test('own mode service disposers are scoped and competing registrations disable 
   apply(h.ctx, { claude: false, codex: true }, h.deps)
   const service = h.services[SERVICE]
   service.ownMode(null)()
-  assert.deepEqual(service.ownModeOf('acp-codex'), { mode: 'agent', bridged: false, answerer: false })
+  assert.deepEqual(service.ownModeOf('acp-codex'), { mode: 'agent', bridged: true, answerer: false })
   const first = service.ownMode(() => true)
   first()
   const second = service.ownMode(() => true)

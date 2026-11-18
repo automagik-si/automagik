@@ -226,8 +226,8 @@ Model providers are set up with dsh's `llm-pi-ai` plugin in `cordis.patch.yml`. 
 **Claude on ACP**: Claude Code came back through `@automagik/acp-dsh`. Once per team, a Bot that ran
 on the retired Claude Code plugin and is still on the pi-ai Claude model it was moved to takes
 `acp-claude` on the same family (`opus`, `sonnet`, `haiku`), keeping its Session and history. It
-moves only when the ACP plugin's `dshTools` bridge is on (its absent default is on for Claude), a
-live bridge probe on this machine passes (cached per adapter version, retried after ten minutes or
+moves only when the ACP plugin's `dshTools` bridge is on (its absent default is on for every
+ACP agent that can run the bridge), a live bridge probe on this machine passes (cached per adapter version, retried after ten minutes or
 the next start), its adapter is installed, its CLI is signed in, and its route lists that model; a
 Bot the person has changed since, or whose model the route does not list, stays where it is. The
 sign-in is the CLI's own answer, asked again on every pass: an installed-but-signed-out Claude moves
@@ -369,7 +369,7 @@ enter team state, messages, tools, model calls or logs. The earlier confirm step
 existing account in the Bot's own CLI home. Terminal user settings are not imported; RFC 0003's
 isolation amendment records the settings migration.
 
-**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table): with it absent, both get the chat's history as a redacted replay, Claude Code gets the team's tools over the bridge, and Codex keeps only its own tools; the team's tools on Codex need an explicit `dshTools: true`.
+**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table): with it absent, every ACP agent that can run the bridge — Codex included (#1544) — gets the team's tools, the Bot's browser and the rest over the bridge, and the chat's history as a redacted replay. Codex keeps its own built-in tools beside DSH's; a structured call that is not an MCP name is recorded as toolset drift and its turn cancelled, so it cannot act twice silently. A tool DSH would not admit for the Bot's model is not offered (and a call to one is refused in words), and read-only does not hide a writer: DSH refuses the write when it runs. Only an explicit `dshTools: false` is the kill switch, and a native Hermes/Antigravity/omp agent row never takes a bridge. A Bot told to open the Bot Browser uses its browser tools, never the system Chrome; with no browser tools it hands the task to the Bot named browse with `message_bot`, and the answer comes back to that chat.
 
 - Give every model a `contextWindow`. DS Bot takes its lines from it: the usable window is the window minus the reply reserve (`maxTokens`), the hard line is 95% of that, and the check line is `checkRatio` of it. A model without `contextWindow` gets the adapter's default (262,144 tokens for `llm-pi-ai`), which may be wrong for that model; a model that reports no window at all counts as 500,000.
 - To send images, the provider needs `defaultInput: [ text, image ]`.
@@ -452,7 +452,7 @@ With both lists empty, prompt-injected channel text can still reach localhost se
 
 ## Bot browser
 
-Every Bot has a browser of its own, on by default (`browserPlugin: false` turns it off). It is the Chrome, Edge, Chromium or Brave already on this computer, driven through `playwright-core`: nothing is downloaded. Without one, a Bot that needs a browser says so and asks you to install Chrome.
+Every Bot has a browser of its own, on by default (`browserPlugin: false` turns it off). It is the Chrome, Edge, Chromium or Brave already on this computer, driven through `playwright-core`: nothing is downloaded. Without one, a Bot that needs a browser says so and asks you to install Chrome. A Bot on an agent over ACP gets the same browser tools as any other Bot through the bridge (acp-dsh's `dshTools`, on by default): `browser_open` tells it to use this browser and never launch the system Chrome, and to hand a browsing task to the Bot named browse with `message_bot` when it has no browser tools.
 
 - **A profile per Bot**, in `browser-profiles/<id>/`: its sign-ins and cookies stay between runs and belong to that Bot only. Deleting a Bot deletes its profile.
 - **Tabs come back**: the Bot's open tabs (address and title) are saved there as they change and reopen at its next browser call after a crash or a restart. A browser that went away (closed, crashed) opens again at that call.

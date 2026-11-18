@@ -88,7 +88,7 @@ test('the bridge fact is the adapter\'s own decision, and its reason always expl
         const { on, why } = diagnostics.read('s1').bridge
         const label = JSON.stringify({ backchannel: backchannel !== undefined, setting, agent })
         assert.equal(on, decided, label)
-        const byDefault = agent.disableBuiltInTools === true
+        const byDefault = agent.bridge !== false
         const expected = backchannel === undefined ? 'no-backchannel'
           : setting !== undefined && setting !== byDefault ? 'setting'
             : 'agent-default'

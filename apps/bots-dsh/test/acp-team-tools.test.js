@@ -21,10 +21,6 @@ import { install as installWhoRefused } from '../src/host/who-refused.js'
 import { fakeContext } from './fake-ctx.js'
 import { until } from './until.js'
 
-// A read-only Session cannot write files, so the bridge hides the file-only mutators. The
-// list repeats apps/acp-dsh/src/host/backchannel.js, which owns it for a real bridge.
-const MUTATING_TOOLS = new Set(['write', 'edit', 'apply_patch', 'str_replace_editor'])
-
 const seed = () => ({
   version: 1,
   mainBotIds: ['a'],
@@ -84,13 +80,13 @@ async function start() {
   // the Session's assembled list, which the bridge reads, holds both.
   const rt = ctx.provided.get('omniTeam')
   const toolOf = name => ctx.registeredTools.get(name) ?? rt.teamTools.find(tool => tool.name === name)
-  const offeredAt = (level) => [...ctx.registeredTools.values(), ...rt.teamTools]
-    .filter(tool => level !== 'read-only' || !MUTATING_TOOLS.has(tool.name))
-    .map(tool => tool.name)
+  // The bridge lists the Session's whole admitted set, whatever its level: a read-only write is
+  // refused by DSH's own pipeline when it runs, not hidden from the list (#1544).
+  const offeredAt = () => [...ctx.registeredTools.values(), ...rt.teamTools].map(tool => tool.name)
   // One Manual bridge call, in the order the ACP bridge runs it: the offer check, then the
   // Session level's approval, then the Bot tool. Auto is the real tools pipeline below.
-  const bridgeCall = async (sessionId, name, args, { level = 'workspace-write', next } = {}) => {
-    assert.ok(offeredAt(level).includes(name), `${name} is offered at ${level}`)
+  const bridgeCall = async (sessionId, name, args, { next } = {}) => {
+    assert.ok(offeredAt().includes(name), `${name} is offered`)
     const session = sessionOf(sessionId).session
     const body = async () => {
       const tool = toolOf(name)
@@ -177,7 +173,7 @@ async function autoReviewPipeline(tool, agent, decision = 'deny') {
 test('a team tool posts to the Bot\'s group through the bridge, and the call carries the approval row', async (t) => {
   const host = await start()
   t.after(host.stop)
-  assert.ok(host.offeredAt('workspace-write').includes('post_to_group'))
+  assert.ok(host.offeredAt().includes('post_to_group'))
   let release
   const pending = host.bridgeCall('b', 'post_to_group', { group: 'Ops', message: 'the report is ready' }, {
     next: () => new Promise((resolve) => { release = resolve }),
@@ -229,16 +225,15 @@ test('an Auto Bot\'s team tool goes through auto-review: allow runs, deny refuse
   assert.deepEqual((await host.call('state', {})).value.work.approvals, [])
 })
 
-test('a read-only Bot is not offered a file-writing tool through the bridge', async (t) => {
+test('a read-only Bot is offered the same tools as a native step', async (t) => {
   const host = await start()
   t.after(host.stop)
-  // A profile's own file tools are part of the same offered set; the bridge hides the ones a
-  // read-only sandbox cannot run.
+  // A profile's own file tools are part of the same offered set. Hiding them here made the ACP
+  // list differ from the native one; the refusal belongs to DSH's pipeline, at execution (#1544).
   host.ctx.registeredTools.set('write', { name: 'write' })
   host.ctx.registeredTools.set('edit', { name: 'edit' })
-  assert.ok(host.offeredAt('workspace-write').includes('write'))
-  assert.equal(host.offeredAt('read-only').includes('write'), false)
-  assert.equal(host.offeredAt('read-only').includes('edit'), false)
+  assert.ok(host.offeredAt().includes('write'))
+  assert.ok(host.offeredAt().includes('edit'))
   // The team tool still is: posting a message is not a file write.
-  assert.ok(host.offeredAt('read-only').includes('post_to_group'))
+  assert.ok(host.offeredAt().includes('post_to_group'))
 })

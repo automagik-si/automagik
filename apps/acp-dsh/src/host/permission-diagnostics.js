@@ -90,7 +90,8 @@ function modesOf(values) {
 // cannot explain the decision is `other`.
 function bridgeOf(adapter, agent, state) {
   const on = state.bridge !== undefined
-  const byDefault = agent?.disableBuiltInTools === true
+  // Every ACP agent that can run the bridge defaults to on (#1544); a native row never does.
+  const byDefault = agent?.bridge !== false
   if (adapter.backchannel === undefined) return { on, why: on ? OTHER : 'no-backchannel' }
   if (agent?.bridge === false) return { on, why: on ? OTHER : 'agent-no-bridge' }
   return { on, why: on === byDefault ? 'agent-default' : 'setting' }
