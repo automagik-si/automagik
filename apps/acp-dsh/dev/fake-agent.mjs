@@ -432,6 +432,12 @@ const implementation = {
         await update({ sessionUpdate: 'tool_call', toolCallId, name: 'Read', title: 'Read notes.txt', kind: 'read', status: 'pending', rawInput: { file_path: 'notes.txt' }, _meta: { claudeCode: { toolName: 'Read' } } })
         trace({ event: 'native-tool-ran', sessionId, toolCallId, name: 'Read' })
         await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'the notes' } }] })
+        // "native-read hold": the turn then waits until it is cancelled, as "drift" does, so a
+        // turn the drift detector cancels ends only once that cancel arrived (and was traced).
+        if (/hold/.test(said)) {
+          if (!session.cancelled) await new Promise((resolve) => { session.wake = resolve })
+          return { stopReason: 'cancelled' }
+        }
         await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' I read the notes.' } })
       } else if (native[1] === 'bash') {
         const answer = await runBash(toolCallId)

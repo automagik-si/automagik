@@ -263,12 +263,15 @@ for (const [label, setting] of [['absent', undefined], ['false', false]]) {
   test(`${label}: built-ins off, the whole preset on the bridge, and a built-in call is drift (today)`, async (t) => {
     const w = await world(t, { nativeTools: setting })
     const c = w.chat('s1')
-    const { mirrors } = await c.turn('native-read')
+    // "hold": the fake turn ends only when it is cancelled, and it traces the cancel before it
+    // ends, so the cancel below is observed, not raced against the end of the turn.
+    const { chunks, mirrors } = await c.turn('native-read hold')
     assert.deepEqual(w.events('new-session')[0].meta, { disableBuiltInTools: true })
     assert.deepEqual(w.events('mcp-list')[0].tools.sort(), ['bash', 'list_bots', 'read'])
     assert.deepEqual(mirrors, [], 'a drifted call gets no card')
     assert.equal(c.drifts().length, 1, 'recorded as toolset drift')
-    assert.ok(w.events('cancel').length >= 1, 'and the turn is cancelled')
+    assert.equal(chunks.at(-1).reason.kind, 'aborted', 'and the turn is cancelled')
+    assert.ok(w.events('cancel').length >= 1, 'by session/cancel to the agent')
   })
 }
 

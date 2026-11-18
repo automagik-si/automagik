@@ -203,12 +203,16 @@ that makes your harness lose all your power."
   the call runs. The hard ask rules (`CLAUDE_HARD_ASK`) are injected as session settings, so the
   person's allow rules cannot silently skip the ask for those Bash cases. A subagent's nested
   call asks while its Agent card is still waiting: that card asks DSH for it, naming the nested
-  call, and the nested call's own card follows, already answered.
+  call, and the nested call's own card follows, already answered. That nested ask does not go
+  through DSH's Auto review: it goes straight to DSH's approval request, so the person's
+  dialog answers it (or the Bot team's judge, where one is set; a delegated child that may never
+  ask is refused). An unattended Session at Auto therefore waits on the person at each nested
+  ask.
 
   | Level | Claude Code mode | What asks DSH | What can bypass DSH |
   |---|---|---|---|
   | Manual | `default` | every native call its own settings leave as "ask"; DSH's dialog answers | a call its own allow rules or hooks allow (the hard asks still ask) |
-  | Auto | `auto` | only what Claude Code's auto mode asks about; DSH Auto review answers | whatever its auto mode runs without asking |
+  | Auto | `auto` | only what Claude Code's auto mode asks about; DSH Auto review answers a top-level call, the person answers a subagent's nested call | whatever its auto mode runs without asking |
   | Full | `bypassPermissions` | nothing; no hard asks injected | every native call |
 
   Manual is the guarded level; Auto is convenience, and its review sees only what reaches the
