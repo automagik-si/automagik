@@ -158,11 +158,9 @@ export class Updater {
     try { text = await this.readText(this.heldFile); } catch {}
     if (!step) return { held: heldFrom(text, version) };
 
-    const record = heldRecordFrom(text, version);
-    if (record?.notes.length && record.landingId && record.landingId !== id) {
-      // A pending landing has no result of its own to announce when the record is from another attempt.
-      return step.ready ? step : null;
-    }
+    const saved = heldRecordFrom(text, version);
+    // A previous attempt at the same version can leave a record behind after rollback.
+    const record = saved?.landingId && saved.landingId !== id ? null : saved;
     const held = step.held?.length ? step.held : record?.held ?? [];
     const notes = id && record?.landingId === id ? record.notes : [];
     return { held, warnings: [...new Set([...(step.warnings ?? []), ...notes])] };
@@ -213,7 +211,6 @@ export class Updater {
       const afterHeld = landingState();
       if (!afterHeld) return;
       if (unchecked && landing(afterHeld, version, this.now())?.ready) return this.arrive(waited);
-      if (unchecked && !record) return;
       if (unchecked && step) step.warnings = record.warnings;
       if (unchecked) {
         finish(this.get, this.set, state.busy?.id ?? null, { announced: version, ...requestAnswer(this.state(), null) });
@@ -232,7 +229,6 @@ export class Updater {
       const afterHeld = landingState();
       if (!afterHeld) return;
       if (!step.ready && landing(afterHeld, version, this.now())?.ready) return this.arrive(waited);
-      if (!record) return;
       step.warnings = record.warnings;
     }
     if (!step) return;
