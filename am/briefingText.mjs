@@ -14,6 +14,11 @@ export const WORKER_LINE = "You write no code yourself: for each task start one 
   + "`am worker \"<task>\" --branch <branch>` (it runs in the task's worktree, under your pane), "
   + "check its result, and end it with `am worker kill <terminal>` once the task merges.";
 
+/** How every bot messages (fleet telemetry, 2026-11-18): no acknowledgements, state is read, not asked. */
+export const MESSAGE_LINE = "Messages: send a task, a result or a blocker. Never send or answer an "
+  + "acknowledgement, a \"holding\" or a status-only note. Read another bot's state with `am brief` or "
+  + "`hc get` instead of asking it.";
+
 // The caller checks git; an omitted flag keeps the existing pure-text default.
 const workerLines = (self, isGit) => (isGit && self.code !== false ? [WORKER_LINE] : []);
 
@@ -137,7 +142,7 @@ export function briefingText({ self, file, members = [], lead, helpers = [], gua
     `Role: ${self.role || "(none given)"}`,
   ];
   if (shown.trim()) head.push("Instructions:", shown.trim());
-  head.push(...workerLines(self, isGit), ...guardLines(self, guard), liveLine(self.id));
+  head.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE, liveLine(self.id));
   const tail = [];
 
   if (lead) {
@@ -222,7 +227,7 @@ export function launchBriefingText({ self, file, guard = null, isGit = true, pro
     `Role: ${self.role || "(none given)"}`,
   ];
   if (shown.trim()) lines.push("Instructions:", shown.trim());
-  lines.push(...workerLines(self, isGit), ...guardLines(self, guard), liveLine(self.id), restartLine(self.id));
+  lines.push(...workerLines(self, isGit), ...guardLines(self, guard), MESSAGE_LINE, liveLine(self.id), restartLine(self.id));
   const eff = self.kind === "member" || self.leadProject
     ? effectiveLead(file, self.id, { project, projects })
     : { lead: "", leadProject: null, leadBot: null, warning: null };

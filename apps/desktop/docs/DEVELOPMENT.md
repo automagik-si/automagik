@@ -21,6 +21,8 @@ The app is **Automagik** wherever a person sees it: the bundle and its menu bar,
 
 There are no keychain items to carry: Electron keeps its cookies unencrypted (the cookie-encryption fuse is off), the secure token store (`src/secure-tokens.js`) is written only when the person's sign-in is switched on, and its credentials are the files above.
 
+A team proving a build on a clean home beside the person's own launches it with `AUTOMAGIK_USER_DATA=<folder>`. The setting is read before Electron's paths are pinned and before the single-instance lock: `appData`, `userData` and `sessionData` all become that folder (made first if it is not there), and the lock follows `userData`, so the copy runs beside the person's app without touching its storage or handing off to its window. Unset or blank, the paths and the lock are exactly as in the table above.
+
 What an updated install shows: the update into the rename is announced by the installed app, so that one notice still reads "Omni <version> is ready"; after the restart the window, title bar, later notices and (macOS) menu bar and About say Automagik. On macOS the updater replaces the bundle where it is, so it stays `/Applications/Omni.app` (with `CFBundleName` and `CFBundleDisplayName` Automagik and the executable `Contents/MacOS/Automagik`), and Finder, Launchpad and the Dock may keep showing the file's name until the person renames it; a fresh install from the dmg is `Automagik.app`. A versioned AppImage is replaced by `Automagik-<version>-linux-x86_64.AppImage` in the same folder (electron-updater keeps a name without a version as it is).
 
 > Labs: macOS (Apple silicon, signed and notarized) and Linux x64 (AppImage, deb; also WSL with WSLg). Windows itself is not supported.
@@ -47,7 +49,7 @@ downloads the build for this machine from this repository's releases, checks it 
   |---|---|
   | `dsh/` | dsh's home (`DSH_HOME`): its Sessions, settings, and the `omni` profile the app copies in from the build |
   | `bots/` | the Bot team's home (`AUTOMAGIK_BOTS_HOME`): the team, the companion's picture, and `omni.json`, the Omni this app is linked to (0600) |
-  | `bin/` | `node` and `pnpm` for dsh, written at each launch: both run on the app's own Electron as Node, so installing a plugin (Settings → Plugins, the market) needs nothing on the machine |
+  | `bin/` | `node` and `pnpm` for dsh's PATH, written at each launch: both run on the app's own Electron as Node. Plugin installs, updates and removals do not resolve `pnpm` there: the app starts dsh through `src/dsh-launch.cjs`, which gives its plugin manager the bundled pnpm by absolute path, so installing a plugin (Settings → Plugins, the market) needs nothing on the machine and cannot pick up another pnpm from PATH |
   | `logs/dsh.log`, `logs/update.log` | dsh's output, and the update checks |
 
   It is apart from a dsh you already run (`~/.dsh`) and from the Bot team installed into that dsh (`~/.automagik/bots`). The app sets no `OMNI_HOME`: an Omni sandbox and the Bun Omni's channels download are in Omni's own `~/.omni`.

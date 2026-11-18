@@ -227,18 +227,30 @@ function roomUploads(row, saved, session, ctx) {
   if (!fresh(row) || !fresh(saved) || uploads?.v !== 1 ||
       typeof uploads.roomId !== 'string' || !Array.isArray(uploads.items) ||
       !isDeepStrictEqual(saved.source.uploads, uploads)) return []
-  let group
+  const groups = []
   try {
     if (!ownsRoomUploads(ctx, session, uploads.roomId)) return []
-    group = ctx.agents?.get(uploads.roomId)?.session?.deriveMessages?.()
+    const team = ctx.get('omniTeam')
+    const room = team.roomOf(uploads.roomId)
+    // room.id stays fixed while room.sessionId follows the current part.
+    const current = typeof team.sessionOfRoom === 'function' ? team.sessionOfRoom(room) : (room.sessionId ?? room.id)
+    const parts = Array.isArray(room.parts) ? room.parts.map(part => part?.sessionId).reverse() : []
+    const ids = new Set([current, ...parts, room.id].filter(id => typeof id === 'string'))
+    for (const id of ids) {
+      const group = ctx.agents?.get(id)?.session?.deriveMessages?.()
+      if (Array.isArray(group)) groups.push(group)
+    }
   } catch { return [] }
-  if (!Array.isArray(group)) return []
   return uploads.items.flatMap(item => {
     if (!item || typeof item.messageId !== 'string' ||
         typeof item.attachmentId !== 'string' ||
         !Number.isInteger(item.blockIndex) || item.blockIndex < 0 ||
         !['file', 'image'].includes(item.kind)) return []
-    const person = group.find(message => message.id === item.messageId)
+    let person
+    for (const group of groups) {
+      person = group.find(message => message.id === item.messageId)
+      if (person) break
+    }
     if (person?.source?.kind !== 'user' || person.source.handoff ||
         !Array.isArray(person.content) || item.blockIndex >= person.content.length) return []
     const block = person.content[item.blockIndex]
@@ -528,7 +540,7 @@ export class AcpAdapter extends LlmAdapter {
    *   waits a real deadline out.
    */
   constructor(ctx, agents, {
-    dshTools = () => false, backchannel, redactor, onSignedOut, images = () => undefined,
+    dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
     botIdentity = () => undefined, access, holds, ownMode = () => undefined,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
@@ -554,6 +566,9 @@ export class AcpAdapter extends LlmAdapter {
     this.ctx = ctx
     this.agents = agents
     this.dshTools = dshTools
+    // The raw `nativeTools` setting (index.js): absent, a boolean, or Bot names/Session ids to
+    // booleans. Read at each turn's start by `nativeOn`.
+    this.nativeTools = nativeTools
     this.botIdentity = botIdentity
     this.backchannel = backchannel
     this.redact = redactor ?? (text => text)
@@ -705,6 +720,32 @@ export class AcpAdapter extends LlmAdapter {
     const setting = this.dshTools()
     if (setting === true || setting === false) return setting
     return this.bridgeDefault(agent)
+  }
+
+  /**
+   * Native-tools mode (#1564) for one Session: the agent keeps its own built-in tools (Claude
+   * Code's Agent, Bash, Read, Edit, Write, Grep, Glob, Skill...) and the bridge serves only DSH's
+   * extras (backchannel.js NATIVE_TWIN_TOOLS). Only for an agent whose built-in tools the bridge
+   * would otherwise turn off (`disableBuiltInTools`, Claude Code) while its bridge is on; off
+   * everywhere else, so an absent or false setting is today's behaviour. The setting is `true`
+   * (every such Session) or an object whose keys are Bot names or DSH Session ids: a Session is
+   * on when at least one key names it and none that names it says false. A throwing reader is off.
+   * @param {any} agent this plugin's agent row
+   * @param {string} sessionId the DSH Session
+   */
+  nativeOn(agent, sessionId) {
+    if (agent?.disableBuiltInTools !== true || !this.bridgeOn(agent)) return false
+    let setting
+    try { setting = this.nativeTools() } catch { return false }
+    if (setting === true) return true
+    if (setting === null || typeof setting !== 'object' || Array.isArray(setting)) return false
+    const keys = [sessionId]
+    try {
+      const name = this.botIdentity(sessionId)?.name
+      if (typeof name === 'string' && name !== '') keys.push(name)
+    } catch {}
+    const said = keys.filter(key => typeof key === 'string' && Object.hasOwn(setting, key)).map(key => setting[key])
+    return said.length > 0 && said.every(value => value === true)
   }
 
   /**
@@ -959,7 +1000,7 @@ export class AcpAdapter extends LlmAdapter {
    */
   async refork(agent, live, dshAgent, signal) {
     const previous = live.bridge
-    const next = this.backchannel.mint({ sessionId: dshAgent?.session?.id, agent: dshAgent, name: agent.name, promptRunning: () => live.open === true && live.run?.busy === true })
+    const next = this.backchannel.mint({ sessionId: dshAgent?.session?.id, agent: dshAgent, name: agent.name, promptRunning: () => live.open === true && live.run?.busy === true, native: live.native === true })
     live.bridge = next
     try {
       await live.run.held(() => live.run.fork({
@@ -1227,10 +1268,14 @@ export class AcpAdapter extends LlmAdapter {
       // to, as for an agent that is no longer alive (#969).
       let full = false
       try { full = levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets')).full === true } catch {}
-      const asks = typeof agent.hardAsk === 'function' && !(this.bridgeOn(agent) && agent.disableBuiltInTools === true) && !full
+      // Native-tools mode keeps the agent's own tools, so it keeps the hard ask rules too: the
+      // person's own allow rules must not silently skip the ask for a hard Bash or file case.
+      const native = this.nativeOn(agent, sessionId)
+      const asks = typeof agent.hardAsk === 'function' && !(this.bridgeOn(agent) && agent.disableBuiltInTools === true && !native) && !full
       const bridgeGone = live?.bridge?.closed === true && this.bridgeOn(agent)
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
-      if (live !== undefined && (live.provider !== options.provider || !live.run.alive || bridgeGone || live.asks !== asks)) {
+      // A flip of the mode is a new tool set: the next turn starts a new agent session on it.
+      if (live !== undefined && (live.provider !== options.provider || !live.run.alive || bridgeGone || live.asks !== asks || (live.native === true) !== native)) {
         this.end(sessionId, live)
         live = undefined
       }
@@ -1277,7 +1322,7 @@ export class AcpAdapter extends LlmAdapter {
       const replaying = this.replayOn()
       if (live === undefined) {
         crossing = replaying && prior !== undefined && prior !== options.provider
-        const state = { fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox, provider: options.provider, name: agent.name, asks, run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent, bridge: undefined, replay: undefined, owed: undefined, drifted: false }
+        const state = { fileOwner, pendingMirrors: new Set(), fileSandbox: fileContext?.sandbox, provider: options.provider, name: agent.name, asks, native, run: undefined, calls: new Set(), toolIds: new Map(), open: false, dshAgent, bridge: undefined, replay: undefined, owed: undefined, drifted: false }
         // A connector release that passed its start check is still unproven until it opens a
         // session. One that fails here goes back to the release before it (install.js), and the
         // session start is tried once more on that one: the turn is not lost to a bad release.
@@ -1298,7 +1343,7 @@ export class AcpAdapter extends LlmAdapter {
             if (this.bridgeOn(agent)) {
               await this.backchannel.listen()
               if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined || options.signal?.aborted)) throw new Error('Image permission changed while the bridge started.')
-              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true })
+              state.bridge = this.backchannel.mint({ sessionId, agent: dshAgent, name: agent.name, promptRunning: () => state.open === true && state.run?.busy === true, native })
             }
             this.diagnostics?.started(sessionId, this, agent, state)
             const takesIdentity = ['acp-claude', 'acp-codex'].includes(options.provider)
@@ -1322,14 +1367,20 @@ export class AcpAdapter extends LlmAdapter {
                 try { this.ctx.logger?.info?.(`acp-dsh: ${agent.name} Bot identity: ${delivery}`) } catch {}
               } : undefined,
               mcpServers: state.bridge === undefined ? [] : [this.bridgeServer(state.bridge)],
-              ...(this.bridgeOn(agent) && agent.disableBuiltInTools === true
-                ? { sessionMeta: { disableBuiltInTools: true } }
-                : asks ? { sessionMeta: agent.hardAsk() } : {}),
+              // Native-tools mode: the built-in tools stay on (`disableBuiltInTools: false`), with
+              // the hard ask rules unless the level is Full.
+              ...(native
+                ? { sessionMeta: { ...(asks ? agent.hardAsk() : {}), disableBuiltInTools: false } }
+                : this.bridgeOn(agent) && agent.disableBuiltInTools === true
+                  ? { sessionMeta: { disableBuiltInTools: true } }
+                  : asks ? { sessionMeta: agent.hardAsk() } : {}),
               dshTools: this.bridgeOn(agent),
               refresh: agent.refresh,
               onReady: state.bridge === undefined ? undefined : () => this.ready(agent, state),
               onAsked: () => { if (state.own === true && state.bridge !== undefined) state.bridge.agentAsked = true },
-              onToolCall: tool => this.checkDrift(sessionId, agent, tool),
+              // In native-tools mode a built-in call is the point, not drift: it gets its mirror
+              // card and DSH's approval like any call of an agent without the bridge.
+              onToolCall: tool => { if (!native) this.checkDrift(sessionId, agent, tool) },
               onIgnored: message => this.warn(message),
               onRefusedMcp: tool => this.warn(`${agent.name} asked to run an MCP tool of ${typeof tool.mcpServer === 'string' ? `server "${tool.mcpServer.slice(0, 80)}"` : 'an unnamed server'}: refused, only the ${BRIDGE_NAME} bridge's tools run with DSH's tools on`),
               onMode: seen => this.diagnostics?.mode(sessionId, state, seen),
