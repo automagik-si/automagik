@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (delivery 1 authorized by the owner and merged: #1094, #1118, #1377; deliveries 2-5 open; questions (a)-(g) open, owner decision pending; replaces RFC 0024's identity-provider choice) |
+| Status | In delivery (delivery 1 authorized by the owner and merged: #1094, #1118, #1377; deliveries 2-5 open; questions (a), (b) and (d) decided by the owner on 2026-11-18, (c) and (e)-(g) open; replaces RFC 0024's identity-provider choice) |
 | Milestone | none (independent Worker deployment) |
 | Lanes | none: `apps/id/` deploys on its own and no release carries it |
 | Created | 2026-11-11 |
@@ -38,16 +38,27 @@ A small service of our own gives:
 ## Decided
 
 1. **Better Auth in one Worker with D1** (owner). No other provider, no secondary store.
-2. **Passkeys first.** Account creation works without a prior session. No email,
-   password, social sign-in or sign-up form.
+2. **Passkeys first.** Account creation works without a prior session, but only with
+   an admission ticket (Decided 9). No email, password, social sign-in or sign-up form.
 3. **Passkey site name `automagik.si`** (owner, 2026-11-11), read from a setting. The
    service refuses to start on a host outside it.
-4. **First deployment on a test name under `automagik.si`** (owner, 2026-11-15).
-   No public-name move happens until the owner directs it.
+4. **The public name is `id.automagik.si`** (owner, 2026-11-18). It is the issuer
+   every product stores in `(iss, sub)`. It replaces the test-name first deployment
+   (owner, 2026-11-15): the first deployment goes to `id.automagik.si`, so the issuer
+   never moves, and the invite gate keeps it closed until someone is admitted.
 5. **Phone proof is inbound only.** The person sends a browser-issued challenge
    message through WhatsApp; the service never sends first. It is off by default.
 6. **Identity only.** Product roles and entitlements stay in each product.
 7. **No automatic migration** from another provider's principals.
+8. **The free product stays one human per instance** (owner, 2026-11-18), as RFC 0024's
+   Decided 2 says. Many people working together is Cloud.
+9. **Invite only, as Arca** (owner, 2026-11-18). Invitations stay Cloud records:
+   single use, with an expiry, revocable, minted by staff and named by project. The ID
+   stores no invitation and no code. It creates an account only when the request
+   carries an admission ticket: a short-lived token Cloud signs after it redeems an
+   invitation, checked against public keys in the ID's config, used once (its id is
+   kept in D1). With no admission key configured, no account can be created. A first
+   phone proof for an unknown number needs a ticket too.
 
 ## Design
 
@@ -182,16 +193,17 @@ Content-Security-Policy. Without the `PAGES` binding both routes answer 501.
 - **Forged inbound phone events.** Bearer secret compared in constant time; numeric
   sender only; message time inside the challenge life; one D1 batch deduplicates the
   event and enforces 10 events per sender per minute and 3 per challenge.
-- **Account-creation abuse.** A bare GET to
+- **Account-creation abuse.** Without the invite gate, a bare GET to
   `/api/auth/passkey/generate-register-options` writes a user row before any passkey
-  exists. A script can fill D1 with orphan users, limited only by the 60 per minute
-  per IP limit, which a spread of addresses avoids.
+  exists, and a spread of addresses gets past the 60 per minute limit. The gate
+  (Decided 9) refuses registration without a valid, unused admission ticket before any
+  row is written; the orphan cleanup removes what an abandoned ceremony leaves.
 - **Rate-limit cost.** Every limited request writes a D1 row. A flood costs D1 writes
   even when it is refused.
 
 ### Residual risks
 
-- Orphan users from abandoned or abusive registrations, until delivery 2's cleanup.
+- Account creation open to anyone, until delivery 2's invite gate and cleanup.
 - One passkey per account and no recovery: a lost authenticator loses the account.
 - No session list or revoke for the person; sign-out ends only the current session.
 - No security headers on API responses, no HSTS and no header CSP yet (delivery 2).
@@ -221,7 +233,9 @@ real account; 3 and 4 after 2; 5 after 3.
    mutation in `scripts/mutations.mjs` fails its test.
    *Rollback:* remove the custom domain or the Worker; keep D1 and the secret.
 2. **Ready for real accounts.**
-   - the custom domain name the owner picks (question (d));
+   - the public name `id.automagik.si` as the Worker's custom domain (Decided 4);
+   - the invite gate: account creation and a first phone proof need an admission
+     ticket (Decided 9);
    - the sign-in and consent pages on it, with the contract's states;
    - security headers on every response (HSTS, header CSP, `nosniff`,
      `frame-ancestors 'none'`);
@@ -259,19 +273,19 @@ real account; 3 and 4 after 2; 5 after 3.
 
 Each has a recommendation; the owner's decision is pending.
 
-- **(a) Is the free or self-hosted product one human per instance?** Recommended: yes,
-  as RFC 0024's Decided 2 says. Automagik ID serves Cloud and the desktop; a
-  self-hosted instance keeps its local claim.
-- **(b) Open sign-up or invite-only?** Recommended: open, with the rate limit and
-  delivery 2's orphan cleanup. Invitations stay Cloud records. RFC 0024's one-use
-  signup links from an operator job are superseded: there is no admin key to mint them.
+- **(a) Is the free or self-hosted product one human per instance?** Decided: yes
+  (Decided 8).
+- **(b) Open sign-up or invite-only?** Decided: invite-only, as Arca (Decided 9). RFC
+  0024's one-use signup links from an operator job are superseded by the admission
+  ticket: there is no admin key to mint them.
 - **(c) What does recovery look like?** Recommended: a second passkey now (delivery 2),
-  recovery codes later. No email reset.
-- **(d) What is the public name?** Recommended: `id.automagik.si`, chosen before the
-  first real account. Passkeys are bound to `automagik.si`, so a host move keeps them
-  if the D1 database is kept. The issuer string changes with the host, and with it
-  every product's `(iss, sub)`, so the move must happen before products store
-  principals.
+  and, for a person who lost every passkey, a recovery ticket staff mint after they
+  know the person, the way they hand out invitations. It is the admission ticket with
+  the account's `sub`: used once, short-lived, it adds a new passkey to that account and
+  ends all its sessions. Recovery codes only if staff recovery stops scaling. No email
+  reset.
+- **(d) What is the public name?** Decided: `id.automagik.si` (Decided 4), before any
+  product stores a principal.
 - **(e) A device-code grant for headless clients?** Recommended: not now. Add it when
   a headless client exists, with its own review.
 - **(f) Linking a phone identity to a passkey identity?** Recommended: not now. When
