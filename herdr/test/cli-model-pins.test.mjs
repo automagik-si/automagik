@@ -12,6 +12,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { join } from "node:path";
 
 import { readJsonLines } from "./log-lines.mjs";
+import { startFakeCore } from "./fake-core.mjs";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
 
 const CLI = new URL("../mods/am-sidebar/bin/automagik-herdr.mjs", import.meta.url).pathname;
@@ -52,6 +53,8 @@ function scene(t, { bots = null, def = "sonnet", terminals = [] } = {}) {
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, LANG: "C",
     GIT_CEILING_DIRECTORIES: root, AUTOMAGIK_HERDR_RESTART_STABLE_MS: "300", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "4000",
     AUTOMAGIK_HERDR_TAB_WAIT_MS: "300" };
+  // #1497: the core-id lookup reads a fake core's socket, never hc's default one (the runner's own).
+  Object.assign(env, startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root }).env);
   const cli = (args) => {
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr };
@@ -133,6 +136,8 @@ test("#1491 a start on a linked machine of a bot pinned to the 1M id: hc run --o
   writeFileSync(logPath, "");
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, LANG: "C",
     XDG_DATA_HOME: "", GIT_CEILING_DIRECTORIES: root, AUTOMAGIK_HERDR_TAB_WAIT_MS: "300", HC_TERMINAL_ID: "t1" };
+  // #1497: the core-id lookup reads a fake core's socket, never hc's default one (the runner's own).
+  Object.assign(env, startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root }).env);
   const r = spawnSync(process.execPath, [CLI, "start", "Primary", "--machine", "vm", "--project", project], { cwd: root, env, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
   const run = readJsonLines(logPath).find((c) => c[0] === "run");
