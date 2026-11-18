@@ -419,7 +419,7 @@ export function install(rt) {
    * @param {object} bot - the Bot record (its `denyTools` and `shell` are read live).
    */
   async function applyToolDeny(bot, extra = []) {
-    if (bot === undefined || rt.shellHoldOf?.(bot.id) !== undefined) return
+    if (bot === undefined || bot.shellHeld !== undefined) return
     const sessions = new Set([...rt.sessionsOfBot(bot.id), ...extra])
     for (const part of bot.segments ?? []) sessions.add(part.sessionId)
     // A group keeps its earlier parts under the room, beside the Bot's own history.

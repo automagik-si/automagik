@@ -343,6 +343,13 @@ export function install(rt) {
       const sessionId = agent?.session?.id ?? agent?.id
       const header = agent?.session?.header
       const parentId = header?.parentSession
+      try {
+        rt.assertShellChoice?.(sessionId)
+        rt.assertShellChoice?.(parentId)
+      } catch {
+        agent.cancel?.({ kind: 'user' }, { keepInbox: true })
+        continue
+      }
       if (typeof parentId === 'string' && header?.origin === 'subagent' && known(parentId)) {
         noteSubagentStart(parentId, sessionId, undefined, Date.now())
         continue
@@ -391,21 +398,6 @@ export function install(rt) {
       agent?.cancel?.({ kind: 'user' })
     }
     return true
-  }
-
-  function stopShellHeldAgents() {
-    for (const agent of ctx.get?.('agents')?.list?.() ?? []) {
-      const sessionId = agent.session?.id ?? agent.id
-      const parentId = agent.session?.header?.parentSession
-      if (agent.status !== 'running' && !hasSubagents(sessionId)) continue
-      try {
-        rt.assertShellChoice?.(sessionId)
-        if (parentId !== undefined) rt.assertShellChoice?.(parentId)
-      } catch {
-        agent.cancel?.({ kind: 'user' }, { keepInbox: true })
-        void stopSubagents(sessionId).catch(error => rt.warn('ds-bot: could not stop held subagents: %s', error))
-      }
-    }
   }
 
   const liveOf = id => {
@@ -1390,7 +1382,7 @@ export function install(rt) {
         try {
           rt.assertShellChoice?.(request.address.sessionId)
         } catch (error) {
-          if (error?.code !== 'bot/shell-off-cli') throw error
+          if (error?.code !== 'bot/shell') throw error
           request = { ...request, activate: false }
         }
       }
@@ -1407,9 +1399,10 @@ export function install(rt) {
   if (typeof prompt === 'function') {
     const controller = ctx.sessionController
     const admitted = async function (request, ...rest) {
-      await rt.refreshShellChoice?.()
-      rt.assertShellChoice?.(request?.sessionId)
       try {
+        // A Bot held at load for its shell-off coding CLI never starts its own turn.
+        await rt.refreshShellChoice?.()
+        rt.assertShellChoice?.(request?.sessionId)
         return await prompt.call(this, request, ...rest)
       } catch (error) {
         const id = request?.sessionId
@@ -1439,5 +1432,5 @@ export function install(rt) {
     wrapMethod(controller, 'prompt', admitted, 'omni-ui: prompt rejection reasons')
   }
 
-  Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, callCapability, doingOf, stopRoomTurn, stopChat, stopShellHeldAgents, releaseBot, unblockBots, resumeBot, markSteerCut, hasSubagents, stopSubagents, adoptLiveWork })
+  Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, callCapability, doingOf, stopRoomTurn, stopChat, releaseBot, unblockBots, resumeBot, markSteerCut, hasSubagents, stopSubagents, adoptLiveWork })
 }

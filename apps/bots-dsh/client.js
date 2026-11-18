@@ -1299,13 +1299,8 @@ var ZH = {
   "Shell access": "Shell 访问",
   "A Bot with shell access can read what the operating-system user can read.": "有 shell 访问权限的 Bot 可以读取操作系统用户能读取的内容。",
   "This Bot stays on {model}: {cli} is a coding CLI that brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.": "这个 Bot 会继续使用 {model}：{cli} 是自带 shell 的编程 CLI。请打开 shell，或选择一个使用 DeepSeek Harness 工具的模型。",
-  "This Bot needs a choice. Turn on its shell to continue using its host’s model.": "这个 Bot 需要你做出选择。打开 shell 后才能继续使用宿主的模型。",
-  "This Bot needs a choice. Turn on its shell, or pick a model that uses DeepSeek Harness’s tools. The shell is off and {cli} can run commands.": "这个 Bot 需要你做出选择。打开 shell，或选择使用 DeepSeek Harness 工具的模型。当前 shell 已关闭，而 {cli} 可以运行命令。",
-  "Change model": "更改模型",
-  "Change model?": "更改模型？",
-  "This changes the model for future messages in this conversation.": "这会更改此对话后续消息使用的模型。",
-  "This starts a new conversation. You can still read the earlier one in history.": "这将开始新的对话。你仍可在历史记录中阅读之前的对话。",
   "This model no longer answers, and this Bot cannot move to {cli} while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.": "这个模型已不再可用，而在 shell 关闭时这个 Bot 无法迁移到 {cli}。请选择一个使用 DeepSeek Harness 工具的模型，或打开 shell。",
+  "This Bot has no shell, so it cannot run on {cli}, whose own tools can run commands. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.": "这个 Bot 没有 shell，因此不能在 {cli} 上运行，它的工具可以执行命令。请选择一个使用 DeepSeek Harness 工具的模型，或打开 shell。",
   "The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.": "Bot 团队在授予工具时执行此设置：它会移除这些工具，而不会把 shell 放进操作系统沙箱。",
   "This removes this Bot's own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.": "这只会移除这个 Bot 自己的 shell 工具；它不能阻止另一个有 shell 的 Bot，或操作系统用户，读取这个 Bot 能读取的文件。",
   "Denied tools": "禁止使用的工具",
@@ -3747,6 +3742,13 @@ var LEGACY_LOCAL_CLIS = Object.freeze([
   "qwen-code",
   "goose"
 ]);
+function shellHoldModelOf(bot) {
+  if (bot?.shell !== false) return void 0;
+  return [bot.model, bot.appliedModel].find(commandCapableAgent);
+}
+function shellHoldText(bot, cli = bot?.shellHeld?.cli) {
+  return `${bot?.name ?? "This Bot"} has no shell, so it cannot run on ${cli ?? "a coding CLI"}, whose own tools can run commands. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.`;
+}
 function commandCapableAgent(ref) {
   const provider = String(ref ?? "").split("/")[0];
   if (provider === "") return false;
@@ -6999,9 +7001,8 @@ function modelStateLine(state2, roster) {
   return void 0;
 }
 function modelHint(bot, roster, state2) {
-  if (bot.shellHold?.reason === "shell-off-cli") {
-    const params = { cli: bot.shellHold.provider };
-    return bot.shellHold.nativeRecovery === false ? t("This Bot needs a choice. Turn on its shell to continue using its host’s model.") : t("This Bot needs a choice. Turn on its shell, or pick a model that uses DeepSeek Harness’s tools. The shell is off and {cli} can run commands.", params);
+  if (bot.shellHeld !== void 0) {
+    return t("This Bot has no shell, so it cannot run on {cli}, whose own tools can run commands. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.", { cli: bot.shellHeld.cli });
   }
   const host = roster.hostModels?.[bot.id];
   if (host !== void 0) {
@@ -7123,7 +7124,6 @@ function modelRoute(roster, ref) {
 }
 var MENU_ROOT = Object.freeze({ step: "routes" });
 function routesFor(bot, roster) {
-  if (bot?.shellHold?.reason === "shell-off-cli") return ["native"];
   const policy = roster?.routePolicy;
   if (policy === null || typeof policy !== "object") return [...ROUTE_ORDER];
   const named = policy[bot?.kind ?? "automagik"] ?? policy.default;
@@ -7212,7 +7212,7 @@ var toggledGroup = (manual, id, open) => ({ ...manual, [id]: !open });
 var NO_MANUAL = {};
 var manualFor = (state2, opening) => state2.opening === opening ? state2.manual : NO_MANUAL;
 function ModelSteps({ roster, bot, view, current, picked, levelName: levelName2, go, onModel, onLevel, onManage, onRemote, folds, levels: withLevels = true }) {
-  const models = bot?.shellHold?.reason === "shell-off-cli" ? (roster.models ?? []).filter((entry) => !commandCapableAgent(entry.ref)) : roster.models ?? [];
+  const models = roster.models ?? [];
   const remote = roster.prefs?.hermesRemote;
   const remoteConfigured = remote?.enabled === true && Boolean(remote.profile);
   const currentRoute = current === void 0 ? void 0 : modelRoute(roster, current).route;
@@ -7446,7 +7446,6 @@ function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
   return { isOpen: place !== null, shownPlace, leaving, button, menu, open, close };
 }
 function ModelMenu(props) {
-  if (props.bot?.shellHold?.nativeRecovery === false) return null;
   return (0, import_react16.createElement)(props.roster?.hostModels?.[props.bot?.id] === void 0 ? DshModelMenu : HostModelMenu, props);
 }
 function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm }) {
@@ -7455,29 +7454,23 @@ function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm }) {
   const routeChanged = from?.route !== to.route;
   const fullAccess = bot.permission === "danger-full-access";
   const fullAccessLine = !fullAccess ? void 0 : to.route === "native" ? t("Full access: DSH's own tools run without asking.") : to.route === "hermes-remote" ? t("Full access: Hermes still asks you in the chat when it wants an approval. Its own rules apply there.") : to.provider === "acp-claude" || to.provider === "acp-codex" ? t("Full access: the CLI's own no-ask mode.") : t("Full access: the agent's actions run without asking.");
-  const inPlace = bot.shellHold?.reason === "shell-off-cli" && bot.sessionPinned === true;
-  const title = inPlace ? t("Change model?") : t("Start a new conversation?");
   return (0, import_react16.createElement)(
     "div",
-    { className: "bt-model-step bt-model-confirm", role: "group", "aria-label": title },
-    (0, import_react16.createElement)("div", { className: "bt-model-confirm-title" }, title),
+    { className: "bt-model-step bt-model-confirm", role: "group", "aria-label": t("Start a new conversation?") },
+    (0, import_react16.createElement)("div", { className: "bt-model-confirm-title" }, t("Start a new conversation?")),
     (0, import_react16.createElement)(
       "div",
       { className: "bt-model-confirm-move" },
       from ? `${routeName(from.route)} · ${from.connection} → ` : "",
       `${routeName(to.route)} · ${to.connection}`
     ),
-    (0, import_react16.createElement)("div", { className: "bt-model-confirm-text" }, inPlace ? t("This changes the model for future messages in this conversation.") : bot.shellHold?.reason === "shell-off-cli" ? t("This starts a new conversation. You can still read the earlier one in history.") : routeChanged ? t("Changing the route starts a new conversation. {name} writes a handoff note first.", { name: bot.name }) : t("Changing the agent starts a new conversation. {name} writes a handoff note first.", { name: bot.name })),
+    (0, import_react16.createElement)("div", { className: "bt-model-confirm-text" }, routeChanged ? t("Changing the route starts a new conversation. {name} writes a handoff note first.", { name: bot.name }) : t("Changing the agent starts a new conversation. {name} writes a handoff note first.", { name: bot.name })),
     fullAccessLine === void 0 ? null : (0, import_react16.createElement)("div", { className: "bt-model-confirm-access", role: "note" }, fullAccessLine),
     (0, import_react16.createElement)(
       "div",
       { className: "bt-model-confirm-actions" },
-      (0, import_react16.createElement)(
-        "button",
-        { type: "button", className: "bt-model-confirm-cancel", onClick: onCancel },
-        inPlace ? t("Cancel") : t("Keep this conversation")
-      ),
-      (0, import_react16.createElement)("button", { type: "button", className: "bt-model-confirm-go", onClick: onConfirm }, inPlace ? t("Change model") : routeChanged ? t("Change route") : t("Change agent"))
+      (0, import_react16.createElement)("button", { type: "button", className: "bt-model-confirm-cancel", onClick: onCancel }, t("Keep this conversation")),
+      (0, import_react16.createElement)("button", { type: "button", className: "bt-model-confirm-go", onClick: onConfirm }, routeChanged ? t("Change route") : t("Change agent"))
     )
   );
 }
@@ -7578,8 +7571,8 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
     if (focused) button.current?.focus();
   };
   const same = (ref) => !onPick && ref === current && Boolean(bot.model);
-  const held = bot.shellHold?.reason === "shell-off-cli";
-  const crossing = (ref) => saved && (held ? !commandCapableAgent(ref) : Boolean(current) && ref !== current && crossesHarness(current, ref));
+  const crossing = (ref) => Boolean(current) && saved && ref !== current && crossesHarness(current, ref);
+  const recovery = (ref) => saved && bot.shellHeld !== void 0 && !commandCapableAgent(ref);
   const pickModel = (ref, effort, { routeChange = false, level = false } = {}) => {
     if (routeChange && typeof onPick === "function") return onPick(ref, { routeChange: true, effort });
     if (onPick) {
@@ -7604,16 +7597,17 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
     return run2(actions.updateBot(bot.id, { model: ref, ...level || effort !== void 0 ? { effort: effort ?? null } : {} }));
   };
   const commit = (model, effort) => {
-    if (model.ref !== void 0 && crossing(model.ref)) {
+    const routeChange = model.ref !== void 0 && recovery(model.ref);
+    if (!routeChange && model.ref !== void 0 && crossing(model.ref)) {
       setConfirm({ ref: model.ref, effort });
       return;
     }
     finish();
-    void Promise.resolve(pickModel(model.ref, effort)).catch(() => {
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange })).catch(() => {
     });
   };
   const onModel = (model, route) => {
-    if (route === "herdr" || model.ref === void 0 || held && commandCapableAgent(model.ref)) return;
+    if (route === "herdr" || model.ref === void 0) return;
     if (model.needsKey) {
       if (typeof actions.setProviderKey === "function") {
         setKeyFor(model);
@@ -7648,12 +7642,13 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
     else void askEfforts(model.ref, actions).then(decide);
   };
   const onLevel = (model, effort) => {
-    if (crossing(model.ref)) {
+    const routeChange = recovery(model.ref);
+    if (!routeChange && crossing(model.ref)) {
       setConfirm({ ref: model.ref, effort });
       return;
     }
     finish();
-    void Promise.resolve(pickModel(model.ref, effort, { level: true })).catch(() => {
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange, level: true })).catch(() => {
     });
   };
   const onKeyDown = (event) => {
@@ -15365,7 +15360,7 @@ function BotSettingsForm({ bot, roster, actions, run: run2 }) {
       (0, import_react40.createElement)(
         "div",
         { className: "bt-set-row bt-bs-row" },
-        (0, import_react40.createElement)("span", { className: "bt-set-copy" }, (0, import_react40.createElement)("span", { className: "bt-bs-label" }, t("Model")), (0, import_react40.createElement)("span", { className: "bt-set-hint", role: bot.shellHold || modelState?.lastFailure?.kept ? "status" : void 0 }, modelHint(bot, roster, modelState))),
+        (0, import_react40.createElement)("span", { className: "bt-set-copy" }, (0, import_react40.createElement)("span", { className: "bt-bs-label" }, t("Model")), (0, import_react40.createElement)("span", { className: "bt-set-hint", role: modelState?.lastFailure?.kept ? "status" : void 0 }, modelHint(bot, roster, modelState))),
         (0, import_react40.createElement)(ModelMenu, picker)
       ),
       signIn && actions.openCliLogin ? (0, import_react40.createElement)(

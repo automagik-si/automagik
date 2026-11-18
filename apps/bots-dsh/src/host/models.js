@@ -289,8 +289,8 @@ export function install(rt) {
       const last = signInChecks.get(row.id)
       if (row.on === false || row.connector?.state !== 'ready' || typeof agents.inspect !== 'function' || (last !== undefined && Date.now() - last < SIGN_IN_CHECK_MS)) continue
       const providerMatches = bot => [bot.model, bot.appliedModel].some(ref => typeof ref === 'string' && ref.split('/')[0] === row.id)
-      if (bots.some(bot => providerMatches(bot) && rt.shellHoldOf?.(bot.id) !== undefined)
-        && !bots.some(bot => providerMatches(bot) && rt.shellHoldOf?.(bot.id) === undefined)) continue
+      if (bots.some(bot => providerMatches(bot) && bot.shellHeld !== undefined)
+        && !bots.some(bot => providerMatches(bot) && bot.shellHeld === undefined)) continue
       signInChecks.set(row.id, Date.now())
       void Promise.resolve().then(() => agents.inspect(row.id)).then((seen) => {
         if (epoch !== catalogEpoch || typeof seen?.signedIn !== 'boolean') return
@@ -327,7 +327,7 @@ export function install(rt) {
         })
       }
     }
-    const used = new Set(Object.values(state.bots ?? {}).filter(bot => onDsh(bot) && rt.shellHoldOf?.(bot.id) === undefined)
+    const used = new Set(Object.values(state.bots ?? {}).filter(bot => onDsh(bot) && bot.shellHeld === undefined)
       .flatMap(bot => [bot.model, bot.appliedModel].filter(Boolean)))
     const entries = listed
     // Claude on pi-ai's anthropic route: the menu offers each family's newest model.
@@ -711,7 +711,7 @@ export function install(rt) {
   }
 
   // The store can replace a Bot while a model choice is in flight.
-  const modelTargetLive = bot => rt.shellHoldOf?.(bot.id) === undefined
+  const modelTargetLive = bot => bot.shellHeld === undefined
     && (rt.botOf === undefined || rt.botOf(bot.id) === bot)
 
   // `force` re-selects even when the record says it is applied: the composer's own
@@ -807,7 +807,7 @@ export function install(rt) {
       refused.set(ref, served)
       rt.warn('omni-ui: %s is not a model endpoint, so it is not chosen again', ref)
       const entries = await catalog()
-      const pinned = Object.values(state.bots).filter(other => rt.shellHoldOf?.(other.id) === undefined && (other.model === ref || other.appliedModel === ref))
+      const pinned = Object.values(state.bots).filter(other => other.shellHeld === undefined && (other.model === ref || other.appliedModel === ref))
       for (const other of pinned) {
         if (other.model === ref) other.model = pickDefault(entries)
         if (other.appliedModel === ref) delete other.appliedModel

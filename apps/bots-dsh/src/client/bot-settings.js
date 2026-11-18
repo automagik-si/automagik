@@ -176,7 +176,7 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
       h(Row, { label: t('Role'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Role'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) }))),
     h(Card, { title: t('Model') },
       h('div', { className: 'bt-set-row bt-bs-row' },
-        h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Model')), h('span', { className: 'bt-set-hint', role: bot.shellHold || modelState?.lastFailure?.kept ? 'status' : undefined }, modelHint(bot, roster, modelState))),
+        h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Model')), h('span', { className: 'bt-set-hint', role: modelState?.lastFailure?.kept ? 'status' : undefined }, modelHint(bot, roster, modelState))),
         h(ModelMenu, picker)),
       signIn && actions.openCliLogin ? h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-set-hint' }, t('This model needs a sign-in to its coding agent.'))),

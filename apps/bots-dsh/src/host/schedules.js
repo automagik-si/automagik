@@ -329,7 +329,7 @@ export function install(rt) {
   })
   // Whether one delivery still belongs to a task a restricted Bot is involved in. Reads the
   // catalog only: management writes are serialized behind a delivery, reads are not.
-  const unsafeDelivery = async (sessionId, { heldOnly = false } = {}) => {
+  const unsafeDelivery = async (sessionId) => {
     let entries
     try {
       entries = await service.catalog()
@@ -340,15 +340,14 @@ export function install(rt) {
     const restrictedInvolved = async (ids) => {
       for (const id of ids) {
         if (!seen.has(id)) seen.set(id, await botOfTaskSession(id))
-        const bot = seen.get(id)
-        if (heldOnly ? rt.shellHoldOf?.(bot?.id) !== undefined : restricted(bot)) return true
+        if (restricted(seen.get(id))) return true
       }
       return false
     }
     let freshUnsafe = false
     let exact = false
     for (const entry of entries) {
-      if (entry.status !== 'active' && (!heldOnly || entry.status !== 'paused')) continue
+      if (entry.status !== 'active') continue
       const target = entry.target ?? {}
       const involved = Array.isArray(entry.involvedSessionIds) ? entry.involvedSessionIds : []
       if (target.kind === 'new') {
@@ -363,8 +362,7 @@ export function install(rt) {
         if (await restrictedInvolved(involved)) return true
         continue
       }
-      if ((target.kind !== 'session' || target.sessionId !== sessionId)
-        && (!heldOnly || entry.lastDelivery?.targetSessionId !== sessionId)) continue
+      if (target.kind !== 'session' || target.sessionId !== sessionId) continue
       exact = true
       // A session target that resolves to a Bot is bound; one that does not is unsafe only
       // when a restricted Bot is involved (a fresh target that already delivered once).
@@ -420,23 +418,13 @@ export function install(rt) {
   // DSH drives deliveries through this waterfall, before the prompt runs. It must never
   // await a management write: that would queue behind the delivery's own serialized drive.
   ctx.on('schedule/resolve-agent', async (sessionId, next) => {
-    const blocked = 'ds-bot: a scheduled delivery is blocked until its task can be paused'
-    // Let the load-backed sweep request the re-drive after the team is available.
-    if (!teamLoaded) throw new Error(blocked)
-    await rt.refreshShellChoice?.()
-    rt.assertShellChoice?.(sessionId)
-    const bot = await botOfTaskSession(sessionId)
-    if (bot !== undefined) rt.assertShellChoice?.(sessionId, bot.id)
-    if (service !== null && Object.values(rt.state?.bots ?? {}).some(candidate => rt.shellHoldOf?.(candidate.id) !== undefined)
-      && await unsafeDelivery(sessionId, { heldOnly: true })) {
-      throw Object.assign(new Error('A Bot needs a shell or native model choice before this scheduled delivery can run.'), { code: 'bot/shell-off-cli' })
-    }
     if (swept && stuck.size === 0) return openedLevel(sessionId, await next())
-    if (bot !== undefined) return next()
-    if (!await unsafeDelivery(sessionId)) return openedLevel(sessionId, await next())
+    if (await botOfTaskSession(sessionId) !== undefined) return next()
+    const unsafe = teamLoaded ? await unsafeDelivery(sessionId) : true
+    if (!unsafe) return openedLevel(sessionId, await next())
     void revokeNewSchedules()
       .catch(error => rt.warn('ds-bot: fresh-Session tasks were not checked: %s', error))
-    throw new Error(blocked)
+    throw new Error('ds-bot: a scheduled delivery is blocked until its task can be paused')
   })
 
   async function schedulesView() {

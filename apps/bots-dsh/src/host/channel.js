@@ -131,10 +131,6 @@ export function install(rt) {
       const running = runningOf(bot)
       return running.runningModel === undefined ? '' : `${bot.id}=${running.runningModel}:${running.runningEffort ?? ''}`
     }).join(','),
-    Object.values(state.bots).map(bot => {
-      const hold = rt.shellHoldOf?.(bot.id)
-      return hold === undefined ? '' : `${bot.id}=${hold.provider}:${rt.canRecoverShellModel?.(bot) !== false}`
-    }).join(','),
   ].join('|')
   const view = () => ({
     revision: state.revision,
@@ -153,9 +149,8 @@ export function install(rt) {
     // (agents.js rollbackAdoption) would pass, so the menu offers rollback only then.
     bots: Object.values(state.bots).map(({ segments, kickoff, ...bot }) => {
       const tail = rt.chatTail(rt.chatOf(bot.id))
-      const shellHold = rt.shellHoldOf?.(bot.id)
       return {
-        ...bot, ...(shellHold === undefined ? {} : { shellHold: { ...shellHold, nativeRecovery: rt.canRecoverShellModel?.(bot) !== false } }), sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
+        ...bot, sessionId: rt.chatOf(bot.id), parts: (segments ?? []).map(segment => segment.sessionId), ...(kickoff ? { waiting: true } : {}),
         ...(bot.dshAgentId === undefined ? {} : { adoptionHistoryMatches: rt.adoptionHistoryMatches(bot.id) }),
         ...rt.permissionFallbackOf('bot', bot),
         ...rt.autoViewOf?.(bot),

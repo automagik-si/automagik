@@ -158,7 +158,7 @@ export function install(rt) {
       return cliOnly
     }
     for (const bot of Object.values(state.bots ?? {})) {
-      if (rt.shellHoldOf?.(bot.id) !== undefined) continue
+      if (bot.shellHeld !== undefined) continue
       const moved = bot?.acpMoved ?? (state.claudeAcpMoved === true ? priorMove(bot) : undefined)
       if (moved === undefined) continue
       const pickedModel = bot.model !== moved.target
@@ -182,7 +182,7 @@ export function install(rt) {
       delete bot.appliedEffort
       restored.push(bot)
     }
-    if (state.claudeAcpMoved === true && Object.values(state.bots ?? {}).every(bot => rt.shellHoldOf?.(bot.id) === undefined)) {
+    if (state.claudeAcpMoved === true && Object.values(state.bots ?? {}).every(bot => bot.shellHeld === undefined)) {
       delete state.claudeAcpMoved
       changed = true
     }
@@ -201,7 +201,7 @@ export function install(rt) {
     await rt.load()
     // Nothing is written by a host that only reads the team; the writer moves or restores them.
     if (rt.readOnly?.() !== undefined) return
-    const bots = () => Object.values(state.bots ?? {}).filter(bot => rt.shellHoldOf?.(bot.id) === undefined)
+    const bots = () => Object.values(state.bots ?? {}).filter(bot => bot.shellHeld === undefined)
     if (bots().length === 0 && Object.keys(state.bots ?? {}).length > 0) return
     // A team moved before this record existed: the pi-ai model is still recoverable from the
     // old ref, so the rollback has something exact to restore. The record is saved, so a

@@ -64,6 +64,18 @@ export function routeOf(provider, { piAi = new Set(SUBSCRIPTION_ROUTES) } = {}) 
 const LEGACY_LOCAL_CLIS = Object.freeze([
   'codex-cli', 'devin-cli', 'gemini-cli', 'grok-cli', 'cursor-cli', 'cline', 'qwen-code', 'goose',
 ])
+/** The actual CLI reference that needs a shell choice. */
+export function shellHoldModelOf(bot) {
+  if (bot?.shell !== false) return undefined
+  return [bot.model, bot.appliedModel].find(commandCapableAgent)
+}
+
+/** The line a held Bot says: the reason, and the two choices that lift the hold. */
+export function shellHoldText(bot, cli = bot?.shellHeld?.cli) {
+  return `${bot?.name ?? 'This Bot'} has no shell, so it cannot run on ${cli ?? 'a coding CLI'}, `
+    + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.'
+}
+
 export function commandCapableAgent(ref) {
   const provider = String(ref ?? '').split('/')[0]
   if (provider === '') return false

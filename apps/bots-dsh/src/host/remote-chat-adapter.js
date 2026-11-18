@@ -148,7 +148,6 @@ export class RemoteChatAdapter extends LlmAdapter {
       presentResult: (args, result) => ({ card: 'generic', title: args.title, content: result?.content ?? [] }),
     })
     const register = agent => {
-      try { rt.assertShellChoice?.(agent?.session?.id ?? agent?.id) } catch { return }
       if (!this.enabled() || typeof agent?.ctx?.tools?.register !== 'function' || this.registrations.has(agent)) return
       this.registrations.set(agent, agent.ctx.tools.register(this.mirror, {
         when: ({ modelSelection }) => modelSelection?.provider === 'hermes-remote',
@@ -238,7 +237,6 @@ export class RemoteChatAdapter extends LlmAdapter {
   async *stream(options) {
     const request = requestFields(options)
     if (!this.enabled() || !request) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
-    try { this.rt.assertShellChoice?.(request.sessionId) } catch (error) { return yield finish('error', error.message) }
     const agent = service(this.rt.ctx, 'agents')?.get?.(request.sessionId)
     if (!RemoteChatAdapter.ownTurnFields(request, agent, ref => this.filePath(ref))) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
     if (!agent) return yield finish('error', 'Remote Hermes needs a live Automagik chat to show its tools and approvals.')

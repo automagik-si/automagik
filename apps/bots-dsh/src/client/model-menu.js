@@ -90,11 +90,10 @@ export function modelStateLine(state, roster) {
 
 // The line under a Bot's model in its settings. `state`: the host's model state for this Bot.
 export function modelHint(bot, roster, state) {
-  if (bot.shellHold?.reason === 'shell-off-cli') {
-    const params = { cli: bot.shellHold.provider }
-    return bot.shellHold.nativeRecovery === false
-      ? t('This Bot needs a choice. Turn on its shell to continue using its host’s model.')
-      : t('This Bot needs a choice. Turn on its shell, or pick a model that uses DeepSeek Harness’s tools. The shell is off and {cli} can run commands.', params)
+  // A Bot held at load: its shell is off and its model is a coding CLI that brings its own
+  // shell. It does not start until the person picks a native model or turns the shell on.
+  if (bot.shellHeld !== undefined) {
+    return t('This Bot has no shell, so it cannot run on {cli}, whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.', { cli: bot.shellHeld.cli })
   }
   // A Bot whose model its plugin owns: the DSH model saved on it answers nothing. The hint
   // names what answers now, from the plugin's menu, or says nothing.
@@ -250,7 +249,6 @@ export function modelRoute(roster, ref) {
 export const MENU_ROOT = Object.freeze({ step: 'routes' })
 
 export function routesFor(bot, roster) {
-  if (bot?.shellHold?.reason === 'shell-off-cli') return ['native']
   const policy = roster?.routePolicy
   if (policy === null || typeof policy !== 'object') return [...ROUTE_ORDER]
   const named = policy[bot?.kind ?? 'automagik'] ?? policy.default
@@ -383,9 +381,7 @@ export const manualFor = (state, opening) => (state.opening === opening ? state.
 // heading that opens and closes it; without it every provider's models show. `levels: false`
 // leaves the level step out, for a pick that has no level of its own.
 export function ModelSteps({ roster, bot, view, current, picked, levelName, go, onModel, onLevel, onManage, onRemote, folds, levels: withLevels = true }) {
-  const models = bot?.shellHold?.reason === 'shell-off-cli'
-    ? (roster.models ?? []).filter(entry => !commandCapableAgent(entry.ref))
-    : roster.models ?? []
+  const models = roster.models ?? []
   const remote = roster.prefs?.hermesRemote
   // A saved Remote Hermes profile lists its models directly; setup is for a first
   // connection, and an explicit manage row below reopens the wizard on purpose.
@@ -599,7 +595,6 @@ export function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
 // (the model new Bots start on).
 // A Bot whose model menu its plugin owns gets that menu instead (host-model-menu.js).
 export function ModelMenu(props) {
-  if (props.bot?.shellHold?.nativeRecovery === false) return null
   return h(props.roster?.hostModels?.[props.bot?.id] === undefined ? DshModelMenu : HostModelMenu, props)
 }
 
@@ -617,25 +612,18 @@ export function RouteConfirm({ bot, roster, current, target, onCancel, onConfirm
       : to.route === 'hermes-remote' ? t('Full access: Hermes still asks you in the chat when it wants an approval. Its own rules apply there.')
       : to.provider === 'acp-claude' || to.provider === 'acp-codex' ? t("Full access: the CLI's own no-ask mode.")
         : t("Full access: the agent's actions run without asking.")
-  const inPlace = bot.shellHold?.reason === 'shell-off-cli' && bot.sessionPinned === true
-  const title = inPlace ? t('Change model?') : t('Start a new conversation?')
-  return h('div', { className: 'bt-model-step bt-model-confirm', role: 'group', 'aria-label': title },
-    h('div', { className: 'bt-model-confirm-title' }, title),
+  return h('div', { className: 'bt-model-step bt-model-confirm', role: 'group', 'aria-label': t('Start a new conversation?') },
+    h('div', { className: 'bt-model-confirm-title' }, t('Start a new conversation?')),
     h('div', { className: 'bt-model-confirm-move' },
       from ? `${routeName(from.route)} · ${from.connection} → ` : '',
       `${routeName(to.route)} · ${to.connection}`),
-    h('div', { className: 'bt-model-confirm-text' }, inPlace
-      ? t('This changes the model for future messages in this conversation.')
-      : bot.shellHold?.reason === 'shell-off-cli'
-      ? t('This starts a new conversation. You can still read the earlier one in history.')
-      : routeChanged
+    h('div', { className: 'bt-model-confirm-text' }, routeChanged
       ? t('Changing the route starts a new conversation. {name} writes a handoff note first.', { name: bot.name })
       : t('Changing the agent starts a new conversation. {name} writes a handoff note first.', { name: bot.name })),
     fullAccessLine === undefined ? null : h('div', { className: 'bt-model-confirm-access', role: 'note' }, fullAccessLine),
     h('div', { className: 'bt-model-confirm-actions' },
-      h('button', { type: 'button', className: 'bt-model-confirm-cancel', onClick: onCancel },
-        inPlace ? t('Cancel') : t('Keep this conversation')),
-      h('button', { type: 'button', className: 'bt-model-confirm-go', onClick: onConfirm }, inPlace ? t('Change model') : routeChanged ? t('Change route') : t('Change agent'))))
+      h('button', { type: 'button', className: 'bt-model-confirm-cancel', onClick: onCancel }, t('Keep this conversation')),
+      h('button', { type: 'button', className: 'bt-model-confirm-go', onClick: onConfirm }, routeChanged ? t('Change route') : t('Change agent'))))
 }
 
 function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, chat = false, bar = false, running = false, onPick, onPickEffort, saved = onPick === undefined, withEfforts = true }) {
@@ -748,8 +736,8 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // first pick, and a model change inside one route, keep the conversation.
   // A Bot already saved (settings, details, the chat bar) crosses; a Bot being created does
   // not: `onPick` alone says nothing about whether the conversation exists yet.
-  const held = bot.shellHold?.reason === 'shell-off-cli'
-  const crossing = ref => saved && (held ? !commandCapableAgent(ref) : Boolean(current) && ref !== current && crossesHarness(current, ref))
+  const crossing = ref => Boolean(current) && saved && ref !== current && crossesHarness(current, ref)
+  const recovery = ref => saved && bot.shellHeld !== undefined && !commandCapableAgent(ref)
   const pickModel = (ref, effort, { routeChange = false, level = false } = {}) => {
     // A crossing started from a saved Bot's settings still goes through the picker's own
     // action: the settings wrapper needs to keep its sign-in/account handling.
@@ -779,15 +767,16 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     return run(actions.updateBot(bot.id, { model: ref, ...(level || effort !== undefined ? { effort: effort ?? null } : {}) }))
   }
   const commit = (model, effort) => {
-    if (model.ref !== undefined && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
+    const routeChange = model.ref !== undefined && recovery(model.ref)
+    if (!routeChange && model.ref !== undefined && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
     finish()
-    void Promise.resolve(pickModel(model.ref, effort)).catch(() => {})
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange })).catch(() => {})
   }
   // A model with levels opens its level step; one without applies now. Levels not known yet
   // are asked for first. A model that needs an API key asks for it, a signed-out agent opens
   // its sign-in row in the chat, and Herdr's models wait for #1007.
   const onModel = (model, route) => {
-    if (route === 'herdr' || model.ref === undefined || (held && commandCapableAgent(model.ref))) return
+    if (route === 'herdr' || model.ref === undefined) return
     if (model.needsKey) {
       if (typeof actions.setProviderKey === 'function') { setKeyFor(model); return }
       const manage = manageModels(actions)
@@ -811,9 +800,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // A level of the current model changes the level only; on another model, the model and its
   // level go together, and a crossing asks first.
   const onLevel = (model, effort) => {
-    if (crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
+    const routeChange = recovery(model.ref)
+    if (!routeChange && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
     finish()
-    void Promise.resolve(pickModel(model.ref, effort, { level: true })).catch(() => {})
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange, level: true })).catch(() => {})
   }
   const onKeyDown = (event) => {
     const rows = menuRows(event.currentTarget)
