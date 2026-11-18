@@ -873,8 +873,8 @@ async function projectDefining(botId, folder) {
  * one per bot by the old live rule (an agent in front, then the newest), its project the one
  * that defines the bot. The file is created, even empty, so it happens once.
  */
-async function importLabels(path) {
-  const found = await labelRows();
+async function importLabels(path, proposed) {
+  const found = proposed ?? await labelRows();
   try {
     await withLockAsync(ledgerLock(path), async () => {
       if (existsSync(path)) return; // another CLI imported first
@@ -4942,7 +4942,7 @@ async function duplicateLabel(project, bot, view) {
   try { return (await labelledPanes(project, bot, bound)).length > 1; } catch { return false; }
 }
 
-async function restartTarget(project, bot, requestedHome, explicitHome) {
+async function restartTarget(project, bot, requestedHome, explicitHome, allowImport = false) {
   const core = await coreId();
   const bindingIn = (dir) => heldIn(foldAttach(readAttachFile(attachPath(dir)) ?? []), bot.id);
   const carriedBinding = (pane) => {
@@ -4952,7 +4952,9 @@ async function restartTarget(project, bot, requestedHome, explicitHome) {
     const row = bindingIn(dir);
     return row?.core === core && row.terminal === pane.address && row.created_ms === pane.created_ms ? row : null;
   };
-  const selected = bindingIn(requestedHome);
+  const selectedPath = attachPath(requestedHome);
+  const selectedRows = readAttachFile(selectedPath);
+  const selected = heldIn(foldAttach(selectedRows ?? []), bot.id);
   const binding = selected?.core === core && (selected.project == null || selected.project === project.key) ? selected : null;
   let get = binding ? await checkedPane(binding.terminal) : null;
   if (get?.created_ms !== binding?.created_ms) get = null;
@@ -4993,6 +4995,17 @@ async function restartTarget(project, bot, requestedHome, explicitHome) {
         1, { refused: "app-home", terminal: candidate.address });
     }
     return { held: { binding: row, get: candidate }, dir: carried };
+  }
+  // A deliberately selected app home still gets its documented one-time import. Never
+  // use import to decide which home owns an unbound pane when the caller lost its home.
+  if (allowImport && explicitHome && selectedRows === null && (!carried || sameHome(requestedHome, carried))) {
+    const proposed = await labelRows();
+    const imported = proposed.find((entry) => entry.bot === bot.id);
+    if (imported?.project === project.key && imported.core === core
+        && imported.terminal === candidate.address && imported.created_ms === candidate.created_ms) {
+      await importLabels(selectedPath, proposed);
+      return restartTarget(project, bot, requestedHome, explicitHome);
+    }
   }
   throw new CliError(`${candidate.address} has ${bot.name}'s label but no matching attachment in the selected or carried app home. `
     + `Inspect the pane and run am attach ${bot.id} ${candidate.address} --project ${project.key} in its app home before restarting.`,
@@ -5042,7 +5055,7 @@ async function cmdRestart(opts, [ref]) {
   if (project.machine) return restartResolved(opts, project, bot, wanted, swap);
   const explicit = process.env.HERDR_APP_HOME;
   const requested = appHome();
-  const target = await restartTarget(project, bot, requested, Boolean(explicit));
+  const target = await restartTarget(project, bot, requested, Boolean(explicit), !opts._queuedTarget);
   const recovered = opts._queuedTarget?.options?.recoveredHome === true || !sameHome(requested, target.dir);
   if (recovered) {
     process.env.HERDR_APP_HOME = target.dir;
