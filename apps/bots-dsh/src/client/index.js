@@ -540,6 +540,13 @@ export function apply(ctx) {
     openedOnPurpose: id => id === chosen,
     ownershipPending: id => pendingBot.has(id),
     openSession: (id) => {
+      const bot = roster.getSnapshot().byId?.[id]
+      if (bot?.type === 'herdr') {
+        seatChatView.set({ seat: { ...bot, artId: bot.id, terminal: null, status: 'off' } })
+        ui.set(state => ({ ...state, newChat: null, exchange: null, menu: null, palette: null }))
+        try { ctx.layout.selectPanel(SEAT_CHAT_PANEL) } catch (error) { noteClientError('seat-chat', error) }
+        return
+      }
       // A DSH Agent Session id lands on the plain surface, not the Bot skin.
       if (isAgentSessionId(id)) return actions.openAgentSession(partFor(id))
       ui.set(state => (state.newChat || state.exchange || state.menu || state.palette ? { ...state, newChat: null, exchange: null, menu: null, palette: null } : state))

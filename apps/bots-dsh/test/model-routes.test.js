@@ -46,8 +46,18 @@ test('a route policy hides routes per bot type, refuses unknown routes, and keep
 test('a legacy herdr policy drops only herdr and warns instead of throwing', () => {
   const warnings = []
   const result = selectorRoutePolicy({ default: ['native', 'herdr', 'acp'], genie: ['herdr'] }, warning => warnings.push(warning))
-  assert.deepEqual(result, { default: ['native', 'acp'], genie: [] })
+  assert.deepEqual(result, { default: ['native', 'acp'], genie: [...SELECTOR_ROUTES] })
   assert.equal(warnings.length, 2, 'each legacy policy entry must warn')
   assert.match(warnings[0], /default.*herdr.*no longer.*ignored/)
   assert.match(warnings[1], /genie.*herdr/)
+})
+
+
+test('a policy containing only herdr falls back to default routes and warns', () => {
+  const warnings = []
+  const result = selectorRoutePolicy({ default: ['herdr', 'herdr'] }, warning => warnings.push(warning))
+  assert.deepEqual(result.default, [...SELECTOR_ROUTES], 'dropping the only legacy route must retain default routes')
+  assert.ok(warnings.length > 0, 'the fallback must warn')
+  assert.match(warnings[0], /herdr.*ignored/)
+  assert.deepEqual(selectorRoutePolicy({ default: [] }), { default: [] }, 'an intentional empty policy stays empty')
 })

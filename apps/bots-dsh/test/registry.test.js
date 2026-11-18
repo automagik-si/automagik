@@ -1,3 +1,4 @@
+import { SEAT_AGENTS as CLIENT_SEAT_AGENTS } from '../src/shared/bot-types.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
@@ -5,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import {
-  BOT_ID, MAX_FILE_BYTES, checkRegistry, defaultLook, dropBot, dropLock, emptyRegistry, fromDshState, fromHerdrV1,
+  BOT_ID, SEAT_AGENTS, MAX_FILE_BYTES, checkRegistry, defaultLook, dropBot, dropLock, emptyRegistry, fromDshState, fromHerdrV1,
   indentOf, isBotId, newBotId, parseRegistry, putBot, readRegistryText, takeLock, updateRegistry, writeRegistry,
 } from '../src/shared/registry.js'
 
@@ -551,11 +552,36 @@ test('the registry validator refuses unknown type values', () => {
 })
 
 test('the registry parser leaves out unknown types with a warning and preserves raw', () => {
-  for (const type of ['native', 'unknown', '', null, 1, {}, ['herdr']]) {
+  for (const type of ['native', 'unknown', '', 1, {}, ['herdr']]) {
     const raw = { version: 2, bots: [{ id: ID.main, name: 'Bad', type }] }
     const parsed = parseRegistry(JSON.stringify(raw), { kind: 'home' })
     assert.equal(parsed.file.bots.length, 0, 'unknown type must not reach the app')
     assert.match(parsed.warnings.join(';'), /unknown type.*left out/)
     assert.deepEqual(parsed.raw, raw)
   }
+})
+
+
+test('the registry parser treats explicit null type as absent', () => {
+  const parsed = parseRegistry(JSON.stringify({ version: 2, bots: [{ id: ID.main, name: 'Native', type: null, agent: 'codex' }] }), { kind: 'home' })
+  assert.equal(Object.hasOwn(parsed.file.bots[0], 'type'), false)
+  assert.deepEqual(parsed.warnings, [])
+  assert.equal(parsed.raw.bots[0].type, null)
+})
+
+test('a Herdr registry Bot refuses an unknown terminal agent on save', () => {
+  const raw = { version: 2, bots: [{ id: ID.main, name: 'Bad', type: 'herdr', agent: 'unknown' }] }
+  assert.match(checkRegistry(raw, { kind: 'home' }).join(';'), /unknown terminal agent/)
+})
+
+test('a Herdr registry Bot refuses an unknown terminal agent on parse', () => {
+  const raw = { version: 2, bots: [{ id: ID.main, name: 'Bad', type: 'herdr', agent: 'unknown' }] }
+  const parsed = parseRegistry(JSON.stringify(raw), { kind: 'home' })
+  assert.deepEqual(parsed.file.bots, [])
+  assert.match(parsed.warnings.join(';'), /unknown terminal agent/)
+})
+
+
+test('the client seat agent catalog agrees with the self-contained registry', () => {
+  assert.deepEqual(CLIENT_SEAT_AGENTS, SEAT_AGENTS)
 })

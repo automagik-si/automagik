@@ -27,7 +27,7 @@ import { MODEL_ACCESS_REQUIRED, switchFailure, switchPending } from './model-sta
 // account needs a sign-in (an agent whose CLI is signed out: model-state.js; the Bot stays on
 // its pick and the person is asked to sign in, never moved silently to another model). Any
 // other failure of an agent (ACP_AGENT) falls back like any model's, with its notice.
-export const KEEP_CODES = new Set(['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'IMAGE_OFFLOAD_REQUIRED', MODEL_ACCESS_REQUIRED, 'REMOTE_HERMES'])
+export const KEEP_CODES = new Set(['CONTEXT_WINDOW_EXCEEDED', 'ABORTED', 'IMAGE_OFFLOAD_REQUIRED', MODEL_ACCESS_REQUIRED, 'REMOTE_HERMES', 'bot/terminal-only'])
 
 const sameRoute = (a, b) => a?.provider === b?.provider && a?.model === b?.model
 const label = route => `${route.provider}/${route.model}`

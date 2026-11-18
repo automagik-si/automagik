@@ -66,6 +66,9 @@ function SessionFileApproval({ matched: { pending, item }, renderFactorySlot }) 
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
+  "A Main Bot cannot be a Herdr Bot.": "主 Bot 不能是 Herdr Bot。",
+  "The Bot is terminal-only.": "此 Bot 仅支持终端。",
+  "Unknown terminal agent. Choose a supported terminal agent.": "未知的终端代理。请选择受支持的终端代理。",
   "Bot type": "Bot 类型",
   "Native DSH Bot": "原生 DSH Bot",
   "Herdr Bot": "Herdr Bot",
@@ -3764,7 +3767,8 @@ function selectorRoutePolicy(input, warn = console.warn) {
       }
       if (!known2.has(route)) throw new TypeError(`routePolicy.${kind}: unknown route ${JSON.stringify(route)}`);
     }
-    out[kind] = [...new Set(routes.filter((route) => route !== "herdr"))];
+    const kept = [...new Set(routes.filter((route) => route !== "herdr"))];
+    out[kind] = kept.length === 0 && routes.includes("herdr") ? [...SELECTOR_ROUTES] : kept;
   }
   return Object.keys(out).length === 0 ? void 0 : out;
 }
@@ -13242,16 +13246,14 @@ var CHARACTER_SELECT_CSS = `
 body[data-bt-motion=quiet] :is(.bt-cs-spot,.bt-cs-tile[data-focus]){animation:none}
 `;
 
+// src/shared/bot-types.js
+var SEAT_AGENTS = Object.freeze(["claude", "codex", "pi", "omp", "opencode", "cursor", "copilot", "amp", "grok", "antigravity", "kimi", "kiro", "hermes", "qoder", "crush", "dsh-tui"]);
+
 // src/client/bot-type.js
 var import_react33 = require("react");
-var HERDR_AGENTS = Object.freeze([
-  { id: "claude", name: "Claude Code" },
-  { id: "codex", name: "Codex" },
-  { id: "hermes", name: "Hermes" },
-  { id: "antigravity", name: "Antigravity" },
-  { id: "omp", name: "omp" }
-]);
-function BotTypeFields({ type, agent, onType, onAgent }) {
+var AGENT_NAMES = { claude: "Claude Code", codex: "Codex", hermes: "Hermes", antigravity: "Antigravity", omp: "Oh My Pi", pi: "Pi", opencode: "OpenCode", cursor: "Cursor", copilot: "Copilot", amp: "Amp", grok: "Grok", kimi: "Kimi", kiro: "Kiro", qoder: "Qoder", crush: "Crush", "dsh-tui": "dsh-TUI" };
+var HERDR_AGENTS = Object.freeze(SEAT_AGENTS.map((id) => ({ id, name: AGENT_NAMES[id] })));
+function BotTypeFields({ type, agent, onType, onAgent, main = false }) {
   return (0, import_react33.createElement)(
     import_react33.Fragment,
     null,
@@ -13263,8 +13265,9 @@ function BotTypeFields({ type, agent, onType, onAgent }) {
         "select",
         { className: "bt-input", "aria-label": t("Bot type"), value: type ?? "", onChange: (event) => onType(event.target.value) },
         (0, import_react33.createElement)("option", { value: "" }, t("Native DSH Bot")),
-        (0, import_react33.createElement)("option", { value: "herdr" }, t("Herdr Bot"))
-      )
+        main ? null : (0, import_react33.createElement)("option", { value: "herdr" }, t("Herdr Bot"))
+      ),
+      main ? (0, import_react33.createElement)("span", { className: "bt-note" }, t("A Main Bot cannot be a Herdr Bot.")) : null
     ),
     type === "herdr" ? (0, import_react33.createElement)(
       "label",
@@ -15352,7 +15355,7 @@ function BotSettingsForm({ bot, roster, actions, run: run2 }) {
     (0, import_react41.createElement)(
       Card2,
       { title: t("Profile") },
-      (0, import_react41.createElement)(BotTypeFields, { type: bot.type, agent: bot.agent, onType: (type) => save({ type: type || null, ...type === "herdr" ? { agent: bot.agent ?? "claude" } : {} }), onAgent: (agent) => save({ agent }) }),
+      (0, import_react41.createElement)(BotTypeFields, { main: isMainBot, type: bot.type, agent: bot.agent, onType: (type) => save({ type: type || null, ...type === "herdr" ? { agent: bot.agent ?? "claude" } : {} }), onAgent: (agent) => save({ agent }) }),
       (0, import_react41.createElement)(Row, { label: t("Name") }, (0, import_react41.createElement)(InlineText, { label: t("Name"), value: bot.name, placeholder: "Bob", required: true, maxLength: 40, onSave: (name) => save({ name }) })),
       bot.type === "herdr" ? null : (0, import_react41.createElement)(Row, { label: t("Role"), hint: t("A few words on what it does.") }, (0, import_react41.createElement)(InlineText, { label: t("Role"), value: bot.role, placeholder: t("Research, admin…"), maxLength: 24, onSave: (role) => save({ role }) }))
     ),
@@ -37973,6 +37976,17 @@ function apply(ctx) {
     openedOnPurpose: (id) => id === chosen,
     ownershipPending: (id) => pendingBot.has(id),
     openSession: (id) => {
+      const bot = roster.getSnapshot().byId?.[id];
+      if (bot?.type === "herdr") {
+        seatChatView.set({ seat: { ...bot, artId: bot.id, terminal: null, status: "off" } });
+        ui2.set((state2) => ({ ...state2, newChat: null, exchange: null, menu: null, palette: null }));
+        try {
+          ctx.layout.selectPanel(SEAT_CHAT_PANEL);
+        } catch (error) {
+          noteClientError("seat-chat", error);
+        }
+        return;
+      }
       if (isAgentSessionId(id)) return actions.openAgentSession(partFor(id));
       ui2.set((state2) => state2.newChat || state2.exchange || state2.menu || state2.palette ? { ...state2, newChat: null, exchange: null, menu: null, palette: null } : state2);
       setPlain(false);

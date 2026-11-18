@@ -55,19 +55,19 @@ runInNewContext(workspaceBundle.replace(workspaceTail, 'exports.NavigationForTes
   AbortController, AbortSignal, console, setTimeout, clearTimeout,
 })
 
-async function start(t, { advanced = false, model, delay = false, reject = false, refuse = undefined, standalone = false } = {}) {
+async function start(t, { advanced = false, model, delay = false, reject = false, refuse = undefined, standalone = false, herdr = false } = {}) {
   const dom = new JSDOM('<div id="root"></div>', { url: 'http://localhost' })
   const globals = ['window', 'document', 'navigator', 'Element', 'HTMLElement', 'MutationObserver', 'IS_REACT_ACT_ENVIRONMENT']
   const saved = globals.map(key => Object.getOwnPropertyDescriptor(globalThis, key))
   for (const key of globals) Object.defineProperty(globalThis, key, { configurable: true, value: key === 'IS_REACT_ACT_ENVIRONMENT' ? true : dom.window[key] })
   dom.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} })
   const main = { id: 'main', sessionId: 'main', name: 'Main', createdAt: 1 }
-  const brain = { id: 'brain', sessionId: 'brain', name: 'Brain', kind: 'dsh', dshAgentId: 'native', profile: 'cordis', workDir: '/original', advanced, ...(model ? { model } : {}), createdAt: 2 }
+  const brain = { id: 'brain', sessionId: 'brain', name: 'Brain', kind: 'dsh', dshAgentId: 'native', profile: 'cordis', workDir: '/original', advanced, ...(model ? { model } : {}), ...(herdr ? { type: 'herdr', sessionId: undefined } : {}), createdAt: 2 }
   const bots = standalone ? [main] : [main, brain]
   const agents = standalone ? [{ id: 'native', kind: 'dsh', name: 'Standalone', sessions: ['brain'], createdAt: 2 }] : []
   const list = source({ ids: ['main', 'brain'], byId: { main: { id: 'main', blank: false }, brain: { id: 'brain', blank: true, retainedBy: { mainView: 1 } } } })
   const workspaceList = source({ items: [{ workspaceId: 'original', sessionIds: ['brain'] }] })
-  const calls = [], opened = [], registrations = [], effects = [], disposers = []
+  const calls = [], opened = [], panels = [], registrations = [], effects = [], disposers = []
   let revision = 1, pauseNextState = false
   const stateRegistrations = []
   const retain = id => {
@@ -105,7 +105,7 @@ async function start(t, { advanced = false, model, delay = false, reject = false
     get: name => name === 'workspaces' ? { list: workspaceList } : undefined,
     sessions: { list, refresh: async () => {}, refreshProjections: async () => {} },
     uiWorkspace: { openSession: id => { opened.push(id); retain(id) } },
-    inject: () => () => {}, uiConversation: {}, slots, layout: { panelInfo: source({}) },
+    inject: () => () => {}, uiConversation: {}, slots, layout: { panelInfo: source({}), selectPanel: name => panels.push(name) },
   }
   module.exports.apply(ctx)
   for (const label of ['ds-bot: roster poll', 'ds-bot: agent surface', 'ds-bot: face for other Omni plugins']) disposers.push(effects.find(effect => effect.label === label).fn())
@@ -187,7 +187,7 @@ async function start(t, { advanced = false, model, delay = false, reject = false
       await tick()
     })
   }
-  return { pick, fork, calls, opened, brain, list, nativeCreates, surfaceTransitions, registrations, retain, stateRegistrations, pauseState: () => { pauseNextState = true }, actions: face.actions, hooks: face.hooks, current: () => Object.values(list.getSnapshot().byId).find(row => row.retainedBy?.mainView)?.id }
+  return { pick, fork, calls, opened, panels, brain, list, nativeCreates, surfaceTransitions, registrations, retain, stateRegistrations, pauseState: () => { pauseNextState = true }, actions: face.actions, hooks: face.hooks, current: () => Object.values(list.getSnapshot().byId).find(row => row.retainedBy?.mainView)?.id }
 }
 
 test('standalone Agent navigation keeps the separate agent-adopt path and native rendering', async t => {
@@ -393,3 +393,12 @@ for (const advanced of [false, true]) for (const model of [undefined, 'native/ch
     assert.deepEqual(bench.opened, [])
   })
 }
+
+
+test('opening a Herdr definition selects its terminal panel without opening a native Session', async t => {
+  const bench = await start(t, { herdr: true })
+  await act(async () => bench.actions.openSession('brain'))
+  assert.deepEqual(bench.panels, ['seat-chat'])
+  assert.deepEqual(bench.opened, [])
+  assert.equal(bench.nativeCreates.length, 0)
+})

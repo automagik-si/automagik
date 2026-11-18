@@ -211,3 +211,8 @@ test('native gateway failure codes retain fallback wake and route restoration', 
     assert.equal(h.selected.length, 2)
   }
 })
+
+
+test('terminal-only refusals never select a fallback model or wake a native turn', () => {
+  assert.equal(fallbackFor({ failure: { code: 'bot/terminal-only' }, failed: OPENAI, fallback: DEEPSEEK }), undefined)
+})

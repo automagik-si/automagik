@@ -2872,7 +2872,10 @@ const pack = createPack({
     "Native DSH Bot": "Bot DSH nativo",
     "Herdr Bot": "Bot Herdr",
     "Terminal agent": "Agente do terminal",
-    "This Bot uses only its terminal.": "Este Bot usa apenas o terminal."
+    "This Bot uses only its terminal.": "Este Bot usa apenas o terminal.",
+    "A Main Bot cannot be a Herdr Bot.": "Um Bot principal não pode ser um Bot Herdr.",
+    "The Bot is terminal-only.": "Este Bot usa apenas o terminal.",
+    "Unknown terminal agent. Choose a supported terminal agent.": "Agente do terminal desconhecido. Escolha um agente compatível."
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

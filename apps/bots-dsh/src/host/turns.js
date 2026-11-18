@@ -1,3 +1,4 @@
+import { assertNativeTurn } from './refusal.js'
 // Turns: what each Bot Session is doing now (for its mascot), which turns another Bot
 // triggered, the waiters and inboxes of group rounds, and routing a finished turn's reply.
 //
@@ -1283,6 +1284,8 @@ export function install(rt) {
     const controller = ctx.sessionController
     const admitted = async function (request, ...rest) {
       try {
+        await rt.load?.()
+        assertNativeTurn(rt, request?.sessionId)
         return await prompt.call(this, request, ...rest)
       } catch (error) {
         const id = request?.sessionId

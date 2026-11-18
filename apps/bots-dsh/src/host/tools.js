@@ -1,3 +1,4 @@
+import { assertNativeTurn } from './refusal.js'
 // Team tools: the roster, bot-to-bot messages, group chat settings and posts, and the
 // question and view cards. Group rounds and reading chats are in groups.js.
 import { randomUUID } from 'node:crypto'
@@ -227,6 +228,7 @@ export function install(rt) {
       if (name.length > NAME_MAX) return `The request_id is ${name.length} characters long; a request name is at most ${NAME_MAX}.`
       const text = absoluteLinks(String(args.message), rt.sessionFolder?.(exec.agent?.session ?? exec.agent))
       const room = rt.roomOf(rt.groupOwners.get(exec.agent?.id)?.roomId)
+      assertNativeTurn(rt, target.id)
       const images = []
       if (Array.isArray(args.images) && args.images.length > 0) {
         if (room !== undefined || rt.groupOwners.has(exec.agent?.session?.id ?? exec.agent?.id)) return 'Not sent: forward pictures from your own chat.'

@@ -12,7 +12,7 @@ import { currentColor, isColor, normalize, unquote } from './text.js'
 import { nameProblem } from '../shared/mentions.js'
 import { contextPatch } from '../shared/context-policy.js'
 import { commandCapableAgent, crossesHarness } from '../shared/routes.js'
-import { BOT_TYPES } from '../shared/registry.js'
+import { BOT_TYPES, SEAT_AGENTS, newBotId } from '../shared/registry.js'
 import { cleanPetId, shippedPet } from './pets.js'
 import { cleanDenyTools, cleanShell } from './tool-deny.js'
 
@@ -23,8 +23,8 @@ function cleanBotType(type) {
 }
 function cleanTerminalAgent(agent) {
   if (agent === undefined) return undefined
-  if (typeof agent !== 'string' || !agent.trim() || agent.trim().startsWith('-')) throw refusal('Invalid terminal agent')
-  return agent.trim()
+  if (!SEAT_AGENTS.includes(agent)) throw refusal('Unknown terminal agent. Choose a supported terminal agent.')
+  return agent
 }
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
@@ -295,6 +295,25 @@ export function install(rt) {
   async function buildBot(cleanName, { type: typeInput, agent: agentInput, role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }) {
     const type = cleanBotType(typeInput)
     const agent = cleanTerminalAgent(agentInput)
+    if (type === 'herdr' && main) throw refusal('A Main Bot cannot be a Herdr Bot.')
+    if (type === 'herdr') {
+      const readOnly = rt.readOnly()
+      if (readOnly !== undefined) throw refusal(readOnly)
+      const id = newBotId()
+      const secId = resolveSectionInput({ section, sectionId })
+      const bot = {
+        id, name: cleanName, type, agent: agent ?? 'claude',
+        lead: createdBy ?? state.mainBotIds[0],
+        role: cleanRole(role), instructions: String(instructions).trim(),
+        createdAt: Date.now(), capabilities: [], shell: true,
+        ...(isColor(currentColor(color)) ? { color: currentColor(color) } : {}),
+        ...(cleanAvatar(avatar) ? { avatar: cleanAvatar(avatar) } : {}),
+        ...(secId ? { sectionId: secId } : {}),
+      }
+      state.bots[id] = bot
+      try { await rt.save() } catch (error) { delete state.bots[id]; throw error }
+      return bot
+    }
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
@@ -416,10 +435,6 @@ export function install(rt) {
         .catch(error => rt.warn('omni-ui: scoped tools for %s not applied: %s', cleanName, error))
       // A host-owned conversation already has its own history and turn source. Adoption
       // adds only its team identity, never a greeting or a deferred model turn.
-      if (type === 'herdr') {
-        await rt.save()
-        return bot
-      }
       if (existingSessionId !== undefined) {
         await rt.save()
         await scopeTools()
@@ -579,6 +594,8 @@ export function install(rt) {
       patch = rest
     }
     const type = Object.hasOwn(patch, 'type') ? cleanBotType(patch.type) : bot.type
+    if (type === 'herdr' && rt.isMain(id)) throw refusal('A Main Bot cannot be a Herdr Bot.')
+    if (type === 'herdr' && ((patch.instructions !== undefined && String(patch.instructions).trim() !== bot.instructions) || (patch.role !== undefined && cleanRole(patch.role) !== bot.role))) throw refusal('The Bot is terminal-only.', { code: 'bot/terminal-only' })
     const agent = cleanTerminalAgent(patch.agent)
     const policyPatch = contextPatch(patch)
     const policyOnly = Object.keys(patch).every(key => key === 'id' || Object.hasOwn(policyPatch, key))
@@ -693,15 +710,28 @@ export function install(rt) {
     if (patch.denyTools !== undefined && bot.permissionRev === revBefore) rt.movePermissionRev(bot)
     const modelChanged = type !== 'herdr' && (patch.model !== undefined || patch.effort !== undefined)
     const modelBefore = modelChanged ? modelFields(bot) : undefined
-    if (modelChanged) await switchModel(bot, patch, modelRef, effortId)
+    let switched = false
+    const nativeBefore = bot.type === 'herdr' && type === undefined ? { ...bot } : undefined
+    let nativeSession
     const roleBefore = bot.role
     const instructionsBefore = bot.instructions
     let unapplied
     try {
+      // A definition without a native Session gets one only when the person explicitly
+      // clears its Herdr type. No message is queued by this conversion.
+      if (nativeBefore) {
+        nativeSession = await createSession(nextName ?? bot.name, { dir: workDir ?? bot.workDir })
+        bot.sessionId = nativeSession
+        delete bot.type
+        rt.indexSessions()
+      }
+      if (modelChanged) { await switchModel(bot, patch, modelRef, effortId); switched = true }
       if (nextName !== undefined) {
         bot.name = nextName
-        const agent = await rt.resolveAgent(rt.chatOf(id))
-        await ctx.sessionTitle.rename(agent.session, nextName)
+        if (bot.type !== 'herdr') {
+          const agent = await rt.resolveAgent(rt.chatOf(id))
+          await ctx.sessionTitle.rename(agent.session, nextName)
+        }
         await followMemberNames(Object.values(state.rooms).filter(room => room.members.includes(id)))
       }
       if (Object.hasOwn(patch, 'type')) {
@@ -737,7 +767,12 @@ export function install(rt) {
     } catch (error) {
       // A step after the switch still failed (the title, the level's apply): the model goes
       // back too, on the record and on its Sessions, so the refused update leaves it as it was.
-      if (modelChanged) await restoreModel(bot, modelBefore)
+      if (nativeBefore) {
+        for (const key of Object.keys(bot)) if (!Object.hasOwn(nativeBefore, key)) delete bot[key]
+        Object.assign(bot, nativeBefore)
+        rt.indexSessions()
+        if (nativeSession) await ctx.workspaceRegistry.archiveSession(nativeSession).catch(() => {})
+      } else if (switched) await restoreModel(bot, modelBefore)
       throw error
     }
     if (browserGrants !== undefined) {
@@ -1267,6 +1302,7 @@ export function install(rt) {
   async function setMain(id, main, { primary = false, replace } = {}) {
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
+    if (main && bot.type === 'herdr') throw refusal('A Main Bot cannot be a Herdr Bot.')
     if (main && bot.private === true) throw refusal(`${bot.name} is private, so it cannot be a Main Bot`)
     const others = state.mainBotIds.filter(other => other !== id)
     let next

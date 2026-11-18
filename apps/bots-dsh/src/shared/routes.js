@@ -124,7 +124,8 @@ export function selectorRoutePolicy(input, warn = console.warn) {
       }
       if (!known.has(route)) throw new TypeError(`routePolicy.${kind}: unknown route ${JSON.stringify(route)}`)
     }
-    out[kind] = [...new Set(routes.filter(route => route !== 'herdr'))]
+    const kept = [...new Set(routes.filter(route => route !== 'herdr'))]
+    out[kind] = kept.length === 0 && routes.includes('herdr') ? [...SELECTOR_ROUTES] : kept
   }
   return Object.keys(out).length === 0 ? undefined : out
 }

@@ -8999,6 +8999,9 @@ module.exports = __toCommonJS(code_side_pane_exports);
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
+  "A Main Bot cannot be a Herdr Bot.": "主 Bot 不能是 Herdr Bot。",
+  "The Bot is terminal-only.": "此 Bot 仅支持终端。",
+  "Unknown terminal agent. Choose a supported terminal agent.": "未知的终端代理。请选择受支持的终端代理。",
   "Bot type": "Bot 类型",
   "Native DSH Bot": "原生 DSH Bot",
   "Herdr Bot": "Herdr Bot",

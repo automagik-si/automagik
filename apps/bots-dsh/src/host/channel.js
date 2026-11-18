@@ -1,3 +1,4 @@
+import { refusal } from './refusal.js'
 // Client channel: the team view the browser renders, and the POST /api/omni-ui endpoints.
 import { randomUUID } from 'node:crypto'
 import { createSpaceReads } from './agent-space.js'
@@ -614,6 +615,7 @@ export function install(rt) {
           return ok({ ...view, active, speaking })
         }
         case 'create-bot': {
+          if (body.type === 'herdr' && body.main === true) throw refusal('A Main Bot cannot be a Herdr Bot.')
           await rt.bootstrap()
           // `private` and `shell` are the user's own create fields (no acting Bot here):
           // a Bot created private starts without a shell unless `shell` says otherwise.

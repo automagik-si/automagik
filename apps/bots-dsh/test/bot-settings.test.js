@@ -111,3 +111,13 @@ test('settings reads only the explicit type and saves type and terminal agent', 
   fields.props.onType('')
   assert.deepEqual(JSON.parse(JSON.stringify(updates)), [['b', { agent: 'claude' }], ['b', { type: null }]])
 })
+
+
+test('Main Bot settings omit the Herdr choice and show the reason', () => {
+  const fields = settings(bot, { main: true }).find(node => node.type?.name === 'BotTypeFields')
+  const drawn = walk(fields.type(fields.props))
+  assert.equal(drawn.some(node => node.type === 'option' && node.props.value === 'herdr'), false)
+  assert.ok(JSON.stringify(drawn).includes('A Main Bot cannot be a Herdr Bot.'))
+  const member = settings(bot).find(node => node.type?.name === 'BotTypeFields')
+  assert.equal(walk(member.type(member.props)).some(node => node.type === 'option' && node.props.value === 'herdr'), true)
+})

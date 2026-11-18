@@ -2,10 +2,36 @@
 import { randomUUID } from 'node:crypto'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { HISTORY_TIMEOUT_MS, LONG_HEAD, MESSAGE_INLINE_MAX, READ_LINE_MAX, SOURCE_KIND, TEXT_KEPT, TEXT_SHOW_MAX } from './constants.js'
+import { assertNativeTurn } from './refusal.js'
 import { headOf, textOf } from './text.js'
 
 export function install(rt) {
   const { ctx, state } = rt
+  // Check at invocation, including agents retained before a Bot changed type. Reads,
+  // renames and cancellation may still resolve an agent without starting a turn.
+  const guarded = new WeakSet()
+  const lifts = []
+  const guardNativeAgent = (agent) => {
+    if (!agent || guarded.has(agent)) return agent
+    guarded.add(agent)
+    for (const method of ['followup', 'steer', 'inject']) {
+      const original = agent[method]
+      if (typeof original !== 'function') continue
+      const guard = function (...args) {
+        assertNativeTurn(rt, agent.session?.id ?? agent.id)
+        return original.apply(this, args)
+      }
+      agent[method] = guard
+      lifts.push(() => { if (agent[method] === guard) agent[method] = original })
+    }
+    return agent
+  }
+  ctx.on?.('agent/created', ({ agent }) => { guardNativeAgent(agent) })
+  ctx.on?.('agent/pre-step', async function admitNativeStep({ agent }, next) {
+    assertNativeTurn(rt, agent.session?.id ?? agent.id)
+    return next()
+  }, { prepend: true })
+  ctx.effect?.(() => () => { for (const lift of lifts) lift() }, 'omni-ui: terminal-only admission')
 
   const resolveAgent = async (sessionId) => {
     const resolved = await ctx.sessionController.resolveAgent(sessionId)
@@ -14,7 +40,7 @@ export function install(rt) {
       throw rt.autoClosed?.(sessionId, error) ?? error
     }
     rt.hideBotUnusedTools(resolved.agent)
-    return resolved.agent
+    return guardNativeAgent(resolved.agent)
   }
 
   const headerFor = (role, fromName, roomName, audience, note = 'new message', deferred = false, { resumed = false, retried = false, resent = false, abandoned = false, asker } = {}) => {
@@ -91,6 +117,8 @@ export function install(rt) {
     const from = rt.botOf(fromId)
     const to = rt.botOf(toId)
     if (to === undefined) throw new Error(`Unknown Bot ${toId}`)
+    assertNativeTurn(rt, toId)
+    assertNativeTurn(rt, sessionId ?? rt.chatOf(toId))
     const fromName = senderName ?? from?.name ?? 'You'
     const room = rt.roomOf(roomId)
     const asker = work === undefined ? undefined : rt.botOf(state.works?.[work]?.from)?.name

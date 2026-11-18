@@ -1,3 +1,4 @@
+import { assertNativeTurn } from './refusal.js'
 // Group chats: the room log, members' group Sessions, rounds and @mentions, round
 // reports, and the group tools (group_relay, read_own_chat, read_group_chat).
 //
@@ -382,6 +383,7 @@ export function install(rt) {
   // a fresh look at the log and a brief of the member's own chat; the brief is the
   // first message, so it stays fixed and the prefix stays cacheable.
   async function groupSessionFor(room, member) {
+    assertNativeTurn(rt, member.id)
     room.sessions ??= {}
     const known = room.sessions[member.id]
     if (known !== undefined) {
@@ -1688,6 +1690,8 @@ export function install(rt) {
   // once, and the members it calls start in that round, so it is not held back until
   // the round ends and never sits in the group Session's QueueDock (#663).
   async function postToRoom(room, sender, text, extra = {}, files = []) {
+    const { speakers } = openingCall(room, { ...extra, botId: sender.id, text })
+    for (const member of speakers) assertNativeTurn(rt, member.id)
     const running = [...rt.roomProgress.values()].find(round => round.roomId === room.id && round.nudge !== undefined)
     if (running !== undefined) {
       if (extra.failed !== undefined) {

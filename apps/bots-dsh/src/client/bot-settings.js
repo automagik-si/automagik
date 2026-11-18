@@ -173,7 +173,7 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
         h('span', { className: 'bt-bs-name' }, bot.name),
         h('span', { className: 'bt-bs-sub' }, [bot.role, isMainBot ? t('Main Bot') : ''].filter(Boolean).join(' · ') || t('Bot')))),
     h(Card, { title: t('Profile') },
-      h(BotTypeFields, { type: bot.type, agent: bot.agent, onType: type => save({ type: type || null, ...(type === 'herdr' ? { agent: bot.agent ?? 'claude' } : {}) }), onAgent: agent => save({ agent }) }),
+      h(BotTypeFields, { main: isMainBot, type: bot.type, agent: bot.agent, onType: type => save({ type: type || null, ...(type === 'herdr' ? { agent: bot.agent ?? 'claude' } : {}) }), onAgent: agent => save({ agent }) }),
       h(Row, { label: t('Name') }, h(InlineText, { label: t('Name'), value: bot.name, placeholder: 'Bob', required: true, maxLength: 40, onSave: name => save({ name }) })),
       bot.type === 'herdr' ? null : h(Row, { label: t('Role'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Role'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) }))),
     bot.type === 'herdr' ? null : h(Fragment, null,

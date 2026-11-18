@@ -3,9 +3,7 @@
 // (`<repo>/.automagik/bots/bots.json`, a repo file). Parse, check, and write-if-unchanged
 // under the lock the automagik-herdr CLI already takes, so DSH and the CLI can edit one file.
 //
-// Self-contained on purpose: no imports. The same bytes are copied into
-// herdr/mods/am-sidebar/ (RFC 0014 delivery 2, Q15), where Herdr's mod imports the parse and
-// check half and has no node:fs. The write half loads node:fs only when it is called, from
+// The plugin's registry parser and validator. The write half loads node:fs only when called, from
 // Node (the DSH host, the CLI), or takes an `fs` with the same sync calls (tests).
 //
 // Readers keep unknown fields: `raw` is the file exactly as parsed, and a write saves that,
@@ -13,6 +11,8 @@
 
 // An absent type is the native DSH Bot. Never infer it from agent or model.
 export const BOT_TYPES = Object.freeze(['herdr'])
+// Kept self-contained for registry readers; the client catalog is checked against this.
+export const SEAT_AGENTS = Object.freeze(['claude', 'codex', 'pi', 'omp', 'opencode', 'cursor', 'copilot', 'amp', 'grok', 'antigravity', 'kimi', 'kiro', 'hermes', 'qoder', 'crush', 'dsh-tui'])
 export const REGISTRY_VERSION = 2
 /** The home file's place under `$AUTOMAGIK_HOME`, and a repo file's place under the repo. */
 export const HOME_PATH = 'bots/bots.json'
@@ -182,8 +182,10 @@ export function parseRegistry(text, { kind } = {}) {
     if (bots.some(k => k.id === b.id)) return warnings.push(`${where}: id used twice; left out`)
     if (!isText(b.name)) return warnings.push(`${where}: name is missing; left out`)
     if (b.name.length > MAX_NAME) return warnings.push(`${where}: name is longer than ${MAX_NAME} characters; left out`)
-    if (b.type !== undefined && !BOT_TYPES.includes(b.type)) return warnings.push(`${where}: unknown type ${JSON.stringify(b.type)}; left out`)
+    if (b.type != null && !BOT_TYPES.includes(b.type)) return warnings.push(`${where}: unknown type ${JSON.stringify(b.type)}; left out`)
     const bot = { ...b }
+    if (bot.type === null) delete bot.type
+    if (bot.type === 'herdr' && bot.agent !== undefined && !SEAT_AGENTS.includes(bot.agent)) return warnings.push(`${where}: unknown terminal agent; left out`)
     for (const key of [...NEVER_FIELDS, ...UNSAFE_KEYS]) {
       if (!Object.hasOwn(bot, key)) continue
       warnings.push(`${where}: ${key} is never kept in bots.json; ignored`)
@@ -288,6 +290,7 @@ export function checkRegistry(file, { kind, before = null } = {}) {
     if (ids.has(b.id)) errors.push(`${at}: id used twice`)
     ids.add(b.id)
     if (b.type !== undefined && !BOT_TYPES.includes(b.type)) errors.push(`${at}: unknown type ${JSON.stringify(b.type)}`)
+    if (b.type === 'herdr' && b.agent !== undefined && !SEAT_AGENTS.includes(b.agent)) errors.push(`${at}: unknown terminal agent`)
     if (!isText(b.name)) errors.push(`${at}: name is missing`)
     else if (b.name.length > MAX_NAME) errors.push(`${at}: name is longer than ${MAX_NAME} characters`)
     for (const [key, cap] of Object.entries(TEXT_CAPS)) {
