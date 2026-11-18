@@ -700,3 +700,19 @@ test('a later signed list is Cloud\'s word on a removal: new opens resume', asyn
   assert.equal((await request(f.port, { headers: { cookie: old } })).status, 401,
     'a dropped session is never restored')
 })
+
+test('an older revocation call does not replace a newer one', async t => {
+  const f = await fixture(t)
+  const send = at => {
+    const body = JSON.stringify({ version: 1, event: 'session.revoke',
+      workspace: 'workspace-a', subject: 'person-1', reason: 'removed',
+      issued_at: iso(at) })
+    return request(f.port, { method: 'POST', path: REVOKE, body,
+      headers: { 'content-type': 'application/json', [SIGN]: detached(body) } })
+  }
+  assert.equal((await send(f.state.now + 5000)).status, 204)
+  assert.equal(f.cloud.removed.get('person-1').at, f.state.now + 5000)
+  // A replayed older call is still accepted idempotently, but it changes nothing.
+  assert.equal((await send(f.state.now)).status, 204)
+  assert.equal(f.cloud.removed.get('person-1').at, f.state.now + 5000)
+})
