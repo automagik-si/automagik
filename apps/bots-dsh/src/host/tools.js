@@ -192,15 +192,15 @@ export function install(rt) {
 
   rt.teamTools.push(defineTool({
     name: 'message_bot',
-    description: 'Send a message to another Bot on the team. If that Bot is working, it reads your message at its next step and can change course, then answers once that work is done; if it is idle, it starts on it right away. Its reply arrives later as a new message to you; with reply_to "user" it answers the user in its own chat instead. In a group chat it reaches only members of that group, as writing "@Name" there does. With request_id you name the request yourself: a repeat of that name with the same message is not sent again, but gives the receipt of the first call back.',
+    description: 'Send a message to another Bot on the team. If that Bot is working, it reads your message at its next step and can change course, then answers once that work is done; if it is idle, it starts on it right away. Its reply arrives later as a new message to you; with reply_to "user" it answers the user in its own chat instead, and with reply_to "none" nothing comes back at all. In a group chat it reaches only members of that group, as writing "@Name" there does. With request_id you name the request yourself: a repeat of that name with the same message is not sent again, but gives the receipt of the first call back.',
     parameters: {
       to: { type: 'string', required: true, description: 'Exact Bot name from list_bots' },
       message: { type: 'string', required: true, description: 'Self-contained message; the other Bot cannot see this conversation' },
       images: { type: 'array', items: { type: 'string' }, description: 'Pictures to send along, each by its name, sha256 or saved path as your own chat shows it; the other Bot gets its own copy. Only pictures you were given.' },
       reply_to: {
         type: 'string',
-        enum: ['me', 'user'],
-        description: '"me" (default): the reply comes back to you and the user does not see it. "user": the Bot answers the user in its own chat, where the user reads it, and nothing comes back to you. Use "user" whenever the user wants to hear from that Bot directly or asks Bots to say something in their own chats.',
+        enum: ['me', 'user', 'none'],
+        description: '"me" (default): the reply comes back to you and the user does not see it. "user": the Bot answers the user in its own chat, where the user reads it, and nothing comes back to you. "none": the Bot reads your message and nothing comes back to you; use it for a thank-you, a hold, a warning or a fact, never for work you need an answer to. Use "user" whenever the user wants to hear from that Bot directly or asks Bots to say something in their own chats.',
       },
       when: {
         type: 'string',
@@ -223,6 +223,9 @@ export function install(rt) {
       if (target.id === sender.id) return 'You cannot message yourself.'
       if (String(args.message ?? '').trim() === '') return 'Write a message to send.'
       const toUser = rt.isPrivate(target.id) || args.reply_to === 'user'
+      // No reply is owed to the sender: the message is read where it lands, and no
+      // answer is routed back or handed on. A private Bot still answers the user.
+      const noReply = args.reply_to === 'none'
       const name = typeof args.request_id === 'string' ? args.request_id.trim() : ''
       if (name.length > NAME_MAX) return `The request_id is ${name.length} characters long; a request name is at most ${NAME_MAX}.`
       const text = absoluteLinks(String(args.message), rt.sessionFolder?.(exec.agent?.session ?? exec.agent))
@@ -244,7 +247,7 @@ export function install(rt) {
         payload: {
           to: target.id,
           message: String(args.message ?? '').replace(/\r\n?/g, '\n').trim(),
-          reply_to: toUser ? 'user' : 'me',
+          reply_to: toUser ? 'user' : noReply ? 'none' : 'me',
           when: args.when === 'queue' ? 'queue' : 'now',
           ...(images.length > 0 ? { images: images.map(ref => ref.attachmentId).sort() } : {}),
         },
@@ -284,7 +287,7 @@ export function install(rt) {
           await rt.approvePictureForward(exec, { sender, target, images })
           exec.signal?.throwIfAborted()
         }
-        const work = toUser ? undefined : works[0]
+        const work = toUser || noReply ? undefined : works[0]
         const chat = rt.chatOf(target.id)
         const agent = await rt.resolveAgent(chat)
         const status = rt.statusOf(target.id)
@@ -302,10 +305,15 @@ export function install(rt) {
         const working = rt.live.get(chat)?.turn !== undefined
         const steer = (args.when !== 'queue' && !toUser) || (joins && earlier.steered)
         const exchangeId = joins ? earlier.message.source.exchangeId : randomUUID()
+        // The merged message owes nothing only when neither message it took in does.
+        const earlierNoReply = earlier !== undefined && earlier.message.source.noReply === true
+        const mergedNoReply = noReply && (joins ? earlierNoReply : true)
         if (joins) rt.forgetDelivery?.(exchangeId)
-        else if (!toUser) rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work })
+        // A request that owes a reply needs its work, also when it grew out of an
+        // earlier no-reply message that had none.
+        if (!toUser && !mergedNoReply && state.works?.[exchangeId] === undefined) rt.openWork(exchangeId, { from: sender.id, to: target.id, parent: work })
         try {
-          await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
+          await rt.deliver({ fromId: sender.id, toId: target.id, text: long.text, files: [...long.files, ...(joins ? before.files : [])], images: [...images, ...(joins ? before.images : [])], forwarded: true, length: long.length, role: 'request', steer, exchangeId, ...(joins ? { merged: true } : {}), ...(mergedNoReply ? { noReply: true } : {}), ...(toUser ? { audience: 'user' } : {}) })
         } catch (error) {
           // The delivery stays noted for the next start while its Bot exists
           // (resume.js), and the resent request still answers up the tree, so the
@@ -315,14 +323,20 @@ export function install(rt) {
         }
         const sent = toUser
           ? `Delivered to ${target.name}. It will answer the user in its own chat; nothing comes back to you, so point the user to ${target.name}'s chat instead of relaying.`
-          : working && steer
-            ? `Delivered to ${target.name} while it is working: it reads your message at its next step and answers once that work is done. Its reply will arrive later as a new message; do not wait for it.`
-            : working
-              ? `Queued for ${target.name}: it reads your message after its current work. Its reply will arrive later as a new message; do not wait for it.`
-              : `Delivered to ${target.name}. Its reply will arrive later as a new message; do not wait for it.`
-        const asker = rt.ownsWork(sender.id, work) ? rt.botOf(state.works[work].from)?.name : undefined
+          : noReply || mergedNoReply
+            ? working && steer
+              ? `Delivered to ${target.name} while it is working: it reads your message at its next step. No reply comes back to you.`
+              : working
+                ? `Queued for ${target.name}: it reads your message after its current work. No reply comes back to you.`
+                : `Delivered to ${target.name}. It reads your message; no reply comes back to you.`
+            : working && steer
+              ? `Delivered to ${target.name} while it is working: it reads your message at its next step and answers once that work is done. Its reply will arrive later as a new message; do not wait for it.`
+              : working
+                ? `Queued for ${target.name}: it reads your message after its current work. Its reply will arrive later as a new message; do not wait for it.`
+                : `Delivered to ${target.name}. Its reply will arrive later as a new message; do not wait for it.`
+        const asker = work !== undefined && rt.ownsWork(sender.id, work) ? rt.botOf(state.works[work].from)?.name : undefined
         const notes = [
-          joins ? `${target.name} had not read your earlier message yet, so this one was added to it, and it answers both at once.` : '',
+          joins ? `${target.name} had not read your earlier message yet, so this one was added to it, ${mergedNoReply ? 'and it reads them together.' : 'and it answers both at once.'}` : '',
           status === 'idle' ? '' : `${target.name} now: ${status}.`,
           asker ? `When you have handed on everything, end your turn: each reply brings you back to this work, and your answer goes to ${asker} once all of it is back.` : '',
         ].filter(Boolean)

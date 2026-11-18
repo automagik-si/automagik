@@ -451,7 +451,7 @@ export function install(rt) {
     }
   }
   const adminActions = new Set([...AGENT_TOOLS.map(tool => tool.endpoint),
-    'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags',
+    'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags', 'set-main',
     'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
   const handle = async (endpoint, payload, signal) => {

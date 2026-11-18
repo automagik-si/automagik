@@ -558,10 +558,31 @@ export function install(rt) {
     }
     return dropped
   }
-  rt.saveCopy = (change) => {
+  rt.saveCopy = (change, { afterWrite } = {}) => {
     if (stopped || !writable()) return Promise.reject(new Error('This host cannot save the Bot team.'))
     indexSessions()
     rt.sweepAuto?.()
+    if (afterWrite !== undefined) {
+      let revision
+      return writeSnapshot(() => {
+        const copy = JSON.parse(JSON.stringify(state))
+        change(copy)
+        revision = state.revision + 1
+        copy.revision = copy.autoStamp = revision
+        copy.version = STATE_VERSION
+        copy.exchanges = copy.exchanges.slice(-MAX_EXCHANGES)
+        return JSON.stringify(copy)
+      }, {
+        required: true,
+        epoch: lockEpoch,
+        afterWrite: () => {
+          state.revision = state.autoStamp = revision
+          state.version = STATE_VERSION
+          state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
+          afterWrite()
+        },
+      })
+    }
     state.revision += 1
     state.autoStamp = state.revision
     state.version = STATE_VERSION
@@ -589,7 +610,7 @@ export function install(rt) {
     }, { required })
   }
 
-  const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch } = {}) => {
+  const writeSnapshot = (snapshotOf, { required = false, epoch: copyEpoch, afterWrite } = {}) => {
     const run = writing.then(async () => {
       // An adopt ahead of this save may have made the team read-only.
       if (stuck !== undefined || holder !== undefined) {
@@ -622,6 +643,7 @@ export function install(rt) {
         ensureLock()
         await replaceFile(temp, statePath, ensureLock)
         seen = stamp()
+        afterWrite?.()
         // The file now holds this team, a fresh one after a corrupt file included.
         if (stuck === undefined) teamRead = true
         syncShellHolds(shellRecords)
