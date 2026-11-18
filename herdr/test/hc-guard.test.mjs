@@ -767,6 +767,38 @@ test("the exact dsh-tui worker argv reaches the stub unchanged", (t) => {
   assert.deepEqual(calls(s), [exact]);
 });
 
+// #1011: a dsh-tui lead's full guard starts a worker of any agent the pack launches, not dsh-tui
+// alone. Claude carries its agent.session label and its login words (the default login puts
+// `-u CLAUDE_CONFIG_DIR` before PATH); every other agent kind starts from its own program.
+test("a dsh-tui lead's guard accepts a Claude worker with its session label (#1011)", (t) => {
+  const s = scene(t);
+  const exact = exactRun(s, {
+    agent: "claude", argv: ["claude", "--session-id", "session-1"], session: "session-1", login: ["-u", "CLAUDE_CONFIG_DIR"],
+    path: `${GUARD_DIR}:/usr/bin:/bin`,
+  });
+  assert.ok(exact.includes("agent.session=session-1"), exact.join(" "));
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, exact);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s), [exact], "the Claude worker launch reached hc unchanged");
+});
+
+test("a dsh-tui lead's guard accepts every other agent kind's worker launch (#1011)", (t) => {
+  const s = scene(t);
+  const starts = {
+    codex: ["codex"], antigravity: ["agy", "--mode", "auto"], omp: ["omp"], pi: ["pi"],
+    opencode: ["opencode"], cursor: ["cursor-agent"], copilot: ["copilot"], amp: ["amp"], grok: ["grok"],
+    kimi: ["kimi"], kiro: ["kiro-cli"], hermes: ["hermes"], qoder: ["qodercli"], crush: ["crush"],
+  };
+  for (const [agent, argv] of Object.entries(starts)) {
+    const exact = exactRun(s, { agent, argv, task: "do it", path: `${GUARD_DIR}:/usr/bin:/bin` });
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, exact);
+    assert.equal(r.status, 0, `${agent}: ${r.stderr}`);
+    assert.deepEqual(calls(s), [exact], `${agent}: the worker launch reached hc unchanged`);
+  }
+});
+
 test("a run that is not the worker shape is refused before hc", (t) => {
   const s = scene(t);
   const exact = exactRun(s);
@@ -777,15 +809,15 @@ test("a run that is not the worker shape is refused before hc", (t) => {
   const noGuardPath = [...exact];
   noGuardPath[noGuardPath.indexOf("--") + 2] = "PATH=/usr/bin:/bin";
   const template = [...exact.slice(0, parentAt), "--label", "worker.template=dev-sol", ...exact.slice(parentAt)];
-  const otherAgent = [...exact];
-  otherAgent[otherAgent.indexOf("--") + 3] = "claude";
+  const notAnAgent = [...exact];
+  notAnAgent[notAnAgent.indexOf("--") + 3] = "bash";
   const wrongCwd = exactRun(s, { cwd: s.project });
   const foreignParent = exactRun(s, { parent: "t101" });
   const foreignBot = exactRun(s, { botId: ID.cap });
   const bare = ["run", "--bg", "--parent", "t100", "--", "/usr/bin/env", `PATH=${GUARD_DIR}:/usr/bin`, "dsh-tui", "--", "task"];
   const cases = [
     ["bare", bare], ["foreign parent", foreignParent], ["foreign worker.of", foreignBot],
-    ["cwd outside the worktrees", wrongCwd], ["template", template], ["another agent", otherAgent],
+    ["cwd outside the worktrees", wrongCwd], ["template", template], ["not an agent", notAnAgent],
     ["no parent", withoutParent], ["outlive-parent", withFlag("--outlive-parent")], ["keep", withFlag("--keep")],
     ["--on", withFlag("--on")], ["no guard on PATH", noGuardPath],
   ];
