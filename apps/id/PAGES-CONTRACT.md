@@ -109,12 +109,31 @@ Authentication:
 
 Account creation:
 
+Sign-up is by invitation only. An invitation link carries an admission ticket in
+the URL fragment, `#ticket=<ticket>`: either `/sign-in#ticket=…` or a product's
+authorization URL with the fragment, which the provider's redirect to `/sign-in`
+keeps. On load the sign-in page reads `ticket` from the fragment, keeps it in
+memory only and removes the fragment with `history.replaceState`, leaving the
+path and the provider query exactly as they were. The ticket is sent only in the
+request header `X-Automagik-Admission: <ticket>`, never in a query or a body, and
+is forgotten once an account exists. Without a ticket, **Create a passkey** says
+that new accounts need an invitation and calls nothing.
+
 **Create a passkey** always creates a fresh account. If a session is active, the
 page signs out before requesting registration options. Both registration steps
 ignore session identity while retaining the WebAuthn challenge cookie.
 
-1. `GET /api/auth/passkey/generate-register-options`, no body. Optional query
+1. `GET /api/auth/passkey/generate-register-options`, no body, with the
+   `X-Automagik-Admission` header. Optional query
    `authenticatorAttachment=platform` or `cross-platform`; omit for broad support.
+   Without a valid, unused ticket the answer is HTTP 403 with
+   `{code, message}`, and nothing is stored:
+   - `INVITATION_REQUIRED`: no ticket was sent.
+   - `INVITATION_INVALID`: the ticket failed a check (signature, issuer, audience,
+     expiry, purpose), or the service has no admission key configured.
+   - `INVITATION_USED`: the ticket already made an account, or it has started its
+     ten ceremonies.
+   A retry with the same unused ticket (after a cancelled prompt) is allowed.
    Response is `PublicKeyCredentialCreationOptionsJSON`: `{challenge, rp: {id,
    name}, user: {id, name, displayName}, pubKeyCredParams, timeout?,
    excludeCredentials?, authenticatorSelection, attestation?, extensions?}`.
@@ -124,13 +143,17 @@ ignore session identity while retaining the WebAuthn challenge cookie.
 3. `POST /api/auth/passkey/verify-registration` with
    `{response: RegistrationResponseJSON, createSession: true, name?: string,
    oauth_query?: string}`. Omit `oauth_query` for `prompt=create` as described above.
+   It needs no ticket header: the ceremony is bound to its ticket. If another
+   ceremony on the same ticket finished first, the answer is HTTP 403
+   `{code: "INVITATION_USED", message}`.
    Success includes the stored passkey's `{id, name?, credentialID, ...}`, plus
    `{session: {...}, user: {id, name, ...}}`; a session cookie is set. Never display
    or store the stored public key, session token or internal technical fields.
    A provider flow can instead return `{redirect: true, url}`.
 4. Resume the provider query as described above. A cancelled or failed ceremony requires new
-   options; challenges are single use. Starting registration creates an internal
-   user row before successful verification; there is no signed-in session yet.
+   options; challenges are single use. Starting registration with a ticket creates
+   one internal user row before successful verification, and every retry on that
+   ticket reuses it; there is no signed-in session yet.
 
 For browsers without the WebAuthn JSON conversion helpers, use the matching
 Better Auth passkey client or a WebAuthn JSON adapter. Do not send a raw
@@ -140,7 +163,11 @@ WhatsApp inbound proof, only when `whatsappEnabled` is true:
 
 1. `POST /api/auth/whatsapp/start` with `{oauth_query?: string}`. Preserve the
    signed provider query exactly as described above. No phone number or linking
-   flag is accepted from the browser. Success: `{url: string, code: string,
+   flag is accepted from the browser. When the page holds an invitation's ticket,
+   send it in the `X-Automagik-Admission` header: it is used only if the number
+   has no account yet. A ticket that fails a check answers HTTP 403
+   `{code: "INVITATION_INVALID", message}`; an already recorded one,
+   `{code: "INVITATION_USED", message}`. Without the header, start works as before. Success: `{url: string, code: string,
    expiresAt: number}`. The expiry is Unix time in milliseconds, five minutes
    after creation. A new Secure, HttpOnly, host-only SameSite=Lax challenge cookie
    binds this request to the browser. The URL is a WhatsApp link with the message
@@ -160,6 +187,11 @@ WhatsApp inbound proof, only when `whatsappEnabled` is true:
    passkey sign-in. Navigate only to this server-returned URL. The browser never
    receives a phone number to choose or an account-linking option. The verified
    sender determines the account, regardless of any existing browser session.
+   A number with no account gets one only if the start request carried a valid,
+   unused ticket. Otherwise the proof is spent, the challenge cookie is cleared,
+   nothing is created and status answers `{status: "invitation_required"}` (no
+   ticket was sent) or `{status: "invitation_used"}` (the ticket was used
+   meanwhile). Stop polling; say that new accounts need an invitation.
 4. Treat 429 as a wait state, 403 as an invalid/cross-site request, and a signed
    query error as a request to restart from the product. A direct POST to status
    is not public and returns 404. Do not call `/api/omni/inbound` from a page;
@@ -179,7 +211,8 @@ message is required. An invalid or unrecognized sender identifier gets no reply
 and cannot complete proof.
 
 Required visible states: loading/config, passkey offered, authenticator prompt
-pending, passkey cancelled,
+pending, passkey cancelled, sign-up needs an invitation, invitation used,
+invitation not valid or expired, WhatsApp number needs an invitation,
 passkey unavailable, passkey failed with retry, account created, signed in,
 continuing to product, WhatsApp offered only when enabled, waiting for a message,
 expired proof, restart wait, rate limited, service/network error,

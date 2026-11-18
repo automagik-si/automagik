@@ -4,7 +4,24 @@ One identity for Automagik products, implemented with Better Auth 1.7.21 (MIT),
 its matching passkey and OAuth provider plugins, and a Cloudflare Worker with D1.
 This service deploys independently; repository releases never package it.
 
-Passkey registration creates an account without a prior session. The authenticator
+Sign-up is invite only (RFC 0032, Decided 9). Passkey registration creates an
+account without a prior session, but only for a request carrying an admission
+ticket in the `X-Automagik-Admission` header: a short-lived Ed25519 JWS that
+Automagik Cloud signs after it redeems an invitation, checked against the public
+keys in `ADMISSION_KEYS` and the issuer in `ADMISSION_ISSUER`. Invitations stay
+Cloud records; this service keeps only each ticket's `jti`, in D1. Without a
+valid, unused ticket, `generate-register-options` answers 403 before any row is
+written; with no admission key configured, no account can be created, while
+sign-in and OIDC keep working. One ticket reserves one user row: a retry after a
+cancelled prompt reuses it (at most ten ceremonies per ticket), and only the
+first ceremony to finish takes the ticket; the others are refused. The
+reservation and the claim are each one D1 statement, so they hold across
+isolates. `src/admission.ts` checks tickets; `src/gate.ts` applies them. See
+[DEPLOY.md](DEPLOY.md) for the keys and the operator's stand-in signer
+(`scripts/admission.ts`), and [PAGES-CONTRACT.md](PAGES-CONTRACT.md) for the
+header and the refusals.
+
+Passkey registration needs no prior session. The authenticator
 must support a discoverable credential and user verification. Authentication uses
 discoverable credential options without requiring a username. The pages start the
 authenticator from an explicit passkey action. No email, password, social login
@@ -36,11 +53,13 @@ messages receive no reply.
 One D1 batch deduplicates both event IDs, enforces ten events per sender per
 minute and three per challenge per five minutes, and consumes the challenge.
 The browser can claim the verified proof once. Better Auth creates the session
-for the account owning the verified number, or creates a separate phone account.
+for the account owning the verified number, or creates a separate phone account,
+but only when the start request carried a valid, unused admission ticket; without
+one, the proof ends with `invitation_required` and nothing is created.
 The browser's existing passkey account is never selected or modified. The
 receiving number, sender, code and secret are never logged.
 
-Sessions, WebAuthn and WhatsApp challenges, OAuth codes, grants, signing keys,
+Sessions, WebAuthn and WhatsApp challenges, admission ticket ids, OAuth codes, grants, signing keys,
 and rate limits live in D1. There is no secondary storage or session cookie cache.
 Only Cloudflare's replaced `cf-connecting-ip` header supplies the limiter's IP.
 The default limit is 60 requests per rolling minute per IP and path; Better Auth
@@ -102,8 +121,12 @@ Mutation checks drop inbound authentication or timestamp checks, permit proof
 reuse, select the current session account, restore the session JWT header, disable
 PKCE, relax redirects, enable public registration, move rate limits to memory,
 serve a page file directly as `.html`, take the passkey site name from the host,
-start on (or configure) a host outside it, accept a look-alike host and let CI
-skip the page browser tests,
+start on (or configure) a host outside it, accept a look-alike host, let CI
+skip the page browser tests, remove the invite gate, skip a ticket's signature,
+audience, expiry, issuer, purpose or 15-minute cap, allow a used ticket again,
+allow sign-up with no admission key, let an unknown phone number in without a
+ticket, let a ticket's second ceremony finish and accept a private key in
+`ADMISSION_KEYS`,
 one at a time. Each must fail its targeted test; source files are restored
 afterward. Announcements and results are printed to stdout.
 `bun scripts/generate-migration.ts` regenerates the initial schema for review;

@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { createLocalJWKSet, jwtVerify } from 'jose';
 import { clientSeedSQL } from '../scripts/client-seed';
 import { SoftwareAuthenticator } from './authenticator';
+import { ADMISSION_HEADER, admissions, TEST_ISSUER, type Admissions } from './admission';
 
 // The service runs on a subdomain of the passkey site name, as it does for real.
 const origin = 'https://id.automagik.si';
@@ -23,6 +24,7 @@ let runtimes: Miniflare[];
 let runtime: Miniflare;
 let cookie: string;
 let ip: number;
+let tickets: Admissions;
 
 beforeAll(async () => {
   await mkdir('.wrangler', { recursive: true });
@@ -33,6 +35,8 @@ beforeAll(async () => {
     platform: 'browser', target: 'es2022', conditions: ['workerd', 'worker'],
     external: ['node:*', 'cloudflare:*'], logLevel: 'silent',
   });
+  // Admission tickets are signed with a key made for this run.
+  tickets = await admissions(origin);
 });
 afterAll(async () => { await rm(root, { recursive: true, force: true }); });
 
@@ -61,6 +65,8 @@ async function instance(whatsapp = false, _unused?: undefined, pages = false, co
       BETTER_AUTH_URL: origin,
       PASSKEY_RP_ID: siteName,
       BETTER_AUTH_SECRET: 'test-only-auth-secret-placeholder-never-deployed',
+      ADMISSION_KEYS: tickets.keys,
+      ADMISSION_ISSUER: TEST_ISSUER,
       ...(whatsapp ? { WHATSAPP_RECEIVING_NUMBER: '15555550100', OMNI_INBOUND_TOKEN: inboundToken } : {}),
       ...config,
     },
@@ -140,9 +146,18 @@ async function jsonOK(response: Awaited<ReturnType<typeof request>>) {
   try { return JSON.parse(text); } catch { throw new Error(`Invalid JSON response: ${text}`); }
 }
 
+/** The header that carries a fresh admission ticket: account creation is invite only. */
+async function admit(claims?: Record<string, unknown>) {
+  return { [ADMISSION_HEADER]: await tickets.mint(claims) };
+}
+async function withTicket(options: { cookie?: string; headers?: Record<string, string> }) {
+  return { ...options, headers: { ...options.headers, ...(await admit()) } };
+}
+
 async function signup(oauth_query?: string) {
   const authenticator = new SoftwareAuthenticator();
-  const options = await jsonOK(await request('/api/auth/passkey/generate-register-options'));
+  const options = await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined,
+    await withTicket({})));
   expect(options.authenticatorSelection.residentKey).toBe('required');
   const response = await request('/api/auth/passkey/verify-registration', {
     response: authenticator.register(options, origin), createSession: true,
@@ -189,8 +204,12 @@ function exchange(authorizationCode: string, extra: Record<string, string> = {})
   return request('/api/auth/oauth2/token', body, { form: true, cookie: '' });
 }
 
-async function startWhatsApp(mf: Miniflare, oauth_query?: string) {
-  const response = await request('/api/auth/whatsapp/start', oauth_query ? { oauth_query } : {}, { mf });
+async function startWhatsApp(mf: Miniflare, oauth_query?: string, ticket: string | null | 'mint' = 'mint') {
+  // A number with no account needs an admission ticket; a fresh one comes by default.
+  const token = ticket === 'mint' ? await tickets.mint() : ticket;
+  const response = await request('/api/auth/whatsapp/start', oauth_query ? { oauth_query } : {}, {
+    mf, headers: token ? { [ADMISSION_HEADER]: token } : {},
+  });
   const challengeCookie = response.headers.get('set-cookie') ?? '';
   for (const attribute of ['__Host-automagik-id-whatsapp=', 'HttpOnly', 'Secure', 'SameSite=Lax', 'Max-Age=300']) {
     expect(challengeCookie).toContain(attribute);
@@ -451,7 +470,8 @@ describe('Worker + D1 identity', () => {
     }))).user.id).toBe(first.userId);
     const headers = { aUtHoRiZaTiOn: '\t Bearer unused-session-header \t' };
     const options = await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined, {
-      cookie: step === 'verification' ? originalCookie : spaced(originalCookie), headers,
+      cookie: step === 'verification' ? originalCookie : spaced(originalCookie),
+      headers: { ...headers, ...(await admit()) },
     }));
     const second = await jsonOK(await request('/api/auth/passkey/verify-registration', {
       response: new SoftwareAuthenticator().register(options, origin), createSession: true,
@@ -472,7 +492,7 @@ describe('Worker + D1 identity', () => {
     expect((await jsonOK(await request('/api/auth/get-session', undefined,
       duplicateCookie(originalCookie)))).user.id).toBe(first.userId);
     const options = await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined,
-      duplicateCookie(originalCookie)));
+      await withTicket(duplicateCookie(originalCookie))));
     const second = await jsonOK(await request('/api/auth/passkey/verify-registration', {
       response: new SoftwareAuthenticator().register(options, origin), createSession: true,
     }, duplicateCookie(cookie)));
@@ -483,9 +503,8 @@ describe('Worker + D1 identity', () => {
     const first = await signup();
     const differentCase = cookie.replace(/session_token/g, 'SESSION_TOKEN');
     expect(await jsonOK(await request('/api/auth/get-session', undefined, { cookie: differentCase }))).toBeNull();
-    const options = await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined, {
-      cookie: differentCase,
-    }));
+    const options = await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined,
+      await withTicket({ cookie: differentCase })));
     const second = await jsonOK(await request('/api/auth/passkey/verify-registration', {
       response: new SoftwareAuthenticator().register(options, origin), createSession: true,
     }, { cookie: cookie.replace(/session_token/g, 'SESSION_TOKEN') }));
@@ -504,7 +523,7 @@ describe('Worker + D1 identity', () => {
     expect(session.headers.get('access-control-expose-headers') ?? '').not.toContain('set-auth-jwt');
     expect((await session.json() as any).user.email).toBeUndefined();
     // Existing-account registration options must not use the internal email as a display name.
-    await jsonOK(await request('/api/auth/passkey/generate-register-options'));
+    await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined, await withTicket({})));
   });
 
   test('software passkey signup, sign-in, native S256 code flow, JWKS, ID token and userinfo', async () => {
@@ -642,7 +661,8 @@ describe('Worker + D1 identity', () => {
 
   test('passkey wrong origin and challenge replay fail', async () => {
     const authenticator = new SoftwareAuthenticator();
-    const options = await jsonOK(await request('/api/auth/passkey/generate-register-options'));
+    const options = await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined,
+      await withTicket({})));
     const registration = authenticator.register(options, 'https://wrong.example.com');
     expect((await request('/api/auth/passkey/verify-registration', { response: registration })).status).toBe(400);
     expect((await request('/api/auth/passkey/verify-registration', {
@@ -738,7 +758,8 @@ describe('Worker + D1 identity', () => {
 
   test('D1 challenges and sessions work in a separate runtime', async () => {
     const authenticator = new SoftwareAuthenticator();
-    const options = await jsonOK(await request('/api/auth/passkey/generate-register-options'));
+    const options = await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined,
+      await withTicket({})));
     const db = await runtime.getD1Database('DB');
     expect((await db.prepare('SELECT count(*) AS n FROM verification').first<{ n: number }>())!.n)
       .toBeGreaterThan(0);
@@ -807,12 +828,14 @@ describe('Worker + D1 identity', () => {
 describe('passkey site name', () => {
   async function at(mf: Miniflare, base: string, path: string) {
     return mf.dispatchFetch(`${base}${path}`, {
-      headers: { origin: base, accept: 'application/json', 'cf-connecting-ip': `192.0.2.${ip++}` },
+      headers: { origin: base, accept: 'application/json', 'cf-connecting-ip': `192.0.2.${ip++}`,
+        ...(path.endsWith('/generate-register-options') ? await admit({ aud: base }) : {}) },
     });
   }
 
   test('registration and sign-in options carry the site name automagik.si, not the service host', async () => {
-    const options = await jsonOK(await request('/api/auth/passkey/generate-register-options'));
+    const options = await jsonOK(await request('/api/auth/passkey/generate-register-options', undefined,
+      await withTicket({})));
     expect(options.rp.id).toBe('automagik.si');
     const { authenticator } = await signup();
     cookie = '';
@@ -864,5 +887,218 @@ describe('passkey site name', () => {
       expect(response.status, value).toBe(500);
       expect(await response.text()).toContain(message);
     }
+  });
+});
+
+describe('invite gate', () => {
+  const REGISTER = '/api/auth/passkey/generate-register-options';
+  type Answer = Awaited<ReturnType<typeof request>>;
+  const count = async (table: string, mf: Miniflare = runtime) =>
+    (await (await mf.getD1Database('DB')).prepare(`SELECT count(*) AS n FROM "${table}"`).first<{ n: number }>())!.n;
+  async function refusedWith(response: Answer, code: string) {
+    const text = await response.text();
+    expect(response.status, text).toBe(403);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    expect(JSON.parse(text).code).toBe(code);
+  }
+  // One ceremony in its own cookie jar, so two can run side by side.
+  async function begin(ticket: string | null, mf: Miniflare = runtime) {
+    const response = await request(REGISTER, undefined, {
+      mf, cookie: '', headers: ticket ? { [ADMISSION_HEADER]: ticket } : {},
+    });
+    const jar = response.headers.getSetCookie().map(entry => entry.split(';')[0]).join('; ');
+    return { response, jar };
+  }
+  async function finish(started: { response: Answer; jar: string }, mf: Miniflare = runtime) {
+    const options = await jsonOK(started.response);
+    return request('/api/auth/passkey/verify-registration', {
+      response: new SoftwareAuthenticator().register(options, origin), createSession: true,
+    }, { mf, cookie: started.jar });
+  }
+
+  test('sign-up without a ticket is refused before any row is written', async () => {
+    await refusedWith(await request(REGISTER), 'INVITATION_REQUIRED');
+    // A ticket in the query is not a ticket: it travels in the header only.
+    await refusedWith(await request(`${REGISTER}?ticket=${await tickets.mint()}`), 'INVITATION_REQUIRED');
+    for (const table of ['user', 'admission_ticket', 'verification', 'passkey']) expect(await count(table), table).toBe(0);
+  });
+
+  test.each([
+    ['wrong signature', () => tickets.forge()],
+    ['wrong aud', () => tickets.mint({ aud: 'https://other.automagik.si' })],
+    ['wrong iss', () => tickets.mint({ iss: 'https://cloud.example.org' })],
+    ['expired', () => tickets.mint({ iat: Math.floor(Date.now() / 1000) - 700, exp: Math.floor(Date.now() / 1000) - 100 })],
+    ['life over 15 minutes', () => tickets.mint({ exp: Math.floor(Date.now() / 1000) + 901 })],
+    ['use not signup', () => tickets.mint({ use: 'recover' })],
+    ['use missing', () => tickets.mint({ use: undefined })],
+    ['alg HS256', () => tickets.symmetric()],
+    ['alg none', async () => tickets.unsigned()],
+    ['jti missing', () => tickets.mint({ jti: undefined })],
+    ['issued in the future', () => tickets.mint({ iat: Math.floor(Date.now() / 1000) + 120 })],
+    ['unknown kid', () => tickets.mint({}, { kid: 'not-listed' })],
+    ['names an account', () => tickets.mint({ sub: 'some-user' })],
+    ['not a JWS', async () => 'not-a-ticket'],
+  ] as [string, () => Promise<string>][])('a bad ticket is refused with no row: %s', async (_label, make) => {
+    await refusedWith(await request(REGISTER, undefined, { headers: { [ADMISSION_HEADER]: await make() } }),
+      'INVITATION_INVALID');
+    for (const table of ['user', 'admission_ticket', 'verification']) expect(await count(table), table).toBe(0);
+  });
+
+  test('a good ticket within the clock skew is accepted', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const response = await request(REGISTER, undefined, {
+      headers: { [ADMISSION_HEADER]: await tickets.mint({ iat: now + 20, exp: now + 20 + 900 }) },
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await count('user')).toBe(1);
+  });
+
+  test('a used ticket is refused', async () => {
+    const ticket = await tickets.mint();
+    expect((await finish(await begin(ticket))).status).toBe(200);
+    await refusedWith((await begin(ticket)).response, 'INVITATION_USED');
+    expect(await count('user')).toBe(1);
+    expect(await count('passkey')).toBe(1);
+  });
+
+  test('an abandoned ceremony can be retried on its ticket, reusing its one user row', async () => {
+    const ticket = await tickets.mint();
+    await jsonOK((await begin(ticket)).response); // the authenticator prompt was cancelled
+    const retry = await begin(ticket);
+    const db = await runtime.getD1Database('DB');
+    expect(await db.prepare('SELECT state, ceremonies FROM admission_ticket').first())
+      .toEqual({ state: 'pending', ceremonies: 2 });
+    expect(await count('user')).toBe(1);
+    const created = await jsonOK(await finish(retry));
+    const reserved = await db.prepare('SELECT userId, state FROM admission_ticket').first<any>();
+    expect(reserved).toEqual({ userId: created.session.userId, state: 'used' });
+    expect(await count('user')).toBe(1);
+  });
+
+  test('one ticket starts at most ten ceremonies', async () => {
+    const ticket = await tickets.mint();
+    for (let i = 0; i < 10; i++) await jsonOK((await begin(ticket)).response);
+    await refusedWith((await begin(ticket)).response, 'INVITATION_USED');
+    expect(await count('user')).toBe(1);
+  });
+
+  test("a ticket's second ceremony cannot finish after its first", async () => {
+    const ticket = await tickets.mint();
+    const first = await begin(ticket);
+    const second = await begin(ticket);
+    expect((await finish(first)).status).toBe(200);
+    await refusedWith(await finish(second), 'INVITATION_USED');
+    expect(await count('user')).toBe(1);
+    expect(await count('passkey')).toBe(1);
+  });
+
+  test('two concurrent registrations with one ticket create at most one account', async () => {
+    // Both requests run at once in one runtime, interleaving at every D1 call. (Miniflare's
+    // local D1 answers an internal error to simultaneous writes from two runtimes, so the
+    // two-runtime case below interleaves the steps instead.)
+    for (let round = 0; round < 3; round++) {
+      const ticket = await tickets.mint();
+      const started = await Promise.all([begin(ticket), begin(ticket)]);
+      const statuses = (await Promise.all(started.map(ceremony => finish(ceremony))))
+        .map(response => response.status);
+      expect(statuses.sort()).toEqual([200, 403]);
+      expect(await count('user')).toBe(round + 1);
+      expect(await count('passkey')).toBe(round + 1);
+    }
+    // Two isolated runtimes sharing D1: either one's ceremony takes the ticket for both.
+    const peer = await instance();
+    const ticket = await tickets.mint();
+    const here = await begin(ticket);
+    const there = await begin(ticket, peer);
+    expect((await finish(there, peer)).status).toBe(200);
+    await refusedWith(await finish(here), 'INVITATION_USED');
+    await refusedWith((await begin(ticket, peer)).response, 'INVITATION_USED');
+    expect(await count('user')).toBe(4);
+    expect(await count('passkey')).toBe(4);
+    expect(await count('admission_ticket')).toBe(4);
+  });
+
+  test('no ADMISSION_KEYS: sign-up is refused while sign-in and OIDC keep working', async () => {
+    const { authenticator, userId } = await signup();
+    for (const config of [{ ADMISSION_KEYS: '' }, { ADMISSION_ISSUER: '' }] as Record<string, string>[]) {
+      const closed = await instance(false, undefined, false, config);
+      await refusedWith((await begin(await tickets.mint(), closed)).response, 'INVITATION_INVALID');
+      await refusedWith((await begin(null, closed)).response, 'INVITATION_REQUIRED');
+      expect(await count('user')).toBe(1);
+      cookie = '';
+      const options = await jsonOK(await request('/api/auth/passkey/generate-authenticate-options', undefined, { mf: closed }));
+      const signedIn = await jsonOK(await request('/api/auth/passkey/verify-authentication', {
+        response: authenticator.authenticate(options, origin),
+      }, { mf: closed }));
+      expect(signedIn.user.id).toBe(userId);
+      expect((await request('/.well-known/openid-configuration', undefined, { mf: closed })).status).toBe(200);
+      const result = await request(authorization(), undefined, { mf: closed });
+      const target = new URL(result.headers.get('location') ?? JSON.parse(await result.text()).url);
+      expect(target.searchParams.get('code')).toBeTruthy();
+    }
+  });
+
+  test('malformed ADMISSION_KEYS refuse sign-up', async () => {
+    const [listed] = JSON.parse(tickets.keys).keys;
+    for (const value of ['not json', '[]', '{}', '{"keys":[]}', JSON.stringify(listed),
+      JSON.stringify({ keys: [{ ...listed, d: listed.x }] }),
+      JSON.stringify({ keys: [{ ...listed, kid: undefined }] }),
+      JSON.stringify({ keys: [listed, listed] }),
+      JSON.stringify({ keys: [{ ...listed, alg: 'RS256' }] }),
+      JSON.stringify({ keys: [{ ...listed, crv: 'X25519' }] }),
+      JSON.stringify({ keys: [{ kty: 'RSA', kid: listed.kid, n: 'AQAB', e: 'AQAB' }] })]) {
+      const broken = await instance(false, undefined, false, { ADMISSION_KEYS: value });
+      await refusedWith((await begin(await tickets.mint(), broken)).response, 'INVITATION_INVALID');
+    }
+    expect(await count('user')).toBe(0);
+  });
+
+  test('WhatsApp: a first proof for an unknown number without a ticket creates no account', async () => {
+    const mf = await instance(true);
+    const started = await startWhatsApp(mf, undefined, null);
+    expect((await deliver(mf, started.code)).status).toBe(200);
+    const status = await request('/api/auth/whatsapp/status', undefined, { mf });
+    expect(await jsonOK(status)).toEqual({ status: 'invitation_required' });
+    expect(status.headers.get('set-cookie')).toContain('Max-Age=0');
+    expect(await count('user', mf)).toBe(0);
+    expect(await jsonOK(await request('/api/auth/get-session', undefined, { mf }))).toBeNull();
+  });
+
+  test('WhatsApp: an existing phone account signs in without a ticket', async () => {
+    const mf = await instance(true);
+    const first = await startWhatsApp(mf);
+    expect((await deliver(mf, first.code)).status).toBe(200);
+    const created = await jsonOK(await request('/api/auth/whatsapp/status', undefined, { mf }));
+    cookie = '';
+    const again = await startWhatsApp(mf, undefined, null);
+    expect((await deliver(mf, again.code)).status).toBe(200);
+    const signedIn = await jsonOK(await request('/api/auth/whatsapp/status', undefined, { mf }));
+    expect(signedIn.status).toBe('verified');
+    expect(signedIn.user.id).toBe(created.user.id);
+    expect(await count('user', mf)).toBe(1);
+  });
+
+  test('WhatsApp: one ticket creates one phone account, and a used or bad ticket is refused at start', async () => {
+    const mf = await instance(true);
+    const ticket = await tickets.mint();
+    const one = await startWhatsApp(mf, undefined, ticket);
+    const oneCookie = cookie;
+    cookie = '';
+    const two = await startWhatsApp(mf, undefined, ticket);
+    const twoCookie = cookie;
+    expect((await deliver(mf, one.code, { from: '15555550160' })).status).toBe(200);
+    expect((await deliver(mf, two.code, { from: '15555550161' })).status).toBe(200);
+    expect((await jsonOK(await request('/api/auth/whatsapp/status', undefined, { mf, cookie: oneCookie }))).status)
+      .toBe('verified');
+    expect(await jsonOK(await request('/api/auth/whatsapp/status', undefined, { mf, cookie: twoCookie })))
+      .toEqual({ status: 'invitation_used' });
+    expect(await count('user', mf)).toBe(1);
+    cookie = '';
+    await refusedWith(await request('/api/auth/whatsapp/start', {}, { mf, headers: { [ADMISSION_HEADER]: ticket } }),
+      'INVITATION_USED');
+    await refusedWith(await request('/api/auth/whatsapp/start', {}, {
+      mf, headers: { [ADMISSION_HEADER]: await tickets.forge() },
+    }), 'INVITATION_INVALID');
+    expect(await count('whatsapp_challenge', mf)).toBe(2);
   });
 });

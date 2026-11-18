@@ -4,6 +4,8 @@ import { setSessionCookie } from 'better-auth/cookies';
 import type { BetterAuthPlugin } from 'better-auth';
 import type { User } from 'better-auth/types';
 import type { Env } from './auth';
+import { ADMISSION_HEADER, admissionUnused, consumeForPhone } from './admission';
+import { checkTicket, refusal } from './gate';
 
 const COOKIE = '__Host-automagik-id-whatsapp';
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -14,6 +16,7 @@ interface Challenge {
   codeHash: string; cookieHash: string; createdAt: number; expiresAt: number;
   oauthQuery: string | null; clientName: string; phoneNumber: string | null;
   state: 'pending' | 'verified' | 'used';
+  admissionJti: string | null; admissionExpiresAt: number | null;
 }
 
 export async function hash(value: string): Promise<string> {
@@ -64,6 +67,10 @@ export function whatsappPlugin(env: Env): BetterAuthPlugin {
           if (!client || client.disabled) throw new APIError('BAD_REQUEST');
           clientName = client.name || 'Automagik';
         }
+        // A ticket is only needed if the number turns out to have no account; check it now.
+        const ticket = ctx.headers?.get(ADMISSION_HEADER);
+        const admission = ticket ? await checkTicket(env, ticket) : null;
+        if (admission && !(await admissionUnused(env.DB, admission.jti))) throw refusal('INVITATION_USED');
         const token = [...crypto.getRandomValues(new Uint8Array(32))]
           .map(byte => byte.toString(16).padStart(2, '0')).join('');
         const now = Date.now();
@@ -71,9 +78,9 @@ export function whatsappPlugin(env: Env): BetterAuthPlugin {
           // 32 symbols divide 256 exactly, so masking introduces no sampling bias.
           const code = [...crypto.getRandomValues(new Uint8Array(6))].map(byte => ALPHABET[byte & 31]).join('');
           const inserted = await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_challenge
-            (codeHash, cookieHash, createdAt, expiresAt, oauthQuery, clientName)
-            VALUES (?, ?, ?, ?, ?, ?)`).bind(await hash(code), await hash(token), now, now + LIFE,
-              query || null, clientName).run();
+            (codeHash, cookieHash, createdAt, expiresAt, oauthQuery, clientName, admissionJti, admissionExpiresAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(await hash(code), await hash(token), now, now + LIFE,
+              query || null, clientName, admission?.jti ?? null, admission?.expiresAt ?? null).run();
           if (!inserted.meta.changes) continue;
           ctx.setCookie(COOKIE, token, { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 300 });
           const receiving = env.WHATSAPP_RECEIVING_NUMBER!.replace(/^\+/, '');
@@ -93,16 +100,26 @@ export function whatsappPlugin(env: Env): BetterAuthPlugin {
         if (challenge.state !== 'verified') return ctx.json({ status: 'pending' });
         const claimed = await env.DB.prepare(`UPDATE whatsapp_challenge SET state = 'used'
           WHERE cookieHash = ? AND state = 'verified' AND expiresAt > ?
-          RETURNING phoneNumber`).bind(challenge.cookieHash, Date.now()).first<{ phoneNumber: string }>();
+          RETURNING phoneNumber, admissionJti, admissionExpiresAt`).bind(challenge.cookieHash, Date.now())
+          .first<{ phoneNumber: string; admissionJti: string | null; admissionExpiresAt: number | null }>();
         if (!claimed) return ctx.json({ status: 'expired' });
         const findPhoneUser = () => ctx.context.adapter.findOne<User>({
           model: 'user', where: [{ field: 'phoneNumber', value: claimed.phoneNumber }],
         });
         let user = await findPhoneUser();
         if (!user) {
+          // Invite only (RFC 0032, Decided 9): a number with no account needs the ticket its
+          // start request carried, used here once.
+          const admittedId = claimed.admissionJti
+            ? await consumeForPhone(env.DB, claimed.admissionJti, claimed.admissionExpiresAt ?? Date.now())
+            : null;
+          if (!admittedId) {
+            ctx.setCookie(COOKIE, '', { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 0 });
+            return ctx.json({ status: claimed.admissionJti ? 'invitation_used' : 'invitation_required' });
+          }
           try {
             user = await ctx.context.internalAdapter.createUser({
-              name: 'Automagik user', email: `${crypto.randomUUID()}@id.invalid`,
+              id: admittedId, name: 'Automagik user', email: `${crypto.randomUUID()}@id.invalid`,
               emailVerified: false, phoneNumber: claimed.phoneNumber, phoneNumberVerified: true,
             }, { method: 'whatsapp' });
           } catch {

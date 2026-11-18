@@ -100,6 +100,72 @@ const mutations = [
     test: 'the CI job runs the browser tests',
     edits: [['../../.github/workflows/ci.yml', 'ID_PAGES_BROWSER: required', 'ID_PAGES_BROWSER: optional']],
   },
+  // The invite gate (RFC 0032, Decided 9).
+  {
+    name: 'invite gate removed',
+    test: 'sign-up without a ticket is refused before any row',
+    edits: [['src/auth.ts', 'const id = await admitSignup(env, endpoint.headers?.get(ADMISSION_HEADER));',
+      "const id = crypto.randomUUID().replace(/-/g, '');"]],
+  },
+  {
+    name: 'admission signature not checked',
+    test: 'refused with no row: wrong signature',
+    edits: [['src/admission.ts', "const verified = await compactVerify(token, key, { algorithms: ['EdDSA'] });",
+      "const verified = { payload: Buffer.from(token.split('.')[1], 'base64url') };"]],
+  },
+  {
+    name: 'admission aud not checked',
+    test: 'refused with no row: wrong aud',
+    edits: [['src/admission.ts', 'if (!audienceMatches(payload.aud, new URL(env.BETTER_AUTH_URL).origin))', 'if (false)']],
+  },
+  {
+    name: 'admission exp not checked',
+    test: 'refused with no row: expired',
+    edits: [['src/admission.ts', 'if ((exp as number) <= seconds - ADMISSION_SKEW)', 'if (false)']],
+  },
+  {
+    name: 'admission jti reuse allowed',
+    test: 'a used ticket is refused',
+    edits: [['src/admission.ts', "WHERE admission_ticket.state = 'pending' AND admission_ticket.ceremonies",
+      'WHERE admission_ticket.ceremonies']],
+  },
+  {
+    name: 'missing admission keys allow sign-up',
+    test: 'no ADMISSION_KEYS: sign-up is refused',
+    edits: [['src/admission.ts', 'if (!keys || !issuer) throw invalid();',
+      'if (!keys || !issuer) return { jti: crypto.randomUUID(), expiresAt: now + 60_000 };']],
+  },
+  {
+    name: 'phone path ungated',
+    test: 'unknown number without a ticket creates no account',
+    edits: [['src/whatsapp.ts', 'if (!admittedId) {', 'if (false) {']],
+  },
+  {
+    name: "a ticket's second ceremony completes",
+    test: 'second ceremony cannot finish after its first',
+    edits: [['src/gate.ts', "if (!(await claimSignup(env.DB, userId))) throw refusal('INVITATION_USED');",
+      'await claimSignup(env.DB, userId);']],
+  },
+  {
+    name: 'admission iss not checked',
+    test: 'refused with no row: wrong iss',
+    edits: [['src/admission.ts', 'if (payload.iss !== issuer)', 'if (false)']],
+  },
+  {
+    name: 'admission use not checked',
+    test: 'refused with no row: use not signup',
+    edits: [['src/admission.ts', 'if (payload.use !== use)', 'if (false)']],
+  },
+  {
+    name: 'admission life not capped at 15 minutes',
+    test: 'refused with no row: life over 15 minutes',
+    edits: [['src/admission.ts', ' || (exp as number) - (iat as number) > ADMISSION_MAX_LIFE', '']],
+  },
+  {
+    name: 'accept a private key in ADMISSION_KEYS',
+    test: 'admission settings are validated',
+    edits: [['src/admission.ts', "if ('d' in key || key.kty", 'if (key.kty']],
+  },
 ];
 
 const selectedMutation = process.env.ID_MUTATION;
