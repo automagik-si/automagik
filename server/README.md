@@ -247,7 +247,13 @@ mount -o remount,ro,bind /srv/automagik/measure/automagik-data
 ```
 
 For `/etc/fstab`, the same source and target with `none bind,ro 0 0`. With Incus, bind the `dir`
-pool's `source` the same way; with another driver, export the read-only copy there.
+pool's `source` the same way; with another driver, export the read-only copy there. Grant the
+measurement identity read and directory search on the view, never a write bit; where the volume
+is owned by the image's uid 1000, a POSIX ACL does that without changing ownership:
+
+```sh
+setfacl -R -m u:<measurement>:rX /srv/automagik/measure/automagik-data
+```
 
 Inside that view the measurement identity may read, per workspace:
 
