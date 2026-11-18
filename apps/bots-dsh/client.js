@@ -836,9 +836,9 @@ var ZH = {
   "The Bot team could not start. The engine’s startup output — its console, or the app’s startup error box — has the cause.": "Bot 团队启动失败。原因在引擎的启动输出里——它的控制台，或应用的启动错误框。",
   "The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.": "Bot 团队启动失败。{error}。原因在引擎的启动输出里——它的控制台，或应用的启动错误框。",
   "Automation tasks": "自动化任务",
-  Connectors: "连接器",
-  "Search connectors": "搜索连接器",
-  "No connectors": "暂无连接器",
+  Apps: "应用",
+  "Search apps": "搜索应用",
+  "No apps": "暂无应用",
   IM: "IM",
   "via {platform}": "来自 {platform}",
   "Your IM bots": "我的 IM 机器人",
@@ -2308,7 +2308,7 @@ var ZH = {
   "Who to chat with…": "想和谁聊…",
   "Add at least one more Bot": "再至少添加一个 Bot",
   Members: "成员",
-  // Connectors and scheduled tasks
+  // Apps and scheduled tasks
   "Scheduled tasks": "定时任务",
   "Every day": "每天",
   "Every {count} days": "每 {count} 天",
@@ -2740,7 +2740,7 @@ var ZH = {
   "Design": "设计",
   "Data": "数据",
   "Commerce": "商务",
-  "No connectors connected": "未连接任何连接器",
+  "No apps connected": "未连接任何应用",
   "{bot} needs {name}": "{bot} 需要 {name}",
   "{bot} wants to send an email": "{bot} 想发送一封邮件",
   "Mail": "邮件",
@@ -16197,7 +16197,7 @@ function BotConnectors({ bot, roster, actions, run: run2 }) {
   return (0, import_react42.createElement)(
     "div",
     { className: "bt-drawer-model" },
-    (0, import_react42.createElement)("div", { key: "t", className: "bt-section-title" }, t("Connectors")),
+    (0, import_react42.createElement)("div", { key: "t", className: "bt-section-title" }, t("Apps")),
     rows2.map((connector) => {
       const off = (connector.offFor ?? []).includes(bot.id);
       return (0, import_react42.createElement)(SwitchRow, { key: connector.id, label: connector.name, on: !off, onChange: (checked) => {
@@ -20327,7 +20327,7 @@ font:12px/17px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;overf
 .bt-phone-pair-copy{display:flex;flex-direction:column;gap:8px;font-size:14px;line-height:20px}
 @media(max-width:700px){.bt-phone-pair{flex-direction:column;align-items:flex-start}}
 
-/* Settings → Connectors. */
+/* Settings → Apps. */
 .bt-connector{display:flex;flex-direction:column;gap:10px;padding:12px}
 .bt-connector-head{display:flex;align-items:center;gap:12px;min-width:0}
 .bt-connector-mark{flex:none;width:36px;height:36px;border-radius:10px;background:var(--bt-card);border:.5px solid var(--bt-line);display:flex;align-items:center;justify-content:center;color:var(--bt-ink)}
@@ -23843,7 +23843,7 @@ function AccountLauncher({ seat = true, settingsOpen, openSettings, openOnboardi
     [
       [t("Usage"), GaugeIcon, () => actions.openSettings("usage")],
       [t("Plugins"), PlugIcon, () => actions.selectPanel("plugins")],
-      [t("Connectors"), ConnectorIcon, () => actions.openConnectors()],
+      [t("Apps"), ConnectorIcon, () => actions.openConnectors()],
       // Rows other Omni plugins add (extend.js), such as Automations.
       ...navRows.map((row) => [row.label(), row.icon, () => row.run(actions)]),
       [t("Bot settings"), GearIcon, () => actions.openSettings("general")]
@@ -30348,7 +30348,7 @@ function ConnectorsPage({ roster, actions }) {
       (0, import_react81.createElement)(
         "div",
         { className: "bt-set-card bt-connectors-card" },
-        count === 0 ? (0, import_react81.createElement)("div", { className: "bt-set-row" }, (0, import_react81.createElement)("span", { className: "bt-set-hint" }, t("No connectors connected"))) : null,
+        count === 0 ? (0, import_react81.createElement)("div", { className: "bt-set-row" }, (0, import_react81.createElement)("span", { className: "bt-set-hint" }, t("No apps connected"))) : null,
         rows2.map((app) => (0, import_react81.createElement)(ConnectorRow, { key: app.id, connector: app, actions })),
         accounts.map((account) => (0, import_react81.createElement)(MailAccount, { key: account.id, account, actions, run: run2 })),
         (mail.pending ?? []).map((p) => (0, import_react81.createElement)(MailPending, { key: p.address ?? "google", pending: p })),
@@ -30388,7 +30388,7 @@ function ConnectorsPage({ roster, actions }) {
         "label",
         { className: "bt-app-search" },
         (0, import_react81.createElement)(SearchIcon),
-        (0, import_react81.createElement)("input", { type: "search", "aria-label": t("Search connectors"), placeholder: t("Search connectors"), value: query, onChange: (e) => setQuery(e.target.value) })
+        (0, import_react81.createElement)("input", { type: "search", "aria-label": t("Search apps"), placeholder: t("Search apps"), value: query, onChange: (e) => setQuery(e.target.value) })
       ),
       (0, import_react81.createElement)("button", { type: "button", className: "bt-app-pill", onClick: () => setView("custom") }, (0, import_react81.createElement)(PlusIcon), t("Custom")),
       (0, import_react81.createElement)(ConnectedSummary, { apps: marks, count, onClick: () => setView("connected") })
@@ -31676,7 +31676,7 @@ var SETTINGS_PAGES = [
   ["models", "Models"],
   ["bots", "Bots"],
   ["groups", "Group chats"],
-  ["connectors", "Connectors"],
+  ["connectors", "Apps"],
   ["capabilities", "Capabilities"],
   ["browser", "Browser"],
   ["computer", "Computer use"],

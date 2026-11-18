@@ -1,4 +1,4 @@
-// Settings → Connectors. The catalog is a two-column grid of apps grouped by
+// Settings → Apps. The catalog is a two-column grid of apps grouped by
 // category, with search and category chips on top and the connected count at the
 // right. A tile connects in place when nothing more is needed, and shows the
 // sign-in it started; anything that needs a form or a choice opens the app's own
@@ -166,7 +166,7 @@ export function ConnectorsPage({ roster, actions }) {
     const rows = connected.filter(app => app.id !== 'mail')
     return h(Subview, { title: t('Connected'), onBack: back }, banner,
       h('div', { className: 'bt-set-card bt-connectors-card' },
-        count === 0 ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-set-hint' }, t('No connectors connected'))) : null,
+        count === 0 ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-set-hint' }, t('No apps connected'))) : null,
         rows.map(app => h(ConnectorRow, { key: app.id, connector: app, actions })),
         accounts.map(account => h(MailAccount, { key: account.id, account, actions, run })),
         (mail.pending ?? []).map(p => h(MailPending, { key: p.address ?? 'google', pending: p })),
@@ -197,7 +197,7 @@ export function ConnectorsPage({ roster, actions }) {
     h('div', { className: 'bt-app-bar' },
       h('label', { className: 'bt-app-search' },
         h(SearchIcon),
-        h('input', { type: 'search', 'aria-label': t('Search connectors'), placeholder: t('Search connectors'), value: query, onChange: e => setQuery(e.target.value) })),
+        h('input', { type: 'search', 'aria-label': t('Search apps'), placeholder: t('Search apps'), value: query, onChange: e => setQuery(e.target.value) })),
       h('button', { type: 'button', className: 'bt-app-pill', onClick: () => setView('custom') }, h(PlusIcon), t('Custom')),
       h(ConnectedSummary, { apps: marks, count, onClick: () => setView('connected') })),
     h('div', { className: 'bt-app-chips', role: 'group', 'aria-label': t('Category') },
