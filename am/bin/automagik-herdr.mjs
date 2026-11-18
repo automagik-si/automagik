@@ -15,7 +15,7 @@ import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync
 import { homedir, uptime } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseArgs } from "node:util";
+import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
 import { coreStatus, inTestRoots } from "../coreSocket.mjs";
@@ -99,16 +99,18 @@ async function slot(fn) {
   try { return await fn(); } finally { running -= 1; waiting.shift()?.(); }
 }
 
-/** Runs a program: { code, stdout, stderr }; code 127 when it isn't there; killed: true when its timeout ended it. */
+/** Runs a program: stderr falls back to the exec error, while rawStderr is the child's output.
+ * Code 127 when it isn't there; killed: true when its timeout ended it. */
 export function runProgram(command, args, { cwd, timeout = 15000 } = {}) {
   return slot(() => new Promise((done) => {
     try {
       execFile(command, args, { cwd, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (!err) return done({ code: 0, stdout, stderr });
+        if (!err) return done({ code: 0, stdout, stderr, rawStderr: stderr });
         done({ code: err.code === "ENOENT" ? 127 : (typeof err.code === "number" ? err.code : 1), stdout: stdout ?? "", stderr: stderr || String(err.message),
+          rawStderr: stderr ?? "",
           ...(err.killed ? { killed: true } : {}) });
       });
-    } catch (e) { done({ code: 127, stdout: "", stderr: String(e?.message ?? e) }); }
+    } catch (e) { done({ code: 127, stdout: "", stderr: String(e?.message ?? e), rawStderr: "" }); }
   }));
 }
 const git = async (args, cwd) => { const r = await runProgram("git", args, { cwd }); return r.code === 0 ? r.stdout : null; };
@@ -161,20 +163,27 @@ async function hcJson(args) {
 }
 /** hc's exit code for "no such terminal" (hc --skill: 3 not_found). */
 export const HC_NOT_FOUND = 3;
+const HC_FAILURE_MAX = 300;
 /**
  * What a failed hc call said, safe to print: its error's kind and message when it printed one as
  * JSON (hc --skill: `{error: {kind, message, hint}}` on stderr), else its first line; the home
  * folder written as ~, cut to 300 characters.
  */
 export function hcFailure(r, homeDir = home()) {
-  const text = String(r?.stderr || r?.stdout || "").trim();
+  return formatHcFailure(r, hcFailureMessage(r?.stderr || r?.stdout, homeDir));
+}
+function hcFailureMessage(output, homeDir = home()) {
+  const text = String(output || "").trim();
   let said = text.split("\n")[0];
   try {
     const e = JSON.parse(text)?.error;
     if (e && typeof e === "object") said = [e.kind, e.message].filter((x) => typeof x === "string" && x).join(": ") || said;
   } catch { /* not JSON: its first line */ }
   if (homeDir && homeDir !== "/") said = said.split(homeDir).join("~");
-  return `${said || "no message"}${r?.killed ? " (timed out)" : ""} (exit ${r?.code ?? "?"})`.slice(0, 300);
+  return said;
+}
+function formatHcFailure(r, message) {
+  return `${message || "no message"}${r?.killed ? " (timed out)" : ""} (exit ${r?.code ?? "?"})`.slice(0, HC_FAILURE_MAX);
 }
 /**
  * `hc get <t> --json`, or null when hc says there is no such terminal: only its not_found exit
@@ -2480,6 +2489,11 @@ const heldIds = new Set();
 const holdId = (id) => { if (typeof id === "string" && id.trim().length >= 6) heldIds.add(id.trim()); return id; };
 /** `text` with every held session id shown as SESSION_MASK. */
 const unprinted = (text) => { let out = String(text); for (const id of heldIds) out = out.split(id).join(SESSION_MASK); return out; };
+// Clean the whole message before masking, so truncation can't expose part of a held id.
+function printableHcMessage(text) {
+  const clean = stripVTControlCharacters(String(text)).replace(/[\p{Cc}\p{Cf}]/gu, (c) => (/\s/.test(c) ? " " : ""));
+  return unprinted(clean.replace(/\s+/g, " ").trim());
+}
 const report = (warnings) => { for (const w of warnings) process.stderr.write(`am: ${unprinted(w)}\n`); };
 
 /**
@@ -3842,17 +3856,27 @@ async function launchSeat(project, bot, over = {}) {
   listProject(key);
   // An edit that landed while this Start ran: the file read again, its role and category
   // put on the new pane (relabelWords against the labels it started with).
+  let words = [];
   try {
     const fresh = loadProject(key).file;
     if (fresh.bots.some((b) => b.id === bot.id && !b.planned)) {
-      const words = relabelWords(labels, paneLabels(fresh, bot.id), labels);
-      if (words.length && (await hc(["label", terminal, ...words])).code !== 0) {
-        const warning = `${terminal}'s labels ${words.join(" ")} weren't set.`;
-        hook.warnings.push(warning);
-        report([warning]); // the hook's warnings were printed before hc run
-      }
+      words = relabelWords(labels, paneLabels(fresh, bot.id), labels);
     }
   } catch { /* the file can't be read now: the labels it started with stand */ }
+  if (words.length) {
+    let reason = null;
+    try {
+      const r = await hc(["label", terminal, ...words]);
+      if (r.code !== 0) reason = formatHcFailure(r, printableHcMessage(hcFailureMessage(r.rawStderr)));
+    } catch (e) {
+      reason = printableHcMessage(e?.message ?? e).slice(0, HC_FAILURE_MAX) || "no message";
+    }
+    if (reason) {
+      const warning = `${terminal}'s labels ${words.join(" ")} weren't set. ${reason}`;
+      hook.warnings.push(warning);
+      report([warning]); // the hook's warnings were printed before hc run
+    }
+  }
   if (!place) {
     hook.warnings.push(`No open Herdr space shows ${key}, so Herdr gives ${terminal} no pane: it runs, unseen. `
       + `Watch it with hc attach ${terminal}. To give the next start a pane, open a space on ${key} first, or pass --space <id> (herdr-app ls lists the ids).`);
