@@ -866,3 +866,27 @@ test("cross-project lead (#850): schema validation, applyBotEdit, and collectPro
   const map2 = new Map([["/work/hub", hubWithMemberLead], ["/work/spoke", spokeParsed]]);
   assert.equal(roleOf(hubWithMemberLead, hubWithMemberLead.bots[1], { project: "/work/hub", projects: map2 }), "captain");
 });
+
+test("#1411: effort and tier are a Codex bot's; a malformed value warns and is ignored, another agent's is refused", () => {
+  const file = sample((f) => { f.bots[0].agent = "codex"; f.bots[0].effort = "high"; f.bots[0].tier = "fast"; return f; });
+  assert.deepEqual(checkBots(file), []);
+  const parsed = parseBots(text(file));
+  assert.deepEqual([parsed.file.bots[0].effort, parsed.file.bots[0].tier], ["high", "fast"]);
+  const cases = [["High Effort", "fast", [undefined, "fast"], /reasoning effort "High Effort" isn't one of low, medium, high, xhigh, max, ultra/],
+    ["banana", "fast", [undefined, "fast"], /reasoning effort "banana" isn't one of low, medium, high, xhigh, max, ultra/],
+    ["high", "priority", ["high", undefined], /service tier "priority" isn't fast or standard/],
+    [5, "fast", [undefined, "fast"], /effort 5 isn't an effort level/]];
+  for (const [effort, tier, kept, why] of cases) {
+    const bad = sample((f) => { f.bots[0].agent = "codex"; f.bots[0].effort = effort; f.bots[0].tier = tier; return f; });
+    assert.ok(checkBots(bad).some((line) => why.test(line)), JSON.stringify(checkBots(bad)));
+    const got = parseBots(text(bad));
+    assert.deepEqual([got.file.bots[0].effort, got.file.bots[0].tier], kept);
+    assert.ok(got.warnings.some((line) => why.test(line)), JSON.stringify(got.warnings));
+  }
+  // Another agent's values are not its own: check refuses, a read drops them with a warning.
+  const claude = sample((f) => { f.bots[1].effort = "high"; f.bots[1].tier = "fast"; return f; });
+  assert.ok(checkBots(claude).some((line) => /reasoning effort and service tier are Codex's \(this bot runs claude\)/.test(line)));
+  const got = parseBots(text(claude));
+  assert.deepEqual([got.file.bots[1].effort, got.file.bots[1].tier], [undefined, undefined]);
+  assert.ok(got.warnings.some((line) => /reasoning effort and service tier are Codex's; ignored/.test(line)));
+});
