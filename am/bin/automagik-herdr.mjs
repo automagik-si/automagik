@@ -433,18 +433,16 @@ export async function loadRemoteProject(key, machine) {
 }
 
 /**
- * writeBotsFile's rule on a linked machine: the whole raw file must pass checkBots, and the
- * file there must still hold the text read (null: none), else nothing is written
- * (remoteFile.js: hc file edit for an edit, an exclusive create for a new file, a checked
- * remove for `raw === null`).
+ * Validates the whole roster on a linked save. remoteFile.js sends the old and new text in
+ * one hc file edit, creates a new file exclusively, or checks before removing it for `raw === null`.
  */
-async function writeRemoteBots(project, raw) {
+async function writeRemoteBots(project, raw, { preview, confirmUnchanged }) {
   const { key, machine, text: expected } = project;
   const path = under(key, BOTS_PATH);
-  if (raw !== null) checkBotsForSave(raw, expected);
+  if (raw !== null) checkBotsForSave(raw, expected, preview);
   try {
     if (raw === null) await removeRemoteText(remoteIo, machine, path, expected);
-    else await writeRemoteText(remoteIo, machine, path, botsText(raw, expected), expected);
+    else await writeRemoteText(remoteIo, machine, path, botsText(raw, expected), expected, { confirmUnchanged });
   } catch (e) {
     if (e instanceof StaleSnapshot) throw new CliError(`Not saved: ${fileName(project)} changed since it was read (another edit landed first). Run the command again.`);
     // A write whose answer was lost and that the file doesn't show: said as it is.
@@ -460,9 +458,9 @@ async function writeRemoteBots(project, raw) {
  * only: a linked machine's shows in the sidebar from its open space, or once the sidebar
  * itself has written it.
  */
-async function saveProject(project, raw, { list = true } = {}) {
-  if (project.machine) return writeRemoteBots(project, raw);
-  writeBotsFile(project.dir, raw, project.expected, fsIo, project.text);
+async function saveProject(project, raw, { list = true, preview, confirmUnchanged } = {}) {
+  if (project.machine) return writeRemoteBots(project, raw, { preview, confirmUnchanged });
+  writeBotsFile(project.dir, raw, project.expected, fsIo, project.text, preview);
   if (list) listProject(project.key);
   if (project.dir !== project.key) report([worktreeNote(project, await changesIn(project.key, project.dir))]);
 }
@@ -546,10 +544,11 @@ const fsIo = {
 };
 
 /** Shared save validation: hard errors refuse; read warnings remain visible on stderr. */
-function checkBotsForSave(raw, before) {
+function checkBotsForSave(raw, before, preview) {
   const errors = checkBots(raw, before);
   if (errors.length) throw new CliError(`Not saved: ${errors.join("; ")}`);
   report(parseBots(JSON.stringify(raw)).warnings.map((w) => `Warning: ${w}`));
+  preview?.();
 }
 
 /**
@@ -560,10 +559,10 @@ function checkBotsForSave(raw, before) {
  * `raw === null` deletes the file (the project's last bot removed). `before`, for checkBots, is
  * the text the edit started from when that isn't the file written (a worktree's first edit).
  */
-export function writeBotsFile(key, raw, expected, io = fsIo, before = expected) {
+export function writeBotsFile(key, raw, expected, io = fsIo, before = expected, preview) {
   if (expected === undefined) throw new Error("writeBotsFile: pass the text the edit started from (null for a new file)");
   const path = under(key, BOTS_PATH);
-  if (raw !== null) checkBotsForSave(raw, before);
+  if (raw !== null) checkBotsForSave(raw, before, preview);
   let now;
   try { now = io.read(path); } catch (e) { throw new CliError(`Not saved: can't read ${path} again: ${e?.message ?? e}`); }
   if (now !== expected) throw new CliError(`Not saved: ${path} changed since it was read (another edit landed first). Run the command again.`);
@@ -1268,6 +1267,7 @@ const OPTIONS = {
   role: { type: "string" }, instructions: { type: "string" }, "instructions-file": { type: "string" },
   code: { type: "string" },
   lead: { type: "string" }, "lead-project": { type: "string" }, "no-lead-project": { type: "boolean" },
+  "old-lead": { type: "string" },
   "cross-member": { type: "string", multiple: true }, "no-cross-members": { type: "boolean" },
   category: { type: "string" }, "no-category": { type: "boolean" },
   character: { type: "string" }, colour: { type: "string" }, color: { type: "string" }, omni: { type: "boolean" },
@@ -1297,7 +1297,7 @@ export const USAGE = `am: Automagik Herdr's bots and updates from the command li
 
 Usage: am <command> [options]                   (every command takes --json and --project <folder>)
        am <command> --machine M --project <folder there> ...
-                                                 ls, show, create, edit, rm, category, start,
+                                                 ls, show, create, edit, main, rm, category, start,
                                                  restart, attach, detach and whois on a linked
                                                  machine (hc machine ls), through hc
        am --version                              the installed pack's version
@@ -1342,6 +1342,9 @@ Usage: am <command> [options]                   (every command takes --json and 
   that names no --tier runs the new model on standard, said explicitly on the launch line, so
   a Fast a profile, a template or the host config still names never applies to it. am show
   --json reports the effective values and their source.
+  main <bot> [--old-lead <bot>] [--dry-run]
+                                hand over the main role and list the members that follow it
+                                --old-lead sets the previous main's lead. --dry-run previews the hand-over.
   rm <bot>
   category ls | add --title T [--sub S] [--id ID] | edit <id> [--title T] [--sub S]
            | rm <id> | order <id>...
@@ -2074,7 +2077,7 @@ async function editProjectFor(opts) {
   return loadProject(key, await writeDirOf(opts, key));
 }
 // The commands that take --machine: the definitions ones (and meter's own --machine).
-const ON_MACHINE = new Set(["ls", "show", "create", "edit", "rm", "category", "start", "restart", "attach", "detach", "whois", "meter", "doc", "machines"]);
+const ON_MACHINE = new Set(["ls", "show", "create", "edit", "main", "rm", "category", "start", "restart", "attach", "detach", "whois", "meter", "doc", "machines"]);
 // A project's place in --json answers: `machine` only for a linked machine's.
 const placeOf = (project) => ({ project: project.key, ...(project.machine ? { machine: project.machine } : {}) });
 
@@ -2383,6 +2386,82 @@ async function cmdEdit(opts, [ref]) {
   warnCrossLinkAfterSave(project, raw, bot.id);
   const relabelled = project.machine ? [] : await relabelAfter(project.file, raw);
   return opts.json ? { id: bot.id, ...placeOf(project), bot: entry, relabelled } : `${entry.name} (${bot.id}) saved.`;
+}
+
+const MAIN_USAGE = "usage: am main <bot> [--old-lead <bot>] [--dry-run] [--project DIR] [--machine M] [--json]";
+const MAIN_OPTIONS = new Set(["old-lead", "dry-run", "project", "machine", "json"]);
+
+function checkMainArgs(rest, tokens) {
+  if (rest.length !== 1 || !rest[0].trim()) throw new CliError(MAIN_USAGE, 2);
+  const seen = new Set();
+  for (const token of tokens) {
+    if (token.kind !== "option") continue;
+    if (!MAIN_OPTIONS.has(token.name)) throw new CliError(`--${token.name} isn't an option for main. ${MAIN_USAGE}`, 2);
+    if (seen.has(token.name)) throw new CliError(`Give --${token.name} once. ${MAIN_USAGE}`, 2);
+    if (token.value !== undefined && !token.value.trim()) throw new CliError(`--${token.name} needs a value. ${MAIN_USAGE}`, 2);
+    seen.add(token.name);
+  }
+}
+
+async function cmdMain(opts, [ref]) {
+  const project = await editProjectFor(opts);
+  const mains = project.raw.bots.filter((row) => row?.kind === "main");
+  if (mains.length !== 1) throw new CliError(`Not saved: ${mains.length} main bots; a project has exactly one.`);
+  const [incumbent] = mains;
+  const successor = await botIn(project, ref, opts);
+  if (successor.id === incumbent.id) throw new CliError(`${successor.name} is already the main bot.`);
+  if (successor.planned) throw new CliError(`${successor.name} is planned, so it can't be the main bot yet.`);
+  const lead = opts["old-lead"] === undefined ? successor : await botIn(project, opts["old-lead"], opts);
+  if (lead.id === incumbent.id) throw new CliError(`${incumbent.name} can't lead itself.`);
+  if (lead.planned) throw new CliError(`${lead.name} is planned, so it can't lead a bot yet.`);
+
+  const describe = ({ id, name }) => `${name} (${id})`;
+  const explicitLead = lead.id !== successor.id;
+  const ownProject = cleanProjectPath(project.key);
+  const implicitMembers = [], displacedLinks = [], changes = [];
+  // Use the stored rows so legacy cross-members and unrelated settings pass through verbatim.
+  const bots = project.raw.bots.map((row) => {
+    const promoted = row?.id === successor.id;
+    if (!promoted && row !== incumbent) {
+      if (row?.kind === "member" && !Object.hasOwn(row, "lead")) implicitMembers.push({ id: row.id, name: row.name });
+      return row;
+    }
+    const leadProject = cleanProjectPath(row.leadProject);
+    if (leadProject.startsWith("/") && leadProject !== ownProject && typeof row.lead === "string" && row.lead.trim()) {
+      displacedLinks.push({ id: row.id, name: row.name, lead: row.lead, leadProject });
+    }
+    const next = { ...row, kind: promoted ? "main" : "member" };
+    delete next.lead;
+    delete next.leadProject;
+    if (!promoted && explicitLead) next.lead = lead.id;
+    if (promoted || explicitLead) delete next.category;
+    changes.push(promoted ? `${describe(row)} becomes the main bot.`
+      : `${describe(row)} becomes a member reporting to ${describe(lead)}.`);
+    return next;
+  });
+  const raw = { ...project.raw, bots };
+  const preview = () => {
+    const lines = [
+      ...changes,
+      `Members with no stored lead that will follow ${describe(successor)}:`,
+      ...(implicitMembers.length ? implicitMembers.map((bot) => `  ${describe(bot)}`) : ["  None."]),
+      ...displacedLinks.map((link) => `Displaced external lead: ${describe(link)} → ${link.lead} in ${link.leadProject}. `
+        + "Remove the reciprocal entry there manually."),
+    ];
+    if (opts.json) report(lines);
+    else process.stdout.write(unprinted(`${lines.join("\n")}\n`));
+  };
+
+  const dryRun = Boolean(opts["dry-run"]);
+  let relabelled = [];
+  if (dryRun) checkBotsForSave(raw, project.text, preview);
+  else {
+    await saveProject(project, raw, { preview, confirmUnchanged: true });
+    if (!project.machine) relabelled = await relabelAfter(project.file, raw);
+  }
+  if (opts.json) return { id: successor.id, ...placeOf(project), previousMain: incumbent.id, oldLead: lead.id,
+    implicitMembers, displacedLinks, saved: !dryRun, relabelled };
+  return dryRun ? null : `Main bot hand-over saved in ${fileName(project)}.`;
 }
 
 async function cmdRm(opts, [ref]) {
@@ -7859,7 +7938,7 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
   return PRINTED;
 }
 
-const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, rm: cmdRm, category: cmdCategory,
+const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, main: cmdMain, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
   tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
   proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive };
@@ -7869,13 +7948,17 @@ const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "
 export async function main(argv = process.argv.slice(2), io = {}) {
   let parsed;
   try {
-    parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true });
+    parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true, tokens: true });
   } catch (e) {
     process.stderr.write(`am: ${e.message}\n\n${USAGE}\n`);
     return 2;
   }
-  const { values: opts, positionals } = parsed;
+  const { values: opts, positionals, tokens } = parsed;
   const [command, ...rest] = positionals;
+  if (command !== "main") {
+    if (opts["old-lead"] !== undefined) { report(["--old-lead is only for main."]); return 2; }
+    io.repairCliLinks?.();
+  }
   // The pack this command belongs to (its VERSION file; 0.0.0 for a checkout never released).
   if (opts.version && !command) {
     let version = "0.0.0";
@@ -7884,13 +7967,16 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     return 0;
   }
   if (opts.help && command === "proxy") { process.stdout.write(`${PROXY_USAGE}\n`); return 0; }
-  if (opts.help || !command || command === "help") { process.stdout.write(`${USAGE}\n`); return command || opts.help ? 0 : 2; }
+  if ((opts.help && command !== "main") || !command || command === "help") {
+    process.stdout.write(`${USAGE}\n`); return command || opts.help ? 0 : 2;
+  }
   const run = COMMANDS[command];
   if (!run) { process.stderr.write(`am: unknown command "${command}"\n\n${USAGE}\n`); return 2; }
   try {
+    if (command === "main") checkMainArgs(rest, tokens);
     if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"]))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
     if (opts.machine !== undefined && !ON_MACHINE.has(command)) {
-      throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, rm, category, start, restart, attach, detach, whois, meter, machines and doc.`, 2);
+      throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, main, rm, category, start, restart, attach, detach, whois, meter, machines and doc.`, 2);
     }
     exitAfter.code = 0;
     const out = command === "proxy" ? await run(opts, rest, io) : await run(opts, rest);
@@ -7912,7 +7998,9 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     const message = e instanceof CliError ? e.message : botAction
       ? actionError(e, command === "start" ? "Start" : "Restart") : `${e?.stack ?? e}`;
     process.stderr.write(unprinted(`am: ${message}\n`));
-    if (opts.json && e instanceof CliError && e.detail) process.stdout.write(unprinted(`${JSON.stringify({ error: message, ...e.detail }, null, 2)}\n`));
+    if (opts.json && e instanceof CliError && (e.detail || command === "main")) {
+      process.stdout.write(unprinted(`${JSON.stringify({ error: message, ...e.detail }, null, 2)}\n`));
+    }
     return e instanceof CliError ? e.code : 1;
   }
 }
@@ -7921,7 +8009,8 @@ export async function main(argv = process.argv.slice(2), io = {}) {
 const invoked = (() => { try { return pathToFileURL(realpathSync(process.argv[1])).href; } catch { return null; } })();
 if (import.meta.url === invoked) {
   // An update made by an older CLI (0.3.4 and before) left the link on the .mjs, which needs node
-  // on PATH: the first start that has a runtime moves it to the wrapper. Silent, never fatal.
-  try { relinkCli(); } catch { /* the link stays; `automagik-herdr update` reports why */ }
-  process.exitCode = await main();
+  // on PATH. Repair those links on startup outside main, whose preview and refusals are read-only.
+  process.exitCode = await main(undefined, { repairCliLinks: () => {
+    try { relinkCli(); } catch { /* the link stays; `automagik-herdr update` reports why */ }
+  } });
 }
