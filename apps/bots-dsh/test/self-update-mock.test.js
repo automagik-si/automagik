@@ -32,11 +32,25 @@ test('the preview mounts only with the flag, and leaves a normal start alone', t
 
   const on = installSelfUpdateMock({ location: { search: '?mock-1540', hash: '' }, document })
   assert.notEqual(document.getElementById('ds-bot-self-update-mock'), null)
-  assert.equal(document.querySelector('.su-nod').textContent.includes('Update available'), true)
-  // The sample data says so on screen, and in the nod's screen-reader line.
-  assert.match(document.querySelector('.su-nod .su-sr').textContent, /Example data/)
+  const nod = document.querySelector('.su-nod')
+  // It is one of the bar's own round buttons, not a floating pill of its own design.
+  assert.equal(nod.classList.contains('bt-round'), true)
+  assert.equal(nod.getAttribute('aria-label'), 'Update available')
+  assert.notEqual(nod.querySelector('svg'), null)
   on()
   assert.equal(document.getElementById('ds-bot-self-update-mock'), null)
+})
+
+test('the nod sits in the bottom row seat when there is one', t => {
+  const document = dom(t)
+  // The app's footer row, or a harness's stand-in for it.
+  const foot = document.createElement('div')
+  foot.dataset.mockSeat = ''
+  document.body.append(foot)
+  const off = installSelfUpdateMock({ location: { search: '?mock-1540', hash: '' }, document })
+  assert.equal(foot.querySelector('.bt-round.su-nod') !== null, true)
+  assert.equal(document.querySelectorAll('.su-nod').length, 1)
+  off()
 })
 
 test('the hash form mounts it too', t => {

@@ -19365,11 +19365,11 @@ var MOCK_DATA = Object.freeze({
 var STEP_MS = 900;
 var SUCCESS_MS = 700;
 var CSS2 = `
-.su-nod{position:fixed;left:14px;bottom:14px;z-index:70;display:flex;align-items:center;gap:8px;padding:8px 12px 8px 8px;border-radius:999px;border:.5px solid var(--bt-line-2);background:var(--bt-card);color:var(--bt-ink);box-shadow:var(--bt-glass-shadow);font:500 13px/18px var(--bt-font,system-ui);cursor:pointer;animation:su-nod-in .34s cubic-bezier(.34,1.4,.64,1)}
-.su-nod:hover{background:var(--bt-hover)}
-.su-dot{position:relative;width:20px;height:20px;border-radius:50%;background:var(--bt-accent);color:var(--bt-accent-ink);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
-.su-dot::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--bt-accent);opacity:.35;animation:su-pulse 2.4s ease-out infinite}
-.su-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+/* The nod is one of the bar's own round buttons (.bt-round), seated in the bottom row like the
+   other footer entries, never a floating pill of its own: same 36px circle, same --bt-* colours. */
+.su-nod{position:relative}
+.su-nod .su-dot{position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:var(--bt-accent);box-shadow:0 0 0 2px var(--bt-main)}
+.su-nod .su-label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 .su-layer{position:fixed;inset:0;z-index:80;display:flex;background:var(--bt-main);animation:su-veil .18s ease-out;font-family:var(--bt-font,system-ui)}
 .su-modal{width:100%;height:100%;display:flex;flex-direction:column;background:var(--bt-main);color:var(--bt-ink);animation:su-pop .22s cubic-bezier(.34,1.3,.64,1)}
 .su-head{display:flex;align-items:flex-start;gap:12px;padding:20px max(24px,calc((100vw - 760px)/2)) 0}
@@ -19420,6 +19420,22 @@ function installStyle(css, doc) {
   doc.head.append(style);
   return () => style.remove();
 }
+var arrowSvg = () => {
+  const svg2 = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg2.setAttribute("viewBox", "0 0 20 20");
+  svg2.setAttribute("width", "18");
+  svg2.setAttribute("height", "18");
+  svg2.setAttribute("fill", "none");
+  svg2.setAttribute("stroke", "currentColor");
+  svg2.setAttribute("stroke-width", "1.5");
+  svg2.setAttribute("stroke-linecap", "round");
+  svg2.setAttribute("stroke-linejoin", "round");
+  svg2.setAttribute("aria-hidden", "true");
+  const path2 = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path2.setAttribute("d", "M10 3v8.5M6.5 8.5 10 12l3.5-3.5M4 16h12");
+  svg2.append(path2);
+  return svg2;
+};
 var el = (tag, className, text2) => {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -19456,7 +19472,7 @@ function head(box, title, onClose) {
   row.append(close);
   box.append(row);
 }
-function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, successMs = SUCCESS_MS, doc = document } = {}) {
+function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, successMs = SUCCESS_MS, seat = null, doc = document } = {}) {
   let timers = [];
   const stop3 = () => {
     for (const id of timers) clearTimeout(id);
@@ -19470,14 +19486,18 @@ function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, succe
   };
   const nod = () => {
     stop3();
-    const button = el("button", "su-nod");
+    const button = el("button", "su-nod bt-round");
     button.type = "button";
     button.dataset.mock = MOCK_FLAG;
     button.title = t("Update available");
-    button.append(el("span", "su-dot", "↑"), el("span", null, t("Update available")));
-    button.append(el("span", "su-sr", t("Example data: nothing is downloaded in this preview.")));
+    button.setAttribute("aria-label", t("Update available"));
+    button.append(arrowSvg(), el("span", "su-dot"), el("span", "su-label", t("Update available")));
     button.addEventListener("click", () => open());
-    place(button);
+    if (seat) {
+      seat.replaceChildren(button);
+    } else {
+      place(button);
+    }
   };
   const open = () => changes();
   const changes = () => {
@@ -19655,7 +19675,8 @@ function installSelfUpdateMock({ location: location2 = globalThis.location, docu
   const root = doc.createElement("div");
   root.id = "ds-bot-self-update-mock";
   doc.body.append(root);
-  const control = mountSelfUpdateMock(root, { doc });
+  const seat = doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div') ?? doc.querySelector("[data-mock-seat]");
+  const control = mountSelfUpdateMock(root, { doc, seat });
   return () => {
     control.dispose();
     offStyles();
