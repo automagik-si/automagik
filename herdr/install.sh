@@ -273,11 +273,10 @@ am_link_is_am() {
 
 # Resolve guidance in the caller's PATH, even if install added a directory for its own checks.
 hint_command() (
-  PATH=$HINT_PATH
   standalone=${AM_HOME:-$HOME/.automagik}
   standalone=${standalone%/}/parts/automagik.am/current/bin
   for name in am automagik-herdr; do
-    found=$(command -v "$name") || continue
+    found=$(PATH=$HINT_PATH command -v "$name") || continue
     case $found in */*) ;; *) continue ;; esac
     [ -f "$found" ] && [ -x "$found" ] || continue
     if link_ours "$found"; then say "$name"; return; fi
@@ -288,7 +287,7 @@ hint_command() (
       return
     fi
   done
-  case ":$PATH:" in *":$BIN_DIR:"*) return 0 ;; esac
+  case ":$HINT_PATH:" in *":$BIN_DIR:"*) return 0 ;; esac
   for found in "$AM_LINK" "$LINK"; do
     if [ -f "$found" ] && [ -x "$found" ] && link_ours "$found"; then
       case $found in
@@ -917,7 +916,7 @@ fleet() {
   HERDR_APP_HOME=$APP_HOME node "$cli" meter "$@" </dev/null 2>&1 \
     || {
       hint_cmd=$(hint_command)
-      say "Warning: usagemeter on linked machines did not finish${hint_cmd:+; '$hint_cmd meter install' retries it}."
+      say "Warning: usagemeter on linked machines did not finish${hint_cmd:+"; '$hint_cmd meter install' retries it"}."
     }
 }
 meter_step() {
@@ -1272,15 +1271,15 @@ dsh_tui_step() {
   [ "$DSH_TUI" = no ] && { say "Left DSH (dsh-TUI) alone (--no-dsh-tui)."; return 0; }
   hint_cmd=$(hint_command)
   if ! command -v dsh >/dev/null 2>&1; then
-    say "DSH is not installed (no dsh on PATH): skipped dsh-TUI. Install DSH Desktop or 'npm install -g @deepseek-ai/dsh'${hint_cmd:+, then run '$hint_cmd dsh-tui install'}."
+    say "DSH is not installed (no dsh on PATH): skipped dsh-TUI. Install DSH Desktop or 'npm install -g @deepseek-ai/dsh'${hint_cmd:+", then run '$hint_cmd dsh-tui install'"}."
     return 0
   fi
   if [ "$DSH_TUI" = ask ] && [ "$YES" = 1 ]; then
-    say "Left DSH (dsh-TUI) alone: --yes never installs the third-party dsh-TUI package; ${hint_cmd:+'$hint_cmd dsh-tui install' or }this installer with --dsh-tui adds it."
+    say "Left DSH (dsh-TUI) alone: --yes never installs the third-party dsh-TUI package; ${hint_cmd:+"'$hint_cmd dsh-tui install' or "}this installer with --dsh-tui adds it."
     return 0
   fi
   if [ "$DSH_TUI" = ask ] && ! ask_opt_in "Install DSH as a Herdr agent (dsh-TUI, its own dsh-tui DSH profile; a third-party package)?"; then
-    say "Left DSH (dsh-TUI) alone${hint_cmd:+; '$hint_cmd dsh-tui install' adds it later}."
+    say "Left DSH (dsh-TUI) alone${hint_cmd:+"; '$hint_cmd dsh-tui install' adds it later"}."
     return 0
   fi
   dsh_rc=0
@@ -1314,11 +1313,11 @@ revive_step() {
   if [ -f "$REVIVE_UNIT" ] && [ "$REVIVE" = ask ]; then return 0; fi
   hint_cmd=$(hint_command)
   if [ "$REVIVE" = ask ] && [ "$YES" = 1 ]; then
-    say "Left the revive login service alone: --yes never changes what runs at login; ${hint_cmd:+'$hint_cmd revive service install' or }this installer with --revive adds it."
+    say "Left the revive login service alone: --yes never changes what runs at login; ${hint_cmd:+"'$hint_cmd revive service install' or "}this installer with --revive adds it."
     return 0
   fi
-  if [ "$REVIVE" = ask ] && ! ask_opt_in "Bring the bots back by themselves after a restart of this computer (a login service${hint_cmd:+ that runs '$hint_cmd revive --boot'})?"; then
-    say "Left the revive login service alone${hint_cmd:+; '$hint_cmd revive service install' adds it later}."
+  if [ "$REVIVE" = ask ] && ! ask_opt_in "Bring the bots back by themselves after a restart of this computer (a login service${hint_cmd:+" that runs '$hint_cmd revive --boot'"})?"; then
+    say "Left the revive login service alone${hint_cmd:+"; '$hint_cmd revive service install' adds it later"}."
     return 0
   fi
   revive_rc=0
@@ -1680,7 +1679,7 @@ install() {
   fi
   if [ "$rollback_hint_pending" = yes ]; then
     hint_cmd=$(hint_command)
-    say "$kept_pack${hint_cmd:+: '$hint_cmd update --rollback' swaps them back}."
+    say "$kept_pack${hint_cmd:+": '$hint_cmd update --rollback' swaps them back"}."
   fi
   fleet_step
   case ":${PATH}:" in
@@ -1703,7 +1702,7 @@ install() {
     switch_hint
     if [ -n "$kept_pack" ]; then
       hint_cmd=$(hint_command)
-      fail "herdr-app check failed for a mod (above); the pack is installed.${hint_cmd:+ Run '$hint_cmd update --rollback' to swap the kept set back.}"
+      fail "herdr-app check failed for a mod (above); the pack is installed.${hint_cmd:+" Run '$hint_cmd update --rollback' to swap the kept set back."}"
     fi
     fail "herdr-app check failed for a mod (above); the pack is installed. This installer with --uninstall moves the pack out of mods/ if the active layout allows it."
   fi
