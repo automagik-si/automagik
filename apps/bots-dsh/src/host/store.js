@@ -37,6 +37,30 @@ export function install(rt) {
   let writing = Promise.resolve()
   const { warn } = rt
 
+  const diagnosticLabel = value => headOf(String(value).replace(/\s+/g, ' ').trim(), 120)
+  // Keep the on-disk marker and the admission checks on the same Bot record.
+  const refreshShellHolds = (bots, { log = true } = {}) => {
+    let changed = false
+    for (const bot of Object.values(bots)) {
+      const model = shellHoldModelOf(bot)
+      if (model === undefined) {
+        if (bot.shellHeld !== undefined) {
+          delete bot.shellHeld
+          changed = true
+        }
+        continue
+      }
+      const cli = model.split('/')[0]
+      if (bot.shellHeld?.model === model && bot.shellHeld.cli === cli) continue
+      bot.shellHeld = { cli, model }
+      changed = true
+      if (log) warn('ds-bot: %s loads with its shell off on %s, a coding CLI that brings its own shell: '
+        + 'it is held until the shell is turned on or it runs on a model that uses DeepSeek Harness\'s tools.',
+      diagnosticLabel(bot.name ?? 'This Bot'), diagnosticLabel(cli))
+    }
+    return changed
+  }
+
   const EMPTY = JSON.stringify(state)
   // The other dsh host that holds state.lock while this one only reads (see home-lock.js);
   // undefined while this host may write.
@@ -216,23 +240,6 @@ export function install(rt) {
       // `bot.computer` holds the computer-use level and Always-grant apps; corrupt values reset.
       if (bot.computer !== undefined && (bot.computer === null || typeof bot.computer !== 'object' || Array.isArray(bot.computer))) delete bot.computer
       else if (bot.computer !== undefined && (bot.computer.apps === null || typeof bot.computer.apps !== 'object' || Array.isArray(bot.computer.apps))) delete bot.computer.apps
-      // A stored Bot whose shell is off while its model is a coding CLI brings its own
-      // shell: the combination no supported path stores, so only a hand-edited file has
-      // it. It is held at load, never started on that route, until a native model or the
-      // shell is the person's choice. The line says so in the log too.
-      const shellModel = shellHoldModelOf(bot)
-      if (shellModel !== undefined) {
-        const shellCli = shellModel.split('/')[0]
-        if (bot.shellHeld?.cli !== shellCli || bot.shellHeld?.model !== shellModel) {
-          bot.shellHeld = { cli: shellCli, model: shellModel }
-          migrated = true
-          warn('ds-bot: %s loads with its shell off on %s, a coding CLI that brings its own shell: '
-            + 'it is held until the shell is turned on or it runs on a model that uses DeepSeek Harness\'s tools.', bot.name, shellCli)
-        }
-      } else if (bot.shellHeld !== undefined) {
-        delete bot.shellHeld
-        migrated = true
-      }
       // LEGACY: Bots saved with a lab ran on that lab's default model; the model they
       // last ran on becomes their own, so dropping the lab changes nothing for them.
       if ('lab' in bot) {
@@ -241,6 +248,7 @@ export function install(rt) {
         migrated = true
       }
     }
+    if (refreshShellHolds(state.bots)) migrated = true
     // A team from before several Main Bots were allowed names a single one.
     if (!Array.isArray(state.mainBotIds)) state.mainBotIds = []
     if ('mainBotId' in state) {
@@ -543,6 +551,7 @@ export function install(rt) {
   }
   rt.saveCopy = (change, { beforeCommit, afterWrite } = {}) => {
     if (stopped || !writable()) return Promise.reject(new Error('This host cannot save the Bot team.'))
+    refreshShellHolds(state.bots)
     indexSessions()
     rt.sweepAuto?.()
     if (afterWrite !== undefined) {
@@ -550,6 +559,7 @@ export function install(rt) {
       return writeSnapshot(() => {
         const copy = JSON.parse(JSON.stringify(state))
         change(copy)
+        refreshShellHolds(copy.bots, { log: false })
         revision = state.revision + 1
         copy.revision = copy.autoStamp = revision
         copy.version = STATE_VERSION
@@ -564,6 +574,7 @@ export function install(rt) {
           state.version = STATE_VERSION
           state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
           afterWrite()
+          refreshShellHolds(state.bots)
         },
       })
     }
@@ -573,6 +584,7 @@ export function install(rt) {
     state.exchanges = state.exchanges.slice(-MAX_EXCHANGES)
     const copy = JSON.parse(JSON.stringify(state))
     change(copy)
+    refreshShellHolds(copy.bots, { log: false })
     // Permission copies belong to the state the caller inspected. Never apply one
     // to a replacement team adopted while this write waited.
     const snapshot = JSON.stringify(copy)
@@ -581,10 +593,12 @@ export function install(rt) {
 
   const save = ({ required = false } = {}) => {
     if (stopped) return required ? Promise.reject(new Error('The Bot team cannot be saved after this host stopped.')) : writing
+    refreshShellHolds(state.bots)
     indexSessions()
     // A reading host keeps the file's revision, so its window does not skip the next change.
     if (!writable()) return required ? Promise.reject(new Error(`This host cannot save the Bot team: ${readOnly()}`)) : writing
     return writeSnapshot(() => {
+      refreshShellHolds(state.bots)
       rt.sweepAuto?.()
       state.revision += 1
       state.autoStamp = state.revision
