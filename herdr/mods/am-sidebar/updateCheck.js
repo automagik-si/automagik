@@ -367,11 +367,24 @@ export function seenRequest(request, state) {
 /**
  * The STATE_KEY patch for a finished run's request: the one `state.queued` recorded while it ran is
  * answered by its result (the bar's latest click), else the run's own `own` id. Frees `queued`.
+ * With nothing to answer, `request` is left out: writing null there would clear an answer another
+ * path recorded (#796).
  */
 export function requestAnswer(state, own = null) {
   const queued = objectOr(state?.queued, null);
   const id = typeof queued?.id === "string" && queued.id !== "" ? queued.id : null;
-  return { request: id ?? (typeof own === "string" && own !== "" ? own : null), queued: null };
+  const answer = id ?? (typeof own === "string" && own !== "" ? own : null);
+  return { ...(answer ? { request: answer } : {}), queued: null };
+}
+
+/** A reloaded build answers only the same apply claim it found before reading the note.
+ *  With no claim before or after the read, an existing queued click still gets an answer. */
+export function landingAnswer(original, state, target) {
+  const current = state.busy;
+  const matches = typeof original?.id === "string" && original.what === "apply" && original.to === target
+    && current?.id === original.id && current.what === "apply" && current.to === target;
+  if (!matches && (original || current)) return { id: null, answer: {} };
+  return { id: current?.id ?? null, answer: requestAnswer(state, current?.request ?? null) };
 }
 
 // ---- Installing on its own (auto-update) ----
@@ -470,7 +483,8 @@ export function landing(state, version, now) {
   }
   const busy = objectOr(state?.busy, null);
   if (busy?.what === "apply" && busy.announce === true && busy.to === version && typeof busy.since === "number" && now - busy.since < LANDING_MS) {
-    return { ready: false, from: busy.from ?? null, id: busy.id, check: null };
+    return { ready: false, from: busy.from ?? null, id: busy.id, check: null,
+      request: typeof busy.request === "string" && busy.request !== "" ? busy.request : null };
   }
   return null;
 }

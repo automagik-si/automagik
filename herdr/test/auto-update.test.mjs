@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { Updater } from "../mods/am-sidebar/updater.js";
 import {
   FIRST_CHECK_MS, LANDING_MS, LANDING_WAIT_MS, RELOAD_GRACE_MS, REQUEST_KEY, STATE_KEY, autoPlan, backoffOf, busyOf,
+  requestAnswer,
 } from "../mods/am-sidebar/updateCheck.js";
 import { AUTO_FILE, CHECK_FILE, RESTORE_FILE, parseAuto } from "../mods/am-sidebar/release.js";
 import { autoLabel, statusLabel } from "../mods/am-status/label.js";
@@ -667,3 +668,118 @@ test("a request still waiting at a mods reload is answered by the new build once
   assert.equal(h.state().at, at, "and without a second answer");
   assert.equal(h.state().request, request.id);
 });
+
+// #796 Low 2: the bar's own install click is the run being landed, not a queued request: the
+// landing answers that id too, so the bar does not show "couldn't update" after a good install.
+test("#796 a landing answers the install click's own request when the old build never replied", async () => {
+  const h = herdr();
+  const request = { id: "apply-own", what: "apply", at: h.now, to: "0.8.1" };
+  h.shared.set(REQUEST_KEY, request);
+  h.shared.set(STATE_KEY, { kind: "update", update: update("0.8.1"), current: "0.8.0", latest: "0.8.1", at: h.now - 60_000 });
+  h.answer = () => new Promise(() => {});
+  const old = h.build();
+  old.u.request();
+  await h.flush();
+  assert.equal(h.state().busy?.request, request.id, "the click's run holds the request id");
+  h.swap(old, "0.8.1");
+  const fresh = h.build();
+  await fresh.u.arrive();
+  await h.tick(LANDING_WAIT_MS + 5_000);
+  assert.equal(h.state().request, request.id, "the landing answers the run's own request");
+  assert.equal(h.state().queued, null);
+  const label = text(statusLabel({ state: h.state(), request: h.shared.get(REQUEST_KEY), version: h.version, now: h.now }));
+  assert.doesNotMatch(label, /couldn't/);
+});
+
+// #796 Low 3: a landing with nothing to answer must not write request: null over another path's answer.
+test("#796 a landing with nothing to answer leaves a recorded answer alone", () => {
+  assert.deepEqual(requestAnswer({ request: "answered-before", queued: null }, null), { queued: null });
+  assert.deepEqual(requestAnswer({ request: "answered-before", queued: { id: "queued-id" } }, null), { request: "queued-id", queued: null });
+  assert.deepEqual(requestAnswer({}, "own-id"), { request: "own-id", queued: null });
+});
+
+// #796: the reloaded build's landing (update.mjs's restore note, its unchecked note, or the wait
+// running out) answers for the apply claim it found, if that claim still holds the lock.
+const NOTES = `${HOME}/automagik-herdr`;
+const hung = (h) => (args) => (args[1] === "check" ? h.check() : new Promise(() => {}));
+/** A click's install (REQUEST_KEY `id`) whose exec never answers: the old build is reloaded away mid-run. */
+async function clickedInstall(h, id = "bar-apply-1") {
+  h.answer = hung(h);
+  const old = h.build();
+  old.u.start();
+  await h.tick(FIRST_CHECK_MS);
+  h.shared.set(REQUEST_KEY, { id, what: "apply", to: "0.8.1", at: h.now });
+  old.u.request();
+  await h.flush();
+  assert.equal(h.state().busy?.what, "apply");
+  assert.equal(h.state().busy?.request, id);
+  return old;
+}
+/** The new build loads; `race(h)` runs inside its read of the restore note (on the last pass, for
+ *  the wait): after the landing took its state, before it answers. */
+async function land(h, race, wait) {
+  const fresh = h.build();
+  const start = h.now;
+  const read = fresh.u.readText;
+  let raced = false;
+  fresh.u.readText = async (p) => {
+    if (race && !raced && p === `${NOTES}/${RESTORE_FILE}` && h.now - start >= wait) { raced = true; race(h); }
+    return read(p);
+  };
+  fresh.u.start();
+  await h.tick(wait === 0 ? 1 : wait + 2_000);
+  if (race) assert.equal(raced, true, "the race ran inside the landing's note read");
+}
+/** The four ways the reloaded build lands an install it did not see finish. `to`: the version the note is about. */
+const LANDINGS = {
+  restored: async (h, old, race = null, to = "0.8.1") => {
+    h.files.set(`${NOTES}/${RESTORE_FILE}`, JSON.stringify({ version: "0.8.0", failedVersion: to, mod: "am-tabs", failed: ["am-tabs"], checked: true, at: h.now }));
+    h.swap(old, "0.8.0");
+    await land(h, race, 0);
+  },
+  "restore-failed": async (h, old, race = null, to = "0.8.1") => {
+    h.files.set(`${NOTES}/${RESTORE_FILE}`, JSON.stringify({ version: to, error: "could not restore: no previous version kept", at: h.now }));
+    h.swap(old, to);
+    await land(h, race, 0);
+  },
+  unchecked: async (h, old, race = null, to = "0.8.1") => {
+    h.files.set(`${NOTES}/${CHECK_FILE}`, JSON.stringify({ version: to, from: "0.8.0", unavailable: "herdr-app is not on PATH", at: h.now }));
+    h.swap(old, to);
+    await land(h, race, 0);
+  },
+  timeout: async (h, old, race = null) => {
+    h.swap(old, "0.8.1");
+    await land(h, race, LANDING_WAIT_MS);
+  },
+};
+
+for (const [name, run] of Object.entries(LANDINGS)) {
+  for (const [kind, newer] of [
+    ["a newer check", (h) => ({ what: "check", id: "check-newer", since: h.now, request: "bar-check-new" })],
+    ["a stale owner's successor (a newer apply claim for the same release)",
+      (h) => ({ what: "apply", to: "0.8.1", from: "0.8.0", id: "apply-newer", since: h.now, request: "bar-apply-2", announce: true, auto: false })],
+  ]) {
+    test(`#796 ${name}: ${kind} claimed during the note read keeps its lock, its queue and the earlier answer`, async () => {
+      const h = herdr({ auto: { ...MANAGED, on: false } });
+      const old = await clickedInstall(h);
+      await run(h, old, (h) => {
+        h.shared.set(STATE_KEY, { ...h.state(), busy: newer(h), queued: { id: "bar-check-q", what: "check", at: h.now }, request: "bar-previous" });
+      });
+      assert.equal(h.state().busy?.id, newer(h).id, "the newer claim still holds the lock");
+      assert.equal(h.state().queued?.id, "bar-check-q", "the newer claim's queued click is untouched");
+      assert.equal(h.state().request, "bar-previous", "the replaced claim's click is not answered over it");
+    });
+  }
+}
+
+for (const name of ["restored", "restore-failed", "unchecked"]) {
+  test(`#796 ${name}: a claim for another release is not borrowed from`, async () => {
+    const h = herdr({ auto: { ...MANAGED, on: false } });
+    const old = await clickedInstall(h);
+    h.shared.set(STATE_KEY, { ...h.state(), request: "bar-previous" });
+    const unrelated = h.state().busy;
+    await LANDINGS[name](h, old, null, "0.8.2");
+    assert.equal(h.state().request, "bar-previous", "the 0.8.1 claim's click is not answered by a 0.8.2 landing");
+    assert.deepEqual(h.state().busy, unrelated, "the unrelated apply keeps its claim");
+  });
+}
