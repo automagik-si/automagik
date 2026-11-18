@@ -3006,10 +3006,9 @@ Object.assign(ZH, {
   "Official": "官方",
   "Install": "安装",
   "Installed": "已安装",
-  "SAMPLE DATA": "示例数据",
+  "Not installed": "未安装",
+  "State": "状态",
   "Included with Automagik": "随 Automagik 提供",
-  "Sample row: nothing is installed from this preview.": "示例行：此预览不会安装任何内容。",
-  "A mock of the Apps page. Nothing here installs; click a row to expand it.": "应用页面的模型：这里不会安装任何内容；点击一行即可展开。",
   "The Main Bot: your team, channels, and memory": "主 Bot：你的团队、频道和记忆",
   "Plans, works, and reports on wishes": "规划、执行并汇报愿望",
   "Claude Code through the Agent Client Protocol": "通过 Agent Client Protocol 使用 Claude Code",
@@ -30200,7 +30199,6 @@ var OFFICIAL_IDS = Object.freeze(OFFICIAL_APPS.map((app) => app.id));
 // src/client/connectors-page.js
 var import_react81 = require("react");
 var CATEGORIES = [["dev", "Developer"], ["docs", "Docs & files"], ["work", "Work"], ["design", "Design"], ["data", "Data"], ["commerce", "Commerce"], ["search", "Search"]];
-var FEATURED = ["github", "mail", "notion", "linear", "figma", "slack"];
 var PREVIEW = 6;
 var matches = (query, ...texts2) => query === "" || texts2.join(" ").toLowerCase().includes(query.toLowerCase());
 function useJustConnected(state2) {
@@ -30227,7 +30225,7 @@ function tileStatus(app) {
   if (app.state === "error") return t("Could not connect: {error}", { error: hostText(app.error ?? "") });
   return null;
 }
-function AppTile({ app, actions, onOpen, showsSignIn, onSignIn, inert = false, expanded }) {
+function AppTile({ app, actions, onOpen }) {
   const [busy, setBusy] = (0, import_react81.useState)(false);
   const [error, setError] = (0, import_react81.useState)(null);
   const fresh = useJustConnected(app.state);
@@ -30243,7 +30241,6 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn, inert = false, e
     const auth = app.auth ?? {};
     if (app.id === "mail" || auth.kind === "key" || auth.kind === "oauth" && auth.token && !auth.client?.id) return onOpen();
     if (auth.kind === "oauth") {
-      onSignIn();
       const win = reserveWindow();
       return void run2(actions.connectorConnect(app.id, {}), (view) => openSignIn(win, app.id, view), () => win.close());
     }
@@ -30254,12 +30251,11 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn, inert = false, e
   const status = error ? hostText(error) : tileStatus(app);
   const label = busy ? t("Connecting…") : ready ? t("Connected") : off ? t("Connect") : app.state === "error" ? t("Try again") : app.state === "needs-sign-in" ? t("Sign in again") : t("Open");
   const press = () => {
-    if (inert) return void 0;
     if (off) return connect();
     if (app.state === "error") return void run2(actions.connectorRetry(app.id));
     return onOpen();
   };
-  const signIn = showsSignIn ? app.pending?.kind : void 0;
+  const signIn = app.pending?.kind;
   const tile = (0, import_react81.useRef)(null);
   useMorph(tile, signIn ?? "");
   return (0, import_react81.createElement)(
@@ -30267,7 +30263,7 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn, inert = false, e
     { ref: tile, className: "bt-app", "data-state": app.state, "data-fresh": fresh ? "" : void 0, "data-error": error ? "" : void 0, "data-signing": signIn ? "" : void 0 },
     (0, import_react81.createElement)(
       "button",
-      { type: "button", className: "bt-app-main", onClick: onOpen, "aria-expanded": expanded },
+      { type: "button", className: "bt-app-main", onClick: onOpen },
       (0, import_react81.createElement)(AppIcon, { app }),
       (0, import_react81.createElement)(
         "span",
@@ -30285,21 +30281,15 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn, inert = false, e
     signIn ? (0, import_react81.createElement)(SignInPanel, { connector: app, actions, run: run2 }) : null
   );
 }
-function Grid({ apps, actions, open, place = null, signInPlaces, inert = false }) {
-  const homePlace = (app) => FEATURED.includes(app.id) ? "featured" : app.category;
+function Grid({ apps, actions, open }) {
   return (0, import_react81.createElement)("div", { className: "bt-app-grid" }, apps.map((app) => (0, import_react81.createElement)(AppTile, {
     key: app.id,
     app,
     actions,
-    inert,
-    onOpen: () => open(app.id),
-    showsSignIn: place === null || place === (signInPlaces.current[app.id] ?? homePlace(app)),
-    onSignIn: () => {
-      signInPlaces.current[app.id] = place;
-    }
+    onOpen: () => open(app.id)
   })));
 }
-function Section2({ title, apps, actions, open, onAll, place, signInPlaces }) {
+function Section2({ title, apps, actions, open, onAll }) {
   if (apps.length === 0) return null;
   return (0, import_react81.createElement)(
     "section",
@@ -30310,7 +30300,7 @@ function Section2({ title, apps, actions, open, onAll, place, signInPlaces }) {
       (0, import_react81.createElement)("h3", null, title),
       onAll && apps.length > PREVIEW ? (0, import_react81.createElement)("button", { type: "button", className: "bt-app-all", onClick: onAll }, t("See all")) : null
     ),
-    (0, import_react81.createElement)(Grid, { apps: onAll ? apps.slice(0, PREVIEW) : apps, actions, open, place, signInPlaces })
+    (0, import_react81.createElement)(Grid, { apps: onAll ? apps.slice(0, PREVIEW) : apps, actions, open })
   );
 }
 function Subview({ title, onBack, children }) {
@@ -30336,165 +30326,176 @@ function ConnectedSummary({ apps, count, onClick }) {
     (0, import_react81.createElement)(ChevronRightIcon)
   );
 }
-var MOCK_STATE = Object.freeze({ omni: "installed", genie: "update", claude: "install", codex: "installed" });
-var MOCK_INERT = Object.freeze({});
-var mockFlag = () => {
-  try {
-    const search = String(window.location?.search ?? "").replace(/^\?/, "");
-    return search.split("&").some((part) => part === "mock-apps" || part.startsWith("mock-apps="));
-  } catch {
-    return false;
+var ACP_ROUTE = Object.freeze({ claude: "acp-claude", codex: "acp-codex" });
+function officialBot(app, roster) {
+  const bots = roster?.bots;
+  if (!Array.isArray(bots)) return void 0;
+  const own = bots.find((bot) => bot.kind === app.id);
+  if (own !== void 0) return own;
+  return app.id === "omni" ? roster?.byId?.[roster.mainBotId] : void 0;
+}
+function officialAcp(app, roster) {
+  const provider = ACP_ROUTE[app.id];
+  const models = roster?.models;
+  if (provider === void 0 || !Array.isArray(models)) return void 0;
+  return models.filter((model) => (model.provider ?? String(model.ref ?? "").split("/")[0]) === provider);
+}
+function officialState(app, roster) {
+  if (roster?.ready === false) return { state: "unknown" };
+  if (app.kind === "agent") {
+    if (!Array.isArray(roster?.bots)) return { state: "unknown" };
+    const bot = officialBot(app, roster);
+    return bot === void 0 ? { state: "missing" } : { state: "installed", bot };
   }
-};
+  if (app.kind === "acp") {
+    const models = officialAcp(app, roster);
+    if (models === void 0) return { state: "unknown" };
+    if (models.length === 0) return { state: "missing" };
+    return { state: models.some((model) => model.needsSignIn === true) ? "sign-in" : "installed" };
+  }
+  return { state: "unknown" };
+}
+function officialStateText(state2) {
+  if (state2 === "installed") return t("Installed");
+  if (state2 === "sign-in") return t("Sign-in needed");
+  if (state2 === "missing") return t("Not installed");
+  return t("Unknown");
+}
+function officialAction(app, resolved, roster, actions) {
+  if (resolved.state === "unknown") return null;
+  if (app.kind === "agent") {
+    if (resolved.state === "installed") {
+      const bot = resolved.bot;
+      if (bot === void 0) return null;
+      return {
+        label: t("Installed"),
+        done: true,
+        run: () => {
+          actions.closeSettings?.();
+          if (typeof actions.openSession === "function") actions.openSession(bot.id);
+          else actions.openSettings?.("bots", bot.id);
+        }
+      };
+    }
+    if (typeof actions.openHarnessOnboarding !== "function") return null;
+    return {
+      label: t("Install"),
+      done: false,
+      run: () => {
+        actions.closeSettings?.();
+        actions.openHarnessOnboarding("omni-team");
+      }
+    };
+  }
+  if (app.kind !== "acp" || resolved.state === "missing") return null;
+  const provider = ACP_ROUTE[app.id];
+  const botId = (roster?.mainBotIds ?? [])[0] ?? roster?.mainBotId ?? roster?.bots?.[0]?.id;
+  if (provider === void 0 || botId === void 0 || typeof actions.openCliLogin !== "function") return null;
+  return {
+    label: resolved.state === "sign-in" ? t("Sign in") : t("Installed"),
+    done: resolved.state === "installed",
+    run: () => {
+      actions.closeSettings?.();
+      actions.openCliLogin(botId, provider);
+    }
+  };
+}
 function OfficialMark({ app, size = 22 }) {
   if (app.mark === "omni") return (0, import_react81.createElement)(OmniMark, { size });
   if (app.mark === "genie") return (0, import_react81.createElement)("img", { className: "bt-agent-mark", src: LAMP, width: size, height: size, alt: "", "aria-hidden": true, draggable: false });
   return (0, import_react81.createElement)(AgentMark, { id: app.mark, name: app.name, size });
 }
-function officialLabel(state2) {
-  return state2 === "installed" ? t("Installed") : state2 === "update" ? t("Update") : t("Install");
+function OfficialButton({ action }) {
+  if (action === null) return null;
+  return (0, import_react81.createElement)("button", {
+    type: "button",
+    className: action.done ? "bt-app-btn bt-app-btn-done" : "bt-app-btn",
+    onClick: action.run
+  }, action.done ? (0, import_react81.createElement)(CheckIcon) : null, action.label);
 }
-function OfficialTile({ app, state: state2, expanded, onToggle }) {
-  const installed = state2 !== "install";
+function OfficialTile({ app, resolved, action, expanded, onToggle }) {
   return (0, import_react81.createElement)(
     "div",
-    { className: "bt-app", "data-state": installed ? "ready" : "off" },
+    { className: "bt-app", "data-state": resolved.state === "installed" ? "ready" : "off" },
     (0, import_react81.createElement)(
       "button",
-      {
-        type: "button",
-        className: "bt-app-main",
-        "aria-expanded": expanded,
-        onClick: onToggle
-      },
+      { type: "button", className: "bt-app-main", "aria-expanded": expanded, onClick: onToggle },
       (0, import_react81.createElement)("span", { className: "bt-app-icon" }, (0, import_react81.createElement)(OfficialMark, { app })),
       (0, import_react81.createElement)(
         "span",
         { className: "bt-app-text" },
         (0, import_react81.createElement)("span", { className: "bt-app-name" }, app.name, (0, import_react81.createElement)("span", { className: "bt-tag" }, t("Official"))),
-        (0, import_react81.createElement)("span", { className: "bt-app-status" }, t(app.about))
+        (0, import_react81.createElement)("span", { className: "bt-app-status" }, officialStateText(resolved.state))
       )
     ),
-    (0, import_react81.createElement)("button", {
-      type: "button",
-      className: state2 === "installed" ? "bt-app-btn bt-app-btn-done" : "bt-app-btn",
-      // The mock installs nothing: the control draws its state and does nothing.
-      onClick: () => {
-      }
-    }, state2 === "installed" ? (0, import_react81.createElement)(CheckIcon) : null, officialLabel(state2))
+    (0, import_react81.createElement)(OfficialButton, { action })
   );
 }
-function MockDetail({ app, official, state: state2 }) {
-  const ready = official ? state2 !== "install" : app.state === "ready";
-  const label = official ? officialLabel(state2) : ready ? t("Connected") : t("Connect");
+function OfficialDetail({ app, resolved, action }) {
   return (0, import_react81.createElement)(
     "div",
     { className: "bt-set-card bt-connectors-card bt-app-detail bt-app-expanded" },
     (0, import_react81.createElement)(
       "div",
-      { className: "bt-connector", "data-state": ready ? "ready" : "off" },
+      { className: "bt-connector", "data-state": resolved.state === "installed" ? "ready" : "off" },
       (0, import_react81.createElement)(
         "div",
         { className: "bt-connector-head" },
-        (0, import_react81.createElement)("span", { className: "bt-connector-mark" }, official ? (0, import_react81.createElement)(OfficialMark, { app, size: 20 }) : (0, import_react81.createElement)(ConnectorMark, { connector: app })),
+        (0, import_react81.createElement)("span", { className: "bt-connector-mark" }, (0, import_react81.createElement)(OfficialMark, { app, size: 20 })),
         (0, import_react81.createElement)(
           "span",
           { className: "bt-connector-text" },
-          (0, import_react81.createElement)("span", { className: "bt-connector-name" }, app.name, official ? (0, import_react81.createElement)("span", { className: "bt-tag" }, t("Official")) : null),
-          (0, import_react81.createElement)("span", { className: "bt-connector-status" }, t(app.about ?? ""))
+          (0, import_react81.createElement)("span", { className: "bt-connector-name" }, app.name, (0, import_react81.createElement)("span", { className: "bt-tag" }, t("Official"))),
+          (0, import_react81.createElement)("span", { className: "bt-connector-status" }, t(app.about))
         ),
+        action === null ? null : (0, import_react81.createElement)("span", { className: "bt-connector-actions" }, (0, import_react81.createElement)(OfficialButton, { action }))
+      ),
+      (0, import_react81.createElement)(
+        "div",
+        { className: "bt-set-row" },
         (0, import_react81.createElement)(
           "span",
-          { className: "bt-connector-actions" },
-          (0, import_react81.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => {
-          } }, label)
+          { className: "bt-set-copy" },
+          (0, import_react81.createElement)("span", { className: "bt-bs-label" }, t("State")),
+          (0, import_react81.createElement)("span", { className: "bt-set-hint" }, officialStateText(resolved.state))
         )
-      )
-    ),
-    (0, import_react81.createElement)(
-      "div",
-      { className: "bt-set-row" },
-      (0, import_react81.createElement)(
-        "span",
-        { className: "bt-set-copy" },
-        (0, import_react81.createElement)("span", { className: "bt-bs-label" }, t(official ? "Included with Automagik" : "SAMPLE DATA")),
-        (0, import_react81.createElement)("span", { className: "bt-set-hint" }, t("Sample row: nothing is installed from this preview."))
       )
     )
   );
 }
-function MockSection({ title, hint, apps, openId, onToggle, official = false }) {
+function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
   if (apps.length === 0) return null;
-  const open = apps.find((app) => app.id === openId);
+  const rows2 = apps.map((app) => {
+    const resolved = officialState(app, roster);
+    return { app, resolved, action: officialAction(app, resolved, roster, actions) };
+  });
+  const open = rows2.find((row) => row.app.id === expanded);
   return (0, import_react81.createElement)(
     "section",
     { className: "bt-app-section" },
-    title === void 0 && hint === void 0 ? null : (0, import_react81.createElement)(
+    (0, import_react81.createElement)(
       "div",
       { className: "bt-app-section-head" },
-      title === void 0 ? null : (0, import_react81.createElement)("h3", null, title),
-      hint === void 0 ? null : (0, import_react81.createElement)("span", { className: "bt-app-status" }, hint)
+      (0, import_react81.createElement)("h3", null, t("Automagik official")),
+      (0, import_react81.createElement)("span", { className: "bt-app-status" }, t("Included with Automagik"))
     ),
-    (0, import_react81.createElement)("div", { className: "bt-app-grid" }, apps.map((app) => official ? (0, import_react81.createElement)(OfficialTile, { key: app.id, app, state: MOCK_STATE[app.id], expanded: openId === app.id, onToggle: () => onToggle(app.id) }) : (0, import_react81.createElement)(AppTile, { key: app.id, app, actions: MOCK_INERT, inert: true, showsSignIn: true, expanded: openId === app.id, onOpen: () => onToggle(app.id) }))),
-    open ? (0, import_react81.createElement)(MockDetail, { app: open, official, state: MOCK_STATE[open.id] }) : null
+    (0, import_react81.createElement)("div", { className: "bt-app-grid" }, rows2.map((row) => (0, import_react81.createElement)(OfficialTile, {
+      key: row.app.id,
+      app: row.app,
+      resolved: row.resolved,
+      action: row.action,
+      expanded: row.app.id === expanded,
+      onToggle: () => onToggle(row.app.id)
+    }))),
+    open === void 0 ? null : (0, import_react81.createElement)(OfficialDetail, { app: open.app, resolved: open.resolved, action: open.action })
   );
 }
-function MockAppsPage({ roster }) {
-  const [query, setQuery] = (0, import_react81.useState)("");
-  const [category, setCategory] = (0, import_react81.useState)("");
-  const [expanded, setExpanded] = (0, import_react81.useState)("genie");
-  const upstream = (roster?.connectors?.connectors ?? []).filter((app) => app.id !== "mail");
-  const queryText = query.trim();
-  const searching = queryText !== "" || category !== "";
-  const official = category === "" ? OFFICIAL_APPS.filter((app) => matches(queryText, app.name, app.about, t(app.about))) : [];
-  const found = upstream.filter((app) => (category === "" || app.category === category) && matches(queryText, app.name, app.about ?? "", t(app.about ?? "")));
-  const toggle = (id) => setExpanded((current) => current === id ? null : id);
-  const inCategory = (id) => upstream.filter((app) => app.category === id);
-  const sections = searching ? [
-    (0, import_react81.createElement)(MockSection, { key: "official", title: t("Automagik official"), hint: t("Included with Automagik"), apps: official, openId: expanded, onToggle: toggle, official: true }),
-    (0, import_react81.createElement)(MockSection, { key: "found", apps: found, openId: expanded, onToggle: toggle })
-  ] : [
-    (0, import_react81.createElement)(MockSection, { key: "official", title: t("Automagik official"), hint: t("Included with Automagik"), apps: official, openId: expanded, onToggle: toggle, official: true }),
-    ...CATEGORIES.map(([id, label]) => (0, import_react81.createElement)(MockSection, { key: id, title: t(label), apps: inCategory(id), openId: expanded, onToggle: toggle }))
-  ];
-  return (0, import_react81.createElement)(
-    "div",
-    { className: "bt-apps" },
-    (0, import_react81.createElement)(
-      "div",
-      { className: "bt-app-note", role: "note" },
-      (0, import_react81.createElement)("span", { className: "bt-tag" }, t("SAMPLE DATA")),
-      (0, import_react81.createElement)("span", null, t("A mock of the Apps page. Nothing here installs; click a row to expand it."))
-    ),
-    (0, import_react81.createElement)(
-      "div",
-      { className: "bt-app-bar" },
-      (0, import_react81.createElement)(
-        "label",
-        { className: "bt-app-search" },
-        (0, import_react81.createElement)(SearchIcon),
-        (0, import_react81.createElement)("input", { type: "search", "aria-label": t("Search apps"), placeholder: t("Search apps"), value: query, onChange: (e) => setQuery(e.target.value) })
-      ),
-      (0, import_react81.createElement)("button", { type: "button", className: "bt-app-pill", onClick: () => {
-      } }, (0, import_react81.createElement)(PlusIcon), t("Custom"))
-    ),
-    (0, import_react81.createElement)(
-      "div",
-      { className: "bt-app-chips", role: "group", "aria-label": t("Category") },
-      [["", "All"], ...CATEGORIES].map(([id, label]) => (0, import_react81.createElement)("button", { key: id || "all", type: "button", "aria-pressed": category === id, onClick: () => setCategory(id) }, t(label)))
-    ),
-    found.length === 0 && official.length === 0 ? (0, import_react81.createElement)("p", { className: "bt-app-empty" }, t("Nothing matches")) : sections
-  );
-}
-function ConnectorsPage(props) {
-  return mockFlag() ? (0, import_react81.createElement)(MockAppsPage, props) : (0, import_react81.createElement)(AppsPage, props);
-}
-function AppsPage({ roster, actions }) {
+function ConnectorsPage({ roster, actions }) {
   const [query, setQuery] = (0, import_react81.useState)("");
   const [category, setCategory] = (0, import_react81.useState)("");
   const [view, setView] = (0, import_react81.useState)(null);
+  const [expanded, setExpanded] = (0, import_react81.useState)(null);
   const [error, setError] = (0, import_react81.useState)(null);
-  const signInPlaces = (0, import_react81.useRef)({});
   const run2 = (task, onDone) => Promise.resolve(task).then((value) => {
     setError(null);
     onDone?.(value);
@@ -30567,16 +30568,21 @@ function AppsPage({ roster, actions }) {
     );
   }
   const inCategory = (id) => apps.filter((app) => app.category === id);
-  const searching = query.trim() !== "";
-  const found = apps.filter((app) => (category === "" || app.category === category) && matches(query.trim(), app.name, app.about ?? ""));
+  const queryText = query.trim();
+  const searching = queryText !== "";
+  const official = category === "" ? OFFICIAL_APPS.filter((app) => matches(queryText, app.name, app.about, t(app.about))) : [];
+  const found = apps.filter((app) => (category === "" || app.category === category) && matches(queryText, app.name, app.about ?? ""));
+  const toggle = (id) => setExpanded((current) => current === id ? null : id);
   let body;
   if (searching || category !== "") {
-    body = found.length === 0 ? (0, import_react81.createElement)("p", { className: "bt-app-empty" }, t("Nothing matches")) : (0, import_react81.createElement)(Grid, { apps: found, actions, open, signInPlaces });
+    body = found.length === 0 && official.length === 0 ? (0, import_react81.createElement)("p", { className: "bt-app-empty" }, t("Nothing matches")) : [
+      official.length === 0 ? null : (0, import_react81.createElement)(OfficialSection, { key: "official", apps: official, roster, actions, expanded, onToggle: toggle }),
+      found.length === 0 ? null : (0, import_react81.createElement)(Grid, { key: "found", apps: found, actions, open })
+    ];
   } else {
-    const featured = FEATURED.map((id) => apps.find((app) => app.id === id)).filter(Boolean);
     body = [
-      (0, import_react81.createElement)(Section2, { key: "featured", place: "featured", signInPlaces, title: t("Recommended"), apps: featured, actions, open }),
-      ...CATEGORIES.map(([id, label]) => (0, import_react81.createElement)(Section2, { key: id, place: id, signInPlaces, title: t(label), apps: inCategory(id), actions, open, onAll: () => setCategory(id) }))
+      (0, import_react81.createElement)(OfficialSection, { key: "official", apps: official, roster, actions, expanded, onToggle: toggle }),
+      ...CATEGORIES.map(([id, label]) => (0, import_react81.createElement)(Section2, { key: id, title: t(label), apps: inCategory(id), actions, open, onAll: () => setCategory(id) }))
     ];
   }
   return (0, import_react81.createElement)(
@@ -30605,8 +30611,6 @@ function AppsPage({ roster, actions }) {
 }
 var CONNECTORS_PAGE_CSS = `
 .bt-apps{display:flex;flex-direction:column;gap:14px;container-type:inline-size}
-.bt-app-note{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px;line-height:16px;color:var(--bt-ink-3)}
-.bt-app-note .bt-tag{max-width:none}
 .bt-app-expanded{grid-column:1/-1;margin-top:4px}
 .bt-app-bar{display:flex;align-items:center;gap:8px}
 .bt-app-search{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-card);color:var(--bt-ink-3);cursor:text}

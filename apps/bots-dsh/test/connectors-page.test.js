@@ -5,6 +5,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
+import { CATALOG } from '../src/host/connectors/catalog.js'
+import { OFFICIAL_APPS } from '../src/host/connectors/official.js'
 
 // jsdom comes from the harness that test/harness-resolve.mjs found, like the dsh packages.
 const PLUGIN = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -59,8 +61,8 @@ const opened = []
 const clipboard = { writeText: () => Promise.resolve() }
 const dom = new JSDOM('<!doctype html><body></body>')
 const module = { exports: {} }
-// The page reads the ?mock-apps flag from window.location; the vm's window object is the one
-// the tests set it on.
+// The page no longer reads a ?mock-apps flag; a test sets it on the vm's window to prove it
+// selects nothing.
 const pageWindow = { matchMedia: () => ({ matches: false }), dshDesktop: {}, open: (url) => { opened.push(url); return null } }
 runInNewContext(outputFiles[0].text, {
   module, exports: module.exports,
@@ -318,7 +320,7 @@ test('a refused clipboard write shows no copied hint and the Copy button can sti
   const pending = github(devicePending('REFU-SED1'))
   const page = pageWith(github(), { connectorConnect: () => Promise.resolve({ connectors: [pending] }) })
   renderPage(page)
-  sectionButton('Recommended', 'Connect').props.onClick()
+  sectionButton('Developer', 'Connect').props.onClick()
   await flush()
   page.roster = pageWith(pending).roster
   await flush()
@@ -336,81 +338,155 @@ test('a sign-in found after a reload is drawn once, and a browser sign-in says w
   slots.length = 0
   renderPage(pageWith(github(devicePending('RELO-ADED'))))
   assert.equal(has('bt-connector-code').length, 1)
-  assert.equal(sectionOf(has('bt-connector-code')[0]), 'Recommended')
+  assert.equal(sectionOf(has('bt-connector-code')[0]), 'Developer')
   slots.length = 0
   renderPage(pageWith(github({ state: 'connecting', pending: { kind: 'browser', url: 'https://github.com/login/oauth' } })))
   assert.equal(pageText().split('Finish signing in in your browser.').length - 1, 1)
 })
 
-// --- the ?mock-apps preview ----------------------------------------------
-// The preview is the real page under a flag: the same pieces, with the Automagik overlay
-// first and every control inert. The actions proxy throws if the mock ever reaches the host.
-const mockPage = () => ({
+// --- the real Apps page: the Automagik overlay on top of upstream ----------
+// The official rows come from official.js, the upstream rows from catalog.js as the host sends
+// them, and the states and actions are what the page already knows.
+const UPSTREAM = CATALOG.filter(entry => entry.id !== 'mail').map(entry => ({
+  id: entry.id, name: entry.name, category: entry.category, about: entry.about, auth: entry.auth, state: 'off',
+}))
+const CATEGORY_LABEL = { dev: 'Developer', docs: 'Docs & files', work: 'Work', design: 'Design', data: 'Data', commerce: 'Commerce', search: 'Search' }
+const officialPage = ({ bots = [], models = [], mainBotId = bots[0]?.id ?? null, connectors = UPSTREAM, actions = {} } = {}) => ({
   roster: {
-    connectors: {
-      connectors: [
-        { id: 'github', name: 'GitHub', category: 'dev', about: 'Repositories and requests', auth: { kind: 'none' }, state: 'off' },
-        { id: 'notion', name: 'Notion', category: 'docs', about: 'Pages and databases', auth: { kind: 'none' }, state: 'off' },
-        { id: 'paypal', name: 'PayPal', category: 'commerce', about: 'Orders and payments', auth: { kind: 'none' }, state: 'off' },
-      ],
-      mail: { accounts: [] },
-    },
+    ready: true, bots, byId: Object.fromEntries(bots.map(bot => [bot.id, bot])),
+    mainBotId, mainBotIds: mainBotId === null ? [] : [mainBotId], models,
+    connectors: { connectors, mail: { accounts: [] } },
   },
-  actions: new Proxy({}, { get: () => () => { throw new Error('the mock calls no host action') } }),
+  actions,
 })
-const withFlag = (value, run) => {
-  pageWindow.location = { search: value }
-  try { return run() } finally { pageWindow.location = { search: '' } }
+const within = (root, match) => {
+  const out = []
+  const walk = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (Array.isArray(node)) { node.forEach(walk); return }
+    if (match(node)) out.push(node)
+    walk(node.props?.children)
+  }
+  walk(root)
+  return out
 }
+const officialTile = name => collect(n => n.props?.className === 'bt-app' && flatten(n).join('').startsWith(name))[0]
+const actionIn = (tile, label) => within(tile, n => n.type === 'button' && flatten(n).join('') === label)[0]
 const mainButton = name => collect(n => n.type === 'button' && n.props?.className === 'bt-app-main' && flatten(n).join('').startsWith(name))[0]
 
-test('?mock-apps shows the official section first, sample states, then upstream categories', () => {
+test('the Automagik overlay comes first and only its rows carry the Official tag', () => {
   slots.length = 0
-  withFlag('?mock-apps', () => {
-    renderPage(mockPage())
-    const titles = collect(n => n.type === 'h3').map(n => flatten(n).join(''))
-    assert.equal(titles[0], 'Automagik official')
-    assert.ok(titles.includes('Developer') && titles.includes('Docs & files') && titles.includes('Commerce'), titles.join(' | '))
-    assert.match(pageText(), /SAMPLE DATA/)
-    for (const name of ['Omni', 'Genie', 'Claude', 'Codex']) assert.ok(pageText().includes(name), name)
-    const labels = collect(n => n.type === 'button').map(n => flatten(n).join(''))
-    for (const label of ['Install', 'Installed', 'Update']) assert.ok(labels.includes(label), `button "${label}"`)
-    assert.ok((pageText().match(/Official/g) ?? []).length >= 4, 'every official app carries the tag')
-    assert.match(pageText(), /Included with Automagik/)
-    assert.match(pageText(), /Sample row: nothing is installed from this preview\./)
-  })
+  renderPage(officialPage())
+  const titles = collect(n => n.type === 'h3').map(n => flatten(n).join(''))
+  assert.equal(titles[0], 'Automagik official')
+  const names = collect(n => n.props?.className === 'bt-app-name').map(n => (Array.isArray(n.props.children) ? n.props.children[0] : n.props.children))
+  assert.deepEqual(names.slice(0, OFFICIAL_APPS.length), OFFICIAL_APPS.map(app => app.name))
+  for (const app of OFFICIAL_APPS) {
+    const tile = officialTile(app.name)
+    assert.ok(tile, app.name)
+    assert.match(flatten(tile).join(' '), /Official/, `${app.name} carries the tag`)
+  }
+  assert.doesNotMatch(flatten(officialTile('GitHub')).join(' '), /Official/)
+  assert.equal((pageText().match(/Official/g) ?? []).length, OFFICIAL_APPS.length, 'one tag per official row, none upstream')
 })
 
-test('?mock-apps starts with Genie expanded, and a click expands only that row', () => {
+test('the upstream categories render from catalog.js, after the overlay', () => {
   slots.length = 0
-  withFlag('?mock-apps', () => {
-    renderPage(mockPage())
-    const openedBefore = opened.length
-    const expanded = () => collect(n => n.type === 'button' && n.props?.className === 'bt-app-main').filter(n => n.props?.['aria-expanded'] === true).map(n => flatten(n)[0])
-    assert.deepEqual(expanded(), ['Genie'])
-    mainButton('Claude').props.onClick()
-    assert.deepEqual(expanded(), ['Claude'])
-    assert.equal((pageText().match(/Sample row: nothing is installed from this preview\./g) ?? []).length, 1, 'one row expanded at a time')
-    mainButton('GitHub').props.onClick()
-    assert.deepEqual(expanded(), ['GitHub'], 'an upstream row expands too')
-    assert.equal(opened.length, openedBefore, 'no row opens a page')
-  })
-})
-
-test('?mock-apps controls are inert and the page without the flag is unchanged', () => {
-  slots.length = 0
-  withFlag('?mock-apps', () => {
-    renderPage(mockPage())
-    const buttons = collect(n => n.type === 'button')
-    for (const label of ['Install', 'Installed', 'Update', 'Connect', 'Custom']) {
-      const button = buttons.find(n => flatten(n).join('') === label || flatten(n).join('').endsWith(label))
-      if (button) button.props.onClick()
+  renderPage(officialPage())
+  const titles = collect(n => n.type === 'h3').map(n => flatten(n).join(''))
+  assert.deepEqual(titles, ['Automagik official', ...Object.values(CATEGORY_LABEL)])
+  for (const [id, label] of Object.entries(CATEGORY_LABEL)) {
+    const entries = CATALOG.filter(row => row.id !== 'mail' && row.category === id)
+    // Work's preview starts with the mailbox, so one fewer catalog row fits there.
+    for (const entry of entries.slice(0, id === 'work' ? 5 : 6)) {
+      const tile = officialTile(entry.name)
+      assert.ok(tile, `${entry.name} is drawn from the catalog`)
+      assert.ok(sectionOf(tile).startsWith(label), `${entry.name} stays in its own category`)
     }
-    rerender()
-    assert.match(pageText(), /SAMPLE DATA/)
-  })
+    if (entries.length > 6) assert.ok(collect(n => n.type === 'button' && flatten(n).join('') === 'See all')[0], `${label} offers the rest`)
+  }
+  // Each section's preview hides its last rows; See all shows them from the same catalog.
+  const seeAllIn = label => collect(n => n.type === 'button' && flatten(n).join('') === 'See all').find(n => sectionOf(n).startsWith(label))
+  seeAllIn('Work').props.onClick()
+  for (const entry of CATALOG.filter(row => row.category === 'work')) assert.ok(officialTile(entry.name), `${entry.name} comes with the rest of Work`)
+})
+
+test('a Bot on the roster is Installed and a kind with no Bot is not installed', () => {
   slots.length = 0
-  renderPage(mockPage())
-  assert.doesNotMatch(pageText(), /SAMPLE DATA|Automagik official/)
-  assert.match(pageText(), /Recommended/)
+  renderPage(officialPage({ bots: [{ id: 'omni-1', kind: 'omni', name: 'Omni' }], actions: { openHarnessOnboarding: () => {} } }))
+  assert.match(flatten(officialTile('Omni')).join(' '), /Installed/)
+  assert.match(flatten(officialTile('Genie')).join(' '), /Not installed/)
+  assert.ok(actionIn(officialTile('Genie'), 'Install'), 'a missing Genie offers the team-step install')
+  for (const name of ['Claude', 'Codex']) {
+    const tile = officialTile(name)
+    assert.match(flatten(tile).join(' '), /Not installed/)
+    assert.equal(actionIn(tile, 'Install'), undefined, `${name} has no install flow here`)
+  }
+})
+
+test('an install opens the team setup, and an installed Bot opens its chat', () => {
+  const calls = []
+  const actions = {
+    closeSettings: () => calls.push(['closeSettings']),
+    openSession: id => calls.push(['openSession', id]),
+    openHarnessOnboarding: id => calls.push(['openHarnessOnboarding', id]),
+  }
+  slots.length = 0
+  renderPage(officialPage({ bots: [{ id: 'omni-1', kind: 'omni', name: 'Omni' }], actions }))
+  actionIn(officialTile('Omni'), 'Installed').props.onClick()
+  actionIn(officialTile('Genie'), 'Install').props.onClick()
+  assert.deepEqual(calls, [['closeSettings'], ['openSession', 'omni-1'], ['closeSettings'], ['openHarnessOnboarding', 'omni-team']])
+})
+
+test('Claude and Codex follow the ACP routes, open the sign-in the app already uses, and offer no install', () => {
+  const calls = []
+  const actions = {
+    closeSettings: () => calls.push(['closeSettings']),
+    openCliLogin: (botId, provider) => calls.push(['openCliLogin', botId, provider]),
+  }
+  const models = [
+    { ref: 'acp-claude/sonnet', provider: 'acp-claude', needsSignIn: true },
+    { ref: 'acp-codex/gpt-5', provider: 'acp-codex' },
+  ]
+  slots.length = 0
+  renderPage(officialPage({ bots: [{ id: 'main', kind: 'omni', name: 'Omni' }], mainBotId: 'main', models, actions }))
+  assert.match(flatten(officialTile('Claude')).join(' '), /Sign-in needed/)
+  assert.match(flatten(officialTile('Codex')).join(' '), /Installed/)
+  actionIn(officialTile('Claude'), 'Sign in').props.onClick()
+  actionIn(officialTile('Codex'), 'Installed').props.onClick()
+  assert.deepEqual(calls, [
+    ['closeSettings'], ['openCliLogin', 'main', 'acp-claude'],
+    ['closeSettings'], ['openCliLogin', 'main', 'acp-codex'],
+  ])
+})
+
+test('the expanded official row keeps what the app is, its state and its one action', () => {
+  slots.length = 0
+  renderPage(officialPage({ bots: [{ id: 'main', kind: 'omni', name: 'Omni' }], models: [] }))
+  mainButton('Claude').props.onClick()
+  const detail = has('bt-app-expanded')[0]
+  assert.ok(detail, 'the row expands')
+  const text = flatten(detail).join(' ')
+  assert.match(text, /Claude/)
+  assert.match(text, /Claude Code through the Agent Client Protocol/)
+  assert.match(text, /Not installed/)
+  assert.equal(within(detail, n => n.type === 'button').length, 0, 'a missing agent has no action')
+})
+
+test('?mock-apps selects nothing: the page is the real page with or without it', () => {
+  const page = officialPage({ bots: [{ id: 'main', kind: 'omni', name: 'Omni' }], models: [] })
+  slots.length = 0
+  renderPage(page)
+  const without = pageText()
+  slots.length = 0
+  pageWindow.location = { search: '?mock-apps' }
+  try {
+    renderPage(page)
+    assert.equal(pageText(), without, 'the flag changes nothing')
+    assert.match(without, /Automagik official/)
+    assert.match(without, /Not installed/)
+    assert.doesNotMatch(without, /SAMPLE DATA|A mock of the Apps page/)
+  } finally {
+    pageWindow.location = { search: '' }
+  }
 })
