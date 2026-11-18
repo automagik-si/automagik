@@ -1289,6 +1289,32 @@ export function install(rt) {
     if (entry?.turn !== undefined) entry.cut = { texts: entry.texts.length }
   }
 
+  // Cordis returns a scope proxy when a service method is read. Compare the own
+  // descriptor so unload restores only our wrapper, even through that proxy.
+  const wrapMethod = (service, key, method, label) => ctx.effect(() => {
+    const previous = Object.getOwnPropertyDescriptor(service, key)
+    service[key] = method
+    return () => {
+      if (Object.getOwnPropertyDescriptor(service, key)?.value !== method) return
+      if (previous === undefined) delete service[key]
+      else Object.defineProperty(service, key, previous)
+    }
+  }, label)
+
+  // Typert resolves typed Agent and Session arguments before invoking a controller
+  // method. Those lookups can go straight to the DSH registry, so guard its resume
+  // boundary before the factory constructs an Agent or mounts its preset.
+  const agentRegistry = ctx.get?.('agents')
+  const resume = agentRegistry?.resume
+  if (typeof resume === 'function') {
+    const admitted = async function (options, ...rest) {
+      await rt.refreshShellChoice?.()
+      rt.assertShellChoice?.(options?.resumeSessionId)
+      return resume.call(this, options, ...rest)
+    }
+    wrapMethod(agentRegistry, 'resume', admitted, 'ds-bot: refuse resuming shell-held Sessions before Agent creation')
+  }
+
   // DSH's desktop history follower normally activates a cold Session in the
   // background. Keep the history and live events readable without promoting a
   // Session whose Bot is waiting for a shell choice.
@@ -1307,10 +1333,7 @@ export function install(rt) {
       }
       yield* follow.call(this, request, ...rest)
     }
-    ctx.effect(() => {
-      controller.follow = admitted
-      return () => { if (controller.follow === admitted) controller.follow = follow }
-    }, 'ds-bot: keep shell-held Sessions readable without activating them')
+    wrapMethod(controller, 'follow', admitted, 'ds-bot: keep shell-held Sessions readable without activating them')
   }
 
   // DSH's prompt admission wraps any unexpected failure as 'session/agent-busy' and
@@ -1350,10 +1373,7 @@ export function install(rt) {
         throw error
       }
     }
-    ctx.effect(() => {
-      controller.prompt = admitted
-      return () => { if (controller.prompt === admitted) controller.prompt = prompt }
-    }, 'omni-ui: prompt rejection reasons')
+    wrapMethod(controller, 'prompt', admitted, 'omni-ui: prompt rejection reasons')
   }
 
   Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, callCapability, doingOf, stopRoomTurn, stopChat, stopShellHeldAgents, releaseBot, unblockBots, resumeBot, markSteerCut, hasSubagents, stopSubagents, adoptLiveWork })
