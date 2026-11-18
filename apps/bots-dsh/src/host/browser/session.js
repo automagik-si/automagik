@@ -187,11 +187,9 @@ export function createSession({
   }
 
   function activateAfterLoad(target) {
-    // Never left unhandled: a tab that crashes while loading rejects with no action awaiting it,
-    // and the host exits on any unhandled rejection (#1577). settle() re-waits the page itself.
     pendingPageReady = waitForPageReady(target).then(() => {
       if (!target.isClosed()) current = target
-    }).catch(() => {})
+    })
   }
 
   function trackPage(target, activate = false) {
@@ -239,13 +237,7 @@ export function createSession({
     }
     try {
       addressReady = Promise.resolve(context.route('**/*', guard)).then(() => {
-        // One shot, skipped once the browser has gone, and never left unhandled: a rejected
-        // unroute on a closed context must not reach the host's unhandledRejection exit.
-        removal = () => {
-          removal = () => {}
-          if (closed) return
-          Promise.resolve(context.unroute?.('**/*', guard)).catch(() => {})
-        }
+        removal = () => { void context.unroute?.('**/*', guard) }
       }, () => {})
     } catch {
       addressReady = Promise.resolve()
@@ -558,14 +550,10 @@ export function createSession({
         if (requestOrigin !== action.origin || ['GET', 'HEAD'].includes(request.method().toUpperCase())) return
         let resolve
         let reject
-        const pending = new Promise((res, rej) => {
+        requests.push(new Promise((res, rej) => {
           resolve = res
           reject = rej
-        })
-        // Promise.all still sees the failure; this only stops a request that fails after the
-        // write stopped waiting from reaching the host's unhandledRejection exit (#1577).
-        pending.catch(() => {})
-        requests.push(pending)
+        }))
         pendingRequests.set(request, { resolve, reject })
       }
       const onRequestFinished = request => {
@@ -835,68 +823,12 @@ export function createSession({
       const target = activePage()
       return finishAction(() => target.goBack({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}), target)
     },
-    async forward() {
-      ready()
-      await clearPendingDelete()
-      const target = activePage()
-      return finishAction(() => target.goForward({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}), target)
-    },
-    async reload() {
-      ready()
-      await clearPendingDelete()
-      const target = activePage()
-      return finishAction(() => target.reload({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}), target)
-    },
-    // The person's own input on the page the Bot is driving: coordinates are CSS pixels of
-    // the page's viewport, the same ones a frame's width and height report.
-    async clickAt(x, y) {
-      ready()
-      const target = activePage()
-      await target.mouse.click(Number(x), Number(y))
-      await settle()
-      return true
-    },
-    async typeText(text) {
-      ready()
-      await activePage().keyboard.type(String(text))
-      await settle()
-      return true
-    },
-    async pressKey(key) {
-      ready()
-      await activePage().keyboard.press(String(key))
-      await settle()
-      return true
-    },
-    async wheel(dy) {
-      ready()
-      await activePage().mouse.wheel(0, Number(dy))
-      await settle()
-      return true
-    },
-    async state() {
-      const target = activePage()
-      const open = openPages()
-      return {
-        url: target?.url() ?? '',
-        title: target !== undefined ? await target.title().catch(() => '') : '',
-        tabs: open.map(page => ({ url: page.url() })),
-      }
-    },
     shot,
     async frame() {
       const target = activePage()
       if (!target) return undefined
       const image = await target.screenshot({ type: 'jpeg', quality: 40 })
-      const size = target.viewportSize?.() ?? undefined
-      return {
-        mime: 'image/jpeg',
-        data: image.toString('base64'),
-        url: target.url(),
-        title: await target.title().catch(() => ''),
-        width: size?.width ?? 0,
-        height: size?.height ?? 0,
-      }
+      return { mime: 'image/jpeg', data: image.toString('base64'), url: target.url(), title: await target.title().catch(() => '') }
     },
     // `origin` names the call and Session that asked, so a card can answer them.
     handoff(reason, note, origin) {

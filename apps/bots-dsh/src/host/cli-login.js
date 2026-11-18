@@ -55,30 +55,10 @@ export const OUTCOME_TTL_MS = 60_000
 const METHODS = { start: 'loginStart', current: 'loginCurrent', status: 'loginStatus', answer: 'loginAnswer', cancel: 'loginCancel' }
 export const CODE_HINT = 'Paste the complete code shown by Claude, including the part after #.'
 export const CODE_REFUSED = 'This message contains a sign-in code, so it was not sent. Paste the code only in the sign-in step.'
-const DEVICE_ACCESS = 'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.'
-const DEVICE_START = 'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.'
-const DEVICE_FAILURES = new Set([DEVICE_ACCESS, DEVICE_START])
-// Why an attempt failed, as fixed words. acp-dsh computes one cause from a closed set it never
-// fills with CLI output (its own words: what the CLI printed is never kept), so a failed row can
-// say what happened instead of one dead end. A host from before the cause existed carries only
-// its fixed message; the two this side already knew are still recognized.
-const CODE_NOT_READY = 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'
-const FAILED_REASONS = new Map([
-  ['no CLI found', CODE_NOT_READY],
-  ['no sign-in link in time', 'The CLI did not offer a sign-in link in time. Try again.'],
-  ['the CLI could not be started', 'The CLI could not be started. Run it once in a terminal, then try again.'],
-  ['unsupported sign-in link', 'The CLI returned an old sign-in link. Update it, then try again.'],
-  ['the CLI did not confirm the sign-in', 'The CLI did not confirm the sign-in. Try again.'],
-  ['the CLI exited', 'The CLI exited before the sign-in finished. Try again.'],
+const DEVICE_FAILURES = new Set([
+  'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.',
+  'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.',
 ])
-const DEVICE_CAUSES = new Map([['device-code login is not enabled', DEVICE_ACCESS], ['device sign-in did not start', DEVICE_START]])
-const failedMessageOf = (value, provider) => {
-  const cause = typeof value?.cause === 'string' ? value.cause : ''
-  if (provider === 'acp-codex' && DEVICE_CAUSES.has(cause)) return DEVICE_CAUSES.get(cause)
-  if (FAILED_REASONS.has(cause)) return FAILED_REASONS.get(cause)
-  if (value?.message === 'Install the CLI before signing in.') return CODE_NOT_READY
-  return provider === 'acp-codex' && DEVICE_FAILURES.has(value?.message) ? value.message : 'Sign-in did not finish. Try again.'
-}
 const ERRORS = {
   'acp-account/unverified-login': ACCOUNT_RECOVERY_HINT,
   'acp-login/invalid': 'This sign-in request is no longer valid. Start again.',
@@ -86,45 +66,6 @@ const ERRORS = {
   'acp-login/not-found': 'This sign-in has ended. Start again.',
   'acp-login/unavailable': 'This CLI cannot sign in yet. Check its installation and try again.',
   'acp-login/disposed': 'The connection restarted. Start sign-in again.',
-  // This agent signs in from its own terminal; acp-dsh says which command, but the row says
-  // the shape of it without naming a path a person has to paste anywhere.
-  'acp-login/terminal': 'This coding agent signs in from its own terminal. Run its sign-in command there, then try again.',
-}
-// acp-dsh refuses the sign-in with its own fixed sentences: an account change another live
-// instance holds, a home that is changing, a Bot account reset, a CLI that is not there. Its
-// sentences never carry what the CLI printed, and several of them name the one thing left to the
-// person, so the exact text is an allowlist here and nothing else is echoed. The code is the
-// fallback for a sentence this side has not seen yet.
-const ACCOUNT_FIXED = new Map([
-  ['Close other Automagik sessions before changing the Bot account.',
-    'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.'],
-  ['The Bot account is already changing. Try again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
-  ['The Bot account is changing. Try again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
-  ['The Bot account is changing. Sign in again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
-  ['The Bot account is changing.', 'The Bot account is already changing. Try again when it finishes.'],
-  ['The Bot account changed. Start this work again after signing in.', 'The Bot account changed. Sign in again.'],
-  ['The account changed since it was shown.', 'The account changed. Check it and confirm again.'],
-  ['This CLI is not signed in any more.', 'This coding agent is not signed in any more. Press Sign in again.'],
-  ['Automagik is restarting.', 'Automagik is restarting. Try again in a moment.'],
-  ['Automagik is restarting. Try again.', 'Automagik is restarting. Try again in a moment.'],
-  ['This installation keeps no account record.',
-    'This installation keeps no record of the Bot account. Sign in again; if it keeps happening, the instance needs its profile repaired.'],
-  ['The Bot account cannot be changed here.', 'The Bot account cannot be changed from this session. Use the app on this computer.'],
-  ['Install the CLI before changing accounts.', 'Install the coding agent before signing in.'],
-  ['Sign-out did not finish. Try again.', 'Signing out of the Bot account did not finish. Try again.'],
-  ['Sign-out could not be verified. Try again.', 'Signing out of the Bot account could not be verified. Try again.'],
-  ['Bot sign-in was reset. Retry sign-in in the app.', 'The Bot account was reset. Press Sign in again.'],
-])
-// The code, for a sentence this side does not know yet: every code acp-dsh can refuse a sign-in
-// with says something a person can act on.
-const ACCOUNT_SENTENCES = {
-  'acp-account/busy': 'The Bot account is busy in another Automagik session on this computer. Close it, then press Sign in again.',
-  'acp-account/unavailable': 'The Bot account cannot be changed from this session. Use the app on this computer.',
-  'acp-account/invalid': 'This sign-in is not available for this Bot.',
-  'acp-account/logout': 'Signing out of the Bot account did not finish. Try again.',
-  'acp-account/disposed': 'Automagik is restarting. Try again in a moment.',
-  'acp-account/changed': 'The account changed. Check it and confirm again.',
-  'acp-account/signed-out': 'This coding agent is not signed in any more. Press Sign in again.',
 }
 // The page branches on these two, never on their (translated) wording: an ended attempt asks the
 // agent's own sign-in first (rule 4), a restart interrupts the row.
@@ -140,17 +81,6 @@ const ACCOUNT_ERRORS = {
   'acp-account/signed-out': ['This coding agent is not signed in any more. Sign in to use it.', 'bot/account-signed-out'],
 }
 const failed = (message, code = 'bot/refused') => Object.assign(new Error(message), { code })
-// A native failure the team has no sentence for: the CLI's own words never reach the person
-// (a CLI may print an account name or a secret, #970), but its failure class does. The class is
-// a bounded identifier, so the row can say which kind of failure it was instead of one dead end.
-// Only an ACP failure namespace: a relative path, a scheme and a token, or any other two-segment
-// string an error happens to carry is not a class and is never put in the row.
-const FAILURE_CLASS = /^acp-[a-z0-9-]{1,27}\/[a-z0-9-]{1,40}$/
-const failureClassOf = error => (typeof error?.code === 'string' && FAILURE_CLASS.test(error.code) ? error.code : '')
-const unmappedFailure = (error) => {
-  const kind = failureClassOf(error)
-  return kind === '' ? 'Could not continue this sign-in. Try again.' : `Could not continue this sign-in (${kind}). Try again.`
-}
 const invalid = () => failed('This sign-in request is not valid.', 'bot/invalid')
 
 // Keep the browser link on a provider's official authorization page: Claude's must ask for
@@ -196,7 +126,9 @@ export function cliLoginView(value, provider, attemptId) {
     }
     if (value.checking === true) view.checking = true
   }
-  if (value.status === 'failed') view.message = failedMessageOf(value, provider)
+  if (value.status === 'failed') view.message = value.message === 'Install the CLI before signing in.'
+    ? 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'
+    : provider === 'acp-codex' && DEVICE_FAILURES.has(value.message) ? value.message : 'Sign-in did not finish. Try again.'
   if (value.status === 'expired') view.message = 'This sign-in expired. Start again.'
   if (value.status === 'cancelled') view.message = 'Sign-in cancelled.'
   return view
@@ -398,13 +330,7 @@ export function install(rt) {
     try {
       await service.accountConfirm(body.provider, body.ref === undefined ? {} : { ref: body.ref })
     } catch (error) {
-      // Read through Object.hasOwn, as the sign-in path does: `error.code` can be a name of
-      // Object.prototype ('toString', '__proto__'), and a plain index would then hand back a
-      // function and break the destructuring into an internal error.
-      const known = typeof error?.code === 'string' && Object.hasOwn(ACCOUNT_ERRORS, error.code)
-        ? ACCOUNT_ERRORS[error.code] : undefined
-      const [message, code] = known
-        ?? [`The account could not be confirmed${failureClassOf(error) === '' ? '' : ` (${failureClassOf(error)})`}. Try again.`, 'bot/refused']
+      const [message, code] = ACCOUNT_ERRORS[error?.code] ?? ['The account could not be confirmed. Try again.', 'bot/refused']
       throw failed(message, code)
     }
     const choice = choiceOf(body.botId, body.provider)
@@ -512,15 +438,7 @@ export function install(rt) {
       value = await service[method](...args)
     } catch (error) {
       const code = error?.code ?? ''
-      // acp-dsh's own fixed sentence first (more precise, and its text is the allowlist), then a
-      // code the team knows, then the failure class, then the one line. What the CLI printed never
-      // reaches the person: the sentence is only taken from a fixed set. Both code tables are read
-      // through Object.hasOwn: `error.code` can name Object.prototype ('toString', '__proto__'),
-      // and a plain index would hand back a function or an object in place of the one line.
-      const sentence = ACCOUNT_FIXED.get(error?.message)
-        ?? (Object.hasOwn(ERRORS, code) ? ERRORS[code]
-          : Object.hasOwn(ACCOUNT_SENTENCES, code) ? ACCOUNT_SENTENCES[code] : undefined)
-      throw failed(sentence ?? unmappedFailure(error), Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
+      throw failed(Object.hasOwn(ERRORS, code) ? ERRORS[code] : 'Could not continue this sign-in. Try again.', Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
     }
     if (action === 'current' && (value === undefined || value === null)) {
       const choice = choiceOf(body.botId, body.provider)

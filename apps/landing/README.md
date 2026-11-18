@@ -278,9 +278,8 @@ node herdr/scripts/privacy-check.mjs
 The browser gate checks all pages at 1440, 1024, 390 and 320 px, light and dark. It checks
 that no heading word breaks across lines, every image is sized, the film still stays smaller
 than the page's main picture and keyboard focus shows. It checks that a dark page shows
-the dark captures (and a light page the light ones), checking capture lightness as well as
-the filename. It checks that the home's speech bubble stays off the app window and that
-the hero's app capture is shown near its real size. It checks
+the dark captures (and a light page the light ones), that the home's speech bubble stays
+off the app window, and that the hero's app capture is shown near its real size. It checks
 images/fonts, overflow, failed/external loads and native form 503/200 responses against an
 isolated SQLite fixture. It drives the menus with real clicks and keys in both themes: open
 and close by click, Enter and Space, Escape with the focus returning to the button, the

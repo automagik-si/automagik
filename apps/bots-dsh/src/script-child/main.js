@@ -30,12 +30,11 @@ const send = (message) => {
 }
 
 // The host kills this process at the run's deadline. A host that is gone, or stopped,
-// kills nothing, so the process keeps the deadline too. The host arms its budget before
-// it sends go; this process starts its clock at go, with this much grace after it. Before
-// go it keeps a start watchdog of twice the budget plus the grace. A script whose own
-// code never yields is stopped by the interpreter (sandbox.js `overdue`), and the
-// process then leaves. A script that is busy inside one long call of a built-in is
-// stopped by the host only, so it can outlive a host that is gone or stopped.
+// kills nothing, so the process keeps the deadline too, this long after the host's: a
+// script whose own code never yields is stopped by the interpreter (sandbox.js
+// `overdue`), and the process then leaves. A script that is busy inside one long call of
+// a built-in is stopped by the host only, so it can outlive a host that is gone or
+// stopped.
 const GRACE = 1_000
 
 let lastCall = 0
@@ -60,43 +59,18 @@ const call = (name, args) => {
 const finish = (answer, error) => send({ type: 'done', answer, error })
 
 let started = false
-let pendingStart
-let startTimer
 const receive = async (message) => {
   if (message?.type === 'start') {
     if (started || typeof message.body !== 'string' || !Array.isArray(message.names) || !(message.wait > 0)) return
     started = true
     waitLimit = message.wait
-    if (message.ready === true) {
-      startTimer = setTimeout(() => process.exit(0), 2 * waitLimit + GRACE)
-    } else {
-      // By the clock that only runs forward: a change of the machine's time moves nothing.
-      deadline = performance.now() + waitLimit + GRACE
-      setTimeout(() => process.exit(0), waitLimit + GRACE)
-    }
+    // By the clock that only runs forward: a change of the machine's time moves nothing.
+    deadline = performance.now() + waitLimit + GRACE
+    setTimeout(() => process.exit(0), waitLimit + GRACE)
     const overdue = () => performance.now() >= deadline ? `Script ran longer than ${waitLimit / 1000} seconds.` : undefined
     try {
       sandbox = await openSandbox({ call, finish, overdue })
-      if (message.ready === true) {
-        send({ type: 'ready' })
-        pendingStart = message
-      } else {
-        sandbox.start(message.names, message.body)
-      }
-    } catch {
-      finish(null, 'Script failed.')
-    }
-    return
-  }
-  if (message?.type === 'go') {
-    if (pendingStart === undefined) return
-    const start = pendingStart
-    pendingStart = undefined
-    clearTimeout(startTimer)
-    deadline = performance.now() + waitLimit + GRACE
-    setTimeout(() => process.exit(0), waitLimit + GRACE)
-    try {
-      sandbox.start(start.names, start.body)
+      sandbox.start(message.names, message.body)
     } catch {
       finish(null, 'Script failed.')
     }

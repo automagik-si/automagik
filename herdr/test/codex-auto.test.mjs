@@ -1,4 +1,3 @@
-import { startFakeCore } from "./fake-core.mjs";
 // Codex auto mode (#946, #1045, #1125): every Codex launch the pack makes passes Codex's
 // `--approve-for-me` and `--disable hooks`, so an approval request goes to Codex's own reviewer
 // instead of stopping for a person, and TUI startup never stops at the "Hooks need review"
@@ -45,8 +44,6 @@ function scene(t, bots = [MAIN]) {
   // A pinned PATH, so the pane's PATH is the same on every runner.
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     LANG: "C", GIT_CEILING_DIRECTORIES: root, AUTOMAGIK_HERDR_RESTART_STABLE_MS: "1" };
-  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
-  Object.assign(env, { ...core.env });
   const cli = (args) => {
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr };

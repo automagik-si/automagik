@@ -27,15 +27,6 @@ function remoteReason(...values) {
   }
   return undefined
 }
-
-// tui_gateway/methods_prompt.py at 3bcd071226d3d605a2bb3b4f3933e7d583e189d6:
-// refusals say "Nothing was sent"; unconfirmed "may already be queued".
-function refusedSubmit(error) {
-  const remote = error?.remote
-  return Boolean(remote && ([4004, 4009, 4091, 4120, 4121, 4124, 5035].includes(remote.code)
-    || remote.code === 4090 && ['SESSION_OWNER_BUSY', 'SESSION_NOT_OWNED'].includes(remote.reason)))
-}
-
 const localFailures = new WeakSet()
 const failure = (message, code = 'bot/hermes') => {
   const error = Object.assign(new Error(message), { code })
@@ -369,12 +360,8 @@ export class HermesTransport {
     if (!frame.error && !resultShape(pending.method, frame.result)) throw failure(INVALID_FRAME, 'bot/hermes-protocol')
     this.pending.delete(frame.id)
     clearTimeout(pending.timer)
-    if (frame.error) {
-      const remote = this.redact(frame.error)
-      pending.reject(Object.assign(failure('Remote Hermes refused a control request. Check the remote session.'), {
-        remote: { code: remote.code, reason: typeof remote.data?.reason === 'string' ? remote.data.reason : undefined, message: remoteReason(remote.message) },
-      }))
-    } else pending.resolve(this.redact(frame.result))
+    if (frame.error) pending.reject(failure('Remote Hermes refused a control request. Check the remote session.'))
+    else pending.resolve(this.redact(frame.result))
   }
 
   request(method, params = {}, ms = this.deadlines.control) {
@@ -485,7 +472,6 @@ export class RemoteChat {
     this.tools = new Map()
     this.questions = new Map()
     this.cancelledQuestions = new Set()
-    this.openAtJoin = []
     this.streamed = ''
     this.off = event => this.receive(event)
     transport.listeners.add(this.off)
@@ -514,10 +500,6 @@ export class RemoteChat {
       return
     }
     if (this.reconciling) { this.reconciling.push(event); return }
-    if (this.joining && (event.kind === 'question' || event.type === 'request.cancel')) {
-      this.joinControls.push(event)
-      return
-    }
     if (event.epoch && this.identity.epoch && event.epoch !== this.identity.epoch) return
     const sid = event.kind === 'question' ? event.params?.session_id : event.session_id
     if (sid !== this.identity.runtimeSessionId && sid !== this.identity.storedSessionId) return
@@ -585,7 +567,6 @@ export class RemoteChat {
     }
     if (event.type === 'error') {
       this.identity.uncertain = true
-      if (this.identity.pendingSubmit) this.remoteFailed = true
       void this.save().catch(() => {})
       const reason = remoteReason(payload.message, payload.detail)
       this.push({ kind: 'error', text: reason ? `Remote Hermes reported a turn failure: ${reason}` : TURN_FAILURE })
@@ -606,56 +587,32 @@ export class RemoteChat {
     if (event.method !== 'approval') { this.transport.answer(event.id, undefined, true); return }
     let choice = 'deny'
     try { choice = await this.question(event.params, asking.signal) } catch {}
-    if (this.reconciling || this.released || this.cancelledQuestions.has(event.id) || generation !== this.generation || epoch !== this.transport.epoch
+    if (this.reconciling || this.cancelledQuestions.has(event.id) || generation !== this.generation || epoch !== this.transport.epoch
       || (epoch && this.identity.epoch && epoch !== this.identity.epoch)) return
     this.transport.answer(event.id, { choice: choice === 'once' ? 'once' : 'deny' })
-  }
-
-  checkProfile(snapshot) {
-    const profileName = snapshot.info?.profile_name
-    if (typeof profileName === 'string' && profileName && this.transport.profile
-      && profileName !== this.transport.profile) {
-      throw failure('Hermes returned a different profile or Bot Chat; nothing was submitted.',
-        'bot/hermes-pairing')
-    }
-    return snapshot
   }
 
   async prepare(model) {
     this.joinGap = false
     await this.save()
     let snapshot = await this.transport.session(this.identity, model)
-    let requests = (snapshot.open_requests ?? []).map(request => ({ ...request, epoch: this.transport.epoch }))
-    let cancels = []
-    try {
-      if (this.transport.attached === true) {
-        // The attach JOIN is resume -> activate -> the gap: activate returns the
-        // authoritative snapshot and the viewer subscription, which detach later releases.
-        const cursor = this.identity.lastSeq ?? 0
-        const joined = snapshot.stored_session_id
-        this.joining = new Set()
-        this.joinControls = []
-        snapshot = this.checkProfile(this.transport.check(await this.transport.request(
-          'session.activate', { session_id: snapshot.session_id },
-          this.transport.deadlines?.control)))
-        // Only resume verified the stored id against the Bot Chat we joined.
-        snapshot = { ...snapshot, stored_session_id: joined }
+    if (this.transport.attached === true) {
+      // The attach JOIN is resume -> activate -> the gap: activate returns the
+      // authoritative snapshot and the viewer subscription, which detach later releases.
+      const cursor = this.identity.lastSeq ?? 0
+      this.joining = new Set()
+      try {
+        snapshot = this.transport.check(await this.transport.request('session.activate', { session_id: snapshot.session_id }, this.transport.deadlines?.control))
         const replay = await this.transport.request('session.events.since', {
           session_id: snapshot.session_id, last_seen: cursor, replay_epoch: this.identity.epoch,
         }, this.transport.deadlines?.control)
-        // Replay is newer than activate; an approval may already have been answered.
-        requests = (replay.open_requests ?? []).map(request => ({ ...request, epoch: replay.epoch }))
-        cancels = (replay.events ?? []).filter(event => event.type === 'request.cancel')
         const changedEpoch = typeof replay?.epoch === 'string' && replay.epoch !== this.identity.epoch
         // A reloaded session (new runtime) or a sequence that went backwards is the same
         // reset as a restart even when the epoch string did not change: the new events start
         // near zero and receive would drop them all against the old, larger lastSeq.
         const reloaded = this.identity.runtimeSessionId !== undefined && this.identity.runtimeSessionId !== snapshot.session_id
-        const rewound = Number.isSafeInteger(replay?.latest_seq) && Number.isSafeInteger(cursor) && replay.latest_seq < cursor
-        const gap = replay.truncated === true || Boolean((changedEpoch || reloaded || rewound)
-          && this.identity.epoch
-          && (cursor > 0 || this.identity.pendingSubmit === true
-            || this.identity.uncertain === true))
+        const rewound = Number.isSafeInteger(replay?.latest_seq) && Number.isSafeInteger(this.identity.lastSeq) && replay.latest_seq < this.identity.lastSeq
+        const gap = replay.truncated === true || Boolean((changedEpoch || reloaded || rewound) && this.identity.epoch && cursor > 0)
         if (changedEpoch || reloaded || rewound) {
           // A restarted serve has a new epoch and sequence numbers near zero. Taking the new
           // latest_seq (not max with the old) is what reconcile does; otherwise submit sees
@@ -689,33 +646,11 @@ export class RemoteChat {
           this.joinGap = true
           this.recovered.push(REPLAY_GAP)
         }
-      }
-      Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
-      if (typeof snapshot.subscription_id === 'string' && snapshot.subscription_id) this.identity.subscriptionId = snapshot.subscription_id
-      if (snapshot.admission_id) this.identity.admissionId = snapshot.admission_id
-      const open = new Map()
-      for (const request of [...requests, ...(this.joinControls ?? []).filter(event => event.kind === 'question')]) {
-        if (request.method !== 'approval' || (request.params?.session_id !== this.identity.runtimeSessionId
-          && request.params?.session_id !== this.identity.storedSessionId) || open.has(request.id)) continue
-        open.set(request.id, request)
-      }
-      // These controls can precede the new identity or fall behind the replay cursor.
-      for (const event of [...cancels, ...(this.joinControls ?? []).filter(event => event.type === 'request.cancel')]) {
-        if ((event.session_id !== this.identity.runtimeSessionId && event.session_id !== this.identity.storedSessionId)
-          || (event.epoch !== undefined && event.epoch !== this.identity.epoch)) continue
-        this.cancelledQuestions.add(event.payload.id)
-        this.questions.get(event.payload.id)?.abort?.()
-        this.questions.delete(event.payload.id)
-        open.delete(event.payload.id)
-      }
-      this.openAtJoin = [...open.values()]
-      for (const event of this.joinControls ?? []) {
-        if (event.kind === 'question' && event.method !== 'approval' && this.question) void this.control(event)
-      }
-    } finally {
-      this.joining = undefined
-      this.joinControls = undefined
+      } finally { this.joining = undefined }
     }
+    Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
+    if (typeof snapshot.subscription_id === 'string' && snapshot.subscription_id) this.identity.subscriptionId = snapshot.subscription_id
+    if (snapshot.admission_id) this.identity.admissionId = snapshot.admission_id
     await this.save()
     return snapshot
   }
@@ -745,7 +680,6 @@ export class RemoteChat {
     this.reconciling = []
     try {
       await this.prepare()
-      this.openAtJoin = []
       const joinGap = this.joinGap
       this.recovered = []
       const replay = await this.transport.request('session.events.since', {
@@ -767,14 +701,11 @@ export class RemoteChat {
       let snapshot
       for (let attempt = 0; attempt < 3; attempt++) {
         const before = snapshotChanges()
-        snapshot = this.checkProfile(this.transport.check(await this.transport.request(
-          'session.activate', { session_id: this.identity.runtimeSessionId })))
+        snapshot = this.transport.check(await this.transport.request('session.activate', { session_id: this.identity.runtimeSessionId }))
         if (snapshotChanges() === before) break
         if (attempt === 2) throw failure('Remote session changed while reconciling. Reconnect and reconcile again before sending.')
       }
-      // Keep the stored id that prepare verified, including in the returned snapshot.
-      snapshot = { ...snapshot, stored_session_id: this.identity.storedSessionId }
-      this.identity.runtimeSessionId = snapshot.session_id
+      Object.assign(this.identity, { runtimeSessionId: snapshot.session_id, storedSessionId: snapshot.stored_session_id })
       for (const event of this.reconciling) if (event.epoch === replay.epoch && Number.isSafeInteger(event.seq)) this.identity.lastSeq = Math.max(this.identity.lastSeq, event.seq)
       this.identity.uncertain = snapshot.running === true || snapshot.info?.running === true || snapshot.hydrating === true || snapshot.inflight?.streaming === true
         || ['starting', 'waiting', 'working', 'streaming', 'resuming'].includes(snapshot.status) || (snapshot.open_requests?.length ?? 0) > 0 || Boolean(snapshot.auto_continue)
@@ -796,21 +727,13 @@ export class RemoteChat {
       this.identity.lastSeq = 0
     }
     this.identity.epoch = this.transport.epoch
-    for (const { epoch, ...request } of this.openAtJoin) void this.control({ ...request, kind: 'question', epoch })
-    this.openAtJoin = []
     this.identity.pendingSubmit = true
     await this.save() // Durable before any submit bytes leave.
     try {
       const result = await this.transport.request('prompt.submit', { session_id: this.identity.runtimeSessionId, text })
       if (result.admission_id) this.identity.admissionId = result.admission_id
       await this.save()
-    } catch (error) {
-      if (refusedSubmit(error)) {
-        this.identity.pendingSubmit = false
-        await this.save()
-        const message = error.remote.message
-        throw failure(message ? `Remote Hermes refused this message: ${message}` : 'Remote Hermes refused this message. Nothing was sent; send it again.', 'bot/hermes')
-      }
+    } catch {
       this.identity.uncertain = true
       await this.save()
       throw failure(LOST)
@@ -818,7 +741,6 @@ export class RemoteChat {
   }
 
   async stop() {
-    if (this.released && !this.stopping) return
     if (this.stopping) return this.stopping
     this.stopping = this.stopOnce()
     return this.stopping
@@ -835,10 +757,6 @@ export class RemoteChat {
         if (this.identity.pendingSubmit) await new Promise(resolve => { this.stopped = resolve })
       })(), this.transport.deadlines.cancel, LOST)
     } catch { this.push({ kind: 'error', text: LOST }) }
-    if (this.remoteFailed && this.identity.uncertain && !this.transport.lostNotified && !this.transport.closed) {
-      // Only the remote's settled snapshot can clear a nonterminal failure.
-      try { await this.transport.bounded(this.reconcile(), this.transport.deadlines.control, LOST) } catch {}
-    }
     await this.save()
     // Closing detaches this viewer; it says nothing about remote children.
     await this.close()
@@ -856,23 +774,6 @@ export class RemoteChat {
     this.dispose()
   }
 
-  /**
-   * Close a replaced run with the same detach as close(), but stop listening first so
-   * the old socket cannot change the shared identity or answer questions during detach.
-   */
-  async release() {
-    if (this.released || this.closed) return
-    this.released = true
-    if (this.stopping) {
-      await this.stopping.catch(() => {})
-      return
-    }
-    this.closed = true
-    this.quiet()
-    await this.detach()
-    this.dispose()
-  }
-
   async detach() {
     if (this.detached || this.transport.attached !== true) return
     this.detached = true
@@ -882,18 +783,12 @@ export class RemoteChat {
     try { await this.transport.request('session.detach', { session_id: sessionId, subscription_id: subscriptionId }, this.transport.deadlines?.control) } catch {}
   }
 
-  quiet() {
-    if (this.quieted) return
-    this.quieted = true
-    this.transport.listeners.delete(this.off)
-    for (const asking of this.questions.values()) asking.abort?.()
-    for (const tool of this.tools.values()) { if (tool.status === 'running') tool.status = 'unknown'; tool.done?.() }
-  }
-
   dispose() {
     if (this.disposed) return
     this.disposed = true
-    this.quiet()
+    this.transport.listeners.delete(this.off)
+    for (const asking of this.questions.values()) asking.abort?.()
+    for (const tool of this.tools.values()) { if (tool.status === 'running') tool.status = 'unknown'; tool.done?.() }
     this.transport.close()
   }
 }

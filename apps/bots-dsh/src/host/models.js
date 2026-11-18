@@ -685,25 +685,6 @@ export function install(rt) {
     })
   }
 
-  // THE RULE: a chat already on a Remote Hermes route never takes the in-place model
-  // switch to the attach row, whatever came before. The attached serve answers on its
-  // one row whatever ref the request names (remote-chat-adapter.js stream), so the
-  // Session keeps its route and the exact-route guard accepts the turn. The decision is
-  // the chat's ACTUAL route: the live Session's request header, or, for an unloaded
-  // chat, the last request/header in its stored log. It is never the history of picks.
-  async function keepsCarriedRoute(sessionId, ref) {
-    if (ref !== 'hermes-remote/attach') return false
-    let config
-    try {
-      config = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config
-    } catch { return false }
-    if (config !== undefined) return config?.provider === 'hermes-remote'
-    const stored = await storedRoute(sessionId)
-    // An unreadable log keeps its route: switching would load and measure it too.
-    // A missing log is a fresh part and takes the row.
-    return stored?.unreadable === true || stored?.provider === 'hermes-remote'
-  }
-
   // `force` re-selects even when the record says it is applied: the composer's own
   // model picker can move the Session without telling this plugin.
   async function applyModel(bot, { force = false } = {}) {
@@ -722,14 +703,28 @@ export function install(rt) {
     const effort = await desiredEffort(bot, ref)
     const ownChanged = force || staying.size > 0 || bot.appliedModel !== ref || (bot.appliedEffort ?? undefined) !== effort
     const route = { ...splitRef(ref), ...(effort === undefined ? {} : { reasoningEffort: effort }) }
-    if (ownChanged && !staying.has(chat) && !(await keepsCarriedRoute(chat, ref))) {
-      await selectSessionModel(chat, route)
+    // THE RULE: a chat already on a Remote Hermes route never takes the in-place model
+    // switch to the attach row, whatever came before. The attached serve answers on its
+    // one row whatever ref the request names (remote-chat-adapter.js stream), so the
+    // Session keeps its route and the exact-route guard accepts the turn. The decision is
+    // the chat's ACTUAL route: the live Session's request header, or, for an unloaded
+    // chat, the last request/header in its stored log. It is never the history of picks.
+    const onHermesRoute = async (sessionId) => {
+      if (ref !== 'hermes-remote/attach') return false
+      let config
+      try { config = ctx.sessions?.get?.(sessionId)?.requestHeader?.()?.config } catch { return false }
+      if (config !== undefined) return config?.provider === 'hermes-remote'
+      const stored = await storedRoute(sessionId)
+      // An unreadable log keeps its route: switching would load and measure it too.
+      // A missing log is a fresh part and takes the row.
+      return stored?.unreadable === true || stored?.provider === 'hermes-remote'
     }
+    if (ownChanged && !staying.has(chat) && !(await onHermesRoute(chat))) await selectSessionModel(chat, route)
     for (const sessionId of rt.groupSessionsOf(bot.id)) {
       if (staying.has(sessionId)) continue
       const applied = sessionSelections.get(sessionId)
       if (!force && applied !== undefined && sameSelection(applied, route)) continue
-      if (await keepsCarriedRoute(sessionId, ref)) continue
+      if (await onHermesRoute(sessionId)) continue
       await selectSessionModel(sessionId, route)
         .catch(error => rt.warn('omni-ui: model for %s in a group not applied: %s', bot.name, error))
     }
@@ -817,7 +812,7 @@ export function install(rt) {
     catalog, cachedCatalog: () => answerable(catalogCache.value), cachedDefault: () => pickDefault(catalogCache.value),
     defaultRef, defaultModel, defaultBotModel, defaultEffort, isUsable, resolveModel, modelAccess, assertModelAccess, desiredModel, assertNotOffCli, reasoningOf, resolveEffort, desiredEffort,
     backgroundModel, cachedBackground: () => pickBackground(catalogCache.value), answersAside: answersAsideRef,
-    selectSessionModel, keepsCarriedRoute, applyModel, waitForModel, syncModels, routeRefused,
+    selectSessionModel, applyModel, waitForModel, syncModels, routeRefused,
     dropCatalog: () => { catalogCache = { at: 0, value: [] } },
   })
 }

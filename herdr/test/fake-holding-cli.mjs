@@ -1,4 +1,3 @@
-import { startFakeCore } from "./fake-core.mjs";
 // Run the real CLI against the linked machine's own view of fake-hc. Its pane IDs
 // are local there; the controller sees those same panes with the machine prefix.
 import { readFileSync, writeFileSync } from "node:fs";
@@ -13,12 +12,8 @@ const state = { ...outer, core: { id: "core-of-vm", name: "vm" }, machines: [], 
   .filter((pane) => pane.address.startsWith(prefix))
   .map((pane) => ({ ...pane, address: local(pane.address), parent: local(pane.parent) })) };
 writeFileSync(localPath, JSON.stringify(state));
-const holdingEnv = { ...process.env, HC_FAKE_STATE: localPath, HC_FAKE_LOG: `${outerPath}.holding.log`,
-  HERDR_APP_HOME: process.env.HOLDING_APP };
-const core = startFakeCore(null, holdingEnv);
 const result = spawnSync(process.execPath, [process.env.HOLDING_CLI, ...process.argv.slice(2)], {
   encoding: "utf8", env: { ...process.env, HC_FAKE_STATE: localPath,
-    ...core.env,
     HC_FAKE_LOG: `${outerPath}.holding.log`, HERDR_APP_HOME: process.env.HOLDING_APP,
     AUTOMAGIK_HERDR_RESTART_STABLE_MS: "1", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "2000" },
 });

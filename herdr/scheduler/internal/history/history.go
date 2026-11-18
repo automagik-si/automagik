@@ -70,13 +70,12 @@ type Record struct {
 	WorkspaceID string `json:"workspace_id,omitempty"`
 	PaneID      string `json:"pane_id,omitempty"`
 	Error       string `json:"error,omitempty"`
-	// ExitCode, Stderr and Notified are a command run's (ADR 0013).
+	// The next four are a command run's (ADR 0013); an agent run has none.
 	// ExitCode is the program's exit status, absent when it has none (it never
 	// started, the timeout or a signal ended it).
 	ExitCode *int `json:"exit_code,omitempty"`
-	// Result is a command run in one line: the last line of stdout when it
-	// worked, else the failure. It is what Notify's bot is sent. An agent
-	// run's done may carry a late-start note here; that note is not sent.
+	// Result is the run in one line: the last line of stdout when it worked,
+	// else the failure. It is what Notify's bot is sent.
 	Result string `json:"result,omitempty"`
 	// Stderr is the last lines of the program's stderr, kept for a failure.
 	Stderr string `json:"stderr,omitempty"`

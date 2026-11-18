@@ -45,9 +45,9 @@ file, to be here) and prints each as patched or added; any other difference fail
 docs/adr/0012-a-successful-run-may-close-its-workspace.md — patched: existing mode closes its own tab; blocked grace
 docs/adr/0013-a-command-is-a-run-the-scheduler-does-itself.md — added: why a run may be a plain command (#938)
 automations.example.yaml       — patched: a command entry
-CHANGELOG.md                   — patched: the command kind and hc late starts (#1416), under Unreleased
-CONTEXT.md                     — patched: work has three kinds; command, result line, report; agent done may carry a late-start note
-internal/api/api.go            — patched: ls --json carries blocked_grace_minutes, kinds, command and notify; history a command run's result or an agent done's late-start note
+CHANGELOG.md                   — patched: the command kind, under Unreleased
+CONTEXT.md                     — patched: work has three kinds; command, result line, report
+internal/api/api.go            — patched: ls --json carries blocked_grace_minutes, kinds, command and notify; history a command run's result
 internal/api/api_test.go       — patched: the listing carries blocked_grace_minutes and its default; kinds, a command entry, a command run
 internal/cleanup/cleanup.go    — patched: a command entry has no repo to scan
 internal/command/command.go    — added: runs a command, its exit status, last lines, timeout and shutdown (#938)
@@ -57,11 +57,11 @@ internal/config/config_test.go — patched: the grace defaults, -1, and existing
 internal/config/edit_test.go   — patched: put's merge cases for blocked_grace_minutes; existing + on-success accepted
 internal/daemon/daemon.go      — patched: a daemon told to stop ends its running commands first
 internal/daemon/daemon_test.go — patched: the stop ends a running command and waits for its record
-internal/hc/hc.go              — patched: hc read with a ten-second deadline; live terminals by label; hc send
-internal/history/history.go    — patched: a command run's exit code, result line, stderr and report; agent done may carry a late-start note
+internal/hc/hc.go              — patched: hc read, the blocked run's screen; live terminals by label; hc send
+internal/history/history.go    — patched: a command run's exit code, result line, stderr and report
 internal/notify/bot.go         — added: a result line to a bot, by its label, through hc send (#938)
 internal/notify/bot_test.go    — added: label lookup, the terminal-name fallback, an undelivered report
-internal/runner/runner.go      — patched: a command run skips the host; true status, then the report; takes host notes on every outcome, records them only on done
+internal/runner/runner.go      — patched: a command run skips the host; true status, then the report
 skills/creating-automations/SKILL.md — patched: the command entry
 internal/herdr/herdr.go        — patched: tab id/list/close; pane process-info for a blocked agent's stop request
 internal/herdr/herdr_test.go   — patched: tab and pane process-info wire cases
@@ -69,50 +69,22 @@ internal/host/agent.go         — patched: herdr blocked grace, rechecked stop;
 internal/host/agent_test.go    — patched: herdr blocked/blips/-1; submit mismatch deadline, attempt limit and pacing; error and unknown status rows
 internal/host/close.go         — added: read and close serialized per workspace within one scheduler process
 internal/host/close_test.go    — added: concurrent closes on two tabs leave the last visible tab
-internal/host/hc.go            — patched: blocked/close/status fixes; Codex --no-daemon (#929); confirmed startup dialogs, latched Get-working and late-start notes (#1416)
+internal/host/hc.go            — patched: blocked/close/status fixes; Codex --no-daemon (#929)
 internal/host/hc_test.go       — patched: blocked/close/status rows; hc launch arguments (#929)
-internal/host/host.go          — patched: Session carries the run's tab; existing mode asks only for a tab a read says is listed and not last; optional Noter returns and forgets a run's note
+internal/host/host.go          — patched: Session carries the run's tab; existing mode asks only for a tab a read says is listed and not last
 internal/host/host_test.go     — patched: own-tab close, last tab, unlisted tab, unreadable list, race row, worktree/root unchanged
 internal/host/ops.go           — patched: tab operations and rechecked AgentStop result in the seam
 internal/host/stop_unix.go     — added: recheck status and foreground group before SIGTERM request
 internal/host/stop_unix_test.go — added: status/group changes, unchanged target, read errors and refusals
 internal/host/stop_resume_unix_test.go — added: cleared dialog before signal resumes startup/submit/wait
 internal/host/stop_other.go    — added: unsupported platform stop reports an error
-internal/host/screen.go        — added: the dialog line read from a blocked screen; startup dialog detection requires an option below a prompt word
+internal/host/screen.go        — added: the dialog line read from a blocked screen
 internal/host/screen_test.go   — added: dialog line, control characters, the bound and the fallback
-internal/host/dialog_line_test.go — added: a startup dialog is a question with an option below it (#1416)
-internal/host/late_start_test.go — added: late start noted, confirmed dialog fails early, no early failure from silence, Get witnesses, concurrent notes (#1416)
 internal/runner/runner_test.go — patched: the blocked failure's notice; existing mode's default; command runs and their reports
-internal/runner/note_test.go   — added: a done run carries the host's note; failure and cancellation drop it (#1416)
 main.go                        — patched: put copies blocked_grace_minutes, command and notify into the entry; put gives a new automation the form's default agent args, never a command; list and history show a command
 main_test.go                   — added: the put wire path carries blocked_grace_minutes; existing + on-success accepted; put and a form save write the same file; a command and its bot
 README.md                      — patched: blocked_grace_minutes, and existing mode's own-tab close; run a plain command
 ```
-
-Issue #1416: silence from an hc agent no longer fails a run before its timeout.
-Work means a wait reporting `working`, a positive turn count, or a Get reporting
-`working`; Get-working now latches the same witness as a wait. Get's `blocked`
-and `done` only suppress an early verdict. The done, idle, exit and error
-verdicts and the blocked grace path stay as they were. With no witness and past
-`paneReady`, at most once per `waitSlice`, the host reads the screen then gets a
-fresh status. Only the same non-empty dialog line in two consecutive inspections,
-with that Get saying neither working, blocked nor done, fails early. The line is
-the last cleaned, clipped line matching a prompt word with an answer option
-below it; the blocked path's `promptLine` is unchanged. A read error logs one
-line and resets the previous dialog. The early error names the pane and the
-dialog to answer, and leaves its terminal running. At the timeout without a
-witness, a fresh Get-working keeps the existing still-working error; otherwise
-the error says no sign of work in the timeout and names the pane to inspect.
-The first witness after `paneReady` logs and keeps `started late: first seen
-working <elapsed rounded to the second> after the run began`; done without a
-witness makes no note. The host owns this interpretation (ADR 0004), with a
-mutex-guarded note per pane, cleared at Do's start and taken and forgotten through
-`Noter`. The runner always takes it after Do, records it in Result only on done,
-and drops it on failure or cancellation so Error stays visible. Success stays
-quiet, with no toast or bot report. Read has a ten-second command context;
-Wait and Get are unchanged. Accepted cost: a dialog the detector does not
-recognise holds the run until its timeout (normally 60 minutes) instead of two
-minutes.
 
 Issue #929 (Refs #498): direct Codex launches under `backend: hc` add `--no-daemon` unless
 already supplied, so execution stays associated with the run's terminal. Permission flags, model,

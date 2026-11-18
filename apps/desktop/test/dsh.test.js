@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 import { createServer } from 'node:net'
 import { test } from 'node:test'
@@ -20,8 +19,6 @@ import { batchSafe } from '../scripts/batch-spawn.mjs'
 
 const posixOnly = { skip: process.platform === 'win32' ? 'the tools are sh scripts here' : false }
 const windowsOnly = { skip: process.platform === 'win32' ? false : 'Windows only' }
-// The dsh launcher a start uses in a checkout (resourcesOf names the packaged one).
-const LAUNCHER = fileURLToPath(new URL('../src/dsh-launch.cjs', import.meta.url))
 // A folder mode that forbids removing a file in it: POSIX only, and never for root.
 const permissionOnly = { skip: process.platform === 'win32' ? 'Windows has no folder write mode' : process.getuid?.() === 0 ? 'root removes a file from any folder' : false }
 
@@ -109,11 +106,9 @@ test('resources come from the app when packaged and from build/ in a checkout', 
   assert.deepEqual(resourcesOf({ packaged: true, resourcesPath: '/opt/Omni/resources', appPath: '/x' }), {
     bin: join('/opt/Omni/resources', 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     pnpm: join('/opt/Omni/resources', 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
-    launcher: join('/opt/Omni/resources', 'dsh-launch', 'dsh-launch.cjs'),
     profile: join('/opt/Omni/resources', 'profile'),
   })
   assert.equal(resourcesOf({ packaged: false, resourcesPath: '/x', appPath: '/src/apps/omni-desktop' }).profile, join('/src/apps/omni-desktop', 'build', 'profile'))
-  assert.equal(resourcesOf({ packaged: false, resourcesPath: '/x', appPath: '/src/apps/omni-desktop' }).launcher, join('/src/apps/omni-desktop', 'src', 'dsh-launch.cjs'))
 })
 
 test('the shipped profile seeds a new home, and a new build replaces only its packages', async (t) => {
@@ -499,156 +494,6 @@ setInterval(() => {}, 1000)
   assert.match(lines.join(''), /booting omni on 127\.0\.0\.1 with \/app\/profile\/privacy\.patch\.yml/)
   await stopDsh(child)
   assert.notEqual(child.exitCode ?? child.signalCode, null)
-})
-
-// The app's plugin installs, updates and removals are bound to the pnpm it ships (#1466): a
-// stand-in dsh runs a package operation through the invocation startDsh gives it, and the pnpm
-// first on PATH must never run.
-test('plugin operations use the app\'s bundled pnpm, not one first on PATH', async (t) => {
-  const scope = scratch(t, 'omni-desktop-bundled-pnpm-')
-  const { root } = scope
-  const bundled = join(root, 'bundled-pnpm.cjs')
-  writeFileSync(bundled, `
-const { appendFileSync } = require('node:fs')
-appendFileSync(process.env.PNPM_CALLS, 'bundled ' + process.argv.slice(2).join(' ') + '\\n')
-console.log('10.34.6')
-`)
-  // A stand-in pnpm first on PATH: if anything resolves the command `pnpm` it runs this.
-  const pathDir = join(root, 'path', 'bin')
-  const pathMarker = join(root, 'path-pnpm-used')
-  mkdirSync(pathDir, { recursive: true })
-  writeFileSync(join(pathDir, 'pnpm'), `#!/bin/sh\necho path-pnpm > '${pathMarker}'\nexit 97\n`)
-  chmodSync(join(pathDir, 'pnpm'), 0o755)
-  writeFileSync(join(pathDir, 'pnpm.cmd'), `@echo off\r\necho path-pnpm > "${pathMarker}"\r\nexit /b 97\r\n`)
-  // A stand-in dsh: it records the invocation, runs it as a plugin operation would, and starts.
-  const entry = join(root, 'fake-dsh.mjs')
-  writeFileSync(entry, `
-import { execFileSync } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
-export async function runCli(options = {}) {
-  const manager = options.packageManager
-  writeFileSync(process.env.LAUNCHER_FACTS, JSON.stringify(manager ?? null))
-  writeFileSync(process.env.LAUNCHER_ARGV, process.argv[1])
-  if (!manager) throw new Error('dsh was given no package manager')
-  const version = execFileSync(manager.command, [...manager.args, '--version'], {
-    encoding: 'utf8', env: { ...process.env, ...manager.env },
-  }).trim()
-  process.stdout.write('plugin pnpm ' + version + '\\n')
-  const args = process.argv.slice(2)
-  const port = args[args.indexOf('--port') + 1]
-  setTimeout(() => console.log('dsh web: http://127.0.0.1:' + port + '/?token=pnpm'), 50)
-  setInterval(() => {}, 1000)
-}
-`)
-  const calls = join(root, 'pnpm-calls.txt')
-  const facts = join(root, 'launcher-facts.json')
-  const argvFile = join(root, 'launcher-argv.txt')
-  const port = await freePort()
-  const running = await startDsh({
-    node: process.execPath, bin: entry, launcher: LAUNCHER, bundledPnpm: bundled,
-    env: {
-      ...process.env,
-      PATH: [pathDir, process.env.PATH].filter(Boolean).join(delimiter),
-      PNPM_CALLS: calls, LAUNCHER_FACTS: facts, LAUNCHER_ARGV: argvFile,
-    },
-    port, cwd: root,
-  })
-  scope.stop = () => stopDsh(running.child)
-  assert.equal(running.url, `http://127.0.0.1:${port}/?token=pnpm`)
-  assert.equal(existsSync(pathMarker), false, 'the pnpm first on PATH never ran')
-  assert.equal(readFileSync(calls, 'utf8'), 'bundled --version\n')
-  // argv[1] names dsh's entry, as a direct start did: the Bot team's update check reads it.
-  assert.equal(readFileSync(argvFile, 'utf8'), entry)
-  assert.deepEqual(JSON.parse(readFileSync(facts, 'utf8')), {
-    command: process.execPath,
-    args: [bundled],
-    env: { ELECTRON_RUN_AS_NODE: '1' },
-  })
-})
-
-test('a start without the app\'s bundled pnpm fails clearly and never falls back to PATH', async (t) => {
-  const scope = scratch(t, 'omni-desktop-pnpm-missing-')
-  const missing = join(scope.root, 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
-  let spawned = false
-  await assert.rejects(
-    startDsh({
-      node: process.execPath, bin: join(scope.root, 'fake-dsh.mjs'), launcher: LAUNCHER,
-      bundledPnpm: missing, env: process.env, port: 1, cwd: scope.root,
-      spawn: () => { spawned = true },
-    }),
-    error => /the app's bundled pnpm is missing at /.test(error.message) && error.message.endsWith(missing),
-  )
-  assert.equal(spawned, false, 'dsh never starts to fall back to PATH')
-  // The launcher says the same if it is ever started directly: it exits, never tries `pnpm`.
-  const entry = join(scope.root, 'fake-dsh.mjs')
-  writeFileSync(entry, 'export async function runCli() {}\n')
-  const carrier = spawnSync(process.execPath, [LAUNCHER], {
-    env: { ...process.env, AUTOMAGIK_DSH_ENTRY: entry, AUTOMAGIK_DSH_PNPM: missing },
-    encoding: 'utf8',
-  })
-  assert.equal(carrier.status, 1)
-  assert.match(carrier.stderr, /the app's bundled pnpm is missing at .*pnpm\.cjs/)
-})
-
-test('an entry with a direct-run guard starts once, with the package manager', async (t) => {
-  const scope = scratch(t, 'omni-desktop-launcher-guard-')
-  const { root } = scope
-  const bundled = join(root, 'bundled-pnpm.cjs')
-  writeFileSync(bundled, "console.log('10.34.6')\n")
-  const calls = join(root, 'launcher-calls.txt')
-  const facts = join(root, 'launcher-facts.json')
-  // A stand-in entry that runs itself when argv names it, as an installed bin may.
-  const entry = join(root, 'guarded-dsh.mjs')
-  writeFileSync(entry, `
-import { appendFileSync, writeFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
-export async function runCli(options = {}) {
-  appendFileSync(process.env.LAUNCHER_CALLS, JSON.stringify({ manager: options.packageManager !== undefined }) + '\\n')
-  if (!options.packageManager) return
-  writeFileSync(process.env.LAUNCHER_FACTS, JSON.stringify(options.packageManager))
-  const args = process.argv.slice(2)
-  const port = args[args.indexOf('--port') + 1]
-  setTimeout(() => console.log('dsh web: http://127.0.0.1:' + port + '/?token=guard'), 50)
-  setInterval(() => {}, 1000)
-}
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await runCli()
-`)
-  const port = await freePort()
-  const running = await startDsh({
-    node: process.execPath, bin: entry, launcher: LAUNCHER, bundledPnpm: bundled,
-    env: { ...process.env, LAUNCHER_CALLS: calls, LAUNCHER_FACTS: facts },
-    port, cwd: root,
-  })
-  scope.stop = () => stopDsh(running.child)
-  assert.equal(running.url, `http://127.0.0.1:${port}/?token=guard`)
-  // argv[1] is named only after the import: the guard must not start dsh a second time.
-  assert.equal(readFileSync(calls, 'utf8'), '{"manager":true}\n')
-  assert.deepEqual(JSON.parse(readFileSync(facts, 'utf8')), {
-    command: process.execPath,
-    args: [bundled],
-    env: { ELECTRON_RUN_AS_NODE: '1' },
-  })
-})
-
-test('a launcher without the app\'s bundled pnpm is refused, never a direct start', async (t) => {
-  const scope = scratch(t, 'omni-desktop-launcher-alone-')
-  let spawned = false
-  await assert.rejects(
-    startDsh({
-      node: process.execPath, bin: join(scope.root, 'fake-dsh.mjs'), launcher: LAUNCHER,
-      env: process.env, port: 1, cwd: scope.root, spawn: () => { spawned = true },
-    }),
-    /the dsh launcher needs the app's bundled pnpm/,
-  )
-  assert.equal(spawned, false)
-})
-
-test('the launcher that binds the bundled pnpm ships outside the asar', () => {
-  const prepare = readFileSync(new URL('../scripts/prepare-runtime.mjs', import.meta.url), 'utf8')
-  assert.match(prepare, /cpSync\(join\(APP, 'src', 'dsh-launch\.cjs'\)/)
-  const builder = readFileSync(new URL('../electron-builder.yml', import.meta.url), 'utf8')
-  assert.match(builder, /- from: build\/dsh-launch\n {4}to: dsh-launch/)
-  assert.ok(existsSync(LAUNCHER))
 })
 
 // Windows: dsh's whole tree ends, so nothing it started keeps files of the app's folder open
@@ -1370,9 +1215,6 @@ test('main.js guards the origin as it is now, and loads only the URL pageUrlOf h
   assert.match(main, /guard: \(\) => harden\(\(\) => dshOrigin\)/)
   assert.match(main, /const url = pageUrlOf\(running, dshOrigin\)[\s\S]{0,120}loadURL\(url\)/)
   assert.match(main, /serveDsh\(\{\s*run: dshProcess,/)
-  // Every start binds the plugin manager to the app's own pnpm: losing these props would bring
-  // back #1466 with the rest of the suite still green.
-  assert.match(main, /bundledPnpm: resources\.pnpm, launcher: resources\.launcher,/)
   assert.match(main, /urlFile/)
   assert.equal(/stopDsh\(|dshChild/.test(main), false, 'every way out stops dshProcess, the current dsh')
 })

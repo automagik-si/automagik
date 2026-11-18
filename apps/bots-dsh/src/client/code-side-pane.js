@@ -323,14 +323,10 @@ export function CodeBody({ code }) {
     else code.selectPane({ botId, worker: null })
   }
   const projects = tree?.projects ?? []
-  // A project-less group is RFC 0014's global Bots: they are seats and carry their own label.
-  const realProjects = projects.filter(project => project.global !== true)
-  const projectCount = realProjects.length === 1 ? t('1 project') : t('{n} projects', { n: realProjects.length })
-  const treeRows = projects.map((project) => {
-    const label = project.global === true ? t('Global Bots') : project.name ?? project.folder
-    return h('section', { key: project.global === true ? 'global' : project.folder, className: 'cs-project' },
-      h('div', { className: 'cs-project-name', title: project.global === true ? label : project.folder }, label),
-      project.bots.map(bot => h('div', { key: bot.id, className: 'cs-bot' },
+  const projectCount = projects.length === 1 ? t('1 project') : t('{n} projects', { n: projects.length })
+  const treeRows = projects.map(project => h('section', { key: project.folder, className: 'cs-project' },
+    h('div', { className: 'cs-project-name', title: project.folder }, project.name ?? project.folder),
+    project.bots.map(bot => h('div', { key: bot.id, className: 'cs-bot' },
       h(TreeRow, {
         label: bot.name,
         status: bot.status,
@@ -346,8 +342,7 @@ export function CodeBody({ code }) {
         current: current.selected?.botId === bot.id && current.selected?.worker === worker.terminal,
         title: [worker.role, worker.branch?.replace(/^refs\/heads\//, '')].filter(Boolean).join(' · '),
         onClick: () => choose(bot.id, worker.terminal),
-      })))))
-  })
+      }))))))
   return h('div', { className: 'cs-host' },
     h('div', { className: 'cs-top' },
       h('span', { className: 'cs-machine' }, tree?.machine?.name ?? t('This computer')),

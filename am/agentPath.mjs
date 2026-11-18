@@ -226,11 +226,7 @@ export function loginPathOf(text, marker) {
  * the same agent and interpreter (#436); then the user bin folders that exist (a profile that
  * didn't answer, or doesn't add them), /usr/bin and /bin, and last the folders of the agent's
  * real file (npm's <prefix>/bin holds its node). Prints that PATH, the agent's absolute file and
- * its first line; exit 3 when no such file. When hc's PATH didn't find the agent and its real
- * file is an npm package's env-node script, <prefix>/bin goes before the first other node
- * folder, after the folders first, if the prefix folder and node are safe. This guarantee
- * needs readlink -f; a change that selects a different real agent is undone. The words are
- * data here: none is ever evaluated.
+ * its first line; exit 3 when no such file. The words are data here: none is ever evaluated.
  */
 export const AGENT_PATH_SH = `if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
   sec=$(command -v security 2>/dev/null); [ -x "$sec" ] || sec=/usr/bin/security
@@ -238,8 +234,8 @@ export const AGENT_PATH_SH = `if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     err=$("$sec" show-keychain-info 2>&1) || { printf '%s\\n' "$err" | head -n 1; exit 4; }
   fi
 fi
-agent=$1 path= first=$2 rest=$PATH pre=$3 own=0
-case $(command -v "$agent" 2>/dev/null) in /*) first=$PATH rest=$2 own=1 ;; esac
+agent=$1 path= first=$2 rest=$PATH pre=$3
+case $(command -v "$agent" 2>/dev/null) in /*) first=$PATH rest=$2 ;; esac
 add() {
   case $1 in /*) ;; *) return ;; esac
   case ":$path:" in *":$1:"*) ;; *) path=\${path:+$path:}$1 ;; esac
@@ -254,55 +250,7 @@ case $file in /*) ;; *) exit 3 ;; esac
 real=$(readlink -f "$file" 2>/dev/null) && [ -n "$real" ] || real=$file
 add "\${real%/*}"
 case $real in */lib/node_modules/*) d=\${real%/lib/node_modules/*}/bin; [ -d "$d" ] && add "$d" ;; esac
-line=$(head -c 256 "$real" 2>/dev/null | head -n 1)
-trusted() (
-  at=$1
-  case $at in /*) ;; *) exit 1 ;; esac
-  uid=$(id -u) || exit 1
-  case $uid in ''|*[!0-9]*) exit 1 ;; esac
-  set -f
-  while :; do
-    info=$(LC_ALL=C ls -ldn "$at" 2>/dev/null) || exit 1
-    # Split only the metadata fields; globbing is off and the filename is unused.
-    # shellcheck disable=SC2086
-    set -- $info
-    [ "$#" -ge 3 ] || exit 1
-    mode=$1 owner=$3
-    case $mode in ??????????*) ;; *) exit 1 ;; esac
-    case $owner in "$uid"|0) ;; *) exit 1 ;; esac
-    case $mode in ????????w*)
-      case "$owner:$mode" in 0:d????????t*) ;; *) exit 1 ;; esac
-    ;; esac
-    [ "$at" = / ] && exit 0
-    at=\${at%/*}; [ -n "$at" ] || at=/
-  done
-)
-case $real in */lib/node_modules/*)
-  case $line in '#!'*env*node*)
-    if [ "$own" = 0 ] && [ -d "$d" ] && [ -f "$d/node" ] && [ -x "$d/node" ] &&
-      realdir=$(readlink -f "$d" 2>/dev/null) && realnode=$(readlink -f "$d/node" 2>/dev/null) &&
-      trusted "$realdir" && trusted "$realnode"; then
-      old=$path; path= placed=0
-      set -f; IFS=:
-      for x in $pre; do add "$x"; done
-      for x in $old; do
-        case ":$path:" in *":$x:"*) continue ;; esac
-        if [ "$placed" = 0 ] && [ -f "$x/node" ] && [ -x "$x/node" ]; then
-          add "$d"; placed=1
-        fi
-        add "$x"
-      done
-      unset IFS; set +f
-      add "$d"
-      if ! (PATH=$path; export PATH
-        found=$(command -v "$agent") && foundreal=$(readlink -f "$found" 2>/dev/null) &&
-          [ "$foundreal" = "$real" ]); then
-        path=$old
-      fi
-    fi
-  ;; esac
-;; esac
-printf '%s\\n%s\\n%s\\n' "$path" "$file" "$line"`;
+printf '%s\\n%s\\n%s\\n' "$path" "$file" "$(head -c 256 "$real" 2>/dev/null | head -n 1)"`;
 
 /**
  * Finds `program` on a linked machine, as a pane there will (`prepend`: colon-separated absolute

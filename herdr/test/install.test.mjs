@@ -10,7 +10,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readJsonLines } from "./log-lines.mjs";
-import { UNIT_MARK as UNIT_MARK_LINE } from "../mods/am-sidebar/revive.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const INSTALL = join(ROOT, "install.sh");
@@ -3067,45 +3066,4 @@ test("#220: --no-scheduler installs the pack and never downloads, configures or 
   assert.equal(existsSync(schedConfig(s)), false);
   assert.equal(existsSync(schedState(s)), false);
   assert.match(s.run("--help").out, /--no-scheduler leaves ~\/\.local\/bin\/herdr-automations/);
-});
-
-test("a pack revive unit from before #1418 (no kept PATH) is refreshed by a rerun, even with --yes; --no-revive, a unit that keeps a PATH and a unit not the pack's are left alone", { skip: process.platform !== "linux" }, (t) => {
-  const s = scratch(t, { os: "Linux" });
-  s.addHerdrApp();
-  s.publish("9.9.0");
-  const log = join(s.root, "systemctl.log");
-  exe(join(s.bin, "systemctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\nexit 0\n`);
-  const calls = () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : []);
-  assert.equal(s.run("--no-revive", "--no-usagemeter").code, 0);
-  const unit = join(s.home, ".config", "systemd", "user", "automagik-herdr-revive.service");
-  mkdirSync(dirname(unit), { recursive: true });
-  const legacy = [UNIT_MARK_LINE, "[Unit]", "Description=Automagik Herdr: bring the bots back after a restart", "", "[Service]", "Type=oneshot",
-    `ExecStart="${s.link}" revive --boot --wait 600`, "TimeoutStartSec=infinity", "", "[Install]", "WantedBy=default.target", ""].join("\n");
-  // --no-revive: nothing, not even a refresh.
-  writeFileSync(unit, legacy);
-  const no = s.run("--no-revive", "--no-usagemeter");
-  assert.equal(no.code, 0, no.err + no.out);
-  assert.equal(readFileSync(unit, "utf8"), legacy);
-  assert.deepEqual(calls(), []);
-  // --yes: the same login service, refreshed so it keeps the PATH (with the CLI's link folder).
-  const yes = s.run("--yes", "--no-usagemeter");
-  assert.equal(yes.code, 0, yes.err + yes.out);
-  assert.match(yes.out, /Refreshed the revive login service: it now keeps your PATH \(#1418\)\./);
-  const text = readFileSync(unit, "utf8");
-  const line = text.split("\n").find((l) => l.startsWith('Environment="PATH='));
-  assert.ok(line, text);
-  assert.ok(line.includes(dirname(s.link)), line);
-  assert.ok(text.includes(`ExecStart="${s.link}" revive --boot --wait `), text);
-  assert.deepEqual(calls(), ["--user daemon-reload", "--user enable automagik-herdr-revive.service"]);
-  // It keeps a PATH now: a later run says nothing and writes nothing.
-  const again = s.run("--yes", "--no-usagemeter");
-  assert.equal(again.code, 0, again.err + again.out);
-  assert.doesNotMatch(again.out, /revive login service/);
-  assert.equal(readFileSync(unit, "utf8"), text);
-  // Someone else's unit at that path is never refreshed.
-  writeFileSync(unit, "[Unit]\nDescription=mine\n");
-  const theirs = s.run("--yes", "--no-usagemeter");
-  assert.equal(theirs.code, 0, theirs.err + theirs.out);
-  assert.equal(readFileSync(unit, "utf8"), "[Unit]\nDescription=mine\n");
-  assert.equal(calls().length, 2);
 });

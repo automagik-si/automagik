@@ -1,4 +1,3 @@
-import { spawnSync as spawnScratch } from "node:child_process";
 // tidy (sidebar-rules Group 2): the planner over the recorded fixtures and plain-data cases,
 // the State read from hc, herdr-app, git and the files, and the CLI: `tidy` changes nothing,
 // and start, attach and create apply only the non-visual fixes. Fakes only: test/fake-hc.mjs
@@ -357,7 +356,6 @@ function scene(t) {
   const list = join(app, "am-sidebar-projects.json");
   writeFileSync(list, `${JSON.stringify([alpha, join(root, "gone"), beta], null, 2)}\n`);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: hcState, HC_FAKE_LOG: hcLog, GIT_CEILING_DIRECTORIES: root };
-  Object.assign(env, { AUTOMAGIK_HERDR_TEST_ROOTS: root, HC_SOCKET: "", HC_SESSION: "" });
   delete env.HC_TERMINAL_ID;
   const cli = (args) => { const r = spawnSync(process.execPath, [CLI, ...args], { cwd: alpha, env, encoding: "utf8" }); return { code: r.status, out: r.stdout, err: r.stderr }; };
   const read = (p) => readFileSync(p, "utf8");
@@ -486,9 +484,6 @@ test("create with no hc on PATH warns once, about its own panes, and nothing fro
   const project = scratchProject(root, "p");
   symlinkSync(process.execPath, join(bin, "node"));
   symlinkSync(execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim(), join(bin, "git"));
-  const spawnSync = (command, args, options) => spawnScratch(command, args, {
-    ...options, env: { ...options.env, AUTOMAGIK_HERDR_TEST_ROOTS: root },
-  });
   const r = spawnSync(process.execPath, [CLI, "create", "--name", "Solo", "--agent", "claude"],
     { cwd: project, env: { HOME: root, PATH: bin, HERDR_APP_HOME: app, GIT_CEILING_DIRECTORIES: root }, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);

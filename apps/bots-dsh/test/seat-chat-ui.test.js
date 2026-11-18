@@ -13,7 +13,6 @@ const bundle = await build({
     contents: [
       "export { teamOf, renderArt } from './src/client/left-bar.js'",
       "export * from './src/client/seat-chat.js'",
-      "export { codeStore } from './src/client/code-side.js'",
       "export { QUIET, WORDED, word } from './src/client/left-bar-status.js'",
       "export { installLocale } from './src/client/i18n.js'",
     ].join('\n'),
@@ -23,7 +22,6 @@ const bundle = await build({
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
 let stored = null
-const realFetch = globalThis.fetch
 globalThis.localStorage = {
   getItem: () => stored,
   setItem: (key, value) => { stored = value },
@@ -39,8 +37,7 @@ const module = { exports: {} }
 new Function('module', 'exports', 'require', bundle.outputFiles[0].text)(module, module.exports, name => (name === 'react' ? react : {}))
 
 const {
-  EMPTY_FACE, QUIET, SeatChatPanel, SeatRow, WaitingCard, WORDED, codeStore, mergeFace, renderArt, seatAgentName, seatBotId, seatChatView,
-  seatClientId, seatSourceNote, seatTerminalWhy, seatWithFreshPane, seatWordOf, teamOf, word,
+  EMPTY_FACE, QUIET, SeatChatPanel, SeatRow, WaitingCard, WORDED, mergeFace, renderArt, seatAgentName, seatChatView, seatClientId, seatSourceNote, seatWordOf, teamOf, word,
 } = module.exports
 
 /** An element with its function components drawn, down to tags and text. */
@@ -60,29 +57,6 @@ const seat = {
   id: 'b-aaaaaaaaaa', name: 'Orchestrator One', project: 'Project One', terminal: 't1',
   agent: 'claude', chat: 'transcript', status: 'working', order: 0,
 }
-/** The row the bar really opens: its key has the `seat:` prefix, its artId is the registry Bot. */
-const seatRow = { ...seat, id: 'seat:b-aaaaaaaaaa', artId: 'b-aaaaaaaaaa' }
-
-/** The Code side's tree read, answered by the test: no route of the seat's own is involved. */
-const TREE = {
-  projects: [{
-    folder: '/project-one', name: 'Project One',
-    bots: [{ id: 'b-aaaaaaaaaa', name: 'Orchestrator One', status: 'idle', terminal: { id: 't1' }, workers: [] }],
-  }],
-}
-let fetched = []
-const readCodeTree = () => {
-  fetched = []
-  globalThis.fetch = async (_url, options) => {
-    const body = JSON.parse(options.body)
-    fetched.push(body.endpoint)
-    if (body.endpoint !== 'code-tree') throw new Error(`unexpected endpoint ${body.endpoint}`)
-    return { ok: true, json: async () => ({ ok: true, value: TREE }) }
-  }
-}
-const settle = () => new Promise(resolve => setTimeout(resolve, 20))
-const part = (tree, face) => buttons(tree).find(button => button.props['data-face'] === face)
-const renderSeat = onBack => render(SeatChatPanel({ onBack }))
 
 test('the bar puts a seat under the Main Bot, marked as a seat, with its own status', () => {
   const roster = {
@@ -200,113 +174,4 @@ test('the panel is its own keyed main panel, not a Session', () => {
   assert.equal(module.exports.SEAT_CHAT_PANEL, 'seat-chat')
   seatChatView.set({ seat: null })
   assert.deepEqual(seatChatView.getSnapshot(), { seat: null }, 'the store names no seat before the bar opens one')
-})
-
-test('a seat row keys the Code side by its registry Bot, never by its seat: row key', () => {
-  assert.equal(seatBotId(seatRow), 'b-aaaaaaaaaa')
-  assert.equal(seatBotId({ ...seatRow, artId: undefined }), 'b-aaaaaaaaaa', 'the seat: prefix is not a Bot id')
-  assert.equal(seatBotId(seat), 'b-aaaaaaaaaa')
-  assert.equal(seatBotId({ ...seatRow, artId: undefined, id: 'seat:' }), null)
-  assert.equal(seatBotId(null), null)
-  assert.equal(seatTerminalWhy(seatRow), null)
-  assert.match(seatTerminalWhy({ ...seatRow, terminal: null }), /not running on this computer/)
-  assert.equal(seatTerminalWhy(null), null)
-})
-
-test('the switch appears for a seat row that names its registry Bot', () => {
-  seatChatView.set({ seat: { ...seatRow, artId: undefined, id: 'seat:' } })
-  try {
-    assert.equal(part(renderSeat(() => {}), 'terminal'), undefined, 'no registry Bot behind the row: no switch')
-  } finally {
-    seatChatView.set({ seat: null })
-  }
-})
-
-test('a live seat shows the switch; Terminal opens that registry Bot pane; Chat and Back return', async (t) => {
-  readCodeTree()
-  t.after(() => {
-    globalThis.fetch = realFetch
-    codeStore.reset()
-    seatChatView.set({ seat: null })
-  })
-  let backs = 0
-  const onBack = () => { backs += 1 }
-  seatChatView.set({ seat: seatRow })
-  let tree = renderSeat(onBack)
-  assert.equal(part(tree, 'chat').props['aria-pressed'], true)
-  assert.equal(part(tree, 'terminal').props['aria-pressed'], false)
-  assert.equal(part(tree, 'terminal').props['aria-disabled'], undefined, 'the live pane opens')
-  part(tree, 'terminal').props.onClick()
-  await settle()
-  assert.equal(codeStore.snapshot().face, 'terminal')
-  assert.equal(codeStore.snapshot().botId, 'b-aaaaaaaaaa', 'the registry Bot id, not seat:b-aaaaaaaaaa')
-  assert.equal(codeStore.snapshot().seat, true, 'the seat panel draws the Code body itself')
-  assert.deepEqual(codeStore.snapshot().selected, { botId: 'b-aaaaaaaaaa', worker: null })
-  assert.deepEqual(fetched, ['code-tree'], 'Terminal reads the Code side tree: it adds no route of its own')
-
-  tree = renderSeat(onBack)
-  assert.equal(tree.props['data-seat-face'], 'terminal')
-  assert.equal(part(tree, 'terminal').props['aria-pressed'], true)
-  part(tree, 'chat').props.onClick()
-  assert.equal(codeStore.snapshot().face, 'chat', 'the Chat part returns to the seat face')
-  assert.equal(renderSeat(onBack).props['data-seat-face'], 'chat')
-
-  // Terminal again: Back returns to the seat face and does not leave the panel.
-  part(renderSeat(onBack), 'terminal').props.onClick()
-  await settle()
-  const back = buttons(renderSeat(onBack)).find(button => button.props.className === 'bt-seat-back')
-  assert.equal(back.props['aria-label'], 'Back to chat')
-  back.props.onClick()
-  assert.equal(codeStore.snapshot().face, 'chat')
-  assert.equal(backs, 0, 'Back stays on the seat while Terminal is open')
-  buttons(renderSeat(onBack)).find(button => button.props.className === 'bt-seat-back').props.onClick()
-  assert.equal(backs, 1, 'in Chat, Back leaves the seat')
-})
-
-test('the bar poll updates the open seat only when its live facts change', () => {
-  const fresh = { ...seat, id: 'b-aaaaaaaaaa' }
-  assert.equal(seatWithFreshPane(seatRow, fresh), null, 'the same facts do not re-render')
-  const started = seatWithFreshPane(seatRow, { ...fresh, terminal: 't2', status: 'working' })
-  assert.equal(started.terminal, 't2')
-  assert.equal(started.id, 'seat:b-aaaaaaaaaa', 'the row identity stays')
-  assert.equal(started.artId, 'b-aaaaaaaaaa')
-  assert.equal(seatWithFreshPane(seatRow, { ...fresh, terminal: null, status: 'off' }).terminal, null)
-  assert.equal(seatWithFreshPane(seatRow, null), null, 'a row the poll no longer has changes nothing')
-})
-
-test('the open seat learns a pane that stops and starts while the panel stays open', () => {
-  seatChatView.set({ seat: seatRow })
-  try {
-    let tree = renderSeat(() => {})
-    assert.equal(part(tree, 'terminal').props['aria-disabled'], undefined)
-    seatChatView.set({ seat: { ...seatRow, terminal: null, status: 'off' } })
-    tree = renderSeat(() => {})
-    assert.equal(part(tree, 'terminal').props['aria-disabled'], 'true')
-    assert.match(textOf(tree), /not running on this computer/)
-    seatChatView.set({ seat: { ...seatRow, terminal: 't2', status: 'working' } })
-    tree = renderSeat(() => {})
-    assert.equal(part(tree, 'terminal').props['aria-disabled'], undefined, 'a started seat can open again')
-  } finally {
-    seatChatView.set({ seat: null })
-  }
-})
-
-test('a seat with no live pane keeps Terminal, says why, and opens nothing', (t) => {
-  readCodeTree()
-  t.after(() => {
-    globalThis.fetch = realFetch
-    codeStore.reset()
-    seatChatView.set({ seat: null })
-  })
-  seatChatView.set({ seat: { ...seatRow, terminal: null, status: 'off', chat: null } })
-  const tree = renderSeat(() => { throw new Error('a quiet seat must not leave from the switch') })
-  const terminal = part(tree, 'terminal')
-  assert.ok(terminal, 'Terminal stays on screen')
-  assert.equal(terminal.props['aria-disabled'], 'true')
-  assert.equal(terminal.props.onClick, undefined, 'a press opens nothing')
-  assert.match(String(terminal.props.title), /not running on this computer/)
-  assert.match(textOf(tree), /not running on this computer/, 'the reason is on screen in plain words')
-  assert.equal(part(tree, 'chat').props['aria-pressed'], true)
-  assert.equal(codeStore.snapshot().face, 'chat')
-  assert.deepEqual(fetched, [], 'no tree, no chunk and no new route is fetched')
 })

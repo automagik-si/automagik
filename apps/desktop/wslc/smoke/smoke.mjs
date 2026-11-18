@@ -26,7 +26,6 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FakeElectron, RELAY_PORT, TOKEN } from './driver.mjs'
 import { launchUrlMismatch, maskUrl as masked } from './launch-url.mjs'
-import { DSH_LAUNCHER, dshRunning } from './process.mjs'
 import { createLineMasker } from './redact.mjs'
 
 const IMAGE = process.argv[2]
@@ -36,6 +35,7 @@ const HOME = '/home/automagik'
 const DESKTOP = `${HOME}/.automagik/desktop`
 const PROFILE = `${DESKTOP}/dsh/profiles/omni`
 const WELCOME = '@automagik/welcome-dsh'
+const DSH_PROCESS = '@deepseek-ai/dsh/lib/bin.js'
 const FAKE_PROCESS = '/opt/smoke/fake-dsh.mjs'
 const READY_MS = 240_000
 const STOP_LIMIT_MS = 5_000
@@ -73,6 +73,7 @@ class Guest {
 
   run(...command) { return docker(['exec', this.name, ...command]).trim() }
   ok(...command) { try { this.run(...command); return true } catch { return false } }
+  running(pattern) { return this.ok('pgrep', '-f', pattern) }
   // Whether something accepts connections on the container's 127.0.0.1:41700.
   portTaken() {
     return this.run('node', '-e', `require('net').connect(41700, '127.0.0.1').on('connect', () => { console.log('taken'); process.exit(0) }).on('error', e => { console.log(e.code); process.exit(0) })`) === 'taken'
@@ -95,14 +96,14 @@ class Guest {
   }
 
   /**
-   * Closes `electron`'s stdin and checks the stop: the launcher exits 0 within STOP_LIMIT_MS, the
-   * launcher that hosted DSH is gone, and 41700 is free. Answers how long the stop took.
+   * Closes `electron`'s stdin and checks the stop: the launcher exits 0 within STOP_LIMIT_MS, no
+   * process matching `pattern` is left, and 41700 is free. Answers how long the stop took.
    */
-  async stop(electron) {
+  async stop(electron, pattern) {
     const { code, signal, ms } = await electron.close()
     expect(code === 0, `dsh-launch exited with ${signal ?? code}, not 0`)
     expect(ms < STOP_LIMIT_MS, `dsh-launch took ${ms} ms to stop, not under ${STOP_LIMIT_MS}`)
-    expect(!dshRunning(this), `the launcher hosting DSH still runs in the container (${DSH_LAUNCHER})`)
+    expect(!this.running(pattern), `a process matching ${pattern} still runs in the container`)
     expect(!this.portTaken(), '127.0.0.1:41700 is still taken in the container after the stop')
     return ms
   }
@@ -224,7 +225,7 @@ try {
     expect(LAUNCH_URL.test(ready.url), `ready's url ${masked(ready.url)} is not DSH's launch URL on 41700`)
     expect(electron.protocolError === null, `stdout carried something that is no frame: ${electron.protocolError?.message}`)
     const answer = await signIn(guest, ready.url)
-    realStop = await guest.stop(electron)
+    realStop = await guest.stop(electron, DSH_PROCESS)
     // The stop waits for 'close', both pipes drained: DSH's launch line can no longer still be in
     // flight when its url is compared with the ready frame's. Both sides are raw, so the token is
     // part of the evidence; only the message masks it.
@@ -260,7 +261,7 @@ try {
     const refused = await electron.waitFor(frame => frame.type === 'ipc' && frame.message?.type === 'smoke:open-result' && frame.message.url === 'http://example.com/', 10_000, 'the refused open')
     expect(refused.message.code === 4, `xdg-open http: exited ${refused.message.code}`)
     expect(electron.frames.filter(frame => frame.type === 'open').length === before, 'an http: link reached Electron')
-    fakeStop = await guest.stop(electron)
+    fakeStop = await guest.stop(electron, FAKE_PROCESS)
     return `ipc echo both ways; DSH's endpoint ${url.protocol}//127.0.0.1:${url.port}${url.pathname.replace(TOKEN, '<token>')}; tunnel to ${RELAY_PORT} replied; https: opened, http: refused (exit 4); stopped in ${fakeStop} ms`
   })
 
@@ -280,7 +281,7 @@ try {
     const first = guest.launch({ fake: true })
     expect((await laneOf(first)).state === 'none', 'the first start had a lane state')
     await readyOf(first)
-    await guest.stop(first)
+    await guest.stop(first, FAKE_PROCESS)
 
     const before = welcomeVersion(guest)
     const [major, minor, patch] = before.split('-')[0].split('.').map(Number)
@@ -319,7 +320,7 @@ try {
     trial.send({ type: 'lane', trial: 'failed' })
     const judged = await trial.waitFor(frame => frame.type === 'lane' && frame.trial === 'failed', 10_000, 'the verdict\'s answer')
     expect(judged.recorded === true, `the failed trial was not recorded: ${JSON.stringify(judged)}`)
-    const trialStop = await guest.stop(trial)
+    const trialStop = await guest.stop(trial, DSH_PROCESS)
 
     // The next start puts the previous welcome back before DSH.
     const after = guest.launch({ fake: true })
@@ -328,7 +329,7 @@ try {
     expect(welcomeVersion(guest) === before, `the profile's welcome is ${welcomeVersion(guest)} after the restore, not ${before}`)
     expect(!guest.ok('test', '-e', `${PROFILE}/node_modules/@automagik/welcome-dsh.lane-prev`), '.lane-prev is still there after the restore')
     await readyOf(after)
-    await guest.stop(after)
+    await guest.stop(after, FAKE_PROCESS)
     return `${before} -> ${next} applied before DSH (.lane-prev kept, handoff taken), real DSH ready on it, stopped in ${trialStop} ms; trial failed -> restored to ${before}, .lane-prev gone`
   })
 } finally {

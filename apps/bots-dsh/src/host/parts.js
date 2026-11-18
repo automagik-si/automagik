@@ -26,7 +26,7 @@ import { RESUME_DELAY_MS } from './resume.js'
 import { switchFailure } from './model-state.js'
 import { turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
-import { commandCapableAgent, crossesHarness } from '../shared/routes.js'
+import { crossesHarness } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
@@ -1257,26 +1257,6 @@ export function install(rt) {
     return job
   }
 
-  // A goal belongs to the Session, so the part that takes over starts with none. An active
-  // goal moves with the conversation, carrying what is left of its round budget, or a long
-  // loop ends at the first handoff. A group's goal is Omni's own (group_goal) and never a
-  // goal on the Session, so a group part carries none.
-  const carryGoal = (from, to, room, nameOfBot) => {
-    if (room !== undefined || from === undefined || to === undefined) return
-    const service = ctx.get?.('goals')
-    if (typeof service?.get !== 'function' || typeof service?.create !== 'function') return
-    try {
-      const goal = service.get(from)
-      if (goal?.phase !== 'active' || typeof goal.objective !== 'string' || goal.objective === '') return
-      const started = typeof goal.roundsStarted === 'number' ? goal.roundsStarted : 0
-      const left = typeof goal.maxGoalRounds === 'number' ? goal.maxGoalRounds - started : undefined
-      if (left !== undefined && left <= 0) return
-      service.create(to, { objective: goal.objective, ...(left === undefined ? {} : { maxGoalRounds: left }) })
-    } catch (error) {
-      rt.warn('omni-ui: the goal of %s did not move to its fresh part: %s', nameOfBot ?? 'a Bot', error)
-    }
-  }
-
   async function runSwitch(agent, job) {
     // Marks the part while the switch runs; it stays marked whenever input was put
     // back, so a restart knows where to look without resolving every earlier part.
@@ -1401,13 +1381,7 @@ export function install(rt) {
       try { await takeBack(freshId, old) } catch (error) { rt.warn('ds-bot: input of the fresh part of %s not taken back: %s', bot.name, error) }
     } else rt.warn('ds-bot: the part %s came from could not be loaded; its input stays in the fresh part', bot.name)
     const picked = await freshRoute(bot, old?.session)
-    if (picked !== undefined && await rt.keepsCarriedRoute?.(entry.oldId, picked.ref) === true) {
-      // The old part is a carried Hermes chat; THE RULE (models.js) keeps its route.
-      bot.appliedModel = picked.ref
-      if (picked.effort === undefined) delete bot.appliedEffort
-      else bot.appliedEffort = picked.effort
-      await rt.save()
-    } else if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
+    if (picked !== undefined) await selectRoute(bot, entry.oldId, picked)
     if (old !== undefined) partBase.set(entry.oldId, tokensOf(old.session) ?? 0)
     rt.renewMemory(entry.oldId)
     rt.warn('ds-bot: the first call in the fresh part of %s failed before any answer; it is back on the part it came from, which was not archived', bot.name)
@@ -1652,8 +1626,6 @@ export function install(rt) {
       const text = job.fresh ? freshPackage({ room, number: number + 1 }) : handoffPackage({ room, self: bot === undefined, segment, lines: carried, number: number + 1, resume, overflow: job.overflow, cutoff: job.cutoff, failed: job.failed, bare: job.bare, folder, manual: job.manual, target: job.target })
       freshParts.set(freshId, estimateTokens(text))
       fresh.followup(createUserMessage({ content: [{ type: 'text', text }], source: handoffSource(job, resume) }))
-      // Before the flush, so the goal's own record is written with the part it belongs to.
-      carryGoal(agent, fresh, room, name)
       await ctx.sessions.flush(fresh.session)
       carry.push(...job.carry.splice(0))
       await forward(job, [...carry, ...held])
@@ -2263,12 +2235,6 @@ export function install(rt) {
     if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
     if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
     if (bot.sessionPinned === true) throw refused('refused', pinnedText(bot, 'fresh'))
-    // The other direction of the shell boundary: a Bot without a shell cannot switch onto an
-    // agent whose own tools run commands. The Bot's shell comes on first, or another model.
-    if (bot.shell === false && commandCapableAgent(model)) {
-      throw refused('shell', `${bot.name} has no shell, so it cannot move to ${String(model).split('/')[0]}, `
-        + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
-    }
     const current = bot.model ?? bot.appliedModel
     if (typeof current !== 'string' || !crossesHarness(current, model)) throw refused('refused', `${bot.name} is already on that route.`)
     await rt.clearAuto?.(bot)
@@ -2297,17 +2263,13 @@ export function install(rt) {
     try { said = saidSomething(agent.session.deriveMessages()) } catch {}
     if (!said) {
       rt.noteModelChoice?.(bot, target)
-      const takeRoute = async () => {
-        putRoute()
-        try {
-          await rt.applyModel(bot, { force: true })
-        } catch (error) {
-          restore()
-          throw error
-        }
+      putRoute()
+      try {
+        await rt.applyModel(bot, { force: true })
+      } catch (error) {
+        restore()
+        throw error
       }
-      if (rt.whilePicking) await rt.whilePicking(bot, takeRoute)
-      else await takeRoute()
       await rt.save()
       return { id: botId, model: target, ...(effortId === null ? {} : { effort: effortId }), status: 'switched' }
     }

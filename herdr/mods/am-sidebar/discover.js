@@ -1,11 +1,11 @@
 // Bot discovery's schedule (bots.js discoverProjects), with no Herdr in it so it can be tested
 // and timed apart: each machine's lookups run on their own, at most `limit` at once, this
-// computer's first; a project is shown as soon as its read has answered, and a machine
+// computer's first; a project is shown as soon as its machine has answered, and a machine
 // that is slow or away holds back only its own projects. Apache-2.0.
 
 /** Lookups in flight at once on one machine. */
 export const DISCOVER_LIMIT = 8;
-/** How long a discovery call may wait for an answer. */
+/** How long one call to another machine may take before that machine counts as away. */
 export const CALL_TIMEOUT_MS = 5000;
 
 /** The rejection of a call that took longer than its time (within). */
@@ -42,7 +42,7 @@ export function within(p, ms, sleep) {
 
 /**
  * Every call to one machine, across discoveries and the background: at most `limit`
- * running at once. With `sleep` (the caller's timer), a call that waits or runs
+ * running at once. With `sleep` (the caller's timer) and `remote`, a call that waits or runs
  * longer than `ms` rejects TimedOut: one that hadn't started never starts, one that had
  * counts as stuck until it settles, and while `limit` are stuck every call rejects TimedOut
  * at once, so a machine that has stopped answering is never sent more than `limit` calls.
@@ -53,10 +53,7 @@ export function machineGate(limit = DISCOVER_LIMIT, ms = CALL_TIMEOUT_MS) {
   const run = limiter(limit);
   const gate = { stuck: 0, answered: false, away: false, inFlight: 0 };
   gate.call = (ask, { sleep = null, remote = false } = {}) => {
-    if ((sleep || remote) && gate.stuck >= limit) {
-      if (remote) gate.away = true;
-      return Promise.reject(new TimedOut(ms));
-    }
+    if (remote && gate.stuck >= limit) { gate.away = true; return Promise.reject(new TimedOut(ms)); }
     let state = "queued"; // -> running -> done | stuck -> done; queued -> dropped
     const p = run(() => {
       if (state === "dropped") return Promise.reject(new TimedOut(ms));
@@ -68,9 +65,9 @@ export function machineGate(limit = DISCOVER_LIMIT, ms = CALL_TIMEOUT_MS) {
         state = "done";
       });
     });
-    if (!sleep && !remote) return p;
+    if (!remote) return p;
     return within(p, ms, sleep).catch((e) => {
-      if (remote) gate.away = true;
+      gate.away = true;
       if (e instanceof TimedOut) {
         if (state === "queued") state = "dropped";
         else if (state === "running") { state = "stuck"; gate.stuck += 1; }
@@ -88,8 +85,7 @@ export function machineGate(limit = DISCOVER_LIMIT, ms = CALL_TIMEOUT_MS) {
  * spaces keyed to the project, in sidebar order.
  *   spaces: [{ id, folder, machine }], folder null: skipped (another machine's home);
  *   remembered: [{ key, machine }];
- *   io.provisional() -> optional local keys to show while the CLI listing is unknown;
- *   io.listed() -> keys on this computer, or a TimedOut rejection;
+ *   io.listed() -> keys on this computer (never rejects);
  *   io.cachedKey(folder, machine) -> { key, fresh } known for the folder, without asking, or
  *     undefined; a known key places the space at once, and one not fresh is looked up again;
  *   io.keyOf(folder, machine) -> key; a rejection keeps the known key, else skips the space
@@ -98,15 +94,14 @@ export function machineGate(limit = DISCOVER_LIMIT, ms = CALL_TIMEOUT_MS) {
  *     rejects when the machine can't answer;
  *   io.last({ key, machine }) -> what to show when a read rejects: { file, warnings, ... }
  *     or undefined.
- * io bounds its own calls' time. On a remote machine, TimedOut skips the remaining queued
- * calls this time. `onUpdate(list)` gets the list after each read and when a machine other
- * than the last finishes. A pending read shows io.last; the final list is returned.
+ * io bounds its own calls' time; a TimedOut rejection means the machine is away, and its
+ * other calls this time don't wait. `onUpdate(list)` gets the list each time a machine is
+ * done but the last, a project still being read showing io.last; the last list is returned.
  */
 export async function discover({ spaces, remembered = [] }, io, { limit = DISCOVER_LIMIT, onUpdate = null } = {}) {
   const keyed = new Map(); // space index -> project key
   const read = new Map(); // project id -> { file, warnings } | null
-  const provisional = new Set(io.provisional?.() ?? []);
-  let listed = provisional;
+  let listed = [];
 
   const assemble = () => {
     const found = new Map();
@@ -121,15 +116,10 @@ export async function discover({ spaces, remembered = [] }, io, { limit = DISCOV
     for (const key of listed) add(key, null, null);
     const out = [];
     for (const [k, p] of found) {
-      const r = read.get(k);
-      const visible = r === undefined ? io.last(p) : r;
-      if (visible) out.push({ key: p.key, machine: p.machine, spaces: p.spaces, ...visible });
+      const r = read.has(k) ? read.get(k) : io.last(p);
+      if (r) out.push({ key: p.key, machine: p.machine, spaces: p.spaces, ...r });
     }
     return out;
-  };
-
-  const publish = () => {
-    if (onUpdate) try { onUpdate(assemble()); } catch {}
   };
 
   const machines = [null, ...new Set([...spaces, ...remembered].map((s) => s.machine).filter(Boolean))];
@@ -141,7 +131,7 @@ export async function discover({ spaces, remembered = [] }, io, { limit = DISCOV
     const call = (ask, fallback) => run(async () => {
       if (away) return fallback();
       try { return await ask(); } catch (e) {
-        if (machine && e instanceof TimedOut) away = true;
+        if (e instanceof TimedOut) away = true;
         return fallback();
       }
     });
@@ -155,17 +145,10 @@ export async function discover({ spaces, remembered = [] }, io, { limit = DISCOV
       if (asked.has(k)) return;
       asked.add(k);
       const p = { key, machine, remembered: kept.has(key) };
-      reads.push(call(() => io.read(p), () => undefined).then((r) => {
-        read.set(k, r);
-        publish();
-      }));
+      reads.push(call(() => io.read(p), () => io.last(p) ?? null).then((r) => read.set(k, r ?? null)));
     };
     for (const key of kept) want(key);
-    const cli = machine ? null : call(() => io.listed(), () => undefined).then((keys) => {
-      if (keys === undefined) return;
-      listed = keys;
-      for (const key of keys) want(key);
-    });
+    const cli = machine ? null : call(() => io.listed(), () => []).then((keys) => { listed = keys; for (const key of keys) want(key); });
     const lookups = [];
     spaces.forEach((s, i) => {
       if ((s.machine ?? null) !== machine || !s.folder) return;
@@ -176,17 +159,13 @@ export async function discover({ spaces, remembered = [] }, io, { limit = DISCOV
         if (known.fresh) return;
       }
       lookups.push(call(() => io.keyOf(s.folder, machine), () => known?.key).then((key) => {
-        if (typeof key === "string" && key !== known?.key) {
-          if (!machine && known) provisional.delete(known.key);
-          keyed.set(i, key);
-          want(key);
-        }
+        if (typeof key === "string" && key !== known?.key) { keyed.set(i, key); want(key); }
       }));
     });
     await Promise.all([cli, ...lookups]);
     await Promise.all(reads);
     left -= 1;
-    if (left > 0) publish();
+    if (onUpdate && left > 0) try { onUpdate(assemble()); } catch {}
   };
   await Promise.all(machines.map(side));
   return assemble();

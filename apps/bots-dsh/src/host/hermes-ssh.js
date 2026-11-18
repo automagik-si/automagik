@@ -22,7 +22,6 @@ const messages = Object.freeze({
   'interactive-auth': 'SSH requires an interactive check. Complete it once in a terminal, then try this connection again.',
   'hermes-not-found': 'Hermes was not found on the remote computer through its login shell (bash -lc “command -v hermes”). Install it there or check the Hermes executable path.',
   'serve-not-running': 'Hermes is not running on the remote computer. Start it there with “hermes serve”, then try again.',
-  'serve-gateway-running': 'Hermes is running there as a gateway, but no “hermes serve” is running. Start “hermes serve” there, then try again.',
   'serve-gateway': 'Hermes is running there as a gateway that owns its sessions. Start “hermes serve” there, then try again.',
   'serve-record': 'Hermes is not running there: its connection record or private token is stale. Start “hermes serve” there, then try again.',
   'serve-profiles': 'Hermes is running there, but its profiles could not be read. Run “hermes profile list” there, then try again.',
@@ -49,7 +48,6 @@ const publicCodes = {
   'forward-conflict': 'bot/hermes-ssh-forward', 'remote-script': 'bot/hermes-ssh-script', 'invalid-details': 'bot/hermes-ssh-details',
   timeout: 'bot/hermes-ssh-timeout', unreachable: 'bot/hermes-ssh-unreachable', cleanup: 'bot/hermes-ssh-cleanup',
   'serve-not-running': 'bot/hermes-attach-not-running', 'serve-gateway': 'bot/hermes-attach-gateway',
-  'serve-gateway-running': 'bot/hermes-attach-gateway-running',
   'serve-record': 'bot/hermes-attach-record', 'serve-profiles': 'bot/hermes-attach-profiles',
 }
 /** Every public SSH code, for the callers that pass a known kind through unchanged. */

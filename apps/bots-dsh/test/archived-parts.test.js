@@ -12,7 +12,6 @@ import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import { createRuntime } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
-import { until } from './until.js'
 
 // DSH 0.2.2 exports the JSONL persistence as a plugin module; earlier DSH as a default class.
 const SessionPersistence = typeof Jsonl.apply === 'function' ? Jsonl : Jsonl.default
@@ -77,15 +76,16 @@ async function team(t, archived) {
   return { home, registry, call, rt }
 }
 
-// Wait for DSH's asynchronous archive restores; the ceiling matters only if the state never comes.
-const settled = (check, t) => until(check).catch(error => t?.diagnostic(error.message))
+const settled = async (check) => {
+  for (let i = 0; i < 50 && !check(); i += 1) await new Promise(resolve => setTimeout(resolve, 10))
+}
 
 test('opening an earlier part takes it out of the archive and archives the part it replaces', async (t) => {
   const { home, registry, call } = await team(t, ['w1'])
   await call('state')
   const result = await call('bot-open-part', { botId: 'w1', sessionId: 'w1' })
   assert.equal(result.ok, true, JSON.stringify(result))
-  await settled(() => registry.archivedSessionIds.includes('w2'), t)
+  await settled(() => registry.archivedSessionIds.includes('w2'))
   assert.deepEqual([...registry.archivedSessionIds].sort(), ['w2'])
   const saved = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')).bots.w1
   assert.equal(saved.sessionId, 'w1')
@@ -95,7 +95,7 @@ test('opening an earlier part takes it out of the archive and archives the part 
 test('current team Sessions held archived in DSH are taken back out; earlier parts stay', async (t) => {
   const { registry, call } = await team(t, ['w1', 'w2', 'g1', 'gw', 'outside'])
   await call('state')
-  await settled(() => registry.archivedSessionIds.length === 2, t)
+  await settled(() => registry.archivedSessionIds.length === 2)
   assert.deepEqual([...registry.archivedSessionIds].sort(), ['outside', 'w1'])
 })
 
@@ -107,7 +107,7 @@ test('a current Session archived in DSH while the team runs is taken back out', 
   // A one-off automation task is not a persistent chat to restore.
   rt.taskOwners.set('outside', { botId: 'w1' })
   await registry.archiveSession(SessionId('outside'))
-  await settled(() => registry.archivedSessionIds.length === 1, t)
+  await settled(() => registry.archivedSessionIds.length === 1)
   assert.deepEqual([...registry.archivedSessionIds], ['outside'])
 })
 

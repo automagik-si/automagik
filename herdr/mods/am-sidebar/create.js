@@ -171,27 +171,14 @@ export class BotForm {
   // Null when it isn't there, so the form and the CLI agree on the program they run.
   async programFile(program) {
     if (typeof program !== "string" || !program) return null;
-    const files = new Set();
-    if (program.includes("/")) {
-      files.add(program);
-    } else {
-      const env = typeof process === "undefined" ? {} : process.env;
-      const execPath = typeof process === "undefined" ? "" : process.execPath;
-      const dirs = [...String(env.PATH ?? "").split(":"), `${home()}/.local/bin`,
-        String(execPath ?? "").replace(/\/[^/]*$/, "")];
-      for (const dir of dirs) {
-        if (dir) files.add(`${dir.replace(/\/+$/, "")}/${program}`);
-      }
-    }
-    for (const file of files) {
-      if (!(await fs.exists(file))) continue;
-      try {
-        const result = await exec("/bin/test", ["-x", file]);
-        if (result?.code === 1) continue;
-      } catch {
-        // Some systems lack /bin/test. Keep the existence result when the probe cannot run.
-      }
-      return file;
+    if (program.includes("/")) return (await fs.exists(program)) ? program : null;
+    const env = typeof process === "undefined" ? {} : process.env;
+    const execPath = typeof process === "undefined" ? "" : process.execPath;
+    const dirs = [...String(env.PATH ?? "").split(":"), `${home()}/.local/bin`,
+      String(execPath ?? "").replace(/\/[^/]*$/, "")].filter(Boolean);
+    for (const dir of dirs) {
+      const file = `${dir.replace(/\/+$/, "")}/${program}`;
+      if (await fs.exists(file)) return file;
     }
     return null;
   }
@@ -347,7 +334,6 @@ export class BotForm {
       const fresh = formFrom({ mode: "create", file, id: this.s.id, agent });
       this.s = { ...this.s, kind: fresh.kind, agent, lead: "", category: "" };
       await this.refreshModels();
-      this.models.clear();
     }
   }
 

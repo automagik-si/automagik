@@ -16,8 +16,8 @@ const REMEMBERED = "am.sidebar.projects";
 // A folder's project changes rarely (a repo made or removed): looked up again after a minute.
 const KEY_TTL = 60_000;
 // The last discovery kept between runs (discoverySnapshot): a folder's key while a space has
-// shown it in the last week; a project's file, drawn while its read is pending or its
-// machine is away, for at most a day after it was read and three discoveries without an answer.
+// shown it in the last week; a project's file, drawn only until its machine answers in this
+// run of Herdr, for at most a day after it was read and three discoveries without an answer.
 const KEYS_KEPT_MS = 7 * 24 * 3600_000;
 const SAVED_MS = 24 * 3600_000;
 const SAVED_RUNS = 3;
@@ -29,7 +29,6 @@ const paneKeys = new Map(); // folder on this computer -> { key, at } (model.js 
 const lastGood = new Map();
 const gates = new Map(); // machine -> discover.js machineGate: every call there goes through it
 const misses = new Map(); // machine -> discoveries it hasn't answered, while it has saved files
-let cliProjects = null; // last known membership of the CLI list, if it has answered
 
 const id = (machine, key) => JSON.stringify([machine ?? null, key]);
 const under = (key, rest) => `${key === "/" ? "" : key}/${rest}`;
@@ -40,19 +39,18 @@ function gateOf(machine) {
   return gates.get(m);
 }
 // One call on a machine, through its gate (at most DISCOVER_LIMIT at once there; with
-// `sleep`, the caller's timer, one call gives up after CALL_TIMEOUT_MS).
+// `sleep`, the caller's timer, one to another machine gives up after CALL_TIMEOUT_MS).
 const onMachine = (on, ask, sleep) => gateOf(on).call(ask, { sleep, remote: Boolean(on) });
 
 // A call that rejects on another machine: rethrown when the machine can't be reached (the
 // answer is unknown, never "no"), else `fallback` (the program or file isn't there).
-// An ordinary rejection on this computer uses the fallback. A TimedOut leaves the answer unknown.
+// On this machine a rejection always means the program or file isn't there. A TimedOut
+// (onMachine) means the machine is away.
 async function orUnreachable(on, call, fallback, sleep) {
   try { return await onMachine(on, call, sleep); } catch (e) {
-    if (e instanceof TimedOut) throw e;
     if (!on) return fallback;
-    try { await onMachine(on, () => exec("true", [], { on }), sleep); } catch (probeError) {
-      throw probeError instanceof TimedOut ? probeError : e;
-    }
+    if (e instanceof TimedOut) throw e;
+    try { await onMachine(on, () => exec("true", [], { on }), sleep); } catch { throw e; }
     return fallback;
   }
 }
@@ -66,31 +64,10 @@ function existsOn(on, sleep) {
   return (p) => orUnreachable(on, async () => (await readTextFile(p, { on })) !== null, false, sleep);
 }
 
-// projectOf owns the walk and its ordering. Collect its candidates only after git misses,
-// and check them on the remote machine in one call. Paths are shell arguments, and stdout
-// carries only one flag per file.
-const CHECK_FILES = 'for path do if [ -f "$path" ] && [ -r "$path" ]; then echo 1; else echo 0; fi; done';
-function remoteExistsOn(folder, on, sleep) {
-  const fallback = existsOn(on, sleep);
-  let found;
-  return async (path) => {
-    if (found === undefined) {
-      const paths = [];
-      await projectOf(folder, () => null, (candidate) => { paths.push(candidate); return false; });
-      const result = await onMachine(on, () => exec("sh", ["-c", CHECK_FILES, "sh", ...paths], { on }), sleep);
-      const flags = result.stdout?.replace(/\n$/, "").split("\n");
-      found = result.code === 0 && flags?.length === paths.length && flags.every((flag) => flag === "0" || flag === "1")
-        ? new Set(paths.filter((_, i) => flags[i] === "1"))
-        : null;
-    }
-    return found ? found.has(path) : fallback(path);
-  };
-}
-
 /**
  * The project of a folder on a machine (null: this one), as model.js projectOf's
  * `{ key, own }`, cached for a minute. When the machine can't be reached, the last answer
- * found for the folder, when available. A timeout rejects. `opts.sleep`:
+ * found for the folder (not asked again for a minute); with none, it rejects. `opts.sleep`:
  * see onMachine.
  */
 export async function projectOfFolder(folder, machine = null, { sleep = null } = {}) {
@@ -99,10 +76,10 @@ export async function projectOfFolder(folder, machine = null, { sleep = null } =
   if (hit && Date.now() - hit.at < KEY_TTL) return { key: hit.key, own: hit.own };
   let found;
   try {
-    const exists = machine ? remoteExistsOn(folder, machine, sleep) : existsOn(machine, sleep);
-    found = await projectOf(folder, gitOn(machine, sleep), exists);
+    found = await projectOf(folder, gitOn(machine, sleep), existsOn(machine, sleep));
   } catch (e) {
-    if (!hit || e instanceof TimedOut) throw e;
+    if (!hit) throw e;
+    hit.at = Date.now();
     return { key: hit.key, own: hit.own };
   }
   keys.set(k, { ...found, at: Date.now(), used: Date.now() });
@@ -139,25 +116,8 @@ export async function folderExists(folder, machine = null) {
 
 // The projects the command line created, edited, started or attached bots in (model.js
 // PROJECTS_FILE, local keys). Only the CLI writes the file; an unreadable one lists none.
-async function listedByCli(sleep) {
-  try {
-    const text = await onMachine(null, () => readTextFile(`${appHome()}/${PROJECTS_FILE}`), sleep);
-    cliProjects = new Set(listedProjects(text));
-  } catch (e) {
-    if (e instanceof TimedOut) throw e;
-    cliProjects = new Set();
-  }
-  return cliProjects;
-}
-
-function provisionalProjects() {
-  const local = [];
-  for (const [projectId, project] of lastGood) {
-    if (!project.saved) continue;
-    const [machine, key] = JSON.parse(projectId);
-    if (machine === null && (cliProjects === null || cliProjects.has(key))) local.push(key);
-  }
-  return local;
+async function listedByCli() {
+  try { return listedProjects(await readTextFile(`${appHome()}/${PROJECTS_FILE}`)); } catch { return []; }
 }
 
 function remembered() {
@@ -202,19 +162,19 @@ async function readProject(p, sleep) {
 const ago = (ms) => (ms < 3600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${Math.round(ms / 3600_000)} h`);
 
 // What a project shows when its read rejects or hasn't answered yet: its last good file. One
-// from the last run of Herdr stays within SAVED_MS and SAVED_RUNS, until its own read fails
-// on an answering machine. A timeout or an away machine marks it stale.
-function lastOf(p, failed, timedOut) {
+// from the last run of Herdr only until its machine answers, and within SAVED_MS and
+// SAVED_RUNS; while the machine is away it is marked `stale`, with when it was read.
+function lastOf(p) {
   const k = id(p.machine, p.key);
   const last = lastGood.get(k);
   if (!last) return undefined;
   if (!last.saved) return { file: last.file, warnings: last.warnings };
   const gate = gateOf(p.machine);
-  if ((gate.answered && failed.has(k)) || (misses.get(p.machine) ?? 0) >= SAVED_RUNS || Date.now() - last.seen > SAVED_MS) {
+  if (gate.answered || (misses.get(p.machine) ?? 0) >= SAVED_RUNS || Date.now() - last.seen > SAVED_MS) {
     lastGood.delete(k);
     return undefined;
   }
-  if (!gate.away && !timedOut.has(k)) return { file: last.file, warnings: last.warnings };
+  if (!gate.away) return { file: last.file, warnings: last.warnings };
   const note = `last seen ${ago(Date.now() - last.seen)} ago; ${p.machine ?? "this computer"} isn't answering`;
   return { file: last.file, warnings: [note, ...last.warnings], stale: true };
 }
@@ -231,19 +191,17 @@ function lastOf(p, failed, timedOut) {
  * just not shown: its line in the CLI's file stays, as the view never writes that file.
  * Each machine is asked on its own, a few lookups at once (discover.js); a folder keyed
  * before is placed at once and, its key a minute old, looked up again in the same discovery.
- * `opts.sleep(ms)` (the caller's timer: a mod has no setTimeout) bounds each call to
- * CALL_TIMEOUT_MS. A timeout shows the last good file (lastOf: `stale` for one from the
- * last run of Herdr). `opts.onUpdate(list)` gets the list as project reads finish.
+ * `opts.sleep(ms)` (the caller's timer: a mod has no setTimeout) bounds each call to another
+ * machine to CALL_TIMEOUT_MS, after which that machine's projects show their last good file
+ * (lastOf: `stale` for one from the last run of Herdr); `opts.onUpdate(list)` gets the list
+ * as soon as a machine is done, this computer's projects first.
  */
 export async function discoverProjects({ sleep = null, onUpdate = null } = {}) {
   // An empty folder is that machine's home. Ours is home(); another machine's isn't known
   // here without asking it, so such a space is skipped (its projects can be remembered).
   const shown = spaces().map((s) => ({ id: s.id, machine: s.machine ?? null, folder: s.folder || (s.machine ? null : home()) }));
-  const failed = new Set();
-  const timedOut = new Set();
   const found = await discover({ spaces: shown, remembered: remembered() }, {
-    provisional: provisionalProjects,
-    listed: () => listedByCli(sleep),
+    listed: listedByCli,
     cachedKey: (folder, machine) => {
       const hit = keys.get(id(machine, folder));
       if (!hit) return undefined;
@@ -251,14 +209,8 @@ export async function discoverProjects({ sleep = null, onUpdate = null } = {}) {
       return { key: hit.key, fresh: Date.now() - hit.at < KEY_TTL };
     },
     keyOf: async (folder, machine) => (await projectOfFolder(folder, machine, { sleep })).key,
-    read: async (p) => {
-      try { return await readProject(p, sleep); } catch (e) {
-        const failures = e instanceof TimedOut ? timedOut : failed;
-        failures.add(id(p.machine, p.key));
-        throw e;
-      }
-    },
-    last: (p) => lastOf(p, failed, timedOut),
+    read: (p) => readProject(p, sleep),
+    last: lastOf,
   }, { onUpdate });
   // A machine with files from the last run of Herdr that didn't answer this time.
   const waiting = new Set([...lastGood].filter(([, v]) => v.saved).map(([k]) => JSON.parse(k)[0]));

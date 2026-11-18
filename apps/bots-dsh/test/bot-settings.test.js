@@ -63,35 +63,3 @@ test('a private Bot can always turn privacy off, and cannot become Main or be du
   assert.equal(tree.find(node => node.props?.label === 'Main Bot').props.disabled, true)
   assert.equal(tree.some(node => node.props?.onClick && node.props.className === 'bt-set-row bt-bs-row' && JSON.stringify(node).includes('Duplicate')), false)
 })
-
-test('the Shell switch shows what shell access reaches and saves the capability', () => {
-  const sentence = 'A Bot with shell access can read what the operating-system user can read.'
-  const on = settings(bot).find(node => node.props?.label === 'Shell access')
-  assert.equal(on.props.on, true)
-  assert.equal(on.props.hint, sentence)
-  assert.equal(on.props.disabled, undefined)
-  const off = settings({ ...bot, shell: false }).find(node => node.props?.label === 'Shell access')
-  assert.equal(off.props.on, false)
-  assert.equal(off.props.hint, sentence)
-  // The card says where the fence lives: the tool grant, not an operating-system sandbox.
-  const notes = settings(bot).filter(node => node.props?.className === 'bt-bs-shell-note')
-    .map(node => [].concat(node.props.children).join(''))
-  assert.ok(notes.includes('The Bot team enforces this at the tool grant: it removes the tools; '
-    + 'it does not put a shell in an operating-system sandbox.'))
-  // The named limit a person can act on: another Bot or the OS user is not fenced by this.
-  assert.ok(notes.includes("This removes this Bot's own shell tools; it does not stop another Bot "
-    + 'with a shell, or the operating-system user, from reading files this Bot can read.'))
-
-  const calls = []
-  const roster = { mainBotIds: [], mainBotId: null, rooms: [], models: [], memory: false }
-  const tree = walk(BotSettingsForm({
-    bot,
-    roster,
-    actions: { updateBot: (id, patch) => { calls.push({ id, patch }); return Promise.resolve() } },
-    run: fn => fn,
-  }))
-  tree.find(node => node.props?.label === 'Shell access').props.onChange(false)
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].id, 'b')
-  assert.equal(calls[0].patch.shell, false)
-})

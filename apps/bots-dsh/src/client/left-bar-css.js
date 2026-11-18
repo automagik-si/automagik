@@ -90,10 +90,7 @@ const RAIL = `
 .lb-rail{flex:none;display:flex;flex-direction:column;align-items:center;gap:var(--lb-rail-gap);width:var(--lb-rail-w);padding:12px 0;box-sizing:border-box;border-right:1px solid var(--lb-line);overflow-y:auto;scrollbar-width:none}
 .lb-tile{position:relative;flex:none;display:block;width:var(--lb-tile);height:var(--lb-tile);margin:0;padding:0;border:0;border-radius:var(--lb-tile-r);background:none;color:var(--bt-ink);font:inherit;cursor:pointer}
 .lb-tile-face{display:grid;place-items:center;width:100%;height:100%;border-radius:inherit;background:var(--lb-tile-ground)}
-/* The computer mark has no opening; only actionable tiles promise one on hover. */
-.lb-tile:not(.lb-tile-still):hover .lb-tile-face{background:var(--bt-active)}
-/* Keep the focus ring while the resting mark stops offering a pointer action. */
-.lb-tile-still{cursor:default}
+.lb-tile:hover .lb-tile-face{background:var(--bt-active)}
 .lb-tile[aria-current]{outline:1.5px solid var(--bt-ink);outline-offset:1.5px}
 .lb-tile[aria-current] .lb-tile-face{background:var(--lb-tile-open)}
 .lb-tile-letter .lb-tile-face,.lb-tile-letter:hover .lb-tile-face,.lb-tile-letter[aria-current] .lb-tile-face{background:color-mix(in srgb,var(--st-lilac,var(--bt-active)) 72%,var(--st-paper,var(--bt-card)));color:var(--st-lilac-ink,var(--bt-ink));font:var(--bt-weight-title,600) 18px/1 var(--bt-head-font,var(--bt-font))}
@@ -195,10 +192,8 @@ const HOST = `
 .lb-bar[data-lb-host] .lb-rail{border-right:0}
 .lb-railcol{flex:none;display:flex;flex-direction:column;align-items:center;width:var(--lb-rail-w);min-height:0}
 .lb-railcol .lb-rail{flex:1;min-height:0}
-/* Both wide and drawer seats use the rail's existing control face. */
-.lb-railcol .bt-side-collapse,.bt-side-collapse.bt-foot-toggle{flex:none;width:36px;height:36px;margin:0 0 10px;border:0;border-radius:var(--lb-tile-r);background:none;box-shadow:none;color:var(--lb-muted)}
-/* The footer seat has the same hover affordance as the drawer's rail control. */
-.lb-railcol .bt-side-collapse:hover,.bt-side-collapse.bt-foot-toggle:hover{background:var(--bt-hover);color:var(--bt-ink)}
+.lb-railcol .bt-side-collapse{flex:none;width:36px;height:36px;margin:0 0 10px;border:0;border-radius:var(--lb-tile-r);background:none;box-shadow:none;color:var(--lb-muted)}
+.lb-railcol .bt-side-collapse:hover{background:var(--bt-hover);color:var(--bt-ink)}
 .lb-bar[data-lb-host] .lb-list{flex:1;width:auto}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){position:relative;margin:var(--lb-panel-gap)!important;height:calc(100% - 2 * var(--lb-panel-gap))!important;padding:0!important;border-radius:var(--lb-panel-r);background:var(--lb-ground)!important}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host)::before{content:'';position:absolute;left:calc(var(--lb-rail-w) - 1px);top:0;bottom:0;width:1px;background:var(--lb-line);pointer-events:none}
@@ -209,14 +204,6 @@ html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]:has(.lb-
 [class*="_root"]:has(.lb-host) [class*="_scrollArea"]:has(.lb-host){grid-template-columns:0 minmax(0,1fr) 0;grid-template-rows:0 max-content 0 minmax(0,1fr);margin:0}
 [class*="_root"]:has(.lb-host) [class*="_scrollFade"]{display:none}
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
-/* Anchor against the card so footer entries and a scrolling list cannot move the toggle. */
-html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.lb-host) .bt-foot-toggle{position:absolute;left:calc(10px - var(--lb-panel-gap));bottom:calc(18px - var(--lb-panel-gap));margin:0}
-/* The rail draws its icons at 18px (DSH's rail spec), so the glyph keeps its size across the fold. */
-.bt-side-collapse.bt-foot-toggle svg{width:18px;height:18px}
-/* Keep the drawer's rail control until a footer seat takes over outside the drawer. */
-[class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.bt-foot-toggle) .lb-railcol .bt-side-collapse{display:none}
-/* The drawer retains its rail control and its existing placement. */
-[class*="_frame"][data-sidebar-drawer] .bt-foot-toggle{display:none}
 .lb-head{flex:none;display:flex;align-items:center;gap:4px;height:52px;padding:0 8px 0 14px;box-sizing:border-box}
 .lb-brand{flex:1;min-width:0;display:flex;align-items:center;overflow:hidden}
 .lb-brand .omni-wordmark{display:block;flex:none;max-width:100%;height:auto}

@@ -20,7 +20,6 @@
 // Apache-2.0.
 
 import { execFile } from "node:child_process";
-import { coreStatus } from "./coreSocket.mjs";
 import { access, readFile } from "node:fs/promises";
 import { closeSync, existsSync, fchmodSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync, writeSync }
   from "node:fs";
@@ -83,12 +82,6 @@ function notFound({ err, stdout, stderr }) {
 // not_found (or is missing); any other failure, or no JSON, is UNANSWERED, as a run out of time
 // is: a failed read never reads as "no pane" (#345), the same as the CLI's `brief`.
 async function hcJson(args) {
-  if (args.length === 2 && args[0] === "server" && args[1] === "status") {
-    const timeoutMs = Math.min(callMs, until - Date.now());
-    if (timeoutMs <= 0) return UNANSWERED;
-    const r = await coreStatus(process.env, { timeoutMs });
-    return Object.hasOwn(r, "status") ? r.status : UNANSWERED;
-  }
   const r = await exec("hc", [...args, "--json"]);
   if (r === UNANSWERED) return r;
   if (r.err) return hcMissing || notFound(r) ? null : UNANSWERED;

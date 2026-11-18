@@ -260,7 +260,6 @@ export class CliLogins {
       ...(flow.prompt ? { prompt: { ...flow.prompt } } : {}),
       ...(flow.answering && this.active(flow) ? { checking: true } : {}),
       ...(flow.message ? { message: flow.message } : {}),
-      ...(flow.status === 'failed' && typeof flow.cause === 'string' ? { cause: flow.cause } : {}),
     }
   }
 
@@ -579,9 +578,6 @@ export class CliLogins {
     const failed = status === 'failed' ? failureOf(flow, message) : undefined
     flow.status = status
     flow.message = message
-    // The cause the host log gets, kept on the ended attempt too: a fixed class, never what the
-    // CLI printed, so the surface above can say why it failed without moving CLI text.
-    flow.cause = failed?.cause
     flow.url = undefined
     flow.userCode = undefined
     flow.prompt = undefined

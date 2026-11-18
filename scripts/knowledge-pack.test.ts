@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -154,55 +154,6 @@ const scratch = mkdtempSync(join(tmpdir(), 'knowledge-pack-'));
 let n = 0;
 const freshOut = () => join(scratch, `run-${++n}`, 'knowledge');
 
-/**
- * The work a case started, so cleanup can wait for it. A case that times out leaves its build
- * running; every promise here is observed from the moment it starts and awaited in afterEach, so
- * its rejection cannot arrive unhandled in the next case.
- */
-const inFlight = new Set<Promise<unknown>>();
-function track<T>(work: Promise<T>): Promise<T> {
-  inFlight.add(work);
-  void work.then(() => inFlight.delete(work), () => inFlight.delete(work));
-  return work;
-}
-afterEach(async () => {
-  // The body of a case that timed out keeps running: a loop, not one snapshot, also settles the
-  // work it starts after the deadline. `track` empties the set as each promise settles.
-  while (inFlight.size) await Promise.allSettled([...inFlight]);
-});
-
-/** A heavy case's deadline: a pack build is a few ms idle, seconds on a loaded host. */
-const SLOW_CASE_MS = 30_000;
-
-type CaseOutcome = { state: 'done' } | { state: 'failed'; error: unknown } | { state: 'deadline' };
-
-/**
- * Runs a case's work under its own deadline. The work is tracked and its rejection observed even
- * when it outlives the case, and the case fails at the deadline rather than at Bun's per-test
- * timeout: a timed-out case may leave work running, never an unhandled rejection for the next case.
- */
-async function runCase(ms: number, body: () => Promise<void>): Promise<CaseOutcome> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<CaseOutcome>((resolve) => { timer = setTimeout(() => resolve({ state: 'deadline' }), ms); });
-  const settled = track(body()).then(
-    () => ({ state: 'done' }) as CaseOutcome,
-    (error) => ({ state: 'failed', error }) as CaseOutcome,
-  );
-  try {
-    return await Promise.race([settled, deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** A test whose real work may pass Bun's 5 s default; it fails at its own deadline instead. */
-const slowTest = (name: string, body: () => Promise<void>, ms = SLOW_CASE_MS) =>
-  test(name, async () => {
-    const outcome = await runCase(ms, body);
-    if (outcome.state === 'deadline') throw new Error(`${name}: still running after ${ms} ms`);
-    if (outcome.state === 'failed') throw outcome.error;
-  }, ms + 10_000);
-
 /** Every file under `dir`, relative, sorted. */
 function files(dir: string, prefix = ''): string[] {
   return readdirSync(join(dir, prefix), { withFileTypes: true })
@@ -212,7 +163,7 @@ function files(dir: string, prefix = ''): string[] {
 const snapshot = (dir: string) => Object.fromEntries(files(dir).map((f) => [f, readFileSync(join(dir, f)).toString('base64')]));
 
 describe('the knowledge pack', () => {
-  slowTest('the allow-list takes READMEs and docs, never env, config, code, binaries or other paths', async () => {
+  test('the allow-list takes READMEs and docs, never env, config, code, binaries or other paths', async () => {
     const out = freshOut();
     await build({ ...gh.opts, out });
     expect(files(out)).toEqual([
@@ -292,7 +243,7 @@ describe('the knowledge pack', () => {
     expect(allowed('docs', 'guides/setup.mdx')).toBe(true);
   });
 
-  slowTest('each file carries its stamp, and the manifest lists every file with its size, sha256 and totals', async () => {
+  test('each file carries its stamp, and the manifest lists every file with its size, sha256 and totals', async () => {
     const out = freshOut();
     const m = await build({ ...gh.opts, out });
     const guide = readFileSync(join(out, 'genie/docs/guide.md'), 'utf8');
@@ -321,7 +272,7 @@ describe('the knowledge pack', () => {
     expect(readFileSync(join(out, 'manifest.json'), 'utf8')).not.toMatch(/20\d\d-\d\d-\d\d/);
   });
 
-  slowTest('two builds of the same commits are byte-identical, and a rebuild replaces the pack in place', async () => {
+  test('two builds of the same commits are byte-identical, and a rebuild replaces the pack in place', async () => {
     const a = freshOut();
     const b = freshOut();
     await build({ ...gh.opts, out: a });
@@ -332,7 +283,7 @@ describe('the knowledge pack', () => {
     expect(readdirSync(join(a, '..'))).toEqual(['knowledge']);
   });
 
-  slowTest('a privacy hit fails the build, prints file:line: rule, and keeps the old pack', async () => {
+  test('a privacy hit fails the build, prints file:line: rule, and keeps the old pack', async () => {
     const out = freshOut();
     await build({ ...gh.opts, out });
     const before = snapshot(out);
@@ -349,36 +300,32 @@ describe('the knowledge pack', () => {
     expect(readdirSync(join(out, '..'))).toEqual(['knowledge']);
   });
 
-  // One build over one repository: the guide is the only pack input this case reads, and building
-  // the whole fake org twice was the work that outlasted a five-second timeout under load.
-  slowTest('pack placeholders pass; a real-looking personal email or home path still fails', async () => {
+  test('pack placeholders pass; a real-looking personal email or home path still fails', async () => {
     const at = (local: string, domain: string) => `${local}@${domain}`;
     const home = (name: string) => `/${'home'}/${name}`;
-    const withGuide = (text: string) => [{ ...GENIE, files: { ...GENIE.files, 'docs/guide.md': text } }];
+    const withGuide = (text: string) => [{ ...GENIE, files: { ...GENIE.files, 'docs/guide.md': text } }, DOCS, OMNI];
     const placeholders = [at('you', 'gmail.com'), at('5511999999999', 's.whatsapp.net'), at('120363123456789', 'g.us'),
       at('omni', '2.YYMMDD'), at('git', 'github.com'), at('dpo', 'namastex.ai'), `${home('user')}/x`, `${home('genie')}/.claude`, home('automagik')];
     gh.set(withGuide(`# Guide\n\n${placeholders.join('\n')}\n`));
     try {
       await build({ ...gh.opts, out: freshOut() });
+      // A tool address outside the three listed ones is a hit too.
+      const personal = [at('ana.souza', 'gmail.com'), at('xyou', 'gmail.com'), at('5511987654321', 's.whatsapp.net'), at('support', 'github.com'),
+        home('username'), home('ana')];
+      gh.set(withGuide(`# Guide\n\n${personal.join('\n')}\n`));
+      const error = await build({ ...gh.opts, out: freshOut() }).then(() => null, (e) => e);
+      expect(error?.hits).toEqual([
+        'genie/docs/guide.md:10: email',
+        'genie/docs/guide.md:11: email',
+        'genie/docs/guide.md:12: email',
+        'genie/docs/guide.md:13: email',
+        'genie/docs/guide.md:14: home-path',
+        'genie/docs/guide.md:15: home-path',
+      ]);
     } finally {
       gh.set(ALL);
     }
-    // A tool address outside the three listed ones is a hit too. privacyHits is the check the
-    // build runs; one file gives the same answer without a second build.
-    const personal = [at('ana.souza', 'gmail.com'), at('xyou', 'gmail.com'), at('5511987654321', 's.whatsapp.net'), at('support', 'github.com'),
-      home('username'), home('ana')];
-    const dir = join(scratch, `placeholders-${++n}`);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'guide.md'), `# Guide\n\n${personal.join('\n')}\n`);
-    expect(privacyHits(dir)).toEqual([
-      'guide.md:3: email',
-      'guide.md:4: email',
-      'guide.md:5: email',
-      'guide.md:6: email',
-      'guide.md:7: home-path',
-      'guide.md:8: home-path',
-    ]);
-  }, 60_000);
+  });
 
   test('the placeholder list is checked: email or home-path only, a why, an exact match or an anchored pattern', () => {
     const shipped = JSON.parse(readFileSync(PLACEHOLDERS_PATH, 'utf8')).placeholders;
@@ -391,13 +338,13 @@ describe('the knowledge pack', () => {
     expect(() => placeholderTest([{ rule: 'email', match: 'x', pattern: '^x$', why: 'w' }])).toThrow(/one of match or pattern/);
     expect(() => placeholderTest([{ rule: 'email', pattern: 'x', why: 'w' }])).toThrow(/anchored/);
     const at = String.fromCharCode(64);
-    const pass = placeholderTest([{ rule: 'email', pattern: `^omni${at}v[0-9]+$`, why: 'w' }, { rule: 'home-path', match: 'h', why: 'w' }]);
-    expect(pass({ rule: 'email', match: `omni${at}v1` })).toBe(true);
-    expect(pass({ rule: 'email', match: `omni${at}v1x` })).toBe(false);
+    const pass = placeholderTest([{ rule: 'email', pattern: `^a${at}[0-9]$`, why: 'w' }, { rule: 'home-path', match: 'h', why: 'w' }]);
+    expect(pass({ rule: 'email', match: `a${at}1` })).toBe(true);
+    expect(pass({ rule: 'email', match: `a${at}12` })).toBe(false);
     expect(pass({ rule: 'email', match: 'h' })).toBe(false);
     expect(pass({ rule: 'home-path', match: 'h' })).toBe(true);
-    expect(pass({ rule: 'home-path', match: `omni${at}v1` })).toBe(false);
-    expect(pass({ rule: 'secret', match: `omni${at}v1` })).toBe(false);
+    expect(pass({ rule: 'home-path', match: `a${at}1` })).toBe(false);
+    expect(pass({ rule: 'secret', match: `a${at}1` })).toBe(false);
   });
 
   test('a placeholder pattern that matches empty text, has no literal part or matches unrelated text is refused', () => {
@@ -471,17 +418,9 @@ describe('the knowledge pack', () => {
     const shipped: Placeholder[] = JSON.parse(readFileSync(PLACEHOLDERS_PATH, 'utf8')).placeholders;
     expect(() => placeholderTest(shipped)).not.toThrow();
     expect(placeholderTest(shipped)({ rule: 'email', match: `omni${at}2.251115` })).toBe(true);
-    const narrow = [`^you${at}x\\.com$|^omni${at}[0-9]+\\.[0-9A-Za-z]+$`, `^you${at}x\\.com$|^me${at}x\\.com$`, `^omni${at}v[0-9]+$`];
+    const narrow = [`^a${at}[0-9]$`, `^you${at}x\\.com$|^me${at}x\\.com$`, `^omni${at}v[0-9]+$`];
     for (const pattern of narrow) expect(load(pattern)).not.toThrow();
     expect(load(`^${home}user$`, 'home-path')).not.toThrow();
-    expect(load(`^${home}user/docs/notes$`, 'home-path')).not.toThrow();
-    // A pinned local part or home name is not enough: the domain, and the path below the name,
-    // must be literal text too, the omni version forms aside. Each branch is checked on its own.
-    const DOMAIN = /must carry its whole domain as literal text/;
-    for (const pattern of [
-      `^a${at}[0-9]$`, `^you${at}[a-z]+\\.[a-z]+$`, `^omni${at}[a-z]+\\.[a-z]+$`, `^you${at}x\\.com$|^you${at}[a-z]+\\.[a-z]+$`,
-    ]) expect(load(pattern)).toThrow(DOMAIN);
-    expect(load(`^${home}user/[a-z]+/[a-z]+$`, 'home-path')).toThrow(/must carry the path below its home name as literal text/);
     const two = placeholderTest([{ rule: 'email', pattern: narrow[1], why: 'w' }]);
     expect([`you${at}x.com`, `me${at}x.com`, `them${at}x.com`].map((match) => two({ rule: 'email', match }))).toEqual([true, true, false]);
   });
@@ -555,7 +494,7 @@ describe('the knowledge pack', () => {
     expect(privacyHits(dir, [{ ...broad[0], rule: 'home-path' }])).toEqual(['a.md:4: secret']);
   });
 
-  slowTest('a read GitHub refuses fails the build and keeps the old pack', async () => {
+  test('a read GitHub refuses fails the build and keeps the old pack', async () => {
     const out = freshOut();
     await build({ ...gh.opts, out });
     const before = snapshot(out);
@@ -569,7 +508,7 @@ describe('the knowledge pack', () => {
     expect(readdirSync(join(out, '..'))).toEqual(['knowledge']);
   });
 
-  slowTest('a listing entry that is not public fails the build', async () => {
+  test('a listing entry that is not public fails the build', async () => {
     gh.set([...ALL, { name: 'secret', branch: 'main', commit: C1, private: true, files: { 'README.md': '# s\n' } }]);
     try {
       await expect(build({ ...gh.opts, out: freshOut() })).rejects.toThrow(/secret is not public/);
@@ -578,7 +517,7 @@ describe('the knowledge pack', () => {
     }
   });
 
-  slowTest('a folder that is not a pack is never replaced', async () => {
+  test('a folder that is not a pack is never replaced', async () => {
     const out = freshOut();
     mkdirSync(out, { recursive: true });
     writeFileSync(join(out, 'keep.txt'), 'mine\n');
@@ -586,7 +525,7 @@ describe('the knowledge pack', () => {
     expect(readFileSync(join(out, 'keep.txt'), 'utf8')).toBe('mine\n');
   });
 
-  slowTest('a token in the environment goes unused: no request carries credentials', async () => {
+  test('a token in the environment goes unused: no request carries credentials', async () => {
     const out = freshOut();
     gh.seen.length = 0;
     const env = { ...process.env, GH_TOKEN: 'test-token-not-real', GITHUB_TOKEN: 'test-token-not-real' };
@@ -608,30 +547,5 @@ describe('the knowledge pack', () => {
     bad[0] ^= 1;
     expect(() => readTar(bad)).toThrow(/checksum/);
     expect(readTar(Buffer.from(raw))).toMatchObject({ comment: C1, files: [{ path: 'x-main/README.md' }] });
-  });
-});
-
-// The guard the heavy cases use, in the two states a leak needs: a case whose deadline passes
-// while its work is still running, then the following case, which sees that work settled by
-// cleanup. Without the afterEach await, the second case starts with the work still in flight and
-// fails; without the tracked, observed rejection, the run reports an unhandled rejection between
-// the two.
-describe('a case that times out', () => {
-  let late: 'pending' | 'rejected' = 'pending';
-
-  test('abandons its work at the deadline, and that work rejects afterwards', async () => {
-    const outcome = await runCase(20, async () => {
-      await new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          late = 'rejected';
-          reject(new Error('late rejection from the timed-out case'));
-        }, 200);
-      });
-    });
-    expect(outcome).toEqual({ state: 'deadline' });
-  });
-
-  test('the following case is green: cleanup settled the work before it started', () => {
-    expect([inFlight.size, late]).toEqual([0, 'rejected']);
   });
 });

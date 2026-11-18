@@ -1479,26 +1479,16 @@ test('Unfold Main Bot adopts the configured adapter root in either startup order
         await env.call('state', {}) // the browser may arrive before either plugin
         assert.deepEqual(env.state().bots, {})
         const rt = env.ctx.provided.get('omniTeam')
-        let expired = false
-        const warn = rt.warn
-        rt.warn = (...args) => {
-          if (typeof args[0] === 'string' && args[0].includes('the Main Bot maker gave no answer')) expired = true
-          return warn?.(...args)
-        }
         rt.mainBotMakerMs = 10
         const unfold = createUnfold(env.ctx, rt)
         const reading = env.call('state', {})
         if (delayed) {
-          // The state read must finish through the deadline while the adapter is still blocked.
-          await until(() => expired, { label: 'the Main Bot maker deadline expired' })
-          await reading
+          await settle() // beyond the team's maker deadline; it must still create no default
           assert.equal(env.created.length, 0)
           assert.deepEqual(env.state().bots, {}, 'no default Bot while the adapter prepares its root')
           release()
         }
         await Promise.all([reading, unfold.unfoldReady])
-        // The fake plugin's readiness can precede the adopted Bot's save.
-        await until(() => env.state().bots[session.sessionId] !== undefined, { label: 'the adopted Bot is saved' })
         const bots = Object.values(env.state().bots)
         assert.deepEqual(bots.map(bot => [bot.id, bot.kind]), [[session.sessionId, 'unfold']])
         assert.deepEqual(env.state().mainBotIds, [session.sessionId])

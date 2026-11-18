@@ -50,10 +50,7 @@ type Terminal struct {
 var ErrNotFound = errors.New("no such terminal")
 
 func run(out any, args ...string) error {
-	return runCommand(exec.Command(hostpath.HCBin(), args...), out, args...)
-}
-
-func runCommand(cmd *exec.Cmd, out any, args ...string) error {
+	cmd := exec.Command(hostpath.HCBin(), args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -148,15 +145,12 @@ func (Client) Terminals(labels map[string]string) ([]string, error) {
 }
 
 // Read returns the terminal's screen as plain text, without its history. It is
-// what a blocked run quotes in its failure line. A read gets at most ten seconds.
+// what a blocked run quotes in its failure line.
 func (Client) Read(address string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	var res struct {
 		Text string `json:"text"`
 	}
-	args := []string{"read", address, "--json"}
-	err := runCommand(exec.CommandContext(ctx, hostpath.HCBin(), args...), &res, args...)
+	err := run(&res, "read", address, "--json")
 	return res.Text, err
 }
 

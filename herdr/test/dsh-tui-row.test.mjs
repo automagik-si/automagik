@@ -1,4 +1,3 @@
-import { startFakeCore } from "./fake-core.mjs";
 // dsh-tui as an agent row (#598): Start, Restart and workers run it as the DSH lane fixed it
 // (DSH 0.2.2-rc.1, dsh-tui 0.19.0). An interactive pane only, never a permission, add-dir or
 // approval flag (the dsh-tui profile on that machine supplies the sandbox); the briefing, or a
@@ -140,10 +139,7 @@ function scene(t, { terminals = [] } = {}) {
   writeFileSync(logPath, "");
   const env = { XDG_DATA_HOME: join(root, "data"), PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     AUTOMAGIK_HERDR_RESTART_STABLE_MS: "300", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "4000", AUTOMAGIK_HERDR_TAB_WAIT_MS: "0" };
-  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
-  Object.assign(env, { ...core.env });
   const cli = (args, extra = {}) => {
-    core.control({ ...env, ...extra });
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...extra }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
