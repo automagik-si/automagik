@@ -37,8 +37,9 @@ import { UNFOLD_BOT } from './companion.js'
 //   acp, acp-switch, acp-retry
 //                      Claude Code and Codex through @automagik/acp-dsh: its acpAgents
 //                      service's status, and its claude/codex settings (src/host/acp.js)
-//   migrate-probe, migrate-start, migrate-status, migrate-omni-status
-//                      the "From another tool" step: Hermes's Telegram channel and its key
+//   migrate-probe, migrate-start, migrate-status, migrate-omni-status, migrate-restore-hermes
+//                      the "From another tool" step: Hermes's Telegram channel and its key,
+//                      and the way back to Hermes after an unknown Omni result
 //                      (src/host/hermes-migrate.js). The key never enters an answer.
 //
 // The key never enters settings, a reply or a log line: the route names it by the
@@ -250,6 +251,7 @@ export function install(ctx, deps = {}) {
   actions['migrate-start'] = (payload, signal) => migrate['migrate-start'](parse(MigrateStartPayload, payload) ?? {}, signal)
   actions['migrate-status'] = (payload, signal) => migrate['migrate-status'](parse(MigrateStatusPayload, payload) ?? {}, signal)
   actions['migrate-omni-status'] = (payload, signal) => migrate['migrate-omni-status'](parse(MigrateOmniPayload, payload) ?? {}, signal)
+  actions['migrate-restore-hermes'] = migrate['migrate-restore-hermes']
   actions['migrate-probe'] = migrate['migrate-probe']
   // Connect AI finished with an AI on: the companion, the Omni Bot and the Genie Bot get their model, and
   // their held greetings go out. The step waits for that a little (ASSIGN_HOLD_MS), so the
