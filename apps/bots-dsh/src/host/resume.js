@@ -117,6 +117,11 @@ const triggerOf = info => ({
   ...(info.audience ? { audience: info.audience } : {}),
   ...(info.askedBy ? { askedBy: info.askedBy } : {}),
   ...(info.senderRoomId ? { senderRoomId: info.senderRoomId } : {}),
+  // A message that owes no reply still owes none once the turn is picked up.
+  ...(info.noReply === true ? { noReply: true } : {}),
+  // The requests a handed-back turn answers with its trigger: the batch message is
+  // taken up by then, so this note is the only place they are kept.
+  ...(Array.isArray(info.joined) && info.joined.length > 0 ? { joined: info.joined } : {}),
 })
 
 const readNotes = (file) => {
@@ -332,6 +337,13 @@ export function install(rt) {
   rt.noteApproval = (sessionId, approval) => update(sessionId, record => (record === undefined ? record
     : approval === undefined ? (({ approval: _, ...rest }) => rest)(record) : { ...record, approval }))
 
+  // A batch names every sender it answers, as the handed-back turn did.
+  const joinedFrom = (trigger) => {
+    const names = [...new Set([rt.botOf(trigger.senderSessionId)?.name, ...trigger.joined.map(item => item?.info?.senderName)]
+      .filter(name => typeof name === 'string' && name !== ''))]
+    return names.length > 0 ? { fromName: names.join(', ') } : {}
+  }
+
   async function resumeDelivery(sessionId, record) {
     const bot = rt.botOf(record.botId)
     if (bot === undefined || rt.shellHoldOf?.(bot.id) !== undefined) return undefined
@@ -353,19 +365,15 @@ export function install(rt) {
       // Preserve the original exchange for a sender still waiting for the answer.
       return { fromId: trigger.senderSessionId, toId: bot.id, sessionId: target, role: trigger.role,
         exchangeId: trigger.exchangeId ?? exchangeId, ...(trigger.senderRoomId ? { fromRoomId: trigger.senderRoomId } : {}),
+        ...(trigger.noReply === true ? { noReply: true } : {}),
+        ...(Array.isArray(trigger.joined) && trigger.joined.length > 0 ? { joined: trigger.joined, ...joinedFrom(trigger) } : {}),
         resumed: true, text }
     }
     // A turn that went on with work another Bot asked for still owes that Bot its answer.
     return { toId: bot.id, sessionId: target, role: 'resume', resumed: true, text, exchangeId, ...(trigger?.work ? { work: trigger.work } : {}) }
   }
 
-  // Use the delivery route's shared destination lookup when it is installed.
-  const sessionFor = (sessionId, args) => {
-    if (rt.sessionNow !== undefined) return rt.sessionNow(sessionId, args?.toId, args?.roomId)
-    if (rt.isBotSession(sessionId)) return sessionId
-    if (!rt.pastOwners.has(sessionId)) return undefined
-    return args?.roomId === undefined ? rt.chatOf(args?.toId) : rt.roomOf(args.roomId)?.sessions?.[args.toId]
-  }
+  const sessionFor = (sessionId, args) => rt.sessionNow(sessionId, args?.toId, args?.roomId)
 
   const waitingFor = agent => new Set([...(agent.inbox?.nextStep ?? []), ...(agent.inbox?.nextTurn ?? [])]
     .map(message => message.source?.exchangeId))

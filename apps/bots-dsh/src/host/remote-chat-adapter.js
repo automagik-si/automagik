@@ -60,14 +60,18 @@ function* textBlocks(text, index) {
   yield { type: 'block-end', index, block: { type: 'text', text } }
 }
 
-// Deep-frozen plain data only: an object with its own toJSON, a getter, a Proxy or a class
+// Deep-frozen plain data only: an object with its own function toJSON, a getter, a Proxy or a class
 // prototype could answer one read and behave differently on the next, so it is not a message.
 function plainData(value) {
   if (value === null || typeof value !== 'object') return typeof value !== 'function'
   if (types.isProxy(value)) return false
   const prototype = Object.getPrototypeOf(value)
   if (Array.isArray(value) ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) return false
-  if (Object.hasOwn(value, 'toJSON') || !Object.isFrozen(value)) return false
+  if (!Object.isFrozen(value)) return false
+  // JSON.stringify calls only a function toJSON. A plain data key with that name is ordinary
+  // data a tool argument or a model reply may legitimately carry.
+  const toJSON = Object.getOwnPropertyDescriptor(value, 'toJSON')
+  if (toJSON !== undefined && 'value' in toJSON && typeof toJSON.value === 'function') return false
   for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
     if (!('value' in descriptor)) return false
     if (!plainData(descriptor.value)) return false
@@ -196,7 +200,7 @@ export class RemoteChatAdapter extends LlmAdapter {
     let expected
     try { expected = projectFilesToText(derived.filter(message => message?.role !== 'developer'), filePath) } catch { return false }
     if (expected.length !== request.messages.length || expected.length === 0) return false
-    // Only deep-frozen plain data: no toJSON, accessors, Proxies or class instances can make one
+    // Only deep-frozen plain data: no function toJSON, accessors, Proxies or class instances can make one
     // read (this comparison) differ from the next (the text the adapter actually submits).
     if (!plainData(request.messages)) return false
     const want = expected.map(message => asDispatched(message, request.provider))

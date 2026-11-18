@@ -52,15 +52,15 @@ function findAll(node, match, out = []) {
 test('the companion offers Pirlim first and as its placeholder, without Pip among the ideas', () => {
   const tree = render(flow.CompanionStep({}))
   const names = findAll(tree, node => node.props.className === 'oai-chip').map(node => node.children.join(''))
-  assert.deepEqual(names, ['Pirlim', 'Nova', 'Mochi', 'Echo', 'Biscuit'])
+  assert.deepEqual(names, ['Pirlim', 'Mestrik', 'Maguito', 'Guizo', 'Trunfo'])
   assert.ok(!names.includes('Pip'))
   assert.equal(findAll(tree, node => node.type === 'input' && node.props.id === 'oai-name')[0].props.placeholder, 'Pirlim')
 })
 
-test('the committed client carries the Pirlim name ideas and no old Pip list', () => {
+test('the committed client carries the Pirlim name ideas and no older list', () => {
   const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
-  assert.match(source, /\bNAMES\s*=\s*\["Pirlim", "Nova", "Mochi", "Echo", "Biscuit"\]/)
-  assert.doesNotMatch(source, /\["Pip", "Nova", "Mochi", "Echo", "Biscuit"\]/)
+  assert.match(source, /\bNAMES\s*=\s*\["Pirlim", "Mestrik", "Maguito", "Guizo", "Trunfo"\]/)
+  assert.doesNotMatch(source, /\["Pirlim", "Nova", "Mochi", "Echo", "Biscuit"\]/)
 })
 
 for (const language of ['en', 'pt-BR']) {
