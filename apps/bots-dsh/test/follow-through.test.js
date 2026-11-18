@@ -724,6 +724,8 @@ test('an ACP task the person stopped reads stopped, not failed', async (t) => {
   const home = freshHome(t)
   taskTeam(home, { tasks: { cut: working('Reviewer', Date.now() - 60_000) } })
   const host = await start(home)
+  // The task's Session runs on an ACP agent: a prompt cancelled there ends as the ABORTED error.
+  host.agentOf('cut').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: 'opus' } })
   host.emit('cut', 'turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'Stopped', code: 'ABORTED' } } })
   await settleState(t, home, () => stateOf(home).tasks.cut.status === 'stopped')
   await settle(() => host.agentOf('a').calls.length === 1)

@@ -17,6 +17,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AGENT_NAME, AGENT_SESSION_TITLE_MAX, DSH_BOT_NAME_MAX, TEAM_TOOLS } from './constants.js'
 import { nameProblem } from '../shared/mentions.js'
+import { routeOf } from '../shared/routes.js'
 import { splitRef } from './text.js'
 import { output } from './tools.js'
 import { OMNI_KIND } from './roster.js'
@@ -982,7 +983,9 @@ export function install(rt) {
       // An error fails the task; the user or a Bot stopping it (an abort, or the error a
       // cancelled ACP prompt ends with) only stops it.
       const reason = event.data?.reason
+      const provider = session.requestHeader?.()?.config?.provider
       const cancelled = reason?.kind === 'error' && reason.error?.code === 'ABORTED'
+        && routeOf(provider).connectedBy === 'acp'
       const stopped = reason?.kind === 'aborted' || cancelled
       const failed = reason?.kind === 'error' && !stopped
       task.status = failed ? 'failed' : stopped ? 'stopped' : 'done'
