@@ -1656,16 +1656,14 @@ async function homeOn(machine) {
 
 /**
  * The models `agent` may be pinned to on `machine`, from that machine's own knowledge (#1173):
- * Codex's `~/.codex/models_cache.json` there, Antigravity's pack cache under its app home there.
- * Claude's list is the same on every computer, so the static one stands. Resolves an array, or
- * null when that machine has no list to read (an older cache, no app home, a machine that can't
- * answer): the launch there then judges the pin, never this computer's stale cache.
+ * Codex's `~/.codex/models_cache.json` there, Antigravity's pack cache under its app home there,
+ * Claude's `~/.claude/settings.json` default there (its static list is the same everywhere, but
+ * its settings default is each computer's own). Resolves an array, or null when that machine has
+ * no list to read (an older cache, no app home, no settings, a machine that can't answer): the
+ * launch there then judges the pin, never this computer's stale cache.
  */
 async function modelsOnMachine(machine, key, agent) {
-  // Claude's accepted list is static on every computer; any other agent's cache is the target's
-  // to read or to judge at its launch, never this computer's.
-  if (agent === "claude") return modelList(agent);
-  if (agent !== "codex" && agent !== "antigravity") return null;
+  if (agent !== "claude" && agent !== "codex" && agent !== "antigravity") return null;
   try {
     let text = null;
     if (agent === "antigravity") {
@@ -1674,9 +1672,15 @@ async function modelsOnMachine(machine, key, agent) {
       if (app) text = await readRemoteText(remoteIo, machine, agModelsPath(app));
     } else {
       const home = await homeOn(machine);
-      if (home) text = await readRemoteText(remoteIo, machine, `${home}/.codex/models_cache.json`);
+      if (!home) return null;
+      text = await readRemoteText(remoteIo, machine, agent === "claude"
+        ? `${home}/.claude/settings.json` : `${home}/.codex/models_cache.json`);
     }
-    const list = knownModelsFrom(agent, agent === "antigravity" ? { antigravityModels: text } : { codexModels: text });
+    // No file there is no list to judge a pin by: never fall back to this computer's knowledge.
+    if (text === null) return null;
+    const texts = agent === "antigravity" ? { antigravityModels: text }
+      : agent === "claude" ? { claudeSettings: text } : { codexModels: text };
+    const list = knownModelsFrom(agent, texts);
     return list.length ? list : null;
   } catch {
     return null;
