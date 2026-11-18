@@ -68,6 +68,7 @@ test('apply registers listeners and effects in a fixed order', (t) => {
     'on tools/result',
     'on session/event',
     'effect omni-ui: lost hand-offs',
+    'on session/event',
     'effect ds-bot: folder access context',
     'prompt context ds-bot:folder-access 650',
     'effect ds-bot: agent tool restrict retry',

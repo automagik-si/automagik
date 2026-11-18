@@ -17,14 +17,18 @@ export function install(rt) {
     return resolved.agent
   }
 
-  const headerFor = (role, fromName, roomName, audience, note = 'new message', deferred = false, { resumed = false, retried = false, resent = false, abandoned = false, asker } = {}) => {
+  const headerFor = (role, fromName, roomName, audience, note = 'new message', deferred = false, { resumed = false, retried = false, resent = false, abandoned = false, asker, noReply = false, plural = false } = {}) => {
     // What came back for work another Bot gave this one says where its answer goes.
     const goesOn = asker === undefined ? '' : ` · for the work ${asker} asked you for; your answer goes to ${asker} once everything you handed on is back`
     // A wait the user gave up reads as its own thing: the other Bot never answered.
     if (abandoned) return `[Waiting given up · ${fromName} did not hand back this work; go on with the work it was for${goesOn}]`
     if (deferred && role === 'reply') return `[Reply from ${fromName} · you read it during your last task; go on with the work it is for now${goesOn}]`
     if (deferred && role === 'report') return `[Group chat "${roomName}" · replies to your post · you read them during your last task; go on with the work they are for now${goesOn}]`
-    if (deferred && role !== 'room') return `[Message from ${fromName} · you read it during your last task; answer it now]`
+    if (deferred && role !== 'room') return plural
+      ? `[Messages from ${fromName} · you read them during your last task; answer them now]`
+      : `[Message from ${fromName} · you read it during your last task; answer it now]`
+    // A message that owes nothing says so, so the Bot reads it without answering it.
+    if (noReply && role === 'request' && audience !== 'user') return `[Message from ${fromName} · no reply needed]`
     if (retried && role !== 'room') return '[Your last reply wrote a tool call as text, so nothing ran]'
     if (resumed && role === 'resume') return '[DeepSeek Harness restarted while you were working]'
     if (resumed && role !== 'room') return `[Message from ${fromName} · DeepSeek Harness restarted while you were working on it]`
@@ -73,6 +77,95 @@ export function install(rt) {
     return [...shown.values()]
   }
 
+  // Replies waiting for one Bot go in together: the turn it opens reads them all.
+  // A finished turn appends its replies here before any await, so one event-loop turn
+  // collects them; `inject` queues for the next step without waking, and the last one
+  // wakes the driver, so one turn claims the batch. A batch never mixes two works:
+  // one turn answers one work, and replies for different works keep their own turns
+  // (the merge covers what one answer can carry).
+  const replyQueues = new Map()
+  const replyKey = (sessionId, work) => `${sessionId}\u0000${work ?? ''}`
+  const scheduleReplies = (key) => {
+    const queue = replyQueues.get(key)
+    if (queue === undefined || queue.timer !== undefined || queue.running) return
+    // Deliveries made by one turn append before any await, so one event-loop turn is
+    // enough to collect them; what is waiting when the flush runs goes in together.
+    queue.timer = setImmediate(() => {
+      queue.timer = undefined
+      void flushReplies(key)
+    })
+  }
+  const flushReplies = async (key) => {
+    const queue = replyQueues.get(key)
+    if (queue === undefined || queue.running || queue.items.length === 0) return
+    // A turn is already reading its inbox: what waits for it goes in when it ends.
+    if (rt.live?.get?.(queue.sessionId)?.turn !== undefined) return
+    queue.running = true
+    const batch = queue.items.splice(0)
+    try {
+      // The exchange is recorded before its message goes out; wait for each.
+      const outcomes = await Promise.allSettled(batch.map(item => item.ready))
+      const sendable = []
+      for (const [index, item] of batch.entries()) {
+        if (outcomes[index].status === 'fulfilled') sendable.push(item)
+        else item.fail(outcomes[index].reason)
+      }
+      if (sendable.length === 0) return
+      const agent = sendable[0].agent
+      if (rt.live?.get?.(queue.sessionId)?.turn !== undefined || agent.status === 'running') {
+        // A turn opened while the exchanges were written: it reads them at the end.
+        queue.items = [...sendable, ...queue.items]
+        return
+      }
+      if (typeof agent.inject === 'function') {
+        for (const item of sendable.slice(0, -1)) agent.inject(item.message)
+        agent.followup(sendable.at(-1).message)
+      } else {
+        // An older host without inject still gets the replies, one turn each.
+        for (const item of sendable) agent.followup(item.message)
+      }
+      await ctx.sessions.flush(agent.session)
+      for (const item of sendable) item.delivered()
+    } catch (error) {
+      for (const item of batch) item.fail(error)
+    } finally {
+      queue.running = false
+      if (queue.items.length === 0) replyQueues.delete(key)
+      else scheduleReplies(key)
+    }
+  }
+  const queueReply = (sessionId, work, message) => {
+    const key = replyKey(sessionId, work)
+    let queue = replyQueues.get(key)
+    if (queue === undefined) replyQueues.set(key, queue = { sessionId, work, items: [], timer: undefined, running: false })
+    let markReady
+    let markUnready
+    let markDelivered
+    let markFailed
+    const item = {
+      message,
+      agent: undefined,
+      ready: new Promise((resolve, reject) => { markReady = resolve; markUnready = reject }),
+      sent: new Promise((resolve, reject) => { markDelivered = resolve; markFailed = reject }),
+      made: () => markReady(),
+      delivered: () => markDelivered(),
+      fail: (error) => { markUnready(error); markFailed(error) },
+    }
+    // A setup failure is reported through `sent`; these keep neither promise unhandled
+    // while the reply waits for a busy Bot or the delivery that failed is still unwinding.
+    item.ready.catch(() => {})
+    item.sent.catch(() => {})
+    queue.items.push(item)
+    if (!queue.running) scheduleReplies(key)
+    return item
+  }
+  ctx.on('session/event', (session, event) => {
+    if (event?.type !== 'turn/end') return
+    const id = session?.id
+    // After every listener has cleared the turn, deliver what waited for it.
+    for (const [key, queue] of replyQueues) if (queue.sessionId === id) setImmediate(() => void flushReplies(key))
+  })
+
   // `sessionId` defaults to the recipient's own chat; group turns name its group Session.
   // `deferred`: a request the Bot already read mid-turn, handed back to answer in a
   // turn of its own; its exchange was recorded when it first arrived. `resumed` and
@@ -87,7 +180,7 @@ export function install(rt) {
   // result that came back goes on with. `merged`: a request that takes in an earlier
   // one its recipient had not read, under that one's exchange. `uploads`: the person's
   // uploads of a group turn, for a member over ACP.
-  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, retried = false, resent = false, merged = false, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }) {
+  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }) {
     const from = rt.botOf(fromId)
     const to = rt.botOf(toId)
     if (to === undefined) throw new Error(`Unknown Bot ${toId}`)
@@ -109,6 +202,8 @@ export function install(rt) {
       ...(roomId && uploads.length > 0 ? { uploads: { v: 1, roomId, items: uploads } } : {}),
       ...(audience === 'user' ? { audience } : {}),
       ...(deferred ? { deferred: true } : {}),
+      ...(noReply ? { noReply: true } : {}),
+      ...(joined && joined.length > 0 ? { joined } : {}),
       ...(resumed ? { resumed: true } : {}),
       ...(retried ? { retried: true } : {}),
       ...(askedBy ? { askedBy } : {}),
@@ -121,25 +216,39 @@ export function install(rt) {
     // delivered with no record of it. A resend keeps the record it has; only a merged request
     // replaces it with its added text.
     const book = fromId !== undefined && from !== undefined && recordExchange && EXCHANGE_ROLES.has(role) && !deferred && !resumed && !retried ? pairBook(fromId, toId) : undefined
-    if (book !== undefined && (merged || !rt.ledger.records(book).some(record => record.event === undefined && record.id === exchangeId))) {
-      rt.ledger.append(book, { id: exchangeId, from: fromId, to: toId, role, text, time: Date.now(), ...(length !== undefined ? { length, files } : {}), ...(replyTo ? { replyTo } : {}), ...(audience === 'user' ? { audience } : {}), ...(roomId ? { roomId } : {}) })
-      await rt.ledger.written(book)
-    }
-    await rt.ensureCapabilities(targetSessionId)
-    const agent = await resolveAgent(targetSessionId)
     // A steered message cuts into a running turn at its next step; a follow-up
     // queues for the next turn (see turns.js for how each is routed).
     const message = createUserMessage({
       content: [
-        { type: 'text', text: `${headerFor(role, fromName, room?.name, audience, note, deferred, { resumed, retried, resent, abandoned, asker })}\n${text}` },
+        { type: 'text', text: `${headerFor(role, fromName, room?.name, audience, note, deferred, { resumed, retried, resent, abandoned, asker, noReply, plural: (joined?.length ?? 0) > 0 })}\n${text}` },
         ...images.map(attachment => ({ type: 'image', attachment })),
         ...files.map(attachment => ({ type: 'file', attachment })),
       ],
       source,
     })
-    if (steer) agent.steer(message)
-    else agent.followup(message)
-    await ctx.sessions.flush(agent.session)
+    // A reply joins its recipient's batch before anything is awaited, so every reply one
+    // finished turn produces lands in the same batch and one turn reads them all.
+    const queued = role === 'reply' && !steer ? queueReply(targetSessionId, work, message) : undefined
+    try {
+      if (book !== undefined && (merged || !rt.ledger.records(book).some(record => record.event === undefined && record.id === exchangeId))) {
+        rt.ledger.append(book, { id: exchangeId, from: fromId, to: toId, role, text, time: Date.now(), ...(length !== undefined ? { length, files } : {}), ...(replyTo ? { replyTo } : {}), ...(audience === 'user' ? { audience } : {}), ...(roomId ? { roomId } : {}) })
+        await rt.ledger.written(book)
+      }
+      await rt.ensureCapabilities(targetSessionId)
+      const agent = await resolveAgent(targetSessionId)
+      if (queued !== undefined) {
+        queued.agent = agent
+        queued.made()
+        await queued.sent
+      } else {
+        if (steer) agent.steer(message)
+        else agent.followup(message)
+        await ctx.sessions.flush(agent.session)
+      }
+    } catch (error) {
+      queued?.fail(error)
+      throw error
+    }
     if (book !== undefined) {
       rt.ledger.append(book, { event: 'delivered', id: exchangeId, sessionId: targetSessionId, time: Date.now() })
       // The message went out either way; a mark that is lost only hides it from the dialog.
