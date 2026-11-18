@@ -27,8 +27,10 @@ The updater reads **only** the signed lane pointer, never the releases list:
 1. **`lane.json` and `lane.json.sig`** from the rolling `plugin-lane` release (a prerelease, moved
    every release). It is ed25519-signed (`PLUGIN_LANE_KEY`); the public keys ship in the plugin
    (`plugin-lane/keys.json`, copied into the package). The updater verifies the signature **over the
-   exact bytes** against those keys **before reading any field**, exactly as the desktop app's own
-   lane reader does (`apps/desktop/src/lane.js`).
+   exact bytes** against those keys **before reading any field**. The verifier is the one the host
+   upgrade already uses: `verifyLane` in `scripts/lane.ts`, called from `scripts/upgrade.ts:50,519-540`
+   with `plugin-lane/keys.json`; the desktop app reads the same pointer (`apps/desktop/src/lane.js`).
+   The web updater calls that module, never a second copy of the ed25519 code.
 2. From the verified pointer it takes the entry for this plugin: `version`, `integrity` (sha512) and
    `sha256`, plus the release that carries the tarball (`automagik-bots-dsh-<version>.tgz` on that
    release).
@@ -46,16 +48,23 @@ same trust chain the pack and the desktop app already use; the web updater adds 
 The instance's plugins live in its DSH profile (`<profile>/node_modules/@automagik/...`, installed by
 DSH). Before switching, the updater stores the version that is running:
 
-- **Plain host**: `<profile>/update/versions/<version>/` holds a copy of what the profile has for this
-  plugin (the files the release tarball contains) together with the installed `package.json`, so the
-  rollback is a directory switch and never a re-download. A small pointer file,
-  `<profile>/update/current.json`, names the version that is live and the one kept beside it. At most
-  two versions are kept; the third is removed only after a healthy run of the new one.
-- **Where the instance lives in Arca**: Arca supplies the container and its writable home, nothing
-  about plugin versions. So the same layout is used **inside** the instance's Arca home, and Arca adds
-  two things the updater relies on: the restart of the instance is a container restart (the updater
-  asks Arca to restart the instance, it does not kill the process itself), and the state file survives
-  it because it is in the same writable home. If a host offers no writable home, the updater refuses
+- **Plain host**: the layout is the one the host upgrade proved (`scripts/upgrade.ts:9-17`,
+  `docs/upgrade.md:28-46`): every version beside the running one — `releases/<version>/` with the
+  `runtime` symlink as the pointer — but at the profile's scale: `<profile>/update/versions/<version>/`
+  holds what the profile has for this plugin together with the installed `package.json`, and
+  `<profile>/update/current.json` names the live version and the one kept beside it. The switch is the
+  same atomic move (`temp symlink + mv -T`, `scripts/upgrade.ts:13`), so the rollback is a directory
+  switch and never a re-download. At most two versions are kept; the third is removed only after a
+  healthy run of the new one.
+- **Where the instance lives in Arca (a server image)**: the image already follows the lane on start,
+  offline and under a volume lock: `followImage`/`installOffline`/`reuseInstalledIndexes` in
+  `server/profile-follow.mjs:33-76`, entered from `server/entrypoint.mjs:21`. So in that case the
+  updater does **not** write a second installer: it materializes the payload the same way the image
+  does and hands it to that path (the follow installs beside/over the profile under
+  `server/volume-lock.mjs`), then asks Arca to restart the instance. On a plain host — the layout
+  `docs/upgrade.md:6-8` describes — the profile-level store above is used instead. Arca adds two things
+  the updater relies on: the restart is a container restart (the updater asks Arca, it does not kill
+  the process itself), and the state file survives it because it is in the same writable home. If a host offers no writable home, the updater refuses
   and says why — it never falls back to installing in place with nothing kept.
 - The data a person cares about — sessions, Bots, memory, secrets — is **not** part of a version and
   is never touched by an update or a rollback. That is what "nothing was lost" means here, and the
@@ -168,6 +177,29 @@ The modal states it before the click: "Work in progress stops when you click Upd
 back by itself once the update is done. Nothing is lost." The success and rollback screens say that the
 stopped work came back.
 
+## What exists already, and what we reuse ("O que já existe e o que reutilizamos")
+
+There are already three update paths, and the owner wants one mechanism per problem, not two. Each
+one keeps its problem; 0035 reuses what it can and never adds a second copy.
+
+| exists | what it does | 0035 reuses | 0035 replaces | 0035 retires |
+|---|---|---|---|---|
+| `scripts/upgrade.ts` + `docs/upgrade.md` | upgrades an **installed host**: latest release or `--to`, verifies the signed lane and `PLUGINS.SHA256SUMS` (`scripts/upgrade.ts:516-540`, `verifyLane` from `scripts/lane.ts` at `:50`), backs up, stages `releases/<version>/` and swaps the `runtime` symlink atomically (`:9-17`), re-adds tarballs through `dsh plugin`, smoke-checks, rolls back on failure, prints one `RESULT:` (`docs/upgrade.md:28-46`) | the lane verifier (`verifyLane`, `plugin-lane/keys.json`), the integrity check of a tarball (`scripts/upgrade.ts:316`), the beside-the-running-version layout and the atomic switch, the automatic rollback and the one-line result | the manual "stop, backfill, re-add, restart, check" sequence **for plugins only**, from inside the app | nothing — it stays the way a host upgrades its runtime; 0035 never touches `runtime/` or the service unit |
+| `server/profile-follow.mjs` | a server image's profile follows the lane on start: offline install from materialized archives, under a volume lock (`:33-76`, entered at `server/entrypoint.mjs:21`), with `compareRelease`/`validBuild`/ownership state (`server/profile-state.mjs`) | `followImage`/`installOffline`/`reuseInstalledIndexes` as **the** installer when the instance runs from a server image (Arca), its volume lock, and its state checks | 0035's own install step on that kind of host — the plan now hands the payload to this path instead of keeping a second installer (delivery 5, delivery 8) | nothing — it keeps updating image-hosted instances on start; 0035 only adds the in-app trigger and the visible state |
+| the signed lane + `am` as loaders (`docs/rfcs/0011-*`, `0012-*`; `am/lib/lane.mjs`) | the lane is the signed pointer (`lane.json` + `lane.json.sig`, `plugin-lane/keys.json`); `am` is the one command that reads it and loads the parts | the lane as the only source of a version and its signature, and am's lane reader (`am/lib/lane.mjs`: `LANE_RELEASE`, the sequence and no-downgrade refusal) as the reference for the same rules | the manual download of release tarballs, checking them by hand against `PLUGINS.SHA256SUMS` | the instruction "update by hand" as the normal path on a web instance; am keeps loading a host, and 0035 adds the in-app trigger that uses the same lane |
+
+The plan changes that follow from this comparison, all inside the deliveries table below:
+
+- **Delivery 4 reuses the verifier**: it calls `scripts/lane.ts`'s `verifyLane` (as
+  `scripts/upgrade.ts` does) and the same sha256/integrity check, instead of a new reader.
+- **Delivery 5 reuses the installer on an image host**: on Arca it materializes the payload and calls
+  `installOffline`/`followImage` (`server/profile-follow.mjs`); on a plain host it uses the
+  profile-level store, which copies the upgrade's beside-the-version layout and atomic switch.
+- **Delivery 6 reuses the rollback lesson**: the same trigger and the same automatic return that
+  `scripts/upgrade.ts` proves (switch back to the kept version, restart, re-check, one result line).
+- **Delivery 8 becomes smaller**: the Arca hand-over is just "materialize, follow, restart", because the
+  installer already exists there.
+
 ## Deliveries (each one PR, plugin lane)
 
 | # | What it adds | Visible to the person |
@@ -175,11 +207,11 @@ stopped work came back.
 | 1 | The mock (#1541, approved) | the whole flow, with sample data, behind `?mock-1540` |
 | 2 | This RFC | no |
 | 3 | Host half: version store, `current.json`, `update-status`, and the "did the last run finish" read the page uses | no (no update yet) |
-| 4 | Verified fetch: read `lane.json`, check its signature, take this plugin's `version`/`sha256`, download the tarball, check it, and stop — a dry run that writes what it would do | a "check for updates" line in Settings, no install |
-| 5 | Install beside and switch: unpack into `versions/<version>`, write the state, restart through the supervisor | a real update behind a setting, off by default |
+| 4 | Verified fetch: read `lane.json` through `verifyLane` (`scripts/lane.ts`, as `scripts/upgrade.ts:50` does), take this plugin's `version`/`sha256`, download the tarball, check it, and stop — a dry run that writes what it would do | a "check for updates" line in Settings, no install |
+| 5 | Install beside and switch: on an image host hand the payload to `installOffline`/`followImage` (`server/profile-follow.mjs:47,76`); on a plain host unpack into `versions/<version>` and switch atomically as `scripts/upgrade.ts:13` does; write the state, restart through the supervisor | a real update behind a setting, off by default |
 | 6 | Health and automatic rollback, as above | the rollback screen tells the truth |
 | 7 | The nod and the full-screen modal wired to the real state instead of the mock's timers; the mock retires | the approved flow, working |
-| 8 | Arca hand-over: the restart call and the home it uses, documented for the owner | an instance in Arca updating itself |
+| 8 | Arca hand-over: materialize, follow (`server/profile-follow.mjs`), and the restart call and the home it uses, documented for the owner | an instance in Arca updating itself |
 
 Delivery 4 must not install anything; 5 and 6 are one setting apart from people; 7 is the switch that
 retires `?mock-1540`.
