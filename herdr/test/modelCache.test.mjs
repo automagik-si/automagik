@@ -91,14 +91,18 @@ test("refreshAgModels writes a temp file beside the cache, then renames it into 
   });
   assert.equal(r.refreshed, true);
   assert.deepEqual(calls, [["write", `${path}.tmp-${NOW}`], ["rename", `${path}.tmp-${NOW}`, path]]);
-  // A rename failure is a failed refresh, keeping the last list, and never a half-written cache.
+  // A rename failure is a failed refresh, keeping the last list, and never a half-written cache;
+  // the temp file it wrote is removed (#809).
   const stale = agModelsCacheText(parseAgModelsOutput(MODELS), NOW - AG_MODELS_TTL_MS - 1);
+  const removed = [];
   const failed = await refreshAgModels({
     appHome: "/app", read: () => stale, now: NOW, write: () => {}, rename: () => { throw new Error("no rename"); },
+    remove: (path) => { removed.push(path); },
     exec: () => ({ code: 0, stdout: MODELS, stderr: "" }),
   });
   assert.deepEqual([failed.refreshed, failed.cache.models.length], [false, 13]);
   assert.match(failed.why, /couldn't be written/);
+  assert.deepEqual(removed, [`${path}.tmp-${NOW}`], "the temp file is removed, the old list kept");
   // The sync path does the same.
   const syncCalls = [];
   refreshAgModelsSync({ appHome: "/app", read: () => null, now: NOW,
@@ -106,6 +110,14 @@ test("refreshAgModels writes a temp file beside the cache, then renames it into 
     rename: (from, to) => { syncCalls.push(["rename", from, to]); },
     exec: () => ({ code: 0, stdout: MODELS, stderr: "" }) });
   assert.deepEqual(syncCalls, [["write", `${path}.tmp-${NOW}`], ["rename", `${path}.tmp-${NOW}`, path]]);
+  // The sync path removes its temp file too when the rename fails.
+  const syncRemoved = [];
+  const syncFailed = refreshAgModelsSync({ appHome: "/app", read: () => stale, now: NOW,
+    write: () => {}, rename: () => { throw new Error("no rename"); },
+    remove: (p) => { syncRemoved.push(p); },
+    exec: () => ({ code: 0, stdout: MODELS, stderr: "" }) });
+  assert.deepEqual([syncFailed.refreshed, syncFailed.cache.models.length], [false, 13]);
+  assert.deepEqual(syncRemoved, [`${path}.tmp-${NOW}`], "the sync temp file is removed too");
 });
 
 test("refreshAgModels: agy missing or failing keeps the last list and says why; no list stays none", async () => {

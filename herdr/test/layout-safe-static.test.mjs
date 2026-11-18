@@ -22,7 +22,7 @@ const CALL = new RegExp([
   String.raw`\b(?:rmSync|renameSync|unlinkSync|cpSync|rmdirSync|removePath)\s*\(`,
   String.raw`\b(?:fs|fsp|promises)\s*\.\s*(?:rm|rename|unlink|cp|rmdir)\s*\(`,
   String.raw`(?<![\w.$])(?:rm|rename|unlink)\s*\(`,
-  String.raw`\b(?:run\s*\(\s*io\s*,|(?:io\.)?exec\s*\()\s*["'\`](?:rm|mv|cp|find|rmdir|unlink)["'\`]`,
+  String.raw`\b(?:run\s*\(\s*io\s*,|(?:io\.)?exec\s*\()\s*["'\`](?:/bin/)?(?:rm|mv|cp|find|rmdir|unlink)["'\`]`,
 ].join("|"), "g");
 
 /** The call starting at `at` in `text`, up to its closing parenthesis, whitespace folded. */
@@ -158,6 +158,8 @@ export const ALLOWLIST = [
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(from, to)", 1, "the Antigravity model cache's temp file under <app home>/automagik-herdr/ (antigravity-models.json.tmp-<time>) renamed onto its cache: never under mods/ or layouts/"],
   ["herdr/mods/am-sidebar/bin/automagik-herdr.mjs", "renameSync(tmp, settings.path)", 1, "the Antigravity launch permission file under <app home>/automagik-herdr/agy-settings, written 0600 and renamed onto its deterministic path: never under mods/ or layouts/"],
   ["herdr/mods/am-sidebar/modelCache.js", "rename(tmp, path)", 2, "the injected rename of the Antigravity model cache's temp file under <app home>/automagik-herdr/ (antigravity-models.json.tmp-<time>) onto its cache: never under mods/ or layouts/; the caller supplies rename"],
+  ["herdr/mods/am-sidebar/create.js", "exec(\"/bin/mv\", [from, to])", 1, "the Antigravity model cache's temp file under <app home>/automagik-herdr/ renamed onto its cache (the form's fs API has no rename): never under mods/ or layouts/ (#809)"],
+  ["herdr/mods/am-sidebar/create.js", "fs.rm(path, { force: true })", 1, "a temp file a failed model-cache rename left beside the cache under <app home>/automagik-herdr/, removed only after that failure: never under mods/ or layouts/ (#809)"],
   ["herdr/mods/am-sidebar/main.js", "fs.unlink(file)", 1, "a pasted image in <app home>/paste-tmp/"],
   ["herdr/mods/am-sidebar/spaceIcon.js", "fs.unlink(scratch)", 1, "a space icon the sidebar wrote under <app home>/space-icons/ (spaceIconModel.js leftover) or its scratch file"],
   ["herdr/mods/am-sidebar/spaceIcon.js", "fs.unlink(`${appHome()}/${drop}`)", 2, "a space icon the sidebar wrote under <app home>/space-icons/ (spaceIconModel.js leftover) or its scratch file"],

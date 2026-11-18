@@ -223,6 +223,8 @@ export class BotForm {
           const r = await exec("/bin/mv", [from, to]);
           if (r?.code !== 0) throw new Error(`mv failed (${r?.stderr || `exit ${r?.code}`})`);
         },
+        // #809: a failed move leaves the temp file behind; it is this form's own file, never agy's.
+        remove: (path) => fs.rm(path, { force: true }),
         exec: async (command, args, options) => {
           const file = await this.programFile(command);
           if (!file) throw new Error(`${command} isn't installed`);
