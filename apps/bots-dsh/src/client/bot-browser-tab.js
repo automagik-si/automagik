@@ -323,7 +323,7 @@ const BotBrowserButton = ({ open }) => h('button', {
 // Registers the tab type, its body and the Session-header globe. Returns the disposer the
 // shell's installer effect holds; the tab type's own cleanup is needed too, since a tab of
 // this kind would otherwise outlive the type that draws it.
-export function installBotBrowserTab({ tabs, slots, sidebar, face, Body, installCss: _installCss }) {
+export function installBotBrowserTab({ tabs, slots, sidebar, face, Body }) {
   const releaseType = tabs.register({
     id: BOT_BROWSER_ID,
     kind: BOT_BROWSER_KIND,
