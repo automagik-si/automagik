@@ -38,6 +38,9 @@ export const NATIVE_WORKERS_CSS = `
 `
 
 const stateLabel = state => (state === 'done' ? t('Done') : state === 'failed' ? t('Failed') : t('Running'))
+// How an ended worker ended: Stopped when DSH closed it with its turn (acp-dsh `stopped`), else
+// the line its result opens with, else its state.
+const endedLine = worker => (worker.stopped === true ? t('Stopped') : worker.result || stateLabel(worker.state))
 
 /** The Bot's native workers from the live answer (`work.native`), as one stable text. */
 export const workersKey = (work, botId) => JSON.stringify(work?.native?.[botId] ?? [])
@@ -51,7 +54,7 @@ export function workerLine(worker) {
     const step = [...(worker.steps ?? [])].reverse().find(entry => entry.state === 'running') ?? worker.steps?.at(-1)
     return step ? t('{step}…', { step: step.title }) : t('Starting…')
   }
-  return worker.result || stateLabel(worker.state)
+  return endedLine(worker)
 }
 
 // Running ones first, then the newest; past WORKERS_SHOWN the rest fold into a count.
@@ -88,7 +91,7 @@ function WorkerPopover({ worker, anchor, age, onClose }) {
       h('span', { className: 'bt-worker-badge', 'data-state': worker.state }, stateLabel(worker.state)),
       age ? h('span', { className: 'bt-menu-hint' }, age) : null),
     h('div', { className: 'bt-menu-sep' }),
-    h('div', { className: 'bt-menu-note' }, t('Result: {line}', { line: worker.state === 'running' ? t('still running') : (worker.result || stateLabel(worker.state)) })),
+    h('div', { className: 'bt-menu-note' }, t('Result: {line}', { line: worker.state === 'running' ? t('still running') : endedLine(worker) })),
     h('div', { className: 'bt-menu-sep' }),
     h('div', { className: 'bt-menu-note' }, worker.more > 0 ? t('Steps (latest {n})', { n: steps.length }) : t('Steps')),
     steps.length === 0

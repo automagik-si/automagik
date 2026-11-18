@@ -23038,6 +23038,7 @@ var NATIVE_WORKERS_CSS = `
 .bt-worker-step[data-state=running] .bt-worker-step-mark{background:var(--bt-accent)}
 `;
 var stateLabel = (state2) => state2 === "done" ? t("Done") : state2 === "failed" ? t("Failed") : t("Running");
+var endedLine = (worker) => worker.stopped === true ? t("Stopped") : worker.result || stateLabel(worker.state);
 var workersKey = (work, botId) => JSON.stringify(work?.native?.[botId] ?? []);
 var runningWorkers = (work, botId) => (work?.native?.[botId] ?? []).filter((worker) => worker?.state === "running").length;
 function workerLine(worker) {
@@ -23045,7 +23046,7 @@ function workerLine(worker) {
     const step2 = [...worker.steps ?? []].reverse().find((entry) => entry.state === "running") ?? worker.steps?.at(-1);
     return step2 ? t("{step}…", { step: step2.title }) : t("Starting…");
   }
-  return worker.result || stateLabel(worker.state);
+  return endedLine(worker);
 }
 var ordered = (workers) => workers.map((worker, index) => ({ worker, index })).sort((a, b) => Number(b.worker.state === "running") - Number(a.worker.state === "running") || b.index - a.index).map((entry) => entry.worker);
 function WorkerPopover({ worker, anchor, age, onClose }) {
@@ -23084,7 +23085,7 @@ function WorkerPopover({ worker, anchor, age, onClose }) {
       age ? (0, import_react59.createElement)("span", { className: "bt-menu-hint" }, age) : null
     ),
     (0, import_react59.createElement)("div", { className: "bt-menu-sep" }),
-    (0, import_react59.createElement)("div", { className: "bt-menu-note" }, t("Result: {line}", { line: worker.state === "running" ? t("still running") : worker.result || stateLabel(worker.state) })),
+    (0, import_react59.createElement)("div", { className: "bt-menu-note" }, t("Result: {line}", { line: worker.state === "running" ? t("still running") : endedLine(worker) })),
     (0, import_react59.createElement)("div", { className: "bt-menu-sep" }),
     (0, import_react59.createElement)("div", { className: "bt-menu-note" }, worker.more > 0 ? t("Steps (latest {n})", { n: steps.length }) : t("Steps")),
     steps.length === 0 ? (0, import_react59.createElement)("div", { className: "bt-menu-note" }, t("No steps yet.")) : (0, import_react59.createElement)(

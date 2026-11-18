@@ -190,6 +190,26 @@ test('the look is the sidebar\'s: only --bt-* tokens, no colour of its own', (t)
   assert.doesNotMatch(NATIVE_WORKERS_CSS, /#[0-9a-f]{3,8}\b|rgba?\(/i)
 })
 
+// A worker DSH closed with its turn (Stop, or the agent went away): acp-dsh says failed and
+// stopped. Its row and popover say Stopped, never Done, and its unfinished steps failed.
+test('a worker stopped with its turn reads Stopped, under a Failed badge', async (t) => {
+  const env = mount(t)
+  const STOPPED = { id: 'toolu_s', title: 'Review the adapter bundle', state: 'failed', result: 'Stopped', stopped: true, at: NOW, steps: [
+    { id: 's1', title: 'find the adapter version', tool: 'Grep', state: 'done' },
+    { id: 's2', title: 'read the session update path', tool: 'Read', state: 'failed' },
+  ] }
+  await render(env, { workers: [STOPPED] })
+  const { document } = env
+  assert.equal(rows(document)[0].dataset.state, 'failed')
+  assert.equal(rows(document)[0].querySelector('.bt-worker-line').textContent, 'Stopped')
+  assert.equal(row(document, 'toolu_s').getAttribute('aria-label'), 'Review the adapter bundle, Failed, Stopped')
+  assert.equal(env.workerLine({ ...STOPPED, result: 'half a report' }), 'Stopped', 'a stopped worker\'s partial text is not its result')
+  await act(() => row(document, 'toolu_s').click())
+  assert.equal(pop(document).querySelector('.bt-worker-badge').textContent, 'Failed')
+  assert.match(pop(document).textContent, /Result: Stopped/)
+  assert.deepEqual([...pop(document).querySelectorAll('.bt-worker-step .bt-menu-hint')].map(node => node.textContent), ['Grep · Done', 'Read · Failed'])
+})
+
 test('the host maps each Session\'s workers onto its Bot and keeps only what the row draws', () => {
   const rt = {
     chatOwners: new Map([['chat-pip', 'pip'], ['chat-omni', 'omni']]),
@@ -199,14 +219,18 @@ test('the host maps each Session\'s workers onto its Bot and keeps only what the
   const acp = {
     nativeWorkers: () => ({
       'chat-pip': [{ id: 'w1', title: `  Review\n the bundle  ${long}`, state: 'running', steps: [{ id: 's1', title: 'Read a file', tool: 'Read', state: 'done', extra: 'dropped' }], prompt: 'never sent' }],
-      'room-session': [{ id: 'w2', title: 'In the group', state: 'weird', result: 'ok', at: 5, steps: [] }],
+      'room-session': [{ id: 'w2', title: 'In the group', state: 'weird', result: 'ok', at: 5, steps: [] }, { id: 'w4', title: 'Stopped one', state: 'failed', result: 'Stopped', stopped: true, steps: [] }, { id: 'w5', title: 'Odd flag', state: 'done', stopped: 'yes', steps: [] }],
       'chat-omni': [{ title: 'no id' }],
       'stray-session': [{ id: 'w3', title: 'Nobody owns me', state: 'done', steps: [] }],
     }),
   }
   const view = nativeWorkersView(rt, acp)
   assert.deepEqual(Object.keys(view), ['pip'])
-  assert.deepEqual(view.pip.map(worker => worker.id), ['w1', 'w2'])
+  assert.deepEqual(view.pip.map(worker => worker.id), ['w1', 'w2', 'w4', 'w5'])
+  // DSH's own stop passes on as it came; only a true flag does.
+  assert.deepEqual([view.pip[2].state, view.pip[2].result, view.pip[2].stopped], ['failed', 'Stopped', true])
+  assert.equal('stopped' in view.pip[3], false)
+  assert.equal('stopped' in view.pip[0], false)
   assert.equal(view.pip[0].title.length, 160)
   assert.match(view.pip[0].title, /^Review the bundle x/)
   assert.deepEqual(view.pip[0].steps, [{ id: 's1', title: 'Read a file', tool: 'Read', state: 'done' }])

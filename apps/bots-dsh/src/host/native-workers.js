@@ -27,6 +27,8 @@ function cleanWorker(worker) {
     title: text(worker.title, 160),
     state: stateOf(worker.state),
     ...(text(worker.result, 160) ? { result: text(worker.result, 160) } : {}),
+    // DSH closed it with its turn (Stop, or the agent went away): the client says Stopped.
+    ...(worker.stopped === true ? { stopped: true } : {}),
     ...(Number.isFinite(worker.at) ? { at: worker.at } : {}),
     steps,
     ...(more > 0 ? { more } : {}),
