@@ -31,7 +31,7 @@ import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, co
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, defaultModel, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, defaultModel, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
   codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
@@ -1583,13 +1583,49 @@ function modelList(agent, pin = null) {
 // Whether this CLI run has already looked at `agy models`: one refresh a run at most.
 let agModelsLooked = false;
 
-function checkModel(agent, model) {
+function checkModel(agent, model, listOf = null) {
   if (!agent) throw new CliError("A model pin needs a coding agent (--agent).", 2);
   if (modelRefusal(agent)) throw new CliError(modelRefusal(agent), 2);
-  const list = modelList(agent, model);
+  const list = listOf ? listOf(agent, model) : modelList(agent, model);
+  // A linked machine's own list could not be read: its launch is left to judge the pin (#1173).
+  if (list === null) return;
   if (!list.includes(model)) {
     throw new CliError(list.length ? `${model} isn't a known ${agent} model. Pick one of: ${list.join(", ")}.`
       : `There is no list of ${agent} models to pin from${agent === "antigravity" ? " (agy models has listed none: agy may not be installed, signed in, or cached yet)" : ""}; leave the model unpinned (the running one is detected).`);
+  }
+}
+
+/** That machine's home folder (`$HOME`), or null when it gives none (#1173). */
+async function homeOn(machine) {
+  const r = await remoteIo.exec("sh", ["-c", 'printf %s "$HOME"'], machine, { timeout: AGENT_WAIT_S });
+  const home = r.code === 0 ? r.stdout : "";
+  // eslint-disable-next-line no-control-regex
+  return home.startsWith("/") && !/[\x00-\x1f\x7f]/.test(home) ? home.replace(/\/+$/, "") : null;
+}
+
+/**
+ * The models `agent` may be pinned to on `machine`, from that machine's own knowledge (#1173):
+ * Codex's `~/.codex/models_cache.json` there, Antigravity's pack cache under its app home there.
+ * Claude's list is the same on every computer, so the static one stands. Resolves an array, or
+ * null when that machine has no list to read (an older cache, no app home, a machine that can't
+ * answer): the launch there then judges the pin, never this computer's stale cache.
+ */
+async function modelsOnMachine(machine, key, agent) {
+  if (agent !== "codex" && agent !== "antigravity") return modelList(agent);
+  try {
+    let text = null;
+    if (agent === "antigravity") {
+      const paneEnv = await paneEnvOn(machine, key);
+      const app = paneEnv.appHome ?? await appHomeOn(machine);
+      if (app) text = await readRemoteText(remoteIo, machine, agModelsPath(app));
+    } else {
+      const home = await homeOn(machine);
+      if (home) text = await readRemoteText(remoteIo, machine, `${home}/.codex/models_cache.json`);
+    }
+    const list = knownModelsFrom(agent, agent === "antigravity" ? { antigravityModels: text } : { codexModels: text });
+    return list.length ? list : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1630,7 +1666,7 @@ function launchAgyMode(bot, agentKey) {
  * The entry create or edit writes: `base` (the stored raw entry, or a new one) with the
  * options given applied and checked against the project. Throws a CliError on a refusal.
  */
-export function entryFrom(opts, base, project, { creating }) {
+export function entryFrom(opts, base, project, { creating, listOf = null }) {
   const { file } = project;
   const entry = JSON.parse(JSON.stringify(base));
   if (opts.name !== undefined) {
@@ -1697,9 +1733,13 @@ export function entryFrom(opts, base, project, { creating }) {
   // Model pin (A12): from the agent's list, never free text.
   if (opts.model !== undefined && opts["no-model"]) throw new CliError("Give --model or --no-model, not both.", 2);
   if (opts["no-model"]) delete entry.model;
-  if (opts.model !== undefined) { checkModel(entry.agent, opts.model); entry.model = opts.model; }
-  else if (entry.model && opts.agent !== undefined && !modelList(entry.agent, entry.model).includes(entry.model)) {
-    throw new CliError(`${entry.name} is pinned to ${entry.model}, which ${entry.agent} doesn't list; pass --model or --no-model.`);
+  if (opts.model !== undefined) { checkModel(entry.agent, opts.model, listOf); entry.model = opts.model; }
+  else if (entry.model && opts.agent !== undefined) {
+    const list = listOf ? listOf(entry.agent, entry.model) : modelList(entry.agent, entry.model);
+    // null: that machine's own list could not be read; the launch there judges the pin (#1173).
+    if (list !== null && !list.includes(entry.model)) {
+      throw new CliError(`${entry.name} is pinned to ${entry.model}, which ${entry.agent} doesn't list; pass --model or --no-model.`);
+    }
   }
   // Antigravity's execution mode: applied at launch (auto unless another is stored), so the
   // default is written as no field at all and auto clears a stored one.
@@ -3004,9 +3044,13 @@ async function seatOnMachine(project, bot, over = {}) {
   if (!agent?.run?.length) throw new CliError(`${bot.name}'s coding agent "${agentKey}" isn't one Herdr can start.`);
   // Antigravity's mode: validated even when over.argv (a restart's plan) already carries it.
   const agyMode = launchAgyMode(bot, agentKey);
-  if (!over.argv && bot.model && !modelList(bot.agent, bot.model).includes(bot.model)) {
-    throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't a ${bot.agent} model this computer lists. `
-      + `Pick one with am edit ${bot.id} --model <model> --machine ${machine} --project ${key}, or clear it with --no-model.`);
+  if (!over.argv && bot.model) {
+    // #1173: the target's own model list, when it has one, not the controller's stale cache.
+    const list = await modelsOnMachine(machine, key, bot.agent);
+    if (list !== null && !list.includes(bot.model)) {
+      throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't on ${machine}'s ${bot.agent} model list. `
+        + `Pick one with am edit ${bot.id} --model <model> --machine ${machine} --project ${key}, or clear it with --no-model.`);
+    }
   }
   const paneEnv = await paneEnvOn(machine, key);
   // #823: agy reads its permission list from a file on its own machine, under that machine's
@@ -4801,10 +4845,23 @@ async function cmdRestart(opts, [ref]) {
     const target = opts.agent !== undefined ? resolveAgent(opts.agent, agentTable()) : bot.agent;
     const edit = { agent: opts.agent, model: opts.model };
     if (opts.model === undefined && target !== bot.agent) edit["no-model"] = true;
-    entry = entryFrom(edit, stored, project, { creating: false });
-  } else if (bot.model && !modelList(bot.agent, bot.model).includes(bot.model)) {
-    throw new CliError(`${bot.name} is pinned to "${bot.model}", which isn't a ${bot.agent} model this computer lists. `
-      + `Pick one with am edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`);
+    // #1173: a swap on a linked machine weighs its pin against that machine's list, when it has
+    // one; a list that can't be read leaves the pin to the launch there.
+    let listOf = null;
+    if (project.machine && target) {
+      const list = await modelsOnMachine(project.machine, key, target);
+      listOf = (agent, pin) => (agent === target ? list : modelList(agent, pin));
+    }
+    entry = entryFrom(edit, stored, project, { creating: false, listOf });
+  } else if (bot.model) {
+    const list = project.machine ? await modelsOnMachine(project.machine, key, bot.agent) : modelList(bot.agent, bot.model);
+    if (list !== null && !list.includes(bot.model)) {
+      throw new CliError(project.machine
+        ? `${bot.name} is pinned to "${bot.model}", which isn't on ${project.machine}'s ${bot.agent} model list. `
+          + `Pick one with am edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`
+        : `${bot.name} is pinned to "${bot.model}", which isn't a ${bot.agent} model this computer lists. `
+          + `Pick one with am edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`);
+    }
   }
   if (project.machine) return restartOnMachine(opts, project, bot, entry);
   // The old pane: the one the attach ledger names for the bot, as hc confirms it.
