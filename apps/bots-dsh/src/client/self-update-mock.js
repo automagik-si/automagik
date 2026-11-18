@@ -39,16 +39,19 @@ const SUCCESS_MS = 700
 const CSS = `
 .su-nod{position:fixed;left:14px;bottom:14px;z-index:70;display:flex;align-items:center;gap:8px;padding:8px 12px 8px 8px;border-radius:999px;border:.5px solid var(--bt-line-2);background:var(--bt-card);color:var(--bt-ink);box-shadow:var(--bt-glass-shadow);font:500 13px/18px var(--bt-font,system-ui);cursor:pointer;animation:su-nod-in .34s cubic-bezier(.34,1.4,.64,1)}
 .su-nod:hover{background:var(--bt-hover)}
-.su-dot{position:relative;width:20px;height:20px;border-radius:50%;background:var(--bt-accent);color:var(--bt-knob);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+.su-dot{position:relative;width:20px;height:20px;border-radius:50%;background:var(--bt-accent);color:var(--bt-accent-ink);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
 .su-dot::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:2px solid var(--bt-accent);opacity:.35;animation:su-pulse 2.4s ease-out infinite}
 .su-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
-.su-layer{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:24px;background:color-mix(in srgb,var(--bt-ink) 42%,transparent);animation:su-veil .18s ease-out;font-family:var(--bt-font,system-ui)}
-.su-modal{width:min(720px,100%);max-height:calc(100vh - 48px);overflow:auto;background:var(--bt-main);color:var(--bt-ink);border:.5px solid var(--bt-line-2);border-radius:18px;box-shadow:var(--bt-glass-shadow);animation:su-pop .22s cubic-bezier(.34,1.3,.64,1)}
-.su-head{display:flex;align-items:flex-start;gap:12px;padding:20px 22px 0}
+.su-layer{position:fixed;inset:0;z-index:80;display:flex;background:var(--bt-main);animation:su-veil .18s ease-out;font-family:var(--bt-font,system-ui)}
+.su-modal{width:100%;height:100%;display:flex;flex-direction:column;background:var(--bt-main);color:var(--bt-ink);animation:su-pop .22s cubic-bezier(.34,1.3,.64,1)}
+.su-head{display:flex;align-items:flex-start;gap:12px;padding:20px max(24px,calc((100vw - 760px)/2)) 0}
 .su-head h2{margin:0;font-size:17px;line-height:24px;font-weight:600}
 .su-close{margin-left:auto;border:0;background:transparent;color:var(--bt-ink-2);font:500 13px/18px var(--bt-font,system-ui);cursor:pointer;padding:2px 4px;border-radius:8px}
 .su-close:hover{background:var(--bt-hover);color:var(--bt-ink)}
-.su-body{padding:14px 22px 20px;display:flex;flex-direction:column;gap:14px}
+.su-body{flex:1;overflow:auto;padding:18px max(24px,calc((100vw - 760px)/2)) 24px;display:flex;flex-direction:column;gap:14px}
+.su-body.su-fill{justify-content:center}
+.su-body.su-center{align-items:center;text-align:center}
+.su-body.su-center .su-example{align-self:center}
 .su-example{align-self:flex-start;padding:2px 8px;border-radius:999px;background:var(--bt-accent-soft);color:var(--bt-accent);font:600 11px/16px var(--bt-font,system-ui);letter-spacing:.02em;text-transform:uppercase}
 .su-line{margin:0;font-size:14px;line-height:21px;color:var(--bt-ink)}
 .su-versions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px;color:var(--bt-ink-2)}
@@ -57,20 +60,21 @@ const CSS = `
 .su-steps{display:flex;flex-direction:column;gap:2px}
 .su-step{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;font-size:14px;line-height:20px;color:var(--bt-ink-2)}
 .su-step[data-state=active]{background:var(--bt-accent-soft);color:var(--bt-ink)}
+.su-step[data-state=active] .su-mark{border-color:var(--bt-accent);background:var(--bt-accent-soft);color:var(--bt-accent)}
 .su-step[data-state=done]{color:var(--bt-ink)}
 .su-mark{width:20px;height:20px;flex:none;border-radius:50%;border:1.5px solid var(--bt-line-2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
-.su-step[data-state=done] .su-mark{border-color:transparent;background:var(--bt-accent);color:var(--bt-knob)}
-.su-step[data-state=failed] .su-mark{border-color:transparent;background:var(--bt-danger);color:var(--bt-knob)}
+.su-step[data-state=done] .su-mark{border-color:transparent;background:var(--bt-accent);color:var(--bt-accent-ink)}
+.su-step[data-state=failed] .su-mark{border-color:transparent;background:var(--bt-danger);color:var(--bt-accent-ink)}
 .su-step[data-state=failed]{color:var(--bt-ink)}
 .su-note{margin:0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}
-.su-foot{display:flex;gap:10px;align-items:center;padding:0 22px 20px}
-.su-primary{border:0;border-radius:10px;padding:10px 16px;background:var(--bt-accent);color:var(--bt-knob);font:600 14px/18px var(--bt-font,system-ui);cursor:pointer}
+.su-foot{display:flex;gap:10px;align-items:center;padding:14px max(24px,calc((100vw - 760px)/2)) 18px;border-top:.5px solid var(--bt-line);background:var(--bt-main)}
+.su-primary{border:0;border-radius:10px;padding:10px 16px;background:var(--bt-accent);color:var(--bt-accent-ink);font:600 14px/18px var(--bt-font,system-ui);cursor:pointer}
 .su-primary:hover{filter:brightness(1.05)}
 .su-ghost{border:.5px solid var(--bt-line-2);border-radius:10px;padding:9px 14px;background:transparent;color:var(--bt-ink);font:500 14px/18px var(--bt-font,system-ui);cursor:pointer}
 .su-ghost:hover{background:var(--bt-hover)}
 .su-link{margin-left:auto;border:0;background:transparent;color:var(--bt-ink-2);font:500 12px/18px var(--bt-font,system-ui);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
-.su-result{display:flex;flex-direction:column;align-items:center;gap:10px;padding:8px 0 4px;text-align:center}
-.su-result .su-badge{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--bt-knob);background:var(--bt-accent)}
+.su-result{display:flex;flex-direction:column;align-items:center;gap:10px;padding:8vh 0 4px;text-align:center}
+.su-result .su-badge{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--bt-accent-ink);background:var(--bt-accent)}
 .su-result[data-kind=rollback] .su-badge{background:var(--bt-danger)}
 .su-result h3{margin:0;font-size:16px;line-height:22px;font-weight:600}
 .su-result p{margin:0;max-width:52ch;font-size:13px;line-height:20px;color:var(--bt-ink-2)}
@@ -211,6 +215,7 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
     })
     body.append(list)
     body.append(el('p', 'su-note', t('In this preview the steps are timers and nothing is downloaded.')))
+    body.classList.add('su-fill')
     box.append(body)
     const foot = el('div', 'su-foot')
     foot.append(el('span', 'su-note', t('The previous version stays kept for the rollback.')))
@@ -252,6 +257,7 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
     card.append(el('h3', null, title))
     card.append(el('p', null, text))
     body.append(card, EXAMPLE())
+    body.classList.add('su-fill', 'su-center')
     for (const node of extra) body.append(node)
     box.append(body)
     return { layer, box, body }
