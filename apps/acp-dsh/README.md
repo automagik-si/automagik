@@ -943,6 +943,18 @@ overlapping calls and step and turn ends through the real back-channel on a real
 loads the log with the pinned reader after every move. `FUZZ_SEED` and `FUZZ_RUNS` replay one
 seed or widen the search.
 
+**The read-time recovery for older sessions** lives in the desktop app, not in this plugin: the
+carried runtime patch (`apps/desktop/runtime/patches/acp-bridge-tool-lifecycle.patch`) over the
+pinned `dsh-session-format-v3-to-v4` bytes and the persistence worker tolerates a first
+`tool/call` with no advertisement, a bridged call a step or turn end left open, and one late
+bridge row. It reports each shape on stderr and never rewrites the session file. The recovery
+applies only where that patch is installed, pinned to the DSH version named in
+`apps/desktop/runtime/patches/patches.json`: a plain DSH CLI, or a DSH version the patch is not
+pinned to, still refuses such a session, and the file stays invalid for any reader without the
+patch. The upstream question (whether the loader should carry the advertisement forward, or the
+format should state the requirement) is recorded in issue #855; this recovery is a compatibility
+shim for sessions written before #842, not a runtime fix.
+
 **Drift.** `node scripts/acp-drift.mjs` fails when the pin is more than one minor behind npm's
 latest, and names each adapter that moved past `dev/acp-compat.json`, the record of the SDK and
 adapter versions the suite last passed against (`--record` writes it, after the suite and the
