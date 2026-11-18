@@ -29,7 +29,8 @@ export function install(rt) {
     if (resumed && role === 'resume') return '[DeepSeek Harness restarted while you were working]'
     if (resumed && role !== 'room') return `[Message from ${fromName} · DeepSeek Harness restarted while you were working on it]`
     if (resent && role === 'reply') return `[Reply from ${fromName} · DeepSeek Harness restarted before it could reach you]`
-    if (resent && role !== 'room') return `[Message from ${fromName} · DeepSeek Harness restarted before it could reach you]`
+    if (resent && role === 'task-done') return `[Task "${note}" finished · DeepSeek Harness restarted before this report could reach you · its last words follow; tell the user what matters in a line or two]`
+    if (resent && hasSender && role !== 'room') return `[Message from ${fromName} · DeepSeek Harness restarted before it could reach you]`
     if (role === 'reply') return `[Reply from ${fromName}${goesOn}]`
     if (role === 'stopped') return `[Stopped by ${fromName}]`
     if (role === 'room') return `[Group chat "${roomName}" · ${note}]`
@@ -87,7 +88,7 @@ export function install(rt) {
   // result that came back goes on with. `merged`: a request that takes in an earlier
   // one its recipient had not read, under that one's exchange. `uploads`: the person's
   // uploads of a group turn, for a member over ACP.
-  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, retried = false, resent = false, merged = false, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }) {
+  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, retried = false, resent = false, merged = false, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }, { enqueue, shouldSend } = {}) {
     const from = rt.botOf(fromId)
     const to = rt.botOf(toId)
     if (to === undefined) throw new Error(`Unknown Bot ${toId}`)
@@ -100,7 +101,7 @@ export function install(rt) {
       form: 'relay',
       role,
       exchangeId,
-      senderName: fromName,
+      ...(role !== 'task-done' || fromId !== undefined || senderName !== undefined ? { senderName: fromName } : {}),
       ...(work ? { work } : {}),
       ...(fromId ? { senderSessionId: fromId } : {}),
       ...(forwarded && images.length > 0 ? { forwarded: { v: 1 } } : {}),
@@ -127,19 +128,24 @@ export function install(rt) {
     }
     await rt.ensureCapabilities(targetSessionId)
     const agent = await resolveAgent(targetSessionId)
+    if (shouldSend !== undefined && !shouldSend(agent)) return undefined
     // A steered message cuts into a running turn at its next step; a follow-up
     // queues for the next turn (see turns.js for how each is routed).
     const message = createUserMessage({
       content: [
-        { type: 'text', text: `${headerFor(role, fromName, room?.name, audience, note, deferred, { resumed, retried, resent, abandoned, asker })}\n${text}` },
+        { type: 'text', text: `${headerFor(role, fromName, room?.name, audience, note, deferred, { resumed, retried, resent, abandoned, asker, hasSender: fromId !== undefined || senderName !== undefined })}\n${text}` },
         ...images.map(attachment => ({ type: 'image', attachment })),
         ...files.map(attachment => ({ type: 'file', attachment })),
       ],
       source,
     })
-    if (steer) agent.steer(message)
-    else agent.followup(message)
-    await ctx.sessions.flush(agent.session)
+    if (enqueue !== undefined) {
+      if (!await enqueue(agent, message)) return undefined
+    } else {
+      if (steer) agent.steer(message)
+      else agent.followup(message)
+      await ctx.sessions.flush(agent.session)
+    }
     if (book !== undefined) {
       rt.ledger.append(book, { event: 'delivered', id: exchangeId, sessionId: targetSessionId, time: Date.now() })
       // The message went out either way; a mark that is lost only hides it from the dialog.
