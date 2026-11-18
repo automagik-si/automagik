@@ -135,12 +135,15 @@ export async function botOfTerminal(terminal) {
  * Every binding the attach ledger holds (`automagik-herdr whois --all --json`, its
  * bots.whois-all-json@1 answer), rows of { terminal, core, created_ms, bot, project, since,
  * address, machine, state } with `state` "live" or "unknown" (a machine away), or null when the
- * CLI can't answer (a CLI without --all, or a failure). The sidebar draws its rows from the
- * bindings and keeps the bot= labels while it gets null.
+ * CLI can't answer. The CLI is asked the exact call runCli completes with `--json`; an older
+ * build without `--all` (it lands with #1616) refuses the flag, so null keeps rows.js on the
+ * bot= labels: no row is lost and nothing is thrown. A success that isn't the @1 shape reads
+ * the same way.
  */
 export async function ledgerBindings() {
   const r = await runCli(["whois", "--all"]);
-  return r.code === 0 && Array.isArray(r.out?.bindings) ? r.out.bindings : null;
+  if (r.code !== 0) return null;
+  return Array.isArray(r.out?.bindings) ? r.out.bindings : null;
 }
 
 /**
@@ -248,10 +251,13 @@ function spareOf(space) {
 }
 
 // A space this start opened that another start's space made superfluous: closed only while it
-// holds space.new's own shell, alone in its one tab and idle. Never a space with a bot in it,
-// and when the window can't say the shell is alone, never closed.
+// holds space.new's own shell, alone in its one tab and idle. Every tab is inspected: a space
+// with a second tab (a CLI-started bot there, say) is left whole, since closing it would take
+// that tab down too. When the window can't say the shell is alone, never closed.
 function closeMadeSpace(space) {
-  const [tab] = tabsOf(space);
+  const tabs = tabsOf(space);
+  if (tabs.length !== 1) return false;
+  const [tab] = tabs;
   if (tab?.terminals.length !== 1 || tab.count !== 1 || !shellIdleIn(tab.terminals[0])) return false;
   try { run("space.close", { id: space.id, confirmed: true }); return true; } catch { return false; }
 }
