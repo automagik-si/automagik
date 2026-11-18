@@ -151,8 +151,6 @@ export class CliGenerations {
 
   matchesRecord(record, state = this.recordState()) {
     return record?.version === RECORD_VERSION
-      && Number.isSafeInteger(record.sequence) && record.sequence >= 0
-      && record.sequence < Number.MAX_SAFE_INTEGER
       && JSON.stringify(record.claude) === JSON.stringify(state.claude)
       && JSON.stringify(record.codex) === JSON.stringify(state.codex)
   }

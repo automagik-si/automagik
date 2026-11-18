@@ -325,12 +325,15 @@ test('start repairs a record with the wrong version', t => {
   assert.equal(recordOf(cliHome).sequence, old.sequence + 1)
 })
 
-test('start resets a bad sequence to one', t => {
+test('start leaves matching records with bad metadata alone; select resets a bad sequence to one', t => {
   const { cliHome, generations } = place(t)
   generations.select('claude', randomUUID())
   for (const sequence of ['3', -1]) {
-    writeFileSync(recordPath(cliHome), JSON.stringify({ ...recordOf(cliHome), sequence }))
-    assert.equal(generations.ensureRecord(), true)
+    const bytes = JSON.stringify({ ...recordOf(cliHome), sequence, updatedAt: 'invalid' })
+    writeFileSync(recordPath(cliHome), bytes)
+    assert.equal(generations.ensureRecord(), false)
+    assert.equal(readFileSync(recordPath(cliHome), 'utf8'), bytes)
+    generations.select('claude', randomUUID())
     assert.equal(recordOf(cliHome).sequence, 1)
   }
 })
