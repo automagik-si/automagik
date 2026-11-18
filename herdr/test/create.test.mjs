@@ -1685,3 +1685,45 @@ test("menu Restart with its helpers on a Herdr that takes no exec timeout: not r
   assert.match(form.error, /cannot wait long enough for a restart with its helpers; restart it from a terminal/);
   assert.equal(form.busy, false);
 });
+
+// ---- #1172: a paired Hermes bot's menu explains the binding before offering a restart ----
+
+const HERMES_BOT = { id: "b-hermesaaaa", name: "hermes-bot", kind: "member", look: look("star", "blue"), role: "r", instructions: "",
+  agent: "hermes", hermes: { home: "/srv/hermes", profile: "default" } };
+
+test("#1172 a paired Hermes bot's menu explains the pairing and offers only the restarts it can take", async () => {
+  seed([MAIN, HERMES_BOT]);
+  const running = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes", live: "t5", terminal: "t5" });
+  running.draw();
+  assert.ok(nodes.has("menu-focus") && nodes.has("menu-restart"), "Focus and Restart stay");
+  assert.equal(nodes.has("menu-restart-fresh"), false, "no fresh session for a paired bot");
+  assert.equal(nodes.has("menu-restart-on"), false, "no other agent for a paired bot");
+  assert.match(textOf(nodes.get("menu-paired-note")), /Paired to its Hermes Bot Chat \(profile default\)/);
+  assert.match(textOf(nodes.get("menu-paired-note")), /Configure… clears it/);
+  assert.match(textOf(nodes.get("menu-configure")), /Configure… \(unpair\)/);
+  const off = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes" });
+  off.draw();
+  assert.ok(nodes.has("menu-start") && nodes.has("menu-restart"), "Start and Restart stay");
+  assert.equal(nodes.has("menu-restart-fresh"), false);
+  assert.equal(nodes.has("menu-restart-on"), false);
+});
+
+test("#1172 a paired bot's menu on a linked machine explains the pairing there too", async () => {
+  seed([MAIN, HERMES_BOT]);
+  const { draw } = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes",
+    machine: "vm", live: "vm/t8", terminal: "vm/t8" });
+  draw();
+  assert.ok(nodes.has("menu-restart") && nodes.has("menu-focus"));
+  assert.equal(nodes.has("menu-restart-fresh"), false);
+  assert.equal(nodes.has("menu-restart-on"), false);
+  assert.match(textOf(nodes.get("menu-paired-note")), /profile default/);
+});
+
+test("#1172 a paired bot's menu from a stale linked roster snapshot still names the pairing and how to unpair", async () => {
+  seed([MAIN, HERMES_BOT]);
+  const { draw } = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes", machine: "vm", stale: true });
+  draw();
+  assert.ok(!nodes.has("menu-configure") && !nodes.has("menu-restart-on"), "nothing to press while vm is away");
+  assert.match(textOf(nodes.get("menu-remote-note")), /vm isn't answering/);
+  assert.match(textOf(nodes.get("menu-remote-note")), /paired to its Hermes Bot Chat \(profile default\): Configure… unpairs it once vm is back/);
+});
