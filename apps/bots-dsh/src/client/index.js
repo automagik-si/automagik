@@ -19,7 +19,7 @@ import { markConversation } from './stage.js'
 import { MENTION_ORIGIN, currentPart, relativeShort } from './text.js'
 import { SHELL_CSS, CONVERSATION_CSS, installStyles, installCompiledStyles } from './styles.js'
 import { BotMark, lookOf } from './mark.js'
-import { TeamSidebar, ChannelsMoved, YouAvatar, AccountLauncher, FooterAccount, BrandMark, BrandName, BotReturn, SIDEBAR_CSS, RETURN_CSS, holdShellShortcuts, openHarnessOnboarding, openHarnessSettings } from './sidebar.js'
+import { TeamSidebar, ChannelsMoved, YouAvatar, AccountLauncher, FooterAccount, RailToggle, BrandMark, BrandName, BotReturn, SIDEBAR_CSS, RETURN_CSS, holdShellShortcuts, openHarnessOnboarding, openHarnessSettings } from './sidebar.js'
 import { frameLayout } from './frame-layout.js'
 import { HeaderPill, NativeBotHeader, NativeControlsNote } from './header.js'
 import { ComposerPermission, ComposerPlus, ComposerVoice, menuIcons } from './composer.js'
@@ -1223,6 +1223,8 @@ export function apply(ctx) {
     () => shadow('sidebar.footer.action', { id: 'bot-account', order: -200, inject: face }, FooterAccount),
     // Shown only when the team is linked to an Omni without the channels plugin.
     () => shadow('sidebar.footer.action', { id: 'bot-channels-moved', order: -100, inject: face }, ChannelsMoved),
+    // The footer keeps the wide toggle below every entry, independent of the Bot list's height.
+    () => shadow('sidebar.footer.action', { id: 'bot-rail-toggle', order: 0, inject: face }, RailToggle),
     () => shadow('settings.trigger', { priority: BOT_PRIORITY }, YouAvatar),
     // The whale wins the seat over a shell account plugin's own launcher (the
     // Desktop's "··· More"), which comes back in Agent mode.

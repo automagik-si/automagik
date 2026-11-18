@@ -90,6 +90,9 @@ export function install(rt) {
   const runningOf = (bot) => {
     try {
       if (rt.hostOwned?.(bot)) return {}
+      // A pick names the model before the Session takes it. This reading would show a switch
+      // the person did not see the chat make (#1319).
+      if (rt.pickingModel?.(bot.id) || rt.switchingChat?.(bot.id)) return {}
       const sessionId = rt.chatOf(bot.id)
       const agent = ctx.get?.('agents')?.get?.(sessionId)
       let selection
@@ -612,7 +615,9 @@ export function install(rt) {
         }
         case 'create-bot': {
           await rt.bootstrap()
-          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId })
+          // `private` and `shell` are the user's own create fields (no acting Bot here):
+          // a Bot created private starts without a shell unless `shell` says otherwise.
+          const bot = await rt.createBot({ name: body.name, role: body.role, color: body.color, instructions: body.instructions, brief: body.brief, avatar: body.avatar, model: body.model, effort: body.effort, workDir: body.workDir, section: body.section, sectionId: body.sectionId, private: body.private, shell: body.shell })
           return ok(bot)
         }
         case 'set-bot-auto':

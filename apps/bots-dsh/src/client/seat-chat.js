@@ -1,15 +1,19 @@
 // The rendered face of a seat on this computer, in the main panel (RFC 0022 delivery 1L).
 //
 // A Team row that is a seat ((i)) opens this: the seat's own transcript, its status, and the
-// waiting card when it asks for the owner. Show only: there is no composer here and no button
-// answers, sends or interrupts; delivery 2L serves the writes, owner-only, and 1L ships without
-// them. Every row comes from what exists (the registry, herdr-core's status, the transcript) and
-// nothing here starts, stops or restarts anything.
+// waiting card when it asks for the owner. Its chat face stays show only: there is no composer
+// here and no button answers, sends or interrupts; delivery 2L serves those writes, owner-only,
+// and 1L ships without them. The header's Chat / Terminal switch opens the same Code side a Bot
+// conversation has (code-side.js), view-only until an explicit click, so the seat's own terminal
+// is one press away. Every row comes from what exists (the registry, herdr-core's status, the
+// transcript) and nothing here starts, stops or restarts anything.
 import { Fragment, createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { call } from './api.js'
+import { CodeBody, closeTerminal, useCodeFace } from './code-side.js'
 import { MarkdownText } from './dsh-primitives.js'
 import { hostText, t } from './i18n.js'
 import { mdLabels } from './btw.js'
+import { FaceSwitch } from './left-bar-faces.js'
 import { word } from './left-bar-status.js'
 import { createSource } from './sources.js'
 
@@ -52,6 +56,44 @@ export function seatWordOf(status) {
 }
 /** Where the seat runs, as the header says it: this view exists only for this computer. */
 export const SEAT_MACHINE = () => t('This computer')
+
+/**
+ * The registry Bot behind a seat row. `artId` is the registry Bot's own id (left-bar.js); a row
+ * that only has its `seat:` key still names the Bot under the prefix. Null names no Bot.
+ */
+export function seatBotId(seat) {
+  if (typeof seat?.artId === 'string' && seat.artId !== '') return seat.artId
+  if (typeof seat?.id !== 'string') return null
+  const id = seat.id.startsWith('seat:') ? seat.id.slice('seat:'.length) : seat.id
+  return id === '' ? null : id
+}
+
+/** Why a seat cannot show its terminal, in words; null when its own pane is live here. */
+export const seatTerminalWhy = seat => (seat === null
+  ? null
+  : typeof seat.terminal === 'string' && seat.terminal !== ''
+    ? null
+    : t('This seat is not running on this computer, so its terminal cannot open.'))
+
+/**
+ * The open seat after the bar's next poll: the row's own identity stays, its live facts follow.
+ * Null when the row is gone or nothing changed, so the panel does not re-render every poll.
+ */
+export function seatWithFreshPane(seat, fresh) {
+  if (seat === null || fresh === null || fresh === undefined) return null
+  const next = {
+    ...seat,
+    name: fresh.name ?? seat.name,
+    project: fresh.project ?? null,
+    terminal: fresh.terminal ?? null,
+    agent: fresh.agent ?? null,
+    chat: fresh.chat ?? null,
+    status: fresh.status ?? seat.status,
+  }
+  return next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal
+    && next.agent === seat.agent && next.chat === seat.chat && next.status === seat.status
+    ? null : next
+}
 
 /** No seats: one frozen empty list, so an empty reply never changes state or re-renders. */
 const NO_SEATS = Object.freeze([])
@@ -227,6 +269,14 @@ export const seatSourceNote = seat => (seat?.chat === 'screen'
 export function SeatChatPanel({ onBack }) {
   const seat = useSyncExternalStore(seatChatView.subscribe, seatChatView.getSnapshot).seat
   const face = useSeatFace(seat)
+  const botId = seatBotId(seat)
+  // The same flip and the same Code body a Bot conversation uses (code-side.js), keyed by the
+  // seat's registry Bot id. The seat row keeps the body itself; the conversation slot is not
+  // registered underneath it.
+  const code = useCodeFace(botId, { seat: true })
+  const terminal = code.face === 'terminal'
+  const why = seatTerminalWhy(seat)
+  const showingTerminal = terminal && why === null
   const scroll = useRef(null)
   const [pinned, setPinned] = useState(true)
   const length = face.rows.length
@@ -234,6 +284,10 @@ export function SeatChatPanel({ onBack }) {
     const node = scroll.current
     if (node && pinned) node.scrollTop = node.scrollHeight
   }, [length, pinned, seat?.terminal])
+  // A seat that lost its pane always shows its chat, never a Terminal body it cannot open.
+  useEffect(() => { if (why !== null && terminal) closeTerminal() }, [why, terminal])
+  // Leaving the seat panel leaves its Terminal too: a later conversation never opens on it.
+  useEffect(() => () => { if (showingTerminal) closeTerminal() }, [showingTerminal])
   if (seat === null) {
     return h('div', { className: 'bt-seat' },
       h('div', { className: 'bt-seat-empty' }, t('Choose a seat in the team bar to read its chat.')))
@@ -241,42 +295,53 @@ export function SeatChatPanel({ onBack }) {
   const status = face.status === null ? seat.status : seatWordOf(face.status)
   const needs = (face.approval !== null || face.question !== null) && status === 'needs'
   const seatLine = [seat.project, seatAgentName(seat.agent), SEAT_MACHINE()].filter(Boolean).join(' · ')
-  return h('div', { className: 'bt-seat', 'data-seat': seat.id },
+  return h('div', { className: 'bt-seat', 'data-seat': seat.id, 'data-seat-face': showingTerminal ? 'terminal' : 'chat' },
     h('header', { className: 'bt-seat-head' },
       h('button', {
-        type: 'button', className: 'bt-seat-back', 'aria-label': t('Back to the team'), title: t('Back to the team'),
-        onClick: () => onBack?.(),
+        type: 'button', className: 'bt-seat-back',
+        'aria-label': showingTerminal ? t('Back to chat') : t('Back to the team'),
+        title: showingTerminal ? t('Back to chat') : t('Back to the team'),
+        onClick: () => { if (showingTerminal) closeTerminal(); else onBack?.() },
       }, '←'),
       h('div', { className: 'bt-seat-who' },
         h('div', { className: 'bt-seat-title' }, seat.name),
         h('div', { className: 'bt-seat-sub' }, seatLine)),
+      botId === null ? null : h(FaceSwitch, {
+        face: showingTerminal ? 'terminal' : 'chat',
+        onFace: code.onFace,
+        unavailable: why === null ? {} : { terminal: why },
+      }),
       h('span', { className: 'bt-seat-status', 'data-status': status, title: word(status), 'aria-label': word(status) },
         h('span', { className: 'bt-seat-status-mark', 'data-status': status, 'aria-hidden': true }),
         word(status))),
+    why === null ? null : h('p', { className: 'bt-seat-why', role: 'status' }, why),
     h('div', { className: 'bt-seat-body' },
-      needs ? h(WaitingCard, { approval: face.approval, question: face.question }) : null,
-      face.error !== null
-        ? h('div', { className: 'bt-seat-error', role: 'status' }, face.error)
-        : null,
-      face.loading && face.rows.length === 0
-        ? h('p', { className: 'bt-seat-note bt-seat-loading' }, t('Reading the seat…'))
-        : null,
-      h('div', {
-        className: 'bt-seat-scroll', ref: scroll,
-        onScroll: (event) => {
-          const node = event.currentTarget
-          setPinned(node.scrollHeight - node.scrollTop - node.clientHeight < 24)
-        },
-      },
-        face.rows.map(row => h(SeatRow, { key: row.id, row })),
-        face.rows.length === 0 && !face.loading && face.error === null
-          ? h('p', { className: 'bt-seat-note' }, t('No transcript rows yet. The seat is quiet.'))
-          : null),
-      !pinned ? h('button', {
-        type: 'button', className: 'bt-seat-latest',
-        onClick: () => { setPinned(true); const node = scroll.current; if (node) node.scrollTop = node.scrollHeight },
-      }, t('Latest')) : null),
-    h('footer', { className: 'bt-seat-foot' }, seatSourceNote(seat)))
+      showingTerminal
+        ? h(CodeBody, { key: botId })
+        : h(Fragment, null,
+          needs ? h(WaitingCard, { approval: face.approval, question: face.question }) : null,
+          face.error !== null
+            ? h('div', { className: 'bt-seat-error', role: 'status' }, face.error)
+            : null,
+          face.loading && face.rows.length === 0
+            ? h('p', { className: 'bt-seat-note bt-seat-loading' }, t('Reading the seat…'))
+            : null,
+          h('div', {
+            className: 'bt-seat-scroll', ref: scroll,
+            onScroll: (event) => {
+              const node = event.currentTarget
+              setPinned(node.scrollHeight - node.scrollTop - node.clientHeight < 24)
+            },
+          },
+            face.rows.map(row => h(SeatRow, { key: row.id, row })),
+            face.rows.length === 0 && !face.loading && face.error === null
+              ? h('p', { className: 'bt-seat-note' }, t('No transcript rows yet. The seat is quiet.'))
+              : null),
+          !pinned ? h('button', {
+            type: 'button', className: 'bt-seat-latest',
+            onClick: () => { setPinned(true); const node = scroll.current; if (node) node.scrollTop = node.scrollHeight },
+          }, t('Latest')) : null)),
+    showingTerminal ? null : h('footer', { className: 'bt-seat-foot' }, seatSourceNote(seat)))
 }
 
 export const SEAT_CHAT_CSS = `
@@ -288,6 +353,8 @@ export const SEAT_CHAT_CSS = `
 .bt-seat-who{flex:1;min-width:0}
 .bt-seat-title{font:var(--bt-weight-title,600) 15px/21px var(--bt-head-font,var(--bt-font));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bt-seat-sub{font-size:12px;line-height:17px;color:var(--bt-ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bt-seat-head .lb-face{flex:none}
+.bt-seat-why{flex:none;margin:0;padding:8px 20px 0;font-size:12px;line-height:18px;color:var(--bt-ink-3)}
 .bt-seat-status{flex:none;display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:17px;color:var(--bt-ink-3);white-space:nowrap}
 .bt-seat-status[data-status=needs]{color:var(--st-warn,var(--bt-ink))}
 .bt-seat-status[data-status=error]{color:var(--st-bad-strong,var(--bt-danger))}
@@ -319,4 +386,5 @@ export const SEAT_CHAT_CSS = `
 .bt-seat-error{margin:14px 20px 0;padding:9px 12px;border-radius:10px;border:.5px solid var(--bt-line);background:var(--bt-card);color:var(--st-bad-strong,var(--bt-danger));font-size:12px;line-height:18px}
 .bt-seat-latest{position:absolute;right:22px;bottom:14px;padding:5px 11px;border-radius:999px;border:.5px solid var(--bt-line-2);background:var(--bt-glass-bg,var(--bt-card));color:var(--bt-ink-2);font:inherit;font-size:12px;cursor:pointer;box-shadow:var(--bt-glass-shadow,0 2px 8px rgba(0,0,0,.12))}
 .bt-seat-foot{flex:none;padding:9px 20px 11px;border-top:.5px solid var(--bt-line);font-size:11px;line-height:16px;color:var(--bt-ink-3)}
+@media (max-width:520px){.bt-seat-head{gap:8px;padding:10px 12px}.bt-seat-sub{display:none}}
 `

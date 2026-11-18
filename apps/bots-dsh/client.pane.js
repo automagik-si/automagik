@@ -9063,6 +9063,7 @@ var ZH = {
   "The folder on {host} holds no Hermes settings or server record.": "{host} 上的该文件夹没有 Hermes 设置或服务器记录。",
   "Point at the folder that holds Hermes, or choose another computer.": "请指向包含 Hermes 的文件夹，或选择另一台电脑。",
   "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "它的 serve 记录位于与另一个 Hermes 数据目录共享的文件夹中，因此无法在此选择。旁边的另一个文件夹看起来像 Hermes 数据目录。请给这个 Hermes 一个自己的文件夹：移动它，或移动另一个文件夹，然后用“添加另一个 Hermes”添加该文件夹。",
+  "Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.": "它的 serve 记录位于与 {folders} 共享的文件夹中，因此无法在此选择。{folders} 有 config.yaml 和名称像 Hermes 数据目录的文件夹，但没有 SOUL.md 或 state.db，因此 Automagik 无法判断它是否是另一个 Hermes。如果它不是 Hermes，请将它移到另一个父文件夹，然后按“再次检查”。如果它是另一个 Hermes，两者需要不同的父文件夹。",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",
@@ -9198,12 +9199,24 @@ var ZH = {
   "The saved profile is not served there": "保存的配置在该机器上不可用",
   "Choose this Hermes profile again": "请重新选择 Hermes 配置",
   "This connection’s saved Hermes profile is not served on that machine.": "此连接保存的 Hermes 配置在该机器上不可用。",
+  "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.": "此连接保存的 Hermes 配置“{profile}”在该机器上不可用。请重新选择配置后再连接。",
+  "Hermes on {host} no longer serves the profile “{profile}”": "{host} 上的 Hermes 不再提供配置“{profile}”",
+  "This connection saved the Hermes profile “{profile}”, which is not served on that machine.": "此连接保存了 Hermes 配置“{profile}”，但该机器不提供此配置。",
+  "Saved profile": "保存的配置",
   "Open the connection setup and choose a profile that Hermes serves there.": "打开连接设置，选择 Hermes 在该机器上提供的配置。",
   "Hermes is not running there": "Hermes 在那里没有运行",
   "Start Hermes on {host}": "在 {host} 上启动 Hermes",
   "Hermes is not running on {host}. Start it there with “hermes serve”, then try again.": "{host} 上的 Hermes 没有运行。请在那里用“hermes serve”启动它，然后重试。",
   "Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes.": "请在 {host} 的终端里运行“hermes serve”。Automagik 从不启动或重启 Hermes。",
   "Hermes is running there as a gateway": "Hermes 在那里以网关方式运行",
+  "Gateway running": "网关正在运行",
+  "Its gateway is running, but no “hermes serve” is. Start it with “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.": "它的网关正在运行，但没有运行“hermes serve”。请在 {host} 的终端里用“{command}”启动；网关可以继续运行。Automagik 从不启动、停止或重启 Hermes。",
+  "Hermes’s gateway is running there, but no serve is": "Hermes 的网关在那里正在运行，但 serve 未运行",
+  "Hermes on {host} is running as a gateway, but no “hermes serve” is running there. This chat attaches only to a running “hermes serve”.": "{host} 上的 Hermes 正在以网关方式运行，但那里没有运行“hermes serve”。此聊天仅连接到正在运行的“hermes serve”。",
+  "Run “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.": "请在 {host} 的终端里运行“{command}”；网关可以继续运行。Automagik 从不启动、停止或重启 Hermes。",
+  "Gateway state": "网关状态",
+  "Serve state": "serve 状态",
+  "Serve command": "Serve 命令",
   "Start “hermes serve” on {host}": "在 {host} 上启动“hermes serve”",
   "The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.": "{host} 上运行的 Hermes 以网关方式管理会话。此聊天需要用以“hermes serve”启动的 Hermes。",
   "Hermes’s profiles could not be read": "无法读取 Hermes 的配置",
@@ -9507,6 +9520,28 @@ var ZH = {
   "The sign-in status could not be verified. Start again.": "无法确认登录状态，请重新开始。",
   "The sign-in link could not be verified. Start again.": "无法验证登录链接，请重新开始。",
   "Could not continue this sign-in. Try again.": "无法继续登录，请重试。",
+  // A failure the host has no sentence for says its ACP class; the class itself stays as it is.
+  "Could not continue this sign-in ({kind}). Try again.": "无法继续登录（{kind}），请重试。",
+  "The account could not be confirmed ({kind}). Try again.": "无法确认账号（{kind}），请重试。",
+  "This coding agent signs in from its own terminal. Run its sign-in command there, then try again.": "此编程助手需要在自己的终端里登录。请在那里运行它的登录命令，然后重试。",
+  "The CLI did not offer a sign-in link in time. Try again.": "CLI 没有及时给出登录链接，请重试。",
+  "The CLI could not be started. Run it once in a terminal, then try again.": "无法启动 CLI。请先在终端里运行一次，然后重试。",
+  "The CLI returned an old sign-in link. Update it, then try again.": "CLI 返回了旧的登录链接。请更新后重试。",
+  "The CLI did not confirm the sign-in. Try again.": "CLI 没有确认登录，请重试。",
+  "The CLI exited before the sign-in finished. Try again.": "CLI 在登录完成前退出了，请重试。",
+  "Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.": "这台电脑上的另一个 Automagik 会话正在使用 Bot 账号。请关闭它，然后再次点击登录。",
+  "The Bot account is busy in another Automagik session on this computer. Close it, then press Sign in again.": "Bot 账号正被这台电脑上的另一个 Automagik 会话占用。请关闭它，然后再次点击登录。",
+  "The Bot account is already changing. Try again when it finishes.": "Bot 账号正在更改中。等它完成后重试。",
+  "The Bot account changed. Sign in again.": "Bot 账号已变更，请重新登录。",
+  "This coding agent is not signed in any more. Press Sign in again.": "此编程助手已不再登录。请再次点击登录。",
+  "Automagik is restarting. Try again in a moment.": "Automagik 正在重启，请稍后重试。",
+  "This installation keeps no record of the Bot account. Sign in again; if it keeps happening, the instance needs its profile repaired.": "此安装没有 Bot 账号的记录。请重新登录；若反复出现，这个实例的配置文件需要修复。",
+  "The Bot account cannot be changed from this session. Use the app on this computer.": "无法从这个会话更改 Bot 账号。请在这台电脑上的应用里操作。",
+  "Install the coding agent before signing in.": "请先安装编程助手，再登录。",
+  "Signing out of the Bot account did not finish. Try again.": "退出 Bot 账号没有完成，请重试。",
+  "Signing out of the Bot account could not be verified. Try again.": "无法确认已退出 Bot 账号，请重试。",
+  "The Bot account was reset. Press Sign in again.": "Bot 账号已被重置。请再次点击登录。",
+  "This sign-in is not available for this Bot.": "此 Bot 无法使用这个登录。",
   "This Bot is no longer available.": "此 Bot 已不可用。",
   "The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.": "编程助手尚未就绪。请在设置 → Claude Code 和 Codex 中检查安装，然后重试。",
   "Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.": "Codex 设备登录不可用。请在 ChatGPT 安全设置或工作区权限中启用设备代码登录后重试。",
@@ -10194,6 +10229,12 @@ var ZH = {
   "A few words on what it does.": "用几个词说明它做什么。",
   "Research, admin…": "研究、行政…",
   Tools: "工具",
+  "Shell access": "Shell 访问",
+  "A Bot with shell access can read what the operating-system user can read.": "有 shell 访问权限的 Bot 可以读取操作系统用户能读取的内容。",
+  "This Bot stays on {model}: {cli} is a coding CLI that brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.": "这个 Bot 会继续使用 {model}：{cli} 是自带 shell 的编程 CLI。请打开 shell，或选择一个使用 DeepSeek Harness 工具的模型。",
+  "This model no longer answers, and this Bot cannot move to {cli} while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.": "这个模型已不再可用，而在 shell 关闭时这个 Bot 无法迁移到 {cli}。请选择一个使用 DeepSeek Harness 工具的模型，或打开 shell。",
+  "The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.": "Bot 团队在授予工具时执行此设置：它会移除这些工具，而不会把 shell 放进操作系统沙箱。",
+  "This removes this Bot's own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.": "这只会移除这个 Bot 自己的 shell 工具；它不能阻止另一个有 shell 的 Bot，或操作系统用户，读取这个 Bot 能读取的文件。",
   "Denied tools": "禁止使用的工具",
   "Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.": "精确的工具名，每行一个或用逗号分隔，区分大小写。留空表示允许所有工具。",
   "What this Bot does": "这个 Bot 做什么",
@@ -11666,6 +11707,7 @@ var ZH = {
   "Screen only: this agent has no transcript reader, so these are its last screens.": "只有屏幕：这个 agent 没有对话记录读取器，所以这里显示的是它最近的屏幕。",
   "Read from this seat’s own transcript. This view never runs or types into it.": "读取自这个席位自己的对话记录。这个视图绝不运行它，也不向它输入。",
   "Choose a seat in the team bar to read its chat.": "在团队栏里选一个席位，读它的聊天。",
+  "This seat is not running on this computer, so its terminal cannot open.": "这个席位没有在这台电脑上运行，所以无法打开它的终端。",
   "Back to the team": "返回团队",
   "Reading the seat…": "正在读取席位…",
   "No transcript rows yet. The seat is quiet.": "还没有对话记录。这个席位很安静。",
@@ -11854,6 +11896,7 @@ var HOST_ZH = {
   "{n} projects": "{n} 个项目",
   "Reading…": "读取中…",
   "Code team": "代码团队",
+  "Global Bots": "全局 Bot",
   "The Code side could not read this computer’s team.": "代码端无法读取本机的团队。",
   "No project has a Bot on this computer yet.": "本机还没有任何项目包含 Bot。",
   "Reading this computer’s team…": "正在读取本机的团队…",
@@ -11931,12 +11974,16 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 var HOST_TEMPLATES = [
+  "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
   "This step is hard to undo: {step}. Allow it once?",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?",
   "Turn on {connection} in Settings → Claude Code and Codex before using this model.",
   "Wait for {connection} to finish installing, or retry it in Settings → Claude Code and Codex.",
   "Sign in to {connection} before using this model.",
   "Confirm the account of {connection} before using this model.",
+  // A host sign-in refusal with no sentence of its own carries its ACP class.
+  "Could not continue this sign-in ({kind}). Try again.",
+  "The account could not be confirmed ({kind}). Try again.",
   "{name} could not switch to {model}. It stays on {kept}.",
   // A Bot Session adopt refused after it began (#877). `host`: a value that is itself a host
   // message (the store's read-only reason) is worded in turn.
@@ -14950,32 +14997,36 @@ function CodeBody({ code }) {
     else code.selectPane({ botId, worker: null });
   };
   const projects = tree?.projects ?? [];
-  const projectCount = projects.length === 1 ? t("1 project") : t("{n} projects", { n: projects.length });
-  const treeRows = projects.map((project) => (0, import_react2.createElement)(
-    "section",
-    { key: project.folder, className: "cs-project" },
-    (0, import_react2.createElement)("div", { className: "cs-project-name", title: project.folder }, project.name ?? project.folder),
-    project.bots.map((bot) => (0, import_react2.createElement)(
-      "div",
-      { key: bot.id, className: "cs-bot" },
-      (0, import_react2.createElement)(TreeRow, {
-        label: bot.name,
-        status: bot.status,
-        current: current.selected?.botId === bot.id && !current.selected?.worker,
-        note: bot.main ? t("lead") : null,
-        onClick: () => choose(bot.id)
-      }),
-      bot.workers.map((worker) => (0, import_react2.createElement)(TreeRow, {
-        key: worker.terminal,
-        label: worker.role ?? worker.agent ?? worker.terminal,
-        status: worker.status,
-        depth: 1,
-        current: current.selected?.botId === bot.id && current.selected?.worker === worker.terminal,
-        title: [worker.role, worker.branch?.replace(/^refs\/heads\//, "")].filter(Boolean).join(" · "),
-        onClick: () => choose(bot.id, worker.terminal)
-      }))
-    ))
-  ));
+  const realProjects = projects.filter((project) => project.global !== true);
+  const projectCount = realProjects.length === 1 ? t("1 project") : t("{n} projects", { n: realProjects.length });
+  const treeRows = projects.map((project) => {
+    const label = project.global === true ? t("Global Bots") : project.name ?? project.folder;
+    return (0, import_react2.createElement)(
+      "section",
+      { key: project.global === true ? "global" : project.folder, className: "cs-project" },
+      (0, import_react2.createElement)("div", { className: "cs-project-name", title: project.global === true ? label : project.folder }, label),
+      project.bots.map((bot) => (0, import_react2.createElement)(
+        "div",
+        { key: bot.id, className: "cs-bot" },
+        (0, import_react2.createElement)(TreeRow, {
+          label: bot.name,
+          status: bot.status,
+          current: current.selected?.botId === bot.id && !current.selected?.worker,
+          note: bot.main ? t("lead") : null,
+          onClick: () => choose(bot.id)
+        }),
+        bot.workers.map((worker) => (0, import_react2.createElement)(TreeRow, {
+          key: worker.terminal,
+          label: worker.role ?? worker.agent ?? worker.terminal,
+          status: worker.status,
+          depth: 1,
+          current: current.selected?.botId === bot.id && current.selected?.worker === worker.terminal,
+          title: [worker.role, worker.branch?.replace(/^refs\/heads\//, "")].filter(Boolean).join(" · "),
+          onClick: () => choose(bot.id, worker.terminal)
+        }))
+      ))
+    );
+  });
   return (0, import_react2.createElement)(
     "div",
     { className: "cs-host" },

@@ -226,8 +226,15 @@ export function install(rt) {
     const moved = []
     const reapply = []
     let waiting = false
+    let heldOnRoute = false
     let changed = recovered
     for (const bot of Object.values(state.bots ?? {})) {
+      // A Bot without a shell cannot move onto a coding CLI that brings its own shell.
+      // Its hold ends when the shell comes back, and the move runs again then.
+      if (bot?.acpShellHeld !== undefined && bot.shell !== false) {
+        delete bot.acpShellHeld
+        changed = true
+      }
       const prior = bot?.acpMoved
       if (prior !== undefined) {
         if (bot.model !== prior.target) {
@@ -250,6 +257,16 @@ export function install(rt) {
         if (bot?.claudeCodeModel !== undefined && bot.model === piAiClaudeOf(bot.claudeCodeModel)) waiting = true
         continue
       }
+      if (bot.shell === false) {
+        heldOnRoute = true
+        if (bot.acpShellHeld !== true) {
+          bot.acpShellHeld = true
+          changed = true
+          rt.warn?.('ds-bot: %s stays on %s: Claude Code over ACP brings its own shell, '
+            + 'so turn the shell on or pick a native model.', bot.name, bot.model)
+        }
+        continue
+      }
       bot.acpMoved = {
         from: { model: bot.model, ...(bot.effort === undefined ? {} : { effort: bot.effort }) },
         target,
@@ -261,7 +278,7 @@ export function install(rt) {
       moved.push(bot)
       changed = true
     }
-    if (state.claudeAcpMoved !== true && !waiting) {
+    if (state.claudeAcpMoved !== true && !waiting && !heldOnRoute) {
       state.claudeAcpMoved = true
       changed = true
     }

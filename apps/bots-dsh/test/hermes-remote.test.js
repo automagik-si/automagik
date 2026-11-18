@@ -266,6 +266,78 @@ test('reconnect resumes stored ID, refreshes runtime ID and replaces a replay ga
   assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
 })
 
+test('attached reconcile flags an epoch gap with a pending submit and zero cursor', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    pendingSubmit: true,
+  })
+  await f.wire.connect()
+  const result = await f.run.reconcile()
+  assert.equal(result.gap, true)
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+  assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
+})
+
+test('attached reconcile flags an epoch gap with an uncertain turn and zero cursor', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    uncertain: true,
+  })
+  await f.wire.connect()
+  const result = await f.run.reconcile()
+  assert.equal(result.gap, true)
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+  assert.ok(!f.sent.some(frame => frame.method === 'prompt.submit'))
+})
+
+test('attached prepare has no epoch gap at zero cursor with nothing waiting', async t => {
+  const f = fixture(t, {
+    attached: true, ready: { replay_epoch: 'epoch-b' },
+    replay: { epoch: 'epoch-b', latest_seq: 0 },
+  })
+  Object.assign(f.identity, {
+    canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+    runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+    pendingSubmit: false, uncertain: false,
+  })
+  await f.wire.connect()
+  await f.run.prepare()
+  assert.equal(f.run.joinGap, false)
+  assert.deepEqual(f.run.takeRecovered(), [])
+  assert.equal(f.identity.epoch, 'epoch-b')
+  assert.equal(f.identity.lastSeq, 0)
+})
+
+test('attached prepare has no gap for a waiting turn in the same epoch and runtime', async t => {
+  for (const waiting of ['pendingSubmit', 'uncertain']) {
+    const f = fixture(t, { attached: true, replay: { epoch: 'epoch-a', latest_seq: 0 } })
+    Object.assign(f.identity, {
+      canonicalBot: true, storedSessionId: f.snapshot.stored_session_id,
+      runtimeSessionId: f.snapshot.session_id, epoch: 'epoch-a', lastSeq: 0,
+      [waiting]: true,
+    })
+    await f.wire.connect()
+    await f.run.prepare()
+    assert.equal(f.run.joinGap, false, waiting)
+    assert.deepEqual(f.run.takeRecovered(), [], waiting)
+    assert.equal(f.identity[waiting], true)
+    assert.equal(f.identity.epoch, 'epoch-a')
+    assert.equal(f.identity.runtimeSessionId, f.snapshot.session_id)
+  }
+})
+
 test('a normal turn resets the watermark when an owned SSH backend starts a new replay epoch', async t => {
   const f = fixture(t, { ready: { replay_epoch: 'epoch-b' } })
   Object.assign(f.identity, { storedSessionId: f.snapshot.stored_session_id, runtimeSessionId: f.snapshot.session_id, lastSeq: 100, epoch: 'epoch-a', pendingSubmit: false })
@@ -1494,3 +1566,30 @@ test('an attached chat with no visible row still opens so the first open can nor
   assert.equal(chunks.at(-1).type, 'finish')
   assert.equal(chunks.at(-1).reason.kind, 'stop')
 })
+
+for (const [type, field] of [['error', 'message'], ['message.complete', 'error']]) {
+  test(type + ' reason drops a split supplementary character at the cut', async t => {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    const reason = '.'.repeat(498) + '\u{1F600}' + 'tail ' + 'more '.repeat(10)
+    f.socket().event(type, { ...(type === 'message.complete' ? { status: 'error', text: '' } : {}), [field]: reason }, 1)
+    const row = await f.run.next()
+    assert.equal(row.kind, 'error')
+    const detail = row.text.slice(row.text.indexOf(': ') + 2)
+    assert.equal(detail, '.'.repeat(498) + '…')
+    assert.ok(detail.isWellFormed())
+  })
+
+  test(type + ' reason keeps a complete supplementary character before the cut', async t => {
+    const f = fixture(t)
+    await f.wire.connect(); await f.run.submit('Sample')
+    const reason = '.'.repeat(497) + '\u{1F600}' + 'tail' + 'more '.repeat(10)
+    f.socket().event(type, { ...(type === 'message.complete' ? { status: 'error', text: '' } : {}), [field]: reason }, 1)
+    const row = await f.run.next()
+    assert.equal(row.kind, 'error')
+    const detail = row.text.slice(row.text.indexOf(': ') + 2)
+    assert.equal(detail, '.'.repeat(497) + '\u{1F600}' + '…')
+    assert.equal(detail.length, 500)
+    assert.ok(detail.isWellFormed())
+  })
+}
