@@ -2993,7 +2993,30 @@ var HOST_ZH = {
   "You control the computer": "你在操控电脑",
   "Stop {name}": "停止 {name}",
   "{name} · foreground": "{name} · 前台",
-  "{name} waits for the computer": "{name} 等你停手"
+  "{name} waits for the computer": "{name} 等你停手",
+  // Native subagents as workers, the clickable mock for issue 1564 (mock-workers.js).
+  "Native subagents": "原生子代理",
+  "SAMPLE DATA": "示例数据",
+  "Sample data: nothing here is real.": "示例数据：这里没有任何真实内容。",
+  "Review the adapter bundle": "检查适配器包",
+  "Reading the adapter bundle…": "正在读取适配器包…",
+  "find the adapter version": "查找适配器版本",
+  "read the session update path": "读取会话更新路径",
+  "search for parentToolUseId": "搜索 parentToolUseId",
+  "Audit memory writes": "审查记忆写入",
+  "2 files changed · 4 notes kept": "修改了 2 个文件 · 保留了 4 条笔记",
+  "read the memory doors": "读取记忆入口",
+  "compare both memory stores": "比较两个记忆库",
+  "keep the app memory as the source": "以应用记忆为来源",
+  "Check the approval path": "检查批准路径",
+  "Bash exited 1 · approval path missing": "Bash 退出码 1 · 缺少批准路径",
+  "list the approval levels": "列出批准级别",
+  "run the permission probe": "运行权限探测",
+  "Not started": "尚未开始",
+  Steps: "步骤",
+  Result: "结果",
+  "Worker details": "工作详情",
+  "Close preview": "关闭预览"
 };
 Object.assign(ZH, {
   "This step is hard to undo: {step}. Allow it once?": "这一步难以撤销：{step}。允许这一次吗？",
@@ -17941,10 +17964,10 @@ function ThinkingRow({ text: text2, live, at, ms, viewKey }) {
     if (viewKey !== void 0) rowViews.set(viewKey, { ...rowViews.get(viewKey), ...patch });
   };
   const measure = () => {
-    const el = box.current;
-    atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 2;
-    remember({ atEnd: atEnd.current, top: el.scrollTop });
-    const above = el.scrollTop > 0;
+    const el2 = box.current;
+    atEnd.current = el2.scrollHeight - el2.scrollTop - el2.clientHeight < 2;
+    remember({ atEnd: atEnd.current, top: el2.scrollTop });
+    const above = el2.scrollTop > 0;
     setFade(above && !atEnd.current ? "both" : above ? "top" : !atEnd.current ? "bottom" : void 0);
   };
   const toggle = (event) => {
@@ -17955,11 +17978,11 @@ function ThinkingRow({ text: text2, live, at, ms, viewKey }) {
   };
   (0, import_react46.useLayoutEffect)(() => {
     if (!open) return;
-    const el = box.current;
+    const el2 = box.current;
     const restore = view.current;
     view.current = void 0;
-    if (atEnd.current) el.scrollTop = el.scrollHeight;
-    else if (restore?.top !== void 0) el.scrollTop = restore.top;
+    if (atEnd.current) el2.scrollTop = el2.scrollHeight;
+    else if (restore?.top !== void 0) el2.scrollTop = restore.top;
     measure();
   }, [text2, open]);
   const title = live ? t("Thinking") : t("Thought it through");
@@ -18110,9 +18133,9 @@ function scheduleGroupChains(flow) {
 function GroupMessage({ bot, text: text2, texts: texts2 = [text2], room: room2, roster, actions, msgKey, useUi, whole, time, duration: duration2 }) {
   const ref = (0, import_react46.useRef)(null);
   (0, import_react46.useLayoutEffect)(() => {
-    const el = ref.current;
-    if (!el?.closest) return void 0;
-    const flow = el.closest("[data-chat-flow]");
+    const el2 = ref.current;
+    if (!el2?.closest) return void 0;
+    const flow = el2.closest("[data-chat-flow]");
     if (!flow) return void 0;
     scheduleGroupChains(flow);
     return () => scheduleGroupChains(flow);
@@ -19313,6 +19336,247 @@ function sidebarActions({ sidebar, shown, teamSession = () => false, closePanel,
     hasRightSidebar: () => sidebar() !== void 0,
     openLive: () => perform((controller) => controller.openTab(LIVE_KIND)),
     toggleRightSidebar: () => perform((controller) => controller.toggleExpanded())
+  };
+}
+
+// src/client/mock-workers.js
+var MOCK_FLAG = "mock-workers";
+var PARAM_FLAG = "mock-workers";
+var ROOT_ID = "ds-bot-mock-workers";
+var CSS2 = `
+.bt-mock-workers{left:16px;top:auto;right:auto;bottom:16px;width:308px;max-height:calc(100vh - 32px);overflow:auto;z-index:75}
+.bt-mock-workers .bt-mock-head{display:flex;align-items:center;gap:8px;padding:4px 6px 2px}
+.bt-mock-workers .bt-mock-head .bt-menu-label{font-weight:600}
+.bt-mock-badge{flex:none;align-self:center;padding:1px 7px;border-radius:999px;background:var(--bt-accent-soft);color:var(--bt-accent);font-size:10px;line-height:16px;font-weight:700;letter-spacing:.04em}
+.bt-mock-avatar{flex:none;width:36px;height:36px;border-radius:50%;background:var(--bt-tag-bg);color:var(--bt-ink-2);display:flex;align-items:center;justify-content:center;font:600 14px/1 var(--bt-font)}
+.bt-mock-workers .bt-threads{margin-top:2px}
+.bt-mock-worker{display:flex;flex-direction:column}
+.bt-mock-worker>.bt-row-preview{margin:0 8px 4px 28px;font-size:12px}
+.bt-mock-workers .bt-thread-mark{flex:none;width:10px;height:10px;border-radius:50%;background:var(--bt-ink-3);box-sizing:border-box}
+.bt-mock-workers .bt-thread[data-state=done] .bt-thread-mark{background:var(--bt-green)}
+.bt-mock-workers .bt-thread[data-state=failed] .bt-thread-mark{background:var(--bt-danger)}
+.bt-mock-steps{display:flex;flex-direction:column;gap:2px}
+.bt-mock-step{display:flex;align-items:flex-start;gap:8px;padding:5px 8px;border-radius:8px;color:var(--bt-ink)}
+.bt-mock-step[data-state=running]{background:var(--bt-accent-soft)}
+.bt-mock-step .bt-menu-label{font-size:12.5px;white-space:normal;overflow:visible;line-height:16px}
+.bt-mock-step .bt-menu-hint{font-size:11px;flex:none;margin-left:auto}
+.bt-mock-pop-head{display:flex;align-items:center;gap:8px;padding:2px 8px 4px;min-width:0}
+.bt-mock-pop-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--bt-ink);font-weight:600;font-size:13px;line-height:18px}
+.bt-mock-step-mark{flex:none;width:8px;height:8px;margin-top:4px;border-radius:50%;background:var(--bt-ink-3)}
+.bt-mock-step[data-state=done] .bt-mock-step-mark{background:var(--bt-green)}
+.bt-mock-step[data-state=failed] .bt-mock-step-mark{background:var(--bt-danger)}
+.bt-mock-step[data-state=running] .bt-mock-step-mark{background:var(--bt-accent)}
+`;
+var MOCK_WORKERS = Object.freeze([
+  Object.freeze({
+    id: "adapter",
+    state: "running",
+    age: () => t("now"),
+    title: () => t("Review the adapter bundle"),
+    line: () => t("Reading the adapter bundle…"),
+    steps: Object.freeze([
+      Object.freeze({ tool: "Grep", state: "done", title: () => t("find the adapter version") }),
+      Object.freeze({ tool: "Read", state: "running", title: () => t("read the session update path") }),
+      Object.freeze({ tool: "Grep", state: "pending", title: () => t("search for parentToolUseId") })
+    ])
+  }),
+  Object.freeze({
+    id: "memory",
+    state: "done",
+    age: () => t("{n}m", { n: 4 }),
+    title: () => t("Audit memory writes"),
+    line: () => t("2 files changed · 4 notes kept"),
+    steps: Object.freeze([
+      Object.freeze({ tool: "Read", state: "done", title: () => t("read the memory doors") }),
+      Object.freeze({ tool: "Grep", state: "done", title: () => t("compare both memory stores") }),
+      Object.freeze({ tool: "Edit", state: "done", title: () => t("keep the app memory as the source") })
+    ])
+  }),
+  Object.freeze({
+    id: "approval",
+    state: "failed",
+    age: () => t("{n}m", { n: 9 }),
+    title: () => t("Check the approval path"),
+    line: () => t("Bash exited 1 · approval path missing"),
+    steps: Object.freeze([
+      Object.freeze({ tool: "Read", state: "done", title: () => t("list the approval levels") }),
+      Object.freeze({ tool: "Bash", state: "failed", title: () => t("run the permission probe") })
+    ])
+  })
+]);
+var stateLabel = (state2) => state2 === "done" ? t("Done") : state2 === "failed" ? t("Failed") : state2 === "pending" ? t("Not started") : t("Running");
+function installStyle(text2, doc) {
+  const style = doc.createElement("style");
+  style.dataset.dshBotMock = "workers";
+  style.textContent = text2;
+  doc.head.append(style);
+  return () => style.remove();
+}
+function el(doc, tag, props, ...children) {
+  const node = doc.createElement(tag);
+  for (const [key, value] of Object.entries(props ?? {})) {
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value;
+    else if (key === "style" && typeof value === "object") for (const [name, setting] of Object.entries(value)) node.style.setProperty(name, setting);
+    else if (key === "dataset") Object.assign(node.dataset, value);
+    else if (value !== void 0 && value !== false) node.setAttribute(key, value === true ? "" : String(value));
+  }
+  for (const child of children) if (child !== void 0 && child !== null) node.append(child);
+  return node;
+}
+function workerRow(doc, worker, { onOpen }) {
+  const state2 = worker.state;
+  const label = [worker.title(), stateLabel(state2), worker.line()].filter(Boolean).join(", ");
+  const mark2 = state2 === "running" ? el(doc, "span", { class: "bt-thread-spin", "aria-hidden": "true" }) : el(doc, "span", { class: "bt-thread-mark", "aria-hidden": "true" });
+  const button = el(
+    doc,
+    "button",
+    {
+      type: "button",
+      class: "bt-thread",
+      dataset: { state: state2, worker: worker.id },
+      "aria-label": label,
+      title: worker.title()
+    },
+    mark2,
+    el(doc, "span", { class: "bt-thread-title" }, worker.title()),
+    el(doc, "span", { class: "bt-thread-age", "aria-hidden": "true" }, worker.age())
+  );
+  button.addEventListener("click", () => onOpen(worker, button));
+  return el(
+    doc,
+    "div",
+    { class: "bt-mock-worker", dataset: { state: state2 } },
+    button,
+    el(doc, "span", { class: "bt-row-preview" }, worker.line())
+  );
+}
+function stepsList(doc, worker) {
+  return el(
+    doc,
+    "div",
+    { class: "bt-mock-steps", role: "list", "aria-label": t("Steps") },
+    ...worker.steps.map((step2) => el(
+      doc,
+      "div",
+      { class: "bt-mock-step", dataset: { state: step2.state }, role: "listitem" },
+      el(doc, "span", { class: "bt-mock-step-mark", "aria-hidden": "true" }),
+      el(doc, "span", { class: "bt-menu-label" }, step2.title()),
+      el(doc, "span", { class: "bt-menu-hint" }, `${step2.tool} · ${stateLabel(step2.state)}`)
+    ))
+  );
+}
+function popover(doc, worker, anchor, onClose) {
+  const rect = typeof anchor?.getBoundingClientRect === "function" ? anchor.getBoundingClientRect() : void 0;
+  const viewport = doc.defaultView?.innerHeight ?? 800;
+  const left = rect !== void 0 && rect.width > 0 ? Math.round(rect.right + 12) : 340;
+  const top = Math.max(16, Math.min(rect !== void 0 && rect.height > 0 ? Math.round(rect.top) : 96, viewport - 360));
+  const steps = stepsList(doc, worker);
+  const status = el(doc, "span", { class: "bt-mock-badge", dataset: { state: worker.state } }, stateLabel(worker.state));
+  const close = el(doc, "button", { type: "button", "aria-label": t("Close") }, t("Close"));
+  close.addEventListener("click", onClose);
+  return el(
+    doc,
+    "div",
+    {
+      class: "bt-menu bt-mock-popover",
+      role: "dialog",
+      "aria-label": t("Worker details"),
+      style: { left: `${left}px`, top: `${top}px`, bottom: "auto", right: "auto", width: "288px", "max-height": "calc(100vh - 32px)", overflow: "auto", "z-index": 76 }
+    },
+    el(doc, "div", { class: "bt-mock-pop-head" }, el(doc, "span", { class: "bt-mock-pop-title" }, worker.title()), status, el(doc, "span", { class: "bt-menu-hint" }, worker.age())),
+    el(doc, "div", { class: "bt-menu-note" }, t("Sample data: nothing here is real.")),
+    el(doc, "div", { class: "bt-menu-sep" }),
+    el(doc, "div", { class: "bt-menu-note" }, t("Result"), ": ", worker.line() || stateLabel(worker.state)),
+    el(doc, "div", { class: "bt-menu-sep" }),
+    el(doc, "div", { class: "bt-menu-note" }, t("Steps")),
+    steps,
+    el(doc, "div", { class: "bt-menu-sep" }),
+    close
+  );
+}
+function mountWorkersMock(root, { doc = globalThis.document } = {}) {
+  const panel = el(doc, "div", {
+    class: "bt-menu bt-mock-workers",
+    role: "region",
+    "aria-label": t("Native subagents")
+  });
+  const closePreview = el(doc, "button", { type: "button", "aria-label": t("Close preview") }, t("Close preview"));
+  closePreview.addEventListener("click", () => {
+    panel.hidden = true;
+  });
+  const head = el(
+    doc,
+    "div",
+    { class: "bt-mock-head" },
+    el(doc, "span", { class: "bt-menu-label" }, t("Native subagents")),
+    el(doc, "span", { class: "bt-mock-badge" }, t("SAMPLE DATA"))
+  );
+  const closeRow = el(doc, "div", null, closePreview);
+  const note = el(doc, "div", { class: "bt-menu-note" }, t("Sample data: nothing here is real."));
+  const bot = el(
+    doc,
+    "div",
+    { class: "bt-row", dataset: { bot: "sample" } },
+    el(doc, "span", { class: "bt-mock-avatar", "aria-hidden": "true" }, "C"),
+    el(
+      doc,
+      "span",
+      { class: "bt-row-body" },
+      el(doc, "span", { class: "bt-row-name" }, el(doc, "span", { class: "bt-row-title" }, "Claude Code")),
+      el(doc, "span", { class: "bt-row-preview" }, t("Working on {n} things", { n: MOCK_WORKERS.length }))
+    )
+  );
+  let open = null;
+  const close = () => {
+    if (open !== null) {
+      open.remove();
+      open = null;
+    }
+  };
+  const onOpen = (worker, anchor) => {
+    close();
+    open = popover(doc, worker, anchor, close);
+    panel.after(open);
+  };
+  const threads = el(
+    doc,
+    "div",
+    { class: "bt-threads", role: "group", "aria-label": t("Native subagents") },
+    ...MOCK_WORKERS.map((worker) => workerRow(doc, worker, { onOpen }))
+  );
+  panel.append(head, note, el(doc, "div", { class: "bt-menu-sep" }), bot, threads, closeRow);
+  root.append(panel);
+  return {
+    panel,
+    screen: () => open === null ? "workers" : "worker",
+    open: (id) => {
+      const worker = MOCK_WORKERS.find((entry) => entry.id === id);
+      if (worker !== void 0) onOpen(worker, panel.querySelector(`[data-worker="${id}"]`));
+    },
+    close,
+    dispose: () => {
+      close();
+      panel.remove();
+    }
+  };
+}
+function installWorkersMock({ location: location2 = globalThis.location, document: doc = globalThis.document } = {}) {
+  if (!doc || !location2) return () => {
+  };
+  const search = typeof location2.search === "string" ? location2.search : "";
+  const hash = typeof location2.hash === "string" ? location2.hash : "";
+  if (!new RegExp(`(?:[?&])${PARAM_FLAG}(?:=|&|$)`).test(search) && !hash.includes(MOCK_FLAG)) return () => {
+  };
+  const offStyles = installStyle(CSS2, doc);
+  const root = doc.createElement("div");
+  root.id = ROOT_ID;
+  doc.body.append(root);
+  const control = mountWorkersMock(root, { doc });
+  return () => {
+    control.dispose();
+    offStyles();
+    root.remove();
   };
 }
 
@@ -34713,10 +34977,10 @@ function readPage(limits) {
   let chars = 0;
   let stop3 = "";
   const collapse = (value) => String(value || "").replace(/\s+/g, " ").trim();
-  const isSecret = (el) => {
-    if (el.localName !== "input" && el.localName !== "textarea") return false;
-    const auto = String(el.getAttribute("autocomplete") || "").toLowerCase();
-    return el.type === "password" || /(^|\s)(cc-|one-time-code)/.test(auto) || SECRET_HINT.test(`${el.getAttribute("name") || ""} ${el.id || ""}`);
+  const isSecret = (el2) => {
+    if (el2.localName !== "input" && el2.localName !== "textarea") return false;
+    const auto = String(el2.getAttribute("autocomplete") || "").toLowerCase();
+    return el2.type === "password" || /(^|\s)(cc-|one-time-code)/.test(auto) || SECRET_HINT.test(`${el2.getAttribute("name") || ""} ${el2.id || ""}`);
   };
   const keep = (text3, end = "") => {
     if (text3 === "") return "";
@@ -34731,14 +34995,14 @@ function readPage(limits) {
   const flow = (text3) => text3.split("\n").map((line) => line.replace(/[ \t\f\v\u00a0\u2028\u2029]+/g, " ").trim().replace(/^· /, "")).join("\n").replace(/\n{3,}/g, "\n\n").replace(/\u0003\n\n(?=\u0001\d+\u0003)/g, "\n").trim();
   const block = (text3) => expand(flow(text3));
   const oneLine = (text3) => block(text3).replace(/\s*\n+\s*/g, " ").trim();
-  const styleOf = (el) => (el.ownerDocument.defaultView || window).getComputedStyle(el);
-  const childrenOf = (el) => {
-    if (el.shadowRoot) return el.shadowRoot.childNodes;
-    if (el.localName === "slot" && typeof el.assignedNodes === "function") {
-      const assigned = el.assignedNodes();
+  const styleOf = (el2) => (el2.ownerDocument.defaultView || window).getComputedStyle(el2);
+  const childrenOf = (el2) => {
+    if (el2.shadowRoot) return el2.shadowRoot.childNodes;
+    if (el2.localName === "slot" && typeof el2.assignedNodes === "function") {
+      const assigned = el2.assignedNodes();
       if (assigned.length > 0) return assigned;
     }
-    return el.childNodes;
+    return el2.childNodes;
   };
   const over = () => {
     if (stop3) return true;
@@ -34747,25 +35011,25 @@ function readPage(limits) {
     else if (stats.nodes % 512 === 0 && performance.now() - started > limits.ms) stop3 = `reading took longer than ${limits.ms} ms`;
     return stop3 !== "";
   };
-  const roleOf = (el) => el.getAttribute("role") || ROLES[el.localName] || (el.localName === "input" ? INPUT_ROLES[el.type] || "textbox" : el.isContentEditable ? "textbox" : el.localName);
-  const sized = (el) => {
-    const box = el.getBoundingClientRect();
+  const roleOf = (el2) => el2.getAttribute("role") || ROLES[el2.localName] || (el2.localName === "input" ? INPUT_ROLES[el2.type] || "textbox" : el2.isContentEditable ? "textbox" : el2.localName);
+  const sized = (el2) => {
+    const box = el2.getBoundingClientRect();
     return box.width > 0 && box.height > 0;
   };
-  const itemFor = (el, style) => {
-    if (items.length >= limits.items || style.visibility !== "visible" || !el.matches(ITEM) || !sized(el)) return null;
-    const item = { role: roleOf(el) };
-    const secret = isSecret(el);
-    if (el.href) item.href = String(el.href);
-    if ((el.localName === "input" || el.localName === "textarea") && !secret && !NO_VALUE_TYPES.has(el.type) && el.value) item.value = String(el.value).slice(0, 120);
-    if (el.localName === "select" && el.selectedOptions?.length) item.value = collapse([...el.selectedOptions].map((option) => option.label || option.text).join(", ")).slice(0, 120);
-    if (el.checked) item.checked = true;
-    if (el.disabled) item.disabled = true;
+  const itemFor = (el2, style) => {
+    if (items.length >= limits.items || style.visibility !== "visible" || !el2.matches(ITEM) || !sized(el2)) return null;
+    const item = { role: roleOf(el2) };
+    const secret = isSecret(el2);
+    if (el2.href) item.href = String(el2.href);
+    if ((el2.localName === "input" || el2.localName === "textarea") && !secret && !NO_VALUE_TYPES.has(el2.type) && el2.value) item.value = String(el2.value).slice(0, 120);
+    if (el2.localName === "select" && el2.selectedOptions?.length) item.value = collapse([...el2.selectedOptions].map((option) => option.label || option.text).join(", ")).slice(0, 120);
+    if (el2.checked) item.checked = true;
+    if (el2.disabled) item.disabled = true;
     items.push(item);
     return { item, number: items.length, secret };
   };
-  const nameOf3 = (el, text3, secret) => collapse(
-    el.getAttribute("aria-label") || text3 || (el.localName === "input" && !secret && NO_VALUE_TYPES.has(el.type) ? el.value : "") || el.getAttribute("placeholder") || el.title || el.getAttribute("alt") || el.querySelector?.("img[alt]")?.alt || el.getAttribute("name") || ""
+  const nameOf3 = (el2, text3, secret) => collapse(
+    el2.getAttribute("aria-label") || text3 || (el2.localName === "input" && !secret && NO_VALUE_TYPES.has(el2.type) ? el2.value : "") || el2.getAttribute("placeholder") || el2.title || el2.getAttribute("alt") || el2.querySelector?.("img[alt]")?.alt || el2.getAttribute("name") || ""
   ).slice(0, 80);
   const fenced = (code, lang) => {
     const longest = Math.max(2, ...(code.match(/`{3,}/g) || []).map((run2) => run2.length));
@@ -34774,15 +35038,15 @@ function readPage(limits) {
 ${code.replace(/\n+$/, "")}
 ${fence}`;
   };
-  const langOf = (el) => {
-    const names = `${el.className || ""} ${el.querySelector?.("code")?.className || ""}`;
+  const langOf = (el2) => {
+    const names = `${el2.className || ""} ${el2.querySelector?.("code")?.className || ""}`;
     return /(?:^|\s)(?:lang|language)-([\w+#.-]+)/.exec(names)?.[1] || "";
   };
-  const list = (el, ctx) => {
-    const ordered = el.localName === "ol";
-    let number = ordered ? Number(el.getAttribute("start") || 1) || 1 : 1;
+  const list = (el2, ctx) => {
+    const ordered = el2.localName === "ol";
+    let number = ordered ? Number(el2.getAttribute("start") || 1) || 1 : 1;
     const lines = [];
-    for (const child of childrenOf(el)) {
+    for (const child of childrenOf(el2)) {
       if (over()) break;
       if (child.nodeType !== 1 || child.localName !== "li") {
         const loose = block(render(child, ctx));
@@ -34860,18 +35124,18 @@ ${caption}
 
 Table: ${caption}` : ""}${keep(out.join("\n"))}`;
   };
-  const frame = (el, ctx) => {
+  const frame = (el2, ctx) => {
     let doc = null;
     try {
-      doc = el.contentDocument;
+      doc = el2.contentDocument;
     } catch {
       doc = null;
     }
     const address = (() => {
       try {
-        return doc?.location?.href || el.src || el.getAttribute("src") || "about:blank";
+        return doc?.location?.href || el2.src || el2.getAttribute("src") || "about:blank";
       } catch {
-        return el.src || "about:blank";
+        return el2.src || "about:blank";
       }
     })();
     if (!doc) return `
@@ -34885,15 +35149,15 @@ Table: ${caption}` : ""}${keep(out.join("\n"))}`;
 
 `;
     stats.frames += 1;
-    const title = collapse(el.title || doc.title);
+    const title = collapse(el2.title || doc.title);
     const body2 = doc.body ? block(children(doc.body, { ...ctx, frames: ctx.frames + 1, depth: ctx.depth + 1, shown: true, pre: false })) : "";
     return keep(`[iframe: ${title ? `${title} (${address})` : address}]
 ${body2 || "(no text)"}
 [iframe end]`);
   };
-  function children(el, ctx) {
+  function children(el2, ctx) {
     let out = "";
-    for (const child of childrenOf(el)) {
+    for (const child of childrenOf(el2)) {
       if (over()) break;
       out += render(child, ctx);
     }
@@ -34909,57 +35173,57 @@ ${body2 || "(no text)"}
       return text3;
     }
     if (node.nodeType !== 1) return "";
-    const el = node;
-    const tag = el.localName;
+    const el2 = node;
+    const tag = el2.localName;
     if (SKIP.has(tag) || ctx.depth > limits.depth || over()) return "";
-    const style = styleOf(el);
+    const style = styleOf(el2);
     const display = style.display;
     if (display === "none" || style.contentVisibility === "hidden") return "";
     const shown = style.visibility === "visible";
     const keepsSpace = String(style.whiteSpace || "").startsWith("pre") || style.whiteSpace === "break-spaces";
     const next = { ...ctx, depth: ctx.depth + 1, shown };
-    if (display === "contents" && !SEMANTIC.test(tag) && !el.matches(ITEM)) return children(el, next);
+    if (display === "contents" && !SEMANTIC.test(tag) && !el2.matches(ITEM)) return children(el2, next);
     if (style.overflowX !== "visible" || style.overflowY !== "visible") {
-      const box = el.getBoundingClientRect();
+      const box = el2.getBoundingClientRect();
       if (box.width === 0 || box.height === 0) return "";
     }
     if (tag === "br") return "\n";
     if (tag === "hr") return "\n\n---\n\n";
     if (tag === "img") {
-      const alt = collapse(el.getAttribute("alt"));
+      const alt = collapse(el2.getAttribute("alt"));
       return shown && alt ? `[image: ${alt}]` : "";
     }
     if (tag === "canvas") {
-      const box = el.getBoundingClientRect();
+      const box = el2.getBoundingClientRect();
       return box.width >= 200 && box.height >= 100 ? "\n\n[canvas: drawn content, not readable]\n\n" : "";
     }
     if (tag === "iframe" || tag === "frame") {
-      const box = el.getBoundingClientRect();
-      return tag === "iframe" && (box.width < 2 || box.height < 2) ? "" : frame(el, next);
+      const box = el2.getBoundingClientRect();
+      return tag === "iframe" && (box.width < 2 || box.height < 2) ? "" : frame(el2, next);
     }
-    const found = itemFor(el, style);
+    const found = itemFor(el2, style);
     const mark2 = found ? `[#${found.number}]` : "";
     if (tag === "input" || tag === "textarea" || tag === "select") {
-      if (found) found.item.name = nameOf3(el, tag === "select" ? "" : el.labels?.[0] ? collapse(el.labels[0].textContent) : "", found.secret);
+      if (found) found.item.name = nameOf3(el2, tag === "select" ? "" : el2.labels?.[0] ? collapse(el2.labels[0].textContent) : "", found.secret);
       return mark2 ? ` ${mark2} ` : "";
     }
     let body2;
     if (tag === "pre") {
-      const code = shown ? String(el.innerText || el.textContent || "") : "";
+      const code = shown ? String(el2.innerText || el2.textContent || "") : "";
       chars += code.length;
-      body2 = code.trim() ? keep(fenced(code, langOf(el))) : "";
+      body2 = code.trim() ? keep(fenced(code, langOf(el2))) : "";
     } else if (tag === "table") {
-      body2 = tableMarkdown(el, next);
+      body2 = tableMarkdown(el2, next);
     } else if (tag === "ul" || tag === "ol") {
-      body2 = list(el, next);
-    } else if (tag === "details" && !el.open) {
-      const summary = [...el.children].find((child) => child.localName === "summary");
+      body2 = list(el2, next);
+    } else if (tag === "details" && !el2.open) {
+      const summary = [...el2.children].find((child) => child.localName === "summary");
       body2 = summary ? render(summary, next) : "";
     } else {
-      body2 = children(el, { ...next, pre: keepsSpace });
+      body2 = children(el2, { ...next, pre: keepsSpace });
     }
-    if (found) found.item.name = nameOf3(el, oneLine(body2), found.secret);
-    const level = /^h([1-6])$/.exec(tag)?.[1] || (el.getAttribute("role") === "heading" ? el.getAttribute("aria-level") || "2" : "");
+    if (found) found.item.name = nameOf3(el2, oneLine(body2), found.secret);
+    const level = /^h([1-6])$/.exec(tag)?.[1] || (el2.getAttribute("role") === "heading" ? el2.getAttribute("aria-level") || "2" : "");
     if (level) {
       const title = oneLine(body2);
       return title ? `
@@ -38886,6 +39150,7 @@ function apply(ctx) {
       groups.dispose();
     };
   }, "ds-bot: surface");
+  ctx.effect(() => installWorkersMock(), "ds-bot: native subagents preview (issue 1564)");
 }
 return Object.defineProperty({ ...module.exports }, Symbol.toStringTag, { value: 'Module' })
   },

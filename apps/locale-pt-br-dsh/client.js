@@ -2867,7 +2867,29 @@ const pack = createPack({
     "Signing out of the Bot account did not finish. Try again.": "Sair da conta do Bot não terminou. Tente de novo.",
     "Signing out of the Bot account could not be verified. Try again.": "Não foi possível confirmar a saída da conta do Bot. Tente de novo.",
     "The Bot account was reset. Press Sign in again.": "A conta do Bot foi redefinida. Clique em Entrar de novo.",
-    "This sign-in is not available for this Bot.": "Este login não está disponível para este Bot."
+    "This sign-in is not available for this Bot.": "Este login não está disponível para este Bot.",
+    "Native subagents": "Subagentes nativos",
+    "SAMPLE DATA": "DADOS DE EXEMPLO",
+    "Sample data: nothing here is real.": "Dados de exemplo: nada aqui é real.",
+    "Review the adapter bundle": "Revisar o pacote do adaptador",
+    "Reading the adapter bundle…": "Lendo o pacote do adaptador…",
+    "find the adapter version": "encontrar a versão do adaptador",
+    "read the session update path": "ler o caminho de atualização da sessão",
+    "search for parentToolUseId": "procurar parentToolUseId",
+    "Audit memory writes": "Auditar as gravações de memória",
+    "2 files changed · 4 notes kept": "2 arquivos alterados · 4 notas mantidas",
+    "read the memory doors": "ler as portas da memória",
+    "compare both memory stores": "comparar os dois acervos de memória",
+    "keep the app memory as the source": "manter a memória do app como fonte",
+    "Check the approval path": "Conferir o caminho de aprovação",
+    "Bash exited 1 · approval path missing": "Bash saiu com 1 · caminho de aprovação ausente",
+    "list the approval levels": "listar os níveis de aprovação",
+    "run the permission probe": "rodar a sonda de permissão",
+    "Not started": "Não iniciado",
+    "Steps": "Etapas",
+    "Result": "Resultado",
+    "Worker details": "Detalhes do worker",
+    "Close preview": "Fechar prévia"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

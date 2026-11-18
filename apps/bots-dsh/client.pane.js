@@ -11926,7 +11926,30 @@ var HOST_ZH = {
   "You control the computer": "你在操控电脑",
   "Stop {name}": "停止 {name}",
   "{name} · foreground": "{name} · 前台",
-  "{name} waits for the computer": "{name} 等你停手"
+  "{name} waits for the computer": "{name} 等你停手",
+  // Native subagents as workers, the clickable mock for issue 1564 (mock-workers.js).
+  "Native subagents": "原生子代理",
+  "SAMPLE DATA": "示例数据",
+  "Sample data: nothing here is real.": "示例数据：这里没有任何真实内容。",
+  "Review the adapter bundle": "检查适配器包",
+  "Reading the adapter bundle…": "正在读取适配器包…",
+  "find the adapter version": "查找适配器版本",
+  "read the session update path": "读取会话更新路径",
+  "search for parentToolUseId": "搜索 parentToolUseId",
+  "Audit memory writes": "审查记忆写入",
+  "2 files changed · 4 notes kept": "修改了 2 个文件 · 保留了 4 条笔记",
+  "read the memory doors": "读取记忆入口",
+  "compare both memory stores": "比较两个记忆库",
+  "keep the app memory as the source": "以应用记忆为来源",
+  "Check the approval path": "检查批准路径",
+  "Bash exited 1 · approval path missing": "Bash 退出码 1 · 缺少批准路径",
+  "list the approval levels": "列出批准级别",
+  "run the permission probe": "运行权限探测",
+  "Not started": "尚未开始",
+  Steps: "步骤",
+  Result: "结果",
+  "Worker details": "工作详情",
+  "Close preview": "关闭预览"
 };
 Object.assign(ZH, {
   "This step is hard to undo: {step}. Allow it once?": "这一步难以撤销：{step}。允许这一次吗？",
