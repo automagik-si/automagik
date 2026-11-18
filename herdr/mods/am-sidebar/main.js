@@ -8,7 +8,7 @@
 // as the agents list names them (sub-agents beneath); click one to focus it.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, Button } from "gpui-base";
 import { spaces, machines, panes, agents, terminals, focused, setAgentOrder, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, nextCommand, readTextFile, writeTextFile, appHome, home, knownAgents, notify, props } from "herdr";
 import * as fs from "fs/promises";
 import { isPng, keysFor, remote } from "./paste.js";
@@ -156,6 +156,10 @@ const PETS = "am-sidebar-pets";
 // The last bot discovery (bots.js discoverySnapshot), in the mod's localStorage: drawn at
 // startup until the first discovery answers.
 const BOTS_SAVED = "bots.last";
+// The last accepted update's advisory text, shared across sidebar copies until dismissed.
+const UPDATE_ADVISORIES = "am.sidebar.update-advisories";
+const hasAdvisories = (notes) => Array.isArray(notes) && notes.length > 0
+  && notes.every((note) => typeof note === "string" && note !== "");
 
 // What a stored color name looks like on an avatar (the same in every mod
 // that draws space avatars): one strong color per hue, light and dark alike.
@@ -219,6 +223,10 @@ export default class Spaces extends View {
     // status bar (am-status) shows the answer and asks for a look, an install or the switch
     // (REQUEST_KEY). The timers are this init's: a reload (the install's own swap) stops them.
     this.updater = new Updater({ exec, get: shared, set: setShared, notify, appHome: appHome(),
+      onAdvisories: (notes) => {
+        const next = hasAdvisories(notes) ? notes : null;
+        if (next || shared(UPDATE_ADVISORIES) != null) setShared(UPDATE_ADVISORIES, next);
+      },
       readText: (path) => readTextFile(path), writeText: (path, text, before) => writeTextFile(path, text, before),
       after: (ms, fn) => cx.timer.after(ms, () => fn()), spawn: (fn) => cx.spawn(async () => { await fn(); }) });
     // The Automagik theme, selected once (theme.js): now, then on the 15-second timer until done.
@@ -1420,6 +1428,15 @@ export default class Spaces extends View {
       .child(div().text_color(tone(t, w.status)).child(glyph(w.status)));
   }
 
+  advisoryRow(notes, t) {
+    return v_flex().id("update-advisories").flex_none().self_stretch().min_w(0).mb(6).p(8).gap(6).rounded(8)
+      .bg(t.raised).text_color(t.foreground).text_size(12)
+      .child(Button.new("dismiss-update-advisories").self_end().h(22).px(6).rounded(5).cursor_pointer()
+        .hover((s) => s.bg(t.hover)).accessibility_label("Dismiss update advisories")
+        .on_click(() => setShared(UPDATE_ADVISORIES, null)).child("Dismiss"))
+      .children(notes.map((note) => div().w_full().min_w(0).whitespace_normal().child(note)));
+  }
+
   render(cx) {
     if (this.form) return this.form.render(cx);
     const t = theme();
@@ -1444,6 +1461,7 @@ export default class Spaces extends View {
     this.prepareBots();
     this.nameBotTabs();
     const list = this.grouped(t, collapsed);
+    const advisories = collapsed ? null : shared(UPDATE_ADVISORIES);
     // agent.next / agent.prev follow the rows; ones not shown come after, in model order.
     setAgentOrder(this.order);
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
@@ -1453,6 +1471,7 @@ export default class Spaces extends View {
       // An id keeps the scroll position across renders (hover, live data).
       .child(v_flex().id("space-list").flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
+        .when(hasAdvisories(advisories), (el) => el.child(this.advisoryRow(advisories, t)))
         .children(list));
   }
 }

@@ -19,12 +19,13 @@ const landingIdOf = (state) => state.busy?.id ?? state.landed?.id;
 export class Updater {
   /**
    * `exec(command, args)`: Herdr's exec. `get`/`set`: shared/setShared. `notify`: Herdr's notify.
+   * `onAdvisories(notes)`: the layout advisories from an accepted install or restore notice.
    * `after(ms, fn)`: a one-shot timer that stops when this build is reloaded (the mod passes its
    * init cx's timer). `spawn(fn)`: runs an async task (cx.spawn). `readText`/`writeText`: Herdr's
    * readTextFile/writeTextFile. `appHome`: the app home. `now`: the clock.
    */
-  constructor({ exec, get, set, notify, after, spawn = (fn) => { fn(); }, readText, writeText, appHome, now = Date.now }) {
-    Object.assign(this, { exec, get, set, notify, after, spawn, readText, writeText, now });
+  constructor({ exec, get, set, notify, onAdvisories, after, spawn = (fn) => { fn(); }, readText, writeText, appHome, now = Date.now }) {
+    Object.assign(this, { exec, get, set, notify, onAdvisories, after, spawn, readText, writeText, now });
     this.script = `${appHome}/mods/am-sidebar/update.mjs`;
     this.mods = `${appHome}/mods`;
     this.autoFile = `${appHome}/automagik-herdr/${AUTO_FILE}`;
@@ -40,6 +41,10 @@ export class Updater {
 
   state() { return stateFrom(this.get(STATE_KEY)); }
   patch(fields) { this.set(STATE_KEY, { ...this.state(), ...fields }); }
+
+  presentAdvisories(notes = []) {
+    try { this.onAdvisories?.(notes); } catch {}
+  }
 
   /** At load: the first check after FIRST_CHECK_MS, and the notice for an install that just landed. */
   start() {
@@ -114,6 +119,7 @@ export class Updater {
         if (before.announced !== patch.current) {
           const note = patch.kind === "restored" ? restoredNotice(patch.restore) : restoreFailedNotice(patch.restoreError, patch.current);
           if (note) try { this.notify(note); } catch {}
+          if (before.busy?.id === id && this.state().announced === patch.current) this.presentAdvisories(patch.restore?.notes);
         }
         return;
       }
@@ -123,7 +129,7 @@ export class Updater {
         try { finish(this.get, this.set, id, { ...patch, ...requestAnswer(this.state(), request), autoFailed: null, landed }); } catch {}
         // Herdr reloads the mods as the folders swap, and the new build announces it (arrive).
         // Still here after the grace: no reload happened, so say what to do.
-        try { this.after(RELOAD_GRACE_MS, () => this.unreloaded(patch.current, patch.heldMods, patch.check, patch.warnings)); } catch {}
+        try { this.after(RELOAD_GRACE_MS, () => this.unreloaded(id, patch.current, patch.heldMods, patch.check, patch.warnings)); } catch {}
         return;
       }
       if (auto && patch.refused) {
@@ -147,10 +153,14 @@ export class Updater {
     return true;
   }
 
-  unreloaded(version, held = [], check = null, warnings = []) {
-    if (this.state().announced === version) return;
+  unreloaded(id, version, held = [], check = null, warnings = []) {
+    const { announced, landed, busy } = this.state();
+    if (announced === version) return;
     this.patch({ announced: version });
     try { this.notify(noReloadNotice(version, held, check, warnings)); } catch {}
+    if (landed?.version === version && landed.id === id && (busy?.what !== "apply" || busy.id === id)) {
+      this.presentAdvisories(warnings);
+    }
   }
 
   async readLandingHeld(version, step, id) {
@@ -193,6 +203,7 @@ export class Updater {
       finish(this.get, this.set, state.busy?.id ?? null, { announced: version, ...requestAnswer(this.state(), null) });
       try { this.set(SHOWN_KEY, note.error ? version : note.restore.failedVersion); } catch {}
       try { this.notify(note.error ? restoreFailedNotice(note.error, version) : restoredNotice(note.restore)); } catch {}
+      this.presentAdvisories(note.restore?.notes);
       return;
     }
     const step = landing(afterRestore, version, this.now());
@@ -217,6 +228,7 @@ export class Updater {
         try { this.set(SHOWN_KEY, version); } catch {}
         const { held } = record;
         try { this.notify(landedNotice(version, unchecked.from, false, held, { checked: false, unavailable: unchecked.unavailable }, step?.warnings)); } catch {}
+        this.presentAdvisories(step?.warnings);
         return;
       }
     }
@@ -241,6 +253,7 @@ export class Updater {
     this.patch({ announced: version });
     const { held } = record;
     try { this.notify(landedNotice(version, step.from, step.restartBots === true, held, step.check, step.warnings)); } catch {}
+    this.presentAdvisories(step.warnings);
   }
 
   // "Install updates automatically", switched from the status bar: written to the pack's own
