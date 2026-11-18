@@ -290,8 +290,21 @@ export function install(ctx, deps = {}) {
     fetch: async (request) => {
       let body
       try { body = await request.json() } catch { body = {} }
-      const asked = parse(RequestBody, body) ?? { endpoint: '' }
-      const result = await handle(asked.endpoint, asked.payload, request.signal)
+      const asked = parse(RequestBody, body)
+      let result
+      if (asked !== undefined) {
+        result = await handle(asked.endpoint, asked.payload, request.signal)
+      } else {
+        // A body that does not parse is not the same as an unknown endpoint: a known
+        // endpoint whose request simply has no payload says that, in its own words.
+        const plain = body !== null && typeof body === 'object' ? body : {}
+        const named = typeof plain.endpoint === 'string' ? plain.endpoint : ''
+        if (named !== '' && Object.hasOwn(actions, named) && !Object.hasOwn(plain, 'payload')) {
+          result = { ok: false, error: { code: 'omni-ai/no-payload', message: 'The payload is missing.' } }
+        } else {
+          result = await handle(named, undefined, request.signal)
+        }
+      }
       return new Response(JSON.stringify(result), { status: 200, headers: { 'content-type': 'application/json' } })
     },
   }), 'omni-ai: api route')
