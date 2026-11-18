@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 import { CATALOG } from '../src/host/connectors/catalog.js'
+import { genieLampCream, genieLampInk, lamp, omniExpressions, omniMarkCream32, omniMarkInk32, triskleThreeColours32 } from '../src/client/art/inline.js'
 import { OFFICIAL_APPS } from '../src/host/connectors/official.js'
 
 // jsdom comes from the harness that test/harness-resolve.mjs found, like the dsh packages.
@@ -471,6 +472,39 @@ test('the expanded official row keeps what the app is, its state and its one act
   assert.match(text, /Claude Code through the Agent Client Protocol/)
   assert.match(text, /Not installed/)
   assert.equal(within(detail, n => n.type === 'button').length, 0, 'a missing agent has no action')
+})
+
+test('the Omni and Genie rows wear their own brand mark, ink or cream, at 32px', () => {
+  const markIn = name => within(officialTile(name), n => n.type === 'img' && n.props?.className === 'bt-official-brand-mark')[0]
+  const pin = (name, expected, forbidden) => {
+    const mark = markIn(name)
+    assert.ok(mark, `${name} draws its own mark`)
+    assert.equal(mark.props.src, expected, `${name} draws the brand's own drawing`)
+    assert.deepEqual([mark.props.width, mark.props.height], [32, 32], `${name}'s mark is drawn at 32px`)
+    for (const other of forbidden) assert.notEqual(mark.props.src, other, `${name} never falls back to the triskle or the pet`)
+  }
+  slots.length = 0
+  renderPage(officialPage({ bots: [], models: [] }))
+  pin('Omni', omniMarkInk32, [triskleThreeColours32, omniExpressions, lamp])
+  pin('Genie', genieLampInk, [triskleThreeColours32, omniExpressions, lamp])
+  // The mark follows DSH's Appearance setting while the page is open.
+  dom.window.document.body.setAttribute('data-ds-dark-theme', '')
+  try {
+    slots.length = 0
+    renderPage(officialPage({ bots: [], models: [] }))
+    pin('Omni', omniMarkCream32, [omniMarkInk32, triskleThreeColours32, omniExpressions, lamp])
+    pin('Genie', genieLampCream, [genieLampInk, triskleThreeColours32, omniExpressions, lamp])
+  } finally {
+    dom.window.document.body.removeAttribute('data-ds-dark-theme')
+  }
+  // The expanded row wears the same mark, in the same colour, not the ACP agents' look.
+  slots.length = 0
+  renderPage(officialPage({ bots: [], models: [] }))
+  mainButton('Genie').props.onClick()
+  const detail = has('bt-app-expanded')[0]
+  const inDetail = within(detail, n => n.type === 'img' && n.props?.className === 'bt-official-brand-mark')[0]
+  assert.equal(inDetail.props.src, genieLampInk, 'the expanded Genie row draws the lamp')
+  assert.deepEqual([inDetail.props.width, inDetail.props.height], [32, 32], 'the expanded row does not shrink the mark')
 })
 
 test('?mock-apps selects nothing: the page is the real page with or without it', () => {

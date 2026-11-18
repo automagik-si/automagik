@@ -5,11 +5,10 @@
 // place when nothing more is needed, and shows the sign-in it started. Anything that needs a form
 // or a choice opens the app's own view, which reuses the rows in connectors.js. Connected apps
 // and the mailbox accounts have their own view.
-import { createElement as h, useEffect, useRef, useState } from 'react'
+import { createElement as h, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { OFFICIAL_APPS } from '../host/connectors/official.js'
 import { ConnectorMark, ConnectorRow, MailAccount, MailCatalogRow, MailPending, MailRules, AddMenu, openSignIn, SignInPanel } from './connectors.js'
-import { LAMP } from './clay-art.js'
-import { OmniMark } from './logo.js'
+import { PRODUCT_MARK_ART } from './clay-art.js'
 import { AgentMark } from './marks.js'
 import { useMorph } from './motion.js'
 import { reserveWindow } from './open-window.js'
@@ -209,9 +208,31 @@ function officialAction(app, resolved, roster, actions) {
   }
 }
 
+// The mark on an official row is the product's own drawing from the brand's logo set, never
+// Automagik's triskle (brand rule 1) and never the clay pet (rule 3): Omni's vortex and Genie's
+// lamp, one colour, ink on a light ground and cream on a dark one. The mark is drawn at the
+// 32px size (rule 6: Omni's small drawing has no smaller version; the lamp has one drawing), so
+// it is never scaled down. The ground is DSH's Appearance setting, read from
+// body[data-ds-dark-theme] the way logo.js reads it.
+const DARK = 'data-ds-dark-theme'
+const isDark = () => document.body.hasAttribute(DARK)
+const watchDark = (changed) => {
+  const watch = new MutationObserver(changed)
+  watch.observe(document.body, { attributes: true, attributeFilter: [DARK] })
+  return () => watch.disconnect()
+}
+const useDarkGround = () => useSyncExternalStore(watchDark, isDark, () => false)
+
+function BrandMark({ mark }) {
+  const dark = useDarkGround()
+  return h('img', {
+    className: 'bt-official-brand-mark', src: PRODUCT_MARK_ART[mark][dark ? 'cream' : 'ink'],
+    width: 32, height: 32, alt: '', 'aria-hidden': true, draggable: false,
+  })
+}
+
 function OfficialMark({ app, size = 22 }) {
-  if (app.mark === 'omni') return h(OmniMark, { size })
-  if (app.mark === 'genie') return h('img', { className: 'bt-agent-mark', src: LAMP, width: size, height: size, alt: '', 'aria-hidden': true, draggable: false })
+  if (app.mark === 'omni' || app.mark === 'genie') return h(BrandMark, { mark: app.mark })
   return h(AgentMark, { id: app.mark, name: app.name, size })
 }
 
@@ -410,6 +431,7 @@ export const CONNECTORS_PAGE_CSS = `
 .bt-app-sub-head h3{margin:0;font-size:14px;line-height:20px;font-weight:600}
 .bt-app-about{margin:0 4px;font-size:13px;line-height:20px;color:var(--bt-ink-2)}
 .bt-connector-mark{--bt-mark-ink:var(--bt-ink)}
+.bt-official-brand-mark{object-fit:contain}
 [data-bt-motion=off] .bt-app,[data-bt-motion=off] .bt-app *,[data-bt-motion=off] .bt-app::after{animation:none!important;transition:none!important}
 @media (prefers-reduced-motion:reduce){.bt-app[data-fresh]::after,.bt-app[data-fresh] .bt-app-icon,.bt-app[data-fresh] .bt-app-btn-done{animation:none}}
 `
