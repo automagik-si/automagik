@@ -55,12 +55,16 @@ export const WORKER_TOOLS = new Set(['Agent', 'Task'])
 export const WORKERS_MAX = 12
 export const WORKER_STEPS_MAX = 40
 const WORKER_TEXT_MAX = 160
-const workerStatus = status => (status === 'completed' ? 'done' : status === 'failed' ? 'failed' : 'running')
+// A call DSH closed itself (`ended`: endPrompt, when the turn was stopped or the agent went
+// away) did not finish, whatever status it was closed with: it failed, it was never done.
+const workerStatus = tool => (tool.ended === true ? 'failed' : tool.status === 'completed' ? 'done' : tool.status === 'failed' ? 'failed' : 'running')
 const shortLine = text => String(text ?? '').slice(0, 4096).split('\n').map(line => line.trim()).find(Boolean)?.slice(0, WORKER_TEXT_MAX) ?? ''
 // The ending a worker reports: its stripped report, else the raw result less the adapter's
 // `<usage>` block and `agentId:` line, which only the raw text still carries for this client.
+// One DSH stopped reports only that (`Stopped`, with `stopped`): what it had said is partial.
 const workerResult = (tool) => {
-  if (workerStatus(tool.status) === 'running') return ''
+  if (tool.ended === true) return 'Stopped'
+  if (workerStatus(tool) === 'running') return ''
   const text = contentText(tool.content) || (typeof tool.rawOutput === 'string' ? tool.rawOutput : '')
   return shortLine(text.replace(/<usage>[\s\S]*?<\/usage>/g, '').replace(/^agentId:.*$/gm, ''))
 }
@@ -69,6 +73,7 @@ const workerResult = (tool) => {
  * The native subagents of one prompt, as workers: each Agent/Task call in `ids` (the prompt's
  * calls, in the order they came) with its title, its state, the line its result opens with and
  * the calls stamped with its id as its steps. Newest workers last; bounded, never the payloads.
+ * One DSH closed when its turn ended (`ended`) is failed, `stopped`, and its result `Stopped`.
  * @param {Map<string, any>} tools
  * @param {Iterable<string>} ids
  */
@@ -82,14 +87,15 @@ export function workersOf(tools, ids) {
     return {
       id: worker.id,
       title: shortLine(worker.title) || worker.structuredName,
-      state: workerStatus(worker.status),
+      state: workerStatus(worker),
       ...(result ? { result } : {}),
+      ...(worker.ended === true ? { stopped: true } : {}),
       ...(worker.seenAt === undefined ? {} : { at: worker.seenAt }),
       steps: shown.map(step => ({
         id: step.id,
         title: shortLine(step.title) || step.structuredName || 'Tool',
         ...(step.structuredName === undefined ? {} : { tool: String(step.structuredName).slice(0, 80) }),
-        state: workerStatus(step.status),
+        state: workerStatus(step),
       })),
       ...(steps.length > shown.length ? { more: steps.length - shown.length } : {}),
     }

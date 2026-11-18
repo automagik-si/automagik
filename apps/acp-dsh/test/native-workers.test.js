@@ -96,11 +96,49 @@ test("workers() groups each subagent's steps under it, with its state and result
   // The main agent's own call is nobody's step.
   assert.equal(workers.flatMap(w => w.steps).some(step => step.id === 'main'), false)
   await end()
-  // The prompt ended: its workers stay, now ended, until the next prompt starts.
-  assert.deepEqual(p.run.workers().map(w => w.state), ['done', 'done', 'failed'])
+  // The prompt ended: its workers stay, now ended, until the next prompt starts. The one
+  // still running when it ended was stopped by DSH, so it failed; the two the agent closed keep
+  // how they ended.
+  assert.deepEqual(p.run.workers().map(w => [w.state, w.result, w.stopped]), [
+    ['failed', 'Stopped', true],
+    ['done', '2 files changed · 4 notes kept', undefined],
+    ['failed', 'Bash exited 1 · approval path missing', undefined],
+  ])
   const next = p.begin()
   assert.deepEqual(p.run.workers(), [])
   await next()
+})
+
+test('a worker DSH closed when its turn ended (Stop, or the agent went away) failed: it is never Done', async t => {
+  const p = probe(t)
+  const end = p.begin()
+  await p.run.onUpdate(agentCall('toolu_w', 'Review the adapter bundle'))
+  await p.run.onUpdate(update('toolu_w', { status: 'in_progress', content: [{ type: 'content', content: { type: 'text', text: 'Half a report' } }] }))
+  await p.run.onUpdate(childCall('w1', 'toolu_w', 'Grep', 'find the adapter version', { status: 'completed' }))
+  await p.run.onUpdate(childCall('w2', 'toolu_w', 'Read', 'read the session update path', { status: 'in_progress' }))
+  await p.run.onUpdate(childCall('w3', 'toolu_w', 'Bash', 'run the probe'))
+  assert.deepEqual(p.run.workers().map(w => w.state), ['running'])
+  await end()
+  // endPrompt closed what the agent never did: `completed` (or `failed` if pending), `ended`.
+  assert.equal(p.run.tools.get('toolu_w').ended, true)
+  assert.equal(p.run.tools.get('toolu_w').status, 'completed')
+  const [worker] = p.run.workers()
+  assert.equal(worker.state, 'failed')
+  assert.equal(worker.result, 'Stopped')
+  assert.equal(worker.stopped, true)
+  // Its steps: the one the agent finished stays done, the ones DSH closed failed.
+  assert.deepEqual(worker.steps.map(step => [step.id, step.state]), [['w1', 'done'], ['w2', 'failed'], ['w3', 'failed']])
+})
+
+test('workersOf: a call closed by DSH (ended) is failed and Stopped, the worker and its steps', () => {
+  const tools = new Map([
+    ['w1', { id: 'w1', title: 'Big job', structuredName: 'Agent', status: 'completed', ended: true, content: [{ type: 'text', text: 'partial' }] }],
+    ['s1', { id: 's1', title: 'read', structuredName: 'Read', status: 'completed', ended: true, parent: 'w1' }],
+    ['w2', { id: 'w2', title: 'Small job', structuredName: 'Agent', status: 'completed', content: [{ type: 'text', text: 'all good' }] }],
+  ])
+  const [stopped, done] = workersOf(tools, ['w1', 's1', 'w2'])
+  assert.deepEqual([stopped.state, stopped.result, stopped.stopped, stopped.steps[0].state], ['failed', 'Stopped', true, 'failed'])
+  assert.deepEqual([done.state, done.result, 'stopped' in done], ['done', 'all good', false])
 })
 
 test('a worker keeps its newest steps and counts the rest', () => {

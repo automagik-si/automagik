@@ -1356,8 +1356,10 @@ export function apply(ctx, config = {}, {
     /**
      * Claude Code's native subagents in each running agent's current prompt, as workers
      * (acp.js workersOf), by DSH Session id: { [sessionId]: [{ id, title, state: 'running' |
-     * 'done' | 'failed', result?, at?, steps: [{ id, title, tool?, state }], more? }] }. Only
-     * Sessions with a worker are listed. Read-only: it starts, stops and answers nothing.
+     * 'done' | 'failed', result?, stopped?, at?, steps: [{ id, title, tool?, state }], more? }] }.
+     * `stopped`: DSH closed it when its turn ended (Stop, or the agent went away), so it is
+     * `failed` with the result `Stopped`. Only Sessions with a worker are listed. Read-only: it
+     * starts, stops and answers nothing.
      */
     nativeWorkers: () => {
       const out = {}
