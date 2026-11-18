@@ -49,6 +49,7 @@ import { headerNavigation, installHeaderNavigation } from './header-navigation.j
 import { AssistantCell, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
+import { BotBrowserBody, installBotBrowserTab } from './bot-browser-tab.js'
 import { createBotBrowsers, serveBrowserReads } from './bot-browsers.js'
 import { BROWSER_CSS } from './browser-pane.js'
 import { SECRET_CSS, SecretDock } from './secret-card.js'
@@ -1193,6 +1194,14 @@ export function apply(ctx) {
     () => {
       const fiber = ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
         scope.effect(() => installLiveTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: LiveTab }), 'ds-bot: native Live tab')
+      })
+      return () => fiber.dispose()
+    },
+    // The Bot browser in the same right column: the person drives the Bot's own page, then
+    // hands it back, so the Web app needs no Electron webview to show it.
+    () => {
+      const fiber = ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
+        scope.effect(() => installBotBrowserTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: BotBrowserBody, installCss: installCompiledStyles }), 'ds-bot: native Bot browser tab')
       })
       return () => fiber.dispose()
     },

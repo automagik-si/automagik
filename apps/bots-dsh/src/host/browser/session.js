@@ -829,12 +829,68 @@ export function createSession({
       const target = activePage()
       return finishAction(() => target.goBack({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}), target)
     },
+    async forward() {
+      ready()
+      await clearPendingDelete()
+      const target = activePage()
+      return finishAction(() => target.goForward({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}), target)
+    },
+    async reload() {
+      ready()
+      await clearPendingDelete()
+      const target = activePage()
+      return finishAction(() => target.reload({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {}), target)
+    },
+    // The person's own input on the page the Bot is driving: coordinates are CSS pixels of
+    // the page's viewport, the same ones a frame's width and height report.
+    async clickAt(x, y) {
+      ready()
+      const target = activePage()
+      await target.mouse.click(Number(x), Number(y))
+      await settle()
+      return true
+    },
+    async typeText(text) {
+      ready()
+      await activePage().keyboard.type(String(text))
+      await settle()
+      return true
+    },
+    async pressKey(key) {
+      ready()
+      await activePage().keyboard.press(String(key))
+      await settle()
+      return true
+    },
+    async wheel(dy) {
+      ready()
+      await activePage().mouse.wheel(0, Number(dy))
+      await settle()
+      return true
+    },
+    async state() {
+      const target = activePage()
+      const open = openPages()
+      return {
+        url: target?.url() ?? '',
+        title: target !== undefined ? await target.title().catch(() => '') : '',
+        tabs: open.map(page => ({ url: page.url() })),
+      }
+    },
     shot,
     async frame() {
       const target = activePage()
       if (!target) return undefined
       const image = await target.screenshot({ type: 'jpeg', quality: 40 })
-      return { mime: 'image/jpeg', data: image.toString('base64'), url: target.url(), title: await target.title().catch(() => '') }
+      const size = target.viewportSize?.() ?? undefined
+      return {
+        mime: 'image/jpeg',
+        data: image.toString('base64'),
+        url: target.url(),
+        title: await target.title().catch(() => ''),
+        width: size?.width ?? 0,
+        height: size?.height ?? 0,
+      }
     },
     // `origin` names the call and Session that asked, so a card can answer them.
     handoff(reason, note, origin) {
