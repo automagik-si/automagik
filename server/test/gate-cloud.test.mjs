@@ -716,3 +716,24 @@ test('an older revocation call does not replace a newer one', async t => {
   assert.equal((await send(f.state.now)).status, 204)
   assert.equal(f.cloud.removed.get('person-1').at, f.state.now + 5000)
 })
+
+test('a replayed call older than a newer list does not undo a re-admission', async t => {
+  const f = await fixture(t, { pollInterval: 20 })
+  const old = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  const issued = iso(f.state.now)
+  const body = JSON.stringify({ version: 1, event: 'session.revoke',
+    workspace: 'workspace-a', subject: 'person-1', reason: 'removed', issued_at: issued })
+  const replay = () => request(f.port, { method: 'POST', path: REVOKE, body,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(body) } })
+  assert.equal((await replay()).status, 204)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 401)
+  f.state.now += 1000
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now), expires_at: iso(f.state.now + 300_000), revoked: [] }
+  await f.cloud.poll()
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+  // Cloud's newer list wins; the replay is accepted idempotently and changes nothing.
+  assert.equal((await replay()).status, 204)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+  assert.equal((await request(f.port, { headers: { cookie: old } })).status, 401)
+})

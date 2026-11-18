@@ -158,6 +158,8 @@ export class CloudSignIn {
     // sessions that existed at their effective time.
     this.removed = new Map()
     this.lowered = new Map()
+    // The newest list is Cloud's current word; a call older than it is a replay.
+    this.listedAt = 0
     this.polling = undefined
   }
   // The session store's admission check: only a Cloud principal for this one workspace.
@@ -290,6 +292,8 @@ export class CloudSignIn {
       typeof subject !== 'string' || !subject || subject.length > 256 ||
       (reason !== 'removed' && reason !== 'role_lowered')) throw refused()
     const at = instant(issued_at)
+    // A list newer than the call already states Cloud's current word; a replay changes nothing.
+    if (at < this.listedAt) return { subject, reason, at }
     if (reason === 'removed') {
       const previous = this.removed.get(subject)
       if (!previous || at >= previous.at) this.removed.set(subject, { issuedAt: at, at })
@@ -322,6 +326,7 @@ export class CloudSignIn {
   // A list is Cloud's current word: a removed subject it omits may open again, but sessions
   // already dropped are never restored (a call newer than this list stays in force).
   applyList({ issuedAt, entries }) {
+    this.listedAt = Math.max(this.listedAt, issuedAt)
     const listed = new Map()
     for (const entry of entries) {
       if (entry.reason !== 'removed') continue
