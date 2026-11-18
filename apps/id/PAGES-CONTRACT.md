@@ -214,3 +214,54 @@ flag is true. Third-party clients keep it false; explicit `prompt=consent` can
 also cause a prompt. Required states: validating request/session, client name and
 scopes ready, allow/deny pending, continued, session expired, signature/expiry
 failure, permission error, rate limit and network error. Never consent on load.
+
+## Passkeys on an existing account
+
+A signed-in person can add another passkey, list theirs, rename one and delete
+one. No page uses these routes yet; the account page is later work. They never
+create an account and are separate from **Create a passkey** above, whose routes
+keep ignoring the session.
+
+**Fresh sign-in.** Adding and deleting need a session created by a passkey
+ceremony (passkey sign-in, or creating the account with a passkey) less than five
+minutes ago. A WhatsApp sign-in session, an older session or one issued before this
+rule is refused with HTTP 403 `{code: "SESSION_NOT_FRESH"}`: ask the person to use a
+passkey again, then retry. `get-session` shows `session.signInMethod` (`"passkey"`,
+`"whatsapp"` or `null`). Listing and renaming need only a session.
+
+Without a session, every route here answers HTTP 401 `{code: "UNAUTHORIZED"}`.
+
+Adding a passkey:
+
+1. `GET /api/auth/passkey/add/generate-register-options`, no body; the same optional
+   query as account creation. Response is the same
+   `PublicKeyCredentialCreationOptionsJSON`, for the signed-in account:
+   `excludeCredentials` lists the account's existing passkeys so an authenticator
+   is not enrolled twice.
+2. Convert byte fields and call `navigator.credentials.create({publicKey})`.
+3. `POST /api/auth/passkey/add/verify-registration` with
+   `{response: RegistrationResponseJSON, name?: string}`. The ceremony is bound to
+   the session that started it: verifying under another session is refused (401).
+   `createSession` is ignored: the current session stays and no other starts.
+   Success is HTTP 200 with the new passkey as listed below. A failed or cancelled
+   ceremony needs new options.
+
+Listing: `GET /api/auth/passkey/account/list`. Success is an array, oldest first,
+of `{id: string, name: string | null, createdAt: string, deviceType:
+"singleDevice" | "multiDevice", backedUp: boolean}`. `createdAt` is an ISO 8601
+time. `id` is the service's own passkey ID, used only to rename or delete; the
+credential ID, public key, counter, transports and authenticator model are never
+returned.
+
+Renaming: `POST /api/auth/passkey/account/rename` with `{id, name}`; the name is
+trimmed and must be 1 to 64 characters. Success is `{passkey: {...}}` as listed.
+
+Deleting: `POST /api/auth/passkey/account/delete` with `{id}`, behind a fresh
+sign-in. Success is `{status: true}`. Deleting the account's last passkey is
+refused with HTTP 409 `{code: "LAST_PASSKEY"}` unless the account also has a phone
+number: add another passkey first. There is no recovery for a person who loses
+every passkey.
+
+A missing ID and another person's ID both answer HTTP 404
+`{code: "PASSKEY_NOT_FOUND", message: "Passkey not found"}`, byte for byte the same.
+A malformed body is HTTP 400 `{code: "INVALID_REQUEST"}`.

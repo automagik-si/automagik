@@ -11,6 +11,18 @@ authenticator from an explicit passkey action. No email, password, social login
 or public OAuth client registration is exposed. There is no account management or recovery UI in
 this delivery. The service does not provide a passkey recovery mechanism.
 
+A signed-in person can add a second passkey to their account, list, rename and
+delete their passkeys (routes in PAGES-CONTRACT.md). These
+routes never create an account; the account-creation routes keep stripping the
+session. Adding and deleting need a fresh sign-in: a session created by a passkey
+ceremony less than five minutes ago. Each session records the ceremony that made
+it (`session.signInMethod`, migration `0004`) and `src/passkeys.ts` checks that and
+`session.createdAt` itself. Better Auth's `session.freshAge` is not used: it is one
+global setting, also behind `/list-sessions`, and cannot tell a passkey sign-in
+from a WhatsApp one. The last passkey of an account without a phone number cannot
+be deleted, and another person's passkey ID answers exactly like a missing one.
+No page offers these yet; the account page is later work.
+
 Better Auth's user schema requires a unique email. Accounts receive a random
 address under the reserved `.invalid` domain solely for that database field.
 It is never mailed or returned by this service, and the provider offers no email
@@ -102,8 +114,12 @@ Mutation checks drop inbound authentication or timestamp checks, permit proof
 reuse, select the current session account, restore the session JWT header, disable
 PKCE, relax redirects, enable public registration, move rate limits to memory,
 serve a page file directly as `.html`, take the passkey site name from the host,
-start on (or configure) a host outside it, accept a look-alike host and let CI
-skip the page browser tests,
+start on (or configure) a host outside it, accept a look-alike host, let CI
+skip the page browser tests, and, for passkeys on an existing account, drop the
+fresh sign-in age check, the session requirement, the last-passkey guard or the
+delete ownership check, accept any sign-in method, let an add request create an
+account or start a session, let a client mark an account-creation request and
+return the stored passkey row,
 one at a time. Each must fail its targeted test; source files are restored
 afterward. Announcements and results are printed to stdout.
 `bun scripts/generate-migration.ts` regenerates the initial schema for review;

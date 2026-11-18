@@ -230,8 +230,9 @@ async function world(options: { whatsapp?: boolean } = {}) {
   worlds.push(mf);
   await mf.ready;
   const db = await mf.getD1Database('DB');
-  for (const file of ['migrations/0001_auth.sql', 'migrations/0002_whatsapp.sql']) {
-    const migration = await readFile(file, 'utf8');
+  // Every migration, in order, like the deployed database.
+  for (const file of (await readdir('migrations')).filter(name => name.endsWith('.sql')).sort()) {
+    const migration = await readFile(`migrations/${file}`, 'utf8');
     for (const sql of migration.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(sql).run();
   }
   for (const sql of clientSeedSQL(digest('test-only-cloud-client-secret-never-deployed')).split(';').filter(Boolean)) {

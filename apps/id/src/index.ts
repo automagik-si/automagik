@@ -6,6 +6,7 @@ import { createAuth, type Env } from './auth';
 import { getCookies } from 'better-auth/cookies';
 import { inbound, readChallenge, whatsappEnabled } from './whatsapp';
 import { passkeySiteName } from './site';
+import { ADD_PASSKEY_HEADER, ADD_PASSKEY_ROUTES, PASSKEY_ACCOUNT_ROUTES, passkeyView } from './passkeys';
 
 function publicData(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(publicData);
@@ -99,6 +100,7 @@ export default {
       '/oauth2/end-session', '/oauth2/end-session/confirm', '/oauth2/consent', '/oauth2/continue',
       '/oauth2/public-client-prelogin',
       ...(whatsappOn ? ['/whatsapp/start', '/whatsapp/status'] : []),
+      ...ADD_PASSKEY_ROUTES.keys(), ...PASSKEY_ACCOUNT_ROUTES,
     ]);
     if (!url.pathname.startsWith('/api/auth/') || !allowed.has(path)) {
       return new Response('Not found', { status: 404 });
@@ -116,13 +118,23 @@ export default {
       }).join(';');
       headers.set('cookie', ceremonyCookies);
       headers.delete('authorization');
+      headers.delete(ADD_PASSKEY_HEADER);
       request = new Request(request, { headers });
+    }
+    // Adding a passkey to the signed-in account: the same plugin step, with the session kept.
+    // The passkey-account plugin refuses it without a fresh passkey session (src/passkeys.ts).
+    const addTarget = ADD_PASSKEY_ROUTES.get(path);
+    if (addTarget) {
+      const headers = new Headers(request.headers);
+      headers.set(ADD_PASSKEY_HEADER, '1');
+      request = new Request(new URL(`/api/auth${addTarget}${url.search}`, url), new Request(request, { headers }));
     }
     const response = await auth.handler(request);
     if (response.headers.get('content-type')?.includes('application/json')) {
       const text = await response.text();
       if (!text) return new Response(null, response);
-      const body = publicData(JSON.parse(text));
+      const body = addTarget === '/passkey/verify-registration' && response.ok ?
+        passkeyView(JSON.parse(text)) : publicData(JSON.parse(text));
       return new Response(JSON.stringify(body), response);
     }
     return response;

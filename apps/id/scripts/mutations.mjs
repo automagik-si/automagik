@@ -100,6 +100,52 @@ const mutations = [
     test: 'the CI job runs the browser tests',
     edits: [['../../.github/workflows/ci.yml', 'ID_PAGES_BROWSER: required', 'ID_PAGES_BROWSER: optional']],
   },
+  // Passkeys on an existing account.
+  {
+    name: 'drop the fresh sign-in age check',
+    test: 'a stale session cannot add or delete a passkey',
+    edits: [['src/passkeys.ts', '.getTime() >= FRESH_SIGN_IN_MS)', '.getTime() >= Infinity)']],
+  },
+  {
+    name: 'drop the session requirement on adding a passkey',
+    test: 'adding a passkey without a session is refused and creates no account',
+    edits: [['src/passkeys.ts', 'if (!session) throw unauthorized();', '']],
+  },
+  {
+    name: 'drop the last-passkey guard',
+    test: 'the last one is refused without a phone number',
+    edits: [['src/passkeys.ts', 'AND ${KEEPS_A_WAY_IN}', '']],
+  },
+  {
+    name: 'drop the ownership check on delete',
+    test: "someone else's passkey cannot be deleted",
+    edits: [['src/passkeys.ts', 'WHERE id = ?1 AND userId = ?2', 'WHERE id = ?1']],
+  },
+  {
+    name: 'accept any sign-in method as fresh',
+    test: 'a WhatsApp sign-in session cannot add a passkey',
+    edits: [['src/passkeys.ts', "if (session?.session.signInMethod !== 'passkey')", 'if (!session)']],
+  },
+  {
+    name: 'let an add request create an account',
+    test: 'an add request never creates an account',
+    edits: [['src/passkeys.ts', 'if (ctx?.headers?.get(ADD_PASSKEY_HEADER)) throw unauthorized();', '']],
+  },
+  {
+    name: 'let a client mark an account-creation request',
+    test: 'drops a client-sent add-passkey mark',
+    edits: [['src/index.ts', 'headers.delete(ADD_PASSKEY_HEADER);', '']],
+  },
+  {
+    name: 'let adding a passkey start another session',
+    test: 'a second passkey added after a fresh sign-in',
+    edits: [['src/passkeys.ts', 'return { context: { body: { ...body, createSession: false } } };', '']],
+  },
+  {
+    name: 'return the stored passkey row from the add route',
+    test: 'a second passkey added after a fresh sign-in',
+    edits: [['src/index.ts', 'passkeyView(JSON.parse(text))', 'publicData(JSON.parse(text))']],
+  },
 ];
 
 const selectedMutation = process.env.ID_MUTATION;

@@ -4,6 +4,7 @@ import { passkey } from '@better-auth/passkey';
 import { oauthProvider } from '@better-auth/oauth-provider';
 import { whatsappEnabled, whatsappPlugin } from './whatsapp';
 import { passkeySiteName } from './site';
+import { passkeyAccountPlugin } from './passkeys';
 
 function strictRedirectUri(uri: string, registered: readonly string[], defaultResult: boolean) {
   const url = new URL(uri);
@@ -68,6 +69,7 @@ export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>) {
           },
         },
       }),
+      passkeyAccountPlugin(env),
       jwt({ disableSettingJwtHeader: true }),
       oauthProvider({
         loginPage: '/sign-in',
