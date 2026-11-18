@@ -118,6 +118,18 @@ export function nodeCommand() {
 }
 
 /**
+ * The installation an app is, for the Bot CLI root's ownership records: the DSH profile it runs.
+ * `undefined` when this host does not say (an older DSH, a test), which leaves the record
+ * unlabelled and the fence as strict as it was.
+ */
+export function installationOf(ctx) {
+  try {
+    const name = ctx?.get?.('profileContext')?.name
+    return typeof name === 'string' && name.trim() !== '' ? name.trim() : undefined
+  } catch { return undefined }
+}
+
+/**
  * @param {any} ctx
  * @param {{ claude?: any, codex?: any, hermes?: any, antigravity?: any, omp?: any, sideModel?: any, fakeAgent?: string, dshTools?: any }}
  *   [config]
@@ -144,13 +156,16 @@ export function apply(ctx, config = {}, {
       ? join(dirname(store.home), CONSENT_FILE) : undefined,
   logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile,
 } = {}) {
-  const homes = cliHome === undefined ? undefined : new CliHomes(cliHome)
+  // The installation this app is: one DSH profile. Two profiles on one machine share the Bot CLI
+  // root by contract, and only the same profile's live app may refuse an account change.
+  const installId = installationOf(ctx)
+  const homes = cliHome === undefined ? undefined : new CliHomes(cliHome, { installId })
   if (homes) for (const vendor of ['claude', 'codex']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.
   }
   if (cliStore === undefined && !config.fakeAgent
     && (process.env.AUTOMAGIK_APP_BROWSER === '1' || process.env.AUTOMAGIK_PNPM)) {
-    cliStore = new CliStore({ log: message => info(ctx, message),
+    cliStore = new CliStore({ log: message => info(ctx, message), installId,
       ...(homes ? { versionEnv: spec => homes.environment(spec.key) } : {}),
     })
   }

@@ -92,12 +92,12 @@ export async function installCli(dir, spec, version, env, { signal, platform = c
 
 export class CliStore extends AdapterStore {
   constructor({ env = process.env, home = clisHome(env), latest = latestVersion,
-    install = installCli, versionOf = cliVersion, versionEnv, platform, ...options } = {}) {
+    install = installCli, versionOf = cliVersion, versionEnv, platform, installId, ...options } = {}) {
     super({ ...options, home, env, latest, install })
     this.versionOf = versionOf
     // Registry/package-manager environment stays separate. Only CLI queries use these homes.
     if (versionEnv === undefined) {
-      this.versionHomes = new CliHomes(join(dirname(home), 'cli-homes'))
+      this.versionHomes = new CliHomes(join(dirname(home), 'cli-homes'), { installId })
       versionEnv = spec => this.versionHomes.environment(spec.key, env)
     }
     this.versionEnv = versionEnv

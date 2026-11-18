@@ -98,9 +98,13 @@ export function assertGeneration(env) {
 }
 
 export class CliGenerations {
-  constructor(root, instance) {
+  constructor(root, instance, { installId } = {}) {
     this.root = root
     this.instance = instance
+    // Which installation this app is: one DSH profile. Two installations on one machine keep
+    // their Bot sign-ins under the same root by contract (the path is public), so the record
+    // says which one wrote it and only the same installation fences an account change.
+    this.installId = typeof installId === 'string' && installId.trim() !== '' ? installId.trim() : undefined
     this.held = new Map()
     this.registered = new Set()
     this.birth = processBirth(process.pid)
@@ -127,7 +131,8 @@ export class CliGenerations {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
     const temporary = join(staging, randomUUID())
     const bytes = JSON.stringify({ format: 'app-birth-v1', pid: process.pid,
-      nonce: basename(path), birth: this.birth, marker })
+      nonce: basename(path), birth: this.birth, marker,
+      ...(this.installId === undefined ? {} : { install: this.installId }) })
     const fd = openSync(temporary, 'wx', 0o600)
     try { writeFileSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
     try {
@@ -146,11 +151,21 @@ export class CliGenerations {
     if (sameOwnership(snapshot)) rmSync(path, { force: true })
   }
 
+  /** Whether a live record belongs to another installation: a different profile's app. */
+  foreign(snapshot) {
+    const label = snapshot?.record?.install
+    return this.installId !== undefined && typeof label === 'string' && label !== ''
+      && label !== this.installId
+  }
+
   peers(directory, legacy, own, { sweep = false } = {}) {
     if (!existsSync(directory)) return
     for (const name of readdirSync(directory)) {
       if (name === own) continue
       const snapshot = ownershipAt(join(directory, name), { legacy })
+      // Another installation's live app changes only its own Bot account; an unlabelled record
+      // is an older build, which is treated as this installation.
+      if (ownershipState(snapshot) !== 'dead' && this.foreign(snapshot)) continue
       if (ownershipState(snapshot) !== 'dead') throw busy()
       // Empty legacy home markers are evidence of untracked detached logins: retain them.
       if (sweep && !(legacy === 'home' && snapshot.record.marker !== LOGIN_RECORD_VERSION)

@@ -28,12 +28,12 @@ const inherited = new RegExp([
 const failure = message => Object.assign(new Error(message), { code: 'acp-account/busy' })
 
 export class CliHomes {
-  constructor(root) {
+  constructor(root, { installId } = {}) {
     this.root = resolve(root)
     this.instance = `${process.pid}-${randomUUID()}`
     this.registered = new Map()
     this.changes = new Map()
-    this.generations = new CliGenerations(this.root, this.instance)
+    this.generations = new CliGenerations(this.root, this.instance, { installId })
   }
 
   home(vendor) {
@@ -255,6 +255,9 @@ export class CliHomes {
       for (const name of readdirSync(instances)) {
         if (name === this.instance) continue
         const snapshot = ownershipAt(join(instances, name), { legacy: 'home' })
+        // Another installation's live app changes only its own Bot account (see CliGenerations
+        // .foreign): it is not a reason to refuse this one, and an older unlabelled build is.
+        if (ownershipState(snapshot) !== 'dead' && this.generations.foreign(snapshot)) continue
         if (ownershipState(snapshot) !== 'dead' || !removeDeadOwnership(snapshot)) {
           throw failure('Close other Automagik sessions before changing the Bot account.')
         }

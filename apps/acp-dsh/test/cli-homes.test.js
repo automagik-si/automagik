@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { AgentRun } from '../src/host/acp.js'
 import { AGENTS, launchOf } from '../src/host/agents.js'
 import { CliHomes, HOME_ENV, stopRuns, trackRun } from '../src/host/cli-homes.js'
+import { installationOf } from '../index.js'
 import { recordLogin } from '../src/host/login-ownership.js'
 
 function place(t) {
@@ -51,6 +52,69 @@ test('vendor homes exclude terminal credentials and all inherited auth/config ov
   const other = new CliHomes(join(root, 'other-installation'))
   t.after(() => other.dispose())
   assert.notEqual(other.environment('claude').HOME, claude.HOME)
+})
+
+// Two Automagik installations on one machine (two DSH profiles) share the Bot CLI root: the path
+// is public and moving it would orphan the accounts people already signed in. Only the same
+// installation's live app may refuse an account change, so the record says which one wrote it.
+test('another installation on the same root does not refuse this one\'s account change', t => {
+  const root = mkdtempSync(join(tmpdir(), 'bot-cli-scope-'))
+  const shared = join(root, 'acp', 'cli-homes')
+  const web = new CliHomes(shared, { installId: 'automagik-web' })
+  const gtm = new CliHomes(shared, { installId: 'automagik-gtm' })
+  t.after(() => { web.dispose(); gtm.dispose(); rmSync(root, { recursive: true, force: true }) })
+  web.environment('claude')
+  gtm.environment('claude')
+  // The reported case: the other profile's app is live, and signing in here used to be refused.
+  gtm.begin('claude')
+  gtm.end('claude')
+  web.begin('claude')
+  web.end('claude')
+  // The record on disk names the installation, so an app can tell a peer from a stranger.
+  const directory = join(shared, 'instances', 'claude')
+  const labels = readdirSync(directory)
+    .map(name => JSON.parse(readFileSync(join(directory, name), 'utf8')).install)
+    .sort()
+  assert.deepEqual(labels, ['automagik-gtm', 'automagik-web'])
+})
+
+test('the same installation still fences, and an unlabelled older record still counts', t => {
+  const root = mkdtempSync(join(tmpdir(), 'bot-cli-scope-same-'))
+  const shared = join(root, 'acp', 'cli-homes')
+  const first = new CliHomes(shared, { installId: 'automagik-web' })
+  const second = new CliHomes(shared, { installId: 'automagik-web' })
+  t.after(() => { first.dispose(); second.dispose(); rmSync(root, { recursive: true, force: true }) })
+  first.environment('codex')
+  second.environment('codex')
+  assert.throws(() => first.begin('codex'), /Close other Automagik sessions/)
+  second.dispose()
+  // An app from before the label existed is this installation as far as anyone can tell: it
+  // fences, because it may be the very process changing the account.
+  const older = new CliHomes(shared)
+  t.after(() => older.dispose())
+  older.environment('codex')
+  assert.throws(() => first.begin('codex'), /Close other Automagik sessions/)
+})
+
+test('a host that does not name its installation writes an unlabelled record as before', t => {
+  const root = mkdtempSync(join(tmpdir(), 'bot-cli-scope-old-'))
+  const shared = join(root, 'acp', 'cli-homes')
+  const homes = new CliHomes(shared)
+  t.after(() => { homes.dispose(); rmSync(root, { recursive: true, force: true }) })
+  homes.environment('claude')
+  const directory = join(shared, 'instances', 'claude')
+  for (const name of readdirSync(directory)) {
+    const record = JSON.parse(readFileSync(join(directory, name), 'utf8'))
+    assert.equal(Object.hasOwn(record, 'install'), false)
+  }
+})
+
+test('installationOf reads the DSH profile and nothing else', () => {
+  assert.equal(installationOf({ get: name => name === 'profileContext' ? { name: 'automagik-web' } : undefined }), 'automagik-web')
+  assert.equal(installationOf({ get: () => undefined }), undefined)
+  assert.equal(installationOf({ get: () => ({ name: '   ' }) }), undefined)
+  assert.equal(installationOf({ get: () => { throw new Error('not injected') } }), undefined)
+  assert.equal(installationOf(undefined), undefined)
 })
 
 test('account mutation excludes other app instances, blocks new work and survives failure', t => {
