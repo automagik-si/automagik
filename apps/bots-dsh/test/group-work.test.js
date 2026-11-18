@@ -2485,6 +2485,58 @@ test('stopping a group while its round finishes starts nothing afterwards', asyn
 })
 
 
+test('an admin-mode person post keeps the same admin-only recipients with or without Herdr', async t => {
+  const controls = []
+  for (const herdr of [false, true]) {
+    const host = await start(t, { mode: 'admin', members: herdr ? ['a', 'b', 'c'] : ['a', 'c'] }, undefined, undefined, { b: { type: 'herdr', agent: 'codex' } })
+    const read = host.round(`person-${herdr}`, host.say('Please check the plan'))
+    await settle(() => host.agentOf('ga').calls.length === 1)
+    const recipients = [...rt.roomProgress.values()].find(round => round.roomId === 'r1').slots.map(slot => slot.id)
+    assert.deepEqual(recipients, ['a'], 'admin-mode person recipients must remain admin-only, identical to the no-Herdr control')
+    controls.push(recipients)
+    host.begin('ga')
+    host.finish('ga', 'The plan is ready.')
+    await settle(() => read() !== undefined)
+    assert.deepEqual(['gb', 'gc'].map(id => host.agentOf(id).calls), [[], []])
+    assert.equal(rt.groupRows('r1', 0, Number.MAX_SAFE_INTEGER).some(row => row.kind === 'terminal-only'), false, 'no skip notice may be emitted when the original recipient rules selected no Herdr member')
+  }
+  assert.deepEqual(controls[1], controls[0], 'adding Herdr must not change the admin-mode recipients')
+})
+
+test('an unaddressed member post keeps the same empty recipients with or without Herdr', async t => {
+  const controls = []
+  for (const herdr of [false, true]) {
+    const host = await start(t, { mode: 'admin', members: herdr ? ['a', 'b', 'c'] : ['a', 'c'] }, undefined, undefined, { b: { type: 'herdr', agent: 'codex' } })
+    const posted = await host.tool('post_to_group', { group: 'Ops', message: 'Please check the plan' }, 'c')
+    const read = host.round(`member-${herdr}`, host.takePost())
+    await settle(() => read() !== undefined || ['ga', 'gb', 'gc'].some(id => host.agentOf(id).calls.length > 0))
+    const recipients = ['ga', 'gb', 'gc'].filter(id => host.agentOf(id).calls.length > 0)
+    assert.deepEqual(recipients, [], 'unaddressed member recipients must remain empty, identical to the no-Herdr control')
+    controls.push(recipients)
+    await settle(() => read() !== undefined)
+    assert.match(posted, /Nobody answers it/)
+    assert.doesNotMatch(posted, /Skipped|terminal-only/, 'no skip notice may be emitted when the original recipient rules selected no Herdr member')
+    assert.equal(rt.groupRows('r1', 0, Number.MAX_SAFE_INTEGER).some(row => row.kind === 'terminal-only'), false)
+  }
+  assert.deepEqual(controls[1], controls[0], 'adding Herdr must not change member-post recipients')
+})
+
+test('a person at-all post refuses Herdr and calls nobody', async t => {
+  const host = await start(t, { mode: 'admin' }, undefined, undefined, { b: { type: 'herdr', agent: 'codex' } })
+  const read = host.round('person-all', host.say('@all Please check the plan'))
+  await settle(() => read() !== undefined)
+  assert.deepEqual(['ga', 'gb', 'gc'].map(id => host.agentOf(id).calls), [[], [], []])
+  assert.ok(read().replies.some(row => row.kind === 'terminal-only' && row.text === 'Writer: The Bot is terminal-only.'))
+})
+
+test('an all-Herdr group delivers a person post to nobody with a terminal-only notice', async t => {
+  const host = await start(t, { mode: 'admin', members: ['b', 'c'], admin: 'b' }, undefined, undefined, { b: { type: 'herdr', agent: 'codex' }, c: { type: 'herdr', agent: 'claude' } })
+  const read = host.round('person-terminals', host.say('Please check the plan'))
+  await settle(() => read() !== undefined)
+  assert.deepEqual(['gb', 'gc'].map(id => host.agentOf(id).calls), [[], []])
+  assert.ok(read().replies.some(row => row.kind === 'terminal-only' && row.text === 'Nothing delivered. Skipped Writer: terminal-only.'), 'only the admin chosen by the original rule is reported as skipped')
+})
+
 test('an unaddressed mixed-group post reaches native members and reports terminal-only skips', async t => {
   const host = await start(t, { mode: 'all' }, undefined, undefined, { b: { type: 'herdr', agent: 'codex' }, c: { agent: 'codex' } })
   const posted = await host.tool('post_to_group', { group: 'Ops', message: 'Please check the plan' }, 'a')

@@ -1638,7 +1638,11 @@ export function install(rt) {
     const everyone = room.members.map(rt.botOf).filter(Boolean)
     const members = everyone.filter(bot => bot.id !== opener.botId)
     const admin = members.find(bot => rt.isAdminOf(room, bot.id))
-    const at = speakers => ({ speakers, ordered: false })
+    // Apply type only after the existing routing rule has picked its recipients.
+    const at = (speakers, ordered = false) => {
+      const skipped = speakers.filter(bot => bot.type === 'herdr')
+      return { speakers: speakers.filter(bot => bot.type !== 'herdr'), ordered, ...(skipped.length > 0 ? { skipped } : {}) }
+    }
     if (opener.kickoff) return at(admin ? [admin] : [])
     if (opener.quiet) return at([])
     if (opener.done) return at(members.filter(bot => bot.id === opener.askedBy))
@@ -1651,15 +1655,11 @@ export function install(rt) {
     if (refused.length > 0) return { speakers: [], ordered: false, refused }
     if (opener.progress) return at(found)
     if (opener.late) return at(found.length > 0 ? found : members.filter(bot => bot.id === opener.askedBy))
-    if (!all && found.length === 0 && terminal.length > 0) {
-      const speakers = members.filter(bot => bot.type !== 'herdr')
-      return { speakers, ordered: speakers.length > 1, skipped: terminal }
-    }
     if (opener.member) return at(found)
     if (found.length > 0 && !all) return at(found)
     if (!all && room.mode === 'admin' && admin) return at([admin])
     const speakers = admin ? [admin, ...members.filter(bot => bot !== admin)] : members
-    return { speakers, ordered: !all && speakers.length > 1 }
+    return at(speakers, !all && speakers.length > 1)
   }
   const openingSpeakers = (room, opener) => openingCall(room, opener).speakers
 

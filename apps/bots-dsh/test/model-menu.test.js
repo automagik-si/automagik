@@ -87,6 +87,17 @@ test('with models that can run and none chosen, one press starts the Bot: no gri
   assert.deepEqual(picked, [['chief', 'local/flash'], ['chief', 'official/flash']])
 })
 
+test('modelOf uses type alone to suppress retained Herdr models and leaves absent type native', () => {
+  const { modelOf } = module.exports
+  for (const fields of [{ model: 'official/flash' }, { appliedModel: 'official/flash' }]) {
+    for (const agent of ['codex', 'claude', undefined]) {
+      const bot = { id: 'chief', ...fields, agent }
+      assert.equal(modelOf(bot, { models }).ref, 'official/flash', 'absent type must resolve the native model regardless of the seat agent')
+      assert.equal(modelOf({ ...bot, type: 'herdr' }, { models }), undefined, 'a Herdr Bot must have no displayed model even with retained model/appliedModel fields')
+    }
+  }
+})
+
 test('the model line names the model and its provider, and "change" opens the model menu', () => {
   const bot = { id: 'chief', name: 'Pip', model: 'anthropic/claude-opus-5-5' }
   const roster = { models: [{ ref: 'anthropic/claude-opus-5-5', provider: 'anthropic', providerName: 'Anthropic', name: 'Claude Opus 5.5' }, ...models] }
