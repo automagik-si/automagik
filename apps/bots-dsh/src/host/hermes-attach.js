@@ -183,6 +183,22 @@ def has_hermes_sibling(home):
             continue
     return False
 
+def serve_pids(hermes_bin, home, timeout):
+    """Live serve PIDs for one home, or None when its own status cannot be read."""
+    if not hermes_bin:
+        return None
+    env = os.environ.copy()
+    env["HERMES_HOME"] = home
+    code, out, _ = run([hermes_bin, "serve", "--status"], timeout, env)
+    if code != 0:
+        return None
+    pids = set()
+    for line in out.splitlines():
+        found = re.match(r"^\s*PID\s+(\d+)\s+\[\s*serve\s*\]", line)
+        if found:
+            pids.add(int(found.group(1)))
+    return pids
+
 def home_spellings(launch_home):
     written = os.path.normpath(launch_home)
     homes = [written]
@@ -297,6 +313,19 @@ def state_folder(explicit, launch_home, extra=()):
                 if os.path.realpath(beside) == target:
                     return True
         return False
+    def proven_beside(record, home):
+        """A shared beside record is this home's only when its own serve status names the
+        recorded pid and no other candidate home's does. Two claimants prove nothing."""
+        until = min(start_until, time.monotonic() + control)
+        claimants = []
+        for candidate in candidates_of()[0][:12]:
+            budget = min(20.0, until - time.monotonic())
+            if budget < 0.2:
+                return False
+            pids = serve_pids(hermes, candidate, budget)
+            if pids is not None and record.get("pid") in pids:
+                claimants.append(candidate)
+        return len(claimants) == 1 and os.path.realpath(claimants[0]) == os.path.realpath(home)
     if explicit:
         if not isinstance(explicit, str) or not explicit.startswith("/"):
             raise Fault("serve-record")
@@ -312,7 +341,8 @@ def state_folder(explicit, launch_home, extra=()):
             return explicit, record
         beside = beside_spellings(folder, home)
         if beside:
-            if any(has_hermes_sibling(spelled) for spelled in beside) or shares_beside(folder, home):
+            shared = any(has_hermes_sibling(spelled) for spelled in beside) or shares_beside(folder, home)
+            if shared and not proven_beside(record, home):
                 raise Fault("serve-record")
             return explicit, record
         homes, spellings = candidates_of()
