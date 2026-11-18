@@ -212,35 +212,36 @@ test("Antigravity (#793): a missing model cache is refreshed once with `agy mode
   assert.equal(execs(), 1, "once per session");
   assert.deepEqual(readdirSync(join(state.appHome, "automagik-herdr")).filter((n) => n.startsWith("antigravity-models.json")),
     ["antigravity-models.json"], "the form's temp file was moved into place");
-  // #809: a failed move keeps the old list, says why, and the form removes only its own temp file.
-  // (1) Herdr's exec rejects /bin/mv. (2) The real /bin/mv exits non-zero: its destination is a
-  // folder already holding a folder of the temp file's name, so the wrapper's non-zero check throws.
-  t.after(() => { state.execFault = undefined; });
-  const temps = (app) => readdirSync(join(app, "automagik-herdr")).filter((n) => n.includes(".tmp-"));
-  for (const [label, fault] of [
-    ["exec rejects", (command) => (command === "/bin/mv" ? new Error("mv was ended") : undefined)],
-    ["mv exits non-zero", (command, args) => {
-      if (command === "/bin/mv") mkdirSync(join(args[1], args[0].split("/").pop()), { recursive: true });
-      return undefined;
-    }],
-  ]) {
-    state.appHome = join(root, `app-mv-${label.replace(/\W+/g, "-")}`);
+
+  // #809: exercise both Herdr rejecting exec and the real /bin/mv returning a non-zero exit.
+  t.after(() => { delete state.execFault; });
+  for (const result of ["exec rejects", "mv exits non-zero"]) {
+    state.appHome = join(root, result);
     state.calls = [];
-    if (label === "exec rejects") seedAgModels([{ id: "old-model", label: "Old Model" }], "2000-01-01T00:00:00.000Z");
-    else mkdirSync(join(state.appHome, "automagik-herdr"), { recursive: true });
-    state.execFault = fault;
+    const dir = join(state.appHome, "automagik-herdr");
+    const otherTemp = "antigravity-models.json.tmp-unrelated";
+    const rejects = result === "exec rejects";
+    if (rejects) seedAgModels([{ id: "old-model", label: "Old Model" }], "2000-01-01T00:00:00.000Z");
+    else mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, otherTemp), "another refresh");
+    state.execFault = (command, [from, to]) => {
+      if (command !== "/bin/mv") return;
+      if (rejects) return new Error("mv was ended");
+      // A directory of the same name inside the destination makes mv refuse the move.
+      mkdirSync(join(to, from.split("/").pop()), { recursive: true });
+    };
     const { form: failed } = await open({ form: "edit", bot: AG.id });
-    state.execFault = undefined;
-    const mv = state.calls.filter((c) => c.kind === "exec" && c.command === "/bin/mv");
-    assert.equal(mv.length, 1, `${label}: one move`);
-    assert.match(mv[0].args[0], /antigravity-models\.json\.tmp-\d+-\d+-[a-z0-9]+$/, `${label}: an owned temp name`);
-    assert.equal(failed.modelsWhy, "the model cache couldn't be written", label);
-    assert.deepEqual(temps(state.appHome), [], `${label}: no temp file left`);
-    if (label === "exec rejects") {
+    delete state.execFault;
+    const moves = state.calls.filter((c) => c.kind === "exec" && c.command === "/bin/mv");
+    assert.equal(moves.length, 1, result);
+    assert.match(moves[0].args[0], /antigravity-models\.json\.tmp-\d+-\d+-[a-z0-9]+$/);
+    assert.equal(failed.modelsWhy, "the model cache couldn't be written", result);
+    assert.deepEqual(readdirSync(dir).filter((n) => n.includes(".tmp-")), [otherTemp], result);
+    assert.equal(readFileSync(join(dir, otherTemp), "utf8"), "another refresh", result);
+    if (rejects) {
       assert.ok(failed.modelInfo("antigravity").models.includes("old-model"), "the old list stays");
     } else {
-      assert.deepEqual(readdirSync(join(state.appHome, "automagik-herdr/antigravity-models.json")),
-        [mv[0].args[0].split("/").pop()], "mv refused: only the blocking folder is at the destination");
+      assert.deepEqual(readdirSync(moves[0].args[1]), [moves[0].args[0].split("/").pop()], "only the blocking folder is at the destination");
     }
   }
 });
