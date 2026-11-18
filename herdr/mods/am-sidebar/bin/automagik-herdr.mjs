@@ -3778,7 +3778,8 @@ async function launchSeat(project, bot, over = {}) {
     place = spaceOnly(await windowPlace(key, await placementOf(key, seen), seen));
   }
   // The Claude login this launch uses (#453): read from claude-logins.json now, Claude only.
-  const login = over.login ?? claudeLogin(argv, briefed.warnings);
+  const login = over.login?.words ?? claudeLogin(argv, briefed.warnings);
+  if (over.login) briefed.warnings.push(...over.login.warnings);
   const proxyOn = agentKey === "dsh-tui" && proxyEnabled(
     approvedProxyState({ project: key, bot }), process.platform,
     (warning) => briefed.warnings.push(warning));
@@ -4996,14 +4997,16 @@ function recoveredLogin(old, argv) {
   const source = paneCommand(old);
   if (launchAgent(argv) !== "claude" || (source && launchAgent(source.argv ?? ["sh", "-c", source.shell]) !== "claude")) return undefined;
   const previous = paneLaunchEnv(old)?.get(CONFIG_VAR);
-  const words = claudeLogin(argv);
+  const warnings = [];
+  const words = claudeLogin(argv, warnings);
   const next = words[0] === "-u" ? null : words[0]?.slice(CONFIG_VAR.length + 1);
-  if (previous === undefined || !(previous === next || (previous && next && sameHome(previous, next)))) {
+  const matches = previous === next || (typeof previous === "string" && isAbsolute(previous) && next && sameHome(previous, next));
+  if (previous === undefined || !matches) {
     const why = previous === undefined ? "its launch gives no Claude login" : "the selected Claude login differs from its launch";
     throw new CliError(`${old.address}: ${why} in the recovered app home. Nothing was started. `
       + "Select that app home explicitly to apply an account change.", 1, { refused: "login", terminal: old.address });
   }
-  return words;
+  return { words, warnings };
 }
 
 async function cmdRestart(opts, [ref]) {
@@ -5035,7 +5038,10 @@ async function cmdRestart(opts, [ref]) {
   const requested = appHome();
   const target = await restartTarget(project, bot, requested, Boolean(explicit));
   const recovered = opts._queuedTarget?.options?.recoveredHome === true || !sameHome(requested, target.dir);
-  if (recovered) process.env.HERDR_APP_HOME = target.dir;
+  if (recovered) {
+    process.env.HERDR_APP_HOME = target.dir;
+    viewOnce = null;
+  }
   try {
     return await restartResolved(opts, project, bot, wanted, swap, target, recovered);
   } finally {
