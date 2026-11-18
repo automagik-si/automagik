@@ -1208,7 +1208,7 @@ export function install(rt) {
       const settled = async (failed = false) => {
         if (!job.moved) {
           // Restore before dropping the switch marker so a second pick sees the kept route.
-          await routeChange.rollback()
+          if (routeChange.restore()) await rt.save()
           routeChange.note('rolled back')
         } else if (failed) routeChange.note('failed', 'fresh conversation did not finish')
         else if (awaiting.get(job.freshId)?.job !== job) routeChange.note('completed')
@@ -1394,7 +1394,7 @@ export function install(rt) {
     if (current !== freshId || segments.at(-1)?.sessionId !== entry.oldId) return
     segments.pop()
     if (room === undefined && (entry.expected === undefined || bot.model === entry.expected)) {
-      if (entry.job?.routeChange !== undefined) await entry.job.routeChange.rollback()
+      if (entry.job?.routeChange !== undefined) entry.job.routeChange.restore()
       else rt.revertModel?.(bot, failure)
     }
     if (room !== undefined) room.sessions[bot.id] = entry.oldId
@@ -2655,10 +2655,12 @@ export function install(rt) {
     }
     const job = startSwitch(agent, { hard: true, target, routeChange: {
       note,
-      rollback: async () => {
-        if (rt.botOf(botId) !== bot || bot.model !== target) return
+      // Restore only the choice this job owns, including its thinking level. Persistence
+      // belongs to the caller: a moved chat must restore its Session and related state too.
+      restore: () => {
+        if (rt.botOf(botId) !== bot || bot.model !== target || bot.effort !== (effortId === null ? undefined : effortId)) return false
         restore()
-        await rt.save()
+        return true
       },
     } })
     if (!job) {

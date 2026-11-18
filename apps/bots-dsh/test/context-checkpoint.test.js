@@ -1262,7 +1262,7 @@ for (const trigger of ['idle', 'pre-step']) {
 // #1631: an explicit managed crossing from an agent that cannot answer beside its turn
 // uses the existing first-answer boundary. Selection alone must not log completion.
 test('an explicit route crossing settles on its first answer or restores its full choice on failure', async (t) => {
-  for (const outcome of ['answer', 'failure', 'newer']) {
+  for (const outcome of ['answer', 'failure', 'newer', 'newer effort']) {
     const b = await switchBench({ perNode: 10, model: 'acp-codex/default' })
     t.after(b.stop)
     Object.assign(b.bot, { appliedModel: 'acp-codex/default', effort: 'high', appliedEffort: 'high' })
@@ -1279,6 +1279,11 @@ test('an explicit route crossing settles on its first answer or restores its ful
     assert.deepEqual(notes.map(entry => entry.text), ['Route change acp-codex/default → api/small accepted'])
     assert.deepEqual(b.calls.archived, [])
     if (outcome === 'newer') Object.assign(b.bot, { model: 'api/big', appliedModel: 'api/big', effort: 'newer', appliedEffort: 'newer' })
+    if (outcome === 'newer effort') {
+      b.bot.effort = 'medium'
+      await b.rt.applyModel(b.bot, { force: true })
+      b.bot.appliedEffort = 'medium'
+    }
     b.firstTurn('fresh1', { answer: outcome === 'answer' })
     assert.ok(await until(() => notes.length === 2))
     assert.equal(notes[1].text, outcome === 'answer'
@@ -1292,12 +1297,68 @@ test('an explicit route crossing settles on its first answer or restores its ful
       assert.equal(b.bot.sessionId, 's1')
       assert.deepEqual(b.bot.segments, [])
       assert.deepEqual(b.calls.archived, ['fresh1'])
-      assert.equal(b.bot.model, outcome === 'newer' ? 'api/big' : 'acp-codex/default')
-      assert.equal(b.bot.effort, outcome === 'newer' ? 'newer' : 'high')
-      assert.equal(b.bot.appliedModel, outcome === 'newer' ? 'api/big' : 'acp-codex/default')
-      assert.equal(b.bot.appliedEffort, outcome === 'newer' ? 'newer' : 'high')
+      assert.equal(b.bot.model, outcome === 'newer' ? 'api/big' : outcome === 'newer effort' ? 'api/small' : 'acp-codex/default')
+      assert.equal(b.bot.effort, outcome === 'newer' ? 'newer' : outcome === 'newer effort' ? 'medium' : 'high')
+      assert.equal(b.bot.appliedModel, outcome === 'newer' ? 'api/big' : outcome === 'newer effort' ? 'api/small' : 'acp-codex/default')
+      assert.equal(b.bot.appliedEffort, outcome === 'newer' ? 'newer' : outcome === 'newer effort' ? 'medium' : 'high')
       assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
       assert.equal(b.bot.previousModel, undefined)
     }
   }
+})
+
+// Real Session projection and first-turn events; only the save sink fails. Every attempted
+// snapshot must already own the old chat coherently, even when persistence rejects it.
+test('explicit route first-answer rollback restores ownership before successful or EIO saves', async (t) => {
+  for (const failSave of [false, true]) await t.test(failSave ? 'EIO is surfaced' : 'successful snapshots are coherent', async t => {
+    const b = await switchBench({ perNode: 10, model: 'acp-codex/default' })
+    t.after(b.stop)
+    Object.assign(b.bot, { appliedModel: 'acp-codex/default', effort: 'high', appliedEffort: 'high', previousModel: 'acp-codex/default' })
+    const history = b.session.snapshotEvents()
+    const notes = []
+    b.rt.desiredEffort = async bot => bot.effort
+    b.rt.resolveModel = async ref => ref
+    b.rt.resolveEffort = async (_ref, effort) => effort
+    b.rt.cachedCatalog = () => ['acp-codex/default', 'api/small'].map(ref => ({ ref }))
+    b.rt.noteFailure = entry => notes.push(entry)
+    assert.equal((await b.rt.switchRoute('b1', 'api/small', 'low')).status, 'switching')
+    assert.ok(await until(() => b.rt.awaitingFirstAnswer('fresh1') && !b.rt.switchingChat('b1')))
+    b.state.questions.fresh1 = { question: 'pending question' }
+    b.state.views.fresh1 = { view: 'pending view' }
+    const snapshots = []
+    b.rt.save = async () => {
+      snapshots.push(structuredClone(b.state))
+      if (failSave) throw Object.assign(new Error('injected rollback EIO'), { code: 'EIO' })
+    }
+    b.firstTurn('fresh1', { answer: false })
+    assert.ok(await until(() => failSave
+      ? b.calls.warnings.some(line => line.includes('injected rollback EIO'))
+      : notes.length === 2))
+    assert.ok(snapshots.length > 0)
+    for (const snapshot of [...snapshots, b.state]) {
+      const bot = snapshot.bots.b1
+      assert.equal(bot.sessionId, 's1', 'no save may strand the old choice on the fresh chat')
+      assert.equal(bot.model, 'acp-codex/default')
+      assert.equal(bot.appliedModel, 'acp-codex/default')
+      assert.equal(bot.effort, 'high')
+      assert.equal(bot.appliedEffort, 'high')
+      assert.equal(bot.previousModel, 'acp-codex/default')
+      assert.deepEqual(bot.segments, [])
+      assert.deepEqual(snapshot.questions, { s1: { question: 'pending question' } })
+      assert.deepEqual(snapshot.views, { s1: { view: 'pending view' } })
+      assert.deepEqual(snapshot.switching, {})
+    }
+    assert.deepEqual(b.session.snapshotEvents(), history)
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
+    if (failSave) {
+      assert.equal(snapshots.length, 1, 'the failed write is not swallowed or retried')
+      assert.deepEqual(b.calls.archived, [], 'a failed write cannot authorize archival')
+      assert.deepEqual(notes.map(entry => entry.text), ['Route change acp-codex/default → api/small accepted'], 'no false success or completed rollback')
+      assert.ok(b.calls.warnings.some(line => line.includes('going back from the fresh part') && line.includes('injected rollback EIO')))
+    } else {
+      assert.deepEqual(b.calls.archived, ['fresh1'])
+      assert.deepEqual(b.calls.selected.at(-1), ['s1', 'acp-codex/default'])
+      assert.equal(notes.at(-1).text, 'Route change acp-codex/default → api/small rolled back (fresh conversation could not answer)')
+    }
+  })
 })
