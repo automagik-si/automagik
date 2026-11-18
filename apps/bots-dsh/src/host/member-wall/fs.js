@@ -12,8 +12,8 @@
 //   absent: a probe finds nothing and a read or a listing fails as not found, so it learns
 //   nothing of what is there, and DSH's own probes (a workspace's parents) go on as for a path
 //   that does not exist. A listing of a folder the member may reach leaves out every child whose
-//   resolved target is denied, so neither a child's name nor its metadata names what it may not
-//   read. Writing there is refused;
+//   resolved target is denied, and every child whose walk crosses a denied folder, so neither a
+//   child's name nor its metadata names what it may not read. Writing there is refused;
 // - grep and glob search with ripgrep, which never reads through `ctx.fs`, so their search
 //   root (as spelled, against the session's working directory) goes through the same rule before
 //   they run, and a root with a denied root below it is refused. ripgrep walks the folder the
@@ -111,9 +111,11 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
     return mayUse(this.wall, this.principals(scopeSessions()), path, cwd)
   }
 
-  // The target key is the target's real path: what is read is decided by it.
+  // The target key is the target's real path and the display path is the walk the kernel takes
+  // to it. What is read is decided by both: a target whose walk crosses a denied folder is
+  // denied even when the real path it ends on is allowed.
   visible(target) {
-    return this.open(String(target.targetKey))
+    return this.open(String(target.targetKey)) && this.open(String(target.displayPath))
   }
 
   // The fenced methods are async, so a refusal is a rejection, as DSH's own errors are.
@@ -167,9 +169,10 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
   async listDir(target, signal) {
     this.hide('list', target)
     const entries = await super.listDir(target, signal)
-    // Every child is decided on the target it really reaches, as every other read is: a child
-    // that leaves for a denied path is left out of the listing whole, its name and metadata
-    // included, so the listing cannot name what the member may not see.
+    // Every child is decided on the walk it takes and the target it really reaches, as every
+    // other read is: a child that leaves for a denied path, or walks through one, is left out of
+    // the listing whole, its name and metadata included, so the listing cannot name what the
+    // member may not see.
     return this.wall.members ? entries.filter(entry => this.visible(entry.target)) : entries
   }
 

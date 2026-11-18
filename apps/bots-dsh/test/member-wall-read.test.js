@@ -213,25 +213,26 @@ test('a member reaches the shared roots, but not another member, a denied root, 
   assert.doesNotMatch(own.text, /7f3a/)
 })
 
-test('a listing withholds every child whose resolved target is denied, and only those', async t => {
+test('a listing withholds every child whose walk or target is denied, and only those', async t => {
   const places = layout(); t.after(() => rmSync(places.root, { recursive: true, force: true }))
-  // Children of the member's own folder that leave it: absolute, relative, through `..`, and
-  // through a denied folder that itself links back into an allowed one.
+  // Children of the member's own folder that leave it: absolute, relative, through `..`, through
+  // a denied folder that itself links back into an allowed one, and straight to a shared file.
   writeFileSync(join(places.dshHome, 'launch-token'), `${CANARY}\n`)
   symlinkSync('../../dsh-home/launch-token', join(places.ana, 'rel-token'))
   symlinkSync('../../shared/held/held.txt', join(places.ana, 'held-link'))
   symlinkSync('../../owner', join(places.ana, 'escape'))
   symlinkSync('../../dsh-home/door', join(places.ana, 'door'))
   symlinkSync('../shared/team.txt', join(places.dshHome, 'door'))
+  symlinkSync('../../shared/team.txt', join(places.ana, 'team-link.txt'))
   const ctx = await world(t, places)
   const folder = await ctx.fs.resolve(places.ana)
   const listing = await sessionScope.run({ sessionId: 'session-ana' }, () => ctx.fs.listDir(folder))
   const names = listing.map(entry => entry.name)
-  assert.deepEqual(names, ['door', 'notes.txt', 'pic.png', 'skills'])
+  assert.deepEqual(names, ['notes.txt', 'pic.png', 'skills', 'team-link.txt'])
   const text = JSON.stringify(listing)
-  for (const hidden of ['link.txt', 'owner-dir', 'rel-token', 'held-link', 'escape']) {
+  for (const hidden of ['link.txt', 'owner-dir', 'rel-token', 'held-link', 'escape', 'door']) {
     assert.ok(!names.includes(hidden), `${hidden}: withheld`)
-    assert.ok(!text.includes(hidden), `${hidden}: no name in the listing`)
+    assert.ok(!text.includes(`"name":"${hidden}"`), `${hidden}: no name in the listing`)
   }
   // An allowed child is reported as before: its type, size, version and resolved target.
   const notes = listing.find(entry => entry.name === 'notes.txt')
@@ -242,19 +243,81 @@ test('a listing withholds every child whose resolved target is denied, and only 
     targetKey: realpathSync(join(places.ana, 'notes.txt')),
     displayPath: join(places.ana, 'notes.txt'),
   })
-  // The decision is on the resolved target: a child of an allowed folder that reaches an allowed
-  // file through a denied folder is still reported, with that file's metadata.
-  const door = listing.find(entry => entry.name === 'door')
-  assert.equal(door.type, 'file')
-  assert.equal(door.size, 14)
-  assert.equal(door.target.targetKey, realpathSync(join(places.shared, 'team.txt')))
+  // The resolved-target rule still holds for a child whose own path stays allowed: a straight
+  // link to a shared file is listed with that file's metadata.
+  const linked = listing.find(entry => entry.name === 'team-link.txt')
+  assert.equal(linked.type, 'file')
+  assert.equal(linked.size, 14)
+  assert.equal(linked.target.targetKey, realpathSync(join(places.shared, 'team.txt')))
+  // Reading agrees with the listing: the straight link reads, the one through the denied folder
+  // does not, and its target never reaches the member.
+  const ana = (tool, args) => call(ctx, 'session-ana', places.ana, tool, args)
+  allowed(await ana('read', { file_path: join(places.ana, 'team-link.txt') }),
+    'a link straight to a shared file', /shared canary/)
+  refused(await ana('read', { file_path: join(places.ana, 'door') }),
+    'a link through a denied folder')
   // With members off the same listing is the whole folder, as DSH gives it.
-  const whole = ['door', 'escape', 'held-link', 'link.txt', 'notes.txt', 'owner-dir', 'pic.png', 'rel-token', 'skills']
+  const whole = [
+    'door', 'escape', 'held-link', 'link.txt', 'notes.txt', 'owner-dir', 'pic.png', 'rel-token',
+    'skills', 'team-link.txt',
+  ]
   const off = await world(t, places, { members: false })
   const all = await sessionScope.run({ sessionId: 'session-ana' }, async () => off.fs.listDir(await off.fs.resolve(places.ana)))
   assert.deepEqual(all.map(entry => entry.name), whole)
   assert.equal(all.find(entry => entry.name === 'link.txt').target.targetKey, realpathSync(join(places.owner, 'secret.txt')))
   // The owner's listing under the same fence is unchanged: the wall only ever narrows a member.
+  const owner = await sessionScope.run({ sessionId: 'session-owner' }, () => ctx.fs.listDir(folder))
+  assert.deepEqual(owner.map(entry => entry.name), whole)
+})
+
+test('a shared-root listing withholds every denied child and only those', async t => {
+  const places = layout(); t.after(() => rmSync(places.root, { recursive: true, force: true }))
+  // The shared root itself has an allowed file, an allowed folder, a straight link to the allowed
+  // file, a link to a denied file, a denied folder, and a link that reaches the allowed file only
+  // by walking through the denied data folder.
+  writeFileSync(join(places.shared, 'guide.txt'), 'shared guide\n')
+  mkdirSync(join(places.shared, 'guides'))
+  writeFileSync(join(places.shared, 'guides', 'start.txt'), 'start here\n')
+  symlinkSync(join(places.shared, 'team.txt'), join(places.shared, 'team-link.txt'))
+  symlinkSync(join(places.owner, 'secret.txt'), join(places.shared, 'leak.txt'))
+  symlinkSync(join(places.dshHome, 'door'), join(places.shared, 'tunnel'))
+  symlinkSync(join(places.shared, 'team.txt'), join(places.dshHome, 'door'))
+  const ctx = await world(t, places)
+  const folder = await ctx.fs.resolve(places.shared)
+  const listing = await sessionScope.run({ sessionId: 'session-ana' }, () => ctx.fs.listDir(folder))
+  const names = listing.map(entry => entry.name)
+  assert.deepEqual(names, ['guide.txt', 'guides', 'team-link.txt', 'team.txt'])
+  const text = JSON.stringify(listing)
+  for (const hidden of ['held', 'leak.txt', 'tunnel']) {
+    assert.ok(!names.includes(hidden), `${hidden}: withheld from the shared root`)
+    assert.ok(!text.includes(`"name":"${hidden}"`), `${hidden}: no name or metadata in the listing`)
+  }
+  // `team.txt` and the other allowed children keep their metadata and resolved targets.
+  const team = listing.find(entry => entry.name === 'team.txt')
+  assert.equal(team.type, 'file')
+  assert.equal(team.size, 14)
+  assert.ok(team.version)
+  assert.deepEqual(team.target, {
+    targetKey: realpathSync(join(places.shared, 'team.txt')),
+    displayPath: join(places.shared, 'team.txt'),
+  })
+  const guide = listing.find(entry => entry.name === 'guide.txt')
+  assert.equal(guide.type, 'file')
+  assert.equal(guide.size, 13)
+  assert.ok(guide.version)
+  const guides = listing.find(entry => entry.name === 'guides')
+  assert.equal(guides.type, 'directory')
+  assert.equal(guides.target.targetKey, realpathSync(join(places.shared, 'guides')))
+  const linked = listing.find(entry => entry.name === 'team-link.txt')
+  assert.equal(linked.type, 'file')
+  assert.equal(linked.size, 14)
+  assert.equal(linked.target.targetKey, realpathSync(join(places.shared, 'team.txt')))
+  // With members off, and for the owner, the same root is whole as DSH gives it.
+  const whole = ['guide.txt', 'guides', 'held', 'leak.txt', 'team-link.txt', 'team.txt', 'tunnel']
+  const off = await world(t, places, { members: false })
+  const all = await sessionScope.run({ sessionId: 'session-ana' },
+    async () => off.fs.listDir(await off.fs.resolve(places.shared)))
+  assert.deepEqual(all.map(entry => entry.name), whole)
   const owner = await sessionScope.run({ sessionId: 'session-owner' }, () => ctx.fs.listDir(folder))
   assert.deepEqual(owner.map(entry => entry.name), whole)
 })

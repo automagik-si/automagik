@@ -459,7 +459,8 @@ sandboxed filesystem, unchanged. Its rows are in `src/host/member-wall/profile.y
 
 With members on, a session recorded as a member's may read, list, search and load skills only
 in its own area and in the shared roots, never in a denied root; a link out of the area is
-refused too, and a listing leaves out each child that reaches one, name and metadata included.
+refused too, and a listing leaves out each child that reaches or walks through one, name and
+metadata included, even when the child's final target is allowed.
 Only a session recorded as the owner's acts as the owner; any other session, and
 every session while the record cannot be trusted, is held to a member's rules. The owner's own
 sessions and the owner's interface read as before. A member's commands are not fenced by this
