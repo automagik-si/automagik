@@ -39,7 +39,13 @@ bun install --frozen-lockfile --ignore-scripts
 node rebuild.mjs "<path>/Fredoka[wdth,wght].ttf"
 ```
 
-A new font file is a new source commit or a new text: change the script's two sha256 values with it, and the site's copy with `node apps/landing/scripts/sync-theme.mjs`.
+A new font file is a new source commit or new text. Update the script's recorded hashes as needed, then refresh the landing and Bots copies from the repository root.
+
+```sh
+node apps/landing/scripts/sync-theme.mjs
+cp docs/brand/fonts/fredoka-latin.woff2 docs/brand/fonts/OFL-Fredoka.txt apps/bots-dsh/src/client/art/fonts/
+(cd apps/bots-dsh && node scripts/inline-art.mjs && node scripts/build-client.mjs)
+```
 
 Keep `OFL-Fredoka.txt` beside the font wherever it is copied. The licence lets you use, embed and bundle the font; it does not let you sell the font by itself.
 
