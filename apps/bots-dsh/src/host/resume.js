@@ -117,6 +117,11 @@ const triggerOf = info => ({
   ...(info.audience ? { audience: info.audience } : {}),
   ...(info.askedBy ? { askedBy: info.askedBy } : {}),
   ...(info.senderRoomId ? { senderRoomId: info.senderRoomId } : {}),
+  // A message that owes no reply still owes none once the turn is picked up.
+  ...(info.noReply === true ? { noReply: true } : {}),
+  // The requests a handed-back turn answers with its trigger: the batch message is
+  // taken up by then, so this note is the only place they are kept.
+  ...(Array.isArray(info.joined) && info.joined.length > 0 ? { joined: info.joined } : {}),
 })
 
 const readNotes = (file) => {
@@ -323,6 +328,13 @@ export function install(rt) {
   rt.noteApproval = (sessionId, approval) => update(sessionId, record => (record === undefined ? record
     : approval === undefined ? (({ approval: _, ...rest }) => rest)(record) : { ...record, approval }))
 
+  // A batch names every sender it answers, as the handed-back turn did.
+  const joinedFrom = (trigger) => {
+    const names = [...new Set([rt.botOf(trigger.senderSessionId)?.name, ...trigger.joined.map(item => item?.info?.senderName)]
+      .filter(name => typeof name === 'string' && name !== ''))]
+    return names.length > 0 ? { fromName: names.join(', ') } : {}
+  }
+
   async function resumeTurn(sessionId, record) {
     const bot = rt.botOf(record.botId)
     if (bot === undefined) return
@@ -341,7 +353,7 @@ export function install(rt) {
     const trigger = record.trigger
     if ((trigger?.role === 'request' || trigger?.role === 'stopped') && trigger.senderSessionId && trigger.audience !== 'user' && rt.botOf(trigger.senderSessionId)) {
       // The sender still waits for this turn's answer, so it goes on under the same exchange.
-      await resume(sessionId, () => rt.deliver({ fromId: trigger.senderSessionId, toId: bot.id, role: trigger.role, ...(trigger.exchangeId ? { exchangeId: trigger.exchangeId } : {}), ...(trigger.senderRoomId ? { fromRoomId: trigger.senderRoomId } : {}), resumed: true, text }))
+      await resume(sessionId, () => rt.deliver({ fromId: trigger.senderSessionId, toId: bot.id, role: trigger.role, ...(trigger.exchangeId ? { exchangeId: trigger.exchangeId } : {}), ...(trigger.senderRoomId ? { fromRoomId: trigger.senderRoomId } : {}), ...(trigger.noReply === true ? { noReply: true } : {}), ...(Array.isArray(trigger.joined) && trigger.joined.length > 0 ? { joined: trigger.joined, ...joinedFrom(trigger) } : {}), resumed: true, text }))
       return
     }
     // A turn that went on with work another Bot asked for still owes that Bot its answer.

@@ -28,10 +28,14 @@ export function install(rt) {
       ? `[Messages from ${fromName} · you read them during your last task; answer them now]`
       : `[Message from ${fromName} · you read it during your last task; answer it now]`
     // A message that owes nothing says so, so the Bot reads it without answering it.
-    if (noReply && role === 'request' && audience !== 'user') return `[Message from ${fromName} · no reply needed]`
+    if (noReply && role === 'request' && audience !== 'user') return resumed
+      ? `[Message from ${fromName} · no reply needed · DeepSeek Harness restarted while you were working on it]`
+      : `[Message from ${fromName} · no reply needed]`
     if (retried && role !== 'room') return '[Your last reply wrote a tool call as text, so nothing ran]'
     if (resumed && role === 'resume') return '[DeepSeek Harness restarted while you were working]'
-    if (resumed && role !== 'room') return `[Message from ${fromName} · DeepSeek Harness restarted while you were working on it]`
+    if (resumed && role !== 'room') return plural
+      ? `[Messages from ${fromName} · DeepSeek Harness restarted while you were working on them]`
+      : `[Message from ${fromName} · DeepSeek Harness restarted while you were working on it]`
     if (resent && role === 'reply') return `[Reply from ${fromName} · DeepSeek Harness restarted before it could reach you]`
     if (resent && role !== 'room') return `[Message from ${fromName} · DeepSeek Harness restarted before it could reach you]`
     if (role === 'reply') return `[Reply from ${fromName}${goesOn}]`
