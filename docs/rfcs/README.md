@@ -66,6 +66,7 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0031](0031-auto-permission-level.md) | Auto, a permission level where a model decides each step | Queued (amends RFC 0003 with its delivery 2; numbers 0028 to 0030 are taken by open pull requests) | none (ships outside the five milestones) |
 | [0032](0032-automagik-id.md) | Automagik ID | In delivery (delivery 1 authorized by the owner; replaces RFC 0024's identity-provider sections) | none (independent Worker deployment) |
 | [0033](0033-attachments-from-pocket.md) | Attachments from Pocket | Queued (amends RFC 0015's chat route: attachments; owner not yet read) | none (ships outside the five milestones) |
+| [0034](0034-web-self-update.md) | Web self-update in the app | Proposed (mock approved by the owner 2026-11-18, #1541; plan drafted 2026-11-18; Q1-Q7 open) | none (ships outside the five milestones) |
 
 Milestones, in the owner's order:
 
