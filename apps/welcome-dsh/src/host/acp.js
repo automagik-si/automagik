@@ -72,6 +72,7 @@ export function agentView(agent) {
       state: ['off', 'no-cli', 'installing', 'failed', 'ready'].includes(agent.connector?.state) ? agent.connector.state : 'installing',
       // A native agent: its CLI is the ACP server, so there is no connector to install or show.
       ...(agent.connector?.native === true ? { native: true } : {}),
+      ...(agent.connector?.state === 'failed' && agent.connectorUnreachable === true ? { unreachable: true } : {}),
       ...(typeof agent.connector?.version === 'string' ? { version: agent.connector.version } : {}),
       ...(typeof agent.connector?.error === 'string' ? { error: shownText(redactText(agent.connector.error)).slice(0, 300) } : {}),
       // Installed, but its last start failed: the settings page offers Retry, which reinstalls it.
