@@ -64,6 +64,28 @@ test("a network error from the public download falls back to the API asset route
   assert.equal(r.code, 0, r.errors.join("\n"));
   assert.ok(r.requests.every((request) => !request.path.startsWith("/download/")), "the public route was unreachable");
   assert.ok(r.logs.includes("checksums.txt: served by the REST API asset route"), "the API served it");
+
+  // A hung public route: only its 15 s allowance is cut to 1 ms of real time; the API keeps its own full one.
+  const realTimeout = AbortSignal.timeout;
+  const allowances = [];
+  const apiSignals = [];
+  AbortSignal.timeout = (ms) => (allowances.push(ms), realTimeout.call(AbortSignal, ms === 15_000 ? 1 : ms));
+  const hungPublic = (url, init) => {
+    if (!String(url).includes(`/download/${TAG}/`)) return apiSignals.push(init.signal.aborted), forwarded(url, init);
+    return new Promise((_, reject) => {
+      if (init.signal.aborted) reject(init.signal.reason);
+      else init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+    });
+  };
+  const started = Date.now();
+  let hung;
+  try { hung = await run({ fetch: hungPublic }); } finally { AbortSignal.timeout = realTimeout; }
+  assert.equal(hung.code, 0, hung.errors.join("\n"));
+  assert.deepEqual(allowances, [15_000, 120_000, 120_000], "public 15 s; the API release and asset requests each get the full 120 s");
+  assert.deepEqual(apiSignals, [false, false], "each API request starts with its own live signal");
+  assert.ok(hung.logs.includes("checksums.txt: served by the REST API asset route"), "a public timeout falls back to the API");
+  for (const [arch, asset] of Object.entries(ASSETS)) assert.ok(hung.logs.includes(`${asset}: ${HASH[arch]} ok`), `${asset} still checked`);
+  assert.ok(Date.now() - started < 5_000, "no real allowance was waited out");
 });
 
 test("when both routes fail the check exits 2", async () => {
