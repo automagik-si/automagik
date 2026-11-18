@@ -40,6 +40,68 @@ export function structuredNameOf(update) {
   return undefined
 }
 
+/**
+ * The Agent/Task call a call ran inside, when the agent says so: Claude Code's adapter stamps
+ * every call a native subagent makes, and its result, with `_meta.claudeCode.parentToolUseId`,
+ * the subagent's own Agent/Task call id. Undefined for a call the main agent made.
+ */
+export function parentToolOf(update) {
+  const parent = update?._meta?.claudeCode?.parentToolUseId
+  return isToolId(parent) ? parent : undefined
+}
+
+// Claude Code's subagent tool: `Agent`, `Task` on older CLIs (the adapter's agent reporter).
+export const WORKER_TOOLS = new Set(['Agent', 'Task'])
+export const WORKERS_MAX = 12
+export const WORKER_STEPS_MAX = 40
+const WORKER_TEXT_MAX = 160
+// A call DSH closed itself (`ended`: endPrompt, when the turn was stopped or the agent went
+// away) did not finish, whatever status it was closed with: it failed, it was never done.
+const workerStatus = tool => (tool.ended === true ? 'failed' : tool.status === 'completed' ? 'done' : tool.status === 'failed' ? 'failed' : 'running')
+const shortLine = text => String(text ?? '').slice(0, 4096).split('\n').map(line => line.trim()).find(Boolean)?.slice(0, WORKER_TEXT_MAX) ?? ''
+// The ending a worker reports: its stripped report, else the raw result less the adapter's
+// `<usage>` block and `agentId:` line, which only the raw text still carries for this client.
+// One DSH stopped reports only that (`Stopped`, with `stopped`): what it had said is partial.
+const workerResult = (tool) => {
+  if (tool.ended === true) return 'Stopped'
+  if (workerStatus(tool) === 'running') return ''
+  const text = contentText(tool.content) || (typeof tool.rawOutput === 'string' ? tool.rawOutput : '')
+  return shortLine(text.replace(/<usage>[\s\S]*?<\/usage>/g, '').replace(/^agentId:.*$/gm, ''))
+}
+
+/**
+ * The native subagents of one prompt, as workers: each Agent/Task call in `ids` (the prompt's
+ * calls, in the order they came) with its title, its state, the line its result opens with and
+ * the calls stamped with its id as its steps. Newest workers last; bounded, never the payloads.
+ * One DSH closed when its turn ended (`ended`) is failed, `stopped`, and its result `Stopped`.
+ * @param {Map<string, any>} tools
+ * @param {Iterable<string>} ids
+ */
+export function workersOf(tools, ids) {
+  const calls = [...ids].map(id => tools.get(id)).filter(tool => tool !== undefined && tool.retired !== true)
+  const workers = calls.filter(tool => WORKER_TOOLS.has(tool.structuredName)).slice(-WORKERS_MAX)
+  return workers.map((worker) => {
+    const steps = calls.filter(tool => tool.parent === worker.id)
+    const shown = steps.slice(-WORKER_STEPS_MAX)
+    const result = workerResult(worker)
+    return {
+      id: worker.id,
+      title: shortLine(worker.title) || worker.structuredName,
+      state: workerStatus(worker),
+      ...(result ? { result } : {}),
+      ...(worker.ended === true ? { stopped: true } : {}),
+      ...(worker.seenAt === undefined ? {} : { at: worker.seenAt }),
+      steps: shown.map(step => ({
+        id: step.id,
+        title: shortLine(step.title) || step.structuredName || 'Tool',
+        ...(step.structuredName === undefined ? {} : { tool: String(step.structuredName).slice(0, 80) }),
+        state: workerStatus(step),
+      })),
+      ...(steps.length > shown.length ? { more: steps.length - shown.length } : {}),
+    }
+  })
+}
+
 // The text of ACP content: a content block, or a tool call's content items.
 export function contentText(content) {
   if (content == null) return ''
@@ -604,6 +666,15 @@ export class AgentRun {
 
   // --- the agent's side of the conversation ---------------------------------------------
 
+  /**
+   * The native subagents this prompt started, as workers (workersOf): what the Bot team draws
+   * under the Bot's row. The prompt's calls only, so a finished worker stays until the next
+   * prompt. Read-only.
+   */
+  workers() {
+    return workersOf(this.tools, this.turn)
+  }
+
   ignored(what, payload) {
     // Rejected traffic still needs safety checks, without retaining it or making a card.
     try {
@@ -682,7 +753,10 @@ export class AgentRun {
       return known
     }
     if (this.reviews?.last) this.reviews.after = true
-    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set() }
+    const tool = { id: update.toolCallId, title: update.title ?? 'Tool', kind: update.kind ?? 'other', status: update.status ?? 'pending', content: update.content ?? [], locations: update.locations ?? [], rawInput: update.rawInput, rawOutput: update.rawOutput, listeners: new Set(), seenAt: Date.now() }
+    // A native subagent's call keeps the Agent/Task call it ran inside (workers()).
+    const parent = parentToolOf(update)
+    if (parent !== undefined && parent !== tool.id) tool.parent = parent
     // First seen after its prompt ended: its event lands behind the prompt's end, where no step
     // reads it, and the next prompt drops it. No card will ever ask its question.
     if (this.promptEnded === true) tool.unanswerable = true
@@ -723,6 +797,9 @@ export class AgentRun {
     for (const key of ['title', 'kind', 'status', 'content', 'locations', 'rawInput', 'rawOutput', 'ended']) {
       if (update[key] !== undefined && update[key] !== null) tool[key] = update[key]
     }
+    // The link can come on a later update only (a streamed refinement or the result).
+    const parent = parentToolOf(update)
+    if (parent !== undefined && parent !== tool.id) tool.parent = parent
     const status = tool.rawOutput?.review?.status
     if (this.reviews && tool.id.startsWith('guardian_assessment:') && typeof status === 'string' && !tool.reviewed) {
       tool.reviewed = true

@@ -2945,7 +2945,17 @@ Object.assign(ZH, {
   "This step is hard to undo: {step}. Allow it once?": "这一步难以撤销：{step}。允许这一次吗？",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?": "{name} 在本轮被拒绝了 {count} 次，最近一次是 {tool}。让它继续工作吗？",
   "Let it keep working?": "让它继续工作吗？",
-  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。"
+  "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。",
+  // Claude Code's native subagents as workers under a Bot's row (native-workers.js, issue 1564).
+  "Subagents {name} started": "{name} 启动的子代理",
+  "{step}…": "{step}…",
+  "Starting…": "正在启动…",
+  "Worker details": "工作详情",
+  "Result: {line}": "结果：{line}",
+  "still running": "仍在运行",
+  "Steps": "步骤",
+  "Steps (latest {n})": "步骤（最近 {n} 个）",
+  "No steps yet.": "还没有步骤。"
 })
 Object.assign(ZH, HOST_ZH)
 
