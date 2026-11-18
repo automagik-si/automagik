@@ -237,23 +237,54 @@ The image bakes no host path. Resolve the workspace volume's host path per runti
 
 The node's existing measurement user reads that host path through the node's own SSH alias. The
 image adds no account, key, link, home move or remote shell. On the node, expose one path per
-workspace read-only, here `/srv/automagik/measure/<workspace>`:
+workspace, here `/srv/automagik/measure/<workspace>`. Grant first, then remount read-only: a
+read-only mount refuses `setfacl`. The volume is owned by the image's uid 1000, so a POSIX ACL
+grants without changing ownership; `<measurement>` is the node's existing measurement account:
 
 ```sh
 install -d -m 0755 /srv/automagik/measure
-mount --bind /var/lib/docker/volumes/automagik-data/_data \
-  /srv/automagik/measure/automagik-data
-mount -o remount,ro,bind /srv/automagik/measure/automagik-data
+view=/srv/automagik/measure/automagik-data
+me=<measurement>
+
+mount --bind /var/lib/docker/volumes/automagik-data/_data "$view"
+
+# Search only: the view itself, then every directory on the way to a readable path.
+setfacl -m "u:$me:--x" "$view"
+setfacl -m "u:$me:--x" "$view/.claude" "$view/.codex" "$view/.automagik"
+setfacl -m "u:$me:--x" "$view/dsh" "$view/dsh/profiles" "$view/dsh/profiles/automagik-web"
+setfacl -m "u:$me:r--" "$view/dsh/profiles/automagik-web/automagik-server-profile"
+# Search only into the agent homes: their presence decides the derived-file check.
+for d in .gemini .antigravity; do
+  [ -d "$view/$d" ] && setfacl -m "u:$me:--x" "$view/$d"
+done
+
+# Read and search inside the exposed roots only, never over the view.
+setfacl -R -m "u:$me:rX" \
+  "$view/.claude/projects" "$view/.claude/session-archive" \
+  "$view/.codex/sessions" "$view/.codex/archived_sessions" \
+  "$view/.automagik/meter"
+
+# A Gemini or Antigravity workspace: the derived model-name file and nothing else.
+if [ -e "$view/.automagik/measure/model-name.json" ]; then
+  setfacl -m "u:$me:--x" "$view/.automagik/measure"
+  setfacl -m "u:$me:r--" "$view/.automagik/measure/model-name.json"
+fi
+
+# Never readable, whatever the file mode: credentials and raw settings.
+for f in .claude/.credentials.json .codex/auth.json .claude.json \
+         .claude/settings.json .gemini/settings.json \
+         .gemini/antigravity-cli/settings.json .antigravity/settings.json; do
+  [ -e "$view/$f" ] && setfacl -m "u:$me:---" "$view/$f"
+done
+
+mount -o remount,ro,bind "$view"
 ```
 
-For `/etc/fstab`, the same source and target with `none bind,ro 0 0`. With Incus, bind the `dir`
-pool's `source` the same way; with another driver, export the read-only copy there. Grant the
-measurement identity read and directory search on the view, never a write bit; where the volume
-is owned by the image's uid 1000, a POSIX ACL does that without changing ownership:
-
-```sh
-setfacl -R -m u:<measurement>:rX /srv/automagik/measure/automagik-data
-```
+For `/etc/fstab`, the same source and target with `none bind,ro 0 0`, but apply the grants first
+through a temporary writable bind, or to the volume's source path: a read-only mount refuses
+`setfacl`. With Incus, bind the `dir` pool's `source` the same way; with another driver, export
+the read-only copy there. Never `setfacl -R` on the view: that makes the credential files
+readable, and rerun the deny loop after a vendor writes a new credential file.
 
 Inside that view the measurement identity may read, per workspace:
 
@@ -262,6 +293,7 @@ Inside that view the measurement identity may read, per workspace:
 | Claude | `.claude/projects/`, `.claude/session-archive/` |
 | Codex | `.codex/sessions/`, `.codex/archived_sessions/` |
 | Meter | `.automagik/meter/`: `meter.db` and `claude-limits.jsonl` |
+| Gemini / Antigravity | `.automagik/measure/model-name.json` (the derived model name only) |
 
 The meter's state directory follows `usagemeter`'s own rule: `METER_STATE_DIR`, else
 `<AM_HOME>/meter` (an absolute `AM_HOME`), else `~/.automagik/meter`; with this image's
@@ -269,19 +301,24 @@ The meter's state directory follows `usagemeter`'s own rule: `METER_STATE_DIR`, 
 counts as measured.
 
 This image runs no Gemini or Antigravity agent. Where a workspace adds one, expose only its log
-directory, conversation databases and generated transcripts, plus a derived file carrying the
-model name alone; never the raw settings file.
+directory, conversation databases and generated transcripts. Before the view is mounted, generate
+`.automagik/measure/model-name.json` inside the volume from the raw settings with the measurement
+project's field allowlist, never by copying the settings file; it holds exactly
+`{"model":"<name>"}` and nothing else. That one file is the only settings-shaped path exposed,
+and without it the usage reads "model unknown". Never the agent's raw settings file.
 
 Never exposed, in whole or in part: `.claude/.credentials.json`, `.codex/auth.json`,
 `.claude.json` (the combined Claude configuration, which can carry MCP server environment
 values), `.claude/settings.json`, and any Gemini or Antigravity settings file that carries an API
-key or an MCP environment value. The Claude account block is not exposed here; until the
+key or an MCP environment value (`.gemini/settings.json`, `.gemini/antigravity-cli/settings.json`,
+`.antigravity/settings.json`). The Claude account block is not exposed here; until the
 measurement project's RFC 0006 decides, that usage reads "unattributed".
 
 The pilot's check runs on the node as the measurement identity, against the read-only view. It
 exits non-zero when the view is absent, is stale (no seeded profile marker), finds an exposed
-root that is unreadable or writable, misses the meter's files in an existing meter directory, or
-lets the identity read a file listed above:
+root unreadable or writable, misses the meter's files in an existing meter directory, cannot read
+`.automagik/measure/model-name.json` while a Gemini or Antigravity agent is present, finds that
+file readable but not exactly one model name, or lets the identity read a file listed above:
 
 ```sh
 node server/measurement-check.mjs /srv/automagik/measure/<workspace>

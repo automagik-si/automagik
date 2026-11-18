@@ -6,7 +6,8 @@
 //   node server/measurement-check.mjs /srv/automagik/measure/<workspace>
 //
 // Exit 0 only when the view is present, is not stale, gives the exposed roots read-only, keeps
-// the meter's files readable, and lets no credential or settings file be read.
+// the meter's files readable, reads the derived model-name file where an agent runs, and lets no
+// credential or settings file be read.
 import { accessSync, constants, readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
@@ -28,8 +29,17 @@ export const SECRETS = [
   '.claude.json',
   '.claude/settings.json',
   '.gemini/settings.json',
+  '.gemini/antigravity-cli/settings.json',
   '.antigravity/settings.json',
 ]
+/**
+ * Derived by the measurement project's field allowlist, never copied from a raw settings file:
+ * exactly `{"model":"<name>"}`. Where a Gemini or Antigravity agent runs it must be readable;
+ * without it that usage reads "model unknown".
+ */
+export const MODEL = '.automagik/measure/model-name.json'
+/** Paths whose presence means the workspace runs a Gemini or Antigravity agent. */
+export const MODEL_AGENTS = ['.gemini/settings.json', '.gemini/antigravity-cli', '.antigravity']
 const METER = '.automagik/meter'
 const METER_FILES = ['meter.db', 'claude-limits.jsonl']
 
@@ -74,6 +84,27 @@ function check(view) {
       if (readable(join(view, rel))) ok.push(`readable: ${rel}`)
       else fail.push(`not readable: ${rel}`)
     }
+  }
+
+  const modelPath = join(view, MODEL)
+  if (present(modelPath)) {
+    if (!readable(modelPath)) fail.push(`not readable: ${MODEL}`)
+    else {
+      let model
+      try { model = JSON.parse(readFileSync(modelPath, 'utf8')) } catch { /* reported below */ }
+      const keys = model && typeof model === 'object' && !Array.isArray(model)
+        ? Object.keys(model) : []
+      if (keys.length !== 1 || keys[0] !== 'model' || typeof model.model !== 'string'
+        || !model.model.trim()) {
+        fail.push(`not model-only: ${MODEL}`)
+      } else if (writable(modelPath)) {
+        fail.push(`writable: ${MODEL}`)
+      } else {
+        ok.push(`readable: ${MODEL}`)
+      }
+    }
+  } else if (MODEL_AGENTS.some((rel) => present(join(view, rel)))) {
+    fail.push(`missing: ${MODEL} (a Gemini or Antigravity agent is present)`)
   }
 
   for (const rel of SECRETS) {

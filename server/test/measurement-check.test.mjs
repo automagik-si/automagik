@@ -36,7 +36,7 @@ const EXPOSED = [
   '.automagik/meter',
 ]
 
-function fixture() {
+function fixture(setup) {
   const root = mkdtempSync(join(tmpdir(), 'measurement-check-'))
   TEMPS.push(root)
   for (const dir of ['dsh/profiles/automagik-web', ...EXPOSED]) {
@@ -58,6 +58,7 @@ function fixture() {
     writeFileSync(join(root, secret), '{}')
     chmodSync(join(root, secret), 0o000)
   }
+  if (setup) setup(root)
   // A read-only view: neither the root nor an exposed root is writable.
   for (const dir of EXPOSED) chmodSync(join(root, dir), 0o555)
   chmodSync(root, 0o555)
@@ -90,11 +91,120 @@ test('the measurement docs name the one volume, the read-only view and the negat
   }
 })
 
+test('the documented grant reads only the exposed roots and denies every credential', () => {
+  const readme = read('server/README.md')
+  const start = readme.indexOf('## Measurement access (read-only)')
+  assert.ok(start >= 0, 'server/README.md has a Measurement access section')
+  const end = readme.indexOf('\n## ', start + 1)
+  const section = readme.slice(start, end < 0 ? undefined : end)
+  // A recursive grant over the whole view makes every credential readable.
+  assert.doesNotMatch(
+    section,
+    /setfacl\s+-R\s+-m\s+u:<measurement>:rX\s+\/srv\/automagik\/measure\/automagik-data/,
+  )
+  const setup = section.slice(section.indexOf('view=/srv/automagik/measure/automagik-data'))
+  assert.ok(setup.length > 0, 'the section is one runnable setup block')
+  // Read and search only on the roots the measurement identity consumes.
+  for (const root of [
+    '.claude/projects', '.claude/session-archive', '.codex/sessions',
+    '.codex/archived_sessions', '.automagik/meter',
+  ]) {
+    assert.ok(setup.includes(`"$view/${root}"`), `the grant names ${root}`)
+  }
+  assert.ok(
+    setup.includes('"$view/dsh/profiles/automagik-web/automagik-server-profile"'),
+    'the grant names the seeded marker',
+  )
+  // The documented grant runs before the view is remounted read-only: setfacl needs a writable
+  // mount.
+  assert.ok(
+    setup.indexOf('mount -o remount,ro,bind "$view"') > setup.indexOf('setfacl -R'),
+    'the grants precede the read-only remount',
+  )
+  // Every credential path gets an explicit deny, whatever the file mode.
+  const deny = setup.slice(setup.indexOf('# Never readable'))
+  assert.ok(deny.length > 0, 'the section denies the never-exposed paths explicitly')
+  for (const secret of [
+    '.claude/.credentials.json', '.codex/auth.json', '.claude.json', '.claude/settings.json',
+    '.gemini/settings.json', '.gemini/antigravity-cli/settings.json', '.antigravity/settings.json',
+  ]) {
+    assert.ok(deny.includes(secret), `the deny loop names ${secret}`)
+  }
+})
+
 test('passes on a readable read-only view', () => {
   const result = run(fixture())
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
   assert.match(result.stdout, /^OK: /m)
   assert.match(result.stdout, /ok: readable: \.claude\/projects/)
+})
+
+/** Write the derived model-name file into a fixture and lock it down. */
+function derived(root, value = '{"model":"gemini-3-pro"}\n') {
+  const dir = join(root, '.automagik/measure')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'model-name.json'), value)
+  chmodSync(join(dir, 'model-name.json'), 0o444)
+  chmodSync(dir, 0o555)
+}
+
+/** Mark a fixture as running Gemini, whose raw settings must never be readable. */
+function gemini(root, mode = 0o000) {
+  mkdirSync(join(root, '.gemini'), { recursive: true })
+  writeFileSync(join(root, '.gemini/settings.json'), '{"apiKey":"secret"}')
+  chmodSync(join(root, '.gemini/settings.json'), mode)
+  chmodSync(join(root, '.gemini'), 0o555)
+}
+
+test('passes when a Gemini workspace exposes the derived model name', () => {
+  const root = fixture((dir) => { gemini(dir); derived(dir) })
+  const result = run(root)
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stdout, /ok: readable: \.automagik\/measure\/model-name\.json/)
+  assert.doesNotMatch(result.stderr, /exposed: /)
+})
+
+test('passes when an Antigravity workspace exposes the derived model name', () => {
+  const root = fixture((dir) => {
+    mkdirSync(join(dir, '.gemini/antigravity-cli'), { recursive: true })
+    derived(dir)
+  })
+  const result = run(root)
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stdout, /ok: readable: \.automagik\/measure\/model-name\.json/)
+})
+
+test('fails when a Gemini workspace has no derived model-name file', () => {
+  const root = fixture((dir) => gemini(dir))
+  const result = run(root)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /missing: \.automagik\/measure\/model-name\.json/)
+})
+
+test('fails when the derived model-name file is not readable', () => {
+  const root = fixture((dir) => {
+    mkdirSync(join(dir, '.automagik/measure'), { recursive: true })
+    writeFileSync(join(dir, '.automagik/measure/model-name.json'), '{"model":"x"}\n')
+    chmodSync(join(dir, '.automagik/measure/model-name.json'), 0o000)
+    chmodSync(join(dir, '.automagik/measure'), 0o555)
+  })
+  const result = run(root)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /not readable: \.automagik\/measure\/model-name\.json/)
+})
+
+test('fails when the derived model-name file carries more than the model', () => {
+  const root = fixture((dir) => derived(dir, '{"model":"x","apiKey":"secret"}\n'))
+  const result = run(root)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /not model-only: \.automagik\/measure\/model-name\.json/)
+})
+
+test('fails when a raw Gemini settings file is readable', () => {
+  const root = fixture((dir) => { gemini(dir, 0o644); derived(dir) })
+  const result = run(root)
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /exposed: \.gemini\/settings\.json is readable/)
 })
 
 test('fails when the documented view is absent', () => {
