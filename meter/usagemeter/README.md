@@ -354,7 +354,8 @@ widening it re-imports), `--budget-secs N` (default 20), `--no-publish`, `--doc 
   whose logs are gone, and rows written before schema 3 keep their hours before evidence.
 - Duplicate evidence rows (issue 1229): a call whose evidence is already written is never
   adopted again. `usagemeter status` counts them under `evidence.duplicates` (`groups`,
-  `extra_rows`, `exact_groups`, `exact_extra_rows`) without removing anything; a group is one
+  `extra_rows`, `exact_groups`, `exact_extra_rows`, and `hours` with each hour's `groups` and
+  `extra_rows`, up to 50 hours plus `hours_omitted`) without removing anything; a group is one
   time, request id and logging, so two real calls that reuse a request id at different times stay
   distinct. When the rows are exact copies and the hour's rollup already counts the distinct
   requests, the store can be repaired from its own evidence: deleting the extra rows changes no

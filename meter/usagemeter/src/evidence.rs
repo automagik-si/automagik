@@ -997,16 +997,30 @@ pub fn dirty_count(c: &Connection) -> rusqlite::Result<i64> {
     c.query_row("SELECT count(*) FROM ev_dirty", [], |r| r.get(0))
 }
 
+/// At most this many duplicate hours are listed; the rest are counted in `hours_omitted`.
+const DUPLICATE_HOURS: usize = 50;
+
+/// One hour with duplicate evidence rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DuplicateHour {
+    pub hour_ms: i64,
+    pub groups: i64,
+    pub extra_rows: i64,
+}
+
 /// Duplicate evidence rows (issue 1229), for a dry-run report before any removal. A group is the
 /// rows that share a time, logging and request id: two real calls with the same request id are
 /// distinct when their times differ, and one with the same time and logging is one call counted
 /// twice. `exact` counts the groups whose rows are identical in every column but the row id.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Duplicates {
     pub groups: i64,
     pub extra_rows: i64,
     pub exact_groups: i64,
     pub exact_extra_rows: i64,
+    /// The hours that hold at least one group, oldest first, at most [`DUPLICATE_HOURS`].
+    pub hours: Vec<DuplicateHour>,
+    pub hours_omitted: usize,
 }
 
 /// Counts the duplicate evidence rows in the store, without writing anything.
@@ -1033,11 +1047,33 @@ pub fn duplicates(c: &Connection) -> rusqlite::Result<Duplicates> {
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    let mut st = c.prepare(&format!(
+        "SELECT hour, count(*), coalesce(sum(n - 1), 0) FROM (
+           SELECT (ts_ms / {h}) * {h} AS hour, count(*) AS n FROM evidence
+           WHERE request IS NOT NULL
+           GROUP BY ts_ms, dim, request
+           HAVING count(*) > 1
+         ) GROUP BY hour ORDER BY hour",
+        h = crate::time::HOUR_MS
+    ))?;
+    let mut hours = st
+        .query_map([], |r| {
+            Ok(DuplicateHour {
+                hour_ms: r.get(0)?,
+                groups: r.get(1)?,
+                extra_rows: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let hours_omitted = hours.len().saturating_sub(DUPLICATE_HOURS);
+    hours.truncate(DUPLICATE_HOURS);
     Ok(Duplicates {
         groups,
         extra_rows,
         exact_groups,
         exact_extra_rows,
+        hours,
+        hours_omitted,
     })
 }
 

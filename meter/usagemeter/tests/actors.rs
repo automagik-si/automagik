@@ -1018,6 +1018,10 @@ fn status_counts_duplicate_evidence_rows_and_removes_nothing() {
         (d.groups, d.extra_rows, d.exact_groups, d.exact_extra_rows),
         (1, 1, 1, 1)
     );
+    assert_eq!(d.hours.len(), 1);
+    assert_eq!(d.hours[0].hour_ms, t("2026-11-08T14:00:00Z"));
+    assert_eq!((d.hours[0].groups, d.hours[0].extra_rows), (1, 1));
+    assert_eq!(d.hours_omitted, 0);
     // The same request id one hour later is another real call, not a duplicate row.
     store
         .conn
@@ -1049,6 +1053,13 @@ fn status_counts_duplicate_evidence_rows_and_removes_nothing() {
     assert_eq!(v["evidence"]["duplicates"]["groups"], 1);
     assert_eq!(v["evidence"]["duplicates"]["extra_rows"], 1);
     assert_eq!(v["evidence"]["duplicates"]["exact_extra_rows"], 1);
+    assert_eq!(
+        v["evidence"]["duplicates"]["hours"],
+        serde_json::json!([
+            {"hour": "2026-11-08T14:00:00Z", "groups": 1, "extra_rows": 1}
+        ])
+    );
+    assert_eq!(v["evidence"]["duplicates"]["hours_omitted"], 0);
     // A status run is read-only: the rows it counted are still there.
     let store = s.store();
     assert_eq!(store.count("evidence").unwrap(), 3);

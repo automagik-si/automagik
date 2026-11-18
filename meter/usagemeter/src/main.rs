@@ -466,6 +466,12 @@ fn cmd_status() -> Result<ExitCode, String> {
                 "extra_rows": duplicates.extra_rows,
                 "exact_groups": duplicates.exact_groups,
                 "exact_extra_rows": duplicates.exact_extra_rows,
+                "hours": duplicates.hours.iter().map(|h| serde_json::json!({
+                    "hour": format_rfc3339(h.hour_ms),
+                    "groups": h.groups,
+                    "extra_rows": h.extra_rows,
+                })).collect::<Vec<_>>(),
+                "hours_omitted": duplicates.hours_omitted,
             },
             "attribution_backlog": meter::evidence::dirty_count(&store.conn).unwrap_or(0),
             "tokens_by_harness": meter::evidence::actor_totals(
