@@ -17,7 +17,7 @@ export function install(rt) {
     return resolved.agent
   }
 
-  const headerFor = (role, fromName, roomName, audience, note = 'new message', deferred = false, { resumed = false, retried = false, resent = false, abandoned = false, asker } = {}) => {
+  const headerFor = (role, fromName, roomName, audience, note = 'new message', deferred = false, { resumed = false, retried = false, resent = false, abandoned = false, asker, hasSender = false } = {}) => {
     // What came back for work another Bot gave this one says where its answer goes.
     const goesOn = asker === undefined ? '' : ` · for the work ${asker} asked you for; your answer goes to ${asker} once everything you handed on is back`
     // A wait the user gave up reads as its own thing: the other Bot never answered.
