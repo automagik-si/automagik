@@ -845,6 +845,7 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
       keep = [...plan.replaced, ...plan.retired, ...plan.held.map((h) => h.mod)];
       old = keep.length ? setAside(modsDir) : null;
     };
+    let notes = [];
     try {
       const swap = swapAll(modsDir, moves, rename, {
         needed: "hold", mods: inMods.map((r) => r.mod), exclude: replacedLayout(modsDir), stranded: strandedLayouts, prepare,
@@ -854,6 +855,10 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
       });
       // A linked mods/ (#494): nothing done, prepare never ran.
       if (swap.refused) throw new Error(swap.refused);
+      // #524: the layout guard's lines (a retire or rename it could not weigh) are the answer's,
+      // not only stderr's: the sidebar shows the JSON result. They are notes, not warnings: the
+      // update finished, so the CLI's exit 4 (a failed step) stays for real warnings.
+      notes = Array.isArray(swap.notes) ? swap.notes : [];
     } catch (error) {
       restoreSet(modsDir, old);
       throw error;
@@ -884,7 +889,8 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
     for (const m of repair ? plan.installed : []) log(`repaired mods/${m}: it was missing; installed ${version}`);
     for (const w of warnings) log(`warning: ${w}`);
     tightenLedgers(dirname(resolve(modsDir)), { log });
-    return { version, mods: record.mods, ...plan, prev: keep.length && !exists(next) ? prevSetOf(modsDir) : null, recorded, warnings };
+    return { version, mods: record.mods, ...plan, prev: keep.length && !exists(next) ? prevSetOf(modsDir) : null, recorded, warnings,
+      ...(notes.length ? { notes } : {}) };
   } finally {
     rmSync(staging, { recursive: true, force: true });
     if (!swapped) rmSync(next, { recursive: true, force: true });
@@ -1016,9 +1022,11 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
     staleLayout = !keptLayout && isFile(packLayout) && !linkedLayout(packLayout) && isFile(layoutRefOf(modsDir))
       && readFileSync(packLayout).equals(readFileSync(layoutRefOf(modsDir)));
   } catch {}
+  let notes = [];
   try {
     const r = swapAll(modsDir, moves, rename, { needed: "refuse", unknown: "warn", then: "roll back", exclude, prepare, log });
     if (r.refused) throw new Error(`nothing rolled back: ${r.refused}`);
+    notes = Array.isArray(r.notes) ? r.notes : [];
   } catch (error) {
     rmSync(next, { recursive: true, force: true });
     throw error;
@@ -1078,7 +1086,8 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
       if (gone.length) log(staleLayoutLine(packLayout, gone));
     } catch {}
   }
-  return { pack: modsDir, prev, mods: set.mods, version: set.version, from: record.version ?? null, layout, reverted: reverted.restored, migration, hooks, warnings };
+  return { pack: modsDir, prev, mods: set.mods, version: set.version, from: record.version ?? null, layout, reverted: reverted.restored, migration, hooks, warnings,
+    ...(notes.length ? { notes } : {}) };
 }
 
 /**

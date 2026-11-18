@@ -2133,8 +2133,8 @@ test("overtaken (under the lock): the version installed since the check, or a re
       const logs = [];
       const r = await applyUpdate({ tgzPath: h.t.path, version: "0.2.0", modsDir: h.mods, log: (l) => logs.push(l) });
       assert.deepEqual(r.retired, ["auto-tabs"]);
-      assert.ok(r.warnings.some((w) => /without knowing the layout Herdr shows/.test(w)), r.warnings.join("\n"));
-      assert.ok(r.warnings.some((w) => /broken\.json/.test(w)));
+      assert.ok(r.notes.some((w) => /without knowing the layout Herdr shows/.test(w)), (r.notes ?? []).join("\n"));
+      assert.ok(r.notes.some((w) => /broken\.json/.test(w)));
       assert.ok(logs.some((l) => /without knowing the layout Herdr shows/.test(l)), "still said on stderr");
     } finally { h.done(); }
   });
@@ -2147,7 +2147,7 @@ test("overtaken (under the lock): the version installed since the check, or a re
       writeFileSync(join(h.home, "layouts", "broken.json"), '{"content": {"mod": "am-tabs"');
       const r = rollback({ modsDir: h.mods });
       assert.equal(r.version, "0.1.0");
-      assert.ok(r.warnings.some((w) => /without knowing the layout Herdr shows/.test(w)), r.warnings.join("\n"));
+      assert.ok(r.notes.some((w) => /without knowing the layout Herdr shows/.test(w)), (r.notes ?? []).join("\n"));
     } finally { h.done(); }
   });
 

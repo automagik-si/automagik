@@ -49,12 +49,13 @@ const refused = (r) => `agy models failed (${oneLine(r?.stderr || r?.stdout) || 
  * AG_MODELS_TTL_MS. `read(path)`/`write(path, text)` may be sync or async; `exec(command, args,
  * options)` must resolve `{ code, stdout, stderr }` (an `ENOENT` for a missing agy rejects).
  * With `rename(from, to)`, the write goes to a temp file beside the cache and is renamed into
- * place, so a reader never sees half a cache; without it the write is direct.
+ * place, so a reader never sees half a cache; without it the write is direct. `remove(path)`
+ * clears a temp file a failed rename left behind (the last list is kept either way, #809).
  * Resolves { text (the cache text, the new one when written), cache, refreshed, why (the
  * fallback reason, else null) }. A failed refresh never throws and never drops a list already
  * cached; when agy is missing and nothing is cached, `text` stays null and `why` says so.
  */
-export async function refreshAgModels({ appHome, read, write, rename, exec, now = Date.now() }) {
+export async function refreshAgModels({ appHome, read, write, rename, remove, exec, now = Date.now() }) {
   const path = agModelsPath(appHome);
   let text = null;
   try { text = await read(path); } catch { text = null; }
@@ -73,7 +74,12 @@ export async function refreshAgModels({ appHome, read, write, rename, exec, now 
   try {
     if (typeof rename === "function") { await write(tmp, next); await rename(tmp, path); }
     else await write(path, next);
-  } catch { return { text, cache: before, refreshed: false, why: "the model cache couldn't be written" }; }
+  } catch {
+    if (typeof rename === "function" && typeof remove === "function") {
+      try { await remove(tmp); } catch { /* already gone */ }
+    }
+    return { text, cache: before, refreshed: false, why: "the model cache couldn't be written" };
+  }
   return { text: next, cache: cached(next), refreshed: true, why: null };
 }
 
@@ -82,7 +88,7 @@ export async function refreshAgModels({ appHome, read, write, rename, exec, now 
  * are sync). Same contract; `exec` returns `{ code, stdout, stderr }` and may throw for a missing
  * agy.
  */
-export function refreshAgModelsSync({ appHome, read, write, rename, exec, now = Date.now() }) {
+export function refreshAgModelsSync({ appHome, read, write, rename, remove, exec, now = Date.now() }) {
   const path = agModelsPath(appHome);
   let text = null;
   try { text = read(path); } catch { text = null; }
@@ -101,6 +107,11 @@ export function refreshAgModelsSync({ appHome, read, write, rename, exec, now = 
   try {
     if (typeof rename === "function") { write(tmp, next); rename(tmp, path); }
     else write(path, next);
-  } catch { return { text, cache: before, refreshed: false, why: "the model cache couldn't be written" }; }
+  } catch {
+    if (typeof rename === "function" && typeof remove === "function") {
+      try { remove(tmp); } catch { /* already gone */ }
+    }
+    return { text, cache: before, refreshed: false, why: "the model cache couldn't be written" };
+  }
   return { text: next, cache: cached(next), refreshed: true, why: null };
 }
