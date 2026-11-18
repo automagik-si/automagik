@@ -96,6 +96,16 @@ const mutations = [
     edits: [['scripts/configure.ts', '!hostUnderSiteName(origin.hostname, PASSKEY_SITE_NAME)', 'false']],
   },
   {
+    name: 'drop the Custom Domain from the generated config',
+    test: 'the origin host is the one Custom Domain',
+    edits: [['scripts/configure.ts', '\\ncustom_domain = true\\n', '\\ncustom_domain = false\\n']],
+  },
+  {
+    name: 'let configure accept an origin with a port',
+    test: 'an invalid origin writes no route',
+    edits: [['scripts/configure.ts', '    origin.port) {', '    false) {']],
+  },
+  {
     name: 'let CI skip the page browser tests',
     test: 'the CI job runs the browser tests',
     edits: [['../../.github/workflows/ci.yml', 'ID_PAGES_BROWSER: required', 'ID_PAGES_BROWSER: optional']],

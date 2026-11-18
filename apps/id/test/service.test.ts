@@ -516,6 +516,8 @@ describe('Worker + D1 identity', () => {
       response: authenticator.authenticate(options, origin),
     }));
     const metadata = await jsonOK(await request('/.well-known/openid-configuration'));
+    // The issuer every product stores with the subject; DEPLOY.md's check names this string.
+    expect(metadata.issuer).toBe('https://id.automagik.si/api/auth');
     expect(metadata.code_challenge_methods_supported).toEqual(['S256']);
     expect(metadata.registration_endpoint).toBeUndefined();
     for (const field of ['authorization_endpoint', 'token_endpoint', 'userinfo_endpoint',
