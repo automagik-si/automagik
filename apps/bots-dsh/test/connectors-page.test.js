@@ -59,11 +59,14 @@ const opened = []
 const clipboard = { writeText: () => Promise.resolve() }
 const dom = new JSDOM('<!doctype html><body></body>')
 const module = { exports: {} }
+// The page reads the ?mock-apps flag from window.location; the vm's window object is the one
+// the tests set it on.
+const pageWindow = { matchMedia: () => ({ matches: false }), dshDesktop: {}, open: (url) => { opened.push(url); return null } }
 runInNewContext(outputFiles[0].text, {
   module, exports: module.exports,
   document: dom.window.document,
   navigator: { clipboard },
-  window: { matchMedia: () => ({ matches: false }), dshDesktop: {}, open: (url) => { opened.push(url); return null } },
+  window: pageWindow,
   require: name => (name === 'react' ? react : name === 'react-dom' ? { createPortal: node => node } : {}),
 })
 const { MailCatalogRow, MailToolCell, ConnectorsPage } = module.exports
@@ -337,4 +340,77 @@ test('a sign-in found after a reload is drawn once, and a browser sign-in says w
   slots.length = 0
   renderPage(pageWith(github({ state: 'connecting', pending: { kind: 'browser', url: 'https://github.com/login/oauth' } })))
   assert.equal(pageText().split('Finish signing in in your browser.').length - 1, 1)
+})
+
+// --- the ?mock-apps preview ----------------------------------------------
+// The preview is the real page under a flag: the same pieces, with the Automagik overlay
+// first and every control inert. The actions proxy throws if the mock ever reaches the host.
+const mockPage = () => ({
+  roster: {
+    connectors: {
+      connectors: [
+        { id: 'github', name: 'GitHub', category: 'dev', about: 'Repositories and requests', auth: { kind: 'none' }, state: 'off' },
+        { id: 'notion', name: 'Notion', category: 'docs', about: 'Pages and databases', auth: { kind: 'none' }, state: 'off' },
+        { id: 'paypal', name: 'PayPal', category: 'commerce', about: 'Orders and payments', auth: { kind: 'none' }, state: 'off' },
+      ],
+      mail: { accounts: [] },
+    },
+  },
+  actions: new Proxy({}, { get: () => () => { throw new Error('the mock calls no host action') } }),
+})
+const withFlag = (value, run) => {
+  pageWindow.location = { search: value }
+  try { return run() } finally { pageWindow.location = { search: '' } }
+}
+const mainButton = name => collect(n => n.type === 'button' && n.props?.className === 'bt-app-main' && flatten(n).join('').startsWith(name))[0]
+
+test('?mock-apps shows the official section first, sample states, then upstream categories', () => {
+  slots.length = 0
+  withFlag('?mock-apps', () => {
+    renderPage(mockPage())
+    const titles = collect(n => n.type === 'h3').map(n => flatten(n).join(''))
+    assert.equal(titles[0], 'Automagik official')
+    assert.ok(titles.includes('Developer') && titles.includes('Docs & files') && titles.includes('Commerce'), titles.join(' | '))
+    assert.match(pageText(), /SAMPLE DATA/)
+    for (const name of ['Omni', 'Genie', 'Claude', 'Codex']) assert.ok(pageText().includes(name), name)
+    const labels = collect(n => n.type === 'button').map(n => flatten(n).join(''))
+    for (const label of ['Install', 'Installed', 'Update']) assert.ok(labels.includes(label), `button "${label}"`)
+    assert.ok((pageText().match(/Official/g) ?? []).length >= 4, 'every official app carries the tag')
+    assert.match(pageText(), /Included with Automagik/)
+    assert.match(pageText(), /Sample row: nothing is installed from this preview\./)
+  })
+})
+
+test('?mock-apps starts with Genie expanded, and a click expands only that row', () => {
+  slots.length = 0
+  withFlag('?mock-apps', () => {
+    renderPage(mockPage())
+    const openedBefore = opened.length
+    const expanded = () => collect(n => n.type === 'button' && n.props?.className === 'bt-app-main').filter(n => n.props?.['aria-expanded'] === true).map(n => flatten(n)[0])
+    assert.deepEqual(expanded(), ['Genie'])
+    mainButton('Claude').props.onClick()
+    assert.deepEqual(expanded(), ['Claude'])
+    assert.equal((pageText().match(/Sample row: nothing is installed from this preview\./g) ?? []).length, 1, 'one row expanded at a time')
+    mainButton('GitHub').props.onClick()
+    assert.deepEqual(expanded(), ['GitHub'], 'an upstream row expands too')
+    assert.equal(opened.length, openedBefore, 'no row opens a page')
+  })
+})
+
+test('?mock-apps controls are inert and the page without the flag is unchanged', () => {
+  slots.length = 0
+  withFlag('?mock-apps', () => {
+    renderPage(mockPage())
+    const buttons = collect(n => n.type === 'button')
+    for (const label of ['Install', 'Installed', 'Update', 'Connect', 'Custom']) {
+      const button = buttons.find(n => flatten(n).join('') === label || flatten(n).join('').endsWith(label))
+      if (button) button.props.onClick()
+    }
+    rerender()
+    assert.match(pageText(), /SAMPLE DATA/)
+  })
+  slots.length = 0
+  renderPage(mockPage())
+  assert.doesNotMatch(pageText(), /SAMPLE DATA|Automagik official/)
+  assert.match(pageText(), /Recommended/)
 })

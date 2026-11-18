@@ -3001,6 +3001,20 @@ Object.assign(ZH, {
   "Let it keep working?": "让它继续工作吗？",
   "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。"
 });
+Object.assign(ZH, {
+  "Automagik official": "Automagik 官方",
+  "Official": "官方",
+  "Install": "安装",
+  "Installed": "已安装",
+  "SAMPLE DATA": "示例数据",
+  "Included with Automagik": "随 Automagik 提供",
+  "Sample row: nothing is installed from this preview.": "示例行：此预览不会安装任何内容。",
+  "A mock of the Apps page. Nothing here installs; click a row to expand it.": "应用页面的模型：这里不会安装任何内容；点击一行即可展开。",
+  "The Main Bot: your team, channels, and memory": "主 Bot：你的团队、频道和记忆",
+  "Plans, works, and reports on wishes": "规划、执行并汇报愿望",
+  "Claude Code through the Agent Client Protocol": "通过 Agent Client Protocol 使用 Claude Code",
+  "OpenAI Codex through the Agent Client Protocol": "通过 Agent Client Protocol 使用 OpenAI Codex"
+});
 Object.assign(ZH, HOST_ZH);
 var fill = (text2, params) => params ? text2.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match) : text2;
 var service = null;
@@ -30150,6 +30164,39 @@ button.bt-us-row:hover{background:var(--bt-hover)}
 }
 `;
 
+// src/host/connectors/official.js
+var OFFICIAL_APPS = Object.freeze([
+  Object.freeze({
+    id: "omni",
+    name: "Omni",
+    kind: "agent",
+    mark: "omni",
+    about: "The Main Bot: your team, channels, and memory"
+  }),
+  Object.freeze({
+    id: "genie",
+    name: "Genie",
+    kind: "agent",
+    mark: "genie",
+    about: "Plans, works, and reports on wishes"
+  }),
+  Object.freeze({
+    id: "claude",
+    name: "Claude",
+    kind: "acp",
+    mark: "claude",
+    about: "Claude Code through the Agent Client Protocol"
+  }),
+  Object.freeze({
+    id: "codex",
+    name: "Codex",
+    kind: "acp",
+    mark: "codex",
+    about: "OpenAI Codex through the Agent Client Protocol"
+  })
+]);
+var OFFICIAL_IDS = Object.freeze(OFFICIAL_APPS.map((app) => app.id));
+
 // src/client/connectors-page.js
 var import_react81 = require("react");
 var CATEGORIES = [["dev", "Developer"], ["docs", "Docs & files"], ["work", "Work"], ["design", "Design"], ["data", "Data"], ["commerce", "Commerce"], ["search", "Search"]];
@@ -30180,7 +30227,7 @@ function tileStatus(app) {
   if (app.state === "error") return t("Could not connect: {error}", { error: hostText(app.error ?? "") });
   return null;
 }
-function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
+function AppTile({ app, actions, onOpen, showsSignIn, onSignIn, inert = false, expanded }) {
   const [busy, setBusy] = (0, import_react81.useState)(false);
   const [error, setError] = (0, import_react81.useState)(null);
   const fresh = useJustConnected(app.state);
@@ -30207,6 +30254,7 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
   const status = error ? hostText(error) : tileStatus(app);
   const label = busy ? t("Connecting…") : ready ? t("Connected") : off ? t("Connect") : app.state === "error" ? t("Try again") : app.state === "needs-sign-in" ? t("Sign in again") : t("Open");
   const press = () => {
+    if (inert) return void 0;
     if (off) return connect();
     if (app.state === "error") return void run2(actions.connectorRetry(app.id));
     return onOpen();
@@ -30219,7 +30267,7 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
     { ref: tile, className: "bt-app", "data-state": app.state, "data-fresh": fresh ? "" : void 0, "data-error": error ? "" : void 0, "data-signing": signIn ? "" : void 0 },
     (0, import_react81.createElement)(
       "button",
-      { type: "button", className: "bt-app-main", onClick: onOpen },
+      { type: "button", className: "bt-app-main", onClick: onOpen, "aria-expanded": expanded },
       (0, import_react81.createElement)(AppIcon, { app }),
       (0, import_react81.createElement)(
         "span",
@@ -30237,12 +30285,13 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
     signIn ? (0, import_react81.createElement)(SignInPanel, { connector: app, actions, run: run2 }) : null
   );
 }
-function Grid({ apps, actions, open, place = null, signInPlaces }) {
+function Grid({ apps, actions, open, place = null, signInPlaces, inert = false }) {
   const homePlace = (app) => FEATURED.includes(app.id) ? "featured" : app.category;
   return (0, import_react81.createElement)("div", { className: "bt-app-grid" }, apps.map((app) => (0, import_react81.createElement)(AppTile, {
     key: app.id,
     app,
     actions,
+    inert,
     onOpen: () => open(app.id),
     showsSignIn: place === null || place === (signInPlaces.current[app.id] ?? homePlace(app)),
     onSignIn: () => {
@@ -30287,7 +30336,160 @@ function ConnectedSummary({ apps, count, onClick }) {
     (0, import_react81.createElement)(ChevronRightIcon)
   );
 }
-function ConnectorsPage({ roster, actions }) {
+var MOCK_STATE = Object.freeze({ omni: "installed", genie: "update", claude: "install", codex: "installed" });
+var MOCK_INERT = Object.freeze({});
+var mockFlag = () => {
+  try {
+    const search = String(window.location?.search ?? "").replace(/^\?/, "");
+    return search.split("&").some((part) => part === "mock-apps" || part.startsWith("mock-apps="));
+  } catch {
+    return false;
+  }
+};
+function OfficialMark({ app, size = 22 }) {
+  if (app.mark === "omni") return (0, import_react81.createElement)(OmniMark, { size });
+  if (app.mark === "genie") return (0, import_react81.createElement)("img", { className: "bt-agent-mark", src: LAMP, width: size, height: size, alt: "", "aria-hidden": true, draggable: false });
+  return (0, import_react81.createElement)(AgentMark, { id: app.mark, name: app.name, size });
+}
+function officialLabel(state2) {
+  return state2 === "installed" ? t("Installed") : state2 === "update" ? t("Update") : t("Install");
+}
+function OfficialTile({ app, state: state2, expanded, onToggle }) {
+  const installed = state2 !== "install";
+  return (0, import_react81.createElement)(
+    "div",
+    { className: "bt-app", "data-state": installed ? "ready" : "off" },
+    (0, import_react81.createElement)(
+      "button",
+      {
+        type: "button",
+        className: "bt-app-main",
+        "aria-expanded": expanded,
+        onClick: onToggle
+      },
+      (0, import_react81.createElement)("span", { className: "bt-app-icon" }, (0, import_react81.createElement)(OfficialMark, { app })),
+      (0, import_react81.createElement)(
+        "span",
+        { className: "bt-app-text" },
+        (0, import_react81.createElement)("span", { className: "bt-app-name" }, app.name, (0, import_react81.createElement)("span", { className: "bt-tag" }, t("Official"))),
+        (0, import_react81.createElement)("span", { className: "bt-app-status" }, t(app.about))
+      )
+    ),
+    (0, import_react81.createElement)("button", {
+      type: "button",
+      className: state2 === "installed" ? "bt-app-btn bt-app-btn-done" : "bt-app-btn",
+      // The mock installs nothing: the control draws its state and does nothing.
+      onClick: () => {
+      }
+    }, state2 === "installed" ? (0, import_react81.createElement)(CheckIcon) : null, officialLabel(state2))
+  );
+}
+function MockDetail({ app, official, state: state2 }) {
+  const ready = official ? state2 !== "install" : app.state === "ready";
+  const label = official ? officialLabel(state2) : ready ? t("Connected") : t("Connect");
+  return (0, import_react81.createElement)(
+    "div",
+    { className: "bt-set-card bt-connectors-card bt-app-detail bt-app-expanded" },
+    (0, import_react81.createElement)(
+      "div",
+      { className: "bt-connector", "data-state": ready ? "ready" : "off" },
+      (0, import_react81.createElement)(
+        "div",
+        { className: "bt-connector-head" },
+        (0, import_react81.createElement)("span", { className: "bt-connector-mark" }, official ? (0, import_react81.createElement)(OfficialMark, { app, size: 20 }) : (0, import_react81.createElement)(ConnectorMark, { connector: app })),
+        (0, import_react81.createElement)(
+          "span",
+          { className: "bt-connector-text" },
+          (0, import_react81.createElement)("span", { className: "bt-connector-name" }, app.name, official ? (0, import_react81.createElement)("span", { className: "bt-tag" }, t("Official")) : null),
+          (0, import_react81.createElement)("span", { className: "bt-connector-status" }, t(app.about ?? ""))
+        ),
+        (0, import_react81.createElement)(
+          "span",
+          { className: "bt-connector-actions" },
+          (0, import_react81.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: () => {
+          } }, label)
+        )
+      )
+    ),
+    (0, import_react81.createElement)(
+      "div",
+      { className: "bt-set-row" },
+      (0, import_react81.createElement)(
+        "span",
+        { className: "bt-set-copy" },
+        (0, import_react81.createElement)("span", { className: "bt-bs-label" }, t(official ? "Included with Automagik" : "SAMPLE DATA")),
+        (0, import_react81.createElement)("span", { className: "bt-set-hint" }, t("Sample row: nothing is installed from this preview."))
+      )
+    )
+  );
+}
+function MockSection({ title, hint, apps, openId, onToggle, official = false }) {
+  if (apps.length === 0) return null;
+  const open = apps.find((app) => app.id === openId);
+  return (0, import_react81.createElement)(
+    "section",
+    { className: "bt-app-section" },
+    title === void 0 && hint === void 0 ? null : (0, import_react81.createElement)(
+      "div",
+      { className: "bt-app-section-head" },
+      title === void 0 ? null : (0, import_react81.createElement)("h3", null, title),
+      hint === void 0 ? null : (0, import_react81.createElement)("span", { className: "bt-app-status" }, hint)
+    ),
+    (0, import_react81.createElement)("div", { className: "bt-app-grid" }, apps.map((app) => official ? (0, import_react81.createElement)(OfficialTile, { key: app.id, app, state: MOCK_STATE[app.id], expanded: openId === app.id, onToggle: () => onToggle(app.id) }) : (0, import_react81.createElement)(AppTile, { key: app.id, app, actions: MOCK_INERT, inert: true, showsSignIn: true, expanded: openId === app.id, onOpen: () => onToggle(app.id) }))),
+    open ? (0, import_react81.createElement)(MockDetail, { app: open, official, state: MOCK_STATE[open.id] }) : null
+  );
+}
+function MockAppsPage({ roster }) {
+  const [query, setQuery] = (0, import_react81.useState)("");
+  const [category, setCategory] = (0, import_react81.useState)("");
+  const [expanded, setExpanded] = (0, import_react81.useState)("genie");
+  const upstream = (roster?.connectors?.connectors ?? []).filter((app) => app.id !== "mail");
+  const queryText = query.trim();
+  const searching = queryText !== "" || category !== "";
+  const official = category === "" ? OFFICIAL_APPS.filter((app) => matches(queryText, app.name, app.about, t(app.about))) : [];
+  const found = upstream.filter((app) => (category === "" || app.category === category) && matches(queryText, app.name, app.about ?? "", t(app.about ?? "")));
+  const toggle = (id) => setExpanded((current) => current === id ? null : id);
+  const inCategory = (id) => upstream.filter((app) => app.category === id);
+  const sections = searching ? [
+    (0, import_react81.createElement)(MockSection, { key: "official", title: t("Automagik official"), hint: t("Included with Automagik"), apps: official, openId: expanded, onToggle: toggle, official: true }),
+    (0, import_react81.createElement)(MockSection, { key: "found", apps: found, openId: expanded, onToggle: toggle })
+  ] : [
+    (0, import_react81.createElement)(MockSection, { key: "official", title: t("Automagik official"), hint: t("Included with Automagik"), apps: official, openId: expanded, onToggle: toggle, official: true }),
+    ...CATEGORIES.map(([id, label]) => (0, import_react81.createElement)(MockSection, { key: id, title: t(label), apps: inCategory(id), openId: expanded, onToggle: toggle }))
+  ];
+  return (0, import_react81.createElement)(
+    "div",
+    { className: "bt-apps" },
+    (0, import_react81.createElement)(
+      "div",
+      { className: "bt-app-note", role: "note" },
+      (0, import_react81.createElement)("span", { className: "bt-tag" }, t("SAMPLE DATA")),
+      (0, import_react81.createElement)("span", null, t("A mock of the Apps page. Nothing here installs; click a row to expand it."))
+    ),
+    (0, import_react81.createElement)(
+      "div",
+      { className: "bt-app-bar" },
+      (0, import_react81.createElement)(
+        "label",
+        { className: "bt-app-search" },
+        (0, import_react81.createElement)(SearchIcon),
+        (0, import_react81.createElement)("input", { type: "search", "aria-label": t("Search apps"), placeholder: t("Search apps"), value: query, onChange: (e) => setQuery(e.target.value) })
+      ),
+      (0, import_react81.createElement)("button", { type: "button", className: "bt-app-pill", onClick: () => {
+      } }, (0, import_react81.createElement)(PlusIcon), t("Custom"))
+    ),
+    (0, import_react81.createElement)(
+      "div",
+      { className: "bt-app-chips", role: "group", "aria-label": t("Category") },
+      [["", "All"], ...CATEGORIES].map(([id, label]) => (0, import_react81.createElement)("button", { key: id || "all", type: "button", "aria-pressed": category === id, onClick: () => setCategory(id) }, t(label)))
+    ),
+    found.length === 0 && official.length === 0 ? (0, import_react81.createElement)("p", { className: "bt-app-empty" }, t("Nothing matches")) : sections
+  );
+}
+function ConnectorsPage(props) {
+  return mockFlag() ? (0, import_react81.createElement)(MockAppsPage, props) : (0, import_react81.createElement)(AppsPage, props);
+}
+function AppsPage({ roster, actions }) {
   const [query, setQuery] = (0, import_react81.useState)("");
   const [category, setCategory] = (0, import_react81.useState)("");
   const [view, setView] = (0, import_react81.useState)(null);
@@ -30403,6 +30605,9 @@ function ConnectorsPage({ roster, actions }) {
 }
 var CONNECTORS_PAGE_CSS = `
 .bt-apps{display:flex;flex-direction:column;gap:14px;container-type:inline-size}
+.bt-app-note{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px;line-height:16px;color:var(--bt-ink-3)}
+.bt-app-note .bt-tag{max-width:none}
+.bt-app-expanded{grid-column:1/-1;margin-top:4px}
 .bt-app-bar{display:flex;align-items:center;gap:8px}
 .bt-app-search{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-card);color:var(--bt-ink-3);cursor:text}
 .bt-app-search:focus-within{border-color:var(--bt-line-2)}

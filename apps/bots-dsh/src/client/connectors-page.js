@@ -5,7 +5,11 @@
 // view, which reuses the rows in connectors.js. Connected apps and the mailbox
 // accounts have their own view.
 import { createElement as h, useEffect, useRef, useState } from 'react'
+import { OFFICIAL_APPS } from '../host/connectors/official.js'
 import { ConnectorMark, ConnectorRow, MailAccount, MailCatalogRow, MailPending, MailRules, AddMenu, openSignIn, SignInPanel } from './connectors.js'
+import { LAMP } from './clay-art.js'
+import { OmniMark } from './logo.js'
+import { AgentMark } from './marks.js'
 import { useMorph } from './motion.js'
 import { reserveWindow } from './open-window.js'
 import { ChevronLeftIcon, ChevronRightIcon, CheckIcon, PlusIcon, SearchIcon } from './icons.js'
@@ -46,7 +50,7 @@ function tileStatus(app) {
   return null
 }
 
-function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
+function AppTile({ app, actions, onOpen, showsSignIn, onSignIn, inert = false, expanded }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const fresh = useJustConnected(app.state)
@@ -71,6 +75,7 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
   const status = error ? hostText(error) : tileStatus(app)
   const label = busy ? t('Connecting…') : ready ? t('Connected') : off ? t('Connect') : app.state === 'error' ? t('Try again') : app.state === 'needs-sign-in' ? t('Sign in again') : t('Open')
   const press = () => {
+    if (inert) return undefined
     if (off) return connect()
     if (app.state === 'error') return void run(actions.connectorRetry(app.id))
     return onOpen()
@@ -79,7 +84,7 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
   const tile = useRef(null)
   useMorph(tile, signIn ?? '')
   return h('div', { ref: tile, className: 'bt-app', 'data-state': app.state, 'data-fresh': fresh ? '' : undefined, 'data-error': error ? '' : undefined, 'data-signing': signIn ? '' : undefined },
-    h('button', { type: 'button', className: 'bt-app-main', onClick: onOpen },
+    h('button', { type: 'button', className: 'bt-app-main', onClick: onOpen, 'aria-expanded': expanded },
       h(AppIcon, { app }),
       h('span', { className: 'bt-app-text' },
         h('span', { className: 'bt-app-name' }, app.name, app.custom ? h('span', { className: 'bt-tag' }, t('Added')) : null),
@@ -91,10 +96,10 @@ function AppTile({ app, actions, onOpen, showsSignIn, onSignIn }) {
 
 // An app can be listed in two sections. Only one tile draws the sign-in: the one
 // that was clicked, or after a reload the first one on the page.
-function Grid({ apps, actions, open, place = null, signInPlaces }) {
+function Grid({ apps, actions, open, place = null, signInPlaces, inert = false }) {
   const homePlace = app => (FEATURED.includes(app.id) ? 'featured' : app.category)
   return h('div', { className: 'bt-app-grid' }, apps.map(app => h(AppTile, {
-    key: app.id, app, actions,
+    key: app.id, app, actions, inert,
     onOpen: () => open(app.id),
     showsSignIn: place === null || place === (signInPlaces.current[app.id] ?? homePlace(app)),
     onSignIn: () => { signInPlaces.current[app.id] = place },
@@ -125,7 +130,124 @@ function ConnectedSummary({ apps, count, onClick }) {
     t('{count} connected', { count }), h(ChevronRightIcon))
 }
 
-export function ConnectorsPage({ roster, actions }) {
+// --- the mock behind ?mock-apps ------------------------------------------
+//
+// The planned Apps page: Automagik's official apps on top, the upstream catalog below,
+// all of it sample data. No install logic: every button is inert and a row only expands.
+// It is drawn from the page's own tile, grid, section and row pieces, so what it shows is
+// what the real page would look like.
+
+const MOCK_STATE = Object.freeze({ omni: 'installed', genie: 'update', claude: 'install', codex: 'installed' })
+const MOCK_INERT = Object.freeze({})
+
+const mockFlag = () => {
+  try {
+    const search = String(window.location?.search ?? '').replace(/^\?/, '')
+    return search.split('&').some(part => part === 'mock-apps' || part.startsWith('mock-apps='))
+  } catch {
+    return false
+  }
+}
+
+function OfficialMark({ app, size = 22 }) {
+  if (app.mark === 'omni') return h(OmniMark, { size })
+  if (app.mark === 'genie') return h('img', { className: 'bt-agent-mark', src: LAMP, width: size, height: size, alt: '', 'aria-hidden': true, draggable: false })
+  return h(AgentMark, { id: app.mark, name: app.name, size })
+}
+
+function officialLabel(state) {
+  return state === 'installed' ? t('Installed') : state === 'update' ? t('Update') : t('Install')
+}
+
+function OfficialTile({ app, state, expanded, onToggle }) {
+  const installed = state !== 'install'
+  return h('div', { className: 'bt-app', 'data-state': installed ? 'ready' : 'off' },
+    h('button', {
+      type: 'button', className: 'bt-app-main', 'aria-expanded': expanded,
+      onClick: onToggle,
+    },
+      h('span', { className: 'bt-app-icon' }, h(OfficialMark, { app })),
+      h('span', { className: 'bt-app-text' },
+        h('span', { className: 'bt-app-name' }, app.name, h('span', { className: 'bt-tag' }, t('Official'))),
+        h('span', { className: 'bt-app-status' }, t(app.about)))),
+    h('button', {
+      type: 'button', className: state === 'installed' ? 'bt-app-btn bt-app-btn-done' : 'bt-app-btn',
+      // The mock installs nothing: the control draws its state and does nothing.
+      onClick: () => {},
+    }, state === 'installed' ? h(CheckIcon) : null, officialLabel(state)))
+}
+
+function MockDetail({ app, official, state }) {
+  const ready = official ? state !== 'install' : app.state === 'ready'
+  const label = official ? officialLabel(state) : ready ? t('Connected') : t('Connect')
+  return h('div', { className: 'bt-set-card bt-connectors-card bt-app-detail bt-app-expanded' },
+    h('div', { className: 'bt-connector', 'data-state': ready ? 'ready' : 'off' },
+      h('div', { className: 'bt-connector-head' },
+        h('span', { className: 'bt-connector-mark' }, official ? h(OfficialMark, { app, size: 20 }) : h(ConnectorMark, { connector: app })),
+        h('span', { className: 'bt-connector-text' },
+          h('span', { className: 'bt-connector-name' }, app.name, official ? h('span', { className: 'bt-tag' }, t('Official')) : null),
+          h('span', { className: 'bt-connector-status' }, t(app.about ?? ''))),
+        h('span', { className: 'bt-connector-actions' },
+          h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => {} }, label)))),
+    h('div', { className: 'bt-set-row' },
+      h('span', { className: 'bt-set-copy' },
+        h('span', { className: 'bt-bs-label' }, t(official ? 'Included with Automagik' : 'SAMPLE DATA')),
+        h('span', { className: 'bt-set-hint' }, t('Sample row: nothing is installed from this preview.')))))
+}
+
+function MockSection({ title, hint, apps, openId, onToggle, official = false }) {
+  if (apps.length === 0) return null
+  const open = apps.find(app => app.id === openId)
+  return h('section', { className: 'bt-app-section' },
+    title === undefined && hint === undefined ? null : h('div', { className: 'bt-app-section-head' },
+      title === undefined ? null : h('h3', null, title),
+      hint === undefined ? null : h('span', { className: 'bt-app-status' }, hint)),
+    h('div', { className: 'bt-app-grid' }, apps.map(app => (official
+      ? h(OfficialTile, { key: app.id, app, state: MOCK_STATE[app.id], expanded: openId === app.id, onToggle: () => onToggle(app.id) })
+      : h(AppTile, { key: app.id, app, actions: MOCK_INERT, inert: true, showsSignIn: true, expanded: openId === app.id, onOpen: () => onToggle(app.id) })))),
+    open ? h(MockDetail, { app: open, official, state: MOCK_STATE[open.id] }) : null)
+}
+
+function MockAppsPage({ roster }) {
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState('')
+  const [expanded, setExpanded] = useState('genie')
+  const upstream = (roster?.connectors?.connectors ?? []).filter(app => app.id !== 'mail')
+  const queryText = query.trim()
+  const searching = queryText !== '' || category !== ''
+  const official = category === '' ? OFFICIAL_APPS.filter(app => matches(queryText, app.name, app.about, t(app.about))) : []
+  const found = upstream.filter(app => (category === '' || app.category === category) && matches(queryText, app.name, app.about ?? '', t(app.about ?? '')))
+  const toggle = id => setExpanded(current => (current === id ? null : id))
+  const inCategory = id => upstream.filter(app => app.category === id)
+  const sections = searching
+    ? [
+      h(MockSection, { key: 'official', title: t('Automagik official'), hint: t('Included with Automagik'), apps: official, openId: expanded, onToggle: toggle, official: true }),
+      h(MockSection, { key: 'found', apps: found, openId: expanded, onToggle: toggle }),
+    ]
+    : [
+      h(MockSection, { key: 'official', title: t('Automagik official'), hint: t('Included with Automagik'), apps: official, openId: expanded, onToggle: toggle, official: true }),
+      ...CATEGORIES.map(([id, label]) => h(MockSection, { key: id, title: t(label), apps: inCategory(id), openId: expanded, onToggle: toggle })),
+    ]
+  return h('div', { className: 'bt-apps' },
+    h('div', { className: 'bt-app-note', role: 'note' },
+      h('span', { className: 'bt-tag' }, t('SAMPLE DATA')),
+      h('span', null, t('A mock of the Apps page. Nothing here installs; click a row to expand it.'))),
+    h('div', { className: 'bt-app-bar' },
+      h('label', { className: 'bt-app-search' },
+        h(SearchIcon),
+        h('input', { type: 'search', 'aria-label': t('Search apps'), placeholder: t('Search apps'), value: query, onChange: e => setQuery(e.target.value) })),
+      h('button', { type: 'button', className: 'bt-app-pill', onClick: () => {} }, h(PlusIcon), t('Custom'))),
+    h('div', { className: 'bt-app-chips', role: 'group', 'aria-label': t('Category') },
+      [['', 'All'], ...CATEGORIES].map(([id, label]) => h('button', { key: id || 'all', type: 'button', 'aria-pressed': category === id, onClick: () => setCategory(id) }, t(label)))),
+    found.length === 0 && official.length === 0 ? h('p', { className: 'bt-app-empty' }, t('Nothing matches')) : sections)
+}
+
+// The flag is read at render time, so the page without it is today's page unchanged.
+export function ConnectorsPage(props) {
+  return mockFlag() ? h(MockAppsPage, props) : h(AppsPage, props)
+}
+
+function AppsPage({ roster, actions }) {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('')
   const [view, setView] = useState(null)
@@ -207,6 +329,9 @@ export function ConnectorsPage({ roster, actions }) {
 
 export const CONNECTORS_PAGE_CSS = `
 .bt-apps{display:flex;flex-direction:column;gap:14px;container-type:inline-size}
+.bt-app-note{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px;line-height:16px;color:var(--bt-ink-3)}
+.bt-app-note .bt-tag{max-width:none}
+.bt-app-expanded{grid-column:1/-1;margin-top:4px}
 .bt-app-bar{display:flex;align-items:center;gap:8px}
 .bt-app-search{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-card);color:var(--bt-ink-3);cursor:text}
 .bt-app-search:focus-within{border-color:var(--bt-line-2)}

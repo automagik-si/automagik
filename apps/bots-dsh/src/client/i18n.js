@@ -2947,6 +2947,21 @@ Object.assign(ZH, {
   "Let it keep working?": "让它继续工作吗？",
   "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。"
 })
+// The Apps page's Automagik overlay (official.js) and its ?mock-apps preview.
+Object.assign(ZH, {
+  'Automagik official': 'Automagik 官方',
+  'Official': '官方',
+  'Install': '安装',
+  'Installed': '已安装',
+  'SAMPLE DATA': '示例数据',
+  'Included with Automagik': '随 Automagik 提供',
+  'Sample row: nothing is installed from this preview.': '示例行：此预览不会安装任何内容。',
+  'A mock of the Apps page. Nothing here installs; click a row to expand it.': '应用页面的模型：这里不会安装任何内容；点击一行即可展开。',
+  'The Main Bot: your team, channels, and memory': '主 Bot：你的团队、频道和记忆',
+  'Plans, works, and reports on wishes': '规划、执行并汇报愿望',
+  'Claude Code through the Agent Client Protocol': '通过 Agent Client Protocol 使用 Claude Code',
+  'OpenAI Codex through the Agent Client Protocol': '通过 Agent Client Protocol 使用 OpenAI Codex',
+})
 Object.assign(ZH, HOST_ZH)
 
 const fill = (text, params) => (params
