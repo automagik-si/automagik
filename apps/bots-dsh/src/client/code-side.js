@@ -1,5 +1,6 @@
-// The Code side's flip (RFC 0030 delivery 1): the state the view's Chat / Terminal switch and
-// the conversation body share, and the lazy seam to the renderer.
+// The Code side's flip (RFC 0030 delivery 1): the state a Bot conversation's Chat / Terminal
+// switch and a seat face's switch share (RFC 0022 delivery 1L), and the lazy seam to the
+// renderer.
 //
 // Nothing of the renderer loads at app start: this module carries only the switch's state, the
 // tree read (on a press) and the registration that swaps the body while Terminal is chosen.
@@ -13,7 +14,7 @@ import { FaceSwitch } from './left-bar-faces.js'
 import { botRowOf, codeHasPane, paneFor, statusKey, stillThere } from './code-side-model.js'
 import { PANE_CHUNK, loadPane } from './code-side-lazy.js'
 
-const NO_STATE = { face: 'chat', botId: null, tree: null, loading: false, error: null, selected: null, loadedAt: 0 }
+const NO_STATE = { face: 'chat', botId: null, seat: false, tree: null, loading: false, error: null, selected: null, loadedAt: 0 }
 
 // One store for the window, as the rest of the team's client uses.
 const listeners = new Set()
@@ -47,31 +48,37 @@ export async function loadTree({ fresh = false } = {}) {
   return reading
 }
 
-/** Flip the view to the open Bot's terminal; the tree is read now, not before. */
-export async function openTerminal(botId) {
-  set({ face: 'terminal', botId, selected: state.selected?.botId === botId ? state.selected : null })
+/**
+ * Flip the view to the open Bot's terminal; the tree is read now, not before.
+ *
+ * `seat` says the face belongs to a seat panel, not a conversation header. It is the same store
+ * and the same pane: the seat renders the Code body itself, so the conversation body is not
+ * registered underneath it.
+ */
+export async function openTerminal(botId, { seat = false } = {}) {
+  set({ face: 'terminal', botId, seat, selected: state.selected?.botId === botId ? state.selected : null })
   const tree = await loadTree({ fresh: true })
-  if (!tree || state.botId !== botId || state.face !== 'terminal') return
+  if (!tree || state.botId !== botId || state.face !== 'terminal' || state.seat !== seat) return
   const pane = paneFor(tree, botId)
   if (pane) set({ selected: pane })
 }
 
 /** Flip the view back to the chat; the terminal stream closes with the pane. */
 export function closeTerminal() {
-  set({ face: 'chat', botId: null, selected: null })
+  set({ face: 'chat', botId: null, seat: false, selected: null })
 }
 
 /** Choose one tree row's pane (or clear it), without leaving the Code face. */
 export function selectPane(selected) { set({ selected }) }
 
-/** The flip's state for one Bot, as the chat header's Chat / Terminal switch takes it. */
-export function useCodeFace(botId) {
+/** The flip's state for one Bot, as the chat header's or the seat's Chat / Terminal switch takes it. */
+export function useCodeFace(botId, { seat = false } = {}) {
   const current = useSyncExternalStore(storeSubscribe, snapshot, snapshot)
   return {
-    face: current.face === 'terminal' && current.botId === botId ? 'terminal' : 'chat',
+    face: current.face === 'terminal' && current.botId === botId && current.seat === seat ? 'terminal' : 'chat',
     // Whether a Bot has a pane is the renderer's own answer, read when Terminal is pressed:
     // the switch never fetches the tree or the chunk on its own.
-    onFace: (face) => { if (face === 'terminal') void openTerminal(botId); else closeTerminal() },
+    onFace: (face) => { if (face === 'terminal') void openTerminal(botId, { seat }); else closeTerminal() },
   }
 }
 
@@ -81,8 +88,11 @@ export function BotFaceSwitch({ bot }) {
   return h(FaceSwitch, { face: code.face, onFace: code.onFace })
 }
 
-/** The body registered for the conversation while the face is terminal; it loads the chunk once. */
-function CodeBody() {
+/**
+ * The body of the Terminal face, for a conversation (registered below) and for a seat's panel
+ * (rendered by seat-chat.js): it loads the chunk once and draws the pane the flip selected.
+ */
+export function CodeBody() {
   const [pane, setPane] = useState(null)
   const [failed, setFailed] = useState(false)
   useEffect(() => {
@@ -120,7 +130,8 @@ export function installCodeSide(ctx) {
     }) ?? null
   }
   const sync = () => {
-    const wanted = state.face === 'terminal'
+    // A seat panel draws the body itself; only a conversation takes the slot body.
+    const wanted = state.face === 'terminal' && !state.seat
     if (wanted && !off) {
       watchView()
       off = ctx.slots.inject('conversation.session', () => ctx.slots.register({ name: 'conversation.session', priority: -100 }, CodeBody))
@@ -140,7 +151,7 @@ export function installCodeSide(ctx) {
     listOff = null
     off?.()
     off = null
-    if (state.face === 'terminal') set({ face: 'chat', botId: null, selected: null })
+    if (state.face === 'terminal') set({ face: 'chat', botId: null, seat: false, selected: null })
   }
 }
 

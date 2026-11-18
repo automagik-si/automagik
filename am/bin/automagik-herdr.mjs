@@ -11,13 +11,14 @@
 import { execFile, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync,
-  renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
+  readSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, uptime } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
+import { coreStatus, inTestRoots } from "../coreSocket.mjs";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots,
   CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId,
@@ -30,7 +31,7 @@ import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, co
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, defaultModel, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -43,8 +44,9 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   workLeft, writesWorktree } from "../workers.js";
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
-import { SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
-  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../revive.js";
+import { BORN_SLACK_MS, FIRST_SESSION_MS, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
+  countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, ledgerRivals,
+  lastText, pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
@@ -56,6 +58,7 @@ import { botHistory, historyLines } from "../inspect.js";
 import { chooseLogin } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
+import { looksLikeGuardFolder } from "../hcGuard.mjs";
 import { DSH_TUI, approvedDataRootProblem, doctorBotProxies, doctorDshTui, installDshTui,
   uninstallDshTui, workerProxyTransport } from "../dshTui.mjs";
 import { approveProject, approvedProxyEnabled, approvedProxyState, approvedSettingsDir, parseApprovedRecord,
@@ -143,7 +146,7 @@ const commandKeyOf = async (opts) => {
 };
 
 async function hc(args, { timeout } = {}) {
-  const r = await runProgram(programPath("hc") ?? "hc", args, { timeout });
+  const r = await runProgram(hcExecutable(programPath("hc")), args, { timeout });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   return r;
 }
@@ -217,6 +220,18 @@ const modelIo = () => ({ home: home(), appHome: appHome(), read: (p) => { try { 
 /** The agents Herdr can start: its shipped table with the app home's programs.json applied. */
 const agentTable = () => withOverrides(readText(`${appHome()}/programs.json`));
 
+function checkedHcPath(file) {
+  if (!inTestRoots(file) && !isGuardFolder(dirname(file))) {
+    throw new CliError(`test guard: ${file} is outside AUTOMAGIK_HERDR_TEST_ROOTS; nothing was run.`);
+  }
+  return file;
+}
+function hcExecutable(file) {
+  if (file) return checkedHcPath(file);
+  if (process.env.AUTOMAGIK_HERDR_TEST_ROOTS) throw new CliError("hc (herdr-core) is not on PATH.");
+  return "hc";
+}
+
 /**
  * Where `program` runs from: PATH, then two folders a PATH may lack when the sidebar runs this
  * CLI with Herdr's own (~/.local/bin, where hc and Claude Code install, and the folder of the
@@ -227,7 +242,8 @@ function programPath(program) {
   const dirs = [...(process.env.PATH ?? "").split(":"), `${home()}/.local/bin`, dirname(process.execPath)];
   for (const dir of dirs) {
     if (!dir) continue;
-    try { accessSync(`${dir}/${program}`, constants.X_OK); return `${dir}/${program}`; } catch { /* next */ }
+    try { accessSync(`${dir}/${program}`, constants.X_OK); } catch { continue; }
+    return program === "hc" ? checkedHcPath(`${dir}/${program}`) : `${dir}/${program}`;
   }
   return null;
 }
@@ -260,13 +276,13 @@ function realHcPath() {
     const file = `${dir}/hc`;
     try {
       accessSync(file, constants.X_OK);
-      return file;
-    } catch { /* next */ }
+    } catch { continue; }
+    return checkedHcPath(file);
   }
   return null;
 }
 async function hcReal(args, { timeout } = {}) {
-  const r = await runProgram(realHcPath() ?? "hc", args, { timeout });
+  const r = await runProgram(hcExecutable(realHcPath()), args, { timeout });
   if (r.code === 127) throw new CliError("hc (herdr-core) is not on PATH.");
   return r;
 }
@@ -789,7 +805,13 @@ let coreOnce = null;
  */
 function coreId() {
   coreOnce ??= workerTransport().then(async (transport) => {
-    const status = transport || await hcRealJson(["server", "status"]);
+    let status = transport;
+    if (!status) {
+      const r = await coreStatus();
+      if (r.none) throw new CliError(`hc server status failed: herdr-core isn't answering on this computer (tried ${r.tried.join(", ") || "no socket"}); nothing was started.`);
+      if (r.error !== undefined) throw new CliError(`hc server status failed: ${r.error}`);
+      status = r.status;
+    }
     const id = status?.core?.id;
     if (typeof id !== "string" || !id) throw new CliError("hc server status gave no core id.");
     return id;
@@ -1022,6 +1044,25 @@ function localProjectsFor(project, appHomeDir = appHome(), extraKeys = []) {
   });
 }
 
+/**
+ * A Codex setting as ls and show report it (#1411): what the bot's live pane runs (detected:
+ * a stored value a restart hasn't applied yet isn't what runs), else the bot's own stored value
+ * (roster), else the first of `levels` ([source, value] from strongest to weakest: the profile
+ * its launch names, then its global config), else `fallback`, else null. `map` turns Codex's id
+ * into the roster's word (a service tier: priority is fast).
+ */
+function shownCodexSetting({ argv, pinned, levels = [], fallback = null, fallbackSource = "default", key, map = (v) => v }) {
+  if (Array.isArray(argv)) {
+    const detected = codexConfigValue(argv, key);
+    if (detected !== null) return { value: map(detected), source: "detected" };
+  } else if (pinned) return { value: pinned, source: "roster" };
+  for (const [source, value] of levels) {
+    if (value !== null && value !== undefined) return { value: map(value), source };
+  }
+  if (fallback !== null && fallback !== undefined) return { value: map(fallback), source: fallbackSource };
+  return { value: null, source: null };
+}
+
 /** One bot as ls and show print it. With hc failing, the bot is still shown, its pane unknown. */
 function describe(project, bot, view, hcError, projects = null) {
   const { file } = project;
@@ -1032,8 +1073,27 @@ function describe(project, bot, view, hcError, projects = null) {
     ? effectiveLead(file, bot.id, { project: project.key, projects: projectsMap })
     : { lead: "", leadProject: null, leadBot: null, warning: null };
   const leadName = lead.leadBot?.name ?? (!lead.leadProject && lead.lead ? file.bots.find((b) => b.id === lead.lead)?.name ?? null : null);
-  const fallback = bot.agent ? defaultModel(bot.agent, modelIo()) : null;
+  const agentKey = bot.agent ? resolveAgent(bot.agent, agentTable()) : null;
+  const io = modelIo();
+  const texts = agentKey ? configTexts(io.home, io.read) : {};
+  const fallback = bot.agent ? defaultModelFrom(bot.agent, texts) : null;
   const shown = shownModel({ argv: live?.foreground?.argv, agentKey: bot.agent, pinned: bot.model, fallback });
+  // #1411: the Codex reasoning effort and service tier this bot runs now (its pane's command
+  // line), else its own record when it isn't running, else the profile its launch names, else
+  // the host's global config, else Codex's own: no effort, the default (standard) tier. A
+  // template's own words are on the pane's command line too, so they read as detected.
+  const codex = agentKey === "codex";
+  const global = codex ? codexSettingsFrom(texts.codexConfig) : null;
+  const profileName = codex ? codexProfileName(live?.foreground?.argv) : null;
+  const profile = profileName ? codexProfileFrom(profileName, io) : null;
+  const shownEffort = codex
+    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.effort, key: "model_reasoning_effort",
+      levels: [["profile", profile?.effort], ["global", global?.effort]] })
+    : { value: null, source: null };
+  const shownTier = codex
+    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.tier, key: "service_tier", map: tierName, fallback: "standard",
+      levels: [["profile", profile?.tier], ["global", global?.tier]] })
+    : { value: null, source: null };
   // The workers' Antigravity mode is shown as the default (auto) when their agent is Antigravity.
   const worker = bot.worker && typeof bot.worker === "object" ? { ...bot.worker } : null;
   if (worker && resolveAgent(worker.agent ?? bot.agent) === "antigravity") worker.agyMode = agyModeOf(worker.agyMode);
@@ -1061,6 +1121,8 @@ function describe(project, bot, view, hcError, projects = null) {
     category: bot.kind === "member" && !lead.leadProject && lead.lead === mainBotOf(file)?.id ? (bot.category ?? null) : null,
     planned: bot.planned ?? null, agent: bot.agent ?? null,
     model: shown.model, modelSource: shown.source, pinnedModel: bot.model ?? null,
+    effort: shownEffort.value, effortSource: shownEffort.source, pinnedEffort: bot.effort ?? null,
+    tier: shownTier.value, tierSource: shownTier.source, pinnedTier: bot.tier ?? null,
     agyMode: bot.agent === "antigravity" ? agyModeOf(bot.agyMode) : (typeof bot.agyMode === "string" && bot.agyMode ? bot.agyMode : null),
     terminal: held?.binding.terminal ?? null, status, duplicate: false, since: held?.binding.at ?? null,
     role: bot.role, rank: bot.rank ?? null, code: bot.code !== false, look: bot.look,
@@ -1211,12 +1273,12 @@ const OPTIONS = {
   check: { type: "boolean" }, rollback: { type: "boolean" }, auto: { type: "string" },
   "worker-agent": { type: "string" }, "worker-model": { type: "string" }, "worker-effort": { type: "string" },
   "worker-template": { type: "string" }, template: { type: "string" },
-  branch: { type: "string" }, worktree: { type: "string" }, base: { type: "string" }, effort: { type: "string" },
+  branch: { type: "string" }, worktree: { type: "string" }, base: { type: "string" }, effort: { type: "string" }, tier: { type: "string" },
   task: { type: "string" }, bot: { type: "string" }, move: { type: "boolean" },
   queued: { type: "boolean" }, cancel: { type: "boolean" }, "run-queued": { type: "string" },
   fresh: { type: "boolean" }, force: { type: "boolean" }, save: { type: "boolean" }, tree: { type: "boolean" }, "fresh-shared": { type: "boolean" },
   cwd: { type: "string" },
-  revive: { type: "boolean" }, boot: { type: "boolean" }, wait: { type: "string" }, "dry-run": { type: "boolean" },
+  revive: { type: "boolean" }, boot: { type: "boolean" }, wait: { type: "string" }, "dry-run": { type: "boolean" }, last: { type: "boolean" },
   machine: { type: "string" }, linked: { type: "boolean" }, local: { type: "boolean" },
   "from-hc": { type: "boolean" }, "squad-label": { type: "string" }, apply: { type: "boolean" },
 };
@@ -1232,12 +1294,16 @@ Usage: am <command> [options]                   (every command takes --json and 
 
   ls [--all]                    bots with kind, lead, category, rank, agent, model, pane, status
                                plus planned waves, code opt-outs and Antigravity modes
-  show <bot>                    one bot in full
+  show <bot>                    one bot in full (--json: the effective effort and tier,
+                                and where each comes from)
   create --name N --agent A [--kind main|member] [--role R]
          [--code true|false]            false omits the worker instruction; default true
          [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
          [--cross-member BOT@DIR]...   reciprocal cross-project member(s) reporting to this lead
          [--character C --colour K | --omni] [--model M] [--rank R]
+         [--effort E] [--tier fast|standard]   Codex: the bot's own reasoning effort (low,
+                                       medium, high, xhigh, max, ultra) and tier; empty on
+                                       edit clears them
          [--hermes-home DIR --hermes-profile NAME]  pair an existing Hermes Bot Chat
          [--no-hermes]                   remove a pairing (does not delete the Hermes Bot)
          [--agy-mode accept-edits|auto|plan]   Antigravity's --mode; default auto
@@ -1252,26 +1318,37 @@ Usage: am <command> [options]                   (every command takes --json and 
                                        (review the diff), then restart to apply or roll back
          [--worker-template T]          (an hc template: owns the command, so it wins)
   edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category]
-             [--no-lead-project] [--no-cross-members] [--rank=]
+             [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
              [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
              [--agy-mode=auto] [--worker-agy-mode=auto]   (empty: cleared; auto is the default)
              [--agy-allow=] [--agy-deny=] [--no-agy-permissions] [--cross-member=]   (empty: cleared)
+  Effort and tier (Codex): --effort E and --tier fast|standard store the bot's own reasoning
+  effort and service tier; every start, restart and revive passes them as per-launch Codex
+  overrides, and the global Codex config is never written. What wins: the bot's record, then
+  the hc template it runs, then its Codex profile, then the global config. A --model change
+  that names no --tier runs the new model on standard, said explicitly on the launch line, so
+  a Fast a profile, a template or the host config still names never applies to it. am show
+  --json reports the effective values and their source.
   rm <bot>
   category ls | add --title T [--sub S] [--id ID] | edit <id> [--title T] [--sub S]
            | rm <id> | order <id>...
   start <bot> [--space ID] [--tab ID]   a new pane on this computer (prints its terminal)
-  revive [--dry-run] [--boot] [--wait SECONDS]
+  revive [--dry-run] [--boot] [--wait SECONDS] | revive --last
                                 after a restart of this computer: every bot the attach ledger
                                 binds here whose pane is gone, or is the bare shell herdr-core
                                 keeps in a pane whose program ended, is restarted in its place
                                 (restart --tree: same space, tab and folder, resumed where its
                                 agent allows, its helpers under it), the main bot first, each
                                 bot after its lead. A pane whose agent runs is never touched.
+                                dsh-TUI, Antigravity, Codex and Kimi ids are found on disk after
+                                launch. With no id of its own, Codex or Kimi starts a new
+                                conversation; its folder's latest one is never guessed.
                                 Each project's main bot gets one report: who resumed, who is on
                                 a new conversation and why, who isn't back and the command that
                                 brings it back by hand; it is kept in the app home's
-                                automagik-herdr/revive-last.json too. --dry-run prints the plan
-                                and touches nothing. --boot is the login service's pass: once
+                                automagik-herdr/revive-last.json too, and so is a pass that
+                                stopped early; --last shows the last pass and runs nothing.
+                                --dry-run prints the plan and touches nothing. --boot is the login service's pass: once
                                 per boot, it also takes the bots whose ended pane another
                                 command swept since the boot. --wait waits that long for
                                 herdr-core first, and prints counts only. This computer's
@@ -1490,7 +1567,12 @@ changed since it was read is never overwritten); its panes run there (M/tN). A p
 reports no status to hc can't say it is waiting for an approval: restart refuses it unless
 --force, which still sends it no keys. restart --tree works on this computer and, with
 --machine, on that machine (there it needs --force, since it runs at once); a bot whose helpers
-end with its pane there is refused until each helper's pane is ended (hc kill M/tN).`;
+end with its pane there is refused until each helper's pane is ended (hc kill M/tN).
+
+For a code agent: the am skill teaches these commands,
+https://github.com/automagik-si/automagik/blob/dev/skills/am/SKILL.md
+Install it: npx skills add automagik-si/automagik --skill am
+Report what am cannot do: https://github.com/automagik-si/automagik/issues`;
 
 /** `proxy approve`'s own help: the residual is part of the command's contract. */
 export const PROXY_USAGE = `usage: am proxy approve --project <dir>
@@ -1668,6 +1750,43 @@ export function entryFrom(opts, base, project, { creating }) {
   if (opts.model !== undefined) { checkModel(entry.agent, opts.model); entry.model = opts.model; }
   else if (entry.model && opts.agent !== undefined && !modelList(entry.agent, entry.model).includes(entry.model)) {
     throw new CliError(`${entry.name} is pinned to ${entry.model}, which ${entry.agent} doesn't list; pass --model or --no-model.`);
+  }
+  // #1411: a bot's own reasoning effort and service tier (Codex's), passed on every launch as
+  // its own overrides. Empty clears. A service tier belongs to the model choice: a --model
+  // change that names no --tier runs the new model on Codex's default tier, stored as standard
+  // and so said explicitly on the launch line, where a profile's, a template's or the host
+  // config's Fast no longer applies to it.
+  const modelChanged = (opts.model !== undefined || opts["no-model"]) && (opts.model || undefined) !== base.model;
+  const givenEffort = opts.effort !== undefined && opts.effort !== "";
+  const givenTier = opts.tier !== undefined && opts.tier !== "";
+  if (givenEffort) {
+    const why = codexEffortProblem(opts.effort);
+    if (why) throw new CliError(`--effort: ${why}.`, 2);
+    entry.effort = opts.effort;
+  }
+  if (givenTier) {
+    const why = tierProblem(opts.tier);
+    if (why) throw new CliError(`--tier: ${why} (or --tier= to clear).`, 2);
+    entry.tier = opts.tier;
+  }
+  if (opts.effort === "") entry.effort = "";
+  if (opts.tier === "") entry.tier = "";
+  const storedEffort = entry.effort !== undefined && entry.effort !== "";
+  const storedTier = entry.tier !== undefined && entry.tier !== "";
+  const codexBot = entry.agent ? resolveAgent(entry.agent, agentTable()) === "codex" : false;
+  if ((storedEffort || storedTier) && !codexBot) {
+    if (givenEffort || givenTier) {
+      throw new CliError(`--effort and --tier are a Codex bot's; ${entry.name} runs ${entry.agent || "no agent"}.`, 2);
+    }
+    entry.effort = "";
+    entry.tier = "";
+    report([`${entry.name}: its reasoning effort and service tier were cleared, since they are a Codex bot's and it runs ${entry.agent || "no agent"}.`]);
+  } else if (opts.tier === undefined && modelChanged && !creating && codexBot) {
+    // An edit that swaps the model names no tier: the new model runs on Codex's default one,
+    // stored as standard rather than left out, so the launch passes -c service_tier=default
+    // after the template's and the profile's own words and neither can keep Fast on it.
+    entry.tier = "standard";
+    if (storedTier) report([`${entry.name}: its service tier doesn't carry over to a new model; it runs standard unless --tier fast is passed with --model.`]);
   }
   // Antigravity's execution mode: applied at launch (auto unless another is stored), so the
   // default is written as no field at all and auto clears a stored one.
@@ -2130,6 +2249,10 @@ async function cmdShow(opts, [ref]) {
     ...(info.category ? [`  category     ${info.category}`] : []),
     ...(info.planned ? [`  planned      wave ${info.planned.wave}${info.planned.note ? ` · ${info.planned.note}` : ""}`] : []),
     `  agent        ${info.agent ?? "-"}`, `  model        ${info.model ? `${info.model} (${info.modelSource})` : "-"}${info.pinnedModel && info.modelSource !== "pinned" ? `, pinned ${info.pinnedModel}` : ""}`,
+    ...(info.effort !== null || info.tier !== null ? [
+      `  effort       ${info.effort ? `${info.effort} (${info.effortSource})` : "-"}`,
+      `  tier         ${info.tier ? `${info.tier} (${info.tierSource})` : "-"}`,
+    ] : []),
     ...(info.agyMode ? [`  agy mode     ${info.agyMode}`] : []),
     ...(info.autoMode ? [`  auto mode    ${info.autoMode.args.length ? `${info.autoMode.args.join(" ")} (${info.autoMode.note})` : `none: ${info.autoMode.note}`}`] : []),
     ...(info.autoMode?.sandbox && info.autoMode.sandbox.state !== "available"
@@ -2997,7 +3120,8 @@ async function seatOnMachine(project, bot, over = {}) {
   // of the seat's session. A command that picks its own session keeps it; a restart's plan
   // (over.argv) brings its own id, in its argv and its carried label.
   // A Codex --add-dir is left for that machine to weigh (codexOn, #1142): only it can resolve it.
-  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, codexWhereThere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model)];
+  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, codexWhereThere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model),
+    ...seatSettingsArgs(agentKey, bot)];
   const chosen = !over.argv && choosesSession(agentKey) && !ownsSession(source) ? newSessionId() : null;
   const command = agyGuarded(agentKey, withAgySettings(agentKey, chosen ? [...source, ...sessionIdArgs(agentKey, chosen)] : source, agySettings?.path));
   // #612: a local absolute override that isn't there falls back to the shipped run when that is.
@@ -3356,7 +3480,7 @@ async function restartOnMachine(opts, project, bot, entry) {
   if (opts.save) {
     const now = await loadRemoteProject(key, machine);
     const stored = now.raw.bots.find((b) => b?.id === bot.id);
-    if (stored) { await saveProject(now, applyBotEdit(now.raw, { ...stored, agent: entry.agent, ...(entry.model ? { model: entry.model } : { model: undefined }) })); saved = true; }
+    if (stored) { await saveProject(now, applyBotEdit(now.raw, { ...stored, agent: entry.agent, ...(entry.model ? { model: entry.model } : { model: undefined }), effort: entry.effort, tier: entry.tier })); saved = true; }
   }
   if (!opts.json) report([`${bot.name}: ${old ? `${seat.address} replaces ${old.address}, ${restartText(plan, session)}` : `${bot.name} wasn't running; started in ${seat.address}`}${saved ? `; ${BOTS_PATH} now says ${plan.agent}` : ""}.`]);
   return opts.json ? { ...seatOnJson(bot, seat), warnings, replaced: old ? held.binding.terminal : null, mode: old ? plan.mode : "start",
@@ -3415,7 +3539,8 @@ const localWhere = () => codexWhere({ home: home(), appHome: appHome(), resolve:
 async function localCodexGrantPlan(cwd) {
   const out = cwd ? await git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd) : null;
   const [gitDir, gitCommonDir] = (out ?? "").split("\n").map((l) => l.trim());
-  return codexGrantPlan({ where: localWhere(), home: home(), env: process.env, gitDir: gitDir || null, gitCommonDir: gitCommonDir || null, isDir: dirHere });
+  return { ...codexGrantPlan({ where: localWhere(), home: home(), env: process.env, gitDir: gitDir || null, gitCommonDir: gitCommonDir || null, isDir: dirHere }),
+    gitDir: gitDir || null, gitCommonDir: gitCommonDir || null };
 }
 
 /** codexGrantPlan's isDir here (#1142): true, false when it isn't there (or isn't a folder), null when stat fails otherwise. */
@@ -3610,7 +3735,8 @@ async function launchSeat(project, bot, over = {}) {
   const labels = { ...paneLabels(file, bot.id, carry, lead ? leadPane(await liveRows(lead))?.labels ?? null : null), ...carry }; // A16
   const taken = new Set(rowsOf(await hcJson(["ls"])).map((r) => r?.name).filter(Boolean));
   // A Start's command, on a new session whose id Herdr chooses (Claude), unless it picks its own.
-  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, localWhere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model)];
+  const source = over.argv ?? [...launchRun(agentKey, agent.run, bot, localWhere()), ...agyModeArgs(agentKey, agyMode), ...modelArgs(bot.agent, bot.model),
+    ...seatSettingsArgs(agentKey, bot)];
   const chosen = !over.argv && choosesSession(agentKey) && !ownsSession(source) ? newSessionId() : null;
   const session = over.argv ? (over.session ?? null) : chosen;
   if (session && agentKey === "claude") labels[SESSION_LABEL] = session;
@@ -3892,8 +4018,77 @@ function sessionBorn(dir) {
   return Number.isFinite(born) ? born : null;
 }
 
-/** Whether either agent has left sessions under this home: with none, nothing is looked up and hc is asked nothing more. */
-const sessionsOnDisk = () => existsSync(join(dshHomeOf(home(), process.env), "sessions")) || existsSync(agyHistoryPath(home()));
+/** Whether an agent has left sessions under this home: with none, nothing is looked up and hc is asked nothing more. */
+const sessionsOnDisk = () => existsSync(join(dshHomeOf(home(), process.env), "sessions")) || existsSync(agyHistoryPath(home()))
+  || existsSync(codexSessionsDir(codexHomeOf(home(), process.env))) || existsSync(kimiIndexPath(kimiHomeOf(home(), process.env)));
+
+// One read per path per pass (recordSessions, or one restart and its helpers): emptied at the
+// start of each, so a long-lived queued restart never acts on an old listing.
+const sessionDiscovery = new Map();
+
+/** Codex's existing YYYY/MM/DD folders, or null when their listing can't be read. */
+function codexFolders(dir) {
+  if (!sessionDiscovery.has(dir)) {
+    let days = null;
+    try {
+      days = [];
+      for (const y of readdirSync(dir, { withFileTypes: true })) {
+        if (!y.isDirectory() || !/^\d{4}$/.test(y.name)) continue;
+        for (const m of readdirSync(join(dir, y.name), { withFileTypes: true })) {
+          if (!m.isDirectory() || !/^(0[1-9]|1[0-2])$/.test(m.name)) continue;
+          for (const d of readdirSync(join(dir, y.name, m.name), { withFileTypes: true })) {
+            if (d.isDirectory() && /^(0[1-9]|[12]\d|3[01])$/.test(d.name)) days.push(`${y.name}/${m.name}/${d.name}`);
+          }
+        }
+      }
+    } catch { days = null; }
+    sessionDiscovery.set(dir, days);
+  }
+  return sessionDiscovery.get(dir);
+}
+
+/** A rollout's first line, at most 1 MiB; null when unreadable or longer. */
+function codexFirstLine(file) {
+  if (!sessionDiscovery.has(file)) {
+    let line = null, fd = null;
+    try {
+      fd = openSync(file, "r");
+      if (fstatSync(fd).isFile()) {
+        const cap = 1024 * 1024;
+        const bytes = Buffer.alloc(cap + 1);
+        let used = 0, end = -1;
+        while (used < bytes.length) {
+          const n = readSync(fd, bytes, used, Math.min(64 * 1024, bytes.length - used), null);
+          if (!n) break;
+          end = bytes.indexOf(10, used);
+          used += n;
+          if (end >= 0 && end < used) break;
+          end = -1;
+        }
+        if (end >= 0 || used <= cap) line = bytes.subarray(0, end >= 0 ? end : used).toString("utf8");
+      }
+    } catch { line = null; }
+    finally { if (fd !== null) closeSync(fd); }
+    sessionDiscovery.set(file, line);
+  }
+  return sessionDiscovery.get(file);
+}
+
+/** Kimi's whole index, at most 16 MiB; null when unreadable or larger. */
+function kimiIndexText(file) {
+  if (!sessionDiscovery.has(file)) {
+    let text = null;
+    try {
+      const cap = 16 * 1024 * 1024;
+      if (statSync(file).size <= cap) {
+        const bytes = readFileSync(file);
+        if (bytes.length <= cap) text = bytes.toString("utf8");
+      }
+    } catch { text = null; }
+    sessionDiscovery.set(file, text);
+  }
+  return sessionDiscovery.get(file);
+}
 
 /** hc's live panes on this computer, as hc get answers them ([] when hc can't say): discoveredSession's rivals come from them. */
 async function livePanes() {
@@ -3906,9 +4101,9 @@ async function livePanes() {
 /**
  * #939: the session the pane `get` (its address, created_ms and folder) runs on an agent that
  * takes no session id at launch, read from what that agent left under the home: DSH's session
- * folders for the pane's folder, or Antigravity's prompt history (its three fields; a prompt's
- * text is never kept). revive.js pickSession decides, right or nothing; `ledger`: the workers
- * ledger's rows (the other launches there, and the ids already tied to one). Null when there
+ * folders, Antigravity's prompt history, Codex's session_meta first line, or Kimi's index.
+ * Only ids, folders and times are read. revive.js pickSession decides, right or nothing;
+ * `ledger`: the workers ledger's rows (the other launches there, and the ids already tied to one). Null when there
  * is none, or it can't be told from another pane's. The id is held: never printed.
  */
 function discoveredSession(agentKey, get, ledger, panes) {
@@ -3931,7 +4126,48 @@ function discoveredSession(agentKey, get, ledger, panes) {
           if (born !== null) candidates.push({ id, born });
         }
       }
-    } else candidates = agyCandidates(readText(agyHistoryPath(home())) ?? "", folders);
+    } else if (agentKey === "antigravity") candidates = agyCandidates(readText(agyHistoryPath(home())) ?? "", folders);
+    else if (agentKey === "codex") {
+      const dir = codexSessionsDir(codexHomeOf(home(), process.env));
+      const days = codexFolders(dir);
+      if (days === null) return null;
+      const launch = new Date(get.created_ms);
+      launch.setDate(launch.getDate() - 1);
+      const since = `${launch.getFullYear()}/${String(launch.getMonth() + 1).padStart(2, "0")}/${String(launch.getDate()).padStart(2, "0")}`;
+      for (const day of days) {
+        if (day < since) continue;
+        const folder = join(dir, day);
+        if (!sessionDiscovery.has(folder)) {
+          let names = null;
+          try { names = readdirSync(folder); } catch { names = null; }
+          sessionDiscovery.set(folder, names);
+        }
+        const names = sessionDiscovery.get(folder);
+        if (names === null) return null;
+        for (const name of names) {
+          if (!/^rollout-.*\.jsonl$/.test(name)) continue;
+          const id = codexRolloutId(name);
+          const born = uuidV7Ms(id);
+          if (born !== null && (born < get.created_ms - BORN_SLACK_MS || born > get.created_ms + FIRST_SESSION_MS)) continue;
+          const first = codexFirstLine(join(folder, name));
+          if (first === null) return null;
+          const candidate = codexCandidate(first, folders);
+          if (candidate === undefined) return null;
+          if (candidate) candidates.push(candidate);
+        }
+      }
+    } else if (agentKey === "kimi") {
+      const kimiHome = kimiHomeOf(home(), process.env);
+      const index = kimiIndexText(kimiIndexPath(kimiHome));
+      if (index === null) return null;
+      for (const c of kimiCandidates(index, folders, kimiHome)) {
+        let dir = null;
+        try { dir = lstatSync(c.sessionDir); } catch { dir = null; }
+        if (!dir?.isDirectory()) continue;
+        const born = sessionBorn(c.sessionDir);
+        if (born !== null) candidates.push({ id: c.id, born });
+      }
+    }
   } catch { return null; }
   const { rivals, claimed } = ledgerRivals(ledger, { terminal: get.address, createdMs: get.created_ms, agentKey, folders });
   // Every other live pane on that agent in the folder is a rival too, whoever started it (as
@@ -3949,7 +4185,7 @@ function discoveredSession(agentKey, get, ledger, panes) {
 }
 
 /**
- * #939: ties each live dsh-TUI or Antigravity pane of a bot or a worker to the session it started
+ * #939: ties each live dsh-TUI, Antigravity, Codex or Kimi pane of a bot or a worker to the session it started
  * on (discoveredSession), as the briefing hook does for Claude: a session row in the workers
  * ledger and the pane's agent.session label. Once: a pane that has a label, or a session row,
  * is never looked at again, so nothing found later can replace what it holds. Never fails: what
@@ -3957,6 +4193,7 @@ function discoveredSession(agentKey, get, ledger, panes) {
  */
 async function recordSessions() {
   let recorded = 0;
+  sessionDiscovery.clear();
   if (!sessionsOnDisk()) return recorded;
   try {
     const agents = agentTable();
@@ -4703,13 +4940,14 @@ async function cmdRestart(opts, [ref]) {
   // else the ledger's last session row for that terminal (the Claude hook writes them), for
   // every agent that resumes by id.
   // hc's live panes, asked only when a session may have to be found on disk (#939): its rivals.
+  sessionDiscovery.clear();
   const panesNow = sessionsOnDisk() && (discoversSession(runningAgent ?? bot.agent) || helpers.length) ? await livePanes() : [];
   const knownSession = (get, agentKey) => {
     const id = paneSession(get, agentKey);
     if (id) return { session: id, transcript: null };
     const row = resumesById(agentKey) ? ledgerSession(ledger, get.address, agentKey, get.created_ms) : null;
     if (row) return row;
-    // #939: an agent that takes no id at launch (dsh-TUI, Antigravity) left its session on disk.
+    // #939: an agent that takes no id at launch (dsh-TUI, Antigravity, Codex, Kimi) left its session on disk.
     const found = discoveredSession(agentKey, get, ledger, panesNow);
     return found ? { session: found, transcript: null } : null;
   };
@@ -4763,6 +5001,12 @@ async function cmdRestart(opts, [ref]) {
   // --last), for every agent: beside another bot on that agent there, a new conversation, and
   // why (#328: an omp --continue picked up a teammate's). Alone there, the resume as before.
   let sharedNote = null;
+  // #1417, revive only: Codex and Kimi must have a conversation of their own, even alone.
+  if (opts.revive && plan.mode === "resume" && !resumeId && !plan.canonicalBot && ["codex", "kimi"].includes(plan.agent)) {
+    const note = `no ${agentName(plan.agent)} conversation of its own could be identified for ${was.address}, so its folder's latest one was not guessed`;
+    plan = { ...restartPlan({ ...planned, fresh: true }), note };
+    sharedNote = note;
+  }
   if (plan.mode === "resume" && !resumeId && !plan.canonicalBot) {
     const anywhere = continuesAnywhere(plan.agent);
     const sharers = await sharersOf({ view, cwd, botId: bot.id, file, agentKey: plan.agent, ledger, old, anywhere });
@@ -4951,7 +5195,7 @@ async function cmdRestart(opts, [ref]) {
     const now = loadProject(key, await writeDirOf(opts, key));
     const stored = now.raw.bots.find((b) => b?.id === bot.id);
     if (stored) {
-      await saveProject(now, applyBotEdit(now.raw, { ...stored, agent: entry.agent, ...(entry.model ? { model: entry.model } : { model: undefined }) }), { list: false });
+      await saveProject(now, applyBotEdit(now.raw, { ...stored, agent: entry.agent, ...(entry.model ? { model: entry.model } : { model: undefined }), effort: entry.effort, tier: entry.tier }), { list: false });
       saved = true;
     } else {
       // A worktree branched before the bot was added: its file has no entry to change.
@@ -6580,6 +6824,25 @@ async function cmdWorker(opts, rest) {
     const codexWithheld = codexPlan && !plan.template ? localCodexWarning(agents.codex?.run, codexPlan) : null;
     if (codexWithheld) warnings.push(codexWithheld);
     workerArgv = codexPlan ? withCodexGrants(launchArgv, codexPlan.dirs) : launchArgv;
+    // #1420: worker starts alone get a per-launch trust word, after checking the person's settings.
+    // The proxy and templates keep their commands; no config is written and no prompt is answered.
+    if (plan.template && runs === "codex") {
+      warnings.push(codexTrustKeptWarning(`${bot.name}'s Codex worker`, `template ${plan.template} owns its command`));
+    } else if (plan.agent === "codex" && proxied && !plan.template) {
+      warnings.push(codexTrustKeptWarning(`${bot.name}'s Codex worker`, "proxy"));
+    } else if (plan.agent === "codex" && !proxied && !plan.template && codexPlan) {
+      const codexHome = process.env.CODEX_HOME || join(home(), ".codex");
+      const configs = isAbsolute(codexHome)
+        ? ["/etc/codex/config.toml", "/etc/codex/managed_config.toml", join(codexHome, "config.toml")].map((path) => {
+          try { return { text: readFileSync(path, "utf8") }; } catch (error) { return { error }; }
+        }) : [{ error: { code: "EINVAL" } }];
+      // The common dir's parent, and the project's main checkout too (a git dir kept elsewhere): one more only withholds.
+      const roots = codexPlan.gitCommonDir ? [...new Set([realDir(dirname(codexPlan.gitCommonDir)) ?? dirname(codexPlan.gitCommonDir),
+        realDir(project.key) ?? project.key].filter(Boolean))] : null;
+      const trust = codexTrustPlan({ folder: place.worktree, roots, configs, run: agents.codex?.run, home: home(), realpath: realDir });
+      if (trust.args.length) workerArgv = withCodexTrust(workerArgv, place.worktree);
+      else warnings.push(codexTrustWarning(`${bot.name}'s Codex worker`, trust.withheld));
+    }
     const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
       agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task, template: plan.template,
       templateArgv,
@@ -6775,7 +7038,7 @@ const REVIVE_RESTART_MS = Number(process.env.AUTOMAGIK_HERDR_REVIVE_RESTART_MS) 
 const REVIVE_SETTLE_MS = process.env.AUTOMAGIK_HERDR_REVIVE_SETTLE_MS !== undefined ? Number(process.env.AUTOMAGIK_HERDR_REVIVE_SETTLE_MS) || 0 : 20_000;
 const reviveStampPath = () => join(appHome(), "automagik-herdr", "revive-boot.json");
 const reviveReportPath = () => join(appHome(), "automagik-herdr", "revive-last.json");
-const REVIVE_USAGE = "usage: am revive [--dry-run] [--boot] [--wait SECONDS] [--json] | revive service install|uninstall|status";
+const REVIVE_USAGE = "usage: am revive [--dry-run] [--boot] [--wait SECONDS] [--json] | revive --last [--json] | revive service install|uninstall|status";
 
 /** Waits until herdr-core answers (`hc server status`), up to `seconds`; a CliError when it doesn't. */
 async function coreUp(seconds) {
@@ -6783,9 +7046,11 @@ async function coreUp(seconds) {
   for (;;) {
     let why;
     try {
-      const r = await hc(["server", "status", "--json"], { timeout: 10_000 });
-      if (r.code === 0) return;
-      why = (r.stderr || r.stdout).trim() || `exit ${r.code}`;
+      // Each poll asks the socket straight (never hc, which would start a core), bound as the
+      // old hc call was: 10 s each, so the last poll still reports why, not a cut-short wait.
+      const r = await coreStatus(process.env, { timeoutMs: 10_000 });
+      if (Object.hasOwn(r, "status")) return;
+      why = r.none ? `core is not running (no socket answers: ${r.tried.join(", ") || "no socket"})` : r.error;
     } catch (e) { why = e?.message ?? String(e); }
     if (Date.now() >= until) throw new CliError(`herdr-core isn't answering${seconds ? ` ${seconds}s on` : ""} (${why.split("\n")[0]}). Nothing was started.`);
     await later(Math.min(2000, Math.max(100, until - Date.now())));
@@ -6835,18 +7100,28 @@ async function reviveOne(target, bot) {
  * plan, nothing touched. --wait S: waits that long for herdr-core first.
  */
 async function cmdRevive(opts, [verb, sub, ...more]) {
+  if (opts.last) return reviveLast(opts, verb);
   if (verb === "service") return reviveService(opts, sub, more);
   if (verb) throw new CliError(REVIVE_USAGE, 2);
   const wait = opts.wait === undefined ? 0 : Number(opts.wait);
   if (!Number.isFinite(wait) || wait < 0 || wait > 86_400) throw new CliError("--wait takes seconds, 0 to 86400.", 2);
   const dry = Boolean(opts["dry-run"]);
-  await coreUp(wait);
   const bootMs = bootTime();
+  // Before herdr-core is asked: a second boot pass while it is down says so and keeps the record as it is.
   if (opts.boot && !dry) {
     let ran = null;
     try { ran = JSON.parse(readFileSync(reviveStampPath(), "utf8"))?.boot_ms ?? null; } catch { ran = null; }
     if (sameBoot(ran, bootMs)) return opts.json ? { ran: false, reason: "already ran for this boot" } : "revive already ran for this boot; run am revive to look again.";
   }
+  const projects = new Map();
+  if (dry) return revivePass(opts, { wait, dry, bootMs, projects });
+  // #1419: a pass that stops early is recorded too (never stamped), and its error stands.
+  try { return await revivePass(opts, { wait, dry, bootMs, projects }); } catch (e) { keepStopped(e, opts, bootMs, projects); throw e; }
+}
+
+/** cmdRevive's pass, from herdr-core's wait to the reports; `projects` is cmdRevive's, so a pass that stops early is recorded with what it knew. */
+async function revivePass(opts, { wait, dry, bootMs, projects }) {
+  await coreUp(wait);
   const core = await coreId();
   const look = async () => {
     // The ledger as it stands, never the one-time import: with no ledger there is nothing to bring back.
@@ -6860,10 +7135,9 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   let seen = await look();
   if (opts.boot && !dry && REVIVE_SETTLE_MS > 0 && seen.targets.length) { await later(REVIVE_SETTLE_MS); seen = await look(); }
   const { states, skipped } = seen;
-  // Sessions first, while each pane still stands: a dsh-TUI or Antigravity pane gets its id recorded.
+  // Sessions first, while each pane still stands: a dsh-TUI, Antigravity, Codex or Kimi pane gets its id recorded.
   if (!dry) await recordSessions();
   const me = process.env.HC_TERMINAL_ID ?? null;
-  const projects = new Map();
   const projectOfKey = (key) => {
     if (!projects.has(key)) {
       let loaded = null;
@@ -6917,19 +7191,23 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   const out = [];
   for (const proj of projects.values()) {
     const line = reportLine(proj.key ?? "(no project)", proj.results);
+    proj.report = line;
     if (!line) continue;
     const main = proj.file ? mainBotOf(proj.file) : null;
-    const binding = main ? [...fold.byKey.values()].find((b) => !b.machine && b.bot === main.id && (b.project == null || b.project === proj.key)) ?? null : null;
+    // #1419: this core's binding, and the pane it was bound to: a reused terminal is another's pane.
+    const binding = main ? [...fold.byKey.values()].find((b) => !b.machine && b.core === core && b.bot === main.id && (b.project == null || b.project === proj.key)) ?? null : null;
     let sent = null, unsent = null;
     if (!binding) unsent = main ? `${main.name} has no pane` : "the project has no main bot that can be read";
     else {
-      const live = await hcState(binding.terminal);
-      if (live.state !== "live" || !agentInForeground(live.get)) unsent = `${main.name}'s pane ${binding.terminal} runs no agent`;
-      else {
-        const r = await hc(["send", binding.terminal, line]);
-        if (r.code === 0) sent = binding.terminal;
-        else unsent = `hc send ${binding.terminal} failed (${(r.stderr || r.stdout).trim().split("\n")[0]})`;
-      }
+      try {
+        const live = await hcState(binding.terminal);
+        if (live.state !== "live" || live.get?.created_ms !== binding.created_ms || !agentInForeground(live.get)) unsent = `${main.name}'s pane ${binding.terminal} runs no agent`;
+        else {
+          const r = await hc(["send", binding.terminal, line]);
+          if (r.code === 0) sent = binding.terminal;
+          else unsent = `hc send ${binding.terminal} failed (${(r.stderr || r.stdout).trim().split("\n")[0]})`;
+        }
+      } catch (e) { unsent = `the report to ${binding.terminal} couldn't be sent (${stoppedReason(e)})`; }
     }
     out.push({ project: proj.key, report: line, sent, unsent, results: proj.results });
   }
@@ -6937,7 +7215,7 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   // What happened, kept for the owner (0600; it holds no session id), and the boot's stamp.
   try {
     mkdirSync(dirname(reviveReportPath()), { recursive: true });
-    writeFileSync(reviveReportPath(), unprinted(`${JSON.stringify({ at: new Date().toISOString(), boot_ms: bootMs, projects: out }, null, 2)}\n`), { mode: 0o600 });
+    writeFileSync(reviveReportPath(), unprinted(`${JSON.stringify({ at: new Date().toISOString(), boot_ms: bootMs, boot: Boolean(opts.boot), projects: out }, null, 2)}\n`), { mode: 0o600 });
     if (opts.boot) writeFileSync(reviveStampPath(), `${JSON.stringify({ boot_ms: bootMs, at: new Date().toISOString() })}\n`, { mode: 0o600 });
   } catch (e) { report([`revive: its record wasn't written (${opts.boot ? e?.code ?? "an error" : e?.message ?? e}).`]); }
   if (failed) exitAfter.code = 1;
@@ -6946,6 +7224,40 @@ async function cmdRevive(opts, [verb, sub, ...more]) {
   // The login service's output goes to the user journal: counts only, no folder, no name.
   if (opts.boot) return countsLine(out);
   return out.map((p) => `${p.report}\n  ${p.sent ? `Sent to the main bot (${p.sent}).` : `Not sent: ${p.unsent}. It is kept in ${reviveReportPath()}.`}`).join("\n");
+}
+
+/** Why a pass or a send stopped, for the record: a refusal's first line, else an error's code; never a stack. */
+const stoppedReason = (e) => (e instanceof CliError ? unprinted(String(e.message).split("\n")[0]) : typeof e?.code === "string" ? e.code : "an unexpected error");
+
+/**
+ * #1419: a pass that stopped early, kept in revive-last.json with `stopped: { at, boot, reason }`.
+ * The record already there for this boot is kept under it (a report not sent yet is never lost);
+ * else the projects the pass knew, none of them sent. Never throws: the pass's own error stands.
+ */
+function keepStopped(e, opts, bootMs, projects) {
+  try {
+    let base = null;
+    try { base = JSON.parse(readFileSync(reviveReportPath(), "utf8")); } catch { base = null; }
+    if (!base || typeof base !== "object" || !sameBoot(base.boot_ms, bootMs)) {
+      base = { boot_ms: bootMs, projects: [...projects.values()].map((p) => ({ project: p.key, report: p.report ?? reportLine(p.key ?? "(no project)", p.results),
+        sent: null, unsent: "the pass stopped early", results: p.results })) };
+    }
+    const stopped = { at: new Date().toISOString(), boot: Boolean(opts.boot), reason: stoppedReason(e) };
+    mkdirSync(dirname(reviveReportPath()), { recursive: true });
+    writeFileSync(reviveReportPath(), unprinted(`${JSON.stringify({ ...base, stopped }, null, 2)}\n`), { mode: 0o600 });
+    chmodSync(reviveReportPath(), 0o600);
+  } catch { /* the pass's own error is what the caller sees */ }
+}
+
+/** `revive --last`: the last pass as kept in the app home (revive.js lastText); runs nothing, asks hc nothing. */
+function reviveLast(opts, verb) {
+  if (verb || opts.boot || opts["dry-run"] || opts.wait !== undefined) throw new CliError(REVIVE_USAGE, 2);
+  const path = reviveReportPath();
+  let record = null;
+  try { record = JSON.parse(readFileSync(path, "utf8")); } catch (e) {
+    if (e?.code !== "ENOENT") throw new CliError(e instanceof SyntaxError ? `The revive record isn't valid JSON (${path}).` : `The revive record can't be read (${path}, ${e?.code ?? "an error"}).`);
+  }
+  return opts.json ? { path, record } : lastText(record, path);
 }
 
 /**
@@ -6962,9 +7274,11 @@ async function reviveService(opts, verb, more = []) {
   const said = (r) => (r.stderr || r.stdout).trim().split("\n")[0] || `exit ${r.code}`;
   if (verb === "status") {
     const enabled = process.platform === "linux" && text !== null ? (await systemctl(["is-enabled", UNIT_NAME])).code === 0 : false;
-    const out = { path: unit, installed: text !== null, ours: unitIsOurs(text), enabled };
+    const out = { path: unit, installed: text !== null, ours: unitIsOurs(text), enabled,
+      ...(text !== null ? { path_kept: unitKeepsPath(text) } : {}) };
     return opts.json ? out : !out.installed ? `The revive login service isn't installed (${unit}).`
-      : `${unit}: ${out.ours ? "Automagik Herdr's" : "not one Automagik Herdr wrote"}, ${enabled ? "enabled" : "not enabled"}.`;
+      : `${unit}: ${out.ours ? "Automagik Herdr's" : "not one Automagik Herdr wrote"}, ${enabled ? "enabled" : "not enabled"}.`
+        + (out.ours && !out.path_kept ? " It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install." : "");
   }
   if (process.platform !== "linux") {
     throw new CliError("The revive login service is built for Linux (a systemd user unit) so far; macOS (launchd) is the next delivery of #939. "
@@ -6983,14 +7297,18 @@ async function reviveService(opts, verb, more = []) {
   // The command as people run it (the link install.sh makes, which an update keeps), else the wrapper beside this file.
   const link = join(binDirOf(), "automagik-herdr");
   const runner = existsSync(link) ? link : join(dirname(fileURLToPath(import.meta.url)), "automagik-herdr");
-  const unitBody = unitText({ runner, env: process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}, wait: SERVICE_WAIT_S });
+  // A pane's guard folders (this copy's, am's, or an older version's) never become the boot pass's.
+  const guardWord = (dir) => isGuardFolder(dir) || looksLikeGuardFolder(dir);
+  const keptPath = servicePath(process.env.PATH ?? "", { binDir: binDirOf(), venv: process.env.VIRTUAL_ENV ?? null, drop: guardWord });
+  const unitBody = unitText({ runner, env: { ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}), PATH: keptPath }, wait: SERVICE_WAIT_S });
   mkdirSync(dirname(unit), { recursive: true });
   writeFileSync(unit, unitBody, { mode: 0o644 });
   const reload = await systemctl(["daemon-reload"]);
   const on = reload.code === 0 ? await systemctl(["enable", UNIT_NAME]) : reload;
   if (on.code !== 0) notes.push(`The unit is written but not enabled (systemctl --user: ${said(on)}); enable it with: systemctl --user daemon-reload && systemctl --user enable ${UNIT_NAME}`);
   notes.push("It runs at your next login after a restart of this computer. For bots that come back before anyone logs in: loginctl enable-linger.");
-  return opts.json ? { path: unit, installed: true, enabled: on.code === 0, runner, notes }
+  notes.push("The unit keeps this PATH to find the agents and hc; rerunning am revive service install refreshes it.");
+  return opts.json ? { path: unit, installed: true, enabled: on.code === 0, runner, kept_path: keptPath, notes }
     : [`Installed the revive login service (${unit}): after a restart it runs ${runner} revive --boot.`, ...notes].join("\n");
 }
 
@@ -6999,7 +7317,7 @@ async function reviveService(opts, verb, more = []) {
 const hcProgram = () => realHcPath();
 /** meterFleet.js's runner: on a linked machine through `hc exec`, else here from the home folder. */
 const meterRun = (argv, { on, timeout }) => (on
-  ? runProgram(hcProgram() ?? "hc", hcExecArgs(on, argv, timeout), { timeout: (timeout + 15) * 1000 }).then((r) => decodeExec(r, timeout))
+  ? runProgram(hcExecutable(hcProgram()), hcExecArgs(on, argv, timeout), { timeout: (timeout + 15) * 1000 }).then((r) => decodeExec(r, timeout))
   : runProgram(argv[0], argv.slice(1), { cwd: home(), timeout: timeout * 1000 }));
 
 /** The linked machines (`{ name, connected }`), or `{ why }` when hc can't say. */
@@ -7437,7 +7755,7 @@ export async function cmdDoc(opts, [verb, name, ...rest]) {
   if (rest.length) throw new CliError(`doc get takes one name (got ${[name, ...rest].join(" ")}).`, 2);
   let value;
   try {
-    value = await docGet(name, { machine: opts.machine, hc: realHcPath() ?? "hc" });
+    value = await docGet(name, { machine: opts.machine, hc: hcExecutable(realHcPath()) });
   } catch (e) {
     if (e instanceof DocError) throw new CliError(e.message, e.code);
     throw e;

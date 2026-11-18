@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { format } from 'node:util'
 import * as repeatReminder from '@deepseek-ai/dsh-repeat-tool-reminder'
+import { until } from './until.js'
 // Fei2411/DS-Bot#978: the real guard counts by tool name and canonical arguments;
 // the group relay stream is synthesized, so that integration test does not need an LLM adapter.
 
@@ -21,22 +22,49 @@ const TEAM = {
   mainBotIds: ['chief'],
   revision: 1,
   whaleStored: true,
-  bots: { chief: { id: 'chief', sessionId: 'chief', name: 'Omni', role: 'Lead', instructions: '', createdAt: 1 } },
+  bots: {
+    chief: { id: 'chief', sessionId: 'chief', name: 'Omni', role: 'Lead', instructions: '', createdAt: 1 },
+    writer: { id: 'writer', sessionId: 'writer', name: 'Writer', role: 'Writer', instructions: '', createdAt: 1 },
+  },
   rooms: { room: { id: 'room', name: 'Desk', members: ['chief'], admin: 'chief', mode: 'everyone', sessions: {}, seq: 0, log: [] } },
   exchanges: [],
   exchangeTurns: {},
   questions: {},
 }
 
-function start({ presets } = {}) {
+// Enough of a live agent for the Session paths under test (groupSessionFor, moveOn): a
+// Session, an idle status and the inbox the switch hands over.
+function liveAgent(id, { cwd } = {}) {
+  return {
+    id,
+    status: 'idle',
+    session: {
+      id,
+      header: cwd === undefined ? undefined : { cwd },
+      requestHeader: () => ({ config: {} }),
+      deriveMessages: () => [],
+      toolHistory: () => [],
+    },
+    inbox: { nextStep: [], nextTurn: [], remove: () => true },
+    followup: () => {},
+    inject: () => {},
+    send: async () => {},
+    whenIdle: async () => {},
+    runMaintenance: async work => work(new AbortController().signal),
+  }
+}
+
+function start({ presets, presetsService, teamFolder = false, agentFor = liveAgent } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-agent-preset-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify(TEAM))
-  const services = presets === undefined ? {} : { agentPresets: { list: async () => presets } }
+  const folder = teamFolder ? join(home, 'team') : undefined
+  if (folder !== undefined) mkdirSync(folder, { recursive: true })
+  const services = presetsService ?? (presets === undefined ? {} : { agentPresets: { list: async () => presets } })
   const ctx = fakeContext({ services })
   const created = []
   Object.assign(ctx, {
     workspaceRegistry: {
-      get: id => (id === 'w1' ? { id } : undefined),
+      get: id => (id === 'w1' ? { id, ...(folder === undefined ? {} : { path: folder }) } : undefined),
       resolveByPath: async () => undefined,
       create: async path => ({ id: 'w1', path }),
       archiveSession: async () => {},
@@ -46,9 +74,10 @@ function start({ presets } = {}) {
         created.push(request)
         return { sessionId: `new${created.length}` }
       },
-      resolveAgent: async id => ({ agent: { id, session: { id } } }),
+      resolveAgent: async id => ({ agent: agentFor(id) }),
     },
     sessionTitle: { rename: async () => {} },
+    sessions: { flush: async () => {} },
   })
   const rt = createRuntime(ctx, { home, github: false, diagnosticsFile: false })
   const relay = ctx.listeners.get('llm/stream').find(listener => /relayOrPass/.test(String(listener)))
@@ -78,22 +107,98 @@ const relayCall = async (relay, tools) => {
   return chunks.find(chunk => chunk.type === 'block-end').block
 }
 
-test('a new Bot Session is made with the standard preset when DSH serves it', async (t) => {
+test('a Bot\'s own Session inherits DSH\'s default preset', async (t) => {
   const { rt, created, stop } = start({ presets: [{ id: 'ptc' }, { id: 'standard' }] })
   t.after(stop)
   await rt.load()
-  await rt.createSession('Omni')
+  await rt.createBot({ name: 'Editor', role: 'Editor', instructions: 'Edit.', pickModel: true })
+  assert.deepEqual(created, [{ workspaceId: 'w1' }])
+})
+
+test('a group Session keeps the standard preset so group_relay stays directly callable', async (t) => {
+  const { rt, created, stop } = start({ presets: [{ id: 'ptc' }, { id: 'standard' }] })
+  t.after(stop)
+  await rt.load()
+  await rt.createRoom({ members: ['chief', 'writer'], name: 'Desk Two', createdBy: 'chief' })
   assert.deepEqual(created, [{ workspaceId: 'w1', agentPreset: 'standard' }])
 })
 
-test('without a usable standard preset a Bot Session keeps DSH\'s default', async (t) => {
+test('without a usable standard preset a group Session keeps DSH\'s default', async (t) => {
   for (const presets of [undefined, [{ id: 'ptc' }], [{ id: 'standard', broken: 'failed to start' }]]) {
     const { rt, created, stop } = start({ presets })
     t.after(stop)
     await rt.load()
-    await rt.createSession('Omni')
+    await rt.createSession('Desk', { group: true })
     assert.deepEqual(created, [{ workspaceId: 'w1' }])
   }
+})
+
+// The member's own group Session is made by groupSessionFor (groups.js), not by
+// createRoom: a pin dropped there would leave a group turn on PTC, where the direct
+// group_relay call is refused.
+test('a member\'s group Session made by groupSessionFor keeps the standard preset', async (t) => {
+  const { rt, created, stop } = start({ presets: [{ id: 'ptc' }, { id: 'standard' }] })
+  t.after(stop)
+  await rt.load()
+  const room = await rt.createRoom({ members: ['chief', 'writer'], name: 'Desk Three', createdBy: 'chief' })
+  assert.deepEqual(created, [{ workspaceId: 'w1', agentPreset: 'standard' }])
+  const relay = rt.teamTools.find(def => def.name === 'group_relay')
+  await relay.execute({}, { agent: { id: rt.sessionOfRoom(room) }, callId: 'round-1' })
+  await until(() => created.length > 1, { t })
+  // The member's turn waits for a reply the fake agent never sends; stop the round once
+  // the Session under test exists, so nothing keeps the file alive.
+  rt.stopRoomRound(room.id)
+  await Promise.allSettled(rt.roomRounds(room.id))
+  assert.ok(created.length > 1, 'the group round made a Session for the member it called')
+  for (const request of created.slice(1)) assert.deepEqual(request, { workspaceId: 'w1', agentPreset: 'standard' })
+})
+
+// A preset service that cannot list must not take a Session down with it: neither a
+// Bot's own chat nor a fresh group part may fail on the lookup (fix-first #1438).
+test('a failing preset service pins nothing and never stops a Session', async (t) => {
+  const services = [
+    { agentPresets: { list: async () => { throw new Error('presets are down') } } },
+    { agentPresets: { list: async () => undefined } },
+    { agentPresets: {} },
+  ]
+  for (const presetsService of services) {
+    const { rt, created, stop } = start({ presetsService })
+    t.after(stop)
+    await rt.load()
+    await rt.createBot({ name: 'Editor', role: 'Editor', instructions: 'Edit.', pickModel: true })
+    await rt.createSession('Desk', { group: true })
+    assert.deepEqual(created, [{ workspaceId: 'w1' }, { workspaceId: 'w1' }])
+  }
+})
+
+// A fresh part is made by moveOn (parts.js): the group's own Session stays on the
+// standard preset, while a Bot's own chat asks for no preset (the roster test above
+// covers its first part).
+test('a fresh part of a Bot\'s own chat asks for no preset', async (t) => {
+  const { rt, created, stop } = start({ presets: [{ id: 'ptc' }, { id: 'standard' }] })
+  t.after(stop)
+  await rt.load()
+  const bot = await rt.createBot({ name: 'Editor', role: 'Editor', instructions: 'Edit.', pickModel: true })
+  rt.resolveAgent = async id => liveAgent(id)
+  await rt.startFresh(bot.id)
+  await until(() => created.length === 2, { t })
+  assert.deepEqual(created[1], { workspaceId: 'w1' })
+})
+
+test('a group part moved on by moveOn keeps the standard preset', async (t) => {
+  const { rt, created, stop } = start({ presets: [{ id: 'ptc' }, { id: 'standard' }], teamFolder: true })
+  t.after(stop)
+  await rt.load()
+  const room = await rt.createRoom({ members: ['chief', 'writer'], name: 'Desk Four', createdBy: 'chief' })
+  const agents = new Map()
+  rt.resolveAgent = async (id) => {
+    if (!agents.has(id)) agents.set(id, liveAgent(id, { cwd: '/not-the-team-folder' }))
+    return agents.get(id)
+  }
+  rt.indexSessions()
+  await rt.followFolder({ roomId: room.id })
+  await until(() => created.length === 2, { t })
+  assert.deepEqual(created[1], { workspaceId: 'w1', agentPreset: 'standard' })
 })
 
 test('a group round calls group_relay directly when the Session declares it', async (t) => {

@@ -185,7 +185,7 @@ test('a Bot busy in a group gets the message in its own chat, and the sender is 
   assert.equal(back, 'Delivered to Omni. Its reply will arrive later as a new message; do not wait for it. Omni now: working in group "Ops" for less than a minute. Your message does not reach its work in group "Ops".')
 })
 
-test('a request steered into a running turn is recorded once and answered in a turn of its own', async (t) => {
+test('a request steered into a running turn is answered by that turn, once', async (t) => {
   const { agents, emit, tool, exchanges, stop } = await start(team())
   t.after(stop)
 
@@ -196,24 +196,13 @@ test('a request steered into a running turn is recorded once and answered in a t
   emit('b', 'user/message', { content: steered.content, source: steered.source })
   emit('b', 'assistant/message', assistantText('the letter, for the user'))
   emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
-  for (let count = 0; count < 200 && agents.get('b').calls.length < 2; count += 1) await delay(5)
+  await settled(() => (agents.get('a')?.calls ?? []).length >= 1)
 
-  // Nothing from the user's turn goes to Omni; the request comes back to Writer.
-  assert.equal(agents.get('a')?.calls.length ?? 0, 0)
-  const [kind, again] = agents.get('b').calls[1]
+  // The turn's own text answers the request; it is not handed back for a second turn.
+  assert.equal(agents.get('b').calls.length, 1)
+  const [kind, reply] = agents.get('a').calls[0]
   assert.equal(kind, 'followup')
-  assert.equal(textOf(again.content), '[Message from Omni · you read it during your last task; answer it now]\nwhich year is the data?')
-  assert.equal(again.source.deferred, true)
-  assert.equal(again.source.exchangeId, steered.source.exchangeId)
-  assert.deepEqual((await exchanges()).map(entry => entry.role), ['request'])
-
-  emit('b', 'turn/start', { turn: 2 })
-  emit('b', 'user/message', { content: again.content, source: again.source })
-  emit('b', 'assistant/message', assistantText('2025'))
-  emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
-  for (let count = 0; count < 200 && (agents.get('a')?.calls ?? []).length < 1; count += 1) await delay(5)
-  const reply = agents.get('a').calls[0][1]
-  assert.equal(textOf(reply.content), '[Reply from Writer]\n2025')
+  assert.equal(textOf(reply.content), '[Reply from Writer]\nthe letter, for the user')
   assert.equal(reply.source.replyTo, steered.source.exchangeId)
   assert.deepEqual((await exchanges()).map(entry => entry.role), ['request', 'reply'])
 })
@@ -259,7 +248,7 @@ test('a request from a name with brackets keeps its body when replayed after the
   const steered = agents.get('b').calls[0][1]
   assert.equal(steered.source.senderName, 'R]2')
   emit('b', 'user/message', { content: steered.content, source: steered.source })
-  emit('b', 'assistant/message', assistantText('the letter'))
+  // The turn writes nothing, so the one request it read comes back as a turn.
   emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
   await settled(() => agents.get('b').calls.length === 2)
   const [kind, again] = agents.get('b').calls[1]
@@ -401,10 +390,8 @@ test('a stopped notice routes the acknowledgement back like a request', () => {
   assert.equal(delivered[0].text, 'understood')
 })
 
-// What the turn hands back for a joined request: the request itself, to answer next.
-const deferredOf = job => [job.fromId, job.toId, job.sessionId, job.role, job.exchangeId, job.deferred, job.text]
 
-test('a request that joins a user-started turn is handed back, not answered with the turn\'s text', () => {
+test('a request that joins a user-started turn is answered by that turn\'s text', () => {
   const { rt, emit, delivered } = turnsHost()
   emit('b', 'turn/start', { turn: 1 })
   emit('b', 'user/message', { content: textBlock('write the letter'), source: { kind: 'user' } })
@@ -412,19 +399,11 @@ test('a request that joins a user-started turn is handed back, not answered with
   emit('b', 'user/message', { content: textBlock('[Message from Omni]\nmake it shorter'), source: replySource('request', { exchangeId: 'e1' }) })
   emit('b', 'assistant/message', assistantText('second half'))
   emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
-  assert.deepEqual(delivered.map(deferredOf), [['a', 'b', 'b', 'request', 'e1', true, 'make it shorter']])
+  assert.deepEqual(delivered.map(job => [job.toId, job.role, job.replyTo, job.text]), [['a', 'reply', 'e1', 'first half\n\nsecond half']])
   assert.deepEqual(rt.state.exchangeTurns, {})
-
-  // The handed-back request opens a hidden turn whose text is the reply.
-  emit('b', 'turn/start', { turn: 2 })
-  emit('b', 'user/message', { content: textBlock('[Message from Omni · you read it during your last task; answer it now]\nmake it shorter'), source: replySource('request', { exchangeId: 'e1', deferred: true }) })
-  emit('b', 'assistant/message', assistantText('done, it is shorter'))
-  emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
-  assert.deepEqual(delivered.slice(1).map(job => [job.toId, job.role, job.replyTo, job.text]), [['a', 'reply', 'e1', 'done, it is shorter']])
-  assert.deepEqual(rt.state.exchangeTurns, { b: [2] })
 })
 
-test('a request that joins a Bot-triggered turn is handed back; the trigger gets the whole turn', () => {
+test('a request that joins a Bot-triggered turn gets the whole turn too', () => {
   const { rt, emit, delivered } = turnsHost()
   emit('b', 'turn/start', { turn: 1 })
   emit('b', 'user/message', { content: textBlock('[Message from Omni]\ntask'), source: replySource('request', { exchangeId: 'e0' }) })
@@ -433,7 +412,7 @@ test('a request that joins a Bot-triggered turn is handed back; the trigger gets
   emit('b', 'assistant/message', assistantText('second half'))
   emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
   assert.deepEqual(rt.state.exchangeTurns.b, [1])
-  assert.deepEqual(delivered.map(job => [job.role, job.replyTo ?? job.exchangeId, job.text]), [['reply', 'e0', 'first half\n\nsecond half'], ['request', 'e1', 'more']])
+  assert.deepEqual(delivered.map(job => [job.role, job.replyTo ?? job.exchangeId, job.text]), [['reply', 'e0', 'first half\n\nsecond half'], ['reply', 'e1', 'first half\n\nsecond half']])
 })
 
 test('a joined request in a stopped turn tells its sender, and is not handed back', () => {
@@ -462,7 +441,7 @@ test('a joined request gets the failure notice when the model call fails', () =>
   assert.match(delivered[0].text, /^Writer could not answer your message: its model call failed \(SERVER 503: upstream busy\)/)
 })
 
-test('a joined request never claims the next turn', () => {
+test('a joined request answers in its turn and never claims the next one', () => {
   const { rt, emit, delivered } = turnsHost()
   emit('b', 'turn/start', { turn: 1 })
   emit('b', 'user/message', { content: textBlock('write the letter'), source: { kind: 'user' } })
@@ -473,7 +452,7 @@ test('a joined request never claims the next turn', () => {
   emit('b', 'user/message', { content: textBlock('next task'), source: { kind: 'user' } })
   emit('b', 'assistant/message', assistantText('for the user'))
   emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
-  assert.deepEqual(delivered.map(job => [job.role, job.exchangeId, job.deferred]), [['request', 'e1', true]])
+  assert.deepEqual(delivered.map(job => [job.role, job.replyTo, job.deferred]), [['reply', 'e1', undefined]])
   assert.deepEqual(rt.state.exchangeTurns, {})
 })
 
@@ -485,7 +464,7 @@ test('a schedule-started turn stays visible when a request joins', () => {
   emit('b', 'user/message', { content: textBlock('[Message from Omni]\nmore'), source: replySource('request', { exchangeId: 'e1' }) })
   emit('b', 'assistant/message', assistantText('after'))
   emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
-  assert.deepEqual(delivered.map(job => [job.role, job.exchangeId, job.text]), [['request', 'e1', 'more']])
+  assert.deepEqual(delivered.map(job => [job.role, job.replyTo, job.text]), [['reply', 'e1', 'before\n\nafter']])
   assert.deepEqual(rt.state.exchangeTurns, {})
 })
 
@@ -518,19 +497,17 @@ test('a joined request crosses a part switch and is handed back in the new part'
   assert.equal(handoff.source.exchangeId, 'e0')
   assert.deepEqual(handoff.source.joined.map(item => [item.info.exchangeId, item.text]), [['e1', 'more']])
 
-  // The resumed turn answers its trigger and hands the joined request back there.
+  // The resumed turn answers its trigger and the request it read, both with its text.
   emit('s1', 'turn/start', { turn: 1 })
   emit('s1', 'user/message', { content: textBlock('[Handoff]\npackage'), source: handoff.source })
   emit('s1', 'assistant/message', assistantText('done'))
   emit('s1', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
-  const handedBack = () => agents.get('s1').calls.find(([, message]) => message.source?.deferred === true)
-  for (let count = 0; count < 200 && ((agents.get('a')?.calls ?? []).length < 1 || handedBack() === undefined); count += 1) await delay(5)
+  for (let count = 0; count < 200 && (agents.get('a')?.calls ?? []).length < 2; count += 1) await delay(5)
   const replies = (agents.get('a')?.calls ?? []).filter(([, message]) => message.source?.role === 'reply')
-  assert.deepEqual(replies.map(([, message]) => message.source.replyTo), ['e0'])
+  assert.deepEqual(replies.map(([, message]) => message.source.replyTo), ['e0', 'e1'])
   assert.equal(textOf(replies[0][1].content), '[Reply from Writer]\ndone')
-  assert.equal(handedBack()[0], 'followup')
-  assert.equal(handedBack()[1].source.exchangeId, 'e1')
-  assert.equal(textOf(handedBack()[1].content), '[Message from Omni · you read it during your last task; answer it now]\nmore')
+  assert.equal(textOf(replies[1][1].content), '[Reply from Writer]\ndone')
+  assert.equal(agents.get('s1').calls.find(([, message]) => message.source?.deferred === true), undefined)
 })
 
 // Each Session takes up the newest message it was sent as its next turn.
@@ -628,8 +605,8 @@ test('a Bot may take part in the same work again, but not message one that waits
   // The guard answers with a result, not a failed call: the turn goes on with the
   // work, and the result says where its answer goes.
   const refused = /^Not sent: (Omni|Writer) is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back\./
-  assert.match(await tool('message_bot', { to: 'Omni', message: 'please accept it' }, 'c'), refused)
-  assert.match(await tool('message_bot', { to: 'Writer', message: 'it passes' }, 'c'), refused)
+  assert.match((await tool('message_bot', { to: 'Omni', message: 'please accept it' }, 'c')).text, refused)
+  assert.match((await tool('message_bot', { to: 'Writer', message: 'it passes' }, 'c')).text, refused)
   assert.deepEqual(callsOf(agents, 'a'), [])
   assert.equal(callsOf(agents, 'b').length, 1)
   end('c', 'it passes')
@@ -643,7 +620,34 @@ test('a Bot may take part in the same work again, but not message one that waits
   end('a')
   take('c')
   assert.match(await tool('message_bot', { to: 'Writer', message: 'what did you change last?' }, 'c'), /^Delivered to Writer/)
-  assert.match(await tool('message_bot', { to: 'Omni', message: 'done' }, 'c'), refused)
+  assert.match((await tool('message_bot', { to: 'Omni', message: 'done' }, 'c')).text, refused)
+})
+
+test('a message_bot refusal carries the host\'s reason as a result the chat can tell from a sent one', async (t) => {
+  const team = await start(threeBots())
+  t.after(team.stop)
+  const { take, end } = await handedOn(team)
+  end('b')
+  take('c')
+  const result = await team.tool('message_bot', { to: 'Omni', message: 'please accept it' }, 'c')
+  assert.equal(typeof result, 'object')
+  assert.equal(result.sent, false)
+  assert.match(result.reason, /^Not sent: Omni is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back\./)
+  assert.equal(result.text, result.reason)
+  // The Bot still reads exactly the words it read before this change.
+  const definition = rt.teamTools.find(item => item.name === 'message_bot')
+  assert.equal(textOf(definition.output.render({}, result)), result.text)
+  assert.deepEqual(definition.output.presentationMeta({}, result), { sent: false, reason: result.reason })
+})
+
+test('a message_bot delivery keeps its string result and is marked sent', async (t) => {
+  const botTeam = await start(team())
+  t.after(botTeam.stop)
+  const definition = rt.teamTools.find(item => item.name === 'message_bot')
+  const sent = await botTeam.tool('message_bot', { to: 'Writer', message: 'how are you' }, 'a')
+  assert.equal(typeof sent, 'string')
+  assert.equal(textOf(definition.output.render({}, sent)), sent)
+  assert.deepEqual(definition.output.presentationMeta({}, sent), { sent: true })
 })
 
 test('a stopped turn answers at once, and what it handed on comes back to it alone', async (t) => {
@@ -1163,7 +1167,7 @@ for (const id of ['b', 'gb']) {
 test('message_bot turns down an empty message', async (t) => {
   const { agentOf, tool, exchanges, stop } = await start(team())
   t.after(stop)
-  for (const message of ['', '   \n\t ']) assert.equal(await tool('message_bot', { to: 'Writer', message }, 'a'), 'Write a message to send.')
+  for (const message of ['', '   \n\t ']) assert.equal((await tool('message_bot', { to: 'Writer', message }, 'a')).text, 'Write a message to send.')
   assert.deepEqual(agentOf('b').calls, [])
   assert.deepEqual(await exchanges(), [])
 })
@@ -1243,7 +1247,8 @@ test('without file storage a message past 20,000 characters is not sent', async 
   const { agentOf, tool, exchanges, stop } = await start(team())
   t.after(stop)
   const answer = await tool('message_bot', { to: 'Writer', message: 'x'.repeat(20_001) }, 'a')
-  assert.equal(answer, 'Not sent: the message has 20001 characters, more than 20000, and this DeepSeek Harness cannot send it as a file. Write it to a file in your working folder and send its path instead.')
+  assert.equal(answer.text, 'Not sent: the message has 20001 characters, more than 20000, and this DeepSeek Harness cannot send it as a file. Write it to a file in your working folder and send its path instead.')
+  assert.equal(answer.sent, false)
   assert.deepEqual(agentOf('b').calls, [])
   assert.deepEqual(await exchanges(), [])
   // 20,000 characters still go as they are.
@@ -1296,4 +1301,302 @@ test('a message between Bots that the book cannot keep is not sent', { skip: pro
     chmodSync(join(home, 'ledger'), 0o700)
   }
   assert.deepEqual(await exchanges(), [])
+})
+
+// A no-reply message is read where it lands, and its sender is never woken with an answer.
+test('message_bot reply_to "none" delivers to a busy Bot and owes no reply', async (t) => {
+  const { agents, emit, tool, stop } = await start(team())
+  t.after(stop)
+
+  emit('b', 'turn/start', { turn: 1 })
+  const out = await tool('message_bot', { to: 'Writer', message: 'hold the deploy until the review lands', reply_to: 'none' }, 'a')
+  assert.match(out, /no reply comes back/i)
+  const [kind, delivered] = agents.get('b').calls[0]
+  assert.equal(kind, 'steer')
+  assert.equal(delivered.source.role, 'request')
+  assert.equal(delivered.source.noReply, true)
+  assert.match(textOf(delivered.content), /^\[Message from Omni · no reply needed\]/)
+  // It opens no work, so nothing is owed and nothing is handed back.
+  assert.equal((rt.state.works ?? {})[delivered.source.exchangeId], undefined)
+
+  emit('b', 'user/message', { content: delivered.content, source: delivered.source })
+  emit('b', 'assistant/message', assistantText('noted, holding the deploy'))
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await delay(60)
+  assert.equal(agents.get('a')?.calls.length ?? 0, 0)
+  assert.equal(agents.get('b').calls.length, 1)
+})
+
+test('an idle Bot reads a no-reply message without opening a reply turn', async (t) => {
+  const { agents, emit, tool, stop } = await start(team())
+  t.after(stop)
+
+  const out = await tool('message_bot', { to: 'Writer', message: 'the review is on its way', reply_to: 'none' }, 'a')
+  assert.match(out, /no reply comes back/i)
+  const [kind, delivered] = agents.get('b').calls[0]
+  assert.equal(kind, 'steer')
+  assert.equal(delivered.source.noReply, true)
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: delivered.content, source: delivered.source })
+  emit('b', 'assistant/message', assistantText('ok'))
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await delay(60)
+  assert.equal(agents.get('a')?.calls.length ?? 0, 0)
+  assert.equal(agents.get('b').calls.length, 1)
+})
+
+// A request read inside a running turn is answered by that turn's own text: the turn
+// answers everything it read, instead of handing each request back for another turn.
+test('a request that joins a running turn is answered by that turn, not handed back', () => {
+  const { rt, emit, delivered } = turnsHost()
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: textBlock('write the letter'), source: { kind: 'user' } })
+  emit('b', 'assistant/message', assistantText('first half'))
+  emit('b', 'user/message', { content: textBlock('[Message from Omni]\nmake it shorter'), source: replySource('request', { exchangeId: 'e1' }) })
+  emit('b', 'assistant/message', assistantText('second half'))
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(delivered.map(job => [job.toId, job.role, job.replyTo, job.text]), [['a', 'reply', 'e1', 'first half\n\nsecond half']])
+  assert.deepEqual(rt.state.exchangeTurns, {})
+})
+
+test('two requests read in one turn are both answered by that one turn', () => {
+  const { emit, delivered } = turnsHost()
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni]\ntask'), source: replySource('request', { exchangeId: 'e0' }) })
+  emit('b', 'user/message', { content: textBlock('[Message from Writer]\nmore'), source: replySource('request', { exchangeId: 'e1', senderSessionId: 'c', senderName: 'Writer' }) })
+  emit('b', 'assistant/message', assistantText('both done'))
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(delivered.map(job => [job.role, job.replyTo, job.text]).sort(), [
+    ['reply', 'e0', 'both done'],
+    ['reply', 'e1', 'both done'],
+  ])
+})
+
+// With no text to share, the requests a turn read still need an answer: they come back
+// as one turn, and its one answer reaches every sender.
+test('joined requests a turn cannot answer arrive as one turn and each gets the answer', () => {
+  const { emit, delivered } = turnsHost()
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: textBlock('write the letter'), source: { kind: 'user' } })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni]\nfirst'), source: replySource('request', { exchangeId: 'e1' }) })
+  emit('b', 'user/message', { content: textBlock('[Message from Writer]\nsecond'), source: replySource('request', { exchangeId: 'e2', senderSessionId: 'c', senderName: 'Writer' }) })
+  // The turn wrote nothing, so there is no shared answer to carry them.
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.equal(delivered.length, 1)
+  const [handedBack] = delivered
+  assert.equal(handedBack.role, 'request')
+  assert.equal(handedBack.deferred, true)
+  assert.equal(handedBack.exchangeId, 'e1')
+  assert.equal(handedBack.fromId, 'a')
+  assert.deepEqual(handedBack.joined.map(item => item.info.exchangeId), ['e2'])
+  assert.match(handedBack.text, /first/)
+  assert.match(handedBack.text, /second/)
+
+  emit('b', 'turn/start', { turn: 2 })
+  emit('b', 'user/message', {
+    content: textBlock(`[Messages from Omni, Writer · you read them during your last task; answer them now]\n${handedBack.text}`),
+    source: replySource('request', { exchangeId: 'e1', deferred: true, joined: handedBack.joined }),
+  })
+  emit('b', 'assistant/message', assistantText('both done'))
+  emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+  assert.deepEqual(delivered.slice(1).map(job => [job.role, job.replyTo, job.text]).sort(), [
+    ['reply', 'e1', 'both done'],
+    ['reply', 'e2', 'both done'],
+  ])
+})
+
+// Replies waiting for one Bot go in together: one turn reads them all, and every request
+// keeps its own answer and its own exchange.
+test('replies waiting for the same Bot arrive in one turn', async (t) => {
+  const { agents, stop } = await start(team())
+  t.after(stop)
+  const first = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'first answer', exchangeId: 'r1', replyTo: 'q1' })
+  const second = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'second answer', exchangeId: 'r2', replyTo: 'q2' })
+  await Promise.all([first, second])
+  const calls = agents.get('a').calls
+  assert.deepEqual(calls.map(([kind]) => kind).sort(), ['followup', 'inject'])
+  assert.deepEqual(calls.map(([, message]) => message.source.replyTo).sort(), ['q1', 'q2'])
+  assert.deepEqual(calls.map(([, message]) => textOf(message.content)).sort(), ['[Reply from Writer]\nfirst answer', '[Reply from Writer]\nsecond answer'])
+})
+
+// One turn answers one work, so replies for different works keep their own turns:
+// the merge only covers what one answer can carry.
+test('replies for different works keep their own turns', async (t) => {
+  const { agents, stop } = await start(team())
+  t.after(stop)
+  await Promise.all([
+    rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'first answer', exchangeId: 'r1', replyTo: 'q1', work: 'w1' }),
+    rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'second answer', exchangeId: 'r2', replyTo: 'q2', work: 'w2' }),
+  ])
+  const calls = agents.get('a').calls
+  assert.equal(calls.filter(([kind]) => kind === 'followup').length, 2)
+  assert.deepEqual(calls.map(([, message]) => message.source.replyTo).sort(), ['q1', 'q2'])
+})
+
+test('replies that arrive while the Bot is working wait and then share one turn', async (t) => {
+  const { agents, emit, stop } = await start(team())
+  t.after(stop)
+  emit('a', 'turn/start', { turn: 1 })
+  const first = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'first answer', exchangeId: 'r1', replyTo: 'q1' })
+  const second = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'second answer', exchangeId: 'r2', replyTo: 'q2' })
+  await delay(60)
+  assert.equal(agents.get('a').calls.length, 0)
+  emit('a', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await Promise.all([first, second])
+  assert.deepEqual(agents.get('a').calls.map(([kind]) => kind).sort(), ['followup', 'inject'])
+})
+
+// The measured case: two messages to a busy Bot are read in its turn and answered by it,
+// and the two answers reach the sender together, in one turn.
+test('two messages to a busy Bot cost one answer turn and one reply turn', async (t) => {
+  const { agents, emit, tool, stop } = await start(team())
+  t.after(stop)
+
+  emit('b', 'turn/start', { turn: 1 })
+  await tool('message_bot', { to: 'Writer', message: 'check the first table' }, 'a')
+  await tool('message_bot', { to: 'Writer', message: 'and the second one' }, 'a')
+  const [first, second] = agents.get('b').calls.map(([, message]) => message)
+  assert.equal(agents.get('b').calls.length, 2)
+
+  emit('b', 'user/message', { content: first.content, source: first.source })
+  emit('b', 'user/message', { content: second.content, source: second.source })
+  emit('b', 'assistant/message', assistantText('both tables check out'))
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await delay(80)
+  assert.equal(agents.get('b').calls.length, 2)
+  assert.deepEqual(agents.get('a').calls.map(([kind]) => kind).sort(), ['followup', 'inject'])
+  assert.deepEqual(agents.get('a').calls.map(([, message]) => message.source.replyTo).sort(), [first.source.exchangeId, second.source.exchangeId].sort())
+  assert.equal(new Set(agents.get('a').calls.map(([, message]) => textOf(message.content))).size, 1)
+})
+
+// A reply that waits for a busy Bot belongs to the Bot, not to the part it was sent to:
+// a part switch while it waits sends it to the part that took over, never to the old one.
+test('replies waiting for a busy Bot reach its new part after a part switch', async (t) => {
+  const { agents, emit, stop } = await start(team())
+  t.after(stop)
+  emit('a', 'turn/start', { turn: 1 })
+  const first = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'first answer', exchangeId: 'r1', replyTo: 'q1' })
+  const second = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'second answer', exchangeId: 'r2', replyTo: 'q2' })
+  await delay(60)
+  assert.equal(agents.get('a').calls.length, 0)
+  // The switch moves the Bot's chat to 'a2' the way parts.js does, then ends the old turn.
+  const bot = rt.botOf('a')
+  bot.sessionId = 'a2'
+  rt.chatOwners.delete('a')
+  rt.chatOwners.set('a2', 'a')
+  rt.pastOwners.set('a', { botId: 'a' })
+  emit('a', 'turn/end', { turn: 1, reason: { kind: 'aborted' } })
+  await Promise.all([first, second])
+  assert.deepEqual(agents.get('a').calls, [])
+  assert.deepEqual(agents.get('a2').calls.map(([kind]) => kind).sort(), ['followup', 'inject'])
+  assert.deepEqual(agents.get('a2').calls.map(([, message]) => message.source.replyTo).sort(), ['q1', 'q2'])
+})
+
+// A new part that is already working when the old turn ends takes the replies once its
+// own turn ends.
+test('replies moved to a new part that is working wait for that part\'s turn', async (t) => {
+  const { agents, emit, stop } = await start(team())
+  t.after(stop)
+  emit('a', 'turn/start', { turn: 1 })
+  const reply = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'the answer', exchangeId: 'r1', replyTo: 'q1' })
+  await delay(30)
+  const bot = rt.botOf('a')
+  bot.sessionId = 'a2'
+  rt.chatOwners.delete('a')
+  rt.chatOwners.set('a2', 'a')
+  rt.pastOwners.set('a', { botId: 'a' })
+  emit('a2', 'turn/start', { turn: 1 })
+  emit('a', 'turn/end', { turn: 1, reason: { kind: 'aborted' } })
+  await delay(60)
+  assert.equal(agents.get('a').calls.length, 0)
+  assert.equal(agents.get('a2')?.calls.length ?? 0, 0)
+  emit('a2', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await reply
+  assert.deepEqual(agents.get('a2').calls.map(([kind, message]) => [kind, message.source.replyTo]), [['followup', 'q1']])
+})
+
+// An agent that has ended its turn but not yet gone idle is waited for without spinning:
+// the replies go in once it reports idle.
+test('replies for an agent still settling wait for it to go idle, without spinning', async (t) => {
+  const { ctx, agents, agentOf, stop } = await start(team())
+  t.after(stop)
+  const agent = agentOf('a')
+  let status = 'running'
+  let reads = 0
+  Object.defineProperty(agent, 'status', { get: () => { reads += 1; return status }, configurable: true })
+  const reply = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'the answer', exchangeId: 'r1', replyTo: 'q1' })
+  await delay(80)
+  assert.equal(agents.get('a').calls.length, 0)
+  // One look at a running agent, not one every tick.
+  assert.ok(reads <= 2, `status read ${reads} times while the agent was running`)
+  status = 'idle'
+  for (const listener of ctx.listeners.get('agent/status') ?? []) listener({ agent, status: 'idle' })
+  await reply
+  assert.deepEqual(agents.get('a').calls.map(([kind, message]) => [kind, message.source.replyTo]), [['followup', 'q1']])
+})
+
+// Every request a handed-back turn answers is closed the way its trigger is: a turn that
+// says nothing hands none of them back again, so no sender is dropped while the others
+// cost one more turn each.
+test('a handed-back batch that says nothing closes every request alike', () => {
+  const { emit, delivered } = turnsHost()
+  const joined = [
+    { info: replySource('request', { exchangeId: 'e2', senderSessionId: 'c', senderName: 'Writer' }), text: 'second' },
+    { info: replySource('request', { exchangeId: 'e3' }), text: 'third' },
+  ]
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', {
+    content: textBlock('[Messages from Omni, Writer · you read them during your last task; answer them now]\nOmni:\nfirst'),
+    source: replySource('request', { exchangeId: 'e1', deferred: true, joined }),
+  })
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(delivered, [])
+})
+
+test('a handed-back batch that answers closes every request with the one answer', () => {
+  const { emit, delivered } = turnsHost()
+  const joined = [{ info: replySource('stopped', { exchangeId: 's2' }), text: 'stop that' }]
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', {
+    content: textBlock('[Messages from Omni · you read them during your last task; answer them now]\nOmni:\nfirst'),
+    source: replySource('request', { exchangeId: 'e1', deferred: true, joined }),
+  })
+  emit('b', 'assistant/message', assistantText('done'))
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(delivered.map(job => [job.role, job.replyTo, job.text]).sort(), [['reply', 'e1', 'done'], ['reply', 's2', 'done']])
+})
+
+// A stopped notice that is handed back stays a stopped notice.
+test('a handed-back stopped notice keeps its role', () => {
+  const { emit, delivered } = turnsHost()
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: textBlock('write the letter'), source: { kind: 'user' } })
+  emit('b', 'user/message', { content: textBlock('[Stopped by Omni]\nwhy'), source: replySource('stopped', { exchangeId: 's1' }) })
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(delivered.map(job => [job.role, job.exchangeId, job.deferred]), [['stopped', 's1', true]])
+
+  emit('b', 'turn/start', { turn: 2 })
+  emit('b', 'user/message', { content: textBlock('write the letter'), source: { kind: 'user' } })
+  emit('b', 'user/message', { content: textBlock('[Stopped by Omni]\nwhy'), source: replySource('stopped', { exchangeId: 's2' }) })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni]\nand this'), source: replySource('request', { exchangeId: 'e2' }) })
+  emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+  const batch = delivered.at(-1)
+  assert.deepEqual([batch.role, batch.exchangeId, batch.joined.map(item => [item.info.role, item.info.exchangeId])], ['stopped', 's2', [['request', 'e2']]])
+})
+
+// A turn opened by a message that owes no reply is a Bot-to-Bot exchange like the others,
+// so the user does not see it in the recipient's chat.
+test('a turn opened by a no-reply message is hidden from the user', () => {
+  const { rt, emit, delivered } = turnsHost()
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni · no reply needed]\nhold the deploy'), source: replySource('request', { exchangeId: 'n1', noReply: true }) })
+  emit('b', 'assistant/message', assistantText('holding'))
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(rt.state.exchangeTurns.b, [1])
+  assert.deepEqual(delivered, [])
+  // One the user is meant to read stays visible.
+  emit('b', 'turn/start', { turn: 2 })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni · the user sees your reply here]\nsay hi'), source: replySource('request', { exchangeId: 'n2', noReply: true, audience: 'user' }) })
+  emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+  assert.deepEqual(rt.state.exchangeTurns.b, [1])
 })

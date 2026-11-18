@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // The attach ledger (attach.js, and the CLI that alone writes it): the fold over plain rows,
 // then automagik-herdr as a program against scratch git projects, a scratch HERDR_APP_HOME
 // and the fake hc (test/fake-hc.mjs) and a fake herdr-app with no window (test/fake-herdr-app.mjs)
@@ -66,7 +67,7 @@ test("verdict: live only when hc says live with the same created_ms; finished an
   const out = await confirmBindings([b, row("attach", ID.cap, "t2"), row("attach", ID.dev, "t3"), row("attach", "b-dddddddddd", "t4", { core: "other" })],
     CORE, ask, gone);
   assert.deepEqual(out.live.map((l) => l.binding.terminal), ["t1"]);
-  assert.deepEqual(out.ended.map((e) => [e.binding.terminal, e.reason]).sort(), [["t2", "replaced"], ["t4", "finished"]]);
+  assert.deepEqual(out.ended.map((e) => [e.binding.terminal, e.reason]).sort(), [["t2", "replaced"], ["t4", "replaced"]]);
   assert.deepEqual(out.unknown.map((u) => u.terminal), ["t3"]);
 });
 
@@ -108,6 +109,9 @@ function scene(t, terminals = () => []) {
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: join(root, "herdr-app.json"), HERDR_APP_FAKE_LOG: join(root, "herdr-app.log"), GIT_CEILING_DIRECTORIES: root };
   delete env.HC_TERMINAL_ID;
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   const cli = (...args) => {
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
@@ -160,6 +164,9 @@ test("NEGATIVE: two CLIs attaching one bot at once: one wins, the other is refus
     HC_FAKE_STATE: join(s.root, "hc.json"), HC_FAKE_LOG: join(s.root, "hc.log"),
     HERDR_APP_FAKE_STATE: join(s.root, "herdr-app.json"), HERDR_APP_FAKE_LOG: join(s.root, "herdr-app.log") };
   delete env.HC_TERMINAL_ID;
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: s.root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   const go = (terminal) => new Promise((done) => execFile(process.execPath, [CLI, "attach", "Genie", terminal], { cwd: s.project, env },
     (e) => done(e ? e.code : 0)));
   const codes = await Promise.all([go("t1"), go("t2")]);
@@ -192,8 +199,13 @@ test("NEGATIVE: a terminal id reused with a new created_ms reads as unattached (
   assert.equal(s.ledger().at(-1).created_ms, 1000, "the end row names the old terminal");
   // So is a row of another core (hc's state wiped): its terminals are gone.
   assert.equal(s.cli("attach", "Genie", "t1").code, 0);
+  const reattached = s.ledger().length;
   s.edit((st) => { st.core = { id: "newcore", name: "fake" }; });
   assert.equal(s.whois("t1").bot, null);
+  const appended = s.ledger().slice(reattached);
+  assert.deepEqual(brief(appended), [["end", ID.main, "t1", "sweep", "replaced"]], "exactly one end row, replaced");
+  assert.equal(appended[0].core, CORE, "the end row names the old core");
+  assert.equal(appended[0].created_ms, 2000, "the end row names the reattached terminal");
 });
 
 test("NEGATIVE: a failed hc get is not a missing pane: whois refuses, the binding stays and no end row is written", (t) => {
@@ -408,7 +420,7 @@ test("confirmBindings: a connected machine's row is asked at its address; away o
   assert.equal(gone.ended[0].reason, "finished");
   const reused = await confirmBindings([remoteRow()], "mac", async () => ({ state: "live", created_ms: 5 }), undefined, connected);
   assert.equal(reused.ended[0].reason, "replaced");
-  // A local row of another core still ends as before.
+  // A local row of another core ends as replaced: this core no longer owns it.
   const other = await confirmBindings([remoteRow({ machine: null, core: "old" })], "mac", ask, undefined, connected);
-  assert.equal(other.ended[0].reason, "finished");
+  assert.equal(other.ended[0].reason, "replaced");
 });

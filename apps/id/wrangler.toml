@@ -2,7 +2,9 @@ name = "automagik-id"
 main = "src/index.ts"
 compatibility_date = "2025-11-18"
 compatibility_flags = ["nodejs_compat"]
-workers_dev = true
+# The service answers only on its name under automagik.si (see DEPLOY.md); a
+# workers.dev address can never carry the automagik.si passkey site name.
+workers_dev = false
 preview_urls = false
 
 # Copy to ignored wrangler.local.toml; the deployment script supplies the binding.

@@ -3,6 +3,10 @@ import { randomUUID } from 'node:crypto'
 import { Transform } from 'node:stream'
 import { COOKIE, cookieSecret, LOCAL_TRUST_NOTICE, sessionCookie } from './gate-store.mjs'
 import { agentMcpHeaders, DSH_HOST, responseHeaders, upstreamHeaders } from './gate-upstream.mjs'
+import { samePerson } from './gate-cloud.mjs'
+
+export const CLOUD_OPEN_PATH = '/_gate/cloud/open'
+const MAX_OPEN_BODY = 4096
 
 export function pinOrigin(value) {
   const url = new URL(value)
@@ -50,6 +54,22 @@ function answer(res, status, value) {
   res.writeHead(status, { 'cache-control': 'no-store', 'content-type': 'application/json' })
   res.end(JSON.stringify(value))
 }
+function readBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0, failed = false
+    const timer = setTimeout(() => { req.destroy(); reject(new Error('Body timeout')) }, 5000).unref()
+    req.on('data', chunk => {
+      if (failed) return
+      size += chunk.length
+      // Stop collecting and answer at once; the refusal closes the connection.
+      if (size > limit) { failed = true; clearTimeout(timer); reject(new Error('Body too large')); return }
+      chunks.push(chunk)
+    })
+    req.on('end', () => { clearTimeout(timer); resolve(Buffer.concat(chunks).toString('utf8')) })
+    req.on('error', error => { clearTimeout(timer); reject(error) })
+  })
+}
 function refuseSocket(socket, status = 401) {
   const destroy = () => socket.destroy()
   const timer = setTimeout(destroy, 1000).unref()
@@ -60,9 +80,41 @@ function refuseSocket(socket, status = 401) {
   socket.end(`HTTP/1.1 ${status} Refused\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, destroy)
 }
 
-export function createGate({ origin: value, sessions, credentials, access, selfHosted, bootstrap = false, auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
+export function createGate({ origin: value, sessions, credentials, access, cloud, selfHosted, bootstrap = false, auditAccess = record => process.stderr.write(`${JSON.stringify(record)}\n`) }) {
   const origin = pinOrigin(value)
   const sockets = new Map()
+  // Cloud mode: the rail posts a single-use open code here, as a form (OIDC's form_post shape).
+  // The gate trades it with the Cloud service itself and sets its own session; the browser
+  // never sees a workspace token, and a code or token in a URL is refused.
+  async function cloudOpen(req, res) {
+    const refuse = (status, error) => {
+      auditAccess({ status, request_id: randomUUID() })
+      res.setHeader('connection', 'close')
+      answer(res, status, { error })
+    }
+    if (req.url !== CLOUD_OPEN_PATH) { refuse(400, 'Open codes and tokens never belong in a URL'); return }
+    if (req.method !== 'POST') { refuse(405, 'Open takes a form post'); return }
+    if (req.headers.host !== origin.host || req.headers.origin !== cloud.config.rail) { refuse(403, 'Invalid open origin'); return }
+    if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/x-www-form-urlencoded') { refuse(415, 'Open takes a form post'); return }
+    // A workspace token comes only from the gate's own exchange, never from a client.
+    if (req.headers.authorization !== undefined) { refuse(401, 'Open refused'); return }
+    let body
+    try { body = await readBody(req, MAX_OPEN_BODY) } catch { refuse(413, 'Open refused'); return }
+    const form = new URLSearchParams(body)
+    const names = [...form.keys()]
+    if (names.length !== 1 || names[0] !== 'code') { refuse(401, 'Open refused'); return }
+    let opened
+    try { opened = await cloud.open(form.get('code')) }
+    catch (error) { refuse(error?.status === 429 ? 429 : 401, 'Open refused'); return }
+    if (res.destroyed) return
+    // A fresh open replaces this browser's session; a replayed cookie still revokes its family.
+    const previous = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
+    if (previous) sessions.revoke(previous)
+    const issued = sessions.issue(origin.origin, opened.principal, { expires: opened.expires })
+    res.writeHead(303, { location: '/', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
+      'set-cookie': sessionCookie(issued.secret, sessions.maxAge(issued.family)) })
+    res.end()
+  }
   async function authorize(req, upgrade = false) {
     if (trustedRequest(req, origin, upgrade)) {
       const family = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
@@ -83,8 +135,12 @@ export function createGate({ origin: value, sessions, credentials, access, selfH
       return undefined
     }
   }
+  // A Cloud workspace has several people: their session list and "sign out everywhere" are
+  // their own. A self-hosted instance has one human, so it keeps every session in scope.
+  const mine = family => cloud ? other => samePerson(other.principal, family.principal) : undefined
   const server = http.createServer(async (req, res) => {
     if (reservedPathAlias(req.url, origin)) { answer(res, 400, { error: 'Non-canonical gate path' }); return }
+    if (cloud && req.url.split('?', 1)[0] === CLOUD_OPEN_PATH) { await cloudOpen(req, res); return }
     // Literal target only: queries and aliases continue through the ordinary session gate.
     // The upstream exact route admits only agent tokens, never a browser session alone.
     if (req.url === '/api/omni-mcp') {
@@ -128,12 +184,12 @@ export function createGate({ origin: value, sessions, credentials, access, selfH
       if (url.searchParams.has('token')) { answer(res, 401, { error: 'Session required' }); return }
       if (url.pathname.startsWith('/_gate/')) {
         if (url.pathname === '/_gate/sessions' && req.method === 'GET') {
-          answer(res, 200, { sessions: sessions.list(), current: family.id, local_trust_notice: LOCAL_TRUST_NOTICE })
+          answer(res, 200, { sessions: sessions.list(mine(family)), current: family.id, local_trust_notice: LOCAL_TRUST_NOTICE })
         } else if (url.pathname === '/_gate/session/renew' && req.method === 'POST') {
-          res.setHeader('set-cookie', sessionCookie(sessions.renew(family)))
+          res.setHeader('set-cookie', sessionCookie(sessions.renew(family), sessions.maxAge(family)))
           answer(res, 200, {})
         } else if (url.pathname === '/_gate/sign-out-everywhere' && req.method === 'POST') {
-          sessions.revokeAll()
+          sessions.revokeAll(mine(family))
           res.setHeader('set-cookie', sessionCookie('', 0))
           answer(res, 200, {})
         } else answer(res, 404, { error: 'Unknown gate route' })

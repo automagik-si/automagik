@@ -14,6 +14,7 @@ import { state } from "./use-stubs.mjs";
 import { hcFileOps } from "./hc-file-ops.mjs";
 import { scratchRoot } from "./scratch-project.mjs";
 import { PROJECTS_FILE } from "../mods/am-sidebar/model.js";
+import { TimedOut } from "../mods/am-sidebar/discover.js";
 const { discoverProjects, discoverySnapshot, editFolderOf, writeBots, rememberProject, keyOf } = await import("../mods/am-sidebar/bots.js");
 
 const run = promisify(execFile);
@@ -108,6 +109,19 @@ test("discoverProjects: outside git, a local space finds the bots.json above it"
   state.spaces = [{ id: "s1", folder: join(root, "a", "b"), machine: null }];
   const found = await discoverProjects();
   assert.deepEqual(found.map((p) => p.key), [join(root, "a")]);
+  // A read that times out on this computer leaves the answer unknown, never "no file": the
+  // walk rejects and keeps nothing, the project shows its last good file, and the next look
+  // finds the project.
+  mkdirSync(join(root, "a", "c"));
+  const file = join(root, "a", ".herdr", "bots.json");
+  state.readFault = (p) => (p === file ? new TimedOut(5000) : null);
+  t.after(() => { state.readFault = null; });
+  await assert.rejects(keyOf(join(root, "a", "c")), TimedOut);
+  state.spaces = [...state.spaces, { id: "s2", folder: join(root, "a", "c"), machine: null }];
+  assert.deepEqual((await discoverProjects()).map((p) => [p.key, p.spaces, p.file.bots.length]), [[join(root, "a"), ["s1"], 2]]);
+  state.readFault = null;
+  assert.equal(await keyOf(join(root, "a", "c")), join(root, "a"));
+  assert.deepEqual((await discoverProjects()).map((p) => [p.key, p.spaces]), [[join(root, "a"), ["s1", "s2"]]]);
 });
 
 test("discoverProjects: an open space on another machine is asked there, with on", async (t) => {
@@ -115,15 +129,38 @@ test("discoverProjects: an open space on another machine is asked there, with on
   const root = scratch(t);
   mkdirSync(join(root, "srv", "app"), { recursive: true });
   put(join(root, "srv"), sample());
-  state.spaces = [{ id: "r1", folder: join(root, "srv", "app"), machine: "far" }];
+  // A nearer file under a name a shell would trip on, and a folder with no file above it.
+  const odd = join(root, "srv", `it's a "$HOME"; * dir`);
+  mkdirSync(join(odd, "app"), { recursive: true });
+  put(odd, sample());
+  mkdirSync(join(root, "bare"));
+  state.spaces = [{ id: "r1", folder: join(root, "srv", "app"), machine: "far" }, { id: "r2", folder: join(odd, "app"), machine: "far" },
+    { id: "r3", folder: join(root, "bare"), machine: "far" }];
   const found = await discoverProjects();
-  assert.deepEqual(found.map((p) => [p.key, p.machine]), [[join(root, "srv"), "far"]]);
+  assert.deepEqual(found.map((p) => [p.key, p.machine]), [[join(root, "srv"), "far"], [odd, "far"]]);
   const git = state.calls.filter((c) => c.kind === "exec" && c.command === "git");
   // Every read but this computer's own app home (the CLI's project list) goes to "far".
   const reads = state.calls.filter((c) => c.kind === "read" && !c.path.startsWith(`${state.appHome}/`));
   assert.ok(git.length >= 1);
   assert.ok(reads.some((c) => c.path === join(root, "srv", ".herdr", "bots.json")));
-  for (const c of [...git, ...reads]) assert.equal(c.on, "far", JSON.stringify(c));
+  // Each folder's walk up is one call there, its paths arguments and never script text; no
+  // file is asked for one at a time (only each project's own read).
+  const sh = state.calls.filter((c) => c.kind === "exec" && c.command === "sh");
+  assert.equal(sh.length, 3);
+  assert.ok(reads.length <= 3, `${reads.length} reads`);
+  for (const c of sh) {
+    if (!Array.isArray(c.args)) continue;
+    assert.equal(c.args[0], "-c");
+    assert.ok(!c.args[1].includes(root), c.args[1]);
+    assert.ok(c.args.slice(3).every((p) => p.endsWith("bots.json")), JSON.stringify(c.args));
+  }
+  for (const c of [...git, ...sh, ...reads]) assert.equal(c.on, "far", JSON.stringify(c));
+  // A machine that can't be reached gives no answer: nothing is kept as "no project" for it.
+  state.offline.add("gone");
+  state.spaces = [{ id: "r4", folder: join(odd, "app"), machine: "gone" }];
+  assert.deepEqual(await discoverProjects(), []);
+  state.offline.clear();
+  assert.deepEqual((await discoverProjects()).map((p) => [p.key, p.machine, p.spaces]), [[odd, "gone", ["r4"]]]);
 });
 
 test("discoverProjects: a machine away keeps its known key, and is skipped when never keyed", async (t) => {
@@ -138,6 +175,7 @@ test("discoverProjects: a machine away keeps its known key, and is skipped when 
   state.offline.clear();
   const seen = await discoverProjects();
   assert.deepEqual(seen.map((p) => [p.key, p.file.bots.length]), [[main, 2]]);
+  assert.ok(!state.calls.some((c) => c.command === "sh"), "a git hit sends no batch");
   // Away again, with the cached key a minute old: git rejects, the key holds (no flip to
   // the worktree folder, whose bots.json is never read), and the rejected read keeps the
   // last good definitions.
@@ -154,6 +192,15 @@ test("discoverProjects: a machine away keeps its known key, and is skipped when 
 // that never answers gets a name of its own per test: bots.js keeps one gate per machine for
 // the module's life, so calls stuck on one stay stuck.
 const quick = () => new Promise((done) => setImmediate(done));
+// `quick` gives up on this computer's calls too (they are bounded as well), so it is used
+// only where this computer has nothing to show. Where it has: a timer that runs out once the
+// first project is drawn, so this computer's calls answer in time and a machine that never
+// answers gives up right after. One per discovery.
+function afterLocal() {
+  let release;
+  const drawn = new Promise((done) => { release = done; });
+  return { sleep: () => drawn, onUpdate: () => release() };
+}
 const gitCalls = () => state.calls.filter((c) => c.kind === "exec" && c.command === "git");
 const callsTo = (m) => state.calls.filter((c) => c.on === m);
 const DAY = 24 * 3600_000;
@@ -176,10 +223,11 @@ test("discoverProjects: a folder keyed once isn't asked again; a minute later it
   const found = await discoverProjects({ sleep: quick });
   assert.deepEqual(found.map((p) => [p.key, p.spaces, p.file.bots.length, p.stale ?? false]), [[main, ["s1", "s2"], 2, false]]);
   assert.deepEqual(gitCalls().map((c) => c.cwd), [main, tree]);
-  // The failed look renews the keys: the next discovery doesn't ask again.
+  // A timeout is no answer and renews nothing: the next discovery shows the same and asks again.
   state.calls = [];
-  await discoverProjects({ sleep: quick });
-  assert.deepEqual(gitCalls(), []);
+  const again = await discoverProjects({ sleep: quick });
+  assert.deepEqual(again.map((p) => [p.key, p.spaces, p.file.bots.length, p.stale ?? false]), [[main, ["s1", "s2"], 2, false]]);
+  assert.deepEqual(gitCalls().map((c) => c.cwd), [main, tree]);
 });
 
 test("discoverProjects: a machine that never answers, with 15 folders, is never sent more than 8 calls", async (t) => {
@@ -201,7 +249,7 @@ test("discoverProjects: a machine that never answers doesn't hold back this comp
   state.hung.add("dead");
   state.spaces = [{ id: "r1", folder: "/srv/app", machine: "dead" }, { id: "s1", folder: main, machine: null }];
   rememberProject("/srv/other", "dead");
-  const found = await discoverProjects({ sleep: quick });
+  const found = await discoverProjects(afterLocal());
   assert.deepEqual(found.map((p) => [p.key, p.machine, p.spaces]), [[main, null, ["s1"]]]);
   // Away is not "no": the remembered project stays remembered.
   assert.equal(state.shared.get("am.sidebar.projects").length, 1);
@@ -224,7 +272,7 @@ test("restoreDiscovery: the last discovery draws at startup under the spaces ope
   assert.deepEqual(drawn.map((p) => [p.key, p.machine, p.spaces, p.file.bots.length, p.stale ?? false]),
     [[main, null, ["n1"], 2, false], [main, "far", ["n2"], 2, false]]);
   // "far" times out: its saved file shows stale, with when it was read.
-  const found = await fresh.discoverProjects({ sleep: quick });
+  const found = await fresh.discoverProjects(afterLocal());
   assert.deepEqual(found.map((p) => [p.key, p.machine, p.spaces, p.file.bots.length, p.stale ?? false]),
     [[main, null, ["n1"], 2, false], [main, "far", ["n2"], 2, true]]);
   assert.match(found[1].warnings[0], /^last seen 1 min ago; far isn't answering$/);
@@ -233,9 +281,9 @@ test("restoreDiscovery: the last discovery draws at startup under the spaces ope
   assert.equal(again.seen, seen);
   assert.deepEqual(again.warnings, []);
   // Three discoveries without an answer: no longer shown.
-  await fresh.discoverProjects({ sleep: quick });
-  await fresh.discoverProjects({ sleep: quick });
-  assert.deepEqual((await fresh.discoverProjects({ sleep: quick })).map((p) => p.machine), [null]);
+  await fresh.discoverProjects(afterLocal());
+  await fresh.discoverProjects(afterLocal());
+  assert.deepEqual((await fresh.discoverProjects(afterLocal())).map((p) => p.machine), [null]);
 });
 
 test("restoreDiscovery: a saved file stops showing once its machine has answered", async (t) => {
@@ -247,6 +295,15 @@ test("restoreDiscovery: a saved file stops showing once its machine has answered
   const fresh = await import("../mods/am-sidebar/bots.js?answered");
   state.spaces = [{ id: "r1", folder: main, machine: "near" }];
   assert.equal(fresh.restoreDiscovery(saved).length, 1);
+  // "near" answers (its git does) but this file's read times out: that is no answer, so the
+  // saved copy stays, marked stale, and is read again at the next discovery.
+  state.readFault = (p) => (p === path ? new TimedOut(5000) : null);
+  t.after(() => { state.readFault = null; });
+  for (let round = 0; round < 2; round++) {
+    const kept = await fresh.discoverProjects();
+    assert.deepEqual(kept.map((p) => [p.key, p.machine, p.file.bots.length, p.stale]), [[main, "near", 2, true]]);
+    assert.match(kept[0].warnings[0], /^last seen 1 min ago; near isn't answering$/);
+  }
   // "near" answers (its git does) but this file can't be read: the saved copy goes.
   state.readFault = (p) => (p === path ? new Error("EACCES") : null);
   t.after(() => { state.readFault = null; });
