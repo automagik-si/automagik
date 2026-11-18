@@ -1,3 +1,5 @@
+import { spawnSync as spawnScratch } from "node:child_process";
+import { noCoreEnv } from "./no-core-env.mjs";
 // The bot form (create.js) under `node --test`, with gpui and herdr stood in for
 // (gpui-stub.mjs, form-herdr-stub.mjs): what it lists, what Copy copies, how a save or a
 // Start that fails is reported, and that a picture it can't write is not retried.
@@ -884,6 +886,9 @@ test("the CLI and the form word the pull warning for an uncommitted or changed b
   writeFileSync(mainPath, `${JSON.stringify({ version: 1, categories: [], bots: [MAIN] }, null, 2)}\n`);
   state.spaces = [{ id: "s2", name: "wt", folder: wt }];
   state.focused = { space: "s2" };
+  const spawnSync = (command, args, options) => spawnScratch(command, args, {
+    ...options, env: { ...options.env, ...noCoreEnv(root, options.env.PATH) },
+  });
   const cli = (name) => spawnSync(process.execPath, [CLI, "create", "--name", name, "--agent", "claude", "--lead", MAIN.id], {
     cwd: wt, encoding: "utf8", env: { ...process.env, HOME: home, HERDR_APP_HOME: join(home, "app"), GIT_CONFIG_NOSYSTEM: "1" },
   });
