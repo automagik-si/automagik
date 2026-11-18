@@ -316,7 +316,7 @@ const TITLES = {
   moving: 'Moving your bot…',
   done: 'Omni has your bot',
   problem: 'That did not finish',
-  restored: 'Hermes is back on',
+  restored: 'Hermes\'s Telegram is back on',
   handoff: 'Set up Omni\'s Telegram',
 }
 

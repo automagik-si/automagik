@@ -343,7 +343,7 @@ test('an unknown Omni result offers the way back to Hermes, only when there is a
 
 test('a restored Hermes ends the step with its Telegram back, and a recovered channel says who answers', () => {
   const tree = view({ phase: 'restored' })
-  assert.match(textOf(tree), /Hermes is back on/)
+  assert.match(textOf(tree), /Hermes's Telegram is back on/)
   assert.match(textOf(tree), /Hermes has its Telegram again/)
   assert.deepEqual(buttonLabels(tree), ['Done'])
 

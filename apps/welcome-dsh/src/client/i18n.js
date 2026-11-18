@@ -415,7 +415,7 @@ export const PT_BR = {
   'Hermes: Telegram off': 'Hermes: Telegram desligado',
   'Hermes\'s Telegram is off. Omni did not confirm which channel is the move\'s, so check Omni\'s Channels before trying again. Hermes still has the key.': 'O Telegram do Hermes está desligado. O Omni não confirmou qual canal é o da mudança, então verifique os Canais do Omni antes de tentar de novo. O Hermes ainda tem a chave.',
   'Turn Hermes\'s Telegram back on': 'Religar o Telegram do Hermes',
-  'Hermes is back on': 'O Hermes está de volta',
+  'Hermes\'s Telegram is back on': 'O Telegram do Hermes está de volta',
   'That is your way back. Hermes has its Telegram again.': 'Esse é o caminho de volta. O Hermes está com o Telegram de novo.',
   'Nothing else changed. If Omni kept a channel from this move, check it in Omni\'s Channels before moving again.': 'Nada mais mudou. Se o Omni ficou com um canal desta mudança, verifique nos Canais do Omni antes de mover de novo.',
   'No Bot answers in these chats yet. Pick one in Omni\'s Channels.': 'Nenhum Bot responde nesses chats ainda. Escolha um nos Canais do Omni.',
