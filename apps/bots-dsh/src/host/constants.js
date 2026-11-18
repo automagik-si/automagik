@@ -56,6 +56,10 @@ export const ROOM_REPLY_TIMEOUT_MS = 240_000
 // Lines a member writes less than this apart while it works reach its group together.
 export const ROOM_STEP_GAP_MS = 30_000
 export const SOURCE_KIND = 'bot'
+// The failure code acp-dsh gives a turn the host stopped from outside the app (its SIGTERM at
+// a restart): the work was cut while running, so it is resumed, not marked failed. A Stop the
+// person asked for stays `ABORTED`.
+export const AGENT_INTERRUPTED = 'AGENT_INTERRUPTED'
 // The fixed reply that opens a fresh conversation part; it is never shown or sent on.
 export const HANDOFF_ACK = 'Noted. I have my handoff note and carry on from here.'
 // A result that arrives after the user gave up waiting for it: it settled once

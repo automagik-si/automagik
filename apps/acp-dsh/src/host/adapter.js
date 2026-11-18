@@ -18,7 +18,7 @@ import { recordDrift } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
 import { SessionFiles, restrictedLevel } from './session-files.js'
 import { chatProfileModes } from './codex-chat-profiles.js'
-import { BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
+import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
 import { agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
@@ -541,13 +541,16 @@ export class AcpAdapter extends LlmAdapter {
    */
   constructor(ctx, agents, {
     dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
-    botIdentity = () => undefined, access, holds, ownMode = () => undefined,
+    botIdentity = () => undefined, access, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
   } = {}) {
     super()
     this.cancelWaitMs = cancelWaitMs
     this.timers = timers
+    // Whether the host itself is stopping (index.js watches its SIGTERM/SIGINT): a prompt the
+    // agent then cancels was cut by the restart, not stopped by the person or by its own policy.
+    this.hostStopping = hostStopping
     // The turn gates (index.js `holdTurns`): asked before an agent acts for a Session. They
     // only ever refuse; with none registered nothing is asked.
     this.ownMode = ownMode
@@ -1724,6 +1727,14 @@ export class AcpAdapter extends LlmAdapter {
         }
         yield* shown()
         yield* blocks.close()
+        // A cancel the app did not ask for (the turn's Stop would have aborted the signal) while
+        // the host itself is stopping came from outside: its SIGTERM reached the agent, which
+        // answered with `cancelled`. That is an interruption, not the person's Stop, and not a
+        // model failure: the Bot team resumes the work after the restart.
+        if (event.stopReason === 'cancelled' && options.signal?.aborted !== true
+            && live.run.cancelled !== true && this.hostStopping()) {
+          return yield finish('error', `${agent.name} was interrupted before it finished.`, AGENT_INTERRUPTED)
+        }
         if (event.stopReason === 'cancelled') return yield finish('aborted', 'Stopped', 'ABORTED')
         return yield finish(FINISH[event.stopReason] ?? 'stop')
       } else if (event.type === 'error') {
@@ -1733,6 +1744,12 @@ export class AcpAdapter extends LlmAdapter {
         if (isAuthRequired(event)) {
           this.signedOut(options.provider)
           return yield signInFailure(agent, event)
+        }
+        // The agent process took the host's SIGTERM while its prompt was in flight: the work
+        // was cut while running, so it is reported as an interruption rather than a failure.
+        if (options.signal?.aborted !== true && live.run.cancelled !== true
+            && (this.hostStopping() || live.run.exited?.signal === 'SIGTERM' || live.run.exited?.signal === 'SIGINT')) {
+          return yield finish('error', `${agent.name}: ${event.message}`, AGENT_INTERRUPTED)
         }
         return yield finish('error', `${agent.name}: ${event.message}`)
       } else if (event.type === 'aborted') {

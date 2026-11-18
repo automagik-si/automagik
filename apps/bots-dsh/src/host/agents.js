@@ -976,10 +976,12 @@ export function install(rt) {
       // A restart cut the turn: the task is not done. resume.js sets it going again, or
       // ends it as stopped when it will not.
       if (rt.cutByRestart?.(event.data?.reason)) return
-      // An error fails the task; the user or a Bot stopping it (an abort) only stops it.
+      // An error fails the task; the user or a Bot stopping it (an abort, or the error a
+      // cancelled ACP prompt ends with) only stops it.
       const kind = event.data?.reason?.kind
-      const failed = kind === 'error'
-      const stopped = kind === 'aborted'
+      const cancelled = kind === 'error' && event.data?.reason?.error?.code === 'ABORTED'
+      const failed = kind === 'error' && !cancelled
+      const stopped = kind === 'aborted' || cancelled
       task.status = failed ? 'failed' : stopped ? 'stopped' : 'done'
       task.endedAt = Date.now()
       const words = lastWords.get(id) ?? ''

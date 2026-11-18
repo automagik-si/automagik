@@ -141,6 +141,9 @@ export class AgentRun {
     this.stderr = ''
     this.prompting = undefined
     this.exited = undefined
+    // Whether this prompt was cancelled by the app (a Stop, a reap, an ended session), so a
+    // cancel the app did not ask for is told apart: it comes from the host stopping.
+    this.cancelled = false
   }
 
   /**
@@ -372,6 +375,7 @@ export class AgentRun {
     this.queue = []
     this.reviews = { denied: 0, inRow: 0, last: undefined, after: false }
     this.promptEnded = false
+    this.cancelled = false
     // The calls of the prompts before this one are over for DSH too: their cards ran in turns
     // that have ended, and a call already known never gets a second card. A question for one
     // has nobody left to answer it (onPermission); one still stored is withdrawn here.
@@ -482,6 +486,7 @@ export class AgentRun {
 
   async cancel() {
     if (!this.busy || this.sessionId === undefined) return
+    this.cancelled = true
     await this.held(() => this.conn.cancel({ sessionId: this.sessionId })).catch(() => {})
   }
 
