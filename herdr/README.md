@@ -1615,9 +1615,8 @@ tools, the test checks, the `gh` reads and a short list of git subcommands (`log
 
 Run repository tests only in a checkout you trust. Tests execute checkout code with the access
 available to the test process, so give that process only the files and credentials its work
-needs. Before sending a message, make sure the destination is the agent you intend and trust.
-The proxy restricts which destinations are available, and each recipient handles messages with
-its own permissions.
+needs. Before sending a message, check the intended recipient. The proxy restricts which
+destinations are available, and each recipient handles messages with its own permissions.
 
 The fixed deny rules are always present, the same for a seat and for every worker role, and a
 roster's `agyPermissions` can only add to them:
