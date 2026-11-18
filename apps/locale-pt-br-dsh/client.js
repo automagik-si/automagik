@@ -2846,7 +2846,28 @@ const pack = createPack({
     "Point at the folder that holds Hermes, or choose another computer.": "Aponte para a pasta que contém o Hermes ou escolha outro computador.",
     "The folder must be on the remote computer, such as /srv/hermes.": "A pasta deve estar no computador remoto, por exemplo /srv/hermes.",
     "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "O registro do serve está numa pasta compartilhada com outra pasta do Hermes, então não pode ser escolhido aqui. Outra pasta ao lado deste Hermes parece uma pasta do Hermes. Dê a este Hermes uma pasta própria: mova o Hermes, ou mova a outra pasta, depois adicione essa pasta com Adicionar outro Hermes.",
-    "Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.": "O registro do serve está numa pasta compartilhada com {folders}, então não pode ser escolhido aqui. {folders} tem um config.yaml e pastas com nomes típicos de uma pasta do Hermes, mas não tem SOUL.md nem state.db, então o Automagik não consegue distinguir essa pasta de outro Hermes. Se não for um Hermes, mova essa pasta para outra pasta mãe e pressione Verificar de novo. Se for outro Hermes, os dois precisam de pastas mãe diferentes."
+    "Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.": "O registro do serve está numa pasta compartilhada com {folders}, então não pode ser escolhido aqui. {folders} tem um config.yaml e pastas com nomes típicos de uma pasta do Hermes, mas não tem SOUL.md nem state.db, então o Automagik não consegue distinguir essa pasta de outro Hermes. Se não for um Hermes, mova essa pasta para outra pasta mãe e pressione Verificar de novo. Se for outro Hermes, os dois precisam de pastas mãe diferentes.",
+    "Could not continue this sign-in ({kind}). Try again.": "Não foi possível continuar este login ({kind}). Tente de novo.",
+    "The account could not be confirmed ({kind}). Try again.": "Não foi possível confirmar a conta ({kind}). Tente de novo.",
+    "This coding agent signs in from its own terminal. Run its sign-in command there, then try again.": "Este agente de código entra pelo próprio terminal. Rode o comando de login por lá e tente de novo.",
+    "The CLI did not offer a sign-in link in time. Try again.": "O CLI não ofereceu um link de login a tempo. Tente de novo.",
+    "The CLI could not be started. Run it once in a terminal, then try again.": "Não foi possível iniciar o CLI. Rode-o uma vez no terminal e tente de novo.",
+    "The CLI returned an old sign-in link. Update it, then try again.": "O CLI devolveu um link de login antigo. Atualize-o e tente de novo.",
+    "The CLI did not confirm the sign-in. Try again.": "O CLI não confirmou o login. Tente de novo.",
+    "The CLI exited before the sign-in finished. Try again.": "O CLI saiu antes de o login terminar. Tente de novo.",
+    "Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.": "Outra sessão do Automagik neste computador está usando a conta do Bot. Feche-a e clique em Entrar de novo.",
+    "The Bot account is busy in another Automagik session on this computer. Close it, then press Sign in again.": "A conta do Bot está ocupada em outra sessão do Automagik neste computador. Feche-a e clique em Entrar de novo.",
+    "The Bot account is already changing. Try again when it finishes.": "A conta do Bot já está sendo alterada. Tente de novo quando terminar.",
+    "The Bot account changed. Sign in again.": "A conta do Bot mudou. Entre de novo.",
+    "This coding agent is not signed in any more. Press Sign in again.": "Este agente de código não está mais com login feito. Clique em Entrar de novo.",
+    "Automagik is restarting. Try again in a moment.": "O Automagik está reiniciando. Tente de novo em instantes.",
+    "This installation keeps no record of the Bot account. Sign in again; if it keeps happening, the instance needs its profile repaired.": "Esta instalação não tem registro da conta do Bot. Entre de novo; se continuar, o perfil desta instância precisa ser reparado.",
+    "The Bot account cannot be changed from this session. Use the app on this computer.": "A conta do Bot não pode ser alterada a partir desta sessão. Use o aplicativo neste computador.",
+    "Install the coding agent before signing in.": "Instale o agente de código antes de entrar.",
+    "Signing out of the Bot account did not finish. Try again.": "Sair da conta do Bot não terminou. Tente de novo.",
+    "Signing out of the Bot account could not be verified. Try again.": "Não foi possível confirmar a saída da conta do Bot. Tente de novo.",
+    "The Bot account was reset. Press Sign in again.": "A conta do Bot foi redefinida. Clique em Entrar de novo.",
+    "This sign-in is not available for this Bot.": "Este login não está disponível para este Bot."
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })
