@@ -35040,7 +35040,7 @@ var BotBrowserButton = ({ open }) => (0, import_react94.createElement)("button",
   "aria-label": t("Bot browser"),
   style: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, padding: 0, border: 0, borderRadius: 8, background: "none", color: "var(--dsw-alias-label-secondary, inherit)", cursor: "pointer" }
 }, (0, import_react94.createElement)(GlobeIcon2, { size: 16 }));
-function installBotBrowserTab({ tabs, slots, sidebar, face, Body, installCss: _installCss }) {
+function installBotBrowserTab({ tabs, slots, sidebar, face, Body }) {
   const releaseType = tabs.register({
     id: BOT_BROWSER_ID,
     kind: BOT_BROWSER_KIND,
@@ -38952,7 +38952,7 @@ function apply(ctx) {
     // hands it back, so the Web app needs no Electron webview to show it.
     () => {
       const fiber = ctx.inject(["sidebarRightTabs", "sidebarRight"], (scope) => {
-        scope.effect(() => installBotBrowserTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: BotBrowserBody, installCss: installCompiledStyles }), "ds-bot: native Bot browser tab");
+        scope.effect(() => installBotBrowserTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: BotBrowserBody }), "ds-bot: native Bot browser tab");
       });
       return () => fiber.dispose();
     },
