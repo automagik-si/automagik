@@ -400,6 +400,53 @@ const implementation = {
       await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' The MCP tool answered.' } })
       return { stopReason: 'end_turn' }
     }
+    // Claude Code's own tools by their structured names, as in native-tools mode: `native-read`
+    // is a Read that does not ask (its default mode lets reads through), `native-bash` a Bash
+    // that asks first, `native-agent` an Agent call whose subagent's nested Bash asks while the
+    // Agent call is still running. A call that asks runs only when allowed; the trace says so.
+    const native = /native-(read|bash|agent)/.exec(said)
+    if (native !== null) {
+      const toolCallId = `native-${session.turns}`
+      const ask = async (id, title, rawInput) => {
+        const answer = await conn.requestPermission({
+          sessionId,
+          toolCall: { toolCallId: id, title, kind: 'execute', rawInput },
+          options: [{ optionId: 'yes', name: 'Allow', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }],
+        })
+        return answer.outcome.outcome === 'selected' ? answer.outcome.optionId : answer.outcome.outcome
+      }
+      const runBash = async (id, parent) => {
+        const rawInput = { command: 'echo native' }
+        await update({ sessionUpdate: 'tool_call', toolCallId: id, name: 'Bash', title: 'echo native', kind: 'execute', status: 'pending', rawInput, _meta: { claudeCode: { toolName: 'Bash', ...(parent === undefined ? {} : { parentToolUseId: parent }) } } })
+        const answer = await ask(id, 'Run command?', rawInput)
+        if (answer === 'yes') {
+          trace({ event: 'native-tool-ran', sessionId, toolCallId: id, name: 'Bash' })
+          await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'native' } }] })
+        } else {
+          trace({ event: 'native-tool-refused', sessionId, toolCallId: id, name: 'Bash', answer })
+          await update({ sessionUpdate: 'tool_call_update', toolCallId: id, status: 'failed', content: [{ type: 'content', content: { type: 'text', text: 'Not allowed' } }] })
+        }
+        return answer
+      }
+      if (native[1] === 'read') {
+        await update({ sessionUpdate: 'tool_call', toolCallId, name: 'Read', title: 'Read notes.txt', kind: 'read', status: 'pending', rawInput: { file_path: 'notes.txt' }, _meta: { claudeCode: { toolName: 'Read' } } })
+        trace({ event: 'native-tool-ran', sessionId, toolCallId, name: 'Read' })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'the notes' } }] })
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' I read the notes.' } })
+      } else if (native[1] === 'bash') {
+        const answer = await runBash(toolCallId)
+        if (session.cancelled || answer === 'cancelled') return { stopReason: 'cancelled' }
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: answer === 'yes' ? ' It printed native.' : ' I was not allowed to run it.' } })
+      } else {
+        await update({ sessionUpdate: 'tool_call', toolCallId, name: 'Agent', title: 'Look around', kind: 'think', status: 'pending', rawInput: { description: 'Look around', prompt: 'look', subagent_type: 'general-purpose' }, _meta: { claudeCode: { toolName: 'Agent' } } })
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'in_progress' })
+        const answer = await runBash(`${toolCallId}-child`, toolCallId)
+        if (session.cancelled || answer === 'cancelled') return { stopReason: 'cancelled' }
+        await update({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed', content: [{ type: 'content', content: { type: 'text', text: `subagent report (${answer})` } }] })
+        await update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ` The subagent reported (${answer}).` } })
+      }
+      return { stopReason: 'end_turn' }
+    }
     // A tool call on the `dsh` bridge, by the name Claude Code puts on the wire. With "permit"
     // the call first asks session/request_permission, as Claude Code does in Manual; without it
     // the call runs with no ACP-level request at all, as it would in Auto.
