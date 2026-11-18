@@ -99,6 +99,16 @@ export function modelHint(bot, roster, state) {
   }
   const shown = modelOf(bot, roster)
   if (shown === undefined) return t('Pick the model this Bot runs on.')
+  // A Bot a subscription move had to leave on its plan route: its shell is off, so the CLI
+  // that would bring its own shell cannot take it. The notice names the reason; when the
+  // plan route itself is gone, the Bot asks for a model instead of looking like it works.
+  const held = bot.subscriptionShellHeld
+  if (held !== undefined) {
+    if (!shown.served) {
+      return t('This model no longer answers, and this Bot cannot move to {cli} while its shell is off. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.', { cli: held.cli })
+    }
+    return t('This Bot stays on {model}: {cli} is a coding CLI that brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness\'s tools.', { model: shown.name, cli: held.cli })
+  }
   if (!shown.served && (roster.models ?? []).length > 0) return t('This model is not available now. Pick another one.')
   const served = servedOf(roster, shown.ref)
   if (served?.needsSignIn) return t('{model} needs a sign-in before it can answer.', { model: served.name })

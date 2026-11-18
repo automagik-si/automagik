@@ -358,13 +358,18 @@ export function branches(pattern: string): Branch[] {
 
 /**
  * What a branch that is not one exact text must start with, as literal text, per rule: an
- * address's whole local part and the at sign; a home's root, whole name and a separator. So no
- * wildcard reaches the part of the hit that names a person.
+ * address's whole local part and the at sign; a home's root, whole name and a separator. This
+ * check runs before the branch's remaining text is checked.
  */
 const PINNED: Record<string, { re: RegExp; what: string }> = {
   email: { re: /^[^@]+@/, what: 'its whole local part and the at sign' },
   'home-path': { re: /^(?:\/Users\/|\/home\/|[A-Za-z]:\\Users\\)[A-Za-z0-9._-]+[\\/]/, what: 'its whole home name' },
 };
+
+const OMNI_VERSION_FORMS = [
+  { prefix: ['omni', ''].join('@'), tail: '[0-9]+\\.[0-9A-Za-z]+$' },
+  { prefix: ['omni', 'v'].join('@'), tail: '[0-9]+$' },
+];
 
 /**
  * Text a placeholder pattern must not match, all fixed so the same list always loads the same
@@ -392,9 +397,9 @@ function probes(pattern: string): string[] {
  * either an exact `match` or a `pattern` anchored with ^ and $. A pattern is refused when it
  * matches empty text, has no literal part, has a branch not anchored with ^ and $, has a branch
  * that leaves the person's part of a hit to a wildcard (an address's local part and at sign, a
- * home's name: `PINNED`), or matches unrelated text (`probes`): a placeholder may pass one text,
- * never a whole rule. The checks are fixed, so a list loads or is refused the same way every run.
- * Returns a test for one hit.
+ * home's name: `PINNED`), or matches unrelated text (`probes`). Each home path and email domain
+ * must also be literal, with an exception for the approved Omni version forms. The checks are
+ * deterministic. Returns a test for one hit.
  */
 export function placeholderTest(entries: Placeholder[]): (hit: { rule: string; match: string }) => boolean {
   if (!Array.isArray(entries)) throw new Error('placeholders: the list must be an array');
@@ -421,6 +426,24 @@ export function placeholderTest(entries: Placeholder[]): (hit: { rule: string; m
     }
     const loose = probes(e.pattern).find((p) => re.test(p));
     if (loose !== undefined) throw new Error(`${at}: pattern ${e.pattern} matches unrelated text (${JSON.stringify(loose)})`);
+    if (parts.some((b) => !b.exact)) {
+      if (e.rule === 'home-path') {
+        throw new Error(`${at}: pattern ${e.pattern} must carry the path below its home name as literal text`);
+      }
+      const sources = e.pattern.split('|');
+      const approved = sources.length === parts.length && parts.every((part, index) => {
+        if (part.exact) return true;
+        const source = sources[index];
+        return OMNI_VERSION_FORMS.some(({ prefix, tail }) => {
+          if (!source.endsWith(tail)) return false;
+          const head = branches(`${source.slice(0, -tail.length)}$`);
+          return head.length === 1 && head[0].anchored && head[0].exact && head[0].prefix === prefix;
+        });
+      });
+      if (!approved) {
+        throw new Error(`${at}: pattern ${e.pattern} must carry its whole domain as literal text`);
+      }
+    }
     return (h: { rule: string; match: string }) => h.rule === e.rule && re.test(h.match);
   });
   return (hit) => tests.some((t) => t(hit));

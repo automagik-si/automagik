@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // Shared by the pack and am CI jobs: real CLI calls, only scratch homes and fake hc.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -36,6 +37,8 @@ function scene(t, cli, agent, paired, remote) {
   const env = { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app,
     HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, GIT_CEILING_DIRECTORIES: root,
     AUTOMAGIK_HERDR_RESTART_STABLE_MS: "1", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "1000" };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const run = (args, extraEnv = {}) => spawnSync(process.execPath, [cli, ...args, "--project", project,
     ...(remote ? ["--machine", "vm"] : []), "--json"], { cwd: project, env: { ...env, ...extraEnv }, encoding: "utf8" });
   const live = () => {

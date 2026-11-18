@@ -11,9 +11,9 @@ import { MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOT
 import { currentColor, isColor, normalize, unquote } from './text.js'
 import { nameProblem } from '../shared/mentions.js'
 import { contextPatch } from '../shared/context-policy.js'
-import { crossesHarness } from '../shared/routes.js'
+import { commandCapableAgent, crossesHarness } from '../shared/routes.js'
 import { cleanPetId, shippedPet } from './pets.js'
-import { cleanDenyTools } from './tool-deny.js'
+import { cleanDenyTools, cleanShell } from './tool-deny.js'
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -280,12 +280,15 @@ export function install(rt) {
     }
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, denyTools: denyToolsInput, section, sectionId }) {
+  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
-    // Checked before the Session exists, so a bad list creates no Bot and leaves no orphan.
+    // Checked before the Session exists, so a bad list or shell choice creates no Bot and
+    // leaves no orphan.
     const denyTools = cleanDenyTools(denyToolsInput)
+    const shell = cleanShell(shellInput)
+    const isPrivate = privateInput === true
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
     // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
     // its Session exists.
@@ -301,10 +304,27 @@ export function install(rt) {
     const dir = workDir === undefined || workDir === null ? undefined : await rt.cleanWorkDir(workDir)
     const clash = dir === undefined ? undefined : await rt.privateClash(dir)
     if (clash) throw refusal(`${dir} is in or around the folder of ${clash.name}, a private Bot, so ${cleanName} cannot work there`)
+    // A Bot created private is a new private-folder Bot: it needs a folder of its own and
+    // cannot be the Main Bot, and the same overlap checks an update runs apply here before a
+    // Session exists. It starts without a shell unless the caller explicitly gives it one.
+    if (isPrivate) {
+      if (main) throw refusal(`${cleanName} cannot be a Main Bot and private`)
+      await rt.checkPrivacyChange({ id: 'new-bot', name: cleanName, private: false, workDir: dir }, { flag: true, moving: true, workDir: dir })
+    }
     if (!main && (section !== undefined || sectionId !== undefined)) resolveSectionInput({ section, sectionId }, { allowCreate: false })
     // A Bot made by another Bot takes its creator's level, before its Session is made; else
     // the team default. A Session adopted from a host keeps its own.
     const creator = rt.botOf(createdBy)
+    // A Bot another Bot makes also keeps that creator's shell fence: a shell-less Bot must
+    // not give itself one by spawning a Bot that has it. Only the user turns it back on.
+    const shellOff = shell === undefined ? isPrivate || creator?.shell === false : shell === false
+    // A command-capable agent runs its tools outside this plugin, so a Bot without a shell
+    // cannot be paired with it: the fence would not reach the agent. Refuse before a Session
+    // exists, with the way out.
+    if (shellOff && commandCapableAgent(modelRef)) {
+      throw refusal(`${cleanName} has no shell, so it cannot run on ${String(modelRef).split('/')[0]}, `
+        + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
+    }
     const carried = Array.isArray(creator?.denyTools) ? creator.denyTools : []
     const denied = carried.length === 0 ? denyTools : cleanDenyTools([...new Set([...carried, ...(denyTools ?? [])])])
     // Keep the existing unset representation when the profile already starts at
@@ -343,6 +363,12 @@ export function install(rt) {
         ...(existingSessionId !== undefined ? { sessionPinned: true } : {}),
         // What a team member brought in by its own plugin is for (omni: Omni's channels).
         ...(BOT_KINDS.includes(kind) ? { kind } : {}),
+        // A private-folder Bot. Its shell defaults to off; changing `private` later never
+        // changes a stored Bot's shell (updateBot).
+        ...(isPrivate ? { private: true } : {}),
+        // Every new Bot states its capability. Readers still treat an absent field (a Bot
+        // saved before this existed) as a shell, so nothing is migrated.
+        shell: !shellOff,
         // The tools this Bot never gets, enforced on every Session it speaks from.
         ...(denied ? { denyTools: denied } : {}),
         ...(resolvedSecId ? { sectionId: resolvedSecId } : {}),
@@ -390,9 +416,9 @@ export function install(rt) {
       } else {
         await rt.applyPermission(bot, id, undefined, undefined, { start: true })
       }
-      if (denied) {
+      if (denied || shellOff) {
         await rt.applyToolDeny(bot)
-          .catch(error => rt.warn('ds-bot: the denied tools of %s not applied: %s', cleanName, error))
+          .catch(error => rt.warn('ds-bot: the restricted tools of %s not applied: %s', cleanName, error))
       }
       if (modelRef === undefined) {
         bot.kickoff = greeting
@@ -513,6 +539,9 @@ export function install(rt) {
       workDir,
       sectionId: bot.sectionId,
       copyOf: bot.id,
+      // A copy keeps a shell the original was denied: the copy is new, but taking a
+      // capability away here would not be the user's choice either.
+      ...(bot.shell === false ? { shell: false } : {}),
     })
   }
 
@@ -533,11 +562,14 @@ export function install(rt) {
     if (patch.browserGrants !== undefined && actorId !== undefined) {
       throw refusal(`Only the user can set what ${bot.name} may do in the browser`)
     }
-    // The deny list is the Bot's hard restriction, so a Bot cannot lift or narrow it by
-    // editing itself (or through a Main Bot's call): only the user's settings change it.
-    // Same rule as the browser grants above (#584).
+    // The deny list and the shell capability are the Bot's hard restrictions, so a Bot
+    // cannot lift or narrow either by editing itself (or through a Main Bot's call): only
+    // the user's settings change them. Same rule as the browser grants above (#584).
     if (patch.denyTools !== undefined && actorId !== undefined) {
       throw refusal(`Only the user can set what ${bot.name} may use`)
+    }
+    if (patch.shell !== undefined && actorId !== undefined) {
+      throw refusal(`Only the user can give ${bot.name} a shell or take it away`)
     }
     if (patch.private !== undefined && actorId !== undefined) {
       throw refusal(`Only the user can make ${bot.name} private or open`)
@@ -553,6 +585,9 @@ export function install(rt) {
     // DSH does not serve refuses the update, so a typo cannot quietly weaken the list.
     const denyTools = cleanDenyTools(patch.denyTools)
     if (denyTools !== undefined && denyTools !== null) await rt.assertDenyTools(rt.chatOf(bot.id), denyTools)
+    // The shell capability, checked with the rest: a value that is not true or false
+    // refuses the update before anything is written.
+    const shell = cleanShell(patch.shell)
     // Checked first, so a folder, model or level that does not pass leaves the rest
     // unchanged too.
     const role = patch.role === undefined ? undefined : cleanRole(patch.role)
@@ -567,6 +602,22 @@ export function install(rt) {
     const modelRef = patch.model === undefined ? undefined
       : patch.model === null || patch.model === '' ? null
       : await rt.resolveModel(patch.model, { checkAccess: true, remember: false, keep: bot.model })
+    // The shell and the model are one boundary: a Bot without a shell cannot run on an
+    // agent whose own tools run commands, and such a Bot's shell cannot be turned off.
+    const nextShell = shell === undefined ? bot.shell : shell
+    // A cleared model (`null` or '') leaves the Bot running on the model it last applied
+    // until a new one replaces it, so that is the one the boundary must test.
+    const nextModel = modelRef === undefined ? bot.model ?? bot.appliedModel
+      : modelRef === null ? bot.appliedModel
+      : modelRef
+    if (nextShell === false && commandCapableAgent(nextModel)) {
+      const provider = String(nextModel).split('/')[0]
+      throw refusal(commandCapableAgent(bot.model ?? bot.appliedModel)
+        ? `${bot.name} runs on ${provider}, whose own tools can run commands, so its shell `
+          + 'cannot be turned off. Pick a model that uses DeepSeek Harness\'s tools first.'
+        : `${bot.name} has no shell, so it cannot run on ${provider}, whose own tools can run `
+          + 'commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
+    }
     // A model on another route, or another ACP agent, is a new conversation with a handoff
     // note (RFC 0030, Decided 6 and 10). The menu uses switchRoute for it; a direct update-bot
     // is the same person's pick, so it takes that path too rather than silently carrying the
@@ -663,6 +714,9 @@ export function install(rt) {
       if (denyTools === null) delete bot.denyTools
       else bot.denyTools = denyTools
     }
+    // A change states the capability on the record. An absent field still reads as a
+    // shell: that is how every Bot saved before this capability existed keeps its own.
+    if (shell !== undefined) bot.shell = shell
     if (flag === true) bot.private = true
     else if (flag === false) delete bot.private
     if (patch.section !== undefined || patch.sectionId !== undefined) {
@@ -681,14 +735,14 @@ export function install(rt) {
     }
     if (!bot.permissionAuto && markOf(bot.model) !== markBefore && bot.permissionRev === revBefore) rt.movePermissionRev(bot)
     await rt.save()
-    // The list changed: every Session of this Bot is lifted and re-set from the new one, so
-    // a name added now disappears at once and a name removed comes back.
-    if (denyTools !== undefined) {
+    // The list or the shell changed: every Session of this Bot is lifted and re-set from
+    // the new record, so a shell tool added or removed here takes effect at once.
+    if (denyTools !== undefined || shell !== undefined) {
       await rt.applyToolDeny(bot)
-      if (bot.permissionAuto) rt.endAuto(bot)
-      // The list changed either way: a restricted Bot's already-armed fresh-Session tasks
-      // would keep opening Sessions no deny layer can bind (#584, L5), and a Bot that just
-      // became unrestricted releases a task whose pause had been stuck.
+      if (denyTools !== undefined && bot.permissionAuto) rt.endAuto(bot)
+      // A restricted Bot's already-armed fresh-Session tasks would keep opening Sessions no
+      // deny layer can bind (#584, L5), and a Bot that just became unrestricted releases a
+      // task whose pause had been stuck.
       try {
         await rt.revokeNewSchedules?.(bot.id)
       } catch (error) {

@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // automagik-herdr, the command line (A11): every subcommand run as a program against scratch git
 // projects under $TMPDIR, with a fake `hc` first on PATH (test/fake-hc.mjs) that records
 // each call and answers from a state file, and a fake `herdr-app` (test/fake-herdr-app.mjs; no
@@ -129,12 +130,17 @@ function scene(t, { terminals = [], briefing = true, amPart = false, window = { 
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog, AUTOMAGIK_HERDR_TAB_WAIT_MS: "300", AGY_FAKE_LOG: agyLog, GIT_CEILING_DIRECTORIES: root };
   delete env.HC_TERMINAL_ID;
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   delete env.HERMES_HOME; // a runner's own hermes home must not decide the hermes tests
   const cli = (args, { cwd = project, input, env: extra = {} } = {}) => {
+    core.control({ ...env, ...extra });
     const r = spawnSync(RUNTIME, [CLI, ...args], { cwd, env: { ...env, ...extra }, input, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   const cliAsync = (args, { env: extra = {} } = {}) => new Promise((resolve) => {
+    core.control({ ...env, ...extra });
     execFile(RUNTIME, [CLI, ...args], { cwd: project, env: { ...env, ...extra }, encoding: "utf8" }, (e, out, err) => resolve({ code: e ? e.code : 0, out, err }));
   });
   const calls = () => readJsonLines(logPath);
