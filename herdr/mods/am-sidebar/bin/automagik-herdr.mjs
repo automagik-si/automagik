@@ -55,7 +55,7 @@ import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, ent
 import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
-import { chooseLogin } from "../logins.js";
+import { CONFIG_VAR, chooseLogin } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
@@ -881,8 +881,8 @@ async function projectDefining(botId, folder) {
  * one per bot by the old live rule (an agent in front, then the newest), its project the one
  * that defines the bot. The file is created, even empty, so it happens once.
  */
-async function importLabels(path) {
-  const found = await labelRows();
+async function importLabels(path, proposed) {
+  const found = proposed ?? await labelRows();
   try {
     await withLockAsync(ledgerLock(path), async () => {
       if (existsSync(path)) return; // another CLI imported first
@@ -2134,7 +2134,9 @@ async function cmdLs(opts) {
     if (opts.all) throw new CliError("ls --all lists this computer's projects; give --machine without --all.", 2);
     const project = await projectFor(opts);
     const { view, hcError } = await viewOrError();
-    const bots = project.file.bots.map((b) => describe(project, b, view, hcError));
+    const bots = await Promise.all(project.file.bots.map(async (b) => ({
+      ...describe(project, b, view, hcError), duplicate: await duplicateLabel(project, b, view),
+    })));
     const one = { ...placeOf(project), categories: project.file.categories, warnings: project.warnings, bots };
     return opts.json ? { projects: [one] } : lsLines([one]);
   }
@@ -2146,7 +2148,9 @@ async function cmdLs(opts) {
     let project;
     try { project = loadProject(key); } catch (e) { projects.push({ project: key, error: e.message, categories: [], bots: [], warnings: [] }); continue; }
     if (project.text === null && opts.all && key !== keys[0]) continue; // a remembered project whose file is gone
-    const bots = project.file.bots.map((b) => describe(project, b, view, hcError));
+    const bots = await Promise.all(project.file.bots.map(async (b) => ({
+      ...describe(project, b, view, hcError), duplicate: await duplicateLabel(project, b, view),
+    })));
     projects.push({ project: key, categories: project.file.categories, warnings: project.warnings, bots });
   }
   if (opts.json) return { projects };
@@ -2169,7 +2173,8 @@ function lsLines(projects) {
         ? `  agy-allow ${(b.agyPermissions ?? b.workerAgyPermissions).allow.length} deny ${(b.agyPermissions ?? b.workerAgyPermissions).deny.length}` : "";
       const status = b.planned ? `planned, wave ${b.planned.wave}` : b.terminal ? `${b.status} in ${p.machine ? `${p.machine}/` : ""}${b.terminal}` : b.status;
       const code = b.code === false ? "  code false" : "";
-      lines.push(`  ${b.id}  ${b.name}${b.rank ? ` (${b.rank})` : ""}  ${where}${code}  ${b.agent ?? "-"}  ${model}${agy}${perms}  ${status}${b.warning ? `  ! ${b.warning}` : ""}`);
+      const duplicate = b.duplicate ? "  ! duplicate live labels" : "";
+      lines.push(`  ${b.id}  ${b.name}${b.rank ? ` (${b.rank})` : ""}  ${where}${code}  ${b.agent ?? "-"}  ${model}${agy}${perms}  ${status}${duplicate}${b.warning ? `  ! ${b.warning}` : ""}`);
     }
     for (const w of p.warnings ?? []) lines.push(`  ! ${w}`);
     const hcError = p.bots.find((b) => b.hcError)?.hcError;
@@ -2261,7 +2266,8 @@ async function cmdShow(opts, [ref]) {
   const project = await projectFor(opts);
   const bot = await botIn(project, ref, opts);
   const { view, hcError } = await viewOrError();
-  const info = { ...describe(project, bot, view, hcError), instructions: bot.instructions };
+  const info = { ...describe(project, bot, view, hcError), duplicate: await duplicateLabel(project, bot, view),
+    instructions: bot.instructions };
   info.hcProxyState = project.machine ? await proxyStateOn(project, bot)
     : approvedProxyState({ project: project.key, bot });
   if (opts.json) return info;
@@ -2292,6 +2298,7 @@ async function cmdShow(opts, [ref]) {
       `  worker agy allow  ${info.workerAgyPermissions.allow.join(", ")}`,
       `  worker agy deny   ${info.workerAgyPermissions.deny.join(", ")}`] : []),
     `  status       ${info.status}${info.terminal ? ` in ${info.terminal} (since ${info.since})` : ""}`,
+    ...(info.duplicate ? ["  warning      duplicate live labels"] : []),
     `  look         ${info.look.character} in ${info.look.colour}`, `  role         ${info.role || "-"}`,
     `  rank         ${info.rank ?? "-"}`, `  code         ${info.code}`,
     `  hc proxy     ${proxyStateText(info.hcProxyState)}`,
@@ -3880,7 +3887,8 @@ async function launchSeat(project, bot, over = {}) {
     place = spaceOnly(await windowPlace(key, await placementOf(key, seen), seen));
   }
   // The Claude login this launch uses (#453): read from claude-logins.json now, Claude only.
-  const login = claudeLogin(argv, briefed.warnings);
+  const login = over.login?.words ?? claudeLogin(argv, briefed.warnings);
+  if (over.login) briefed.warnings.push(...over.login.warnings);
   const proxyOn = agentKey === "dsh-tui" && proxyEnabled(
     approvedProxyState({ project: key, bot }), process.platform,
     (warning) => briefed.warnings.push(warning));
@@ -4926,7 +4934,7 @@ async function runQueuedRestart(opts) {
   }
 }
 
-async function queueRestart({ bot, key, old, screen, opts, wanted, plan }) {
+async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered }) {
   const dialog = pendingDialog(screen) ?? (old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
   const queueId = randomUUID();
   const entry = await editRestartQueue(async (rows) => {
@@ -4935,7 +4943,8 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan }) {
     const e = { id: queueId, botId: bot.id, botName: bot.name, project: key, terminal: old.address, created_ms: old.created_ms ?? null,
       reason: dialog ? "blocked" : "working", dialog, options: { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
         model: opts.model ?? null, save: Boolean(opts.save), tree: Boolean(opts.tree), freshShared: Boolean(opts["fresh-shared"]),
-        cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null }, watcher: null, at: new Date().toISOString() };
+        cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null,
+        ...(recovered ? { recoveredHome: true } : {}) }, watcher: null, at: new Date().toISOString() };
     // Persist before starting: the detached process may read immediately, then takes this lock.
     const file = queuePath(), tmp = `${file}.${process.pid}`;
     writeFileSync(tmp, JSON.stringify([...rows, e]), { mode: 0o600 });
@@ -4981,6 +4990,163 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan }) {
   return `${bot.name}: restart queued for ${old.address} (${why}); it will restart and resume at its next idle (am restart --queued lists it; am restart --cancel ${bot.id} cancels it; pass --force to restart now).`;
 }
 
+// Read only env's launch prefix. A template command or foreground process cannot vouch for
+// the app home or login that launched this pane.
+function paneLaunchEnv(get) {
+  const argv = get?.argv;
+  if (!Array.isArray(argv) || argv[0] !== "/usr/bin/env") return null;
+  const vars = new Map();
+  let index = 1;
+  while (argv[index] === "-u" && typeof argv[index + 1] === "string") {
+    vars.set(argv[index + 1], null);
+    index += 2;
+  }
+  for (const word of argv.slice(index)) {
+    if (typeof word !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) break;
+    const end = word.indexOf("=");
+    vars.set(word.slice(0, end), word.slice(end + 1));
+  }
+  return vars;
+}
+
+const sameHome = (left, right) => (realDir(left) ?? resolvePath(left)) === (realDir(right) ?? resolvePath(right));
+
+async function checkedPane(address) {
+  const get = await hcLookup(address);
+  if (!get) return null;
+  if (get.address !== address || !["live", "finished"].includes(get.state)
+      || (get.state === "live" && !Number.isSafeInteger(get.created_ms))) {
+    throw new CliError(`hc get ${address} gave incomplete pane identity; nothing was started.`);
+  }
+  return get.state === "live" ? get : null;
+}
+
+async function labelledPanes(project, bot, bound, carriedBinding = () => null) {
+  const reply = await hcJson(["ls", "--label", `${BOT_LABEL}=${bot.id}`]);
+  if (!Array.isArray(reply) && !Array.isArray(reply?.terminals)) {
+    throw new CliError(`hc ls gave no pane list for ${bot.name}; nothing was started.`);
+  }
+  const addresses = new Set();
+  for (const row of rowsOf(reply)) {
+    if (typeof row?.address !== "string" || !row.address) {
+      throw new CliError(`hc ls gave an incomplete pane address for ${bot.name}; nothing was started.`);
+    }
+    if (project.machine ? row.address.startsWith(`${project.machine}/`) : local(row.address)) addresses.add(row.address);
+  }
+  const gets = await Promise.all([...addresses].map(checkedPane));
+  const scoped = await Promise.all(gets.map(async (get) => {
+    if (!get) return null;
+    if (!get.labels || typeof get.labels !== "object" || Array.isArray(get.labels)) {
+      throw new CliError(`hc get ${get.address} gave no label map; nothing was started.`);
+    }
+    if (get.labels[BOT_LABEL] !== bot.id) return null;
+    if (get.address === bound || !get.cwd) return get;
+    const recordedProject = carriedBinding(get)?.project;
+    if (recordedProject != null) return recordedProject === project.key ? get : null;
+    // The launch folder scopes a label. The foreground process can cd without moving its pane.
+    if (project.machine) return get.cwd === project.key ? get : null;
+    const key = await keyOf(get.cwd);
+    if (key === project.key) return get;
+    // Only a known different checkout can explain the same label elsewhere. A pane launched
+    // with --cwd outside its project can have no roster in that folder.
+    return loadProject(key).file.bots.some((entry) => entry.id === bot.id) ? null : get;
+  }));
+  return scoped.filter(Boolean);
+}
+
+async function duplicateLabel(project, bot, view) {
+  if (!view || bot.planned) return false;
+  const held = liveFor(view, bot.id, project);
+  const bound = held ? addressOf(held.binding, view.machines) : null;
+  try { return (await labelledPanes(project, bot, bound)).length > 1; } catch { return false; }
+}
+
+async function restartTarget(project, bot, requestedHome, explicitHome, allowImport = false) {
+  const core = await coreId();
+  const bindingIn = (dir) => heldIn(foldAttach(readAttachFile(attachPath(dir)) ?? []), bot.id);
+  const carriedBinding = (pane) => {
+    const dir = paneLaunchEnv(pane)?.get("HERDR_APP_HOME");
+    if (typeof dir !== "string" || !isAbsolute(dir) || /[\x00-\x1f\x7f]/.test(dir)
+        || (process.env.AUTOMAGIK_HERDR_TEST_ROOTS && !inTestRoots(dir))) return null;
+    const row = bindingIn(dir);
+    return row?.core === core && row.terminal === pane.address && row.created_ms === pane.created_ms ? row : null;
+  };
+  const selectedPath = attachPath(requestedHome);
+  const selectedRows = readAttachFile(selectedPath);
+  const selected = heldIn(foldAttach(selectedRows ?? []), bot.id);
+  const binding = selected?.core === core && (selected.project == null || selected.project === project.key) ? selected : null;
+  let get = binding ? await checkedPane(binding.terminal) : null;
+  if (get?.created_ms !== binding?.created_ms) get = null;
+  // A legacy row without a project still needs a launch folder in this checkout.
+  if (get && binding.project == null && (!get.cwd || await keyOf(get.cwd) !== project.key)) get = null;
+  const candidates = await labelledPanes(project, bot, get?.address, carriedBinding);
+  if (candidates.length > 1) {
+    const panes = candidates.map((p) => p.address).join(", ");
+    throw new CliError(`${bot.name} has duplicate live labels in ${panes}; inspect those panes before restarting.`,
+      1, { refused: "duplicate", duplicate: true });
+  }
+  let candidate = candidates[0];
+  if (!get && !candidate && /^[A-Za-z0-9._-]+$/.test(process.env.HC_TERMINAL_ID ?? "")) {
+    // An attached pane can lose its display label too. The caller's own terminal is useful
+    // only when its carried app home still proves this exact bot and launch.
+    const caller = await checkedPane(process.env.HC_TERMINAL_ID);
+    if (caller && carriedBinding(caller)?.project === project.key) candidate = caller;
+  }
+  const carried = paneLaunchEnv(candidate)?.get("HERDR_APP_HOME");
+  const row = candidate ? carriedBinding(candidate) : null;
+  if (get && (!candidate || candidate.address === get.address && candidate.created_ms === get.created_ms)) {
+    if (row?.project === project.key && !sameHome(requestedHome, carried)) {
+      throw new CliError(`${get.address} has matching attachments in two app homes; inspect both ledgers before restarting.`,
+        1, { refused: "app-home", terminal: get.address });
+    }
+    return { held: { binding, get }, dir: requestedHome };
+  }
+  if (!candidate) {
+    if (selected?.core === core && selected.project !== project.key && selected.created_ms === (await checkedPane(selected.terminal))?.created_ms) {
+      throw new CliError(`${selected.terminal} has an attachment in the selected app home that doesn't identify this project; nothing was started.`,
+        1, { refused: "attachment", terminal: selected.terminal });
+    }
+    return { held: null, dir: requestedHome };
+  }
+  if (!get && row?.project === project.key) {
+    if (explicitHome && !sameHome(requestedHome, carried)) {
+      throw new CliError(`${candidate.address} belongs to a different HERDR_APP_HOME than the one selected; nothing was started.`,
+        1, { refused: "app-home", terminal: candidate.address });
+    }
+    return { held: { binding: row, get: candidate }, dir: carried };
+  }
+  // A deliberately selected app home still gets its documented one-time import. Never
+  // use import to decide which home owns an unbound pane when the caller lost its home.
+  if (allowImport && explicitHome && selectedRows === null && (!carried || sameHome(requestedHome, carried))) {
+    const proposed = await labelRows();
+    const imported = proposed.find((entry) => entry.bot === bot.id);
+    if (imported?.project === project.key && imported.core === core
+        && imported.terminal === candidate.address && imported.created_ms === candidate.created_ms) {
+      await importLabels(selectedPath, proposed);
+      return restartTarget(project, bot, requestedHome, explicitHome);
+    }
+  }
+  throw new CliError(`${candidate.address} has ${bot.name}'s label but no matching attachment in the selected or carried app home. `
+    + `Inspect the pane and run am attach ${bot.id} ${candidate.address} --project ${project.key} in its app home before restarting.`,
+    1, { refused: "attachment", terminal: candidate.address });
+}
+
+function recoveredLogin(old, argv) {
+  const source = paneCommand(old);
+  if (launchAgent(argv) !== "claude" || (source && launchAgent(source.argv ?? ["sh", "-c", source.shell]) !== "claude")) return undefined;
+  const previous = paneLaunchEnv(old)?.get(CONFIG_VAR);
+  const warnings = [];
+  const words = claudeLogin(argv, warnings);
+  const next = words[0] === "-u" ? null : words[0]?.slice(CONFIG_VAR.length + 1);
+  const matches = previous === next || (typeof previous === "string" && isAbsolute(previous) && next && sameHome(previous, next));
+  if (previous === undefined || !matches) {
+    const why = previous === undefined ? "its launch gives no Claude login" : "the selected Claude login differs from its launch";
+    throw new CliError(`${old.address}: ${why} in the recovered app home. Nothing was started. `
+      + "Select that app home explicitly to apply an account change.", 1, { refused: "login", terminal: old.address });
+  }
+  return { words, warnings };
+}
+
 async function cmdRestart(opts, [ref]) {
   if (opts["run-queued"]) return runQueuedRestart(opts);
   if (opts.queued || opts.cancel) return queuedRestarts(opts, ref);
@@ -5005,6 +5171,28 @@ async function cmdRestart(opts, [ref]) {
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
   if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
+  if (project.machine) return restartResolved(opts, project, bot, wanted, swap);
+  const explicit = process.env.HERDR_APP_HOME;
+  const requested = appHome();
+  const target = await restartTarget(project, bot, requested, Boolean(explicit), !opts._queuedTarget);
+  const recovered = opts._queuedTarget?.options?.recoveredHome === true || !sameHome(requested, target.dir);
+  if (recovered) {
+    process.env.HERDR_APP_HOME = target.dir;
+    viewOnce = null;
+  }
+  try {
+    return await restartResolved(opts, project, bot, wanted, swap, target, recovered);
+  } finally {
+    if (recovered) {
+      if (explicit === undefined) delete process.env.HERDR_APP_HOME;
+      else process.env.HERDR_APP_HOME = explicit;
+      viewOnce = null;
+    }
+  }
+}
+
+async function restartResolved(opts, project, bot, wanted, swap, target, recovered) {
+  const { file, key } = project;
   // A swap's agent and model are checked as an edit checks them (entryFrom); a new agent
   // without --model drops the old agent's pin. bots.json changes only with --save.
   let entry = null;
@@ -5019,10 +5207,16 @@ async function cmdRestart(opts, [ref]) {
       + `Pick one with am edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`);
   }
   if (project.machine) return restartOnMachine(opts, project, bot, entry);
-  // The old pane: the one the attach ledger names for the bot, as hc confirms it.
-  const view = await attachView();
-  const held = view.live.get(bot.id) ?? null;
-  let old = held && local(held.get?.address ?? held.binding.terminal) ? { ...held.get, address: held.get?.address ?? held.binding.terminal } : null;
+  const view = await attachView({ readOnly: true });
+  const held = target.held;
+  let old = held?.get ?? null;
+  const recheck = async (argv) => {
+    const current = await restartTarget(project, bot, appHome(), true);
+    if ((current.held ? attachKey(current.held.binding) : null) !== (held ? attachKey(held.binding) : null)) {
+      throw new CliError(`${bot.name}'s attachment changed while planning the restart; nothing was started.`);
+    }
+    return recovered && current.held ? recoveredLogin(current.held.get, argv) : undefined;
+  };
   if (opts._queuedTarget && (!old || old.address !== opts._queuedTarget.terminal
     || (opts._queuedTarget.created_ms != null && old.created_ms !== opts._queuedTarget.created_ms))) return PRINTED;
   // attachView caches its first hc get for the whole watcher run: a queued fire must judge the
@@ -5104,7 +5298,8 @@ async function cmdRestart(opts, [ref]) {
   let plan = restartPlan(planned);
   if (old && !opts.force && !isPaneIdle(old, screen)
     && (["working", "blocked"].includes(old.status?.state) || pendingDialog(screen))) {
-    return queueRestart({ bot, key, old, screen, opts, wanted, plan });
+    await recheck(plan.argv);
+    return queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered });
   }
   // --cwd: Claude resumes only within one folder slug (~/.claude/projects/<slug>), by id or --continue.
   const movedFrom = wanted && old && oldCwd ? (realDir(oldCwd) ?? oldCwd) : null;
@@ -5153,6 +5348,7 @@ async function cmdRestart(opts, [ref]) {
     ...(plan.template ? { [WORKER_TEMPLATE_LABEL]: plan.template } : {}) };
   // The session the new pane runs, for its label and seat row: the id chosen for a new one, or the resumed one.
   const sessionOfPlan = (p, resumed) => p.sessionId ?? (p.mode === "resume" ? resumed : null);
+  const login = await recheck(plan.argv);
   // A queued restart claims its entry only once every check passed and the seat is about to
   // start: a cancel between the watcher's read and here wins, and nothing is launched.
   if (opts._queuedTarget) {
@@ -5164,7 +5360,7 @@ async function cmdRestart(opts, [ref]) {
   }
   let seat = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
     carry: { ...carry, ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, resumeId),
-    replacing: old ? held.binding : null, granted: plan.granted });
+    replacing: old ? held.binding : null, granted: plan.granted, login });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   // A direct restart supersedes a queued one only once it really started: its watcher must not
   // start a second replacement while this one hands the bot over.
@@ -5223,6 +5419,7 @@ async function cmdRestart(opts, [ref]) {
     if (providerGone(plan, gone)) {
       const note = providerGoneNote(resumeId, seat.terminal, gone);
       plan = { ...restartPlan({ ...planned, fresh: true }), note };
+      await recheck(plan.argv);
       resumeId = null;
       say(`${bot.name} starts on a new conversation: ${note}.`);
       const again = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,

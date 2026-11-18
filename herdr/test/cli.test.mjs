@@ -1343,9 +1343,12 @@ test("ls by the ledger: a shell pane shows no agent in front; the import takes t
   writeFileSync(join(s.app, "shared.json"), JSON.stringify({ "spaces-agents.projects": [{ key: other, machine: null }, { key: join(s.root, "gone"), machine: null }, { key: "/r", machine: "vps" }] }));
   const by = Object.fromEntries(s.cli(["ls", "--json"]).json().projects[0].bots.map((b) => [b.name, b]));
   // The first run imports the labels: Genie's only pane, though a shell is in front; of
-  // Captain's two, the newest with an agent in front. The ledger then ties one pane each.
+  // Captain's two, the newest with an agent in front. The ledger then ties one pane each; the
+  // second live label is still reported (#1195), and whois keeps naming the imported pane.
   assert.deepEqual([by.Genie.terminal, by.Genie.status], ["t1", "no agent in front"]);
-  assert.deepEqual([by.Captain.terminal, by.Captain.duplicate, by.Captain.model], ["t3", false, "opus"]);
+  assert.deepEqual([by.Captain.terminal, by.Captain.duplicate, by.Captain.model], ["t3", true, "opus"]);
+  assert.equal(by.Genie.duplicate, false);
+  assert.equal(s.cli(["whois", "--bot", ID.cap, "--json"]).json().terminal, "t3");
   const all = s.cli(["ls", "--all", "--json"]).json().projects;
   assert.deepEqual(all.map((p) => p.project), [s.project, other]);
 });
