@@ -77,14 +77,24 @@ export function install(rt) {
     return [...shown.values()]
   }
 
+  // Where a message for a Session goes now: that Session while it is still one of a
+  // Bot's, else the current Session of its Bot, or of its group when it went to one.
+  // One no Bot owns any more (a run whose record is gone) has nowhere to go: undefined.
+  rt.sessionNow = (sessionId, toId, roomId) => (rt.isBotSession(sessionId) ? sessionId
+    : !rt.pastOwners.has(sessionId) ? undefined
+      : roomId === undefined ? rt.chatOf(toId) : rt.roomOf(roomId)?.sessions?.[toId])
+
   // Replies waiting for one Bot go in together: the turn it opens reads them all.
   // A finished turn appends its replies here before any await, so one event-loop turn
   // collects them; `inject` queues for the next step without waking, and the last one
   // wakes the driver, so one turn claims the batch. A batch never mixes two works:
   // one turn answers one work, and replies for different works keep their own turns
-  // (the merge covers what one answer can carry).
+  // (the merge covers what one answer can carry). A queue is the Bot's, not one
+  // Session's: a part switch while replies wait gives the Bot a new chat, and the
+  // flush sends them to the Session the Bot has then.
   const replyQueues = new Map()
-  const replyKey = (sessionId, work) => `${sessionId}\u0000${work ?? ''}`
+  const replyKey = (toId, roomId, work) => `${toId}\u0000${roomId ?? ''}\u0000${work ?? ''}`
+  const targetOf = queue => rt.sessionNow(queue.sessionId, queue.toId, rt.pastOwners.get(queue.sessionId)?.roomId) ?? queue.sessionId
   const scheduleReplies = (key) => {
     const queue = replyQueues.get(key)
     if (queue === undefined || queue.timer !== undefined || queue.running) return
@@ -98,9 +108,11 @@ export function install(rt) {
   const flushReplies = async (key) => {
     const queue = replyQueues.get(key)
     if (queue === undefined || queue.running || queue.items.length === 0) return
+    queue.sessionId = targetOf(queue)
     // A turn is already reading its inbox: what waits for it goes in when it ends.
     if (rt.live?.get?.(queue.sessionId)?.turn !== undefined) return
     queue.running = true
+    queue.waiting = false
     const batch = queue.items.splice(0)
     try {
       // The exchange is recorded before its message goes out; wait for each.
@@ -111,10 +123,19 @@ export function install(rt) {
         else item.fail(outcomes[index].reason)
       }
       if (sendable.length === 0) return
-      const agent = sendable[0].agent
-      if (rt.live?.get?.(queue.sessionId)?.turn !== undefined || agent.status === 'running') {
-        // A turn opened while the exchanges were written: it reads them at the end.
+      // The Bot may have switched part while the replies waited: they go to its part now.
+      const target = targetOf(queue)
+      queue.sessionId = target
+      let agent = sendable.find(item => item.sessionId === target)?.agent
+      if (agent === undefined) {
+        await rt.ensureCapabilities(target)
+        agent = await resolveAgent(target)
+      }
+      if (rt.live?.get?.(target)?.turn !== undefined || agent.status === 'running') {
+        // A turn opened while the exchanges were written, or the agent has not settled
+        // yet: the turn's end or the agent going idle wakes the queue again.
         queue.items = [...sendable, ...queue.items]
+        queue.waiting = true
         return
       }
       if (typeof agent.inject === 'function') {
@@ -125,30 +146,31 @@ export function install(rt) {
         for (const item of sendable) agent.followup(item.message)
       }
       await ctx.sessions.flush(agent.session)
-      for (const item of sendable) item.delivered()
+      for (const item of sendable) item.delivered(target)
     } catch (error) {
       for (const item of batch) item.fail(error)
     } finally {
       queue.running = false
       if (queue.items.length === 0) replyQueues.delete(key)
-      else scheduleReplies(key)
+      else if (!queue.waiting) scheduleReplies(key)
     }
   }
-  const queueReply = (sessionId, work, message) => {
-    const key = replyKey(sessionId, work)
+  const queueReply = (sessionId, toId, work, message) => {
+    const key = replyKey(toId, rt.groupOwners?.get?.(sessionId)?.roomId, work)
     let queue = replyQueues.get(key)
-    if (queue === undefined) replyQueues.set(key, queue = { sessionId, work, items: [], timer: undefined, running: false })
+    if (queue === undefined) replyQueues.set(key, queue = { sessionId, toId, work, items: [], timer: undefined, running: false, waiting: false })
     let markReady
     let markUnready
     let markDelivered
     let markFailed
     const item = {
       message,
+      sessionId,
       agent: undefined,
       ready: new Promise((resolve, reject) => { markReady = resolve; markUnready = reject }),
       sent: new Promise((resolve, reject) => { markDelivered = resolve; markFailed = reject }),
       made: () => markReady(),
-      delivered: () => markDelivered(),
+      delivered: target => markDelivered(target),
       fail: (error) => { markUnready(error); markFailed(error) },
     }
     // A setup failure is reported through `sent`; these keep neither promise unhandled
@@ -159,11 +181,18 @@ export function install(rt) {
     if (!queue.running) scheduleReplies(key)
     return item
   }
+  // What waits for a Session goes in once it can take it: after every listener has
+  // cleared its turn, or once its agent settles idle.
+  const wake = (id) => {
+    for (const [key, queue] of replyQueues) if (queue.sessionId === id || targetOf(queue) === id) setImmediate(() => void flushReplies(key))
+  }
   ctx.on('session/event', (session, event) => {
-    if (event?.type !== 'turn/end') return
-    const id = session?.id
-    // After every listener has cleared the turn, deliver what waited for it.
-    for (const [key, queue] of replyQueues) if (queue.sessionId === id) setImmediate(() => void flushReplies(key))
+    if (event?.type === 'turn/end') wake(session?.id)
+  })
+  ctx.on('agent/status', ({ agent, status } = {}) => {
+    if (status !== 'idle') return
+    const id = agent?.session?.id ?? agent?.id
+    if (id !== undefined && [...replyQueues.values()].some(queue => queue.waiting)) wake(id)
   })
 
   // `sessionId` defaults to the recipient's own chat; group turns name its group Session.
@@ -212,6 +241,8 @@ export function install(rt) {
       ...(abandoned ? { abandoned: true } : {}),
     }
     const targetSessionId = sessionId ?? rt.chatOf(toId)
+    // Where the message went: a reply that waited for a busy Bot may reach a later part.
+    let deliveredTo = targetSessionId
     // On disk before it goes out: a message the book could not keep is not sent, so none is
     // delivered with no record of it. A resend keeps the record it has; only a merged request
     // replaces it with its added text.
@@ -228,7 +259,7 @@ export function install(rt) {
     })
     // A reply joins its recipient's batch before anything is awaited, so every reply one
     // finished turn produces lands in the same batch and one turn reads them all.
-    const queued = role === 'reply' && !steer ? queueReply(targetSessionId, work, message) : undefined
+    const queued = role === 'reply' && !steer ? queueReply(targetSessionId, toId, work, message) : undefined
     try {
       if (book !== undefined && (merged || !rt.ledger.records(book).some(record => record.event === undefined && record.id === exchangeId))) {
         rt.ledger.append(book, { id: exchangeId, from: fromId, to: toId, role, text, time: Date.now(), ...(length !== undefined ? { length, files } : {}), ...(replyTo ? { replyTo } : {}), ...(audience === 'user' ? { audience } : {}), ...(roomId ? { roomId } : {}) })
@@ -239,7 +270,7 @@ export function install(rt) {
       if (queued !== undefined) {
         queued.agent = agent
         queued.made()
-        await queued.sent
+        deliveredTo = await queued.sent ?? targetSessionId
       } else {
         if (steer) agent.steer(message)
         else agent.followup(message)
@@ -250,7 +281,7 @@ export function install(rt) {
       throw error
     }
     if (book !== undefined) {
-      rt.ledger.append(book, { event: 'delivered', id: exchangeId, sessionId: targetSessionId, time: Date.now() })
+      rt.ledger.append(book, { event: 'delivered', id: exchangeId, sessionId: deliveredTo, time: Date.now() })
       // The message went out either way; a mark that is lost only hides it from the dialog.
       await rt.ledger.written(book).catch(() => {})
     } else if (recordExchange && EXCHANGE_ROLES.has(role) && !deferred && !resumed && !retried) {
@@ -260,7 +291,7 @@ export function install(rt) {
       // Session it goes to; exchangeText reads it back there. Resends keep any
       // existing record; only a merged request replaces it with its added text.
       const kept = headOf(text, TEXT_KEPT)
-      const whole = length !== undefined ? { length, files } : kept.length < text.length ? { length: text.length, sessionId: targetSessionId } : {}
+      const whole = length !== undefined ? { length, files } : kept.length < text.length ? { length: text.length, sessionId: deliveredTo } : {}
       const entry = { id: exchangeId, from: fromId, to: toId, text: kept, ...whole, role, time: Date.now(), ...(replyTo ? { replyTo } : {}), ...(audience === 'user' ? { audience } : {}) }
       const earlier = state.exchanges.findIndex(other => other.id === exchangeId)
       if (earlier === -1) state.exchanges.push(entry)

@@ -1440,3 +1440,69 @@ test('two messages to a busy Bot cost one answer turn and one reply turn', async
   assert.deepEqual(agents.get('a').calls.map(([, message]) => message.source.replyTo).sort(), [first.source.exchangeId, second.source.exchangeId].sort())
   assert.equal(new Set(agents.get('a').calls.map(([, message]) => textOf(message.content))).size, 1)
 })
+
+// A reply that waits for a busy Bot belongs to the Bot, not to the part it was sent to:
+// a part switch while it waits sends it to the part that took over, never to the old one.
+test('replies waiting for a busy Bot reach its new part after a part switch', async (t) => {
+  const { agents, emit, stop } = await start(team())
+  t.after(stop)
+  emit('a', 'turn/start', { turn: 1 })
+  const first = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'first answer', exchangeId: 'r1', replyTo: 'q1' })
+  const second = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'second answer', exchangeId: 'r2', replyTo: 'q2' })
+  await delay(60)
+  assert.equal(agents.get('a').calls.length, 0)
+  // The switch moves the Bot's chat to 'a2' the way parts.js does, then ends the old turn.
+  const bot = rt.botOf('a')
+  bot.sessionId = 'a2'
+  rt.chatOwners.delete('a')
+  rt.chatOwners.set('a2', 'a')
+  rt.pastOwners.set('a', { botId: 'a' })
+  emit('a', 'turn/end', { turn: 1, reason: { kind: 'aborted' } })
+  await Promise.all([first, second])
+  assert.deepEqual(agents.get('a').calls, [])
+  assert.deepEqual(agents.get('a2').calls.map(([kind]) => kind).sort(), ['followup', 'inject'])
+  assert.deepEqual(agents.get('a2').calls.map(([, message]) => message.source.replyTo).sort(), ['q1', 'q2'])
+})
+
+// A new part that is already working when the old turn ends takes the replies once its
+// own turn ends.
+test('replies moved to a new part that is working wait for that part\'s turn', async (t) => {
+  const { agents, emit, stop } = await start(team())
+  t.after(stop)
+  emit('a', 'turn/start', { turn: 1 })
+  const reply = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'the answer', exchangeId: 'r1', replyTo: 'q1' })
+  await delay(30)
+  const bot = rt.botOf('a')
+  bot.sessionId = 'a2'
+  rt.chatOwners.delete('a')
+  rt.chatOwners.set('a2', 'a')
+  rt.pastOwners.set('a', { botId: 'a' })
+  emit('a2', 'turn/start', { turn: 1 })
+  emit('a', 'turn/end', { turn: 1, reason: { kind: 'aborted' } })
+  await delay(60)
+  assert.equal(agents.get('a').calls.length, 0)
+  assert.equal(agents.get('a2')?.calls.length ?? 0, 0)
+  emit('a2', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await reply
+  assert.deepEqual(agents.get('a2').calls.map(([kind, message]) => [kind, message.source.replyTo]), [['followup', 'q1']])
+})
+
+// An agent that has ended its turn but not yet gone idle is waited for without spinning:
+// the replies go in once it reports idle.
+test('replies for an agent still settling wait for it to go idle, without spinning', async (t) => {
+  const { ctx, agents, agentOf, stop } = await start(team())
+  t.after(stop)
+  const agent = agentOf('a')
+  let status = 'running'
+  let reads = 0
+  Object.defineProperty(agent, 'status', { get: () => { reads += 1; return status }, configurable: true })
+  const reply = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'the answer', exchangeId: 'r1', replyTo: 'q1' })
+  await delay(80)
+  assert.equal(agents.get('a').calls.length, 0)
+  // One look at a running agent, not one every tick.
+  assert.ok(reads <= 2, `status read ${reads} times while the agent was running`)
+  status = 'idle'
+  for (const listener of ctx.listeners.get('agent/status') ?? []) listener({ agent, status: 'idle' })
+  await reply
+  assert.deepEqual(agents.get('a').calls.map(([kind, message]) => [kind, message.source.replyTo]), [['followup', 'q1']])
+})

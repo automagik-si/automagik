@@ -352,9 +352,7 @@ export function install(rt) {
   // current Session of its Bot, or of its group when the message went to one.
   // One no Bot owns any more (a run whose record is gone) has nowhere to go: it is dropped,
   // not sent to the Bot's chat.
-  const sessionFor = (sessionId, args) => (rt.isBotSession(sessionId) ? sessionId
-    : !rt.pastOwners.has(sessionId) ? undefined
-      : args?.roomId === undefined ? rt.chatOf(args?.toId) : rt.roomOf(args.roomId)?.sessions?.[args.toId])
+  const sessionFor = (sessionId, args) => rt.sessionNow(sessionId, args?.toId, args?.roomId)
 
   // A hard stop keeps the inbox, which the Session runs once it wakes; only what DSH
   // cancelled is sent again. The notes stay queued until a turn takes the messages
