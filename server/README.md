@@ -742,7 +742,7 @@ checks the two-volume topology and gate `401`; CI builds, smokes and scans the i
 
 ## Self-hosted claim, passkeys and recovery (#908)
 
-Leave all three `AUTOMAGIK_GATE_ACCESS_*` settings and all six `AUTOMAGIK_GATE_CLOUD_*` settings
+Leave all three `AUTOMAGIK_GATE_ACCESS_*` settings and all seven `AUTOMAGIK_GATE_CLOUD_*` settings
 unset to use this mode. It makes no outside
 authentication connection. The verifier is the maintained, MIT-licensed
 [`@simplewebauthn/server` 14.1.0](https://github.com/MasterKale/SimpleWebAuthn/releases/tag/v14.1.0),
@@ -916,12 +916,12 @@ valid `session.revoke` for this workspace drops that `subject`'s gate sessions b
 subject is refused a new open until a later signed list omits them.
 
 If the call does not land, the gate polls the list at `AUTOMAGIK_GATE_CLOUD_REVOCATION_URL` every
-60 seconds while it holds sessions. The list body is JSON and its `x-automagik-signature` is a
-detached JWS over the exact body, checked against the same key set. A list for another workspace,
-past `expires_at`, malformed or unverifiable is a failure that changes nothing, never an empty
-list. An entry a newer contract scopes to another workspace is ignored. The call is idempotent: a
-repeat is accepted and changes nothing. The gate keeps no Cloud credential and logs only a status
-and a generated request id.
+60 seconds while it holds sessions or a removal is pending. The list body is JSON and its
+`x-automagik-signature` is a detached JWS over the exact body, checked against the same key set.
+A list for another workspace, past `expires_at`, malformed or unverifiable is a failure that
+changes nothing, never an empty list. An entry a newer contract scopes to another workspace is
+ignored. The call is idempotent: a repeat is accepted and changes nothing. The gate keeps no
+Cloud credential and logs only a status and a generated request id.
 
 ## Interim Cloudflare Access sign-in
 

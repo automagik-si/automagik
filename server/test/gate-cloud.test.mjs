@@ -737,3 +737,55 @@ test('a replayed call older than a newer list does not undo a re-admission', asy
   assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
   assert.equal((await request(f.port, { headers: { cookie: old } })).status, 401)
 })
+
+// Mutant CLOUD_LIST_STALE_APPLIED applies a list issued before the one already applied.
+test('a stale signed list does not undo a newer list or its re-admission', async t => {
+  const f = await fixture(t, { pollInterval: 20 })
+  const old = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  f.state.now += 60_000
+  const kept = cookieOf(await f.open(f.issue({ sub: 'person-2' })))
+  const removal = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now) })
+  assert.equal((await request(f.port, { method: 'POST', path: REVOKE, body: removal,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(removal) } })).status, 204)
+  assert.equal((await request(f.port, { headers: { cookie: old } })).status, 401)
+  // A newer list omits person-1: the removal is lifted and a new open is admitted.
+  f.state.now += 1000
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now), expires_at: iso(f.state.now + 300_000), revoked: [] }
+  await f.cloud.poll()
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+  // A delayed list issued before that one still names the removal and a role cut.
+  const stale = f.state.now - 500
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(stale), expires_at: iso(stale + 300_000),
+    revoked: [{ subject: 'person-1', reason: 'removed', effective_at: iso(stale) },
+      { subject: 'person-2', reason: 'role_lowered', effective_at: iso(stale) }] }
+  await f.cloud.poll()
+  // The newer list stands: the re-admission holds and the older session is untouched.
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+  assert.equal((await request(f.port, { headers: { cookie: kept } })).status, 200)
+})
+
+// Mutant CLOUD_POLL_IDLE skips the poll when the last session ended, stranding a removal.
+test('the timer re-admits a removed subject after the last session ends', async t => {
+  const f = await fixture(t, { pollInterval: 20 })
+  const last = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  const call = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now) })
+  assert.equal((await request(f.port, { method: 'POST', path: REVOKE, body: call,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(call) } })).status, 204)
+  assert.equal((await request(f.port, { headers: { cookie: last } })).status, 401)
+  assert.equal(f.sessions.families.length, 0, 'the removal ended the last session')
+  const refused = await f.open(f.issue({ sub: 'person-1' }))
+  assert.equal(refused.status, 401, 'a removed subject may not open')
+  const before = f.state.listFetches
+  f.state.now += 1000
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now), expires_at: iso(f.state.now + 300_000), revoked: [] }
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.ok(f.state.listFetches > before,
+    'the timer polls with no sessions while a removal is pending')
+  await waitFor(() => !f.cloud.removed.size)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+})

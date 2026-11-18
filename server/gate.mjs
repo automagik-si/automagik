@@ -297,12 +297,13 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const revoke = id => { for (const record of sockets.values()) if (record.family.id === id) record.socket.destroy() }
   sessions.on('revoke', revoke)
   const timer = setInterval(() => { for (const record of sockets.values()) if (!sessions.active(record.family)) record.socket.destroy() }, 1000).unref()
-  // Section 6's poll fallback: at least every 5 minutes while the gate holds sessions. A failed
-  // poll changes nothing, and the next tick tries again; no subject is logged.
+  // Section 6's poll fallback: at least every 5 minutes while the gate holds sessions, and
+  // while a removal is still pending (it may have ended the last session, and only a later
+  // list can lift it). A failed poll changes nothing, and the next tick tries again.
   let pollTimer
   if (cloud) {
     pollTimer = setInterval(() => {
-      if (!sessions.families.length) return
+      if (!sessions.families.length && !cloud.hasPendingRemoval()) return
       cloud.poll().then(() => sessions.revokeAll(family => cloud.drops(family))).catch(() => {})
     }, cloud.pollInterval)
     pollTimer.unref()

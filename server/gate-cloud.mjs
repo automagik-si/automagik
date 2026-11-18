@@ -255,6 +255,8 @@ export class CloudSignIn {
     const entry = this.removed.get(subject)
     return Boolean(entry) && this.now() >= entry.at
   }
+  // A removal keeps the list poll alive even after it ended the gate's last session.
+  hasPendingRemoval() { return this.removed.size > 0 }
   // The gate's session store asks this after every call or poll.
   drops(family) {
     const subject = family?.principal?.subject
@@ -326,7 +328,12 @@ export class CloudSignIn {
   // A list is Cloud's current word: a removed subject it omits may open again, but sessions
   // already dropped are never restored (a call newer than this list stays in force).
   applyList({ issuedAt, entries }) {
-    this.listedAt = Math.max(this.listedAt, issuedAt)
+    // A list issued before the one already applied is a delayed or replayed copy: applying it
+    // could re-add a removal a newer list omitted, or a stale role cut. Equal instants are not
+    // out of order (the same list, or a same-instant reissue), so only a strictly older list is
+    // ignored, matching the signed call's replay bound.
+    if (issuedAt < this.listedAt) return
+    this.listedAt = issuedAt
     const listed = new Map()
     for (const entry of entries) {
       if (entry.reason !== 'removed') continue
