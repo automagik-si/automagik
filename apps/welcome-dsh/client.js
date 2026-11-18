@@ -9356,6 +9356,11 @@ var PT_BR = {
   "Omni has the channel. Its next update adds your Bot as the one who answers.": "O Omni está com o canal. A próxima atualização do Omni adiciona o seu Bot como quem responde.",
   "Hermes: Telegram off": "Hermes: Telegram desligado",
   "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key.": "O Telegram do Hermes está desligado. O Omni não confirmou qual canal é o da mudança, então verifique os Canais do Omni antes de tentar de novo. O Hermes ainda tem a chave.",
+  "Turn Hermes's Telegram back on": "Religar o Telegram do Hermes",
+  "Hermes is back on": "O Hermes está de volta",
+  "That is your way back. Hermes has its Telegram again.": "Esse é o caminho de volta. O Hermes está com o Telegram de novo.",
+  "Nothing else changed. If Omni kept a channel from this move, check it in Omni's Channels before moving again.": "Nada mais mudou. Se o Omni ficou com um canal desta mudança, verifique nos Canais do Omni antes de mover de novo.",
+  "No Bot answers in these chats yet. Pick one in Omni's Channels.": "Nenhum Bot responde nesses chats ainda. Escolha um nos Canais do Omni.",
   "Hermes was not running. Its Telegram stays off until you start Hermes again.": "O Hermes não estava rodando. O Telegram fica desligado até você iniciar o Hermes de novo.",
   "Hermes: Telegram was already off": "Hermes: o Telegram já estava desligado",
   "Omni: listening": "Omni: escutando",
@@ -13102,6 +13107,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     "div",
     { className: "oai-mig-doneview" },
     (0, import_react11.createElement)(BotPanel, { result }),
+    result.recovered === true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("No Bot answers in these chats yet. Pick one in Omni's Channels.")) : null,
     result.connected !== true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("Omni has the channel. It is bringing the bot up now.")) : null,
     result.chatUrl ? (0, import_react11.createElement)("a", { className: "oai-pill oai-mig-sayhi", href: result.chatUrl, target: "_blank", rel: "noreferrer" }, t("Say hi to your bot"), Arrow()) : null,
     result.answering === true && result.answerBot ? (0, import_react11.createElement)("p", { className: "oai-mig-answer" }, Check2(), t("Replies through {name}.", { name: result.answerBot.name })) : null,
@@ -13129,19 +13135,34 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     )
   );
 }
-function ProblemCard({ error, onRetry, onHandoff }) {
+function ProblemCard({ error, note, restoring, onRetry, onHandoff, onRestoreHermes }) {
   const changed = error?.changed ?? {};
   const lines = error?.code === "hermes-still-on" ? "Hermes still has the channel. Nothing was handed to Omni, and its settings were put back." : error?.code === "refused" ? "Hermes would not restart. It may still have a chat open; finish it and try again." : changed.omniUnknown === true ? "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key." : changed.hermesOff === true && changed.omniCreated !== true ? "Hermes's Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key." : "Nothing was changed. Hermes is exactly as it was.";
+  const canRestore = changed.omniUnknown === true && error?.canRestoreHermes === true;
   return (0, import_react11.createElement)(
     "div",
     { className: "oai-mig-problem" },
     (0, import_react11.createElement)("p", { className: "oai-mig-error", role: "alert" }, t(lines)),
     error?.message && !["hermes-still-on", "refused", "omni", "failed"].includes(error.code) ? (0, import_react11.createElement)("p", { className: "oai-mig-fine" }, hidden(error.message)) : null,
+    note ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t(note)) : null,
     (0, import_react11.createElement)(
       "div",
       { className: "oai-actions" },
-      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", onClick: onHandoff }, t("Set up Omni's Telegram instead")),
-      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onRetry }, t("Try again"))
+      canRestore ? (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", disabled: restoring === true, onClick: onRestoreHermes }, t("Turn Hermes's Telegram back on")) : null,
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", disabled: restoring === true, onClick: onHandoff }, t("Set up Omni's Telegram instead")),
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", disabled: restoring === true, onClick: onRetry }, t("Try again"))
+    )
+  );
+}
+function RestoredCard({ onDone }) {
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-handoff" },
+    (0, import_react11.createElement)("p", { className: "oai-mig-lede" }, t("Nothing else changed. If Omni kept a channel from this move, check it in Omni's Channels before moving again.")),
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-actions" },
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onDone }, t("Done"))
     )
   );
 }
@@ -13152,6 +13173,7 @@ var TITLES = {
   moving: "Moving your bot…",
   done: "Omni has your bot",
   problem: "That did not finish",
+  restored: "Hermes is back on",
   handoff: "Set up Omni's Telegram"
 };
 var SPEECH = {
@@ -13161,6 +13183,7 @@ var SPEECH = {
   moving: "Moving your bot. The key stays with me the whole time.",
   done: "There it is. Your bot answers on Omni now.",
   problem: "That did not finish. I'll tell you exactly where it stopped.",
+  restored: "That is your way back. Hermes has its Telegram again.",
   handoff: "We will do this Omni's own way."
 };
 function MigrateView({
@@ -13201,7 +13224,10 @@ function MigrateView({
   },
   onCheckStatus = null,
   gatewayStopped = false,
-  aside = null
+  aside = null,
+  onRestoreHermes = () => {
+  },
+  restoring = false
 }) {
   if (aside !== null) {
     return (0, import_react11.createElement)(StepAside, {
@@ -13231,7 +13257,8 @@ function MigrateView({
     phase === "confirm" && probe !== null ? (0, import_react11.createElement)(ConfirmCard, { probe, botId, agreed, busy, onPickBot, onAgree, onStart, onBack }) : null,
     phase === "moving" ? (0, import_react11.createElement)(MovingCard, { steps }) : null,
     phase === "done" && result !== null ? (0, import_react11.createElement)(DoneCard, { result, onDone, onCheckStatus, canOpenSettings, onOpenSettings, gatewayStopped }) : null,
-    phase === "problem" ? (0, import_react11.createElement)(ProblemCard, { error, onRetry, onHandoff }) : null,
+    phase === "problem" ? (0, import_react11.createElement)(ProblemCard, { error, note, restoring, onRetry, onHandoff, onRestoreHermes }) : null,
+    phase === "restored" ? (0, import_react11.createElement)(RestoredCard, { onDone }) : null,
     phase === "handoff" ? (0, import_react11.createElement)(HandoffCard, { handoff, note, onOpenChannels, onCheckAgain, onSkip }) : null
   );
 }
@@ -13280,6 +13307,7 @@ function MigrateStep(props) {
   const [note, setNote] = (0, import_react11.useState)(null);
   const [aside, setAside] = (0, import_react11.useState)(null);
   const [busy, setBusy] = (0, import_react11.useState)(false);
+  const [restoring, setRestoring] = (0, import_react11.useState)(false);
   const alive = (0, import_react11.useRef)(true);
   (0, import_react11.useEffect)(() => () => {
     alive.current = false;
@@ -13414,6 +13442,19 @@ function MigrateStep(props) {
       if (alive.current) setNote(problem.message);
     }
   };
+  const restoreHermes = async () => {
+    if (restoring) return;
+    setRestoring(true);
+    setNote(null);
+    try {
+      await call("migrate-restore-hermes");
+      if (alive.current) setPhase("restored");
+    } catch (problem) {
+      if (alive.current) setNote(problem.message);
+    } finally {
+      if (alive.current) setRestoring(false);
+    }
+  };
   return (0, import_react11.createElement)(MigrateView, {
     phase,
     probe,
@@ -13459,6 +13500,10 @@ function MigrateStep(props) {
     },
     onOpenSettings: openSettingsHere,
     onCheckStatus: checkStatus,
+    onRestoreHermes: () => {
+      void restoreHermes();
+    },
+    restoring,
     gatewayStopped: result?.gatewayStopped === true
   });
 }
@@ -13548,6 +13593,7 @@ var MIGRATE_CSS = `
 .oai-card button.oai-mig-soft{justify-self:start;width:auto;min-height:34px;margin:2px 0 0;padding:7px 14px;font-size:12.5px;${raised("var(--oai-card)", 2)};color:var(--oai-ink)}
 .oai-mig-summary{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--oai-ink2);margin:0 0 14px}
 .oai-mig-problem{display:grid;gap:10px}
+.oai-mig-problem .oai-actions{flex-wrap:wrap}
 .oai-mig-error{margin:0;color:var(--oai-bad);font-size:13.5px;line-height:1.5}
 .oai-mig-handoff{display:grid;gap:12px}
 .oai-card .oai-mig-handoff h2{margin:0;font:var(--bt-weight-title,800) 19px/1.25 var(--oai-head);letter-spacing:-.016em}

@@ -478,6 +478,7 @@ test('Omni holding the move\'s own channel, with a bot id, keeps Hermes off and 
   const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
   assert.equal(done.phase, 'done')
   assert.equal(done.result.channelId, CHANNEL)
+  assert.equal(done.result.recovered, true)
   assert.equal(done.result.connected, true)
   assert.equal(done.result.hermesOff, true)
   assert.equal(channels.calls.some(([name]) => name === 'omni-channel-act'), false)
@@ -497,6 +498,37 @@ test('a retry with a channel and no bot id stops with Hermes off and says it is 
   assert.equal(done.error.restored, undefined)
   assert.ok(!script.modes.includes('restore'), 'Hermes was put back without knowing the channel')
   assert.equal(restarts, 1, 'only the switch-off restart')
+})
+
+test('an unknown Omni result keeps the copy, and the step can put Hermes back on request', async () => {
+  const script = fakeScript()
+  const team = fakeTeam()
+  const channels = fakeChannels({ attach: async () => { throw new Error('name exists') }, instances: [{ id: CHANNEL, channel: 'telegram', name: 'Telegram' }] })
+  const actions = install({ script, team, channels })
+  const started = await actions['migrate-start']({ confirm: true })
+  const done = await settled(actions, started.jobId)
+  assert.equal(done.phase, 'failed')
+  assert.equal(done.error.changed.omniUnknown, true)
+  assert.equal(done.error.canRestoreHermes, true)
+  assert.ok(!script.modes.includes('restore'), 'Hermes was put back while Omni might have the channel')
+
+  assert.deepEqual(await actions['migrate-restore-hermes'](), { restored: true })
+  assert.ok(script.modes.includes('restore'), 'Hermes was never put back')
+  const after = await status(actions, started.jobId)
+  assert.equal(after.error.canRestoreHermes, false)
+  assert.equal(after.error.hermesRestored, true)
+  await assert.rejects(actions['migrate-restore-hermes'](), { code: 'omni-ai/migrate-restore' })
+})
+
+test('an already-off Hermes leaves the step nothing to put back', async () => {
+  const script = fakeScript({ channel: 'off', gateway: { pid: 100, pidAlive: true, telegram: null } })
+  const channels = fakeChannels({ attach: async () => { throw new Error('name exists') }, instances: [{ id: CHANNEL, channel: 'telegram', name: 'Telegram' }] })
+  const actions = install({ script, team: fakeTeam(), channels })
+  const done = await settled(actions, (await actions['migrate-start']({ confirm: true })).jobId)
+  assert.equal(done.phase, 'failed')
+  assert.equal(done.error.changed.omniUnknown, true)
+  assert.equal(done.error.canRestoreHermes, undefined)
+  await assert.rejects(actions['migrate-restore-hermes'](), { code: 'omni-ai/migrate-restore' })
 })
 
 test('a refused attach is one fixed sentence, puts Hermes back on, and never echoes the key', async () => {

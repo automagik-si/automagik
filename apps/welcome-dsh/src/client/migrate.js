@@ -257,6 +257,7 @@ function MovingCard({ steps }) {
 function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettings, gatewayStopped }) {
   return h('div', { className: 'oai-mig-doneview' },
     h(BotPanel, { result }),
+    result.recovered === true ? h('p', { className: 'oai-mig-note', role: 'status' }, t('No Bot answers in these chats yet. Pick one in Omni\'s Channels.')) : null,
     result.connected !== true ? h('p', { className: 'oai-mig-note', role: 'status' }, t('Omni has the channel. It is bringing the bot up now.')) : null,
     result.chatUrl ? h('a', { className: 'oai-pill oai-mig-sayhi', href: result.chatUrl, target: '_blank', rel: 'noreferrer' }, t('Say hi to your bot'), Arrow()) : null,
     result.answering === true && result.answerBot ? h('p', { className: 'oai-mig-answer' }, Check(), t('Replies through {name}.', { name: result.answerBot.name })) : null,
@@ -275,7 +276,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
       h('button', { type: 'button', className: 'oai-primary', onClick: onDone }, t('Done'))))
 }
 
-function ProblemCard({ error, onRetry, onHandoff }) {
+function ProblemCard({ error, note, restoring, onRetry, onHandoff, onRestoreHermes }) {
   const changed = error?.changed ?? {}
   const lines = error?.code === 'hermes-still-on'
     ? 'Hermes still has the channel. Nothing was handed to Omni, and its settings were put back.'
@@ -286,12 +287,24 @@ function ProblemCard({ error, onRetry, onHandoff }) {
         : changed.hermesOff === true && changed.omniCreated !== true
           ? 'Hermes\'s Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key.'
           : 'Nothing was changed. Hermes is exactly as it was.'
+  // The way back is offered only when the host still holds the copy it made before switching
+  // Hermes off, and the result is unknown: a channel Omni confirmed must keep one listener.
+  const canRestore = changed.omniUnknown === true && error?.canRestoreHermes === true
   return h('div', { className: 'oai-mig-problem' },
     h('p', { className: 'oai-mig-error', role: 'alert' }, t(lines)),
     error?.message && !['hermes-still-on', 'refused', 'omni', 'failed'].includes(error.code) ? h('p', { className: 'oai-mig-fine' }, hidden(error.message)) : null,
+    note ? h('p', { className: 'oai-mig-note', role: 'status' }, t(note)) : null,
     h('div', { className: 'oai-actions' },
-      h('button', { type: 'button', className: 'oai-quiet', onClick: onHandoff }, t('Set up Omni\'s Telegram instead')),
-      h('button', { type: 'button', className: 'oai-primary', onClick: onRetry }, t('Try again'))))
+      canRestore ? h('button', { type: 'button', className: 'oai-quiet', disabled: restoring === true, onClick: onRestoreHermes }, t('Turn Hermes\'s Telegram back on')) : null,
+      h('button', { type: 'button', className: 'oai-quiet', disabled: restoring === true, onClick: onHandoff }, t('Set up Omni\'s Telegram instead')),
+      h('button', { type: 'button', className: 'oai-primary', disabled: restoring === true, onClick: onRetry }, t('Try again'))))
+}
+
+function RestoredCard({ onDone }) {
+  return h('div', { className: 'oai-mig-handoff' },
+    h('p', { className: 'oai-mig-lede' }, t('Nothing else changed. If Omni kept a channel from this move, check it in Omni\'s Channels before moving again.')),
+    h('div', { className: 'oai-actions' },
+      h('button', { type: 'button', className: 'oai-primary', onClick: onDone }, t('Done'))))
 }
 
 // ── the view ──────────────────────────────────────────────────────────────────────────────
@@ -303,6 +316,7 @@ const TITLES = {
   moving: 'Moving your bot…',
   done: 'Omni has your bot',
   problem: 'That did not finish',
+  restored: 'Hermes is back on',
   handoff: 'Set up Omni\'s Telegram',
 }
 
@@ -313,6 +327,7 @@ const SPEECH = {
   moving: 'Moving your bot. The key stays with me the whole time.',
   done: 'There it is. Your bot answers on Omni now.',
   problem: 'That did not finish. I\'ll tell you exactly where it stopped.',
+  restored: 'That is your way back. Hermes has its Telegram again.',
   handoff: 'We will do this Omni\'s own way.',
 }
 
@@ -327,6 +342,7 @@ export function MigrateView({
   onPick = () => {}, onBack = () => {}, onAgree = () => {}, onPickBot = () => {}, onStart = () => {},
   onRetry = () => {}, onSkip = () => {}, onDone = () => {}, onCheckAgain = () => {}, onOpenChannels = null,
   onHandoff = () => {}, onOpenSettings = () => {}, onCheckStatus = null, gatewayStopped = false, aside = null,
+  onRestoreHermes = () => {}, restoring = false,
 }) {
   if (aside !== null) {
     return h(StepAside, {
@@ -350,7 +366,8 @@ export function MigrateView({
     phase === 'confirm' && probe !== null ? h(ConfirmCard, { probe, botId, agreed, busy, onPickBot, onAgree, onStart, onBack }) : null,
     phase === 'moving' ? h(MovingCard, { steps }) : null,
     phase === 'done' && result !== null ? h(DoneCard, { result, onDone, onCheckStatus, canOpenSettings, onOpenSettings, gatewayStopped }) : null,
-    phase === 'problem' ? h(ProblemCard, { error, onRetry, onHandoff }) : null,
+    phase === 'problem' ? h(ProblemCard, { error, note, restoring, onRetry, onHandoff, onRestoreHermes }) : null,
+    phase === 'restored' ? h(RestoredCard, { onDone }) : null,
     phase === 'handoff' ? h(HandoffCard, { handoff, note, onOpenChannels, onCheckAgain, onSkip }) : null)
 }
 
@@ -407,6 +424,7 @@ export function MigrateStep(props) {
   const [note, setNote] = useState(null)
   const [aside, setAside] = useState(null)
   const [busy, setBusy] = useState(false)
+  const [restoring, setRestoring] = useState(false)
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
   useEffect(() => { if (state) glitch() }, [state, glitch])
@@ -539,6 +557,21 @@ export function MigrateStep(props) {
       if (alive.current) setNote(problem.message)
     }
   }
+  // The way back after an unknown Omni result: the host puts back the copy it made before
+  // switching Hermes off, and the step ends with Hermes's Telegram on again.
+  const restoreHermes = async () => {
+    if (restoring) return
+    setRestoring(true)
+    setNote(null)
+    try {
+      await call('migrate-restore-hermes')
+      if (alive.current) setPhase('restored')
+    } catch (problem) {
+      if (alive.current) setNote(problem.message)
+    } finally {
+      if (alive.current) setRestoring(false)
+    }
+  }
 
   return h(MigrateView, {
     phase,
@@ -567,6 +600,8 @@ export function MigrateStep(props) {
     onHandoff: () => { setError(null); setHandoff({ reason: 'manual' }); setPhase('handoff') },
     onOpenSettings: openSettingsHere,
     onCheckStatus: checkStatus,
+    onRestoreHermes: () => { void restoreHermes() },
+    restoring,
     gatewayStopped: result?.gatewayStopped === true,
   })
 }
@@ -659,6 +694,7 @@ export const MIGRATE_CSS = `
 .oai-card button.oai-mig-soft{justify-self:start;width:auto;min-height:34px;margin:2px 0 0;padding:7px 14px;font-size:12.5px;${raised('var(--oai-card)', 2)};color:var(--oai-ink)}
 .oai-mig-summary{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--oai-ink2);margin:0 0 14px}
 .oai-mig-problem{display:grid;gap:10px}
+.oai-mig-problem .oai-actions{flex-wrap:wrap}
 .oai-mig-error{margin:0;color:var(--oai-bad);font-size:13.5px;line-height:1.5}
 .oai-mig-handoff{display:grid;gap:12px}
 .oai-card .oai-mig-handoff h2{margin:0;font:var(--bt-weight-title,800) 19px/1.25 var(--oai-head);letter-spacing:-.016em}
