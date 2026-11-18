@@ -3,10 +3,12 @@ import { randomUUID } from 'node:crypto'
 import { Transform } from 'node:stream'
 import { COOKIE, cookieSecret, LOCAL_TRUST_NOTICE, sessionCookie } from './gate-store.mjs'
 import { agentMcpHeaders, DSH_HOST, responseHeaders, upstreamHeaders } from './gate-upstream.mjs'
-import { samePerson } from './gate-cloud.mjs'
+import { samePerson, SIGNATURE_HEADER } from './gate-cloud.mjs'
 
 export const CLOUD_OPEN_PATH = '/_gate/cloud/open'
+export const CLOUD_REVOCATION_PATH = '/_gate/cloud/revocation'
 const MAX_OPEN_BODY = 4096
+const MAX_REVOCATION_BODY = 4096
 
 export function pinOrigin(value) {
   const url = new URL(value)
@@ -54,7 +56,7 @@ function answer(res, status, value) {
   res.writeHead(status, { 'cache-control': 'no-store', 'content-type': 'application/json' })
   res.end(JSON.stringify(value))
 }
-function readBody(req, limit) {
+function readBody(req, limit, raw = false) {
   return new Promise((resolve, reject) => {
     const chunks = []
     let size = 0, failed = false
@@ -66,7 +68,11 @@ function readBody(req, limit) {
       if (size > limit) { failed = true; clearTimeout(timer); reject(new Error('Body too large')); return }
       chunks.push(chunk)
     })
-    req.on('end', () => { clearTimeout(timer); resolve(Buffer.concat(chunks).toString('utf8')) })
+    req.on('end', () => {
+      clearTimeout(timer)
+      const body = Buffer.concat(chunks)
+      resolve(raw ? body : body.toString('utf8'))
+    })
     req.on('error', error => { clearTimeout(timer); reject(error) })
   })
 }
@@ -115,6 +121,34 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
       'set-cookie': sessionCookie(issued.secret, sessions.maxAge(issued.family)) })
     res.end()
   }
+  // Cloud's signed revocation call (contracts v1, section 6). It needs no browser session and
+  // sets none; the detached JWS covers the exact body bytes, and the gate changes nothing
+  // unless that signature verifies against the published key set.
+  async function cloudRevoke(req, res) {
+    const refuse = status => {
+      auditAccess({ status, request_id: randomUUID() })
+      res.setHeader('connection', 'close')
+      answer(res, status, { error: 'Revocation refused' })
+    }
+    if (req.url !== CLOUD_REVOCATION_PATH) { refuse(400); return }
+    if (req.method !== 'POST') { refuse(405); return }
+    if (req.headers.host !== origin.host) { refuse(403); return }
+    if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+      refuse(415)
+      return
+    }
+    // The call is signed by Cloud, never by a person, a browser header or a gate session.
+    if (req.headers.authorization !== undefined) { refuse(401); return }
+    const signature = req.headers[SIGNATURE_HEADER]
+    if (typeof signature !== 'string') { refuse(401); return }
+    let body
+    try { body = await readBody(req, MAX_REVOCATION_BODY, true) } catch { refuse(413); return }
+    try { await cloud.revokeCall(body, signature) } catch { refuse(401); return }
+    if (res.destroyed) return
+    sessions.revokeAll(family => cloud.drops(family))
+    res.writeHead(204, { 'cache-control': 'no-store' })
+    res.end()
+  }
   async function authorize(req, upgrade = false) {
     if (trustedRequest(req, origin, upgrade)) {
       const family = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
@@ -140,6 +174,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const mine = family => cloud ? other => samePerson(other.principal, family.principal) : undefined
   const server = http.createServer(async (req, res) => {
     if (reservedPathAlias(req.url, origin)) { answer(res, 400, { error: 'Non-canonical gate path' }); return }
+    if (cloud && req.url === CLOUD_REVOCATION_PATH) { await cloudRevoke(req, res); return }
     if (cloud && req.url.split('?', 1)[0] === CLOUD_OPEN_PATH) { await cloudOpen(req, res); return }
     // Literal target only: queries and aliases continue through the ordinary session gate.
     // The upstream exact route admits only agent tokens, never a browser session alone.
@@ -262,8 +297,22 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const revoke = id => { for (const record of sockets.values()) if (record.family.id === id) record.socket.destroy() }
   sessions.on('revoke', revoke)
   const timer = setInterval(() => { for (const record of sockets.values()) if (!sessions.active(record.family)) record.socket.destroy() }, 1000).unref()
+  // Section 6's poll fallback: at least every 5 minutes while the gate holds sessions. A failed
+  // poll changes nothing, and the next tick tries again; no subject is logged.
+  let pollTimer
+  if (cloud) {
+    pollTimer = setInterval(() => {
+      if (!sessions.families.length) return
+      cloud.poll().then(() => sessions.revokeAll(family => cloud.drops(family))).catch(() => {})
+    }, cloud.pollInterval)
+    pollTimer.unref()
+  }
   let rebinding = false
-  server.on('close', () => { if (!rebinding) { clearInterval(timer); sessions.off('revoke', revoke) } })
+  server.on('close', () => {
+    if (!rebinding) {
+      clearInterval(timer); clearInterval(pollTimer); sessions.off('revoke', revoke)
+    }
+  })
   let binding = Promise.resolve()
   server.rebind = (port, target, drop = false) => {
     if (drop) { for (const record of sockets.values()) record.socket.destroy(); server.closeAllConnections() }

@@ -851,11 +851,11 @@ smoke checks private claim output and host control in the built runtime.
 
 A Cloud workspace's gate takes no claim and no passkey. A person opens the workspace from the
 Cloud rail, and the gate turns that open into its own session. It follows RFC 0024 (g) and the
-[version 1 contracts](../docs/cloud/contracts-v1.md), sections 4 and 5. Delivery state: the
+[version 1 contracts](../docs/cloud/contracts-v1.md), sections 4, 5 and 6. Delivery state: the
 gate side is built and tested against a fake Cloud service; the Cloud service's side (minting
-open codes and tokens) is not built yet.
+open codes and tokens, and sending revocation) is not built yet.
 
-Set all six values on the gate container, with your own values on the host:
+Set all seven values on the gate container, with your own values on the host:
 
 | Setting | Value |
 |---|---|
@@ -865,8 +865,9 @@ Set all six values on the gate container, with your own values on the host:
 | `AUTOMAGIK_GATE_CLOUD_KEYS_URL` | the HTTPS URL of the Cloud service's published key set |
 | `AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL` | the HTTPS URL of the Cloud service's open-code exchange |
 | `AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN` | the exact HTTPS origin of the Cloud rail page that opens workspaces |
+| `AUTOMAGIK_GATE_CLOUD_REVOCATION_URL` | the HTTPS URL of the Cloud service's revocation list |
 
-All six unset leaves the other modes unchanged and opens no Cloud connection. Some but not all
+All seven unset leaves the other modes unchanged and opens no Cloud connection. Some but not all
 of them refuses startup and names the missing settings, never their values. Cloud and Access
 together refuse startup. In Cloud mode no claim, passkey route, recovery or host reset socket
 exists, and no owner record is read or written. None of the values is a secret: the workspace
@@ -905,8 +906,22 @@ restart ends them. To keep working, the person opens the workspace from the rail
 open replaces the browser's previous session. The session list and "sign out everywhere" cover
 only the signed-in person's own sessions.
 
-Not in this mode yet: the Cloud service's revocation call and its poll fallback. Until they land,
-the 5-minute session bound is what ends a removed person's access.
+**Revocation.** The Cloud service sends `POST /_gate/cloud/revocation` to the gate's origin as
+`application/json`, with the version 1 call body. The call carries a detached JWS in
+`x-automagik-signature`: the header, an empty payload segment, and a signature over the header and
+the base64url of the exact body bytes, made with a key the same two-slot published set names. The
+gate verifies it before it reads a field and changes nothing on a missing, wrong or replayed
+signature. A valid `session.revoke` for this workspace drops that `subject`'s gate sessions before
+it answers `204`; a `role_lowered` call drops only the sessions that existed at `issued_at`. A
+`removed` subject is refused a new open until a later signed list omits them.
+
+If the call does not land, the gate polls the list at `AUTOMAGIK_GATE_CLOUD_REVOCATION_URL` every
+60 seconds while it holds sessions. The list body is JSON and its `x-automagik-signature` is a
+detached JWS over the exact body, checked against the same key set. A list for another workspace,
+past `expires_at`, malformed or unverifiable is a failure that changes nothing, never an empty
+list. An entry a newer contract scopes to another workspace is ignored. The call is idempotent: a
+repeat is accepted and changes nothing. The gate keeps no Cloud credential and logs only a status
+and a generated request id.
 
 ## Interim Cloudflare Access sign-in
 
@@ -952,7 +967,7 @@ an assertion; it never silently replaces a revoked family. Signing out ends gate
 Access can still authenticate a new session after that cookie is cleared. End the Access
 session too when signing out of the identity provider. Gate sessions retain the normal 12-hour
 idle limit; Access policy enforcement at public ingress remains the operator's responsibility
-until #909 supplies workspace-token revocation.
+until Cloud mode replaces Access sign-in.
 
 Access assertions are exchanged only on HTTP requests. WebSocket upgrades require an existing
 gate session cookie and never create an owner, session or browser cookie. Complete HTTP sign-in
