@@ -32,6 +32,7 @@ const { installs } = await import(FAKE_SWITCH);
 const { default: Panel, plain, records } = await import("../mods/am-quota/main.js");
 const { all, index, nodes, textOf } = await import(stubs["gpui-kit"]);
 const { AUTH_SCRIPT, FOLDER_SCRIPT, PRESENT_SCRIPT } = await import("../mods/am-quota/logins.js");
+const { layoutPopup } = await import("./popup-layout.mjs");
 
 const NOW = Date.now();
 const H = 3600000;
@@ -180,6 +181,61 @@ test("no cliproxy.json: a setup line, the generic name, no Open button and no re
   assert.match(text(root), /Accounts come from your CLIProxyAPI\. To add one/);
   assert.equal(nodes.has("am-open-proxy"), false);
   assert.deepEqual(asked, []);
+});
+
+// #929 G4: the footer's Accounts tab opens this panel as a popup as tall as its content
+// (am-footer PANEL_POPUP, 0.6 of the window), and a body built with overflow_y_scrollbar measures
+// 0 there: the installed app drew the title, the tool switch and the footer, and no setup line.
+// Laid out through popup-layout.mjs (its rule held to live frames by popup-layout.test.mjs); the
+// model clips a scroll area and has no scroll offset, so "scrolls" here means clipped, not moved.
+const POPUP_H = 492; // 0.6 of the 820 px window, as popup-layout.test.mjs
+const FIXED_H = 470; // a layout block of a set height: the control that drew the line
+const setupRow = (root) => all(root).find((n) => n.kids.some((k) => typeof k === "string" && /your own CLIProxyAPI/.test(k)));
+
+test("no cliproxy.json, as the footer's popup and in a fixed block: the setup line is drawn in the body, the same in both (#929 G4)", async () => {
+  for (const tool of ["claude", "codex"]) {
+    const { view, draw } = await panel({ config: null, claude: {} });
+    view.tool = tool;
+    const root = draw();
+    const row = setupRow(root);
+    assert.ok(row, `${tool}: the setup line is in the tree`);
+    const popOut = layoutPopup(root, { height: POPUP_H }, nodes);
+    const pop = popOut.box(row);
+    assert.ok(pop.h > 0 && pop.visible === pop.h, `${tool}: as the popup, the setup line has its height, none of it clipped (got ${JSON.stringify(pop)})`);
+    assert.ok(pop.y + pop.h <= popOut.height, `${tool}: inside the popup's own height (${popOut.height})`);
+    const fixedOut = layoutPopup(root, { height: FIXED_H, fixed: true }, nodes);
+    const fixed = fixedOut.box(row);
+    assert.ok(fixed.visible > 0 && fixed.y + fixed.h <= fixedOut.height, `${tool}: in a fixed block too`);
+    assert.equal(pop.visible, fixed.visible, `${tool}: the popup shows what the fixed block shows`);
+  }
+});
+
+test("a list taller than the popup: the popup takes its full height, the body clips, the footer stays whole (#929 G4)", async () => {
+  // Test-only accounts: forty more Codex accounts on the fake proxy, so the list overflows.
+  const accounts = QUOTAS.accounts.slice(), files = CREDENTIALS.files;
+  for (let i = 0; i < 40; i += 1) {
+    QUOTAS.accounts.push({ name: `codex-9${i}-x${i}-pro.json`, provider: "codex", email: `x${i}@example.com`, plan: "pro",
+      windows: [{ id: "primary", used_percent: 5, reset_at: iso(NOW + 6 * H) }] });
+  }
+  CREDENTIALS.files = QUOTAS.accounts.map((a) => ({ name: a.name, provider: a.provider, email: a.email, status: "active" }));
+  try {
+    const { view, draw } = await panel();
+    view.tool = "codex";
+    const root = draw();
+    const rows = all(root).filter((n) => /^acct-/.test(n.id ?? ""));
+    assert.ok(rows.length >= 40, `the long list is drawn (${rows.length} rows)`);
+    const out = layoutPopup(root, { height: POPUP_H }, nodes);
+    assert.equal(out.height, POPUP_H, "the body's rows size the popup up to its cap");
+    const first = out.box(rows[0]), last = out.box(rows.at(-1));
+    assert.ok(first.visible > 0, `the first account row is in view (got ${JSON.stringify(first)})`);
+    assert.equal(last.visible, 0, "the last is clipped by the scroll area, below the fold");
+    const foot = all(root).find((n) => n.kind === "h_flex" && n.calls.some(([m]) => m === "border_t"));
+    const f = out.box(foot);
+    assert.ok(f.h > 0 && f.visible === f.h && f.y + f.h <= out.height, "the footer stays whole at the bottom");
+  } finally {
+    QUOTAS.accounts.splice(0, Infinity, ...accounts);
+    CREDENTIALS.files = files;
+  }
 });
 
 test("Switch to <email>, then the bots still on the old account, and Restart after a confirmation", async () => {

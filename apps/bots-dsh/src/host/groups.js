@@ -382,6 +382,7 @@ export function install(rt) {
   // a fresh look at the log and a brief of the member's own chat; the brief is the
   // first message, so it stays fixed and the prefix stays cacheable.
   async function groupSessionFor(room, member) {
+    rt.assertShellChoice?.(undefined, member.id)
     room.sessions ??= {}
     const known = room.sessions[member.id]
     if (known !== undefined) {
@@ -391,7 +392,7 @@ export function install(rt) {
     // A saved level DSH no longer offers refuses the member's first turn here before a
     // Session is made for it.
     rt.assertLevelOffered?.(room.permission ?? member.permission)
-    const id = await rt.createSession(`${member.name} · ${room.name}`, { dir: rt.workDirOf({ botId: member.id, roomId: room.id }), ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}) })
+    const id = await rt.createSession(`${member.name} · ${room.name}`, { dir: rt.workDirOf({ botId: member.id, roomId: room.id }), group: true, botId: member.id, ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}) })
     // Its level first, before the Session is the member's: one whose level did not hold is
     // not kept, so the member takes no turn on it and its next turn here makes another.
     try {

@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { check } from "../scripts/scheduler-pin.mjs";
+import { releaseAssets } from "../scripts/release-assets.mjs";
 import { fakeRelease } from "./fake-release.mjs";
 
 const TAG = "herdr-automations-v0.12.1-am.1";
@@ -66,6 +67,49 @@ test("a network error from the public download falls back to the API asset route
   assert.ok(r.logs.includes("checksums.txt: served by the REST API asset route"), "the API served it");
 });
 
+test("a hung public checksum falls back after 15 seconds with full API timeouts", async (t) => {
+  const base = `https://public.example/download/${TAG}`;
+  const api = "https://api.example";
+  const assetUrl = `${api}/assets/checksums.txt`;
+  const logs = [];
+  const errors = [];
+  const realTimeout = AbortSignal.timeout;
+  const allowances = [];
+  const apiSignals = [];
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    allowances.push(ms);
+    // Expire the first request promptly even if its configured timeout regresses.
+    if (allowances.length > 1) return realTimeout(ms);
+    const controller = new AbortController();
+    queueMicrotask(() => controller.abort(new DOMException("Timed out", "TimeoutError")));
+    return controller.signal;
+  });
+  const hungPublic = (url, init) => {
+    if (url === `${base}/checksums.txt`) {
+      return new Promise((_, reject) => {
+        init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+      });
+    }
+    assert.equal(init.signal.aborted, false, "the API request starts with a live signal");
+    apiSignals.push(init.signal);
+    if (url === `${api}/releases/tags/${TAG}`) {
+      return Response.json({ assets: [{ name: "checksums.txt", url: assetUrl }] });
+    }
+    assert.equal(url, assetUrl);
+    return new Response(SUMS);
+  };
+  const code = await check({
+    fetch: hungPublic, base, api, tag: TAG, token: "", pinned: HASH, assets: ASSETS,
+    log: (line) => logs.push(line),
+    error: (line) => errors.push(line),
+  });
+  assert.equal(code, 0, errors.join("\n"));
+  assert.deepEqual(allowances, [15_000, 120_000, 120_000]);
+  assert.equal(new Set(apiSignals).size, 2, "the API release and asset requests use separate signals");
+  assert.ok(logs.includes("checksums.txt: served by the REST API asset route"), "a public timeout falls back to the API");
+  for (const [arch, asset] of Object.entries(ASSETS)) assert.ok(logs.includes(`${asset}: ${HASH[arch]} ok`), `${asset} still checked`);
+});
+
 test("when both routes fail the check exits 2", async () => {
   const r = await run({ publicStatus: 504, apiStatus: 503 });
   assert.equal(r.code, 2);
@@ -95,4 +139,20 @@ test("a public checksums.txt that serves names the public route", async () => {
   assert.equal(r.code, 0, r.errors.join("\n"));
   assert.ok(r.logs.includes("checksums.txt: served by the public release download"), "the public route is named");
   assert.ok(r.requests.every((request) => !request.path.startsWith("/asset/")), "the API was not needed");
+});
+
+// #720 Low 1: a public route that failed retryably is remembered for the rest of the run, so a
+// second asset does not wait another full timeout on it.
+test("#720 one retryable public failure sends the rest of the run straight to the API", async () => {
+  const files = { "checksums.txt": Buffer.from("first\n"), "other.txt": Buffer.from("second\n") };
+  const host = await fakeRelease({ tag: TAG, files, publicStatus: 504 });
+  try {
+    const source = releaseAssets({ base: `${host.origin}/download/${TAG}`, api: `${host.origin}/api`, tag: TAG, log: () => {} });
+    assert.equal((await source.get("checksums.txt")).toString(), "first\n");
+    assert.equal((await source.get("other.txt")).toString(), "second\n");
+    assert.equal(host.requests.filter((r) => r.path.startsWith("/download/")).length, 1, "one public try for the run");
+    assert.equal(host.requests.filter((r) => r.path.startsWith("/asset/")).length, 2, "both assets came from the API");
+  } finally {
+    await host.close();
+  }
 });

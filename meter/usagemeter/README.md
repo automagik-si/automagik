@@ -103,12 +103,19 @@ Several tools on a machine install and run the same usagemeter. They rely on thi
 
 Antigravity:
 
-- A refused or incomplete generation holds the cursor before itself. Rows after it are still read
-  and counted, and the source reports `unsupported` or `degraded` until the row becomes readable.
+- A refused generation, or an incomplete one while its database is recent, holds the cursor before
+  itself. Rows after it are still read and counted, and the source reports `unsupported` or `degraded`
+  until the row becomes readable.
   One permanently bad row therefore keeps the source visibly not counted rather than hiding later
   usage or vouching a zero.
 - An input-only generation counts what it holds once its database and WAL have been quiet for 30
   minutes; output written after that is not added, because the cursor is already past the row.
+- The reader assumes existing generations stop changing once the newest available modification time
+  of the database and its nonempty `-wal` is at least 30 minutes behind the sync clock. Nothing checks
+  this.
+- A generation with absent or empty usage, or with recognized counts that are all zero, waits while
+  the database is recent. Once quiet, it emits no event and the source can report `ok`. If a later
+  sync resumes at or beyond that row, it misses usage filled in afterwards.
 - A new call that reuses an index and the previous call's first step time keeps the old dedupe
   key and is not counted. That includes a same-index retry that keeps the old step; the format
   writes a new call's steps with new times, so this is a stated limit, not a path the reader

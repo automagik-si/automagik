@@ -24,6 +24,8 @@
       "claude",
       "--append-system-prompt-file",
       "<root>/app/automagik-herdr/briefings/<hash>-b-claudeaaaa.md",
+      "--settings",
+      "{\"promptSuggestionEnabled\":false,\"awaySummaryEnabled\":false,\"env\":{\"CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES\":\"1\"}}",
       "--permission-mode",
       "auto",
       "--model",

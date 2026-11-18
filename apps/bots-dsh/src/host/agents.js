@@ -182,7 +182,7 @@ export function install(rt) {
       if (agent.workDir !== undefined && !(await rt.isFolder(agent.workDir))) throw refusal(`The folder ${agent.workDir} of ${agent.name} is gone. Pick another in its settings.`)
       options = { cwd: agent.workDir, agentPreset: agent.profile }
     }
-    const { cwd, agentPreset } = options
+    const { cwd, agentPreset, botId } = options
     // A folder of its own (a task's `cwd`) makes the Session by cwd alone, outside every
     // DSH workspace, as a Bot's working folder does. Otherwise a known workspace id wins
     // (the Agent's latest Session may live outside the team workspace after a workspace
@@ -193,6 +193,7 @@ export function install(rt) {
       ? { cwd }
       : { workspaceId: typeof workspaceId === 'string' && ctx.workspaceRegistry.get(workspaceId) ? workspaceId : await rt.ensureWorkspace() }
     const preset = await servedPreset(agentPreset)
+    rt.assertShellChoice?.(undefined, botId)
     let sessionId
     try {
       if (creation !== undefined) creation.started = true
@@ -581,6 +582,7 @@ export function install(rt) {
   const associations = new Set()
   const associationTargets = new Set()
   async function adoptBotSession(botId, sessionId, sourceSessionId) {
+    rt.assertShellChoice?.(undefined, botId)
     const bot = rt.own(state.bots, botId)
     const original = rt.own(state.agents, bot?.dshAgentId)
     // Every refusal names the Bot and the Session in the message the person sees, and its
@@ -807,9 +809,9 @@ export function install(rt) {
 
   // A fresh task Session with a title; automations that run "a new DSH session" use it too.
   // Another plugin may give it a folder (`cwd`) and a DSH agent preset of its own.
-  async function createTaskSession(title, { cwd, agentPreset } = {}) {
+  async function createTaskSession(title, { cwd, agentPreset, botId } = {}) {
     const agent = await ensureTasks()
-    const sessionId = await createAgentSession(agent.id, undefined, { cwd, agentPreset })
+    const sessionId = await createAgentSession(agent.id, undefined, { cwd, agentPreset, botId })
     const clean = String(title ?? '').trim().slice(0, AGENT_SESSION_TITLE_MAX)
     if (clean !== '') await renameAgentSession(agent.id, sessionId, clean).catch(error => rt.warn('ds-bot: task title not set: %s', error?.message ?? error))
     return sessionId
@@ -867,6 +869,7 @@ export function install(rt) {
     if (levelTaskId !== undefined) rt.assertTaskDepth(levelTaskId)
     const levelRoomId = roomId || from === undefined ? undefined : rt.callerGroup?.() ?? parent?.levelRoomId ?? parent?.roomId
     const caller = state.bots?.[from]
+    rt.assertShellChoice?.(undefined, from)
     let reportRoom
     if (reportRoomId !== undefined && reportRoomId !== null) {
       if (typeof reportRoomId !== 'string' || reportRoomId.trim() === '') throw refusal('The report room must be a group id')
@@ -877,7 +880,7 @@ export function install(rt) {
       if (!reportRoom.members?.includes(from)) throw refusal(`${bot.name} is not a member of "${reportRoom.name}", so the task cannot report there`)
       if (roomId && roomId !== reportRoom.id) throw refusal('A task asked for in one group cannot report to another')
     }
-    const sessionId = await createTaskSession(title, { cwd: cwd ?? caller?.workDir, agentPreset: agentPreset ?? caller?.profile })
+    const sessionId = await createTaskSession(title, { cwd: cwd ?? caller?.workDir, agentPreset: agentPreset ?? caller?.profile, botId: from })
     // Until its start is decided: a re-apply DSH asks for meanwhile must not lower the task
     // in place of the refusal a saved level that is no longer offered gets (permissions.js).
     starting(sessionId)
@@ -978,10 +981,10 @@ export function install(rt) {
       if (rt.cutByRestart?.(event.data?.reason)) return
       // An error fails the task; the user or a Bot stopping it (an abort, or the error a
       // cancelled ACP prompt ends with) only stops it.
-      const kind = event.data?.reason?.kind
-      const cancelled = kind === 'error' && event.data?.reason?.error?.code === 'ABORTED'
-      const failed = kind === 'error' && !cancelled
-      const stopped = kind === 'aborted' || cancelled
+      const reason = event.data?.reason
+      const cancelled = reason?.kind === 'error' && reason.error?.code === 'ABORTED'
+      const stopped = reason?.kind === 'aborted' || cancelled
+      const failed = reason?.kind === 'error' && !stopped
       task.status = failed ? 'failed' : stopped ? 'stopped' : 'done'
       task.endedAt = Date.now()
       const words = lastWords.get(id) ?? ''

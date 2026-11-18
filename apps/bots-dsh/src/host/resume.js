@@ -239,26 +239,31 @@ export function install(rt) {
     persist()
   }
   const forgetQueued = (exchangeId) => {
+    let next = queued
     for (const [sessionId, list] of Object.entries(queued)) {
-      const at = list.findIndex(item => item.args.exchangeId === exchangeId)
-      if (at === -1) continue
-      const rest = list.toSpliced(at, 1)
-      queued = { ...queued }
-      if (rest.length === 0) delete queued[sessionId]
-      else queued[sessionId] = rest
-      persist()
-      return
+      const rest = list.filter(item => item.args.exchangeId !== exchangeId)
+      if (rest.length === list.length) continue
+      if (next === queued) next = { ...queued }
+      if (rest.length === 0) delete next[sessionId]
+      else next[sessionId] = rest
     }
+    if (next === queued) return
+    queued = next
+    persist()
   }
 
+  const noteDelivery = (sessionId, args) => {
+    const list = queued[sessionId] ?? []
+    if (list.some(item => item.args.exchangeId === args.exchangeId)) return
+    // Note it before sending: a turn may take it up before the send returns.
+    queued = { ...queued, [sessionId]: [...list, { at: Date.now(), args }] }
+    persist()
+  }
   const deliver = rt.deliver
   rt.deliver = async (args) => {
     const noted = { ...args, exchangeId: args.exchangeId ?? randomUUID() }
     const sessionId = noted.sessionId ?? rt.chatOf(noted.toId)
-    // Noted before it is sent: a turn may take it up before the send returns. Notes
-    // are kept whole; nothing waits out a delivery silently.
-    queued = { ...queued, [sessionId]: [...(queued[sessionId] ?? []), { at: Date.now(), args: noted }] }
-    persist()
+    noteDelivery(sessionId, noted)
     try {
       return await deliver(noted)
     } catch (error) {
@@ -284,12 +289,16 @@ export function install(rt) {
   // The first turn event of each Session since this start, until the noted turns are
   // picked up. A turn that ends, or still runs, before one starts here outlived the
   // last run: only Omni restarted (the plugin reloaded) and DSH went on.
-  let firstTurn = Object.keys(interrupted.turns).length > 0 ? new Map() : undefined
+  let firstTurn = Object.keys(interrupted.turns).length > 0
+    || Object.values(interrupted.queued).some(list => Array.isArray(list) && list.some(item => item?.args?.resumed === true))
+    ? new Map() : undefined
+  let startedTurns = firstTurn === undefined ? undefined : new Set()
   ctx.on('session/event', (session, event) => {
     const id = session?.id
     if (id === undefined) return
     // DSH closes a cut-off turn as it reopens the Session; that is not the turn finishing.
     const finished = event.type === 'turn/end' && !cutByRestart(event.data?.reason)
+    if (event.type === 'user/message' && event.data?.source?.resumed !== true) startedTurns?.add(id)
     if ((event.type === 'turn/start' || finished) && firstTurn?.has(id) === false) {
       firstTurn.set(id, { type: event.type, turn: event.data?.turn, reason: event.data?.reason })
     }
@@ -338,61 +347,114 @@ export function install(rt) {
     return names.length > 0 ? { fromName: names.join(', ') } : {}
   }
 
-  async function resumeTurn(sessionId, record) {
+  async function resumeDelivery(sessionId, record) {
     const bot = rt.botOf(record.botId)
-    if (bot === undefined) return
+    if (bot === undefined || rt.shellHoldOf?.(bot.id) !== undefined) return undefined
     const text = resumeText(record)
+    const exchangeId = `resume:${sessionId}:${record.since}`
     if (record.roomId !== undefined) {
       const room = rt.roomOf(record.roomId)
-      if (room === undefined || !room.members.includes(bot.id)) return
+      if (room === undefined || !room.members.includes(bot.id)) return undefined
       await rt.postToRoom(room, bot, '', { resumed: true, quiet: true, ...(record.resumed ? { again: true } : {}) })
-      // A turn already picked up once and cut off again stays stopped: a restart loop
-      // must not run it forever.
-      if (record.resumed) return
-      await resume(sessionId, () => rt.deliver({ toId: bot.id, sessionId: room.sessions?.[bot.id] ?? sessionId, role: 'room', roomId: room.id, note: 'picking up after a restart', resumed: true, text, ...(record.trigger?.askedBy ? { askedBy: record.trigger.askedBy } : {}) }))
-      return
+      // A second interruption in the same turn stays stopped.
+      if (record.resumed) return undefined
+      return { toId: bot.id, sessionId: room.sessions?.[bot.id] ?? sessionId, role: 'room', roomId: room.id,
+        note: 'picking up after a restart', resumed: true, text, exchangeId, ...(record.trigger?.askedBy ? { askedBy: record.trigger.askedBy } : {}) }
     }
-    if (record.resumed) return
+    if (record.resumed) return undefined
+    const target = rt.chatOf(bot.id)
     const trigger = record.trigger
     if ((trigger?.role === 'request' || trigger?.role === 'stopped') && trigger.senderSessionId && trigger.audience !== 'user' && rt.botOf(trigger.senderSessionId)) {
-      // The sender still waits for this turn's answer, so it goes on under the same exchange.
-      await resume(sessionId, () => rt.deliver({ fromId: trigger.senderSessionId, toId: bot.id, role: trigger.role, ...(trigger.exchangeId ? { exchangeId: trigger.exchangeId } : {}), ...(trigger.senderRoomId ? { fromRoomId: trigger.senderRoomId } : {}), ...(trigger.noReply === true ? { noReply: true } : {}), ...(Array.isArray(trigger.joined) && trigger.joined.length > 0 ? { joined: trigger.joined, ...joinedFrom(trigger) } : {}), resumed: true, text }))
-      return
+      // Preserve the original exchange for a sender still waiting for the answer.
+      return { fromId: trigger.senderSessionId, toId: bot.id, sessionId: target, role: trigger.role,
+        exchangeId: trigger.exchangeId ?? exchangeId, ...(trigger.senderRoomId ? { fromRoomId: trigger.senderRoomId } : {}),
+        ...(trigger.noReply === true ? { noReply: true } : {}),
+        ...(Array.isArray(trigger.joined) && trigger.joined.length > 0 ? { joined: trigger.joined, ...joinedFrom(trigger) } : {}),
+        resumed: true, text }
     }
     // A turn that went on with work another Bot asked for still owes that Bot its answer.
-    await resume(sessionId, () => rt.deliver({ toId: bot.id, role: 'resume', resumed: true, text, ...(trigger?.work ? { work: trigger.work } : {}) }))
+    return { toId: bot.id, sessionId: target, role: 'resume', resumed: true, text, exchangeId, ...(trigger?.work ? { work: trigger.work } : {}) }
   }
 
-  // Where a queued note goes now: its Session if it still is one, else the
-  // current Session of its Bot, or of its group when the message went to one.
-  // One no Bot owns any more (a run whose record is gone) has nowhere to go: it is dropped,
-  // not sent to the Bot's chat.
   const sessionFor = (sessionId, args) => rt.sessionNow(sessionId, args?.toId, args?.roomId)
 
-  // A hard stop keeps the inbox, which the Session runs once it wakes; only what DSH
-  // cancelled is sent again. The notes stay queued until a turn takes the messages
-  // up, so a send that fails here, or a Session that cannot be opened, leaves them
-  // for the next start instead of losing them.
-  async function resendQueued(sessionId, list) {
-    const fresh = list.filter(item => rt.botOf(item.args?.toId) !== undefined
-      && sessionFor(sessionId, item.args) !== undefined && taken?.has(item.args.exchangeId) !== true)
-    if (fresh.length === 0) return
-    const target = sessionFor(sessionId, fresh[0].args)
-    const agent = await rt.resolveAgent(target)
-    const waiting = new Set([...(agent.inbox?.nextStep ?? []), ...(agent.inbox?.nextTurn ?? [])].map(message => message.source?.exchangeId))
-    for (const { args } of fresh) {
-      if (waiting.has(args.exchangeId)) continue
-      if (taken?.has(args.exchangeId) === true) {
-        forgetQueued(args.exchangeId)
-        continue
-      }
-      // A request that waited through a restart reaches its target late: the work
-      // it is for is marked, so the answer that comes back says so.
-      if (args.role === 'request' || args.role === 'stopped') rt.lateWork?.(args.exchangeId)
-      await deliver({ ...args, sessionId: sessionFor(sessionId, args), steer: false, resent: true })
-        .catch(error => rt.warn('omni-ui: sending again what %s was sent failed: %s', sessionId, error))
-      resent.add(sessionFor(sessionId, args))
+  const waitingFor = agent => new Set([...(agent.inbox?.nextStep ?? []), ...(agent.inbox?.nextTurn ?? [])]
+    .map(message => message.source?.exchangeId))
+
+  // Build each message through ordinary delivery (including its ledger and capabilities)
+  // before waking the destination. A distinct user/message still acknowledges each item.
+  async function resendTo(target, items) {
+    const warn = error => rt.warn('omni-ui: sending again what %s was sent failed: %s', target, error)
+    const started = (item, destination) => startedTurns?.has(item.recordId ?? item.oldId) || startedTurns?.has(destination)
+    const sendable = (agent, item, destination) => (item.recordId !== undefined || sessionFor(item.oldId, item.args) === destination)
+      && (!item.args.resumed || !started(item, destination))
+      && taken?.has(item.args.exchangeId) !== true && !waitingFor(agent).has(item.args.exchangeId)
+
+    // Ordinary delivery joins #1569's reply queue when installed. Submit all replies
+    // before waiting, and let the other roles use their own single wake.
+    const replies = items.filter(item => item.args.role === 'reply').map(async item => {
+      let deliveredTo = target
+      const sent = await deliver({ ...item.args, sessionId: target, steer: false, resent: true }, {
+        shouldSend(agent, destination) {
+          deliveredTo = destination
+          return sendable(agent, item, destination)
+        },
+      })
+      if (sent !== undefined) resent.add(deliveredTo)
+    }).map(reply => reply.catch(warn))
+
+    const staged = items.filter(item => item.args.role !== 'reply').map(item => {
+      const ready = Promise.withResolvers()
+      const settled = deliver({ ...item.args, sessionId: target, steer: false, resent: item.recordId === undefined && !item.args.resumed }, {
+        enqueue(agent, message) {
+          const sent = Promise.withResolvers()
+          ready.resolve({ item, agent, message, sent })
+          return sent.promise
+        },
+      }).catch(warn).finally(() => ready.resolve())
+      return { ready: ready.promise, settled }
+    })
+    const prepared = (await Promise.all(staged.map(stage => stage.ready))).filter(Boolean)
+    const batchAgent = prepared[0]?.agent
+    if (prepared.length > 1 && typeof batchAgent.inject === 'function' && batchAgent.status === 'running') {
+      // A running turn could claim injections before the waking followup starts its turn.
+      try { await batchAgent.whenIdle?.() } catch (error) { warn(error) }
     }
+    const ids = new Set()
+    const batch = prepared.filter(({ agent, item, sent }) => {
+      const id = item.args.exchangeId
+      if (sendable(agent, item, target) && !ids.has(id)) {
+        ids.add(id)
+        return true
+      }
+      sent.resolve(false)
+      return false
+    })
+    if (batch.length > 0) {
+      const { agent } = batch[0]
+      const inject = agent.status !== 'running' && typeof agent.inject === 'function'
+      const resumeItem = batch.find(({ item }) => item.args.resumed === true)
+      const send = async () => {
+        try {
+          for (const [index, { item, message }] of batch.entries()) {
+            rt.assertShellChoice?.(target, item.args.toId)
+            if (item.recordId !== undefined) noteDelivery(target, item.args)
+            if (!item.args.resumed && (item.args.role === 'request' || item.args.role === 'stopped')) rt.lateWork?.(item.args.exchangeId)
+            // DSH claims next-step injections before the waking next-turn followup.
+            if (inject && index < batch.length - 1) agent.inject(message)
+            else agent.followup(message)
+          }
+          await ctx.sessions.flush(agent.session)
+          if (batch.some(({ item }) => !item.args.resumed)) resent.add(target)
+          for (const { sent } of batch) sent.resolve(true)
+        } catch (error) {
+          for (const { sent } of batch) sent.reject(error)
+          throw error
+        }
+      }
+      await (resumeItem === undefined ? send() : resume(resumeItem.item.recordId ?? target, send)).catch(warn)
+    }
+    await Promise.all([...staged.map(stage => stage.settled), ...replies])
   }
 
   // Tasks, DSH bot Sessions, the single-run Sessions of automations and the Sessions other
@@ -417,16 +479,34 @@ export function install(rt) {
     for (const run of state.subscriptionRuns ?? []) if (run.task && run.sessionId && run.status === 'working') candidates.set(run.sessionId, { kind: run.botId ? 'run' : 'tasks', botId: run.botId })
     // A registered Session the team finds on its own keeps the team's way of resuming it.
     for (const id of owners.keys()) if (!candidates.has(id)) candidates.set(id, { kind: rt.agentOf?.(id) ? 'tasks' : 'plain' })
+    const canHeal = (id, botId = state.tasks?.[id]?.from) => {
+      if (rt.shellHoldOf?.(botId) !== undefined) return false
+      try {
+        rt.assertShellChoice?.(id, botId)
+        return true
+      } catch (error) {
+        if (error?.code === 'bot/shell-off-cli') return false
+        throw error
+      }
+    }
     const resumes = state.restartResumes ??= {}
     for (const [id, entry] of Object.entries(resumes)) if (Date.now() - entry.at > CUT_KEPT_MS) delete resumes[id]
     for (const [id, target] of candidates) {
-      if (skip.has(id) || (resumes[id]?.count ?? 0) >= RESUMES_MAX) continue
+      const botId = target.botId ?? state.tasks?.[id]?.from
+      if (skip.has(id) || (resumes[id]?.count ?? 0) >= RESUMES_MAX || !canHeal(id, botId)) continue
       const agent = await rt.resolveAgent(id).catch(() => undefined)
-      if (agent === undefined || agent.status === 'running') continue
+      if (agent === undefined || agent.status === 'running' || agent.session?.header?.origin === 'subagent' || !canHeal(id, botId)) continue
       const last = lastTurnOf(agent)
       if (last?.type !== 'turn/end' || !cutByRestart(last.data?.reason) || Date.now() - (last.time ?? 0) > CUT_KEPT_MS) continue
-      resumes[id] = { count: (resumes[id]?.count ?? 0) + 1, at: Date.now() }
+      const previous = resumes[id]
+      resumes[id] = { count: (previous?.count ?? 0) + 1, at: Date.now() }
       await rt.save()
+      if (!canHeal(id, botId)) {
+        if (previous === undefined) delete resumes[id]
+        else resumes[id] = previous
+        await rt.save()
+        continue
+      }
       const text = resumeText({})
       if (target.kind === 'run' && rt.botOf(target.botId) !== undefined) {
         await resume(id, () => rt.deliver({ toId: target.botId, sessionId: id, role: 'resume', resumed: true, text }))
@@ -444,10 +524,11 @@ export function install(rt) {
     // for ever (#164). It ends as stopped, from when it was cut. Its Bot is not woken for
     // it: at a start that could be many old tasks at once.
     for (const [id, task] of Object.entries(state.tasks ?? {})) {
-      if (task.status !== 'working' || resumed.includes(id)) continue
+      if (task.status !== 'working' || resumed.includes(id) || !canHeal(id, task.from)) continue
       const agent = await rt.resolveAgent(id).catch(() => undefined)
       // Opening a Session takes time: the task may have really ended meanwhile.
-      if (agent === undefined || agent.status === 'running' || task.status !== 'working') continue
+      if (agent === undefined || agent.status === 'running' || agent.session?.header?.origin === 'subagent'
+        || state.tasks[id] !== task || task.status !== 'working' || !canHeal(id, task.from)) continue
       const last = lastTurnOf(agent)
       if (last?.type !== 'turn/end' || !cutByRestart(last.data?.reason)) continue
       Object.assign(task, { status: 'stopped', endedAt: last.time ?? Date.now(), summary: CUT_SUMMARY })
@@ -514,8 +595,7 @@ export function install(rt) {
     // The turn was cut off before it finished: the work is picked up again, as after
     // a restart that cut it off.
     if (reason === undefined || reason.kind === 'interrupted') {
-      await resumeTurn(sessionId, record)
-      return
+      return resumeDelivery(sessionId, record)
     }
     if (reason.kind === 'error') {
       const failure = turnFailure(reason.error)
@@ -588,32 +668,67 @@ export function install(rt) {
     persist()
     // Read once, before any resume, so every post can tell its owners.
     owners = ownersOf()
-    // Agents and inboxes are read before anything wakes their Sessions.
-    const cut = []
+    // Resolve each durable item on its own; an old Session can now lead to several
+    // destinations. Only equal exchange ids represent the same queued delivery.
+    const destinations = new Map()
+    const add = (target, item) => {
+      if (target === undefined) return
+      if (!destinations.has(target)) destinations.set(target, [])
+      destinations.get(target).push(item)
+    }
     for (const [sessionId, record] of Object.entries(noted)) {
-      const first = firstTurn.get(sessionId)
+      if (rt.botOf(record.botId) === undefined) continue
+      const target = record.roomId === undefined ? rt.chatOf(record.botId)
+        : rt.roomOf(record.roomId)?.sessions?.[record.botId] ?? sessionId
+      add(target, { record, recordId: sessionId })
+    }
+    const notes = Object.entries(dropped).flatMap(([oldId, list]) => Array.isArray(list)
+      ? list.filter(item => item?.args?.exchangeId !== undefined).map(item => ({ ...item, oldId }))
+      : []).sort((a, b) => Number(Boolean(b.args.resumed)) - Number(Boolean(a.args.resumed)) || a.at - b.at)
+    const seen = new Set()
+    for (const item of notes) {
+      const { args, oldId } = item
+      if (rt.botOf(args.toId) === undefined || taken?.has(args.exchangeId) || seen.has(args.exchangeId)) continue
+      const target = sessionFor(oldId, args)
+      if (target === undefined) continue
+      seen.add(args.exchangeId)
+      add(target, item)
+    }
+    const prepare = async (target, item) => {
+      if (item.record === undefined) return item
+      const { record, recordId } = item
+      const first = firstTurn?.get(recordId)
       if (first?.type === 'turn/end') {
-        // The turn ended while Omni was not watching it: what it did is settled from
-        // the Session's durable log.
-        await reconcileEnded(sessionId, record).catch(error => rt.warn('ds-bot: settling the work of %s failed: %s', sessionId, error))
-        continue
+        const args = await reconcileEnded(recordId, record)
+        return args?.sessionId === target ? { ...item, args } : undefined
       }
-      // Still running: noted again, as if it had started here.
-      if (first === undefined && (await rt.resolveAgent(sessionId).catch(() => undefined))?.status === 'running') update(sessionId, () => record)
-      else cut.push([sessionId, record])
+      if (startedTurns?.has(recordId) || rt.shellHoldOf?.(record.botId) !== undefined) return undefined
+      const agent = await rt.resolveAgent(recordId).catch(() => undefined)
+      if (startedTurns?.has(recordId)) return undefined
+      if (firstTurn?.get(recordId)?.type === 'turn/end') {
+        const args = await reconcileEnded(recordId, record)
+        return args?.sessionId === target ? { ...item, args } : undefined
+      }
+      if (agent?.status === 'running') {
+        update(recordId, () => record)
+        return undefined
+      }
+      const args = await resumeDelivery(recordId, record)
+      return args?.sessionId === target ? { ...item, args } : undefined
     }
-    firstTurn = undefined
-    for (const [sessionId, list] of Object.entries(dropped)) {
-      if (!Array.isArray(list)) continue
-      await resendQueued(sessionId, list).catch(error => rt.warn('omni-ui: sending again what %s was sent failed: %s', sessionId, error))
-    }
-    taken = undefined
-    for (const [sessionId, record] of cut) {
-      await resumeTurn(sessionId, record).catch(error => rt.warn('omni-ui: picking up the turn of %s failed: %s', sessionId, error))
-    }
-    // What a group's members were asked for and will not pick up is settled now.
-    await rt.settleRoomBatches?.()
-    await healCutSessions(new Set(Object.keys(noted)))
+    const resending = Promise.all([...destinations].map(async ([target, items]) => {
+      const ready = await Promise.all(items.map(item => prepare(target, item).catch(error => {
+        rt.warn('omni-ui: picking up an interrupted turn for %s failed: %s', target, error)
+      })))
+      await resendTo(target, ready.filter(Boolean))
+    })).then(async () => {
+      firstTurn = undefined
+      startedTurns = undefined
+      taken = undefined
+      await rt.settleRoomBatches?.()
+    })
+    // Healing task Sessions is independent of a reply waiting for a busy Bot.
+    await Promise.all([resending, healCutSessions(new Set(Object.keys(noted)))])
     finish({})
   }
 

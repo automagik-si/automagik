@@ -218,6 +218,116 @@ docker exec automagik /nodejs/bin/node \
 at first start. An image-managed seed follows newer image releases on subsequent starts, as
 described below; a profile whose `package.json` the owner changed stays owner-managed.
 
+## Measurement access (read-only)
+
+A DSH container mounts **one volume, at `/data`** (the `--volume` in Run). `/data/workspace` is a
+directory inside it, not a second mount, and the vendor homes and the meter's state default into
+it too: the image sets `HOME=/data`. The optional gate container has its own `/data`
+(`gate-data`) and reads the DSH volume at `/dsh:ro`; that read-only DSH view is the gate's, not
+the workspace's measurement view.
+
+The image bakes no host path. Resolve the workspace volume's host path per runtime:
+
+- Docker: `docker volume inspect automagik-data --format '{{.Mountpoint}}'`, normally
+  `/var/lib/docker/volumes/automagik-data/_data`.
+- Incus: each instance's volume is the custom volume attached at `/data`. A `dir` pool keeps it
+  at `/var/lib/incus/storage-pools/<pool>/custom/<volume>` (confirm with `incus storage volume
+  show <pool> <volume>`). A pool driver with no host path (`zfs`, `lvm`, `ceph`) has none to
+  read: export a read-only copy for measurement instead.
+
+The node's existing measurement user reads that host path through the node's own SSH alias. The
+image adds no account, key, link, home move or remote shell. On the node, expose one path per
+workspace, here `/srv/automagik/measure/<workspace>`. Grant first, then remount read-only: a
+read-only mount refuses `setfacl`. The volume is owned by the image's uid 1000, so a POSIX ACL
+grants without changing ownership; `<measurement>` is the node's existing measurement account:
+
+```sh
+install -d -m 0755 /srv/automagik/measure
+view=/srv/automagik/measure/automagik-data
+me=<measurement>
+
+mount --bind /var/lib/docker/volumes/automagik-data/_data "$view"
+
+# Search only: the view itself, then every directory on the way to a readable path.
+setfacl -m "u:$me:--x" "$view"
+for d in .claude .codex .automagik dsh dsh/profiles dsh/profiles/automagik-web; do
+  [ -d "$view/$d" ] && setfacl -m "u:$me:--x" "$view/$d"
+done
+marker=dsh/profiles/automagik-web/automagik-server-profile
+[ -e "$view/$marker" ] && setfacl -m "u:$me:r--" "$view/$marker"
+# Search only into the agent homes: their presence decides the derived-file check.
+for d in .gemini .antigravity; do
+  [ -d "$view/$d" ] && setfacl -m "u:$me:--x" "$view/$d"
+done
+
+# Read and search inside the exposed roots only, never over the view.
+for d in .claude/projects .claude/session-archive .codex/sessions \
+         .codex/archived_sessions .automagik/meter; do
+  [ -d "$view/$d" ] && setfacl -R -m "u:$me:rX" "$view/$d"
+done
+
+# A Gemini or Antigravity workspace: the derived model-name file and nothing else.
+if [ -e "$view/.automagik/measure/model-name.json" ]; then
+  setfacl -m "u:$me:--x" "$view/.automagik/measure"
+  setfacl -m "u:$me:r--" "$view/.automagik/measure/model-name.json"
+fi
+
+# Never readable, whatever the file mode: credentials and raw settings.
+for f in .claude/.credentials.json .codex/auth.json .claude.json \
+         .claude/settings.json .gemini/settings.json \
+         .gemini/antigravity-cli/settings.json .antigravity/settings.json; do
+  [ -e "$view/$f" ] && setfacl -m "u:$me:---" "$view/$f"
+done
+
+mount -o remount,ro,bind "$view"
+```
+
+For `/etc/fstab`, the same source and target with `none bind,ro 0 0`, but apply the grants first
+through a temporary writable bind, or to the volume's source path: a read-only mount refuses
+`setfacl`. With Incus, bind the `dir` pool's `source` the same way; with another driver, export
+the read-only copy there. Never `setfacl -R` on the view: that makes the credential files
+readable, and rerun the deny loop after a vendor writes a new credential file.
+
+Inside that view the measurement identity may read, per workspace:
+
+| Agent | Read-only roots |
+|---|---|
+| Claude | `.claude/projects/`, `.claude/session-archive/` |
+| Codex | `.codex/sessions/`, `.codex/archived_sessions/` |
+| Meter | `.automagik/meter/`: `meter.db` and `claude-limits.jsonl` |
+| Gemini / Antigravity | `.automagik/measure/model-name.json` (the derived model name only) |
+
+The meter's state directory follows `usagemeter`'s own rule: `METER_STATE_DIR`, else
+`<AM_HOME>/meter` (an absolute `AM_HOME`), else `~/.automagik/meter`; with this image's
+`HOME=/data` the default is `/data/.automagik/meter`. Without `claude-limits.jsonl` no plan
+counts as measured.
+
+This image runs no Gemini or Antigravity agent. Where a workspace adds one, expose only its log
+directory, conversation databases and generated transcripts. Before the view is mounted, generate
+`.automagik/measure/model-name.json` inside the volume from the raw settings with the measurement
+project's field allowlist, never by copying the settings file; it holds exactly
+`{"model":"<name>"}` and nothing else. That one file is the only settings-shaped path exposed,
+and without it the usage reads "model unknown". Never the agent's raw settings file.
+
+Never exposed, in whole or in part: `.claude/.credentials.json`, `.codex/auth.json`,
+`.claude.json` (the combined Claude configuration, which can carry MCP server environment
+values), `.claude/settings.json`, and any Gemini or Antigravity settings file that carries an API
+key or an MCP environment value (`.gemini/settings.json`, `.gemini/antigravity-cli/settings.json`,
+`.antigravity/settings.json`). The Claude account block is not exposed here; until the
+measurement project's RFC 0006 decides, that usage reads "unattributed".
+
+The pilot's check runs on the node as the measurement identity, against the read-only view. It
+exits non-zero when the view is absent, is stale (no seeded profile marker), finds an exposed
+root unreadable or writable, misses the meter's files in an existing meter directory, cannot read
+`.automagik/measure/model-name.json` while a Gemini or Antigravity agent is present, finds that
+file readable but not exactly one model name, or lets the identity read a file listed above:
+
+```sh
+node server/measurement-check.mjs /srv/automagik/measure/<workspace>
+```
+
+The check is host-side and is not shipped in the image.
+
 ## Update a workspace through its image
 
 Arca and host operators update by changing the pinned image digest and restarting on the **same

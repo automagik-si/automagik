@@ -187,6 +187,12 @@ export function parseBots(text) {
       warnings.push(`${where}: codexAuto false no longer opts out: every Codex seat and worker runs in auto mode `
         + "(--approve-for-me) with its sandbox on (#1125); remove the field");
     }
+    // Claude Code's person-feature opt-out (#1558): a boolean, true to keep them. Anything else is
+    // ignored, so a hand-written value never changes what a launch turns off.
+    if (bot.personFeatures !== undefined && typeof bot.personFeatures !== "boolean") {
+      warnings.push(`${where}: personFeatures is not a boolean; ignored`);
+      delete bot.personFeatures;
+    }
     if (!ID_SHAPE.test(bot.id)) warnings.push(`${where}: id is not b- plus 10 base32 characters`);
     if (typeof bot.role !== "string") { if (bot.role !== undefined) warnings.push(`${where}: role is not text`); bot.role = ""; }
     if (typeof bot.instructions !== "string") { if (bot.instructions !== undefined) warnings.push(`${where}: instructions are not text`); bot.instructions = ""; }
@@ -639,6 +645,9 @@ export function checkBots(file, before = null, { project = null, projects = null
     if (b.codexAuto !== undefined && typeof b.codexAuto !== "boolean") {
       errors.push(`${at}: codexAuto is not a boolean`);
     }
+    if (b.personFeatures !== undefined && typeof b.personFeatures !== "boolean") {
+      errors.push(`${at}: personFeatures is not a boolean`);
+    }
     if (typeof b.instructions !== "string") errors.push(`${at}: no instructions`);
     else if (b.instructions.length > MAX_INSTRUCTIONS) errors.push(`${at}: instructions longer than ${MAX_INSTRUCTIONS} characters`);
     if (b.planned !== undefined && (!isObject(b.planned) || !isWave(b.planned.wave))) errors.push(`${at}: planned needs a positive whole wave`);
@@ -947,6 +956,8 @@ export function applyBotEdit(raw, entry, newCategory = null) {
   }
   if ("rank" in bot && (bot.rank === undefined || bot.rank === null || bot.rank === "")) delete merged.rank;
   if ("code" in bot && (bot.code === undefined || bot.code === null || bot.code === "")) delete merged.code;
+  // Off is the default: only a bot that keeps Claude Code's person features stores the field (#1558).
+  if ("personFeatures" in bot && bot.personFeatures !== true) delete merged.personFeatures;
   if (isObject(merged.worker) && merged.worker.agyMode === "") {
     merged.worker = { ...merged.worker };
     delete merged.worker.agyMode;

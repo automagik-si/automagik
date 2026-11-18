@@ -9120,21 +9120,14 @@ var PT_BR = {
   "link": "conexão",
   "team": "equipe",
   "The Omni plugins": "Os plugins do Omni",
+  "Power": "Energia",
   "Power {name} off": "Desligar {name}",
   "Power {name} on": "Ligar {name}",
-  // The power shortcut in the Bot team's sidebar (power-shortcut.js)
-  "Omni and Genie": "Omni e Genie",
-  "Omni, Genie and Unfold": "Omni, Genie e Unfold",
+  // The power card in each built-in Bot's settings (power-shortcut.js)
   "Try again": "Tentar de novo",
   "Choose where Omni lives": "Escolher onde o Omni fica",
   "Add Omni": "Adicionar o Omni",
   "Open Plugins": "Abrir Plugins",
-  "Open team setup": "Abrir configuração da equipe",
-  "{name} on": "{name}: energia ligada",
-  "{name} off": "{name}: energia desligada",
-  "{name} working": "{name}: trabalhando",
-  "{name} needs you": "{name}: precisa de você",
-  "{a}, {b}": "{a}, {b}",
   "On · {status}": "Ligado · {status}",
   "{name} stays on once it joins your team.": "O {name} fica ligado depois que entra na sua equipe.",
   "Adds the Omni plugins to this DSH, then looks for your Omni.": "Adiciona os plugins do Omni a este DSH e depois procura o seu Omni.",
@@ -10679,32 +10672,10 @@ var startPower = (kind, run) => WORKING.has(powerOf(kind).phase) ? null : runPow
 function stopPower(kind) {
   runs.get(kind)?.abort();
 }
-var INTENT_KEY = "automagik.welcome.team-intent";
-var INTENT_MS = 6e4;
-var intent = null;
-function setTeamIntent(power = null, now = Date.now()) {
-  intent = { power, at: now };
-  try {
-    globalThis.sessionStorage?.setItem(INTENT_KEY, JSON.stringify(intent));
-  } catch {
-  }
-}
-function takeTeamIntent(now = Date.now()) {
-  let value = intent;
-  intent = null;
-  try {
-    const stored = globalThis.sessionStorage?.getItem(INTENT_KEY);
-    globalThis.sessionStorage?.removeItem(INTENT_KEY);
-    if (value === null && stored) value = JSON.parse(stored);
-  } catch {
-  }
-  return value !== null && typeof value?.at === "number" && now - value.at >= 0 && now - value.at < INTENT_MS ? value : null;
-}
 function resetPower() {
   for (const controller of runs.values()) controller.abort();
   runs.clear();
   states.clear();
-  intent = null;
   for (const listener of Array.from(listeners)) listener();
 }
 
@@ -11600,10 +11571,9 @@ var TeamLede = ({ name }) => (0, import_react7.createElement)(
   (0, import_react7.createElement)("br"),
   (0, import_react7.createElement)("span", { className: "oai-lede-rule" }, t("Code work goes to a Bot with Computer."))
 );
-var explicitOf = (props, intent2) => props?.explicit === true || intent2 !== null;
+var explicitOf = (props) => props?.explicit === true;
 function TeamStep(props) {
-  const [intent2] = (0, import_react7.useState)(() => takeTeamIntent());
-  const explicit = explicitOf(props, intent2);
+  const explicit = explicitOf(props);
   const state = useGate(explicit ? { ...props, explicit: true } : props);
   const finish2 = useFinish(props);
   const [glitching, glitch] = useGlitch();
@@ -11637,8 +11607,7 @@ function TeamStep(props) {
     if (state) glitch();
   }, [state, glitch]);
   (0, import_react7.useEffect)(() => {
-    const asked = intent2?.power === "omni" && !autoPowered.current && power.phase === "asleep";
-    if (!state || !(asked || powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current))) return;
+    if (!state || !powersOnByItself(state.preload, power.phase, power.detail, autoPowered.current)) return;
     autoPowered.current = true;
     power.toggle();
   }, [state]);
@@ -12067,7 +12036,23 @@ var CREDENTIALS = Object.freeze([
   [/\bAIza[A-Za-z0-9_-]{20,}/g, CREDENTIAL_MARK],
   [/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, CREDENTIAL_MARK],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
-  [/([?&#](?:token|access_token|api_key|apikey|key|secret|password)=)[^&\s"']+/gi, `$1${CREDENTIAL_MARK}`],
+  // Provider and code-host keys whose own prefix the rules above do not cover. Each needs a
+  // long enough body that ordinary words cannot match it.
+  [/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}/g, CREDENTIAL_MARK],
+  [/\bwhsec_[A-Za-z0-9+/=]{12,}/g, CREDENTIAL_MARK],
+  [/\bhf_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bgl(?:pat|oas|rt)-[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bgsk_[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\br8_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bdop_v1_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bshp(?:at|ca|pa|ss)_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bSG\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bya29\.[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\bnfp_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bvercel_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bsbp_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bATBB[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/([?&#](?:token|access[_-]?token|api[_-]?key|apikey|key|secret|password|passwd|auth|authorization|client[_-]?secret|x-api-key|signature|sig|code|ticket)=)[^&#\s"']+/gi, `$1${CREDENTIAL_MARK}`],
   // npm registry credentials: an access token (8+ chars; shorter is indistinguishable from a
   // package name), the .npmrc keys as JSON (quoted key or value), their npm_config_* env
   // spelling, NPM_TOKEN, and any userinfo in an http(s) URL. The userinfo rule is greedy to
@@ -12080,7 +12065,7 @@ var CREDENTIALS = Object.freeze([
   // as a key with = or :, JSON-quoted keys included.
   [/(\b[A-Z0-9_]*(?:NPM_TOKEN|AUTH_TOKEN)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',}]+)/gi, `$1${CREDENTIAL_MARK}`],
   [/(\bhttps?:\/\/)[^/\s]+@/gi, `$1${CREDENTIAL_MARK}@`],
-  [/(["']?(?:api[_-]?key|authorization|x-api-key|password|secret)["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, `$1${CREDENTIAL_MARK}`]
+  [/(["']?(?:(?:[a-z0-9]+[-_.])*(?:api[_-]?key|authorization|x-api-key|x-auth-token|x-amz-security-token|proxy-authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|secret))["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, `$1${CREDENTIAL_MARK}`]
 ]);
 function redactText(text) {
   let out = String(text ?? "");
@@ -13647,16 +13632,8 @@ function installVeil({ doc = globalThis.document, scope = globalThis, request: r
 
 // src/client/power-shortcut.js
 var import_react12 = require("react");
-var import_react_dom2 = require("react-dom");
 var NAMES2 = { omni: "Omni", genie: "Genie", unfold: "Unfold" };
 var CHOOSE = /* @__PURE__ */ new Set(["found", "none"]);
-var FOCUSABLE = 'button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
-var LOOKS = {
-  omni: { id: "omni", kind: "omni", color: "deepseek", avatar: { shape: "octopus" } },
-  genie: { id: "genie", kind: "genie" },
-  unfold: { id: "unfold", kind: "unfold" }
-};
-var MARK_SIZE = 28;
 var statusText = (kind, phase, detail) => kind === "omni" ? statusOf(phase, detail) : kind === "unfold" ? unfoldStatusOf(phase, detail) : genieStatusOf(phase, detail);
 var GENIE_STEPS = { git: () => t("Checking git"), team: () => t("Bot team"), genie: () => t("Genie plugin") };
 function installStepOf(kind, detail) {
@@ -13727,9 +13704,6 @@ function powerRow(kind, power, { roster = {}, status = null } = {}) {
   if (notInstalled(kind, status)) return row("off", t("Not installed"), "install", { note: INSTALL_NOTE[kind]() });
   return row("off", asleep, "power");
 }
-function cardRows(kinds, powers, { roster = {}, read = {}, problems = {}, teamSetup = true } = {}) {
-  return kinds.map((kind) => powerRow(kind, powers[kind], { roster, status: read[kind] ?? null })).map((row) => (row.action === "power" || row.action === "install") && read.checked !== true ? { ...row, action: null, note: null } : row).map((row) => row.action === "choose" && !teamSetup ? { ...row, action: null } : row).map((row) => problems[row.kind] ? { ...row, alert: problems[row.kind] } : row);
-}
 var ACTION_LABEL = {
   power: (name) => t("Power {name} on", { name }),
   off: (name) => t("Power {name} off", { name }),
@@ -13741,239 +13715,46 @@ var ACTION_LABEL = {
 };
 var actionLabel = (row) => row.action ? ACTION_LABEL[row.action](row.name) : null;
 var secondaryLabel = (row) => row.secondary ? ACTION_LABEL[row.secondary](row.name) : null;
-var STATE_LABEL = {
-  on: (name) => t("{name} on", { name }),
-  off: (name) => t("{name} off", { name }),
-  working: (name) => t("{name} working", { name }),
-  attention: (name) => t("{name} needs you", { name })
-};
-var buttonLabel = (rows) => rows.map((row) => STATE_LABEL[row.state](row.name)).reduce((a, b2) => t("{a}, {b}", { a, b: b2 }));
-function badgeOf2(phases) {
-  if (phases.some((phase) => WORKING.has(phase))) return "working";
-  if (phases.some((phase) => phase === "failed" || phase === "restart")) return "error";
-  return null;
+var POWER_KINDS = /* @__PURE__ */ new Set(["omni", "genie", "unfold"]);
+var POWER_ON = { omni: powerOn, genie: geniePowerOn, unfold: unfoldPowerOn };
+function togglePowerSettings(kind, next, { start = startPower, stop = powerOff } = {}) {
+  if (next) start(kind, POWER_ON[kind]);
+  else stop(kind);
 }
-var kindsOf = ({ host = null, preload = null } = {}) => teamOrder(host === "unfold" ? "unfold" : preload).filter((kind) => kind !== "unfold" || host === "unfold");
-function focusAfter(trigger) {
-  const all = [...document.querySelectorAll(FOCUSABLE)].filter((node) => node === trigger || node.getClientRects().length > 0);
-  const next = all[all.indexOf(trigger) + 1];
-  if (next) next.focus();
-  else trigger?.focus();
-}
-var canOpenTeamSetup = (actions) => typeof actions?.openHarnessOnboarding === "function";
-function openTeamSetup({ actions, close }, power = null) {
-  close();
-  if (!canOpenTeamSetup(actions)) return;
-  setTeamIntent(power);
-  actions.openHarnessOnboarding("omni-team");
-}
-function actOn(row, { actions, close, onProblem, start = startPower, stop = powerOff }, action = row.action) {
-  onProblem(row.kind, null);
-  if (action === "power" || action === "install" || action === "retry") {
-    start(row.kind, row.kind === "omni" ? powerOn : geniePowerOn);
-  } else if (action === "off") {
-    if (!row.locked) stop(row.kind);
-  } else if (action === "choose") {
-    openTeamSetup({ actions, close }, "omni");
-  } else if (action === "add") {
-    return Promise.resolve(actions.addOmni?.()).then((bot) => {
-      if (!bot?.id) return;
-      close();
-      actions.openSession(bot.id);
-    }, (error) => onProblem(row.kind, error?.message ?? String(error)));
-  } else if (action === "plugins") {
-    close();
-    actions.selectPanel?.("plugins");
-  }
-  return void 0;
-}
-var installRunning = (status) => status?.install?.phase === "installing";
-function resumeInstall(kind, status, start = startPower) {
-  if (!installRunning(status) || kind !== "omni" && kind !== "genie") return null;
-  const on2 = kind === "omni" ? powerOn : geniePowerOn;
-  return start(kind, (options) => on2({ ...options, resume: status }));
-}
-var readPlugins = (ask = call) => Promise.all([ask("omni-plugins"), ask("genie-plugin")].map((request2) => Promise.resolve(request2).catch(() => null)));
-function RowMark({ Mark, row }) {
-  if (typeof Mark !== "function") return null;
-  return (0, import_react12.createElement)(Mark, { bot: row.bot ?? LOOKS[row.kind], size: MARK_SIZE, live: false });
-}
-function PowerShortcut({ roster, actions, Mark = null }) {
-  const omni = usePowerState("omni");
-  const genie = usePowerState("genie");
-  const unfold = usePowerState("unfold");
-  const [open, setOpen] = (0, import_react12.useState)(false);
-  const [box, setBox] = (0, import_react12.useState)(null);
-  const [read, setRead] = (0, import_react12.useState)({ host: null, preload: null, omni: null, genie: null, checked: false });
-  const [problems, setProblems] = (0, import_react12.useState)({});
-  const button = (0, import_react12.useRef)(null);
-  const card = (0, import_react12.useRef)(null);
-  const title = (0, import_react12.useRef)(null);
-  const id = (0, import_react12.useId)();
-  const powers = { omni, genie, unfold };
-  (0, import_react12.useEffect)(() => {
-    let alive = true;
-    void call("state").catch(() => null).then((state) => {
-      if (alive) setRead((current) => ({ ...current, host: state?.host ?? null, preload: state?.preload ?? null }));
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
-  const mounted = (0, import_react12.useRef)(false);
-  (0, import_react12.useEffect)(() => {
-    if (!open && mounted.current) return void 0;
-    mounted.current = true;
-    let alive = true;
-    void readPlugins().then(([omniStatus, genieStatus]) => {
-      if (!alive) return;
-      setRead((current) => ({ ...current, omni: omniStatus, genie: genieStatus, checked: true }));
-      resumeInstall("omni", omniStatus);
-      resumeInstall("genie", genieStatus);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [open]);
-  (0, import_react12.useEffect)(() => {
-    if (!open) return void 0;
-    const onDown = (event) => {
-      if (event.target instanceof Node && (card.current?.contains(event.target) || button.current?.contains(event.target))) return;
-      setOpen(false);
-    };
-    const onKey = (event) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setOpen(false);
-      button.current?.focus();
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [open]);
-  (0, import_react12.useLayoutEffect)(() => {
-    if (!open) return void 0;
-    const place = () => {
-      const rect = button.current?.getBoundingClientRect();
-      if (rect) setBox({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 288)), top: rect.bottom + 6 });
-    };
-    place();
-    window.addEventListener("resize", place);
-    return () => window.removeEventListener("resize", place);
-  }, [open]);
-  const placed = open && box !== null;
-  (0, import_react12.useEffect)(() => {
-    if (!placed) return;
-    const at2 = document.activeElement;
-    if (card.current?.contains(at2) && at2 !== title.current) return;
-    const first = card.current?.querySelector(".bt-update-dsh button:not(:disabled)");
-    (first ?? title.current)?.focus();
-  }, [placed, read.checked]);
-  (0, import_react12.useEffect)(() => {
-    if (placed && card.current && !card.current.contains(document.activeElement) && document.activeElement === document.body) title.current?.focus();
-  });
-  const kinds = kindsOf(read);
-  const teamSetup = canOpenTeamSetup(actions);
-  const rows = cardRows(kinds, powers, { roster, read, problems, teamSetup });
-  const badge = badgeOf2(kinds.map((kind) => powers[kind].phase));
-  const label = buttonLabel(rows);
+function PowerSettingsCard({ bot, roster, Card, Row: Row2, SwitchRow, start = startPower, stop = powerOff }) {
+  const kind = POWER_KINDS.has(bot?.kind) ? bot.kind : null;
+  const power = usePowerState(kind ?? "omni");
+  if (kind === null || typeof Card !== "function" || typeof Row2 !== "function" || typeof SwitchRow !== "function") return null;
+  const row = powerRow(kind, power, { roster });
   const readOnly = Boolean(roster?.readOnly);
-  const close = () => setOpen(false);
-  const onProblem = (kind, message) => setProblems((current) => ({ ...current, [kind]: message }));
-  const run = (row, action) => actOn(row, { actions, close, onProblem }, action);
-  const onKeyDown = (event) => {
-    if (event.key.length === 1 && event.key !== " " && !event.metaKey && !event.ctrlKey && !event.altKey) event.preventDefault();
-    if (event.key !== "Tab") return;
-    const items = [...card.current.querySelectorAll(FOCUSABLE)];
-    const at2 = document.activeElement;
-    if (!event.shiftKey && (items.length === 0 || at2 === items[items.length - 1])) {
-      event.preventDefault();
-      close();
-      focusAfter(button.current);
-    } else if (event.shiftKey && (at2 === items[0] || at2 === title.current)) {
-      event.preventDefault();
-      close();
-      button.current?.focus();
-    }
-  };
-  const heading = kinds.includes("unfold") ? t("Omni, Genie and Unfold") : t("Omni and Genie");
+  const stays = kind !== "omni" && row.bot !== null && row.state === "on";
+  const on2 = row.state === "on" || row.pressed === true;
+  const note = row.note ?? (stays && kind === "genie" ? t("{name} stays on once it joins your team.", { name: row.name }) : null);
   return (0, import_react12.createElement)(
-    import_react12.Fragment,
-    null,
-    (0, import_react12.createElement)(
-      "button",
-      {
-        ref: button,
-        type: "button",
-        className: "bt-round bt-side-tool bt-power",
-        "aria-label": label,
-        title: label,
-        "aria-haspopup": "dialog",
-        "aria-expanded": open,
-        "aria-controls": open ? id : void 0,
-        onClick: () => setOpen((value) => !value)
-      },
-      badge === "working" ? (0, import_react12.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : (0, import_react12.createElement)(PowerIcon, { size: 16, stroke: 2 }),
-      badge === "error" ? (0, import_react12.createElement)("span", { className: "bt-update-dot", "aria-hidden": true }) : null
-    ),
-    placed ? (0, import_react_dom2.createPortal)((0, import_react12.createElement)(
-      "div",
-      { ref: card, id, className: "bt-update-pop bt-power-pop", role: "dialog", "aria-label": heading, style: box, onKeyDown },
-      (0, import_react12.createElement)("div", { ref: title, className: "bt-update-title", tabIndex: -1 }, heading),
-      rows.map((row) => (0, import_react12.createElement)(
-        "div",
-        { key: row.kind, className: "bt-update-dsh", "data-power": row.kind, "data-state": row.state },
-        (0, import_react12.createElement)(
-          "div",
-          { className: "bt-power-who" },
-          (0, import_react12.createElement)(RowMark, { Mark, row }),
-          (0, import_react12.createElement)(
-            "div",
-            { className: "bt-power-what" },
-            (0, import_react12.createElement)("div", { className: "bt-update-title" }, row.name),
-            (0, import_react12.createElement)("div", { className: "bt-update-text", role: "status", "aria-live": "polite" }, row.text)
-          )
-        ),
-        row.note ? (0, import_react12.createElement)("div", { className: "bt-update-text" }, row.note) : null,
-        row.alert ? (0, import_react12.createElement)("div", { className: "bt-update-error", role: "alert" }, row.alert) : null,
-        row.working || row.action || row.secondary ? (0, import_react12.createElement)(
-          "div",
-          { className: "bt-update-actions" },
-          row.secondary ? (0, import_react12.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => run(row, row.secondary) }, secondaryLabel(row)) : null,
-          row.working ? (0, import_react12.createElement)("span", { className: "bt-thread-spin", "aria-hidden": true }) : null,
-          row.action ? (0, import_react12.createElement)("button", {
-            type: "button",
-            className: "bt-update-go",
-            disabled: row.locked,
-            onClick: () => run(row, row.action),
-            ...row.action === "off" || row.action === "power" ? { "aria-pressed": row.action === "off" } : {}
-          }, actionLabel(row)) : null
-        ) : null
-      )),
-      readOnly || !teamSetup ? null : (0, import_react12.createElement)(
-        "div",
-        { className: "bt-update-actions" },
-        (0, import_react12.createElement)("button", { type: "button", className: "bt-update-notes", onClick: () => openTeamSetup({ actions, close }) }, t("Open team setup"))
-      )
-    ), document.body) : null
+    Card,
+    { title: t("Power") },
+    readOnly ? (0, import_react12.createElement)(Row2, { label: t("Power"), hint: row.text }, null) : (0, import_react12.createElement)(SwitchRow, {
+      label: t("Power"),
+      hint: row.text,
+      on: on2,
+      disabled: row.working === true || row.locked === true || stays,
+      onChange: (value) => togglePowerSettings(kind, value, { start, stop })
+    }),
+    note ? (0, import_react12.createElement)("div", { className: "bt-bs-shell-note" }, note) : null,
+    row.alert ? (0, import_react12.createElement)("div", { className: "bt-bs-shell-note", role: "alert", style: { color: "var(--st-bad-strong,var(--bt-danger))" } }, row.alert) : null
   );
 }
-function installPowerShortcut(load = () => require("@automagik/bots-dsh/client")) {
-  let tools = null;
+function installPowerSettings(load = () => require("@automagik/bots-dsh/client")) {
   let bots = null;
   try {
     bots = load();
-    tools = bots?.omni?.sidebarTools ?? null;
   } catch {
-    tools = null;
+    bots = null;
   }
-  if (typeof tools?.register !== "function") return () => {
+  const settings = bots?.omni?.botSettings ?? null;
+  if (typeof settings?.register !== "function") return () => {
   };
-  const Mark = typeof bots?.omni?.ui?.BotMark === "function" ? bots.omni.ui.BotMark : null;
-  return tools.register({ id: "welcome-power", order: 0, Component: (props) => (0, import_react12.createElement)(PowerShortcut, { ...props, Mark }) });
+  return settings.register({ id: "welcome-power", order: 0, Component: PowerSettingsCard });
 }
 
 // src/client/index.js
@@ -14000,7 +13781,7 @@ function apply(ctx) {
     ctx.slots.inject("settings.onboarding", () => ctx.slots.register({ name: "settings.onboarding", id: step.id, order: step.order }, step.component));
   }
   ctx.effect(() => installAcpSection(ctx), "omni-ai: Claude Code and Codex in Settings");
-  ctx.effect(() => installPowerShortcut(), "omni-ai: power shortcut in the Bot team sidebar");
+  ctx.effect(() => installPowerSettings(), "omni-ai: power in each Bot's settings");
 }
 /*! Bundled license information:
 

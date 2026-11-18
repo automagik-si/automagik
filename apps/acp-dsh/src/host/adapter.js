@@ -206,6 +206,29 @@ export function promptOf(messages, redact = text => text) {
   return [{ type: 'text', text: text || (own.some(message => message.source?.kind === 'retry') ? 'Continue.' : '') }]
 }
 
+// Recovery sends a marked user note. The preceding cut turn may have accepted its
+// brief without ever reaching the CLI, so recover its durable user rows on a fresh run.
+function cutUserRows(messages, session) {
+  if (!promptRows(messages).own.some(row => row.source?.kind === 'user' && row.source.resumed === true)) return []
+  const rows = []
+  let cut
+  for (let seq = (session?.seq ?? 0) - 1; seq >= 0; seq -= 1) {
+    const event = session.eventAt?.(seq)
+    if (event === undefined) break
+    if (cut === undefined) {
+      if (event.type !== 'turn/end') continue
+      const reason = event.data?.reason
+      if (reason?.kind !== 'interrupted' && !(reason?.kind === 'aborted' && reason.reason?.kind === 'disposed')) return []
+      cut = event.data?.turn
+    } else if (event.type === 'turn/start' && event.data?.turn === cut) {
+      return rows.reverse()
+    } else if (event.type === 'user/message' && event.data?.source?.kind === 'user' && event.data.source.resumed !== true) {
+      rows.push(event.data)
+    }
+  }
+  return []
+}
+
 // A group relay carries pointers only. Both Sessions and the current membership must
 // agree before the person's durable row can supply a reference for a workspace copy.
 function ownsRoomUploads(ctx, session, roomId) {
@@ -1636,9 +1659,15 @@ export class AcpAdapter extends LlmAdapter {
         }
       }
       if (!uploadValid()) return yield uploadStopped()
-      const prompt = prepared ?? (live.replay !== undefined
-        ? [...live.replay, ...promptOf(options.messages, this.redact)]
-        : promptOf(options.messages, this.redact))
+      const cutRows = prepared === undefined && fresh && live.replay === undefined
+        ? cutUserRows(options.messages, dshAgent?.session) : []
+      const cutIds = new Set(cutRows.map(row => row.id))
+      const current = cutRows.length === 0 ? options.messages : options.messages.filter(row => !cutIds.has(row.id))
+      const recovered = cutRows.length === 0 ? [] : [
+        ...replayBlocks(cutRows, { redact: this.redact, to: agent.name, renewed: true }),
+        { type: 'text', text: 'The previous turn was interrupted. Check any tool outcomes before repeating work.' },
+      ]
+      const prompt = prepared ?? [...(live.replay ?? recovered), ...promptOf(current, this.redact)]
       if (prepared !== undefined) {
         try { checkUploadSize(uploadRun.sessionId, prompt) } catch (error) {
           return yield finish('error', error.message, 'acp_upload_content')
