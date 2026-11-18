@@ -1,8 +1,8 @@
-# RFC 0034: Web self-update in the app
+# RFC 0035: Web self-update in the app
 
 | Field | Value |
 |---|---|
-| Status | Proposed (mock approved by the owner 2026-11-18, #1541; plan drafted 2026-11-18; no delivery merged; Q1-Q7 open) |
+| Status | Accepted (owner decisions 2026-11-18: Q2, Q6, Q7; technical decisions named below: Q1, Q3, Q4, Q5; mock approved and in draft #1541; no delivery merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin only (3.N.P): `apps/bots-dsh` gains the UI and the host half; nothing here builds the desktop app |
 | Created | 2026-11-18 |
@@ -61,9 +61,6 @@ DSH). Before switching, the updater stores the version that is running:
   is never touched by an update or a rollback. That is what "nothing was lost" means here, and the
   rollback screen says it in those words.
 
-Open: Q1 (who removes an old kept version, and when), Q2 (whether Arca should own the version store
-instead of the instance's home).
-
 ## What counts as health
 
 A version is healthy only when the served instance answers as itself again, checked from the updater,
@@ -79,8 +76,6 @@ Everything with a deadline (60 s for 1 and 2, a further 60 s for 3 and 4 after t
 call is **not** part of health: it costs money, it depends on a provider, and a provider outage is not
 a broken update.
 
-Open: Q3 (whether a quick model round-trip should be opt-in), Q4 (the exact deadlines).
-
 ## How the modal continues after the restart that drops the chat
 
 The restart kills the web socket under the open page, so the modal cannot be driven by the page:
@@ -94,9 +89,6 @@ The restart kills the web socket under the open page, so the modal cannot be dri
 - A state file older than the run that is live is ignored (so a stale file never traps a person in a
   modal), and the person can always close it — the state stays readable in Settings.
 - The supervisor is the only writer of the state file, and the page never drives the update itself.
-
-Open: Q5 (where the supervisor lives: a DSH host plugin in this profile, or a small launcher the
-service starts).
 
 ## Automatic rollback
 
@@ -118,6 +110,63 @@ service starts).
   keep a version in.
 - A failed verification or a downgrade stops before touching the profile.
 - The updater does not read or write a person's sessions, secrets or Bot memory.
+
+## Decided
+
+The owner answered on 2026-11-18, on a card in Automagik's chat; the page here carries his words where
+they are his, and marks the card options as choices, not sentences.
+
+- **Q6 — a Bot in the middle of a task when the update is clicked.** The owner chose **"Para tudo na
+  hora"** (his exact words). The click is already the permission, and running work is interrupted at
+  once. He added, exact words: **"automagik reinicia os bots parados ao reinicio"** — after the restart,
+  with the new version healthy, Automagik resumes by itself the Bots and the work that were stopped. The
+  same holds after a rollback. The mechanics are in "Stopping and resuming work" below, and the modal
+  says it in plain words before the click.
+- **Q7 — which versions are offered.** The owner chose the card option **"Toda release assinada do
+  canal (Recomendado)"**, described as "Cada 3.x.y que o canal de plugins publica, como já chega
+  hoje". This is an option choice, not a sentence of his.
+- **Q2 — who keeps the previous version.** The owner chose the card option **"A instância, e o Arca
+  reinicia (Recomendado)"**, described as "Funciona igual no Arca e numa máquina comum; o Arca só faz
+  o restart e fornece a pasta". An option choice, as designed in "Where the previous version is kept".
+
+Decided by the chief of staff on 2026-11-18 — technical, not the owner's:
+
+- **Q1** two versions are kept; the third is removed only after a healthy run of the new one.
+- **Q3** health never calls a model. At most it is an option, off by default, and only if a real case
+  needs it.
+- **Q4** start with 60 s + 60 s, and adjust from a real measurement on the dev instance.
+- **Q5** the supervisor is a **host plugin in this profile**: it already runs with the team, shares the
+  profile's paths and secrets, starts and stops with the service, and survives a restart of the served
+  app. A separate launcher would be a second thing to install, keep current and log, with no gain here.
+
+## Stopping and resuming work
+
+The owner's decision makes one new rule for the update and one for the rollback: work that runs is
+interrupted at the click, and it comes back by itself once a healthy version is serving. The plan:
+
+1. **Before stopping, write down what is running.** The supervisor writes `update/inflight.json`: each
+   running turn (its session, its turn id, the Bot or agent it runs on, the last completed step and the
+   step in flight), the queued turns in the same sessions, and the moment. This file is the record, not
+   a guess: it is written before anything is stopped.
+2. **Stop at once.** The host stops running turns with a short deadline (they are marked "stopped by
+   an update", so the screens say why), then the restart proceeds. A tool call that cannot be stopped
+   mid-flight is left to finish its current step before the restart; nothing new starts.
+3. **After health, resume.** Once the new version is healthy, the supervisor resumes each recorded
+   turn from its recorded step: a turn whose step was completed is not replayed, and a turn whose step
+   was in flight is retried only when its effect is not known (the record says which). Queued turns
+   start in their order.
+4. **No repeated actions.** Resume is idempotent by construction: the record names the last completed
+   action per turn, resuming continues after it, and a step whose completion cannot be proven is
+   reported to the person instead of being run twice.
+5. **After a rollback, the same path.** The previous version comes back, health passes, and the same
+   `inflight.json` is resumed, so a rollback does not turn an interrupted task into a lost one.
+6. **When resume is impossible** (the turn's session was deleted meanwhile, or the recorded turn no
+   longer exists), the state says so in one line, and the person sees which work could not come back
+   rather than a silent loss.
+
+The modal states it before the click: "Work in progress stops when you click Update now, and it comes
+back by itself once the update is done. Nothing is lost." The success and rollback screens say that the
+stopped work came back.
 
 ## Deliveries (each one PR, plugin lane)
 
