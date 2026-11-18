@@ -37,6 +37,8 @@ jobs:
     # env above), read here instead of in every gated job's own first step. A job-level `if:`
     # is evaluated before any step runs and before a runner is allocated, so an area with no
     # changes now reads `skipped` instead of claiming a runner to check out and skip.
+    # A failed `changes` job must not hide a check: a gated job's `if` skips only an explicit
+    # `false` output, so a failed detection (an empty output) runs the area instead (fail-open).
     # A push, and a manual run, check every area: no dev check and no release is ever silently
     # skipped. Each gated job keeps its own "Assert the steps ran" step, which reads the same
     # diff a second time (#895). Nothing else moves: the rules and the checks are unchanged.
@@ -291,7 +293,7 @@ jobs:
     # `changes` job's herdr output decides it before this job takes a runner.
     name: herdr pack (Node ${{ matrix.node }})
     needs: changes
-    if: needs.changes.outputs.herdr == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.herdr != 'false' }}
     runs-on: ubuntu-24.04
     # The full CLI/worker suites plus the local/linked start matrix exceed ten minutes.
     timeout-minutes: 15
@@ -428,7 +430,7 @@ jobs:
     # decides it before this job takes a runner.
     name: Scheduler (Go)
     needs: changes
-    if: needs.changes.outputs.scheduler == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.scheduler != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -512,7 +514,7 @@ jobs:
     # `changes` job's am output decides it before this job takes a runner.
     name: am (Node ${{ matrix.node }})
     needs: changes
-    if: needs.changes.outputs.am == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.am != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
@@ -598,7 +600,7 @@ jobs:
     # the `changes` job's pocket output decides it before this job takes a runner.
     name: Pocket (build, test, lint)
     needs: changes
-    if: needs.changes.outputs.pocket == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.pocket != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -776,7 +778,7 @@ jobs:
     # job's link output is what keeps a scarce macOS runner from being requested for nothing.
     name: Pocket Link bridge (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.link == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.link != 'false' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -852,7 +854,7 @@ jobs:
     # the `changes` job's meter output decides it before this job takes a runner.
     name: Meter status line
     needs: changes
-    if: needs.changes.outputs.meter == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.meter != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -923,7 +925,7 @@ jobs:
     # job's usagemeter output decides it before either runner is allocated.
     name: usagemeter (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.usagemeter == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.usagemeter != 'false' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -1040,7 +1042,7 @@ jobs:
     # decides it before this job takes a runner.
     name: dsh-sandbox runner
     needs: changes
-    if: needs.changes.outputs.sandbox == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.sandbox != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

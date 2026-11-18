@@ -2,7 +2,9 @@
 // job-level `if`, so an unchanged area is skipped instead of claiming a runner to check out and
 // skip. This keeps that wiring honest: a job-level `if` naming an output the `changes` job does
 // not write, a leftover `steps.changed` reference (it would skip every step of the job), or a
-// detection rule that drifted would skip a check instead of running it (#895).
+// detection rule that drifted would skip a check instead of running it (#895). It also pins
+// fail-open: a failed `changes` job leaves its outputs empty, and a gated job must skip only an
+// explicit `false`, so a red detector runs the area instead of hiding it behind a skipped check.
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -173,12 +175,34 @@ describe('the changes job', () => {
   });
 });
 
+/** Evaluates a job-level `if` for the expression subset this workflow uses. */
+function jobWouldRun(
+  condition: string,
+  { outputs = {}, cancelled = false }:
+    { outputs?: Record<string, string>; cancelled?: boolean } = {},
+) {
+  const expression = condition.replace(/^\s*\$\{\{\s*/, '').replace(/\s*\}\}\s*$/, '');
+  // `!cancelled()`, `&&`, `!=` and the output paths are valid JavaScript too; GitHub evaluates
+  // this subset the same way, an empty output included (it is not the string 'false').
+  const evaluate = new Function('needs', 'cancelled', `return (${expression});`);
+  return Boolean(evaluate({ changes: { outputs } }, () => cancelled));
+}
+
 describe('a gated job', () => {
-  test('reads its own output at the job level, after the changes job', () => {
+  test('is fail-open: only an explicit false output skips the area', () => {
     for (const [id, area] of Object.entries(GATED)) {
       const gated = ci.jobs[id];
       expect([gated.needs].flat()).toContain('changes');
-      expect(gated.if).toBe(`needs.changes.outputs.${area} == 'true'`);
+      // A failed `changes` job leaves its outputs empty; that must run the area, not hide it.
+      expect(jobWouldRun(gated.if, { outputs: {} })).toBe(true);
+      // A successful detection still runs a changed area and skips an unchanged one.
+      expect(jobWouldRun(gated.if, { outputs: { [area]: 'true' } })).toBe(true);
+      expect(jobWouldRun(gated.if, { outputs: { [area]: 'false' } })).toBe(false);
+      // A cancelled run is the one case that still stops every gated job.
+      expect(jobWouldRun(gated.if, { outputs: {}, cancelled: true })).toBe(false);
+      expect(gated.if).toBe(
+        `\${{ !cancelled() && needs.changes.outputs.${area} != 'false' }}`,
+      );
       // The detection step lives in `changes`: a leftover reference would skip every step.
       expect(JSON.stringify(gated.steps)).not.toContain('steps.changed');
     }
