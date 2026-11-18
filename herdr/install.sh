@@ -278,7 +278,7 @@ hint_command() (
   for name in am automagik-herdr; do
     found=$(PATH=$HINT_PATH command -v "$name") || continue
     case $found in */*) ;; *) continue ;; esac
-    [ -f "$found" ] && [ -x "$found" ] || continue
+    if [ ! -f "$found" ] || [ ! -x "$found" ]; then continue; fi
     if link_ours "$found"; then say "$name"; return; fi
     if [ "$(readlink "$found" 2>/dev/null)" = "$standalone/$name" ] \
       && [ -r "$standalone/run.sh" ] && [ -r "$standalone/automagik-herdr.mjs" ]; then
