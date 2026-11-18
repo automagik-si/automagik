@@ -305,6 +305,25 @@ test('a request without a credential, with another Session\'s, or after revocati
   }
 })
 
+// #969 finding 8, verified: a bridge process that ends says `bye`, and that revokes its
+// credential, so a respawn with the same env is refused. The next turn ends that agent session
+// and starts a new one with the chat replayed (closed-bridge-interrupted-turn.test.js). Keeping
+// the credential across a restart is the issue's open owner decision (8b), not asked for here.
+test('#969 finding 8: a bridge that says bye revokes its credential, and a respawn is refused', async () => {
+  const h = await serve()
+  try {
+    const bye = await h.post('bye')
+    assert.equal(bye.status, 200)
+    assert.deepEqual(bye.body, { ok: true })
+    assert.equal(h.record.closed, true)
+    // A respawn of bridge.js gets the same env and credential; the credential is gone.
+    assert.equal((await h.post('hello')).status, 401)
+    assert.equal((await h.post('list')).status, 401)
+  } finally {
+    h.bc.dispose()
+  }
+})
+
 test('the bridge lists the preset\'s tools, never the mirror, and hides file writers in read-only', async () => {
   const h = await serve()
   try {
