@@ -166,7 +166,7 @@ export class Updater {
     if (note) {
       // The update's claim died with the old build: free it here (a later check starts clean), and
       // answer a request that was queued behind it with the install's result.
-      finish(this.get, this.set, state.busy?.id ?? null, { announced: version, ...requestAnswer(this.state(), null) });
+      finish(this.get, this.set, state.busy?.id ?? null, { announced: version, ...requestAnswer(this.state(), state.busy?.request ?? null) });
       try { this.set(SHOWN_KEY, note.error ? version : note.restore.failedVersion); } catch {}
       try { this.notify(note.error ? restoreFailedNotice(note.error, version) : restoredNotice(note.restore)); } catch {}
       return;
@@ -179,7 +179,7 @@ export class Updater {
       let unchecked = null;
       try { unchecked = checkFrom(await this.readText(this.checkFile), version, this.now()); } catch {}
       if (unchecked) {
-        finish(this.get, this.set, state.busy?.id ?? null, { announced: version, ...requestAnswer(this.state(), null) });
+        finish(this.get, this.set, state.busy?.id ?? null, { announced: version, ...requestAnswer(this.state(), state.busy?.request ?? null) });
         try { this.set(SHOWN_KEY, version); } catch {}
         let held = [];
         try { held = heldFrom(await this.readText(this.heldFile), version); } catch {}
@@ -196,7 +196,7 @@ export class Updater {
     if (state.announced === version) return;
     if (!step.ready) {
       finish(this.get, this.set, step.id, { kind: "installed", from: step.from, current: version, latest: version, update: null,
-        why: null, applyError: null, at: this.now(), ...requestAnswer(state, null) });
+        why: null, applyError: null, at: this.now(), ...requestAnswer(state, step.request ?? state.busy?.request ?? null) });
     }
     this.patch({ announced: version });
     // The old build usually stopped before it could record what the install held: the file says.
