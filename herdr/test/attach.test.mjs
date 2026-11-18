@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { addressOf, heldIn, attachKey, attachRow, confirmBindings, foldAttach, machinesById, modeProblem, readAttach, verdictOf } from "../mods/am-sidebar/attach.js";
 import { readAttachFile } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
@@ -287,6 +287,29 @@ test("whois: both forms, attached and not, with created_ms from hc get", (t) => 
   assert.notEqual(s.cli("whois", "vps/t1").code, 0);
 });
 
+test("whois --all: every binding the ledger holds, never the bot= labels (#223)", (t) => {
+  const s = scene(t, (p) => [term("t1", { cwd: p, created: 7 }), term("t2", { cwd: p, created: 8 })]);
+  assert.equal(s.cli("attach", "Genie", "t1").code, 0);
+  assert.equal(s.cli("attach", "Captain", "t2").code, 0);
+  // A relabel moves nothing: the ledger is the authority.
+  s.edit((st) => { st.terminals[0].labels = {}; st.terminals[1].labels = { bot: ID.main }; });
+  const all = s.cli("whois", "--all", "--json").json();
+  assert.deepEqual(Object.keys(all).sort(), ["bindings", "core"], "bots.whois-all-json@1");
+  assert.equal(all.core, CORE);
+  const since = Object.fromEntries(s.ledger().map((r) => [r.terminal, r.at]));
+  assert.deepEqual(all.bindings.map((b) => [b.terminal, b.bot, b.project, b.state, b.machine, b.address]).sort(), [
+    ["t1", ID.main, s.project, "live", null, "t1"],
+    ["t2", ID.cap, s.project, "live", null, "t2"],
+  ]);
+  assert.deepEqual(Object.keys(all.bindings[0]).sort(),
+    ["address", "bot", "core", "created_ms", "machine", "project", "since", "state", "terminal"]);
+  assert.deepEqual([all.bindings.find((b) => b.terminal === "t1").since, all.bindings.find((b) => b.terminal === "t2").since],
+    [since.t1, since.t2]);
+  assert.equal(s.cli("whois", "t1", "--all").code, 2);
+  assert.equal(s.cli("whois", "--all", "--bot", ID.main).code, 2);
+  assert.equal(s.cli("whois", "--all", "--machine", "lab").code, 2);
+});
+
 test("attach --move: the detach (moved) of the old terminal, then the attach, in one run, in that order", (t) => {
   const s = scene(t, (p) => [term("t1", { cwd: p, created: 10 }), term("t2", { cwd: p, created: 20 })]);
   assert.equal(s.cli("attach", "Genie", "t1").code, 0);
@@ -366,6 +389,20 @@ test("the one-time import: live bot= labels become attach rows by import, once; 
   const empty = scene(t);
   empty.cli("ls");
   assert.equal(readFileSync(empty.ledgerPath, "utf8"), "");
+});
+
+test("the one-time import: a running seat of another project the sidebar knows comes in too (#223)", (t) => {
+  let other = null;
+  const s = scene(t, (p) => {
+    other = scratchProject(dirname(p), "other", { commit: true, bots: { version: 1, categories: [], bots: [bot("b-dddddddddd", "main", { name: "Ops" })] } });
+    return [term("t1", { bot: ID.main, cwd: p }), term("t2", { bot: "b-dddddddddd", cwd: dirname(p) })];
+  });
+  assert.equal(s.whois("t1").bot, ID.main);
+  assert.deepEqual(brief(s.ledger()).sort(), [
+    ["attach", ID.main, "t1", "import", null],
+    ["attach", "b-dddddddddd", "t2", "import", null],
+  ].sort());
+  assert.equal(s.ledger().find((r) => r.bot === "b-dddddddddd").project, other, "the project the label's bot belongs to");
 });
 
 test("a torn line in the ledger is skipped; the rows around it still count", (t) => {

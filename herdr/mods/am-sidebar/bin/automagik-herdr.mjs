@@ -856,7 +856,7 @@ const asCliError = (e) => (e instanceof CliError ? e : new CliError(e?.message ?
  * Which project defines `botId`: the one `folder` keys to, else one this run named, the
  * current folder's, or a remembered one; null when none does.
  */
-async function projectDefining(botId, folder) {
+async function projectDefining(botId, folder, known = null) {
   const keys = [];
   for (const f of [folder, process.cwd()]) {
     if (typeof f === "string") { try { keys.push(await keyOf(f)); } catch { /* a folder gone */ } }
@@ -865,6 +865,9 @@ async function projectDefining(botId, folder) {
   for (const k of keys) {
     try { if (loadProject(k).file.bots.some((b) => b.id === botId)) return k; } catch { /* unreadable: not this one */ }
   }
+  // A running seat of a project the sidebar knows (its list, a sibling, a cross-project
+  // reference) is imported too, not only the folders this run named or remembers (#223).
+  for (const [k, file] of known ?? []) if (file?.bots?.some((b) => b.id === botId)) return k;
   return null;
 }
 
@@ -887,6 +890,9 @@ async function importLabels(path) {
 /** The one-time import's rows (importLabels), worked out and not written. */
 async function labelRows() {
   const core = await coreId();
+  let own = null;
+  try { own = await keyOf(process.cwd()); } catch { /* the import can still use the remembered list */ }
+  const known = localProjectsFor(own ? { key: own } : null, appHome(), [...namedKeys]);
   const rows = rowsOf(await hcJson(["ls"])).filter((r) => local(r?.address) && r.state !== "finished");
   // One terminal hc fails to answer for is left out, never the whole import.
   const gets = (await Promise.all(rows.map((r) => hcLookup(r.address).catch(() => null))))
@@ -898,7 +904,7 @@ async function labelRows() {
     const agents = all.filter(agentInForeground);
     const pick = newest(agents.length ? agents : all);
     // A label naming no bot defined here (a stale or hand-set one) is left out.
-    const project = await projectDefining(bot, pick.foreground?.cwd ?? pick.cwd);
+    const project = await projectDefining(bot, pick.foreground?.cwd ?? pick.cwd, known);
     if (project) found.push(attachRow({ event: "attach", bot, project, terminal: pick.address, core, created_ms: pick.created_ms, by: "import" }));
   }
   return found;
@@ -1369,7 +1375,8 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 elsewhere, under another lead or of another agent, a squad
                                 without one captain) refuses the whole import. Never starts,
                                 moves or restarts a pane
-  whois <terminal> | whois --bot <bot>   who plays where, by the attach ledger
+  whois <terminal> | whois --bot <bot> | whois --all
+                                who plays where, by the attach ledger (--all: every place it holds)
   history <bot>                 what the bot did, by the attach and workers ledgers: its panes,
                                 starts, sessions (and the newest transcript) and workers
   brief <bot>                   print the bot's briefing with its team's live state, as it is now
@@ -4902,7 +4909,9 @@ async function cmdRestart(opts, [ref]) {
       + `${claudeSlug(wanted)}, so a resume there would find nothing. Nothing was started. Restart with --fresh for a new conversation in ${wanted}, `
       + `or pick a folder whose slug is the same.`);
   }
-  const place = opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : (old ? placementFrom([old]) ?? undefined : undefined);
+  // A restart with no --space keeps the old pane's place when its labels name one; no labels is
+  // no place, never an invitation to open a space (#217): the replacement runs unseen, and says so.
+  const place = opts.space ? { space: opts.space, tab: opts.tab ?? null, from: null } : (old ? placementFrom([old]) : undefined);
   let resumeId = plan.mode === "resume" && !plan.canonicalBot && resumesById(plan.agent) ? sessionFor(plan.agent, known?.session) : null;
   // With no id, a resume takes the folder's latest conversation (--continue, codex resume
   // --last), for every agent: beside another bot on that agent there, a new conversation, and
@@ -5549,6 +5558,20 @@ async function cmdImport(opts) {
 }
 
 async function cmdWhois(opts, [terminal]) {
+  if (opts.all) {
+    if (terminal !== undefined || opts.bot !== undefined) throw new CliError("whois --all takes no terminal and no --bot.", 2);
+    if (opts.machine !== undefined) throw new CliError("whois --all lists every place the ledger holds; --machine goes with one terminal or --bot.", 2);
+    const view = await attachView();
+    const row = (binding, state) => ({ ...whoisOf({ binding }), address: addressOf(binding, view.machines),
+      machine: view.machines.get(binding.core)?.name ?? binding.machine ?? null, state });
+    const bindings = [
+      ...[...view.liveAt.values()].map(({ binding }) => row(binding, "live")),
+      ...[...view.unknownAt.values()].map((binding) => row(binding, "unknown")),
+    ].sort((a, b) => `${a.address}\n${a.bot}`.localeCompare(`${b.address}\n${b.bot}`));
+    if (opts.json) return { core: view.core, bindings };
+    return bindings.map((b) => `${b.address} ${b.state === "live" ? "plays" : "last played"} ${b.bot} `
+      + `(${b.project ?? "no project"}) since ${b.since}${b.state === "unknown" ? " (machine away)" : ""}`).join("\n") || "No bot is attached.";
+  }
   if ((opts.bot === undefined) === (terminal === undefined)) {
     throw new CliError("whois needs a terminal or --bot <id>: am whois <terminal> | whois --bot <id>.", 2);
   }

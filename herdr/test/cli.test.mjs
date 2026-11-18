@@ -2243,14 +2243,16 @@ const ledgerOf = (s) => readLedger(existsSync(ledgerPath(s.app)) ? readFileSync(
 const attachOf = (s) => readRows(existsSync(attachFile(s.app)) ? readFileSync(attachFile(s.app), "utf8") : "").rows;
 
 /** Genie's live pane t5 in the project, placed in sp9/tb3, with a Claude session and a squad. */
-function restartScene(t, { status = "idle", extra = [], session = SID, runAs, runScreen, paneArgv = null } = {}) {
-  const s = scene(t);
+function restartScene(t, { status = "idle", extra = [], session = SID, runAs, runScreen, paneArgv = null,
+  window = { down: true }, placed = true } = {}) {
+  const s = scene(t, { window });
   s.seed(team());
   const old = term("t5", { bot: ID.main, cwd: s.project, status });
   old.foreground.cwd = s.project;
   // A pane started with words the bot's definition may no longer name (hc get's launch argv).
   if (paneArgv) { old.argv = paneArgv; old.foreground.argv = paneArgv; }
-  old.labels = { ...old.labels, role: "main", "herdr.space": "sp9", "herdr.tab": "tb3", squad: "core", ...(session ? { "agent.session": session } : {}) };
+  old.labels = { ...old.labels, role: "main", ...(placed ? { "herdr.space": "sp9", "herdr.tab": "tb3" } : {}),
+    squad: "core", ...(session ? { "agent.session": session } : {}) };
   writeFileSync(join(s.root, "hc.json"), JSON.stringify({ terminals: [old, ...extra], next: 100, ...(runAs ? { runAs } : {}), ...(runScreen ? { runScreen } : {}) }));
   return s;
 }
@@ -2295,6 +2297,19 @@ test("restart: the new pane resumes the session in the old one's space and tab, 
   const again = s.cli(["restart", "Genie", "--force"]);
   assert.equal(again.code, 0, again.err);
   assert.deepEqual(plain(s.calls().filter((c) => c[0] === "run")[1]).slice(-5), ["claude", "--permission-mode", "auto", "--resume", SID]);
+});
+
+// #217 item 1: an old pane with no herdr.space label has no place to keep. The restart must not
+// fall through to the start path, which opens a space for an unseen pane; it runs unseen instead.
+test("restart: an old pane with no herdr.space label asks no window and opens no space", (t) => {
+  const s = restartScene(t, { window: { spaces: [] }, placed: false });
+  const r = s.cli(["restart", "Genie"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /No open Herdr space shows .* it runs, unseen/);
+  assert.deepEqual(s.appCalls(), [], "no herdr-app ls and no space.new");
+  const run = runCall(s.calls());
+  assert.equal(run.some((w) => w.startsWith("herdr.space=") || w.startsWith("herdr.tab=")), false, run.join(" "));
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t100").state, "live");
 });
 
 test("restart rebuilds the launch from the bot's source, never the old pane's argv (#597)", (t) => {
