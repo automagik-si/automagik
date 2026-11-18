@@ -1487,6 +1487,49 @@ test('replies moved to a new part that is working wait for that part\'s turn', a
   assert.deepEqual(agents.get('a2').calls.map(([kind, message]) => [kind, message.source.replyTo]), [['followup', 'q1']])
 })
 
+// A Bot held for a shell choice while replies wait takes none of them: not through the Agent
+// the queue already resolved for its part, nor through a new part a switch gave it.
+test('replies waiting for a Bot that becomes shell-held are not sent, cached Agent or new part', async (t) => {
+  const { agents, emit, stop } = await start(team())
+  t.after(stop)
+  const hold = async () => {
+    const bot = rt.botOf('a')
+    bot.shell = false
+    bot.appliedModel = 'acp-fake/m1'
+    await rt.save()
+    assert.deepEqual(rt.shellHoldOf('a'), { reason: 'shell-off-cli', provider: 'acp-fake' })
+  }
+  const refused = error => error.code === 'bot/shell-off-cli'
+
+  // Same part: the reply resolved and cached the part's Agent before the hold.
+  emit('a', 'turn/start', { turn: 1 })
+  const cached = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'the answer', exchangeId: 'r1', replyTo: 'q1' })
+  await delay(60)
+  assert.ok(agents.has('a'), 'the queued reply resolved its Agent')
+  await hold()
+  emit('a', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await assert.rejects(cached, refused)
+  assert.deepEqual(agents.get('a').calls, [])
+
+  // Part switch: the reply was queued for the old part, the hold and the switch came after.
+  rt.botOf('a').shell = true
+  await rt.save()
+  assert.equal(rt.shellHoldOf('a'), undefined)
+  emit('a', 'turn/start', { turn: 2 })
+  const moved = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'the next answer', exchangeId: 'r2', replyTo: 'q2' })
+  await delay(60)
+  await hold()
+  const bot = rt.botOf('a')
+  bot.sessionId = 'a2'
+  rt.chatOwners.delete('a')
+  rt.chatOwners.set('a2', 'a')
+  rt.pastOwners.set('a', { botId: 'a' })
+  emit('a', 'turn/end', { turn: 2, reason: { kind: 'aborted' } })
+  await assert.rejects(moved, refused)
+  assert.deepEqual(agents.get('a').calls, [])
+  assert.equal(agents.has('a2'), false, 'no Agent was resolved for the held Bot\'s new part')
+})
+
 // An agent that has ended its turn but not yet gone idle is waited for without spinning:
 // the replies go in once it reports idle.
 test('replies for an agent still settling wait for it to go idle, without spinning', async (t) => {
