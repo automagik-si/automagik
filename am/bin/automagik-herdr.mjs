@@ -1612,7 +1612,10 @@ async function homeOn(machine) {
  * answer): the launch there then judges the pin, never this computer's stale cache.
  */
 async function modelsOnMachine(machine, key, agent) {
-  if (agent !== "codex" && agent !== "antigravity") return modelList(agent);
+  // Claude's accepted list is static on every computer; any other agent's cache is the target's
+  // to read or to judge at its launch, never this computer's.
+  if (agent === "claude") return modelList(agent);
+  if (agent !== "codex" && agent !== "antigravity") return null;
   try {
     let text = null;
     if (agent === "antigravity") {
