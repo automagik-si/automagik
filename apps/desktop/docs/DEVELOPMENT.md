@@ -19,7 +19,9 @@ The app is **Automagik** wherever a person sees it: the bundle and its menu bar,
 | the `automagik://` scheme (`src/deeplink.js`) | Automagik's own links (RFC 0013): `automagik://open`, which Herdr's Work button opens. They only bring the app forward. |
 | the `omni://` scheme, the `omni-desktop` client id, `window.omniDesktop` | Omni's protocol names: what Omni's pages, its API and the plugins use. `omni://` is also `automagik://`'s alias; only it connects (`omni://connect`). |
 
-There are no keychain items to carry: Electron keeps its cookies unencrypted (the cookie-encryption fuse is off), nothing reads or writes the secure token store yet (`src/secure-tokens.js` waits for its setting), and its credentials are the files above.
+There are no keychain items to carry: Electron keeps its cookies unencrypted (the cookie-encryption fuse is off), the secure token store (`src/secure-tokens.js`) is written only when the person's sign-in is switched on, and its credentials are the files above.
+
+A team proving a build on a clean home beside the person's own launches it with `AUTOMAGIK_USER_DATA=<folder>`. The setting is read before Electron's paths are pinned and before the single-instance lock: `appData`, `userData` and `sessionData` all become that folder (made first if it is not there), and the lock follows `userData`, so the copy runs beside the person's app without touching its storage or handing off to its window. Unset or blank, the paths and the lock are exactly as in the table above.
 
 What an updated install shows: the update into the rename is announced by the installed app, so that one notice still reads "Omni <version> is ready"; after the restart the window, title bar, later notices and (macOS) menu bar and About say Automagik. On macOS the updater replaces the bundle where it is, so it stays `/Applications/Omni.app` (with `CFBundleName` and `CFBundleDisplayName` Automagik and the executable `Contents/MacOS/Automagik`), and Finder, Launchpad and the Dock may keep showing the file's name until the person renames it; a fresh install from the dmg is `Automagik.app`. A versioned AppImage is replaced by `Automagik-<version>-linux-x86_64.AppImage` in the same folder (electron-updater keeps a name without a version as it is).
 
@@ -47,10 +49,24 @@ downloads the build for this machine from this repository's releases, checks it 
   |---|---|
   | `dsh/` | dsh's home (`DSH_HOME`): its Sessions, settings, and the `omni` profile the app copies in from the build |
   | `bots/` | the Bot team's home (`AUTOMAGIK_BOTS_HOME`): the team, the companion's picture, and `omni.json`, the Omni this app is linked to (0600) |
-  | `bin/` | `node` and `pnpm` for dsh, written at each launch: both run on the app's own Electron as Node, so installing a plugin (Settings → Plugins, the market) needs nothing on the machine |
+  | `bin/` | `node` and `pnpm` for dsh's PATH, written at each launch: both run on the app's own Electron as Node. Plugin installs, updates and removals do not resolve `pnpm` there: the app starts dsh through `src/dsh-launch.cjs`, which gives its plugin manager the bundled pnpm by absolute path, so installing a plugin (Settings → Plugins, the market) needs nothing on the machine and cannot pick up another pnpm from PATH |
   | `logs/dsh.log`, `logs/update.log` | dsh's output, and the update checks |
 
   It is apart from a dsh you already run (`~/.dsh`) and from the Bot team installed into that dsh (`~/.automagik/bots`). The app sets no `OMNI_HOME`: an Omni sandbox and the Bun Omni's channels download are in Omni's own `~/.omni`.
+- Signing in to a remote Automagik service (`src/sign-in.js`, `src/account.js`) is off unless
+  `~/.automagik/desktop/signin.json` turns it on: `{ "enabled": true, "issuer": "https://…",
+  "clientId": "…" }`. The app ships no issuer, client id or host of its own; with the file missing,
+  `enabled` false, or either value blank, there is no listener, no browser and no token store;
+  the store is opened only when the setting is on and names both values.
+  It uses the system browser with PKCE (S256), `state` and `nonce`, an exact
+  `http://127.0.0.1:<port>/callback` bound before the browser opens and closed after one request
+  or a few minutes, and checks the ID token's issuer, audience, expiry and nonce. The access token
+  stays in the main process; the rotating refresh token goes to `safeStorage`
+  (`src/secure-tokens.js`), or nowhere on a Linux desktop without a secret store, where the person
+  signs in again each launch. The page sees only `window.omniDesktop.account`'s status — never a
+  token, a code or a verifier — and `automagik://` never carries one. Cloud sign-in stays off per
+  OS until the delivery-H mask exists (RFC 0024, Q17): delivery 1 keeps this setting off, and
+  delivery 5 switches it on.
 - The window is a plain page: context isolation and the renderer sandbox are on, there is no Node in it, it stays on dsh's origin, and web links (a `wa.me` link, docs) open in your browser. Other schemes are refused.
 - The window's own frame (`src/shell.html`, `shell.css`: the title bar, the update notice and the splash while dsh starts) wears the clay theme of the app inside, light or dark as the system is set (`prefers-color-scheme`). Before dsh's page paints, it and macOS's window show the clay table (`frame.js` `TABLE`, from Electron's `nativeTheme`), so a light system sees no dark flash. macOS has no vibrancy: clay is matte. Manrope and DM Sans are bundled in `src/fonts` with their licences (SIL OFL 1.1).
 - Linux sandbox: Chromium needs user namespaces or a setuid helper, and Ubuntu 24.04+ restricts user namespaces. The deb installs an AppArmor profile that allows them for the app, so the window is sandboxed. An AppImage cannot carry one; on such a system its launcher runs without the sandbox and says so on stderr. Prefer the deb there.

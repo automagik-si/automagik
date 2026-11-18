@@ -18,6 +18,7 @@ import (
 
 	"github.com/DnzzL/herdr-automations/internal/command"
 	"github.com/DnzzL/herdr-automations/internal/config"
+	"github.com/DnzzL/herdr-automations/internal/hc"
 	"github.com/DnzzL/herdr-automations/internal/history"
 	"github.com/DnzzL/herdr-automations/internal/host"
 	"github.com/DnzzL/herdr-automations/internal/notify"
@@ -96,11 +97,19 @@ func (r *Runner) Run(a config.Automation, trigger history.Trigger) error {
 	r.record(id, a.Name, trigger, history.StatusRunning, session, "")
 
 	timeout := time.Duration(a.TimeoutMinutes) * time.Minute
-	if err := r.host.Do(session, a, timeout); err != nil {
+	err = r.host.Do(session, a, timeout)
+	note := ""
+	if noter, ok := r.host.(host.Noter); ok {
+		note = noter.Note(session)
+	}
+	if err != nil {
 		r.record(id, a.Name, trigger, statusFor(err), session, err.Error())
 		return err
 	}
-	r.record(id, a.Name, trigger, history.StatusDone, session, "")
+	r.write(history.Record{
+		RunID: id, Automation: a.Name, Trigger: trigger, Status: history.StatusDone, At: time.Now(),
+		Session: session.HerdrSession, WorkspaceID: session.WorkspaceID, PaneID: session.PaneID, Result: note,
+	}, "")
 	// After the record: closing is also how a person cancels a run.
 	if a.CloseWorkspace == config.CloseOnSuccess {
 		if err := r.host.Close(session, a); err != nil {
@@ -166,7 +175,12 @@ func (r *Runner) report(a config.Automation, rec history.Record) string {
 	}
 	terminal, err := bots.Send(a.Notify, line)
 	if err != nil {
-		log.Printf("%s: its result did not reach %s: %v", a.Name, a.Notify, err)
+		var detail any = err
+		var sendErr *hc.SendError
+		if errors.As(err, &sendErr) {
+			detail = fmt.Sprintf("hc send: %s (%v)", sendErr.Envelope, sendErr.Unwrap())
+		}
+		log.Printf("%s: its result did not reach %s: %v", a.Name, a.Notify, detail)
 		return "not delivered: " + err.Error()
 	}
 	return "sent to " + terminal

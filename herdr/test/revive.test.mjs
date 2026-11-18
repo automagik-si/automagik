@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // Revive (#939): the bots come back after a restart of this computer. revive.js over plain data,
 // then `automagik-herdr revive` run as a program against a scratch project, a scratch home and
 // app home, a fake `hc` (test/fake-hc.mjs), a fake `herdr-app` and a fake `systemctl`. No live
@@ -263,7 +264,11 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
     AUTOMAGIK_HERDR_TAB_WAIT_MS: "100", AUTOMAGIK_HERDR_RESTART_STABLE_MS: "200", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "3000",
     AUTOMAGIK_HERDR_TREE_TURN_WAIT_MS: "1000", AUTOMAGIK_HERDR_REVIVE_SETTLE_MS: "0" };
   for (const k of ["HC_TERMINAL_ID", "HC_SOCKET", "HERMES_HOME", "AUTOMAGIK_HERDR_BOOT_MS", "CLAUDE_CONFIG_DIR"]) delete env[k];
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   const cli = (args, { env: extra = {}, cwd = project } = {}) => {
+    core.control({ ...env, ...extra });
     const r = spawnSync(RUNTIME, [CLI, ...args], { cwd, env: { ...env, ...extra }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
@@ -642,6 +647,21 @@ test("revive --boot prints counts only: no folder and no bot name reaches the us
   assert.match(r.out, /^revive: 1 resumed, 0 on a new conversation, 0 not back, 0 left alone, in 1 project;/);
   for (const text of [r.out, r.err]) for (const word of [s.project, s.home, s.root, "Genie", SID]) assert.ok(!text.includes(word), text);
   assert.equal(s.lastReport().projects[0].project, s.project, "the kept report still names the project");
+});
+
+// #1411: a reboot's recovery rebuilds a Codex seat from its record, the seat's own reasoning
+// effort and service tier included.
+test("#1411: revive passes a Codex seat's own effort and tier to its replacement pane", (t) => {
+  const file = team({ main: { agent: "codex", effort: "high", tier: "fast" } });
+  const s = world(t, { file, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = runsOf(s)[0];
+  const words = wordsOf(run);
+  assert.ok(hasSeq(words, ["-c", "model_reasoning_effort=high"]), run.join(" "));
+  assert.ok(hasSeq(words, ["-c", "service_tier=priority"]), run.join(" "));
+  assert.ok(hasSeq(words, ["resume", SID]), "resumed by its own id");
+  assert.equal(r.out.includes(SID), false, "no session id printed");
 });
 
 // ---- #1417: Codex and Kimi, whose ids are found on disk after the launch ----

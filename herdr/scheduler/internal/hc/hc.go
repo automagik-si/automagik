@@ -50,7 +50,10 @@ type Terminal struct {
 var ErrNotFound = errors.New("no such terminal")
 
 func run(out any, args ...string) error {
-	cmd := exec.Command(hostpath.HCBin(), args...)
+	return runCommand(exec.Command(hostpath.HCBin(), args...), out, args...)
+}
+
+func runCommand(cmd *exec.Cmd, out any, args ...string) error {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -145,18 +148,45 @@ func (Client) Terminals(labels map[string]string) ([]string, error) {
 }
 
 // Read returns the terminal's screen as plain text, without its history. It is
-// what a blocked run quotes in its failure line.
+// what a blocked run quotes in its failure line. A read gets at most ten seconds.
 func (Client) Read(address string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	var res struct {
 		Text string `json:"text"`
 	}
-	err := run(&res, "read", address, "--json")
+	args := []string{"read", address, "--json"}
+	err := runCommand(exec.CommandContext(ctx, hostpath.HCBin(), args...), &res, args...)
 	return res.Text, err
 }
 
 // sendTimeout bounds one hc send. hc waits for a person typing in that
 // terminal to pause; a report is not worth holding a run's slot for longer.
 const sendTimeout = 2 * time.Minute
+
+// SendError is a refusal reported by hc as a JSON error envelope.
+type SendError struct {
+	Envelope string
+	message  string
+	err      error
+}
+
+func (e *SendError) Error() string { return "hc send: " + e.message }
+
+func (e *SendError) Unwrap() error { return e.err }
+
+func sendErrorMessage(raw string) string {
+	var envelope, body map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &envelope) != nil || json.Unmarshal(envelope["error"], &body) != nil {
+		return ""
+	}
+	var kind *string
+	var message string
+	if json.Unmarshal(body["kind"], &kind) != nil || kind == nil || json.Unmarshal(body["message"], &message) != nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(message), " ")
+}
 
 // Send pastes text into a terminal and submits it: how one bot messages
 // another. hc refuses a terminal whose program is blocked on a dialog, and
@@ -175,6 +205,9 @@ func (Client) Send(address, text string) error {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = strings.TrimSpace(stdout.String())
+		}
+		if message := sendErrorMessage(msg); message != "" {
+			return &SendError{Envelope: msg, message: message, err: err}
 		}
 		return fmt.Errorf("hc send: %s (%w)", msg, err)
 	}
