@@ -730,9 +730,9 @@ export function install(rt) {
     roomOwners.clear()
     pastOwners.clear()
     taskOwners.clear()
-    for (const run of state.subscriptionRuns ?? []) if (run.sessionId && run.botId && run.task) taskOwners.set(run.sessionId, { botId: run.botId, shellOffCli: run.shellOffCli })
+    for (const run of state.subscriptionRuns ?? []) if (run.sessionId && run.botId && run.task) taskOwners.set(run.sessionId, { botId: run.botId, ...(run.shellOffCli === true ? { shellOffCli: true } : {}) })
     for (const bot of Object.values(state.bots)) {
-      for (const segment of bot.segments ?? []) pastOwners.set(segment.sessionId, { botId: bot.id, shellOffCli: segment.shellOffCli })
+      for (const segment of bot.segments ?? []) pastOwners.set(segment.sessionId, { botId: bot.id, ...(segment.shellOffCli === true ? { shellOffCli: true } : {}) })
       chatOwners.set(chatOf(bot.id), bot.id)
     }
     for (const room of Object.values(state.rooms)) {
@@ -740,7 +740,7 @@ export function install(rt) {
       if (sessionId !== undefined) roomOwners.set(sessionId, room.id)
       for (const segment of room.parts ?? []) pastOwners.set(segment.sessionId, { roomId: room.id })
       for (const [botId, segments] of Object.entries(room.segments ?? {})) {
-        for (const segment of segments) pastOwners.set(segment.sessionId, { botId, roomId: room.id, shellOffCli: segment.shellOffCli })
+        for (const segment of segments) pastOwners.set(segment.sessionId, { botId, roomId: room.id, ...(segment.shellOffCli === true ? { shellOffCli: true } : {}) })
       }
       for (const [botId, sessionId] of Object.entries(room.sessions ?? {})) groupOwners.set(sessionId, { botId, roomId: room.id })
     }
