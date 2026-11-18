@@ -910,8 +910,7 @@ only the signed-in person's own sessions.
 `application/json`, with the version 1 call body. The call carries a detached JWS in
 `x-automagik-signature`: the header, an empty payload segment, and a signature over the header and
 the base64url of the exact body bytes, made with a key the same two-slot published set names. The
-gate verifies it before it reads a field and changes nothing on a missing, wrong or replayed
-signature. A valid `session.revoke` for this workspace drops that `subject`'s gate sessions before
+gate verifies it before it reads a field and changes nothing on a missing or wrong signature. A valid `session.revoke` for this workspace drops that `subject`'s gate sessions before
 it answers `204`; a `role_lowered` call drops only the sessions that existed at `issued_at`. A
 `removed` subject is refused a new open until a later signed list omits them.
 

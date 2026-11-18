@@ -290,10 +290,12 @@ export class CloudSignIn {
       typeof subject !== 'string' || !subject || subject.length > 256 ||
       (reason !== 'removed' && reason !== 'role_lowered')) throw refused()
     const at = instant(issued_at)
-    if (reason === 'removed') this.removed.set(subject, { issuedAt: at, at })
-    else {
+    if (reason === 'removed') {
+      const previous = this.removed.get(subject)
+      if (!previous || at >= previous.at) this.removed.set(subject, { issuedAt: at, at })
+    } else {
       const previous = this.lowered.get(subject)
-      this.lowered.set(subject, { issuedAt: at, at: Math.max(at, previous?.at ?? 0) })
+      if (!previous || at > previous.at) this.lowered.set(subject, { issuedAt: at, at })
     }
     return { subject, reason, at }
   }
