@@ -749,6 +749,8 @@ export function install(rt) {
     checkHeldChoice()
     // A change states the capability on the record. An absent field still reads as a
     // shell: that is how every Bot saved before this capability existed keeps its own.
+    const shellBefore = bot.shell
+    const holdBefore = bot.shellHeld
     if (shell !== undefined) bot.shell = shell
     if (flag === true) bot.private = true
     else if (flag === false) delete bot.private
@@ -767,13 +769,23 @@ export function install(rt) {
       else bot[key] = value
     }
     if (!bot.permissionAuto && markOf(bot.model) !== markBefore && bot.permissionRev === revBefore) rt.movePermissionRev(bot)
-    // A load-time shell hold lifts when the person picks a native model or turns the shell on.
-    if (bot.shellHeld !== undefined && shell === true) delete bot.shellHeld
-    await rt.save()
+    try {
+      await rt.save({ required: shell !== undefined })
+    } catch (error) {
+      if (shell !== undefined) {
+        if (shellBefore === undefined) delete bot.shell
+        else bot.shell = shellBefore
+        if (holdBefore === undefined) delete bot.shellHeld
+        else bot.shellHeld = holdBefore
+      }
+      throw error
+    }
     // The list or the shell changed: every Session of this Bot is lifted and re-set from
     // the new record, so a shell tool added or removed here takes effect at once.
     if (denyTools !== undefined || shell !== undefined) {
       await rt.applyToolDeny(bot)
+      if (shell === true && holdBefore !== undefined) await rt.applyModel(bot, { force: true })
+        .catch(error => rt.warn('ds-bot: the model of %s could not be applied after restoring its shell: %s', bot.name, error))
       if (denyTools !== undefined && bot.permissionAuto) rt.endAuto(bot)
       // A restricted Bot's already-armed fresh-Session tasks would keep opening Sessions no
       // deny layer can bind (#584, L5), and a Bot that just became unrestricted releases a
@@ -1042,7 +1054,7 @@ export function install(rt) {
     const title = custom || autoRoomName(members)
     // The group's own Session only relays; like a member's it moves to a fresh part
     // in the group's folder once the group has one (parts.js).
-    const id = await createSession(title)
+    const id = await createSession(title, { group: true })
     try {
       // A member deleted while the Session was made stays out, and the group is checked
       // again as it is written.
