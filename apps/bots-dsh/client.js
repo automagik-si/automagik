@@ -19675,7 +19675,7 @@ function installSelfUpdateMock({ location: location2 = globalThis.location, docu
   const root = doc.createElement("div");
   root.id = "ds-bot-self-update-mock";
   doc.body.append(root);
-  const seat = doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div') ?? doc.querySelector("[data-mock-seat]");
+  const seat = doc.querySelector(".lb-foot") ?? doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div') ?? doc.querySelector("[data-mock-seat]");
   const control = mountSelfUpdateMock(root, { doc, seat });
   return () => {
     control.dispose();
@@ -22804,14 +22804,12 @@ function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionSta
         (0, import_react55.createElement)(
           "div",
           { className: "lb-head" },
-          (0, import_react55.createElement)("span", { className: "lb-brand" }, (0, import_react55.createElement)(Wordmark, { height: 22 })),
-          tools,
           (0, import_react55.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("Search"), title: t("Search"), onClick: () => actions.openPalette() }, (0, import_react55.createElement)(SearchIcon)),
           (0, import_react55.createElement)("button", { type: "button", className: "bt-round", "aria-label": t("New…"), title: t("New…"), onClick: () => actions.openNewChat("new") }, (0, import_react55.createElement)(PlusIcon))
         ),
         notice,
         team.bots.length === 0 && empty ? empty : (0, import_react55.createElement)(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, renderEnd, label: t("Bot list") }),
-        foot ? (0, import_react55.createElement)("div", { className: "lb-foot" }, foot) : null
+        (0, import_react55.createElement)("div", { className: "lb-foot" }, tools, foot ?? null)
       )
     ),
     note ? (0, import_react55.createElement)(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null

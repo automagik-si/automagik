@@ -1,6 +1,6 @@
 import { createElement as h, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { OmniMark, Wordmark } from './logo.js'
+import { OmniMark } from './logo.js'
 import { currentPart } from './text.js'
 import { PlusIcon, SearchIcon, TasksIcon } from './icons.js'
 import { BotMark } from './mark.js'
@@ -206,13 +206,11 @@ export function LeftBar({ roster, order, marked, seats = [], useSessions, useSes
         collapse ?? null),
       h('div', { className: 'lb-list' },
         h('div', { className: 'lb-head' },
-          h('span', { className: 'lb-brand' }, h(Wordmark, { height: 22 })),
-          tools,
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('Search'), title: t('Search'), onClick: () => actions.openPalette() }, h(SearchIcon)),
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon))),
         notice,
         team.bots.length === 0 && empty ? empty
           : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, onOpen: open, onMenu: menu, renderAfter, renderEnd, label: t('Bot list') }),
-        foot ? h('div', { className: 'lb-foot' }, foot) : null)),
+        h('div', { className: 'lb-foot' }, tools, foot ?? null))),
     note ? h(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null)
 }

@@ -44,8 +44,8 @@ const sidebar = wide => TeamSidebar({
 // Fragments drawn in place, so a row reads as the buttons it shows.
 const flat = nodes => [nodes].flat(Infinity).flatMap(node => (node?.type === react.Fragment ? flat(node.props.children) : [node])).filter(Boolean)
 const nameOf = node => node?.type?.name || node?.props?.['aria-label'] || node?.props?.className
-// The new left bar's head (wide: left-bar.js, the wordmark then its buttons) or the rail's
-// buttons, in order.
+// The new left bar's head (wide: left-bar.js; the owner's rule is Search and New… only) or the
+// rail's buttons, in order.
 const rowOf = (wide) => {
   const tree = sidebar(wide)
   if (!wide) return [tree.props.children].flat()[0].props.children
@@ -53,19 +53,26 @@ const rowOf = (wide) => {
   const list = flat(flat(side.props.children)[0].props.children)[1]
   return flat(flat(list.props.children)[0].props.children)
 }
+// The bar's own bottom row, where the other plugins' tools sit now.
+const footOf = (wide) => {
+  const tree = sidebar(wide)
+  const side = tree.type(tree.props)
+  const list = flat(flat(side.props.children)[0].props.children)[1]
+  const foot = flat(list.props.children).find(node => node?.props?.className === 'lb-foot')
+  return flat(foot.props.children)
+}
 // What the SidebarTools element draws: one isolated entry per tool.
 const drawn = (row) => {
   const outlet = row.find(node => node?.type?.name === 'SidebarTools')
   return { outlet, entries: outlet.type(outlet.props) }
 }
 
-test('tools draw between the update cloud and Search, and in the rail under the cloud', () => {
+test('the top row carries Search and New only, and tools draw in the bar bottom row', () => {
   const Tool = () => null
   const off = sidebarTools.register({ id: 'power', Component: Tool })
-  const wideRow = rowOf(true).map(nameOf)
-  assert.deepEqual(wideRow.slice(1, 4), ['UpdateButton', 'SidebarTools', 'Search'])
+  assert.deepEqual(rowOf(true).map(nameOf), ['Search', 'New…'])
   assert.deepEqual(rowOf(false).map(nameOf), ['UpdateButton', 'SidebarTools', 'New…'])
-  const { outlet, entries } = drawn(rowOf(true))
+  const { outlet, entries } = drawn(footOf(true))
   assert.equal(entries.length, 1)
   assert.equal(entries[0].props.entry.Component, Tool)
   // A tool gets the sidebar's width, roster and actions, and its roster hook.
@@ -73,14 +80,14 @@ test('tools draw between the update cloud and Search, and in the rail under the 
   assert.equal(outlet.props.roster, roster)
   assert.equal(drawn(rowOf(false)).outlet.props.wide, false)
   off()
-  assert.equal(drawn(rowOf(true)).entries.length, 0, 'the disposer takes it away')
+  assert.equal(drawn(footOf(true)).entries.length, 0, 'the disposer takes it away')
 })
 
 test('a tool registered after the sidebar drew appears, in order', () => {
-  assert.equal(drawn(rowOf(true)).entries.length, 0)
+  assert.equal(drawn(footOf(true)).entries.length, 0)
   const offLate = sidebarTools.register({ id: 'late', order: 5, Component: () => null })
   const offEarly = sidebarTools.register({ id: 'early', order: -5, Component: () => null })
-  assert.equal(drawn(rowOf(true)).entries.map(entry => entry.props.entry.id).join(), 'early,late')
+  assert.equal(drawn(footOf(true)).entries.map(entry => entry.props.entry.id).join(), 'early,late')
   offLate()
   offEarly()
 })
@@ -90,7 +97,7 @@ test('a tool that throws draws nothing, and the others still draw', () => {
   const Fine = () => 'fine'
   const offBroken = sidebarTools.register({ id: 'broken', Component: Broken })
   const offFine = sidebarTools.register({ id: 'fine', Component: Fine })
-  const { entries } = drawn(rowOf(true))
+  const { entries } = drawn(footOf(true))
   const Boundary = entries[0].type
   assert.equal(Boundary.getDerivedStateFromError(new Error('broken')).failed, true)
   const broken = new Boundary(entries[0].props)

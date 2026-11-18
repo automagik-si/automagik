@@ -357,7 +357,8 @@ export function installSelfUpdateMock({ location = globalThis.location, document
   doc.body.append(root)
   // The app's bottom row is DSH's own footer area; inside it the nod sits in the same line as
   // the footer's other entries. A harness can offer its own seat with `data-mock-seat`.
-  const seat = doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div')
+  const seat = doc.querySelector('.lb-foot')
+    ?? doc.querySelector('[class*="_footArea"] [class*="_footerActions"] > div')
     ?? doc.querySelector('[data-mock-seat]')
   const control = mountSelfUpdateMock(root, { doc, seat })
   return () => {
