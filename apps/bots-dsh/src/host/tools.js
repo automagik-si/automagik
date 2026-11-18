@@ -457,6 +457,7 @@ export function install(rt) {
           section: args.section,
           avatar: avatar === undefined ? undefined : { image: avatar },
           createdBy: creator?.id,
+          readScopeSource: exec.agent.session.id,
           ...(inheritAuto === undefined ? {} : { inheritAuto }),
           // Only when asked: an older call keeps the exact payload it had.
           ...(denyTools === undefined ? {} : { denyTools }),

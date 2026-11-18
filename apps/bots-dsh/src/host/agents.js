@@ -183,7 +183,7 @@ export function install(rt) {
       if (agent.workDir !== undefined && !(await rt.isFolder(agent.workDir))) throw refusal(`The folder ${agent.workDir} of ${agent.name} is gone. Pick another in its settings.`)
       options = { cwd: agent.workDir, agentPreset: agent.profile }
     }
-    const { cwd, agentPreset } = options
+    const { cwd, agentPreset, readScopeSource } = options
     // A folder of its own (a task's `cwd`) makes the Session by cwd alone, outside every
     // DSH workspace, as a Bot's working folder does. Otherwise a known workspace id wins
     // (the Agent's latest Session may live outside the team workspace after a workspace
@@ -194,11 +194,13 @@ export function install(rt) {
       ? { cwd }
       : { workspaceId: typeof workspaceId === 'string' && ctx.workspaceRegistry.get(workspaceId) ? workspaceId : await rt.ensureWorkspace() }
     const preset = await servedPreset(agentPreset)
+    const reserved = readScopeSource === undefined ? creation?.reservedSessionId : await rt.reserveReadScope(readScopeSource)
     let sessionId
     try {
       if (creation !== undefined) creation.started = true
-      const created = await ctx.sessionController.create({ ...place, ...(preset ? { agentPreset: preset } : {}), ...(creation ? { sessionId: creation.reservedSessionId } : {}) })
+      const created = await ctx.sessionController.create({ ...place, ...(preset ? { agentPreset: preset } : {}), ...(reserved === undefined ? {} : { sessionId: reserved }) })
       sessionId = created.sessionId
+      if (readScopeSource !== undefined && sessionId !== reserved) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
     } catch (error) {
       if (creation !== undefined) {
         // Native creation can allocate and then fail workspace attachment.
@@ -808,9 +810,9 @@ export function install(rt) {
 
   // A fresh task Session with a title; automations that run "a new DSH session" use it too.
   // Another plugin may give it a folder (`cwd`) and a DSH agent preset of its own.
-  async function createTaskSession(title, { cwd, agentPreset } = {}) {
+  async function createTaskSession(title, { cwd, agentPreset, readScopeSource } = {}) {
     const agent = await ensureTasks()
-    const sessionId = await createAgentSession(agent.id, undefined, { cwd, agentPreset })
+    const sessionId = await createAgentSession(agent.id, undefined, { cwd, agentPreset, readScopeSource })
     const clean = String(title ?? '').trim().slice(0, AGENT_SESSION_TITLE_MAX)
     if (clean !== '') await renameAgentSession(agent.id, sessionId, clean).catch(error => rt.warn('ds-bot: task title not set: %s', error?.message ?? error))
     return sessionId
@@ -859,7 +861,7 @@ export function install(rt) {
       started?.()
     }
   }
-  async function startFlagged({ title, text, from, cwd, agentPreset, roomId, reportRoomId }, starting) {
+  async function startFlagged({ title, text, from, cwd, agentPreset, roomId, reportRoomId, readScopeSource = rt.callerSessionId?.() }, starting) {
     // Read before the first await: the tool call this runs in may return before the rest.
     const opener = from === undefined ? undefined : rt.callerLevel?.()
     const autoOpener = rt.autoOpener?.()
@@ -878,7 +880,7 @@ export function install(rt) {
       if (!reportRoom.members?.includes(from)) throw refusal(`${bot.name} is not a member of "${reportRoom.name}", so the task cannot report there`)
       if (roomId && roomId !== reportRoom.id) throw refusal('A task asked for in one group cannot report to another')
     }
-    const sessionId = await createTaskSession(title, { cwd: cwd ?? caller?.workDir, agentPreset: agentPreset ?? caller?.profile })
+    const sessionId = await createTaskSession(title, { cwd: cwd ?? caller?.workDir, agentPreset: agentPreset ?? caller?.profile, readScopeSource })
     // Until its start is decided: a re-apply DSH asks for meanwhile must not lower the task
     // in place of the refusal a saved level that is no longer offered gets (permissions.js).
     starting(sessionId)
@@ -1053,7 +1055,7 @@ export function install(rt) {
       // Called in a group, the task belongs to that group: its report goes back there.
       const roomId = rt.groupOwners.get(exec.agent?.id)?.roomId
       try {
-        const sessionId = await startTask({ title, text, from: self, roomId })
+        const sessionId = await startTask({ title, text, from: self, roomId, readScopeSource: exec.agent.session.id })
         const cap = state.tasks?.[sessionId]?.permissionCap
         return `Started task "${title.slice(0, AGENT_SESSION_TITLE_MAX)}" (${sessionId}) under your row.${cap ? ` It runs at the ${cap} permission level, no wider than this conversation.` : ''} Its result comes back to you as a message; do not wait or poll.`
       } catch (error) {

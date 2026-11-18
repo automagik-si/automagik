@@ -3,6 +3,19 @@
 - insert:
     - id: web-search-auto
       name: '@automagik/bots-dsh/web-search'
+    - id: automagik-read-scope-files
+      name: '@automagik/bots-dsh/read-scope-files'
+      config:
+        applyPatch: false
+    - id: automagik-read-scope-search
+      name: '@automagik/bots-dsh/read-scope-search'
+      config:
+        sampleOverCapGlobResults: false
+# These adapters retain DSH's definitions and attest the providers used by their bodies.
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
 - id: web
   config:
     searchProvider: auto

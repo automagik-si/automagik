@@ -391,7 +391,10 @@ export function install(rt) {
     // A saved level DSH no longer offers refuses the member's first turn here before a
     // Session is made for it.
     rt.assertLevelOffered?.(room.permission ?? member.permission)
-    const id = await rt.createSession(`${member.name} · ${room.name}`, { dir: rt.workDirOf({ botId: member.id, roomId: room.id }), group: true, ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}) })
+    const id = await rt.createSession(`${member.name} · ${room.name}`, {
+      dir: rt.workDirOf({ botId: member.id, roomId: room.id }), group: true,
+      readScopeSource: rt.sessionOfRoom(room), ...(member.kind === 'dsh' ? { profile: member.profile ?? null } : {}),
+    })
     // Its level first, before the Session is the member's: one whose level did not hold is
     // not kept, so the member takes no turn on it and its next turn here makes another.
     try {

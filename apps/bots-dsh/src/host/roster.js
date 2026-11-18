@@ -148,7 +148,7 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile, group = false } = {}) {
+  async function createSession(title, { dir, profile, group = false, readScopeSource, continueReadScope = false } = {}) {
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
     const readOnly = rt.readOnly()
@@ -170,7 +170,12 @@ export function install(rt) {
         place = { cwd: fallback }
       }
     }
-    const { sessionId } = await ctx.sessionController.create({ ...place, ...await botPreset(profile, { group }) })
+    const reserved = readScopeSource === undefined ? undefined
+      : await rt.reserveReadScope(readScopeSource, { continuation: continueReadScope })
+    const { sessionId } = await ctx.sessionController.create({
+      ...place, ...await botPreset(profile, { group }), ...(reserved === undefined ? {} : { sessionId: reserved }),
+    })
+    if (reserved !== undefined && sessionId !== reserved) throw refusal('DSH did not use the Session reserved for the file-tool folder.')
     if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
@@ -349,7 +354,7 @@ export function install(rt) {
         : personPermission
     // A host adapter may already own a configured root Session. Adopt it without creating
     // another Session or moving its workspace; this option is internal, not a user payload.
-    const id = existingSessionId ?? await createSession(cleanName, { dir })
+    const id = existingSessionId ?? await createSession(cleanName, { dir, readScopeSource: options.readScopeSource })
     // Checked against the Session's own tool surface, before the Bot record exists: a name
     // this DSH does not serve refuses the create (the catch below archives the Session).
     if (denyTools) await rt.assertDenyTools(id, denyTools)
