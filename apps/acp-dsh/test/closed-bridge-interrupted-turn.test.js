@@ -51,7 +51,7 @@ function clock() {
 const CANCEL_WAIT_MS = 5000
 
 // One Session on the fake agent. `bridge`: DSH's tools over the bridge (else the mirror tool).
-function host(t, { bridge = false, env = {} } = {}) {
+function host(t, { bridge = false, env = {}, hostStopping = () => false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-969-'))
   const trace = join(dir, 'trace.ndjson')
   const session = Session.create('s1')
@@ -89,7 +89,7 @@ function host(t, { bridge = false, env = {} } = {}) {
   }
   const timers = clock()
   const backchannel = new Backchannel({ ctx })
-  const adapter = new AcpAdapter(ctx, new Map([['acp-fake', spec]]), { dshTools: () => bridge, backchannel, cancelWaitMs: CANCEL_WAIT_MS, timers })
+  const adapter = new AcpAdapter(ctx, new Map([['acp-fake', spec]]), { dshTools: () => bridge, backchannel, cancelWaitMs: CANCEL_WAIT_MS, timers, hostStopping })
   let closed = false
   const close = () => { if (closed) return; closed = true; try { adapter.dispose() } finally { backchannel.dispose() } }
   t.after(() => { close(); rmSync(dir, { recursive: true, force: true }) })
@@ -198,4 +198,25 @@ test('#969: a bridge that is open leaves the session as it is', async (t) => {
   const prompts = h.events().filter(event => event.event === 'prompt')
   assert.doesNotMatch(prompts[1].text, /Fake agent, turn|done/, 'nothing is replayed to a session that has the chat')
   assert.deepEqual(h.warned.filter(line => /lost its/.test(line)), [])
+})
+
+// #1575: a prompt the host stopped from outside the app (its process got SIGTERM with the
+// host) ends as an interruption, not as the person's Stop. bots-dsh reads the code by name to
+// resume the task instead of marking it failed, so the exact code is the contract.
+test('#1575: a prompt cancelled from outside the app ends as interrupted, not as a Stop', async (t) => {
+  // The host's SIGTERM reached the agent as it stopped: the app did not ask for this cancel.
+  const h = host(t, { hostStopping: () => true })
+  const reading = h.step([user('hang')])
+  await until(() => h.live()?.run?.prompting !== undefined, 'the prompt to be in flight')
+  // The agent is asked to cancel on the wire, as a CLI that took its host's SIGTERM does; the
+  // adapter did not ask for this cancel.
+  await h.live().run.conn.cancel({ sessionId: h.live().run.sessionId })
+  const chunks = await reading
+  assert.deepEqual(chunks.at(-1).reason, {
+    kind: 'error',
+    failure: {
+      message: 'Fake agent was interrupted before it finished.',
+      code: 'AGENT_INTERRUPTED',
+    },
+  })
 })

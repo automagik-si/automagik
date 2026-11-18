@@ -980,18 +980,21 @@ export function install(rt) {
       // A restart cut the turn: the task is not done. resume.js sets it going again, or
       // ends it as stopped when it will not.
       if (rt.cutByRestart?.(event.data?.reason)) return
-      // An error fails the task; the user or a Bot stopping it (an abort) only stops it.
+      // An error fails the task; the user or a Bot stopping it (an abort, or the error a
+      // cancelled ACP prompt ends with) only stops it.
       const reason = event.data?.reason
       const provider = session.requestHeader?.()?.config?.provider
-      const stopped = reason?.kind === 'aborted' ||
-        (reason?.kind === 'error' && reason.error?.code === 'ABORTED' && routeOf(provider).connectedBy === 'acp')
+      const cancelled = reason?.kind === 'error' && reason.error?.code === 'ABORTED'
+        && routeOf(provider).connectedBy === 'acp'
+      const stopped = reason?.kind === 'aborted' || cancelled
       const failed = reason?.kind === 'error' && !stopped
       task.status = failed ? 'failed' : stopped ? 'stopped' : 'done'
       task.endedAt = Date.now()
       const words = lastWords.get(id) ?? ''
       lastWords.delete(id)
       const problem = event.data?.reason?.error?.message || 'unknown error'
-      task.summary = (failed ? problem : stopped && !words ? 'Stopped before it finished.' : words).slice(0, TASK_SUMMARY_MAX)
+      task.summary = (failed ? problem : words || (stopped ? 'Stopped before it finished.' : ''))
+        .slice(0, TASK_SUMMARY_MAX)
       void rt.save().catch(error => rt.warn('ds-bot: saving a task failed: %s', error))
       if (rt.botOf(task.from) === undefined) return
       const said = failed ? `It failed: ${problem}`
