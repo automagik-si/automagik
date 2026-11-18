@@ -45,8 +45,9 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   start, and it detects and cancels because the update arrives after the call began.
   DSH's `read_image` works for Claude Code because acp-dsh declares its models as taking images;
   other ACP agents keep no declaration.
-  `acp-codex` has no such switch, so it is bridged only with an explicit `dshTools: true`;
-  absent or `false` means no bridge and its built-ins stay its own tool set. Until a structured
+  `acp-codex` has no such switch, so it is bridged only with an explicit `dshTools: true`, or
+  when the Session's Bot needs DSH's role tools (a Genie's `grant_wish`): then the bridge offers
+  DSH's extras only, never a second copy of the tools Codex already has. Until a structured
   name is proven in its tool calls, it draws no ACP card for an MCP call. The person's
   own MCP servers load beside the bridge with their own tools and sign-ins: DSH hands the session
   only the `dsh` bridge, so any other `mcp__<server>__<tool>` is the CLI's own user-scope config
@@ -303,9 +304,12 @@ differs from Claude Code and Codex:
 
 `dshTools` (live, no schema default) is the bridge, its DSH approval, the drift detector and live
 switching above. Absent means the per-agent default: `acp-claude` bridges because its adapter can
-drop its own built-in tools; `acp-codex` does not, because it cannot. Codex is bridged only with
-an explicit `true`; absent or `false` means no bridge, and Codex keeps its own built-in tools as
-its only tool set. An explicit `false` is the kill switch for Claude too: the 2026-11-03
+drop its own built-in tools; `acp-codex` does not, because it cannot, unless the Session's Bot
+needs DSH's role tools: the Bot team sends that as `needsDshTools` in the Bot identity, today for
+a Genie, whose `grant_wish` is a DSH tool. Codex is otherwise bridged only with an explicit
+`true`; absent or `false` means no bridge, and Codex keeps its own built-in tools as its only
+tool set. A role-tools bridge offers DSH's extras only, without twins of Codex's own tools, so it
+never runs two tool sets. An explicit `false` is the kill switch for Claude too: the 2026-11-03
 behaviour, where each agent keeps its own tools and its own approvals. The key is public and
 stays writable through
 DSH's settings service or the profile patch, but it is hidden from settings forms (`.hidden()`):
@@ -324,7 +328,7 @@ The transcript replay is independent of the bridge: only an explicit `false` tur
 
 | `dshTools` | Claude Code: tools | Claude Code: replay | Codex: tools | Codex: replay |
 |---|---|---|---|---|
-| absent | DSH bridge, its own off | yes | its own only | yes |
+| absent | DSH bridge, its own off | yes | its own only (a Genie: DSH extras too) | yes |
 | `true` | DSH bridge | yes | DSH bridge and its own | yes |
 | `false` | its own only | no | its own only | no |
 
@@ -335,7 +339,9 @@ To confirm delivery, check the receiving Bot’s chat. If your team has a native
 a **Browser** tab, you can also open it from **Details → Browser**.
 
 So with `dshTools` absent Codex sees the chat but not the team's tools; those need an explicit
-`true` (two tool sets). A replay reaches an agent in each of these cases, redacted and capped at
+`true` (two tool sets). A Genie is the exception: its role tools live in DSH, so its Codex
+Session gets DSH's extras over the bridge with no setting, and without the twins of Codex's own
+tools. A replay reaches an agent in each of these cases, redacted and capped at
 120,000 characters, the oldest messages dropped first with a marker: a move from another
 provider (with its "Switching to X" row); a new agent session in a chat that already has answers
 (after a restart, or a session a crossing or a flip ended), with no row since the chat stayed on
