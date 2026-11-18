@@ -4,9 +4,9 @@
 // that release's checksums.txt and fails unless every pin is exactly its hash, so a release built from a different tree
 // cannot leave the panel handing out a repair command that 404s or fails its shasum.
 //
-// The public download URL is tried first; on a 5xx, a timeout or a network error checksums.txt
-// comes from the REST API asset route (release-assets.mjs). The
-// pinned hashes are checked the same way wherever the bytes came from.
+// The public download gets 15 seconds for the small checksums.txt file. On a 5xx, a timeout or
+// a network error the REST API asset route gets its full timeout (release-assets.mjs).
+// The pinned hashes are checked the same way wherever the bytes came from.
 //
 //   node herdr/scripts/scheduler-pin.mjs
 //
@@ -20,6 +20,7 @@ import { releaseAssets } from "./release-assets.mjs";
 const RELEASE = `herdr-automations-v${SCHEDULER.version}`;
 const BASE = `https://github.com/${SCHEDULER.repo}/releases/download/${RELEASE}`;
 const API = `https://api.github.com/repos/${SCHEDULER.repo}`;
+const CHECKSUMS_PUBLIC_TIMEOUT = 15_000;
 const ASSETS = {
   arm64: "herdr-automations_darwin_arm64", amd64: "herdr-automations_darwin_amd64",
   linux_arm64: "herdr-automations_linux_arm64", linux_amd64: "herdr-automations_linux_amd64",
@@ -46,7 +47,7 @@ export async function check({
   const problems = [];
   let sums;
   try {
-    sums = (await source.get("checksums.txt")).toString("utf8");
+    sums = (await source.get("checksums.txt", { publicTimeout: CHECKSUMS_PUBLIC_TIMEOUT })).toString("utf8");
   } catch (e) {
     error(`scheduler-pin: ${e.message}`);
     return 2;
