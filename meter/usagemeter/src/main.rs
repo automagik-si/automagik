@@ -318,7 +318,8 @@ fn cmd_sync(args: Vec<String>) -> Result<ExitCode, String> {
             if let Some(b) = &r.evidence_backfill {
                 println!(
                     "meter: evidence backfill from {}: {} calls given their evidence, {} left as \
-                     they were (no row before evidence held them as logged); {}",
+                     they were (no row before evidence held them as logged, or the call already \
+                     had its evidence); {}",
                     format_rfc3339(b.from_ms),
                     b.adopted,
                     b.left_alone,
@@ -430,6 +431,12 @@ fn cmd_status() -> Result<ExitCode, String> {
     } else {
         Vec::new()
     };
+    // Issue 1229's dry-run report: duplicate evidence rows, counted only. Nothing is removed.
+    let duplicates = if current {
+        meter::evidence::duplicates(&store.conn).unwrap_or_default()
+    } else {
+        meter::evidence::Duplicates::default()
+    };
     let v = serde_json::json!({
         "state_dir": db.parent(),
         "location": location.as_str(),
@@ -454,6 +461,12 @@ fn cmd_status() -> Result<ExitCode, String> {
             "calls": store.count("evidence").unwrap_or(0),
             "launches": store.count("launch").unwrap_or(0),
             "links": store.count("link").unwrap_or(0),
+            "duplicates": {
+                "groups": duplicates.groups,
+                "extra_rows": duplicates.extra_rows,
+                "exact_groups": duplicates.exact_groups,
+                "exact_extra_rows": duplicates.exact_extra_rows,
+            },
             "attribution_backlog": meter::evidence::dirty_count(&store.conn).unwrap_or(0),
             "tokens_by_harness": meter::evidence::actor_totals(
                 &store.conn,

@@ -816,14 +816,44 @@ fn credit_adoption_backing(
     Ok(())
 }
 
+/// Whether the store already holds this call's evidence: the same time, request id and logging.
+/// A call a normal sync read from a log's tail before `evidence_from` (the hour the store migrated
+/// in) is already counted; adopting it again would write an identical second row (issue 1229).
+/// Two real calls can reuse a request id, but not at the same time and logging as well: that pair
+/// is one call and a duplicate row.
+fn has_evidence(tx: &Transaction<'_>, e: &Evidence, ts_ms: i64) -> rusqlite::Result<bool> {
+    let Some(request) = e.request else {
+        return Ok(false);
+    };
+    tx.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM evidence ev JOIN ev_dim d ON d.id = ev.dim
+           WHERE ev.ts_ms = ?1 AND ev.request = ?2
+             AND d.harness = ?3 AND d.model = ?4 AND d.machine = ?5
+             AND d.repo IS ?6 AND d.branch IS ?7 AND d.precision = ?8)",
+        params![
+            ts_ms,
+            request.as_slice(),
+            e.dim.harness,
+            e.dim.model,
+            e.dim.machine,
+            e.dim.repo,
+            e.dim.branch,
+            e.dim.precision
+        ],
+        |r| r.get(0),
+    )
+}
+
 /// Gives one re-read call of an hour before `evidence_from` its evidence (an evidence backfill):
 /// its tokens leave a rollup row that counted it before evidence (a frozen row, or one of an hour
 /// before `evidence_from`) with the same logging (harness, model, machine, repo, branch, hour and
 /// precision) and at least its tokens of every kind remaining beyond the row's evidence, for
 /// the row its derived attribution names, and
 /// its evidence row is written, all in the caller's transaction. A call no such row holds (its
-/// usage was counted under other logging, or never) is left alone: a backfill never adds a token
-/// to a total or takes one from it. Returns whether the call was adopted.
+/// usage was counted under other logging, or never) is left alone, as is one that already has its
+/// evidence: adopting it again would write an identical second row (issue 1229). A backfill never
+/// adds a token to a total or takes one from it. Returns whether the call was adopted.
 #[allow(clippy::too_many_arguments)]
 pub fn adopt(
     tx: &Transaction<'_>,
@@ -835,6 +865,9 @@ pub fn adopt(
     evidence_from: i64,
     now_ms: i64,
 ) -> rusqlite::Result<bool> {
+    if has_evidence(tx, e, ts_ms)? {
+        return Ok(false);
+    }
     let hour = crate::time::hour_start(ts_ms);
     load_adoption_hour(tx, hour)?;
     let found: Option<String> = tx
@@ -962,6 +995,50 @@ pub fn dirty_batch(c: &Connection, limit: usize) -> rusqlite::Result<Vec<String>
 
 pub fn dirty_count(c: &Connection) -> rusqlite::Result<i64> {
     c.query_row("SELECT count(*) FROM ev_dirty", [], |r| r.get(0))
+}
+
+/// Duplicate evidence rows (issue 1229), for a dry-run report before any removal. A group is the
+/// rows that share a time, logging and request id: two real calls with the same request id are
+/// distinct when their times differ, and one with the same time and logging is one call counted
+/// twice. `exact` counts the groups whose rows are identical in every column but the row id.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Duplicates {
+    pub groups: i64,
+    pub extra_rows: i64,
+    pub exact_groups: i64,
+    pub exact_extra_rows: i64,
+}
+
+/// Counts the duplicate evidence rows in the store, without writing anything.
+pub fn duplicates(c: &Connection) -> rusqlite::Result<Duplicates> {
+    let (groups, extra_rows) = c.query_row(
+        "SELECT count(*), coalesce(sum(n - 1), 0) FROM (
+           SELECT count(*) AS n FROM evidence
+           WHERE request IS NOT NULL
+           GROUP BY ts_ms, dim, request
+           HAVING count(*) > 1
+         )",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (exact_groups, exact_extra_rows) = c.query_row(
+        "SELECT count(*), coalesce(sum(n - 1), 0) FROM (
+           SELECT count(*) AS n FROM evidence
+           WHERE request IS NOT NULL
+           GROUP BY ts_ms, dim, actor, session, parent, request, cwd, session_cwd, copied,
+                    input_uncached, cache_read, cache_write_5m, cache_write_1h, output,
+                    reasoning, unsplit, reported_usd
+           HAVING count(*) > 1
+         )",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(Duplicates {
+        groups,
+        extra_rows,
+        exact_groups,
+        exact_extra_rows,
+    })
 }
 
 /// A launch as one sync derived it ([`crate::ledger::Resolver::records`]).
