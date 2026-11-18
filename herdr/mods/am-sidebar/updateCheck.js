@@ -194,13 +194,19 @@ const heldOf = (value) => (Array.isArray(value)
 /** An install's warnings or notes (update.mjs's `installed.warnings` / `installed.notes`), as far as they read (#524). */
 const warningsOf = (value) => (Array.isArray(value) ? value.filter((w) => typeof w === "string" && w !== "") : []);
 
-/** The held list in release.js HELD_FILE's `text`, for `version` only: another release's says nothing about this one. */
-export function heldFrom(text, version) {
+/** The held mods and optional advisory in HELD_FILE for this version. */
+export function heldRecordFrom(text, version) {
   try {
-    const file = JSON.parse(text);
-    return file?.version === version ? heldOf(file.held) : [];
-  } catch { return []; }
+    const file = objectOr(JSON.parse(text), null);
+    if (file && file.version === version) {
+      const landingId = typeof file.landingId === "string" && file.landingId !== "" ? file.landingId : null;
+      return { held: heldOf(file.held), notes: warningsOf(file.notes), landingId };
+    }
+  } catch {}
+  return null;
 }
+
+export const heldFrom = (text, version) => heldRecordFrom(text, version)?.held ?? [];
 
 /**
  * release.js RESTORE_FILE's note for `version`: `{ restore }` after a bad pack was put back,
@@ -218,10 +224,11 @@ export function restoreFrom(text, version, now) {
   const failed = Array.isArray(file.failed) ? file.failed.filter((m) => typeof m === "string" && m !== "") : [];
   const mod = typeof file.mod === "string" && file.mod !== "" ? file.mod : failed[0] ?? null;
   const unavailable = typeof file.unavailable === "string" && file.unavailable !== "" ? file.unavailable : null;
-  const warnings = Array.isArray(file.warnings) ? file.warnings.filter((w) => typeof w === "string" && w !== "") : [];
+  const warnings = warningsOf(file.warnings);
+  const notes = warningsOf(file.notes);
   return { restore: { version, failedVersion: file.failedVersion, mod,
     failed: failed.length > 0 ? failed : (mod ? [mod] : []), checked: true, ...(file.prevRemoved === true ? { prevRemoved: true } : {}),
-    ...(warnings.length > 0 ? { warnings } : {}), ...(unavailable ? { unavailable } : {}) } };
+    ...(warnings.length > 0 ? { warnings } : {}), ...(notes.length > 0 ? { notes } : {}), ...(unavailable ? { unavailable } : {}) } };
 }
 
 /**
@@ -294,7 +301,7 @@ export function restoredNotice(restore) {
   const stopped = typeof restore?.unavailable === "string" && restore.unavailable !== "" ? `; ${restore.unavailable}` : "";
   const removed = restore?.prevRemoved === true
     ? " The failed pack was removed, so `am update --rollback` has nothing to go back to." : "";
-  const warnings = Array.isArray(restore?.warnings) ? restore.warnings.filter((w) => typeof w === "string" && w !== "") : [];
+  const warnings = [...new Set([...warningsOf(restore?.warnings), ...warningsOf(restore?.notes)])];
   const warned = warnings.length > 0 ? ` Warning: ${warnings.join(" ")}` : "";
   return { title: `Automagik Herdr restored ${back}`, level: "warning",
     body: `${bad} failed to load (${mods} failed herdr-app check${stopped}): the previous version ${back} is back.${removed}${warned}` };
