@@ -237,7 +237,13 @@ export function createSession({
     }
     try {
       addressReady = Promise.resolve(context.route('**/*', guard)).then(() => {
-        removal = () => { void context.unroute?.('**/*', guard) }
+        // One shot, skipped once the browser has gone, and never left unhandled: a rejected
+        // unroute on a closed context must not reach the host's unhandledRejection exit.
+        removal = () => {
+          removal = () => {}
+          if (closed) return
+          Promise.resolve(context.unroute?.('**/*', guard)).catch(() => {})
+        }
       }, () => {})
     } catch {
       addressReady = Promise.resolve()
