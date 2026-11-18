@@ -190,6 +190,17 @@ test('the look is the sidebar\'s: only --bt-* tokens, no colour of its own', (t)
   assert.doesNotMatch(NATIVE_WORKERS_CSS, /#[0-9a-f]{3,8}\b|rgba?\(/i)
 })
 
+// The approved mock (#1568, 2-steps-light): the Done badge is the accent one, as Running; only
+// Failed has its own. The row's done mark stays green.
+test('the Done badge is the accent badge of the approved mock; the row\'s done mark stays green', (t) => {
+  const { NATIVE_WORKERS_CSS } = mount(t)
+  const rules = NATIVE_WORKERS_CSS.split('\n').filter(line => line.startsWith('.bt-worker-badge'))
+  assert.deepEqual(rules.map(line => line.slice(0, line.indexOf('{'))), ['.bt-worker-badge', '.bt-worker-badge[data-state=failed]'])
+  assert.match(rules[0], /background:var\(--bt-accent-soft\);color:var\(--bt-accent\)/)
+  assert.doesNotMatch(rules.join('\n'), /--bt-green/)
+  assert.match(NATIVE_WORKERS_CSS, /\.bt-thread\[data-state=done\] \.bt-thread-mark\{background:var\(--bt-green\)\}/)
+})
+
 // A worker DSH closed with its turn (Stop, or the agent went away): acp-dsh says failed and
 // stopped. Its row and popover say Stopped, never Done, and its unfinished steps failed.
 test('a worker stopped with its turn reads Stopped, under a Failed badge', async (t) => {

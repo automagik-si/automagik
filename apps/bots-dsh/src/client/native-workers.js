@@ -13,7 +13,9 @@ import { t } from './i18n.js'
 export const WORKERS_SHOWN = 3
 
 // Additions only: the row, thread and popover rules of the sidebar stay the look, every colour
-// a --bt-* token; only the two ended marks, the result line and the steps list are new.
+// a --bt-* token; only the two ended marks, the result line and the steps list are new. The
+// badge is the accent one while running and once done (the approved mock, #1568); only Failed
+// differs. The row's done mark stays green.
 export const NATIVE_WORKERS_CSS = `
 .bt-worker{display:flex;flex-direction:column}
 .bt-worker>.bt-worker-line{margin:0 8px 2px 28px;font-size:12px;line-height:16px;color:var(--bt-ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -24,7 +26,6 @@ export const NATIVE_WORKERS_CSS = `
 .bt-worker-head{display:flex;align-items:center;gap:8px;padding:2px 8px 4px;min-width:0}
 .bt-worker-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--bt-ink);font-weight:600;font-size:13px;line-height:18px}
 .bt-worker-badge{flex:none;padding:1px 7px;border-radius:999px;background:var(--bt-accent-soft);color:var(--bt-accent);font-size:10px;line-height:16px;font-weight:700;letter-spacing:.04em}
-.bt-worker-badge[data-state=done]{background:color-mix(in srgb,var(--bt-green) 14%,transparent);color:var(--bt-green)}
 .bt-worker-badge[data-state=failed]{background:var(--bt-danger-soft);color:var(--st-bad-strong,var(--bt-danger))}
 .bt-worker-steps{display:flex;flex-direction:column;gap:2px}
 .bt-worker-step{display:flex;align-items:flex-start;gap:8px;padding:5px 8px;border-radius:8px;color:var(--bt-ink)}

@@ -23025,7 +23025,6 @@ var NATIVE_WORKERS_CSS = `
 .bt-worker-head{display:flex;align-items:center;gap:8px;padding:2px 8px 4px;min-width:0}
 .bt-worker-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--bt-ink);font-weight:600;font-size:13px;line-height:18px}
 .bt-worker-badge{flex:none;padding:1px 7px;border-radius:999px;background:var(--bt-accent-soft);color:var(--bt-accent);font-size:10px;line-height:16px;font-weight:700;letter-spacing:.04em}
-.bt-worker-badge[data-state=done]{background:color-mix(in srgb,var(--bt-green) 14%,transparent);color:var(--bt-green)}
 .bt-worker-badge[data-state=failed]{background:var(--bt-danger-soft);color:var(--st-bad-strong,var(--bt-danger))}
 .bt-worker-steps{display:flex;flex-direction:column;gap:2px}
 .bt-worker-step{display:flex;align-items:flex-start;gap:8px;padding:5px 8px;border-radius:8px;color:var(--bt-ink)}
