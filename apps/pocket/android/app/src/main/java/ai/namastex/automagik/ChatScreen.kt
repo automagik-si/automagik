@@ -201,16 +201,9 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
                 if (pinned != null) {
                     Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp)) {
                         // Both cards can be open at once. The approval wins at open; the question stays one tap away.
-                        if (pending.size > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            for (card in pending.sortedBy { if (it.kind == "approval") 0 else 1 }) {
-                                val active = card.id == pinned.id
-                                TextButton(onClick = { pinnedId = card.id }, modifier = Modifier.heightIn(min = ChatStyle.SWITCH_HEIGHT),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)) {
-                                    Text(if (card.kind == "question") "Question" else "Approval", fontSize = 12.sp,
-                                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                                        color = if (active) Accent else Muted)
-                                }
-                            }
+                        if (pending.size > 1) {
+                            val ordered = pending.sortedBy { if (it.kind == "approval") 0 else 1 }
+                            ChatCardSwitch(ordered, pinned.id) { pinnedId = it }
                         }
                         key(pinned.id) {
                             Column(Modifier.fillMaxWidth().heightIn(max = cardMax).verticalScroll(rememberScrollState())) {
@@ -362,6 +355,26 @@ fun chatAnnotated(spans: List<ChatText.Span>, open: (String) -> Unit): Annotated
         "tokens" -> {}
         "approval", "question" -> PendingCard(row, s, vm)
         else -> if (row.text.isNotBlank()) ChatTextView(row.text, openLink, Muted)
+    }
+}
+
+/**
+ * The Question/Approval switch shown while both cards are open. Each label is its own 48 dp tap
+ * target (#1040); the size lives here, so a render test can measure the target the issue measured.
+ */
+@Composable
+internal fun ChatCardSwitch(cards: List<Chat.Row>, pinnedId: String?, onPick: (String) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (card in cards) {
+            val active = card.id == pinnedId
+            val size = Modifier.heightIn(min = ChatStyle.SWITCH_HEIGHT)
+            TextButton(onClick = { onPick(card.id) }, modifier = size,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)) {
+                Text(if (card.kind == "question") "Question" else "Approval", fontSize = 12.sp,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                    color = if (active) Accent else Muted)
+            }
+        }
     }
 }
 
