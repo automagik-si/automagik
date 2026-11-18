@@ -209,7 +209,7 @@ export function offeredTools(ctx, agent, { native = false } = {}) {
  * Session before its first request has none; the block only needs a producer-owned source kind.
  * @returns {{ provider?: string, model?: string }}
  */
-function routeOf(session) {
+export function routeOf(session) {
   try {
     const config = session?.requestHeader?.()?.config
     if (typeof config?.provider === 'string' && typeof config?.model === 'string') return { provider: config.provider, model: config.model }
@@ -334,7 +334,7 @@ export function reviewRouteOf(session, name) {
  * also skips it). Throws when the block cannot be written. `openStepOf` is hoisted.
  * @returns {() => void} hide the block; a second call does nothing
  */
-function advertise(session, { turn, step }, route, { id, name, raw }, log) {
+export function advertise(session, { turn, step }, route, { id, name, raw }, log) {
   let seq = session.append('assistant/message', {
     turn,
     step,
@@ -826,6 +826,13 @@ export class Backchannel {
     const offered = offeredTools(this.ctx, record.agent, { native: record.native })
     if (!offered.some((tool) => tool.name === name)) return error(`Tool "${name}" is not offered to this Session.`)
     const raw = JSON.stringify(args ?? {})
+    // A native background task or subagent finishing after its turn ends wakes Claude Code on its
+    // own: there is no DSH step open and no DSH turn to wait for. Manual and Full run the extra
+    // without a card (no loadable row exists outside a step); Auto refuses, because Auto review
+    // reads a call from its step. A plain refusal here would be a silent dead end for the agent.
+    if (openStepOf(session) === undefined && !betweenSteps(session) && record.promptRunning?.() !== true) {
+      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone })
+    }
     const approval = this.ctx?.get?.('approval')
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
     // Every level advertises the call (`advertise`, #842) with the same turn/step, id, name and
@@ -1118,6 +1125,95 @@ export class Backchannel {
       // After its step ended this writes nothing: the write guard hid the block there.
       hideSynthetic()
       releaseApproval()
+      leave()
+    }
+  }
+
+  /**
+   * A bridge call in a turn the agent opened itself (a native background task finished after its
+   * DSH turn ended): no step exists and none can be opened out of band, because the agent loop's
+   * own turn numbering is private. Manual and Full run it without DSH rows and record a plugin
+   * record instead; Auto refuses, because Auto review reads the pending call from its step.
+   * @param {any} record
+   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal }} call
+   */
+  async selfOpenedCall(record, { name, raw, callId, signal: callerGone }) {
+    const error = text => ({ content: [{ type: 'text', text }], isError: true })
+    const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
+    const session = record.agent?.session
+    const tools = this.ctx?.get?.('tools')
+    const approval = this.ctx?.get?.('approval')
+    const id = bridgeCallId(callId)
+    const note = (outcome) => {
+      try { appendPluginRecord(session, 'plugin:acp-dsh/bridge-outside-step', { callId: id, name, outcome }) } catch {}
+    }
+    const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
+    if (level.auto) {
+      note('refused')
+      return unavailable('BRIDGE_OUTSIDE_STEP', `DSH did not run ${name}: Claude Code opened this turn itself (a background task finished), and DSH Auto review cannot see a call outside a DSH step. Ask the person to send a message in the chat; the next turn has a DSH step, and the call works there.`)
+    }
+    if (session === undefined || tools?.execute === undefined) return error(`DSH tools are not available to ${record.name}.`)
+    if (callId !== undefined && id !== callId) this.log(`bridge call id ${JSON.stringify(callId).slice(0, 160)} replaced by ${id} in an agent-opened turn`)
+    const own = new AbortController()
+    const onGone = () => own.abort(callerGone.reason)
+    if (callerGone?.aborted) onGone()
+    else callerGone?.addEventListener('abort', onGone, { once: true })
+    record.controllers.add(own)
+    const stopped = AbortSignal.any([record.abort.signal, own.signal])
+    const cancelled = () => ({ ...error(`${name} was stopped before it finished.`), error: { name: 'BridgeCancelledError', code: 'BRIDGE_CANCELLED' } })
+    const leave = () => {
+      record.controllers.delete(own)
+      callerGone?.removeEventListener('abort', onGone)
+      if (record.closed && record.controllers.size === 0) record.guard?.release()
+    }
+    try {
+      if (record.closed || record.abort.signal.aborted) return { revoked: true }
+      if (!level.full) {
+        let outcome = 'unavailable'
+        let policy
+        try { policy = approval?.effectivePolicy?.(session) } catch {}
+        const request = {
+          agent: record.agent,
+          toolName: name,
+          callId: id,
+          reason: `${record.name}: ${name}`,
+          displayReason: { en: `${record.name} wants to run ${name}` },
+          signal: stopped,
+          bridgeCall: { agentAsked: record.agentAsked === true },
+        }
+        try { outcome = await approval.request(request) } catch {
+          outcome = 'unavailable'
+          this.log(`approval for ${name} failed in an agent-opened turn`)
+        }
+        if (outcome !== 'allowed-once') {
+          if (record.closed || record.abort.signal.aborted) return { revoked: true }
+          if (own.signal.aborted) return cancelled()
+          note('refused')
+          return error(bridgeRefusalText(name, outcome, policy))
+        }
+      }
+      if (record.closed || record.abort.signal.aborted) return { revoked: true }
+      if (own.signal.aborted) return cancelled()
+      const settled = await tools.execute({ calls: [{ id, name, arguments: raw }], agent: record.agent, signal: stopped })
+      if (record.closed || record.abort.signal.aborted) return { revoked: true }
+      if (own.signal.aborted) return cancelled()
+      const result = settled?.results?.[0]?.result
+      if (result === undefined) {
+        note('failed')
+        return error('The tool returned no result.')
+      }
+      const info = result.isError === true ? (result.error?.info ?? (typeof result.error?.code === 'string' ? result.error : undefined)) : undefined
+      note(result.isError === true ? 'failed' : 'ran')
+      return {
+        content: await contentOf(result.content ?? [], this.ctx?.get?.('attachments')),
+        isError: result.isError === true,
+        ...(info === undefined ? {} : { error: info }),
+      }
+    } catch (cause) {
+      if (record.closed || record.abort.signal.aborted) return { revoked: true }
+      note('failed')
+      return error(`Error: ${thrownText(cause)}`)
+    } finally {
       leave()
     }
   }

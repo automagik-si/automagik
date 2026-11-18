@@ -66,9 +66,13 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   (after a `step/end`, before the next `step/start`) waits for the next step, at most 30 s, and is
   recorded and reviewed there; it ends with no rows if the turn ends, its caller goes away, the
   bridge is revoked or the turn is stopped (#969). Otherwise a Manual or Full call with no open
-  step is `BRIDGE_NO_STEP` (Auto: `AUTO_REVIEW_NO_STEP`); one whose advertisement or
-  call row cannot be written is `BRIDGE_RECORD_FAILED`, and the call does not run. The rows' call
-  id is the agent's own `_meta.callId` only when it is 1 to 128 characters of `A-Z a-z 0-9 _ . : -`
+  step is `BRIDGE_NO_STEP` (Auto: `AUTO_REVIEW_NO_STEP`). A call in a turn the agent opened
+  itself, with no DSH turn at all, is different: at Manual or Full it runs without a card and
+  leaves a `plugin:acp-dsh/bridge-outside-step` record; at Auto it is refused as
+  `BRIDGE_OUTSIDE_STEP` with what to do next, because Auto review cannot see a call outside a
+  DSH step. One whose advertisement or call row cannot be written is `BRIDGE_RECORD_FAILED`,
+  and the call does not run. The rows' call id is the agent's own `_meta.callId` only when it is
+  1 to 128 characters of `A-Z a-z 0-9 _ . : -`
   and does not start with `acp_` (the mirror's ids); otherwise the plugin mints `bridge_<16 hex>`
   and logs the replacement. **Codex's MCP approvals.** With `dshTools` on, `acp-codex`'s MCP calls
   get no mirror card (it gives them no structured name), so a `session/request_permission` Codex
@@ -202,21 +206,29 @@ that makes your harness lose all your power."
   it at the Session's level, and a refusal reaches Claude Code as its own reject option before
   the call runs. The hard ask rules (`CLAUDE_HARD_ASK`) are injected as session settings, so the
   person's allow rules cannot silently skip the ask for those Bash cases. A subagent's nested
-  call asks while its Agent card is still waiting: that card asks DSH for it, naming the nested
-  call, and the nested call's own card follows, already answered. That nested ask does not go
-  through DSH's Auto review: it goes straight to DSH's approval request, so the person's
-  dialog answers it (or the Bot team's judge, where one is set; a delegated child that may never
-  ask is refused). An unattended Session at Auto therefore waits on the person at each nested
-  ask.
+  call asks while its Agent card is still waiting. At Auto the Agent card runs the nested call's
+  own card through DSH's tool pipeline inside the step it holds open, so DSH's Auto review sees
+  and answers it like any other call; the person is asked only when the review escalates (or the
+  Bot team's judge, where one is set), and a delegated child that may never ask is refused. At
+  Manual and Full the Agent card asks DSH for the nested call directly, as before, and the
+  nested card follows already answered. At Auto the nested card is written before the Agent
+  card's result, and the agent's later report of that call draws no second card.
 
   | Level | Claude Code mode | What asks DSH | What can bypass DSH |
   |---|---|---|---|
   | Manual | `default` | every native call its own settings leave as "ask"; DSH's dialog answers | a call its own allow rules or hooks allow (the hard asks still ask) |
-  | Auto | `auto` | only what Claude Code's auto mode asks about; DSH Auto review answers a top-level call, the person answers a subagent's nested call | whatever its auto mode runs without asking |
+  | Auto | `auto` | only what Claude Code's auto mode asks about; DSH Auto review answers every call, a subagent's nested call included; the person only when the review escalates | whatever its auto mode runs without asking |
   | Full | `bypassPermissions` | nothing; no hard asks injected | every native call |
 
   Manual is the guarded level; Auto is convenience, and its review sees only what reaches the
   mirror.
+- **A turn Claude Code opens itself.** A native background task or subagent can finish after its
+  DSH turn ended and wake Claude Code on its own. There is no DSH step then, and none can be
+  opened out of band because the DSH agent loop owns turn numbering. At Manual and Full the
+  extra still runs, without a DSH card, and a `plugin:acp-dsh/bridge-outside-step` record marks
+  it. At Auto it is refused with `BRIDGE_OUTSIDE_STEP` and a sentence naming the cause and what
+  to do (send a message, so the next turn has a DSH step), because Auto review reads a call
+  from its step. No call runs unreviewed.
 - **Native commands and edits run in Claude Code, outside DSH's file sandbox.** DSH's sandbox,
   its read-before-write policy and its write guard do not see them; the person's OS permissions
   and Claude Code's own permission mode and rules are the boundary. Claude Code's `CLAUDE.md`
