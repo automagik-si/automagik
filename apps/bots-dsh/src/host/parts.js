@@ -1486,6 +1486,9 @@ export function install(rt) {
       }
       if (entry.answered === true) return
       if (entry.spoke === true) settleLater(session.id, entry)
+      // A restart cut before an answer keeps this entry live while the move settles;
+      // the durable archivePending marker covers a host restart.
+      else if (rt.cutByRestart?.(event.data?.reason)) return
       else if (event.data?.reason?.kind === 'error') {
         if (entry.fellBack !== true && !switchFailure(turnFailure(event.data.reason.error)) && rt.fallbackArmed?.(session.id) === true) {
           entry.fellBack = true

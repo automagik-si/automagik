@@ -4,6 +4,7 @@ import { registerHooks } from 'node:module'
 import { install } from '../src/host/parts.js'
 import { install as installModelState } from '../src/host/model-state.js'
 import { install as installFallback } from '../src/host/fallback.js'
+import { cutByRestart } from '../src/host/resume.js'
 import { fakeContext } from './fake-ctx.js'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import { Session } from '@deepseek-ai/dsh-session'
@@ -1305,6 +1306,121 @@ test('an explicit route crossing settles on its first answer or restores its ful
       assert.equal(b.bot.previousModel, undefined)
     }
   }
+})
+
+// #1631 + #1626: real Session logs on a managed ACP -> ACP crossing without a note.
+// Cut the first turn while the move still owns its job, then keep the host alive.
+test('managed ACP crossing keeps a restart-cut first turn eligible for a real answer or failure', { timeout: 15000 }, async t => {
+  const failure = { kind: 'error', error: { code: 'ACP_AGENT', message: 'The agent failed' } }
+  const stop = { kind: 'error', error: { code: 'ABORTED', message: 'Stopped' } }
+  const cuts = [
+    ['ACP interruption', { kind: 'error', error: { code: 'AGENT_INTERRUPTED', message: 'Claude Code was interrupted before it finished.' } }],
+    ['repaired interruption', { kind: 'interrupted' }],
+    ['host disposal', { kind: 'aborted', reason: { kind: 'disposed' } }],
+  ]
+  const cases = cuts.flatMap(([name, reason]) => ['answer', 'failure'].map(outcome => ({ name: `${name}, then ${outcome}`, reason, outcome, cut: true })))
+  cases.push({ name: 'actual ACP user Stop rolls back', reason: stop }, { name: 'genuine ACP failure rolls back', reason: failure })
+  for (const { name, reason, outcome, cut = false } of cases) await t.test(name, { timeout: 1500 }, async t => {
+    const b = await switchBench({ perNode: 10, model: 'acp-codex/default', fallback: false })
+    t.after(b.stop)
+    b.rt.cutByRestart = cutByRestart
+    b.rt.config.fallback = false
+    installFallback(b.rt)
+    b.ctx.llm.registerAdapter(['acp-claude'], new AgentRoute(b.calls.agent))
+    Object.assign(b.bot, { appliedModel: 'acp-codex/default', effort: 'high', appliedEffort: 'high' })
+    b.rt.desiredEffort = async bot => bot.effort
+    b.rt.resolveModel = async ref => ref
+    b.rt.resolveEffort = async (_ref, effort) => effort
+    b.rt.cachedCatalog = () => ['acp-codex/default', 'acp-claude/default'].map(ref => ({ ref }))
+    const notes = [], snapshots = []
+    b.rt.noteFailure = entry => notes.push(entry.text)
+    b.rt.save = async () => { snapshots.push(structuredClone(b.state)) }
+    const select = b.rt.selectSessionModel
+    b.rt.selectSessionModel = async (id, selection) => {
+      await select(id, selection)
+      const session = b.sessions.get(id)
+      await b.ctx.parallel('session/event', session, session.append('request/header', { reason: 'model-change', header: { config: selection } }))
+    }
+    const moving = deferred(), release = deferred()
+    t.after(() => release.resolve())
+    b.rt.moveSchedules = async () => { moving.resolve(); await release.promise }
+    const history = b.session.snapshotEvents()
+    assert.equal(await b.rt.backgroundModel(), undefined)
+    assert.ok(b.session.deriveMessages().length > 0)
+    assert.equal((await b.rt.switchRoute('b1', 'acp-claude/default', 'low')).status, 'switching')
+    await moving.promise
+    const job = [...b.rt.switchJobs()][0]
+    assert.equal(job.noNote, 'aside')
+    const noNoteWarnings = [...b.calls.warnings]
+    assert.equal(noNoteWarnings.length, 1)
+    assert.match(noNoteWarnings[0], /no model answers beside it.*handoff note/)
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
+    const fresh = b.sessions.get('fresh1')
+    const emit = async (type, data, options) => {
+      const event = fresh.append(type, data, options)
+      await b.ctx.parallel('session/event', fresh, event)
+      return event
+    }
+    await emit('turn/start', { turn: 1 })
+    const owner = b.agents.get('fresh1')
+    for (const message of [...owner.inbox.nextStep.splice(0), ...owner.inbox.nextTurn.splice(0)]) await emit('user/message', message, { surfaceOp: 'append' })
+    const kept = structuredClone(b.bot)
+    const accepted = 'Route change acp-codex/default → acp-claude/default accepted'
+    assert.equal(cutByRestart(reason), cut)
+    const ended = await emit('turn/end', { turn: 1, reason })
+    assert.deepEqual(fresh.snapshotEvents().at(-1), ended)
+    assert.equal(b.rt.switchingChat('b1'), true, 'event delivery finishes before the held move')
+    release.resolve()
+    await job.done
+    assert.ok(await until(() => !b.rt.switchingChat('b1')))
+    assert.deepEqual(b.state.switching, {}, 'the move clears its marker without a future turn')
+    assert.notEqual(b.rt.fallbackArmed?.('fresh1'), true)
+    assert.deepEqual(b.streams(), [], 'no background call or fallback')
+    if (cut) {
+      assert.deepEqual(b.bot, kept, 'restart cannot undo the fresh Session, route, effort or segment')
+      assert.equal(b.bot.sessionId, 'fresh1')
+      assert.equal(b.bot.model, 'acp-claude/default')
+      assert.equal(b.bot.appliedModel, 'acp-claude/default')
+      assert.equal(b.bot.effort, 'low')
+      assert.equal(b.bot.appliedEffort, 'low')
+      assert.deepEqual(fresh.requestHeader().config, { provider: 'acp-claude', model: 'default', reasoningEffort: 'low' })
+      assert.equal(b.bot.segments.at(-1).archivePending, true)
+      assert.deepEqual(snapshots.at(-1).bots.b1, kept, 'durable state retains archivePending and the new choice')
+      assert.deepEqual(notes, [accepted], 'no false completion or rollback')
+      assert.deepEqual(b.calls.warnings, noNoteWarnings)
+      assert.deepEqual(b.calls.archived, [], 'neither Session is archived by a cut')
+      assert.equal(b.rt.awaitingFirstAnswer('fresh1'), true)
+      assert.deepEqual(b.session.snapshotEvents(), history)
+      await emit('turn/start', { turn: 2 })
+      if (outcome === 'answer') await emit('assistant/message', { turn: 2, message: { role: 'assistant', source: { provider: 'acp-claude', model: 'default' }, content: [{ type: 'text', text: 'Continued after the cut.' }] } }, { surfaceOp: 'append' })
+      await emit('turn/end', { turn: 2, reason: outcome === 'answer' ? { kind: 'stop' } : failure })
+    }
+    assert.ok(await until(() => notes.length === 2), 'the real outcome settles without a stranded promise')
+    assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
+    assert.deepEqual(b.session.snapshotEvents().slice(0, history.length), history)
+    if (outcome === 'answer') {
+      assert.equal(b.bot.sessionId, 'fresh1')
+      assert.equal(b.bot.model, 'acp-claude/default')
+      assert.equal(b.bot.effort, 'low')
+      assert.equal(b.bot.segments.at(-1).archivePending, undefined)
+      assert.deepEqual(b.calls.archived, ['s1'], 'the answered fresh Session is never archived')
+      assert.equal(notes[1], 'Route change acp-codex/default → acp-claude/default completed')
+      assert.deepEqual(b.calls.warnings, noNoteWarnings)
+    } else {
+      assert.equal(b.bot.sessionId, 's1')
+      assert.equal(b.bot.model, 'acp-codex/default')
+      assert.equal(b.bot.appliedModel, 'acp-codex/default')
+      assert.equal(b.bot.effort, 'high')
+      assert.equal(b.bot.appliedEffort, 'high')
+      assert.deepEqual(b.bot.segments, [])
+      assert.deepEqual(b.calls.archived, ['fresh1'])
+      assert.equal(notes[1], 'Route change acp-codex/default → acp-claude/default rolled back (fresh conversation could not answer)')
+      assert.equal(b.calls.warnings.length, 2)
+      assert.equal(b.calls.warnings[0], noNoteWarnings[0])
+      assert.match(b.calls.warnings[1], /first call in the fresh part .* failed before any answer/)
+    }
+    assert.deepEqual(snapshots.at(-1).bots.b1, b.bot)
+  })
 })
 
 // Real Session projection and first-turn events; only the save sink fails. Every attempted
