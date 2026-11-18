@@ -1201,7 +1201,7 @@ export function apply(ctx) {
     // hands it back, so the Web app needs no Electron webview to show it.
     () => {
       const fiber = ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
-        scope.effect(() => installBotBrowserTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: BotBrowserBody, installCss: installCompiledStyles }), 'ds-bot: native Bot browser tab')
+        scope.effect(() => installBotBrowserTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: BotBrowserBody }), 'ds-bot: native Bot browser tab')
       })
       return () => fiber.dispose()
     },

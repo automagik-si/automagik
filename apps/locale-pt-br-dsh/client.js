@@ -2867,7 +2867,24 @@ const pack = createPack({
     "Signing out of the Bot account did not finish. Try again.": "Sair da conta do Bot não terminou. Tente de novo.",
     "Signing out of the Bot account could not be verified. Try again.": "Não foi possível confirmar a saída da conta do Bot. Tente de novo.",
     "The Bot account was reset. Press Sign in again.": "A conta do Bot foi redefinida. Clique em Entrar de novo.",
-    "This sign-in is not available for this Bot.": "Este login não está disponível para este Bot."
+    "This sign-in is not available for this Bot.": "Este login não está disponível para este Bot.",
+    "Bot browser": "Navegador do Bot",
+    "Open a page yourself, then hand the browser to this Bot.": "Abra uma página por conta própria e depois passe o navegador para este Bot.",
+    "Go": "Ir",
+    "You are in control — the Bot waits.": "Você está no controle — o Bot espera.",
+    "The Bot is driving.": "O Bot está no controle.",
+    "Give to Bot": "Passar ao Bot",
+    "No page open yet — type an address": "Ainda sem página aberta — digite um endereço",
+    "Type an address above to open a page in this Bot’s browser, or wait for the Bot to browse.": "Digite um endereço acima para abrir uma página no navegador deste Bot ou espere o Bot navegar.",
+    "Type into the page": "Digite na página",
+    "No Bot browser here yet": "Ainda sem navegador do Bot aqui",
+    "The Bot team has not listed this Session’s Bot yet. Ask the Bot to open a page and this view follows it.": "A equipe de Bots ainda não listou o Bot desta sessão. Peça ao Bot para abrir uma página e esta visualização passa a acompanhar o Bot.",
+    "Bot browsers are off": "Os navegadores dos Bots estão desligados",
+    "This host has the Bot browser turned off.": "O navegador do Bot está desligado neste host.",
+    "Could not read the page": "Não foi possível ler a página",
+    "Connecting to the Bot’s browser…": "Conectando ao navegador do Bot…",
+    "The first frame arrives in a moment.": "A primeira imagem chega em instantes.",
+    "The Bot’s browser": "O navegador do Bot"
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })
