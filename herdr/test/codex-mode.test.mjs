@@ -14,7 +14,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { AGENTS, CODEX_MODE_ARGS, CODEX_NETWORK, absPath, cleanPath, codexClean, codexGrantPlan, codexGrantPaths, codexCleanNote, codexDirAllowed,
+import { AGENTS, CLAUDE_PERSON_SETTINGS, CODEX_MODE_ARGS, CODEX_NETWORK, absPath, cleanPath, codexClean, codexGrantPlan, codexGrantPaths, codexCleanNote, codexDirAllowed,
   codexDirVerdict, codexGrants, codexKeepDirs, codexWhere, codexWithheldWarning, homeWide, launchRun, withCodexGrants, withoutBriefing }
   from "../mods/am-sidebar/models.js";
 import { helperPlan, restartPlan } from "../mods/am-sidebar/restart.js";
@@ -236,7 +236,7 @@ test("launchRun: a Codex run always ends in the launch mode, each word once, bef
   }
   assert.deepEqual(launchRun("codex", ["codex", "-m", "x", "--", "task"], {}), ["codex", "-m", "x", ...MODE, "--", "task"]);
   // Only Codex: another agent's run is as before.
-  assert.deepEqual(launchRun("claude", ["claude"], { codexAuto: false }), ["claude", "--permission-mode", "auto"]);
+  assert.deepEqual(launchRun("claude", ["claude"], { codexAuto: false }), ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto"]);
 });
 
 test("--no-daemon and the network word survive every restart shape, the worker plan and a tree helper's rebuild", () => {
@@ -288,6 +288,13 @@ test("codexGrants: the git dirs, herdr-core's state and data folders and the too
   const blind = codexGrantPlan({ home, env: named, isDir: () => true });
   assert.deepEqual(blind.dirs, []);
   assert.equal(blind.unproved.length, codexGrantPaths({ home, env: named }).candidates.length);
+});
+
+test("codex-mode #1261: the hc state and data grants keep a stated, untested case, not a running core", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  assert.match(readme, /#1125's N4 left both out and `hc ls`, `hc get self` and `am brief` still exited 0/);
+  assert.match(readme, /when no core is running and\s+the hc client must start it or take its lock/);
+  assert.match(readme, /no isolated check has shown that case works\s+without them, so they stay until one does \(#1261\)/);
 });
 
 test("codexGrants never grants the root, the home folder, a folder above it, or a whole XDG, cache, GOPATH or Bun folder", () => {

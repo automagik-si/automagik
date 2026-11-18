@@ -871,8 +871,12 @@ export function codexCleanNote(run, where = null, source = "programs.json's Code
  * { candidates, general }. `candidates`, in order: `gitDir`, the launch checkout's own git dir (a
  * linked worktree's `.git/worktrees/<name>`, which Codex keeps read-only even beside its common
  * dir), and `gitCommonDir`, its git common dir (its own .git, or the main checkout's); then
- * herdr-core's state and data folders (XDG_STATE_HOME, XDG_DATA_HOME, else under `home`), which hc
- * needs to reach its core; then the tool caches a build writes: Go's module and build caches
+ * herdr-core's state and data folders (XDG_STATE_HOME, XDG_DATA_HOME, else under `home`). They
+ * are kept as a narrow defence for the one case #1125 did not test: the core is not running and
+ * the hc client must start it or take its lock. While the core runs neither is needed (N4: with
+ * both left out, `hc ls`, `hc get self` and `am brief` exited 0); the network word is always
+ * needed (N3). No isolated check has shown the core-not-running case works without them, so they
+ * stay until one does (#1261); then the tool caches a build writes: Go's module and build caches
  * (GOMODCACHE, GOCACHE, else GOPATH's), npm's (npm_config_cache), pnpm's store and cache, and Bun's
  * install cache (BUN_INSTALL_CACHE_DIR, BUN_INSTALL). `general`: the folders never granted whole
  * (each XDG folder, ~/.local, GOPATH and Bun's own). `env` is the launch's environment.
@@ -1206,10 +1210,63 @@ export function autoModeArgs(agentKey, bot = null, run = []) {
   return [...mode.args];
 }
 
+// Claude Code 2.1.327's person-at-the-keyboard features (#1558): a suggested next prompt after
+// every turn, a recap when a person returns, and progress summaries of running subagents. On a
+// bot seat nobody reads them, and each call carries the seat's whole context. The launch turns
+// them off, never the host's settings file (a person also works there): the two settings keys go
+// as inline JSON through the launch's own `--settings`, and the subagent variable through that
+// settings object's `env`, which Claude Code applies to every session. A bot with
+// `personFeatures: true` keeps them for a seat a person talks to all day.
+export const CLAUDE_PERSON_FEATURES = Object.freeze({
+  promptSuggestionEnabled: false,
+  awaySummaryEnabled: false,
+  env: Object.freeze({ CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES: "1" }),
+});
+export const CLAUDE_PERSON_SETTINGS = JSON.stringify(CLAUDE_PERSON_FEATURES);
+
+/** Whether `bot` keeps Claude Code's person-at-the-keyboard features (the opt-out, #1558). */
+export const keepsPersonFeatures = (bot) => bot?.personFeatures === true;
+
+/** An inline `--settings` value with #1558's keys merged in, or null for one that isn't a JSON object. */
+function withPersonSettingsValue(value) {
+  let parsed = null;
+  try { parsed = JSON.parse(value); } catch { return null; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const env = parsed.env && typeof parsed.env === "object" && !Array.isArray(parsed.env) ? parsed.env : {};
+  return JSON.stringify({ ...parsed, ...CLAUDE_PERSON_FEATURES, env: { ...env, ...CLAUDE_PERSON_FEATURES.env } });
+}
+
+/**
+ * `argv` with Claude Code's person-feature settings off (#1558), for the launch's own
+ * `--settings` word: any other agent, and a bot whose `personFeatures` is true, unchanged. A run
+ * that already carries an inline `--settings` JSON has the two keys and the `env` merged into it
+ * (the pack's keys win); one that names a settings file is left as it is, because that file is
+ * the person's own and a linked machine's file can't be read here.
+ */
+export function withPersonFeatures(agentKey, argv, bot = null) {
+  const words = Array.isArray(argv) ? argv.map(String) : [];
+  if (agentKey !== "claude" || keepsPersonFeatures(bot)) return words;
+  const cut = words.indexOf("--");
+  const head = cut < 0 ? words : words.slice(0, cut);
+  for (let i = 0; i < head.length; i += 1) {
+    const w = head[i];
+    const inline = w.startsWith("--settings=");
+    if (w !== "--settings" && !inline) continue;
+    const value = inline ? w.slice("--settings=".length) : head[i + 1];
+    const merged = value === undefined ? null : withPersonSettingsValue(value);
+    if (merged === null) return words; // a file (or no value): the person's own settings stay
+    return inline ? [...words.slice(0, i), `--settings=${merged}`, ...words.slice(i + 1)]
+      : [...words.slice(0, i + 1), merged, ...words.slice(i + 2)];
+  }
+  const settings = ["--settings", CLAUDE_PERSON_SETTINGS];
+  return cut < 0 ? [...words, ...settings] : [...words.slice(0, cut), ...settings, ...words.slice(cut)];
+}
+
 /**
  * The words `agentKey` starts with: the given run (Herdr's table, programs.json applied) and the
  * flags this pack adds for that agent's automatic mode. They are added here, so a bot's start,
  * its restart and its workers all take them from the definition, never from an old pane's command.
+ * A Claude run also gets the person-feature settings off, unless the bot keeps them (#1558).
  * A Codex run loses its own approval and sandbox words first (codexClean, #1125; `where`, the
  * launch's codexWhere when the caller knows it, also stops an --add-dir of the home folder or an
  * app home, by any alias); the mode words go before a `--` in it, so they stay options.
@@ -1217,7 +1274,7 @@ export function autoModeArgs(agentKey, bot = null, run = []) {
 export function launchRun(agentKey, run, bot, where = null) {
   if (agentKey !== "codex") {
     const words = agentKey === "hermes" ? hermesPairRun(run, bot) : run;
-    return [...words, ...autoModeArgs(agentKey, bot, run)];
+    return [...withPersonFeatures(agentKey, words, bot), ...autoModeArgs(agentKey, bot, run)];
   }
   const { argv } = codexClean(run, where);
   const cut = argv.indexOf("--");
