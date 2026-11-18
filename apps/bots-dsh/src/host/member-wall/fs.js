@@ -11,7 +11,9 @@
 //   the folder a path really reaches on disk, never on its spelling. To a member, any other path looks
 //   absent: a probe finds nothing and a read or a listing fails as not found, so it learns
 //   nothing of what is there, and DSH's own probes (a workspace's parents) go on as for a path
-//   that does not exist. Writing there is refused;
+//   that does not exist. A listing of a folder the member may reach leaves out every child whose
+//   resolved target is denied, so neither a child's name nor its metadata names what it may not
+//   read. Writing there is refused;
 // - grep and glob search with ripgrep, which never reads through `ctx.fs`, so their search
 //   root (as spelled, against the session's working directory) goes through the same rule before
 //   they run, and a root with a denied root below it is refused. ripgrep walks the folder the
@@ -164,7 +166,11 @@ export default class MemberWallFileSystem extends SandboxedFileSystem {
 
   async listDir(target, signal) {
     this.hide('list', target)
-    return super.listDir(target, signal)
+    const entries = await super.listDir(target, signal)
+    // Every child is decided on the target it really reaches, as every other read is: a child
+    // that leaves for a denied path is left out of the listing whole, its name and metadata
+    // included, so the listing cannot name what the member may not see.
+    return this.wall.members ? entries.filter(entry => this.visible(entry.target)) : entries
   }
 
   async writeText(target, content, expected, signal, sandboxPolicy) {
