@@ -37,8 +37,9 @@ import { UNFOLD_BOT } from './companion.js'
 //   acp, acp-switch, acp-retry
 //                      Claude Code and Codex through @automagik/acp-dsh: its acpAgents
 //                      service's status, and its claude/codex settings (src/host/acp.js)
-//   migrate-probe, migrate-start, migrate-status, migrate-omni-status
-//                      the "From another tool" step: Hermes's Telegram channel and its key
+//   migrate-probe, migrate-start, migrate-status, migrate-omni-status, migrate-restore-hermes
+//                      the "From another tool" step: Hermes's Telegram channel and its key,
+//                      and the way back to Hermes after an unknown Omni result
 //                      (src/host/hermes-migrate.js). The key never enters an answer.
 //
 // The key never enters settings, a reply or a log line: the route names it by the
@@ -250,6 +251,7 @@ export function install(ctx, deps = {}) {
   actions['migrate-start'] = (payload, signal) => migrate['migrate-start'](parse(MigrateStartPayload, payload) ?? {}, signal)
   actions['migrate-status'] = (payload, signal) => migrate['migrate-status'](parse(MigrateStatusPayload, payload) ?? {}, signal)
   actions['migrate-omni-status'] = (payload, signal) => migrate['migrate-omni-status'](parse(MigrateOmniPayload, payload) ?? {}, signal)
+  actions['migrate-restore-hermes'] = migrate['migrate-restore-hermes']
   actions['migrate-probe'] = migrate['migrate-probe']
   // Connect AI finished with an AI on: the companion, the Omni Bot and the Genie Bot get their model, and
   // their held greetings go out. The step waits for that a little (ASSIGN_HOLD_MS), so the
@@ -288,8 +290,21 @@ export function install(ctx, deps = {}) {
     fetch: async (request) => {
       let body
       try { body = await request.json() } catch { body = {} }
-      const asked = parse(RequestBody, body) ?? { endpoint: '' }
-      const result = await handle(asked.endpoint, asked.payload, request.signal)
+      const asked = parse(RequestBody, body)
+      let result
+      if (asked !== undefined) {
+        result = await handle(asked.endpoint, asked.payload, request.signal)
+      } else {
+        // A body that does not parse is not the same as an unknown endpoint: a known
+        // endpoint whose request simply has no payload says that, in its own words.
+        const plain = body !== null && typeof body === 'object' ? body : {}
+        const named = typeof plain.endpoint === 'string' ? plain.endpoint : ''
+        if (named !== '' && Object.hasOwn(actions, named) && !Object.hasOwn(plain, 'payload')) {
+          result = { ok: false, error: { code: 'omni-ai/no-payload', message: 'The payload is missing.' } }
+        } else {
+          result = await handle(named, undefined, request.signal)
+        }
+      }
       return new Response(JSON.stringify(result), { status: 200, headers: { 'content-type': 'application/json' } })
     },
   }), 'omni-ai: api route')
