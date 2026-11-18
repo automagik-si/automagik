@@ -784,7 +784,8 @@ export default class Spaces extends View {
     // row's click goes; Detach); worker: what the row's own click opens (Focus, as openWorker);
     // terminal: the pane focused at the click (Attach).
     const onMenu = () => openBotForm({ form: "menu", bot: b.id, name: b.name, planned: planned, project: project.key,
-      machine: project.machine, stale: Boolean(tree.stale), terminal: focused()?.terminal ?? null, live: live?.terminal ?? held ?? null, worker: rowWorker(r),
+      machine: project.machine, stale: Boolean(tree.stale), hermes: b.hermes ?? null, agent: b.agent ?? null,
+      terminal: focused()?.terminal ?? null, live: live?.terminal ?? held ?? null, worker: rowWorker(r),
       helpers: (n.helpers ?? []).map((h) => ({ terminal: h.terminal, name: h.name ?? null })) }, "popup");
     const size = main ? 30 : 26;
     let row = h_flex().flex_1().min_w(0).gap(8).items_center()

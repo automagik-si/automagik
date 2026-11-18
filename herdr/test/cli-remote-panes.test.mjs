@@ -1439,3 +1439,148 @@ test("linked tree reply naming a live pane that is not the bot's replacement: no
   assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false);
   assert.equal(s.rows().at(-1).terminal, "t8", "the controller attachment stays on the old pane");
 });
+
+// ---- #1173: a linked machine's model pins are checked against that machine, not this one ----
+
+/** A Codex model cache in `home` (models.js reads `~/.codex/models_cache.json`). */
+const seedCodexModels = (home, slugs) => {
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  writeFileSync(join(home, ".codex/models_cache.json"), JSON.stringify({ models: slugs.map((slug) => ({ slug })) }));
+};
+/** Hedge stored as a Codex bot with `model` (null: no pin), on vm. */
+const hedgeAsCodex = (s, model = null) => {
+  const file = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json"), "utf8"));
+  const hedge = file.bots.find((b) => b.id === HEDGE);
+  hedge.agent = "codex";
+  if (model) hedge.model = model; else delete hedge.model;
+  writeFileSync(join(s.project, ".herdr/bots.json"), JSON.stringify(file));
+};
+const codexRunWords = (s) => {
+  const run = s.calls().filter((c) => c[0] === "run").at(-1);
+  return agentPart(run.slice(run.indexOf("--") + 1));
+};
+
+test("#1173 start --machine starts a Codex pin that only the target's cache lists", (t) => {
+  const s = scene(t);
+  seedCodexModels(s.home, ["codex-local-only"]);
+  seedCodexModels(join(s.root, "vm"), ["codex-target-only"]);
+  exe(join(s.root, "vm-bin", "codex"), "#!/bin/sh\nexit 0\n");
+  hedgeAsCodex(s, "codex-target-only");
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = codexRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "codex-target-only");
+});
+
+test("#1173 restart --machine keeps a stored Codex pin that only the target's cache lists", (t) => {
+  const s = scene(t, { terminals: [{ address: "vm/t9", name: null, state: "live", created_ms: 1700000000009, parent: null,
+    labels: { bot: HEDGE }, foreground: { argv: ["codex"], name: "codex" }, status: { state: "idle", app: "codex" } }] });
+  seedCodexModels(s.home, ["codex-local-only"]);
+  seedCodexModels(join(s.root, "vm"), ["codex-target-only"]);
+  exe(join(s.root, "vm-bin", "codex"), "#!/bin/sh\nexit 0\n");
+  hedgeAsCodex(s, "codex-target-only");
+  assert.equal(s.cli(["attach", "Hedge", "vm/t9", ...s.on]).code, 0);
+  const r = s.cli(["restart", "Hedge", ...s.on, "--force", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = codexRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "codex-target-only");
+});
+
+test("#1173 restart --machine --model accepts a pin from the target's cache", (t) => {
+  const s = scene(t, { terminals: [{ address: "vm/t9", name: null, state: "live", created_ms: 1700000000009, parent: null,
+    labels: { bot: HEDGE }, foreground: { argv: ["codex"], name: "codex" }, status: { state: "idle", app: "codex" } }] });
+  seedCodexModels(s.home, ["codex-local-only"]);
+  seedCodexModels(join(s.root, "vm"), ["codex-target-only"]);
+  exe(join(s.root, "vm-bin", "codex"), "#!/bin/sh\nexit 0\n");
+  hedgeAsCodex(s);
+  assert.equal(s.cli(["attach", "Hedge", "vm/t9", ...s.on]).code, 0);
+  const r = s.cli(["restart", "Hedge", ...s.on, "--model", "codex-target-only", "--force", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = codexRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "codex-target-only");
+});
+
+test("#1173 restart --machine --agent codex --model: the swap's pin is the target's list's", (t) => {
+  const s = scene(t, { terminals: [{ address: "vm/t9", name: null, state: "live", created_ms: 1700000000009, parent: null,
+    labels: { bot: HEDGE }, foreground: { argv: ["codex"], name: "codex" }, status: { state: "idle", app: "codex" } }] });
+  seedCodexModels(s.home, ["codex-local-only"]);
+  seedCodexModels(join(s.root, "vm"), ["codex-target-only"]);
+  exe(join(s.root, "vm-bin", "codex"), "#!/bin/sh\nexit 0\n");
+  hedgeAsCodex(s);
+  const a = s.cli(["attach", "Hedge", "vm/t9", ...s.on]);
+  assert.equal(a.code, 0, `${a.err}\n${a.out}`);
+  const r = s.cli(["restart", "Hedge", ...s.on, "--agent", "codex", "--model", "codex-target-only", "--force", "--json"]);
+  assert.equal(r.code, 0, `${r.err}\n${r.out}`);
+  const words = codexRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "codex-target-only");
+});
+
+/** A Claude settings default in `home` (models.js reads `~/.claude/settings.json`). */
+const seedClaudeModel = (home, model) => {
+  mkdirSync(join(home, ".claude"), { recursive: true });
+  writeFileSync(join(home, ".claude/settings.json"), JSON.stringify({ model }));
+};
+/** Hedge stored as a Claude bot with `model` (null: no pin), on vm. */
+const hedgeAsClaude = (s, model = null) => {
+  const file = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json"), "utf8"));
+  const hedge = file.bots.find((b) => b.id === HEDGE);
+  hedge.agent = "claude";
+  if (model) hedge.model = model; else delete hedge.model;
+  writeFileSync(join(s.project, ".herdr/bots.json"), JSON.stringify(file));
+};
+const claudeRunWords = (s) => {
+  const run = s.calls().filter((c) => c[0] === "run").at(-1);
+  return agentPart(run.slice(run.indexOf("--") + 1));
+};
+
+test("#1173 start --machine starts a Claude pin that only the target's settings name", (t) => {
+  const s = scene(t);
+  seedClaudeModel(s.home, "claude-local-only");
+  seedClaudeModel(join(s.root, "vm"), "claude-target-only");
+  hedgeAsClaude(s, "claude-target-only");
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(r.code, 0, `exit ${r.code}: ${r.err}`);
+  const words = claudeRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "claude-target-only");
+});
+
+test("#1173 restart --machine keeps a stored Claude pin only the target's settings name", (t) => {
+  const s = scene(t, { terminals: [{ address: "vm/t9", name: null, state: "live",
+    created_ms: 1700000000009, parent: null, labels: { bot: HEDGE },
+    foreground: { argv: ["claude"], name: "claude" },
+    status: { state: "idle", app: "claude" } }] });
+  s.setState((st) => { st.terminals[0].foreground.cwd = s.project; });
+  seedClaudeModel(s.home, "claude-local-only");
+  seedClaudeModel(join(s.root, "vm"), "claude-target-only");
+  hedgeAsClaude(s, "claude-target-only");
+  const a = s.cli(["attach", "Hedge", "vm/t9", ...s.on]);
+  assert.equal(a.code, 0, `${a.err}\n${a.out}`);
+  const r = s.cli(["restart", "Hedge", ...s.on, "--force", "--json"]);
+  assert.equal(r.code, 0, `exit ${r.code}: ${r.err}`);
+  const words = claudeRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "claude-target-only");
+});
+
+test("#1173 start --machine leaves a Claude pin alone when the target lists none", (t) => {
+  const s = scene(t);
+  seedClaudeModel(s.home, "claude-local-only");
+  hedgeAsClaude(s, "claude-target-only");
+  const r = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(r.code, 0, `exit ${r.code}: ${r.err}`);
+  const words = claudeRunWords(s);
+  const at = words.indexOf("--model");
+  assert.ok(at > 0, words.join(" "));
+  assert.equal(words[at + 1], "claude-target-only");
+});

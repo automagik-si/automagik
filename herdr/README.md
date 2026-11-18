@@ -1677,13 +1677,16 @@ under that flag agy asks nothing and runs no classifier: a command runs unless a
 runs unasked, on a seat, a worker and a read-only review launch alike:
 
 - inline code and scripts: `python3 -c`, `node -e`, `bash -c`, a heredoc, any script file;
+- the test runners: `node --test` and `bun test` run any test file they are given, so a
+  read-only launch can run code through one, exactly as `node -e` would;
 - shells and wrappers: `sh`, `bash`, `env`, `xargs`, `find -exec` and `-delete`, `awk`, `tee`,
   `sed -i`, and so a pipeline such as `cat x | sh`;
 - the network and other machines: `curl`, `ssh`, `hc run --on`, `gh gist create`;
 - a plain (non-force) `git push`, to `dev` or `main` too: only GitHub's branch protection
   stands there;
 - a child agent started by hand (`claude --dangerously-skip-permissions`, another `agy`,
-  `hc run -- ...`), and text typed into another pane with `hc send`;
+  `hc run -- ...`), and text typed into another pane with `hc send` (an agent's prompt or a
+  shell's, as that pane decides);
 - a write to the launch's own settings file or to the roster (the next pack launch writes the
   file again from the roster);
 - `gh api <endpoint> -X PUT ...` with the endpoint first, `--method=PUT`, `-XPUT` and
