@@ -30,6 +30,9 @@ const slot = () => generateKeyPairSync('ed25519')
 const slots = { a: slot(), b: slot(), stranger: slot() }
 const jwk = (kid, pair = slots[kid]) => ({ ...pair.publicKey.export({ format: 'jwk' }), kid, alg: 'EdDSA', use: 'sig' })
 const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url')
+const claimsOf = value => {
+  try { return JSON.parse(Buffer.from(String(value).split('.')[1], 'base64url').toString('utf8')) } catch { return undefined }
+}
 const code = () => randomBytes(24).toString('base64url')
 function mint(claims, { kid = 'a', key = slots[kid].privateKey, header = {} } = {}) {
   const input = `${encode({ alg: 'EdDSA', typ: 'JWT', kid, ...header })}.${encode(claims)}`
@@ -81,6 +84,7 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval
     codes: new Map(),
     exchanges: [],
     keyFetches: 0,
+    tokens: [],
     exchangeStatus: 200,
     reply: undefined,
     listFetches: 0,
@@ -112,15 +116,20 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval
           // Version 2 is the renewal recheck; version 1 is the unchanged open exchange. One URL,
           // and each parser refuses the other version before it reads a field.
           if (parsed.version === 2) {
+            // The renewal is proved by the workspace token the gate holds; Cloud verifies its
+            // aud and exp and then rechecks the person's role. No browser cookie or code.
             state.renewals.push({ headers: req.headers, body: parsed })
-            if (state.renewStatus !== 200) {
-              res.writeHead(state.renewStatus, { 'content-type': 'application/json' }).end('{"error":"refused"}')
+            const claims = claimsOf(parsed.token)
+            if (state.renewStatus !== 200 || !claims || claims.aud !== parsed.workspace ||
+              !Number.isSafeInteger(claims.exp) || claims.exp * 1000 <= state.now) {
+              res.writeHead(state.renewStatus === 200 ? 401 : state.renewStatus, { 'content-type': 'application/json' }).end('{"error":"refused"}')
               return
             }
             const iat = Math.floor(state.now / 1000)
             const token = mint({ ver: 1, iss: ENV.AUTOMAGIK_GATE_CLOUD_ISSUER, aud: 'workspace-a',
-              workspace: 'workspace-a', sub: parsed.subject, roles: state.renewRoles, iat,
+              workspace: 'workspace-a', sub: claims.sub, roles: state.renewRoles, iat,
               exp: iat + state.renewExp })
+            state.tokens.push(token)
             res.writeHead(200, { 'content-type': 'application/json' })
               .end(JSON.stringify(state.renewReply?.(token) ?? { version: 2, token, expires_in: state.renewExp }))
             return
@@ -137,6 +146,7 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval
           const iat = Math.floor(state.now / 1000)
           const token = mint({ ver: 1, iss: ENV.AUTOMAGIK_GATE_CLOUD_ISSUER, aud: workspace, sub: issued.sub, roles: issued.roles,
             workspace, iat, exp: iat + 300, ...issued.claims }, { kid: issued.kid ?? state.signer, ...(issued.key ? { key: issued.key } : {}), header: issued.header })
+          state.tokens.push(token)
           res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(state.reply?.(token) ?? { version: 1, token, expires_in: 300 }))
         })
         return
@@ -823,17 +833,19 @@ test('a v2 renewal rechecks the role and issues a session of at most five minute
   assert.equal(opened.status, 303)
   const original = cookieOf(opened)
   const originalFamily = f.sessions.list()[0].id
+  const proof = f.state.tokens[0]
   f.state.now += 60_000
   const renewed = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, original)
   assert.equal(renewed.status, 200)
   const kept = cookieOf(renewed)
   const maxAge = Number(/Max-Age=(\d+)/.exec(renewed.headers['set-cookie'][0])[1])
   assert.ok(maxAge > 0 && maxAge <= 300, `Max-Age=${maxAge}`)
-  // The gate rechecks with Cloud, server to server, naming only the authenticated person.
+  // The gate rechecks with Cloud, server to server, proving itself with the exact token it
+  // verified at open. It names no subject, cookie, code or query string.
   assert.equal(f.state.renewals.length, 1)
-  assert.deepEqual(Object.keys(f.state.renewals[0].body).sort(), ['renew', 'subject', 'version', 'workspace'])
-  assert.deepEqual(f.state.renewals[0].body, { version: 2, renew: true, workspace: 'workspace-a', subject: 'person-1' })
-  for (const name of ['authorization', 'cookie']) assert.equal(f.state.renewals[0].headers[name], undefined)
+  assert.deepEqual(Object.keys(f.state.renewals[0].body).sort(), ['renew', 'token', 'version', 'workspace'])
+  assert.deepEqual(f.state.renewals[0].body, { version: 2, renew: true, workspace: 'workspace-a', token: proof })
+  for (const name of ['authorization', 'cookie', 'set-cookie']) assert.equal(f.state.renewals[0].headers[name], undefined)
   // The old secret is rotated out; the session carries the rechecked roles, not the request's.
   assert.equal((await request(f.port, { headers: { cookie: original } })).status, 401)
   const page = await request(f.port, { headers: { cookie: kept } })
@@ -862,6 +874,87 @@ test('a v2 renewal rechecks the role and issues a session of at most five minute
   // The renewed session still ends at the five-minute bound it was issued with.
   f.state.now += 290_000
   assert.equal((await request(f.port, { headers: { cookie: kept } })).status, 401)
+})
+
+test('a renewal sends exactly the workspace token the gate verified at open', async t => {
+  const f = await fixture(t)
+  const opened = await f.open(f.issue())
+  assert.equal(opened.status, 303)
+  const proof = f.state.tokens[0]
+  assert.equal(typeof proof, 'string')
+  const renewed = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, cookieOf(opened))
+  assert.equal(renewed.status, 200)
+  assert.equal(f.state.renewals.length, 1)
+  const sent = f.state.renewals[0]
+  // The gate-to-Cloud body is the three-field v2 request plus the proof token, and nothing else.
+  assert.deepEqual(Object.keys(sent.body).sort(), ['renew', 'token', 'version', 'workspace'])
+  assert.equal(sent.body.token, proof)
+  assert.equal(sent.body.subject, undefined)
+  assert.equal(sent.body.code, undefined)
+  for (const name of ['authorization', 'cookie', 'set-cookie']) assert.equal(sent.headers[name], undefined)
+  // The renewed session holds the new token Cloud minted, not the old one, so the next renewal
+  // proves itself with the token the gate verified for that session.
+  f.state.now += 10_000
+  const next = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, cookieOf(renewed))
+  assert.equal(next.status, 200)
+  assert.equal(f.state.renewals.length, 2)
+  assert.equal(f.state.renewals[1].body.token, f.state.tokens[1])
+  assert.notEqual(f.state.tokens[1], proof)
+})
+
+test('a held token past exp refuses with no grace, before Cloud and with no session', async t => {
+  const f = await fixture(t)
+  const iat = Math.floor(f.state.now / 1000)
+  const opened = await f.open(f.issue({ claims: { exp: iat + 60 } }))
+  assert.equal(opened.status, 303)
+  const cookie = cookieOf(opened)
+  const family = f.sessions.families[0]
+  const proof = f.state.tokens[0]
+  // The session's own end is the earlier bound and has its own test; this isolates the token.
+  f.state.now += 60_000
+  family.expires = f.state.now + 300_000
+  family.proof = { token: proof, aud: 'workspace-a', exp: iat + 60 }
+  const refused = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, cookie)
+  assert.equal(refused.status, 401)
+  assert.equal(refused.headers['set-cookie'], undefined)
+  assert.equal(f.state.renewals.length, 0, 'an expired held token never reaches Cloud')
+  assert.equal(f.sessions.list().length, 1, 'a refused renewal issues no session')
+})
+
+test('a renewal workspace must be the configured id and the held token\'s aud', async t => {
+  const f = await fixture(t)
+  const opened = await f.open(f.issue())
+  const cookie = cookieOf(opened)
+  // A request for another workspace is refused before Cloud is called.
+  const foreign = await f.renew({ version: 2, renew: true, workspace: 'workspace-b' }, cookie)
+  assert.equal(foreign.status, 401)
+  assert.equal(foreign.headers['set-cookie'], undefined)
+  assert.equal(f.state.renewals.length, 0)
+  // A held token whose aud is not the request's workspace is refused too, even with a valid
+  // signature: workspace in v2 is v1's aud, never a host.
+  const iat = Math.floor(f.state.now / 1000)
+  const foreignToken = mint({ ver: 1, iss: ENV.AUTOMAGIK_GATE_CLOUD_ISSUER, aud: 'workspace-b',
+    workspace: 'workspace-b', sub: 'person-1', roles: ['owner'], iat, exp: iat + 300 })
+  const issued = f.sessions.issue(ORIGIN,
+    { issuer: 'https://id.invalid', subject: 'person-1', roles: ['owner'], workspace: 'workspace-a' },
+    { expires: f.state.now + 300_000, proof: { token: foreignToken, aud: 'workspace-b', exp: iat + 300 } })
+  const mismatched = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, `${COOKIE}=${issued.secret}`)
+  assert.equal(mismatched.status, 401)
+  assert.equal(mismatched.headers['set-cookie'], undefined)
+  assert.equal(f.state.renewals.length, 0, 'a workspace/aud mismatch never reaches Cloud')
+  assert.equal(f.sessions.list().length, 2, 'no session was issued in place of the refused one')
+})
+
+test('a session without the held workspace token cannot renew', async t => {
+  const f = await fixture(t)
+  const issued = f.sessions.issue(ORIGIN,
+    { issuer: 'https://id.invalid', subject: 'person-1', roles: ['owner'], workspace: 'workspace-a' },
+    { expires: f.state.now + 300_000 })
+  const refused = await f.renew({ version: 2, renew: true, workspace: 'workspace-a' }, `${COOKIE}=${issued.secret}`)
+  assert.equal(refused.status, 401)
+  assert.equal(refused.headers['set-cookie'], undefined)
+  assert.equal(f.state.renewals.length, 0, 'a missing proof never reaches Cloud')
+  assert.equal(f.sessions.list().length, 1)
 })
 
 test('a renewal is refused after a revocation or when the role no longer grants access', async t => {

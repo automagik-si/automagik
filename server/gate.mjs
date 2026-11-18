@@ -118,7 +118,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     // A fresh open replaces this browser's session; a replayed cookie still revokes its family.
     const previous = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
     if (previous) sessions.revoke(previous)
-    const issued = sessions.issue(origin.origin, opened.principal, { expires: opened.expires })
+    const issued = sessions.issue(origin.origin, opened.principal, { expires: opened.expires, proof: opened.proof })
     res.writeHead(303, { location: '/', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
       'set-cookie': sessionCookie(issued.secret, sessions.maxAge(issued.family)) })
     res.end()
@@ -150,14 +150,23 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     const family = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
     // An expired or already-revoked session, or one Cloud has dropped, never reaches Cloud.
     if (!family || cloud.drops(family)) { refuse(401, 'Renewal refused'); return }
+    // The proof is the exact workspace token this gate verified for the session. A missing or
+    // expired held token is refused with no grace, before Cloud is called. `workspace` is v1's
+    // aud, never a host: it must equal both the configured id and the held token's aud.
+    const proof = family.proof
+    if (!proof || proof.aud !== request.workspace || proof.exp * 1000 <= sessions.now()) {
+      refuse(401, 'Renewal refused')
+      return
+    }
     let renewed
-    try { renewed = await cloud.renew(family.principal) }
+    try { renewed = await cloud.renew(family.principal, proof) }
     catch (error) { refuse(error?.status === 429 ? 429 : 401, 'Renewal refused'); return }
     if (res.destroyed) return
     if (!samePerson(renewed.principal, family.principal)) { refuse(401, 'Renewal refused'); return }
-    // Rotate the session out and issue the rechecked one; the old secret never outlives it.
+    // Rotate the session out and issue the rechecked one, holding the token Cloud just issued;
+    // the old secret never outlives it.
     sessions.revoke(family)
-    const issued = sessions.issue(origin.origin, renewed.principal, { expires: renewed.expires })
+    const issued = sessions.issue(origin.origin, renewed.principal, { expires: renewed.expires, proof: renewed.proof })
     res.setHeader('set-cookie', sessionCookie(issued.secret, sessions.maxAge(issued.family)))
     answer(res, 200, {})
   }

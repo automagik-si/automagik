@@ -33,14 +33,15 @@ The workspace token is still version 1. Version 2 is the renewal exchange, not a
 
 ## 1. The renewal request
 
-A browser that already holds a gate session asks the gate to renew it. The request carries no
-single-use code and no token.
+A browser that already holds a gate session asks the gate to renew it. The browser request
+carries no single-use code and no token. The gate proves the renewal with the workspace token it
+verified at open, server to server, as section 2 pins.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `version` | integer | yes | `2`. |
 | `renew` | boolean | yes | `true`. |
-| `workspace` | string | yes | The workspace id; it must equal the gate's configured workspace. |
+| `workspace` | string | yes | The workspace id: the same value as version 1's `aud`, the workspace the gate is configured with. It is never a host. |
 
 Example:
 
@@ -66,16 +67,19 @@ Rules:
 - The gate refuses `version` other than `2`, `renew` other than `true`, another workspace, an
   unknown field, a non-object body, another media type, another method or another origin. A
   refused request issues no session and changes nothing.
+- `workspace` is version 1's `aud`, never a host. The gate refuses a request whose `workspace` is
+  not its configured workspace id, and a held token whose `aud` differs from it, before it calls
+  the Cloud service.
 - A role, an expiry, a subject or a workspace claim in the request is never read: an unknown
   field is refused whole, so a caller cannot ask for a longer session or a higher role.
 - The request is not a version 1 open. It never carries an open code, and the version 1 open
   path never accepts it.
 
-## 2. The role recheck
+## 2. The role recheck and the renewal proof
 
 On every renewal the gate rechecks the person's role with the Cloud service, server to server,
-as RFC 0024 already requires. The gate sends the subject of its own valid session; it sends no
-browser cookie, no open code and no workspace token.
+as RFC 0024 already requires. The proof is the current workspace token the gate holds for that
+session: the exact token it verified at open.
 
 The recheck call, to the configured exchange URL (contracts v1, section 5):
 
@@ -83,8 +87,8 @@ The recheck call, to the configured exchange URL (contracts v1, section 5):
 |---|---|---|---|
 | `version` | integer | yes | `2`. |
 | `renew` | boolean | yes | `true`. |
-| `workspace` | string | yes | The gate's workspace id. |
-| `subject` | string | yes | The subject of the gate's authenticated session. It comes from the gate's session, never from the request body. |
+| `workspace` | string | yes | The workspace id: version 1's `aud`, and the same value as the token's `aud`. |
+| `token` | string | yes | The workspace token the gate verified for the session. It is held server-side, never sent to the browser. |
 
 The answer:
 
@@ -101,7 +105,7 @@ Example recheck and answer:
   "version": 2,
   "renew": true,
   "workspace": "{workspace-id}",
-  "subject": "{person-subject}"
+  "token": "{workspace-token}"
 }
 ```
 
@@ -115,23 +119,28 @@ Example recheck and answer:
 
 Rules:
 
-- The Cloud service rechecks the subject's role against its own database and mints a workspace
-  token only when that role still grants access. A removed person, a role that no longer grants
-  access, or an unknown subject is refused and mints no token.
+- The Cloud service verifies the token's own signature, `aud` and `exp`, and then rechecks the
+  person's role against its own database. Only after that does it mint a workspace token. An
+  invalid signature, another `aud`, a token past `exp`, a removed person, a role that no longer
+  grants access, or an unknown subject is refused and mints no token.
+- The Cloud service refuses the request when `workspace` differs from the token's `aud`.
 - The token is the same version 1 workspace token, signed the same way and verified by the gate
   exactly as contracts v1 section 4 says. Its `roles` are Cloud's current answer; the renewal
   request never supplies them.
 - The configured exchange URL distinguishes the two calls by `version` before it reads any
   field. A version 1 parser refuses a version 2 body; a version 2 parser refuses a version 1
   body. Neither falls through to the other.
-- The recheck is server to server. **Open:** how the Cloud service authenticates the gate on
-  this call, as contracts v1 section 5 already leaves open for the exchange. Version 2 adds no
-  new gate credential and holds no Cloud credential at rest.
+- The recheck is server to server. The browser cookie never leaves the gate: no browser cookie,
+  open code or query string is ever forwarded. Version 2 adds no new gate credential; the
+  workspace token is the only proof and stays in the gate's memory for the session's life.
 
 ## 3. The renewed session
 
 The renewal answers `200` with a new `__Host-automagik-session` cookie and an empty JSON object.
 
+- If the token the gate holds is missing or has passed its `exp`, the renewal is refused with no
+  grace: the gate calls no Cloud service and issues no session, and the person presses Open as
+  in version 1.
 - The gate replaces the session: the secret presented by the browser is rotated out and no
   longer authenticates, and the new session carries the principal's subject and the roles from
   the rechecked token.
@@ -158,7 +167,8 @@ A renewal is refused with no new session and no cookie:
 |---|---|
 | no session, an expired session, a revoked session, or a session Cloud already dropped | `401` |
 | a version 1 body, another version, `renew` not `true`, another workspace, an unknown field | `401` |
-| the Cloud recheck refuses the subject, or the rechecked role grants no access | `401` |
+| a missing held token, a held token past its `exp`, or a request `workspace` that differs from the token's `aud` | `401` |
+| the Cloud recheck refuses the token, or the rechecked role grants no access | `401` |
 | the recheck answer's `expires_in` or token life is over 300 seconds, or the token is invalid | `401` |
 | an `Authorization` header | `401` |
 | another origin or a cross-site request | `403` |
@@ -188,8 +198,6 @@ path never accepts a `code` or a version 1 body.
 ## 6. What this page does not pin
 
 - The Cloud service's internals, its database and its exchange path beyond the configured URL.
-- How the Cloud service authenticates the gate on the recheck call, as contracts v1 section 5
-  leaves open for the exchange.
 - The workspace token's signing details, which stay contracts v1 section 4.
 - The gate session's internal format and the rest of its route surface, which are the gate's,
   not this public contract's.

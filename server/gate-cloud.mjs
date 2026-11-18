@@ -211,6 +211,8 @@ export class CloudSignIn {
       principal: { issuer: this.config.identity, subject: sub, roles: known, workspace },
       // The session never outlives the token, nor 5 minutes from now, whatever the clocks say.
       expires: Math.min(exp * 1000, now + TOKEN_MAX_SECONDS * 1000),
+      exp,
+      aud,
     }
   }
   async verify(token) {
@@ -233,7 +235,9 @@ export class CloudSignIn {
     if (!valid) throw refused()
     // No token memory: version 1 has no jti, so two opens in one second can carry equal tokens.
     // A token reaches the gate only from its own exchange of a single-use code.
-    return opened
+    // The verified token itself is the renewal proof; the session keeps it server-side only.
+    return { principal: opened.principal, expires: opened.expires,
+      proof: { token, exp: opened.exp, aud: opened.aud } }
   }
   async open(code) {
     if (typeof code !== 'string' || !CODE.test(code)) throw refused()
@@ -250,18 +254,27 @@ export class CloudSignIn {
     if (this.isRemoved(opened.principal.subject)) throw refused()
     return opened
   }
-  // Delivery 4 (contracts v2): a renewal carries no single-use code. The gate names the subject
-  // of its own still-valid session and Cloud rechecks that person's role before it answers with
-  // a workspace token, the same answer the open path verifies. A removal, a lost role or a
-  // token over five minutes refuses the renewal; the gate never mints a longer session.
-  async renew(principal) {
+  // Delivery 4 (contracts v2): a renewal carries no single-use code and no browser cookie. Its
+  // proof is the current workspace token the gate verified for that session, sent server to
+  // server. Cloud checks that token's signature, aud and exp, then rechecks the person's role
+  // before it answers with a workspace token, the same answer the open path verifies. A held
+  // token past its exp, a removal, a lost role or a token over five minutes refuses the renewal;
+  // the gate never mints a longer session.
+  async renew(principal, proof) {
     if (!principal || typeof principal.subject !== 'string' || !principal.subject || principal.subject.length > 256) throw refused()
+    if (!proof || typeof proof !== 'object' || Array.isArray(proof) ||
+      Object.keys(proof).sort().join(',') !== 'aud,exp,token' ||
+      typeof proof.token !== 'string' || !proof.token || proof.token.length > 8192 ||
+      typeof proof.aud !== 'string' || proof.aud !== this.config.workspace ||
+      !Number.isSafeInteger(proof.exp) || proof.exp * 1000 <= this.now()) throw refused()
     if (this.isRemoved(principal.subject)) throw refused()
     if (this.inflight >= MAX_EXCHANGES) throw new CloudOpenRefused(429)
     this.inflight++
     let reply
     try {
-      reply = await this.call(this.config.exchange, { version: 2, renew: true, workspace: this.config.workspace, subject: principal.subject })
+      // `workspace` is version 1's aud, never a host; the token is the gate's whole proof.
+      reply = await this.call(this.config.exchange,
+        { version: 2, renew: true, workspace: this.config.workspace, token: proof.token })
     } catch { throw refused() } finally { this.inflight-- }
     if (!reply || typeof reply !== 'object' || reply.version !== 2 || typeof reply.token !== 'string' ||
       !Number.isSafeInteger(reply.expires_in) || reply.expires_in < 1 || reply.expires_in > TOKEN_MAX_SECONDS) throw refused()
