@@ -153,6 +153,9 @@ function headOf(fullName, branch) {
 
 const { owner, repo } = remote();
 const fullName = owner && repo ? `${owner}/${repo}` : "";
+// The pack's own entry names the monorepo even in a checkout whose origin is a local mirror, so
+// regenerating there keeps a valid url instead of blanking it (#215).
+const packFullName = fullName || "automagik-si/automagik";
 // The pack's folder in its repository: herdr/ in the Automagik monorepo (its mods are at
 // <path>/mods/<name> there), empty when the pack is a repository of its own.
 const packPath = git(["rev-parse", "--show-prefix"]).replace(/\/+$/, "");
@@ -229,8 +232,8 @@ const entries = [];
 const entryForPack = {
   owner: owner || "automagik-si",
   repo: repo || "automagik",
-  fullName: fullName || "automagik-si/automagik",
-  url: fullName ? `https://github.com/${fullName}` : "",
+  fullName: packFullName,
+  url: `https://github.com/${packFullName}`,
   defaultBranch: branch,
   stars: 0,
   pushedAt: releasePushedAt() || recent,
