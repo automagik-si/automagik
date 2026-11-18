@@ -94,8 +94,33 @@ How they fit:
   | Group admin | Manage its own group only (name, notice, members, reply mode) |
   | Member | Speak in the group, `@` another member, and post into its groups from outside them |
 
-- **Scheduled tasks and restricted Bots**: a Bot with a deny list cannot create or
-  edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
+- **Shell access**: each Bot either has a shell or does not. Every new Bot states its
+  capability; a new private-folder Bot states off, and a Bot saved before it existed has
+  no field and reads as a shell, with no migration. Only the user changes the switch in
+  its settings. A Bot without a shell gets no `bash`, `pwsh` or terminal tool,
+  and no tool that runs a command or starts one for it: a DSH task (`start_task`), an ACP
+  agent's execute call (`acp_tool`; its reads and edits stay), a local CLI's command
+  approval (`approve_agent_action`), an MCP server that would start a command
+  (`save_capability`, `attach_capability`) and the computer-use tools (`cua`,
+  `cua_driver_native__*`). The rule holds on the Bot's own chat, a group Session, a task, a
+  subagent (delegation stays, its child is bound to the parent's fence), a renamed or
+  aliased tool, and a skill. It is enforced where DSH grants tools — the tools are removed,
+  not forbidden by an instruction — and not with an operating-system sandbox. A Bot with
+  shell access can read what the operating-system user can read: that is the honest limit
+  of the folder fence for shell commands.
+
+  A shell-less Bot cannot be paired with a model whose agent runs its own tools: the Bot
+  team refuses it at creation, at the model pick, at a route switch and at the Remote
+  Hermes pairing, both when the shell is switched off and when the agent is set. The
+  automatic move of a Bot off a retired plan route to its coding CLI skips a shell-less
+  Bot, keeps it where it is and says once why (the CLI brings its own shell); if that plan
+  route no longer answers, the Bot asks for a model instead of looking like it works. An
+  MCP server mounted before the shell was turned off keeps running, but a command tool it
+  exposes is refused; a server mounted after the switch is refused too. The settings card
+  says what this capability does not fence: another Bot with a shell, or the
+  operating-system user, can still read files this Bot can read.
+- **Scheduled tasks and restricted Bots**: a Bot with a deny list or no shell cannot create
+  or edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
   layer binds; the tasks it already armed are paused and their record stays. A
   delivery no team lineage can bind is refused while such a task cannot be paused;
   when the pause lands, dsh is asked to drive again and the refused delivery goes

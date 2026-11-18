@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
+import { format } from 'node:util'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { apply } from '../index.js'
@@ -224,6 +225,83 @@ test('subscription Bots move once to their CLI; key and other Bots stay; the Ses
     host.selected.map(request => `${request.sessionId}:${request.provider}/${request.model}`).sort(),
     ['a1:acp-claude/opus', 'c1:acp-codex/gpt-6.1-sol', 'c2:acp-codex/default'],
   )
+})
+
+test('a shell-off Bot stays on its retired plan route, warns once per Bot per route, and never reaches the CLI', async (t) => {
+  const warned = []
+  const team = seed([
+    bot('s1', 'openai-codex/gpt-6.1-sol', { shell: false }),
+    bot('s2', 'anthropic/claude-opus-5-5', { shell: false }),
+  ])
+  const host = await start(team, {
+    prepare: (rt) => {
+      const warn = rt.warn
+      rt.warn = (...args) => { warned.push(format(...args)); return warn(...args) }
+    },
+  })
+  t.after(host.stop)
+  const shellLines = () => warned.filter(line => /brings its own shell/.test(line))
+  await until(() => host.saved().bots.s1.subscriptionShellHeld?.from === 'openai-codex'
+    && host.saved().bots.s2.subscriptionShellHeld?.from === 'anthropic', { label: 'both shell holds were recorded' })
+  await host.pass()
+  let state = host.saved()
+  const held = {
+    s1: { from: 'openai-codex', to: 'acp-codex', cli: 'Codex' },
+    s2: { from: 'anthropic', to: 'acp-claude', cli: 'Claude Code' },
+  }
+  for (const id of ['s1', 's2']) {
+    // Not moved: the model and the shell setting are exactly what they were.
+    assert.equal(state.bots[id].model, id === 's1' ? 'openai-codex/gpt-6.1-sol' : 'anthropic/claude-opus-5-5')
+    assert.equal(state.bots[id].shell, false)
+    assert.equal(state.bots[id].subscriptionMoved, undefined)
+    assert.deepEqual(state.bots[id].subscriptionShellHeld, held[id])
+  }
+  // Once per Bot, not once per process: two Bots held off two routes give two notices.
+  assert.equal(shellLines().length, 2)
+  assert.ok(shellLines().some(line => /s1 stays on openai-codex: Codex is a coding CLI that brings its own shell/.test(line)))
+  assert.ok(shellLines().some(line => /s2 stays on anthropic: Claude Code is a coding CLI that brings its own shell/.test(line)))
+  // A second retirement is not swallowed: s1 moves onto the second retired plan route, is
+  // held off that one too, and gets its own notice; s2's notice for that route is not repeated.
+  await host.rt.updateBot('s1', { model: 'anthropic/claude-opus-5-5' })
+  await host.pass()
+  await until(() => host.saved().bots.s1.subscriptionShellHeld?.from === 'anthropic', { label: 'the second hold was recorded' })
+  state = host.saved()
+  assert.equal(state.bots.s1.model, 'anthropic/claude-opus-5-5')
+  assert.equal(state.bots.s1.shell, false)
+  assert.deepEqual(state.bots.s1.subscriptionShellHeld, held.s2)
+  assert.equal(shellLines().length, 3)
+  assert.equal(shellLines().filter(line => /s2 stays on anthropic/.test(line)).length, 1)
+  assert.equal(shellLines().filter(line => /s1 stays on anthropic/.test(line)).length, 1)
+  // A restart repeats neither notice: the held records are the memory.
+  const again = []
+  const second = await start(host.saved(), {
+    prepare: (rt) => {
+      const warn = rt.warn
+      rt.warn = (...args) => { again.push(format(...args)); return warn(...args) }
+    },
+  })
+  t.after(second.stop)
+  await second.pass()
+  assert.equal(again.filter(line => /brings its own shell/.test(line)).length, 0)
+  assert.equal(second.saved().bots.s1.model, 'anthropic/claude-opus-5-5')
+  assert.equal(second.saved().bots.s2.model, 'anthropic/claude-opus-5-5')
+})
+
+test('a shell-off Bot keeps the previous model a pending switch would go back to', async (t) => {
+  const team = seed([bot('s1', 'deepseek/deepseek-v4-flash', {
+    shell: false,
+    previousModel: 'openai-codex/gpt-6.1-sol',
+  })])
+  const host = await start(team)
+  t.after(host.stop)
+  await until(() => host.saved().subscriptionCliMoved?.['openai-codex'] === true, { label: 'the move pass ran' })
+  const state = host.saved()
+  // The current model is not on a plan route, but the model a pending switch would go back
+  // to is: it must not be moved onto the CLI either, or the switch would land on a shell.
+  assert.equal(state.bots.s1.model, 'deepseek/deepseek-v4-flash')
+  assert.equal(state.bots.s1.previousModel, 'openai-codex/gpt-6.1-sol')
+  assert.equal(state.bots.s1.subscriptionMoved, undefined)
+  assert.equal(state.bots.s1.shell, false)
 })
 
 test('a Claude Bot on an Anthropic API key never moves', async (t) => {

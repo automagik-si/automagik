@@ -1,19 +1,30 @@
-// A Bot's tool deny list. `state.bots.<id>.denyTools` names the tools that Bot never gets,
-// and they are removed from the model's surface by DSH's own `tools.restrict` on every
-// Session of that Bot: its own chat, each group Session, an earlier part reopened, a task,
-// and every subagent child of any of them (by its Session header's parent lineage).
-// A denied tool is absent, not forbidden by an instruction: the model cannot call what it
-// cannot see, and a call that reaches the executor anyway is refused. A tool registered
-// after the Session started stays visible until the next resolve; the executor guard
-// refuses it in the meantime.
+// A Bot's tool deny list and its shell capability. `state.bots.<id>.denyTools` names the
+// tools that Bot never gets; `state.bots.<id>.shell === false` says the Bot has no shell.
+// Both are removed from the model's surface by DSH's own `tools.restrict` on every Session
+// of that Bot: its own chat, each group Session, an earlier part reopened, a task, and
+// every subagent child of any of them (by its Session header's parent lineage). A denied
+// tool is absent, not forbidden by an instruction: the model cannot call what it cannot
+// see, and a call that reaches the executor anyway is refused. A tool registered after
+// the Session started stays visible until the next resolve; the executor guard refuses it
+// in the meantime.
+//
+// The shell capability is fail-closed: a shell-less Bot loses every tool that can run a
+// command or a program, whatever the tool is called. Names the product serves (`bash`,
+// `pwsh`, `terminal_*`, `start_task`, `attach_capability`, `approve_agent_action`, the
+// computer-use tools) are denied outright; any other tool whose parameters take a command,
+// a program or a terminal's text is denied from its schema, and a renamed or aliased copy
+// is refused by the executor from the definition it resolves. A tool the profile registers
+// later is refused there without another apply.
 //
 // A name this profile does not serve is ignored with a warning instead of failing the boot:
 // a list written for another DSH keeps working here, and a typo is reported where the user
 // can see it (the Bot's own chat is untouched by it).
 //
-// A Bot that denies anything is restricted, and it also loses DSH's `schedule_create` and
-// `schedule_edit`: their `new` and `new_once` targets open a Session that is neither a
-// subagent child nor a task record, so no lineage would bind the restriction to it (#584).
+// A Bot that denies anything or has no shell is restricted, and it also loses DSH's
+// `schedule_create` and `schedule_edit`: their `new` and `new_once` targets open a Session
+// that is neither a subagent child nor a task record, so no lineage would bind the
+// restriction to it (#584).
+import { isComputerTool } from './computer/catalog.js'
 import { refusal } from './refusal.js'
 
 /** The most names one Bot may deny. */
@@ -25,6 +36,108 @@ export const DENY_NAME_MAX = 64
 const SCHEDULE_TOOLS = ['schedule_create', 'schedule_edit']
 const RETRY_MS = 1_000
 const RETRY_TRIES = 15
+
+// The shell tools this product serves by name. `terminal_*` and `user_terminal_*` cover
+// every terminal tool the profile offers now or adds later.
+const SHELL_NAMES = new Set(['bash', 'pwsh', 'powershell'])
+const SHELL_PREFIXES = ['terminal_', 'user_terminal_']
+// Tools that start a worker, spawn a program from outside the tool surface, or approve a
+// local agent CLI's command. They are scope-local, so the executor guard is what refuses
+// them; the restriction only hides the ones the registry lets it name.
+const SHELL_LAUNCHERS = new Set(['start_task', 'attach_capability', 'approve_agent_action'])
+// The parameters a tool takes when it runs a command or a program, required or not: a
+// shell-less Bot must not gain one through a tool nobody has taught this plugin about.
+const COMMAND_PARAMS = new Set(['command', 'cmd', 'program', 'executable', 'argv', 'shell', 'bash', 'pwsh', 'powershell'])
+// A session id beside one of these types into a terminal, whatever the tool is called.
+const TERMINAL_PARAMS = ['text', 'type', 'keys']
+// An ACP agent's own call (acp-dsh's `acp_tool`): these kinds do not run a command. Any
+// other kind, a missing kind, or an input carrying a command is refused for a shell-less Bot.
+const ACP_SAFE_KINDS = new Set(['read', 'edit', 'delete', 'move', 'search', 'fetch'])
+// The definitions this process has already identified as shell tools. A plugin that
+// registers the same definition (or its `execute`) under another name is a renamed tool
+// (aliasing it left its capability behind), and the shape alone may not say so.
+const shellDefinitions = new WeakSet()
+const shellExecutes = new WeakSet()
+
+/**
+ * A Bot's shell capability, cleaned. `undefined` leaves it alone; `true` means the Bot may
+ * have a shell; `false` means it never gets one.
+ * @param {unknown} value - the setting the caller sent.
+ * @returns {boolean | undefined} the capability, or undefined to leave it alone.
+ */
+export function cleanShell(value) {
+  if (value === undefined) return undefined
+  if (typeof value !== 'boolean') throw refusal('shell is true or false')
+  return value
+}
+
+/**
+ * The names one tool takes, by the product's names and its parameters. A tool this plugin
+ * has never seen is still a shell tool when it takes a command or a program.
+ * @param {string} name - the tool name as registered.
+ * @param {object} [definition] - the tool definition or projected schema.
+ * @returns {boolean} whether the tool can run a command, a program or a terminal.
+ */
+export function reachesShell(name, definition) {
+  if (typeof name !== 'string' || name === '') return false
+  // An MCP tool is `mcp__<server>__<tool>`; a server may alias a shell tool under its own
+  // prefix, so the last segment is checked too.
+  const leaf = name.includes('__') ? name.slice(name.lastIndexOf('__') + 2) : name
+  if (SHELL_NAMES.has(name) || SHELL_NAMES.has(leaf)) return rememberShell(definition, true)
+  if (SHELL_PREFIXES.some(prefix => name.startsWith(prefix) || leaf.startsWith(prefix))) return rememberShell(definition, true)
+  if (isComputerTool(name)) return rememberShell(definition, true)
+  // A definition already known to run a shell, registered under one more name.
+  if (shellDefinitions.has(definition) || shellExecutes.has(definition?.execute)) return true
+  const properties = propertiesOf(definition)
+  if (properties === undefined) return false
+  if (Object.keys(properties).some(key => COMMAND_PARAMS.has(key))) return rememberShell(definition, true)
+  if (properties.sessionId !== undefined && TERMINAL_PARAMS.some(key => properties[key] !== undefined)) return rememberShell(definition, true)
+  return false
+}
+
+function rememberShell(definition, verdict) {
+  if (definition !== null && typeof definition === 'object') shellDefinitions.add(definition)
+  if (typeof definition?.execute === 'function') shellExecutes.add(definition.execute)
+  return verdict
+}
+
+/**
+ * Whether one call of `name` with `args` runs a command or a program. `reachesShell` covers
+ * the tools that always do; this adds the ACP mirror, whose calls mostly do not.
+ * @param {string} name - the tool name as registered.
+ * @param {unknown} args - the call's own arguments.
+ * @param {object} [definition] - the tool definition or projected schema.
+ * @returns {boolean} whether the call must be refused on a shell-less Bot.
+ */
+export function shellCall(name, args, definition) {
+  if (reachesShell(name, definition)) return true
+  if (SHELL_LAUNCHERS.has(name)) return true
+  if (name === 'acp_tool' || acpShaped(definition)) return runsProgram(args)
+  return false
+}
+
+function propertiesOf(definition) {
+  const properties = definition?.parameters?.properties
+  return properties !== null && typeof properties === 'object' ? properties : undefined
+}
+
+// acp-dsh's mirror: the agent's own call, shown to the person and approved through DSH.
+function acpShaped(definition) {
+  const properties = propertiesOf(definition)
+  return properties !== undefined && properties.title !== undefined
+    && properties.input !== undefined && properties.kind !== undefined
+}
+
+function runsProgram(args) {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return true
+  if (args.kind === 'execute') return true
+  const input = args.input
+  if (input !== null && typeof input === 'object'
+    && (Object.hasOwn(input, 'command') || Object.hasOwn(input, 'cmd'))) return true
+  // An image the agent makes is not a command, even when the agent calls it an "other" tool.
+  if (args.image === true) return false
+  return typeof args.kind !== 'string' || !ACP_SAFE_KINDS.has(args.kind)
+}
 
 /**
  * A Bot's deny list, cleaned: trimmed, deduplicated, empty entries dropped.
@@ -56,14 +169,21 @@ export function install(rt) {
 
   // Session id -> the restriction in force there: the agent it was set on, the names it
   // asked for, and DSH's disposer that gives every tool back.
-  /** @type {Map<string, { agent: object, names: string[], lift: () => void }>} */
+  /** @type {Map<string, { agent: object, names: string[], lift?: () => void }>} */
   const held = new Map()
   // Sessions whose restriction could not be set yet (schemas not up, restrict missing).
   /** @type {Map<string, { agent: object, tries: number }>} */
   const waiting = new Map()
   // What was already reported per Session, so a stuck name warns once.
   const warned = new Map()
+  // Shell tool names seen for a Bot while its shell is off. A tool hidden by the restriction
+  // no longer shows in the visible surface, so the next apply keeps what this one found.
+  /** @type {Map<string, Set<string>>} */
+  const shellSeen = new Map()
   let timer
+
+  const noShell = bot => bot?.shell === false
+  const isRestricted = bot => noShell(bot) || (Array.isArray(bot?.denyTools) && bot.denyTools.length > 0)
 
   const stop = () => {
     if (timer !== undefined) clearInterval(timer)
@@ -105,11 +225,64 @@ export function install(rt) {
 
   const same = (left, right) => left.length === right.length && left.every((name, index) => name === right[index])
 
-  // The names in force for a Bot: its own list, sorted, plus the schedule tools every
-  // restricted Bot loses. An empty (or cleared) list restricts nothing.
-  const deniedNames = (bot) => {
-    const listed = Array.isArray(bot?.denyTools) ? bot.denyTools : []
-    return listed.length === 0 ? [] : [...new Set([...listed, ...SCHEDULE_TOOLS])].sort()
+  // The names this Bot's sessions must not get now: the user's list, the schedule tools a
+  // restricted Bot loses, and every shell tool and launcher when the Bot has no shell.
+  // Shell tools are found from the Session's own surface, so a renamed copy is named too.
+  const deniedNames = (bot, agent) => {
+    const names = new Set(Array.isArray(bot?.denyTools) ? bot.denyTools : [])
+    if (isRestricted(bot)) for (const name of SCHEDULE_TOOLS) names.add(name)
+    if (noShell(bot)) {
+      for (const name of SHELL_LAUNCHERS) names.add(name)
+      for (const name of shellNamesOf(agent, bot)) names.add(name)
+    } else if (bot?.id !== undefined) shellSeen.delete(bot.id)
+    return [...names].sort()
+  }
+
+  // Every shell tool the Session's surface shows, plus what an earlier apply found while the
+  // restriction already hid some of them. `view().visible` is the surface; `knownNames` and
+  // `restrictableNames` are pre-restriction, so a canonical name is caught even when hidden.
+  const shellNamesOf = (agent, bot) => {
+    const names = new Set()
+    let view
+    try { view = typeof ctx.tools?.view === 'function' ? ctx.tools.view(agent) : undefined } catch { view = undefined }
+    const visible = view?.visible
+    if (visible !== undefined && typeof visible.entries === 'function') {
+      for (const [name, definition] of visible) if (reachesShell(name, definition)) names.add(name)
+      // A second pass catches an alias registered before the definition it shares, which the
+      // first pass only learned to recognize when it reached the shell tool's own name.
+      for (const [name, definition] of visible) if (reachesShell(name, definition)) names.add(name)
+    } else {
+      try {
+        for (const schema of ctx.tools?.schemas?.(agent) ?? []) {
+          if (reachesShell(schema?.name, schema)) names.add(schema.name)
+        }
+      } catch { /* no surface yet: the next resolve asks again */ }
+    }
+    for (const name of view?.restrictableNames ?? view?.knownNames ?? []) {
+      if (reachesShell(name)) names.add(name)
+    }
+    if (bot?.id !== undefined) {
+      const seen = shellSeen.get(bot.id) ?? new Set()
+      for (const name of names) seen.add(name)
+      shellSeen.set(bot.id, seen)
+      for (const name of seen) names.add(name)
+    }
+    return names
+  }
+
+  // The tool definition a call runs under. The step's own schema wins; otherwise the
+  // registry (scope-local tools included) is asked, so an alias is checked by what it is.
+  const definitionOf = (exec) => {
+    if (exec?.schema !== undefined && exec.schema?.parameters !== undefined) return exec.schema
+    try {
+      if (typeof ctx.tools?.get === 'function') {
+        const found = ctx.tools.get(exec.name, exec.agent, exec.toolSet)
+        if (found !== undefined) return found
+      }
+      return ctx.tools?.view?.(exec.agent)?.visible?.get?.(exec.name)
+    } catch {
+      return undefined
+    }
   }
 
   // The tool names this profile serves for an Agent, before any restriction. `schemas()` is the
@@ -184,7 +357,7 @@ export function install(rt) {
   async function apply(sessionId, agent, knownBot) {
     if (typeof sessionId !== 'string' || agent === undefined) return
     const bot = knownBot ?? botOfSession(sessionId, agent)
-    const wanted = deniedNames(bot)
+    const wanted = deniedNames(bot, agent)
     const current = held.get(sessionId)
     if (current !== undefined && current.agent === agent && same(current.names, wanted)) {
       waiting.delete(sessionId)
@@ -215,8 +388,8 @@ export function install(rt) {
     // below still refuses it, and the next resolve re-applies this list.
     const deny = wanted.filter(name => served.has(name))
     const missing = wanted.filter(name => !served.has(name))
-    // An implicit schedule name this profile cannot restrict is not the user's typo: the
-    // executor guard still refuses it, so there is nothing to report.
+    // An implicit schedule, shell or launcher name this profile cannot restrict is not the
+    // user's typo: the executor guard still refuses it, so there is nothing to report.
     const listed = new Set(Array.isArray(bot?.denyTools) ? bot.denyTools : [])
     const unknown = missing.filter(name => listed.has(name))
     if (unknown.length > 0) {
@@ -225,7 +398,12 @@ export function install(rt) {
     }
     waiting.delete(sessionId)
     release(sessionId)
-    if (deny.length === 0) return
+    if (deny.length === 0) {
+      // The guard still refuses what cannot be restricted (a scope-local tool); keeping the
+      // entry lets a later apply compare without lifting and re-setting it every time.
+      held.set(sessionId, { agent, names: wanted })
+      return
+    }
     try {
       const lift = agent.ctx.tools.restrict({ deny })
       held.set(sessionId, { agent, names: wanted, lift })
@@ -238,7 +416,7 @@ export function install(rt) {
   /**
    * Apply a Bot's list to every Session it has now. Safe to call after any change: a new
    * list is lifted and re-applied, an emptied one gives every tool back.
-   * @param {object} bot - the Bot record (its `denyTools` is read live).
+   * @param {object} bot - the Bot record (its `denyTools` and `shell` are read live).
    */
   async function applyToolDeny(bot, extra = []) {
     if (bot === undefined) return
@@ -301,8 +479,9 @@ export function install(rt) {
       .catch(error => rt.warn('ds-bot: tool deny on agent/created failed: %s', error))
   })
 
-  // The last line: a call that reaches the executor for a name this Bot denies is refused,
-  // whatever put the tool on the surface.
+  // The last line: a call that reaches the executor for a name this Bot denies, or for any
+  // tool that runs a command when the Bot has no shell, is refused whatever put it on the
+  // surface.
   ctx.on('tools/execute', async (exec, next) => {
     // And none at all on a Session whose permission level was not set (permissions.js).
     try {
@@ -314,9 +493,16 @@ export function install(rt) {
     const name = typeof exec?.name === 'string' ? exec.name : ''
     if (name === '' || exec?.agent === undefined) return next()
     const bot = botOfSession(exec.agent?.id ?? exec.agent?.session?.id, exec.agent)
-    // A call that goes on carries its Session, for a task started inside it (permissions.js).
-    if (bot === undefined || !deniedNames(bot).includes(name)) return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
+    if (bot === undefined) return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
+    const denied = deniedNames(bot, exec.agent)
+    // A tool registered after the last apply is caught here from its definition, so a
+    // renamed or aliased shell tool never needs this plugin to know its name first.
+    const shell = noShell(bot) && shellCall(name, exec.arguments, definitionOf(exec))
+    if (!denied.includes(name) && !shell) return rt.inToolCall === undefined ? next() : rt.inToolCall(exec, next)
     rt.noteStop?.(exec.agent?.id ?? exec.agent?.session?.id, { why: 'tool', tool: name, callId: exec.callId }, exec.agent)
+    if (noShell(bot) && (shell || reachesShell(name) || SHELL_LAUNCHERS.has(name))) {
+      throw refusal(`${bot.name} has no shell, so it cannot use the ${name} tool`)
+    }
     throw refusal(`${bot.name} does not have the ${name} tool`)
   })
 
