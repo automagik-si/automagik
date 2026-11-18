@@ -25,6 +25,47 @@ const collapse = text => {
   for (let next = flat.replace(parentSegment, ''); next !== flat; next = flat.replace(parentSegment, '')) flat = next
   return flat
 }
+// The words a shell command spells out that look like a path. The check that uses them is
+// best effort, not a fence: a word carrying a shell character is left alone, so a path the
+// shell builds or expands ($VAR, $(...), a glob, ~), a folder the command changes into
+// first, and a file a script opens are known misses. Only the words written out are resolved.
+const shellPathWord = /[\\/]/
+const shellExpanded = /[$`(){}[\]*?~]/
+// Shell-style words: quotes group, and on POSIX a backslash escapes the next character, so a
+// quoted or escaped path with spaces stays one word. Unquoted whitespace or a command
+// separator ends a word.
+const shellWords = text => {
+  const words = []
+  let word = ''
+  let quote = ''
+  const end = () => { if (word !== '') words.push(word); word = '' }
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at]
+    if (quote === "'") {
+      if (char === "'") quote = ''
+      else word += char
+    } else if (quote === '"') {
+      if (char === '"') quote = ''
+      else if (char === '\\' && process.platform !== 'win32' && at + 1 < text.length) word += text[++at]
+      else word += char
+    } else if (char === "'" || char === '"') {
+      quote = char
+    } else if (char === '\\' && process.platform !== 'win32') {
+      if (at + 1 < text.length) word += text[++at]
+    } else if (/[\s;&|<>]/.test(char)) {
+      end()
+    } else {
+      word += char
+    }
+  }
+  end()
+  return words
+}
+// A flag keeps its value as a path too, so --file=<path> is checked like the path itself.
+const shellFlagValue = word => /^-+[^=]+=/.test(word) ? [word, word.slice(word.indexOf('=') + 1)] : [word]
+const shellPaths = text => shellWords(text).flatMap(shellFlagValue)
+  .map(word => word.replace(/\\/g, '/'))
+  .filter(word => shellPathWord.test(word) && !shellExpanded.test(word) && !word.includes('://'))
 
 export function uploadLeaf(ref, kind) {
   const name = ref.name ?? (kind === 'image' ? `image.${extensions[ref.mediaType]}` : 'file')
@@ -313,9 +354,10 @@ export function install(rt) {
     } catch { return false }
   }
 
-  // This is a tool-level guard, like private Bots. It does not inspect indirect shell
-  // paths or tools a coding agent runs itself; the text it does see is checked as written
-  // and collapsed the way resolve() collapses the path tools.
+  // This is a tool-level guard, like private Bots. It does not inspect tools a coding agent
+  // runs itself; the text it does see is checked as written and collapsed the way resolve()
+  // collapses the path tools, and shell commands get a best-effort check of the path words
+  // they spell out (see shellPaths), which is not a fence either.
   ctx.on('tools/execute', async (exec, next) => {
     const caller = rt.botOfSession(exec.agent?.session?.id ?? exec.agent?.id, exec.agent)
     if (!caller) return next()
@@ -328,6 +370,32 @@ export function install(rt) {
     // A case variant names the same Bot on a case-insensitive host; rt.botOf is a plain lookup.
     const botOfId = id => rt.botOf?.(id) ?? (process.platform === 'linux' ? undefined
       : Object.values(rt.state?.bots ?? {}).find(bot => fold(bot.id) === fold(id)))
+    // Another Bot's own folder gets the folder words, with this shell check's limit: it is
+    // best effort, not a fence.
+    const closedShell = () => {
+      throw refusal(`That is another Bot's own folder, which ${caller.name} does not open. Ask the user, or that Bot, to share what you need. Shell commands get a best-effort path check, not a fence: a path a command builds, a variable or glob it expands, or a file a script opens can still reach it.`)
+    }
+    // Before a shell command runs, real-path every word that looks like a path, from the
+    // folder the command runs in. See shellPaths for the known misses: best effort, not a fence.
+    async function checkShellPaths() {
+      if (!SHELL_TOOLS.includes(exec.name)) return
+      const folder = rt.sessionFolder(exec.agent?.session ?? exec.agent) ?? '.'
+      // The folder as the file system has it: a link in the folder's own path is the same
+      // folder for the command, so only a link inside a word can hide where a path leads.
+      const base = rt.realBeyond ? await rt.realBeyond(folder) : folder
+      for (const word of shellPaths(strings(args).join('\n'))) {
+        const absolute = resolve(base, word)
+        const real = rt.realBeyond ? await rt.realBeyond(absolute) : absolute
+        // With no link followed, the text check below sees exactly this path, as written and
+        // collapsed; this check adds only where a link hid the target from that text.
+        if (flatten(real) === flatten(absolute)) continue
+        for (const found of flatten(real).matchAll(/\.automagik\/bots\/([A-Za-z0-9._-]+)(?![A-Za-z0-9._-])/gi)) {
+          if (fold(found[1]) === fold(caller.id) || botOfId(found[1]) === undefined) continue
+          closedShell()
+        }
+      }
+    }
+    await checkShellPaths()
     async function inspect(flat) {
       // The bots root holds both a Bot's own folder, which is private, and the team's own
       // files and shared working folders (the state file, the registry, the workspace), which

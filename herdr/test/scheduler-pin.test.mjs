@@ -1,6 +1,6 @@
 // scripts/scheduler-pin.mjs against a fake release host: the public download route can answer 504
-// (or serve), the API asset route serves the same checksums.txt, and the test pins its own hashes
-// (the real pins name the scheduler release's binaries, not these). No test reaches GitHub.
+// (or serve), the API asset route serves the same checksums.txt (directly or through a redirect),
+// and the test pins hashes for its own fixture binaries. No test reaches GitHub.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -16,7 +16,7 @@ const HASH = {
 const SUMS = `${HASH.arm64}  ${ASSETS.arm64}\n${HASH.amd64}  ${ASSETS.amd64}\n`;
 const FILES = { "checksums.txt": Buffer.from(SUMS) };
 
-/** Run the check against the fake host and this fixture's pins; collects logs and requests. */
+/** Run the check against the fake host and this fixture's pins; collects logs, requests and redirects. */
 async function run({ token = "", fetch: fetchImpl, files = FILES, ...hostOptions } = {}) {
   const host = await fakeRelease({ tag: TAG, files, ...hostOptions });
   const logs = [];
@@ -33,14 +33,14 @@ async function run({ token = "", fetch: fetchImpl, files = FILES, ...hostOptions
       log: (line) => logs.push(line),
       error: (line) => errors.push(line),
     });
-    return { code, logs, errors, requests: host.requests };
+    return { code, logs, errors, requests: host.requests, redirects: host.redirects };
   } finally {
     await host.close();
   }
 }
 
 test("a 504 from the public checksums.txt is served by the API asset route", async () => {
-  const r = await run({ publicStatus: 504, token: "test-token" });
+  const r = await run({ publicStatus: 504, token: "test-token", assetRedirect: true });
   assert.equal(r.code, 0, r.errors.join("\n"));
   assert.ok(r.logs.includes("checksums.txt: served by the REST API asset route"), "the API route is named");
   assert.equal(r.logs.filter((line) => line.includes("served by the")).length, 1, "one route line for the one asset");
@@ -51,6 +51,9 @@ test("a 504 from the public checksums.txt is served by the API asset route", asy
   assert.ok(assets.every((request) => request.headers.authorization === "Bearer test-token"), "GITHUB_TOKEN is the bearer token");
   const publicRequests = r.requests.filter((request) => request.path.startsWith("/download/"));
   assert.ok(publicRequests.length > 0 && publicRequests.every((request) => request.headers.authorization === undefined), "the token is never sent to the public URL");
+  assert.equal(r.redirects.length, 1, "one request reached the redirect origin");
+  assert.equal(r.redirects[0].path, "/blob/checksums.txt");
+  assert.equal(r.redirects[0].authorization, false, "the redirect does not forward the token");
 });
 
 // release-assets.mjs's other fallback (it was usagemeter-pin.mjs's test until RFC 0017 retired that check).

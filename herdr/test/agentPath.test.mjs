@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // agentPath.mjs: the PATH an agent worker starts with when its `#!/usr/bin/env node` (or bun)
 // interpreter isn't on the pane's PATH. Fake agents and fake runtimes in temp folders; no real
 // codex, node install or Herdr is touched. The last test runs the CLI with the fake hc.
@@ -273,6 +274,8 @@ function codexProject(t, extra = [], { terminals = [], env: more = {} } = {}) {
   writeFileSync(log, "");
   const path = `${bin}:${s.empty}`;
   const env = { ...s.env, PATH: path, HERDR_APP_HOME: app, HC_FAKE_STATE: state, HC_FAKE_LOG: log, HC_TERMINAL_ID: "t1", ...more };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: s.root });
+  Object.assign(env, { ...core.env });
   const cli = (...args) => spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
   const run = () => readJsonLines(log).find((c) => c[0] === "run");
   return { s, prefix, path, app, cli, run };
