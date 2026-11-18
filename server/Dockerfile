@@ -2,7 +2,7 @@
 # The Automagik server image: the automagik-web dsh profile (dsh-base + dsh-web-app, the Bot
 # team, the welcome and ACP) on a pinned DeepSeek Harness, ready for /data on a host. Built by
 # CI only (.github/workflows/server-image.yml), which extracts the rootfs, scans it
-# (server/secrecy.mjs) and only then publishes it to ghcr.io/automagik-dev/automagik-server.
+# (server/secrecy.mjs) and only then publishes it to ghcr.io/automagik-si/automagik-server.
 #
 # Build from the repository root (the builder reuses the desktop's pinned runtime lock):
 #   docker build -f server/Dockerfile -t automagik-server .
@@ -22,7 +22,7 @@ FROM node:24.22.3-trixie-slim@sha256:af02d57b57719b9657a45199a79264a9437940cd55b
 ARG AUTOMAGIK_VERSION=3.90.1
 ARG DSH_VERSION=0.2.2-rc.2
 ARG IMAGE_REVISION=unknown
-ARG AUTOMAGIK_REPOSITORY=https://github.com/automagik-dev/automagik
+ARG AUTOMAGIK_REPOSITORY=https://github.com/automagik-si/automagik
 ARG INPUT_KIND=release
 ARG INPUT_EVENT=
 ARG INPUT_MANIFEST=
@@ -104,7 +104,7 @@ ARG INPUT_MANIFEST=
 
 LABEL org.opencontainers.image.title="Automagik server" \
       org.opencontainers.image.description="The automagik-web DeepSeek Harness profile for a host: the Bot team, the welcome and ACP agents" \
-      org.opencontainers.image.source="https://github.com/automagik-dev/automagik" \
+      org.opencontainers.image.source="https://github.com/automagik-si/automagik" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.revision="${IMAGE_REVISION}" \
