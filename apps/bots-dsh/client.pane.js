@@ -9567,6 +9567,7 @@ var ZH = {
   "The account could not be confirmed. Try again.": "无法确认账号，请重试。",
   "The model could not be selected.": "无法选择此模型。",
   // The web self-update preview (#1540): nod, modal, steps, success and rollback.
+  "Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.": "点击“立即更新”时，正在进行的工作会停止，更新完成后会自动继续。不会丢失任何内容。",
   "A Bot that moves to a new part of its chat keeps what it was doing.": "Bot 换到对话的新段落时会保留它正在做的事。",
   "A new version is ready. From now on it updates itself from this menu.": "新版本已就绪。从现在起，它会从这个菜单自行更新。",
   "Back to the previous version": "已回到上一个版本",

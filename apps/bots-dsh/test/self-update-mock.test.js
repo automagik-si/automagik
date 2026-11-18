@@ -61,8 +61,11 @@ test('the nod opens what changes, then the steps, then success', async t => {
   // Both versions on screen are the sample ones.
   assert.match(root.textContent, new RegExp(MOCK_DATA.current.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   assert.match(root.textContent, new RegExp(MOCK_DATA.next.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  // The kept version is promised before anything starts.
+  // The kept version is promised before anything starts, and so is what the click does to work
+  // that is running (the owner's decision, RFC 0035 Q6).
   assert.match(root.textContent, /stays kept/)
+  assert.match(root.textContent, /stops when you click Update now/)
+  assert.match(root.textContent, /comes back by itself once the update is done/)
 
   button(root, 'Update now').click()
   assert.equal(control.screen(), 'steps')

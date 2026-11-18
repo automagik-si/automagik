@@ -634,6 +634,7 @@ var ZH = {
   "The account could not be confirmed. Try again.": "无法确认账号，请重试。",
   "The model could not be selected.": "无法选择此模型。",
   // The web self-update preview (#1540): nod, modal, steps, success and rollback.
+  "Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.": "点击“立即更新”时，正在进行的工作会停止，更新完成后会自动继续。不会丢失任何内容。",
   "A Bot that moves to a new part of its chat keeps what it was doing.": "Bot 换到对话的新段落时会保留它正在做的事。",
   "A new version is ready. From now on it updates itself from this menu.": "新版本已就绪。从现在起，它会从这个菜单自行更新。",
   "Back to the previous version": "已回到上一个版本",
@@ -19394,6 +19395,7 @@ var CSS2 = `
 .su-step[data-state=failed] .su-mark{border-color:transparent;background:var(--bt-danger);color:var(--bt-accent-ink)}
 .su-step[data-state=failed]{color:var(--bt-ink)}
 .su-note{margin:0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}
+.su-caution{margin:0;padding:9px 11px;border-radius:10px;background:var(--bt-accent-soft);color:var(--bt-ink);font:500 13px/20px var(--bt-font,system-ui)}
 .su-foot{display:flex;gap:10px;align-items:center;padding:14px max(24px,calc((100vw - 760px)/2)) 18px;border-top:.5px solid var(--bt-line);background:var(--bt-main)}
 .su-primary{border:0;border-radius:10px;padding:10px 16px;background:var(--bt-accent);color:var(--bt-accent-ink);font:600 14px/18px var(--bt-font,system-ui);cursor:pointer}
 .su-primary:hover{filter:brightness(1.05)}
@@ -19502,6 +19504,9 @@ function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, succe
     ]) list.append(el("li", null, line));
     body.append(list);
     body.append(el("p", "su-note", t("Your previous version stays kept. If the new one does not start, Automagik goes back by itself.")));
+    const caution = el("p", "su-caution", t("Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost."));
+    caution.setAttribute("role", "note");
+    body.append(caution);
     box.append(body);
     const foot = el("div", "su-foot");
     const primary = el("button", "su-primary", t("Update now"));

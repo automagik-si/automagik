@@ -67,6 +67,7 @@ const CSS = `
 .su-step[data-state=failed] .su-mark{border-color:transparent;background:var(--bt-danger);color:var(--bt-accent-ink)}
 .su-step[data-state=failed]{color:var(--bt-ink)}
 .su-note{margin:0;font-size:12px;line-height:18px;color:var(--bt-ink-2)}
+.su-caution{margin:0;padding:9px 11px;border-radius:10px;background:var(--bt-accent-soft);color:var(--bt-ink);font:500 13px/20px var(--bt-font,system-ui)}
 .su-foot{display:flex;gap:10px;align-items:center;padding:14px max(24px,calc((100vw - 760px)/2)) 18px;border-top:.5px solid var(--bt-line);background:var(--bt-main)}
 .su-primary{border:0;border-radius:10px;padding:10px 16px;background:var(--bt-accent);color:var(--bt-accent-ink);font:600 14px/18px var(--bt-font,system-ui);cursor:pointer}
 .su-primary:hover{filter:brightness(1.05)}
@@ -182,6 +183,10 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
     ]) list.append(el('li', null, line))
     body.append(list)
     body.append(el('p', 'su-note', t('Your previous version stays kept. If the new one does not start, Automagik goes back by itself.')))
+    // The owner decided (RFC 0035, Q6): the click is the permission, and running work stops.
+    const caution = el('p', 'su-caution', t('Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.'))
+    caution.setAttribute('role', 'note')
+    body.append(caution)
     box.append(body)
     const foot = el('div', 'su-foot')
     const primary = el('button', 'su-primary', t('Update now'))

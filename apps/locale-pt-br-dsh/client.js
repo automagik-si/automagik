@@ -2895,7 +2895,8 @@ const pack = createPack({
     "What changes": "O que muda",
     "You are on": "Você está na",
     "You have": "Você tem",
-    "Your previous version stays kept. If the new one does not start, Automagik goes back by itself.": "Sua versão anterior fica guardada. Se a nova não começar, o Automagik volta sozinho."
+    "Your previous version stays kept. If the new one does not start, Automagik goes back by itself.": "Sua versão anterior fica guardada. Se a nova não começar, o Automagik volta sozinho.",
+    "Work in progress stops when you click Update now, and it comes back by itself once the update is done. Nothing is lost.": "O trabalho em andamento para quando você clica em Atualizar agora e volta sozinho quando a atualização termina. Nada se perde."
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })
