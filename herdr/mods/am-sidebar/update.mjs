@@ -845,6 +845,7 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
       keep = [...plan.replaced, ...plan.retired, ...plan.held.map((h) => h.mod)];
       old = keep.length ? setAside(modsDir) : null;
     };
+    let swapNotes = [];
     try {
       const swap = swapAll(modsDir, moves, rename, {
         needed: "hold", mods: inMods.map((r) => r.mod), exclude: replacedLayout(modsDir), stranded: strandedLayouts, prepare,
@@ -854,6 +855,9 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
       });
       // A linked mods/ (#494): nothing done, prepare never ran.
       if (swap.refused) throw new Error(swap.refused);
+      // #524: the layout guard's lines (a retire or rename it could not weigh) are the answer's,
+      // not only stderr's: the sidebar shows the JSON result.
+      swapNotes = Array.isArray(swap.notes) ? swap.notes : [];
     } catch (error) {
       restoreSet(modsDir, old);
       throw error;
@@ -861,7 +865,7 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
     swapped = true;
     // From here the new folders are live: nothing below undoes them or deletes `next`, and the
     // record is written first so it always names what mods/ holds.
-    const warnings = [];
+    const warnings = [...swapNotes];
     let recorded = true;
     try { writeMarker(modsDir, record); } catch (error) { recorded = false; warnings.push(`the ownership record could not be written (${error.message})`); }
     if (before?.v1) { try { carryV1(modsDir, record, log); writeMarker(modsDir, record); } catch (error) { warnings.push(`v0.2's kept copies stay where they were (${error.message})`); } }
@@ -1016,14 +1020,16 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
     staleLayout = !keptLayout && isFile(packLayout) && !linkedLayout(packLayout) && isFile(layoutRefOf(modsDir))
       && readFileSync(packLayout).equals(readFileSync(layoutRefOf(modsDir)));
   } catch {}
+  let swapNotes = [];
   try {
     const r = swapAll(modsDir, moves, rename, { needed: "refuse", unknown: "warn", then: "roll back", exclude, prepare, log });
     if (r.refused) throw new Error(`nothing rolled back: ${r.refused}`);
+    swapNotes = Array.isArray(r.notes) ? r.notes : [];
   } catch (error) {
     rmSync(next, { recursive: true, force: true });
     throw error;
   }
-  const warnings = [];
+  const warnings = [...swapNotes];
   // A folder the person had, adopted into backup/, comes back where mods/ is free once this
   // rollback drops the pack's copy of it (Group 3, D10): its own name or its renamed twin left
   // mods/; a mod the pack absorbed comes back when the set rolled back to has no am-* mod that

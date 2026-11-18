@@ -2126,6 +2126,31 @@ test("overtaken (under the lock): the version installed since the check, or a re
     } finally { h.done(); }
   });
 
+  test("#524 an unreadable layout's retire/rename warning is in the update's JSON answer", async () => {
+    const h = renameHome();
+    try {
+      writeFileSync(join(h.home, "layouts", "broken.json"), '{"content": {"mod": "auto-tabs"');
+      const logs = [];
+      const r = await applyUpdate({ tgzPath: h.t.path, version: "0.2.0", modsDir: h.mods, log: (l) => logs.push(l) });
+      assert.deepEqual(r.retired, ["auto-tabs"]);
+      assert.ok(r.warnings.some((w) => /without knowing the layout Herdr shows/.test(w)), r.warnings.join("\n"));
+      assert.ok(r.warnings.some((w) => /broken\.json/.test(w)));
+      assert.ok(logs.some((l) => /without knowing the layout Herdr shows/.test(l)), "still said on stderr");
+    } finally { h.done(); }
+  });
+
+  test("#524 a rollback without a readable layout carries its warning in the answer", async () => {
+    const h = renameHome();
+    try {
+      const up = await applyUpdate({ tgzPath: h.t.path, version: "0.2.0", modsDir: h.mods });
+      assert.equal(up.version, "0.2.0");
+      writeFileSync(join(h.home, "layouts", "broken.json"), '{"content": {"mod": "am-tabs"');
+      const r = rollback({ modsDir: h.mods });
+      assert.equal(r.version, "0.1.0");
+      assert.ok(r.warnings.some((w) => /without knowing the layout Herdr shows/.test(w)), r.warnings.join("\n"));
+    } finally { h.done(); }
+  });
+
   test("a held old folder survives a repair and a rollback, and the auto-update's notice says it", async () => {
     const h = renameHome();
     try {
