@@ -514,7 +514,9 @@ export function install(rt) {
       entry.joined = info.joined.filter(item => item?.info !== undefined && item.info !== null)
     }
     if (rt.groupOwners.has(sessionId)) return
-    if ((expectsReply(info) && !answersUser(info)) || info.role === 'room' || (info.role === 'handoff' && info.resume !== true)) {
+    // A message that owes no reply is still an exchange between Bots: its turn is
+    // hidden like the others.
+    if (((expectsReply(info) || (info.role === 'request' && info.noReply === true)) && !answersUser(info)) || info.role === 'room' || (info.role === 'handoff' && info.resume !== true)) {
       markExchangeTurn(sessionId, entry.turn)
     }
   }
@@ -945,10 +947,11 @@ export function install(rt) {
           } else if ((expectsReply(source) || source.role === 'room') && !answersUser(source)
             && source.exchangeId !== entry.info?.exchangeId
             && !(entry.joined ?? []).some(joined => joined.info.exchangeId === source.exchangeId)) {
-            // A request that lands inside a running turn steers that work but is
-            // answered in a hidden turn of its own once the work is done, so the
-            // sender never gets the turn's text. A failed-switch resume message
-            // re-sends the trigger's own source; the same exchangeId must not join twice.
+            // A request that lands inside a running turn steers that work and is
+            // answered by that turn's own text once it ends; a turn with nothing to
+            // say hands it back for a turn of its own (see turn/end). A failed-switch
+            // resume message re-sends the trigger's own source; the same exchangeId
+            // must not join twice.
             const text = textOf(event.data.content).replace(/^\[(?:[^\r\n]*\]\r?\n|[^\]\r\n]*\])/, '')
             entry.joined = [...(entry.joined ?? []), { info: source, text }]
           }
@@ -1223,6 +1226,13 @@ export function install(rt) {
         // call still goes back to the Bot for a turn in its own chat, as it did before.
         const reply = replyText()
         const handedBack = []
+        // A turn that answers handed-back requests together (or picks such a turn up
+        // after a restart) closes all of them as it closes its trigger, also when it
+        // says nothing: handing them back again would cost a turn each time and drop
+        // the trigger alone.
+        const batch = new Set(info?.deferred === true || info?.resumed === true
+          ? (Array.isArray(info.joined) ? info.joined : []).map(item => item?.info?.exchangeId).filter(Boolean)
+          : [])
         for (const request of joined) {
           if (request.info.role === 'room' && stoppedRoomTurns.delete(request.info.exchangeId)) continue
           // A failed or stopped turn closes the request like any other.
@@ -1230,6 +1240,10 @@ export function install(rt) {
             if (request.info.role === 'room') {
               if (failure !== undefined) void rt.lateRoomFailure?.(id, request.info, failure)
             } else answer(request.info, '')
+            continue
+          }
+          if (request.info.role !== 'room' && !recovered && !retry && batch.has(request.info.exchangeId)) {
+            finish(request.info, reply)
             continue
           }
           if (request.info.role === 'room' || recovered || retry || reply === '') {
@@ -1262,7 +1276,7 @@ export function install(rt) {
             toId: rt.selfOf(id),
             sessionId: id,
             text: request.text,
-            role: 'request',
+            role: request.info.role,
             exchangeId: request.info.exchangeId,
             ...(request.info.senderRoomId ? { fromRoomId: request.info.senderRoomId } : {}),
             deferred: true,
@@ -1278,7 +1292,7 @@ export function install(rt) {
             toId: rt.selfOf(id),
             sessionId: id,
             text,
-            role: 'request',
+            role: first.info.role,
             exchangeId: first.info.exchangeId,
             ...(first.info.senderRoomId ? { fromRoomId: first.info.senderRoomId } : {}),
             deferred: true,

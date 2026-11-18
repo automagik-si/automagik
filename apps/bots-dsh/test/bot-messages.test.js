@@ -1506,3 +1506,69 @@ test('replies for an agent still settling wait for it to go idle, without spinni
   await reply
   assert.deepEqual(agents.get('a').calls.map(([kind, message]) => [kind, message.source.replyTo]), [['followup', 'q1']])
 })
+
+// Every request a handed-back turn answers is closed the way its trigger is: a turn that
+// says nothing hands none of them back again, so no sender is dropped while the others
+// cost one more turn each.
+test('a handed-back batch that says nothing closes every request alike', () => {
+  const { emit, delivered } = turnsHost()
+  const joined = [
+    { info: replySource('request', { exchangeId: 'e2', senderSessionId: 'c', senderName: 'Writer' }), text: 'second' },
+    { info: replySource('request', { exchangeId: 'e3' }), text: 'third' },
+  ]
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', {
+    content: textBlock('[Messages from Omni, Writer · you read them during your last task; answer them now]\nOmni:\nfirst'),
+    source: replySource('request', { exchangeId: 'e1', deferred: true, joined }),
+  })
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(delivered, [])
+})
+
+test('a handed-back batch that answers closes every request with the one answer', () => {
+  const { emit, delivered } = turnsHost()
+  const joined = [{ info: replySource('stopped', { exchangeId: 's2' }), text: 'stop that' }]
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', {
+    content: textBlock('[Messages from Omni · you read them during your last task; answer them now]\nOmni:\nfirst'),
+    source: replySource('request', { exchangeId: 'e1', deferred: true, joined }),
+  })
+  emit('b', 'assistant/message', assistantText('done'))
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(delivered.map(job => [job.role, job.replyTo, job.text]).sort(), [['reply', 'e1', 'done'], ['reply', 's2', 'done']])
+})
+
+// A stopped notice that is handed back stays a stopped notice.
+test('a handed-back stopped notice keeps its role', () => {
+  const { emit, delivered } = turnsHost()
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: textBlock('write the letter'), source: { kind: 'user' } })
+  emit('b', 'user/message', { content: textBlock('[Stopped by Omni]\nwhy'), source: replySource('stopped', { exchangeId: 's1' }) })
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(delivered.map(job => [job.role, job.exchangeId, job.deferred]), [['stopped', 's1', true]])
+
+  emit('b', 'turn/start', { turn: 2 })
+  emit('b', 'user/message', { content: textBlock('write the letter'), source: { kind: 'user' } })
+  emit('b', 'user/message', { content: textBlock('[Stopped by Omni]\nwhy'), source: replySource('stopped', { exchangeId: 's2' }) })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni]\nand this'), source: replySource('request', { exchangeId: 'e2' }) })
+  emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+  const batch = delivered.at(-1)
+  assert.deepEqual([batch.role, batch.exchangeId, batch.joined.map(item => [item.info.role, item.info.exchangeId])], ['stopped', 's2', [['request', 'e2']]])
+})
+
+// A turn opened by a message that owes no reply is a Bot-to-Bot exchange like the others,
+// so the user does not see it in the recipient's chat.
+test('a turn opened by a no-reply message is hidden from the user', () => {
+  const { rt, emit, delivered } = turnsHost()
+  emit('b', 'turn/start', { turn: 1 })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni · no reply needed]\nhold the deploy'), source: replySource('request', { exchangeId: 'n1', noReply: true }) })
+  emit('b', 'assistant/message', assistantText('holding'))
+  emit('b', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.deepEqual(rt.state.exchangeTurns.b, [1])
+  assert.deepEqual(delivered, [])
+  // One the user is meant to read stays visible.
+  emit('b', 'turn/start', { turn: 2 })
+  emit('b', 'user/message', { content: textBlock('[Message from Omni · the user sees your reply here]\nsay hi'), source: replySource('request', { exchangeId: 'n2', noReply: true, audience: 'user' }) })
+  emit('b', 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+  assert.deepEqual(rt.state.exchangeTurns.b, [1])
+})
