@@ -49,7 +49,7 @@ downloads the build for this machine from this repository's releases, checks it 
   |---|---|
   | `dsh/` | dsh's home (`DSH_HOME`): its Sessions, settings, and the `omni` profile the app copies in from the build |
   | `bots/` | the Bot team's home (`AUTOMAGIK_BOTS_HOME`): the team, the companion's picture, and `omni.json`, the Omni this app is linked to (0600) |
-  | `bin/` | `node` and `pnpm` for dsh, written at each launch: both run on the app's own Electron as Node, so installing a plugin (Settings → Plugins, the market) needs nothing on the machine |
+  | `bin/` | `node` and `pnpm` for dsh's PATH, written at each launch: both run on the app's own Electron as Node. Plugin installs, updates and removals do not resolve `pnpm` there: the app starts dsh through `src/dsh-launch.cjs`, which gives its plugin manager the bundled pnpm by absolute path, so installing a plugin (Settings → Plugins, the market) needs nothing on the machine and cannot pick up another pnpm from PATH |
   | `logs/dsh.log`, `logs/update.log` | dsh's output, and the update checks |
 
   It is apart from a dsh you already run (`~/.dsh`) and from the Bot team installed into that dsh (`~/.automagik/bots`). The app sets no `OMNI_HOME`: an Omni sandbox and the Bun Omni's channels download are in Omni's own `~/.omni`.

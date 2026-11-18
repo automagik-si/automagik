@@ -347,6 +347,9 @@ function spawnDsh(port, steps) {
   const urlFile = launchUrlFileOf(join(home, 'dsh'))
   return serveDsh({
     run: dshProcess, portFile: portFileOf(home), node: process.execPath, bin: resources.bin, env,
+    // Plugin installs, updates and removals in the profile use the app's own pnpm, never a
+    // pnpm PATH resolves (src/dsh-launch.cjs).
+    bundledPnpm: resources.pnpm, launcher: resources.launcher,
     urlFile, port, onPort, onUnkept, cwd: home, log, privacy: overlay,
     onSpawn: (child) => {
       laneConfirmation.reset()
