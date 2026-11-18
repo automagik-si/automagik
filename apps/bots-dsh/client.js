@@ -24169,10 +24169,6 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
    .bt-update-dot, a card of .bt-update-* rows, and .bt-update-notes as a button. */
 .bt-side-tool{position:relative}
 .bt-update-pop button.bt-update-notes{padding:0;border:0;background:none;font-family:inherit;cursor:pointer}
-/* A card row may lead with its product's mark (BotMark), beside its name and status. */
-.bt-power-who{display:flex;align-items:center;gap:10px}
-.bt-power-who>.bt-mark{flex:none}
-.bt-power-what{min-width:0}
 
 /* A DSH bot's row and its expanding Session list. It wears DSH's own whale, the mark a
    Bot with no look of its own wears too. */

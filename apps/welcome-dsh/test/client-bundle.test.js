@@ -45,7 +45,7 @@ test('client.js registers its three onboarding steps on settings.onboarding, in 
       register: (options, component) => { registered.push({ ...options, component: typeof component }); return () => {} },
     },
   })
-  assert.deepEqual(effects, ['omni-ai: stage styles', 'omni-ai: team step copy', "omni-ai: the table over DSH's first frame", 'omni-ai: omni-companion on the rail', 'omni-ai: omni-team on the rail', 'omni-ai: omni-migrate on the rail', 'omni-ai: omni-connect-ai on the rail', 'omni-ai: Claude Code and Codex in Settings', 'omni-ai: power shortcut in the Bot team sidebar'])
+  assert.deepEqual(effects, ['omni-ai: stage styles', 'omni-ai: team step copy', "omni-ai: the table over DSH's first frame", 'omni-ai: omni-companion on the rail', 'omni-ai: omni-team on the rail', 'omni-ai: omni-migrate on the rail', 'omni-ai: omni-connect-ai on the rail', 'omni-ai: Claude Code and Codex in Settings', 'omni-ai: power in each Bot\'s settings'])
   // The team step's copy goes to DSH's locale service as welcome.team.
   runs.get('omni-ai: team step copy')()
   assert.deepEqual(registers, [['welcome.team', ['en', 'pt', 'pt-BR']]])
@@ -58,10 +58,10 @@ test('client.js registers its three onboarding steps on settings.onboarding, in 
   ])
 })
 
-// The power shortcut goes into the Bot team's sidebar through its client, which DSH loads first
-// when it is installed (`dsh.client.external`). It is looked up only when the effect runs, and a
-// DSH without the Bot team, or one whose client has no sidebarTools, gets no button and no error.
-function shortcutEffect(botTeam) {
+// The power card goes into each Bot's settings through the Bot team's client, which DSH loads
+// first when it is installed (`dsh.client.external`). It is looked up only when the effect runs,
+// and a DSH without the Bot team, or one whose client has no botSettings, gets no card and no error.
+function powerSettingsEffect(botTeam) {
   const registrations = []
   runInNewContext(committed(), { window: { __ModuleLoader__: { load: registration => registrations.push(registration) } } })
   const requested = []
@@ -79,13 +79,13 @@ function shortcutEffect(botTeam) {
     slots: { inject: () => {}, register: () => () => {} },
   })
   assert.ok(!requested.includes('@automagik/bots-dsh/client'), 'the Bot team is looked up only when the effect runs')
-  return { run: runs.get('omni-ai: power shortcut in the Bot team sidebar'), requested }
+  return { run: runs.get('omni-ai: power in each Bot\'s settings'), requested }
 }
 
-test('the power shortcut registers on the Bot team\'s sidebarTools, and leaves with its disposer', () => {
+test('the power card registers on the Bot team\'s botSettings, and leaves with its disposer', () => {
   const entries = []
-  const sidebarTools = { register: (entry) => { entries.push(entry); return () => entries.splice(entries.indexOf(entry), 1) } }
-  const { run, requested } = shortcutEffect(() => ({ omni: { sidebarTools } }))
+  const botSettings = { register: (entry) => { entries.push(entry); return () => entries.splice(entries.indexOf(entry), 1) } }
+  const { run, requested } = powerSettingsEffect(() => ({ omni: { botSettings } }))
   const dispose = run()
   assert.ok(requested.includes('@automagik/bots-dsh/client'))
   assert.equal(entries.length, 1)
@@ -95,7 +95,7 @@ test('the power shortcut registers on the Bot team\'s sidebarTools, and leaves w
   assert.equal(entries.length, 0)
 })
 
-test('without the Bot team, or with a client that has no sidebarTools, there is no button and nothing throws', () => {
+test('without the Bot team, or with a client that has no botSettings, there is no card and nothing throws', () => {
   for (const botTeam of [
     () => { throw new Error('Module @automagik/bots-dsh/client is not registered') },
     () => undefined,
@@ -103,7 +103,7 @@ test('without the Bot team, or with a client that has no sidebarTools, there is 
     () => ({ omni: null }),
     () => ({ omni: {} }),
   ]) {
-    const { run } = shortcutEffect(botTeam)
+    const { run } = powerSettingsEffect(botTeam)
     const dispose = run()
     assert.equal(typeof dispose, 'function')
     dispose()
