@@ -12,7 +12,7 @@ import { apply } from '../index.js'
 import { structuredNameOf } from '../src/host/acp.js'
 import { AcpAdapter, aside, choose, NOTICE_KIND, promptOf, SIDE_MODEL } from '../src/host/adapter.js'
 import { AGENTS } from '../src/host/agents.js'
-import { Backchannel, offeredTools, presetOf } from '../src/host/backchannel.js'
+import { Backchannel, NATIVE_TWIN_TOOLS, offeredTools, presetOf } from '../src/host/backchannel.js'
 import { CliHomes } from '../src/host/cli-homes.js'
 import { isAuthRequired, SYNTHETIC_KIND } from '../src/host/names.js'
 import { credentialShapes } from '../src/host/redact.js'
@@ -1007,19 +1007,22 @@ test('with dshTools on, DSH approves a DSH tool call and the bridge writes its c
   }
 })
 
-// #1639: a Genie's `grant_wish` is a DSH tool registered by its plugin, and its Bot runs on
-// `acp-codex`, which keeps its own built-in tools. With no explicit `dshTools`, this session used
-// to get no bridge at all, so the model was never offered `grant_wish` (Codex's own `bash`,
-// `read`... were its whole tool set). The Bot's identity, which bots-dsh sends, says its role
-// tools live in DSH; the bridge is then on and drops DSH's twins of Codex's built-ins.
-const genieTools = () => [
-  ...bridgeTools(),
-  {
-    name: 'grant_wish', description: 'Grant a wish', parameters: { type: 'object', properties: {} },
-  },
-]
+// #1639: a Genie's role tools are DSH tools registered by its plugins (`grant_wish`,
+// `message_bot`, `start_task`, ...), and its Bot runs on `acp-codex`, which keeps its own
+// built-in tools. With no explicit `dshTools`, this session used to get no bridge at all, so the
+// model was never offered any of them (Codex's own `bash`, `read`... were its whole tool set).
+// The Bot's identity, which bots-dsh sends, says its role tools live in DSH; the bridge is then
+// on and drops only DSH's twins of Codex's built-ins, not the whole set. The names are the
+// Genie's real ones plus six twins, sorted so the wire's preset order equals the expected order.
+const GENIE_DSH_TOOLS = Object.freeze([
+  'bash', 'grant_wish', 'message_bot', 'read', 'send_message',
+  'start_task', 'subagent', 'todo_write', 'write',
+])
+const genieTools = () => GENIE_DSH_TOOLS.map(name => ({
+  name, description: `${name} tool`, parameters: { type: 'object', properties: {} },
+}))
 
-test('a Genie on acp-codex is bridged and offered grant_wish, without DSH twins', async () => {
+test('a Genie on acp-codex keeps its whole DSH tool set, without DSH twins', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-genie-codex-'))
   const genieTrace = join(dir, 'genie.ndjson')
   const genie = dshHost({
@@ -1051,9 +1054,16 @@ test('a Genie on acp-codex is bridged and offered grant_wish, without DSH twins'
     const events = traceEvents(genieTrace)
     const opened = events.find(event => event.event === 'new-session')
     assert.deepEqual(opened.servers, ['dsh'], 'the bridge is offered to the agent')
-    // The wire's real tools/list: the role tool, and none of DSH's twins of Codex's own tools.
+    // The wire's real tools/list: every DSH tool the Genie's role delivers that Codex has no
+    // equivalent for, and none of DSH's twins of Codex's own tools. The expected list is derived
+    // from the twin list itself, so the test states the rule rather than a snapshot.
     const listed = events.find(event => event.event === 'mcp-list' && event.server === 'dsh')
-    assert.deepEqual(listed.tools, ['grant_wish'])
+    const expected = GENIE_DSH_TOOLS.filter(name => !NATIVE_TWIN_TOOLS.has(name)).sort()
+    for (const name of ['grant_wish', 'message_bot', 'start_task']) assert.ok(expected.includes(name), name)
+    const twins = GENIE_DSH_TOOLS.filter(name => NATIVE_TWIN_TOOLS.has(name))
+    assert.ok(twins.length >= 4, `the fixture carries twins of Codex's own tools: ${twins.join(', ')}`)
+    assert.deepEqual(listed.tools, expected)
+    for (const name of twins) assert.ok(!listed.tools.includes(name), `${name} is Codex's own tool, not a bridge tool`)
     assert.equal(chunks.at(-1).reason.kind, 'stop', JSON.stringify(chunks.at(-1).reason))
     assert.match(textIn(chunks), /The bridge said: ran grant_wish/)
     assert.deepEqual(genie.executed, ['grant_wish'])
