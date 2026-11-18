@@ -4314,9 +4314,15 @@ fn custom_interval_clips_evidence_and_keeps_historical_actor_totals() {
     assert_eq!(v["window"]["start"], v["ingestion"]["evidence_from"]);
     assert_eq!(v["window"]["clipped"], true);
     assert_eq!(v["rows"][0]["tokens"]["total"], 150);
-    assert_eq!(v["rows"][1]["state"], "missing");
-    assert_eq!(v["rows"][1]["reason"], "before_evidence");
-    assert!(v["rows"][1]["tokens"].is_null());
+    // The 09:00 frozen row keeps its branch (#1259): it is a measured 77-token row on
+    // feat/history, with all of its tokens in the before-evidence class.
+    assert_eq!(v["rows"][1]["branch"], "feat/history");
+    assert_eq!(v["rows"][1]["state"], "measured");
+    assert_eq!(v["rows"][1]["tokens"]["total"], 77);
+    assert_eq!(
+        v["rows"][1]["attribution"]["actor"]["tokens_before_evidence"],
+        77
+    );
     assert_eq!(v["actor_unattributed"]["tokens_before_evidence"], 77);
     assert_eq!(
         v["actor_unattributed"]["parts"][0]["reason"],
@@ -4347,14 +4353,13 @@ fn custom_interval_clips_evidence_and_keeps_historical_actor_totals() {
     let (_, raw) = s.query(&a);
     let v: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(v["window"]["start"], v["window"]["end"]);
-    assert_eq!(v["rows"][0]["state"], "missing");
-    assert_eq!(v["rows"][0]["reason"], "before_evidence");
-    assert!(
-        v["actor_unattributed"]["tokens_before_evidence"]
-            .as_i64()
-            .unwrap()
-            > 0
-    );
+    // With no evidence floor the reader falls back to the whole hourly history; keeping the
+    // frozen rows' branches makes both requested branches measured (#1259).
+    assert_eq!(v["rows"][0]["state"], "measured");
+    assert_eq!(v["rows"][0]["tokens"]["total"], 1650);
+    assert_eq!(v["rows"][1]["state"], "measured");
+    assert_eq!(v["rows"][1]["tokens"]["total"], 77);
+    assert_eq!(v["actor_unattributed"]["tokens_before_evidence"], 1727);
     assert!(schema().valid(&v), "{:#?}", schema().errors(&v));
 }
 
@@ -4712,8 +4717,81 @@ fn hours_before_evidence_keep_their_number_and_are_not_counted_twice() {
         477,
         "{v}"
     );
-    // The existing reader drops the branch of the hour before evidence, so it is unattributed too.
-    assert_eq!(int(&v["unattributed"]["tokens_total"]), 477, "{v}");
+    // The hour before evidence keeps its branch, so its 77 tokens are not in the branchless
+    // unattributed figure; they remain in the before-evidence class.
+    assert_eq!(int(&v["unattributed"]["tokens_total"]), 400, "{v}");
+    assert_eq!(
+        int(&v["actor_unattributed"]["tokens_before_evidence"]),
+        477,
+        "{v}"
+    );
+}
+
+#[test]
+fn an_interval_keeps_a_frozen_rows_branch_like_the_named_window() {
+    // Issue 1259: the custom-interval reader strips a frozen row's branch before evidence, so
+    // its 77 tokens count as unattributed while the named window keeps them on `feat/history`.
+    // Both answers must count that row the same way.
+    let s = excess_scene();
+    put_hourly(
+        &s,
+        CLAUDE_MODEL,
+        Some(REPO),
+        None,
+        "2026-11-08T11:00:00Z",
+        [400, 0, 0, 0, 0],
+        "",
+        0,
+    );
+    let interval_args = {
+        let mut a = scenes::args(false, &["feat/history"]);
+        a.extend([
+            "--since".into(),
+            "2026-11-08T09:00:00Z".into(),
+            "--until".into(),
+            "2026-11-08T13:00:00Z".into(),
+        ]);
+        a
+    };
+    let (code, raw) = s.query(&interval_args);
+    assert_eq!(code, 0, "{raw}");
+    let interval: Value = serde_json::from_str(&raw).unwrap();
+    let (code, raw) = s.query(&{
+        let mut a = scenes::args(false, &["feat/history"]);
+        a.extend(["--window".into(), "d1".into()]);
+        a
+    });
+    assert_eq!(code, 0, "{raw}");
+    let named: Value = serde_json::from_str(&raw).unwrap();
+    let row = |v: &Value, branch: &str| -> i64 {
+        v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["branch"].as_str() == Some(branch))
+            .map(|r| int(&r["tokens"]["total"]))
+            .unwrap_or(0)
+    };
+    assert_eq!(row(&interval, "feat/history"), 77, "{interval}");
+    assert_eq!(row(&named, "feat/history"), 77, "{named}");
+    // Only the hourly-only 400 of the 11:00 excess has no branch now; the before-evidence class
+    // still holds both the 77 and the 400.
+    assert_eq!(
+        int(&interval["unattributed"]["tokens_total"]),
+        400,
+        "{interval}"
+    );
+    assert_eq!(int(&named["unattributed"]["tokens_total"]), 400, "{named}");
+    assert_eq!(
+        int(&interval["actor_unattributed"]["tokens_before_evidence"]),
+        477,
+        "{interval}"
+    );
+    assert_eq!(
+        int(&named["actor_unattributed"]["tokens_before_evidence"]),
+        477,
+        "{named}"
+    );
 }
 
 #[test]

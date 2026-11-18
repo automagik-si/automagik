@@ -139,6 +139,7 @@ export function install(rt) {
   }
   const mounted = {}
   rt.browserFrame = botId => mounted.frame?.(botId)
+  rt.browserControl = (botId, action, args) => mounted.control?.(botId, action, args)
   mountBrowserPlugin(rt.ctx, {
     api: mounted,
     onAddressRefused: (exec, tool) => rt.noteStop?.(exec.agent?.id ?? exec.agent?.session?.id, { why: 'address', tool, callId: exec.callId }, exec.agent),

@@ -322,6 +322,35 @@ test('an unknown Omni channel state says Hermes is off and what to check, not th
   assert.doesNotMatch(body, /Nothing is listening right now/)
 })
 
+test('an unknown Omni result offers the way back to Hermes, only when there is a copy to put back', () => {
+  const back = []
+  const tree = view({
+    phase: 'problem',
+    error: { code: 'omni', message: '', changed: { hermesOff: true, omniCreated: false, omniUnknown: true }, canRestoreHermes: true },
+    onRestoreHermes: () => back.push(true),
+  })
+  const button = buttons(tree).find(node => textOf(node) === 'Turn Hermes\'s Telegram back on')
+  assert.ok(button, 'the unknown result offered no way back to Hermes')
+  button.props.onClick()
+  assert.deepEqual(back, [true])
+
+  const noCopy = view({ phase: 'problem', error: { code: 'omni', message: '', changed: { hermesOff: true, omniCreated: false, omniUnknown: true } } })
+  assert.equal(buttonLabels(noCopy).includes('Turn Hermes\'s Telegram back on'), false, 'offered a way back with no copy to put back')
+
+  const known = view({ phase: 'problem', error: { code: 'omni', message: '', changed: { hermesOff: true, omniCreated: false }, canRestoreHermes: true } })
+  assert.equal(buttonLabels(known).includes('Turn Hermes\'s Telegram back on'), false, 'offered a way back after a known empty Omni')
+})
+
+test('a restored Hermes ends the step with its Telegram back, and a recovered channel says who answers', () => {
+  const tree = view({ phase: 'restored' })
+  assert.match(textOf(tree), /Hermes's Telegram is back on/)
+  assert.match(textOf(tree), /Hermes has its Telegram again/)
+  assert.deepEqual(buttonLabels(tree), ['Done'])
+
+  const done = view({ phase: 'done', result: { channelId: OTHER, channelName: 'Telegram', connected: true, botName: '@HefestoBot', chatUrl: null, attached: true, answering: false, answeringOff: false, answerBot: null, recovered: true, hermesOff: true } })
+  assert.match(textOf(done), /No Bot answers in these chats yet\. Pick one in Omni's Channels\./)
+})
+
 test('the step carries its own clay, in both themes', () => {
   assert.match(migrate.MIGRATE_CSS, /\.oai-soon\{[^}]*--oai-lilac/)
   assert.match(migrate.MIGRATE_CSS, /\.oai-card \.oai-mig-tool/)

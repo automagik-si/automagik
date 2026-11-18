@@ -40,7 +40,10 @@ for (const [label, opener] of [
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(shown(7), true)
     assert.deepEqual({ ...rt.state.exchangeTurns }, {})
-    assert.ok(!delivered.some(entry => entry.role === 'reply' && /final answer/.test(entry.text ?? '')))
+    // The person's reply stays the turn's, and the Bot's request gets a copy of it.
+    const shared = delivered.find(entry => entry.role === 'reply' && entry.replyTo === 'e1')
+    assert.ok(shared !== undefined)
+    assert.match(shared.text, /final answer/)
   })
 }
 

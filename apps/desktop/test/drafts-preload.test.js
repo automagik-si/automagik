@@ -134,6 +134,6 @@ test('a storage that stops answering later sends nothing more, and the page goes
 test('the drafts add nothing to what the page can reach', () => {
   const { exposed } = loadPreload({ storage: storageOf() })
   assert.deepEqual(Object.keys(exposed).sort(), ['dsBotApp', 'omniDesktop'])
-  assert.deepEqual(Object.keys(exposed.omniDesktop).sort(), ['app', 'herdr', 'platform', 'updates'])
+  assert.deepEqual(Object.keys(exposed.omniDesktop).sort(), ['account', 'app', 'herdr', 'platform', 'updates'])
   assert.deepEqual(Object.keys(exposed.dsBotApp), ['browser'])
 })

@@ -43,6 +43,19 @@ const LEVEL_EVENTS = new Set(['permission/preset', 'sandbox/mode', 'approval/pol
 export const MUTATING_TOOLS = Object.freeze(new Set(['write', 'edit', 'apply_patch', 'str_replace_editor', 'office_convert', 'office_recalculate', 'office_render']))
 // User-owned terminals are outside the Session's read-only filesystem boundary.
 export const READ_ONLY_DENIED_TOOLS = new Set([...MUTATING_TOOLS, 'user_terminal_list', 'user_terminal_read'])
+// Native-tools mode (`nativeTools`, #1564): the agent keeps its own built-in tools, so the
+// bridge does not offer DSH's twin of any of them, nor the DSH subagent tools that would only
+// talk to a registry the agent's own `Agent` tool never uses. What stays is what Claude Code
+// has no tool for: the Bot team's tools, goals, workflow, working_directory and the rest.
+// `web_search`, `web_fetch` and `exit_plan_mode` are conditional and not offered today; they
+// are named so they stay out once they are.
+export const NATIVE_TWIN_TOOLS = Object.freeze(new Set([
+  'bash', 'job_output', 'job_list', 'job_kill',
+  'read', 'write', 'edit', 'read_image', 'apply_patch', 'str_replace_editor', 'glob', 'grep',
+  'skill', 'todo_write',
+  'subagent', 'subagent_fork', 'list_agents', 'send_message', 'interrupt_agent', 'wait_agent', 'list_subagent_models',
+  'web_search', 'web_fetch', 'exit_plan_mode',
+]))
 
 const textOf = (content) => {
   if (typeof content === 'string') return content
@@ -165,12 +178,14 @@ export function presetOf(ctx, session) {
 
 /**
  * What the bridge offers this Session right now: its preset's visible tools, without the mirror
- * tool, and without output tools or user-terminal access when the Session is read-only.
+ * tool, and without output tools or user-terminal access when the Session is read-only. In
+ * native-tools mode (`native`), without DSH's twins of the agent's own tools either.
  * @param {{ get?: (name: string) => any }} ctx
  * @param {any} agent the DSH Agent the Session runs
+ * @param {{ native?: boolean }} [options]
  * @returns {Array<{ name: string, description: string, inputSchema: object }>}
  */
-export function offeredTools(ctx, agent) {
+export function offeredTools(ctx, agent, { native = false } = {}) {
   const tools = ctx?.get?.('tools')
   if (tools?.definitions === undefined || agent === undefined) return []
   const level = levelOf(ctx?.get?.('approval'), agent.session, ctx?.get?.('sandboxPolicy'), ctx?.get?.('permissionPresets'))
@@ -181,6 +196,7 @@ export function offeredTools(ctx, agent) {
     // offered.
     .filter((definition) => typeof tools.executable !== 'function' || tools.executable(definition.name, agent) !== undefined)
     .filter((definition) => level.sandbox !== 'read-only' || !READ_ONLY_DENIED_TOOLS.has(definition.name))
+    .filter((definition) => native !== true || !NATIVE_TWIN_TOOLS.has(definition.name))
     .map((definition) => ({
       name: definition.name,
       description: typeof definition.description === 'string' ? definition.description : '',
@@ -202,7 +218,7 @@ function routeOf(session) {
 }
 
 /** A stable fingerprint of what the bridge would list: preset, level (Auto and Full included) and every tool's schema. */
-export function signatureOf(ctx, agent) {
+export function signatureOf(ctx, agent, { native = false } = {}) {
   const level = levelOf(ctx?.get?.('approval'), agent?.session, ctx?.get?.('sandboxPolicy'), ctx?.get?.('permissionPresets'))
   return JSON.stringify({
     preset: presetOf(ctx, agent?.session),
@@ -210,7 +226,7 @@ export function signatureOf(ctx, agent) {
     approval: level.policy ?? null,
     auto: level.auto === true,
     full: level.full === true,
-    tools: offeredTools(ctx, agent).map((tool) => [tool.name, tool.description, tool.inputSchema]),
+    tools: offeredTools(ctx, agent, { native }).map((tool) => [tool.name, tool.description, tool.inputSchema]),
   })
 }
 
@@ -453,9 +469,11 @@ export class Backchannel {
   /**
    * Mint the credential of one ACP session's bridge. Every spawn (a new ACP session, a fork)
    * gets a fresh value; `revoke` is what ends it.
-   * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean }} options
+   * `native`: the agent keeps its own tools (native-tools mode), so this bridge offers and runs
+   * only DSH's extras, never a twin of one of them (NATIVE_TWIN_TOOLS).
+   * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean, native?: boolean }} options
    */
-  mint({ sessionId, agent, name, promptRunning }) {
+  mint({ sessionId, agent, name, promptRunning, native = false }) {
     const credential = randomBytes(32).toString('hex')
     const record = {
       credential,
@@ -464,8 +482,9 @@ export class Backchannel {
       agent,
       name: name ?? 'agent',
       promptRunning,
+      native: native === true,
       generation: 0,
-      signature: signatureOf(this.ctx, agent),
+      signature: signatureOf(this.ctx, agent, { native: native === true }),
       announced: false,
       listed: false,
       closed: false,
@@ -527,7 +546,7 @@ export class Backchannel {
    */
   refresh(record) {
     if (record === undefined || record.closed) return false
-    const signature = signatureOf(this.ctx, record.agent)
+    const signature = signatureOf(this.ctx, record.agent, { native: record.native })
     if (signature === record.signature) return false
     record.signature = signature
     record.generation++
@@ -601,7 +620,7 @@ export class Backchannel {
     if (op === 'list') {
       this.refresh(record)
       record.listed = true
-      return reply(200, { tools: offeredTools(this.ctx, record.agent), generation: record.generation })
+      return reply(200, { tools: offeredTools(this.ctx, record.agent, { native: record.native }), generation: record.generation })
     }
     if (op === 'call') {
       // The bridge puts no deadline on a call (a long wait, a slow command and an open approval
@@ -804,7 +823,7 @@ export class Backchannel {
         if (record.closed && record.controllers.size === 0) record.guard?.release()
       }
     }
-    const offered = offeredTools(this.ctx, record.agent)
+    const offered = offeredTools(this.ctx, record.agent, { native: record.native })
     if (!offered.some((tool) => tool.name === name)) return error(`Tool "${name}" is not offered to this Session.`)
     const raw = JSON.stringify(args ?? {})
     const approval = this.ctx?.get?.('approval')

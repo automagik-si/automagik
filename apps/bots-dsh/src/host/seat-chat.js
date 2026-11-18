@@ -85,6 +85,8 @@ export class SeatChat {
     const projectName = (folder) => (typeof folder === 'string' ? projects.find(project => project.folder === folder)?.name ?? null : null)
     const byBot = new Map()
     for (const terminal of this.engine.hub.all()) {
+      // A finished pane is not a live seat: it opens no view (RFC 0022 (d)).
+      if (terminal?.state === 'finished') continue
       if (typeof terminal?.address !== 'string' || addressParts(terminal.address).machine !== null) continue
       const id = typeof terminal.labels?.bot === 'string' ? terminal.labels.bot : null
       if (id !== null && !byBot.has(id)) byBot.set(id, terminal)
