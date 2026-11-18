@@ -113,7 +113,7 @@ class AssistActivity : ComponentActivity() {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(text, { text = it }, Modifier.weight(1f), placeholder = { Text("Message ${chosen.terminal.title.ifBlank { chosen.terminal.agent }}") }, maxLines = 4)
                     Spacer(Modifier.width(6.dp))
-                    Dictate { heard -> text = dictated(text, heard) }
+                    Dictate(onHeard = { heard -> text = dictated(text, heard) })
                     IconButton(enabled = text.isNotBlank(), onClick = {
                         val send = text.trim(); val ref = chosen.ref
                         scope.launch {

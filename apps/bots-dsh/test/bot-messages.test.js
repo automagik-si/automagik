@@ -605,8 +605,8 @@ test('a Bot may take part in the same work again, but not message one that waits
   // The guard answers with a result, not a failed call: the turn goes on with the
   // work, and the result says where its answer goes.
   const refused = /^Not sent: (Omni|Writer) is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back\./
-  assert.match(await tool('message_bot', { to: 'Omni', message: 'please accept it' }, 'c'), refused)
-  assert.match(await tool('message_bot', { to: 'Writer', message: 'it passes' }, 'c'), refused)
+  assert.match((await tool('message_bot', { to: 'Omni', message: 'please accept it' }, 'c')).text, refused)
+  assert.match((await tool('message_bot', { to: 'Writer', message: 'it passes' }, 'c')).text, refused)
   assert.deepEqual(callsOf(agents, 'a'), [])
   assert.equal(callsOf(agents, 'b').length, 1)
   end('c', 'it passes')
@@ -620,7 +620,34 @@ test('a Bot may take part in the same work again, but not message one that waits
   end('a')
   take('c')
   assert.match(await tool('message_bot', { to: 'Writer', message: 'what did you change last?' }, 'c'), /^Delivered to Writer/)
-  assert.match(await tool('message_bot', { to: 'Omni', message: 'done' }, 'c'), refused)
+  assert.match((await tool('message_bot', { to: 'Omni', message: 'done' }, 'c')).text, refused)
+})
+
+test('a message_bot refusal carries the host\'s reason as a result the chat can tell from a sent one', async (t) => {
+  const team = await start(threeBots())
+  t.after(team.stop)
+  const { take, end } = await handedOn(team)
+  end('b')
+  take('c')
+  const result = await team.tool('message_bot', { to: 'Omni', message: 'please accept it' }, 'c')
+  assert.equal(typeof result, 'object')
+  assert.equal(result.sent, false)
+  assert.match(result.reason, /^Not sent: Omni is waiting for the result of the work you are doing, and your answer reaches it by itself once everything you handed on is back\./)
+  assert.equal(result.text, result.reason)
+  // The Bot still reads exactly the words it read before this change.
+  const definition = rt.teamTools.find(item => item.name === 'message_bot')
+  assert.equal(textOf(definition.output.render({}, result)), result.text)
+  assert.deepEqual(definition.output.presentationMeta({}, result), { sent: false, reason: result.reason })
+})
+
+test('a message_bot delivery keeps its string result and is marked sent', async (t) => {
+  const botTeam = await start(team())
+  t.after(botTeam.stop)
+  const definition = rt.teamTools.find(item => item.name === 'message_bot')
+  const sent = await botTeam.tool('message_bot', { to: 'Writer', message: 'how are you' }, 'a')
+  assert.equal(typeof sent, 'string')
+  assert.equal(textOf(definition.output.render({}, sent)), sent)
+  assert.deepEqual(definition.output.presentationMeta({}, sent), { sent: true })
 })
 
 test('a stopped turn answers at once, and what it handed on comes back to it alone', async (t) => {
@@ -1140,7 +1167,7 @@ for (const id of ['b', 'gb']) {
 test('message_bot turns down an empty message', async (t) => {
   const { agentOf, tool, exchanges, stop } = await start(team())
   t.after(stop)
-  for (const message of ['', '   \n\t ']) assert.equal(await tool('message_bot', { to: 'Writer', message }, 'a'), 'Write a message to send.')
+  for (const message of ['', '   \n\t ']) assert.equal((await tool('message_bot', { to: 'Writer', message }, 'a')).text, 'Write a message to send.')
   assert.deepEqual(agentOf('b').calls, [])
   assert.deepEqual(await exchanges(), [])
 })
@@ -1220,7 +1247,8 @@ test('without file storage a message past 20,000 characters is not sent', async 
   const { agentOf, tool, exchanges, stop } = await start(team())
   t.after(stop)
   const answer = await tool('message_bot', { to: 'Writer', message: 'x'.repeat(20_001) }, 'a')
-  assert.equal(answer, 'Not sent: the message has 20001 characters, more than 20000, and this DeepSeek Harness cannot send it as a file. Write it to a file in your working folder and send its path instead.')
+  assert.equal(answer.text, 'Not sent: the message has 20001 characters, more than 20000, and this DeepSeek Harness cannot send it as a file. Write it to a file in your working folder and send its path instead.')
+  assert.equal(answer.sent, false)
   assert.deepEqual(agentOf('b').calls, [])
   assert.deepEqual(await exchanges(), [])
   // 20,000 characters still go as they are.
@@ -1485,6 +1513,58 @@ test('replies moved to a new part that is working wait for that part\'s turn', a
   emit('a2', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
   await reply
   assert.deepEqual(agents.get('a2').calls.map(([kind, message]) => [kind, message.source.replyTo]), [['followup', 'q1']])
+})
+
+// A Bot held for a shell choice while replies wait takes none of them: not through the Agent
+// the queue already resolved for its part, nor through a new part a switch gave it.
+test('replies waiting for a Bot that becomes shell-held are not sent, cached Agent or new part', async (t) => {
+  const { agents, emit, home, stop } = await start(team())
+  t.after(stop)
+  // The update path refuses a shell-off Bot on a coding CLI, so the hold comes from the saved
+  // team: an outside edit of state.json, adopted the way the store adopts any (the next write
+  // finds the file changed), which holds the Bot at adoption.
+  const hold = async () => {
+    await rt.save()
+    const path = join(home, 'state.json')
+    const disk = JSON.parse(readFileSync(path, 'utf8'))
+    Object.assign(disk.bots.a, { shell: false, appliedModel: 'acp-fake/m1' })
+    writeFileSync(path, JSON.stringify(disk))
+    await rt.save().catch(() => {})
+    await rt.refresh()
+    assert.deepEqual(rt.botOf('a').shellHeld, { cli: 'acp-fake', model: 'acp-fake/m1' })
+  }
+  // The owner's refusal: code bot/shell, and a message naming both ways out.
+  const refused = error => error.code === 'bot/shell'
+    && /has no shell, so it cannot run on acp-fake/.test(error.message)
+    && /Pick a model that uses DeepSeek Harness's tools, or turn its shell on/.test(error.message)
+
+  // Same part: the reply resolved and cached the part's Agent before the hold.
+  emit('a', 'turn/start', { turn: 1 })
+  const cached = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'the answer', exchangeId: 'r1', replyTo: 'q1' })
+  await delay(60)
+  assert.ok(agents.has('a'), 'the queued reply resolved its Agent')
+  await hold()
+  emit('a', 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  await assert.rejects(cached, refused)
+  assert.deepEqual(agents.get('a').calls, [])
+
+  // Part switch: the reply was queued for the old part, the hold and the switch came after.
+  // The person's shell toggle lifts the first hold.
+  await rt.updateBot('a', { shell: true })
+  assert.equal(rt.botOf('a').shellHeld, undefined)
+  emit('a', 'turn/start', { turn: 2 })
+  const moved = rt.deliver({ fromId: 'b', toId: 'a', role: 'reply', text: 'the next answer', exchangeId: 'r2', replyTo: 'q2' })
+  await delay(60)
+  await hold()
+  const bot = rt.botOf('a')
+  bot.sessionId = 'a2'
+  rt.chatOwners.delete('a')
+  rt.chatOwners.set('a2', 'a')
+  rt.pastOwners.set('a', { botId: 'a' })
+  emit('a', 'turn/end', { turn: 2, reason: { kind: 'aborted' } })
+  await assert.rejects(moved, refused)
+  assert.deepEqual(agents.get('a').calls, [])
+  assert.equal(agents.has('a2'), false, 'no Agent was resolved for the held Bot\'s new part')
 })
 
 // An agent that has ended its turn but not yet gone idle is waited for without spinning:

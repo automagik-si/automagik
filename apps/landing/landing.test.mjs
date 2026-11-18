@@ -499,8 +499,8 @@ test('the title face is the brand\'s: Fredoka from docs/brand, at its three weig
   // The site serves byte copies of the brand's font and licence, and the font is the recorded build.
   assert.deepEqual(brandFonts.map(file => file.to.pathname.split('/').pop()), ['fredoka-latin.woff2', 'OFL-Fredoka.txt'])
   for (const { from, to } of brandFonts) assert.ok(readFileSync(to).equals(readFileSync(from)), to.pathname.split('/').pop())
-  assert.equal(createHash('sha256').update(readFileSync(brandFonts[0].to)).digest('hex'), 'd1ceb16007127919aa1900fb85e4b5d612a4f242404a4068d43f3bc628b2aeca')
-  assert.ok(read('../../docs/brand/fonts/README.md').includes('`d1ceb16007127919aa1900fb85e4b5d612a4f242404a4068d43f3bc628b2aeca`'))
+  assert.equal(createHash('sha256').update(readFileSync(brandFonts[0].to)).digest('hex'), '810dcfb6a381d6af829919740868e38b2e1bfdeca74cec7f34526d9dc7662f1b')
+  assert.ok(read('../../docs/brand/fonts/README.md').includes('`810dcfb6a381d6af829919740868e38b2e1bfdeca74cec7f34526d9dc7662f1b`'))
   // The theme takes the family, the file, the size adjustment and the weights from the brand's tokens.
   assert.deepEqual({ family: titleFace.family, weight: titleFace.weight, sizeAdjust: titleFace.sizeAdjust }, { family: 'Fredoka', weight: '300 700', sizeAdjust: '105%' })
   assert.deepEqual(brand.weights.map(weight => [weight.name, weight.value]), [['weight-title', 536], ['weight-strong', 469], ['weight-label', 402]])

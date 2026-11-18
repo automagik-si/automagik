@@ -39,10 +39,11 @@ with the secret uploads the APK as the `pocket-debug-apk-<number>` artifact (the
 run number on a push) for 14 days and prints its certificate. Without the secret, CI uses the
 runner's default debug key and uploads no APK. To build locally with a keystore you provide, set
 `POCKET_DEBUG_STORE` (or `-Ppocket.debugStore`) to its path; alias `androiddebugkey`, password
-`android`.
+`android`. The environment variable wins over the Gradle property, and a relative path resolves
+against `apps/pocket/android/app/`.
 
 **16 KB pages.** Play requires every native library to support 16 KB memory pages. JNA is pinned
-to 5.17.0 (`android/app/build.gradle.kts:66-71`) because iroh-android 1.2.0 brings 5.15.0, whose
+to 5.17.0 (`android/app/build.gradle.kts:147`) because iroh-android 1.2.0 brings 5.15.0, whose
 `libjnidispatch.so` isn't 16 KB aligned. Drop the pin when iroh-android depends on JNA 5.17 or newer.
 
 ## 3. Run it
@@ -99,7 +100,7 @@ same key.
 - **A maintainer's machine** keeps the key in `~/.config/herdr-pocket/`: the keystore, a password
   file, and `signing.properties` with `storeFile`, `passwordFile` and `alias` (default `pocket`).
   The environment variables `POCKET_SIGNING_STORE` and `POCKET_SIGNING_PASSWORD` override it
-  (`android/app/build.gradle.kts:5-12`).
+  (`android/app/build.gradle.kts:30-35`).
 - With the key present, debug builds are signed with it too, so a build from Android Studio and the
   releases update each other. Without it, builds are debug-signed (section 2).
 - Never commit a key: `*.jks` and `*.keystore` are in `.gitignore`. Never regenerate the key;

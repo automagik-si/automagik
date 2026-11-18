@@ -10,7 +10,6 @@ import { absoluteLinks } from './links.js'
 import { splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { reminderText } from './schedules.js'
-import { shellHoldText } from '../shared/routes.js'
 
 // What a running tool call is about, for an approval card.
 export const detailOfArgs = raw => {
@@ -344,6 +343,13 @@ export function install(rt) {
       const sessionId = agent?.session?.id ?? agent?.id
       const header = agent?.session?.header
       const parentId = header?.parentSession
+      try {
+        rt.assertShellChoice?.(sessionId)
+        rt.assertShellChoice?.(parentId)
+      } catch {
+        agent.cancel?.({ kind: 'user' }, { keepInbox: true })
+        continue
+      }
       if (typeof parentId === 'string' && header?.origin === 'subagent' && known(parentId)) {
         noteSubagentStart(parentId, sessionId, undefined, Date.now())
         continue
@@ -1338,6 +1344,53 @@ export function install(rt) {
     if (entry?.turn !== undefined) entry.cut = { texts: entry.texts.length }
   }
 
+  // Cordis returns a scope proxy when a service method is read. Compare the own
+  // descriptor so unload restores only our wrapper, even through that proxy.
+  const wrapMethod = (service, key, method, label) => ctx.effect(() => {
+    const previous = Object.getOwnPropertyDescriptor(service, key)
+    service[key] = method
+    return () => {
+      if (Object.getOwnPropertyDescriptor(service, key)?.value !== method) return
+      if (previous === undefined) delete service[key]
+      else Object.defineProperty(service, key, previous)
+    }
+  }, label)
+
+  // Typert resolves typed Agent and Session arguments before invoking a controller
+  // method. Those lookups can go straight to the DSH registry, so guard its resume
+  // boundary before the factory constructs an Agent or mounts its preset.
+  const agentRegistry = ctx.get?.('agents')
+  const resume = agentRegistry?.resume
+  if (typeof resume === 'function') {
+    const admitted = async function (options, ...rest) {
+      await rt.refreshShellChoice?.()
+      rt.assertShellChoice?.(options?.resumeSessionId)
+      return resume.call(this, options, ...rest)
+    }
+    wrapMethod(agentRegistry, 'resume', admitted, 'ds-bot: refuse resuming shell-held Sessions before Agent creation')
+  }
+
+  // DSH's desktop history follower normally activates a cold Session in the
+  // background. Keep the history and live events readable without promoting a
+  // Session whose Bot is waiting for a shell choice.
+  const follow = ctx.sessionController?.follow
+  if (typeof follow === 'function') {
+    const controller = ctx.sessionController
+    const admitted = async function* (request, ...rest) {
+      if (request?.activate === true && request.address?.kind === 'session') {
+        await rt.refreshShellChoice?.()
+        try {
+          rt.assertShellChoice?.(request.address.sessionId)
+        } catch (error) {
+          if (error?.code !== 'bot/shell') throw error
+          request = { ...request, activate: false }
+        }
+      }
+      yield* follow.call(this, request, ...rest)
+    }
+    wrapMethod(controller, 'follow', admitted, 'ds-bot: keep shell-held Sessions readable without activating them')
+  }
+
   // DSH's prompt admission wraps any unexpected failure as 'session/agent-busy' and
   // keeps the real cause in details.reason, which the window never shows and the log
   // never saw (#424). For a Session this team owns, the reason is written to the
@@ -1348,8 +1401,8 @@ export function install(rt) {
     const admitted = async function (request, ...rest) {
       try {
         // A Bot held at load for its shell-off coding CLI never starts its own turn.
-        const held = rt.botOf(rt.selfOf(request?.sessionId))
-        if (held?.shellHeld !== undefined) throw Object.assign(new Error(shellHoldText(held)), { code: 'bot/shell' })
+        await rt.refreshShellChoice?.()
+        rt.assertShellChoice?.(request?.sessionId)
         return await prompt.call(this, request, ...rest)
       } catch (error) {
         const id = request?.sessionId
@@ -1376,10 +1429,7 @@ export function install(rt) {
         throw error
       }
     }
-    ctx.effect(() => {
-      controller.prompt = admitted
-      return () => { if (controller.prompt === admitted) controller.prompt = prompt }
-    }, 'omni-ui: prompt rejection reasons')
+    wrapMethod(controller, 'prompt', admitted, 'omni-ui: prompt rejection reasons')
   }
 
   Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, callCapability, doingOf, stopRoomTurn, stopChat, releaseBot, unblockBots, resumeBot, markSteerCut, hasSubagents, stopSubagents, adoptLiveWork })

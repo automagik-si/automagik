@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { Updater } from "../mods/am-sidebar/updater.js";
 import {
   FIRST_CHECK_MS, LANDING_MS, LANDING_WAIT_MS, RELOAD_GRACE_MS, REQUEST_KEY, STATE_KEY, autoPlan, backoffOf, busyOf,
+  requestAnswer,
 } from "../mods/am-sidebar/updateCheck.js";
 import { AUTO_FILE, CHECK_FILE, RESTORE_FILE, parseAuto } from "../mods/am-sidebar/release.js";
 import { autoLabel, statusLabel } from "../mods/am-status/label.js";
@@ -17,6 +18,11 @@ const MANAGED = { on: true, skip: null, managed: true, why: null };
 const update = (version) => ({ version, page: `https://x/v${version}`, sequence: 1 });
 const line = (o) => ({ code: 0, stdout: `${JSON.stringify(o)}\n`, stderr: "" });
 const text = (l) => l.parts.map((p) => p.text).join("");
+// #524: the layout guard's advisory (layoutSafe.mjs), verbatim; `copies` counts it in a notice.
+const ADVISORY = "removing layouts/automagik.json without knowing the layout Herdr shows (herdr-app did not answer), so it may be the one shown: its blocks name am-tabs, which leaves mods/ too. If Herdr shows it, Herdr drops it (plain Herdr instead): switch layouts (ctrl-shift-l), or `am install herdr.pack` puts the pack back";
+const copies = (body, s = ADVISORY) => body.split(s).length - 1;
+// #524: the notes the updater handed the sidebar's advisory row (onAdvisories), non-empty ones only.
+const shown = (h) => h.advisories.filter((n) => Array.isArray(n) && n.length > 0);
 
 /**
  * One Herdr with the pack at `version`: `answer(args)` is update.mjs's reply (the args after the
@@ -24,7 +30,7 @@ const text = (l) => l.parts.map((p) => p.text).join("");
  * reload is `old.reloaded = true` (its timers stop, as Herdr stops a replaced build's) and a new build.
  */
 function herdr({ version = "0.8.0", latest = "0.8.1", auto = MANAGED, answer = null } = {}) {
-  const h = { shared: new Map(), files: new Map(), notes: [], execs: [], timers: [], tasks: [], now: NOW };
+  const h = { shared: new Map(), files: new Map(), notes: [], advisories: [], execs: [], timers: [], tasks: [], now: NOW };
   h.files.set(`${HOME}/mods/am-sidebar/VERSION`, `${version}\n`);
   h.version = version;
   h.check = () => line({ current: h.version, latest, update: latest === h.version ? null : update(latest), disabled: false, auto });
@@ -36,6 +42,7 @@ function herdr({ version = "0.8.0", latest = "0.8.1", auto = MANAGED, answer = n
       exec: async (node, args) => { h.execs.push(args.slice(1)); return h.answer(args); },
       get: (k) => h.shared.get(k), set: (k, v) => { h.shared.set(k, structuredClone(v)); return null; },
       notify: (n) => { h.notes.push(n); },
+      onAdvisories: (notes) => { h.advisories.push(structuredClone(notes)); },
       after: (ms, fn) => { h.timers.push({ at: h.now + ms, fn, b }); },
       spawn: (fn) => { h.tasks.push(Promise.resolve().then(fn)); },
       readText: async (p) => h.files.get(p) ?? null,
@@ -71,9 +78,11 @@ test("a newer verified release installs on its own through apply --expect <v> --
   const h = herdr();
   const old = h.build();
   const id = "check-during-install";
+  let claim = null;
   // The exec of the install: the folders swap (Herdr reloads the mods) before update.mjs answers.
   h.answer = async (args) => {
     if (args[1] === "check") return h.check();
+    claim = h.state().busy?.id ?? null; // #524: update.mjs stamps the install's claim on its held record
     const answer = h.apply("0.8.1"); // update.mjs reports the version it replaced as current
     // A check asked for while the install's reply is pending queues behind it.
     h.shared.set(REQUEST_KEY, { id, what: "check", at: h.now });
@@ -86,7 +95,8 @@ test("a newer verified release installs on its own through apply --expect <v> --
   };
   old.u.start();
   await h.tick(FIRST_CHECK_MS);
-  assert.deepEqual(h.applies(), [["apply", "--expect", "0.8.1", "--auto", "--mods", `${HOME}/mods`]]);
+  assert.match(claim ?? "", /^apply-/, "the install ran under its apply claim");
+  assert.deepEqual(h.applies(), [["apply", "--expect", "0.8.1", "--auto", "--landing-id", claim, "--mods", `${HOME}/mods`]]);
   assert.equal(h.notes.length, 0, "no 'update available' notice for a release that installs on its own");
   assert.equal(h.state().kind, "installed");
   assert.equal(busyOf(h.state(), h.now), null, "the claim is freed");
@@ -107,6 +117,9 @@ test("a newer verified release installs on its own through apply --expect <v> --
   h.build().u.start();
   await h.tick(1);
   assert.equal(h.notes.length, 1);
+  // #524: a landing without notes hands the sidebar no advisory (no row; an earlier release's row
+  // is cleared by this empty hand-off), once, with the notice.
+  assert.deepEqual(h.advisories, [[]]);
 });
 
 test("when Herdr does not reload the mods, the old build says what to do, once", async () => {
@@ -164,8 +177,10 @@ test("off: no install, today's notice once", async () => {
 test("a bad pack is restored: one notice names the failed version and mod, the mods reload, nothing restarts", async () => {
   const h = herdr();
   const old = h.build();
+  let claim = null;
   h.answer = (args) => {
     if (args[1] === "check") return h.check();
+    claim = h.state().busy?.id ?? null;
     const answer = line({ current: "0.8.0", latest: "0.8.1", update: update("0.8.1"), notice: [],
       installed: { version: "0.8.1", check: { failed: ["am-tabs"], checked: true },
         restored: { version: "0.8.0", failedVersion: "0.8.1", mod: "am-tabs", failed: ["am-tabs"], checked: true,
@@ -175,7 +190,8 @@ test("a bad pack is restored: one notice names the failed version and mod, the m
   };
   old.u.start();
   await h.tick(FIRST_CHECK_MS);
-  assert.deepEqual(h.applies(), [["apply", "--expect", "0.8.1", "--auto", "--mods", `${HOME}/mods`]], "only the updater ran");
+  assert.match(claim ?? "", /^apply-/, "the install ran under its apply claim");
+  assert.deepEqual(h.applies(), [["apply", "--expect", "0.8.1", "--auto", "--landing-id", claim, "--mods", `${HOME}/mods`]], "only the updater ran");
   assert.equal(old.reloaded, true, "the restored folders reloaded the mod");
   assert.equal(h.notes.length, 1);
   assert.match(h.notes[0].body, /0\.8\.1 failed to load \(am-tabs failed herdr-app check\): the previous version 0\.8\.0 is back/);
@@ -203,7 +219,9 @@ test("the restored build reads update.mjs's note when the old build never hears 
   await h.tick(FIRST_CHECK_MS);
   h.files.set(`${HOME}/automagik-herdr/${RESTORE_FILE}`, JSON.stringify({ version: "0.8.0", failedVersion: "0.8.1",
     mod: "am-tabs", failed: ["am-tabs"], checked: true, prevRemoved: true,
-    warnings: ["the failed pack could not be removed (EACCES: permission denied, rm '/x/.prev-next-1'): it is in /x/.prev-next-1"], at: h.now }));
+    warnings: ["the failed pack could not be removed (EACCES: permission denied, rm '/x/.prev-next-1'): it is in /x/.prev-next-1"],
+    // #524: the rollback guard's notes, written before the swap; one repeats a warning's exact text.
+    notes: [ADVISORY, "the failed pack could not be removed (EACCES: permission denied, rm '/x/.prev-next-1'): it is in /x/.prev-next-1"], at: h.now }));
   h.check = () => line({ current: "0.8.0", latest: "0.8.1", update: update("0.8.1"), disabled: false, auto: { ...MANAGED, skip: "0.8.1" } });
   h.swap(old, "0.8.0");
   h.build().u.start();
@@ -212,10 +230,16 @@ test("the restored build reads update.mjs's note when the old build never hears 
   assert.match(h.notes[0].body, /0\.8\.1 failed to load \(am-tabs failed herdr-app check\): the previous version 0\.8\.0 is back/);
   assert.match(h.notes[0].body, /The failed pack was removed, so `am update --rollback` has nothing to go back to\./);
   assert.match(h.notes[0].body, /Warning: the failed pack could not be removed .*\.prev-next-1/);
+  assert.equal(copies(h.notes[0].body), 1, "#524: the restore note's advisory, once");
+  assert.equal(copies(h.notes[0].body, "the failed pack could not be removed"), 1, "#524: a note equal to a warning is said once");
+  assert.equal(busyOf(h.state(), h.now), null, "the dead install's claim is freed");
+  // #524: the sidebar row gets the restore record's notes array as written, once, with the notice.
+  assert.deepEqual(shown(h), [[ADVISORY, "the failed pack could not be removed (EACCES: permission denied, rm '/x/.prev-next-1'): it is in /x/.prev-next-1"]]);
   // A later build of the restored version says nothing more.
   h.build().u.start();
   await h.tick(1);
   assert.equal(h.notes.length, 1);
+  assert.equal(shown(h).length, 1, "#524: a later build hands the row nothing again");
   // The next check holds the bad version.
   await h.tick(backoffOf(1));
   assert.equal(h.applies().length, 1);
@@ -224,16 +248,21 @@ test("the restored build reads update.mjs's note when the old build never hears 
 test("the new build reads update.mjs's unchecked note when the old build never hears back", async () => {
   const h = herdr();
   const old = h.build();
-  h.answer = (args) => (args[1] === "check" ? h.check() : new Promise(() => {}));
+  let claim = null;
+  h.answer = (args) => { if (args[1] === "check") return h.check(); claim = args[args.indexOf("--landing-id") + 1]; return new Promise(() => {}); };
   old.u.start();
   await h.tick(FIRST_CHECK_MS);
   h.files.set(`${HOME}/automagik-herdr/${CHECK_FILE}`, JSON.stringify({ version: "0.8.1", from: "0.8.0",
     unavailable: "herdr-app is not on PATH", at: h.now }));
+  // #524: update.mjs's pre-swap held record, nothing held, its note under this install's claim.
+  h.files.set(HELD, JSON.stringify({ version: "0.8.1", held: [], notes: [ADVISORY], landingId: claim }));
   h.swap(old, "0.8.1");
   h.build().u.start();
   await h.tick(1);
   assert.deepEqual(h.notes.map((n) => n.title), ["Automagik Herdr updated to 0.8.1"]);
   assert.match(h.notes[0].body, /herdr-app is not on PATH: the update was kept, but its mods were not checked/);
+  assert.equal(copies(h.notes[0].body), 1, "#524: the claimed note, once");
+  assert.equal(busyOf(h.state(), h.now), null);
   h.build().u.start();
   await h.tick(1);
   assert.equal(h.notes.length, 1, "the note doesn't repeat");
@@ -551,6 +580,150 @@ test("the old build never answers: the new build reads the held file, says it on
   assert.doesNotMatch(stale.notes[0].body, /Kept mods/, "a release that held nothing repeats no old note");
 });
 
+// #524 residual: the record update.mjs writes before the first rename (the reload can come before
+// its answer) carries the layout guard's notes under the install's claim (--landing-id).
+// #524: an install's warnings (a retire or rename the layout guard could not weigh) are the
+// sidebar's too: the old build records them and the reloaded build's one notice says them.
+test("#524 an install's warnings ride in the state and the new build's notice", async () => {
+  const warning = "removed layouts/mine.json without knowing the layout Herdr shows (Herdr is not asked here): switch layouts, ctrl-shift-l";
+  const h = herdr();
+  h.answer = (args) => (args[1] === "check" ? h.check() : line({ current: "0.8.0", latest: "0.8.1", update: update("0.8.1"),
+    installed: { version: "0.8.1", notes: [warning] }, notice: [] }));
+  const old = h.build();
+  assert.equal(old.u.apply(null, "0.8.1"), true);
+  await h.flush();
+  assert.equal(h.state().kind, "installed");
+  assert.deepEqual(h.state().landed.warnings, [warning], "the state carries the warning for the reloaded build");
+  h.swap(old, "0.8.1");
+  const fresh = h.build();
+  fresh.u.start();
+  await h.flush();
+  const note = h.notes.find((n) => n.title === "Automagik Herdr updated to 0.8.1");
+  assert.ok(note, JSON.stringify(h.notes));
+  assert.match(note.body, /without knowing the layout Herdr shows/);
+});
+
+test("#524 the old build never answers: the new build says the claimed pre-swap note once; a stale or unclaimed one is not said", async () => {
+  const run = async (record) => {
+    const g = herdr();
+    const gold = g.build();
+    let claim = null;
+    g.answer = (args) => { if (args[1] === "check") return g.check(); claim = args[args.indexOf("--landing-id") + 1]; return new Promise(() => {}); };
+    gold.u.start();
+    await g.tick(FIRST_CHECK_MS);
+    const body = record(claim);
+    if (body !== null) g.files.set(HELD, body);
+    const early = g.advisories.length; // #524: nothing handed to the row before the new build accepts
+    g.swap(gold, "0.8.1");
+    g.build().u.start();
+    await g.tick(LANDING_WAIT_MS + 2_000);
+    return { g, claim, early };
+  };
+  for (const held of [[], [{ mod: "old-mod", layouts: ["mine"] }]]) {
+    const { g, claim, early } = await run((id) => JSON.stringify({ version: "0.8.1", held, notes: [ADVISORY], landingId: id }));
+    assert.match(claim ?? "", /^apply-/, "update.mjs got the install's claim");
+    assert.deepEqual(g.notes.map((n) => n.title), ["Automagik Herdr updated to 0.8.1"], `held ${held.length}`);
+    assert.equal(copies(g.notes[0].body), 1, `held ${held.length}: the advisory, once`);
+    if (held.length) assert.match(g.notes[0].body, /Kept mods\/old-mod: 0\.8\.1 no longer ships it/);
+    assert.equal(busyOf(g.state(), g.now), null, "the claim is freed");
+    assert.equal(early, 0, `held ${held.length}: no row before the version and claim are accepted`);
+    assert.deepEqual(shown(g), [[ADVISORY]], `held ${held.length}: the row gets the claimed notes, once`);
+    g.build().u.start();
+    await g.tick(LANDING_WAIT_MS + 2_000);
+    assert.equal(g.notes.length, 1, "a later build of this release says nothing more");
+    assert.equal(shown(g).length, 1, "a later build hands the row nothing again");
+  }
+  const cases = {
+    "a stale same-version record of another claim": () => JSON.stringify({ version: "0.8.1", held: [], notes: [ADVISORY], landingId: "apply-1-old" }),
+    "an older writer's record with no claim": () => JSON.stringify({ version: "0.8.1", held: [], notes: [ADVISORY] }),
+    "another release's record": (id) => JSON.stringify({ version: "0.8.0", held: [], notes: [ADVISORY], landingId: id }),
+    "the old array record": () => JSON.stringify([{ mod: "old-mod", layouts: ["mine"] }]),
+    "not JSON": () => "{",
+  };
+  const wrong = [];
+  for (const [name, record] of Object.entries(cases)) {
+    const { g } = await run(record);
+    const titles = g.notes.map((n) => n.title);
+    if (JSON.stringify(titles) !== JSON.stringify(["Automagik Herdr updated to 0.8.1"])) wrong.push(`${name}: notices ${JSON.stringify(titles)}`);
+    else if (copies(g.notes[0].body) !== 0) wrong.push(`${name}: the advisory was said`);
+    if (shown(g).length !== 0) wrong.push(`${name}: the row got ${JSON.stringify(shown(g))}`);
+    if (busyOf(g.state(), g.now) !== null) wrong.push(`${name}: the claim is not freed`);
+  }
+  assert.deepEqual(wrong, [], "each landing is said once, without another claim's or release's advisory, and frees its claim");
+});
+
+test("#524 the answer and the claimed record both carry the note: the notice says it once, before and after the reload", async () => {
+  // Herdr reloads: the old build answered before the swap (ready landing) and the record holds the same text.
+  const h = herdr();
+  const old = h.build();
+  h.answer = (args) => {
+    if (args[1] === "check") return h.check();
+    h.files.set(HELD, JSON.stringify({ version: "0.8.1", held: [], notes: [ADVISORY], landingId: args[args.indexOf("--landing-id") + 1] }));
+    return line({ current: "0.8.0", latest: "0.8.1", update: update("0.8.1"), notice: [], installed: { version: "0.8.1", held: [], notes: [ADVISORY] } });
+  };
+  old.u.start();
+  await h.tick(FIRST_CHECK_MS);
+  assert.equal(h.notes.length, 0);
+  assert.deepEqual(h.advisories, [], "#524: the answer alone puts up no row; the landing build accepts first");
+  h.swap(old, "0.8.1");
+  h.build().u.start();
+  await h.tick(1);
+  assert.deepEqual(h.notes.map((n) => n.title), ["Automagik Herdr updated to 0.8.1"]);
+  assert.equal(copies(h.notes[0].body), 1, "state and record: the advisory once");
+  assert.deepEqual(shown(h), [[ADVISORY]], "#524: state and record: the row gets the notes once");
+  h.build().u.start();
+  await h.tick(LANDING_WAIT_MS + 2_000);
+  assert.equal(h.notes.length, 1, "no second announcement");
+  assert.equal(shown(h).length, 1, "#524: no second hand-off");
+  // Herdr doesn't reload: the old build's no-reload notice says it once.
+  const k = herdr();
+  const kold = k.build();
+  k.answer = (args) => {
+    if (args[1] === "check") return k.check();
+    k.files.set(HELD, JSON.stringify({ version: "0.8.1", held: [], notes: [ADVISORY], landingId: args[args.indexOf("--landing-id") + 1] }));
+    return line({ current: "0.8.0", latest: "0.8.1", update: update("0.8.1"), notice: [], installed: { version: "0.8.1", held: [], notes: [ADVISORY] } });
+  };
+  kold.u.start();
+  await k.tick(FIRST_CHECK_MS + RELOAD_GRACE_MS + 1);
+  assert.equal(k.notes.length, 1);
+  assert.match(k.notes[0].body, /^Herdr did not reload its mods: /);
+  assert.equal(copies(k.notes[0].body), 1);
+  assert.deepEqual(shown(k), [[ADVISORY]], "#524: the no-reload notice's landing hands the row its notes once");
+  k.swap(kold, "0.8.1");
+  k.build().u.start();
+  await k.tick(LANDING_WAIT_MS + 2_000);
+  assert.equal(k.notes.length, 1, "the restarted build stays quiet");
+  assert.equal(shown(k).length, 1, "#524: the restarted build hands the row nothing again");
+});
+
+test("#524 a newer claim taken while the new build reads the held record is neither answered nor announced over", async () => {
+  const g = herdr();
+  const gold = g.build();
+  let claim = null;
+  g.answer = (args) => { if (args[1] === "check") return g.check(); claim = args[args.indexOf("--landing-id") + 1]; return new Promise(() => {}); };
+  gold.u.start();
+  await g.tick(FIRST_CHECK_MS);
+  g.files.set(HELD, JSON.stringify({ version: "0.8.1", held: [], notes: [ADVISORY], landingId: claim }));
+  g.swap(gold, "0.8.1");
+  // The held record's read is where another apply takes the claim (a newer attempt, same version).
+  const newer = { ...g.state().busy, id: "apply-newer", since: g.now };
+  const fresh = g.build();
+  const read = fresh.u.readText;
+  let raced = false;
+  fresh.u.readText = async (p) => {
+    const text = await read.call(fresh.u, p);
+    if (p.endsWith("held-mods.json") && !raced) { raced = true; g.shared.set(STATE_KEY, { ...g.state(), busy: newer }); }
+    return text;
+  };
+  fresh.u.start();
+  await g.tick(LANDING_WAIT_MS + 2_000);
+  assert.ok(raced, "the held record was read");
+  assert.equal(g.notes.length, 0, "the stale landing says nothing over the newer claim");
+  assert.equal(g.state().busy?.id, "apply-newer", "the newer claim is not cleared");
+  assert.notEqual(g.state().announced, "0.8.1");
+  assert.deepEqual(shown(g), [], "the stale landing puts up no row over the newer claim");
+});
+
 test("Herdr doesn't reload: the old build's notice says what it held, and the new build says nothing more", async () => {
   const h = herdr();
   const old = h.build();
@@ -667,3 +840,118 @@ test("a request still waiting at a mods reload is answered by the new build once
   assert.equal(h.state().at, at, "and without a second answer");
   assert.equal(h.state().request, request.id);
 });
+
+// #796 Low 2: the bar's own install click is the run being landed, not a queued request: the
+// landing answers that id too, so the bar does not show "couldn't update" after a good install.
+test("#796 a landing answers the install click's own request when the old build never replied", async () => {
+  const h = herdr();
+  const request = { id: "apply-own", what: "apply", at: h.now, to: "0.8.1" };
+  h.shared.set(REQUEST_KEY, request);
+  h.shared.set(STATE_KEY, { kind: "update", update: update("0.8.1"), current: "0.8.0", latest: "0.8.1", at: h.now - 60_000 });
+  h.answer = () => new Promise(() => {});
+  const old = h.build();
+  old.u.request();
+  await h.flush();
+  assert.equal(h.state().busy?.request, request.id, "the click's run holds the request id");
+  h.swap(old, "0.8.1");
+  const fresh = h.build();
+  await fresh.u.arrive();
+  await h.tick(LANDING_WAIT_MS + 5_000);
+  assert.equal(h.state().request, request.id, "the landing answers the run's own request");
+  assert.equal(h.state().queued, null);
+  const label = text(statusLabel({ state: h.state(), request: h.shared.get(REQUEST_KEY), version: h.version, now: h.now }));
+  assert.doesNotMatch(label, /couldn't/);
+});
+
+// #796 Low 3: a landing with nothing to answer must not write request: null over another path's answer.
+test("#796 a landing with nothing to answer leaves a recorded answer alone", () => {
+  assert.deepEqual(requestAnswer({ request: "answered-before", queued: null }, null), { queued: null });
+  assert.deepEqual(requestAnswer({ request: "answered-before", queued: { id: "queued-id" } }, null), { request: "queued-id", queued: null });
+  assert.deepEqual(requestAnswer({}, "own-id"), { request: "own-id", queued: null });
+});
+
+// #796: the reloaded build's landing (update.mjs's restore note, its unchecked note, or the wait
+// running out) answers for the apply claim it found, if that claim still holds the lock.
+const NOTES = `${HOME}/automagik-herdr`;
+const hung = (h) => (args) => (args[1] === "check" ? h.check() : new Promise(() => {}));
+/** A click's install (REQUEST_KEY `id`) whose exec never answers: the old build is reloaded away mid-run. */
+async function clickedInstall(h, id = "bar-apply-1") {
+  h.answer = hung(h);
+  const old = h.build();
+  old.u.start();
+  await h.tick(FIRST_CHECK_MS);
+  h.shared.set(REQUEST_KEY, { id, what: "apply", to: "0.8.1", at: h.now });
+  old.u.request();
+  await h.flush();
+  assert.equal(h.state().busy?.what, "apply");
+  assert.equal(h.state().busy?.request, id);
+  return old;
+}
+/** The new build loads; `race(h)` runs inside its read of the restore note (on the last pass, for
+ *  the wait): after the landing took its state, before it answers. */
+async function land(h, race, wait) {
+  const fresh = h.build();
+  const start = h.now;
+  const read = fresh.u.readText;
+  let raced = false;
+  fresh.u.readText = async (p) => {
+    if (race && !raced && p === `${NOTES}/${RESTORE_FILE}` && h.now - start >= wait) { raced = true; race(h); }
+    return read(p);
+  };
+  fresh.u.start();
+  await h.tick(wait === 0 ? 1 : wait + 2_000);
+  if (race) assert.equal(raced, true, "the race ran inside the landing's note read");
+}
+/** The four ways the reloaded build lands an install it did not see finish. `to`: the version the note is about. */
+const LANDINGS = {
+  restored: async (h, old, race = null, to = "0.8.1") => {
+    h.files.set(`${NOTES}/${RESTORE_FILE}`, JSON.stringify({ version: "0.8.0", failedVersion: to, mod: "am-tabs", failed: ["am-tabs"], checked: true, at: h.now }));
+    h.swap(old, "0.8.0");
+    await land(h, race, 0);
+  },
+  "restore-failed": async (h, old, race = null, to = "0.8.1") => {
+    h.files.set(`${NOTES}/${RESTORE_FILE}`, JSON.stringify({ version: to, error: "could not restore: no previous version kept", at: h.now }));
+    h.swap(old, to);
+    await land(h, race, 0);
+  },
+  unchecked: async (h, old, race = null, to = "0.8.1") => {
+    h.files.set(`${NOTES}/${CHECK_FILE}`, JSON.stringify({ version: to, from: "0.8.0", unavailable: "herdr-app is not on PATH", at: h.now }));
+    h.swap(old, to);
+    await land(h, race, 0);
+  },
+  timeout: async (h, old, race = null) => {
+    h.swap(old, "0.8.1");
+    await land(h, race, LANDING_WAIT_MS);
+  },
+};
+
+for (const [name, run] of Object.entries(LANDINGS)) {
+  for (const [kind, newer] of [
+    ["a newer check", (h) => ({ what: "check", id: "check-newer", since: h.now, request: "bar-check-new" })],
+    ["a stale owner's successor (a newer apply claim for the same release)",
+      (h) => ({ what: "apply", to: "0.8.1", from: "0.8.0", id: "apply-newer", since: h.now, request: "bar-apply-2", announce: true, auto: false })],
+  ]) {
+    test(`#796 ${name}: ${kind} claimed during the note read keeps its lock, its queue and the earlier answer`, async () => {
+      const h = herdr({ auto: { ...MANAGED, on: false } });
+      const old = await clickedInstall(h);
+      await run(h, old, (h) => {
+        h.shared.set(STATE_KEY, { ...h.state(), busy: newer(h), queued: { id: "bar-check-q", what: "check", at: h.now }, request: "bar-previous" });
+      });
+      assert.equal(h.state().busy?.id, newer(h).id, "the newer claim still holds the lock");
+      assert.equal(h.state().queued?.id, "bar-check-q", "the newer claim's queued click is untouched");
+      assert.equal(h.state().request, "bar-previous", "the replaced claim's click is not answered over it");
+    });
+  }
+}
+
+for (const name of ["restored", "restore-failed", "unchecked"]) {
+  test(`#796 ${name}: a claim for another release is not borrowed from`, async () => {
+    const h = herdr({ auto: { ...MANAGED, on: false } });
+    const old = await clickedInstall(h);
+    h.shared.set(STATE_KEY, { ...h.state(), request: "bar-previous" });
+    const unrelated = h.state().busy;
+    await LANDINGS[name](h, old, null, "0.8.2");
+    assert.equal(h.state().request, "bar-previous", "the 0.8.1 claim's click is not answered by a 0.8.2 landing");
+    assert.deepEqual(h.state().busy, unrelated, "the unrelated apply keeps its claim");
+  });
+}

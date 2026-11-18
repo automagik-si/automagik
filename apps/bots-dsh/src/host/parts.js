@@ -26,7 +26,7 @@ import { RESUME_DELAY_MS } from './resume.js'
 import { switchFailure } from './model-state.js'
 import { turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
-import { commandCapableAgent, crossesHarness } from '../shared/routes.js'
+import { commandCapableAgent, crossesHarness, shellHoldText } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
@@ -1198,6 +1198,7 @@ export function install(rt) {
     // DSH agents carry `id`; a host agent (a test double, an adopted session) may only carry
     // the Session it runs. The Session id is the key either way.
     const agentId = agent.id ?? agent.session?.id
+    try { rt.assertShellChoice?.(agentId) } catch { return false }
     const place = placeOf(agentId)
     if (place === undefined || switches.has(agentId) || checkpoints.has(agentId) || readOnly() || pinned(agentId)) return false
     const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
@@ -1565,7 +1566,7 @@ export function install(rt) {
     if (signal.aborted) throw signal.reason
     const dir = rt.workDirOf(job)
     const intended = dir !== undefined && await rt.isFolder(dir) ? dir : rt.teamFolder()
-    const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, { dir, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}) })
+    const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, { dir, group: room !== undefined, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}) })
     const picked = await freshRoute(bot, session, job.target)
     const selected = picked === undefined || await selectRoute(bot, freshId, picked, name)
     if (bot !== undefined) await rt.applyPermission(bot, freshId, room)
@@ -1691,8 +1692,13 @@ export function install(rt) {
     // A message carrying a shown sign-in code never reaches a model, a note or a fresh part
     // (cli-login.js).
     rt.dropLoginCodes?.(payload)
-    await rt.load()
+    await (rt.refreshShellChoice?.() ?? rt.load())
     const { agent } = payload
+    // An attached Agent can wake from its inbox without a controller prompt.
+    try {
+      rt.assertShellChoice?.(agent.session?.id ?? agent.id)
+      rt.assertShellChoice?.(agent.session?.header?.parentSession)
+    } catch { return { kind: 'reject' } }
     agents.set(agent.id, agent)
     const checkpoint = checkpoints.get(agent.id)
     if (checkpoint !== undefined) {
@@ -1859,9 +1865,15 @@ export function install(rt) {
   }, { prepend: true })
 
   ctx.on('agent/request-error', async (payload, next) => {
-    if (payload.failure?.code !== OVERFLOW || payload.signal?.aborted) return next()
-    await rt.load()
+    if (payload.signal?.aborted) return next()
     const { agent } = payload
+    // DSH may retry inside a step without calling pre-step again.
+    await (rt.refreshShellChoice?.() ?? rt.load())
+    try {
+      rt.assertShellChoice?.(agent.session?.id ?? agent.id)
+      rt.assertShellChoice?.(agent.session?.header?.parentSession)
+    } catch { return undefined }
+    if (payload.failure?.code !== OVERFLOW) return next()
     if (nativeDshSession(agent.id) || pinned(agent.id) || !rt.isBotSession(agent.id) || switches.has(agent.id) || readOnly() || !await canMakeRoom(agent)) return next()
     const entry = rt.liveOf(agent.id)
     entry.switched = true
@@ -1873,6 +1885,7 @@ export function install(rt) {
   // the part ends up below the line, and nothing is decided again until it grows
   // past it.
   async function checkContext(agent) {
+    try { rt.assertShellChoice?.(agent.id) } catch { return }
     if (lastTurnEnd(agent)?.data?.reason?.kind === 'error') return
     if (switches.has(agent.id) || checkpoints.has(agent.id) || freshParts.has(agent.id) || checking.has(agent.id) || readOnly() || pinned(agent.id)) return
     // Twice in a row cut off at the output limit with nothing written: the request is
@@ -1937,6 +1950,7 @@ export function install(rt) {
   // so an unarchive started here queues behind that archive and undoes it. The team's
   // own archives drop the Session from its owner first.
   const keepCurrent = ({ sessionId }) => {
+    try { rt.assertShellChoice?.(sessionId) } catch { return }
     if (readOnly() || !(rt.chatOwners.has(sessionId) || rt.groupOwners.has(sessionId) || rt.roomOwners.has(sessionId))) return
     void ctx.workspaceRegistry.unarchiveSession(sessionId)
       .catch(error => rt.warn('omni-ui: current Session %s is archived in DSH and could not be taken out: %s', sessionId, error))
@@ -2193,6 +2207,7 @@ export function install(rt) {
   // combines cancellation, and persists the backend's standalone marker pair.
   async function checkpointBot(botId, { sessionId } = {}) {
     if (typeof sessionId !== 'string' || sessionId.trim() === '') throw refused('invalid', 'A checkpoint needs the current Session id.')
+    rt.assertShellChoice?.(sessionId, botId)
     const controller = new AbortController()
     const job = { botId, sessionId, controller, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(NOTE_TIMEOUT_MS)]), carry: [] }
     assertCheckpoint(job)
@@ -2254,6 +2269,244 @@ export function install(rt) {
     return { id: botId, sessionId, status: 'checkpointed', context: await contextStatus(botId) }
   }
 
+  const sameModelSelection = (selection, target) => selection?.provider === target.provider && selection.model === target.model
+    && selection.reasoningEffort === target.reasoningEffort
+
+  const heldSelection = bot => ({ ...splitRef(bot.shellHeld.model),
+    ...(bot.appliedEffort === undefined ? {} : { reasoningEffort: bot.appliedEffort }) })
+
+  // The controller resolves the old Agent before selecting. A pinned Session instead
+  // records the standard DSH event on its existing owner or through its exclusive log.
+  async function recoverPinnedShellSession(bot, sessionId, target, check, commit) {
+    const persistence = ctx.get?.('sessionPersistence')
+    if (typeof persistence?.open !== 'function' || typeof ctx.sessions?.get !== 'function') {
+      throw refused('refused', 'This DSH host cannot save a new model for the pinned conversation.')
+    }
+    const attached = () => ctx.sessions.get(sessionId)
+    const live = () => ctx.get?.('agents')?.get?.(sessionId)
+    const recoverAttached = async session => {
+      const agent = live()
+      if (agent?.session !== session || typeof agent?.model?.recordedSelection !== 'function'
+        || typeof agent.runMaintenance !== 'function' || agent.status !== 'idle' || session.header?.origin === 'subagent'
+        || rt.hasSubagents?.(sessionId)) {
+        throw refused('busy', 'Wait for the pinned conversation to be idle and owned by DSH.')
+      }
+      await agent.runMaintenance(async signal => {
+        const checkAttached = () => {
+          check()
+          signal.throwIfAborted()
+          if (attached() !== session || live() !== agent) throw refused('busy', 'The pinned conversation changed owners. Try again.')
+        }
+        checkAttached()
+        const previous = agent.model.recordedSelection() ?? heldSelection(bot)
+        const changed = !sameModelSelection(previous, target)
+        try {
+          if (changed) session.append('model/selection', target)
+          if (await ctx.sessions.flush(session) !== true) throw refused('refused', 'This DSH host could not save the pinned conversation.')
+          checkAttached()
+          await rt.applyToolDenyToAgent?.(sessionId, agent, bot)
+          await commit(() => {
+            checkAttached()
+            if (!sameModelSelection(agent.model.recordedSelection(), target)) {
+              throw refused('busy', 'The pinned conversation did not keep the new model. Try again.')
+            }
+          })
+        } catch (error) {
+          if (changed && attached() === session && live() === agent && sameModelSelection(agent.model.recordedSelection(), target)) {
+            try {
+              session.append('model/selection', previous)
+              await ctx.sessions.flush(session)
+            } catch (rollback) { rt.warn('ds-bot: pinned model rollback failed: %s', rollback) }
+          }
+          throw error
+        }
+      })
+    }
+    check()
+    const session = attached()
+    if (session !== undefined) return recoverAttached(session)
+    let handle
+    try {
+      handle = await persistence.open(sessionId, 'write')
+    } catch (error) {
+      check()
+      const current = attached()
+      if (error?.name === 'SessionAlreadyOwnedError') {
+        if (current !== undefined) return recoverAttached(current)
+        throw refused('busy', 'The pinned conversation is owned by another Agent or host.')
+      }
+      throw error
+    }
+    try {
+      const checkDetached = () => {
+        check()
+        if (attached() !== undefined || live() !== undefined || handle.id !== sessionId || handle.access !== 'write'
+          || handle.header?.id !== sessionId || handle.header.origin === 'subagent') {
+          throw refused('busy', 'The pinned conversation is owned by another Agent or host.')
+        }
+      }
+      const eventAt = async offset => {
+        const { events } = await handle.read(offset, 1)
+        checkDetached()
+        if (events.length > 1 || (events.length && events[0].seq !== offset)) throw refused('refused', 'The pinned conversation history is not contiguous.')
+        return events.length === 1
+      }
+      checkDetached()
+      // A JSONL write-open already prepares its prefix. Before append, sliced reads
+      // only copy their returned range from that preparation. Find the end without
+      // collecting the prefix or reading the changed file a second time.
+      let low = -1
+      let end = 0
+      while (await eventAt(end)) {
+        low = end
+        end = end * 2 + 1
+        if (!Number.isSafeInteger(end)) throw refused('refused', 'The pinned conversation has an invalid history sequence.')
+      }
+      while (end - low > 1) {
+        const middle = low + Math.floor((end - low) / 2)
+        if (await eventAt(middle)) low = middle
+        else end = middle
+      }
+      // On a failed state write, our selection is still at the tail. Non-model
+      // events recorded meanwhile do not retire it.
+      const start = Math.max(0, end - 32)
+      const { events } = await handle.read(start, end - start)
+      checkDetached()
+      if (events.length !== end - start || events.some((event, index) => event.seq !== start + index)) {
+        throw refused('refused', 'The pinned conversation history is not contiguous.')
+      }
+      const lastSelection = events.findLast(event => event.type === 'model/selection')
+      const laterHeaders = events.filter(event => event.type === 'request/header' && event.seq > (lastSelection?.seq ?? end))
+      const configOf = event => event?.data?.header?.config
+      const retired = laterHeaders.some(event => sameModelSelection(configOf(event), target))
+      const alreadySelected = sameModelSelection(lastSelection?.data, target)
+        && (!retired || sameModelSelection(configOf(laterHeaders.at(-1)), target))
+      const previous = lastSelection?.data ?? heldSelection(bot)
+      let appended = false
+      try {
+        if (!alreadySelected) {
+          await handle.append([{ seq: end, time: Date.now(), type: 'model/selection', data: target }])
+          appended = true
+          checkDetached()
+        }
+        // Keep the exclusive lease through the durability barrier and Bot record commit.
+        await handle.flush()
+        checkDetached()
+        await commit(checkDetached)
+      } catch (error) {
+        if (appended) {
+          try {
+            await handle.append([{ seq: end + 1, time: Date.now(), type: 'model/selection', data: previous }])
+            await handle.flush()
+          } catch (rollback) { rt.warn('ds-bot: pinned model rollback failed: %s', rollback) }
+        }
+        throw error
+      }
+    } finally {
+      await handle.close().catch(error => rt.warn('ds-bot: could not close the recovered Session %s: %s', sessionId, error))
+    }
+  }
+
+  // A held route is never asked to generate a handoff. Keep the hold published until
+  // the replacement state is on disk, and retain the earlier parts for reading.
+  async function leaveShellHold(bot, model, effort) {
+    if (rt.pickingModel?.(bot.id)) throw refused('busy', `${bot.name} is already changing models.`)
+    if (rt.hostOwned?.(bot) || ![undefined, 'omni', 'genie', 'dsh'].includes(bot.kind)) {
+      throw refused('shell', 'Turn on this Bot’s shell to continue using its host’s model.')
+    }
+    return rt.whilePicking(bot, async () => {
+      const oldId = rt.chatOf(bot.id)
+      const pinned = bot.sessionPinned === true
+      const { shellHeld, model: previousModel, appliedModel: previousApplied, workDir } = bot
+      const check = () => {
+        if (rt.botOf(bot.id) !== bot || bot.shellHeld !== shellHeld || bot.shell !== false || rt.chatOf(bot.id) !== oldId
+          || bot.model !== previousModel || bot.appliedModel !== previousApplied || bot.workDir !== workDir || (bot.sessionPinned === true) !== pinned
+          || rt.chatOwners.get(oldId) !== bot.id || rt.groupOwners.has(oldId) || rt.taskOwners.has(oldId) || readOnly()) {
+          throw refused('busy', 'The Bot changed while recovering its model. Try again.')
+        }
+      }
+      check()
+      const target = await rt.resolveModel(model, { remember: false, keep: bot.model })
+      const route = splitRef(target)
+      if (route === undefined || commandCapableAgent(target)) throw refused('shell', shellHoldText(bot))
+      await rt.assertModelAccess?.(target)
+      const selectedEffort = effort == null || effort === '' ? undefined : await rt.resolveEffort(target, effort)
+      check()
+      const selected = { ...route, ...(selectedEffort === undefined ? {} : { reasoningEffort: selectedEffort }) }
+      const archive = id => ctx.workspaceRegistry.archiveSession(id, { stopActivity: true })
+        .catch(error => rt.warn('ds-bot: Session %s not archived: %s', id, error))
+      let obsolete = []
+      const commit = async (freshId, validate = check) => {
+        await rt.refreshShellChoice?.()
+        validate()
+        const earlier = sessionId => ({ sessionId, endedAt: Date.now(), shellOffCli: true })
+        const groups = Object.values(state.rooms).filter(room => room.sessions?.[bot.id] !== undefined)
+          .map(room => ({ id: room.id, sessionId: room.sessions[bot.id], segment: earlier(room.sessions[bot.id]) }))
+        const workers = Object.entries(state.tasks ?? {}).filter(([, task]) => task.from === bot.id)
+        const runs = (state.subscriptionRuns ?? []).filter(run => run.botId === bot.id && run.sessionId !== undefined && run.task)
+        const previousPart = freshId !== oldId ? earlier(oldId) : undefined
+        const apply = data => {
+          const record = data.bots[bot.id]
+          for (const { id, sessionId, segment } of groups) {
+            const room = data.rooms[id]
+            if (room?.sessions?.[bot.id] !== sessionId) continue
+            ;(room.segments ??= {})[bot.id] = [...(room.segments[bot.id] ?? []), segment]
+            delete room.sessions[bot.id]
+          }
+          for (const [id] of workers) if (data.tasks?.[id]) data.tasks[id].shellOffCli = true
+          for (const run of data.subscriptionRuns ?? []) {
+            if (run.botId === bot.id && run.task && runs.some(saved => saved.sessionId === run.sessionId)) run.shellOffCli = true
+          }
+          if (previousPart !== undefined) {
+            record.segments = [...(record.segments ?? []), previousPart]
+            record.sessionId = freshId
+          }
+          record.model = record.appliedModel = target
+          delete record.shellHeld
+          delete record.blocked
+          delete record.previousModel
+          delete record.permissionAuto
+          if (selectedEffort === undefined) {
+            delete record.effort
+            delete record.appliedEffort
+          } else record.effort = record.appliedEffort = selectedEffort
+        }
+        await rt.saveCopy(copy => { validate(); apply(copy) }, {
+          beforeCommit: validate,
+          afterWrite: () => { apply(state); rt.indexSessions() },
+        })
+        obsolete = [...(previousPart === undefined ? [] : [oldId]), ...groups.map(group => group.sessionId),
+          ...workers.map(([id]) => id), ...runs.map(run => run.sessionId)]
+      }
+      let freshId = oldId
+      if (pinned) {
+        await ctx.llm.resolveCallConfig(selected)
+        check()
+        await recoverPinnedShellSession(bot, oldId, selected, check, validate => commit(oldId, validate))
+      } else {
+        freshId = await rt.createSession(bot.name, {
+          dir: rt.workDirOf({ botId: bot.id }), ...(bot.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
+        })
+        try {
+          check()
+          await rt.selectSessionModel(freshId, selected)
+          check()
+          const fresh = await rt.resolveAgent(freshId)
+          await rt.applyPermission(bot, freshId, undefined, fresh.session)
+          await rt.applyToolDenyToAgent?.(freshId, fresh, bot)
+          if (await ctx.sessions.flush(fresh.session) === false) throw refused('refused', 'This DSH host could not save the new conversation.')
+          await commit(freshId)
+        } catch (error) {
+          if (rt.chatOf(bot.id) !== freshId) await archive(freshId)
+          throw error
+        }
+      }
+      rt.noteModelChoice?.(bot, target)
+      await Promise.all(obsolete.map(archive))
+      return { id: bot.id, model: target, ...(selectedEffort === undefined ? {} : { effort: selectedEffort }), status: 'switched' }
+    })
+  }
+
   // A route change is a harness change (RFC 0030, Decided 6 and 10): the old harness writes
   // a handoff note while idle and a fresh part opens with it. `bot.model` is the person's new
   // choice; `appliedModel` follows the moment that part takes the route. A conversation with
@@ -2262,6 +2515,10 @@ export function install(rt) {
     const bot = rt.botOf(botId)
     if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
     if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
+    if (bot.shellHeld !== undefined) {
+      if (commandCapableAgent(model)) throw refused('shell', shellHoldText(bot))
+      return leaveShellHold(bot, model, effort)
+    }
     if (bot.sessionPinned === true) throw refused('refused', pinnedText(bot, 'fresh'))
     // The other direction of the shell boundary: a Bot without a shell cannot switch onto an
     // agent whose own tools run commands. The Bot's shell comes on first, or another model.
@@ -2548,6 +2805,7 @@ export function install(rt) {
     if (live?.turn !== undefined) throw Object.assign(new Error('The Bot is working; wait for it to finish or stop it first'), { code: 'bot/busy' })
     // DSH turns away every step of an archived Session and every task aimed at it, so
     // the part leaves the archive before it becomes current.
+    rt.assertShellChoice?.(partId, botId)
     await ctx.workspaceRegistry.unarchiveSession(partId)
     segments.splice(at, 1)
     segments.splice(at, 0, { sessionId: current, endedAt: Date.now() })

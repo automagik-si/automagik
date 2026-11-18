@@ -8,7 +8,7 @@ import { SPRING_POP, SPRING_SHAPE, spring, stepMenuFocus, useLinger, useViewport
 import { hostText, t } from './i18n.js'
 import { HostModelMenu } from './host-model-menu.js'
 import { AgentMark, DshMarkIcon, HerdrMarkIcon } from './marks.js'
-import { crossesHarness, routeOf, selectorRouteOf } from '../shared/routes.js'
+import { commandCapableAgent, crossesHarness, routeOf, selectorRouteOf } from '../shared/routes.js'
 import { HermesMark, HERMES_MARK_CSS } from './hermes-mark.js'
 import { HermesRemoteConnect } from './hermes-remote.js'
 
@@ -737,6 +737,7 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // A Bot already saved (settings, details, the chat bar) crosses; a Bot being created does
   // not: `onPick` alone says nothing about whether the conversation exists yet.
   const crossing = ref => Boolean(current) && saved && ref !== current && crossesHarness(current, ref)
+  const recovery = ref => saved && bot.shellHeld !== undefined && !commandCapableAgent(ref)
   const pickModel = (ref, effort, { routeChange = false, level = false } = {}) => {
     // A crossing started from a saved Bot's settings still goes through the picker's own
     // action: the settings wrapper needs to keep its sign-in/account handling.
@@ -766,9 +767,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
     return run(actions.updateBot(bot.id, { model: ref, ...(level || effort !== undefined ? { effort: effort ?? null } : {}) }))
   }
   const commit = (model, effort) => {
-    if (model.ref !== undefined && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
+    const routeChange = model.ref !== undefined && recovery(model.ref)
+    if (!routeChange && model.ref !== undefined && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
     finish()
-    void Promise.resolve(pickModel(model.ref, effort)).catch(() => {})
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange })).catch(() => {})
   }
   // A model with levels opens its level step; one without applies now. Levels not known yet
   // are asked for first. A model that needs an API key asks for it, a signed-out agent opens
@@ -798,9 +800,10 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   // A level of the current model changes the level only; on another model, the model and its
   // level go together, and a crossing asks first.
   const onLevel = (model, effort) => {
-    if (crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
+    const routeChange = recovery(model.ref)
+    if (!routeChange && crossing(model.ref)) { setConfirm({ ref: model.ref, effort }); return }
     finish()
-    void Promise.resolve(pickModel(model.ref, effort, { level: true })).catch(() => {})
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange, level: true })).catch(() => {})
   }
   const onKeyDown = (event) => {
     const rows = menuRows(event.currentTarget)

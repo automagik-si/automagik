@@ -241,7 +241,8 @@ switch (words[0]) {
   case "label": {
     const t = find(words[1]);
     if (!t) fail(`no terminal ${words[1]}`);
-    if (state.failLabel === words[1]) fail(`label refused on ${words[1]}`);
+    // state.failLabelExit: the refused label's exit code (127: hc isn't there); else 1.
+    if (state.failLabel === words[1]) fail(`label refused on ${words[1]}`, state.failLabelExit ?? 1);
     t.labels ??= {};
     for (const kv of words.slice(2)) {
       const eq = kv.indexOf("=");
@@ -415,6 +416,14 @@ switch (words[0]) {
     const current = readFileSync(path, "utf8");
     const at = current.indexOf(old);
     if (at < 0 || current.indexOf(old, at + 1) >= 0) err(1, "edit_failed", "the old text is not in the file");
+    // state.dropEditAnswer: the link drops before this edit lands. A string is someone else's text
+    // left there instead (the read-back sees neither the old nor the new text).
+    if (state.dropEditAnswer !== undefined) {
+      const theirs = state.dropEditAnswer;
+      delete state.dropEditAnswer; save();
+      if (typeof theirs === "string") writeFileSync(path, theirs);
+      fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } }));
+    }
     writeFileSync(path, current.slice(0, at) + now + current.slice(at + old.length));
     // state.loseEditAnswer: the edit lands, then the link drops: hc's real answer, unavailable.
     if (state.loseEditAnswer) { delete state.loseEditAnswer; save(); fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } })); }

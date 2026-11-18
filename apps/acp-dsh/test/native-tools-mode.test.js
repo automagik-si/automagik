@@ -168,8 +168,9 @@ async function world(t, { level = WRITE, nativeTools, dshTools, answer = 'allowe
   ctx.provide('agentPresets', { presetForSession: () => 'standard' })
   ctx.provide('llm', { stream: options => (async function* () {
     reviews.push(options)
+    const text = typeof decision === 'function' ? await decision(options) : decision
     yield { type: 'block-start', index: 0, blockType: 'text' }
-    yield { type: 'block-end', index: 0, block: { type: 'text', text: decision } }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
     yield { type: 'finish', reason: { kind: 'stop' } }
   })() })
   if (level === AUTO) applyAutoReview(ctx)
@@ -406,5 +407,34 @@ test("a subagent's nested call the person rejects never runs", async (t) => {
   assert.equal(w.asked.length, 1)
   assert.equal(w.events('native-tool-ran').length, 0)
   assert.equal(w.events('native-tool-refused')[0].answer, 'no')
+  assert.match(textIn(chunks), /The subagent reported \(no\)\./)
+})
+
+test("Auto: a subagent's nested call is answered by Auto review, not the person", async (t) => {
+  const w = await world(t, { nativeTools: true, level: AUTO, decision: ALLOW })
+  const c = w.chat('s1')
+  const { chunks, mirrors } = await c.turn('native-agent')
+  assert.equal(w.reviews.length, 2, 'the Agent card and the nested call were reviewed')
+  assert.equal(w.asked.length, 0, 'the reviewer allowed it, so the person was not asked')
+  assert.equal(w.events('native-tool-ran').length, 1)
+  assert.deepEqual(mirrors.map(m => JSON.parse(m.call.arguments).title), ['Look around'], 'the nested card ran inside the Agent card')
+  const calls = c.session.snapshotEvents().filter(event => event.type === 'tool/call' && event.data.name === TOOL_NAME)
+  assert.deepEqual(calls.map(event => JSON.parse(event.data.arguments).title), ['Look around', 'echo native'])
+  assert.match(textIn(chunks), /The subagent reported \(yes\)\./)
+})
+
+test("Auto: a nested call the reviewer denies asks the person, and their no means it never runs", async (t) => {
+  // The Agent card is allowed, so its body runs and the nested question reaches the pipeline;
+  // the nested call is the one the reviewer denies.
+  const review = options => JSON.stringify(options.messages).includes('echo native') ? DENY : ALLOW
+  const w = await world(t, { nativeTools: true, level: AUTO, decision: review, answer: 'rejected' })
+  const c = w.chat('s1')
+  const { chunks, mirrors } = await c.turn('native-agent')
+  assert.equal(w.reviews.length, 2, 'the Agent card and the nested call were reviewed')
+  assert.equal(w.asked.length, 1, 'the reviewer escalation reached the person once')
+  assert.match(w.asked[0].reason, /Auto review denied tool "acp_tool"/)
+  assert.equal(w.events('native-tool-ran').length, 0)
+  assert.equal(w.events('native-tool-refused')[0].answer, 'no')
+  assert.deepEqual(mirrors.map(m => JSON.parse(m.call.arguments).title), ['Look around'])
   assert.match(textIn(chunks), /The subagent reported \(no\)\./)
 })

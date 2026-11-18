@@ -24,6 +24,8 @@ import { codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir, kimiCand
 // #1417: every CLI run below reads Codex's and Kimi's homes under its scratch home only.
 delete process.env.CODEX_HOME;
 delete process.env.KIMI_CODE_HOME;
+// A host's real DSH home must not stand in for the scratch one the session cases build.
+delete process.env.DSH_HOME;
 
 const SID = "0f3c2a4e-1b2d-4c5e-9f60-718293a4b5c6";
 const SID2 = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
@@ -647,6 +649,21 @@ test("revive --boot prints counts only: no folder and no bot name reaches the us
   assert.match(r.out, /^revive: 1 resumed, 0 on a new conversation, 0 not back, 0 left alone, in 1 project;/);
   for (const text of [r.out, r.err]) for (const word of [s.project, s.home, s.root, "Genie", SID]) assert.ok(!text.includes(word), text);
   assert.equal(s.lastReport().projects[0].project, s.project, "the kept report still names the project");
+});
+
+// #1411: a reboot's recovery rebuilds a Codex seat from its record, the seat's own reasoning
+// effort and service tier included.
+test("#1411: revive passes a Codex seat's own effort and tier to its replacement pane", (t) => {
+  const file = team({ main: { agent: "codex", effort: "high", tier: "fast" } });
+  const s = world(t, { file, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = runsOf(s)[0];
+  const words = wordsOf(run);
+  assert.ok(hasSeq(words, ["-c", "model_reasoning_effort=high"]), run.join(" "));
+  assert.ok(hasSeq(words, ["-c", "service_tier=priority"]), run.join(" "));
+  assert.ok(hasSeq(words, ["resume", SID]), "resumed by its own id");
+  assert.equal(r.out.includes(SID), false, "no session id printed");
 });
 
 // ---- #1417: Codex and Kimi, whose ids are found on disk after the launch ----
