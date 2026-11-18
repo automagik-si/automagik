@@ -393,6 +393,21 @@ export function install(rt) {
     return true
   }
 
+  function stopShellHeldAgents() {
+    for (const agent of ctx.get?.('agents')?.list?.() ?? []) {
+      const sessionId = agent.session?.id ?? agent.id
+      const parentId = agent.session?.header?.parentSession
+      if (agent.status !== 'running' && !hasSubagents(sessionId)) continue
+      try {
+        rt.assertShellChoice?.(sessionId)
+        if (parentId !== undefined) rt.assertShellChoice?.(parentId)
+      } catch {
+        agent.cancel?.({ kind: 'user' }, { keepInbox: true })
+        void stopSubagents(sessionId).catch(error => rt.warn('ds-bot: could not stop held subagents: %s', error))
+      }
+    }
+  }
+
   const liveOf = id => {
     let entry = live.get(id)
     if (entry === undefined) live.set(id, entry = { texts: [], shown: 0 })
@@ -1282,6 +1297,8 @@ export function install(rt) {
   if (typeof prompt === 'function') {
     const controller = ctx.sessionController
     const admitted = async function (request, ...rest) {
+      await rt.refreshShellChoice?.()
+      rt.assertShellChoice?.(request?.sessionId)
       try {
         return await prompt.call(this, request, ...rest)
       } catch (error) {
@@ -1315,5 +1332,5 @@ export function install(rt) {
     }, 'omni-ui: prompt rejection reasons')
   }
 
-  Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, callCapability, doingOf, stopRoomTurn, stopChat, releaseBot, unblockBots, resumeBot, markSteerCut, hasSubagents, stopSubagents, adoptLiveWork })
+  Object.assign(rt, { live, liveOf, roomWaiters, roomProgress, roomInbox, activityView, failedView, workView, roomWorkView, turnsView, steeredView, callDetail, callCapability, doingOf, stopRoomTurn, stopChat, stopShellHeldAgents, releaseBot, unblockBots, resumeBot, markSteerCut, hasSubagents, stopSubagents, adoptLiveWork })
 }

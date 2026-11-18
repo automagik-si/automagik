@@ -21,7 +21,10 @@ const TEAM = {
   mainBotIds: ['chief'],
   revision: 1,
   whaleStored: true,
-  bots: { chief: { id: 'chief', sessionId: 'chief', name: 'Omni', role: 'Lead', instructions: '', createdAt: 1 } },
+  bots: {
+    chief: { id: 'chief', sessionId: 'chief', name: 'Omni', role: 'Lead', instructions: '', createdAt: 1 },
+    writer: { id: 'writer', sessionId: 'writer', name: 'Writer', role: 'Writer', instructions: '', createdAt: 1 },
+  },
   rooms: { room: { id: 'room', name: 'Desk', members: ['chief'], admin: 'chief', mode: 'everyone', sessions: {}, seq: 0, log: [] } },
   exchanges: [],
   exchangeTurns: {},
@@ -78,20 +81,28 @@ const relayCall = async (relay, tools) => {
   return chunks.find(chunk => chunk.type === 'block-end').block
 }
 
-test('a new Bot Session is made with the standard preset when DSH serves it', async (t) => {
+test('a Bot\'s own Session inherits DSH\'s default preset', async (t) => {
   const { rt, created, stop } = start({ presets: [{ id: 'ptc' }, { id: 'standard' }] })
   t.after(stop)
   await rt.load()
-  await rt.createSession('Omni')
+  await rt.createBot({ name: 'Editor', role: 'Editor', instructions: 'Edit.', pickModel: true })
+  assert.deepEqual(created, [{ workspaceId: 'w1' }])
+})
+
+test('a group Session keeps the standard preset so group_relay stays directly callable', async (t) => {
+  const { rt, created, stop } = start({ presets: [{ id: 'ptc' }, { id: 'standard' }] })
+  t.after(stop)
+  await rt.load()
+  await rt.createRoom({ members: ['chief', 'writer'], name: 'Desk Two', createdBy: 'chief' })
   assert.deepEqual(created, [{ workspaceId: 'w1', agentPreset: 'standard' }])
 })
 
-test('without a usable standard preset a Bot Session keeps DSH\'s default', async (t) => {
+test('without a usable standard preset a group Session keeps DSH\'s default', async (t) => {
   for (const presets of [undefined, [{ id: 'ptc' }], [{ id: 'standard', broken: 'failed to start' }]]) {
     const { rt, created, stop } = start({ presets })
     t.after(stop)
     await rt.load()
-    await rt.createSession('Omni')
+    await rt.createSession('Desk', { group: true })
     assert.deepEqual(created, [{ workspaceId: 'w1' }])
   }
 })

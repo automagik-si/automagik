@@ -83,10 +83,18 @@ function scopedDefinitionsOf() {
 // Enough of the host for roster and tool-deny: a temporary team home, Sessions that resolve
 // to agents whose `ctx.tools.restrict` records each deny set and hands back a lift, and the
 // workspace/session services a Bot creation needs.
-function bench({ storedTeam } = {}) {
+// `providers` is an inert catalog of model names only: no adapter is registered and nothing
+// answers. `calls` records each controller call by Session, so a held Bot's zero is countable.
+function bench({ storedTeam, providers } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-shell-capability-'))
   if (storedTeam !== undefined) writeFileSync(join(home, 'state.json'), JSON.stringify(storedTeam))
   const ctx = fakeContext()
+  if (providers !== undefined) {
+    ctx.llm.listProviders = () => Object.keys(providers).map(id => ({ id }))
+    ctx.llm.listModels = async id => providers[id] ?? []
+  }
+  const calls = []
+  const archived = []
   const restricted = []
   const lifted = []
   const warnings = []
@@ -130,13 +138,21 @@ function bench({ storedTeam } = {}) {
       get: () => undefined,
       resolveByPath: async () => undefined,
       create: async path => ({ id: `w${created}`, path }),
-      archiveSession: async () => {},
+      archiveSession: async (sessionId) => { archived.push(sessionId) },
     },
     sessionController: {
-      create: async options => ({ sessionId: options.sessionId ?? `s${++created}` }),
+      create: async (options) => {
+        const sessionId = options.sessionId ?? `s${++created}`
+        calls.push({ call: 'create', sessionId })
+        return { sessionId }
+      },
       resolveAgent: async (sessionId) => {
+        calls.push({ call: 'resolveAgent', sessionId })
         if (!agents.has(sessionId)) {
           const live = {
+            // An admitted message is only recorded: nothing runs.
+            followup: () => calls.push({ call: 'followup', sessionId }),
+            steer: () => calls.push({ call: 'steer', sessionId }),
             session: sessions.get(sessionId) ?? { id: sessionId },
             ctx: {
               tools: {
@@ -161,7 +177,7 @@ function bench({ storedTeam } = {}) {
         }
         return { agent: agents.get(sessionId) }
       },
-      selectModel: async () => {},
+      selectModel: async ({ sessionId, provider, model }) => { calls.push({ call: 'selectModel', sessionId, provider, model }) },
     },
     sessionTitle: { rename: async () => {} },
     sessions: { get: sessionId => sessions.get(sessionId), flush: async () => {} },
@@ -201,7 +217,7 @@ function bench({ storedTeam } = {}) {
   }
   return {
     ctx, rt, home, call, create, folder, guard, restrictionFor, restricted, lifted, warnings,
-    agents, sessions, definitions,
+    agents, sessions, definitions, calls, archived,
     addDefinition: (name, definition) => definitions.set(name, definition),
     addScopedDefinition: (name, definition) => scopedDefinitions.set(name, definition),
     stop,
@@ -455,15 +471,16 @@ test('a shell-off Bot cannot be paired with a command-capable agent, either way 
 test('a shell-off Bot cannot be paired with Remote Hermes', async (t) => {
   const { rt, create, call } = team(t)
   const bot = await create()
-  // The pairing boundary refuses even a stored Bot that was put on Hermes before its shell
-  // went off (a state the update path now refuses).
+  // A stored Bot put on Hermes before its shell went off (a state the update path now
+  // refuses) is held from the save on (#1488), so the pairing is refused as the hold.
   bot.model = 'hermes-remote/default'
   bot.shell = false
   rt.state.prefs = { ...(rt.state.prefs ?? {}), hermesRemote: { enabled: true, profile: 'p', models: [] } }
   await rt.save()
+  assert.deepEqual(rt.shellHoldOf(bot.id), { reason: 'shell-off-cli', provider: 'hermes-remote' })
   const refused = await call('hermes-remote-pair', { botId: bot.id })
   assert.equal(refused.ok, false)
-  assert.match(refused.error.message, /has no shell, so it cannot be paired with Remote Hermes/)
+  assert.match(refused.error.message, /needs a choice\. Turn on its shell or choose a DeepSeek Harness model before it can run on hermes-remote/)
   // Turning the model on a shell-less Bot is refused earlier, at the model boundary.
   const other = await create({ shell: false })
   const resolve = rt.resolveModel
@@ -509,6 +526,235 @@ test('a stored Bot with no field reads shell on', async (t) => {
   await allowed(guard(), 'bash', { id: 'old' }, { command: 'id' })
   const saved = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
   assert.equal(saved.bots.old.shell, true)
+})
+
+// #1488: a team saved with a shell-off Bot on a coding CLI (a state the update path refuses)
+// starts nothing for that Bot until the person turns its shell on or picks a native model.
+// Every route here is a name in an inert catalog: no adapter is registered, nothing answers.
+test('a stored shell-off Bot on a coding CLI is held until its shell is on or a native pick', async (t) => {
+  const CLI = 'acp-fake/m1'
+  const NATIVE = 'deepseek/deepseek-v4-flash'
+  const stored = storedBefore()
+  stored.mainBotIds = ['old']
+  const bot = (id, name, extra) => ({
+    id, name, role: '', instructions: '', createdAt: 1, capabilities: [],
+    sessionId: `${id}-chat`, model: CLI, appliedModel: CLI, ...extra,
+  })
+  stored.bots.held = bot('held', 'Held\nBot', { shell: false })
+  // Held by its chosen model alone, and by its applied model alone.
+  stored.bots.native = bot('native', 'Native', { shell: false, appliedModel: undefined })
+  // No applied model, so the model sync has something to select: the positive control.
+  stored.bots.control = bot('control', 'Control', { shell: true, appliedModel: undefined })
+  // Pinned identities: the host runs their conversation, so recovery keeps that Session.
+  // `pinned` is live (attached) when it recovers, `docked` only has its saved log (detached).
+  stored.bots.pinned = bot('pinned', 'Pinned', { shell: false, sessionPinned: true, model: NATIVE })
+  stored.bots.docked = bot('docked', 'Docked', { shell: false, sessionPinned: true })
+  // Only a stated `shell: false` holds: an absent shell (`old`) or another value does not.
+  stored.bots.loose = bot('loose', 'Loose', { shell: 'off' })
+  stored.rooms = {
+    r1: { id: 'r1', name: 'Group', members: ['held', 'control'], admin: 'control', mode: 'everyone', sessions: { held: 'held-group', control: 'control-group' }, seq: 0, log: [] },
+  }
+  stored.tasks = { 'held-task': { title: 'work', from: 'held', status: 'working', at: 1 } }
+  const before = JSON.parse(JSON.stringify(stored.bots))
+  const { ctx, rt, home, call, guard, warnings, calls, archived, sessions } = team(t, {
+    storedTeam: stored,
+    providers: { 'acp-fake': [{ id: 'm1' }], deepseek: [{ id: 'deepseek-v4-flash' }] },
+  })
+  const heldSessions = {
+    held: ['held-chat', 'held-group', 'held-task'], native: ['native-chat'], pinned: ['pinned-chat'], docked: ['docked-chat'],
+  }
+  const on = ids => calls.filter(entry => ids.includes(entry.sessionId))
+  const holdLines = () => warnings.filter(line => line.includes('holding'))
+
+  await rt.load()
+  // The normal state read (bootstrap, model sync) and the model sync again.
+  const state = await call('state', {})
+  assert.equal(state.ok, true)
+  await rt.syncModels()
+  // One ordinary admission per Bot: own chat for each, the group and the worker for `held`.
+  const attempt = (toId, sessionId) => rt.deliver({ toId, sessionId, text: 'hello', role: 'request' })
+  for (const [toId, sessionId] of [['held'], ['held', 'held-group'], ['held', 'held-task'], ['native'], ['pinned'], ['docked']]) {
+    await assert.rejects(() => attempt(toId, sessionId), (error) => {
+      assert.equal(error.code, 'bot/shell-off-cli')
+      return true
+    })
+  }
+  await rt.applyToolDeny(rt.botOf('held'), ['held-task'])
+  await attempt('control')
+  await attempt('control', 'control-group')
+
+  // Zero controller calls for every held Session; the shell-on control was served.
+  for (const ids of Object.values(heldSessions)) assert.deepEqual(on(ids), [])
+  assert.ok(on(['control-chat']).some(entry => entry.call === 'selectModel' && entry.model === 'm1'), 'the control took its model')
+  assert.ok(on(['control-chat']).some(entry => entry.call === 'followup'), 'the control took the message')
+  assert.ok(on(['control-group']).some(entry => entry.call === 'followup'))
+
+  // The roster the settings read carries the reason; the held Bots stay in it.
+  const shown = id => state.value.bots.find(entry => entry.id === id)
+  // Every held Bot here, pinned ones included, is DSH-routed, so the native pick is offered.
+  for (const id of ['held', 'native', 'pinned', 'docked']) {
+    assert.deepEqual(shown(id).shellHold, { reason: 'shell-off-cli', provider: 'acp-fake', nativeRecovery: true })
+    assert.deepEqual(rt.shellHoldOf(id), { reason: 'shell-off-cli', provider: 'acp-fake' })
+  }
+  assert.equal(shown('control').shellHold, undefined)
+  assert.equal(rt.shellHoldOf('old'), undefined)
+  assert.equal(rt.shellHoldOf('loose'), undefined)
+  assert.equal(shown('pinned').sessionPinned, true)
+  assert.equal(shown('docked').sessionPinned, true)
+
+  // One warning per held Bot, each one line, the file's name cleaned; a reload adds none.
+  await rt.load()
+  rt.refresh?.()
+  assert.equal(holdLines().length, 4)
+  for (const line of holdLines()) assert.doesNotMatch(line, /[\n\r]/)
+  assert.ok(holdLines().some(line => line.includes('Held Bot') && line.includes(CLI)))
+
+  // The record is untouched on disk: shell, model, applied model and Session.
+  const fields = ({ shell, model, appliedModel, sessionId }) => ({ shell, model, appliedModel, sessionId })
+  const saved = () => JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
+  for (const id of ['held', 'native', 'pinned', 'docked']) assert.deepEqual(fields(saved().bots[id]), fields(before[id]))
+  // A Bot saved without the field still reads shell on.
+  await allowed(guard(), 'bash', { id: 'old' }, { command: 'id' })
+
+  // Exit 1, the settings' shell toggle: the hold clears from the saved record, and the Bot
+  // then takes its CLI model and its message.
+  const turnedOn = await call('update-bot', { id: 'held', shell: true })
+  assert.equal(turnedOn.ok, true)
+  assert.equal(rt.shellHoldOf('held'), undefined)
+  assert.equal(saved().bots.held.shell, true)
+  assert.ok(on(['held-chat']).some(entry => entry.call === 'selectModel' && entry.provider === 'acp-fake'))
+  await attempt('held')
+  assert.ok(on(['held-chat']).some(entry => entry.call === 'followup'))
+
+  // Exit 2, a native pick: a fresh Session takes the native model, the old one is kept as an
+  // earlier part, and nothing is called on the old Session or the CLI route.
+  const before2 = calls.length
+  const picked = await call('switch-route', { id: 'native', model: NATIVE })
+  assert.equal(picked.ok, true, picked.error?.message)
+  assert.equal(rt.shellHoldOf('native'), undefined)
+  const moved = rt.botOf('native')
+  assert.equal(moved.shell, false)
+  assert.equal(moved.model, NATIVE)
+  assert.equal(moved.appliedModel, NATIVE)
+  assert.notEqual(moved.sessionId, 'native-chat')
+  assert.deepEqual(moved.segments.map(segment => segment.sessionId), ['native-chat'])
+  assert.ok(archived.includes('native-chat'))
+  const exitCalls = calls.slice(before2)
+  assert.deepEqual(exitCalls.filter(entry => entry.sessionId === 'native-chat'), [])
+  assert.deepEqual(exitCalls.filter(entry => entry.provider === 'acp-fake'), [])
+  assert.ok(exitCalls.some(entry => entry.call === 'selectModel' && entry.sessionId === moved.sessionId && entry.provider === 'deepseek'))
+  await assert.rejects(() => attempt('native', 'native-chat'), /set aside/)
+
+  // Exit 2 on a pinned identity: the native pick is DSH's own model/selection event on the
+  // same Session, never a fresh one. The host's services are inert stand-ins: a live Agent
+  // for `pinned`, a saved log for `docked`, and a route lookup that only records.
+  const native = { provider: 'deepseek', model: 'deepseek-v4-flash' }
+  const pinnedSession = Session.create('pinned-chat')
+  pinnedSession.append('model/selection', { provider: 'acp-fake', model: 'm1' })
+  const pinnedEarlier = pinnedSession.snapshotEvents()
+  const maintenance = []
+  const flushed = []
+  const direct = []
+  const live = new Map([['pinned-chat', {
+    session: pinnedSession,
+    status: 'idle',
+    model: { recordedSelection: () => pinnedSession.snapshotEvents().findLast(event => event.type === 'model/selection')?.data },
+    runMaintenance: async (work) => { maintenance.push('pinned-chat'); return work(new AbortController().signal) },
+    followup: () => calls.push({ call: 'followup', sessionId: 'pinned-chat', live: true }),
+    ctx: { tools: { restrict: (filter) => { direct.push([...filter.deny]); return () => {} } } },
+  }]])
+  const dockedEarlier = [
+    { seq: 0, time: 1, type: 'model/selection', data: { provider: 'acp-fake', model: 'm1' } },
+    { seq: 1, time: 2, type: 'request/header', data: { header: { config: { provider: 'acp-fake', model: 'm1' } } } },
+  ]
+  const dockedLog = [...dockedEarlier]
+  const opened = []
+  let owner = 'another host'
+  const persistence = {
+    open: async (sessionId, access) => {
+      if (sessionId !== 'docked-chat') throw Object.assign(new Error(`no ${sessionId}`), { name: 'SessionPersistenceNotFoundError' })
+      if (access === 'write' && owner !== undefined) throw Object.assign(new Error(`owned by ${owner}`), { name: 'SessionAlreadyOwnedError' })
+      const handle = { sessionId, access, appended: [], flushed: 0, closed: false }
+      opened.push(handle)
+      return {
+        id: sessionId, access, header: { id: sessionId },
+        read: async (offset = 0, count = dockedLog.length) => ({ events: dockedLog.slice(offset, offset + count) }),
+        append: async (events) => {
+          if (access !== 'write') throw new Error('a read handle cannot append')
+          for (const event of events) {
+            if (event.seq !== dockedLog.length) throw new Error(`append at ${event.seq} is not contiguous`)
+            dockedLog.push(event)
+            handle.appended.push(event)
+          }
+        },
+        flush: async () => { handle.flushed += 1 },
+        close: async () => { handle.closed = true },
+      }
+    },
+  }
+  const resolved = []
+  const get = ctx.get
+  ctx.get = name => (name === 'sessionPersistence' ? persistence : name === 'agents' ? live : get(name))
+  ctx.sessions.get = sessionId => (sessionId === 'pinned-chat' ? pinnedSession : sessions.get(sessionId))
+  ctx.sessions.flush = async (session) => { flushed.push(session?.id); return true }
+  ctx.llm.resolveCallConfig = async (selection) => { resolved.push(selection); return { ...selection } }
+  const before3 = calls.length
+
+  // A detached log another writer owns: refused, nothing written, and the Bot stays held.
+  const contended = await call('switch-route', { id: 'docked', model: NATIVE })
+  assert.equal(contended.ok, false)
+  assert.match(contended.error.message, /owned by another Agent or host/)
+  assert.deepEqual(rt.shellHoldOf('docked'), { reason: 'shell-off-cli', provider: 'acp-fake' })
+  assert.deepEqual(dockedLog, dockedEarlier)
+  assert.deepEqual(fields(saved().bots.docked), fields(before.docked))
+  owner = undefined
+
+  for (const id of ['pinned', 'docked']) {
+    const picked = await call('switch-route', { id, model: NATIVE })
+    assert.equal(picked.ok, true, picked.error?.message)
+    assert.equal(rt.shellHoldOf(id), undefined)
+    // Persisted on the same Session: shell still off, still pinned, no earlier part.
+    assert.deepEqual(fields(saved().bots[id]), { shell: false, model: NATIVE, appliedModel: NATIVE, sessionId: `${id}-chat` })
+    assert.equal(saved().bots[id].sessionPinned, true)
+    assert.equal(rt.botOf(id).segments, undefined)
+    assert.equal(rt.chatOf(id), `${id}-chat`)
+    assert.equal(archived.includes(`${id}-chat`), false)
+  }
+  // Attached: inside the Agent's maintenance slot, history kept, the selection appended and
+  // flushed, and the shell-off fence put on that Agent directly.
+  const pinnedEvents = pinnedSession.snapshotEvents()
+  assert.deepEqual(pinnedEvents.slice(0, pinnedEarlier.length), pinnedEarlier)
+  assert.equal(pinnedEvents.length, pinnedEarlier.length + 1)
+  assert.deepEqual([pinnedEvents.at(-1).type, pinnedEvents.at(-1).data], ['model/selection', native])
+  assert.deepEqual(maintenance, ['pinned-chat'])
+  assert.ok(flushed.includes('pinned-chat'))
+  assert.ok(direct.some(deny => deny.includes('bash')), 'the shell-off fence reached the live Agent')
+  // Detached: one write claim, history kept, one contiguous selection, flushed and closed.
+  assert.deepEqual(dockedLog.slice(0, dockedEarlier.length), dockedEarlier)
+  assert.deepEqual(dockedLog.slice(dockedEarlier.length).map(({ seq, type, data }) => ({ seq, type, data })),
+    [{ seq: dockedEarlier.length, type: 'model/selection', data: native }])
+  const writes = opened.filter(handle => handle.access === 'write')
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].appended.length, 1)
+  assert.ok(writes[0].flushed >= 1 && writes[0].closed)
+  // Nothing resolved the coding CLI, and no controller call reached either Session.
+  assert.ok(resolved.length > 0 && resolved.every(selection => selection.provider === 'deepseek'), JSON.stringify(resolved))
+  const pinnedCalls = calls.slice(before3)
+  assert.deepEqual(pinnedCalls.filter(entry => ['pinned-chat', 'docked-chat'].includes(entry.sessionId)), [])
+  assert.deepEqual(pinnedCalls.filter(entry => entry.call === 'create' || entry.provider === 'acp-fake'), [])
+  // The next message reaches the same Session, and no CLI route is selected for it.
+  await attempt('pinned')
+  await attempt('docked')
+  assert.ok(on(['pinned-chat']).some(entry => entry.call === 'followup'))
+  assert.ok(on(['docked-chat']).some(entry => entry.call === 'followup'))
+  assert.deepEqual(on(['pinned-chat', 'docked-chat']).filter(entry => entry.provider === 'acp-fake'), [])
+
+  // Leaving and re-entering the hold logs once more. The record is written directly: the
+  // update path refuses this state.
+  rt.botOf('held').shell = false
+  await rt.save()
+  assert.deepEqual(rt.shellHoldOf('held'), { reason: 'shell-off-cli', provider: 'acp-fake' })
+  assert.equal(holdLines().length, 5)
 })
 
 test('a new non-private Bot states shell on and is otherwise unchanged', async (t) => {

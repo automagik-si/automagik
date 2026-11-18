@@ -8,7 +8,9 @@ export function install(rt) {
   const { ctx, state } = rt
 
   const resolveAgent = async (sessionId) => {
+    rt.assertShellChoice?.(sessionId)
     const resolved = await ctx.sessionController.resolveAgent(sessionId)
+    rt.assertShellChoice?.(sessionId)
     if ('error' in resolved) {
       const error = Object.assign(new Error(resolved.error?.message ?? 'Session unavailable'), { code: resolved.error?.code })
       throw rt.autoClosed?.(sessionId, error) ?? error
@@ -117,6 +119,7 @@ export function install(rt) {
       ...(abandoned ? { abandoned: true } : {}),
     }
     const targetSessionId = sessionId ?? rt.chatOf(toId)
+    rt.assertShellChoice?.(targetSessionId, toId)
     // On disk before it goes out: a message the book could not keep is not sent, so none is
     // delivered with no record of it. A resend keeps the record it has; only a merged request
     // replaces it with its added text.
@@ -126,6 +129,7 @@ export function install(rt) {
       await rt.ledger.written(book)
     }
     await rt.ensureCapabilities(targetSessionId)
+    rt.assertShellChoice?.(targetSessionId, toId)
     const agent = await resolveAgent(targetSessionId)
     // A steered message cuts into a running turn at its next step; a follow-up
     // queues for the next turn (see turns.js for how each is routed).

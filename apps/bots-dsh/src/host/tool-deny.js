@@ -419,7 +419,7 @@ export function install(rt) {
    * @param {object} bot - the Bot record (its `denyTools` and `shell` are read live).
    */
   async function applyToolDeny(bot, extra = []) {
-    if (bot === undefined) return
+    if (bot === undefined || rt.shellHoldOf?.(bot.id) !== undefined) return
     const sessions = new Set([...rt.sessionsOfBot(bot.id), ...extra])
     for (const part of bot.segments ?? []) sessions.add(part.sessionId)
     // A group keeps its earlier parts under the room, beside the Bot's own history.
@@ -427,6 +427,7 @@ export function install(rt) {
       for (const part of room.segments?.[bot.id] ?? []) sessions.add(part.sessionId)
     }
     await Promise.all([...sessions].map(async (sessionId) => {
+      try { rt.assertShellChoice?.(sessionId) } catch { return }
       try {
         const agent = await rt.resolveAgent(sessionId)
         // The Bot is known here, and a fresh part can be mapped before the store's own
@@ -475,7 +476,11 @@ export function install(rt) {
   // of a DSH bot Session are decided, and before a step assembles its tools.
   ctx.on('agent/created', ({ agent } = {}) => {
     void rt.load()
-      .then(() => apply(agent?.session?.id, agent))
+      .then(() => {
+        const sessionId = agent?.session?.id
+        try { rt.assertShellChoice?.(sessionId) } catch { return }
+        return apply(sessionId, agent)
+      })
       .catch(error => rt.warn('ds-bot: tool deny on agent/created failed: %s', error))
   })
 
@@ -485,6 +490,7 @@ export function install(rt) {
   ctx.on('tools/execute', async (exec, next) => {
     // And none at all on a Session whose permission level was not set (permissions.js).
     try {
+      rt.assertShellChoice?.(exec.agent?.session?.id ?? exec.agent?.id)
       await rt.levelHolds?.(exec)
     } catch (error) {
       if (error?.code === 'bot/refused') rt.noteStop?.(exec.agent?.id ?? exec.agent?.session?.id, { why: 'level', tool: exec.name, callId: exec.callId }, exec.agent)
@@ -507,5 +513,5 @@ export function install(rt) {
   })
 
   // Retries stop on a Session that leaves the team, so a lift is not attempted on a gone agent.
-  Object.assign(rt, { botOfSession, applyToolDeny, cleanDenyTools, unknownDenyTools, assertDenyTools })
+  Object.assign(rt, { botOfSession, applyToolDeny, applyToolDenyToAgent: apply, cleanDenyTools, unknownDenyTools, assertDenyTools })
 }

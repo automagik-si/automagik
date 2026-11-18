@@ -288,7 +288,7 @@ export function install(rt, { transport = options => new HermesTransport(options
     // first profile: that could join a different Bot's forever-chat.
     if (!row) return Promise.reject(attachProfileRefusal(savedProfileOf(config)))
     const models = [attachedModelOf(row)]
-    const bots = Object.values(state.bots ?? {})
+    const bots = Object.values(state.bots ?? {}).filter(bot => rt.shellHoldOf?.(bot.id) === undefined)
     const botsStale = bots.some(bot => ['model', 'appliedModel'].some(key => typeof bot?.[key] === 'string'
       && bot[key].startsWith(`${HERMES_PROVIDER}/`) && bot[key] !== `${HERMES_PROVIDER}/attach`))
     // A record from the previous release carried chats whose old private serve is gone.
@@ -322,6 +322,7 @@ export function install(rt, { transport = options => new HermesTransport(options
       // Every Bot on this provider now has one served row. An unpaired Bot's old ref is
       // just as stale as the paired one's, and would keep failing its next turn.
       for (const bot of bots) {
+        if (rt.shellHoldOf?.(bot.id) !== undefined || state.bots?.[bot.id] !== bot) continue
         for (const key of ['model', 'appliedModel']) {
           if (typeof bot?.[key] === 'string' && bot[key].startsWith(`${HERMES_PROVIDER}/`) && bot[key] !== `${HERMES_PROVIDER}/attach`) bot[key] = `${HERMES_PROVIDER}/attach`
         }
@@ -939,6 +940,7 @@ export function install(rt, { transport = options => new HermesTransport(options
       return savePair('', signal)
     }
     if (typeof botId !== 'string' || !Object.hasOwn(state.bots ?? {}, botId)) throw fail('Choose an existing Automagik Bot.', 'pairing')
+    rt.assertShellChoice?.(undefined, botId)
     // Remote Hermes runs its own tools on the other computer, outside this plugin's guard.
     if (state.bots[botId].shell === false) throw fail(CONNECTION_ERRORS['bot/hermes-shell'], 'shell')
     if (!state.bots[botId].model?.startsWith(`${HERMES_PROVIDER}/`)) throw fail('Choose Remote Hermes in this Bot’s chat before pairing it.', 'pairing')

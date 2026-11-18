@@ -767,6 +767,8 @@ export function install(rt) {
   const holdAgents = (sub) => {
     const off = sub.acpAgents?.holdTurns?.(async ({ agent } = {}) => {
       try {
+        await rt.refreshShellChoice?.()
+        rt.assertShellChoice?.(agent?.session?.id ?? agent?.id)
         await levelHolds({ agent })
       } catch (error) {
         if (error?.code === 'bot/refused') {
