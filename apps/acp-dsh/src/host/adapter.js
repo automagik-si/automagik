@@ -14,7 +14,7 @@ import {
   isAgentLoopRequest, offloadedImageText,
 } from '@deepseek-ai/dsh-llm'
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
-import { recordDrift } from './backchannel.js'
+import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
 import { SessionFiles, restrictedLevel } from './session-files.js'
 import { chatProfileModes } from './codex-chat-profiles.js'
@@ -588,6 +588,7 @@ export class AcpAdapter extends LlmAdapter {
       cancelled: (sessionId, live) => this.reap(sessionId, live),
       bridgeApprovals: (sessionId, position, signal) =>
         this.backchannel?.awaitApprovals?.(sessionId, position, signal),
+      runNested: (...args) => this.runNested(...args),
       approval: () => ctx.get?.('approval'),
       sandboxPolicy: () => ctx.get?.('sandboxPolicy'),
       permissionPresets: () => ctx.get?.('permissionPresets'),
@@ -644,6 +645,53 @@ export class AcpAdapter extends LlmAdapter {
       try { this.ctx.logger?.warn?.(`acp-dsh: a reviewed call was not recorded: ${error?.message ?? error}`) } catch {}
     }
     return next()
+  }
+
+  /**
+   * Run one subagent's nested call as its own DSH card inside the step its Agent card holds
+   * open. At Auto this is what puts the call through DSH's review gate: the reviewer answers a
+   * real execution, and the mirror body answers the agent's question. The call's rows are
+   * written in that step; the agent's queued update later finds `cardExecuted` and draws no
+   * second card. A failure leaves the question unanswered for the direct ask that follows.
+   * @returns {Promise<boolean>} whether the nested question got its answer
+   */
+  async runNested(live, nested, exec) {
+    const session = exec.agent?.session
+    const position = openStepOf(session)
+    const tools = this.ctx.get?.('tools')
+    const question = nested.permission
+    if (session === undefined || position === undefined || tools?.execute === undefined
+      || exec.toolSet === undefined || question === undefined) return false
+    const id = `acp_${randomUUID()}`
+    const raw = JSON.stringify(callArguments(nested))
+    let hide
+    try {
+      hide = advertise(session, position, routeOf(session), { id, name: TOOL_NAME, raw }, message => this.warn(message))
+    } catch (error) {
+      this.warn(`a nested call was not advertised: ${error?.message ?? error}`)
+      return false
+    }
+    // The execution is admitted by the step's own tool set: the mirror is a conditional tool.
+    nested.cardExecuted = id
+    live.calls.add(id)
+    live.toolIds.set(id, nested.id)
+    try {
+      await tools.execute({
+        calls: [{ id, name: TOOL_NAME, arguments: raw }],
+        agent: exec.agent,
+        signal: exec.signal,
+        toolSet: exec.toolSet,
+        log: position,
+      })
+    } catch (error) {
+      this.warn(`a nested call was not recorded: ${error?.message ?? error}`)
+    } finally {
+      hide()
+      live.calls.delete(id)
+      live.toolIds.delete(id)
+      if (nested.permission === question) nested.cardExecuted = undefined
+    }
+    return nested.permission !== question
   }
 
   /**
@@ -1682,6 +1730,9 @@ export class AcpAdapter extends LlmAdapter {
         // Its entry went with a fork or retirement.
         if (tool === undefined) continue
         this.diagnostics?.call(sessionId, live, tool)
+        // A subagent's nested call at Auto already ran through the pipeline inside its Agent
+        // card's step: its card is written, so this queued update is not a second one.
+        if (tool.cardExecuted !== undefined) continue
         // A DSH tool call is not a mirror call: the bridge writes its rows and DSH draws the one
         // card from them. On `acp-codex` no structured name is proven, so any MCP call there is
         // left to the bridge too; its own tools keep their cards.

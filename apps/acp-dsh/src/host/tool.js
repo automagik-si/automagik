@@ -236,6 +236,13 @@ export function mirrorTool(host) {
             const nested = nestedQuestion(live, tool)
             if (nested !== undefined) {
               const question = nested.permission
+              // Auto review reads a call from its own DSH execution. A nested call asked from
+              // the waiting Agent card has none yet, so at Auto run its own card here, inside
+              // the open step: the reviewer answers it like any call, and only an escalation
+              // reaches the person. Manual and Full keep the direct dialog below.
+              const level = levelOf(host.approval(), exec.agent?.session, host.sandboxPolicy?.(), host.permissionPresets?.())
+              if (level.auto === true && typeof host.runNested === 'function'
+                && await host.runNested(live, nested, exec)) continue
               question.asked = true
               question.answer(optionFor(await ask(host, live, nested, exec, question, { review: false }), question.options))
               continue
