@@ -187,9 +187,11 @@ export function createSession({
   }
 
   function activateAfterLoad(target) {
+    // Never left unhandled: a tab that crashes while loading rejects with no action awaiting it,
+    // and the host exits on any unhandled rejection (#1577). settle() re-waits the page itself.
     pendingPageReady = waitForPageReady(target).then(() => {
       if (!target.isClosed()) current = target
-    })
+    }).catch(() => {})
   }
 
   function trackPage(target, activate = false) {
@@ -550,10 +552,14 @@ export function createSession({
         if (requestOrigin !== action.origin || ['GET', 'HEAD'].includes(request.method().toUpperCase())) return
         let resolve
         let reject
-        requests.push(new Promise((res, rej) => {
+        const pending = new Promise((res, rej) => {
           resolve = res
           reject = rej
-        }))
+        })
+        // Promise.all still sees the failure; this only stops a request that fails after the
+        // write stopped waiting from reaching the host's unhandledRejection exit (#1577).
+        pending.catch(() => {})
+        requests.push(pending)
         pendingRequests.set(request, { resolve, reject })
       }
       const onRequestFinished = request => {
