@@ -1301,6 +1301,7 @@ var ZH = {
   "A Bot with shell access can read what the operating-system user can read.": "有 shell 访问权限的 Bot 可以读取操作系统用户能读取的内容。",
   "This Bot stays on {model}: {cli} is a coding CLI that brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.": "这个 Bot 会继续使用 {model}：{cli} 是自带 shell 的编程 CLI。请打开 shell，或选择一个使用 DeepSeek Harness 工具的模型。",
   "This model no longer answers, and this Bot cannot move to {cli} while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.": "这个模型已不再可用，而在 shell 关闭时这个 Bot 无法迁移到 {cli}。请选择一个使用 DeepSeek Harness 工具的模型，或打开 shell。",
+  "This Bot has no shell, so it cannot run on {cli}, whose own tools can run commands. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.": "这个 Bot 没有 shell，因此不能在 {cli} 上运行，它的工具可以执行命令。请选择一个使用 DeepSeek Harness 工具的模型，或打开 shell。",
   "The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.": "Bot 团队在授予工具时执行此设置：它会移除这些工具，而不会把 shell 放进操作系统沙箱。",
   "This removes this Bot's own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.": "这只会移除这个 Bot 自己的 shell 工具；它不能阻止另一个有 shell 的 Bot，或操作系统用户，读取这个 Bot 能读取的文件。",
   "Denied tools": "禁止使用的工具",
@@ -3773,6 +3774,13 @@ var LEGACY_LOCAL_CLIS = Object.freeze([
   "qwen-code",
   "goose"
 ]);
+function shellHoldModelOf(bot) {
+  if (bot?.shell !== false) return void 0;
+  return [bot.model, bot.appliedModel].find(commandCapableAgent);
+}
+function shellHoldText(bot, cli = bot?.shellHeld?.cli) {
+  return `${bot?.name ?? "This Bot"} has no shell, so it cannot run on ${cli ?? "a coding CLI"}, whose own tools can run commands. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.`;
+}
 function commandCapableAgent(ref) {
   const provider = String(ref ?? "").split("/")[0];
   if (provider === "") return false;
@@ -7025,6 +7033,9 @@ function modelStateLine(state2, roster) {
   return void 0;
 }
 function modelHint(bot, roster, state2) {
+  if (bot.shellHeld !== void 0) {
+    return t("This Bot has no shell, so it cannot run on {cli}, whose own tools can run commands. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.", { cli: bot.shellHeld.cli });
+  }
   const host = roster.hostModels?.[bot.id];
   if (host !== void 0) {
     const answering = host.entries?.find((entry) => entry.answering)?.label;
@@ -7593,6 +7604,7 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
   };
   const same = (ref) => !onPick && ref === current && Boolean(bot.model);
   const crossing = (ref) => Boolean(current) && saved && ref !== current && crossesHarness(current, ref);
+  const recovery = (ref) => saved && bot.shellHeld !== void 0 && !commandCapableAgent(ref);
   const pickModel = (ref, effort, { routeChange = false, level = false } = {}) => {
     if (routeChange && typeof onPick === "function") return onPick(ref, { routeChange: true, effort });
     if (onPick) {
@@ -7617,12 +7629,13 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
     return run2(actions.updateBot(bot.id, { model: ref, ...level || effort !== void 0 ? { effort: effort ?? null } : {} }));
   };
   const commit = (model, effort) => {
-    if (model.ref !== void 0 && crossing(model.ref)) {
+    const routeChange = model.ref !== void 0 && recovery(model.ref);
+    if (!routeChange && model.ref !== void 0 && crossing(model.ref)) {
       setConfirm({ ref: model.ref, effort });
       return;
     }
     finish();
-    void Promise.resolve(pickModel(model.ref, effort)).catch(() => {
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange })).catch(() => {
     });
   };
   const onModel = (model, route) => {
@@ -7661,12 +7674,13 @@ function DshModelMenu({ bot, roster, actions, run: run2, wide = false, link = fa
     else void askEfforts(model.ref, actions).then(decide);
   };
   const onLevel = (model, effort) => {
-    if (crossing(model.ref)) {
+    const routeChange = recovery(model.ref);
+    if (!routeChange && crossing(model.ref)) {
       setConfirm({ ref: model.ref, effort });
       return;
     }
     finish();
-    void Promise.resolve(pickModel(model.ref, effort, { level: true })).catch(() => {
+    void Promise.resolve(pickModel(model.ref, effort, { routeChange, level: true })).catch(() => {
     });
   };
   const onKeyDown = (event) => {
