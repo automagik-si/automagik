@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { format } from 'node:util'
 import { test } from 'node:test'
 import { apply } from '../index.js'
 import { fakeContext } from './fake-ctx.js'
@@ -129,6 +130,30 @@ async function start(team, {
   }
   return { home, ctx, call, stop, saved, teamNow, selected, moved }
 }
+
+test('a shell-off Bot is not moved onto acp-claude by the automatic move', async (t) => {
+  const warned = []
+  const base = seed()
+  const team = seed({ m1: { ...base.bots.m1, shell: false } })
+  const host = await start(team, {
+    onRuntime: (rt) => {
+      const warn = rt.warn
+      rt.warn = (...args) => { warned.push(format(...args)); return warn(...args) }
+    },
+  })
+  t.after(host.stop)
+  // Another eligible Bot on the same route still moves; the shell-off one must not.
+  await until(() => host.saved().bots.w2.model === 'acp-claude/sonnet', { label: 'the other Bot moved' })
+  const state = host.saved()
+  // Not moved, and its shell setting is untouched; the route is not marked done, so it can
+  // move once the shell is on.
+  assert.equal(state.bots.m1.model, 'anthropic/claude-opus-5-5')
+  assert.equal(state.bots.m1.shell, false)
+  assert.equal(state.bots.m1.acpMoved, undefined)
+  assert.equal(state.bots.m1.acpShellHeld, true)
+  assert.notEqual(state.claudeAcpMoved, true)
+  assert.equal(warned.filter(line => /Claude Code over ACP brings its own shell/.test(line)).length, 1)
+})
 
 test('a Bot still on the pi-ai model it was moved to goes to acp-claude once, keeping its Session', async (t) => {
   const host = await start(seed())

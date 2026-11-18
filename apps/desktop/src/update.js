@@ -12,7 +12,14 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { basename, join } from 'node:path'
 
-export const RELEASES_URL = 'https://api.github.com/repos/automagik-si/automagik/releases?per_page=50'
+export const RELEASES_URL = 'https://api.github.com/repos/automagik-si/automagik/releases?per_page=100'
+// The updater reads the release list newest first. A plugin, herdr or Pocket patch is a release
+// too, and only a full release carries a desktop feed: a quiet stretch puts the newest feed past
+// the first page. Follow GitHub's Link next page until the list ends or this cap, so an older
+// feed is never invisible. A normal check stops at the page that holds the running release
+// (nothing after it can be newer); the cap keeps a list without it from walking forever (ten
+// pages is 1,000 releases).
+export const MAX_RELEASE_PAGES = 10
 export const DESKTOP_TAG_PREFIX = 'v'
 const DOWNLOADS = 'https://github.com/automagik-si/automagik/releases/download/'
 const RELEASE_PAGE = 'https://github.com/automagik-si/automagik/releases/tag/'
@@ -301,13 +308,51 @@ export function pickUpdate(releases, { current, platform, channel = 'prerelease'
   return best
 }
 
-export async function fetchReleases(fetchImpl = fetch) {
-  const response = await fetchImpl(RELEASES_URL, {
-    headers: { accept: 'application/vnd.github+json', 'user-agent': 'omni-desktop' },
-    signal: AbortSignal.timeout(15_000),
-  })
-  if (!response.ok) throw new Error(`GitHub answered ${response.status} for the desktop releases`)
-  return response.json()
+/**
+ * The rel="next" address of GitHub's Link header, or null when there is none or it leaves the
+ * API host: only the answer this check already trusts may send it somewhere else.
+ */
+export function nextPage(link, base = RELEASES_URL) {
+  const match = /<([^>]+)>;\s*rel="next"/.exec(String(link ?? ''))
+  if (!match) return null
+  try {
+    const next = new URL(match[1], base)
+    const api = new URL(base)
+    if (next.protocol !== api.protocol || next.host !== api.host) return null
+    return next.href
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The release list, following GitHub's next-page link. `enough` says when the caller has what it
+ * needs: the list is newest first, so older pages cannot change the newest usable update. The
+ * first page's answer is returned whole, as it always was; a later page that is not a release
+ * list fails the check instead of hiding the pages before it.
+ */
+export async function fetchReleases(fetchImpl = fetch, enough = () => false) {
+  const releases = []
+  let url = RELEASES_URL
+  let truncated = false
+  for (let page = 1; url && page <= MAX_RELEASE_PAGES; page++) {
+    const response = await fetchImpl(url, {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': 'omni-desktop' },
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (!response.ok) throw new Error(`GitHub answered ${response.status} for the desktop releases`)
+    const list = await response.json()
+    if (!Array.isArray(list)) {
+      if (releases.length === 0) return list
+      throw new Error('GitHub answered with something other than a release list for the desktop releases')
+    }
+    releases.push(...list)
+    if (enough(releases)) break
+    url = nextPage(response.headers?.get?.('link'))
+    truncated = Boolean(url) && page === MAX_RELEASE_PAGES
+  }
+  if (truncated) console.warn(`update check: read ${MAX_RELEASE_PAGES} pages of releases; an older feed may be hidden`)
+  return releases
 }
 
 /**
@@ -503,7 +548,15 @@ export function startUpdates({ updater, current, platform, env, log, onState, mo
       let update
       if (override) update = { version: null, url: override }
       else {
-        const list = await releases()
+        const list = await releases(undefined, found => {
+          // The list is newest first: once the running release is in hand, nothing after it can
+          // be newer. Without it, a fixed channel can still stop at an update; the cap bounds
+          // the search for a running release the list does not name.
+          if (found.some(release => release?.tag_name === `${DESKTOP_TAG_PREFIX}${current}`)) return true
+          const fixed = env.OMNI_DESKTOP_UPDATE_CHANNEL?.trim()
+          if (fixed !== 'stable' && fixed !== 'prerelease') return false
+          return pickUpdate(found, { current, platform, channel: fixed }) !== null
+        })
         const channel = channelOf(list, { current, env })
         update = pickUpdate(list, { current, platform, channel })
         if (!update) {

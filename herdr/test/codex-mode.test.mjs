@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // One Codex launch mode (#1125, the owner's ruling of 10 and 12 Nov): every Codex seat and every
 // worker the pack builds runs `--approve-for-me` with the sandbox on, `--no-daemon` (hc --skill:
 // else its commands run in Codex's shared server, outside hc) and the sandbox's network access,
@@ -978,6 +979,8 @@ test("#1142 a Codex seat on a linked machine whose HOME is an alias: both core f
     machines: [{ name: "vm", id: "core-of-vm", state: "connected", uname: "Linux x86_64", home: alias, path: vmBin, env: { ...blank, ...env } }] }));
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, LANG: "C",
     GIT_CEILING_DIRECTORIES: root, XDG_DATA_HOME: "", AUTOMAGIK_HERDR_TAB_WAIT_MS: "0" };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const cli = (...args) => {
     writeFileSync(logPath, "");
     const r = spawnSync(process.execPath, [CLI, ...args, "--machine", "vm", "--project", project, "--json"], { cwd: root, env, encoding: "utf8" });
@@ -1085,6 +1088,8 @@ function scene(t, { programs = null, templates = [], env: more = {} } = {}) {
     GIT_CEILING_DIRECTORIES: root, XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"),
     HC_SOCKET: join(root, "unproxied.sock"), AUTOMAGIK_HERDR_TAB_WAIT_MS: "0", AUTOMAGIK_HERDR_RESTART_STABLE_MS: "1", ...more };
   env.HC_TERMINAL_SOCKET = env.HC_SOCKET;
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const cli = (args, { from = "t1" } = {}) => {
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...(from ? { HC_TERMINAL_ID: from } : {}) }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr };
@@ -1313,6 +1318,8 @@ test("#1142 a Codex seat on a linked machine: its --add-dir words and derived fo
   writeFileSync(logPath, "");
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, LANG: "C",
     GIT_CEILING_DIRECTORIES: root, XDG_DATA_HOME: "", AUTOMAGIK_HERDR_TAB_WAIT_MS: "0" };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const r = spawnSync(process.execPath, [CLI, "start", "Dev", "--machine", "vm", "--project", project, "--json"], { cwd: root, env, encoding: "utf8" });
   assert.equal(r.status, 0, r.stderr);
   const call = readJsonLines(logPath).find((c) => c[0] === "run");

@@ -63,9 +63,9 @@ test('follow-omni carries an Omni only after it booted, on the dev commit that b
   assert.match(text, /\n {2}release:\n {4}name: Release\n {4}needs: carry\n/)
 })
 
-test('follow-omni runs on Omni\'s dispatch, takes its payload only as a logged hint', () => {
+test('follow-omni runs on Omni\'s dispatch and the outside daily clock, taking the payload only as a logged hint', () => {
   const text = readFileSync(new URL('../../../.github/workflows/follow-omni.yml', import.meta.url), 'utf8')
-  assert.match(text, /\n {2}repository_dispatch:\n(?: {4}#[^\n]*\n)* {4}types: \[omni-release\]\n/)
+  assert.match(text, /\n {2}repository_dispatch:\n(?: {4}#[^\n]*\n)* {4}types: \[omni-release, daily-carry\]\n/)
   // The schedule stays as the fallback, and every run queues behind a running follow.
   assert.match(text, /\n {2}schedule:\n[\s\S]*?- cron: '/)
   assert.match(text, /\nconcurrency:\n {2}group: follow-omni\n {2}cancel-in-progress: false\n/)

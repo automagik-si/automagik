@@ -765,6 +765,38 @@ test('each hardening check is pinned by a forgery equal to the Session message',
   assert.equal(RemoteChatAdapter.ownTurn(envelope([unfrozen]), agent), false)
 })
 
+test('a plain-data toJSON key in history is ordinary data; a function toJSON is still refused', async t => {
+  const f = fixture(t)
+  const ctx = new Context(), runtime = new LlmRuntime(ctx)
+  // A tool call in history whose arguments carry an ordinary JSON key named toJSON.
+  const call = Object.freeze({ role: 'assistant', id: 'a-1', content: Object.freeze([Object.freeze({ type: 'tool-call', id: 'call-1', name: 'sample', arguments: Object.freeze({ toJSON: 'x', nested: Object.freeze({ toJSON: 1 }) }) })]), source: Object.freeze({ kind: 'model', provider: 'hermes-remote', model: 'sample:model' }) })
+  const user = Object.freeze({ role: 'user', id: 'm-1', content: Object.freeze([Object.freeze({ type: 'text', text: 'say OK' })]) })
+  const messages = Object.freeze([call, user, Object.freeze({ role: 'developer', id: 'dev-tools', content: Object.freeze([Object.freeze({ type: 'tool-addition', toolName: 'sample' })]) })])
+  const session = { deriveMessages: () => [...messages], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  ctx.provide('agents'); ctx.set('agents', { get: id => id === agent.id ? agent : undefined, list: () => [agent] })
+  const adapter = new RemoteChatAdapter({ ctx }, {
+    enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }],
+    identity: () => f.identity, save: async () => {}, open: async () => { await f.wire.connect(); return f.run },
+  })
+  t.after(() => adapter.dispose())
+  runtime.registerAdapter(['hermes-remote'], adapter)
+  const request = markAgentLoopRequest(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages, tools: Object.freeze([]), signal: new AbortController().signal }))
+  const stream = runtime.stream(request)
+  const first = stream.next()
+  await until(() => f.sent.some(frame => frame.method === 'prompt.submit'), 'the prompt to be submitted', first)
+  f.socket().event('message.complete', { text: 'OK' })
+  const chunks = [(await first).value]
+  for await (const chunk of stream) chunks.push(chunk)
+  assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), 'OK')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  // A function toJSON is not data: JSON.stringify would call it, so it stays refused.
+  const evil = Object.freeze(Object.defineProperty([Object.freeze({ type: 'text', text: 'say OK' })], 'toJSON', { value: () => [], enumerable: false }))
+  const evilUser = Object.freeze({ role: 'user', id: 'm-1', content: evil })
+  const evilAgent = { id: 'sample-chat', session: { deriveMessages: () => [evilUser], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) } }
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: Object.freeze([evilUser]) }), evilAgent), false)
+})
+
 test('each request field must be own data: an equal-value accessor envelope is refused', async t => {
   const f = fixture(t)
   const ctx = new Context(), runtime = new LlmRuntime(ctx)

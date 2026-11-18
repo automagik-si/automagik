@@ -227,6 +227,40 @@ test('public views keep the official links only, a fixed code label, and an opti
   assert.equal(cliLoginView({ id: 'acp-codex', attemptId: ATTEMPT, status: 'failed', message: 'Install the CLI before signing in. private-token' }, 'acp-codex').message, 'Sign-in did not finish. Try again.')
 })
 
+test('a failed attempt says why, from acp-dsh’s fixed cause, and never from CLI text', () => {
+  const failed = (extra, provider = 'acp-claude') => ({ id: provider, attemptId: ATTEMPT, status: 'failed', message: 'private-cli-output', ...extra })
+  const message = (value, provider = 'acp-claude') => cliLoginView(value, provider).message
+  // Every cause acp-dsh’s closed set can carry, one case each.
+  const CODEX_ONLY = 'Codex device sign-in is unavailable. Enable device-code login in ChatGPT security settings or workspace permissions, then try again.'
+  const CODEX_START = 'Codex could not start device sign-in. Check your connection and device-code login permissions in ChatGPT, then try again.'
+  const byCause = new Map([
+    ['no CLI found', 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.'],
+    ['no sign-in link in time', 'The CLI did not offer a sign-in link in time. Try again.'],
+    ['the CLI could not be started', 'The CLI could not be started. Run it once in a terminal, then try again.'],
+    ['unsupported sign-in link', 'The CLI returned an old sign-in link. Update it, then try again.'],
+    ['the CLI did not confirm the sign-in', 'The CLI did not confirm the sign-in. Try again.'],
+    ['the CLI exited', 'The CLI exited before the sign-in finished. Try again.'],
+    ['unknown', 'Sign-in did not finish. Try again.'],
+  ])
+  for (const [cause, sentence] of byCause) {
+    assert.equal(message(failed({ cause })), sentence, cause)
+    // The same sentence on the other agent: the closed set is not the provider's.
+    assert.equal(message(failed({ cause }, 'acp-codex'), 'acp-codex'), sentence, cause)
+  }
+  // The two device causes belong to Codex, and only Codex gets their sentences.
+  assert.equal(message(failed({ cause: 'device-code login is not enabled' }, 'acp-codex'), 'acp-codex'), CODEX_ONLY)
+  assert.equal(message(failed({ cause: 'device sign-in did not start' }, 'acp-codex'), 'acp-codex'), CODEX_START)
+  for (const device of ['device-code login is not enabled', 'device sign-in did not start']) {
+    assert.equal(message(failed({ cause: device })), 'Sign-in did not finish. Try again.', device)
+  }
+  // A host from before the cause existed still gets the two it already knew; anything else keeps
+  // the one line, and an unknown cause never becomes a message.
+  assert.equal(message(failed({ message: 'Install the CLI before signing in.' })), 'The coding agent is not ready yet. Check its installation in Settings → Claude Code and Codex, then try again.')
+  assert.equal(message(failed({ message: CODEX_ONLY }, 'acp-codex'), 'acp-codex'), CODEX_ONLY)
+  assert.equal(message(failed({ cause: 'private-cli-output says no' })), 'Sign-in did not finish. Try again.')
+  assert.doesNotMatch(message(failed({ cause: 'private-cli-output says no' })), /private-cli-output/)
+})
+
 test('connections read each CLI’s sign-in through inspect only', async () => {
   const h = fixture()
   const value = await h.actions['cli-login-connections']({})
