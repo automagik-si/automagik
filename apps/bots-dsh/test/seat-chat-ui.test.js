@@ -274,6 +274,43 @@ test('the bar poll updates the open seat only when its live facts change', () =>
   assert.equal(seatWithFreshPane(seatRow, null), null, 'a row the poll no longer has changes nothing')
 })
 
+test('a type-only poll change refreshes the open seat panel in both directions', () => {
+  codeStore.reset()
+  seatChatView.set({ seat: seatRow })
+  const panels = []
+  const off = seatChatView.subscribe(() => panels.push(renderSeat()))
+  const poll = fresh => {
+    const next = seatWithFreshPane(seatChatView.getSnapshot().seat, fresh)
+    if (next !== null) seatChatView.set({ seat: next })
+  }
+  const withoutType = ({ type: _type, ...rest }) => rest
+  try {
+    assert.ok(part(renderSeat(), 'chat'))
+    poll({ ...seatRow })
+    assert.equal(panels.length, 0, 'an identical poll must not refresh the panel')
+    const herdr = { ...seatRow, type: 'herdr' }
+    assert.deepEqual(withoutType(herdr), withoutType(seatRow), 'the poll must change type alone')
+    poll(herdr)
+    assert.equal(panels.length, 1, 'a type-only poll change must refresh the open seat panel')
+    assert.equal(seatChatView.getSnapshot().seat.type, 'herdr')
+    assert.deepEqual(withoutType(seatChatView.getSnapshot().seat), withoutType(seatRow), 'refresh must preserve every other field')
+    assert.equal(panels[0].props['data-seat-face'], 'terminal')
+    assert.equal(part(panels[0], 'chat'), undefined, 'the refreshed Herdr panel must not offer Chat')
+    poll({ ...herdr })
+    assert.equal(panels.length, 1, 'an unchanged Herdr poll must not refresh the panel')
+    poll({ ...seatRow })
+    assert.equal(panels.length, 2, 'clearing type alone must refresh the open seat panel')
+    assert.equal(seatChatView.getSnapshot().seat.type, undefined)
+    assert.deepEqual(withoutType(seatChatView.getSnapshot().seat), withoutType(seatRow))
+    assert.equal(panels[1].props['data-seat-face'], 'chat')
+    assert.ok(part(panels[1], 'chat'), 'clearing type alone must restore the native Chat face')
+  } finally {
+    off()
+    seatChatView.set({ seat: null })
+    codeStore.reset()
+  }
+})
+
 test('the open seat learns a pane that stops and starts while the panel stays open', () => {
   seatChatView.set({ seat: seatRow })
   try {
