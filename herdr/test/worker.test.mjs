@@ -3262,14 +3262,17 @@ test("#858: proxied worker CLI rows pass and exit cleanly when TMPDIR is over 80
   }
 });
 
-test("unproxied worker CLI keeps the guard refusal with switch off and forged env markers", async (t) => {
+test("unproxied worker CLI stays on the guard path with switch off and forged env markers", async (t) => {
   const s = scene(t);
   const r = await s.cliAsync(["worker", "do the task", "--branch", "feat/plain", "--json"],
     { env: { PATH: `${GUARD_DIR}:${s.env.PATH}`, HC_SOCKET: "",
       AM_HC_PROXY: "1", AM_HC_PROXY_SOCKET: join(s.root, "missing.sock"), DSH_SANDBOX_MASK: "1" } });
-  assert.notEqual(r.code, 0);
-  assert.match(r.err, /hc guard: refused run:/);
-  assert.equal(s.runs().length, 0, "no unguarded spawn with the switch off");
+  assert.equal(r.code, 0, r.err);
+  // #1011: the full guard accepts the pack's own worker shape for every agent it launches, so
+  // the run reaches hc once through the pane's guarded PATH; no forged switch chose the proxy.
+  const runs = s.runs();
+  assert.equal(runs.length, 1, "one run, through the pane's guard");
+  assert.ok(runs[0].some((w) => w.startsWith("PATH=") && w.includes(GUARD_DIR)), runs[0].join(" "));
   assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
     "an unproxied pane retains server.status for core id");
 });
@@ -3318,9 +3321,9 @@ test("worker transport rejects a mismatched terminal for core id and routing", a
     assert.equal(s.calls().filter((args) => args[0] === "server").length, 1,
       "a failed terminal check must ignore the reply's core id");
     assert.equal(srv.probes(), 1);
-    assert.notEqual(r.code, 0);
-    assert.match(r.err, /hc guard: refused run:/);
-    assert.equal(s.runs().length, 0);
+    // The rejected reply means an ordinary unproxied run, which #1011's guard now allows.
+    assert.equal(r.code, 0, r.err);
+    assert.equal(s.runs().length, 1);
   } finally {
     await srv.closeServer();
   }
