@@ -54,6 +54,13 @@ jobs:
         with:
           bun-version: 1.4.4
 
+      # The page gate re-derives every committed WebP from its recorded source; that check
+      # calls ffprobe, which the runner image does not carry.
+      - name: ffmpeg for the derived art check
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: node --test apps/landing/landing.test.mjs apps/landing/waitlist.test.mjs
       - name: Verify the page in the runner's Chrome
