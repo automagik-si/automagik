@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { Updater } from "../mods/am-sidebar/updater.js";
 import {
   FIRST_CHECK_MS, LANDING_MS, LANDING_WAIT_MS, RELOAD_GRACE_MS, REQUEST_KEY, STATE_KEY, autoPlan, backoffOf, busyOf,
+  requestAnswer,
 } from "../mods/am-sidebar/updateCheck.js";
 import { AUTO_FILE, CHECK_FILE, RESTORE_FILE, parseAuto } from "../mods/am-sidebar/release.js";
 import { autoLabel, statusLabel } from "../mods/am-status/label.js";
@@ -689,3 +690,31 @@ test("#524 an install's warnings ride in the state and the new build's notice", 
   assert.match(note.body, /without knowing the layout Herdr shows/);
 });
 
+// #796 Low 2: the bar's own install click is the run being landed, not a queued request: the
+// landing answers that id too, so the bar does not show "couldn't update" after a good install.
+test("#796 a landing answers the install click's own request when the old build never replied", async () => {
+  const h = herdr();
+  const request = { id: "apply-own", what: "apply", at: h.now, to: "0.8.1" };
+  h.shared.set(REQUEST_KEY, request);
+  h.shared.set(STATE_KEY, { kind: "update", update: update("0.8.1"), current: "0.8.0", latest: "0.8.1", at: h.now - 60_000 });
+  h.answer = () => new Promise(() => {});
+  const old = h.build();
+  old.u.request();
+  await h.flush();
+  assert.equal(h.state().busy?.request, request.id, "the click's run holds the request id");
+  h.swap(old, "0.8.1");
+  const fresh = h.build();
+  await fresh.u.arrive();
+  await h.tick(LANDING_WAIT_MS + 5_000);
+  assert.equal(h.state().request, request.id, "the landing answers the run's own request");
+  assert.equal(h.state().queued, null);
+  const label = text(statusLabel({ state: h.state(), request: h.shared.get(REQUEST_KEY), version: h.version, now: h.now }));
+  assert.doesNotMatch(label, /couldn't/);
+});
+
+// #796 Low 3: a landing with nothing to answer must not write request: null over another path's answer.
+test("#796 a landing with nothing to answer leaves a recorded answer alone", () => {
+  assert.deepEqual(requestAnswer({ request: "answered-before", queued: null }, null), { queued: null });
+  assert.deepEqual(requestAnswer({ request: "answered-before", queued: { id: "queued-id" } }, null), { request: "queued-id", queued: null });
+  assert.deepEqual(requestAnswer({}, "own-id"), { request: "own-id", queued: null });
+});
