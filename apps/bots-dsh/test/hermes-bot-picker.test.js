@@ -350,3 +350,67 @@ test('the picker drops non-boolean gateway flags rather than showing a gateway d
   assert.doesNotMatch(document.body.textContent, /Gateway running|Its gateway is running/)
   assert.deepEqual(calls.map(call => call.endpoint), ['hermes-remote-detect'])
 })
+
+// ------------------------------------ #1383: a look-alike folder beside the Hermes is named
+const openPicker = async document => {
+  await click(document, 'Use SSH host sample-box')
+  await click(document, 'Connect')
+  const deadline = Date.now() + 5000
+  while (!document.querySelector('[data-step=bots]')) {
+    assert.ok(Date.now() < deadline, 'the bot picker opens')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+const sharedBot = { home: '/srv/shared/hermes', id: 'default', name: 'Juniper', model: 'acme/juniper', provider: 'acme', running: false, recordDir: '', port: 0, blocked: 'shared-beside', start: 'HERMES_HOME=/srv/shared/hermes hermes serve' }
+const useButton = document => [...document.querySelectorAll('.bt-hw-foot button')].find(button => button.textContent.includes('Use this bot'))
+
+test('#1383 a look-alike beside the Hermes is named with the way out, and no start line competes', async t => {
+  const { document, calls } = await mount(t, { detection: { bots: [{ ...sharedBot, besides: ['/srv/shared/other-tool'] }] } })
+  await openPicker(document)
+  const row = document.querySelector('.bt-hw-bot')
+  assert.equal(row.querySelector('.bt-hw-bot-blocked').textContent, 'Its serve record lives in a folder shared with /srv/shared/other-tool, so it cannot be picked here. /srv/shared/other-tool has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.')
+  assert.equal(row.querySelector('.bt-hw-bot-start'), null, 'starting Hermes does not resolve a shared folder')
+  assert.equal(useButton(document).disabled, true)
+  assert.ok(!calls.some(call => call.endpoint === 'hermes-remote-test'))
+})
+
+test('#1383 a blocked bot without named folders keeps the shared-folder sentence, also for a gateway row', async t => {
+  const { document } = await mount(t, { detection: { bots: [{ ...sharedBot, gateway: true }] } })
+  await openPicker(document)
+  const row = document.querySelector('.bt-hw-bot')
+  assert.equal(row.querySelector('.bt-hw-bot-blocked').textContent, 'Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.')
+  assert.equal(row.querySelector('.bt-hw-bot-start'), null)
+  assert.equal(useButton(document).disabled, true)
+})
+
+test('#1383 a folder name is shown as text, and a malformed list falls back to the plain sentence', async t => {
+  const { document } = await mount(t, { detection: { bots: [{ ...sharedBot, besides: ['/srv/shared/<b>tool</b>'] }, { ...sharedBot, home: '/srv/two/hermes', besides: ['/srv/two/tool', 'relative'] }] } })
+  await openPicker(document)
+  const [named, plain] = [...document.querySelectorAll('.bt-hw-bot-blocked')]
+  assert.match(named.textContent, /shared with \/srv\/shared\/<b>tool<\/b>, so/)
+  assert.equal(named.querySelector('b'), null, 'never markup')
+  assert.match(plain.textContent, /^Its serve record lives in a folder shared with another Hermes home/)
+})
+
+test('#1383 after the look-alike is moved, Check again sends the same homes and the bot can be used', async t => {
+  let round = 0
+  // A second, stopped bot keeps the picker open: one running bot alone would connect at once.
+  const detection = () => (round++ === 0
+    ? { bots: [{ ...sharedBot, besides: ['/srv/shared/other-tool'] }, bots[1]] }
+    : { bots: [{ ...sharedBot, running: true, blocked: '', recordDir: '/srv/shared/gateway-locks', port: 9302 }, bots[1]] })
+  const { document, calls } = await mount(t, { detection })
+  await openPicker(document)
+  assert.equal(useButton(document).disabled, true)
+  await click(document, 'Check again')
+  const deadline = Date.now() + 5000
+  while (!document.querySelector('.bt-hw-bot[data-running=true]')) {
+    assert.ok(Date.now() < deadline, 'the row turns running')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const detects = calls.filter(call => call.endpoint === 'hermes-remote-detect')
+  assert.equal(detects.length, 2)
+  assert.deepEqual(detects[1].payload.extraHomes, detects[0].payload.extraHomes, 'Check again keeps the added homes')
+  assert.equal(document.querySelector('.bt-hw-bot-blocked'), null)
+  flushSync(() => document.querySelector('.bt-hw-bot[data-running=true]').click())
+  assert.equal(useButton(document).disabled, false)
+})

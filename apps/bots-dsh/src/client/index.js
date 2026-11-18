@@ -19,7 +19,7 @@ import { markConversation } from './stage.js'
 import { MENTION_ORIGIN, currentPart, relativeShort } from './text.js'
 import { SHELL_CSS, CONVERSATION_CSS, installStyles, installCompiledStyles } from './styles.js'
 import { BotMark, lookOf } from './mark.js'
-import { TeamSidebar, ChannelsMoved, YouAvatar, AccountLauncher, FooterAccount, BrandMark, BrandName, BotReturn, SIDEBAR_CSS, RETURN_CSS, holdShellShortcuts, openHarnessOnboarding, openHarnessSettings } from './sidebar.js'
+import { TeamSidebar, ChannelsMoved, YouAvatar, AccountLauncher, FooterAccount, RailToggle, BrandMark, BrandName, BotReturn, SIDEBAR_CSS, RETURN_CSS, holdShellShortcuts, openHarnessOnboarding, openHarnessSettings } from './sidebar.js'
 import { frameLayout } from './frame-layout.js'
 import { HeaderPill, NativeBotHeader, NativeControlsNote } from './header.js'
 import { ComposerPermission, ComposerPlus, ComposerVoice, menuIcons } from './composer.js'
@@ -49,6 +49,7 @@ import { headerNavigation, installHeaderNavigation } from './header-navigation.j
 import { AssistantCell, TriggerCell, TurnProcessCell, Nothing, CellEmpty, TurnTailCell, ToolCell } from './cells.js'
 import { FailureCell, TURN_ERROR_CSS } from './turn-error.js'
 import { Overlays } from './overlays.js'
+import { BotBrowserBody, installBotBrowserTab } from './bot-browser-tab.js'
 import { createBotBrowsers, serveBrowserReads } from './bot-browsers.js'
 import { BROWSER_CSS } from './browser-pane.js'
 import { SECRET_CSS, SecretDock } from './secret-card.js'
@@ -1196,6 +1197,14 @@ export function apply(ctx) {
       })
       return () => fiber.dispose()
     },
+    // The Bot browser in the same right column: the person drives the Bot's own page, then
+    // hands it back, so the Web app needs no Electron webview to show it.
+    () => {
+      const fiber = ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
+        scope.effect(() => installBotBrowserTab({ tabs: scope.sidebarRightTabs, slots: scope.slots, sidebar: scope.sidebarRight, face, Body: BotBrowserBody, installCss: installCompiledStyles }), 'ds-bot: native Bot browser tab')
+      })
+      return () => fiber.dispose()
+    },
     () => installCompiledStyles(TEAM_APPROVAL_CSS, 'team-approval'),
     () => installCompiledStyles(LAMP_CSS, 'lamp'),
     // What other Omni plugins put on the surface (extend.js), where Omni's channels were.
@@ -1223,6 +1232,8 @@ export function apply(ctx) {
     () => shadow('sidebar.footer.action', { id: 'bot-account', order: -200, inject: face }, FooterAccount),
     // Shown only when the team is linked to an Omni without the channels plugin.
     () => shadow('sidebar.footer.action', { id: 'bot-channels-moved', order: -100, inject: face }, ChannelsMoved),
+    // The footer keeps the wide toggle below every entry, independent of the Bot list's height.
+    () => shadow('sidebar.footer.action', { id: 'bot-rail-toggle', order: 0, inject: face }, RailToggle),
     () => shadow('settings.trigger', { priority: BOT_PRIORITY }, YouAvatar),
     // The whale wins the seat over a shell account plugin's own launcher (the
     // Desktop's "··· More"), which comes back in Agent mode.

@@ -26,7 +26,7 @@ import { RESUME_DELAY_MS } from './resume.js'
 import { switchFailure } from './model-state.js'
 import { turnFailure } from './turns.js'
 import { contextPolicy } from '../shared/context-policy.js'
-import { crossesHarness } from '../shared/routes.js'
+import { commandCapableAgent, crossesHarness } from '../shared/routes.js'
 import { clip, createClock, escapeRegExp, estimateTokens, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { checkShownView, normalizeView, readViewReply, viewCardText, viewReply, viewReplyText } from 'deep-view/core'
@@ -2263,6 +2263,12 @@ export function install(rt) {
     if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
     if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
     if (bot.sessionPinned === true) throw refused('refused', pinnedText(bot, 'fresh'))
+    // The other direction of the shell boundary: a Bot without a shell cannot switch onto an
+    // agent whose own tools run commands. The Bot's shell comes on first, or another model.
+    if (bot.shell === false && commandCapableAgent(model)) {
+      throw refused('shell', `${bot.name} has no shell, so it cannot move to ${String(model).split('/')[0]}, `
+        + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
+    }
     const current = bot.model ?? bot.appliedModel
     if (typeof current !== 'string' || !crossesHarness(current, model)) throw refused('refused', `${bot.name} is already on that route.`)
     await rt.clearAuto?.(bot)

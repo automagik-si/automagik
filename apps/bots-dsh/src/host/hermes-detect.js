@@ -246,12 +246,14 @@ def inside(folder, home):
         return False
 
 def start_command(home, ident, has_record):
-    default = os.path.join(os.path.expanduser("~"), ".hermes")
+    default = normalized_home(os.environ.get("HERMES_HOME", "").strip())
+    if not default:
+        default = normalized_home(os.path.join(os.path.expanduser("~"), ".hermes"))
     if same(home, default):
         return default_start(ident, has_record)
     if has_record:
         # This home's serve already runs: this profile joins it by name.
-        return "hermes --profile %s serve" % shlex.quote(ident)
+        return "HERMES_HOME=%s hermes --profile %s serve" % (shlex.quote(home), shlex.quote(ident))
     return "HERMES_HOME=%s hermes serve" % shlex.quote(home)
 
 
@@ -328,6 +330,29 @@ def has_hermes_sibling(home):
         except OSError:
             continue
     return False
+
+def hermes_siblings(home):
+    path = os.path.normpath(home)
+    parent, name = os.path.dirname(path), os.path.basename(path)
+    try:
+        entries = list(os.scandir(parent))
+        own = os.path.realpath(path)
+    except OSError:
+        return []
+    siblings = []
+    for entry in entries:
+        if entry.name == name:
+            continue
+        try:
+            if not is_hermes_home(entry.path):
+                continue
+            if os.path.realpath(entry.path) != own:
+                own_marks = (os.path.isfile(os.path.join(entry.path, "SOUL.md")) or
+                             os.path.isfile(os.path.join(entry.path, "state.db")))
+                siblings.append((entry.path, own_marks))
+        except OSError:
+            continue
+    return siblings
 
 def normalized_home(path):
     """One spelling per home: resolve, drop trailing/double/dot segments, follow symlinks."""
@@ -582,6 +607,27 @@ try:
         # A home whose only record can be in a beside folder shared with another home
         # cannot be resolved; say why instead of a silent Not running.
         blocked = "shared-beside" if home in ambiguous and not attributed[home] else ""
+        besides = []
+        if blocked:
+            siblings, eligible = {}, True
+            for folder, spelled in beside_entries.get(home, []):
+                key = os.path.realpath(folder)
+                if key not in ambiguous_folders:
+                    continue
+                if len(beside_owners.get(key, set())) != 1:
+                    eligible = False
+                    break
+                for path, own_marks in sorted(hermes_siblings(spelled)):
+                    real = os.path.realpath(path)
+                    if (own_marks or real in homes or not os.path.isabs(path) or len(path) > 4096 or
+                            re.search(r"[\x00-\x1f\x7f]", path)):
+                        eligible = False
+                        break
+                    siblings.setdefault(real, path)
+                if not eligible:
+                    break
+            if eligible and 1 <= len(siblings) <= 4:
+                besides = sorted(siblings.values())
         emit("home", home=home, state="running" if live else "stopped", sandbox=sandbox, blocked=blocked,
              serve={"port": live[0]["port"], "recordDir": live[0]["recordDir"],
                     "served": live[0].get("profiles") or []} if live else None)
@@ -598,7 +644,8 @@ try:
                  recordDir=served_by[0]["recordDir"] if running else "",
                  port=served_by[0]["port"] if running else 0,
                  blocked=blocked if not running else "",
-                 start=start_command(home, ident, bool(attributed[home])))
+                 start=start_command(home, ident, bool(attributed[home])),
+                 **({"besides": besides} if blocked and not running and besides else {}))
             emitted += 1
     emit("ready", homes=len(homes), bots=emitted, hermes=bool(hermes))
 except Fault as error:
@@ -622,6 +669,7 @@ function botOf(value) {
   if (!homePath(value.home)) return undefined
   const running = value.running === true
   const blocked = !running && value.blocked === 'shared-beside' ? 'shared-beside' : ''
+  const besides = blocked && Array.isArray(value.besides) && value.besides.length >= 1 && value.besides.length <= 4 && value.besides.every(homePath) && new Set(value.besides).size === value.besides.length ? value.besides : undefined
   const chosen = running && recordFolder(value.recordDir) && Number.isSafeInteger(value.port) && value.port > 0 && value.port < 65536
   // A running bot without its own record folder and port is not a shape this reader emits.
   if (running && !chosen) return undefined
@@ -634,6 +682,7 @@ function botOf(value) {
     gateway: !running && value.gateway === true,
     recordDir: chosen ? value.recordDir : '', port: chosen ? value.port : 0,
     blocked,
+    ...(besides ? { besides } : {}),
     start: clean(value.start, 500) ? value.start : '',
   }
 }
@@ -667,6 +716,7 @@ export async function detectHermesBots(ssh, {
   let child, closing, stopping = false, expected = false, stage = 'ssh-sign-in'
   const at = error => { if (error && typeof error === 'object') error.sshStage ??= stage; return error }
   const common = ['-T', '-v', '-o', 'BatchMode=yes', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no', '-o', 'PreferredAuthentications=publickey', '-o', 'StrictHostKeyChecking=yes', '-o', 'ExitOnForwardFailure=yes', '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ControlPersist=no', '-o', 'ConnectionAttempts=1', '-o', `ConnectTimeout=${Math.max(1, Math.ceil(limits.control / 1000))}`, '-o', `ServerAliveInterval=${Math.max(1, Math.floor(limits.control / 3000))}`, '-o', 'ServerAliveCountMax=2', ...config.args]
+  if (signal?.aborted) throw hermesSshFailure('unknown', 'SSH connection was cancelled.')
   const timer = setTimeout(() => fail(hermesSshFailure('timeout')), limits.start)
   function fail(error) {
     at(error)
@@ -679,14 +729,15 @@ export async function detectHermesBots(ssh, {
     clearTimeout(timer)
     signal?.removeEventListener('abort', abort)
     closing = (async () => {
+      let timer
       try { child?.stdin.end() } catch {}
       try { child?.kill('SIGTERM') } catch {}
-      try { await Promise.race([ended.promise, new Promise(resolve => setTimeout(resolve, Math.max(1, limits.cancel * 0.8)))]) } catch {}
+      try { await Promise.race([ended.promise, new Promise(resolve => { timer = setTimeout(resolve, Math.max(1, limits.cancel * 0.8)) })]) } catch {}
+      finally { clearTimeout(timer) }
     })()
     return closing
   }
   const abort = () => fail(hermesSshFailure('unknown', 'SSH connection was cancelled.'))
-  if (signal?.aborted) throw hermesSshFailure('unknown', 'SSH connection was cancelled.')
   signal?.addEventListener('abort', abort, { once: true })
   const homes = new Map(), bots = new Map()
   const said = { stderr: '' }
@@ -726,7 +777,7 @@ export async function detectHermesBots(ssh, {
             ? { port: frame.serve.port, recordDir: frame.serve.recordDir,
               served: Array.isArray(frame.serve.served) ? frame.serve.served.filter(item => typeof item === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(item)).slice(0, 50) : [] }
             : undefined
-          if (!homes.has(frame.home)) homes.set(frame.home, { home: frame.home, state: frame.state === 'running' ? 'running' : 'stopped', sandbox: frame.sandbox === true, serve })
+          if (!homes.has(frame.home)) homes.set(frame.home, { home: frame.home, state: frame.state === 'running' ? 'running' : 'stopped', sandbox: frame.sandbox === true, blocked: frame.blocked === 'shared-beside' ? 'shared-beside' : '', serve })
           continue
         }
         if (frame.type === 'bot') {
@@ -753,7 +804,9 @@ export async function detectHermesBots(ssh, {
     const startMs = Math.max(1, Math.floor(limits.start - Math.min(limits.control / 2, limits.start * 0.15)))
     const extras = (Array.isArray(extraHomes) ? extraHomes : []).slice(0, 20).filter(value => homePath(value) && !value.split('/').includes('..'))
     child.stdin.write(`${JSON.stringify({ nonce, hermesPath: config.hermesPath, hermesHome: config.hermesHome, extraHomes: extras, startMs, controlMs: limits.control })}\n`)
-    await Promise.race([ready.promise, new Promise((_, reject) => setTimeout(() => reject(hermesSshFailure('timeout')), Math.max(1, until - Date.now())))])
+    let readyTimer
+    try { await Promise.race([ready.promise, new Promise((_, reject) => { readyTimer = setTimeout(() => reject(hermesSshFailure('timeout')), Math.max(1, until - Date.now())) })]) }
+    finally { clearTimeout(readyTimer) }
     if (stopping) throw hermesSshFailure('unknown', 'SSH connection was cancelled.')
     return { homes: [...homes.values()], bots: [...bots.values()] }
   } catch (error) {

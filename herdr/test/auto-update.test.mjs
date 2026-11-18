@@ -70,10 +70,17 @@ function herdr({ version = "0.8.0", latest = "0.8.1", auto = MANAGED, answer = n
 test("a newer verified release installs on its own through apply --expect <v> --auto; the new build says so once", async () => {
   const h = herdr();
   const old = h.build();
+  const id = "check-during-install";
   // The exec of the install: the folders swap (Herdr reloads the mods) before update.mjs answers.
-  h.answer = (args) => {
+  h.answer = async (args) => {
     if (args[1] === "check") return h.check();
     const answer = h.apply("0.8.1"); // update.mjs reports the version it replaced as current
+    // A check asked for while the install's reply is pending queues behind it.
+    h.shared.set(REQUEST_KEY, { id, what: "check", at: h.now });
+    old.u.request();
+    await h.flush();
+    assert.equal(h.state().busy?.what, "apply");
+    assert.equal(h.state().queued?.id, id);
     h.swap(old, "0.8.1");
     return answer;
   };
@@ -83,6 +90,11 @@ test("a newer verified release installs on its own through apply --expect <v> --
   assert.equal(h.notes.length, 0, "no 'update available' notice for a release that installs on its own");
   assert.equal(h.state().kind, "installed");
   assert.equal(busyOf(h.state(), h.now), null, "the claim is freed");
+  assert.equal(h.state().request, id, "the finished install answers the queued check");
+  assert.equal(h.state().queued, null);
+  const label = text(statusLabel({ state: h.state(), request: h.shared.get(REQUEST_KEY), version: h.version, now: h.now }));
+  assert.equal(label, "Automagik Herdr 0.8.1");
+  assert.doesNotMatch(label, /couldn't/);
   // The new build: its VERSION is the release just installed.
   const fresh = h.build();
   fresh.u.start();

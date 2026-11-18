@@ -237,11 +237,11 @@ export function defaultModel(agentKey, { home, read }) {
   return defaultModelFrom(agentKey, configTexts(home, read));
 }
 
-// Claude Code: the aliases `claude --help` names ("an alias for the latest model (e.g.
-// 'sonnet' or 'opus')") and the current model ids of the Claude 5 family (2026-11-16). A `[1m]`
-// id is Claude Code's 1M-context form, passed to --model as is. An older id stays listed so a
-// bot pinned to it still starts.
-const CLAUDE_MODELS = ["opus", "sonnet", "haiku", "claude-fable-5-2", "claude-fable-5-2[1m]", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+// Claude Code's current menu (offered): aliases and model ids. Older ids live in
+// CLAUDE_ACCEPTED_ONLY so a pinned bot still starts. A `[1m]` id goes to --model as its
+// own argv word.
+const CLAUDE_MODELS = ["opus", "sonnet", "haiku", "claude-fable-5-2", "claude-fable-5-2[1m]", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+const CLAUDE_ACCEPTED_ONLY = ["claude-fable-5-1"];
 
 /** Where the cache lives under an app home; the folder holds the pack's ledgers too. */
 export const AG_MODELS_FILE = "automagik-herdr/antigravity-models.json";
@@ -299,8 +299,8 @@ export function parseAgModelsCache(text) {
 }
 
 /**
- * The models a bot running `agentKey` may be pinned to (A12: picked from a list, never
- * typed). Claude Code: CLAUDE_MODELS above. Codex: the slugs in its own model cache,
+ * The models a bot may be pinned to (accepted). Claude Code: CLAUDE_MODELS and
+ * CLAUDE_ACCEPTED_ONLY above. Codex: the slugs in its own model cache,
  * `~/.codex/models_cache.json` `.models[].slug`, which Codex refreshes itself. Antigravity:
  * the ids the pack's cache holds from `agy models` (the format above; its settings keep a label
  * `--model` may not take), plus that cache's labels for the picker. Any other agent: plus its
@@ -310,7 +310,10 @@ export function parseAgModelsCache(text) {
 export function knownModelsFrom(agentKey, texts = {}) {
   const out = [];
   const add = (m) => { if (typeof m === "string" && m && !out.includes(m)) out.push(m); };
-  if (agentKey === "claude") CLAUDE_MODELS.forEach(add);
+  if (agentKey === "claude") {
+    CLAUDE_MODELS.forEach(add);
+    CLAUDE_ACCEPTED_ONLY.forEach(add);
+  }
   if (agentKey === "codex") {
     const cache = parseJson(texts.codexModels);
     for (const m of Array.isArray(cache?.models) ? cache.models : []) add(m?.slug ?? m?.id);
@@ -318,6 +321,11 @@ export function knownModelsFrom(agentKey, texts = {}) {
   if (agentKey === "antigravity") for (const m of parseAgModelsCache(texts.antigravityModels)?.models ?? []) add(m.id);
   else add(defaultModelFrom(agentKey, texts));
   return out;
+}
+
+/** The pick list (current menu); knownModelsFrom stays the accepted set. */
+export function offeredModelsFrom(agentKey, texts = {}) {
+  return agentKey === "claude" ? [...CLAUDE_MODELS] : knownModelsFrom(agentKey, texts);
 }
 
 /**
@@ -1093,6 +1101,186 @@ export function withCodexGrants(argv, dirs = []) {
   const at = words.findIndex((_, i) => CODEX_MODE_ARGS.every((m, k) => words[i + k] === m));
   if (at < 0 || !dirs.length) return words;
   return [...words.slice(0, at + n), ...dirs.flatMap((d) => ["--add-dir", d]), ...words.slice(at + n)];
+}
+
+/**
+ * The per-launch Codex trust word for exactly `folder` (#1420), never a saved setting. The
+ * projects inline table keeps dots in a path literal; its TOML basic string escapes only \\ and ".
+ * A non-absolute path, the root or a control character proves no folder and gets no words.
+ */
+export function codexTrustArgs(folder) {
+  if (typeof folder !== "string" || !folder.startsWith("/") || !folder.replace(/\/+$/, "") || /[\x00-\x1f\x7f]/.test(folder)) return [];
+  const toml = (s) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return ["-c", `projects={${toml(folder)}={trust_level="trusted"}}`];
+}
+
+/**
+ * `argv` with the worktree's trust word right after CODEX_MODE_ARGS (withCodexGrants' anchor),
+ * before any --add-dir, subcommand or task. Without the anchor or a valid folder, a copy unchanged.
+ */
+export function withCodexTrust(argv, folder) {
+  const words = Array.isArray(argv) ? [...argv] : [];
+  const args = codexTrustArgs(folder);
+  const at = words.findIndex((_, i) => CODEX_MODE_ARGS.every((m, k) => words[i + k] === m));
+  if (at < 0 || !args.length) return words;
+  const end = at + CODEX_MODE_ARGS.length;
+  return [...words.slice(0, end), ...args, ...words.slice(end)];
+}
+
+/**
+ * A Codex config's project trust entries, without fs: { entries: Map<path, level>, unsure }.
+ * One character pass removes comments outside strings and blanks multiline string bodies,
+ * keeping newlines. Then table and dotted keys share tomlKeyParts; only simple string trust
+ * levels are read. Whole project tables, duplicates, root markers and unclosed strings withhold
+ * trust: this narrow reader cannot prove what they mean, and never replaces a person's refusal.
+ */
+export function codexProjectTrust(text) {
+  const entries = new Map();
+  if (text == null || text === "") return { entries, unsure: false };
+  if (typeof text !== "string") return { entries, unsure: true };
+  const chars = [];
+  let quote = null, multi = false, comment = false, unsure = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (comment) {
+      if (ch === "\n") { comment = false; chars.push(ch); }
+      continue;
+    }
+    if (quote) {
+      if (multi) {
+        if (text.startsWith(quote.repeat(3), i)) {
+          let count = 3;
+          while (text[i + count] === quote) count += 1;
+          if (count > 5) unsure = true;
+          chars.push(" ".repeat(count - 3), quote.repeat(3)); i += count - 1; quote = null; multi = false;
+        } else if (quote === "\"" && ch === "\\") {
+          chars.push(" ");
+          if (i + 1 < text.length) { i += 1; chars.push(text[i] === "\n" ? "\n" : " "); }
+        } else chars.push(ch === "\n" ? "\n" : " ");
+      } else {
+        chars.push(ch);
+        if (quote === "\"" && ch === "\\") {
+          if (i + 1 < text.length) { i += 1; chars.push(text[i]); if (text[i] === "\n") unsure = true; }
+        } else if (ch === quote) quote = null;
+        else if (ch === "\n") unsure = true;
+      }
+    } else if (ch === "#") comment = true;
+    else if (ch === "\"" || ch === "'") {
+      quote = ch; multi = text.startsWith(ch.repeat(3), i);
+      chars.push(multi ? ch.repeat(3) : ch);
+      if (multi) i += 2;
+    } else chars.push(ch);
+  }
+  if (quote) unsure = true;
+  let table = [];
+  for (const raw of chars.join("").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const array = line.match(/^\[\[(.*)\]\]$/);
+    const header = array ?? line.match(/^\[(.*)\]$/);
+    if (header) {
+      table = tomlKeyParts(header[1]);
+      if ((array && table[0] === "projects") || table[0] === "project_root_markers") unsure = true;
+      continue;
+    }
+    let equal = -1, quoted = null;
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      if (quoted) {
+        if (quoted === "\"" && ch === "\\") i += 1;
+        else if (ch === quoted) quoted = null;
+      } else if (ch === "\"" || ch === "'") quoted = ch;
+      else if (ch === "=") { equal = i; break; }
+    }
+    if (equal < 0) continue;
+    const key = [...table, ...tomlKeyParts(line.slice(0, equal))];
+    if (key[0] === "project_root_markers") unsure = true;
+    if (key[0] !== "projects") continue;
+    if (key.length < 3) { unsure = true; continue; }
+    if (key.length !== 3 || key[2] !== "trust_level") continue;
+    const value = line.slice(equal + 1).trim();
+    const basic = value.match(/^"((?:[^"\\\x00-\x08\x0a-\x1f\x7f]|\\(?:[btnfr"\\]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*)"$/);
+    const literal = value.match(/^'([^'\x00-\x08\x0a-\x1f\x7f]*)'$/);
+    if (!basic && !literal) { unsure = true; continue; }
+    if (entries.has(key[1])) unsure = true;
+    entries.set(key[1], basic ? tomlBasic(basic[1]) : literal[1]);
+  }
+  return { entries, unsure };
+}
+
+/**
+ * Why a programs.json Codex run cannot take the pack's trust word, or null. Only options before
+ * -- count. A wrapper can change the environment; folder, profile and projects options own the
+ * trust decision. Config keys are read both as TOML and raw, as codexConfigAt reads them.
+ */
+export function codexRunTrustBlock(run) {
+  const argv = Array.isArray(run) ? run.map(String) : [];
+  const cut = argv.indexOf("--");
+  const words = cut < 0 ? argv : argv.slice(0, cut);
+  if (!words.length || programAt(words) !== 0 || agentKeyOfArgv([words[0]]) !== "codex") return "wrapper";
+  for (let i = 1; i < words.length && words[i] !== "--"; i += 1) {
+    const w = words[i];
+    if (w === "--cd" || w.startsWith("--cd=") || w.startsWith("-C")) return "folder";
+    if (w === "--profile" || w.startsWith("--profile=") || w.startsWith("-p")) return "profile";
+    const config = codexConfigAt(words, i);
+    if (config) {
+      if ([tomlKeyParts(config.text), rawKeyParts(config.text)].some((p) => p[0] === "projects" || p[0] === "project_root_markers")) return "projects";
+      i += config.span - 1;
+    } else if (CODEX_TAKES_VALUE.has(w)) i += 1;
+  }
+  return null;
+}
+
+/**
+ * A worker's per-launch trust decision: { args, withheld } (#1420). Configs are { text } or
+ * { error } (ENOENT means absent). Compare paths as written without trailing slashes and, when
+ * realpath resolves, by that spelling too; a throw or null keeps the written comparison. Any
+ * level other than exactly "trusted" for the worktree or a repository root withholds the word.
+ */
+export function codexTrustPlan({ folder, roots, configs = [], run, home, realpath = null }) {
+  const args = codexTrustArgs(folder);
+  const no = (withheld) => ({ args: [], withheld });
+  if (!args.length) return no("folder");
+  const paths = (p) => {
+    if (typeof p !== "string") return [];
+    const strip = (s) => s.replace(/\/+$/, "") || "/";
+    const out = [strip(p)];
+    try {
+      const real = realpath?.(p);
+      if (typeof real === "string" && real) out.push(strip(real));
+    } catch { /* An unresolved path still compares as written. */ }
+    return out;
+  };
+  const here = paths(folder);
+  if (paths(home).some((p) => here.includes(p))) return no("home");
+  if (codexRunTrustBlock(run)) return no("command");
+  if (!Array.isArray(roots) || !roots.length) return no("root");
+  if (configs.some((c) => c?.error && c.error.code !== "ENOENT")) return no("unreadable");
+  const parsed = configs.filter((c) => !c?.error).map((c) => codexProjectTrust(typeof c === "string" ? c : c?.text));
+  if (parsed.some((c) => c.unsure)) return no("unsure");
+  const targets = new Set([...here, ...roots.flatMap(paths)]);
+  for (const config of parsed) {
+    for (const [path, level] of config.entries) {
+      if (level !== "trusted" && paths(path).some((p) => targets.has(p))) return no("untrusted");
+    }
+  }
+  return { args, withheld: null };
+}
+
+/** One worker-start warning explaining withheld folder trust, without any config contents. */
+export function codexTrustWarning(name, withheld) {
+  const why = { folder: "the worktree path isn't a safe absolute folder", home: "the worktree is the home folder",
+    command: "your Codex command picks its own folder, profile or projects, or starts through a wrapper",
+    root: "can't tell the worktree's repository", unreadable: "Codex's settings can't be read",
+    unsure: "Codex's project trust settings can't be understood safely",
+    untrusted: "settings mark the worktree or its repository untrusted" };
+  return codexTrustKeptWarning(name, why[withheld] ?? why.unsure);
+}
+
+/** A proxy or template owns this worker's command; no per-launch trust word is added to it. */
+export function codexTrustKeptWarning(name, why) {
+  return (`${name}: ${why === "proxy" ? "starts through the hc proxy" : why}, so its folder wasn't pre-trusted and Codex may stop `
+    + "at its folder-trust prompt until a person answers it in the worker's pane.").replace(/[\r\n]+/g, " ");
 }
 
 /** agy's flag that answers every permission request itself; its --settings deny list still holds. */

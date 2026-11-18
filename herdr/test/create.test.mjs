@@ -1,3 +1,5 @@
+import { spawnSync as spawnScratch } from "node:child_process";
+import { noCoreEnv } from "./no-core-env.mjs";
 // The bot form (create.js) under `node --test`, with gpui and herdr stood in for
 // (gpui-stub.mjs, form-herdr-stub.mjs): what it lists, what Copy copies, how a save or a
 // Start that fails is reported, and that a picture it can't write is not retried.
@@ -5,7 +7,7 @@ import { registerHooks } from "node:module";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -74,9 +76,10 @@ const seed = (bots, extra = {}) => writeFileSync(join(project, ".herdr/bots.json
 // The pack's Antigravity model cache (modelCache.js) in the test app home: opening a form on
 // Antigravity then reads this list and never runs the host's agy. A test that deletes it and
 // puts a fake agy on PATH watches the one refresh.
-const seedAgModels = (models = [{ id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }, { id: "claude-sonnet-5-5-high", label: "Claude Sonnet 5.5 (High)" }]) => {
+const seedAgModels = (models = [{ id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" }, { id: "claude-sonnet-5-5-high", label: "Claude Sonnet 5.5 (High)" }],
+  at = new Date().toISOString()) => {
   mkdirSync(join(state.appHome, "automagik-herdr"), { recursive: true });
-  writeFileSync(join(state.appHome, "automagik-herdr/antigravity-models.json"), JSON.stringify({ version: 1, source: "agy models", at: new Date().toISOString(), models }));
+  writeFileSync(join(state.appHome, "automagik-herdr/antigravity-models.json"), JSON.stringify({ version: 1, source: "agy models", at, models }));
 };
 const stored = () => JSON.parse(readFileSync(join(project, ".herdr/bots.json"), "utf8"));
 async function open(props) {
@@ -130,6 +133,37 @@ test("Runs on: the pack's agents fill in what knownAgents misses (#793), install
   const dim = await form.withPackAgents([]);
   assert.equal(dim.find((a) => a.key === "antigravity").installed, false, "not installed: shown dimmed when it is the bot's own");
   assert.equal(new Set(dim.map((a) => a.key)).size, dim.length, "no duplicates");
+  // Use a fixture-specific program name so lookup cannot pick up an installed agy.
+  delete form.programFile;
+  const early = join(root, "early");
+  const later = join(root, "later bin");
+  const put = (dir, mode) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "agy-809"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(dir, "agy-809"), mode);
+  };
+  put(early, 0o644);
+  put(later, 0o755);
+  const pathBefore = process.env.PATH;
+  process.env.PATH = `${early}:${later}`;
+  try {
+    state.calls = [];
+    assert.equal(await form.programFile("agy-809-missing"), null, "nowhere: null");
+    assert.equal(state.calls.filter((call) => call.kind === "exec").length, 0, "missing candidates need no probe");
+    assert.equal(await form.programFile(join(later, "agy-809")), join(later, "agy-809"), "an explicit executable path is kept");
+    if (existsSync("/bin/test")) {
+      state.calls = [];
+      assert.equal(await form.programFile("agy-809"), join(later, "agy-809"), "the 0644 file is passed; the later folder, with a space, has the one that runs");
+      assert.equal(await form.programFile(join(early, "agy-809")), null, "an explicit path that is not executable is a miss");
+      assert.ok(!state.calls.some((c) => c.kind === "exec" && String(c.command).endsWith("/agy-809")), "the check never runs the program");
+    }
+    // The probe cannot run (no /bin/test on this system): the exists answer is kept.
+    state.execFault = (command) => (command === "/bin/test" ? new Error("spawn /bin/test ENOENT") : null);
+    assert.equal(await form.programFile("agy-809"), join(early, "agy-809"), "an existing file still counts when the probe throws");
+  } finally {
+    delete state.execFault;
+    process.env.PATH = pathBefore;
+  }
 });
 
 test("Antigravity (#793): the pin list is the cached agy models, never the settings label", async () => {
@@ -148,12 +182,17 @@ test("Antigravity (#793): the pin list is the cached agy models, never the setti
 });
 
 test("Antigravity (#793): a missing model cache is refreshed once with `agy models`, then read from the app home", async (t) => {
-  const bin = join(root, "bin");
+  const bin = join(root, "later bin");
   mkdirSync(bin, { recursive: true });
   const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
   exe(join(bin, "agy"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_AGY}" "$@"\n`);
+  // #809: an earlier PATH folder holds an agy that is not executable; the scan passes it.
+  const shadow = join(root, "shadow bin");
+  mkdirSync(shadow, { recursive: true });
+  writeFileSync(join(shadow, "agy"), "#!/bin/sh\nexit 9\n");
+  chmodSync(join(shadow, "agy"), 0o644);
   const before = process.env.PATH;
-  process.env.PATH = `${bin}:${before}`;
+  process.env.PATH = `${existsSync("/bin/test") ? `${shadow}:` : ""}${bin}:${before}`;
   t.after(() => { process.env.PATH = before; });
   state.agents = withAntigravity(true);
   const AG = { ...MAIN, id: "b-agyaaaaaaa", name: "ag-bot", kind: "member", lead: MAIN.id, agent: "antigravity" };
@@ -173,36 +212,50 @@ test("Antigravity (#793): a missing model cache is refreshed once with `agy mode
   assert.equal(execs(), 1, "once per session");
 });
 
-test("Antigravity (#793): a field typed while a slow model refresh runs is still saved", async (t) => {
+test("Antigravity (#793): a slow refresh updates both forms and preserves edits typed while it runs", async (t) => {
   const bin = join(root, "bin");
   mkdirSync(bin, { recursive: true });
   const release = join(root, "agy-release");
-  const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755); };
+  const agy = join(bin, "agy");
   // The fake agy waits for the test's release file: the refresh is held while the person types.
-  exe(join(bin, "agy"), `#!/bin/sh\ni=0\nwhile [ ! -e "${release}" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i + 1)); done\nexec "${process.execPath}" "${FAKE_AGY}" "$@"\n`);
+  writeFileSync(agy, `#!/bin/sh\ni=0\nwhile [ ! -e "${release}" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i + 1)); done\nexec "${process.execPath}" "${FAKE_AGY}" "$@"\n`);
+  chmodSync(agy, 0o755);
   const before = process.env.PATH;
   process.env.PATH = `${bin}:${before}`;
-  t.after(() => {
-    try { writeFileSync(release, "go"); } catch { /* the temp root is gone: the fake's loop ends on its own */ }
-    process.env.PATH = before;
-  });
-  state.agents = withAntigravity(true);
+  t.after(() => { process.env.PATH = before; });
+  state.agents = withAntigravity(true).filter((a) => a.key === "antigravity");
   const AG = { ...MAIN, id: "b-agyaaaaaaa", name: "ag-bot", kind: "member", lead: MAIN.id, agent: "antigravity" };
   seed([MAIN, AG]);
-  const cx = makeCx();
-  const form = new BotForm({ overlay: "o9", project, form: "edit", bot: AG.id }, cx);
-  // load() fills the fields, snapshots the opened state, then awaits the cache refresh.
-  const started = Date.now();
-  while (!form.initial && Date.now() - started < 5000) await new Promise((go) => setTimeout(go, 10));
-  assert.ok(form.initial, "the form filled and snapshotted before the refresh");
-  form.inputs.name.type("typed-while-refreshing", cx);
-  writeFileSync(release, "go");
-  await cx.settle();
-  assert.ok(form.modelInfo("antigravity").models.includes("gemini-4-argon-high"), "the refreshed list is used");
-  index(form.render(cx));
-  nodes.get("bot-save").click(null, cx);
-  await cx.settle();
-  assert.equal(stored().bots.find((b) => b.id === AG.id).name, "typed-while-refreshing", "the typed name was not lost to the snapshot");
+
+  for (const mode of ["create", "edit"]) {
+    state.appHome = join(root, `app-${mode}`);
+    state.calls = [];
+    seedAgModels([{ id: "old-model", label: "Old Model" }], "2000-01-01T00:00:00.000Z");
+    const cx = makeCx();
+    const form = new BotForm({ overlay: "o9", project, form: mode, bot: AG.id }, cx);
+    const started = Date.now();
+    const refreshing = () => state.calls.some((call) => call.command === agy && call.args?.[0] === "models");
+    try {
+      while (!refreshing() && Date.now() - started < 5000) await new Promise((go) => setTimeout(go, 10));
+      assert.ok(refreshing(), `${mode}: agy started`);
+      if (mode === "edit") {
+        assert.ok(form.initial, "the edit form snapshotted before the refresh");
+        form.inputs.name.type("typed-while-refreshing", cx);
+      }
+      assert.deepEqual(form.modelInfo("antigravity").models, ["old-model"], `${mode}: memoize the old list during refresh`);
+    } finally {
+      writeFileSync(release, "go");
+      await cx.settle();
+      rmSync(release);
+    }
+    assert.ok(form.modelInfo("antigravity").models.includes("claude-opus-5-5-high"), `${mode}: the refreshed list is used`);
+    if (mode === "edit") {
+      index(form.render(cx));
+      nodes.get("bot-save").click(null, cx);
+      await cx.settle();
+      assert.equal(stored().bots.find((b) => b.id === AG.id).name, "typed-while-refreshing", "the typed name was not lost to the snapshot");
+    }
+  }
 });
 
 test("Runs on: a knownAgents() failure is shown, not swallowed", async () => {
@@ -884,6 +937,9 @@ test("the CLI and the form word the pull warning for an uncommitted or changed b
   writeFileSync(mainPath, `${JSON.stringify({ version: 1, categories: [], bots: [MAIN] }, null, 2)}\n`);
   state.spaces = [{ id: "s2", name: "wt", folder: wt }];
   state.focused = { space: "s2" };
+  const spawnSync = (command, args, options) => spawnScratch(command, args, {
+    ...options, env: { ...options.env, ...noCoreEnv(root, options.env.PATH) },
+  });
   const cli = (name) => spawnSync(process.execPath, [CLI, "create", "--name", name, "--agent", "claude", "--lead", MAIN.id], {
     cwd: wt, encoding: "utf8", env: { ...process.env, HOME: home, HERDR_APP_HOME: join(home, "app"), GIT_CONFIG_NOSYSTEM: "1" },
   });
