@@ -4,7 +4,7 @@
 //
 //   node server/build.mjs [--tag automagik-server:local] [--version 3.90.1] [--image-version 3.93.0]
 //                         [--revision 91cf4862…] [--dsh 0.2.2-rc.2]
-//                         [--repository https://github.com/automagik-dev/automagik] [--no-cache]
+//                         [--repository https://github.com/automagik-si/automagik] [--no-cache]
 //
 // `--version` is the release whose plugin tarballs are installed; `--image-version` is the
 // content version label (normally the same release, without its v); `--revision` is the full
@@ -42,7 +42,7 @@ const manifest = args['input-manifest'] || ''
 const imageVersion = args['image-version'] || (kind === 'checkout' ? `checkout-${args.revision}` : version)
 const revision = args.revision || 'unknown'
 const dsh = args.dsh || '0.2.2-rc.2'
-const repository = args.repository || (kind === 'checkout' ? CHECKOUT_REPOSITORY : 'https://github.com/automagik-dev/automagik')
+const repository = args.repository || (kind === 'checkout' ? CHECKOUT_REPOSITORY : 'https://github.com/automagik-si/automagik')
 const input = { kind, event, revision, manifest, repository, version }
 validateInput(input)
 if (kind === 'checkout') {
