@@ -161,6 +161,20 @@ const { mods, problems } = localMods();
 // local commit, so a committed index does not go stale the moment it lands.
 const branch = "dev";
 const recent = git(["log", "-1", "--format=%cI", "--", "."]);
+// Our own entry's pushedAt: the newest release tag's date, not the working tree's head. The tag a
+// release creates is newer only after the release commit, so that commit never rewrites it (#215).
+const releasePushedAt = () => {
+  const tag = git(["describe", "--tags", "--abbrev=0", "--match", "v[0-9]*"]);
+  return tag ? git(["log", "-1", "--format=%cI", `${tag}^{commit}`]) : "";
+};
+// The committed index as it was, read before this run so its volatile stamps can be kept.
+const previousIndex = (() => {
+  try {
+    return JSON.parse(readFileSync(OUT, "utf8"));
+  } catch {
+    return null;
+  }
+})();
 const dirty = git(["status", "--porcelain"]).length > 0;
 const readme = (() => {
   try {
@@ -219,7 +233,7 @@ const entryForPack = {
   url: fullName ? `https://github.com/${fullName}` : "",
   defaultBranch: branch,
   stars: 0,
-  pushedAt: recent,
+  pushedAt: releasePushedAt() || recent,
   headCommit: "",
   path: packPath,
   name: packName,
@@ -310,6 +324,15 @@ for (const entry of curated) {
   });
 }
 
+// What the index describes, without its two volatile stamps: the run's clock and our own entry's
+// pushedAt. An unchanged tree keeps the committed values, so a release commit never rewrites this
+// file and no catalog pull request conflicts with dev (#215).
+const contentKey = (doc) => JSON.stringify({
+  ...doc,
+  generatedAt: "",
+  mods: (doc.mods ?? []).map((e, i) => (i === 0 ? { ...e, pushedAt: "" } : e)),
+});
+
 const index = {
   schemaVersion: 1,
   generatedAt: new Date().toISOString(),
@@ -319,14 +342,14 @@ const index = {
   mods: entries,
 };
 
+if (previousIndex && contentKey(previousIndex) === contentKey(index)) {
+  index.generatedAt = previousIndex.generatedAt;
+  if (index.mods[0] && previousIndex.mods?.[0]) index.mods[0].pushedAt = previousIndex.mods[0].pushedAt;
+}
+
 const stale = (() => {
-  try {
-    const previous = JSON.parse(readFileSync(OUT, "utf8"));
-    const age = (Date.now() - Date.parse(previous.generatedAt)) / 86400000;
-    return Number.isFinite(age) ? age : null;
-  } catch {
-    return null;
-  }
+  const age = (Date.now() - Date.parse(previousIndex?.generatedAt)) / 86400000;
+  return Number.isFinite(age) ? age : null;
 })();
 
 if (CHECK) {

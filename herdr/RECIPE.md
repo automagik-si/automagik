@@ -37,6 +37,9 @@ Every mod brings its own `RECIPE.md`, `LICENSE` and keys.
   `modCount`, `repositoryCount`, `mods[]` with `owner/repo/fullName/url/stars/pushedAt/headCommit/
   path/name/blurb/modNames/hasKeys/hasPreview/recipeBytes/previewUrl`). One mod has one owner: the
   first entry to claim a name keeps it (the pack is first), and a repo left with nothing drops out.
+  `generatedAt` and our own `pushedAt` (the newest release tag's date) move only when what the index
+  describes changes, so a release commit never rewrites it and an open catalog pull request stays
+  mergeable (#215).
 - **At run time** the manager reads that index: `data/am-mods/catalog.json` (else the one from
   before the rename) → `{ url }`, a
   local path in a checkout or the published raw URL after a push. From it, each installed mod gets

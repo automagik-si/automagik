@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -247,4 +247,48 @@ test("catalogUrl: a local catalog path whose file is gone falls back to the publ
   at("am-mods", 1_000_000); at("mod-manager", 2_000_000);
   assert.equal(await core.catalogUrl(ioOf(), home), "https://example.test/index.json", "and loses to a newer one");
   // No case for file:// URLs: nothing reads them, so which one wins is not a contract.
+});
+
+// #215: a release commit touches herdr/ (the version bump) and used to rewrite the index's
+// generatedAt and our pushedAt, so every catalog pull request conflicted after each release.
+// The run's clock is not part of what the index describes, and our pushedAt is the newest release
+// tag's date, so a rebuild on an unchanged tree writes the same bytes. A scratch repository: the
+// generator writes its own catalog/index.json and can never be pointed elsewhere.
+test("catalog.mjs: an unchanged rebuild writes the same bytes, and pushedAt comes from the tag (#215)", (t) => {
+  const root = scratch(t);
+  const pack = join(root, "herdr");
+  mkdirSync(join(pack, "scripts"), { recursive: true });
+  mkdirSync(join(pack, "catalog"), { recursive: true });
+  mkdirSync(join(pack, "mods", "demo"), { recursive: true });
+  copyFileSync(CATALOG, join(pack, "scripts", "catalog.mjs"));
+  writeFileSync(join(pack, "catalog", "repos.json"), JSON.stringify({ repos: [] }));
+  writeFileSync(join(pack, "mods", "demo", "main.js"), "// demo\n");
+  writeFileSync(join(pack, "mods", "demo", "mod.json"), JSON.stringify({ title: "Demo" }));
+  writeFileSync(join(pack, "mods", "demo", "RECIPE.md"), "# Demo\n\nA demo mod.\n");
+  writeFileSync(join(pack, "mods", "demo", "LICENSE"), "Apache License\nVersion 2.0\n");
+  writeFileSync(join(pack, "README.md"), "# Automagik Herdr\n\nThe pack.\n");
+  writeFileSync(join(pack, "RECIPE.md"), "# The pack\n");
+  writeFileSync(join(pack, "LICENSE"), "Apache License\nVersion 2.0\n");
+  const dated = (date) => ({ ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
+  const commit = (message, date) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message], { cwd: root, env: dated(date) });
+  git(root, "init", "-q", "-b", "dev");
+  git(root, "remote", "add", "origin", "git@github.com:automagik-si/automagik.git");
+  git(root, "add", "-A");
+  commit("the pack", "2026-01-02T03:04:05Z");
+  execFileSync("git", ["tag", "-a", "v9.9.9", "-m", "v9.9.9"], { cwd: root, env: dated("2026-01-02T03:04:05Z") });
+  // A release's own commit touches the pack (the version bump) after the tag was cut.
+  writeFileSync(join(pack, "mods", "demo", "VERSION"), "9.9.10\n");
+  git(root, "add", "-A");
+  commit("chore(release): v9.9.10", "2026-02-02T00:00:00Z");
+
+  const run = () => {
+    const r = spawnSync(process.execPath, [join(pack, "scripts", "catalog.mjs")], { cwd: pack, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    return readFileSync(join(pack, "catalog", "index.json"), "utf8");
+  };
+  const first = run();
+  const second = run();
+  assert.equal(second, first, "a second run on an unchanged tree writes the same bytes, generatedAt included");
+  const packEntry = JSON.parse(first).mods.find((e) => e.path === "herdr");
+  assert.equal(packEntry.pushedAt, "2026-01-02T03:04:05Z", "pushedAt is the newest release tag's date, not the release commit's");
 });
