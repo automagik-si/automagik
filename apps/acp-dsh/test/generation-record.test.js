@@ -22,7 +22,7 @@ function paths(t) {
 
 function place(t) {
   const { root, cliHome } = paths(t)
-  return { root, cliHome, generations: new CliGenerations(cliHome, `test-${randomUUID()}`) }
+  return { root, cliHome, generations: new CliGenerations(cliHome, `${process.pid}-${randomUUID()}`) }
 }
 
 const recordPath = cliHome => join(cliHome, 'current', RECORD)
@@ -90,7 +90,7 @@ test('every write advances the sequence, across vendors, instances and resets', 
   assert.equal(recordOf(cliHome).sequence, 1)
   generations.select('claude', randomUUID())
   assert.equal(recordOf(cliHome).sequence, 2)
-  const second = new CliGenerations(cliHome, `test-${randomUUID()}`)
+  const second = new CliGenerations(cliHome, `${process.pid}-${randomUUID()}`)
   second.select('codex', randomUUID())
   assert.equal(recordOf(cliHome).sequence, 3)
   const service = new CliHomes(cliHome)
@@ -173,7 +173,7 @@ test('a failed record rename leaves the old record while the pointer has already
     assert.equal(dirname(from), dirname(to), 'the temp file is in the record’s directory')
     throw Object.assign(new Error('injected record rename failure'), { code: 'EIO' })
   }
-  assert.throws(() => service.reset('claude'), /injected record rename failure/)
+  assert.throws(() => service.reset('claude'), /pointer moved, but the generation record could not be saved/)
   assert.equal(targeted, 1, 'only the record rename failed')
   assert.notEqual(pointerOf(cliHome, 'claude'), oldPointer)
   assert.match(pointerOf(cliHome, 'claude'), UUID)
@@ -255,4 +255,92 @@ test('start rewrites a record that does not match the pointers and advances its 
   assert.equal(record.claude.generation, pointerOf(cliHome, 'claude'))
   assert.equal(record.claude.configDir, stale.claude.configDir)
   assert.equal(record.codex, null)
+})
+
+test('interleaved select and startup reconciliation share the whole-record claim', t => {
+  const { cliHome, generations: first } = place(t)
+  const second = new CliGenerations(cliHome, `${process.pid}-${randomUUID()}`)
+  const old = randomUUID()
+  const newest = randomUUID()
+  first.select('claude', old)
+  let blocked = 0
+  const rename = first.rename
+  first.rename = (from, to) => {
+    assert.throws(() => second.select('claude', newest), /Close other Automagik sessions/)
+    blocked++
+    return rename(from, to)
+  }
+  // Force reconciliation to write, then interleave another writer while it is in flight.
+  const stale = recordOf(cliHome)
+  writeFileSync(recordPath(cliHome), JSON.stringify({ ...stale, claude: null }))
+  first.ensureRecord()
+  assert.equal(blocked, 1)
+  second.select('claude', newest)
+  assert.equal(recordOf(cliHome).claude.generation, newest)
+  assert.equal(recordOf(cliHome).sequence, stale.sequence + 2)
+
+  // The reverse interleaving: startup cannot write while a selection is in flight.
+  const latest = randomUUID()
+  first.rename = (from, to) => {
+    assert.throws(() => second.ensureRecord(), /Close other Automagik sessions/)
+    blocked++
+    return rename(from, to)
+  }
+  first.select('claude', latest)
+  assert.equal(blocked, 2)
+  assert.equal(second.ensureRecord(), false)
+  assert.equal(recordOf(cliHome).claude.generation, latest)
+  assert.equal(recordOf(cliHome).sequence, stale.sequence + 3)
+})
+
+test('startup reports an unwritable record and continues', t => {
+  const { cliHome } = paths(t)
+  const reports = []
+  const service = new CliHomes(cliHome, { onRecordError: vendor => reports.push(vendor) })
+  t.after(() => service.dispose())
+  service.generations.rename = () => { throw new Error('injected write failure') }
+  assert.doesNotThrow(() => service.startup('claude'))
+  assert.deepEqual(reports, ['claude'])
+  assert.equal(existsSync(recordPath(cliHome)), false)
+})
+
+test('start repairs a Codex mismatch', t => {
+  const { cliHome, generations } = place(t)
+  const generation = randomUUID()
+  generations.select('codex', generation)
+  const old = recordOf(cliHome)
+  writeFileSync(recordPath(cliHome), JSON.stringify({ ...old, codex: null }))
+  assert.equal(generations.ensureRecord(), true)
+  assert.equal(recordOf(cliHome).codex.generation, generation)
+  assert.equal(recordOf(cliHome).sequence, old.sequence + 1)
+})
+
+test('start repairs a record with the wrong version', t => {
+  const { cliHome, generations } = place(t)
+  generations.select('claude', randomUUID())
+  const old = recordOf(cliHome)
+  writeFileSync(recordPath(cliHome), JSON.stringify({ ...old, version: 99 }))
+  assert.equal(generations.ensureRecord(), true)
+  assert.equal(recordOf(cliHome).version, 1)
+  assert.equal(recordOf(cliHome).sequence, old.sequence + 1)
+})
+
+test('start resets a bad sequence to one', t => {
+  const { cliHome, generations } = place(t)
+  generations.select('claude', randomUUID())
+  for (const sequence of ['3', -1]) {
+    writeFileSync(recordPath(cliHome), JSON.stringify({ ...recordOf(cliHome), sequence }))
+    assert.equal(generations.ensureRecord(), true)
+    assert.equal(recordOf(cliHome).sequence, 1)
+  }
+})
+
+test('a damaged pointer is recorded as null', t => {
+  const { cliHome, generations } = place(t)
+  generations.select('codex', randomUUID())
+  const old = recordOf(cliHome)
+  writeFileSync(join(cliHome, 'current', 'codex'), 'damaged')
+  assert.equal(generations.ensureRecord(), true)
+  assert.equal(recordOf(cliHome).codex, null)
+  assert.equal(recordOf(cliHome).sequence, old.sequence + 1)
 })

@@ -156,7 +156,9 @@ export function apply(ctx, config = {}, {
       ? join(dirname(store.home), CONSENT_FILE) : undefined,
   logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile,
 } = {}) {
-  const homes = cliHome === undefined ? undefined : new CliHomes(cliHome)
+  const homes = cliHome === undefined ? undefined : new CliHomes(cliHome, {
+    onRecordError: vendor => warn(ctx, `the ${vendor} generation record could not be saved at startup`),
+  })
   if (homes) for (const vendor of ['claude', 'codex']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.
   }

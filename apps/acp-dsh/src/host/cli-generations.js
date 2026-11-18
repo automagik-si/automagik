@@ -151,6 +151,8 @@ export class CliGenerations {
 
   matchesRecord(record, state = this.recordState()) {
     return record?.version === RECORD_VERSION
+      && Number.isSafeInteger(record.sequence) && record.sequence >= 0
+      && record.sequence < Number.MAX_SAFE_INTEGER
       && JSON.stringify(record.claude) === JSON.stringify(state.claude)
       && JSON.stringify(record.codex) === JSON.stringify(state.codex)
   }
@@ -163,6 +165,7 @@ export class CliGenerations {
     const directory = dirname(path)
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     const sequence = Number.isSafeInteger(previous?.sequence) && previous.sequence >= 0
+      && previous.sequence < Number.MAX_SAFE_INTEGER
       ? previous.sequence + 1 : 1
     const record = {
       version: RECORD_VERSION, sequence, claude: state.claude, codex: state.codex,
@@ -193,11 +196,13 @@ export class CliGenerations {
   // restart adds no sequence and no updatedAt. Called after each vendor's startup: the second
   // call is normally the no-op.
   ensureRecord() {
-    const state = this.recordState()
-    const previous = this.currentRecord()
-    if (this.matchesRecord(previous, state)) return false
-    this.writeRecord(state, previous)
-    return true
+    return this.exclusive('generation-record', () => {
+      const state = this.recordState()
+      const previous = this.currentRecord()
+      if (this.matchesRecord(previous, state)) return false
+      this.writeRecord(state, previous)
+      return true
+    })
   }
 
   publish(path, marker) {
@@ -293,15 +298,19 @@ export class CliGenerations {
   }
 
   select(vendor, generation) {
-    const pointer = this.pointer(vendor)
-    mkdirSync(join(this.root, 'current'), { recursive: true, mode: 0o700 })
-    // An absent selection after activation is damage, never permission to revive legacy.
-    writeFileSync(`${pointer}.activated`, '', { mode: 0o600 })
-    const next = `${pointer}.${randomUUID()}`
-    writeFileSync(next, generation, { mode: 0o600 })
-    renameSync(next, pointer)
-    // The pointer is in place first; the record is written last and names it.
-    this.writeRecord()
+    return this.exclusive('generation-record', () => {
+      const pointer = this.pointer(vendor)
+      mkdirSync(join(this.root, 'current'), { recursive: true, mode: 0o700 })
+      // An absent selection after activation is damage, never permission to revive legacy.
+      writeFileSync(`${pointer}.activated`, '', { mode: 0o600 })
+      const next = `${pointer}.${randomUUID()}`
+      writeFileSync(next, generation, { mode: 0o600 })
+      renameSync(next, pointer)
+      // The pointer is in place first; the record is written last and names it.
+      try { this.writeRecord() } catch (error) {
+        throw new Error('The Bot account pointer moved, but the generation record could not be saved.', { cause: error })
+      }
+    })
   }
 
   dispose() {
