@@ -40,6 +40,10 @@ export function createSpaceReads(rt) {
   const statusOf = id => {
     const room = rt.own(rt.state.rooms, id)
     const bot = rt.own(rt.state.bots, id)
+    // A Bot whose plugin is not installed cannot run: not idle, not installed, with why
+    // (installed.js), so a reader of the space never takes it for a live teammate.
+    const installation = bot === undefined ? undefined : rt.installationOf?.(bot)
+    if (installation?.installed === false) return { status: 'not-installed', reason: installation.reason, lastActivity: null }
     const sessionId = bot ? rt.chatOf(id) : id
     const work = room ? rt.roomWorkView()[id] : rt.workView()[id]
     const sessions = room ? [id, ...Object.values(room.sessions ?? {})] : [sessionId]
@@ -109,6 +113,7 @@ export function createSpaceReads(rt) {
     return { items, nextCursor: cursorText(next) }
   }
   const read = async (endpoint, body, handle) => {
+    await rt.refreshInstallation?.()
     switch (endpoint) {
       case 'space-bots': return pageOf(Object.values(rt.state.bots).map(botOf), body)
       case 'space-bot': {
