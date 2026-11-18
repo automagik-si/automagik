@@ -4,13 +4,14 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { EXIT } from '../lib/launcher.mjs'
+import { dshRunning } from '../smoke/process.mjs'
 import { FakeElectron, RELAY_PORT, TOKEN } from '../smoke/driver.mjs'
 
 const WSLC = fileURLToPath(new URL('..', import.meta.url))
@@ -44,7 +45,10 @@ function makeImage() {
   writeFileSync(join(profile, '.build-id'), 'test-build\n')
   mkdirSync(join(image, 'runtime', 'node_modules', 'pnpm', 'bin'), { recursive: true })
   writeFileSync(join(image, 'runtime', 'node_modules', 'pnpm', 'package.json'), JSON.stringify({ name: 'pnpm', version: '10.34.6' }))
-  writeFileSync(join(image, 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'), '')
+  writeFileSync(join(image, 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'), "console.log('bundled-pnpm 10.34.6')\n")
+  // The launcher the guest starts dsh through, as prepare-runtime otherwise puts it in the image.
+  mkdirSync(join(image, 'dsh-launch'), { recursive: true })
+  copyFileSync(join(WSLC, '..', 'src', 'dsh-launch.cjs'), join(image, 'dsh-launch', 'dsh-launch.cjs'))
   mkdirSync(join(image, 'bin'), { recursive: true })
   symlinkSync(join(WSLC, 'bin', 'xdg-open.mjs'), join(image, 'bin', 'xdg-open'))
   mkdirSync(join(dir, 'exchange', 'lane'), { recursive: true })
@@ -144,6 +148,83 @@ test('ready, the ipc relay both ways, the CDP tunnel, open, and the stop on stdi
     const log = readFileSync(join(box.home, '.automagik', 'desktop', 'logs', 'dsh.log'), 'utf8')
     assert.match(log, /fake-dsh: up/)
     assert.match(electron.stderr, /fake-dsh: up/)
+  } finally {
+    reap()
+    rmSync(box.dir, { recursive: true, force: true })
+  }
+})
+
+// The guest's plugin installs, updates and removals (#1466): dsh runs through the image's
+// launcher, so a pnpm earlier on PATH never runs.
+test('the guest runs plugin operations through the image\'s pnpm, not one first on PATH', async () => {
+  const box = makeImage()
+  const hostile = join(box.dir, 'hostile-bin')
+  const marker = join(box.dir, 'path-pnpm-used')
+  mkdirSync(hostile, { recursive: true })
+  writeFileSync(join(hostile, 'pnpm'), `#!/bin/sh\necho path-pnpm > '${marker}'\necho 'path-pnpm 9.15.9'\nexit 97\n`)
+  chmodSync(join(hostile, 'pnpm'), 0o755)
+  try {
+    const { electron } = await launch(box, { env: { PATH: [hostile, process.env.PATH].filter(Boolean).join(':') } })
+    await electron.waitFor(frame => frame.type === 'ready', 15_000, 'ready')
+    electron.send({ type: 'ipc', message: { type: 'smoke:package-manager' } })
+    const answer = await electron.ipc('smoke:package-manager-result')
+    assert.equal(answer.via, 'packageManager')
+    assert.equal(answer.version, 'bundled-pnpm 10.34.6')
+    assert.equal(existsSync(marker), false, 'the pnpm first on PATH never ran')
+    const stopped = await electron.close()
+    assert.equal(stopped.code, EXIT.stopped)
+  } finally {
+    reap()
+    rmSync(box.dir, { recursive: true, force: true })
+  }
+})
+
+test('a missing image pnpm stops the guest instead of falling back to PATH', async () => {
+  const box = makeImage()
+  rmSync(join(box.image, 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'))
+  try {
+    const { electron } = await launch(box)
+    // The old fallback started DSH even without the image's pnpm; this must end the start.
+    const outcome = await Promise.race([
+      electron.closed.then(() => 'stopped'),
+      electron.waitFor(frame => frame.type === 'ready', 5_000, 'ready').then(() => 'started'),
+    ])
+    assert.equal(outcome, 'stopped', 'the guest must not start without its bundled pnpm')
+    const { code } = await electron.closed
+    assert.equal(code, EXIT.dsh)
+    assert.match(electron.stderr, /DSH did not start: the app's bundled pnpm is missing at .*pnpm\.cjs/)
+  } finally {
+    reap()
+    rmSync(box.dir, { recursive: true, force: true })
+  }
+})
+
+// The smoke's stop check now finds DSH by its launcher: the entry is in the environment, so the
+// command line shows the launcher. This is TRUE while the fake DSH lives and FALSE after stop.
+test('the running check sees the fake DSH through its launcher, and not after the stop', async () => {
+  const box = makeImage()
+  try {
+    const { electron } = await launch(box)
+    await electron.waitFor(frame => frame.type === 'ready', 15_000, 'ready')
+    electron.send({ type: 'ipc', message: { type: 'smoke:env' } })
+    const { pid } = await electron.ipc('smoke:env')
+    const launcher = join(box.image, 'dsh-launch', 'dsh-launch.cjs')
+    const guest = {
+      ok: (command, flag, pattern) => {
+        try { execFileSync(command, [flag, pattern], { stdio: 'ignore' }); return true } catch { return false }
+      },
+    }
+    assert.equal(alive(pid), true, 'the fake DSH process is live')
+    assert.equal(dshRunning(guest, launcher), true, 'the live launcher hosts the fake DSH')
+    // The old entry pattern, scoped to this test's own image: unscoped, a live DSH elsewhere on
+    // the host would match and make this row depend on the machine (process.test.mjs keeps the
+    // container literals, where the process list is a fake).
+    const oldEntry = join(box.image, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+    assert.equal(dshRunning(guest, oldEntry), false, 'the old entry pattern misses it')
+    const stopped = await electron.close()
+    assert.equal(stopped.code, EXIT.stopped)
+    assert.equal(dshRunning(guest, launcher), false, 'the launcher is gone after the stop')
+    assert.equal(alive(pid), false, 'the fake DSH is gone after the stop')
   } finally {
     reap()
     rmSync(box.dir, { recursive: true, force: true })

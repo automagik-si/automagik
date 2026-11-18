@@ -30,9 +30,13 @@ not carry it. Acceptance requires passkey account creation and sign-in, an OIDC
 code flow, verified tokens, strict redirect and PKCE checks, optional phone-code
 verification, and shared database rate limits in a local Workers runtime.
 Sign-in and consent screens belong to the owner and follow the page contract.
-Until supplied, those pages return an explicit unavailable response.
+They exist since #1118 (`apps/id/pages/sign-in.html`, `consent.html`).
 
-The first deployment and acceptance trial use workers.dev. No public-name move
+Every Automagik and Arca sign-in shares one passkey site name, `automagik.si`
+(owner, 2026-11-11), read from a setting; the service refuses to start on a host
+outside it. A workers.dev address cannot carry that name, so the first deployment
+and acceptance trial use a test name under `automagik.si` (owner, 2026-11-15),
+and passkeys made there keep working at the public name. No public-name move
 occurs until the owner explicitly directs it. This delivery provisions and
 deploys nothing. Rollback disables the service; keep its database and signing
 material until product sessions have been retired deliberately.

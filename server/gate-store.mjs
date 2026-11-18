@@ -64,26 +64,42 @@ export function cookieSecret(header = '') {
 }
 
 export class SessionStore extends EventEmitter {
-  constructor(dir, { now = Date.now } = {}) {
+  // Cloud mode keeps its sessions in memory only (`memory`), each bounded by its token's expiry,
+  // and admits only the principals its own check (`accepts`) allows. Self-hosted keeps the file.
+  constructor(dir, { now = Date.now, memory = false, accepts = localPrincipal } = {}) {
     super()
+    this.now = now
+    this.accepts = accepts
+    if (memory) { this.families = []; return }
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     this.file = join(dir, 'sessions.json')
-    this.now = now
     const stored = read(this.file)
     if (stored !== undefined && (!stored || stored.version !== 1 || !Array.isArray(stored.families) || !stored.families.every(validFamily))) throw new Error('Unsupported session store')
     this.families = stored?.families ?? []
   }
-  save() { write(this.file, { version: 1, families: this.families }) }
-  // Sign-in calls this only after authentication.
-  issue(origin, principal) {
-    if (!localPrincipal(principal)) throw new Error('Only a local owner can establish a C2.1 session')
+  save() { if (this.file) write(this.file, { version: 1, families: this.families }) }
+  // Sign-in calls this only after authentication. `expires` (ms) is a hard end, never renewed.
+  issue(origin, principal, { expires } = {}) {
+    if (!this.accepts(principal)) throw new Error('Principal refused for this session store')
+    if (expires !== undefined && (!this.memory || !Number.isSafeInteger(expires))) throw new Error('Invalid session expiry')
+    // Ended Cloud sessions leave memory here: their browsers drop the cookie, so none returns.
+    if (this.memory) this.families = this.families.filter(f => f.expires === undefined || this.now() < f.expires)
     const value = secret()
-    const family = { id: randomUUID(), origin, principal: structuredClone(principal), current: digest(value), used: [], created: this.now(), touched: this.now() }
+    const family = { id: randomUUID(), origin, principal: structuredClone(principal), current: digest(value), used: [], created: this.now(), touched: this.now(), ...(expires === undefined ? {} : { expires }) }
     this.families.push(family)
     this.save()
     return { secret: value, family }
   }
-  active(family) { return this.families.includes(family) && this.now() - family.touched < IDLE_MS }
+  get memory() { return !this.file }
+  active(family) {
+    return this.families.includes(family) && this.now() - family.touched < IDLE_MS &&
+      (family.expires === undefined || this.now() < family.expires)
+  }
+  // Cookie lifetime in seconds: the idle limit, or what is left before a hard end.
+  maxAge(family) {
+    const idle = IDLE_MS / 1000
+    return family.expires === undefined ? idle : Math.max(0, Math.min(idle, Math.ceil((family.expires - this.now()) / 1000)))
+  }
   authenticate(value, origin) {
     if (!value) return undefined
     const hash = Buffer.from(digest(value), 'hex')
@@ -125,13 +141,15 @@ export class SessionStore extends EventEmitter {
     this.save()
     this.emit('revoke', family.id)
   }
-  revokeAll() {
-    const previous = this.families
-    this.families = []
+  // `where` narrows to some families (one person's, in Cloud mode); without it, every family.
+  revokeAll(where = () => true) {
+    const previous = this.families.filter(f => where(f))
+    this.families = this.families.filter(f => !where(f))
     this.save()
     for (const family of previous) this.emit('revoke', family.id)
   }
-  list() {
-    return this.families.filter(f => this.active(f)).map(f => ({ id: f.id, created: f.created, last_active: f.touched, expires_at: f.touched + IDLE_MS }))
+  list(where = () => true) {
+    return this.families.filter(f => this.active(f) && where(f)).map(f => ({ id: f.id, created: f.created, last_active: f.touched,
+      expires_at: Math.min(f.touched + IDLE_MS, f.expires ?? Infinity) }))
   }
 }

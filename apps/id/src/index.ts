@@ -5,6 +5,7 @@ import {
 import { createAuth, type Env } from './auth';
 import { getCookies } from 'better-auth/cookies';
 import { inbound, readChallenge, whatsappEnabled } from './whatsapp';
+import { passkeySiteName } from './site';
 
 function publicData(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(publicData);
@@ -27,6 +28,15 @@ function directPage(pathname: string): boolean {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // A service whose host cannot carry the passkey site name answers nothing else.
+    try {
+      passkeySiteName(env);
+    } catch (error) {
+      console.error(error);
+      return new Response(`Automagik ID is not configured: ${(error as Error).message}\n`, {
+        status: 500, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+      });
+    }
     const url = new URL(request.url);
     if (url.pathname === '/sign-in' || url.pathname === '/consent') {
       if (env.PAGES) {

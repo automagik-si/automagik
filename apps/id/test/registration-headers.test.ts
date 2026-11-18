@@ -6,15 +6,15 @@ import type { Env } from '../src/auth';
 // current plugin set does not use for session authentication (Authorization).
 vi.mock('../src/auth', () => ({
   createAuth: () => ({
-    options: { baseURL: 'https://id.example.com' },
+    options: { baseURL: 'https://id.automagik.si' },
     handler: (request: Request) => Response.json({
       cookie: request.headers.get('cookie'), authorization: request.headers.get('authorization'),
     }),
   }),
 }));
 
-const origin = 'https://id.example.com';
-const env = { BETTER_AUTH_URL: origin } as Env;
+const origin = 'https://id.automagik.si';
+const env = { BETTER_AUTH_URL: origin, PASSKEY_RP_ID: 'automagik.si' } as Env;
 const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
 const challenge = '__Secure-better-auth.passkey_challenge=ceremony%2Btoken%3D';
 const whitespace = [' ', '\t', ' \t'];

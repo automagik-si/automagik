@@ -66,7 +66,9 @@ name: Release
 # does. This is a separate job after the cut, with only actions: write; a failed dispatch warns
 # and no other lane waits for it. The image workflow publishes the image and server-image.json.
 #
-# and then the desktop app's builds (desktop-build.yml). Omni pins a release's plugins.json
+# and then the desktop app's builds (desktop-build.yml). A desktop job that fails is dispatched
+# once more for the same version, only while the release has no desktop feed; a publish never
+# replaces a feed the release already has. Omni pins a release's plugins.json
 # (its apps/automagik.json) to serve them from its own market and admin UI; the
 # dsh-marketplace lists the plugins at the tag's commit. After the release, the market index
 # here lists it (scripts/marketplace.ts pin) and main moves to the tag.
@@ -1058,6 +1060,44 @@ jobs:
       ref: ${{ needs.cut.outputs.sha }}
       prerelease: ${{ inputs.prerelease == true }}
       publish: true
+
+  desktop-retry:
+    name: Retry the desktop publish
+    needs: [cut, desktop]
+    # The desktop job failed: one fresh dispatch of the same version, and only while the release
+    # has no desktop feed. The publish job refuses a second feed, so a retry can never replace one.
+    # No run is re-run: the dispatch builds the tag again and publishes the feed it was missing.
+    if: ${{ !cancelled() && needs.cut.outputs.version != '' && needs.desktop.result == 'failure' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.cut.outputs.version }}
+      PRERELEASE: ${{ inputs.prerelease == true && 'true' || 'false' }}
+    steps:
+      - name: Dispatch one rebuild when the release has no feed
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          # Any failed read, a deleted release included, stops the retry: no dispatch blind.
+          if ! assets=$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets \
+            --jq '.assets[].name' 2>&1); then
+            echo "::error ::could not read ${tag}: ${assets}"
+            exit 1
+          fi
+          feeds=$(grep -E '^latest(-mac|-linux)?\.yml$' <<< "${assets}" || true)
+          if [[ -n "${feeds}" ]]; then
+            echo "${tag} already carries a desktop feed; not dispatching a second build"
+            exit 0
+          fi
+          # The workflow file comes from dev, the build from the tag: an older tag's copy of this
+          # workflow needs no new input, and the build is the exact commit that was released.
+          gh workflow run desktop-build.yml --repo "${GITHUB_REPOSITORY}" --ref dev \
+            -f ref="${tag}" -f publish=true -f replace=false -f prerelease="${PRERELEASE}"
+          echo "dispatched desktop-build.yml for ${tag}"
 
   list:
     name: List it in the market index; main follows

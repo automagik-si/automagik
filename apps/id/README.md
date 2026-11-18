@@ -101,14 +101,20 @@ with an `INDEX.md`.
 Mutation checks drop inbound authentication or timestamp checks, permit proof
 reuse, select the current session account, restore the session JWT header, disable
 PKCE, relax redirects, enable public registration, move rate limits to memory,
-serve a page file directly as `.html` and let CI skip the page browser tests,
+serve a page file directly as `.html`, take the passkey site name from the host,
+start on (or configure) a host outside it, accept a look-alike host and let CI
+skip the page browser tests,
 one at a time. Each must fail its targeted test; source files are restored
 afterward. Announcements and results are printed to stdout.
 `bun scripts/generate-migration.ts` regenerates the initial schema for review;
 never replace an already applied migration when upgrading a deployed database.
 
-See [DEPLOY.md](DEPLOY.md) for the owner's first workers.dev deployment. This
-delivery does not deploy, provision infrastructure, or choose a public domain.
+The passkey site name comes from the `PASSKEY_RP_ID` setting, `automagik.si` for
+real use, shared by every Automagik and Arca sign-in. The service refuses to start
+when its own host (`BETTER_AUTH_URL`) is not that name or a subdomain of it, so it
+never runs on workers.dev. See [DEPLOY.md](DEPLOY.md) for the owner's first
+deployment on a test name under `automagik.si`. This delivery does not deploy,
+provision infrastructure, or choose a public domain.
 
 Pinned API references: [passkeys](https://www.better-auth.com/docs/plugins/passkey),
 [OAuth provider](https://www.better-auth.com/docs/plugins/oauth-provider).

@@ -24,6 +24,12 @@ function parseCompose(source, flags = []) {
       AUTOMAGIK_GATE_ACCESS_TEAM_DOMAIN: '',
       AUTOMAGIK_GATE_ACCESS_AUD: '',
       AUTOMAGIK_GATE_ACCESS_EMAILS: '',
+      AUTOMAGIK_GATE_CLOUD_ISSUER: '',
+      AUTOMAGIK_GATE_CLOUD_IDENTITY_ISSUER: '',
+      AUTOMAGIK_GATE_CLOUD_WORKSPACE: '',
+      AUTOMAGIK_GATE_CLOUD_KEYS_URL: '',
+      AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL: '',
+      AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN: '',
       // Resolve a pass-through public URL even if the developer's environment has none.
       AUTOMAGIK_PUBLIC_URL: 'https://public.invalid/',
     },

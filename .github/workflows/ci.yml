@@ -520,7 +520,7 @@ jobs:
         if: steps.changed.outputs.am == 'true'
         run: |
           set -euo pipefail
-          for f in *.js *.mjs bin/*.mjs lib/*.mjs; do
+          for f in *.js *.mjs bin/*.mjs lib/*.mjs runner/*.mjs; do
             node --check "$f"
           done
           shellcheck -s sh bin/am bin/run.sh bin/automagik-herdr
@@ -1327,8 +1327,12 @@ jobs:
       - name: Test
         run: bun run test
 
+      - name: Integration groups (optional here, not claimed as coverage)
+        if: ${{ matrix.app == 'acp-dsh' && !cancelled() }}
+        run: node ../../scripts/integration-gate.mjs summary --job "acp-dsh (plugin tests)"
+
   acp-image-read:
-    name: acp-dsh (real Codex image reads)
+    name: acp-dsh (real Codex image reads) · required integration
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -1396,6 +1400,40 @@ jobs:
             "AUTOMAGIK_TEST_CODEX_RUNTIME_IMAGE=${AUTOMAGIK_TEST_CODEX_RUNTIME_IMAGE}" \
             AUTOMAGIK_REQUIRE_IMAGE_READ_TEST=1 \
             node scripts/image-read-gate.mjs
+
+      - name: Required integration coverage (counted per file)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/integration"
+          sudo systemd-run --quiet --wait --pipe \
+            -p MemoryMax=4G -p MemorySwapMax=0 -p "User=$(id -un)" \
+            -p "WorkingDirectory=${PWD}" \
+            env "PATH=${PATH}" "TMPDIR=${TMPDIR}" NODE_OPTIONS=--max-old-space-size=2048 \
+            "AUTOMAGIK_TEST_CODEX=${AUTOMAGIK_TEST_CODEX}" \
+            "AUTOMAGIK_TEST_CODEX_RUNTIME_IMAGE=${AUTOMAGIK_TEST_CODEX_RUNTIME_IMAGE}" \
+            AUTOMAGIK_REQUIRE_IMAGE_READ_TEST=1 \
+            node ../../scripts/integration-gate.mjs run acp-image-read \
+              --out "${RUNNER_TEMP}/integration"
+
+      - name: Integration results
+        if: ${{ !cancelled() }}
+        id: integration-results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: integration-acp-image-read
+          path: ${{ runner.temp }}/integration
+          if-no-files-found: warn
+
+      - name: Integration summary
+        if: ${{ !cancelled() }}
+        env:
+          ARTIFACT_URL: ${{ steps.integration-results.outputs.artifact-url }}
+        run: |
+          node ../../scripts/integration-gate.mjs summary \
+            --job "acp-dsh (real Codex image reads) · required integration" \
+            --verdict "${RUNNER_TEMP}/integration/verdict.json" \
+            --artifact-url "${ARTIFACT_URL}"
 
   pets:
     # The headless pet bake (automagik-pets) on Node, as DSH and Automagik Herdr run it: Bun
