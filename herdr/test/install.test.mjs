@@ -382,7 +382,7 @@ test("a newer release replaces the installed one; --version pins one", (t) => {
   const r = s.run("--yes");
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(s.versions(), s.all("9.10.0"));
-  assert.match(r.out, /The folders it replaced \(9\.9\.0\) are kept in .*\.prev/);
+  assert.match(r.out, /The folders it replaced \(9\.9\.0\) are kept in \S*\.prev: '\S*\/\.local\/bin\/am update --rollback' swaps them back\./);
   const pinned = s.run("--yes", "--version", "v9.9.0");
   assert.equal(pinned.code, 0, pinned.err);
   assert.deepEqual(s.versions(), s.all("9.9.0"));
@@ -946,7 +946,7 @@ test("free keys only, and an unreadable keys.json stops the install before any f
   assert.equal(existsSync(bad.mods), false);
 });
 
-test("a failing herdr-app check exits 1 after installing, naming the mod and the rollback", (t) => {
+test("a failing herdr-app check exits 1 after installing, naming the mod; a first install promises no rollback", (t) => {
   const s = scratch(t);
   s.addHerdrApp();
   writeFileSync(join(s.bin, "herdr-app"), `${readFileSync(join(s.bin, "herdr-app"), "utf8")}case "$2" in */am-tabs) echo broken >&2; exit 1 ;; esac\n`);
@@ -954,7 +954,8 @@ test("a failing herdr-app check exits 1 after installing, naming the mod and the
   const r = s.run("--yes");
   assert.equal(r.code, 1);
   assert.match(r.out, /check FAILED: am-tabs: broken/);
-  assert.match(r.err, /herdr-app check failed .*update --rollback/);
+  assert.match(r.err, /herdr-app check failed .*the pack is installed\. This installer with --uninstall moves the pack out of mods\//);
+  assert.doesNotMatch(r.out + r.err, /update --rollback|swaps? (them|the kept set) back/);
   assert.doesNotMatch(r.out, /Done/);
   assert.deepEqual(s.versions(), s.all("9.9.0"));
 });
@@ -2555,7 +2556,7 @@ test("--revive installs the login service through the pack's command (#939, Linu
   // No terminal to answer at, and --yes: neither installs a thing that runs at login.
   const quiet = s.run("--no-usagemeter");
   assert.equal(quiet.code, 0, quiet.err + quiet.out);
-  assert.match(quiet.out, /Left the revive login service alone; 'automagik-herdr revive service install' adds it later\./);
+  assert.match(quiet.out, /Left the revive login service alone; '\S*\/\.local\/bin\/am revive service install' adds it later\./);
   const yes = s.run("--yes", "--no-usagemeter");
   assert.equal(yes.code, 0, yes.err + yes.out);
   assert.match(yes.out, /Left the revive login service alone: --yes never changes what runs at login/);
@@ -2694,7 +2695,7 @@ test("no dsh: --yes installs the pack and prints one honest dsh-TUI skip line", 
   s.publish("9.9.0");
   const r = s.run("--yes", "--no-usagemeter");
   assert.equal(r.code, 0, r.err);
-  assert.match(r.out, /DSH is not installed \(no dsh on PATH\): skipped dsh-TUI\. Install DSH Desktop or 'npm install -g @deepseek-ai\/dsh', then run 'automagik-herdr dsh-tui install'\./);
+  assert.match(r.out, /DSH is not installed \(no dsh on PATH\): skipped dsh-TUI\. Install DSH Desktop or 'npm install -g @deepseek-ai\/dsh', then run '\S*\/\.local\/bin\/am dsh-tui install'\./);
   assert.equal(existsSync(join(s.home, ".local", "bin", "dsh-tui")), false);
 });
 

@@ -511,9 +511,19 @@ test('the title face is the brand\'s: Fredoka from docs/brand, at its three weig
   // Nothing set in the title face carries a weight of its own: a heavier Fredoka is heavier than the logo.
   assert.equal(css.match(/font:[^;}]*var\(--head\)/g).length, 37)
   assert.deepEqual(css.match(/font:[^;}]*var\(--head\)/g).filter(rule => !/^font:var\(--weight-(?:title|strong|label)\) /.test(rule)), [])
-  assert.ok(css.includes('\nh1{font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;letter-spacing:-.02em}\n'))
-  assert.ok(css.includes('\nh2{font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;letter-spacing:-.016em}\n'))
-  assert.ok(css.includes('\nh3{font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;letter-spacing:-.01em}\n'))
+  // Each heading's letter spacing is its own brand token's: only the leading zero CSS drops is put back.
+  const headings = brand.groups.find(group => group.name === 'Headings').styles
+  for (const [tag, style, rule] of [
+    ['h1', 'heading-1', 'font-weight:var(--weight-title);font-size:clamp(2.6rem,1.4rem + 4.2vw,4.6rem);line-height:1.02;'],
+    ['h2', 'heading-2', 'font-weight:var(--weight-title);font-size:clamp(1.85rem,1.15rem + 2.3vw,3.05rem);line-height:1.08;'],
+    ['h3', 'heading-3', 'font-weight:var(--weight-strong);font-size:1.3rem;line-height:1.25;'],
+  ]) {
+    const start = `${tag}{${rule}letter-spacing:`
+    const line = css.split('\n').find(text => text.startsWith(start) && /^[^;}]+\}$/.test(text.slice(start.length)))
+    assert.ok(line, `${tag}: the weight, size and line height are not the brand's`)
+    const spacing = line.slice(start.length, -1).replace(/^(-?)\./, (_, sign) => `${sign}0.`)
+    assert.equal(spacing, headings.find(entry => entry.name === style).letterSpacing, `${tag}: the letter spacing is not ${style}'s`)
+  }
   // Fredoka's own word space is wide; the extra word spacing the old face needed is gone.
   assert.doesNotMatch(css, /word-spacing/)
   // Widths counted in the face's own zero: Fredoka's zero is narrower, so the counts grew to keep the same lines.
