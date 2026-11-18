@@ -34781,7 +34781,7 @@ var buttonStyle = {
   height: 26,
   padding: 0,
   border: 0,
-  borderRadius: 7,
+  borderRadius: 8,
   background: "none",
   color: "var(--dsw-alias-label-secondary, inherit)",
   cursor: "pointer",
@@ -34979,7 +34979,7 @@ function BotBrowserBody({ sessionId, hooks }) {
       (0, import_react94.createElement)(
         "div",
         { style: { display: "flex", alignItems: "center", gap: 8, padding: "5px 12px", flex: "none", color: "var(--dsw-alias-label-secondary)", fontSize: 11.5, borderBottom: ".5px solid var(--dsw-alias-border-l1)" } },
-        (0, import_react94.createElement)("span", { "aria-hidden": true, style: { width: 6, height: 6, borderRadius: "50%", flex: "none", background: held ? "var(--dsw-alias-state-warn-primary, #f59e0b)" : "var(--dsw-alias-state-success-primary, #16a34a)" } }),
+        (0, import_react94.createElement)("span", { "aria-hidden": true, style: { width: 6, height: 6, borderRadius: "50%", flex: "none", background: held ? "var(--st-warndot, var(--dsw-alias-state-warn-primary))" : "var(--st-okdot, var(--dsw-alias-state-success-primary))" } }),
         (0, import_react94.createElement)("span", { style: { fontWeight: 600, color: "var(--dsw-alias-label-primary)", maxWidth: "30%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, botName || t("This Bot")),
         (0, import_react94.createElement)(
           "span",
