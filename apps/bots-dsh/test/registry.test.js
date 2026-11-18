@@ -530,3 +530,32 @@ test('parse: permissionAuto is never imported from bots.json', () => {
   assert.equal(parsed.file.bots[0].permissionAuto, undefined)
   assert.match(JSON.stringify(parsed.warnings), /permissionAuto/)
 })
+
+
+test('the registry accepts optional herdr type; absent type remains native despite seat fields', () => {
+  for (const kind of ['home', 'repo']) {
+    const raw = { version: 2, bots: [{ id: ID.main, name: 'Typed', main: true, type: 'herdr' }, { id: ID.dev, name: 'Native', agent: 'codex', model: 'acp-codex/default' }] }
+    assert.deepEqual(checkRegistry(raw, { kind }), [])
+    const { file, warnings } = parseRegistry(JSON.stringify(raw), { kind })
+    assert.equal(file.bots[0].type, 'herdr')
+    assert.equal(Object.hasOwn(file.bots[1], 'type'), false, 'absent type must remain native')
+    assert.deepEqual(warnings, [])
+  }
+})
+
+test('the registry validator refuses unknown type values', () => {
+  for (const type of ['native', 'unknown', '', null, 1, {}, ['herdr']]) {
+    const raw = { version: 2, bots: [{ id: ID.main, name: 'Bad', main: true, type }] }
+    assert.match(checkRegistry(raw, { kind: 'home' }).join(';'), /unknown type/)
+  }
+})
+
+test('the registry parser leaves out unknown types with a warning and preserves raw', () => {
+  for (const type of ['native', 'unknown', '', null, 1, {}, ['herdr']]) {
+    const raw = { version: 2, bots: [{ id: ID.main, name: 'Bad', type }] }
+    const parsed = parseRegistry(JSON.stringify(raw), { kind: 'home' })
+    assert.equal(parsed.file.bots.length, 0, 'unknown type must not reach the app')
+    assert.match(parsed.warnings.join(';'), /unknown type.*left out/)
+    assert.deepEqual(parsed.raw, raw)
+  }
+})

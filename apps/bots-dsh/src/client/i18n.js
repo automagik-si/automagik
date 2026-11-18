@@ -5,6 +5,11 @@
 export const NAMESPACE = 'omni-ui'
 
 const ZH = {
+  'Bot type': 'Bot 类型',
+  'Native DSH Bot': '原生 DSH Bot',
+  'Herdr Bot': 'Herdr Bot',
+  'Terminal agent': '终端代理',
+  'This Bot uses only its terminal.': '此 Bot 仅使用终端。',
   "The operating system blocked read or write access to {folder}. Allow Automagik to use this folder: on macOS, open System Settings > Privacy & Security > Files and Folders (or Full Disk Access); elsewhere, allow your user to read and write the folder. Your folder choice has been kept.": "操作系统阻止了对 {folder} 的读取或写入。请允许 Automagik 使用此文件夹：在 macOS 上，打开系统设置 > 隐私与安全性 > 文件与文件夹（或完全磁盘访问权限）；在其他系统上，允许你的用户读取和写入该文件夹。你选择的文件夹已保留。",
   "What will it do?": "它会做什么？",
   "Add instructions": "添加说明",

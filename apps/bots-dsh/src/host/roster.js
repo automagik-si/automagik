@@ -12,8 +12,20 @@ import { currentColor, isColor, normalize, unquote } from './text.js'
 import { nameProblem } from '../shared/mentions.js'
 import { contextPatch } from '../shared/context-policy.js'
 import { commandCapableAgent, crossesHarness } from '../shared/routes.js'
+import { BOT_TYPES } from '../shared/registry.js'
 import { cleanPetId, shippedPet } from './pets.js'
 import { cleanDenyTools, cleanShell } from './tool-deny.js'
+
+function cleanBotType(type) {
+  if (type == null) return undefined
+  if (!BOT_TYPES.includes(type)) throw refusal('Unknown Bot type')
+  return type
+}
+function cleanTerminalAgent(agent) {
+  if (agent === undefined) return undefined
+  if (typeof agent !== 'string' || !agent.trim() || agent.trim().startsWith('-')) throw refusal('Invalid terminal agent')
+  return agent.trim()
+}
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -280,7 +292,9 @@ export function install(rt) {
     }
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }) {
+  async function buildBot(cleanName, { type: typeInput, agent: agentInput, role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }) {
+    const type = cleanBotType(typeInput)
+    const agent = cleanTerminalAgent(agentInput)
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
@@ -292,10 +306,10 @@ export function install(rt) {
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
     // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
     // its Session exists.
-    const modelRef = model ? await rt.resolveModel(model, { checkAccess: true, remember: false }) : pickModel ? undefined : await rt.defaultBotModel()
+    const modelRef = type === 'herdr' ? undefined : model ? await rt.resolveModel(model, { checkAccess: true, remember: false }) : pickModel ? undefined : await rt.defaultBotModel()
     // A thinking level needs a model to resolve against; with none it would be dropped
     // silently, so the create fails before a Session is made.
-    if (effort && modelRef === undefined) throw refusal('Pick a model before choosing a thinking level')
+    if (type !== 'herdr' && effort && modelRef === undefined) throw refusal('Pick a model before choosing a thinking level')
     // An explicit level wins; an explicit Default (null) picks the model's own
     // level; an untouched pick inherits the profile default's level.
     const effortId = modelRef === undefined ? undefined
@@ -355,6 +369,8 @@ export function install(rt) {
         // A color is only stored when the user picks one; otherwise the id picks it.
         ...(isColor(currentColor(color)) ? { color: currentColor(color) } : {}),
         ...(cleanAvatarValue ? { avatar: cleanAvatarValue } : {}),
+        ...(type ? { type } : {}),
+        ...(agent ? { agent } : {}),
         ...(modelRef ? { model: modelRef } : {}),
         ...(effortId ? { effort: effortId } : {}),
         ...(dir ? { workDir: dir } : {}),
@@ -400,6 +416,10 @@ export function install(rt) {
         .catch(error => rt.warn('omni-ui: scoped tools for %s not applied: %s', cleanName, error))
       // A host-owned conversation already has its own history and turn source. Adoption
       // adds only its team identity, never a greeting or a deferred model turn.
+      if (type === 'herdr') {
+        await rt.save()
+        return bot
+      }
       if (existingSessionId !== undefined) {
         await rt.save()
         await scopeTools()
@@ -527,6 +547,7 @@ export function install(rt) {
     const workDir = bot.workDir !== undefined && await rt.isFolder(bot.workDir) ? bot.workDir : undefined
     // No await from here to createBot's check, so two copies at once get different names.
     return createBot({
+      type: bot.type, agent: bot.agent,
       name: freshName(`${bot.name} copy`),
       role: bot.role,
       instructions: bot.instructions,
@@ -557,6 +578,8 @@ export function install(rt) {
       if (Object.keys(rest).every(key => key === 'id')) return bot
       patch = rest
     }
+    const type = Object.hasOwn(patch, 'type') ? cleanBotType(patch.type) : bot.type
+    const agent = cleanTerminalAgent(patch.agent)
     const policyPatch = contextPatch(patch)
     const policyOnly = Object.keys(patch).every(key => key === 'id' || Object.hasOwn(policyPatch, key))
     if (patch.browserGrants !== undefined && actorId !== undefined) {
@@ -599,7 +622,7 @@ export function install(rt) {
     }
     const flag = patch.private === undefined ? undefined : patch.private === true
     await rt.checkPrivacyChange(bot, { flag, moving, workDir })
-    const modelRef = patch.model === undefined ? undefined
+    const modelRef = type === 'herdr' ? undefined : patch.model === undefined ? undefined
       : patch.model === null || patch.model === '' ? null
       : await rt.resolveModel(patch.model, { checkAccess: true, remember: false, keep: bot.model })
     // The shell and the model are one boundary: a Bot without a shell cannot run on an
@@ -641,7 +664,7 @@ export function install(rt) {
     // model it keeps, or — the model cleared — the one it last ran on.
     const effortRef = modelRef === undefined ? bot.model ?? bot.appliedModel : modelRef ?? bot.appliedModel
     let effortId
-    if (patch.effort !== undefined) {
+    if (type !== 'herdr' && patch.effort !== undefined) {
       if (patch.effort === null || patch.effort === '') effortId = null
       else {
         if (effortRef === undefined) throw refusal('Pick a model before choosing a thinking level')
@@ -668,7 +691,7 @@ export function install(rt) {
       ? markOf(String(patch.model)) !== bot.permissionAuto
       : String(patch.model).split('/')[0] !== 'acp-codex'))) await rt.clearAuto?.(bot)
     if (patch.denyTools !== undefined && bot.permissionRev === revBefore) rt.movePermissionRev(bot)
-    const modelChanged = patch.model !== undefined || patch.effort !== undefined
+    const modelChanged = type !== 'herdr' && (patch.model !== undefined || patch.effort !== undefined)
     const modelBefore = modelChanged ? modelFields(bot) : undefined
     if (modelChanged) await switchModel(bot, patch, modelRef, effortId)
     const roleBefore = bot.role
@@ -680,6 +703,17 @@ export function install(rt) {
         const agent = await rt.resolveAgent(rt.chatOf(id))
         await ctx.sessionTitle.rename(agent.session, nextName)
         await followMemberNames(Object.values(state.rooms).filter(room => room.members.includes(id)))
+      }
+      if (Object.hasOwn(patch, 'type')) {
+        if (type === undefined) delete bot.type
+        else bot.type = type
+      }
+      if (agent !== undefined) bot.agent = agent
+      if (type === 'herdr') {
+        delete bot.model
+        delete bot.appliedModel
+        delete bot.effort
+        delete bot.kickoff
       }
       if (role !== undefined) bot.role = role
       if (patch.instructions !== undefined) bot.instructions = String(patch.instructions).trim()

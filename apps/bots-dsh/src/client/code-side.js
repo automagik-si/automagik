@@ -84,8 +84,10 @@ export function useCodeFace(botId, { seat = false } = {}) {
 
 /** The open Bot's switch, wired to the flip: the view's entry to Code mode. */
 export function BotFaceSwitch({ bot }) {
+  const terminalOnly = bot?.type === 'herdr'
+  useEffect(() => { if (terminalOnly) void openTerminal(bot.id) }, [bot?.id, terminalOnly])
   const code = useCodeFace(bot?.id)
-  return h(FaceSwitch, { face: code.face, onFace: code.onFace })
+  return terminalOnly ? h('span', { className: 'lb-face' }, t('Terminal')) : h(FaceSwitch, { face: code.face, onFace: code.onFace })
 }
 
 /**

@@ -53,7 +53,7 @@ function seatChat(home, { registryPath, terminals = [], screens = {} }) {
 
 test('the listing joins the registry to this computer\'s terminals, never another machine\'s', async (t) => {
   const fixture = homeWith({
-    bots: [{ id: ONE, name: 'Orchestrator One', folder: '/srv/one' }, { id: TWO, name: 'Orchestrator Two' }, { id: OFF, name: 'Not Running' }],
+    bots: [{ id: ONE, name: 'Orchestrator One', type: 'herdr', folder: '/srv/one' }, { id: TWO, name: 'Orchestrator Two' }, { id: OFF, name: 'Not Running' }],
     projects: [{ name: 'Project One', folder: '/srv/one' }],
   })
   t.after(fixture.stop)
@@ -72,6 +72,8 @@ test('the listing joins the registry to this computer\'s terminals, never anothe
     [TWO, null, 'off', null],
     [OFF, null, 'off', null],
   ])
+  assert.equal(seats[0].type, 'herdr', 'the registry type reaches the seat without inference')
+  assert.equal(seats[1].type, undefined, 'an untyped seat remains native')
   assert.equal(seats[0].project, 'Project One')
   assert.equal(seats[0].agent, 'claude')
   assert.equal(seats[1].project, null)

@@ -1,4 +1,4 @@
-import { createElement as h, useEffect, useRef, useState } from 'react'
+import { createElement as h, Fragment, useEffect, useRef, useState } from 'react'
 import { BotMark } from './mark.js'
 import { CharacterGrid } from './bot-settings.js'
 import { AvatarLibraryPanel, avatarImage } from './avatar-library.js'
@@ -6,6 +6,7 @@ import { DEFAULT_SHAPES, DEFAULT_COLORS } from './characters.js'
 import { ChevronLeftIcon, CloseIcon } from './icons.js'
 import { useEscape } from './overlay-hooks.js'
 import { createPayload, freshBotName, startModel } from './bot-draft.js'
+import { BotTypeFields } from './bot-type.js'
 import { ModelMenu } from './model-menu.js'
 import { hostText, t } from './i18n.js'
 import { ROLE_MAX } from '../shared/bot-profile.js'
@@ -23,6 +24,8 @@ const randomLook = (avoid = {}) => {
 // The new-Bot form: look first, then name, model and instructions. Nothing exists until Create.
 // `inline` drops the pane's header for a form shown inside Settings.
 export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBack, onCreated, inline = false }) {
+  const [type, setType] = useState('')
+  const [agent, setAgent] = useState('claude')
   const [look, setLook] = useState(() => randomLook())
   const [image, setImage] = useState(null)
   const [library, setLibrary] = useState(false)
@@ -56,7 +59,7 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
     setBusy(true)
     try {
       const bot = await actions.createBot(createPayload({
-        name: finalName, look, image, model, effort, brief, role, instructions, sectionId: start?.sectionId,
+        type, agent, name: finalName, look, image, model, effort, brief, role, instructions, sectionId: start?.sectionId,
       }))
       onCreated(bot)
     } catch (failure) {
@@ -100,7 +103,8 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
       }),
       problem ? h('span', { className: 'bt-note bt-danger' }, hostText(problem))
         : clash ? h('span', { className: 'bt-note bt-danger' }, t('A Bot named {name} already exists', { name: finalName })) : null),
-    h('label', { className: 'bt-field' },
+    h(BotTypeFields, { type, agent, onType: setType, onAgent: setAgent }),
+    type === 'herdr' ? null : h(Fragment, null, h('label', { className: 'bt-field' },
       h('span', { className: 'bt-field-label' }, t('Role')),
       h('input', {
         className: 'bt-input', value: role, maxLength: ROLE_MAX, 'aria-label': t('Role'),
@@ -137,6 +141,7 @@ export function CreateBot({ roster, actions, start, brief = '', onBack, canGoBac
     permission == null ? null : h('div', { className: 'bt-note' },
       t('New Bots start at {level}.', { level: presetName(permission, roster.permissions) })),
     permission == null ? null : h('div', { className: 'bt-note' }, t('After the Bot is created, Auto can be turned on in its chat or Details, when its model offers it.')),
+    ),
     error ? h('div', { className: 'bt-error', role: 'alert', style: { padding: 0 } }, error) : null,
     h('div', { className: 'bt-create-foot' },
       h('button', { type: 'button', className: 'bt-soft', onClick: onBack }, canGoBack ? t('Back') : t('Cancel')),

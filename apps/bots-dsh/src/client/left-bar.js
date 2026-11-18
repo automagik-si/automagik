@@ -112,7 +112,7 @@ export function teamOf({ roster, order, status, marked = {}, current, now = Date
   // Bot row would (the row's id keeps the `seat:` prefix so a seat and a DSH Bot never collide).
   const seating = seats.map(seat => ({
     id: `seat:${seat.id}`, seat: true, artId: seat.id, name: seat.name, project: seat.project,
-    terminal: seat.terminal, agent: seat.agent, chat: seat.chat, status: seat.status,
+    type: seat.type, terminal: seat.terminal, agent: seat.agent, chat: seat.chat, status: seat.status,
     channels: [], unread: false,
   }))
   const bots = [

@@ -101,7 +101,7 @@ test('a Bot with no model renders its dock in React: the offered model, Start an
   flushSync(() => change.click())
   await tick()
   const routes = [...document.body.querySelectorAll('.bt-model-menu [role="menuitem"][data-route]')]
-  assert.deepEqual(routes.map(row => row.querySelector('.bt-menu-label').textContent), ['Native', 'ACP', 'Herdr', 'Remote Hermes'])
+  assert.deepEqual(routes.map(row => row.querySelector('.bt-menu-label').textContent), ['Native', 'ACP', 'Remote Hermes'])
   assert.deepEqual(routes.filter(row => row.hasAttribute('data-current')).map(row => row.querySelector('.bt-menu-hint').textContent), ['DeepSeek'])
   flushSync(() => routes[0].click())
   await tick()

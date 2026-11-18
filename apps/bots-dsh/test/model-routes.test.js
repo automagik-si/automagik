@@ -2,8 +2,8 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { SELECTOR_ROUTES, crossesHarness, routeOfRef, selectorRouteOf, selectorRoutePolicy } from '../src/shared/routes.js'
 
-test('the selector routes preserve Native, ACP, Herdr, then add Remote Hermes', () => {
-  assert.deepEqual([...SELECTOR_ROUTES], ['native', 'acp', 'herdr', 'hermes-remote'])
+test('the selector offers Native, ACP and Remote Hermes without Herdr', () => {
+  assert.deepEqual([...SELECTOR_ROUTES], ['native', 'acp', 'hermes-remote'])
 })
 
 test('a provider is placed on its selector route and harness', () => {
@@ -32,7 +32,7 @@ test('a route policy hides routes per bot type, refuses unknown routes, and keep
   assert.equal(selectorRoutePolicy({}), undefined)
   assert.deepEqual(selectorRoutePolicy({ dsh: ['native'], default: ['native', 'acp'] }), { dsh: ['native'], default: ['native', 'acp'] })
   // A repeated route is one route; an empty list hides every route for that type.
-  assert.deepEqual(selectorRoutePolicy({ genie: ['herdr', 'herdr'] }), { genie: ['herdr'] })
+  assert.deepEqual(selectorRoutePolicy({ genie: ['native', 'native'] }), { genie: ['native'] })
   assert.deepEqual(selectorRoutePolicy({ default: [] }), { default: [] })
   // Any kind name is accepted: #1007's rules fill the map, the selector does not name the kinds.
   assert.deepEqual(selectorRoutePolicy({ automagik: ['native', 'acp'], omni: ['native'], unfold: ['native'] }),
@@ -40,4 +40,14 @@ test('a route policy hides routes per bot type, refuses unknown routes, and keep
   assert.throws(() => selectorRoutePolicy({ dsh: ['native', 'terminal'] }), /unknown route/)
   assert.throws(() => selectorRoutePolicy({ dsh: 'native' }), /must be a list/)
   assert.throws(() => selectorRoutePolicy([]), /must be an object/)
+})
+
+
+test('a legacy herdr policy drops only herdr and warns instead of throwing', () => {
+  const warnings = []
+  const result = selectorRoutePolicy({ default: ['native', 'herdr', 'acp'], genie: ['herdr'] }, warning => warnings.push(warning))
+  assert.deepEqual(result, { default: ['native', 'acp'], genie: [] })
+  assert.equal(warnings.length, 2, 'each legacy policy entry must warn')
+  assert.match(warnings[0], /default.*herdr.*no longer.*ignored/)
+  assert.match(warnings[1], /genie.*herdr/)
 })

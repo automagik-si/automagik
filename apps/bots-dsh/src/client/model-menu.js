@@ -7,7 +7,7 @@ import { KeyIcon, MaskedInput } from './secret-card.js'
 import { SPRING_POP, SPRING_SHAPE, spring, stepMenuFocus, useLinger, useViewport, viewBottom } from './motion.js'
 import { hostText, t } from './i18n.js'
 import { HostModelMenu } from './host-model-menu.js'
-import { AgentMark, DshMarkIcon, HerdrMarkIcon } from './marks.js'
+import { AgentMark, DshMarkIcon } from './marks.js'
 import { crossesHarness, routeOf, selectorRouteOf } from '../shared/routes.js'
 import { HermesMark, HERMES_MARK_CSS } from './hermes-mark.js'
 import { HermesRemoteConnect } from './hermes-remote.js'
@@ -61,6 +61,7 @@ const servedOf = (roster, ref) => (roster.models ?? []).find(model => model.ref 
 
 // What a Bot runs on, for display: the chosen model, else the one it last ran on.
 export function modelOf(bot, roster) {
+  if (bot.type === 'herdr') return undefined
   const ref = bot.model ?? bot.appliedModel
   if (!ref) return undefined
   const served = servedOf(roster, ref)
@@ -127,7 +128,7 @@ export function modelHint(bot, roster, state) {
 }
 
 // A Bot that waits for a model pick: none chosen, and no plugin answers for it.
-export const needsModelPick = (bot, roster) => modelOf(bot, roster) === undefined && roster.hostModels?.[bot.id] === undefined
+export const needsModelPick = (bot, roster) => bot.type !== 'herdr' && modelOf(bot, roster) === undefined && roster.hostModels?.[bot.id] === undefined
 
 // The thinking levels of one model, `{efforts, defaultEffort?}`, or null when it has none.
 // The catalog carries them for models Bots use; any other ref asks the host once, and the
@@ -195,17 +196,14 @@ export function offeredModels(models, current) {
 const offModel = model => model.missing === true || unavailableModel(model)
 const Tick = ({ on }) => h('span', { className: 'bt-model-tick', 'aria-hidden': true }, on ? h(CheckIcon) : null)
 
-// The selector's three routes, in the order they are offered (issue #1016). Native is DSH's
-// own loop; ACP is every agent acp-dsh serves; Herdr is the agent's own terminal on
-// herdr-core, which #1007 wires. The names are UI words; their details say what each means.
-export const ROUTE_ORDER = Object.freeze(['native', 'acp', 'herdr', 'hermes-remote'])
-const ROUTE_NAME = Object.freeze({ native: 'Native', acp: 'ACP', herdr: 'Herdr', 'hermes-remote': 'Remote Hermes' })
-const ROUTE_ICON = Object.freeze({ native: DshMarkIcon, acp: ConnectorIcon, herdr: HerdrMarkIcon, 'hermes-remote': HermesMark })
+// The selectable model routes. Herdr is selected as a Bot type in its form.
+export const ROUTE_ORDER = Object.freeze(['native', 'acp', 'hermes-remote'])
+const ROUTE_NAME = Object.freeze({ native: 'Native', acp: 'ACP', 'hermes-remote': 'Remote Hermes' })
+const ROUTE_ICON = Object.freeze({ native: DshMarkIcon, acp: ConnectorIcon, 'hermes-remote': HermesMark })
 const routeName = route => t(ROUTE_NAME[route] ?? route)
 const routeDetail = (route) => {
   switch (route) {
     case 'acp': return t('Agent Client Protocol')
-    case 'herdr': return t('herdr-core terminal')
     case 'hermes-remote': return 'hermes serve'
     default: return t('DSH harness')
   }
@@ -304,22 +302,6 @@ export function nativeModels(models, current) {
   return [{ ref: current, provider, name: rest.join('/'), missing: true }, ...list]
 }
 
-// Herdr's agents and their models, from the pack's own table
-// (herdr/mods/am-sidebar/models.js). Herdr cannot run a Bot from this app yet (#1007), so the
-// rows are shown, named and disabled rather than hidden: the owner sees what the route will
-// offer and rules on it at approval.
-const HERDR_AGENTS = Object.freeze([
-  Object.freeze({ id: 'claude', name: 'Claude Code', models: Object.freeze(['default', 'opus', 'sonnet', 'haiku']) }),
-  Object.freeze({ id: 'codex', name: 'Codex', models: Object.freeze(['default']) }),
-  Object.freeze({ id: 'hermes', name: 'Hermes', models: Object.freeze(['default']) }),
-  Object.freeze({ id: 'antigravity', name: 'Antigravity', models: Object.freeze(['default']) }),
-  Object.freeze({ id: 'omp', name: 'omp', models: Object.freeze(['default']) }),
-])
-export function herdrAgents() {
-  return HERDR_AGENTS.map(agent => ({ ...agent, models: agent.models.map(id => ({ id })) }))
-}
-const herdrModelLabel = model => (model.id === 'default' ? t('Default') : model.id.charAt(0).toUpperCase() + model.id.slice(1))
-
 // Why a model cannot run, in the menu's words. Undefined: it can run now.
 export function modelUnavailableText(model) {
   if (model?.pending === true) return t('Not available yet')
@@ -367,8 +349,8 @@ const NO_MANUAL = {}
 // the new opening number then reads the default again instead of the old choices.
 export const manualFor = (state, opening) => (state.opening === opening ? state.manual : NO_MANUAL)
 
-// The rows a step shows (model-menu cascade). The first step is the route, then (ACP and
-// Herdr) the agent, then the route's and agent's models, then a model's thinking levels.
+// The rows a step shows (model-menu cascade). The first step is the route, then (ACP)
+// the agent, then the route's and agent's models, then a model's thinking levels.
 // `current` is the Bot's model, `picked` its level when that model serves it, `levelName`
 // that level's name. `go(view)` opens another step; `onModel(model, route)` and
 // `onLevel(model, effort)` pick; the menu offers the provider's API key where it can.
@@ -405,7 +387,7 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
     const list = route === 'native' ? nativeModels(models, current)
       : route === 'hermes-remote' ? models.filter(model => providerOf(model) === 'hermes-remote')
       : route === 'acp' ? (agent?.models ?? [])
-        : herdrAgents().find(entry => entry.id === view.agent)?.models ?? []
+        : []
     const direct = route === 'native' || route === 'hermes-remote'
     const back = direct ? { label: t('Back to routes'), view: MENU_ROOT } : { label: t('Back to agents'), view: { step: 'agents', route } }
     const backLabel = direct ? back.label : t('Back to {agent}', { agent: agent?.name ?? routeName(route) })
@@ -435,14 +417,13 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
             },
             h(Caret), h('span', { className: 'bt-menu-label' }, label)),
         open ? entries.map((entry) => {
-          const herdr = route === 'herdr'
           const pending = entry.pending === true
-          const off = herdr || pending || offModel(entry)
-          const why = herdr || pending ? t('Not available yet') : modelUnavailableText(entry)
-          const name = herdr ? herdrModelLabel(entry) : modelLabel(entry)
+          const off = pending || offModel(entry)
+          const why = pending ? t('Not available yet') : modelUnavailableText(entry)
+          const name = modelLabel(entry)
           const more = withLevels && !off && effortRows(knownEfforts(entry)).length > 0
           return h('button', {
-            key: entry.ref ?? entry.id, type: 'button', role: 'menuitemradio', 'aria-checked': !herdr && !pending && entry.ref === current,
+            key: entry.ref ?? entry.id, type: 'button', role: 'menuitemradio', 'aria-checked': !pending && entry.ref === current,
             title: entry.ref, 'aria-haspopup': more ? 'menu' : undefined,
             'data-unavailable': off ? '' : undefined,
             'aria-label': why ? `${name} · ${why}` : undefined,
@@ -451,7 +432,7 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
           h('span', { className: 'bt-menu-label' }, name),
           why ? h('span', { className: 'bt-menu-hint' }, why)
             : entry.ref === roster.defaultModel ? h('span', { className: 'bt-menu-hint' }, t('Default')) : null,
-          h(Tick, { on: !herdr && !pending && entry.ref === current }),
+          h(Tick, { on: !pending && entry.ref === current }),
           more ? h(ChevronRightIcon) : null)
         }) : null)
       }),
@@ -466,17 +447,16 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
   }
   if (view.step === 'agents') {
     const route = view.route
-    const agents = route === 'acp' ? acpAgents(models) : herdrAgents()
+    const agents = route === 'acp' ? acpAgents(models) : []
     return h('div', { key: `agents:${route}`, className: 'bt-model-step', role: 'group', 'aria-label': t('Agents') },
       stepBack(t('Back to routes'), () => go(MENU_ROOT)),
       h('div', { className: 'bt-model-group', role: 'presentation' }, t('Agents')),
       agents.length === 0 ? h('div', { className: 'bt-model-none' }, route === 'acp' ? t('No ACP agents are set up in DeepSeek Harness yet.') : t('No agents are set up for this route yet.')) : null,
       agents.map((agent) => {
-        const herdr = route === 'herdr'
         const pending = agent.pending === true
         const here = route === 'acp' && current !== undefined && current.startsWith(`${agent.provider}/`)
-        const signedOut = !herdr && !pending && agent.models.every(entry => offModel(entry)) && agent.models.some(entry => entry.needsSignIn || entry.needsAccount)
-        const why = herdr || pending ? t('Not available yet') : signedOut ? t('Needs a sign-in') : undefined
+        const signedOut = !pending && agent.models.every(entry => offModel(entry)) && agent.models.some(entry => entry.needsSignIn || entry.needsAccount)
+        const why = pending ? t('Not available yet') : signedOut ? t('Needs a sign-in') : undefined
         const now = here ? modelLabel(agent.models.find(entry => entry.ref === current) ?? {}) ?? agent.name : undefined
         return h('button', {
           key: agent.provider ?? agent.id, type: 'button', role: 'menuitem', 'aria-haspopup': route === 'hermes-remote' && onRemote ? 'dialog' : 'menu', 'data-current': here ? '' : undefined,
@@ -488,7 +468,7 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
         h('span', { className: 'bt-menu-label' }, agent.name),
         why ? h('span', { className: 'bt-menu-hint' }, why) : here && levelName ? h('span', { className: 'bt-menu-hint' }, levelName) : null,
         h(Tick, { on: here }),
-        herdr || pending ? null : h(ChevronRightIcon))
+        pending ? null : h(ChevronRightIcon))
       }))
   }
   const routes = routesFor(bot, roster)
@@ -502,11 +482,11 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
         ? rememberedProfile || t('Set up')
         : here
         ? [modelRoute(roster, current).connection, levelName].filter(Boolean).join(' · ')
-        : route === 'herdr' ? t('Not available yet') : undefined
+        : undefined
       return h('button', {
         key: route, type: 'button', role: 'menuitem', 'aria-haspopup': setup ? 'dialog' : 'menu', 'data-current': here ? '' : undefined,
-        'data-route': route, 'data-unavailable': route === 'herdr' ? '' : undefined,
-        title: route === 'acp' ? t('Agent Client Protocol') : route === 'herdr' ? t('Not available yet') : undefined,
+        'data-route': route,
+        title: route === 'acp' ? t('Agent Client Protocol') : undefined,
         'aria-label': here ? t('{route}, current model {model}', { route: routeName(route), model: now ?? '' })
           : now ? `${routeName(route)} · ${now}` : `${routeName(route)} · ${routeDetail(route)}`,
         onClick: () => setup ? onRemote() : go(route === 'native' || route === 'hermes-remote' ? { step: 'models', route } : { step: 'agents', route }),
@@ -516,7 +496,7 @@ export function ModelSteps({ roster, bot, view, current, picked, levelName, go, 
       now ? h('span', { className: 'bt-menu-hint' }, now)
         : h('span', { className: 'bt-menu-hint', 'data-route-detail': '' }, routeDetail(route)),
       h(Tick, { on: here }),
-      route === 'herdr' ? null : h(ChevronRightIcon))
+      h(ChevronRightIcon))
     }),
     onManage ? h('div', { className: 'bt-menu-sep', role: 'separator' }) : null,
     onManage ? h('button', { type: 'button', role: 'menuitem', onClick: onManage }, h(SlidersIcon), h('span', { className: 'bt-menu-label' }, t('Models and providers…'))) : null)
@@ -590,6 +570,7 @@ export function useAnchoredMenu({ onEscape, minWidth = 240 } = {}) {
 // (the model new Bots start on).
 // A Bot whose model menu its plugin owns gets that menu instead (host-model-menu.js).
 export function ModelMenu(props) {
+  if (props.bot?.type === 'herdr') return null
   return h(props.roster?.hostModels?.[props.bot?.id] === undefined ? DshModelMenu : HostModelMenu, props)
 }
 
@@ -767,9 +748,9 @@ function DshModelMenu({ bot, roster, actions, run, wide = false, link = false, c
   }
   // A model with levels opens its level step; one without applies now. Levels not known yet
   // are asked for first. A model that needs an API key asks for it, a signed-out agent opens
-  // its sign-in row in the chat, and Herdr's models wait for #1007.
+  // its sign-in row in the chat.
   const onModel = (model, route) => {
-    if (route === 'herdr' || model.ref === undefined) return
+    if (model.ref === undefined) return
     if (model.needsKey) {
       if (typeof actions.setProviderKey === 'function') { setKeyFor(model); return }
       const manage = manageModels(actions)
@@ -922,6 +903,7 @@ function modelWords(roster, ref) {
 // ACP · Claude Code · change". `modelRef` and `onPick` stand in for a model the Bot does
 // not have yet (not `ref`: React keeps that prop for itself, issue #153).
 export function ModelLine({ bot, roster, actions, run, modelRef, onPick, chat = false }) {
+  if (bot.type === 'herdr') return null
   const words = modelWords(roster, modelRef ?? bot.model ?? bot.appliedModel)
   return h('div', { className: 'bt-model-line' },
     h('span', { className: 'bt-model-line-text' }, words.route === '' || words.route === words.provider
@@ -989,7 +971,7 @@ function useModelChoice({ sessionId, useRoster, actions }, idle) {
   const [error, setError] = useState('')
   // A Bot whose model its plugin picks never waits for a DSH model.
   const hosted = roster.hostModels?.[bot?.id] !== undefined
-  const shown = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && !hosted && !idle
+  const shown = Boolean(bot) && currentPart(bot) === sessionId && roster.ready && bot.type !== 'herdr' && !hosted && !idle
   useEffect(() => { if (shown) void actions.refreshModels?.() }, [shown, sessionId])
   if (!shown) return null
   const models = roster.models ?? []

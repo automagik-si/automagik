@@ -96,6 +96,7 @@ export class SeatChat {
       const agent = terminal ? agentOf(terminal) : null
       return {
         id: bot.id,
+        ...(bot.type !== undefined ? { type: bot.type } : {}),
         name: String(bot.name ?? '').trim() || bot.id,
         project: projectName(bot.folder),
         order,

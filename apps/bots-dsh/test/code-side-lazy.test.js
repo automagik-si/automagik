@@ -101,3 +101,16 @@ test('the main bundle stays free of xterm and of the pane module', () => {
   const pane = readFileSync(new URL('../src/client/code-side-pane.js', import.meta.url), 'utf8')
   assert.match(pane, /@xterm\/xterm/, 'the chunk is where the renderer and xterm live')
 })
+
+
+test('the Bot header selects terminal-only from type, never its model or agent', async () => {
+  const { exports } = await flipModule()
+  for (const agent of ['claude', 'codex', 'dsh-tui', undefined]) {
+    const bot = { id: 'typed', model: 'acp-codex/default', agent }
+    const native = exports.BotFaceSwitch({ bot })
+    assert.equal(native.type.name, 'FaceSwitch', 'absent type is native and keeps Chat / Terminal')
+    const herdr = exports.BotFaceSwitch({ bot: { ...bot, type: 'herdr' } })
+    assert.equal(herdr.type, 'span')
+    assert.deepEqual(Array.from(herdr.children), ['Terminal'])
+  }
+})

@@ -107,7 +107,7 @@ test('the model line names the model and its provider, and "change" opens the mo
     assert.equal(steps.props.current, 'anthropic/claude-opus-5-5')
     const drawn = steps.type(steps.props)
     const items = nodes(drawn, node => node.type === 'button').map(button => nodes(button, n => n.props.className === 'bt-menu-label')[0]?.children[0] ?? '')
-    assert.deepEqual(items, ['Native', 'ACP', 'Herdr', 'Remote Hermes', 'Models and providers…'])
+    assert.deepEqual(items, ['Native', 'ACP', 'Remote Hermes', 'Models and providers…'])
     // Native's own models stay one list under their provider (drawn here without the folding
     // of provider groups, which groupOpen's own tests cover).
     const native = steps.type({ ...steps.props, folds: undefined, view: { step: 'models', route: 'native' } })
@@ -411,7 +411,7 @@ test('a model that cannot run is marked in the route, the agent, the model row a
     // Step 1: the four routes in order, the Bot's own marked; its agent opens the next step.
     const first = nodes(steps.type(steps.props), node => node.props.role === 'menuitem' && ['menu', 'dialog'].includes(node.props['aria-haspopup']))
     assert.deepEqual(first.map(row => [label(row), hint(row) ?? null]), [
-      ['Native', 'DSH harness'], ['ACP', 'Claude Code'], ['Herdr', 'Not available yet'], ['Remote Hermes', 'Set up'],
+      ['Native', 'DSH harness'], ['ACP', 'Claude Code'], ['Remote Hermes', 'Set up'],
     ])
     assert.equal(first[1].props['aria-label'], 'ACP, current model Claude Code')
     assert.equal(first[1].props.title, 'Agent Client Protocol')
@@ -504,16 +504,16 @@ function openMenu({ bot = { id: 'b1', name: 'Ops', model: 'acp-codex/default', a
 const labelOf = row => nodes(row, node => node.props.className === 'bt-menu-label')[0].children[0]
 const hintOf = row => nodes(row, node => node.props.className === 'bt-menu-hint')[0]?.children[0] ?? null
 
-test('step 1 lists the four routes in order, marks the one the Bot is on, and ends on the providers', () => {
+test('step 1 lists the three routes in order, marks the one the Bot is on, and ends on the providers', () => {
   const { step, steps } = openMenu()
   assert.equal(steps.props.view.step, 'routes')
   const tree = step()
   const rows = nodes(tree, node => node.type === 'button')
   assert.deepEqual(rows.map(row => [labelOf(row), hintOf(row)]), [
-    ['Native', 'DSH harness'], ['ACP', 'Codex · High'], ['Herdr', 'Not available yet'], ['Remote Hermes', 'Set up'], ['Models and providers…', null],
+    ['Native', 'DSH harness'], ['ACP', 'Codex · High'], ['Remote Hermes', 'Set up'], ['Models and providers…', null],
   ])
   assert.deepEqual(rows.slice(0, 3).map(row => [row.props.role, row.props['aria-haspopup'], row.props['data-current'] ?? null]),
-    [['menuitem', 'menu', null], ['menuitem', 'menu', ''], ['menuitem', 'menu', null]])
+    [['menuitem', 'menu', null], ['menuitem', 'menu', ''], ['menuitem', 'dialog', null]])
   assert.equal(rows[1].props['aria-label'], 'ACP, current model Codex · High')
   // The current route carries the tick; no model row and no level row on this step.
   assert.deepEqual(rows.slice(0, 3).map(row => nodes(row, node => node.type?.name === 'Tick')[0].props.on), [false, true, false])
@@ -642,22 +642,10 @@ test('a route crossing reaches the host switch, not the in-place model update', 
   assert.deepEqual(switched, [])
 })
 
-test('Herdr is offered, named unavailable, and lists its agents and models until #1007 wires it', () => {
-  const { steps, step, updates, switched } = openMenu()
+test('Herdr is not a model route even when a legacy policy lists it', () => {
+  const { step } = openMenu({ routePolicy: { default: ['native', 'acp', 'herdr'] } })
   const root = nodes(step(), node => node.props.role === 'menuitem' && ['menu', 'dialog'].includes(node.props['aria-haspopup']))
-  assert.deepEqual(root.map(labelOf), ['Native', 'ACP', 'Herdr', 'Remote Hermes'])
-  assert.equal(hintOf(root[2]), 'Not available yet')
-  const agents = step({ step: 'agents', route: 'herdr' })
-  const rows = nodes(agents, node => node.props.role === 'menuitem' && node.props['aria-haspopup'] === 'menu')
-  assert.deepEqual(rows.map(labelOf), ['Claude Code', 'Codex', 'Hermes', 'Antigravity', 'omp'])
-  assert.deepEqual(rows.map(hintOf), ['Not available yet', 'Not available yet', 'Not available yet', 'Not available yet', 'Not available yet'])
-  const models = step({ step: 'models', route: 'herdr', agent: 'claude' })
-  const rowsOf = nodes(models, node => node.props.role === 'menuitemradio')
-  assert.deepEqual(rowsOf.map(labelOf), ['Default', 'Opus', 'Sonnet', 'Haiku'])
-  assert.deepEqual(rowsOf.map(hintOf), ['Not available yet', 'Not available yet', 'Not available yet', 'Not available yet'])
-  steps.props.onModel({ id: 'opus' }, 'herdr')
-  assert.deepEqual(updates, [])
-  assert.deepEqual(switched, [])
+  assert.deepEqual(root.map(labelOf), ['Native', 'ACP'])
 })
 
 test('a Bot kept on a plan route until its CLI can take it says so, not that its model is unavailable (#868)', () => {
@@ -790,4 +778,19 @@ test('a shell-off Bot whose retired plan route is gone asks for a model, not a s
   assert.equal(modelHint({ id: 'chief', name: 'Omni', model: 'openai-codex/gpt-6.1-sol', subscriptionShellHeld: held }, roster),
     'This model no longer answers, and this Bot cannot move to Codex while its shell is off. '
       + "Pick a model that uses DeepSeek Harness's tools, or turn its shell on.")
+})
+
+
+test('Herdr has no model menu, model line or model prompt from its explicit type alone', () => {
+  const { ModelMenu, ModelLine, needsModelPick } = module.exports
+  const roster = { models: [], hostModels: {} }
+  for (const agent of ['codex', 'dsh-tui', undefined]) {
+    const bot = { id: 'typed', name: 'Typed', type: 'herdr', agent, model: 'acp-codex/default' }
+    assert.equal(ModelMenu({ bot, roster }), null)
+    assert.equal(ModelLine({ bot, roster }), null)
+    assert.equal(needsModelPick({ ...bot, model: undefined }, roster), false)
+    const { type: _type, ...native } = bot
+    assert.notEqual(ModelMenu({ bot: native, roster }), null, 'an absent type stays native')
+    assert.equal(needsModelPick({ ...native, model: undefined }, roster), true)
+  }
 })

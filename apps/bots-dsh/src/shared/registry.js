@@ -11,6 +11,8 @@
 // Readers keep unknown fields: `raw` is the file exactly as parsed, and a write saves that,
 // edited, so DSH never drops Herdr's fields and Herdr never drops DSH's.
 
+// An absent type is the native DSH Bot. Never infer it from agent or model.
+export const BOT_TYPES = Object.freeze(['herdr'])
 export const REGISTRY_VERSION = 2
 /** The home file's place under `$AUTOMAGIK_HOME`, and a repo file's place under the repo. */
 export const HOME_PATH = 'bots/bots.json'
@@ -180,6 +182,7 @@ export function parseRegistry(text, { kind } = {}) {
     if (bots.some(k => k.id === b.id)) return warnings.push(`${where}: id used twice; left out`)
     if (!isText(b.name)) return warnings.push(`${where}: name is missing; left out`)
     if (b.name.length > MAX_NAME) return warnings.push(`${where}: name is longer than ${MAX_NAME} characters; left out`)
+    if (b.type !== undefined && !BOT_TYPES.includes(b.type)) return warnings.push(`${where}: unknown type ${JSON.stringify(b.type)}; left out`)
     const bot = { ...b }
     for (const key of [...NEVER_FIELDS, ...UNSAFE_KEYS]) {
       if (!Object.hasOwn(bot, key)) continue
@@ -284,6 +287,7 @@ export function checkRegistry(file, { kind, before = null } = {}) {
     if (!isObject(b) || !isBotId(b.id)) return errors.push(`${at}: ${ID_RULE}`)
     if (ids.has(b.id)) errors.push(`${at}: id used twice`)
     ids.add(b.id)
+    if (b.type !== undefined && !BOT_TYPES.includes(b.type)) errors.push(`${at}: unknown type ${JSON.stringify(b.type)}`)
     if (!isText(b.name)) errors.push(`${at}: name is missing`)
     else if (b.name.length > MAX_NAME) errors.push(`${at}: name is longer than ${MAX_NAME} characters`)
     for (const [key, cap] of Object.entries(TEXT_CAPS)) {
@@ -452,6 +456,8 @@ export function fromDshState(state) {
     if (b.sessionPinned === true) { warnings.push(`${id}: a host's pinned Session; stays in Automagik only`); continue }
     if (!isBotId(id)) { warnings.push(`${id}: not b- or session-<uuid>; stays in Automagik only`); continue }
     const bot = { id, name: b.name, role: b.role ?? '', instructions: b.instructions ?? '' }
+    if (b.type !== undefined) bot.type = b.type
+    if (b.agent !== undefined) bot.agent = b.agent
     if (b.kind !== undefined) bot.identity = b.kind
     if (mains.includes(id)) bot.main = true
     if (isObject(b.avatar?.pet)) bot.pet = { ...b.avatar.pet }

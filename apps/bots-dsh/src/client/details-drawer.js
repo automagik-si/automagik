@@ -351,7 +351,7 @@ export function DetailsDrawer({ sessionId, startRenaming, startTab, hasStrip, ro
       bot && tab === 'computer' ? h(ComputerView, { bot, actions, hooks: { useComputer } }) : null,
       bot && tab === 'details' ? [
         h(RunStats, { key: 'stats', bot, part, running, actions }),
-        h('div', { key: 'model', className: 'bt-drawer-model' },
+        bot.type === 'herdr' ? null : h('div', { key: 'model', className: 'bt-drawer-model' },
           h('div', { className: 'bt-section-title' }, t('Model')),
           h(ModelMenu, { bot, roster, actions, run, wide: true }),
           needsModelPick(bot, roster) ? h('div', { className: 'bt-note' }, t('Pick a model and {name} can start.', { name: bot.name })) : null),

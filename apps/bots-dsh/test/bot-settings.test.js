@@ -95,3 +95,19 @@ test('the Shell switch shows what shell access reaches and saves the capability'
   assert.equal(calls[0].id, 'b')
   assert.equal(calls[0].patch.shell, false)
 })
+
+
+test('settings reads only the explicit type and saves type and terminal agent', () => {
+  for (const native of [bot, { ...bot, agent: 'codex', model: 'acp-codex/default' }]) {
+    assert.equal(settings(native).some(node => node.props?.title === 'Model'), true)
+  }
+  const updates = []
+  const nodes = walk(BotSettingsForm({ bot: { ...bot, type: 'herdr', agent: 'codex', model: 'acp-codex/default' }, roster: { mainBotIds: [], rooms: [], models: [], memory: false }, actions: { updateBot: (id, patch) => updates.push([id, patch]) }, run: value => value }))
+  assert.equal(nodes.some(node => node.props?.title === 'Model'), false, 'Herdr settings must have no model row')
+  const fields = nodes.find(node => node.type?.name === 'BotTypeFields')
+  assert.equal(fields.props.type, 'herdr')
+  assert.equal(fields.props.agent, 'codex')
+  fields.props.onAgent('claude')
+  fields.props.onType('')
+  assert.deepEqual(JSON.parse(JSON.stringify(updates)), [['b', { agent: 'claude' }], ['b', { type: null }]])
+})

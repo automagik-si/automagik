@@ -1520,3 +1520,31 @@ test('a Bot wears a pet Genie ships with; a photo set after it wins, and a pet f
   const missing = await call('pet-use', { botId: writer.id, source: 'team', id: 'nobody' })
   assert.equal(missing.ok, false)
 })
+
+
+test('host create and update persist explicit type and agent without selecting a model', async t => {
+  const { call, stop, home, selected, sent } = start(undefined, { models: ['deepseek-v4-pro'] })
+  t.after(stop)
+  await call('state', {})
+  const created = await call('create-bot', { name: 'Terminal', type: 'herdr', agent: 'codex', model: 'not/a-model' })
+  assert.equal(created.ok, true, JSON.stringify(created))
+  const id = created.value.id
+  assert.equal(created.value.type, 'herdr', 'host create must preserve type')
+  assert.equal(created.value.agent, 'codex')
+  assert.equal(created.value.model, undefined)
+  let saved = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')).bots[id]
+  assert.equal(saved.type, 'herdr', 'created type must be persisted')
+  assert.equal(saved.agent, 'codex')
+  assert.equal((await call('update-bot', { id, type: null })).ok, true)
+  assert.equal(JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')).bots[id].type, undefined)
+  const changed = await call('update-bot', { id, type: 'herdr', agent: 'claude' })
+  assert.equal(changed.ok, true, JSON.stringify(changed))
+  saved = JSON.parse(readFileSync(join(home, 'state.json'), 'utf8')).bots[id]
+  assert.equal(saved.type, 'herdr', 'updated type must be persisted')
+  assert.equal(saved.agent, 'claude')
+  assert.equal((await call('state', {})).value.bots.find(bot => bot.id === id).type, 'herdr')
+  assert.equal((await call('create-bot', { name: 'Invalid', type: 'unknown' })).ok, false)
+  assert.equal((await call('update-bot', { id, type: 'unknown' })).ok, false)
+  assert.deepEqual(selected, [], 'Herdr never selects a DSH model')
+  assert.deepEqual(sent, [], 'Herdr never starts a greeting')
+})

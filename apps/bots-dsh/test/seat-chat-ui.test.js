@@ -310,3 +310,26 @@ test('a seat with no live pane keeps Terminal, says why, and opens nothing', (t)
   assert.equal(codeStore.snapshot().face, 'chat')
   assert.deepEqual(fetched, [], 'no tree, no chunk and no new route is fetched')
 })
+
+
+test('Herdr terminal-only render reads type alone, including an offline seat', () => {
+  codeStore.reset()
+  try {
+    for (const agent of ['claude', 'codex', 'dsh-tui', null]) {
+      seatChatView.set({ seat: { ...seatRow, agent, model: 'acp-codex/default' } })
+      const native = renderSeat()
+      assert.equal(native.props['data-seat-face'], 'chat', 'absent type must stay native regardless of agent/model')
+      assert.ok(part(native, 'chat'), 'native seats keep their Chat face')
+      for (const terminal of ['t1', null]) {
+        seatChatView.set({ seat: { ...seatRow, type: 'herdr', agent, terminal } })
+        const herdr = renderSeat()
+        assert.equal(herdr.props['data-seat-face'], 'terminal', 'explicit Herdr must render terminal-only')
+        assert.equal(part(herdr, 'chat'), undefined, 'Herdr must not offer Chat')
+        assert.equal(textOf(herdr).includes('Back to chat'), false)
+      }
+    }
+  } finally {
+    seatChatView.set({ seat: null })
+    codeStore.reset()
+  }
+})

@@ -100,3 +100,23 @@ test('a name another Bot has blocks Create', () => {
   assert.match(flatten(concrete).join(' '), /A Bot named Ada already exists/)
   assert.equal(button('Create').props.disabled, true)
 })
+
+
+test('create type selector offers Herdr agent and hides its model and instructions', async () => {
+  render({ models: MODELS })
+  let payload
+  props.actions.createBot = async value => { payload = value; return { id: 'created' } }
+  const type = () => collect(n => n.type === 'select' && n.props['aria-label'] === 'Bot type')[0]
+  assert.equal(type().props.value, '')
+  assert.equal(collect(n => n.props?.className === 'bt-model-trigger').length, 1)
+  type().props.onChange({ target: { value: 'herdr' } })
+  assert.equal(collect(n => n.props?.className === 'bt-model-trigger').length, 0)
+  assert.equal(button('Add instructions'), undefined)
+  const agent = collect(n => n.type === 'select' && n.props['aria-label'] === 'Terminal agent')[0]
+  agent.props.onChange({ target: { value: 'codex' } })
+  button('Create').props.onClick()
+  await Promise.resolve()
+  assert.equal(payload.type, 'herdr')
+  assert.equal(payload.agent, 'codex')
+  assert.equal(Object.hasOwn(payload, 'model'), false)
+})

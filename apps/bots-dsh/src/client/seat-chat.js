@@ -84,13 +84,14 @@ export function seatWithFreshPane(seat, fresh) {
   const next = {
     ...seat,
     name: fresh.name ?? seat.name,
+    type: fresh.type,
     project: fresh.project ?? null,
     terminal: fresh.terminal ?? null,
     agent: fresh.agent ?? null,
     chat: fresh.chat ?? null,
     status: fresh.status ?? seat.status,
   }
-  return next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal
+  return next.type === seat.type && next.name === seat.name && next.project === seat.project && next.terminal === seat.terminal
     && next.agent === seat.agent && next.chat === seat.chat && next.status === seat.status
     ? null : next
 }
@@ -268,15 +269,17 @@ export const seatSourceNote = seat => (seat?.chat === 'screen'
  */
 export function SeatChatPanel({ onBack }) {
   const seat = useSyncExternalStore(seatChatView.subscribe, seatChatView.getSnapshot).seat
-  const face = useSeatFace(seat)
+  const terminalOnly = seat?.type === 'herdr'
+  const face = useSeatFace(terminalOnly ? null : seat)
   const botId = seatBotId(seat)
   // The same flip and the same Code body a Bot conversation uses (code-side.js), keyed by the
   // seat's registry Bot id. The seat row keeps the body itself; the conversation slot is not
   // registered underneath it.
   const code = useCodeFace(botId, { seat: true })
-  const terminal = code.face === 'terminal'
+  const terminal = terminalOnly || code.face === 'terminal'
+  useEffect(() => { if (terminalOnly && botId) void code.onFace('terminal') }, [botId, terminalOnly])
   const why = seatTerminalWhy(seat)
-  const showingTerminal = terminal && why === null
+  const showingTerminal = terminal && (terminalOnly || why === null)
   const scroll = useRef(null)
   const [pinned, setPinned] = useState(true)
   const length = face.rows.length
@@ -285,7 +288,7 @@ export function SeatChatPanel({ onBack }) {
     if (node && pinned) node.scrollTop = node.scrollHeight
   }, [length, pinned, seat?.terminal])
   // A seat that lost its pane always shows its chat, never a Terminal body it cannot open.
-  useEffect(() => { if (why !== null && terminal) closeTerminal() }, [why, terminal])
+  useEffect(() => { if (!terminalOnly && why !== null && terminal) closeTerminal() }, [why, terminal, terminalOnly])
   // Leaving the seat panel leaves its Terminal too: a later conversation never opens on it.
   useEffect(() => () => { if (showingTerminal) closeTerminal() }, [showingTerminal])
   if (seat === null) {
@@ -299,14 +302,14 @@ export function SeatChatPanel({ onBack }) {
     h('header', { className: 'bt-seat-head' },
       h('button', {
         type: 'button', className: 'bt-seat-back',
-        'aria-label': showingTerminal ? t('Back to chat') : t('Back to the team'),
-        title: showingTerminal ? t('Back to chat') : t('Back to the team'),
-        onClick: () => { if (showingTerminal) closeTerminal(); else onBack?.() },
+        'aria-label': showingTerminal && !terminalOnly ? t('Back to chat') : t('Back to the team'),
+        title: showingTerminal && !terminalOnly ? t('Back to chat') : t('Back to the team'),
+        onClick: () => { if (showingTerminal && !terminalOnly) closeTerminal(); else onBack?.() },
       }, '←'),
       h('div', { className: 'bt-seat-who' },
         h('div', { className: 'bt-seat-title' }, seat.name),
         h('div', { className: 'bt-seat-sub' }, seatLine)),
-      botId === null ? null : h(FaceSwitch, {
+      botId === null ? null : terminalOnly ? h('span', null, t('Terminal')) : h(FaceSwitch, {
         face: showingTerminal ? 'terminal' : 'chat',
         onFace: code.onFace,
         unavailable: why === null ? {} : { terminal: why },

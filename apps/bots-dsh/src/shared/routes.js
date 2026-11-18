@@ -73,11 +73,11 @@ export function commandCapableAgent(ref) {
 }
 
 // The selector's first level (RFC 0030, issue #1016): the route the person is crossing to.
-// Native is DSH's own loop; ACP is an agent of the person's, over its sign-in; Herdr is the
-// agent's native terminal on herdr-core, wired by #1007. A route is a public word: keep it.
-export const SELECTOR_ROUTES = Object.freeze(['native', 'acp', 'herdr', 'hermes-remote'])
+// Native is DSH's own loop; ACP is an agent over its sign-in. Herdr is a Bot type,
+// not a selectable model route. Legacy policies drop that public word with a warning.
+export const SELECTOR_ROUTES = Object.freeze(['native', 'acp', 'hermes-remote'])
 
-/** The selector route a provider id belongs to: 'native', 'acp' or 'herdr'. */
+/** The selector route a provider id belongs to: 'native', 'acp' or 'hermes-remote'. */
 export function selectorRouteOf(provider) {
   if (provider === 'hermes-remote') return 'hermes-remote'
   return routeOf(provider).connectedBy === 'acp' ? 'acp' : 'native'
@@ -93,7 +93,7 @@ export function routeOfRef(ref) {
 /**
  * Whether moving from one model ref to another crosses a harness: another route, or another
  * agent inside ACP. A model change under the same provider keeps the conversation (RFC 0030,
- * Decided 6 and 10). Herdr has no model ref yet; its crossing is the route itself.
+ * Decided 6 and 10). Herdr Bots have no model route.
  */
 export function crossesHarness(fromRef, toRef) {
   const from = routeOfRef(fromRef)
@@ -110,7 +110,7 @@ export function crossesHarness(fromRef, toRef) {
  * empty map (the same as none).
  * @param {unknown} input
  */
-export function selectorRoutePolicy(input) {
+export function selectorRoutePolicy(input, warn = console.warn) {
   if (input === undefined || input === null) return undefined
   if (typeof input !== 'object' || Array.isArray(input)) throw new TypeError('routePolicy must be an object')
   const known = new Set(SELECTOR_ROUTES)
@@ -118,9 +118,13 @@ export function selectorRoutePolicy(input) {
   for (const [kind, routes] of Object.entries(input)) {
     if (!Array.isArray(routes)) throw new TypeError(`routePolicy.${kind} must be a list of routes`)
     for (const route of routes) {
+      if (route === 'herdr') {
+        warn(`routePolicy.${kind}: herdr is a Bot type, no longer a selectable route; ignored`)
+        continue
+      }
       if (!known.has(route)) throw new TypeError(`routePolicy.${kind}: unknown route ${JSON.stringify(route)}`)
     }
-    out[kind] = [...new Set(routes)]
+    out[kind] = [...new Set(routes.filter(route => route !== 'herdr'))]
   }
   return Object.keys(out).length === 0 ? undefined : out
 }

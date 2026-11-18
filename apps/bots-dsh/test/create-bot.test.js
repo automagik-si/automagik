@@ -52,3 +52,13 @@ test('a new Bot\'s form never starts on a model that is not set up or offered tw
   assert.equal(startModel({ models: lineup, defaultModel: 'acp-claude/default' }), 'acp-codex/gpt-5.6-sol')
   assert.equal(startModel({ models: lineup.slice(0, 3), defaultModel: null }), '')
 })
+
+
+test('Herdr creation sends type and agent with look/name and no model', () => {
+  const draft = { name: 'Terminal Bot', look: { shape: 'star', color: 'cyan' }, type: 'herdr', agent: 'codex', model: 'acp-codex/default', effort: 'high', instructions: 'DSH only' }
+  assert.deepEqual(createPayload(draft), { name: 'Terminal Bot', color: 'cyan', avatar: { shape: 'star' }, type: 'herdr', agent: 'codex' })
+  const { type: _type, ...native } = draft
+  const payload = createPayload(native)
+  assert.equal(payload.type, undefined, 'an agent must not imply a Herdr Bot')
+  assert.equal(payload.model, 'acp-codex/default')
+})

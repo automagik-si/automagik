@@ -5,6 +5,7 @@ import { isMainOf } from './sources.js'
 import { PencilIcon, ChevronRightIcon } from './icons.js'
 import { BotMark } from './mark.js'
 import { CharacterSelect } from './character-select.js'
+import { BotTypeFields } from './bot-type.js'
 import { ModelMenu, modelHint } from './model-menu.js'
 import { settingsModelPicker } from './settings-model-picker.js'
 import { FolderMenu } from './folder-menu.js'
@@ -172,8 +173,10 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
         h('span', { className: 'bt-bs-name' }, bot.name),
         h('span', { className: 'bt-bs-sub' }, [bot.role, isMainBot ? t('Main Bot') : ''].filter(Boolean).join(' · ') || t('Bot')))),
     h(Card, { title: t('Profile') },
+      h(BotTypeFields, { type: bot.type, agent: bot.agent, onType: type => save({ type: type || null, ...(type === 'herdr' ? { agent: bot.agent ?? 'claude' } : {}) }), onAgent: agent => save({ agent }) }),
       h(Row, { label: t('Name') }, h(InlineText, { label: t('Name'), value: bot.name, placeholder: 'Bob', required: true, maxLength: 40, onSave: name => save({ name }) })),
-      h(Row, { label: t('Role'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Role'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) }))),
+      bot.type === 'herdr' ? null : h(Row, { label: t('Role'), hint: t('A few words on what it does.') }, h(InlineText, { label: t('Role'), value: bot.role, placeholder: t('Research, admin…'), maxLength: 24, onSave: role => save({ role }) }))),
+    bot.type === 'herdr' ? null : h(Fragment, null,
     h(Card, { title: t('Model') },
       h('div', { className: 'bt-set-row bt-bs-row' },
         h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Model')), h('span', { className: 'bt-set-hint', role: modelState?.lastFailure?.kept ? 'status' : undefined }, modelHint(bot, roster, modelState))),
@@ -257,7 +260,7 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
         h('span', { className: 'bt-set-copy' },
           h('span', { className: 'bt-bs-label' }, confirming ? t('Delete {name}?', { name: bot.name }) : t('Delete Bot')),
           h('span', { className: 'bt-set-hint' }, confirming ? t('Click again to delete. Its chats are archived.') : t('Removes the Bot from the team.'))),
-        h('span', { className: 'bt-chevron' }, h(ChevronRightIcon)))))
+        h('span', { className: 'bt-chevron' }, h(ChevronRightIcon))))))
 }
 
 export const BOT_SETTINGS_CSS = ADVANCED_SETTINGS_CSS + `
