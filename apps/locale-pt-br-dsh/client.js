@@ -1724,6 +1724,12 @@ const pack = createPack({
     "Sign-in cancelled.": "Login cancelado.",
     "The model could not be selected.": "Não foi possível selecionar o modelo.",
     "Tools": "Ferramentas",
+    "Shell access": "Acesso ao shell",
+    "A Bot with shell access can read what the operating-system user can read.": "Um Bot com acesso ao shell pode ler o que quem usa o sistema operacional pode ler.",
+    "The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.": "O time de Bots aplica isso na concessão das ferramentas: as ferramentas são removidas; o shell não vai para um ambiente isolado do sistema operacional.",
+    "This removes this Bot's own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.": "Isto remove as ferramentas de shell deste Bot; não impede outro Bot com shell, nem quem usa o sistema operacional, de ler os arquivos que este Bot pode ler.",
+    "This Bot stays on {model}: {cli} is a coding CLI that brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.": "Este Bot continua em {model}: {cli} é uma CLI de programação que traz o próprio shell. Ligue o shell ou escolha um modelo que use as ferramentas do DeepSeek Harness.",
+    "This model no longer answers, and this Bot cannot move to {cli} while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.": "Este modelo não responde mais, e este Bot não pode migrar para {cli} com o shell desligado. Escolha um modelo que use as ferramentas do DeepSeek Harness ou ligue o shell.",
     "Denied tools": "Ferramentas bloqueadas",
     "Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.": "Nomes exatos de ferramentas, um por linha ou separados por vírgula, diferenciando maiúsculas de minúsculas. Vazio permite todas as ferramentas.",
     "Saved level: {level}, set for the group": "Nível salvo: {level}, definido para o grupo",
@@ -2851,7 +2857,8 @@ const pack = createPack({
     "Proposed change": "Alteração proposta",
     "Changes": "Alterações",
     "Applying…": "Aplicando…",
-    "Apply": "Aplicar"
+    "Apply": "Aplicar",
+    "Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.": "O registro do serve está numa pasta compartilhada com {folders}, então não pode ser escolhido aqui. {folders} tem um config.yaml e pastas com nomes típicos de uma pasta do Hermes, mas não tem SOUL.md nem state.db, então o Automagik não consegue distinguir essa pasta de outro Hermes. Se não for um Hermes, mova essa pasta para outra pasta mãe e pressione Verificar de novo. Se for outro Hermes, os dois precisam de pastas mãe diferentes."
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

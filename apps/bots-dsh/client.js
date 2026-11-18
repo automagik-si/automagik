@@ -130,6 +130,7 @@ var ZH = {
   "The folder on {host} holds no Hermes settings or server record.": "{host} 上的该文件夹没有 Hermes 设置或服务器记录。",
   "Point at the folder that holds Hermes, or choose another computer.": "请指向包含 Hermes 的文件夹，或选择另一台电脑。",
   "Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.": "它的 serve 记录位于与另一个 Hermes 数据目录共享的文件夹中，因此无法在此选择。旁边的另一个文件夹看起来像 Hermes 数据目录。请给这个 Hermes 一个自己的文件夹：移动它，或移动另一个文件夹，然后用“添加另一个 Hermes”添加该文件夹。",
+  "Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.": "它的 serve 记录位于与 {folders} 共享的文件夹中，因此无法在此选择。{folders} 有 config.yaml 和名称像 Hermes 数据目录的文件夹，但没有 SOUL.md 或 state.db，因此 Automagik 无法判断它是否是另一个 Hermes。如果它不是 Hermes，请将它移到另一个父文件夹，然后按“再次检查”。如果它是另一个 Hermes，两者需要不同的父文件夹。",
   "Pair Hermes Bot": "配对 Hermes Bot",
   "Not paired": "未配对",
   "Uses this profile’s existing Bot Chat. Other bots, groups and tasks cannot use this pairing. Unpair before changing it.": "使用此配置现有的 Bot Chat。其他 Bot、群组和任务不能使用此配对。更改前请先取消配对。",
@@ -1287,6 +1288,12 @@ var ZH = {
   "A few words on what it does.": "用几个词说明它做什么。",
   "Research, admin…": "研究、行政…",
   Tools: "工具",
+  "Shell access": "Shell 访问",
+  "A Bot with shell access can read what the operating-system user can read.": "有 shell 访问权限的 Bot 可以读取操作系统用户能读取的内容。",
+  "This Bot stays on {model}: {cli} is a coding CLI that brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.": "这个 Bot 会继续使用 {model}：{cli} 是自带 shell 的编程 CLI。请打开 shell，或选择一个使用 DeepSeek Harness 工具的模型。",
+  "This model no longer answers, and this Bot cannot move to {cli} while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.": "这个模型已不再可用，而在 shell 关闭时这个 Bot 无法迁移到 {cli}。请选择一个使用 DeepSeek Harness 工具的模型，或打开 shell。",
+  "The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.": "Bot 团队在授予工具时执行此设置：它会移除这些工具，而不会把 shell 放进操作系统沙箱。",
+  "This removes this Bot's own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.": "这只会移除这个 Bot 自己的 shell 工具；它不能阻止另一个有 shell 的 Bot，或操作系统用户，读取这个 Bot 能读取的文件。",
   "Denied tools": "禁止使用的工具",
   "Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.": "精确的工具名，每行一个或用逗号分隔，区分大小写。留空表示允许所有工具。",
   "What this Bot does": "这个 Bot 做什么",
@@ -3694,6 +3701,23 @@ function routeOf(provider, { piAi = new Set(SUBSCRIPTION_ROUTES) } = {}) {
   if (piAi.has(id)) return { harness: "dsh", connectedBy: "pi-ai" };
   return { harness: "dsh", connectedBy: "native" };
 }
+var LEGACY_LOCAL_CLIS = Object.freeze([
+  "codex-cli",
+  "devin-cli",
+  "gemini-cli",
+  "grok-cli",
+  "cursor-cli",
+  "cline",
+  "qwen-code",
+  "goose"
+]);
+function commandCapableAgent(ref) {
+  const provider = String(ref ?? "").split("/")[0];
+  if (provider === "") return false;
+  if (provider === "hermes-remote" || isClaudeCode(provider)) return true;
+  if (provider.startsWith("acp-") || provider.startsWith("local-")) return true;
+  return LEGACY_LOCAL_CLIS.includes(provider);
+}
 var SELECTOR_ROUTES = Object.freeze(["native", "acp", "herdr", "hermes-remote"]);
 function selectorRouteOf(provider) {
   if (provider === "hermes-remote") return "hermes-remote";
@@ -5989,6 +6013,8 @@ var botRows = (rows2) => {
     const home = text2(row.home, 4096), id = text2(row.id, 100);
     if (!home.startsWith("/") || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(id)) return [];
     const running2 = row.running === true;
+    const blocked = !running2 && row.blocked === "shared-beside" ? "shared-beside" : "";
+    const besides = blocked && Array.isArray(row.besides) && row.besides.length >= 1 && row.besides.length <= 4 && row.besides.every((value) => text2(value, 4096).startsWith("/")) && new Set(row.besides).size === row.besides.length ? row.besides : void 0;
     const recordDir = running2 ? text2(row.recordDir, 4096) : "";
     const port = running2 && Number.isSafeInteger(row.port) && row.port > 0 && row.port < 65536 ? row.port : 0;
     const key = `${home}
@@ -6006,7 +6032,8 @@ ${id}`;
       provider: text2(row.provider, 100),
       recordDir: recordDir.startsWith("/") && !recordDir.split("/").includes("..") ? recordDir : "",
       port,
-      blocked: !running2 && row.blocked === "shared-beside" ? "shared-beside" : "",
+      blocked,
+      ...besides ? { besides } : {},
       start: text2(row.start, 500)
     }];
   });
@@ -6171,12 +6198,18 @@ function screenFor(code, draft, facts) {
       ssh: true
     };
   }
-  if (code === "bot/hermes-attach-not-running" || code === "bot/hermes-attach-record") return { heading: t("Hermes is not running there"), title: t("Start Hermes on {host}", { host }), text: t("Hermes is not running on {host}. Start it there with “hermes serve”, then try again.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.", { host }), ssh: true };
+  if (code === "bot/hermes-attach-not-running" || code === "bot/hermes-attach-record") {
+    const home = shortText(draft?.ssh?.hermesHome?.trim?.() ?? "", 4096), command = home.startsWith("/") ? `HERMES_HOME=${shellQuote(home)} hermes serve` : "hermes serve";
+    return { heading: t("Hermes is not running there"), title: t("Start Hermes on {host}", { host }), text: t("Hermes is not running on {host}. Start it there with “hermes serve”, then try again.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.", { host }), ...home.startsWith("/") ? { rows: [{ label: t("Serve command"), value: command, mono: true }] } : {}, ssh: true };
+  }
   if (code === "bot/hermes-attach-gateway-running") {
     const home = shortText(draft?.ssh?.hermesHome?.trim?.() ?? "", 4096), command = home.startsWith("/") ? `HERMES_HOME=${shellQuote(home)} hermes serve` : "hermes serve";
     return { heading: t("Hermes’s gateway is running there, but no serve is"), title: t("Start “hermes serve” on {host}", { host }), text: t("Hermes on {host} is running as a gateway, but no “hermes serve” is running there. This chat attaches only to a running “hermes serve”.", { host }), hint: t("Run “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.", { command, host }), rows: [{ label: t("Gateway state"), value: t("Running") }, { label: t("Serve state"), value: t("Not running") }, { label: t("Serve command"), value: command, mono: true }], ssh: true };
   }
-  if (code === "bot/hermes-attach-gateway") return { heading: t("Hermes is running there as a gateway"), title: t("Start “hermes serve” on {host}", { host }), text: t("The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.", { host }), ssh: true };
+  if (code === "bot/hermes-attach-gateway") {
+    const home = shortText(draft?.ssh?.hermesHome?.trim?.() ?? "", 4096), command = home.startsWith("/") ? `HERMES_HOME=${shellQuote(home)} hermes serve` : "hermes serve";
+    return { heading: t("Hermes is running there as a gateway"), title: t("Start “hermes serve” on {host}", { host }), text: t("The Hermes running on {host} owns its sessions as a gateway. This chat needs a Hermes started with “hermes serve”.", { host }), hint: t("Run “hermes serve” on {host} in a terminal. Automagik never starts or restarts Hermes. If Hermes is running there as a gateway, start a “hermes serve” for this chat.", { host }), ...home.startsWith("/") ? { rows: [{ label: t("Serve command"), value: command, mono: true }] } : {}, ssh: true };
+  }
   if (code === "bot/hermes-attach-profiles") return { heading: t("Hermes’s profiles could not be read"), title: t("Hermes on {host} did not list its profiles", { host }), text: t("Hermes is running on {host}, but its own profile list could not be read.", { host }), hint: t("Run “hermes profile list” on {host}, then try again.", { host }), ssh: true };
   if (code === "bot/hermes-ssh-platform") return { heading: t("This computer cannot run the SSH connection yet"), title: t("Check the remote system and Python"), text: t("The remote computer needs Linux or macOS, Python 3, and a supported Hermes installation."), hint: t("Check Python and the supported system on the other computer, then try again."), ssh: true };
   if (code === "bot/hermes-ssh-exited") return { heading: t("Hermes stopped while starting"), title: t("Hermes on {host} stopped before it was ready", { host }), text: facts.exit !== void 0 ? t("SSH signed in and started Hermes, but Hermes exited with code {code}.", { code: facts.exit }) : t("SSH signed in and started Hermes, but Hermes stopped right away."), hint: t("Run “hermes serve” on {host} to see the full error, fix it there, then try again.", { host }), ssh: true };
@@ -6647,8 +6680,8 @@ function HermesRemoteConnect({ onClose, onConnected, edit = false, more = false,
           { className: "bt-hw-bot-copy" },
           (0, import_react15.createElement)("strong", null, item.name),
           item.model ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-model" }, `${t("Model")}: ${botModelLine(item)}`) : null,
-          item.blocked === "shared-beside" ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-blocked" }, t("Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.")) : null,
-          !item.running && item.gateway ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Its gateway is running, but no “hermes serve” is. Start it with “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.", { command: item.start || "hermes serve", host })) : !item.running && item.start ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.", { command: item.start, host })) : null
+          item.blocked === "shared-beside" ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-blocked" }, item.besides?.length ? t("Its serve record lives in a folder shared with {folders}, so it cannot be picked here. {folders} has a config.yaml and folders named like a Hermes home, but no SOUL.md or state.db, so Automagik cannot tell it from another Hermes. If it is not a Hermes, move it to a different parent folder, then press Check again. If it is another Hermes, the two need different parent folders.", { folders: item.besides.join(", ") }) : t("Its serve record lives in a folder shared with another Hermes home, so it cannot be picked here. Another folder beside this Hermes looks like a Hermes home. Give this Hermes a folder of its own: move it, or move the other folder, then add that folder with Add another Hermes.")) : null,
+          !item.blocked && !item.running && item.gateway ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Its gateway is running, but no “hermes serve” is. Start it with “{command}” on {host} in a terminal; the gateway can keep running. Automagik never starts, stops or restarts Hermes.", { command: item.start || "hermes serve", host })) : !item.blocked && !item.running && item.start ? (0, import_react15.createElement)("small", { className: "bt-hw-bot-start" }, t("Start it with “{command}” on {host} in a terminal. Automagik never starts or restarts Hermes.", { command: item.start, host })) : null
         ),
         (0, import_react15.createElement)("span", { className: `bt-hw-bot-state${item.running ? " bt-hw-bot-ok" : ""}` }, item.running ? t("Running") : item.gateway ? t("Gateway running") : t("Not running"))
       ))),
@@ -6937,6 +6970,13 @@ function modelHint(bot, roster, state2) {
   }
   const shown2 = modelOf(bot, roster);
   if (shown2 === void 0) return t("Pick the model this Bot runs on.");
+  const held = bot.subscriptionShellHeld;
+  if (held !== void 0) {
+    if (!shown2.served) {
+      return t("This model no longer answers, and this Bot cannot move to {cli} while its shell is off. Pick a model that uses DeepSeek Harness's tools, or turn its shell on.", { cli: held.cli });
+    }
+    return t("This Bot stays on {model}: {cli} is a coding CLI that brings its own shell. Turn the shell on, or pick a model that uses DeepSeek Harness's tools.", { model: shown2.name, cli: held.cli });
+  }
   if (!shown2.served && (roster.models ?? []).length > 0) return t("This model is not available now. Pick another one.");
   const served = servedOf(roster, shown2.ref);
   if (served?.needsSignIn) return t("{model} needs a sign-in before it can answer.", { model: served.name });
@@ -15333,6 +15373,22 @@ function BotSettingsForm({ bot, roster, actions, run: run3 }) {
     (0, import_react40.createElement)(
       Card2,
       { title: t("Tools") },
+      (0, import_react40.createElement)(SwitchRow, {
+        label: t("Shell access"),
+        hint: t("A Bot with shell access can read what the operating-system user can read."),
+        on: bot.shell !== false,
+        onChange: (value) => save({ shell: value })
+      }),
+      (0, import_react40.createElement)(
+        "div",
+        { className: "bt-bs-shell-note" },
+        t("The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.")
+      ),
+      (0, import_react40.createElement)(
+        "div",
+        { className: "bt-bs-shell-note" },
+        t("This removes this Bot's own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.")
+      ),
       (0, import_react40.createElement)(Row, {
         label: t("Denied tools"),
         hint: t("Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool."),
@@ -15412,6 +15468,7 @@ var BOT_SETTINGS_CSS = ADVANCED_SETTINGS_CSS + `
 .bt-bs-sub{font-size:13px;line-height:18px;color:var(--bt-ink-2)}
 .bt-bs .bt-avedit{left:0;transform:none;width:min(284px,calc(100vw - 32px))}
 .bt-bs-row{min-height:48px}
+.bt-bs-shell-note{font-size:12px;line-height:16px;padding:0 16px 12px;color:color-mix(in srgb,var(--bt-ink-2) 50%,var(--bt-ink-3))}
 label.bt-bs-row{cursor:text}
 .bt-bs-row>.bt-set-copy{flex:1 1 auto}
 .bt-bs-label{font-size:13px;line-height:18px;font-weight:500}
@@ -22019,7 +22076,7 @@ function ProjectRail({ projects = [], currentId, onOpen, onAdd, label, addLabel,
       return (0, import_react54.createElement)("button", {
         key: project.id,
         type: "button",
-        className: ["lb-tile", pictured(project) ? "" : "lb-tile-letter", badge ? "lb-tile-badged" : ""].filter(Boolean).join(" "),
+        className: ["lb-tile", onOpen ? "" : "lb-tile-still", pictured(project) ? "" : "lb-tile-letter", badge ? "lb-tile-badged" : ""].filter(Boolean).join(" "),
         "data-id": project.id,
         "aria-current": project.id === currentId ? "true" : void 0,
         "aria-label": badge ? `${project.name}, ${word(badge)}` : project.name,
@@ -22292,7 +22349,10 @@ var RAIL = `
 .lb-rail{flex:none;display:flex;flex-direction:column;align-items:center;gap:var(--lb-rail-gap);width:var(--lb-rail-w);padding:12px 0;box-sizing:border-box;border-right:1px solid var(--lb-line);overflow-y:auto;scrollbar-width:none}
 .lb-tile{position:relative;flex:none;display:block;width:var(--lb-tile);height:var(--lb-tile);margin:0;padding:0;border:0;border-radius:var(--lb-tile-r);background:none;color:var(--bt-ink);font:inherit;cursor:pointer}
 .lb-tile-face{display:grid;place-items:center;width:100%;height:100%;border-radius:inherit;background:var(--lb-tile-ground)}
-.lb-tile:hover .lb-tile-face{background:var(--bt-active)}
+/* The computer mark has no opening; only actionable tiles promise one on hover. */
+.lb-tile:not(.lb-tile-still):hover .lb-tile-face{background:var(--bt-active)}
+/* Keep the focus ring while the resting mark stops offering a pointer action. */
+.lb-tile-still{cursor:default}
 .lb-tile[aria-current]{outline:1.5px solid var(--bt-ink);outline-offset:1.5px}
 .lb-tile[aria-current] .lb-tile-face{background:var(--lb-tile-open)}
 .lb-tile-letter .lb-tile-face,.lb-tile-letter:hover .lb-tile-face,.lb-tile-letter[aria-current] .lb-tile-face{background:color-mix(in srgb,var(--st-lilac,var(--bt-active)) 72%,var(--st-paper,var(--bt-card)));color:var(--st-lilac-ink,var(--bt-ink));font:var(--bt-weight-title,600) 18px/1 var(--bt-head-font,var(--bt-font))}
@@ -22375,8 +22435,10 @@ var HOST = `
 .lb-bar[data-lb-host] .lb-rail{border-right:0}
 .lb-railcol{flex:none;display:flex;flex-direction:column;align-items:center;width:var(--lb-rail-w);min-height:0}
 .lb-railcol .lb-rail{flex:1;min-height:0}
-.lb-railcol .bt-side-collapse{flex:none;width:36px;height:36px;margin:0 0 10px;border:0;border-radius:var(--lb-tile-r);background:none;box-shadow:none;color:var(--lb-muted)}
-.lb-railcol .bt-side-collapse:hover{background:var(--bt-hover);color:var(--bt-ink)}
+/* Both wide and drawer seats use the rail's existing control face. */
+.lb-railcol .bt-side-collapse,.bt-side-collapse.bt-foot-toggle{flex:none;width:36px;height:36px;margin:0 0 10px;border:0;border-radius:var(--lb-tile-r);background:none;box-shadow:none;color:var(--lb-muted)}
+/* The footer seat has the same hover affordance as the drawer's rail control. */
+.lb-railcol .bt-side-collapse:hover,.bt-side-collapse.bt-foot-toggle:hover{background:var(--bt-hover);color:var(--bt-ink)}
 .lb-bar[data-lb-host] .lb-list{flex:1;width:auto}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){position:relative;margin:var(--lb-panel-gap)!important;height:calc(100% - 2 * var(--lb-panel-gap))!important;padding:0!important;border-radius:var(--lb-panel-r);background:var(--lb-ground)!important}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host)::before{content:'';position:absolute;left:calc(var(--lb-rail-w) - 1px);top:0;bottom:0;width:1px;background:var(--lb-line);pointer-events:none}
@@ -22387,6 +22449,14 @@ html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]:has(.lb-
 [class*="_root"]:has(.lb-host) [class*="_scrollArea"]:has(.lb-host){grid-template-columns:0 minmax(0,1fr) 0;grid-template-rows:0 max-content 0 minmax(0,1fr);margin:0}
 [class*="_root"]:has(.lb-host) [class*="_scrollFade"]{display:none}
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
+/* Anchor against the card so footer entries and a scrolling list cannot move the toggle. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.lb-host) .bt-foot-toggle{position:absolute;left:calc(10px - var(--lb-panel-gap));bottom:calc(18px - var(--lb-panel-gap));margin:0}
+/* The rail draws its icons at 18px (DSH's rail spec), so the glyph keeps its size across the fold. */
+.bt-side-collapse.bt-foot-toggle svg{width:18px;height:18px}
+/* Keep the drawer's rail control until a footer seat takes over outside the drawer. */
+[class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.bt-foot-toggle) .lb-railcol .bt-side-collapse{display:none}
+/* The drawer retains its rail control and its existing placement. */
+[class*="_frame"][data-sidebar-drawer] .bt-foot-toggle{display:none}
 .lb-head{flex:none;display:flex;align-items:center;gap:4px;height:52px;padding:0 8px 0 14px;box-sizing:border-box}
 .lb-brand{flex:1;min-width:0;display:flex;align-items:center;overflow:hidden}
 .lb-brand .omni-wordmark{display:block;flex:none;max-width:100%;height:auto}
@@ -24104,6 +24174,34 @@ function FooterAccount(props) {
   if (seated) return null;
   return (0, import_react60.createElement)("span", { className: "bt-foot-account" }, (0, import_react60.createElement)(AccountLauncher, { ...props, seat: false }));
 }
+function RailToggle({ wide, actions }) {
+  const button = (0, import_react60.useRef)(null);
+  const hadFocus = (0, import_react60.useRef)(false);
+  (0, import_react60.useLayoutEffect)(() => {
+    const native = document.querySelector("[data-sidebar-toggle]");
+    if (!wide && hadFocus.current) {
+      hadFocus.current = false;
+      native?.focus({ preventScroll: true });
+    } else if (wide && native === document.activeElement && !document.documentElement.matches("[data-windows-titlebar],[data-platform=darwin]") && !button.current?.closest("[data-sidebar-drawer]")) {
+      button.current?.focus({ preventScroll: true });
+    }
+  }, [wide]);
+  if (!wide) return null;
+  return (0, import_react60.createElement)("button", {
+    ref: button,
+    type: "button",
+    className: "bt-round bt-side-collapse bt-foot-toggle",
+    "aria-label": t("Collapse sidebar"),
+    title: t("Collapse sidebar"),
+    onFocus: () => {
+      hadFocus.current = true;
+    },
+    onBlur: () => {
+      hadFocus.current = false;
+    },
+    onClick: () => actions.toggleSidebar()
+  }, (0, import_react60.createElement)(SidebarIcon));
+}
 function BotReturn({ wide, useSurface, actions }) {
   const mode = useSurface((value) => value.mode);
   if (mode !== "agent") return null;
@@ -24163,6 +24261,22 @@ html[data-automagik-desktop=darwin] .bt-panel{-webkit-app-region:no-drag}
 [class*="_root"][class*="_collapsed"]{margin:6px!important;padding-left:0!important;padding-right:0!important}
 [class*="_collapsed"]>[class*="_logoRow"],[class*="_collapsed"] [class*="_regionArea"]{width:100%;display:flex;justify-content:center}
 [class*="_collapsed"]>[class*="_footArea"]{width:100%;justify-items:center;padding-left:0!important;padding-right:0!important}
+/* The rail's card keeps its 6px inset, so its native toggle shares the footer's viewport box. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"][class*="_collapsed"]{position:relative;height:calc(100% - 12px)}
+/* The toggle leaves the logo row without reserving an empty seat above the Bot list. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_logoRow"]{height:0!important;margin:0!important}
+/* DSH keeps the badge and keyboard hints while the control moves below every footer entry. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"] [data-sidebar-toggle]{position:absolute;left:4px;bottom:12px;margin:0}
+/* Footer entries need a whole control's height above the bottom seat, even on short windows. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"]>[class*="_footArea"]{padding-bottom:calc(12px + 36px + var(--lb-rail-gap))!important}
+/* A horizontal rail entrance would move the toggle away from the seat it just replaced. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:bt-rail-toggle-in 150ms var(--ds-ease-in-out) backwards}
+/* Only opacity changes so a mid-animation press still lands on the same control. */
+@keyframes bt-rail-toggle-in{from{opacity:0}}
+/* Quiet motion leaves the native toggle immediately ready in its bottom seat. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) body[data-bt-motion=quiet] [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:none}
+/* Respect the system's motion choice without changing the drawer or caption controls. */
+@media (prefers-reduced-motion:reduce){html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_collapsed"][class*="_railIn"] [data-sidebar-toggle]{animation:none}}
 /* rc.2 nests the Bot list in a scrolling grid. Bound its row so only bt-list
    scrolls; the search and sidebar buttons stay above it. Native sessions keep their grid. */
 [class*="_scrollArea"]:has(.bt-side){grid-template-rows:8px max-content 2px minmax(0,1fr);overflow-y:hidden}
@@ -38674,6 +38788,8 @@ function apply(ctx) {
     () => shadow("sidebar.footer.action", { id: "bot-account", order: -200, inject: face }, FooterAccount),
     // Shown only when the team is linked to an Omni without the channels plugin.
     () => shadow("sidebar.footer.action", { id: "bot-channels-moved", order: -100, inject: face }, ChannelsMoved),
+    // The footer keeps the wide toggle below every entry, independent of the Bot list's height.
+    () => shadow("sidebar.footer.action", { id: "bot-rail-toggle", order: 0, inject: face }, RailToggle),
     () => shadow("settings.trigger", { priority: BOT_PRIORITY }, YouAvatar),
     // The whale wins the seat over a shell account plugin's own launcher (the
     // Desktop's "··· More"), which comes back in Agent mode.

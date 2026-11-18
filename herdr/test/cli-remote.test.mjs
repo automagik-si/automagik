@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // automagik-herdr --machine (automagik#206): a project on a linked machine, read and written
 // there through hc (file read|edit --on, exec --on), by the rule a local edit follows. The
 // linked machine "vm" is test/fake-hc.mjs's: a scratch home, its files paths here. The real hc
@@ -36,6 +37,9 @@ function scene(t, { state = "connected" } = {}) {
   writeFileSync(logPath, "");
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, GIT_CEILING_DIRECTORIES: root };
   delete env.HC_TERMINAL_ID;
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   const cli = (args) => {
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: local, env, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };

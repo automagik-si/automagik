@@ -232,11 +232,11 @@ export function defaultModel(agentKey, { home, read }) {
   return defaultModelFrom(agentKey, textsOf(home, read));
 }
 
-// Claude Code: the aliases `claude --help` names ("an alias for the latest model (e.g.
-// 'sonnet' or 'opus')") and the current model ids of the Claude 5 family (2026-11-16). A `[1m]`
-// id is Claude Code's 1M-context form, passed to --model as is. An older id stays listed so a
-// bot pinned to it still starts.
-const CLAUDE_MODELS = ["opus", "sonnet", "haiku", "claude-fable-5-2", "claude-fable-5-2[1m]", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+// Claude Code's current menu (offered): aliases and model ids. Older ids live in
+// CLAUDE_ACCEPTED_ONLY so a pinned bot still starts. A `[1m]` id goes to --model as its
+// own argv word.
+const CLAUDE_MODELS = ["opus", "sonnet", "haiku", "claude-fable-5-2", "claude-fable-5-2[1m]", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
+const CLAUDE_ACCEPTED_ONLY = ["claude-fable-5-1"];
 
 /** Where the cache lives under an app home; the folder holds the pack's ledgers too. */
 export const AG_MODELS_FILE = "automagik-herdr/antigravity-models.json";
@@ -294,8 +294,8 @@ export function parseAgModelsCache(text) {
 }
 
 /**
- * The models a bot running `agentKey` may be pinned to (A12: picked from a list, never
- * typed). Claude Code: CLAUDE_MODELS above. Codex: the slugs in its own model cache,
+ * The models a bot may be pinned to (accepted). Claude Code: CLAUDE_MODELS and
+ * CLAUDE_ACCEPTED_ONLY above. Codex: the slugs in its own model cache,
  * `~/.codex/models_cache.json` `.models[].slug`, which Codex refreshes itself. Antigravity:
  * the ids the pack's cache holds from `agy models` (the format above; its settings keep a label
  * `--model` may not take), plus that cache's labels for the picker. Any other agent: plus its
@@ -305,7 +305,10 @@ export function parseAgModelsCache(text) {
 export function knownModelsFrom(agentKey, texts = {}) {
   const out = [];
   const add = (m) => { if (typeof m === "string" && m && !out.includes(m)) out.push(m); };
-  if (agentKey === "claude") CLAUDE_MODELS.forEach(add);
+  if (agentKey === "claude") {
+    CLAUDE_MODELS.forEach(add);
+    CLAUDE_ACCEPTED_ONLY.forEach(add);
+  }
   if (agentKey === "codex") {
     const cache = parseJson(texts.codexModels);
     for (const m of Array.isArray(cache?.models) ? cache.models : []) add(m?.slug ?? m?.id);
@@ -313,6 +316,11 @@ export function knownModelsFrom(agentKey, texts = {}) {
   if (agentKey === "antigravity") for (const m of parseAgModelsCache(texts.antigravityModels)?.models ?? []) add(m.id);
   else add(defaultModelFrom(agentKey, texts));
   return out;
+}
+
+/** The pick list (current menu); knownModelsFrom stays the accepted set. */
+export function offeredModelsFrom(agentKey, texts = {}) {
+  return agentKey === "claude" ? [...CLAUDE_MODELS] : knownModelsFrom(agentKey, texts);
 }
 
 /**

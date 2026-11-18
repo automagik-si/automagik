@@ -94,8 +94,33 @@ How they fit:
   | Group admin | Manage its own group only (name, notice, members, reply mode) |
   | Member | Speak in the group, `@` another member, and post into its groups from outside them |
 
-- **Scheduled tasks and restricted Bots**: a Bot with a deny list cannot create or
-  edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
+- **Shell access**: each Bot either has a shell or does not. Every new Bot states its
+  capability; a new private-folder Bot states off, and a Bot saved before it existed has
+  no field and reads as a shell, with no migration. Only the user changes the switch in
+  its settings. A Bot without a shell gets no `bash`, `pwsh` or terminal tool,
+  and no tool that runs a command or starts one for it: a DSH task (`start_task`), an ACP
+  agent's execute call (`acp_tool`; its reads and edits stay), a local CLI's command
+  approval (`approve_agent_action`), an MCP server that would start a command
+  (`save_capability`, `attach_capability`) and the computer-use tools (`cua`,
+  `cua_driver_native__*`). The rule holds on the Bot's own chat, a group Session, a task, a
+  subagent (delegation stays, its child is bound to the parent's fence), a renamed or
+  aliased tool, and a skill. It is enforced where DSH grants tools — the tools are removed,
+  not forbidden by an instruction — and not with an operating-system sandbox. A Bot with
+  shell access can read what the operating-system user can read: that is the honest limit
+  of the folder fence for shell commands.
+
+  A shell-less Bot cannot be paired with a model whose agent runs its own tools: the Bot
+  team refuses it at creation, at the model pick, at a route switch and at the Remote
+  Hermes pairing, both when the shell is switched off and when the agent is set. The
+  automatic move of a Bot off a retired plan route to its coding CLI skips a shell-less
+  Bot, keeps it where it is and says once why (the CLI brings its own shell); if that plan
+  route no longer answers, the Bot asks for a model instead of looking like it works. An
+  MCP server mounted before the shell was turned off keeps running, but a command tool it
+  exposes is refused; a server mounted after the switch is refused too. The settings card
+  says what this capability does not fence: another Bot with a shell, or the
+  operating-system user, can still read files this Bot can read.
+- **Scheduled tasks and restricted Bots**: a Bot with a deny list or no shell cannot create
+  or edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
   layer binds; the tasks it already armed are paused and their record stays. A
   delivery no team lineage can bind is refused while such a task cannot be paused;
   when the pause lands, dsh is asked to drive again and the refused delivery goes
@@ -283,11 +308,20 @@ The DSH tool guard refuses another Bot's region and refuses per-chat ACP copies 
 objects unless the caller holds a verified copy or the picture is already in its own history.
 Tool-result images, channel pictures and handoff rows stay readable from that Bot's own
 history; this does not grant another Bot access or authorise an edit. Like private Bots, this is a tool-level
-check: Codex's own tools and indirect shell paths are not seen. Parent-folder walks are not
-blocked; `.gitignore` hides copies only from ignore-aware walks and is not a filesystem fence.
-No permission, Codex profile or read root is widened. If the operating system refuses the
-folder, the picture's text asks the person to allow Automagik access (Files and Folders or
-Full Disk Access on macOS, or a folder writable by their user elsewhere).
+check: Codex's own tools are not seen. Shell commands get only a best-effort check: each word
+that looks like a path is resolved from the command's working folder, and a word that leads to
+another Bot's own folder is refused. A path a command builds, a variable or glob it expands, a
+folder it changes into, or a file a script opens is still not seen.
+
+A Bot with shell access can read what the operating-system user can read; the folder fence covers file tools, and shell commands get only a best-effort check. The per-Bot shell
+capability that can take the shell away from a Bot that must stay fenced is
+[#1471](https://github.com/automagik-si/automagik/issues/1471).
+
+Parent-folder walks are not blocked; `.gitignore` hides copies only from ignore-aware walks
+and is not a filesystem fence. No permission, Codex profile or read root is widened. If the
+operating system refuses the folder, the picture's text asks the person to allow Automagik
+access (Files and Folders or Full Disk Access on macOS, or a folder writable by their user
+elsewhere).
 
 When Codex refuses an edit with `edit-not-isolated`, the image card stays failed and the Bot
 gets its read-only copy's path. At Workspace it may use its own tools to make and check a new

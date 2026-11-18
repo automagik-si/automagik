@@ -160,7 +160,7 @@ export async function prepareHermesConnection(draft, {
       for (const name of ['user', 'identityFile', 'hermesPath', 'hermesHome', 'recordDir']) if (draft.ssh[name] !== undefined && draft.ssh[name] !== '' && !clean(draft.ssh[name], 4096)) throw fail('Enter valid optional SSH details.', 'ssh')
       const ssh = Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome', 'recordDir'].filter(name => draft.ssh[name] !== undefined).map(name => [name, draft.ssh[name]]))
       phase = 'ssh'
-      owned = await startSsh(ssh, { signal: controller.signal, deadlines, onProgress })
+      owned = await startSsh(ssh, { signal: controller.signal, deadlines, onProgress, extraHomes: draft.extraHomes })
       phase = 'token'
       remaining()
       address = remoteAddress(owned.address, { allowLoopback: true })
@@ -252,6 +252,7 @@ export async function prepareHermesConnection(draft, {
     return {
       mode: draft.mode, authMode, address, credential, authHeaders, redactionSecrets, profiles, defaultProfile, attached,
       ssh: draft.mode === 'ssh' ? Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome', 'recordDir'].filter(name => draft.ssh[name] !== undefined).map(name => [name, draft.ssh[name]])) : undefined,
+      extraHomes: draft.extraHomes,
       secret: persisted,
       allowLoopback: draft.mode === 'ssh',
       fetch: async (url, init) => {
@@ -280,7 +281,7 @@ export async function refreshHermesProfiles(connection, options = {}) {
   if (connection.attached === true) {
     const startSsh = options.startSsh ?? (async (...args) => (await import('./hermes-attach.js')).startHermesAttach(...args))
     if (!connection.ssh) return connection.profiles
-    const owned = await startSsh(connection.ssh, { signal: options.signal, deadlines: options.deadlines })
+    const owned = await startSsh(connection.ssh, { signal: options.signal, deadlines: options.deadlines, extraHomes: connection.extraHomes })
     try {
       if (!Array.isArray(owned.profiles) || !owned.profiles.length) throw fail('Hermes is running there, but its profiles could not be read.', 'profiles')
       connection.profiles = owned.profiles
