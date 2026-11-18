@@ -1,3 +1,4 @@
+import { startFakeCore as startStatusCore } from "./fake-core.mjs";
 // `automagik-herdr worker` (bot workers): a bot starts one worker per task, an hc child of its
 // pane, in the task's worktree. Run as a program against scratch git projects under $TMPDIR,
 // with the fake `hc` first on PATH (test/fake-hc.mjs). The real hc is never run.
@@ -85,10 +86,15 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   writeFileSync(appLog, "");
   const env = { ...process.env, XDG_DATA_HOME: join(root, "data"), PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog, AUTOMAGIK_HERDR_TAB_WAIT_MS: "300", GIT_CEILING_DIRECTORIES: root };
+  const core = startStatusCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SESSION: "" });
   // Worker transport discovery must never inherit a host socket into a fixture scene.
   env.HC_SOCKET = join(root, "unproxied.sock");
   env.HC_TERMINAL_SOCKET = env.HC_SOCKET;
   delete env.HC_TERMINAL_ID;
+  // #1420: a Codex worker reads $CODEX_HOME/config.toml; the scene's is under its own HOME, never the host's.
+  delete env.CODEX_HOME;
   // Every CLI call, including worker/reap, stays in this scratch world (#1135).
   const preflight = (extra = {}, cwd = project) => {
     const effective = { ...env, ...extra };
@@ -116,17 +122,20 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
     assert.ok(CLI.endsWith("/herdr/mods/am-sidebar/bin/automagik-herdr.mjs"));
   };
   const cli = (args, { from = "t1", cwd = project, env: extra = {} } = {}) => {
+    core.control({ ...env, ...extra });
     preflight(extra, cwd);
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd, env: { ...env, ...extra, ...(from ? { HC_TERMINAL_ID: from } : {}) }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   const cliAsync = (args, { from = "t1", env: extra = {} } = {}) => new Promise((resolve) => {
+    core.control({ ...env, ...extra });
     preflight(extra);
     execFile(process.execPath, [CLI, ...args], { cwd: project, env: { ...env, ...extra, HC_TERMINAL_ID: from }, encoding: "utf8" },
       (e, out, err) => resolve({ code: e ? e.code : 0, out, err }));
   });
   /** The CLI as a child process, its stderr readable as it comes. */
   const spawnCli = (args, { from = "t1", env: extra = {} } = {}) => {
+    core.control({ ...env, ...extra });
     preflight(extra);
     return spawn(process.execPath, [CLI, ...args],
       { cwd: project, env: { ...env, ...extra, HC_TERMINAL_ID: from },
@@ -317,6 +326,8 @@ test("a dsh-tui worker reads its bot's approved switch; other agents keep the or
 // #1125: Codex's launch mode, spelled out, and a Codex run's --add-dir grants taken apart from its
 // other words (the tool-cache grants follow the runner's environment, so they are not compared).
 const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"];
+// #1420: a Codex worker start's per-launch trust word for exactly its worktree.
+const TRUST = (worktree) => ["-c", `projects={"${worktree}"={trust_level="trusted"}}`];
 const grantsApart = (words) => {
   const rest = [];
   const dirs = [];
@@ -336,7 +347,7 @@ test("worker: the bot's worker defaults are used, and per-task --agent/--model/-
   const out = r.json();
   assert.deepEqual([out.agent, out.model, out.effort], ["codex", "gpt-5.5", "medium"]);
   const codex = grantsApart(after(s.runs()[0]));
-  assert.deepEqual(codex.words, ["codex", ...CODEX_MODE, "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
+  assert.deepEqual(codex.words, ["codex", ...CODEX_MODE, ...TRUST(out.worktree), "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
   assert.deepEqual(codex.dirs.slice(0, 2), workerGitDirs(s, "feat-login"));
   const o = s.cli(["worker", "review it", "--branch", "feat/review", "--agent", "claude", "--model", "opus", "--effort", "max", "--json"]);
   assert.equal(o.code, 0, o.err);
@@ -350,7 +361,7 @@ test("worker #1125: a bot's codexAuto false no longer opts out (#946 retired): i
   const s = scene(t, { file });
   const r = s.cli(["worker", "fix the login form", "--branch", "feat/login", "--json"]);
   assert.equal(r.code, 0, r.err);
-  assert.deepEqual(grantsApart(after(s.runs()[0])).words, ["codex", ...CODEX_MODE, "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
+  assert.deepEqual(grantsApart(after(s.runs()[0])).words, ["codex", ...CODEX_MODE, ...TRUST(r.json().worktree), "--model", "gpt-5.5", "-c", "model_reasoning_effort=medium", "fix the login form"]);
   const o = s.cli(["worker", "tune it", "--branch", "feat/tune", "--agent", "codex", "--json"]);
   assert.equal(o.code, 0, o.err);
   assert.deepEqual(grantsApart(after(s.runs()[1])).words.slice(0, 1 + CODEX_MODE.length), ["codex", ...CODEX_MODE], "a per-task --agent codex too");
@@ -1029,7 +1040,7 @@ test("worker: a bots.json template default is used; a per-task --agent sets it a
   const m = s.cli(["worker", "tune it", "--branch", "feat/tune", "--model", "gpt-6", "--json"]);
   assert.equal(m.code, 0, m.err);
   const tuned = grantsApart(after(s.runs()[3]));
-  assert.deepEqual(tuned.words, ["codex", ...CODEX_MODE, "--model", "gpt-6", "-c", "model_reasoning_effort=medium", "tune it"]);
+  assert.deepEqual(tuned.words, ["codex", ...CODEX_MODE, ...TRUST(m.json().worktree), "--model", "gpt-6", "-c", "model_reasoning_effort=medium", "tune it"]);
   assert.deepEqual(tuned.dirs.slice(0, 2), workerGitDirs(s, "feat-tune"));
 });
 
@@ -3358,4 +3369,153 @@ test("worker: a new Claude worker's --session-id is its label and its start row'
   assert.equal(after(s.runs()[1]).includes("--session-id"), false);
   assert.equal(s.ledger().filter((x) => x.event === "start").at(-1).session, null);
   for (const id of s.ledger().map((x) => x.session).filter(Boolean)) assert.equal(`${text.out}${text.err}`.includes(id), false);
+});
+
+// ---- #1420: a Codex worker's folder trust, per launch ----
+
+/** The `-c projects=…` words a worker's argv carries (any of them), as written. */
+const trustWords = (words) => words.filter((w, i) => words[i - 1] === "-c" && w.startsWith("projects="));
+/** The person's Codex config in a scene's home (or `dir`), as TOML text. */
+const codexConfig = (s, text, dir = join(s.root, "home", ".codex")) => {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.toml"), text);
+};
+const untrustedToml = (path) => `[projects.${JSON.stringify(path)}]\ntrust_level = "untrusted"\n`;
+const TRUST_LOST = /Dev's Codex worker: (.+), so its folder wasn't pre-trusted and Codex may stop at its folder-trust prompt until a person answers it in the worker's pane\./;
+
+test("worker #1420: a Codex worker pre-trusts exactly its own worktree, never the repository root, and writes no Codex setting", (t) => {
+  const s = scene(t);
+  const r = s.cli(["worker", "fix it", "--branch", "feat/trust", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const wt = r.json().worktree;
+  assert.equal(wt, realpathSync(wt), "the resolved worktree");
+  const words = grantsApart(after(s.runs()[0])).words;
+  assert.deepEqual(words.slice(0, 1 + CODEX_MODE.length + 2), ["codex", ...CODEX_MODE, ...TRUST(wt)]);
+  assert.deepEqual(trustWords(words), [`projects={"${wt}"={trust_level="trusted"}}`], "one word, the worktree's only");
+  assert.ok(r.json().argv.includes(`projects={"${wt}"={trust_level="trusted"}}`), "--json's argv shows it");
+  assert.doesNotMatch(r.err, /pre-trusted/);
+  assert.equal(existsSync(join(s.root, "home", ".codex")), false, "nothing written in the person's Codex home");
+  // A trusted entry of the person's own, and another project's refusal, change nothing.
+  codexConfig(s, `[projects.${JSON.stringify(realpathSync(s.project))}]\ntrust_level = "trusted"\n${untrustedToml("/elsewhere/repo")}`);
+  const o = s.cli(["worker", "again", "--branch", "feat/trust2", "--json"]);
+  assert.equal(o.code, 0, o.err);
+  assert.deepEqual(trustWords(after(s.runs()[1])), [`projects={"${o.json().worktree}"={trust_level="trusted"}}`]);
+});
+
+test("worker #1420: --worktree gets the word too; the person's untrusted worktree or repository withholds it with a warning", (t) => {
+  const s = scene(t);
+  const first = s.cli(["worker", "build it", "--branch", "feat/held", "--json"]);
+  assert.equal(first.code, 0, first.err);
+  const wt = first.json().worktree;
+  // A reviewer on the same worktree (--worktree): the word, as a branch start gets it.
+  const review = s.cli(["worker", "review it", "--worktree", wt, "--role", "review", "--json"]);
+  assert.equal(review.code, 0, review.err);
+  assert.deepEqual(trustWords(after(s.runs()[1])), [`projects={"${wt}"={trust_level="trusted"}}`]);
+  // The person marks that worktree untrusted: another bot's reviewer there runs without the word.
+  codexConfig(s, untrustedToml(wt));
+  const held = s.cli(["worker", "review it too", "--worktree", wt, "--role", "review", "--json"], { from: "t4" });
+  assert.equal(held.code, 0, held.err);
+  assert.deepEqual(trustWords(after(s.runs()[2])), []);
+  assert.match(held.err, /Captain's Codex worker: settings mark the worktree or its repository untrusted, so its folder wasn't pre-trusted/);
+  assert.ok(held.json().warnings.some((w) => /wasn't pre-trusted/.test(w)), "--json lists it for the bot");
+  assert.doesNotMatch(held.err, /trust_level/, "no config text printed");
+  // The repository root marked untrusted (the main checkout, the common dir's parent): withheld for a new branch too.
+  codexConfig(s, untrustedToml(realpathSync(s.project)));
+  const root = s.cli(["worker", "next", "--branch", "feat/held2", "--json"]);
+  assert.equal(root.code, 0, root.err);
+  assert.deepEqual(trustWords(after(s.runs()[3])), []);
+  assert.match(root.err, TRUST_LOST);
+  assert.match(root.err.match(TRUST_LOST)[1], /settings mark the worktree or its repository untrusted/);
+});
+
+test("worker #1420: CODEX_HOME's config is the one read; an unreadable config or a relative CODEX_HOME withholds the word", (t) => {
+  const s = scene(t);
+  const other = join(s.root, "other-codex");
+  codexConfig(s, untrustedToml(realpathSync(s.project)), other);
+  // ~/.codex marks the root untrusted, but CODEX_HOME names an empty folder: its (missing) config is the one Codex reads.
+  codexConfig(s, untrustedToml(realpathSync(s.project)));
+  const empty = join(s.root, "empty-codex");
+  mkdirSync(empty);
+  const a = s.cli(["worker", "a", "--branch", "feat/ch-a", "--json"], { env: { CODEX_HOME: empty } });
+  assert.equal(a.code, 0, a.err);
+  assert.equal(trustWords(after(s.runs()[0])).length, 1);
+  rmSync(join(s.root, "home", ".codex"), { recursive: true });
+  const b = s.cli(["worker", "b", "--branch", "feat/ch-b", "--json"], { env: { CODEX_HOME: other } });
+  assert.equal(b.code, 0, b.err);
+  assert.deepEqual(trustWords(after(s.runs()[1])), []);
+  assert.match(b.err, /settings mark the worktree or its repository untrusted/);
+  // config.toml that can't be read (a folder): withheld.
+  mkdirSync(join(s.root, "home", ".codex", "config.toml"), { recursive: true });
+  const c = s.cli(["worker", "c", "--branch", "feat/ch-c", "--json"]);
+  assert.equal(c.code, 0, c.err);
+  assert.deepEqual(trustWords(after(s.runs()[2])), []);
+  assert.match(c.err, /Codex's settings can't be read, so its folder wasn't pre-trusted/);
+  const d = s.cli(["worker", "d", "--branch", "feat/ch-d", "--json"], { env: { CODEX_HOME: "rel/codex" } });
+  assert.equal(d.code, 0, d.err);
+  assert.deepEqual(trustWords(after(s.runs()[3])), []);
+  assert.match(d.err, /Codex's settings can't be read/);
+  // A config the narrow reader can't prove (a whole inline projects table): withheld.
+  rmSync(join(s.root, "home", ".codex"), { recursive: true });
+  codexConfig(s, "projects = { \"/x\" = { trust_level = \"trusted\" } }\n");
+  const e = s.cli(["worker", "e", "--branch", "feat/ch-e", "--json"]);
+  assert.equal(e.code, 0, e.err);
+  assert.deepEqual(trustWords(after(s.runs()[4])), []);
+  assert.match(e.err, /project trust settings can't be understood safely/);
+});
+
+test("worker #1420: a git dir kept elsewhere still finds the repository's refusal (common dir's parent and the main checkout)", (t) => {
+  for (const inside of [true, false]) {
+    const s = scene(t);
+    const meta = inside ? join(s.project, "git-meta") : join(s.root, "meta.git");
+    execFileSync("git", ["init", "-q", "--separate-git-dir", meta], { cwd: s.project, env: s.env });
+    if (inside) appendFileSync(join(meta, "info", "exclude"), "git-meta\n");
+    codexConfig(s, untrustedToml(realpathSync(s.project)));
+    const r = s.cli(["worker", "x", "--branch", "feat/sep", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(trustWords(after(s.runs()[0])), [], inside ? "git-meta inside" : "meta.git outside");
+    assert.match(r.err, /settings mark the worktree or its repository untrusted/);
+  }
+});
+
+test("worker #1420: programs.json's Codex command that picks its own folder or projects gets no word, with a warning", (t) => {
+  for (const [run, why] of [[["codex", "-C", "/tmp"], /picks its own folder, profile or projects/],
+    [["codex", "-c", 'projects={"/x"={trust_level="untrusted"}}'], /picks its own folder, profile or projects/],
+    [["codex", "--profile", "restricted"], /picks its own folder, profile or projects/]]) {
+    const s = scene(t);
+    writeFileSync(join(s.app, "programs.json"), JSON.stringify({ programs: { codex: { run } } }));
+    const r = s.cli(["worker", "x", "--branch", "feat/own", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(trustWords(after(s.runs()[0])).filter((w) => w.includes("trusted\"}}") && !w.includes("untrusted")), [], JSON.stringify(run));
+    assert.match(r.err, why);
+  }
+});
+
+test("worker #1420: Claude and Antigravity workers are unchanged; a Codex template worker keeps its command, with a warning", (t) => {
+  const s = scene(t);
+  const claude = s.cli(["worker", "review it", "--branch", "feat/c", "--agent", "claude", "--json"]);
+  assert.equal(claude.code, 0, claude.err);
+  assert.equal(after(s.runs()[0]).some((w) => w.startsWith("projects=")), false);
+  assert.doesNotMatch(claude.err, /pre-trusted/);
+  const agy = s.cli(["worker", "look", "--branch", "feat/g", "--agent", "antigravity", "--json"]);
+  assert.equal(agy.code, 0, agy.err);
+  assert.equal(after(s.runs()[1]).some((w) => w.startsWith("projects=")), false);
+  assert.doesNotMatch(agy.err, /pre-trusted/);
+  const tpl = s.cli(["worker", "fix it", "--branch", "feat/t", "--template", "dev-sol", "--json"]);
+  assert.equal(tpl.code, 0, tpl.err);
+  assert.deepEqual(templateArgv(s.runs()[2]), ["dev-sol", "fix it"], "the template's own form, nothing added");
+  assert.match(tpl.err, /Dev's Codex worker: template dev-sol owns its command, so its folder wasn't pre-trusted and Codex may stop/);
+});
+
+test("proxied worker CLI #1420: a Codex worker through the hc proxy gets no trust word and says so", async (t) => {
+  const { s, env, fake, proxy, closeAll } = await proxyWorkerCli(t);
+  try {
+    const r = await s.cliAsync(["worker", "do the task", "--branch", "feat/proxied-trust", "--json"],
+      { env: { ...env, HC_SOCKET: proxy.socket } });
+    assert.equal(r.code, 0, r.err);
+    assert.equal(fake.calls("terminal.run").length, 1);
+    assert.equal(JSON.stringify(fake.calls("terminal.run")[0].params).includes("trust_level"), false);
+    assert.match(r.err, /Dev's Codex worker: starts through the hc proxy, so its folder wasn't pre-trusted and Codex may stop/);
+  } finally {
+    await closeAll();
+  }
 });

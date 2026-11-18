@@ -40,16 +40,16 @@ const messageOutput = {
 const refusedMessage = reason => ({ text: reason, sent: false, reason })
 export const GROUP_REF = { type: 'string', required: true, description: 'Exact group chat name from list_bots' }
 const BLOCKING_QUESTION_TOOL = 'ask_user_question'
-// Omni has its own group goals; DSH's session goal still does not survive conversation parts.
+// A Bot's own chat runs DSH's goal: the loop the team asked for is this one, and
+// create_goal/update_goal are how the Bot reports its round and finishes. A group
+// Session hides them, because Omni has its own group goals.
 const GOAL_TOOLS = ['create_goal', 'update_goal', 'get_goal']
 // Bots keep DSH's subagents and teammates here, so upstream's delegation group is not hidden.
 // restrict() refuses a whole list when one name is registered in the Agent's own
 // scope, so each group is masked on its own.
-const HIDDEN_TOOL_GROUPS = [[BLOCKING_QUESTION_TOOL, ...GOAL_TOOLS]]
-const HIDDEN_TOOLS = HIDDEN_TOOL_GROUPS.flat()
-// The guidance DSH writes into the prompt for the hidden tools.
-const HIDDEN_SECTIONS = new Set([...HIDDEN_TOOLS.map(name => `tool:${name}`), 'tool:goal'])
-const GOAL_REFUSAL = 'Bot chats do not run /goal. To give a group a goal, use Set a goal in its + menu.'
+const QUESTION_TOOL_GROUP = [BLOCKING_QUESTION_TOOL]
+const GROUP_HIDDEN_TOOL_GROUPS = [[BLOCKING_QUESTION_TOOL, ...GOAL_TOOLS]]
+const GOAL_REFUSAL = 'A group Session does not run /goal: set the group\'s goal with Set a goal in its + menu, or with the group_goal tool.'
 // DSH 0.2.2's schedule tools can deliver to a new Session, which is outside the team and
 // has no Bot; a Bot's tasks deliver to its own chat, which Omni moves on with each part.
 const SCHEDULE_TARGET_TOOLS = ['schedule_create', 'schedule_edit']
@@ -84,6 +84,18 @@ const DENY_TOOLS_PARAM = {
 }
 
 export function install(rt) {
+  // A Session a group owns (a member's Session there, or the group's own) shows no goal
+  // tools: its rounds would run where nobody answers them and its goal is Omni's own.
+  const groupSessionOf = id => id !== undefined
+    && (rt.groupOwners?.has?.(id) === true || rt.roomOf(id) !== undefined)
+  const hiddenToolGroupsOf = id => (groupSessionOf(id) ? GROUP_HIDDEN_TOOL_GROUPS : [QUESTION_TOOL_GROUP])
+  const hiddenToolsOf = id => hiddenToolGroupsOf(id).flat()
+  // The guidance DSH writes into the prompt for the hidden tools. A group Session also
+  // drops the goal section itself, since it hides the whole loop.
+  const hiddenSectionsOf = id => new Set([
+    ...hiddenToolsOf(id).map(name => `tool:${name}`),
+    ...(groupSessionOf(id) ? ['tool:goal'] : []),
+  ])
   const { ctx, state } = rt
 
   const callerBot = (exec) => rt.botOf(rt.selfOf(exec.agent?.id))
@@ -1012,14 +1024,17 @@ export function install(rt) {
   // after this one.
   const filterBotAssembly = (agent, held) => {
     if (held.filtered === true || typeof agent.ctx?.on !== 'function') return
+    const id = agent.session?.id ?? agent.id
+    const hidden = hiddenToolsOf(id)
+    const hiddenSections = hiddenSectionsOf(id)
     const dispose = agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
       const assembled = await next()
       // DSH 0.2.2 adds the tool list after this waterfall (#814), so only an
       // older assembly still carries tools to drop here.
       return {
         ...assembled,
-        ...Array.isArray(assembled.tools) ? { tools: assembled.tools.filter(tool => !HIDDEN_TOOLS.includes(tool.name)) } : {},
-        sections: assembled.sections.filter(section => !HIDDEN_SECTIONS.has(section.name)),
+        ...Array.isArray(assembled.tools) ? { tools: assembled.tools.filter(tool => !hidden.includes(tool.name)) } : {},
+        sections: assembled.sections.filter(section => !hiddenSections.has(section.name)),
       }
     })
     held.filtered = true
@@ -1082,7 +1097,8 @@ export function install(rt) {
 
   // restrict() throws on a name this profile does not serve.
   const maskHiddenTools = (agent, held, served) => {
-    const groups = HIDDEN_TOOL_GROUPS.map(group => group.filter(name => served.has(name))).filter(group => group.length > 0)
+    const groups = hiddenToolGroupsOf(agent.session?.id ?? agent.id)
+      .map(group => group.filter(name => served.has(name))).filter(group => group.length > 0)
     if (groups.length === 0) return
     // Marked after one attempt even when a group fails, so a profile that can
     // never mask it is not re-masked on every resolve.
@@ -1109,9 +1125,10 @@ export function install(rt) {
 
   // dsh's own question tool holds the turn open until the user answers, and every
   // message from another Bot or a group round queues behind it. Bot Sessions ask
-  // through ask_user instead, so it is taken out of their tool list, as are the goal
-  // tools. The restricts are kept with the Session's scope, so they lift with it.
-  // A native DSH Bot keeps DSH's own question and goal tools.
+  // through ask_user instead, so it is taken out of their tool list. DSH's goal tools
+  // stay in a Bot's own chat and go with the question tool in a group Session, whose
+  // goal is the group's own. The restricts are kept with the Session's scope, so they
+  // lift with it. A native DSH Bot keeps DSH's own question and goal tools.
   const nativeDshSession = id => rt.botOf(rt.selfOf(id))?.kind === 'dsh'
   const hideBotUnusedTools = (agent) => {
     shareBotTools(agent)
@@ -1155,7 +1172,7 @@ export function install(rt) {
       // names just registered will already be in it; nothing stays pending.
       scoped.get(agent?.session?.id)?.unlisted?.clear()
     } catch (error) {
-      rt.warn('omni-ui: hiding %s on agent/created failed: %s', HIDDEN_TOOLS.join(', '), error)
+      rt.warn('omni-ui: hiding %s on agent/created failed: %s', hiddenToolsOf(agent?.session?.id ?? agent?.id).join(', '), error)
     }
   })
 
@@ -1211,8 +1228,10 @@ export function install(rt) {
     }
   })
 
-  // The /goal command stays open in every Session, so a goal started in a Bot chat or a
-  // group is blocked at once; DSH's round driver then starts no round for it.
+  // A Bot's own chat runs the goal: DSH's round driver continues its rounds, and
+  // create_goal/update_goal are in its tool list. A group Session is the one place a
+  // DSH goal would run rounds nobody answers, so a goal made there is blocked at once;
+  // the group's own goal is Omni's (group_goal).
   let goals = null
   const attachGoals = (sub) => {
     const own = sub.goals
@@ -1236,7 +1255,7 @@ export function install(rt) {
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'goal/change' || event.data?.goal?.phase !== 'active') return
     const id = session?.id
-    if (nativeDshSession(id) || (!rt.isBotSession(id) && rt.roomOf(id) === undefined)) return
+    if (nativeDshSession(id) || !groupSessionOf(id)) return
     // block() appends to the same log, so it waits until every listener has seen this change.
     setTimeout(() => void blockGoal(id), 0)
   })

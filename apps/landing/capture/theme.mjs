@@ -33,7 +33,7 @@ try {
   const state = await api('state')
   const main = state.bots.find(bot => bot.id === state.mainBotId)
   assert.ok(main)
-  await api('update-bot', { id: main.id, name: 'Pip', role: 'Your companion', color: 'orange', avatar: { shape: 'bunny' } })
+  await api('update-bot', { id: main.id, name: 'Pirlim', role: 'Your companion', color: 'orange', avatar: { shape: 'bunny' } })
   await api('create-bot', { name: 'Rowan', role: 'Writing and research', color: 'cyan', avatar: { shape: 'octopus' } })
   await api('create-bot', { name: 'Sage', role: 'Plans and reviews', color: 'pink', avatar: { shape: 'ghost' } })
   await page.reload()
@@ -64,7 +64,7 @@ try {
     capturedBy: 'node apps/landing/capture/theme.mjs --run',
     runtime: { package: '@deepseek-ai/dsh', version: runtime },
     plugin: { version: source.version, repository: source.url, commit: source.commit, path: source.path, tree: source.tree },
-    scenario: 'Fictional Pip, Rowan and Sage created through the real Bot API. No AI model, channel, messages or work result is simulated. The real app shows its model connection prompt.',
+    scenario: 'Fictional Pirlim, Rowan and Sage created through the real Bot API. No AI model, channel, messages or work result is simulated. The real app shows its model connection prompt.',
     themeSource: 'apps/bots-dsh/src/client/stage.js', reports,
   }
   await writeFile(join(output, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
