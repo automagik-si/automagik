@@ -163,6 +163,65 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   saved "always allow" rules or PreToolUse/PermissionRequest hooks approve runs with no DSH
   dialog. This is the owner's decision (RFC 0003, Decided).
 
+### Native-tools mode (`nativeTools`, #1564)
+
+Claude Code keeps its own tools and Automagik adds its extras. The owner's words: "my intention
+is to use claude code + automagik extras, not replace claude code native`s with automagik`s,
+that makes your harness lose all your power."
+
+- **The setting.** `nativeTools` in this plugin's config (the `acpAgents` service's plugin,
+  `acp-dsh`), hidden from settings forms like `dshTools`. Absent (the default) or `false` is
+  today's behaviour for everyone. `true` turns it on for every Claude Code Session; an object
+  turns it on per Bot, by the Bot's name, or per DSH Session id. A key that says `false` wins
+  over one that says `true`. For one Bot, in the profile patch:
+
+  ```yaml
+  - id: acp-dsh
+    name: "@automagik/acp-dsh"
+    config:
+      nativeTools:
+        Automagik: true
+  ```
+
+  It is read at each turn's start: a flip takes effect on that Session's next turn, in a new
+  agent session (the replay carries the chat to it). Only `acp-claude` takes it (the only agent
+  whose built-ins the bridge turns off); with `dshTools: false` it has no effect, since the
+  agent then already runs only its own tools.
+- **What changes when on.** The session starts with `_meta.disableBuiltInTools: false`, so
+  Claude Code has its Agent (subagents), Bash, Read, Edit, Write, Grep, Glob, Skill, TodoWrite
+  and the rest. The `dsh` bridge stays on but drops DSH's twin of each built-in and the DSH
+  subagent family (`NATIVE_TWIN_TOOLS` in `src/host/backchannel.js`: `bash`, `job_*`, `read`,
+  `write`, `edit`, `read_image`, `apply_patch`, `str_replace_editor`, `glob`, `grep`, `skill`,
+  `todo_write`, `subagent`, `subagent_fork`, `list_agents`, `send_message`, `interrupt_agent`,
+  `wait_agent`, `list_subagent_models`, and `web_search`/`web_fetch`/`exit_plan_mode` once they
+  are offered). Everything else stays: the Bot team's tools (`message_bot`, `ask_user`,
+  `show_view`, `remember`/`recall`, groups, secrets, browser, mail...), goals, `workflow`,
+  `working_directory` and schedules. A built-in call is no longer drift.
+- **Approvals stay DSH's.** Each native call ends the model step with its `acp_tool` mirror
+  card, exactly as with the bridge off: when Claude Code asks permission, DSH's approval answers
+  it at the Session's level, and a refusal reaches Claude Code as its own reject option before
+  the call runs. The hard ask rules (`CLAUDE_HARD_ASK`) are injected as session settings, so the
+  person's allow rules cannot silently skip the ask for those Bash cases. A subagent's nested
+  call asks while its Agent card is still waiting: that card asks DSH for it, naming the nested
+  call, and the nested call's own card follows, already answered. That nested ask does not go
+  through DSH's Auto review: it goes straight to DSH's approval request, so the person's
+  dialog answers it (or the Bot team's judge, where one is set; a delegated child that may never
+  ask is refused). An unattended Session at Auto therefore waits on the person at each nested
+  ask.
+
+  | Level | Claude Code mode | What asks DSH | What can bypass DSH |
+  |---|---|---|---|
+  | Manual | `default` | every native call its own settings leave as "ask"; DSH's dialog answers | a call its own allow rules or hooks allow (the hard asks still ask) |
+  | Auto | `auto` | only what Claude Code's auto mode asks about; DSH Auto review answers a top-level call, the person answers a subagent's nested call | whatever its auto mode runs without asking |
+  | Full | `bypassPermissions` | nothing; no hard asks injected | every native call |
+
+  Manual is the guarded level; Auto is convenience, and its review sees only what reaches the
+  mirror.
+- **Native commands and edits run in Claude Code, outside DSH's file sandbox.** DSH's sandbox,
+  its read-before-write policy and its write guard do not see them; the person's OS permissions
+  and Claude Code's own permission mode and rules are the boundary. Claude Code's `CLAUDE.md`
+  memory is the project's own context, loaded by the CLI; the Bot's memory stays `remember`.
+
 ## Agents
 
 Unbridged Claude Code receives per-session ask rules for recursive deletion, destructive Git,

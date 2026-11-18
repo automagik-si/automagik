@@ -31,8 +31,9 @@
 // (`hc server status` core.id), or a linked machine's that is connected now, and `hc get
 // <address>` is live with the same created_ms. A machine's row whose machine isn't linked or
 // isn't connected stays as it is (unknown: shown as last seen, never ended for it). A
-// finished or vanished terminal reads as ended ("finished"), and a terminal id reused after
-// an hc restart, a new created_ms, as ended too ("replaced"), before any end row is written.
+// finished or vanished terminal reads as ended ("finished"). A local row from another core
+// or a live terminal with a different created_ms reads as ended ("replaced"), before any end
+// row is written.
 
 export const ATTACH_FILE = "automagik-herdr/attach.jsonl";
 export const attachPath = (appHome) => `${String(appHome).replace(/\/+$/, "")}/${ATTACH_FILE}`;
@@ -168,7 +169,7 @@ export function addressOf(binding, machines = new Map()) {
  * `hc <args> --json` parsed, null when hc says there is no such terminal, or `unanswered`
  * when it gave no answer (it may also throw: a failed hc never reads as "ended").
  * Resolves { live: [{ binding, get }], ended: [{ binding, reason }], unknown: [binding] }:
- * another core's local row is ended ("finished": this core no longer runs it). A linked
+ * another core's local row is ended ("replaced": this core no longer owns it). A linked
  * machine's row (`machine` set) is asked at its address only while its core is a linked machine
  * that is connected (`machines`, machinesById); otherwise it stays unknown, never ended and
  * never asked, so a machine away doesn't make hc fail every lookup.
@@ -180,7 +181,7 @@ export async function confirmBindings(bindings, core, ask, unanswered = undefine
   await Promise.all(bindings.map(async (binding) => {
     if (binding.machine) {
       if (!machines.get(binding.core)?.connected) { unknown.push(binding); return; }
-    } else if (binding.core !== core) { ended.push({ binding, reason: "finished" }); return; }
+    } else if (binding.core !== core) { ended.push({ binding, reason: "replaced" }); return; }
     const get = await ask(["get", addressOf(binding, machines)]);
     if (unanswered !== undefined && get === unanswered) { unknown.push(binding); return; }
     const verdict = verdictOf(binding, get);

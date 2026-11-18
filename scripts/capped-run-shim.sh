@@ -4,46 +4,9 @@
 # The heredoc is quoted, so the text is literal: quotes and dollars inside need no escaping.
 capped_run_shim() {
   cat <<'CAPPED_RUN_SHIM'
-peek=$1
+# Keep the wrapper's first argument slot, then raise 500 over the inherited value, capped
+# at 1000 and never lowered. The separate monitor scope keeps its inherited value.
 shift
-parent=$$
-if [ -n "$peek" ]; then
-  cg=$(sed -n "s/^0:://p" /proc/self/cgroup 2>/dev/null)
-  if [ -n "$cg" ] && [ -r "/sys/fs/cgroup$cg/memory.peak" ]; then
-    peakf=/sys/fs/cgroup$cg/memory.peak
-    eventsf=/sys/fs/cgroup$cg/memory.events
-    (
-      exec 2>/dev/null
-      umask 077
-      peak=
-      oom=unknown
-      while kill -0 "$parent" 2>/dev/null; do
-        p=$(cat "$peakf" 2>/dev/null) || break
-        if [ -n "$p" ]; then
-          peak=$p
-          if [ -z "${CAPPED_RUN_TEST_UNREADABLE_EVENTS:-}" ]; then
-            o=$(sed -n "s/^oom_kill //p" "$eventsf" 2>/dev/null)
-            [ -n "$o" ] && oom=$o
-          fi
-          printf "peak %s %s\n" "$p" "$oom" >"$peek.tmp" && mv "$peek.tmp" "$peek"
-        fi
-        sleep 0.1
-      done
-      # The final read is explicit: once the payload has ended (the parent is gone), read
-      # memory.peak and memory.events once more, then write done; no tick can lose the cause.
-      p=$(cat "$peakf" 2>/dev/null)
-      [ -n "$p" ] && peak=$p
-      if [ -z "${CAPPED_RUN_TEST_UNREADABLE_EVENTS:-}" ]; then
-        o=$(sed -n "s/^oom_kill //p" "$eventsf" 2>/dev/null)
-        [ -n "$o" ] && oom=$o
-      fi
-      printf "done %s %s\n" "$peak" "$oom" >"$peek.tmp" && mv "$peek.tmp" "$peek"
-    ) &
-  fi
-fi
-# The payload exec path only: raise 500 over what this process inherits, capped at 1000, and
-# never lower (an unprivileged process may only raise). The monitor was forked above and keeps
-# the inherited value, so the payload is strictly above it unless the inherited value is 1000.
 inherited=$(cat /proc/self/oom_score_adj 2>/dev/null)
 case $inherited in
   "" | *[!0-9-]*) inherited=0 ;;
@@ -56,4 +19,51 @@ if [ -w /proc/self/oom_score_adj ]; then
 fi
 exec "$@"
 CAPPED_RUN_SHIM
+}
+
+# The sibling monitor publishes the last sampled payload peak and the slice's final OOM count.
+capped_run_monitor() {
+  cat <<'CAPPED_RUN_MONITOR'
+exec 2>/dev/null
+trap final TERM
+
+final() {
+  oom=unknown
+  if [ -n "${slice:-}" ] && [ -z "${CAPPED_RUN_TEST_UNREADABLE_EVENTS:-}" ] &&
+    awk '$5 == "/sys/fs/cgroup" && / - cgroup2 / {
+      found = 1
+      local_events = ($NF ~ /(^|,)memory_localevents(,|$)/)
+    }
+    END { exit !(found && !local_events) }' /proc/self/mountinfo; then
+    count=$(sed -n 's/^oom_kill //p' "$slice/memory.events")
+    [ -n "$count" ] && oom=$count
+  fi
+  # The wrapper reads three whitespace-delimited fields, even before the first peak sample.
+  publish done "${peak:-unknown}" "$oom"
+  exit 0
+}
+
+publish() {
+  printf '%s\n' "$*" >"$peek.tmp" && mv -f "$peek.tmp" "$peek"
+}
+
+peek=$1
+unit=$2
+wrapper=$3
+umask 077
+cg=$(sed -n 's/^0:://p' /proc/self/cgroup)
+case ${cg%/*} in
+  */app-cappedrun_*.slice) slice=/sys/fs/cgroup${cg%/*} ;;
+  *) exit 1 ;;
+esac
+peak=
+publish ready || exit 1
+while kill -0 "$wrapper" 2>/dev/null; do
+  if p=$(cat "$slice/$unit.scope/memory.peak") && [ -n "$p" ]; then
+    peak=$p
+    publish tick "$peak"
+  fi
+  sleep 0.1
+done
+CAPPED_RUN_MONITOR
 }
