@@ -10,7 +10,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { checkBots, parseBots } from "../mods/am-sidebar/model.js";
+import { checkBots, parseBots, PROJECTS_FILE } from "../mods/am-sidebar/model.js";
 import { writeBotsFile, findBot, CliError, listProject, causeLine } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
 import { GUARD_DIR, KILL_GUARD_DIR, ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { AGY_FIXED_DENY, AGY_SHELL_READ, agySettingsDir, agySettingsFile, withoutBriefing } from "../mods/am-sidebar/models.js";
@@ -5370,4 +5370,205 @@ test("#1415 an unknown Claude model is refused with Fable 5.2 in the choices", (
   assert.equal(refused.code, 1, refused.err);
   assert.match(refused.err, /isn't a known claude model\. Pick one of: .*claude-fable-5-2(?:,|\.)/);
   assert.equal(existsSync(s.botsPath), false, "nothing written");
+});
+
+// ---- #738 main: hand the main role over in one whole-roster save ----
+const HAND = { zed: "b-ffffffffff", ops: "b-dddddddddd", aide: "b-gggggggggg" };
+/** Implicit members around the participants in a non-alphabetical file order; Aide names the main bot explicitly. */
+const handTeam = (edit = (f) => f) => edit(team({ bots: [
+  bot(ID.main, "main", { name: "Genie", category: "eng" }),
+  bot(HAND.zed, "member", { name: "Zed" }),
+  bot(ID.cap, "member", { name: "Captain", category: "eng" }),
+  bot(ID.dev, "member", { name: "Dev", lead: ID.cap }),
+  bot(HAND.aide, "member", { name: "Aide", lead: ID.main }),
+  bot(HAND.ops, "member", { name: "Ops" }),
+  bot(ID.plan, "member", { name: "Studio", agent: undefined, planned: { wave: 3 } }),
+] }));
+const handPreview = (lead = "Captain (b-bbbbbbbbbb)") => [
+  `Genie (b-aaaaaaaaaa) becomes a member reporting to ${lead}.`,
+  "Captain (b-bbbbbbbbbb) becomes the main bot.",
+  "Members with no stored lead that will follow Captain (b-bbbbbbbbbb):",
+  "  Zed (b-ffffffffff)", "  Ops (b-dddddddddd)", "  Studio (b-eeeeeeeeee)",
+];
+const IMPLICIT = [{ id: HAND.zed, name: "Zed" }, { id: HAND.ops, name: "Ops" }, { id: ID.plan, name: "Studio" }];
+
+test("#738 main: the implied lead is stored as an omission; one JSON value on stdout, the preview on stderr; read-back agrees", (t) => {
+  const s = scene(t);
+  const seeded = handTeam();
+  s.seed(seeded);
+  const r = s.cli(["main", "Captain", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), { id: ID.cap, project: s.project, previousMain: ID.main, oldLead: ID.cap,
+    implicitMembers: IMPLICIT, displacedLinks: [], saved: true, relabelled: [] });
+  assert.equal(r.err, handPreview().map((l) => `am: ${l}\n`).join(""));
+  const after = s.bots();
+  const genie = after.bots[0], captain = after.bots[2];
+  assert.equal(genie.kind, "member");
+  assert.equal(Object.hasOwn(genie, "lead"), false, "the default lead is an omission, never a second spelling");
+  assert.equal(genie.category, "eng", "an implied lead keeps the old main's category");
+  assert.equal(captain.kind, "main");
+  assert.equal(Object.hasOwn(captain, "category"), false);
+  assert.deepEqual(after.bots.filter((b) => b.kind === "main").map((b) => b.id), [ID.cap]);
+  // Every other row stays as it was, in place.
+  for (const i of [1, 3, 4, 5, 6]) assert.deepEqual(after.bots[i], JSON.parse(JSON.stringify(seeded.bots[i])));
+  assert.deepEqual(checkBots(after), []);
+  assert.equal(s.cli(["show", "Genie", "--json"]).json().lead, ID.cap);
+  assert.equal(s.cli(["show", "Studio", "--json"]).json().lead, ID.cap);
+  assert.equal(s.cli(["show", "Aide", "--json"]).json().lead, ID.main, "an explicit lead still names the old main");
+});
+
+test("#738 main --old-lead: an alternate lead is saved explicitly, checked in the proposed graph, and read back", (t) => {
+  const s = scene(t);
+  s.seed(handTeam());
+  // Ops reports implicitly to Genie today; after the hand-over it follows Captain, so Genie -> Ops is no cycle.
+  const r = s.cli(["main", "Captain", "--old-lead", "Ops"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, [...handPreview("Ops (b-dddddddddd)"), `Main bot hand-over saved in ${s.botsPath}.`].map((l) => `${l}\n`).join(""));
+  assert.equal(r.err, "");
+  const genie = s.bots().bots[0];
+  assert.deepEqual([genie.kind, genie.lead, Object.hasOwn(genie, "category")], ["member", HAND.ops, false]);
+  assert.equal(s.cli(["show", "Genie", "--json"]).json().lead, HAND.ops);
+  assert.equal(s.cli(["show", "Ops", "--json"]).json().lead, ID.cap);
+});
+
+test("#738 main refusals: self, planned, missing, ambiguous, cycle, an invalid roster, not one main; exact bytes kept", (t) => {
+  const s = scene(t, { terminals: [term("t1", { bot: ID.main }), term("t7", { bot: ID.cap })] });
+  const twins = (f) => { f.bots.push(bot("b-hhhhhhhhhh", "member", { name: "Twin" }), bot("b-iiiiiiiiii", "member", { name: "Twin" })); return f; };
+  const rows = [
+    [handTeam(), ["Genie"], /^am: Genie is already the main bot\.\n$/],
+    [handTeam(), ["Studio"], /^am: Studio is planned, so it can't be the main bot yet\.\n$/],
+    [handTeam(), ["Nobody"], /No bot "Nobody" in this project\./],
+    [handTeam(twins), ["Twin"], /2 bots are named "Twin" \(b-hhhhhhhhhh, b-iiiiiiiiii\); use the id\./],
+    [handTeam(), ["Captain", "--old-lead", "Genie"], /^am: Genie can't lead itself\.\n$/],
+    [handTeam(), ["Captain", "--old-lead", "Studio"], /^am: Studio is planned, so it can't lead a bot yet\.\n$/],
+    [handTeam(), ["Captain", "--old-lead", "Nobody"], /No bot "Nobody" in this project\./],
+    [handTeam(twins), ["Captain", "--old-lead", "Twin"], /2 bots are named "Twin"/],
+    // Aide names Genie as its lead: Genie -> Aide -> Genie.
+    [handTeam(), ["Captain", "--old-lead", "Aide"], /^am: Not saved: .*b-aaaaaaaaaa: lead b-gggggggggg leads back to this bot/],
+    [handTeam((f) => { f.bots[5].lead = "b-zzzzzzzzzz"; return f; }), ["Captain"], /^am: Not saved: .*lead b-zzzzzzzzzz is missing/],
+    [handTeam((f) => { f.bots[0].kind = "member"; return f; }), ["Captain"], /0 main bots; a project has exactly one/],
+    [handTeam((f) => { f.bots[1].kind = "main"; return f; }), ["Captain"], /2 main bots; a project has exactly one/],
+  ];
+  for (const [file, args, why] of rows) {
+    s.seed(file);
+    const before = readFileSync(s.botsPath, "utf8");
+    const labels = labelCalls(s.calls()).length;
+    for (const extra of [[], ["--dry-run"]]) {
+      const r = s.cli(["main", ...args, ...extra]);
+      const what = [...args, ...extra].join(" ");
+      assert.equal(r.code, 1, `${what}: ${r.err}`);
+      assert.match(r.err, why, what);
+      assert.equal(r.out, "", `${what}: no preview for a refusal`);
+      assert.equal(readFileSync(s.botsPath, "utf8"), before, `${what}: exact bytes kept`);
+    }
+    // --json: one error value on stdout, the same message on stderr.
+    const j = s.cli(["main", ...args, "--json"]);
+    assert.equal(j.code, 1);
+    assert.match(j.err, why);
+    assert.equal(j.json().error, j.err.replace(/^am: /, "").trimEnd());
+    assert.equal(readFileSync(s.botsPath, "utf8"), before);
+    assert.equal(labelCalls(s.calls()).length, labels, `${args.join(" ")}: no relabel`);
+  }
+});
+
+test("#738 main --dry-run: same preview twice, byte for byte; no save, no listing, no relabel; then the real run does both", (t) => {
+  const s = scene(t, { terminals: [term("t1", { bot: ID.main }), term("t7", { bot: ID.cap }), term("t8", { bot: ID.dev })] });
+  s.seed(handTeam());
+  const before = readFileSync(s.botsPath, "utf8"), mtime = statSync(s.botsPath).mtimeMs;
+  const listFile = join(s.app, PROJECTS_FILE);
+  assert.equal(existsSync(listFile), false);
+  const runs = [1, 2].map(() => s.cli(["main", "Captain", "--dry-run"]));
+  for (const r of runs) assert.equal(r.code, 0, r.err);
+  assert.equal(runs[0].out, handPreview().map((l) => `${l}\n`).join(""));
+  assert.deepEqual([runs[1].out, runs[1].err], [runs[0].out, runs[0].err]);
+  const json = [1, 2].map(() => s.cli(["main", "Captain", "--dry-run", "--json"]));
+  assert.deepEqual([json[1].code, json[1].out, json[1].err], [json[0].code, json[0].out, json[0].err]);
+  assert.deepEqual(json[0].json(), { id: ID.cap, project: s.project, previousMain: ID.main, oldLead: ID.cap,
+    implicitMembers: IMPLICIT, displacedLinks: [], saved: false, relabelled: [] });
+  assert.equal(json[0].err, handPreview().map((l) => `am: ${l}\n`).join(""));
+  assert.equal(readFileSync(s.botsPath, "utf8"), before);
+  assert.equal(statSync(s.botsPath).mtimeMs, mtime);
+  assert.equal(existsSync(listFile), false, "no project listing");
+  assert.deepEqual(labelCalls(s.calls()), [], "no relabel");
+  // The real run with the same snapshot saves, lists and relabels.
+  const real = s.cli(["main", "Captain", "--json"]);
+  assert.equal(real.code, 0, real.err);
+  assert.notEqual(readFileSync(s.botsPath, "utf8"), before);
+  assert.equal(existsSync(listFile), true, "a real save lists the project");
+  assert.ok(real.json().relabelled.length > 0, JSON.stringify(real.json()));
+  assert.ok(labelCalls(s.calls()).length > 0);
+});
+
+test("#738 main arguments: unrelated, empty or repeated selectors and a stray --old-lead exit 2 before any I/O", (t) => {
+  const s = scene(t);
+  s.seed(handTeam());
+  const before = readFileSync(s.botsPath, "utf8");
+  const gone = join(s.root, "gone");
+  const rows = [
+    [["main"], /usage: am main <bot>/],
+    [["main", "Captain", "Dev"], /usage: am main <bot>/],
+    [["main", ""], /usage: am main <bot>/],
+    [["main", "  "], /usage: am main <bot>/],
+    [["main", "Captain", "--old-lead", ""], /--old-lead needs a value/],
+    [["main", "Captain", "--old-lead=  "], /--old-lead needs a value/],
+    [["main", "Captain", "--project", ""], /--project needs a value/],
+    [["main", "Captain", "--old-lead", "Dev", "--old-lead", "Ops"], /Give --old-lead once/],
+    [["main", "Captain", "--dry-run", "--dry-run"], /Give --dry-run once/],
+    [["main", "Captain", "--project", gone, "--project", gone], /Give --project once/],
+    [["main", "Captain", "--role", "x", "--project", gone], /--role isn't an option for main/],
+    [["main", "Captain", "--lead", "Dev"], /--lead isn't an option for main/],
+    [["main", "Captain", "--all"], /--all isn't an option for main/],
+    [["edit", "Dev", "--old-lead", "Captain"], /^am: --old-lead is only for main\.\n$/],
+    [["ls", "--old-lead", "Captain", "--project", gone], /^am: --old-lead is only for main\.\n$/],
+    [["create", "--name", "New", "--agent", "claude", "--old-lead", "Dev"], /^am: --old-lead is only for main\.\n$/],
+  ];
+  for (const [args, why] of rows) {
+    const r = s.cli(args);
+    assert.equal(r.code, 2, `${args.join(" ")}: ${r.err}`);
+    assert.match(r.err, why, args.join(" "));
+    assert.doesNotMatch(r.err, /is not a folder|No bot/, `${args.join(" ")}: refused before reading anything`);
+    assert.equal(readFileSync(s.botsPath, "utf8"), before);
+  }
+  assert.deepEqual(s.calls(), [], "nothing asked of hc");
+  assert.equal(existsSync(gone), false);
+});
+
+test("#738 main: displaced external leads on the two edited rows are cleared and reported; other rows and the other project stay", (t) => {
+  const s = scene(t);
+  const ext = join(s.root, "ext");
+  mkdirSync(join(ext, ".herdr"), { recursive: true });
+  const O = "b-oooooooooo", Q = "b-qqqqqqqqqq", P = "b-pppppppppp";
+  const extText = `${JSON.stringify({ version: 1, categories: [], bots: [
+    bot(O, "main", { name: "Hub", crossMembers: [{ id: ID.main, project: s.project }, { id: HAND.ops, project: s.project }] }),
+    bot(Q, "member", { name: "Desk", crossMembers: [{ id: ID.cap, project: s.project }] }),
+    bot(P, "member", { name: "Far", lead: ID.main, leadProject: s.project }),
+  ] }, null, 2)}\n`;
+  writeFileSync(join(ext, ".herdr/bots.json"), extText);
+  const seeded = handTeam((f) => {
+    Object.assign(f.bots[0], { lead: O, leadProject: ext, crossMembers: [{ id: P, project: ext }] });
+    Object.assign(f.bots[2], { lead: Q, leadProject: ext });
+    Object.assign(f.bots[5], { lead: O, leadProject: ext });
+    return f;
+  });
+  s.seed(seeded);
+  const r = s.cli(["main", "Captain", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const out = r.json();
+  assert.deepEqual(out.displacedLinks, [
+    { id: ID.main, name: "Genie", lead: O, leadProject: ext },
+    { id: ID.cap, name: "Captain", lead: Q, leadProject: ext },
+  ]);
+  assert.deepEqual(out.implicitMembers, [{ id: HAND.zed, name: "Zed" }, { id: ID.plan, name: "Studio" }], "Ops has a stored lead");
+  for (const [who, lead] of [["Genie", O], ["Captain", Q]]) {
+    assert.ok(r.err.includes(`am: Displaced external lead: ${who} (${who === "Genie" ? ID.main : ID.cap}) → ${lead} in ${ext}. `
+      + "Remove the reciprocal entry there manually.\n"), r.err);
+  }
+  const [genie, , captain, , , ops] = s.bots().bots;
+  for (const row of [genie, captain]) {
+    assert.equal(Object.hasOwn(row, "lead"), false, row.name);
+    assert.equal(Object.hasOwn(row, "leadProject"), false, row.name);
+  }
+  assert.deepEqual(genie.crossMembers, [{ id: P, project: ext }], "crossMembers untouched");
+  assert.deepEqual(ops, JSON.parse(JSON.stringify(seeded.bots[5])), "another row's external link stays");
+  assert.equal(readFileSync(join(ext, ".herdr/bots.json"), "utf8"), extText, "the other project's file is never written");
 });
