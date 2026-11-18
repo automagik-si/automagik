@@ -446,7 +446,7 @@ export function install(rt) {
     }
   }
   const adminActions = new Set([...AGENT_TOOLS.map(tool => tool.endpoint),
-    'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags',
+    'state', 'switch-route', 'duplicate-bot', 'add-agent', 'remove-agent', 'set-flags', 'set-main',
     'agent-adopt', 'bot-session-adopt', 'agent-bot-adopt', 'agent-bot-rollback'])
   const spaceReads = rt.spaceReads ?? createSpaceReads(rt)
   const handle = async (endpoint, payload, signal) => {
@@ -993,6 +993,42 @@ export function install(rt) {
           return ok(privacy.view())
         case 'privacy-set':
           return ok(privacy.set(String(body.share ?? ''), body.on === true))
+        case 'browser-state': {
+          if (rt.browserControl === undefined) return fail('Bot browsers are off on this host', 'bot/browser-off')
+          await rt.load()
+          const botId = String(body.botId ?? '')
+          const state = await rt.browserControl(botId, 'state')
+          if (state === undefined) return fail('This Bot has no open browser', 'bot/not-found')
+          const hold = rt.browserChannel?.holdOf(botId) ?? null
+          return ok({ ...state, hold: hold === null ? null : { by: hold.by, note: hold.note } })
+        }
+        // The person driving the page from the app panel: every action of theirs holds the
+        // browser, so the Bot's own browser tools wait until it is given back.
+        case 'browser-control': {
+          if (rt.browserControl === undefined) return fail('Bot browsers are off on this host', 'bot/browser-off')
+          await rt.load()
+          const botId = String(body.botId ?? '')
+          if (!rt.botOf(botId)) return fail('Unknown Bot', 'bot/not-found')
+          const action = String(body.action ?? '')
+          const args = body.args && typeof body.args === 'object' ? body.args : {}
+          // The session refuses an action while a user hold is on (the Bot must wait), so the
+          // person's own action takes the hold off for its duration and puts it back after:
+          // the Bot never sees a window to act between their actions.
+          const previous = rt.browserChannel?.holdOf(botId) ?? null
+          if (rt.browserChannel !== undefined) rt.browserChannel.setHold(botId, null)
+          let value
+          try {
+            value = await rt.browserControl(botId, action, args)
+          } finally {
+            if (rt.browserChannel !== undefined) {
+              rt.browserChannel.setHold(botId, previous !== null && previous.by === 'user'
+                ? previous
+                : { by: 'user', reason: 'takeover', note: 'The user is controlling this browser.', panel: true })
+            }
+          }
+          if (value === undefined) return fail('This Bot has no open browser', 'bot/not-found')
+          return ok({ action, value })
+        }
         case 'browser-takeover': {
           if (rt.browserChannel === undefined) return fail('Bot browsers are off on this host', 'bot/browser-off')
           await rt.load()

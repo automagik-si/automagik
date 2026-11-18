@@ -508,6 +508,47 @@ try:
                 remember(folder, home)
         for folder in walk_records(home, min(3.0, control)):
             remember(folder, home)
+    # A shared beside folder names no owner by itself. Read the record anyway and let a home's
+    # own 'serve --status' prove it: only the home whose status lists that pid may take it, and
+    # two homes that both list it credit neither. A record no home proves stays unattributed,
+    # so a stopped neighbour never answers with a running home's token.
+    beside_candidates = []
+    candidate_keys = set()
+    for home, entries in beside_entries.items():
+        for folder, _ in entries:
+            try:
+                key = os.path.realpath(folder)
+            except OSError:
+                key = folder
+            if key not in ambiguous_folders or key in candidate_keys or key in seen:
+                continue
+            record = read_record(folder)
+            if record is None:
+                continue
+            candidate_keys.add(key)
+            record["beside"] = True
+            record["besideKey"] = key
+            beside_candidates.append(record)
+    if beside_candidates:
+        shared_pids = {}
+        for home in sorted(ambiguous):
+            if time.monotonic() >= deadline:
+                break
+            budget = min(20.0, control, max(0.2, deadline - time.monotonic()))
+            pids = status_pids(hermes, home, budget)
+            if pids:
+                shared_pids[home] = pids
+        for record in beside_candidates:
+            owners = beside_owners.get(record["besideKey"]) or set()
+            claimants = [home for home in sorted(owners)
+                         if record["pid"] in shared_pids.get(home, set())]
+            if len(claimants) == 1 and alive(record["pid"]) and listening(record["port"]):
+                owner = claimants[0]
+                record["owner"] = owner
+                record["recordDir"] = next(
+                    (folder for folder, _ in beside_entries.get(owner, [])
+                     if os.path.realpath(folder) == record["besideKey"]), record["recordDir"])
+            record["sharedBeside"] = len(claimants) != 1
     # Hermes's serve writes no home field (0.23.x and current main), so a nameless
     # record in the account folder is the DEFAULT home's own serve. A record that names
     # another existing home is left for attribution (a home owning a different serve
@@ -532,11 +573,11 @@ try:
             owned = [item for item in records.values() if item.get("owner") == default_home]
             if not owned or any(item["pid"] == record["pid"] for item in owned):
                 record["owner"] = default_home
-    record_dirs = list(records.values())
+    record_dirs = list(records.values()) + beside_candidates
     # Only a record in the shared account folder may name a home to ask: a structural
     # record's reported home is its sandbox's own path and must not add a host home.
     for record in record_dirs:
-        if record.get("owner"):
+        if record.get("owner") or record.get("sharedBeside"):
             continue
         raw_named = record.get("home") or ""
         named = normalized_home(raw_named)
@@ -562,6 +603,8 @@ try:
         target = record.get("owner") or ""
         if target and target not in attributed:
             target = ""
+        if not target and record.get("sharedBeside"):
+            continue
         if not target:
             # The record lives in the shared account folder; its own report may name the
             # home that wrote it. A home already served by a distinct record is not re-owned.

@@ -18,7 +18,7 @@ import { state } from "./use-stubs.mjs";
 import { parseBots } from "../mods/am-sidebar/model.js";
 import {
   briefingText, directMembers, mergeHook, hookCommand, legacyHookCommand, directHookCommand, briefingPath, stableBriefingPath, withExclude, EXCLUDE_LINE, BRIEFING_LIMIT,
-  botOfBriefingFile, briefDecision, briefedPath, briefingFilePath, launchBriefingText, textHash, GUARD_LINE, WORKER_LINE,
+  botOfBriefingFile, briefDecision, briefedPath, briefingFilePath, launchBriefingText, textHash, GUARD_LINE, WORKER_LINE, MESSAGE_LINE,
   amPartEntryPath, amPartHookCommand, amPartRunnerPath, hookTargetOf, installHook, isAmPartEntry, scriptOf, statusWord, PERMISSION_WORD,
 } from "../mods/am-sidebar/briefingText.mjs";
 import { BUDGET_MS, CALL_MS, GUARD_MS, COMPACT_MARK, compactedSince, timeScale, gatherBriefing } from "../mods/am-sidebar/briefing.mjs";
@@ -1074,6 +1074,7 @@ test("worker instruction: launch and full briefings agree on code and git scope"
       for (const render of [launchBriefingText, briefingText]) {
         const text = render({ self, file, isGit });
         assert.equal(text.includes(WORKER_LINE), expected);
+        assert.ok(text.includes(MESSAGE_LINE));
         if (!expected) assert.doesNotMatch(text, /worker/i);
         assert.match(text, /Keep the board green/);
       }

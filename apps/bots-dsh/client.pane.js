@@ -10074,6 +10074,7 @@ var ZH = {
   "Message Bot": "给 Bot 发消息",
   "To:": "发给：",
   "Remove {name}": "移除 {name}",
+  "Remove {name}?": "移除 {name}？",
   "Adopt as Bot": "转为团队 Bot",
   Recipient: "收件人",
   Recipients: "收件人",
@@ -11347,6 +11348,7 @@ var ZH = {
   "{count} messages": "{count} 条消息",
   "done": "完成",
   "Remove Tasks": "移除任务",
+  "Remove Tasks?": "移除任务？",
   "Started task": "已开始任务",
   "Starting a task": "正在开始任务",
   "Task finished": "任务完成",
@@ -11926,7 +11928,26 @@ var HOST_ZH = {
   "You control the computer": "你在操控电脑",
   "Stop {name}": "停止 {name}",
   "{name} · foreground": "{name} · 前台",
-  "{name} waits for the computer": "{name} 等你停手"
+  "{name} waits for the computer": "{name} 等你停手",
+  // The Bot browser tab beside the conversation (bot-browser-tab.js): the person drives the
+  // Bot's own page, then gives it back.
+  "Bot browser": "Bot 浏览器",
+  "Open a page yourself, then hand the browser to this Bot.": "先自己打开页面，再把浏览器交给这个 Bot。",
+  "Go": "前往",
+  "You are in control — the Bot waits.": "由你操作——Bot 正在等待。",
+  "The Bot is driving.": "Bot 正在操作。",
+  "Give to Bot": "交给 Bot",
+  "No page open yet — type an address": "还没有打开的页面——输入一个网址",
+  "Type an address above to open a page in this Bot’s browser, or wait for the Bot to browse.": "在上方输入网址，在这个 Bot 的浏览器中打开页面；也可以等 Bot 自己去浏览。",
+  "Type into the page": "在页面中输入",
+  "No Bot browser here yet": "这里还没有 Bot 浏览器",
+  "The Bot team has not listed this Session’s Bot yet. Ask the Bot to open a page and this view follows it.": "Bot 团队还没有列出这个会话的 Bot。让 Bot 打开一个页面，这个视图会跟着它。",
+  "Bot browsers are off": "Bot 浏览器已关闭",
+  "This host has the Bot browser turned off.": "此主机已关闭 Bot 浏览器。",
+  "Could not read the page": "无法读取页面",
+  "Connecting to the Bot’s browser…": "正在连接 Bot 的浏览器…",
+  "The first frame arrives in a moment.": "第一帧马上就到。",
+  "The Bot’s browser": "Bot 的浏览器"
 };
 Object.assign(ZH, {
   "This step is hard to undo: {step}. Allow it once?": "这一步难以撤销：{step}。允许这一次吗？",
