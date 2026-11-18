@@ -183,16 +183,3 @@ stopped work came back.
 
 Delivery 4 must not install anything; 5 and 6 are one setting apart from people; 7 is the switch that
 retires `?mock-1540`.
-
-## Open questions
-
-- **Q1** Who removes an old kept version, and when? (Two kept; the third removed after a healthy run?)
-- **Q2** Does Arca own the version store, or the instance's home does, as designed here?
-- **Q3** Should health include one small model round-trip, opt-in?
-- **Q4** Are 60 s + 60 s the right deadlines on the owner's hardware?
-- **Q5** Where does the supervisor live — a host plugin in this profile, or a launcher the service
-  starts?
-- **Q6** Does an update wait for turns that are running, or does the click end them? (The owner's
-  click is consent to restart; what happens to a running turn is a product decision.)
-- **Q7** Which releases may be updated to: every plugin patch, or only stable tags? (A prerelease
-  never moves `plugin-lane`, so the pointer already answers most of this.)
