@@ -1116,6 +1116,17 @@ test('the Cloud form offers email only while WhatsApp sign-ups are paused; remov
 })
 
 
+test('the brand kit WaitlistForm preview shows the form the site serves', () => {
+  const preview = read('../../docs/brand/components/WaitlistForm/preview.html').match(/<form class="waitlist-form"[\s\S]*?<\/form>/)[0]
+  const served = waitlistForm()
+  const names = markup => [...markup.matchAll(/name="([^"]+)"/g)].map(match => match[1])
+  assert.deepEqual(names(preview), names(served), 'The preview carries the served fields, in order')
+  assert.match(preview, /<input type="hidden" name="channel" value="email">/)
+  assert.doesNotMatch(preview, /whatsapp|wa\.me|AMG-/i)
+  assert.equal((preview.match(/<input type="email" name="email" [^>]*required/g) ?? []).length, 1)
+})
+
+
 test('approved WhatsApp support privacy is verbatim in English with its Portuguese counterpart', () => {
   const markup = supportPrivacy()
   const english = markup.match(/<section lang="en"[\s\S]*?<\/section>/)[0]
