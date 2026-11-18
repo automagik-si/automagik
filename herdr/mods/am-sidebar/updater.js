@@ -8,21 +8,24 @@
 
 import { AUTO_FILE, CHECK_FILE, HELD_FILE, RESTORE_FILE, formatAuto, parseAuto } from "./release.js";
 import {
-  FIRST_CHECK_MS, LANDING_WAIT_MS, REQUEST_KEY, RELOAD_GRACE_MS, RETRY_MS, SHOWN_KEY, STATE_KEY, announce, applyNotice, applyPatch,
+  FIRST_CHECK_MS, LANDING_WAIT_MS, REQUEST_KEY, RELOAD_GRACE_MS, RETRY_MS, SHOWN_KEY, STATE_KEY, announce, applyNotice, applyPatch, heldRecordFrom,
   applyRefusal, autoFailedNotice, autoFailure, autoPlan, busyOf, checkFrom, checkPatch, claim, coolingDown, finish, heldFrom, heldNotice, landedNotice,
   landing, landingAnswer, nextCheckIn, noReloadNotice, requestAnswer, requestDue, restoreFrom, restoredNotice, restoreFailedNotice, runCheck,
   seenRequest, shownFrom, stateFrom,
 } from "./updateCheck.js";
 
+const landingIdOf = (state) => state.busy?.id ?? state.landed?.id;
+
 export class Updater {
   /**
    * `exec(command, args)`: Herdr's exec. `get`/`set`: shared/setShared. `notify`: Herdr's notify.
+   * `onAdvisories(notes)`: the layout advisories from an accepted install or restore notice.
    * `after(ms, fn)`: a one-shot timer that stops when this build is reloaded (the mod passes its
    * init cx's timer). `spawn(fn)`: runs an async task (cx.spawn). `readText`/`writeText`: Herdr's
    * readTextFile/writeTextFile. `appHome`: the app home. `now`: the clock.
    */
-  constructor({ exec, get, set, notify, after, spawn = (fn) => { fn(); }, readText, writeText, appHome, now = Date.now }) {
-    Object.assign(this, { exec, get, set, notify, after, spawn, readText, writeText, now });
+  constructor({ exec, get, set, notify, onAdvisories, after, spawn = (fn) => { fn(); }, readText, writeText, appHome, now = Date.now }) {
+    Object.assign(this, { exec, get, set, notify, onAdvisories, after, spawn, readText, writeText, now });
     this.script = `${appHome}/mods/am-sidebar/update.mjs`;
     this.mods = `${appHome}/mods`;
     this.autoFile = `${appHome}/automagik-herdr/${AUTO_FILE}`;
@@ -38,6 +41,10 @@ export class Updater {
 
   state() { return stateFrom(this.get(STATE_KEY)); }
   patch(fields) { this.set(STATE_KEY, { ...this.state(), ...fields }); }
+
+  presentAdvisories(notes = []) {
+    try { this.onAdvisories?.(notes); } catch {}
+  }
 
   /** At load: the first check after FIRST_CHECK_MS, and the notice for an install that just landed. */
   start() {
@@ -98,7 +105,7 @@ export class Updater {
       let patch = { applyError: "the install did not run", at: this.now() };
       try {
         const { node, result } = await runCheck(this.exec, this.script, this.node,
-          { mods: this.mods, command: "apply", extra: ["--expect", to, ...(auto ? ["--auto"] : [])] });
+          { mods: this.mods, command: "apply", extra: ["--expect", to, ...(auto ? ["--auto"] : []), "--landing-id", id] });
         if (node) this.node = node;
         patch = applyPatch(result, before, this.now());
       } catch (e) { patch = { applyError: String(e?.message ?? e), at: this.now() }; }
@@ -112,16 +119,17 @@ export class Updater {
         if (before.announced !== patch.current) {
           const note = patch.kind === "restored" ? restoredNotice(patch.restore) : restoreFailedNotice(patch.restoreError, patch.current);
           if (note) try { this.notify(note); } catch {}
+          if (before.busy?.id === id && this.state().announced === patch.current) this.presentAdvisories(patch.restore?.notes);
         }
         return;
       }
       if (patch.kind === "installed") {
         const landed = { version: patch.current, from: patch.from, restartBots: patch.restartBots === true, held: patch.heldMods ?? [],
-          check: patch.check ?? null, at: this.now() };
+          check: patch.check ?? null, warnings: patch.warnings ?? [], at: this.now(), id };
         try { finish(this.get, this.set, id, { ...patch, ...requestAnswer(this.state(), request), autoFailed: null, landed }); } catch {}
         // Herdr reloads the mods as the folders swap, and the new build announces it (arrive).
         // Still here after the grace: no reload happened, so say what to do.
-        try { this.after(RELOAD_GRACE_MS, () => this.unreloaded(patch.current, patch.heldMods, patch.check)); } catch {}
+        try { this.after(RELOAD_GRACE_MS, () => this.unreloaded(id, patch.current, patch.heldMods, patch.check, patch.warnings)); } catch {}
         return;
       }
       if (auto && patch.refused) {
@@ -145,52 +153,96 @@ export class Updater {
     return true;
   }
 
-  unreloaded(version, held = [], check = null) {
-    if (this.state().announced === version) return;
+  unreloaded(id, version, held = [], check = null, warnings = []) {
+    const { announced, landed, busy } = this.state();
+    if (announced === version) return;
     this.patch({ announced: version });
-    try { this.notify(noReloadNotice(version, held, check)); } catch {}
+    try { this.notify(noReloadNotice(version, held, check, warnings)); } catch {}
+    if (landed?.version === version && landed.id === id && (busy?.what !== "apply" || busy.id === id)) {
+      this.presentAdvisories(warnings);
+    }
+  }
+
+  async readLandingHeld(version, step, id) {
+    let text = null;
+    try { text = await this.readText(this.heldFile); } catch {}
+    if (!step) return { held: heldFrom(text, version) };
+
+    const saved = heldRecordFrom(text, version);
+    // A previous attempt at the same version can leave a record behind after rollback.
+    const record = saved?.landingId && saved.landingId !== id ? null : saved;
+    const held = step.held?.length ? step.held : record?.held ?? [];
+    const notes = id && record?.landingId === id ? record.notes : [];
+    return { held, warnings: [...new Set([...(step.warnings ?? []), ...notes])] };
   }
 
   // At load: when this build is the release an install just put in, say so once. The old build
   // records whether bots need a restart; wait for that up to LANDING_WAIT_MS, then announce anyway
   // (the old build may have stopped with the reload) and free its claim.
   async arrive(waited = 0) {
+    const started = landingIdOf(this.state());
     let version = null;
     try { version = (await this.readText(this.version))?.trim() || null; } catch { return; }
     const state = this.state();
     if (typeof version !== "string" || state.announced === version) return;
+
+    if (landingIdOf(state) !== started) return;
+    const landingState = () => {
+      const current = this.state();
+      return current.announced !== version && landingIdOf(current) === started ? current : null;
+    };
     // The update's own build is usually reloaded away before its answer arrives: update.mjs leaves
     // this note for the restored build, which says the one notice instead (and never repeats it).
     let note = null;
     try { note = restoreFrom(await this.readText(this.restoreFile), version, this.now()); } catch {}
+    const afterRestore = landingState();
+    if (!afterRestore) return;
     if (note) {
       // Free the apply claim for this landing and answer its latest click.
       const { id, answer } = landingAnswer(state.busy, this.state(), note.restore?.failedVersion ?? version);
       finish(this.get, this.set, id, { announced: version, ...answer });
       try { this.set(SHOWN_KEY, note.error ? version : note.restore.failedVersion); } catch {}
       try { this.notify(note.error ? restoreFailedNotice(note.error, version) : restoredNotice(note.restore)); } catch {}
+      this.presentAdvisories(note.restore?.notes);
       return;
     }
-    const step = landing(state, version, this.now());
+    const step = landing(afterRestore, version, this.now());
+    const id = step?.ready ? afterRestore.landed?.id : step?.id;
+    if (step?.ready && afterRestore.busy?.what === "apply" && afterRestore.busy.id !== id) return;
     if (!step || !step.ready) {
       // The build that ran the update is gone and never recorded its answer: update.mjs's note
       // says the update was kept but herdr-app could not judge it. Checked before the wait, since
       // the note appearing is itself the answer.
       let unchecked = null;
       try { unchecked = checkFrom(await this.readText(this.checkFile), version, this.now()); } catch {}
+      const current = landingState();
+      if (!current) return;
+      if (landing(current, version, this.now())?.ready) return this.arrive(waited);
+      const record = unchecked && await this.readLandingHeld(version, step, id);
+      const afterHeld = landingState();
+      if (!afterHeld) return;
+      if (unchecked && landing(afterHeld, version, this.now())?.ready) return this.arrive(waited);
+      if (unchecked && step) step.warnings = record.warnings;
       if (unchecked) {
         const { id, answer } = landingAnswer(state.busy, this.state(), version);
         finish(this.get, this.set, id, { announced: version, ...answer });
         try { this.set(SHOWN_KEY, version); } catch {}
-        let held = [];
-        try { held = heldFrom(await this.readText(this.heldFile), version); } catch {}
-        try { this.notify(landedNotice(version, unchecked.from, false, held, { checked: false, unavailable: unchecked.unavailable })); } catch {}
+        const { held } = record;
+        try { this.notify(landedNotice(version, unchecked.from, false, held, { checked: false, unavailable: unchecked.unavailable }, step?.warnings)); } catch {}
+        this.presentAdvisories(step?.warnings);
         return;
       }
     }
     if (step && !step.ready && waited < LANDING_WAIT_MS) {
       this.after(1000, () => this.spawn(() => this.arrive(waited + 1000)));
       return;
+    }
+    const record = step && await this.readLandingHeld(version, step, id);
+    if (step) {
+      const afterHeld = landingState();
+      if (!afterHeld) return;
+      if (!step.ready && landing(afterHeld, version, this.now())?.ready) return this.arrive(waited);
+      step.warnings = record.warnings;
     }
     if (!step) return;
     const current = this.state();
@@ -201,10 +253,9 @@ export class Updater {
         why: null, applyError: null, at: this.now(), ...answer });
     }
     this.patch({ announced: version });
-    // The old build usually stopped before it could record what the install held: the file says.
-    let held = step.held ?? [];
-    if (held.length === 0) { try { held = heldFrom(await this.readText(this.heldFile), version); } catch {} }
-    try { this.notify(landedNotice(version, step.from, step.restartBots === true, held, step.check)); } catch {}
+    const { held } = record;
+    try { this.notify(landedNotice(version, step.from, step.restartBots === true, held, step.check, step.warnings)); } catch {}
+    this.presentAdvisories(step.warnings);
   }
 
   // "Install updates automatically", switched from the status bar: written to the pack's own
