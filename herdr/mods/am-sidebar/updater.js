@@ -117,11 +117,11 @@ export class Updater {
       }
       if (patch.kind === "installed") {
         const landed = { version: patch.current, from: patch.from, restartBots: patch.restartBots === true, held: patch.heldMods ?? [],
-          check: patch.check ?? null, at: this.now() };
+          check: patch.check ?? null, warnings: patch.warnings ?? [], at: this.now() };
         try { finish(this.get, this.set, id, { ...patch, ...requestAnswer(this.state(), request), autoFailed: null, landed }); } catch {}
         // Herdr reloads the mods as the folders swap, and the new build announces it (arrive).
         // Still here after the grace: no reload happened, so say what to do.
-        try { this.after(RELOAD_GRACE_MS, () => this.unreloaded(patch.current, patch.heldMods, patch.check)); } catch {}
+        try { this.after(RELOAD_GRACE_MS, () => this.unreloaded(patch.current, patch.heldMods, patch.check, patch.warnings)); } catch {}
         return;
       }
       if (auto && patch.refused) {
@@ -145,10 +145,10 @@ export class Updater {
     return true;
   }
 
-  unreloaded(version, held = [], check = null) {
+  unreloaded(version, held = [], check = null, warnings = []) {
     if (this.state().announced === version) return;
     this.patch({ announced: version });
-    try { this.notify(noReloadNotice(version, held, check)); } catch {}
+    try { this.notify(noReloadNotice(version, held, check, warnings)); } catch {}
   }
 
   // At load: when this build is the release an install just put in, say so once. The old build
@@ -183,7 +183,7 @@ export class Updater {
         try { this.set(SHOWN_KEY, version); } catch {}
         let held = [];
         try { held = heldFrom(await this.readText(this.heldFile), version); } catch {}
-        try { this.notify(landedNotice(version, unchecked.from, false, held, { checked: false, unavailable: unchecked.unavailable })); } catch {}
+        try { this.notify(landedNotice(version, unchecked.from, false, held, { checked: false, unavailable: unchecked.unavailable }, step?.warnings)); } catch {}
         return;
       }
     }
@@ -202,7 +202,7 @@ export class Updater {
     // The old build usually stopped before it could record what the install held: the file says.
     let held = step.held ?? [];
     if (held.length === 0) { try { held = heldFrom(await this.readText(this.heldFile), version); } catch {} }
-    try { this.notify(landedNotice(version, step.from, step.restartBots === true, held, step.check)); } catch {}
+    try { this.notify(landedNotice(version, step.from, step.restartBots === true, held, step.check, step.warnings)); } catch {}
   }
 
   // "Install updates automatically", switched from the status bar: written to the pack's own

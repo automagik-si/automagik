@@ -667,3 +667,25 @@ test("a request still waiting at a mods reload is answered by the new build once
   assert.equal(h.state().at, at, "and without a second answer");
   assert.equal(h.state().request, request.id);
 });
+
+// #524: an install's warnings (a retire or rename the layout guard could not weigh) are the
+// sidebar's too: the old build records them and the reloaded build's one notice says them.
+test("#524 an install's warnings ride in the state and the new build's notice", async () => {
+  const warning = "removed layouts/mine.json without knowing the layout Herdr shows (Herdr is not asked here): switch layouts, ctrl-shift-l";
+  const h = herdr();
+  h.answer = (args) => (args[1] === "check" ? h.check() : line({ current: "0.8.0", latest: "0.8.1", update: update("0.8.1"),
+    installed: { version: "0.8.1", warnings: [warning] }, notice: [] }));
+  const old = h.build();
+  assert.equal(old.u.apply(null, "0.8.1"), true);
+  await h.flush();
+  assert.equal(h.state().kind, "installed");
+  assert.deepEqual(h.state().landed.warnings, [warning], "the state carries the warning for the reloaded build");
+  h.swap(old, "0.8.1");
+  const fresh = h.build();
+  fresh.u.start();
+  await h.flush();
+  const note = h.notes.find((n) => n.title === "Automagik Herdr updated to 0.8.1");
+  assert.ok(note, JSON.stringify(h.notes));
+  assert.match(note.body, /without knowing the layout Herdr shows/);
+});
+
