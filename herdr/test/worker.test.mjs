@@ -67,6 +67,10 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   exe(join(bin, "gh"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(root, "gh.log")}"\n`
     + `if [ -f "${join(root, "gh-hook.sh")}" ]; then sh "${join(root, "gh-hook.sh")}"; fi\n`
     + `if [ -f "${join(root, "gh.json")}" ]; then cat "${join(root, "gh.json")}"; exit 0; fi\necho "fake gh: no answer" >&2\nexit 1\n`);
+  // The same for glab (#1278): a GitLab-hosted project's merge requests are asked there, never
+  // of gh. glab.json is its answer; glab.log what it was asked.
+  exe(join(bin, "glab"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${join(root, "glab.log")}"\n`
+    + `if [ -f "${join(root, "glab.json")}" ]; then cat "${join(root, "glab.json")}"; exit 0; fi\necho "fake glab: no answer" >&2\nexit 1\n`);
   const home = join(root, "home");
   mkdirSync(join(home, ".claude"), { recursive: true });
   mkdirSync(join(home, ".config/herdr-app"), { recursive: true });
@@ -166,11 +170,11 @@ const TEMPLATES = [
   { name: "mystery", command: "./run-something.sh" },
 ];
 /** What `hc run` runs after `--`, as raw words. */
-const runArgv = (args) => args.slice(args.indexOf("--") + 1);
+const runArgv = (args) => withoutDone(args.slice(args.indexOf("--") + 1));
 /** A template run: no `--`; the template and the task follow the last option (`--parent P`). */
 const templateArgv = (args) => {
   assert.equal(args.includes("--"), false, `hc's template form has no --: ${JSON.stringify(args)}`);
-  return args.slice(args.indexOf("--parent") + 2);
+  return withoutDone(args.slice(args.indexOf("--parent") + 2));
 };
 /**
  * The agent's argv: after `--`, past the `env PATH=…` every agent worker starts with, and a Claude
@@ -193,6 +197,10 @@ const withoutPerson = (words) => {
   const i = words.indexOf("--settings");
   return i < 0 || words[i + 1] !== CLAUDE_PERSON_SETTINGS ? words : [...words.slice(0, i), ...words.slice(i + 2)];
 };
+const DONE_LINE = "Before you report done: commit or discard every change you made and leave the worktree "
+  + "clean (`git status --porcelain` prints nothing).";
+const withoutDone = (words) => words.map((w) => typeof w === "string" && w.endsWith(`\n\n${DONE_LINE}`)
+  ? w.slice(0, -(DONE_LINE.length + 2)) : w);
 const after = (args) => {
   const argv = runArgv(args);
   assert.equal(argv[0], "/usr/bin/env", `an agent worker runs under /usr/bin/env PATH=…: ${JSON.stringify(argv)}`);
@@ -691,11 +699,11 @@ test("worker #1032: a Kimi worker starts bare and gets its task as its first mes
   assert.deepEqual(out.argv.slice(-1), ["kimi"]);
   // The task goes in once, as a message to the new pane; hc wait comes first (a send to a
   // booting agent can be dropped), both after hc run.
-  assert.deepEqual(s.hcState().sent, [{ to: out.terminal, text: TASK }]);
+  assert.deepEqual(s.hcState().sent, [{ to: out.terminal, text: `${TASK}\n\n${DONE_LINE}` }]);
   const order = s.calls().filter((c) => ["run", "wait", "send"].includes(c[0])).map((c) => c[0]);
   assert.deepEqual(order, ["run", "wait", "send"]);
   assert.deepEqual(s.calls().find((c) => c[0] === "wait").slice(0, 2), ["wait", out.terminal]);
-  assert.deepEqual(s.calls().find((c) => c[0] === "send"), ["send", out.terminal, TASK]);
+  assert.deepEqual(s.calls().find((c) => c[0] === "send"), ["send", out.terminal, `${TASK}\n\n${DONE_LINE}`]);
   assert.deepEqual(out.warnings, [], r.err);
 
   // A send hc refuses (the pane waits for a sign-in or a trust answer, or has ended): the worker
@@ -2217,6 +2225,107 @@ function seedReapTree(s, { project = s.project, owner = project, name = "candida
   return { worktree, branch, row, file };
 }
 
+// ---- #1278: a finished worker's terminal, worktree and branch go without the owner ----
+
+test("worker #1278 cause 1: a worker whose branch's PR merged is ended by the sweep, with an end row", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "merge it", "--branch", "fix/merged", "--json"]).json();
+  // Its turn is over (hc shows idle), but the terminal is still live, as a finished worker's is.
+  const state = s.hcState();
+  Object.assign(state.terminals.find((x) => x.address === w.terminal).status, { state: "idle" });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const head = git(w.worktree, "rev-parse", "HEAD").trim();
+  writeFileSync(join(s.root, "gh.json"), JSON.stringify([{
+    number: 9, state: "MERGED", headRefOid: head,
+    createdAt: new Date(Date.now() - 17 * 60_000).toISOString(),
+    mergedAt: new Date(Date.now() - 16 * 60_000).toISOString(),
+  }]));
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().ended, [w.terminal], "the finished worker's terminal is ended");
+  assert.equal(s.hcState().terminals.find((x) => x.address === w.terminal).state, "finished");
+  assert.ok(s.calls().some((c) => c[0] === "kill" && c[1] === w.terminal), "hc kill was called");
+  const end = s.ledger().find((x) => x.event === "end" && x.terminal === w.terminal);
+  assert.ok(end, "the end event is written");
+  assert.equal(end.reason, "finished");
+});
+
+test("worker #1278 cause 2: reap lists a worktree no worker row created, and never removes it", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  // A project the ledger knows (a worker started there), plus a worktree someone else made.
+  assert.equal(s.cli(["worker", "one", "--branch", "fix/one"]).code, 0);
+  const hand = join(s.project, ".claude/worktrees/hand-made");
+  git(s.project, "worktree", "add", "-q", "-b", "hand/made", hand, "origin/main");
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().unowned.map((x) => x.worktree), [hand], "every worktree is seen");
+  assert.match(r.json().unowned[0].why, /not created by a worker/);
+  assert.equal(existsSync(hand), true, "never touched: no worker made it");
+});
+
+test("worker #1278 cause 3: a GitLab remote asks glab, and its merged MR proves the worktree safe", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "gitlab work", "--branch", "gl-231-fix", "--task", "gl-231", "--json"]).json();
+  git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
+  const head = git(w.worktree, "rev-parse", "HEAD").trim();
+  git(s.project, "remote", "set-url", "origin", "https://gitlab.com/group/proj.git");
+  s.finish(w.terminal);
+  writeFileSync(join(s.root, "glab.json"), JSON.stringify([{
+    iid: 7, state: "merged", sha: head, target_branch: "dev",
+    created_at: new Date(Date.now() - 17 * 60_000).toISOString(),
+    merged_at: new Date(Date.now() - 16 * 60_000).toISOString(),
+  }]));
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().removed, [w.worktree], "the merged MR proves its HEAD preserved");
+  assert.equal(existsSync(w.worktree), false);
+  assert.match(readFileSync(join(s.root, "glab.log"), "utf8"), /--source-branch gl-231-fix/);
+  const ghLog = existsSync(join(s.root, "gh.log")) ? readFileSync(join(s.root, "gh.log"), "utf8") : "";
+  assert.doesNotMatch(ghLog, /gl-231-fix/, "a GitLab remote is never asked of gh");
+});
+
+test("worker #1278 cause 4: a worker's merged branch with no worktree is deleted after a sweep", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = s.cli(["worker", "done", "--branch", "fix/done", "--json"]).json();
+  git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
+  git(w.worktree, "push", "-q", "origin", "fix/done");
+  git(s.project, "merge", "-q", "--no-ff", "fix/done", "-m", "merge fix/done");
+  git(s.project, "push", "-q", "origin", "main");
+  s.finish(w.terminal);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(existsSync(w.worktree), false, "the worktree goes first");
+  assert.deepEqual(r.json().branches, ["fix/done"], "its local branch goes with it");
+  assert.equal(git(s.project, "branch", "--list", "fix/done").trim(), "");
+});
+
+test("worker #1278 cause 4: a hand-made merged branch and an unmerged worker branch are kept", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  git(s.project, "branch", "hand/made");
+  const w = s.cli(["worker", "unmerged", "--branch", "fix/unmerged", "--json"]).json();
+  git(w.worktree, "commit", "-q", "--allow-empty", "-m", "work");
+  s.finish(w.terminal);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().branches, [], "neither is a merged branch a worker made");
+  assert.match(git(s.project, "branch", "--list", "hand/made"), /hand\/made/);
+  assert.match(git(s.project, "branch", "--list", "fix/unmerged"), /fix\/unmerged/);
+});
+
+test("worker #1278 cause 5: a worker's task prompt sends it back with a clean worktree", (t) => {
+  const s = scene(t);
+  const r = s.cli(["worker", "do it", "--branch", "fix/clean", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = s.runs().at(-1);
+  assert.match(words.at(-1), /Before you report done: commit or discard/);
+  assert.match(words.at(-1), /git status --porcelain/);
+});
+
 test("worker #1135: launch never removes or prunes another repository's ended worktree", (t) => {
   const s = scene(t);
   withOrigin(s);
@@ -2526,7 +2635,8 @@ test("worker #567: a killed worker's created worktree is removed by reap 15 min 
   const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
   const live = s.cli(["reap", "--json"], { from: null });
   assert.equal(live.code, 0, live.err);
-  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], waiting: 1, more: 0 }, "a live worker's worktree waits");
+  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], ended: [], unowned: [], branches: [],
+    waiting: 1, more: 0 }, "a live worker's worktree waits");
   assert.equal(existsSync(w.worktree), true);
   fakeHc(s, "kill", w.terminal);
   // Within 15 min of its end (restart --tree runs its workers again there, without the lock): waits.
@@ -2537,7 +2647,7 @@ test("worker #567: a killed worker's created worktree is removed by reap 15 min 
   s.finish(w.terminal, 15 * 60_000 + 1000);
   const r = s.cli(["reap"], { from: null });
   assert.equal(r.code, 0, r.err);
-  assert.equal(r.out.trim(), `removed ${w.worktree}: its workers ended`);
+  assert.equal(r.out.trim(), `removed ${w.worktree}: its workers ended\nremoved branch fix/one: merged into main`);
   assert.equal(existsSync(w.worktree), false);
 });
 
@@ -2605,7 +2715,7 @@ test("worker #567: a worktree only given to a worker (--worktree, a branch's exi
   assert.equal(b.json().created, false, "--branch found the existing worktree");
   s.finish(b.json().terminal);
   const r = s.cli(["reap"], { from: null });
-  assert.equal(r.out.trim(), "No finished worker's worktree to remove.", r.err);
+  assert.equal(r.out.trim(), `kept ${pre}: not created by a worker (no start row); left alone`, r.err);
   assert.equal(existsSync(pre), true, "clean, pushed and ended, but not made by a worker call");
   assert.deepEqual(reapFile(s), []);
 });
@@ -2728,7 +2838,8 @@ writeFileSync(p, JSON.stringify(st));
   writeFileSync(join(s.root, "gh-hook.sh"), `"${process.execPath}" "${join(s.root, "gh-hook.mjs")}"\n`);
   const live = s.cli(["reap", "--json"], { from: null });
   assert.equal(live.code, 0, live.err);
-  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], waiting: 1, more: 0 });
+  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], ended: [], unowned: [], branches: [],
+    waiting: 1, more: 0 });
   assert.equal(existsSync(w.worktree), true);
 });
 
@@ -2739,7 +2850,8 @@ test("worker #567 F6/F7: a worktree on another branch, or a detached HEAD with c
   const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
   s.finish(w.terminal);
   git(w.worktree, "checkout", "-q", "-b", "other");
-  assert.equal(s.cli(["reap"], { from: null }).out.trim(), `kept ${w.worktree}: on other, not the worker's branch fix/one`);
+  assert.equal(s.cli(["reap"], { from: null }).out.trim(),
+    `kept ${w.worktree}: on other, not the worker's branch fix/one\nremoved branch fix/one: merged into main`);
   git(w.worktree, "checkout", "-q", "--detach");
   git(w.worktree, "commit", "-q", "--allow-empty", "-m", "on no branch");
   assert.equal(s.cli(["reap"], { from: null }).out.trim(), `kept ${w.worktree}: HEAD is detached with 1 commit on no remote`, "whatever gh says");
@@ -3294,7 +3406,7 @@ test("proxied worker CLI #1032: an approved Kimi worker starts bare through the 
     const argv = fake.calls("terminal.run")[0].params.argv;
     assert.equal(argv.at(-1), "kimi", `the proxy approved an argv with no task word: ${JSON.stringify(argv)}`);
     assert.equal(argv.includes(TASK), false);
-    assert.deepEqual(s.hcState().sent, [{ to: "t200", text: TASK }], r.err);
+    assert.deepEqual(s.hcState().sent, [{ to: "t200", text: `${TASK}\n\n${DONE_LINE}` }], r.err);
     assert.deepEqual(s.calls().filter((c) => ["wait", "send"].includes(c[0])).map((c) => c.slice(0, 2)), [["wait", "t200"], ["send", "t200"]]);
     assert.deepEqual(out.warnings, [], r.err);
   } finally {

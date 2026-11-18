@@ -37,7 +37,7 @@ import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
   GUARD_DIR, KILL_GUARD_DIR, KILL_GUARD_NAME, SESSION_LABEL, baseCandidates, branchNamesTask, branchSlug, guardPathWith,
   LEDGER_MODE, endRow, finishedEnds, launchKey, ledgerLine, ledgerPath, optionLike, paneArgs, readLedger, reapCandidates, reapPath, reapRow,
-  prAskDue, prBranchKey, prBranches, prChecksPath, prChecksText, prLikely, prRowsFor, readPrChecks,
+  prAskDue, prBranchKey, prBranches, prChecksPath, prChecksText, prLikely, prRowsFor, readPrChecks, forgeHost, forgeOf, workerTaskText,
   sessionRow, stableGuardDir, stableKillDir, stableRootOf,
   parseWorktrees, runsTemplate, startRow, swapArm, swapByte,
   taskIdProblem, taskWorkerName, TEMPLATE_SHAPE, codexTemplateRefusal, codexTemplateWarning, templateAgent, workerArgs, workerBranch, workerKillRefusal, workerPlan, workerRole, worktreeFolder,
@@ -1479,8 +1479,12 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 repositories. Remove only with verified ownership and current
                                 HEAD pushed or proven merged, including squash merges. Keep
                                 unknown ownership, missing checkouts, dirty work or uncertain
-                                proof, with a reason. No broad prune. A worktree only given to
-                                a worker (--worktree, a branch's existing one) is never removed
+                                proof, with a reason. End a finished worker's terminal once its
+                                branch's pull request merged or closed; delete a local branch a
+                                worker made, merged into the default, with no worktree; name
+                                every other worktree of a known project and leave it alone.
+                                No broad prune. A worktree only given to a worker (--worktree,
+                                a branch's existing one) is never removed
   update [--check | --rollback | --retry-skipped]
                                 install the latest release (checksum verified), only report
                                 current and latest (--check), or put the replaced pack back;
@@ -6608,21 +6612,66 @@ async function settled(names, terms, gets = new Map()) {
 }
 const firstLine = (r) => (r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n")[0];
 
+/** The forge tool a project's remote names, or the one installed (gh first) when the host is unknown. */
+const forgeByProject = new Map();
+async function forgeOn(cwd) {
+  const project = resolvePath(cwd);
+  if (forgeByProject.has(project)) return forgeByProject.get(project);
+  const remote = (await git(["remote", "get-url", "origin"], project))?.trim()
+    || (await git(["remote", "get-url", "upstream"], project))?.trim() || null;
+  const named = forgeOf(remote);
+  // A named forge is never swapped for the other tool: a GitLab host asked of gh is no answer.
+  // An unknown remote host prefers glab (the non-GitHub forge); a local path or no remote prefers
+  // gh, so a plain repository keeps the tool it always used.
+  const tool = named ?? (forgeHost(remote)
+    ? (programPath("glab") ? "glab" : programPath("gh") ? "gh" : null)
+    : (programPath("gh") ? "gh" : programPath("glab") ? "glab" : null));
+  forgeByProject.set(project, tool);
+  return tool;
+}
+
+/** The states both forges' list calls use, as the cleanup and its rows read them (gh's words). */
+const FORGE_STATES = { open: "OPEN", opened: "OPEN", merged: "MERGED", closed: "CLOSED", locked: "OPEN" };
+
+/** One of gh's or glab's pull request objects as the cleanup and a `pr` row read it, or null. */
+function normalizedPr(item) {
+  const state = FORGE_STATES[String(item?.state ?? "").toLowerCase()] ?? null;
+  const number = Number.isSafeInteger(item?.number) ? item.number
+    : Number.isSafeInteger(item?.iid) ? item.iid : null;
+  if (!state || !number) return null;
+  return { number, state, createdAt: item.createdAt ?? item.created_at ?? null,
+    mergedAt: item.mergedAt ?? item.merged_at ?? null, closedAt: item.closedAt ?? item.closed_at ?? null,
+    baseRefName: item.baseRefName ?? item.target_branch ?? null,
+    headRefOid: item.headRefOid ?? item.sha ?? item.diff_refs?.head_sha ?? null };
+}
+
 /**
- * The branch's pull requests as gh lists them ([{ number, state, createdAt, mergedAt, closedAt,
- * baseRefName }]), or null when gh is missing or fails. Only what the cleanup's check and a
- * `pr` row need is asked for: never a title, an author, a text or an address.
+ * The branch's pull requests as the project's forge lists them ([{ number, state, createdAt,
+ * mergedAt, closedAt, baseRefName, headRefOid }]), or null when that forge is missing or fails.
+ * The remote's host picks the tool (#1278 cause 3): gh for GitHub, glab for GitLab, never one
+ * asked for the other. Only what the cleanup's check and a `pr` row need is asked for: never a
+ * title, an author, a text or an address.
  */
-async function pullRequestsOf(branch, cwd, { cleanup = false } = {}) {
-  const gh = programPath("gh");
-  if (!gh || !branch) return null;
+async function pullRequestsOf(branch, cwd, { cleanup = false, forge = null } = {}) {
+  const tool = forge ?? await forgeOn(cwd);
+  if (!tool || !branch || !programPath(tool)) return null;
+  if (tool === "glab") {
+    const r = await runProgram(programPath("glab"),
+      ["mr", "list", "--source-branch", branch, "--all", "--output", "json"],
+      { cwd, timeout: GH_TIMEOUT });
+    if (r.code !== 0) return null;
+    try {
+      const list = JSON.parse(r.stdout);
+      return Array.isArray(list) ? list.map(normalizedPr).filter(Boolean) : null;
+    } catch { return null; }
+  }
   const fields = "number,state,createdAt,mergedAt,closedAt,baseRefName"
     + (cleanup ? ",headRefOid" : "");
-  const r = await runProgram(gh,
+  const r = await runProgram(programPath("gh"),
     ["pr", "list", "--head", branch, "--state", "all", "--json", fields, "--limit", "20"],
     { cwd, timeout: GH_TIMEOUT });
   if (r.code !== 0) return null;
-  try { const list = JSON.parse(r.stdout); return Array.isArray(list) ? list : null; } catch { return null; }
+  try { const list = JSON.parse(r.stdout); return Array.isArray(list) ? list.map(normalizedPr).filter(Boolean) : null; } catch { return null; }
 }
 
 // ---- pull requests (#899): the sweep's `pr` rows ----
@@ -6682,7 +6731,6 @@ async function firstCommitAt(project, branch, base, target) {
  * Says nothing unless a row couldn't be written.
  */
 async function recordPullRequests({ asked, start, budget, every, lines }) {
-  if (!programPath("gh")) return;
   const rows = workerLedgerRows();
   const now = Date.now();
   const branches = prBranches(rows, now);
@@ -6806,6 +6854,7 @@ async function ignoredPaths(dir) {
  */
 async function reapOne(c, asked = new Map(), project = null) {
   const path = c.worktree;
+  const forge = await forgeOn(c.project);
   const ownership = await reapOwnership(c, project);
   if (ownership) return { result: "kept", why: ownership };
   const ownerAtStart = await reapRepository(c.project);
@@ -6831,11 +6880,11 @@ async function reapOne(c, asked = new Map(), project = null) {
     }
     branch = (await git(["symbolic-ref", "--short", "-q", "HEAD"], path))?.trim() || null;
     if (unpushed > 0 && branch && branch === c.branch) {
-      prs = await pullRequestsOf(branch, main, { cleanup: true });
+      prs = await pullRequestsOf(branch, main, { cleanup: true, forge });
       if (c.project) asked.set(prBranchKey({ project: c.project, branch }), prs);
     }
   }
-  const why = workLeft({ changes, unpushed, prs, head, branch, expected: c.branch });
+  const why = workLeft({ changes, unpushed, prs, head, branch, expected: c.branch, forge: forge ?? "gh" });
   if (why) return { result: "kept", why };
   // Re-read the ledger and repository after proof: a newer owner, commit or branch
   // must not inherit the earlier snapshot's permission to remove this checkout.
@@ -6863,7 +6912,7 @@ async function reapOne(c, asked = new Map(), project = null) {
   const finalCount = (await git(["rev-list", "--count", "HEAD", "--not", "--remotes"], path))
     ?.trim();
   const finalProof = /^\d+$/.test(finalCount ?? "")
-    ? workLeft({ changes: 0, unpushed: Number(finalCount), prs, head, branch, expected: c.branch })
+    ? workLeft({ changes: 0, unpushed: Number(finalCount), prs, head, branch, expected: c.branch, forge: forge ?? "gh" })
     : "can't prove HEAD is pushed or merged";
   if (finalProof) return { result: "kept", why: finalProof };
   // Looked at once more just before the remove: a pane started in it without the worktree lock
@@ -6883,6 +6932,168 @@ async function reapOne(c, asked = new Map(), project = null) {
   return { result: "removed", why: ignoredNote };
 }
 
+/** The newest pull request in a forge's list, by creation time and number, or null. */
+function newestPr(list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  return [...list].sort((a, b) => (Date.parse(a.createdAt ?? "") || 0) - (Date.parse(b.createdAt ?? "") || 0)
+    || (a.number ?? 0) - (b.number ?? 0)).at(-1);
+}
+
+/**
+ * #1278 cause 1: end the terminals of finished workers whose branch's newest pull request is
+ * merged or closed, and write their end row. A worker's turn is over (hc says not `working`)
+ * and hc still lists it live; it is its bot's worker (`worker.of`, no `bot` label), its launch
+ * key matches the start row, and the request closed at least REAP_SETTLE_MS ago, so a bot
+ * still handling the merge is never cut off. A worker mid-turn is left alone. `every` (reap)
+ * asks every worker; a worker call asks at most PR_ASK_MAX. Never throws into the sweep.
+ */
+async function endMergedWorkers({ terms, rows, every, start, budget, lines, out }) {
+  const ended = new Set();
+  let asked = 0;
+  const starts = rows.filter((r) => r?.event === "start" && r.kind === "worker" && r.branch
+    && typeof r.project === "string" && r.project && r.terminal && Number.isSafeInteger(r.created_ms))
+    .sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? "")));
+  for (const row of starts) {
+    if (Date.now() - start > budget) break;
+    if (!every && asked >= PR_ASK_MAX) break;
+    const key = launchKey(row);
+    if (!key || ended.has(key)) continue;
+    const listed = terms.find((t) => t?.address === row.terminal);
+    const listedState = typeof listed?.status === "string" ? listed.status : listed?.status?.state;
+    if (!listed || listed.state === "finished" || listedState === "working" || listedState === "blocked") continue;
+    let get = null;
+    try {
+      const r = await hc(["get", row.terminal, "--json"]);
+      if (r.code === 0) get = JSON.parse(r.stdout);
+    } catch { get = null; }
+    if (!get || get.created_ms !== row.created_ms || get.state !== "live") continue;
+    if (get.status?.state !== "idle" && get.status?.state !== "done") continue;
+    if (get.labels?.bot || !get.labels?.[WORKER_OF_LABEL]) continue;
+    const prs = await pullRequestsOf(row.branch, row.project, { cleanup: true });
+    if (!every) asked += 1;
+    const pr = newestPr(prs);
+    if (!pr || (pr.state !== "MERGED" && pr.state !== "CLOSED")) continue;
+    const closedAt = Date.parse(pr.state === "MERGED" ? pr.mergedAt : pr.closedAt);
+    if (!Number.isSafeInteger(closedAt) || Date.now() - closedAt < REAP_SETTLE_MS) continue;
+    let kill = null;
+    try { kill = await hcKill(row.terminal); } catch (e) {
+      lines.push(`couldn't end ${row.terminal}: ${e?.message ?? e}`);
+      continue;
+    }
+    if (kill.code !== 0) {
+      lines.push(`couldn't end ${row.terminal}: hc kill failed: ${firstLine(kill)}`);
+      continue;
+    }
+    ended.add(key);
+    const unlogged = appendEnd(endRow({ kind: "worker", terminal: row.terminal, core: row.core ?? await rowCore(),
+      createdMs: row.created_ms, reason: "finished", hcReason: get.reason, exitCode: get.exit_code, signal: get.signal }));
+    if (unlogged) lines.push(unlogged);
+    out.ended.push(row.terminal);
+    lines.push(`ended ${row.terminal}: its branch's pull request ${pr.state.toLowerCase()}`);
+  }
+}
+
+/** A project's default branch name: origin's HEAD, else dev, main or master, else the checkout's. */
+async function defaultBranchOf(project) {
+  const head = (await git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], project))?.trim();
+  if (head) return head.replace(/^origin\//, "");
+  for (const name of ["dev", "main", "master"]) {
+    if (await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${name}`], project) !== null) return name;
+  }
+  return (await git(["symbolic-ref", "--quiet", "--short", "HEAD"], project))?.trim() ?? null;
+}
+
+/** The ref a merged check uses for `name` in `project`: its local branch, else origin's, else HEAD. */
+async function defaultRef(project, name) {
+  for (const ref of [`refs/heads/${name}`, `refs/remotes/origin/${name}`]) {
+    if (await git(["rev-parse", "--verify", "--quiet", ref], project) !== null) return ref;
+  }
+  return "HEAD";
+}
+
+/** The projects a sweep looks at: the launching one, else every project the ledger or list names. */
+function knownProjects(ledger, project) {
+  if (project !== null) return [project];
+  const out = new Set();
+  for (const r of ledger) {
+    if (r?.event === "start" && typeof r.project === "string" && isDir(r.project)) out.add(r.project);
+  }
+  let remembered = [];
+  try { remembered = listedProjects(readText(`${appHome()}/${PROJECTS_FILE}`) ?? ""); } catch { /* the ledger's projects stand */ }
+  for (const key of remembered) if (isDir(key)) out.add(key);
+  return [...out];
+}
+
+/**
+ * #1278 cause 4: delete a local branch a worker made, merged into the project's default branch,
+ * with no worktree and no live worker. Only a branch a start row says this pack created; the
+ * merged check is `git merge-base --is-ancestor`, so an unmerged or diverged branch is kept. The
+ * ref is deleted with `update-ref -d <ref> <sha>`, which refuses a branch that moved since the
+ * check (never -D). A worker call takes at most BRANCH_MAX per project; reap takes every one.
+ */
+const BRANCH_MAX = 50;
+async function sweepBranches({ ledger, terms, project, every, lines, out }) {
+  const cap = every ? Infinity : BRANCH_MAX;
+  const liveBranches = new Set(ledger.filter((r) => r?.event === "start" && r.branch
+    && terms.some((t) => t?.address === r.terminal && t.state !== "finished")).map((r) => `${r.project}\n${r.branch}`));
+  for (const key of knownProjects(ledger, project)) {
+    const mine = ledger.filter((r) => r?.event === "start" && r.kind === "worker" && r.created === true
+      && r.project === key && r.branch);
+    if (!mine.length) continue;
+    const branches = [...new Set(mine.map((r) => r.branch))];
+    const defaultName = await defaultBranchOf(key);
+    if (!defaultName) continue;
+    const defRef = await defaultRef(key, defaultName);
+    const current = (await git(["symbolic-ref", "--quiet", "--short", "HEAD"], key))?.trim() ?? null;
+    const listed = await git(["worktree", "list", "--porcelain"], key);
+    const checkedOut = new Set(listed === null ? [] : parseWorktrees(listed).map((w) => w.branch).filter(Boolean));
+    let removed = 0;
+    for (const branch of branches.sort()) {
+      if (removed >= cap) break;
+      if (!branch || branch === defaultName || branch === current) continue;
+      if (checkedOut.has(branch) || liveBranches.has(`${key}\n${branch}`)) continue;
+      const ref = `refs/heads/${branch}`;
+      const sha = (await git(["rev-parse", "--verify", "--quiet", ref], key))?.trim();
+      if (!sha) continue;
+      if (await git(["merge-base", "--is-ancestor", ref, defRef], key) === null) continue;
+      // A worktree made while this sweep ran, or a checkout moved onto it, is never broken:
+      // both are read again just before the ref goes.
+      const nowListed = await git(["worktree", "list", "--porcelain"], key);
+      if (nowListed === null || parseWorktrees(nowListed).some((w) => w.branch === branch)) continue;
+      const nowCurrent = (await git(["symbolic-ref", "--quiet", "--short", "HEAD"], key))?.trim();
+      if (!nowCurrent || nowCurrent === branch) continue;
+      const del = await runProgram("git", ["update-ref", "-d", ref, sha], { cwd: key });
+      if (del.code !== 0) { lines.push(`couldn't remove branch ${branch}: ${firstLine(del)}`); continue; }
+      removed += 1;
+      out.branches.push(branch);
+      lines.push(`removed branch ${branch}: merged into ${defaultName}`);
+    }
+  }
+}
+
+/**
+ * #1278 cause 2: name every worktree of a known project that no worker start row created, so a
+ * sweep either removes a worktree or says why it kept it. These are never removed: a review
+ * worktree, a subagent's or a person's own is not proof the pack made it.
+ */
+async function listUnownedWorktrees({ ledger, project, candidates, lines, out }) {
+  const accounted = new Set(candidates.map((c) => nativeDir(c.worktree) ?? c.worktree));
+  for (const c of [...out.removed, ...out.gone]) accounted.add(nativeDir(c) ?? c);
+  for (const key of knownProjects(ledger, project)) {
+    const listed = await git(["worktree", "list", "--porcelain"], key);
+    if (listed === null) continue;
+    const main = nativeDir(key) ?? key;
+    for (const w of parseWorktrees(listed)) {
+      const real = nativeDir(w.path) ?? w.path;
+      if (real === main || accounted.has(real) || !isDir(real)) continue;
+      accounted.add(real);
+      const why = "not created by a worker (no start row); left alone";
+      out.unowned.push({ worktree: w.path, why });
+      lines.push(`kept ${w.path}: ${why}`);
+    }
+  }
+}
+
 /**
  * The sweep (#567): every worktree a worker call made (reapCandidates) whose start rows'
  * terminals have all ended, finished or gone in `hc ls --all`, killed or done alike, and in
@@ -6893,17 +7104,23 @@ async function reapOne(c, asked = new Map(), project = null) {
  * hc failing skips the sweep. Each new outcome is a row in the cleanup file and a line.
  * `every` (reap): a line for every kept or failed one, even unchanged; without it (a worker
  * call), a kept one whose reason hasn't changed in REAP_QUIET_MS is skipped.
- * The same sweep, under the same lock and budget, records the worker branches' pull requests
- * in the workers ledger (#899, recordPullRequests), whether or not a worktree is left to remove.
- * A missing checkout its repository no longer lists is recorded gone (#1143), with no git write,
- * and never looked at again. A removed one names the git-ignored files it took with it.
- * Never throws: { removed, gone, kept, failed, waiting, more, lines }.
+ * #1278 adds three passes to that sweep: a finished worker's terminal is ended once its
+ * branch's newest pull request merged or closed (endMergedWorkers), a local branch a worker
+ * made and merged is deleted with no worktree left (sweepBranches), and with `every` (reap)
+ * every worktree of a known project no worker row created is named and kept
+ * (listUnownedWorktrees). The same sweep, under the same lock and budget, records the worker
+ * branches' pull requests in the workers ledger (#899, recordPullRequests), whether or not a
+ * worktree is left to remove. A missing checkout its repository no longer lists is recorded
+ * gone (#1143), with no git write, and never looked at again. A removed one names the
+ * git-ignored files it took with it.
+ * Never throws: { removed, gone, kept, failed, ended, unowned, branches, waiting, more, lines }.
  */
 async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
   every = false, project = null } = {}) {
-  const out = { removed: [], gone: [], kept: [], failed: [], waiting: 0, more: 0, lines: [] };
+  const out = { removed: [], gone: [], kept: [], failed: [], ended: [], unowned: [], branches: [], waiting: 0, more: 0, lines: [] };
   try {
     const ledger = workerLedgerRows();
+    const workers = ledger.filter((r) => r?.event === "start" && r.kind === "worker" && r.branch);
     const owned = await ownedReapCandidates(ledger);
     const launching = project !== null ? await reapRepository(project) : null;
     // Completion observation remains global. Only deletion eligibility is scoped
@@ -6911,7 +7128,7 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
     const candidates = owned.candidates;
     const eligible = new Set(project === null ? candidates : candidates.filter((c) =>
       launching && c.project && owned.owners.get(c.project) === launching));
-    if (!candidates.length && !prBranches(ledger).some((w) => w.followed)) return out;
+    if (!candidates.length && !workers.length && !prBranches(ledger).some((w) => w.followed)) return out;
     const lockDir = dirname(ledgerPath(appHome()));
     mkdirSync(lockDir, { recursive: true });
     let token;
@@ -6919,9 +7136,11 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
     try { token = await takeLockAsync(lock, 0); } catch { return out; }
     const stop = keepFresh(lock, token);
     try {
-      const terms = candidates.length ? await hcTerminals(true) : [];
+      const terms = (candidates.length || workers.length) ? await hcTerminals(true) : [];
       if (!terms) { out.lines.push("worktree cleanup skipped: hc ls --all failed"); return out; }
       const start = Date.now();
+      // A finished worker's terminal, ended once its branch's pull request merged or closed (#1278).
+      await endMergedWorkers({ terms, rows: ledger, every, start, budget, lines: out.lines, out });
       // The finished workers' terminals hc answered for: their end rows, after the loop.
       const gets = new Map();
       // What gh answered for a candidate's branch: its pull requests' rows, after the loop.
@@ -6977,6 +7196,10 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
           if (unlogged) out.lines.push(unlogged);
         }
       }
+      // #1278 causes 2 and 4: every worktree of a known project is seen (an uncreated one is
+      // named, never removed), and a worker's merged branch with no worktree is deleted.
+      if (every) await listUnownedWorktrees({ ledger, project, candidates, lines: out.lines, out });
+      await sweepBranches({ ledger, terms, project, every, lines: out.lines, out });
       try { await recordPullRequests({ asked, start, budget, every, lines: out.lines }); } catch (e) {
         out.lines.push(`pull requests not recorded: ${e?.message ?? e}`);
       }
@@ -6992,7 +7215,8 @@ async function cmdReap(opts, rest) {
   if (rest.length) throw new CliError("reap takes no arguments.", 2);
   const r = await reapWorktrees({ max: Infinity, budget: Infinity, every: true });
   const { lines, ...out } = r;
-  if (opts.json) { report(lines.filter((l) => !l.startsWith("removed ") && !l.startsWith("gone ") && !l.startsWith("kept ") && !l.startsWith("couldn't remove "))); return out; }
+  if (opts.json) { report(lines.filter((l) => !l.startsWith("removed ") && !l.startsWith("gone ")
+    && !l.startsWith("kept ") && !l.startsWith("ended ") && !l.startsWith("couldn't remove "))); return out; }
   return lines.length ? lines.join("\n") : "No finished worker's worktree to remove.";
 }
 
@@ -7054,6 +7278,9 @@ async function cmdWorker(opts, rest) {
   if (rest[0] === "kill" && opts.branch === undefined && opts.worktree === undefined) return cmdWorkerKill(opts, rest.slice(1));
   const task = rest.join(" ").trim();
   if (!task) throw new CliError('worker needs the task text: am worker "<task>" --branch <name>.', 2);
+  // #1278 cause 5: the worker is sent back with a clean worktree, so the sweep never has to
+  // keep its worktree for uncommitted changes.
+  const prompt = workerTaskText(task);
   if (optionLike(task)) throw new CliError("The task text can't start with a dash; the agent would read it as an option.", 2);
   if ((opts.branch === undefined) === (opts.worktree === undefined)) throw new CliError("Give --branch or --worktree (one of them).", 2);
   if (opts.base !== undefined && opts.branch === undefined) throw new CliError("--base goes with --branch.", 2);
@@ -7293,7 +7520,7 @@ async function cmdWorker(opts, rest) {
       else warnings.push(codexTrustWarning(`${bot.name}'s Codex worker`, trust.withheld));
     }
     const args = workerArgs({ botId: bot.id, branch: place.branch, role, name, cwd: place.worktree, parent: me.address, space,
-      agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task, template: plan.template,
+      agent: plan.agent, model: plan.model, effort: plan.effort, agyMode: plan.agyMode, argv: workerArgv, session, task: prompt, template: plan.template,
       templateArgv,
       login: claudeLogin(templateArgv ?? plan.argv ?? [], warnings),
       path: runPath?.path ?? process.env.PATH, taskId, project: project.key, lead,
@@ -7324,7 +7551,7 @@ async function cmdWorker(opts, rest) {
   // An agent that takes no first prompt on its command line (kimi, #1032) started bare: its task
   // goes in as its first message, through the hc that started it, outside the worktree's lock.
   if (!plan.template && promptByMessage(plan.agent)) {
-    const why = await sendFirstTask(terminal, task, started.proxied ? hcReal : hc);
+    const why = await sendFirstTask(terminal, prompt, started.proxied ? hcReal : hc);
     if (why) warnings.push(why);
   }
   // Herdr shows a labelled worker at once, so the sidebar's tab setup (workerTab.js) never
