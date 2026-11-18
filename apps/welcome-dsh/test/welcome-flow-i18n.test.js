@@ -276,8 +276,7 @@ const ENGLISH_ON_PURPOSE = new Set([
   'GLM coding plan', 'Qwen', 'Alibaba Bailian', 'Sourcegraph Cody', 'Cody Pro', 'Replit', 'Replit Core',
   '{} · dsh-subscriptions',
   // The companion's name ideas: names, not words.
-  'Pip', 'Nova', 'Mochi', 'Echo', 'Biscuit',
-  'Pirlim',
+  'Pirlim', 'Mestrik', 'Maguito', 'Guizo', 'Trunfo',
   // The tools a person can come from, and their card tags.
   'Hermes', 'OpenClaw', 'Grok bot', 'Muse', 'Meta', 'Telegram', 'TG', 'OC',
   // Code, not copy: a key name, an HTTP method, a status line the subscriptions plugin never words.
