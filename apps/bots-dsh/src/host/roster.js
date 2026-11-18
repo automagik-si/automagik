@@ -106,13 +106,26 @@ export function install(rt) {
 
   // Under the PTC preset (DSH Desktop's default) a model may call only run_code, which
   // turns down the group_relay call that a group chat's Session is given. A Session
-  // keeps the preset it is made with.
-  async function botPreset(profile) {
+  // keeps the preset it is made with, so a group Session stays on the standard preset,
+  // where group_relay is directly callable. A Bot's own chat asks for no preset at all
+  // and so inherits DSH's default, as a DSH bot made from the UI does.
+  async function botPreset(profile, { group = false } = {}) {
+    // Both ask for no preset whatever the service answers, so a missing or failing
+    // preset service still makes their Session (fix-first #1438).
+    if (profile === null) return {} // Adopted default DSH preset, not the team's standard.
+    if (profile === undefined && !group) return {}
     const presets = ctx.get?.('agentPresets')
     if (presets === undefined) return {}
-    const served = (await presets.list()).filter(preset => preset.broken === undefined)
+    // A list that cannot be read leaves the Session on DSH's default instead of failing
+    // it: a group loses the standard pin, never its Session.
+    let served = []
+    try {
+      const listed = await presets.list?.()
+      served = (Array.isArray(listed) ? listed : []).filter(preset => preset?.broken === undefined)
+    } catch (error) {
+      rt.warn('ds-bot: the agent presets could not be listed; the Session keeps DSH\'s default: %s', error?.message ?? error)
+    }
     if (profile !== undefined) {
-      if (profile === null) return {} // Adopted default DSH preset, not the team's standard.
       if (!served.some(preset => preset.id === profile)) throw refusal(`The preset ${profile} is not available in this DSH`)
       return { agentPreset: profile }
     }
@@ -135,7 +148,7 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile } = {}) {
+  async function createSession(title, { dir, profile, group = false } = {}) {
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
     const readOnly = rt.readOnly()
@@ -157,7 +170,7 @@ export function install(rt) {
         place = { cwd: fallback }
       }
     }
-    const { sessionId } = await ctx.sessionController.create({ ...place, ...await botPreset(profile) })
+    const { sessionId } = await ctx.sessionController.create({ ...place, ...await botPreset(profile, { group }) })
     if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
@@ -935,7 +948,7 @@ export function install(rt) {
     const title = custom || autoRoomName(members)
     // The group's own Session only relays; like a member's it moves to a fresh part
     // in the group's folder once the group has one (parts.js).
-    const id = await createSession(title)
+    const id = await createSession(title, { group: true })
     try {
       // A member deleted while the Session was made stays out, and the group is checked
       // again as it is written.
