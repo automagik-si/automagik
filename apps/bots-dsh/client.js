@@ -1106,6 +1106,7 @@ var ZH = {
   "Message Bot": "给 Bot 发消息",
   "To:": "发给：",
   "Remove {name}": "移除 {name}",
+  "Remove {name}?": "移除 {name}？",
   "Adopt as Bot": "转为团队 Bot",
   Recipient: "收件人",
   Recipients: "收件人",
@@ -2373,6 +2374,7 @@ var ZH = {
   "{count} messages": "{count} 条消息",
   "done": "完成",
   "Remove Tasks": "移除任务",
+  "Remove Tasks?": "移除任务？",
   "Started task": "已开始任务",
   "Starting a task": "正在开始任务",
   "Task finished": "任务完成",
@@ -10895,7 +10897,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   const [asTable, setAsTable] = (0, import_react24.useState)(false);
   const [copied, setCopied] = (0, import_react24.useState)(false);
   const labelId = (0, import_react24.useId)();
-  const menuKey = (0, import_react24.useId)();
+  const menuKey2 = (0, import_react24.useId)();
   const table = (0, import_react24.useRef)(asTable);
   table.current = asTable;
   const shown = series.map((_, index) => !hidden.includes(index));
@@ -10936,7 +10938,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   action.current = { label: menuLabel, copy: copy2, save: () => {
     if (svg2.current) saveImage(svg2.current, "chart.png");
   }, toggleTable };
-  (0, import_react24.useEffect)(() => registerChart?.(menuKey, {
+  (0, import_react24.useEffect)(() => registerChart?.(menuKey2, {
     get label() {
       return action.current.label;
     },
@@ -10946,7 +10948,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
     toggleTable: () => action.current.toggleTable(),
     copy: () => action.current.copy(),
     save: () => action.current.save()
-  }), [registerChart, menuKey]);
+  }), [registerChart, menuKey2]);
   (0, import_react24.useEffect)(() => refreshCharts?.(), [refreshCharts, asTable, menuLabel]);
   const legend = isDonut ? (0, import_react24.createElement)("div", { className: "dv-chart-legend dv-chart-legend-list" }, categories.map((name, at) => (0, import_react24.createElement)(
     "div",
@@ -31998,6 +32000,30 @@ function SettingsDialog({ page, id, roster, actions, useUpdate, leaving = false 
 
 // src/client/context-menu.js
 var import_react88 = require("react");
+function useConfirmStep(target, leaving) {
+  const [ask, setAsk] = (0, import_react88.useState)(null);
+  const [scope, setScope] = (0, import_react88.useState)({ target, leaving });
+  if (scope.target !== target || scope.leaving !== leaving) {
+    setScope({ target, leaving });
+    if (leaving || scope.target !== target) setAsk(null);
+  }
+  (0, import_react88.useEffect)(() => {
+    if (!ask) return void 0;
+    const timer = setTimeout(() => setAsk(null), 4e3);
+    return () => clearTimeout(timer);
+  }, [ask]);
+  const asking = ask !== null && ask.target === target && !leaving;
+  return [asking, () => {
+    if (leaving) return false;
+    if (ask !== null && ask.target === target) {
+      if (ask.confirmed) return false;
+      setAsk({ target, confirmed: true });
+      return true;
+    }
+    setAsk({ target, confirmed: false });
+    return false;
+  }];
+}
 var SECTION_COLORS = ["blue", "orange", "green", "violet", "rose"];
 var SECTIONS_IN_BAR = false;
 function sectionMoveItems(entry, roster, actions) {
@@ -32037,6 +32063,7 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
     };
   }, []);
   const [place, setPlace] = (0, import_react88.useState)({ left: menu.x, top: menu.y });
+  const [confirmingDelete, readyToDelete] = useConfirmStep(`${menu.kind ?? ""}:${menu.id ?? ""}`, leaving);
   const tick = useViewport();
   (0, import_react88.useLayoutEffect)(() => {
     const box = ref.current?.getBoundingClientRect();
@@ -32085,7 +32112,9 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
     bot ? (waits?.waits ?? []).map((item) => [t("Give up waiting for {name}", { name: item.name ?? t("a Bot") }), SignOutIcon, () => actions.abandonWork(item.id)]) : [],
     [
       isMainBot ? null : [t("Hide from sidebar"), HideIcon, () => actions.setFlags(menu.id, { hidden: true })],
-      isMainBot || adopted ? null : [room2 ? t("Delete group") : t("Delete"), TrashIcon, () => bot ? actions.deleteBot(bot.id) : actions.deleteRoom(menu.id), true],
+      // A Bot's delete archives its chats and forgets its secrets, so the item asks first;
+      // only a second click on the named item runs it.
+      isMainBot || adopted ? null : [confirmingDelete ? t("Delete {name}?", { name: room2 ? room2.name : bot.name }) : room2 ? t("Delete group") : t("Delete"), TrashIcon, () => bot ? actions.deleteBot(bot.id) : actions.deleteRoom(menu.id), true, false, void 0, readyToDelete],
       // Only a confirmed rollback whose host preconditions are visible as met is offered.
       canRollback ? [t("Roll back DSH adoption…"), TrashIcon, () => {
         const warning = t("Roll back this adoption? This deletes the Bot record and any settings changed after adoption; the original DSH bot and its session return.");
@@ -32101,13 +32130,19 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
       import_react88.Fragment,
       { key: index },
       index > 0 ? (0, import_react88.createElement)("div", { className: "bt-menu-sep", role: "separator" }) : null,
-      group.map(([label, Icon, run2, danger, checked, describedBy]) => (0, import_react88.createElement)("button", {
-        key: label,
+      // `ask` is the item's own confirmation: it returns false on the click that only asks,
+      // and the menu stays open with the item now naming what it would lose.
+      // The key is the item's place in the group, never its label: the confirmation changes
+      // the label, and a new key would unmount the focused button (and its screen-reader node).
+      group.map(([label, Icon, run2, danger, checked, describedBy, ask], item) => (0, import_react88.createElement)("button", {
+        key: `item-${item}`,
         type: "button",
         role: "menuitem",
         className: danger ? "bt-danger" : void 0,
         "aria-describedby": describedBy,
         onClick: () => {
+          if (leaving) return;
+          if (ask && !ask()) return;
           actions.closeMenu();
           void Promise.resolve(run2()).catch((error) => actions.reportError(error, "menu"));
         }
@@ -32285,6 +32320,7 @@ function AgentMenu({ menu, roster, actions, leaving }) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
   const [place, setPlace] = (0, import_react88.useState)({ left: menu.x, top: menu.y });
+  const [confirmingRemove, readyToRemove] = useConfirmStep(`${menu.kind ?? ""}:${menu.id ?? ""}`, leaving);
   const tick = useViewport();
   (0, import_react88.useLayoutEffect)(() => {
     const box = ref.current?.getBoundingClientRect();
@@ -32302,7 +32338,8 @@ function AgentMenu({ menu, roster, actions, leaving }) {
     ],
     sectionMoveItems(agent, roster, actions),
     [
-      [agent.kind === "tasks" ? t("Remove Tasks") : t("Remove {name}", { name: agent.name }), TrashIcon, () => actions.removeAgent(agent.id), true]
+      // Removing the DSH bot archives every Session it owns, so it asks first too.
+      [confirmingRemove ? agent.kind === "tasks" ? t("Remove Tasks?") : t("Remove {name}?", { name: agent.name }) : agent.kind === "tasks" ? t("Remove Tasks") : t("Remove {name}", { name: agent.name }), TrashIcon, () => actions.removeAgent(agent.id), true, false, void 0, readyToRemove]
     ]
   ].filter((group) => group.length > 0) : [
     [
@@ -32319,12 +32356,15 @@ function AgentMenu({ menu, roster, actions, leaving }) {
       import_react88.Fragment,
       { key: index },
       index > 0 ? (0, import_react88.createElement)("div", { className: "bt-menu-sep", role: "separator" }) : null,
-      group.map(([label, Icon, run2, danger, checked]) => (0, import_react88.createElement)("button", {
-        key: label,
+      group.map(([label, Icon, run2, danger, checked, describedBy, ask], item) => (0, import_react88.createElement)("button", {
+        key: `item-${item}`,
         type: "button",
         role: "menuitem",
         className: danger ? "bt-danger" : void 0,
+        "aria-describedby": describedBy,
         onClick: () => {
+          if (leaving) return;
+          if (ask && !ask()) return;
           actions.closeMenu();
           void Promise.resolve(run2()).catch((error) => actions.reportError(error, "menu"));
         }
@@ -34406,6 +34446,16 @@ var import_react93 = require("react");
 var import_react_dom16 = require("react-dom");
 var DIALOG_EXIT_MS = 160;
 var MENU_EXIT_MS3 = 120;
+var menuKeys = /* @__PURE__ */ new WeakMap();
+var nextMenuKey = 0;
+function menuKey(menu) {
+  let key = menuKeys.get(menu);
+  if (key === void 0) {
+    key = ++nextMenuKey;
+    menuKeys.set(menu, key);
+  }
+  return key;
+}
 function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity, useWork, useRegistry, useBrowserPages, useBrowserTabs, useBrowserHolds, useComputer, useUpdate, useFrame, actions }) {
   const roster = useRoster((value) => value);
   const ui2 = useUi((value) => value);
@@ -34454,7 +34504,7 @@ function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity
     ui2.palette ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(CommandPalette, { key: ui2.palette.token, start: ui2.palette.query, token: ui2.palette.token, roster, actions, useSessions }), document.body) : null,
     ui2.exchange ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(ExchangeDialog, { pair: ui2.exchange, roster, actions }), document.body) : null,
     ui2.voice ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(VoiceMode, { key: ui2.voice, sessionId: ui2.voice, roster, actions, useSessions, useSessionStatus }), document.body) : null,
-    menu ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(ContextMenu, { key: `${menu.kind ?? ""}:${menu.id}:${menu.x}:${menu.y}`, menu, roster, actions, useWork, leaving: menuLeaving }), document.body) : null,
+    menu ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(ContextMenu, { key: menuKey(menu), menu, roster, actions, useWork, leaving: menuLeaving }), document.body) : null,
     settings ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(SettingsDialog, { page: settings.page, id: settings.id, roster, actions, useUpdate, leaving: settingsLeaving }), document.body) : null,
     owner ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(MemoryDialog, { key: owner.id, owner, actions, leaving: memoryLeaving }), document.body) : null
   );
