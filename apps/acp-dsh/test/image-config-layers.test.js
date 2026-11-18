@@ -62,20 +62,27 @@ function boundary(t, { onCheck, onMode } = {}) {
   const f = fixture(t), events = []
   const mock = t.mock.method(childProcess, 'execFile', (_command, args, options, callback) => {
     const debug = args.includes('prompt-input')
+    // The switch's effect is read too: with one required feature on, its tool must appear.
+    const table = args.find((arg, index) => args[index - 1] === '-c' && arg.startsWith('features=')) ?? ''
+    const on = name => new RegExp(`(?:^|[ {,])${name} = true`).test(table)
+    const proof = on('shell_tool') || on('view_image')
     if (debug) {
-      events.push({ event: 'check' })
-      onCheck?.(f)
+      events.push({ event: 'check', proof })
+      if (!proof) onCheck?.(f)
     }
     const grants = '<permission_profile type="managed"><file_system type="restricted">'
       + '<entry access="deny" escalatable="false"><special>:root</special></entry>'
       + `<entry access="read"><path>${options.cwd}</path></entry>`
       + '</file_system></permission_profile>'
+    const nested = ['apply_patch', ...(on('shell_tool') ? ['exec_command'] : []), ...(on('view_image') ? ['view_image'] : [])]
+    const tools = [
+      { type: 'namespace', name: 'image_gen', tools: [{ type: 'function', name: 'imagegen', parameters: {} }] },
+      { type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec', description: nested.map(name => `declare const tools: { ${name}(args: {}): Promise<unknown>; };`).join('\n') }] },
+    ]
     const answer = args.includes('features')
       ? 'shell_tool stable false\nview_image stable false\nimage_generation stable true\n'
       : debug ? JSON.stringify([
-        { type: 'additional_tools', tools: [{ type: 'namespace', name: 'image_gen', tools: [
-          { type: 'function', name: 'imagegen', parameters: {} },
-        ] }] },
+        { type: 'additional_tools', tools },
         { type: 'message', content: [{ type: 'input_text', text: grants }] },
       ]) : '[]'
     queueMicrotask(() => callback(null, answer, ''))

@@ -28,6 +28,8 @@ function fixture(t, env = {}) {
 }
 const refusedEdit = error => error.code === UNAVAILABLE && error.reason === 'edit-not-isolated'
 const fallback = reason => `the Codex image run is not isolated (${reason}); falling back to read-only`
+// A render with one required switch on is a feature-effect proof, not a session check.
+const isProof = args => args.some(arg => arg.startsWith('features=') && /(?:^|[ {,])(shell_tool|view_image) = true/.test(arg))
 async function withoutFallback() {
   const suffix = '?image-home-no-fallback'
   const hook = registerHooks({ load(url, context, next) {
@@ -47,15 +49,25 @@ function boundary(t, { modes = 'offered', refuseConfig = false, onCheck, onMode 
   const mock = t.mock.method(childProcess, 'execFile', (_command, args, options, callback) => {
     const profile = args.some(arg => arg.startsWith('default_permissions='))
     const debug = args.includes('prompt-input')
+    // The switch's effect is read too: with one required feature on, its tool must appear.
+    const table = args.find((arg, index) => args[index - 1] === '-c' && arg.startsWith('features=')) ?? ''
+    const on = name => new RegExp(`(?:^|[ {,])${name} = true`).test(table)
+    // A render with a required switch on is a feature proof, not the session's own config.
+    const proof = on('shell_tool') || on('view_image')
     if (debug) {
-      events.push({ event: 'check', profile })
-      onCheck?.(f)
+      events.push({ event: 'check', profile, proof })
+      if (!proof) onCheck?.(f)
     }
     const grants = `<permission_profile type="managed"><file_system type="restricted"><entry access="deny" escalatable="false"><special>:root</special></entry><entry access="read"><path>${options.cwd}</path></entry></file_system></permission_profile>`
+    const nested = ['apply_patch', ...(on('shell_tool') ? ['exec_command'] : []), ...(on('view_image') ? ['view_image'] : [])]
+    const tools = [
+      { type: 'namespace', name: 'image_gen', tools: [{ type: 'function', name: 'imagegen', parameters: {} }] },
+      { type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec', description: nested.map(name => `declare const tools: { ${name}(args: {}): Promise<unknown>; };`).join('\n') }] },
+    ]
     const answer = args.includes('features')
       ? 'shell_tool stable false\nview_image stable false\nimage_generation stable true\n'
       : debug ? JSON.stringify([
-        { type: 'additional_tools', tools: [{ type: 'namespace', name: 'image_gen', tools: [{ type: 'function', name: 'imagegen', parameters: {} }] }] },
+        { type: 'additional_tools', tools },
         { type: 'message', content: [{ type: 'input_text', text: grants }] },
       ]) : '[]'
     queueMicrotask(() => callback(null, answer, profile && refuseConfig ? 'Invalid configuration; using defaults' : ''))
@@ -150,7 +162,8 @@ for (const edit of [false, true]) test(`home image profile: ${edit ? 'edit' : 'd
   const profile = imageProfileFor(f.launch.profileModes)
   assert.equal(config.default_permissions, profile.id)
   assert.deepEqual(config.permissions[profile.id], { description: IMAGE_PROFILE_DESCRIPTION, filesystem: IMAGE_PROFILE_GRANTS })
-  for (const check of trace.filter(row => row.event === 'cli' && row.args[0] === 'debug')) assert.deepEqual(check.args, ['debug', 'prompt-input', ...configArgs(config)])
+  for (const check of trace.filter(row => row.event === 'cli' && row.args[0] === 'debug' && !isProof(row.args))) assert.deepEqual(check.args, ['debug', 'prompt-input', ...configArgs(config)])
+  assert.equal(trace.filter(row => row.event === 'cli' && row.args[0] === 'debug' && isProof(row.args)).length, 2, 'one effect proof per required switch')
   const ack = trace.find(row => row.event === 'mode-ack'), prompt = trace.find(row => row.event === 'prompt')
   assert.equal(ack.modeId, profile.mode)
   assert.ok(trace.indexOf(ack) < trace.indexOf(prompt))
@@ -178,7 +191,7 @@ for (const resolved of ['wider', 'write', 'missing', 'odd']) test(`resolved prof
     const drawing = drawImage({ ...f.request, ...(edit ? { input } : {}) })
     if (edit) await assert.rejects(drawing, refusedEdit)
     else assert.equal((await drawing).isolated, false)
-    const trace = f.trace(), checks = trace.filter(row => row.event === 'cli' && row.args[0] === 'debug')
+    const trace = f.trace(), checks = trace.filter(row => row.event === 'cli' && row.args[0] === 'debug' && !isProof(row.args))
     assert.deepEqual(checks.map(row => row.args.some(arg => arg.startsWith('default_permissions='))), [true, false])
     const config = JSON.parse(trace.find(row => row.event === 'start').codexConfig)
     assert.equal('default_permissions' in config, false)
@@ -304,7 +317,7 @@ for (const policy of ['edit', 'strict']) test(`profile-only config refusal: ${po
   const draw = policy === 'strict' ? (await withoutFallback()).drawImage : drawImage
   await assert.rejects(draw({ ...f.request, ...(policy === 'edit' ? { input } : {}) }), policy === 'edit' ? refusedEdit : error => error.code === UNAVAILABLE)
   assert.equal(f.events.some(row => row.event === 'prompt'), false)
-  assert.deepEqual(f.events.filter(row => row.event === 'check').map(row => row.profile), policy === 'strict' ? [true] : [true, false])
+  assert.deepEqual(f.events.filter(row => row.event === 'check' && !row.proof).map(row => row.profile), policy === 'strict' ? [true] : [true, false])
   assert.equal(f.events.some(row => row.event === 'start'), policy === 'edit')
   assert.deepEqual(f.logs, policy === 'strict' ? [] : [fallback('profile config refused')])
 })

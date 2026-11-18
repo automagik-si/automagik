@@ -482,6 +482,14 @@ managed preferences (MDM), cloud requirements or cloud-managed config. A process
 already write these sources controls this Codex's configuration; the image lock cannot defend
 against it.
 
+Each required switch is checked twice. Codex's feature list is read again under the whole
+config the session gets, so a layer that turns one back on fails the check. When Codex offers
+its image tool, so a draw can work, the switch is also turned on and must add the tool it
+controls (the shell tool: a command tool; image viewing: `view_image`): a name Codex lists but
+silently ignores adds none, and the draw refuses instead of going on with containment only.
+A signed-out Codex hides its image tool, so the effect proof is asked only where a draw could
+work; a signed-out run stops at the sign-in as before.
+
 **Input ownership.** Drawing sends only prompt text. An edit takes the person's uploaded
 PNG, JPEG or WebP from DSH's verified attachment store: bots-dsh resolves it in that Bot's own
 chat, and acp-dsh validates the bytes, writes a 0400 copy inside the per-draw scratch and sends
@@ -685,8 +693,11 @@ of time leaves Codex ready. A draw always makes its own check.
   from coming back, it does not undo a read.
 - **The per-thread path.** The checks read Codex's command line (`-c`); the session gets the
   same overrides per thread, through codex-acp, which adds a rule of its own that turns one
-  more skill off. That Codex honours them there the same way is tested only up to the sign-in
-  (`test/image-codex.test.js`); past it needs a signed-in Codex, in the app.
+  more skill off. `test/image-codex.test.js` starts a real codex-acp session with a fixed
+  loopback Responses peer and the run's own `CODEX_CONFIG`, then reads the tools Codex built:
+  with `view_image` off the tool is absent, and the same config with it on offers it (Codex
+  0.167.0, codex-acp 2.7.0). That covers the per-thread config path, not the signed-in hosted
+  image tool's reads through the profile; those still need the app on each backend.
 - **codex-acp's own log.** codex-acp writes the config it is started with to its log file, so
   the names of the person's MCP servers and skills, and the scratch path, are there too.
 - **The caller.** A prompt built from an outside message is still the way in. The Bot team
@@ -699,7 +710,8 @@ per-turn enforcement tests on each backend, and asking Codex for a switch for `e
 home (never signed in, no model request). It is skipped unless `AUTOMAGIK_TEST_CODEX_ACP`
 (codex-acp's `dist/index.js`) and `AUTOMAGIK_TEST_CODEX` (a Codex executable) are set. The ordinary
 plugin CI job installs neither; run it by hand when the installed Codex or codex-acp changes. At
-runtime, an unknown required feature or an unrecognised offered tool refuses the draw.
+runtime, an unknown required feature, a required switch with no effect, or an unrecognised
+offered tool refuses the draw.
 Passing those checks does not prove that an image cannot contain locally read content.
 
 **Runtime read grants (pinned source audit).** The source paths and line numbers below are
