@@ -272,7 +272,7 @@ test("catalog.mjs: an unchanged rebuild writes the same bytes, and pushedAt come
   const dated = (date) => ({ ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
   const commit = (message, date) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message], { cwd: root, env: dated(date) });
   git(root, "init", "-q", "-b", "dev");
-  git(root, "remote", "add", "origin", "git@github.com:automagik-si/automagik.git");
+  git(root, "remote", "add", "origin", "https://github.com/automagik-si/automagik.git");
   git(root, "add", "-A");
   commit("the pack", "2026-01-02T03:04:05Z");
   execFileSync("git", ["tag", "-a", "v9.9.9", "-m", "v9.9.9"], { cwd: root, env: dated("2026-01-02T03:04:05Z") });
