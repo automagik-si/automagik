@@ -104,7 +104,7 @@ const giveBack = async (candidates, outcome) => {
 
 const buttonStyle = {
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-  width: 26, height: 26, padding: 0, border: 0, borderRadius: 8,
+  width: 26, height: 26, padding: 0, border: 0, borderRadius: 'var(--dsw-radius-sm, 6px)',
   background: 'none', color: 'var(--dsw-alias-label-secondary, inherit)', cursor: 'pointer', flex: 'none',
 }
 
@@ -271,7 +271,7 @@ export function BotBrowserBody({ sessionId, hooks }) {
         }),
         h('button', { type: 'button', onClick: () => void navigate(), style: wideButtonStyle }, t('Go'))),
       h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '5px 12px', flex: 'none', color: 'var(--dsw-alias-label-secondary)', fontSize: 11.5, borderBottom: '.5px solid var(--dsw-alias-border-l1)' } },
-        h('span', { 'aria-hidden': true, style: { width: 6, height: 6, borderRadius: '50%', flex: 'none', background: held ? 'var(--st-warndot, var(--dsw-alias-state-warn-primary))' : 'var(--st-okdot, var(--dsw-alias-state-success-primary))' } }),
+        h('span', { 'aria-hidden': true, style: { width: 6, height: 6, borderRadius: '50%', flex: 'none', background: held ? 'var(--dsw-alias-state-warn-primary, var(--bt-star))' : 'var(--dsw-alias-state-success-primary, var(--bt-green))' } }),
         h('span', { style: { fontWeight: 600, color: 'var(--dsw-alias-label-primary)', maxWidth: '30%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, botName || t('This Bot')),
         h('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
           held ? t('You are in control — the Bot waits.') : t('The Bot is driving.')),
