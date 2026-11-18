@@ -1,0 +1,33 @@
+{
+  "name": "@automagik/marketplace-dsh",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Automagik app marketplace: every Automagik app, installed and updated in one place.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "external": [
+        "@automagik/bots-dsh/client"
+      ]
+    }
+  }
+}

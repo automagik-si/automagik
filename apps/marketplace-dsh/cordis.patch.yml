@@ -1,0 +1,6 @@
+# The marketplace's Host row: the catalog and install service live here, and the
+# browser half is discovered through this package's dsh.client manifest and
+# ./client export. One row is enough; the entry id is the sidebar panel's.
+- insert:
+    - id: automagik-marketplace
+      name: '@automagik/marketplace-dsh'
