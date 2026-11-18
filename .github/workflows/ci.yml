@@ -520,7 +520,7 @@ jobs:
         if: steps.changed.outputs.am == 'true'
         run: |
           set -euo pipefail
-          for f in *.js *.mjs bin/*.mjs lib/*.mjs; do
+          for f in *.js *.mjs bin/*.mjs lib/*.mjs runner/*.mjs; do
             node --check "$f"
           done
           shellcheck -s sh bin/am bin/run.sh bin/automagik-herdr

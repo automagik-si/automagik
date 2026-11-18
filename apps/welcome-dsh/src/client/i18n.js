@@ -293,6 +293,7 @@ export const PT_BR = {
   'Installing its connector in the background. This takes a minute or two.': 'Instalando o conector em segundo plano. Leva um ou dois minutos.',
   'The connector did not install: {error}': 'O conector não foi instalado: {error}',
   'The connector did not install.': 'O conector não foi instalado.',
+  'Could not reach the connector registry. Automagik tries again by itself, or press Retry.': 'Não foi possível acessar o registro de conectores. O Automagik tenta de novo automaticamente. Para tentar agora, clique em Tentar de novo.',
   'The connector did not start: {error}': 'O conector não iniciou: {error}',
   'Install details': 'Detalhes da instalação',
   'Log: {path}': 'Registro: {path}',

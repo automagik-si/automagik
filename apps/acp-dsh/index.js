@@ -731,7 +731,8 @@ export function apply(ctx, config = {}, {
     const bin = cli === undefined || native ? undefined : store.binOf(spec.adapter, spec.bin)
     const busy = !native && store.busy?.(spec.adapter) === true
     // The installer's own failure first; else a connector that waits for the account record.
-    const failure = native ? undefined : store.lastFailure?.(spec.adapter) ?? recordWaits.get(spec.adapter)
+    const installFailure = native ? undefined : store.lastFailure?.(spec.adapter)
+    const failure = installFailure ?? (native ? undefined : recordWaits.get(spec.adapter))
     const connectorState = native ? undefined : store.stateOf?.(spec.adapter)
     // Only a CLI Automagik installs itself has an install to report; any other is found or missing.
     const managed = cliStore !== undefined && spec.cliPackage !== undefined
@@ -790,6 +791,7 @@ export function apply(ctx, config = {}, {
         ...(bin && connectorState?.previous ? { previous: connectorState.previous } : {}),
         ...(bin && connectorState?.rolledBack ? { rolledBack: connectorState.rolledBack } : {}),
       },
+      ...(connector === 'failed' && installFailure?.unreachable !== undefined ? { connectorUnreachable: true } : {}),
       ...(signIns.get(id) === undefined ? {} : { signedIn: signIns.get(id) }),
       ...(homes && !native ? { authScope: 'isolated' } : {}),
       // No `signedIn`: the last check ran and could not tell, and this is why. Absent when no

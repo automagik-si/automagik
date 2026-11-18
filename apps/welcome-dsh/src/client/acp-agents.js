@@ -34,6 +34,7 @@ export function openChatLogin(provider, scope = globalThis) {
   try { return scope[CHAT_LOGIN]?.open?.(provider) === true } catch { return false }
 }
 export const POLL_MS = 2000
+const UNREACHABLE_POLL_MS = 15_000
 export const SETTINGS_SECTION = 'acp-agents'
 const cliBusy = agent => agent.cli.state === 'installing' || agent.cli.updating === true
 
@@ -120,12 +121,14 @@ export function agentLines(agent) {
     if (isNative(agent)) lines.push({ tone: 'muted', text: t('Turning it on lets Automagik use the sign-in {name} already has on this computer.', { name }) })
     return lines
   }
-  const { state, version, error, diagnostic, logPath } = agent.connector
+  const { state, version, error, diagnostic, logPath, unreachable } = agent.connector
   if (state === 'installing') lines.push({ tone: 'wait', text: t('Installing its connector in the background. This takes a minute or two.') })
   if (state === 'failed') {
     lines.push({
       tone: 'bad',
-      text: error ? t('The connector did not install: {error}', { error: redactText(error) }) : t('The connector did not install.'),
+      text: unreachable === true
+        ? t('Could not reach the connector registry. Automagik tries again by itself, or press Retry.')
+        : error ? t('The connector did not install: {error}', { error: redactText(error) }) : t('The connector did not install.'),
       action: 'retry',
       // What DSH 0.2.2 shows for a failed plugin install: the full diagnostic and its log file.
       // The panel and its expander read this one value, so the shared table runs here too: a
@@ -147,9 +150,9 @@ export function agentLines(agent) {
 }
 
 // The agents' state from the host, refreshed (CLI search, sign-in) when the page opens and
-// polled while a CLI or a connector installs or a switch has not settled yet. `onLoginOpen`
-// runs once a Bot's chat took a sign-in, so the page around it can step aside; `open` is the
-// bridge (a test hands its own).
+// polled while a CLI or a connector installs, a switch is settling, or the connector registry
+// is unreachable. `onLoginOpen` runs once a Bot's chat took a sign-in, so the page around it
+// can step aside; `open` is the bridge (a test hands its own).
 export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {}) {
   const [view, setView] = useState(null)
   const [busy, setBusy] = useState(null)
@@ -174,11 +177,13 @@ export function useAcp(request = call, { onLoginOpen, open = openChatLogin } = {
   useEffect(() => { void load(true) }, [load])
 
   const settling = view?.agents?.some(agent => cliBusy(agent) || (agent.on && agent.cli.found && agent.connector.state === 'installing') || (wanted[agent.id] !== undefined && wanted[agent.id] !== agent.on)) === true
+  const unreachable = view?.agents?.some(agent => agent.on && agent.cli.found && agent.connector.state === 'failed' && agent.connector.unreachable === true) === true
+  const pollMs = settling ? POLL_MS : unreachable ? UNREACHABLE_POLL_MS : undefined
   useEffect(() => {
-    if (!settling) return undefined
-    const timer = setInterval(() => { void load(false) }, POLL_MS)
+    if (pollMs === undefined) return undefined
+    const timer = setInterval(() => { void load(false) }, pollMs)
     return () => clearInterval(timer)
-  }, [settling, load])
+  }, [pollMs, load])
 
   const say = (id, message) => setProblems(previous => ({ ...previous, [id]: message }))
   // Whether the host took it; a refusal leaves its words on the row.

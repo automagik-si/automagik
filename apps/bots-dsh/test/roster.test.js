@@ -410,7 +410,7 @@ test('a team from before the octopus was stored gets it once, on its first Main 
 })
 
 test('set-main keeps one Main Bot and replaces only a Main Bot', async (t) => {
-  const { call, stop } = start()
+  const { call, stop, home } = start()
   t.after(stop)
   const chief = (await call('state', {})).value.mainBotId
   const writer = (await call('create-bot', { name: 'Writer' })).value
@@ -419,6 +419,28 @@ test('set-main keeps one Main Bot and replaces only a Main Bot', async (t) => {
   assert.equal((await call('set-main', { id: 'nope', main: true })).ok, false)
   assert.equal((await call('set-main', { id: reader.id, main: false })).ok, true)
   assert.deepEqual((await call('state', {})).value.mainBotIds, [chief])
+
+  // A replacement whose required save fails is refused, and neither this host nor a
+  // later ordinary save shows the roster that never reached the file.
+  await call('set-flags', { id: writer.id, hidden: true })
+  const saved = () => JSON.parse(readFileSync(join(home, 'state.json'), 'utf8'))
+  const blocker = join(home, `state.json.${process.pid}.tmp`)
+  mkdirSync(blocker)
+  assert.equal((await call('set-main', { id: writer.id, main: true, replace: chief })).ok, false)
+  let team = (await call('state', {})).value
+  assert.deepEqual(team.mainBotIds, [chief])
+  assert.equal(team.bots.find(bot => bot.id === writer.id).hidden, true)
+  rmSync(blocker, { recursive: true })
+  assert.equal((await call('set-prefs', { theme: 'dark' })).ok, true)
+  assert.deepEqual(saved().mainBotIds, [chief])
+  assert.equal(saved().bots[writer.id].hidden, true)
+
+  // Once the file can be written, the same replacement is saved and then shown.
+  team = (await call('set-main', { id: writer.id, main: true, replace: chief })).value
+  assert.deepEqual(team.mainBotIds, [writer.id])
+  assert.equal(team.bots.find(bot => bot.id === writer.id).hidden, undefined)
+  assert.deepEqual(saved().mainBotIds, [writer.id])
+  assert.equal(saved().bots[writer.id].hidden, undefined)
 })
 
 test('deleting a Bot or group chat stops its Session, so its tasks are removed', async (t) => {
