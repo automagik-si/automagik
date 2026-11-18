@@ -267,6 +267,7 @@ Regenerate and commit the HTML and CSS:
 ```sh
 node apps/landing/scripts/sync-theme.mjs
 node apps/landing/scripts/build-art.mjs   # only after an art or capture change; needs ffmpeg with libwebp
+node apps/landing/scripts/build-art.mjs --check   # committed crops re-derive from their sources; needs ffmpeg
 node apps/landing/scripts/build-pages.mjs
 node scripts/brand-bundle.mjs              # after a change to styles.css
 bun install --frozen-lockfile --ignore-scripts
@@ -274,6 +275,10 @@ node --test apps/landing/landing.test.mjs apps/landing/waitlist.test.mjs
 LANDING_CHROME=/path/to/chrome node apps/landing/verify-browser.mjs
 node herdr/scripts/privacy-check.mjs
 ```
+
+The page test re-derives every committed WebP from its recorded source rectangle and fails
+when a crop is stale, even if its manifest digest was updated to match. `build-art.mjs
+--check` runs the same check on its own.
 
 The browser gate checks all pages at 1440, 1024, 390 and 320 px, light and dark. It checks
 that no heading word breaks across lines, every image is sized, the film still stays smaller
