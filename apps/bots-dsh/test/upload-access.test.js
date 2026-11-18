@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { install as uploads } from '../src/host/shared-uploads.js'
 import { install as tools } from '../src/host/tools.js'
@@ -57,12 +57,22 @@ async function fixture(t, { withTools = true } = {}) {
       approval,
     })[name] }
   const owners = new Map([['ga', { roomId: 'g', botId: 'a' }], ['gb', { roomId: 'g', botId: 'b' }]])
+  // The real path of the deepest part that exists, with the rest after it, as folders.js does.
+  const realBeyond = async path => {
+    const rest = []
+    for (let at = resolve(path); ; at = dirname(at)) {
+      const found = await realpath(at).catch(() => undefined)
+      if (found !== undefined) return join(found, ...rest)
+      if (dirname(at) === at) return resolve(path)
+      rest.unshift(basename(at))
+    }
+  }
   const rt = { ctx, state, home: join(folder, 'home'), dshHome: join(folder, 'dsh'), statePath: join(folder, 'state.json'), teamTools: [], live: new Map(), groupOwners: owners,
     botOf: id => bots[id], selfOf: id => bots[id]?.id ?? owners.get(id)?.botId,
     botOfSession: id => bots[id] ?? bots[owners.get(id)?.botId], chatOf: id => bots[id]?.sessionId,
     roomOf: id => rooms[id], findBot: name => Object.values(bots).find(bot => bot.name === name),
     workDirOf: ({ botId }) => bots[botId]?.workDir, teamFolder: () => folder, defaultTeamFolder: () => folder,
-    sessionFolder: session => bots[session?.id]?.workDir ?? folder, realBeyond: async path => resolve(path),
+    sessionFolder: session => bots[session?.id]?.workDir ?? folder, realBeyond,
     groupSessionsOf: id => id === 'a' ? ['ga'] : id === 'b' ? ['gb'] : [], isMain: () => false,
     own: (value, key) => Object.hasOwn(value, key) ? value[key] : undefined,
     load: async () => {}, save: async () => {}, readOnly: () => undefined, warn() {},
@@ -89,6 +99,23 @@ async function fixture(t, { withTools = true } = {}) {
   return { rt, bots, ref, other, folder, books, approval, opened, person, show, rows, guard, call, agentOf, append, storePath, edits: () => edits }
 }
 
+test('a name under the bots root that is no Bot folder is not refused', async t => {
+  const f = await fixture(t, { withTools: false })
+  // The bots root holds the team's own files and the shared working folders beside the Bots'
+  // own folders, and a Bot's workspace is one of them: naming one of those is not opening a
+  // picture. Only a Bot's own folder is another Bot's to keep out.
+  for (const leaf of ['bots/workspace', 'bots/workspace/omni', 'bots/state.json', 'bots/bots.json', 'bots/learning/state.json']) {
+    const candidate = join(f.folder, '.automagik', leaf)
+    assert.equal(await f.guard('b', 'read', { file_path: candidate }), 'ran', leaf)
+    assert.equal(await f.guard('b', 'bash', { command: `ls ${candidate}` }), 'ran', leaf)
+    assert.equal(await f.guard('b', 'grep', { path: candidate, pattern: 'x' }), 'ran', leaf)
+  }
+  const own = join('.automagik', 'bots', 'a', 'uploads')
+  await assert.rejects(f.guard('b', 'read', { file_path: join(f.folder, own, 'x.png') }), /another Bot's own folder/)
+  await assert.rejects(f.guard('b', 'bash', { command: `ls ${own}` }), /another Bot's own folder/)
+  assert.equal(await f.guard('a', 'bash', { command: `ls ${own}` }), 'ran')
+})
+
 test('a picture belongs only to its recipient; all direct tools and shell spellings enforce it', async t => {
   const f = await fixture(t, { withTools: false })
   f.person('a', f.ref)
@@ -99,18 +126,18 @@ test('a picture belongs only to its recipient; all direct tools and shell spelli
   assert.equal(await f.rt.sharedUploads.holds('b', hex), false)
   for (const candidate of [path, join(f.folder, '.automagik/uploads', hex, f.ref.name), f.storePath(f.ref)]) {
     for (const [name, args] of [['read', { file_path: candidate }], ['bash', { command: `cat ${JSON.stringify(candidate)}` }], ['custom_tool', { text: candidate }]]) {
-      await assert.rejects(f.guard('b', name, args), /not sent to the test Bot b/)
+      await assert.rejects(f.guard('b', name, args), /not sent to the test Bot b|another Bot's own folder/)
       assert.equal(await f.guard('a', name, args), 'ran')
     }
   }
-  for (const name of ['read', 'write', 'edit', 'read_image']) await assert.rejects(f.guard('b', name, { file_path: path }), /not sent/)
-  await assert.rejects(f.guard('b', 'str_replace_editor', { path }), /not sent/)
+  for (const name of ['read', 'write', 'edit', 'read_image']) await assert.rejects(f.guard('b', name, { file_path: path }), /not sent to the test Bot b|another Bot's own folder/)
+  await assert.rejects(f.guard('b', 'str_replace_editor', { path }), /not sent to the test Bot b|another Bot's own folder/)
   for (const name of ['glob', 'grep']) {
-    await assert.rejects(f.guard('b', name, { path: join(f.folder, '.automagik/bots/a') }), /not sent/)
-    await assert.rejects(f.guard('b', name, { path: join(f.folder, '.automagik/bots'), pattern: `${path}*` }), /not sent/)
+    await assert.rejects(f.guard('b', name, { path: join(f.folder, '.automagik', 'bots', 'a') }), /another Bot's own folder/)
+    await assert.rejects(f.guard('b', name, { path: join(f.folder, '.automagik/bots'), pattern: `${path}*` }), /not sent to the test Bot b|another Bot's own folder/)
     assert.equal(await f.guard('b', name, { path: join(f.folder, '.automagik/bots') }), 'ran')
   }
-  for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) await assert.rejects(f.guard('b', name, { command: `cat .automagik/bots/a/uploads/${hex}/picture.png` }), /not sent/)
+  for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) await assert.rejects(f.guard('b', name, { command: `cat .automagik/bots/a/uploads/${hex}/picture.png` }), /not sent to the test Bot b|another Bot's own folder/)
   uploads(f.rt) // fresh in-memory grants; the own-chat directory is the durable holding.
   assert.equal(f.rt.sharedUploads.grantedTo('a').size, 0)
   assert.equal(await f.rt.sharedUploads.holds('a', hex), true)
@@ -411,7 +438,7 @@ test('a child task’s upload and tool access belong to its owner Bot', async t 
   assert.equal(await f.rt.sharedUploads.holds('a', f.ref.attachmentId.slice(7)), true)
   assert.equal(await f.rt.sharedUploads.holds('b', f.ref.attachmentId.slice(7)), false)
   assert.equal(await f.guard('test-subagent', 'read', { file_path: path }), 'ran')
-  await assert.rejects(f.guard('b', 'read', { file_path: path }), /not sent/)
+  await assert.rejects(f.guard('b', 'read', { file_path: path }), /not sent to the test Bot b|another Bot's own folder/)
 })
 
 test('private senders retain unread request merging and each image forward has its own authority record', async t => {
@@ -438,13 +465,29 @@ for (const spelling of ['.automagik/bots/a', '.Automagik/Bots/a', '.AUTOMAGIK/BO
   test(`guard ends Bot ids at shell punctuation and whitespace: ${spelling}`, async t => {
     const f = await fixture(t, { withTools: false })
     for (const command of [`cp -r ${spelling} /tmp/x`, `cp -r "${spelling}" /tmp/x`, `cat ${spelling}; true`, `cat ${spelling}|cat`, `cat ${spelling}\ntrue`]) {
-      await assert.rejects(f.guard('b', 'bash', { command }), /not sent/)
+      await assert.rejects(f.guard('b', 'bash', { command }), /not sent to the test Bot b|another Bot's own folder/)
       assert.equal(await f.guard('a', 'bash', { command }), 'ran')
     }
     // A longer id cannot be mistaken for the caller's id.
-    for (const suffix of ['-other', '.other', '_other']) await assert.rejects(f.guard('a', 'bash', { command: `cp -r ${spelling}${suffix} /tmp/x` }), /not sent/)
+    // A name no Bot has is not a Bot folder: the guard ends the id exactly.
+    for (const suffix of ['-other', '.other', '_other']) assert.equal(await f.guard('a', 'bash', { command: `cp -r ${spelling}${suffix} /tmp/x` }), 'ran')
   })
 }
+
+test('Bot ids fold like the file system off linux', async t => {
+  const f = await fixture(t, { withTools: false })
+  const candidate = join(f.folder, '.automagik', 'bots', 'Outside', 'uploads', 'notes.txt')
+  // On linux the folder name is exact, so another case is not this Bot's folder.
+  if (process.platform === 'linux') assert.equal(await f.guard('b', 'read', { file_path: candidate }), 'ran')
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  try {
+    Object.defineProperty(process, 'platform', { value: 'darwin' })
+    await assert.rejects(f.guard('b', 'read', { file_path: candidate }), /another Bot's own folder/)
+    assert.equal(await f.guard('outside', 'read', { file_path: candidate }), 'ran')
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+  }
+})
 
 for (const kind of ['tool-result', 'channel', 'handoff']) {
   test(`own-history ${kind} stored files remain readable before and after prompt projection`, async t => {
@@ -486,11 +529,69 @@ for (const spelling of [
   test(`shell guard normalizes Bot path segments: ${spelling}`, async t => {
     const f = await fixture(t, { withTools: false })
     for (const command of [`cat ${spelling}/uploads/picture.png`, `cp -r ${spelling} /tmp/test-copy`]) {
-      await assert.rejects(f.guard('b', 'bash', { command }), /not sent/)
+      await assert.rejects(f.guard('b', 'bash', { command }), /not sent to the test Bot b|another Bot's own folder/)
       assert.equal(await f.guard('a', 'bash', { command }), 'ran')
     }
   })
 }
+
+test('shell text collapses parent segments under the bots root', async t => {
+  const f = await fixture(t, { withTools: false })
+  const command = 'cat .automagik/bots/learning/../outside/notes.txt'
+  for (const name of ['bash', 'pwsh', 'terminal_open', 'terminal_send']) {
+    await assert.rejects(f.guard('b', name, { command }), /another Bot's own folder/)
+    assert.equal(await f.guard('outside', name, { command }), 'ran')
+  }
+})
+
+test('a later parent segment cannot erase an earlier protected path', async t => {
+  const f = await fixture(t, { withTools: false })
+  f.person('a', f.ref)
+  await f.show('a')
+  const hex = f.ref.attachmentId.slice(7)
+  for (const command of [
+    'cat .automagik/bots/outside/draft.md /../../scratch/dump',
+    'cat .automagik/bots/outside/cache/draft.md # /../../..',
+    'cat .automagik/bots/outside/draft.md; echo /../../..',
+  ]) await assert.rejects(f.guard('b', 'bash', { command }), /another Bot's own folder/)
+  for (const command of [
+    `cat .automagik/uploads/${hex}/picture.png # /../..`,
+    `cat objects/${hex.slice(0, 2)}/${hex} # /..`,
+  ]) {
+    await assert.rejects(f.guard('b', 'bash', { command }), /not sent to the test Bot b/)
+    assert.equal(await f.guard('a', 'bash', { command }), 'ran')
+  }
+})
+
+test('a link outside the bots root into another Bot folder is refused', async t => {
+  const f = await fixture(t, { withTools: false })
+  const target = join(f.folder, '.automagik', 'bots', 'outside')
+  await mkdir(target, { recursive: true })
+  const link = join(f.folder, 'outside-shortcut')
+  await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+  const path = join(link, 'uploads', 'notes.txt')
+  await assert.rejects(f.guard('b', 'read', { file_path: path }), /another Bot's own folder/)
+  await assert.rejects(f.guard('b', 'grep', { path: link, pattern: 'notes' }), /another Bot's own folder/)
+  assert.equal(await f.guard('outside', 'read', { file_path: path }), 'ran')
+})
+
+test('a relative glob pattern through a link outside the bots root is refused', async t => {
+  const f = await fixture(t, { withTools: false })
+  const working = join(f.folder, 'working')
+  await mkdir(working)
+  const target = join(f.folder, '.automagik', 'bots', 'outside')
+  await mkdir(target, { recursive: true })
+  const link = join(working, 'bot-folder-link')
+  await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+  const pattern = 'bot-folder-link/cache/*.md'
+  await assert.rejects(f.guard('b', 'glob', { path: working, pattern }), /another Bot's own folder/)
+  assert.equal(await f.guard('outside', 'glob', { path: working, pattern }), 'ran')
+  // The pattern alone names the folder too; with no private Bot to close the whole walk,
+  // the link's target is what refuses it.
+  delete f.rt.state.bots['test-private-bot']
+  await assert.rejects(f.guard('b', 'glob', { pattern: 'working/bot-folder-link/cache/*.md' }), /another Bot's own folder/)
+  assert.equal(await f.guard('outside', 'glob', { pattern: 'working/bot-folder-link/cache/*.md' }), 'ran')
+})
 
 test('shell store guards match object ids in home-relative, quoted and cd-relative paths', async t => {
   const f = await fixture(t, { withTools: false })

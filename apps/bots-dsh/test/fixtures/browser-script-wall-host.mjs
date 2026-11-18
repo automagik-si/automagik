@@ -43,6 +43,8 @@ for (const name of ['answer', 'error']) {
   result[name] = `${result[name].slice(0, 20)}...${result[name].slice(-20)}`
 }
 result.helperCalls = helperCalls
+// The test also checks that this pid is gone from the process table.
+result.pid = child?.pid
 // A settled run alone does not prove that the process stopped.
 result.exit = await new Promise((resolve) => {
   const ended = () => ({ code: child.exitCode, signal: child.signalCode })

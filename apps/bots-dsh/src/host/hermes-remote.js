@@ -18,6 +18,11 @@ const fail = (message, kind = 'connection') => refusal(message, { code: `bot/her
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const extraHomes = value => (Array.isArray(value) ? value : []).slice(0, 20).filter(path => typeof path === 'string' && path.startsWith('/') && path.length <= 4096 && !/[\x00-]/.test(path) && !path.split('/').includes('..'))
 const sshFields = ssh => Object.fromEntries(['host', 'user', 'port', 'identityFile', 'hermesPath', 'hermesHome', 'recordDir'].filter(key => ssh?.[key] !== undefined).map(key => [key, ssh[key]]))
+const shq = value => /^[A-Za-z0-9_@%+=:,.\/-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\"'\"'")}'`
+function startLine(config) {
+  const home = config.ssh?.hermesHome
+  return typeof home === 'string' && home.startsWith('/') ? `HERMES_HOME=${shq(home)} hermes serve` : 'hermes serve'
+}
 const CONNECTION_ERRORS = Object.freeze({
   'bot/hermes-busy': CHAT_BUSY,
   'bot/hermes-pairing': 'The Hermes Bot pairing could not be verified. Check the selected profile and its existing Bot Chat.',
@@ -426,7 +431,7 @@ export function install(rt, { transport = options => new HermesTransport(options
         : savedSecret(config)
       const pending = { controller, waiters: 0 }
       pendingConnection = pending
-      pending.task = prepareHermesConnection({ mode: config.mode, address: config.address, authMode: config.authMode, ssh: config.ssh }, {
+      pending.task = prepareHermesConnection({ mode: config.mode, address: config.address, authMode: config.authMode, ssh: config.ssh, extraHomes: config.extraHomes }, {
         fetch: fetcher, startSsh, signal: controller.signal, deadlines: remaining(until), secret, discover: false,
         onAuthUpdate: updated => mutate(async () => {
           if (!config.credentialRef) return
@@ -1015,7 +1020,17 @@ export function install(rt, { transport = options => new HermesTransport(options
         || (expectedIdentity && !Object.values(state.hermesSessions ?? {}).includes(expectedIdentity))) throw fail(CHAT_BUSY, 'busy')
       return open({ ...options, startup, finishOnPrepare: true })
     })
-    return waiting(task, startup, false).catch(error => { startup.finish(); throw error })
+    return waiting(task, startup, false).catch(error => {
+      startup.finish()
+      const config = record()
+      if (config?.mode === 'ssh') {
+        const line = startLine(config)
+        if (error?.code === 'bot/hermes-attach-not-running' || error?.code === 'bot/hermes-attach-record') throw refusal(`Hermes is not running on the other computer. Start it there with “${line}”, then try again.`, { code: 'bot/hermes' })
+        if (error?.code === 'bot/hermes-attach-gateway-running') throw refusal(`Hermes is running on the other computer as a gateway, but no “hermes serve” is running. Start “${line}” there, then try again.`, { code: 'bot/hermes' })
+        if (error?.code === 'bot/hermes-attach-gateway') throw refusal(`Hermes is running there as a gateway that owns its sessions. Start “${line}” there, then try again.`, { code: 'bot/hermes' })
+      }
+      throw error
+    })
   }
   adapter = new RemoteChatAdapter(rt, { open: openChat, models: servedModels, identity, save: saveState, enabled, attached: () => attachedRecord(record()) })
   api.adapter = adapter

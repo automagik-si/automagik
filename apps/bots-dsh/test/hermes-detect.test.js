@@ -1706,3 +1706,128 @@ test('without a chosen folder, the home’s own state folder is read before the 
   const { frames } = await runAttach(fixture, { stateDir: '', hermesHome: fixture.home })
   assert.equal(frames.find(frame => frame.type === 'token')?.value, token)
 })
+
+// ------------------------------------------- #1383: a look-alike folder beside the home is named
+// The refusal is #1369's and stays whole; detection only names the folder when every folder
+// that made the beside record ambiguous is a look-alike (config.yaml and skeleton folders, no
+// SOUL.md or state.db, not a home it knows), so the person can move it and press Check again.
+const { rename } = await import('node:fs/promises')
+
+async function lookalikeFixture(t) {
+  const fixture = await readerFixture(t, { cloneRecord: false, primaryRecord: false })
+  const beside = join(dirname(fixture.clone), 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  return { fixture, beside }
+}
+const cloneBot = (frames, fixture) => botsOf(frames).find(row => row.home === fixture.clone && row.id === 'default')
+
+test('#1383 a look-alike beside the home is named, and the home still refuses the shared record', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const { fixture, beside } = await lookalikeFixture(t)
+  const tool = join(dirname(fixture.clone), 'other-tool')
+  await makeHome(tool, { skeleton: ['sessions', 'logs'] })
+  const { frames } = await runReader(fixture)
+  const bot = cloneBot(frames, fixture)
+  assert.equal(bot.running, false)
+  assert.equal(bot.blocked, 'shared-beside')
+  assert.deepEqual(bot.besides, [tool])
+  assert.ok(!botsOf(frames).some(row => row.recordDir === beside), 'the shared record is still not credited')
+  assert.ok(!frames.some(frame => frame.type === 'home' && 'besides' in frame), 'only the bot rows carry the folders')
+  assert.ok(botsOf(frames).filter(row => !row.blocked).every(row => !('besides' in row)), 'a row that is not blocked names nothing')
+})
+
+test('#1383 the way out works: the look-alike moved to another parent, the home is picked from its beside record', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const { fixture, beside } = await lookalikeFixture(t)
+  const tool = join(dirname(fixture.clone), 'other-tool')
+  await makeHome(tool, { skeleton: ['sessions', 'logs'] })
+  assert.equal(cloneBot((await runReader(fixture)).frames, fixture).blocked, 'shared-beside')
+  await mkdir(join(fixture.root, 'tools'), { recursive: true })
+  await rename(tool, join(fixture.root, 'tools', 'other-tool'))
+  const bot = cloneBot((await runReader(fixture)).frames, fixture)
+  assert.equal(bot.running, true, 'Check again finds the home running')
+  assert.equal(bot.recordDir, beside)
+  assert.equal(bot.blocked, '')
+  assert.ok(!('besides' in bot))
+})
+
+test('#1383 a real Hermes beside (SOUL.md or state.db) still refuses and is never called a look-alike', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  for (const marks of [{ soul: true, skeleton: ['sessions', 'logs'] }, { state: true }]) {
+    const { fixture, beside } = await lookalikeFixture(t)
+    await makeHome(join(dirname(fixture.clone), 'runner'), marks)
+    const { frames } = await runReader(fixture)
+    const bot = cloneBot(frames, fixture)
+    assert.equal(bot.running, false, 'a real running home beside still refuses')
+    assert.equal(bot.blocked, 'shared-beside')
+    assert.ok(!('besides' in bot), JSON.stringify(marks))
+    assert.ok(!botsOf(frames).some(row => row.recordDir === beside))
+  }
+})
+
+test('#1383 a look-alike next to a real Hermes sibling names nothing', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const { fixture } = await lookalikeFixture(t)
+  await makeHome(join(dirname(fixture.clone), 'a-tool'), { skeleton: ['sessions', 'logs'] })
+  await makeHome(join(dirname(fixture.clone), 'z-runner'), { soul: true })
+  const bot = cloneBot((await runReader(fixture)).frames, fixture)
+  assert.equal(bot.blocked, 'shared-beside')
+  assert.ok(!('besides' in bot), 'moving the look-alike alone would not unblock it')
+})
+
+test('#1383 five look-alikes are more than the row names, so it names none', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const { fixture } = await lookalikeFixture(t)
+  for (const name of ['t1', 't2', 't3', 't4', 't5']) await makeHome(join(dirname(fixture.clone), name), { skeleton: ['sessions', 'logs'] })
+  const bot = cloneBot((await runReader(fixture)).frames, fixture)
+  assert.equal(bot.blocked, 'shared-beside')
+  assert.ok(!('besides' in bot))
+  const { fixture: few } = await lookalikeFixture(t)
+  const tools = ['t1', 't2', 't3', 't4'].map(name => join(dirname(few.clone), name))
+  for (const tool of tools) await makeHome(tool, { skeleton: ['cron', 'logs'] })
+  assert.deepEqual(cloneBot((await runReader(few)).frames, few).besides, tools)
+})
+
+test('#1383 two known config-only homes sharing the folder name nothing', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { primaryRecord: false, cloneRecord: false })
+  const shared = join(fixture.root, 'shared')
+  const ash = join(shared, 'ash')
+  const oak = join(shared, 'oak')
+  await makeHome(ash, { config: true })
+  await makeHome(oak, { config: true })
+  const spec = JSON.parse(await readFile(join(fixture.root, 'spec.json'), 'utf8'))
+  spec.homes[oak] = { profiles: [{ name: 'Oak', id: 'default', model: 'made-up/model', gateway: 'stopped' }] }
+  await writeFile(join(fixture.root, 'spec.json'), JSON.stringify(spec))
+  const beside = join(shared, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const { frames } = await runReader(fixture, { extraHomes: [ash, oak] })
+  const bot = botsOf(frames).find(row => row.home === oak && row.id === 'default')
+  assert.equal(bot.blocked, 'shared-beside')
+  assert.ok(!('besides' in bot), 'another home this app knows is a Hermes, not a look-alike')
+})
+
+test('#1383 a home given through a link names the look-alike beside the link, under the link\'s parent', async t => {
+  if (!await hasPython()) { t.skip('python3 is not available'); return }
+  const fixture = await readerFixture(t, { cloneRecord: false, primaryRecord: false })
+  const real = join(fixture.root, 'reals', 'hermes')
+  await makeHome(real, { soul: true })
+  const links = join(fixture.root, 'links')
+  await mkdir(links, { recursive: true })
+  const link = join(links, 'hermes-link')
+  await symlink(real, link)
+  const tool = join(links, 'tool')
+  await makeHome(tool, { skeleton: ['sessions', 'memories'] })
+  const beside = join(links, 'gateway-locks')
+  await mkdir(beside, { recursive: true })
+  await writeFile(join(beside, 'host-serve.json'), JSON.stringify({ role: 'serve', pid: process.pid, port: fixture.port, profiles: ['default'], home: '' }))
+  const spec = JSON.parse(await readFile(join(fixture.root, 'spec.json'), 'utf8'))
+  spec.homes[real] = { profiles: [{ name: 'Moved', id: 'default', model: 'made-up/model', gateway: 'stopped' }] }
+  await writeFile(join(fixture.root, 'spec.json'), JSON.stringify(spec))
+  const { frames } = await runReader(fixture, { hermesHome: link })
+  const bot = botsOf(frames).find(row => row.home === real && row.id === 'default')
+  assert.equal(bot.blocked, 'shared-beside')
+  assert.deepEqual(bot.besides, [tool], 'the folder is the one beside the link, not under the real parent')
+})

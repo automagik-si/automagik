@@ -1377,3 +1377,31 @@ test('all new gateway picker and error screen translation keys exist in Chinese 
     if (key.includes('hermes serve')) assert.ok(translated.includes('hermes serve'), `${locale} preserves the command: ${key}`)
   }
 })
+
+// #1404: a stopped saved Hermes is started in its own home. The screen keeps its text and adds
+// the exact serve command for the home the person typed or picked; without one it is unchanged.
+async function stoppedServeScreen(t, code, kind, hermesHome = '') {
+  const render = await startWizard(t, {
+    'hermes-remote-test': () => { throw Object.assign(Error('Sample refusal'), { code }) },
+    'hermes-remote-test-status': () => ({ stage: 'open', failure: { code, kind, stage: 'attach-record' } }),
+  }, { detect: hermesHome ? undefined : async () => { throw Object.assign(Error('Sample refusal'), { code }) } })
+  await render.fill('SSH host or config name', 'sample-box')
+  if (hermesHome) await render.fill('Hermes home (optional)', hermesHome)
+  await render.click('Connect')
+  await waitFor(() => render.document.querySelector('[data-status=error]'), `${code} screen`)
+  await render.click('Details')
+  return Object.fromEntries([...render.document.querySelectorAll('.bt-hw-facts .bt-hw-pair')]
+    .map(row => [row.querySelector('span').textContent, row.querySelector('strong').textContent]))
+}
+
+for (const [code, kind] of [['bot/hermes-attach-not-running', 'serve-not-running'], ['bot/hermes-attach-record', 'serve-record'], ['bot/hermes-attach-gateway', 'serve-gateway']]) {
+  test(`#1404 the ${kind} screen names the serve command for the saved Hermes home`, async t => {
+    const rows = await stoppedServeScreen(t, code, kind, '/srv/my hermes')
+    assert.equal(rows['Serve command'], "HERMES_HOME='/srv/my hermes' hermes serve")
+    assert.equal(rows['SSH host'], 'sample-box')
+  })
+  test(`#1404 the ${kind} screen without a saved home shows no serve command row`, async t => {
+    const rows = await stoppedServeScreen(t, code, kind)
+    assert.equal(Object.hasOwn(rows, 'Serve command'), false)
+  })
+}
