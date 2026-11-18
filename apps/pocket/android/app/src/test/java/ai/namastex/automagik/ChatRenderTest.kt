@@ -158,4 +158,9 @@ class ChatRenderTest {
         assertEquals(28f, ChatStyle.COMPOSER_RADIUS.value)
         assertEquals(17f, ChatStyle.COMPOSER_TEXT.value)
     }
+
+    /** The Question/Approval switch is a tap target: it must be at least the 48dp minimum (#1040). */
+    @Test fun theModeSwitchIsAtLeast48Dp() {
+        assertTrue(ChatStyle.SWITCH_HEIGHT.value >= 48f)
+    }
 }
