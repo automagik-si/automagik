@@ -327,6 +327,10 @@ test('the card\'s label follows the power state, in the existing words', () => {
   shortcut.showPower('omni', 'waking')
   sw = switchOf(drawCard(OMNI_BOT, { bots: [] }))
   assert.deepEqual([sw.props.on, sw.props.hint, sw.props.disabled], [true, 'Waking up…', true])
+  // Waiting on the phone is on too; its switch is the way to cancel it.
+  shortcut.showPower('omni', 'pairing', { pairing: { code: 'X' } })
+  sw = switchOf(drawCard(OMNI_BOT, { bots: [] }))
+  assert.deepEqual([sw.props.on, sw.props.hint, sw.props.disabled], [true, 'Approve this device on your phone', false])
   // Genie, once on the team, is on and held; its note says why.
   shortcut.resetPower()
   shortcut.showPower('genie', 'ready', { bot: GENIE_BOT })

@@ -137,7 +137,8 @@ export function PowerSettingsCard({ bot, roster, Card, Row, SwitchRow, start = s
   const readOnly = Boolean(roster?.readOnly)
   // Genie's and Unfold's Bots stay once they join the team, as their boxes hold them.
   const stays = kind !== 'omni' && row.bot !== null && row.state === 'on'
-  const on = row.state === 'on' || row.working === true
+  // `pressed` is the state table's own "the next press is off": on, working, looking, pairing.
+  const on = row.state === 'on' || row.pressed === true
   const note = row.note ?? (stays && kind === 'genie' ? t('{name} stays on once it joins your team.', { name: row.name }) : null)
   return h(Card, { title: t('Power') },
     readOnly

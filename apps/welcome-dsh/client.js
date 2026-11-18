@@ -13662,7 +13662,7 @@ function PowerSettingsCard({ bot, roster, Card, Row: Row2, SwitchRow, start = st
   const row = powerRow(kind, power, { roster });
   const readOnly = Boolean(roster?.readOnly);
   const stays = kind !== "omni" && row.bot !== null && row.state === "on";
-  const on2 = row.state === "on" || row.working === true;
+  const on2 = row.state === "on" || row.pressed === true;
   const note = row.note ?? (stays && kind === "genie" ? t("{name} stays on once it joins your team.", { name: row.name }) : null);
   return (0, import_react12.createElement)(
     Card,
