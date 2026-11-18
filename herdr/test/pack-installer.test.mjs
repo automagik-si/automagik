@@ -251,10 +251,10 @@ test("catalogUrl: a local catalog path whose file is gone falls back to the publ
 
 // #215: a release commit touches herdr/ (the version bump) and used to rewrite the index's
 // generatedAt and our pushedAt, so every catalog pull request conflicted after each release.
-// The run's clock is not part of what the index describes, and our pushedAt is the newest release
-// tag's date, so a rebuild on an unchanged tree writes the same bytes. A scratch repository: the
-// generator writes its own catalog/index.json and can never be pointed elsewhere.
-test("catalog.mjs: an unchanged rebuild writes the same bytes, and pushedAt comes from the tag (#215)", (t) => {
+// #1600 keeps both stamps from the committed index when nothing the index describes changed, so
+// the release commit no longer rewrites it. A scratch repository: the generator writes its own
+// catalog/index.json and can never be pointed elsewhere.
+const catalogPack = (t, origin = "https://github.com/automagik-si/automagik.git") => {
   const root = scratch(t);
   const pack = join(root, "herdr");
   mkdirSync(join(pack, "scripts"), { recursive: true });
@@ -269,26 +269,45 @@ test("catalog.mjs: an unchanged rebuild writes the same bytes, and pushedAt come
   writeFileSync(join(pack, "README.md"), "# Automagik Herdr\n\nThe pack.\n");
   writeFileSync(join(pack, "RECIPE.md"), "# The pack\n");
   writeFileSync(join(pack, "LICENSE"), "Apache License\nVersion 2.0\n");
+  git(root, "init", "-q", "-b", "dev");
+  git(root, "remote", "add", "origin", origin);
+  git(root, "add", "-A");
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "the pack"], {
+    cwd: root,
+    env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-02T03:04:05Z", GIT_COMMITTER_DATE: "2026-01-02T03:04:05Z" },
+  });
+  return { root, pack };
+};
+
+test("catalog.mjs: an unchanged rebuild writes the same bytes (#215)", (t) => {
+  const { root, pack } = catalogPack(t);
   const dated = (date) => ({ ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date });
   const commit = (message, date) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", message], { cwd: root, env: dated(date) });
-  git(root, "init", "-q", "-b", "dev");
-  git(root, "remote", "add", "origin", "https://github.com/automagik-si/automagik.git");
-  git(root, "add", "-A");
-  commit("the pack", "2026-01-02T03:04:05Z");
   execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "tag", "-a", "v9.9.9", "-m", "v9.9.9"], { cwd: root, env: dated("2026-01-02T03:04:05Z") });
-  // A release's own commit touches the pack (the version bump) after the tag was cut.
-  writeFileSync(join(pack, "mods", "demo", "VERSION"), "9.9.10\n");
-  git(root, "add", "-A");
-  commit("chore(release): v9.9.10", "2026-02-02T00:00:00Z");
-
   const run = () => {
     const r = spawnSync(process.execPath, [join(pack, "scripts", "catalog.mjs")], { cwd: pack, encoding: "utf8" });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     return readFileSync(join(pack, "catalog", "index.json"), "utf8");
   };
   const first = run();
+  // A release's own commit touches the pack (the version bump) after the tag was cut, without
+  // changing what the index describes.
+  writeFileSync(join(pack, "mods", "demo", "VERSION"), "9.9.10\n");
+  git(root, "add", "-A");
+  commit("chore(release): v9.9.10", "2026-02-02T00:00:00Z");
   const second = run();
-  assert.equal(second, first, "a second run on an unchanged tree writes the same bytes, generatedAt included");
-  const packEntry = JSON.parse(first).mods.find((e) => e.path === "herdr");
-  assert.equal(packEntry.pushedAt, "2026-01-02T03:04:05Z", "pushedAt is the newest release tag's date, not the release commit's");
+  assert.equal(second, first, "the release commit keeps the same bytes, generatedAt and pushedAt included");
+  const packEntry = JSON.parse(second).mods.find((e) => e.path === "herdr");
+  assert.equal(packEntry.pushedAt, "2026-01-02T03:04:05Z", "the release commit keeps the pack's indexed pushedAt");
+});
+
+// #215: a checkout whose origin is a local mirror parsed no owner/repo, so a regeneration blanked
+// the pack entry's url while its fullName still fell back to the monorepo. Both fall back together.
+test("catalog.mjs: a mirror checkout keeps the pack's monorepo url (#215)", (t) => {
+  const { pack } = catalogPack(t, "/srv/automagik-mirror.git");
+  const r = spawnSync(process.execPath, [join(pack, "scripts", "catalog.mjs")], { cwd: pack, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const packEntry = JSON.parse(readFileSync(join(pack, "catalog", "index.json"), "utf8")).mods.find((e) => e.path === "herdr");
+  assert.equal(packEntry.fullName, "automagik-si/automagik");
+  assert.equal(packEntry.url, "https://github.com/automagik-si/automagik");
 });

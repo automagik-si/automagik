@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-18T18:34:20.716Z",
+  "generatedAt": "2026-11-18T20:12:08.104Z",
   "modCount": 11,
   "repositoryCount": 4,
   "source": "automagik-herdr",
@@ -12,7 +12,7 @@
       "url": "https://github.com/automagik-si/automagik",
       "defaultBranch": "dev",
       "stars": 0,
-      "pushedAt": "2026-11-18T17:54:47Z",
+      "pushedAt": "2026-11-18T20:10:59Z",
       "headCommit": "",
       "path": "herdr",
       "name": "Automagik Herdr",
@@ -30,7 +30,7 @@
       ],
       "hasKeys": true,
       "hasPreview": false,
-      "recipeBytes": 5509,
+      "recipeBytes": 5479,
       "previewUrl": "",
       "license": "Apache-2.0",
       "mods": [
