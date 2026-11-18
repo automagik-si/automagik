@@ -15,7 +15,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
 import { checkBots, parseBots } from "../mods/am-sidebar/model.js";
-import { AGENTS, CODEX_MODE_ARGS, autoModeArgs, withoutBriefing } from "../mods/am-sidebar/models.js";
+import { AGENTS, CLAUDE_PERSON_SETTINGS, CODEX_MODE_ARGS, autoModeArgs, withoutBriefing } from "../mods/am-sidebar/models.js";
 import { helperPlan, restartPlan } from "../mods/am-sidebar/restart.js";
 import { workerArgs, workerPlan } from "../mods/am-sidebar/workers.js";
 import { readJsonLines } from "./log-lines.mjs";
@@ -116,7 +116,7 @@ test("a Codex worker passes the launch mode from the bot's definition, codexAuto
     .slice(-(MODE.length + 2)), ["codex", ...MODE, "do it"]);
   assert.deepEqual(workerPlan({ ...bot, codexAuto: false }, { agent: "codex" }).argv, ["codex", ...MODE]);
   const other = workerPlan({ ...bot, codexAuto: false }, { agent: "claude" });
-  assert.deepEqual(other.argv, ["claude", "--permission-mode", "auto"]);
+  assert.deepEqual(other.argv, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto"]);
 });
 
 test("Restart --tree's Codex worker helper keeps the auto mode from the bot's definition; a template keeps its own command (#946, #1125)", () => {

@@ -15,7 +15,7 @@ import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync
 import { homedir, uptime } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseArgs } from "node:util";
+import { parseArgs, stripVTControlCharacters } from "node:util";
 import { hermesPairEnv } from "../hermesPair.js";
 import { actionError } from "../actionError.js";
 import { coreStatus, inTestRoots } from "../coreSocket.mjs";
@@ -99,16 +99,18 @@ async function slot(fn) {
   try { return await fn(); } finally { running -= 1; waiting.shift()?.(); }
 }
 
-/** Runs a program: { code, stdout, stderr }; code 127 when it isn't there; killed: true when its timeout ended it. */
+/** Runs a program: stderr falls back to the exec error, while rawStderr is the child's output.
+ * Code 127 when it isn't there; killed: true when its timeout ended it. */
 export function runProgram(command, args, { cwd, timeout = 15000 } = {}) {
   return slot(() => new Promise((done) => {
     try {
       execFile(command, args, { cwd, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (!err) return done({ code: 0, stdout, stderr });
+        if (!err) return done({ code: 0, stdout, stderr, rawStderr: stderr });
         done({ code: err.code === "ENOENT" ? 127 : (typeof err.code === "number" ? err.code : 1), stdout: stdout ?? "", stderr: stderr || String(err.message),
+          rawStderr: stderr ?? "",
           ...(err.killed ? { killed: true } : {}) });
       });
-    } catch (e) { done({ code: 127, stdout: "", stderr: String(e?.message ?? e) }); }
+    } catch (e) { done({ code: 127, stdout: "", stderr: String(e?.message ?? e), rawStderr: "" }); }
   }));
 }
 const git = async (args, cwd) => { const r = await runProgram("git", args, { cwd }); return r.code === 0 ? r.stdout : null; };
@@ -161,20 +163,27 @@ async function hcJson(args) {
 }
 /** hc's exit code for "no such terminal" (hc --skill: 3 not_found). */
 export const HC_NOT_FOUND = 3;
+const HC_FAILURE_MAX = 300;
 /**
  * What a failed hc call said, safe to print: its error's kind and message when it printed one as
  * JSON (hc --skill: `{error: {kind, message, hint}}` on stderr), else its first line; the home
  * folder written as ~, cut to 300 characters.
  */
 export function hcFailure(r, homeDir = home()) {
-  const text = String(r?.stderr || r?.stdout || "").trim();
+  return formatHcFailure(r, hcFailureMessage(r?.stderr || r?.stdout, homeDir));
+}
+function hcFailureMessage(output, homeDir = home()) {
+  const text = String(output || "").trim();
   let said = text.split("\n")[0];
   try {
     const e = JSON.parse(text)?.error;
     if (e && typeof e === "object") said = [e.kind, e.message].filter((x) => typeof x === "string" && x).join(": ") || said;
   } catch { /* not JSON: its first line */ }
   if (homeDir && homeDir !== "/") said = said.split(homeDir).join("~");
-  return `${said || "no message"}${r?.killed ? " (timed out)" : ""} (exit ${r?.code ?? "?"})`.slice(0, 300);
+  return said;
+}
+function formatHcFailure(r, message) {
+  return `${message || "no message"}${r?.killed ? " (timed out)" : ""} (exit ${r?.code ?? "?"})`.slice(0, HC_FAILURE_MAX);
 }
 /**
  * `hc get <t> --json`, or null when hc says there is no such terminal: only its not_found exit
@@ -1263,6 +1272,7 @@ const OPTIONS = {
   category: { type: "string" }, "no-category": { type: "boolean" },
   character: { type: "string" }, colour: { type: "string" }, color: { type: "string" }, omni: { type: "boolean" },
   model: { type: "string" }, "no-model": { type: "boolean" }, rank: { type: "string" }, "hc-proxy": { type: "string" },
+  "person-features": { type: "string" },
   "agy-mode": { type: "string" }, "worker-agy-mode": { type: "string" },
   "hermes-home": { type: "string" }, "hermes-profile": { type: "string" }, "no-hermes": { type: "boolean" },
   "agy-allow": { type: "string", multiple: true }, "agy-deny": { type: "string", multiple: true },
@@ -1298,6 +1308,8 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 and where each comes from)
   create --name N --agent A [--kind main|member] [--role R]
          [--code true|false]            false omits the worker instruction; default true
+         [--person-features on|off]     Claude Code only: keep the prompt suggestions, away
+                                       summaries and subagent progress summaries; default off
          [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
          [--cross-member BOT@DIR]...   reciprocal cross-project member(s) reporting to this lead
          [--character C --colour K | --omni] [--model M] [--rank R]
@@ -1321,6 +1333,7 @@ Usage: am <command> [options]                   (every command takes --json and 
              [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
              [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
              [--agy-mode=auto] [--worker-agy-mode=auto]   (empty: cleared; auto is the default)
+             [--person-features on|off]   (Claude Code only; default off)
              [--agy-allow=] [--agy-deny=] [--no-agy-permissions] [--cross-member=]   (empty: cleared)
   Effort and tier (Codex): --effort E and --tier fast|standard store the bot's own reasoning
   effort and service tier; every start, restart and revive passes them as per-launch Codex
@@ -1767,6 +1780,17 @@ export function entryFrom(opts, base, project, { creating, listOf = null }) {
     const key = resolveAgent(opts.agent, agents);
     if (!key) throw new CliError(`"${opts.agent}" isn't a coding agent Herdr knows. Known: ${Object.keys(agents).join(", ")}.`);
     entry.agent = key;
+  }
+  // Claude Code's person-at-the-keyboard features (#1558): off by default for a bot seat, and
+  // this keeps them for a seat a person talks to all day. Other agents ignore the field.
+  if (opts["person-features"] !== undefined) {
+    if (!["on", "off"].includes(opts["person-features"])) {
+      throw new CliError("--person-features is on or off; nothing was saved.", 2);
+    }
+    entry.personFeatures = opts["person-features"] === "on";
+    if (entry.personFeatures && entry.agent !== "claude") {
+      report([`--person-features only applies to Claude Code; ${entry.name} runs ${entry.agent ?? "another agent"} and ignores it.`]);
+    }
   }
   const pairFields = ["home", "profile"];
   const pairing = pairFields.some((field) => opts[`hermes-${field}`] !== undefined);
@@ -2512,6 +2536,11 @@ const heldIds = new Set();
 const holdId = (id) => { if (typeof id === "string" && id.trim().length >= 6) heldIds.add(id.trim()); return id; };
 /** `text` with every held session id shown as SESSION_MASK. */
 const unprinted = (text) => { let out = String(text); for (const id of heldIds) out = out.split(id).join(SESSION_MASK); return out; };
+// Clean the whole message before masking, so truncation can't expose part of a held id.
+function printableHcMessage(text) {
+  const clean = stripVTControlCharacters(String(text)).replace(/[\p{Cc}\p{Cf}]/gu, (c) => (/\s/.test(c) ? " " : ""));
+  return unprinted(clean.replace(/\s+/g, " ").trim());
+}
 const report = (warnings) => { for (const w of warnings) process.stderr.write(`am: ${unprinted(w)}\n`); };
 
 /**
@@ -3878,17 +3907,27 @@ async function launchSeat(project, bot, over = {}) {
   listProject(key);
   // An edit that landed while this Start ran: the file read again, its role and category
   // put on the new pane (relabelWords against the labels it started with).
+  let words = [];
   try {
     const fresh = loadProject(key).file;
     if (fresh.bots.some((b) => b.id === bot.id && !b.planned)) {
-      const words = relabelWords(labels, paneLabels(fresh, bot.id), labels);
-      if (words.length && (await hc(["label", terminal, ...words])).code !== 0) {
-        const warning = `${terminal}'s labels ${words.join(" ")} weren't set.`;
-        hook.warnings.push(warning);
-        report([warning]); // the hook's warnings were printed before hc run
-      }
+      words = relabelWords(labels, paneLabels(fresh, bot.id), labels);
     }
   } catch { /* the file can't be read now: the labels it started with stand */ }
+  if (words.length) {
+    let reason = null;
+    try {
+      const r = await hc(["label", terminal, ...words]);
+      if (r.code !== 0) reason = formatHcFailure(r, printableHcMessage(hcFailureMessage(r.rawStderr)));
+    } catch (e) {
+      reason = printableHcMessage(e?.message ?? e).slice(0, HC_FAILURE_MAX) || "no message";
+    }
+    if (reason) {
+      const warning = `${terminal}'s labels ${words.join(" ")} weren't set. ${reason}`;
+      hook.warnings.push(warning);
+      report([warning]); // the hook's warnings were printed before hc run
+    }
+  }
   if (!place) {
     hook.warnings.push(`No open Herdr space shows ${key}, so Herdr gives ${terminal} no pane: it runs, unseen. `
       + `Watch it with hc attach ${terminal}. To give the next start a pane, open a space on ${key} first, or pass --space <id> (herdr-app ls lists the ids).`);
@@ -6428,6 +6467,35 @@ async function reapOwnership(c, project = null) {
   return null;
 }
 
+/** A path's spelling without trailing slashes: a missing checkout is compared as recorded. */
+const withoutTrailingSlash = (p) => String(p ?? "").replace(/\/+$/, "");
+
+/**
+ * A candidate whose checkout is missing, as a cleanup outcome: "gone" once its recorded
+ * repository's `git worktree list` no longer names it (#1143), so the cleanup file stops
+ * carrying it as kept forever. Null in every other case: no unambiguous owner, an unreadable
+ * repository, or a registration still there (a folder removed by hand keeps its record; only
+ * `git worktree prune` or `remove` may drop it, never this cleanup). Reads git's list only:
+ * no remove, no prune.
+ */
+async function goneCheckout(c) {
+  if (!c.project) return null;
+  const listed = await git(["worktree", "list", "--porcelain"], c.project);
+  if (listed === null) return null;
+  return parseWorktrees(listed).some((w) => withoutTrailingSlash(w.path) === withoutTrailingSlash(c.worktree))
+    ? null : { result: "gone", why: null };
+}
+
+/**
+ * The paths git lists as ignored under `dir` (`!! ` lines), for the cleanup to name before it
+ * removes a clean checkout that holds them (#1143), or null when git can't say.
+ */
+async function ignoredPaths(dir) {
+  const r = await runProgram("git", ["status", "--porcelain", "--ignored", "--untracked-files=normal"], { cwd: dir });
+  if (r.code !== 0) return null;
+  return r.stdout.split("\n").filter((line) => line.startsWith("!! ")).map((line) => line.slice(3));
+}
+
 /**
  * One candidate, under its worktree's lock: checked for ownership, live terminals and work,
  * then rechecked after preservation proof. git worktree remove (no --force) also removes
@@ -6501,9 +6569,16 @@ async function reapOne(c, asked = new Map(), project = null) {
   // has gained changes since the status above.
   const last = await hcTerminals(false);
   if (!last || liveIn(last, path).length) return { result: "waiting" };
+  // #1143: `git worktree remove` deletes git-ignored files too (build output, local env files).
+  // Name them before the remove, so a cleanup that loses them is never silent; an unreadable
+  // list keeps the checkout, because the sweep cannot say what it would remove.
+  const ignored = await ignoredPaths(path);
+  if (ignored === null) return { result: "kept", why: "can't list the files git ignores" };
   const rm = await runProgram("git", ["worktree", "remove", path], { cwd: main, timeout: REMOVE_TIMEOUT });
   if (rm.code !== 0) return { result: "failed", why: `git worktree remove failed: ${firstLine(rm)}` };
-  return { result: "removed", why: null };
+  const ignoredNote = ignored.length ? `git-ignored files removed too: ${ignored.slice(0, 5).join(", ")}`
+    + `${ignored.length > 5 ? ` and ${ignored.length - 5} more` : ""}` : null;
+  return { result: "removed", why: ignoredNote };
 }
 
 /**
@@ -6518,11 +6593,13 @@ async function reapOne(c, asked = new Map(), project = null) {
  * call), a kept one whose reason hasn't changed in REAP_QUIET_MS is skipped.
  * The same sweep, under the same lock and budget, records the worker branches' pull requests
  * in the workers ledger (#899, recordPullRequests), whether or not a worktree is left to remove.
- * Never throws: { removed, kept, failed, waiting, more, lines }.
+ * A missing checkout its repository no longer lists is recorded gone (#1143), with no git write,
+ * and never looked at again. A removed one names the git-ignored files it took with it.
+ * Never throws: { removed, gone, kept, failed, waiting, more, lines }.
  */
 async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
   every = false, project = null } = {}) {
-  const out = { removed: [], kept: [], failed: [], waiting: 0, more: 0, lines: [] };
+  const out = { removed: [], gone: [], kept: [], failed: [], waiting: 0, more: 0, lines: [] };
   try {
     const ledger = workerLedgerRows();
     const owned = await ownedReapCandidates(ledger);
@@ -6564,9 +6641,10 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
         if (!ready) {
           done = { result: "waiting" };
         } else if (!isDir(path)) {
-          // A missing checkout cannot prove its actual repository. Keep its
-          // registration; a repository-wide prune could remove unrelated records.
-          done = { result: "kept", why: "can't verify missing worktree repository ownership" };
+          // A missing checkout cannot prove its actual repository. Keep its registration; a
+          // repository-wide prune could remove unrelated records. A repository that no longer
+          // lists it at all has forgotten it: said gone, never kept forever (#1143).
+          done = await goneCheckout(c) ?? { result: "kept", why: "can't verify missing worktree repository ownership" };
         } else if (liveIn(terms, path).length) {
           done = { result: "waiting" };
         } else {
@@ -6578,7 +6656,11 @@ async function reapWorktrees({ max = REAP_MAX, budget = REAP_BUDGET_MS,
         if (done.result === "waiting") { out.waiting += 1; continue; }
         const changed = c.last?.result !== done.result || c.last?.why !== (done.why ?? null);
         if (changed) { const unrecorded = appendReap(reapRow({ worktree: path, ...done })); if (unrecorded) out.lines.push(unrecorded); }
-        if (done.result === "removed") { out.removed.push(path); out.lines.push(`removed ${path}: its workers ended`); }
+        if (done.result === "removed") {
+          out.removed.push(path);
+          out.lines.push(`removed ${path}: its workers ended${done.why ? ` (${done.why})` : ""}`);
+        }
+        if (done.result === "gone") { out.gone.push(path); out.lines.push(`gone ${path}: its repository no longer lists it`); }
         if (done.result === "kept") out.kept.push({ worktree: path, why: done.why });
         if (done.result === "failed") out.failed.push({ worktree: path, why: done.why });
         if ((done.result === "kept" || done.result === "failed") && (changed || every)) {
@@ -6608,7 +6690,7 @@ async function cmdReap(opts, rest) {
   if (rest.length) throw new CliError("reap takes no arguments.", 2);
   const r = await reapWorktrees({ max: Infinity, budget: Infinity, every: true });
   const { lines, ...out } = r;
-  if (opts.json) { report(lines.filter((l) => !l.startsWith("removed ") && !l.startsWith("kept ") && !l.startsWith("couldn't remove "))); return out; }
+  if (opts.json) { report(lines.filter((l) => !l.startsWith("removed ") && !l.startsWith("gone ") && !l.startsWith("kept ") && !l.startsWith("couldn't remove "))); return out; }
   return lines.length ? lines.join("\n") : "No finished worker's worktree to remove.";
 }
 

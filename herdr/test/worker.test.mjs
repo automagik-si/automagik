@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 
 import { applyBotEdit, checkBots, parseBots, swapProblem } from "../mods/am-sidebar/model.js";
-import { AGENTS, AGY_FIXED_DENY, AGY_SHELL_READ, agySettingsDir, agySettingsFile, effortArgs, promptArgs } from "../mods/am-sidebar/models.js";
+import { AGENTS, AGY_FIXED_DENY, AGY_SHELL_READ, CLAUDE_PERSON_SETTINGS, agySettingsDir, agySettingsFile, effortArgs, promptArgs } from "../mods/am-sidebar/models.js";
 import { ENV, GUARD_DIR, WORKER_OF_LABEL, stableGuardDir, stableHelper, stableRunner, baseCandidates, hcProxyEnabled, branchNamesTask, branchSlug, parseWorktrees, readLedger, reapCandidates, runsTemplate, workLeft, sessionChange, startRow, swapArm, swapByte, templateAgent,
   KILL_GUARD_DIR, workerArgs, workerBranch, workerPlan, workerRole, workerTaskId, writesWorktree,
   PR_ASK_MAX_MS, PR_ASK_MIN_MS, PR_QUIET_EVERY_MS, PR_QUIET_FIRST_MS, PR_QUIET_WATCH_MS, PR_STATES, PR_WATCH_MS, endRow, finishedEnds, prAskDue, prBranchKey,
@@ -187,6 +187,12 @@ const freshClaude = (words) => {
   assert.equal(words.lastIndexOf("--session-id"), i, "one --session-id");
   return [...words.slice(0, i), ...words.slice(i + 2)];
 };
+// #1558: a Claude launch's person-feature settings are pinned by person-features.test.mjs; the
+// worker tests compare the rest of the launch.
+const withoutPerson = (words) => {
+  const i = words.indexOf("--settings");
+  return i < 0 || words[i + 1] !== CLAUDE_PERSON_SETTINGS ? words : [...words.slice(0, i), ...words.slice(i + 2)];
+};
 const after = (args) => {
   const argv = runArgv(args);
   assert.equal(argv[0], "/usr/bin/env", `an agent worker runs under /usr/bin/env PATH=…: ${JSON.stringify(argv)}`);
@@ -195,7 +201,7 @@ const after = (args) => {
   assert.match(argv[at], /^PATH=/);
   const rest = argv.slice(at + 1);
   assert.equal(at === 3, rest[0] === "claude", `only a Claude worker gets the login words: ${JSON.stringify(argv)}`);
-  return rest;
+  return withoutPerson(rest);
 };
 const labelsOf = (args) => args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
 
@@ -1193,7 +1199,7 @@ test("effortArgs: claude/antigravity --effort, codex -c model_reasoning_effort, 
   assert.equal(unknown.error.includes("\n"), false, "one clear line");
   // Another agent's worker defaults never add mode words: its argv stays as it was.
   const claude = workerPlan({ id: ID.dev, name: "A", agent: "claude", worker: { agyMode: "plan" } });
-  assert.deepEqual([claude.agyMode, claude.argv], [null, ["claude", "--permission-mode", "auto"]]);
+  assert.deepEqual([claude.agyMode, claude.argv], [null, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto"]]);
   const legacy = workerPlan({ name: "L", agent: "claude" }, { agent: "gemini", effort: "low" });
   assert.equal(legacy.agent, "antigravity", "a typed gemini runs antigravity");
   assert.deepEqual(legacy.argv, ["agy", "--dangerously-skip-permissions", "--mode", "auto", "--effort", "low"]);
@@ -2184,7 +2190,8 @@ function watchReapGit(s, { count = null } = {}) {
   writeFileSync(log, "");
   exe(join(s.root, "bin/git"), "#!/bin/sh\n"
     + 'if [ "$1" = worktree ] && { [ "$2" = remove ] || [ "$2" = prune ]; }; then\n'
-    + `  printf '%s\\t%s\\n' "$PWD" "$2" >> ${quote(log)}\nfi\n`
+    // The full argv too (#1143): a test can say the remove it saw carried no --force.
+    + `  printf '%s\\t%s\\t%s\\n' "$PWD" "$2" "$*" >> ${quote(log)}\nfi\n`
     + (count === null ? "" : 'if [ "$1" = rev-list ] && [ "$2" = --count ]; then\n'
       + `  printf '%s' ${quote(count)}\n  exit 0\nfi\n`)
     + `exec ${quote(realGit)} "$@"\n`);
@@ -2299,6 +2306,59 @@ for (const ownership of ["missing", "mismatched", "conflicting", "gone"]) {
   });
 }
 
+test("worker #1143: a missing checkout its repository no longer lists is gone, never kept forever", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = seedReapTree(s);
+  rmSync(w.worktree, { recursive: true });
+  // Somebody else pruned the registration (a person's git worktree prune): the cleanup only reads.
+  git(s.project, "worktree", "prune");
+  assert.equal(worktreesOf(s).includes(w.worktree), false);
+  const calls = watchReapGit(s);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().gone, [w.worktree]);
+  assert.deepEqual(r.json().kept, []);
+  assert.deepEqual(calls(), [], "no remove and no prune: the repository already forgot it");
+  assert.deepEqual(reapFile(s).map((x) => [x.worktree, x.result, x.why]), [[w.worktree, "gone", null]]);
+  assert.equal(s.cli(["reap"], { from: null }).out.trim(), "No finished worker's worktree to remove.",
+    "a gone checkout is not looked at again");
+});
+
+test("worker #1143: a clean checkout's git-ignored files are named, then removed with it", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  writeFileSync(join(s.project, ".gitignore"), "*.local\nbuild/\n");
+  git(s.project, "add", ".gitignore");
+  git(s.project, "commit", "-q", "-m", "ignore local files");
+  git(s.project, "push", "-q", "origin", "main");
+  const w = seedReapTree(s);
+  writeFileSync(join(w.worktree, "secrets.local"), "not committed\n");
+  mkdirSync(join(w.worktree, "build"));
+  writeFileSync(join(w.worktree, "build/out.log"), "ignored too\n");
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().removed, [w.worktree]);
+  const row = reapFile(s).find((x) => x.worktree === w.worktree);
+  assert.equal(row.result, "removed");
+  assert.match(row.why, /git-ignored files removed too/);
+  assert.match(row.why, /secrets\.local/);
+  assert.match(row.why, /build\//);
+  assert.equal(existsSync(join(w.worktree, "secrets.local")), false);
+});
+
+test("worker #567: git worktree remove is called without --force", (t) => {
+  const s = scene(t);
+  withOrigin(s);
+  const w = seedReapTree(s);
+  const calls = watchReapGit(s);
+  const r = s.cli(["reap", "--json"], { from: null });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().removed, [w.worktree]);
+  const remove = calls().find((line) => line.split("\t")[1] === "remove");
+  assert.equal(remove, `${s.project}\tremove\tworktree remove ${w.worktree}`, "no --force: git itself refuses a tree that changed");
+});
+
 test("worker #1135: canonical owner aliases allow pushed same-project work", (t) => {
   const s = scene(t);
   withOrigin(s);
@@ -2311,7 +2371,7 @@ test("worker #1135: canonical owner aliases allow pushed same-project work", (t)
   const r = s.cli(["worker", "one", "--branch", "fix/one", "--json"]);
   assert.equal(r.code, 0, r.err);
   assert.equal(existsSync(w.worktree), false, r.out);
-  assert.ok(calls().some((line) => line.endsWith("\tremove")));
+  assert.ok(calls().some((line) => line.split("\t")[1] === "remove"));
 });
 
 for (const ownership of ["foreign", "unknown"]) {
@@ -2466,7 +2526,7 @@ test("worker #567: a killed worker's created worktree is removed by reap 15 min 
   const w = s.cli(["worker", "one", "--branch", "fix/one", "--json"]).json();
   const live = s.cli(["reap", "--json"], { from: null });
   assert.equal(live.code, 0, live.err);
-  assert.deepEqual(live.json(), { removed: [], kept: [], failed: [], waiting: 1, more: 0 }, "a live worker's worktree waits");
+  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], waiting: 1, more: 0 }, "a live worker's worktree waits");
   assert.equal(existsSync(w.worktree), true);
   fakeHc(s, "kill", w.terminal);
   // Within 15 min of its end (restart --tree runs its workers again there, without the lock): waits.
@@ -2668,7 +2728,7 @@ writeFileSync(p, JSON.stringify(st));
   writeFileSync(join(s.root, "gh-hook.sh"), `"${process.execPath}" "${join(s.root, "gh-hook.mjs")}"\n`);
   const live = s.cli(["reap", "--json"], { from: null });
   assert.equal(live.code, 0, live.err);
-  assert.deepEqual(live.json(), { removed: [], kept: [], failed: [], waiting: 1, more: 0 });
+  assert.deepEqual(live.json(), { removed: [], gone: [], kept: [], failed: [], waiting: 1, more: 0 });
   assert.equal(existsSync(w.worktree), true);
 });
 
@@ -3361,7 +3421,7 @@ test("worker: a new Claude worker's --session-id is its label and its start row'
   assert.ok(labelsOf(run).includes(`agent.session=${sid}`));
   const row = s.ledger().find((x) => x.event === "start" && x.terminal === r.json().terminal);
   assert.equal(row.session, sid);
-  assert.deepEqual(r.json().argv, ["claude", "--permission-mode", "auto", "--session-id", "***"]);
+  assert.deepEqual(r.json().argv, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto", "--session-id", "***"]);
   assert.equal(`${r.out}${r.err}`.includes(sid), false, "never printed");
   // A codex worker: no session id, none in its row.
   const text = s.cli(["worker", "review it", "--branch", "feat/other", "--agent", "codex"]);

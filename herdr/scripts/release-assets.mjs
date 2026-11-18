@@ -45,6 +45,8 @@ const apiHeaders = (token, accept) => ({ Accept: accept, ...(token ? { Authoriza
  * retryable failure. `base` is the public download folder (`.../releases/download/<tag>`), `api`
  * the repository's API root (`https://api.github.com/repos/<owner>/<repo>`) and `tag` the release
  * tag. The API's asset list is read once per fetcher; `log` gets the one route line per asset.
+ * For small files, `get(name, { publicTimeout })` can shorten the public attempt in milliseconds.
+ * Each API request uses `timeout`.
  */
 export function releaseAssets({
   base,
@@ -72,10 +74,10 @@ export function releaseAssets({
   }
 
   return {
-    async get(name) {
+    async get(name, { publicTimeout = timeout } = {}) {
       if (!publicDown) {
         try {
-          const bytes = await download(fetchImpl, `${base}/${name}`, {}, timeout);
+          const bytes = await download(fetchImpl, `${base}/${name}`, {}, publicTimeout);
           log(`${name}: served by the ${PUBLIC_ROUTE}`);
           return bytes;
         } catch (publicError) {

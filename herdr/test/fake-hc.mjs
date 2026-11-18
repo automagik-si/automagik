@@ -241,7 +241,8 @@ switch (words[0]) {
   case "label": {
     const t = find(words[1]);
     if (!t) fail(`no terminal ${words[1]}`);
-    if (state.failLabel === words[1]) fail(`label refused on ${words[1]}`);
+    // state.failLabelExit: the refused label's exit code (127: hc isn't there); else 1.
+    if (state.failLabel === words[1]) fail(`label refused on ${words[1]}`, state.failLabelExit ?? 1);
     t.labels ??= {};
     for (const kv of words.slice(2)) {
       const eq = kv.indexOf("=");

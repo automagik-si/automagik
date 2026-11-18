@@ -308,15 +308,15 @@ globalThis.fetch = async (url) => {
   return body === undefined ? new Response("not found", { status: 404 }) : new Response(Buffer.from(body, "base64"));
 };
 `);
-    const run = (command, h) => {
+    const run = (command, h, extra = []) => {
       const app = fakeCheckApp(join(h.home, "bad"), ["am-tabs"]);
       const env = { ...process.env, HOME: h.home, HERDR_APP_HOME: h.home, AUTOMAGIK_TEST_FETCH: fetchFile,
         PATH: `${dirname(app.bin)}:${process.env.PATH ?? ""}` };
       delete env.AUTOMAGIK_HERDR_NO_UPDATE;
       return spawnSync(process.execPath, ["--import", fakeFetch, join(pack, "update.mjs"), command,
-        ...(command === "update" ? ["--json"] : []), "--mods", h.mods], { env, encoding: "utf8" });
+        ...(command === "update" ? ["--json"] : []), ...extra, "--mods", h.mods], { env, encoding: "utf8" });
     };
-    const homes = [autoHome(["0.2.0"]), autoHome(["0.2.0"])];
+    const homes = [autoHome(["0.2.0"]), autoHome(["0.2.0"]), autoHome(["0.2.0"]), autoHome(["0.2.0"])];
     try {
       const applied = run("apply", homes[0]);
       assert.equal(applied.status, 5, applied.stderr);
@@ -328,6 +328,27 @@ globalThis.fetch = async (url) => {
       const updateAnswer = JSON.parse(updated.stdout.trim().split("\n").at(-1));
       assert.equal(updateAnswer.installed.restored.version, "0.1.0");
       assert.equal(updateAnswer.installed.restored.failedVersion, "0.2.0");
+      // #524: a restore whose rollback guard leaves a note: still exit 5, the note in restored.notes and
+      // the restore record, never in restored.warnings; stderr (update only) says it once.
+      const note = "going on without knowing the layout Herdr shows (Herdr is not asked here, and layouts/broken.json does not read): "
+        + "if one names am-tabs and Herdr shows it, Herdr drops it (plain Herdr instead)";
+      for (const [command, h] of [["apply", homes[2]], ["update", homes[3]]]) {
+        // 0.1.0 without am-tabs: the restore takes the failed am-tabs out of mods/.
+        rmSync(join(h.mods, "am-tabs"), { recursive: true, force: true });
+        writeFileSync(markerOf(h.mods), "version=0.1.0\nmods=am-sidebar\nbefore=none\nsequence=10000\n");
+        mkdirSync(join(h.home, "layouts"));
+        writeFileSync(join(h.home, "layouts", "broken.json"), "{");
+        const r = run(command, h, command === "apply" ? ["--landing-id", "apply-524"] : []);
+        assert.equal(r.status, 5, `${command}: ${r.stderr}`);
+        const answer = JSON.parse(r.stdout.trim().split("\n").at(-1));
+        assert.equal(answer.installed.restored.version, "0.1.0", command);
+        assert.deepEqual(answer.installed.restored.notes, [note], command);
+        assert.equal(answer.installed.restored.warnings, undefined, `${command}: a note is not a warning`);
+        assert.equal(r.stderr.split(note).length - 1, command === "update" ? 1 : 0, `${command}: ${r.stderr}`);
+        const record = JSON.parse(readFileSync(join(h.home, "automagik-herdr", RESTORE_FILE), "utf8"));
+        assert.deepEqual(record.notes, [note], command);
+        assert.equal(record.warnings, undefined, command);
+      }
     } finally { for (const h of homes) h.done(); }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1148,6 +1169,11 @@ test("node update.mjs apply --expect <v>: the flag takes a value; other commands
   const { parseArgs } = await import("../mods/am-sidebar/update.mjs");
   assert.deepEqual(parseArgs(["apply", "--expect", "0.8.1", "--mods", "/m"]), { command: "apply", opts: { expect: "0.8.1", mods: "/m" } });
   assert.throws(() => parseArgs(["apply", "--expect"]), /usage/);
+  // #524: the sidebar's claim rides on apply only, and needs its value.
+  assert.deepEqual(parseArgs(["apply", "--expect", "0.8.1", "--landing-id", "apply-1", "--mods", "/m"]),
+    { command: "apply", opts: { expect: "0.8.1", "landing-id": "apply-1", mods: "/m" } });
+  assert.throws(() => parseArgs(["apply", "--landing-id"]), /usage/);
+  assert.throws(() => parseArgs(["update", "--landing-id", "apply-1"]), /usage/);
   assert.throws(() => parseArgs(["check", "--expect", "0.8.1"]), /usage/);
 });
 
@@ -2150,6 +2176,82 @@ test("overtaken (under the lock): the version installed since the check, or a re
       assert.ok(r.notes.some((w) => /without knowing the layout Herdr shows/.test(w)), (r.notes ?? []).join("\n"));
     } finally { h.done(); }
   });
+
+  // #524 residual: Herdr can reload at the first folder move, before update.mjs answers, so the
+  // notes are in held-mods.json, under the sidebar's claim, before it; a failed swap undoes that.
+  {
+    const { heldAfterMigration } = await import("../mods/am-sidebar/update.mjs");
+    const { heldRecordFrom } = await import("../mods/am-sidebar/updateCheck.js");
+    const unread = (mod) => "going on without knowing the layout Herdr shows (Herdr is not asked here, and layouts/broken.json does not read): "
+      + `if one names ${mod} and Herdr shows it, Herdr drops it (plain Herdr instead)`;
+    const heldFile = (mods) => join(stateDirOf(mods), "held-mods.json");
+    const leftovers = (mods) => readdirSync(stateDirOf(mods)).filter((n) => n.startsWith("held-mods.json."));
+    /** retire: old-mod leaves while an unreadable layout names it; rename: auto-tabs's old folder does. */
+    const rows = {
+      retire: () => {
+        const h = appHome("0.1.0", ["am-sidebar", "old-mod"]);
+        mkdirSync(join(h.home, "layouts"));
+        return { ...h, leaving: "old-mod", t: tarball("0.2.0", { mods: ["am-sidebar"] }),
+          done() { rmSync(this.t.src, { recursive: true, force: true }); rmSync(h.home, { recursive: true, force: true }); } };
+      },
+      rename: () => ({ ...renameHome(), leaving: "auto-tabs" }),
+    };
+    const withBroken = (row) => {
+      const h = rows[row]();
+      writeFileSync(join(h.home, "layouts", "broken.json"), `{"content": {"mod": "${h.leaving}"`);
+      return h;
+    };
+
+    for (const row of Object.keys(rows)) {
+      test(`#524 ${row}: the note is in held-mods.json at the first rename (nothing held), kept after the swap and the migration, logged once`, async () => {
+        const h = withBroken(row);
+        try {
+          const logs = [];
+          let atFirst;
+          let n = 0;
+          const rename = (a, b) => { if (n++ === 0) atFirst = existsSync(heldFile(h.mods)) ? readFileSync(heldFile(h.mods), "utf8") : null; renameSync(a, b); };
+          const r = await applyUpdate({ tgzPath: h.t.path, version: "0.2.0", modsDir: h.mods, log: (l) => logs.push(l), rename, landingId: "apply-524" });
+          const line = unread(h.leaving);
+          assert.ok(r.retired.includes(h.leaving), "the mod left (fail open)");
+          assert.deepEqual(r.notes, [line]);
+          assert.equal(logs.filter((l) => l === line).length, 1, "stderr says it once");
+          assert.ok(!r.warnings.some((w) => w.includes("without knowing")), "never a warning: exit 4 reads r.warnings");
+          const want = { version: "0.2.0", held: [], notes: [line], landingId: "apply-524" };
+          assert.ok(atFirst, "the record exists before the first rename");
+          assert.deepEqual(JSON.parse(atFirst), want, "zero held mods: the record is written for the note alone");
+          assert.deepEqual(JSON.parse(readFileSync(heldFile(h.mods), "utf8")), want, "the post-swap rewrite keeps it");
+          assert.deepEqual(leftovers(h.mods), [], "no temp file left");
+          assert.deepEqual(heldRecordFrom(readFileSync(heldFile(h.mods), "utf8"), "0.2.0"), { held: [], notes: [line], landingId: "apply-524" });
+          // The migration's rewrite (a stranded, gone folder joins held) keeps the note and the claim.
+          heldAfterMigration(h.mods, { version: "0.2.0", held: [], notes: r.notes,
+            migration: { stranded: [{ mod: "gone-mod", layouts: ["x"], gone: true }] } }, () => {}, "apply-524");
+          const after = JSON.parse(readFileSync(heldFile(h.mods), "utf8"));
+          assert.deepEqual([after.notes, after.landingId], [[line], "apply-524"]);
+          assert.ok(after.held.some((x) => x.mod === "gone-mod"));
+        } finally { h.done(); }
+      });
+
+      test(`#524 ${row}: a swap that fails puts the folders and the prior held-mods.json back byte for byte, or leaves it absent`, async () => {
+        for (const prior of [null, '{ "version":"0.1.0",  "held":[{"mod":"x","layouts":["y"]}] }\n']) {
+          const h = withBroken(row);
+          try {
+            if (prior !== null) writeFileSync(heldFile(h.mods), prior);
+            let n = 0;
+            let staged = null;
+            const rename = (a, b) => { if (++n === 2) { staged = readFileSync(heldFile(h.mods), "utf8"); throw new Error("disk full"); } renameSync(a, b); };
+            await assert.rejects(applyUpdate({ tgzPath: h.t.path, version: "0.2.0", modsDir: h.mods, rename, landingId: "apply-524" }), /disk full/);
+            assert.deepEqual(JSON.parse(staged).notes, [unread(h.leaving)], "it was staged before the swap");
+            if (prior === null) assert.equal(existsSync(heldFile(h.mods)), false, "absent again");
+            else assert.equal(readFileSync(heldFile(h.mods), "utf8"), prior, "the prior record, byte for byte");
+            assert.equal(readMarker(h.mods).version, "0.1.0");
+            assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0");
+            assert.ok(existsSync(join(h.mods, h.leaving, "main.js")), "the folders are back");
+            assert.deepEqual(leftovers(h.mods), []);
+          } finally { h.done(); }
+        }
+      });
+    }
+  }
 
   test("a held old folder survives a repair and a rollback, and the auto-update's notice says it", async () => {
     const h = renameHome();

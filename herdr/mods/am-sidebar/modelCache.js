@@ -40,6 +40,13 @@ export function agModelsFresh(cache, now = Date.now()) {
 
 const cached = (text) => parseAgModelsCache(text);
 
+// The counter separates refreshes in this runtime. The suffix reduces collisions across runtimes.
+let refreshSequence = 0;
+function temporaryPath(path, now) {
+  const random = Math.floor(Math.random() * 2 ** 53).toString(36);
+  return `${path}.tmp-${now}-${++refreshSequence}-${random}`;
+}
+
 // What a failed refresh says for a person: one line, no stack, no home path of agy's own log.
 const failure = (e) => `agy models couldn't run (${oneLine(e?.message ?? e) || "no answer"})`;
 const refused = (r) => `agy models failed (${oneLine(r?.stderr || r?.stdout) || `exit ${r?.code ?? "?"}`})`;
@@ -50,7 +57,8 @@ const refused = (r) => `agy models failed (${oneLine(r?.stderr || r?.stdout) || 
  * options)` must resolve `{ code, stdout, stderr }` (an `ENOENT` for a missing agy rejects).
  * With `rename(from, to)`, the write goes to a temp file beside the cache and is renamed into
  * place, so a reader never sees half a cache; without it the write is direct. `remove(path)`
- * clears a temp file a failed rename left behind (the last list is kept either way, #809).
+ * clears only this refresh's temp file after a failed write or rename (the last list is kept
+ * either way, #809).
  * Resolves { text (the cache text, the new one when written), cache, refreshed, why (the
  * fallback reason, else null) }. A failed refresh never throws and never drops a list already
  * cached; when agy is missing and nothing is cached, `text` stays null and `why` says so.
@@ -70,13 +78,13 @@ export async function refreshAgModels({ appHome, read, write, rename, remove, ex
   const models = parseAgModelsOutput(r?.stdout);
   if (!models.length) return { text, cache: before, refreshed: false, why: "agy models listed no models" };
   const next = agModelsCacheText(models, now);
-  const tmp = `${path}.tmp-${now}`;
+  const tmp = typeof rename === "function" ? temporaryPath(path, now) : null;
   try {
-    if (typeof rename === "function") { await write(tmp, next); await rename(tmp, path); }
-    else await write(path, next);
+    await write(tmp ?? path, next);
+    if (tmp !== null) await rename(tmp, path);
   } catch {
-    if (typeof rename === "function" && typeof remove === "function") {
-      try { await remove(tmp); } catch { /* already gone */ }
+    if (tmp !== null && typeof remove === "function") {
+      try { await remove(tmp); } catch { /* Keep the original failure. */ }
     }
     return { text, cache: before, refreshed: false, why: "the model cache couldn't be written" };
   }
@@ -84,7 +92,7 @@ export async function refreshAgModels({ appHome, read, write, rename, remove, ex
 }
 
 /**
- * refreshAgModels over synchronous `read`/`write`/`rename`/`exec` (the CLI, whose pin checks
+ * refreshAgModels over synchronous `read`/`write`/`rename`/`remove`/`exec` (the CLI, whose pin checks
  * are sync). Same contract; `exec` returns `{ code, stdout, stderr }` and may throw for a missing
  * agy.
  */
@@ -103,13 +111,13 @@ export function refreshAgModelsSync({ appHome, read, write, rename, remove, exec
   const models = parseAgModelsOutput(r?.stdout);
   if (!models.length) return { text, cache: before, refreshed: false, why: "agy models listed no models" };
   const next = agModelsCacheText(models, now);
-  const tmp = `${path}.tmp-${now}`;
+  const tmp = typeof rename === "function" ? temporaryPath(path, now) : null;
   try {
-    if (typeof rename === "function") { write(tmp, next); rename(tmp, path); }
-    else write(path, next);
+    write(tmp ?? path, next);
+    if (tmp !== null) rename(tmp, path);
   } catch {
-    if (typeof rename === "function" && typeof remove === "function") {
-      try { remove(tmp); } catch { /* already gone */ }
+    if (tmp !== null && typeof remove === "function") {
+      try { remove(tmp); } catch { /* Keep the original failure. */ }
     }
     return { text, cache: before, refreshed: false, why: "the model cache couldn't be written" };
   }

@@ -80,44 +80,100 @@ test("refreshAgModels: a missing cache runs `agy models` once, writes the table 
   assert.equal(r.text, written.text);
 });
 
-test("refreshAgModels writes a temp file beside the cache, then renames it into place", async () => {
+test("refreshAgModels renames its own temp file into place and removes it on failure", async () => {
   const path = agModelsPath("/app");
-  const calls = [];
-  const r = await refreshAgModels({
-    appHome: "/app", read: () => null, now: NOW,
-    write: (p, text) => { calls.push(["write", p]); assert.match(text, /"source": "agy models"/); },
-    rename: (from, to) => { calls.push(["rename", from, to]); },
-    exec: () => ({ code: 0, stdout: MODELS, stderr: "" }),
-  });
-  assert.equal(r.refreshed, true);
-  assert.deepEqual(calls, [["write", `${path}.tmp-${NOW}`], ["rename", `${path}.tmp-${NOW}`, path]]);
-  // A rename failure is a failed refresh, keeping the last list, and never a half-written cache;
-  // the temp file it wrote is removed (#809).
   const stale = agModelsCacheText(parseAgModelsOutput(MODELS), NOW - AG_MODELS_TTL_MS - 1);
-  const removed = [];
-  const failed = await refreshAgModels({
-    appHome: "/app", read: () => stale, now: NOW, write: () => {}, rename: () => { throw new Error("no rename"); },
-    remove: (path) => { removed.push(path); },
-    exec: () => ({ code: 0, stdout: MODELS, stderr: "" }),
+  const options = { appHome: "/app", now: NOW, exec: () => ({ code: 0, stdout: MODELS, stderr: "" }) };
+  const why = "the model cache couldn't be written";
+  const tempName = new RegExp(`^${path.replaceAll(".", "\\.")}\\.tmp-${NOW}-\\d+-[a-z0-9]+$`);
+  for (const refresh of [refreshAgModels, refreshAgModelsSync]) {
+    const names = new Set();
+    for (const failure of [null, "write", "rename", "remove"]) {
+      const label = `${refresh.name}: ${failure ?? "success"}`;
+      const calls = [];
+      const result = await refresh({
+        ...options,
+        read: () => failure ? stale : null,
+        write: (p, text) => {
+          calls.push(["write", p]);
+          assert.match(text, /"source": "agy models"/);
+          if (failure === "write") throw new Error("disk full");
+        },
+        rename: (from, to) => {
+          calls.push(["rename", from, to]);
+          if (failure) throw new Error("no rename");
+        },
+        remove: (p) => {
+          calls.push(["remove", p]);
+          if (failure === "remove") throw new Error("no unlink");
+        },
+      });
+      const tmp = calls[0][1];
+      assert.match(tmp, tempName, label);
+      names.add(tmp);
+      const expected = [["write", tmp]];
+      if (failure !== "write") expected.push(["rename", tmp, path]);
+      if (failure) expected.push(["remove", tmp]);
+      assert.deepEqual(calls, expected, label);
+      assert.equal(result.refreshed, !failure, label);
+      if (failure) assert.deepEqual([result.text, result.cache.models.length, result.why], [stale, 13, why], label);
+    }
+    assert.equal(names.size, 4, `${refresh.name}: distinct temp names at the same time`);
+
+    const directCalls = [];
+    const direct = await refresh({
+      ...options,
+      read: () => stale,
+      write: (p) => { directCalls.push(["write", p]); throw new Error("disk full"); },
+      remove: (p) => { directCalls.push(["remove", p]); },
+    });
+    assert.deepEqual([direct.refreshed, direct.text, direct.why], [false, stale, why]);
+    assert.deepEqual(directCalls, [["write", path]], "a failed direct write leaves the cache alone");
+  }
+
+  // Keep the first refresh's temp live while another refresh at the same clock value fails.
+  const files = new Map([[path, stale]]);
+  const atRename = Promise.withResolvers();
+  const finishRename = Promise.withResolvers();
+  const first = refreshAgModels({
+    ...options,
+    read: (p) => files.get(p),
+    write: (p, text) => { files.set(p, text); },
+    rename: async (from, to) => {
+      atRename.resolve(from);
+      await finishRename.promise;
+      if (!files.has(from)) throw new Error("temp is gone");
+      files.set(to, files.get(from));
+      files.delete(from);
+    },
   });
-  assert.deepEqual([failed.refreshed, failed.cache.models.length], [false, 13]);
-  assert.match(failed.why, /couldn't be written/);
-  assert.deepEqual(removed, [`${path}.tmp-${NOW}`], "the temp file is removed, the old list kept");
-  // The sync path does the same.
-  const syncCalls = [];
-  refreshAgModelsSync({ appHome: "/app", read: () => null, now: NOW,
-    write: (p) => { syncCalls.push(["write", p]); },
-    rename: (from, to) => { syncCalls.push(["rename", from, to]); },
-    exec: () => ({ code: 0, stdout: MODELS, stderr: "" }) });
-  assert.deepEqual(syncCalls, [["write", `${path}.tmp-${NOW}`], ["rename", `${path}.tmp-${NOW}`, path]]);
-  // The sync path removes its temp file too when the rename fails.
-  const syncRemoved = [];
-  const syncFailed = refreshAgModelsSync({ appHome: "/app", read: () => stale, now: NOW,
-    write: () => {}, rename: () => { throw new Error("no rename"); },
-    remove: (p) => { syncRemoved.push(p); },
-    exec: () => ({ code: 0, stdout: MODELS, stderr: "" }) });
-  assert.deepEqual([syncFailed.refreshed, syncFailed.cache.models.length], [false, 13]);
-  assert.deepEqual(syncRemoved, [`${path}.tmp-${NOW}`], "the sync temp file is removed too");
+  const live = await Promise.race([atRename.promise, first.then(() => assert.fail("the first refresh did not reach rename"))]);
+  try {
+    const originalTemp = files.get(live);
+    for (const failure of ["write", "rename"]) {
+      const failed = await refreshAgModels({
+        ...options,
+        read: (p) => files.get(p),
+        write: async (p) => {
+          files.set(p, "failed refresh's temp contents");
+          if (failure === "write") throw new Error("disk full");
+        },
+        rename: async () => { throw new Error("no rename"); },
+        remove: async (p) => {
+          await new Promise((resolve) => setImmediate(resolve));
+          files.delete(p);
+        },
+      });
+      assert.deepEqual([failed.refreshed, failed.text, failed.why], [false, stale, why], failure);
+      assert.deepEqual([...files], [[path, stale], [live, originalTemp]], failure);
+    }
+  } finally {
+    finishRename.resolve();
+    await first;
+  }
+  const refreshed = await first;
+  assert.equal(refreshed.refreshed, true);
+  assert.deepEqual([...files], [[path, refreshed.text]]);
 });
 
 test("refreshAgModels: agy missing or failing keeps the last list and says why; no list stays none", async () => {

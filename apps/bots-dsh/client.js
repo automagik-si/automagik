@@ -1141,6 +1141,7 @@ var ZH = {
   "Message Bot": "给 Bot 发消息",
   "To:": "发给：",
   "Remove {name}": "移除 {name}",
+  "Remove {name}?": "移除 {name}？",
   "Adopt as Bot": "转为团队 Bot",
   Recipient: "收件人",
   Recipients: "收件人",
@@ -2414,6 +2415,7 @@ var ZH = {
   "{count} messages": "{count} 条消息",
   "done": "完成",
   "Remove Tasks": "移除任务",
+  "Remove Tasks?": "移除任务？",
   "Started task": "已开始任务",
   "Starting a task": "正在开始任务",
   "Task finished": "任务完成",
@@ -2994,6 +2996,36 @@ var HOST_ZH = {
   "Stop {name}": "停止 {name}",
   "{name} · foreground": "{name} · 前台",
   "{name} waits for the computer": "{name} 等你停手",
+  // The shared gen-UI kit (#1326): a chat's progress and coverage, and the person card.
+  "Waiting": "等待中",
+  "Reading": "阅读中",
+  "Fetching": "获取中",
+  "Phone did not answer": "手机没有响应",
+  "Not started": "未开始",
+  "Page {page}": "第 {page} 页",
+  "Page {page} of about {pages}": "第 {page} 页，约 {pages} 页",
+  "{fetched} of {total}": "{fetched} / {total}",
+  "{count} photos": "{count} 张照片",
+  "{count} missing": "缺少 {count} 个",
+  "{count} photos, {missing} missing": "{count} 张照片，缺少 {missing} 张",
+  "{count} fetched": "已获取 {count} 条",
+  "{count} reactions": "{count} 个回应",
+  "{count} edits": "已编辑 {count} 条",
+  "{count} deleted": "已删除 {count} 条",
+  "{count} missing media": "缺少 {count} 个媒体文件",
+  "From them {date}": "对方 {date}",
+  "From you {date}": "你 {date}",
+  "Who they are to you": "对方是谁",
+  "What is open": "未完成的事项",
+  "Last contact": "最后联系",
+  "How you talk": "你们的交谈方式",
+  "Reading note": "阅读笔记",
+  "Not in the note yet.": "笔记中还没有这一项",
+  "Not read yet. Ask the bot to read this chat.": "还没有阅读。请让 Bot 阅读这个聊天。",
+  "Reading the note…": "正在读取笔记…",
+  "The note could not be read.": "无法读取笔记。",
+  "Read through {date}": "已读到 {date}",
+  "This chat": "这个聊天",
   // The Bot browser tab beside the conversation (bot-browser-tab.js): the person drives the
   // Bot's own page, then gives it back.
   "Bot browser": "Bot 浏览器",
@@ -4301,10 +4333,10 @@ function bodyOf(def, paint, flat = false) {
   }
 }
 var PUPIL = "#0a0f1f";
-var pupilMarkup = ([cx, cy, w, h95, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h95 / 2}" width="${w}" height="${h95}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h95 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h95 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
-var blushMarkup = ([cx, cy, w, h95, tilt]) => `<ellipse cx="${cx}" cy="${cy + h95 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
-var eyeMarkup = ([cx, cy, w, h95, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h95 / 2}" width="${w}" height="${h95}" rx="${w / 2}"/></g>`;
-var happyEyeMarkup = ([cx, cy, w, h95, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h95 * 0.14}Q0 ${-h95 * 0.42} ${w * 0.62} ${h95 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
+var pupilMarkup = ([cx, cy, w, h96, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h96 / 2}" width="${w}" height="${h96}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h96 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h96 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
+var blushMarkup = ([cx, cy, w, h96, tilt]) => `<ellipse cx="${cx}" cy="${cy + h96 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
+var eyeMarkup = ([cx, cy, w, h96, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h96 / 2}" width="${w}" height="${h96}" rx="${w / 2}"/></g>`;
+var happyEyeMarkup = ([cx, cy, w, h96, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h96 * 0.14}Q0 ${-h96 * 0.42} ${w * 0.62} ${h96 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
 var maskBox = (size) => `maskUnits="userSpaceOnUse" x="${-size}" y="${-size}" width="${size * 3}" height="${size * 3}"`;
 var holes = (def, eyes) => `<rect x="${-def.size}" y="${-def.size}" width="${def.size * 3}" height="${def.size * 3}" fill="#fff"/>${eyes}`;
 var MASK_ID = "%MASK%";
@@ -4419,12 +4451,12 @@ function liveSprings(apply2) {
     const dt = Math.min(0.5, Math.max(1e-3, (now - last) / 1e3));
     last = now;
     const steps = Math.ceil(dt * 240);
-    const h95 = dt / steps;
+    const h96 = dt / steps;
     let moving = false;
     for (const [key, value] of values) {
       for (let index = 0; index < steps; index += 1) {
-        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h95;
-        value.x += value.v * h95;
+        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h96;
+        value.x += value.v * h96;
       }
       if (Math.abs(value.x - value.to) < 0.05 && Math.abs(value.v) < 1) {
         value.x = value.to;
@@ -11011,7 +11043,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   const [asTable, setAsTable] = (0, import_react24.useState)(false);
   const [copied, setCopied] = (0, import_react24.useState)(false);
   const labelId = (0, import_react24.useId)();
-  const menuKey = (0, import_react24.useId)();
+  const menuKey2 = (0, import_react24.useId)();
   const table = (0, import_react24.useRef)(asTable);
   table.current = asTable;
   const shown = series.map((_, index) => !hidden.includes(index));
@@ -11052,7 +11084,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
   action.current = { label: menuLabel, copy: copy2, save: () => {
     if (svg2.current) saveImage(svg2.current, "chart.png");
   }, toggleTable };
-  (0, import_react24.useEffect)(() => registerChart?.(menuKey, {
+  (0, import_react24.useEffect)(() => registerChart?.(menuKey2, {
     get label() {
       return action.current.label;
     },
@@ -11062,7 +11094,7 @@ function WidgetChart({ node, lookup, registerChart, refreshCharts }) {
     toggleTable: () => action.current.toggleTable(),
     copy: () => action.current.copy(),
     save: () => action.current.save()
-  }), [registerChart, menuKey]);
+  }), [registerChart, menuKey2]);
   (0, import_react24.useEffect)(() => refreshCharts?.(), [refreshCharts, asTable, menuLabel]);
   const legend = isDonut ? (0, import_react24.createElement)("div", { className: "dv-chart-legend dv-chart-legend-list" }, categories.map((name, at) => (0, import_react24.createElement)(
     "div",
@@ -24137,10 +24169,6 @@ body[data-bt-motion=quiet] .bt-thread-spin{animation-duration:3s}
    .bt-update-dot, a card of .bt-update-* rows, and .bt-update-notes as a button. */
 .bt-side-tool{position:relative}
 .bt-update-pop button.bt-update-notes{padding:0;border:0;background:none;font-family:inherit;cursor:pointer}
-/* A card row may lead with its product's mark (BotMark), beside its name and status. */
-.bt-power-who{display:flex;align-items:center;gap:10px}
-.bt-power-who>.bt-mark{flex:none}
-.bt-power-what{min-width:0}
 
 /* A DSH bot's row and its expanding Session list. It wears DSH's own whale, the mark a
    Bot with no look of its own wears too. */
@@ -32246,6 +32274,30 @@ function SettingsDialog({ page, id, roster, actions, useUpdate, leaving = false 
 
 // src/client/context-menu.js
 var import_react88 = require("react");
+function useConfirmStep(target, leaving) {
+  const [ask, setAsk] = (0, import_react88.useState)(null);
+  const [scope, setScope] = (0, import_react88.useState)({ target, leaving });
+  if (scope.target !== target || scope.leaving !== leaving) {
+    setScope({ target, leaving });
+    if (leaving || scope.target !== target) setAsk(null);
+  }
+  (0, import_react88.useEffect)(() => {
+    if (!ask) return void 0;
+    const timer = setTimeout(() => setAsk(null), 4e3);
+    return () => clearTimeout(timer);
+  }, [ask]);
+  const asking = ask !== null && ask.target === target && !leaving;
+  return [asking, () => {
+    if (leaving) return false;
+    if (ask !== null && ask.target === target) {
+      if (ask.confirmed) return false;
+      setAsk({ target, confirmed: true });
+      return true;
+    }
+    setAsk({ target, confirmed: false });
+    return false;
+  }];
+}
 var SECTION_COLORS = ["blue", "orange", "green", "violet", "rose"];
 var SECTIONS_IN_BAR = false;
 function sectionMoveItems(entry, roster, actions) {
@@ -32285,6 +32337,7 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
     };
   }, []);
   const [place, setPlace] = (0, import_react88.useState)({ left: menu.x, top: menu.y });
+  const [confirmingDelete, readyToDelete] = useConfirmStep(`${menu.kind ?? ""}:${menu.id ?? ""}`, leaving);
   const tick = useViewport();
   (0, import_react88.useLayoutEffect)(() => {
     const box = ref.current?.getBoundingClientRect();
@@ -32333,7 +32386,9 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
     bot ? (waits?.waits ?? []).map((item) => [t("Give up waiting for {name}", { name: item.name ?? t("a Bot") }), SignOutIcon, () => actions.abandonWork(item.id)]) : [],
     [
       isMainBot ? null : [t("Hide from sidebar"), HideIcon, () => actions.setFlags(menu.id, { hidden: true })],
-      isMainBot || adopted ? null : [room2 ? t("Delete group") : t("Delete"), TrashIcon, () => bot ? actions.deleteBot(bot.id) : actions.deleteRoom(menu.id), true],
+      // A Bot's delete archives its chats and forgets its secrets, so the item asks first;
+      // only a second click on the named item runs it.
+      isMainBot || adopted ? null : [confirmingDelete ? t("Delete {name}?", { name: room2 ? room2.name : bot.name }) : room2 ? t("Delete group") : t("Delete"), TrashIcon, () => bot ? actions.deleteBot(bot.id) : actions.deleteRoom(menu.id), true, false, void 0, readyToDelete],
       // Only a confirmed rollback whose host preconditions are visible as met is offered.
       canRollback ? [t("Roll back DSH adoption…"), TrashIcon, () => {
         const warning = t("Roll back this adoption? This deletes the Bot record and any settings changed after adoption; the original DSH bot and its session return.");
@@ -32349,13 +32404,19 @@ function ContextMenu({ menu, roster, actions, useWork, leaving = false }) {
       import_react88.Fragment,
       { key: index },
       index > 0 ? (0, import_react88.createElement)("div", { className: "bt-menu-sep", role: "separator" }) : null,
-      group.map(([label, Icon, run2, danger, checked, describedBy]) => (0, import_react88.createElement)("button", {
-        key: label,
+      // `ask` is the item's own confirmation: it returns false on the click that only asks,
+      // and the menu stays open with the item now naming what it would lose.
+      // The key is the item's place in the group, never its label: the confirmation changes
+      // the label, and a new key would unmount the focused button (and its screen-reader node).
+      group.map(([label, Icon, run2, danger, checked, describedBy, ask], item) => (0, import_react88.createElement)("button", {
+        key: `item-${item}`,
         type: "button",
         role: "menuitem",
         className: danger ? "bt-danger" : void 0,
         "aria-describedby": describedBy,
         onClick: () => {
+          if (leaving) return;
+          if (ask && !ask()) return;
           actions.closeMenu();
           void Promise.resolve(run2()).catch((error) => actions.reportError(error, "menu"));
         }
@@ -32533,6 +32594,7 @@ function AgentMenu({ menu, roster, actions, leaving }) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
   const [place, setPlace] = (0, import_react88.useState)({ left: menu.x, top: menu.y });
+  const [confirmingRemove, readyToRemove] = useConfirmStep(`${menu.kind ?? ""}:${menu.id ?? ""}`, leaving);
   const tick = useViewport();
   (0, import_react88.useLayoutEffect)(() => {
     const box = ref.current?.getBoundingClientRect();
@@ -32550,7 +32612,8 @@ function AgentMenu({ menu, roster, actions, leaving }) {
     ],
     sectionMoveItems(agent, roster, actions),
     [
-      [agent.kind === "tasks" ? t("Remove Tasks") : t("Remove {name}", { name: agent.name }), TrashIcon, () => actions.removeAgent(agent.id), true]
+      // Removing the DSH bot archives every Session it owns, so it asks first too.
+      [confirmingRemove ? agent.kind === "tasks" ? t("Remove Tasks?") : t("Remove {name}?", { name: agent.name }) : agent.kind === "tasks" ? t("Remove Tasks") : t("Remove {name}", { name: agent.name }), TrashIcon, () => actions.removeAgent(agent.id), true, false, void 0, readyToRemove]
     ]
   ].filter((group) => group.length > 0) : [
     [
@@ -32567,12 +32630,15 @@ function AgentMenu({ menu, roster, actions, leaving }) {
       import_react88.Fragment,
       { key: index },
       index > 0 ? (0, import_react88.createElement)("div", { className: "bt-menu-sep", role: "separator" }) : null,
-      group.map(([label, Icon, run2, danger, checked]) => (0, import_react88.createElement)("button", {
-        key: label,
+      group.map(([label, Icon, run2, danger, checked, describedBy, ask], item) => (0, import_react88.createElement)("button", {
+        key: `item-${item}`,
         type: "button",
         role: "menuitem",
         className: danger ? "bt-danger" : void 0,
+        "aria-describedby": describedBy,
         onClick: () => {
+          if (leaving) return;
+          if (ask && !ask()) return;
           actions.closeMenu();
           void Promise.resolve(run2()).catch((error) => actions.reportError(error, "menu"));
         }
@@ -34654,6 +34720,16 @@ var import_react93 = require("react");
 var import_react_dom16 = require("react-dom");
 var DIALOG_EXIT_MS = 160;
 var MENU_EXIT_MS3 = 120;
+var menuKeys = /* @__PURE__ */ new WeakMap();
+var nextMenuKey = 0;
+function menuKey(menu) {
+  let key = menuKeys.get(menu);
+  if (key === void 0) {
+    key = ++nextMenuKey;
+    menuKeys.set(menu, key);
+  }
+  return key;
+}
 function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity, useWork, useRegistry, useBrowserPages, useBrowserTabs, useBrowserHolds, useComputer, useUpdate, useFrame, actions }) {
   const roster = useRoster((value) => value);
   const ui2 = useUi((value) => value);
@@ -34702,7 +34778,7 @@ function Overlays({ useRoster, useUi, useSessions, useSessionStatus, useActivity
     ui2.palette ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(CommandPalette, { key: ui2.palette.token, start: ui2.palette.query, token: ui2.palette.token, roster, actions, useSessions }), document.body) : null,
     ui2.exchange ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(ExchangeDialog, { pair: ui2.exchange, roster, actions }), document.body) : null,
     ui2.voice ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(VoiceMode, { key: ui2.voice, sessionId: ui2.voice, roster, actions, useSessions, useSessionStatus }), document.body) : null,
-    menu ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(ContextMenu, { key: `${menu.kind ?? ""}:${menu.id}:${menu.x}:${menu.y}`, menu, roster, actions, useWork, leaving: menuLeaving }), document.body) : null,
+    menu ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(ContextMenu, { key: menuKey(menu), menu, roster, actions, useWork, leaving: menuLeaving }), document.body) : null,
     settings ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(SettingsDialog, { page: settings.page, id: settings.id, roster, actions, useUpdate, leaving: settingsLeaving }), document.body) : null,
     owner ? (0, import_react_dom16.createPortal)((0, import_react93.createElement)(MemoryDialog, { key: owner.id, owner, actions, leaving: memoryLeaving }), document.body) : null
   );
@@ -37418,6 +37494,417 @@ var LEARNING_CSS = `
 .bt-learning-error{font-size:12px;line-height:16px;color:var(--st-bad-strong,var(--bt-danger))}
 `;
 
+// src/client/genui-model.js
+var OUTCOME_FIRST = /* @__PURE__ */ new Set(["stopped", "not-started"]);
+var COUNT_KEYS = ["fetched", "total", "stored", "duplicates", "mediaDownloaded", "mediaMissing", "reactions", "edits", "deletions", "unmatched"];
+var NOTE_MAX = 8e3;
+var genuiNumber = (value) => {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof parsed === "number" && Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : void 0;
+};
+var genuiInstant = (value) => {
+  if (typeof value !== "string") return void 0;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms) : void 0;
+};
+var genuiLabel = (value, max = 120) => {
+  if (typeof value !== "string") return void 0;
+  const text2 = value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, "").replace(/\s+/g, " ").trim();
+  return text2 === "" ? void 0 : text2.slice(0, max);
+};
+function countText2(value) {
+  const count = genuiNumber(value);
+  return count === void 0 ? "" : count.toLocaleString(dateLocale());
+}
+function percentOf(fetched, total) {
+  const done = genuiNumber(fetched);
+  const all = genuiNumber(total);
+  if (done === void 0 || all === void 0 || all === 0) return void 0;
+  return Math.min(100, Math.round(done / all * 100));
+}
+function shortDate(value) {
+  const date = genuiInstant(value);
+  if (date === void 0) return "";
+  return new Intl.DateTimeFormat(dateLocale(), { day: "numeric", month: "short", year: "numeric" }).format(date);
+}
+var genuiMonth = (date, withYear) => new Intl.DateTimeFormat(dateLocale(), { month: "short", ...withYear ? { year: "numeric" } : {} }).format(date);
+function spanOf2(value) {
+  const coverage = coverageOf(value);
+  if (coverage === void 0) return "";
+  const oldest = genuiInstant(coverage.oldest);
+  const newest = genuiInstant(coverage.newest);
+  if (oldest === void 0 && newest === void 0) return "";
+  if (oldest === void 0) return shortDate(coverage.newest);
+  if (newest === void 0) return shortDate(coverage.oldest);
+  if (oldest.getFullYear() === newest.getFullYear()) return `${genuiMonth(oldest, false)}–${genuiMonth(newest, false)}`;
+  return `${genuiMonth(oldest, true)} – ${genuiMonth(newest, true)}`;
+}
+function coverageOf(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const coverage = {};
+  for (const key of ["oldest", "newest", "lastInbound", "lastOutbound"]) {
+    if (genuiInstant(value[key]) !== void 0) coverage[key] = value[key];
+  }
+  for (const key of ["count", "countInWindow", "mediaMissing", "deletedCount"]) {
+    const count = genuiNumber(value[key]);
+    if (count !== void 0) coverage[key] = count;
+  }
+  return Object.keys(coverage).length === 0 ? void 0 : coverage;
+}
+function coverageLine(value) {
+  const coverage = coverageOf(value);
+  if (coverage === void 0) return "";
+  const parts = [];
+  if (coverage.count !== void 0) parts.push(t("{count} messages", { count: countText2(coverage.count) }));
+  const span = spanOf2(coverage);
+  if (span !== "") parts.push(span);
+  if ((coverage.deletedCount ?? 0) > 0) parts.push(t("{count} deleted", { count: countText2(coverage.deletedCount) }));
+  if ((coverage.mediaMissing ?? 0) > 0) parts.push(t("{count} missing media", { count: countText2(coverage.mediaMissing) }));
+  return parts.join(" · ");
+}
+function contactLine(value) {
+  const coverage = coverageOf(value);
+  if (coverage === void 0) return "";
+  const parts = [];
+  if (coverage.lastInbound !== void 0) parts.push(t("From them {date}", { date: shortDate(coverage.lastInbound) }));
+  if (coverage.lastOutbound !== void 0) parts.push(t("From you {date}", { date: shortDate(coverage.lastOutbound) }));
+  return parts.join(" · ");
+}
+function countsOf(row) {
+  const counts2 = {};
+  const read = (source) => {
+    for (const key of COUNT_KEYS) {
+      const count = genuiNumber(source[key]);
+      if (count !== void 0) counts2[key] = count;
+    }
+  };
+  if (row.counts !== null && typeof row.counts === "object" && !Array.isArray(row.counts)) read(row.counts);
+  if (Object.keys(counts2).length === 0) read(row);
+  return counts2;
+}
+function stateWord(row) {
+  if (row === null || typeof row !== "object") return "";
+  switch (row.outcome) {
+    case "stopped":
+      return t("Stopped");
+    case "not-started":
+      return t("Not started");
+    default:
+      break;
+  }
+  switch (row.state) {
+    case "queued":
+      return t("Waiting");
+    case "reading":
+      return t("Reading");
+    case "fetching":
+      return t("Fetching");
+    case "done":
+      return t("Done");
+    case "phone-did-not-answer":
+      return t("Phone did not answer");
+    case "cancelled":
+      return t("Stopped");
+    case "failed":
+      return t("Failed");
+    default:
+      break;
+  }
+  switch (row.outcome) {
+    case "done":
+      return t("Done");
+    case "phone-did-not-answer":
+      return t("Phone did not answer");
+    case "failed":
+      return t("Failed");
+    default:
+      return "";
+  }
+}
+function stateId(row) {
+  if (row === null || typeof row !== "object") return "unknown";
+  if (OUTCOME_FIRST.has(row.outcome)) return "stopped";
+  if (row.state === "done" || row.outcome === "done") return "done";
+  if (row.state === "failed" || row.outcome === "failed") return "failed";
+  if (row.state === "phone-did-not-answer" || row.outcome === "phone-did-not-answer") return "phone";
+  if (row.state === "cancelled") return "stopped";
+  if (row.state !== void 0) return "work";
+  return "unknown";
+}
+function pageText(row) {
+  const page = genuiNumber(row.page);
+  if (page === void 0 || page === 0) return "";
+  const pages = genuiNumber(row.pages);
+  if (pages !== void 0 && pages >= page) return t("Page {page} of about {pages}", { page: countText2(page), pages: countText2(pages) });
+  return t("Page {page}", { page: countText2(page) });
+}
+function progressText(counts2) {
+  const fetched = counts2.fetched;
+  const total = counts2.total;
+  if (fetched !== void 0 && total !== void 0 && total > 0) {
+    const percent3 = percentOf(fetched, total);
+    const line = t("{fetched} of {total}", { fetched: countText2(fetched), total: countText2(total) });
+    return percent3 === void 0 ? line : `${line} · ${t("{percent}%", { percent: percent3 })}`;
+  }
+  return fetched === void 0 ? "" : t("{count} fetched", { count: countText2(fetched) });
+}
+function mediaText(counts2) {
+  const downloaded2 = counts2.mediaDownloaded;
+  const missing = counts2.mediaMissing;
+  if ((downloaded2 ?? 0) > 0 && (missing ?? 0) > 0) {
+    return t("{count} photos, {missing} missing", { count: countText2(downloaded2), missing: countText2(missing) });
+  }
+  if ((downloaded2 ?? 0) > 0) return t("{count} photos", { count: countText2(downloaded2) });
+  return (missing ?? 0) > 0 ? t("{count} missing", { count: countText2(missing) }) : "";
+}
+function marksText(counts2) {
+  const parts = [];
+  if ((counts2.reactions ?? 0) > 0) parts.push(t("{count} reactions", { count: countText2(counts2.reactions) }));
+  if ((counts2.edits ?? 0) > 0) parts.push(t("{count} edits", { count: countText2(counts2.edits) }));
+  return parts.join(" · ");
+}
+function rowView(row) {
+  const source = row !== null && typeof row === "object" ? row : {};
+  const counts2 = countsOf(source);
+  return {
+    state: stateId(source),
+    word: stateWord(source),
+    name: genuiLabel(source.chat ?? source.name) ?? "",
+    page: pageText(source),
+    progress: progressText(counts2),
+    media: mediaText(counts2),
+    marks: marksText(counts2),
+    span: spanOf2(source.coverage),
+    coverage: coverageLine(source.coverage)
+  };
+}
+var NOTE_LABELS = [
+  ["who", /^(?:who(?: they are)?(?: to (?:you|him|them))?|relationship|about)\s*[:\-–—]\s*(.*)$/i],
+  ["open", /^(?:open(?: items)?|what'?s open(?: between (?:you|them))?|pending)\s*[:\-–—]\s*(.*)$/i],
+  ["contact", /^(?:last contact(?: each way)?|contact)\s*[:\-–—]\s*(.*)$/i],
+  ["tone", /^(?:tone(?: of voice)?|how (?:you|he|she|they) talks?(?: to (?:you|him|them))?|style)\s*[:\-–—]\s*(.*)$/i]
+];
+function parseReadingNote(text2) {
+  const blocks = /* @__PURE__ */ new Map();
+  const loose = [];
+  let current;
+  for (const raw of String(text2 ?? "").slice(0, NOTE_MAX).split(/\r?\n/)) {
+    const line = raw.trim();
+    const found = NOTE_LABELS.find(([, pattern]) => pattern.test(line));
+    if (found !== void 0) {
+      current = found[0];
+      if (!blocks.has(current)) blocks.set(current, []);
+      const rest2 = found[1].exec(line)?.[1]?.trim() ?? "";
+      if (rest2 !== "") blocks.get(current).push(rest2);
+      continue;
+    }
+    if (current !== void 0) {
+      if (line !== "") blocks.get(current).push(line);
+      continue;
+    }
+    if (line !== "") loose.push(line);
+  }
+  const parts = {};
+  for (const [key, lines] of blocks) parts[key] = lines.join("\n").trim();
+  return { blocks: parts, loose: loose.join("\n").trim() };
+}
+function noteOf(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const text2 = typeof value.text === "string" ? value.text.trim().slice(0, NOTE_MAX) : "";
+  if (text2 === "") return void 0;
+  return { text: text2, readThrough: value.readThrough, updatedAt: value.updatedAt };
+}
+function personView(data) {
+  const source = data !== null && typeof data === "object" ? data : {};
+  const chat = source.chat !== null && typeof source.chat === "object" ? source.chat : {};
+  const coverage = coverageOf(source.coverage);
+  const title = genuiLabel(chat.name) ?? t("This chat");
+  const note = noteOf(source.note);
+  if (note === void 0) {
+    return {
+      state: "empty",
+      title,
+      subtitle: t("Not read yet. Ask the bot to read this chat."),
+      blocks: [],
+      coverage,
+      readThrough: ""
+    };
+  }
+  const parsed = parseReadingNote(note.text);
+  const blocks = [];
+  if (Object.keys(parsed.blocks).length === 0) {
+    blocks.push({ key: "note", label: t("Reading note"), text: parsed.loose });
+  } else {
+    if (parsed.loose !== "") blocks.push({ key: "note", label: t("Reading note"), text: parsed.loose });
+    const contact = [contactLine(coverage), parsed.blocks.contact ?? ""].filter((text2) => text2 !== "").join("\n");
+    blocks.push(
+      { key: "who", label: t("Who they are to you"), text: parsed.blocks.who ?? "" },
+      { key: "open", label: t("What is open"), text: parsed.blocks.open ?? "" },
+      { key: "contact", label: t("Last contact"), text: contact },
+      { key: "tone", label: t("How you talk"), text: parsed.blocks.tone ?? "" }
+    );
+  }
+  return {
+    state: "ready",
+    title,
+    subtitle: "",
+    blocks,
+    coverage,
+    readThrough: shortDate(note.readThrough)
+  };
+}
+
+// src/client/genui.js
+var import_react98 = require("react");
+var READING_NOTE = "omni-reading-note";
+function loadReadingNote(chatId) {
+  if (typeof chatId !== "string" || chatId === "") return Promise.reject(new Error("A person card needs a chat id"));
+  return call(READING_NOTE, { chat: chatId });
+}
+function genuiRows(roster, batchId) {
+  const batches = roster?.genui?.batches;
+  if (batches === null || typeof batches !== "object" || Array.isArray(batches)) return [];
+  const batch = typeof batchId === "string" ? batches[batchId] : void 0;
+  return batch !== null && typeof batch === "object" && Array.isArray(batch.rows) ? batch.rows : [];
+}
+function revisionOf(roster) {
+  const revision = roster?.genui?.revision;
+  return typeof revision === "number" && Number.isFinite(revision) ? revision : 0;
+}
+function ProgressRow({ row }) {
+  const view = rowView(row);
+  return (0, import_react98.createElement)(
+    "li",
+    { className: "bt-genui-row", "data-state": view.state },
+    (0, import_react98.createElement)("span", { className: "bt-genui-dot", "aria-hidden": true }),
+    (0, import_react98.createElement)(
+      "div",
+      { className: "bt-genui-body" },
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-genui-line" },
+        view.name !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-name" }, view.name) : null,
+        view.word !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-word" }, view.word) : null,
+        view.page !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-num" }, view.page) : null,
+        view.progress !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-num" }, view.progress) : null,
+        view.span !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-num bt-genui-span" }, view.span) : null
+      ),
+      view.media !== "" || view.marks !== "" ? (0, import_react98.createElement)(
+        "div",
+        { className: "bt-genui-line bt-genui-sub" },
+        view.media !== "" ? (0, import_react98.createElement)("span", null, view.media) : null,
+        view.marks !== "" ? (0, import_react98.createElement)("span", null, view.marks) : null
+      ) : null
+    )
+  );
+}
+function ProgressRows({ rows: list, label }) {
+  const shown = Array.isArray(list) ? list : [];
+  if (shown.length === 0) return null;
+  return (0, import_react98.createElement)(
+    "ul",
+    { className: "bt-genui-rows", "aria-label": typeof label === "string" ? label : t("Progress") },
+    shown.map((row, index) => (0, import_react98.createElement)(ProgressRow, { key: typeof row?.chatId === "string" ? row.chatId : index, row }))
+  );
+}
+function CoverageRow({ coverage }) {
+  const line = coverageLine(coverage);
+  return line === "" ? null : (0, import_react98.createElement)("div", { className: "bt-genui-what" }, line);
+}
+function PersonCard({ chatId, load, revision }) {
+  const [state2, setState] = (0, import_react98.useState)({ chatId: void 0, data: void 0, error: void 0, loading: true });
+  const [tries, setTries] = (0, import_react98.useState)(0);
+  const loader = (0, import_react98.useRef)(load ?? loadReadingNote);
+  loader.current = load ?? loadReadingNote;
+  const order = (0, import_react98.useRef)(0);
+  (0, import_react98.useEffect)(() => {
+    if (typeof chatId !== "string" || chatId === "") return void 0;
+    const mine = ++order.current;
+    let live = true;
+    setState((current) => current.chatId === chatId ? { ...current, loading: true, error: void 0 } : { chatId, data: void 0, error: void 0, loading: true });
+    Promise.resolve().then(() => loader.current(chatId)).then((data) => {
+      if (live && mine === order.current) setState({ chatId, data, error: void 0, loading: false });
+    }).catch((error) => {
+      if (live && mine === order.current) setState({ chatId, data: void 0, error, loading: false });
+    });
+    return () => {
+      live = false;
+    };
+  }, [chatId, revision, tries]);
+  const retry = (0, import_react98.useCallback)(() => setTries((count) => count + 1), []);
+  const shown = state2.chatId === chatId ? state2 : { chatId, data: void 0, error: void 0, loading: true };
+  const view = personView(shown.data);
+  const answered = shown.data !== void 0;
+  return (0, import_react98.createElement)(
+    "section",
+    { className: "bt-q bt-genui-person", "aria-busy": shown.loading ? "true" : void 0 },
+    (0, import_react98.createElement)(
+      "div",
+      { className: "bt-q-head" },
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-q-text" },
+        (0, import_react98.createElement)("p", { className: "bt-q-title" }, view.title),
+        answered && view.subtitle !== "" ? (0, import_react98.createElement)("div", { className: "bt-q-detail" }, view.subtitle) : null
+      )
+    ),
+    view.blocks.length === 0 ? null : (0, import_react98.createElement)(
+      "div",
+      { className: "bt-genui-blocks" },
+      view.blocks.map((block) => (0, import_react98.createElement)(
+        "div",
+        { className: "bt-genui-block", key: block.key },
+        (0, import_react98.createElement)("div", { className: "bt-genui-label" }, block.label),
+        block.text !== "" ? (0, import_react98.createElement)("p", { className: "bt-genui-text" }, block.text) : (0, import_react98.createElement)("p", { className: "bt-genui-text bt-genui-muted" }, t("Not in the note yet."))
+      ))
+    ),
+    view.coverage === void 0 ? null : (0, import_react98.createElement)(CoverageRow, { coverage: view.coverage }),
+    (0, import_react98.createElement)(
+      "div",
+      { className: "bt-genui-foot" },
+      view.readThrough !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-read" }, t("Read through {date}", { date: view.readThrough })) : null,
+      shown.loading ? (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("Reading the note…")) : null,
+      shown.error === void 0 ? null : (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("The note could not be read.")),
+      shown.error === void 0 ? null : (0, import_react98.createElement)("button", { type: "button", className: "bt-genui-retry", onClick: retry }, t("Try again"))
+    )
+  );
+}
+var GENUI_CSS = `
+.bt-genui-row{display:flex;align-items:flex-start;gap:10px;min-width:0;padding:8px;border-radius:10px;font:inherit}
+.bt-genui-row+.bt-genui-row{box-shadow:inset 0 1px 0 var(--bt-q-rule-2,var(--bt-line-weak))}
+.bt-genui-rows{display:flex;flex-direction:column;gap:1px;min-width:0;margin:0 -8px;padding:0;list-style:none}
+.bt-genui-dot{flex:none;width:8px;height:8px;margin-top:6px;border-radius:50%;background:var(--bt-ink-3)}
+.bt-genui-row[data-state=done] .bt-genui-dot{background:var(--bt-green)}
+.bt-genui-row[data-state=failed] .bt-genui-dot{background:var(--bt-danger)}
+.bt-genui-row[data-state=phone] .bt-genui-dot{background:var(--bt-gold)}
+.bt-genui-row[data-state=stopped] .bt-genui-dot{background:var(--bt-ink-3)}
+.bt-genui-row[data-state=work] .bt-genui-dot{background:var(--bt-accent)}
+.bt-genui-row[data-state=work] .bt-genui-dot{animation:bt-genui-pulse 1.6s ease-in-out infinite}
+.bt-genui-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:1px}
+.bt-genui-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 8px;min-width:0;font-size:13.5px;line-height:19px}
+.bt-genui-name{font-weight:600;color:var(--bt-ink);overflow-wrap:anywhere}
+.bt-genui-word{color:var(--bt-ink-2)}
+.bt-genui-num{color:var(--bt-ink-2);font-variant-numeric:tabular-nums}
+.bt-genui-span{color:var(--bt-ink-3)}
+.bt-genui-sub{font-size:12.5px;line-height:17px;color:var(--bt-ink-3)}
+.bt-genui-what{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 8px;padding:0 8px;color:var(--bt-ink-2);font-size:12.5px;line-height:18px}
+.bt-genui-blocks{display:flex;flex-direction:column;min-width:0}
+.bt-genui-block{padding-top:10px;border-top:1px solid var(--bt-q-rule-2,var(--bt-line-weak))}
+.bt-genui-block:first-child{padding-top:0;border-top:0}
+.bt-genui-label{margin:0;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--bt-ink-3)}
+.bt-genui-text{margin:2px 0 0;font-size:13.5px;line-height:19px;color:var(--bt-ink);white-space:pre-wrap;overflow-wrap:anywhere}
+.bt-genui-muted{color:var(--bt-ink-3)}
+.bt-genui-foot{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding-top:10px;border-top:1px solid var(--bt-q-rule,var(--bt-line-2));font-size:12.5px;line-height:17px;color:var(--bt-ink-3)}
+.bt-genui-read{color:var(--bt-ink-2);font-variant-numeric:tabular-nums}
+.bt-genui-retry{flex:none;height:26px;padding:0 10px;border:1px solid var(--bt-line-2);border-radius:999px;background:none;color:var(--bt-ink);font:inherit;font-size:12.5px;font-weight:600;cursor:pointer}
+.bt-genui-retry:hover{background:var(--bt-hover)}
+.bt-genui-retry:focus-visible{outline:2px solid var(--bt-accent);outline-offset:-2px}
+.bt-genui-person{max-width:560px}
+@keyframes bt-genui-pulse{50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.bt-genui-row[data-state=work] .bt-genui-dot{animation:none}}
+body[data-bt-motion=quiet] .bt-genui-row[data-state=work] .bt-genui-dot{animation:none}
+`;
+
 // src/client/reopen.js
 var OPEN_CHAT = "omni-ui:open-chat";
 var REOPEN = "omni-ui:reopen";
@@ -37476,7 +37963,7 @@ function createSwitchWindow(settle) {
 }
 
 // src/client/suggestions.js
-var import_react98 = require("react");
+var import_react99 = require("react");
 var MAX_SUGGESTIONS = 3;
 var IMAGE_ACCESS_TTL_MS = 6e4;
 var imagesReady;
@@ -37524,21 +38011,21 @@ function SuggestionDock({ sessionId, input, session, useRoster, useSessions }) {
   const outline = (list) => list.projectionsBySession?.[part]?.values?.turnOutline ?? list.byId?.[part]?.projectionValues?.turnOutline;
   const wrote = useSessions ? useSessions((list) => personWrote(outline(list), roster.exchangeTurns?.[part] ?? [])) : true;
   const entries2 = useEntries(chatSuggestions);
-  const [images, setImages] = (0, import_react98.useState)(false);
-  (0, import_react98.useEffect)(() => {
+  const [images, setImages] = (0, import_react99.useState)(false);
+  (0, import_react99.useEffect)(() => {
     void imageAccess().then(setImages);
   }, [sessionId]);
   if (!bot || wrote || session?.running || (input?.draft ?? "").trim() !== "") return null;
   const items = suggestionsFor(entries2, { bot, roster, images });
   if (items.length === 0) return null;
-  return (0, import_react98.createElement)(
+  return (0, import_react99.createElement)(
     "div",
     { className: "bt-suggest", role: "group", "aria-label": t("Suggestions") },
-    items.map((item) => (0, import_react98.createElement)(
+    items.map((item) => (0, import_react99.createElement)(
       "button",
       { key: item.key, type: "button", className: "bt-suggest-chip", onClick: () => fillComposer(item.text) },
-      icons_exports[item.icon] ? (0, import_react98.createElement)("span", { className: "bt-suggest-icon", "aria-hidden": true }, (0, import_react98.createElement)(icons_exports[item.icon])) : null,
-      (0, import_react98.createElement)("span", null, item.label)
+      icons_exports[item.icon] ? (0, import_react99.createElement)("span", { className: "bt-suggest-icon", "aria-hidden": true }, (0, import_react99.createElement)(icons_exports[item.icon])) : null,
+      (0, import_react99.createElement)("span", null, item.label)
     ))
   );
 }
@@ -37554,7 +38041,7 @@ var SUGGEST_CSS = `
 `;
 
 // src/client/queue-dock.js
-var import_react99 = require("react");
+var import_react100 = require("react");
 var OWN_QUEUE_KINDS = /* @__PURE__ */ new Set(["user", "schedule", "user-question-reply"]);
 var EMPTY_QUEUE = [];
 var QUEUE_TEXT_FACTS = { collapseWhitespace: true, trimWhitespace: true };
@@ -37571,17 +38058,17 @@ function queueAttachments(content) {
 var fileSizeText2 = (bytes) => typeof bytes !== "number" || !Number.isFinite(bytes) ? "" : bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
 function QueueFile({ attachment, label }) {
   const size = fileSizeText2(attachment.bytes);
-  return (0, import_react99.createElement)(
+  return (0, import_react100.createElement)(
     "span",
     { className: "bt-queue-file", "aria-label": label, title: attachment.name },
-    (0, import_react99.createElement)("span", { className: "bt-queue-fileicon", "aria-hidden": true }, (0, import_react99.createElement)(PaperclipIcon)),
-    (0, import_react99.createElement)("span", { className: "bt-queue-filename" }, attachment.name),
-    size !== "" ? (0, import_react99.createElement)("span", { className: "bt-queue-filesize" }, size) : null
+    (0, import_react100.createElement)("span", { className: "bt-queue-fileicon", "aria-hidden": true }, (0, import_react100.createElement)(PaperclipIcon)),
+    (0, import_react100.createElement)("span", { className: "bt-queue-filename" }, attachment.name),
+    size !== "" ? (0, import_react100.createElement)("span", { className: "bt-queue-filesize" }, size) : null
   );
 }
 function QueueThumb({ attachment, loadImage: loadImage2, label }) {
-  const [url, setUrl] = (0, import_react99.useState)(null);
-  (0, import_react99.useEffect)(() => {
+  const [url, setUrl] = (0, import_react100.useState)(null);
+  (0, import_react100.useEffect)(() => {
     let alive = true;
     loadImage2(attachment).then((resolved) => {
       if (alive) setUrl(resolved);
@@ -37591,22 +38078,22 @@ function QueueThumb({ attachment, loadImage: loadImage2, label }) {
       alive = false;
     };
   }, [attachment, loadImage2]);
-  return url === null ? (0, import_react99.createElement)("span", { className: "bt-queue-thumb", "aria-hidden": true }) : (0, import_react99.createElement)("img", { className: "bt-queue-thumb", src: url, alt: label });
+  return url === null ? (0, import_react100.createElement)("span", { className: "bt-queue-thumb", "aria-hidden": true }) : (0, import_react100.createElement)("img", { className: "bt-queue-thumb", src: url, alt: label });
 }
 function Preview({ text: text2, renderFactorySlot }) {
   const rendered = renderFactorySlot?.("conversation.user.text", { text: text2, facts: QUEUE_TEXT_FACTS, interactive: false, ellipsis: true });
-  return (0, import_react99.createElement)("span", { className: "bt-queue-preview" }, rendered ?? text2);
+  return (0, import_react100.createElement)("span", { className: "bt-queue-preview" }, rendered ?? text2);
 }
 function EditField({ text: text2, onChange, onSave, onCancel }) {
-  const field = (0, import_react99.useRef)(null);
-  (0, import_react99.useEffect)(() => {
+  const field = (0, import_react100.useRef)(null);
+  (0, import_react100.useEffect)(() => {
     const node = field.current;
     if (node === null) return;
     node.focus();
     node.style.height = "auto";
     node.style.height = `${node.scrollHeight}px`;
   }, [text2]);
-  return (0, import_react99.createElement)("textarea", {
+  return (0, import_react100.createElement)("textarea", {
     ref: field,
     className: "bt-queue-edit",
     value: text2,
@@ -37625,28 +38112,28 @@ function EditField({ text: text2, onChange, onSave, onCancel }) {
   });
 }
 function RowButton({ label, title, disabled, onClick, children }) {
-  return (0, import_react99.createElement)("button", { type: "button", className: "bt-queue-action", "aria-label": label, title: title ?? label, disabled, onClick }, children);
+  return (0, import_react100.createElement)("button", { type: "button", className: "bt-queue-action", "aria-label": label, title: title ?? label, disabled, onClick }, children);
 }
 function QueueDock({ useSession, useProjection, updateQueue, loadImage: loadImage2, renderFactorySlot, actions }) {
   const inbox = useProjection?.("inbox");
   const pendingSubmissions = useSession?.((s) => s.pendingSubmissions) ?? EMPTY_QUEUE;
-  const queue = (0, import_react99.useMemo)(() => {
+  const queue = (0, import_react100.useMemo)(() => {
     const rows2 = (inbox?.["next-turn"] ?? EMPTY_QUEUE).filter((row) => OWN_QUEUE_KINDS.has(row.source?.kind));
     const inChat = new Set(pendingSubmissions.filter((item) => item.placement === "transcript").map((item) => item.requestId));
     return inChat.size === 0 ? rows2 : rows2.filter(({ source }) => source === null || typeof source !== "object" || !("rpcId" in source) || !inChat.has(source.rpcId));
   }, [inbox, pendingSubmissions]);
-  const pendingQueue = (0, import_react99.useMemo)(() => {
+  const pendingQueue = (0, import_react100.useMemo)(() => {
     const admitted = new Set(queue.flatMap(({ source }) => source !== null && typeof source === "object" && "rpcId" in source ? [source.rpcId] : []));
     return pendingSubmissions.filter((submission) => submission.placement === "queued" && !admitted.has(submission.requestId));
   }, [pendingSubmissions, queue]);
   const rowCount = queue.length + pendingQueue.length;
   const running2 = useSession?.((s) => s.running) === true;
   const queueMutable = useSession?.((s) => s.subagent === null || s.subagent === void 0 || s.subagent.address?.mode === "continuable") ?? true;
-  const [editing, setEditing] = (0, import_react99.useState)(null);
-  const [busy, setBusy] = (0, import_react99.useState)(null);
-  const [collapsed, setCollapsed] = (0, import_react99.useState)(true);
-  const listId = (0, import_react99.useId)();
-  (0, import_react99.useEffect)(() => {
+  const [editing, setEditing] = (0, import_react100.useState)(null);
+  const [busy, setBusy] = (0, import_react100.useState)(null);
+  const [collapsed, setCollapsed] = (0, import_react100.useState)(true);
+  const listId = (0, import_react100.useId)();
+  (0, import_react100.useEffect)(() => {
     if (rowCount === 0 && !collapsed) setCollapsed(true);
     if (editing !== null && (!queueMutable || !queue.some((row) => row.id === editing.id))) setEditing(null);
   }, [collapsed, editing, queue, queueMutable, rowCount]);
@@ -37674,77 +38161,77 @@ function QueueDock({ useSession, useProjection, updateQueue, loadImage: loadImag
     if (editing === null || editing.text.trim() === "") return;
     if (await applyAction(editing.id, { kind: "edit", content: [{ type: "text", text: editing.text }] }, t("Couldn’t edit the queued message — it may have started already."))) setEditing(null);
   };
-  return (0, import_react99.createElement)(
+  return (0, import_react100.createElement)(
     "div",
     { className: "bt-queue-dock", "data-queue-dock": "" },
-    (0, import_react99.createElement)(
+    (0, import_react100.createElement)(
       "div",
       { className: "bt-queue-panel" },
-      rowCount > 1 && (0, import_react99.createElement)(
+      rowCount > 1 && (0, import_react100.createElement)(
         "button",
         { type: "button", className: "bt-queue-head", "aria-controls": listId, "aria-expanded": expanded, disabled: interactionActive, onClick: () => setCollapsed((value) => !value) },
-        (0, import_react99.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react99.createElement)(QueueIcon)),
-        (0, import_react99.createElement)("span", { className: "bt-queue-count" }, t("{n} queued messages", { n: rowCount })),
-        !listVisible && pendingQueue.length > 0 && (0, import_react99.createElement)("span", { className: "bt-queue-status", role: "status" }, t("Sending…")),
-        (0, import_react99.createElement)("span", { className: "bt-queue-chev", "aria-hidden": true }, expanded ? (0, import_react99.createElement)(ChevronDownIcon) : (0, import_react99.createElement)(ChevronUpIcon))
+        (0, import_react100.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react100.createElement)(QueueIcon)),
+        (0, import_react100.createElement)("span", { className: "bt-queue-count" }, t("{n} queued messages", { n: rowCount })),
+        !listVisible && pendingQueue.length > 0 && (0, import_react100.createElement)("span", { className: "bt-queue-status", role: "status" }, t("Sending…")),
+        (0, import_react100.createElement)("span", { className: "bt-queue-chev", "aria-hidden": true }, expanded ? (0, import_react100.createElement)(ChevronDownIcon) : (0, import_react100.createElement)(ChevronUpIcon))
       ),
-      (0, import_react99.createElement)(
+      (0, import_react100.createElement)(
         "ul",
         { id: listId, className: "bt-queue-list", hidden: !listVisible },
         listVisible && queue.map((row) => {
           const attachments = queueAttachments(row.content);
           const text2 = textOf(row.content);
-          return (0, import_react99.createElement)(
+          return (0, import_react100.createElement)(
             "li",
             { key: row.id, className: "bt-queue-row" },
-            rowCount === 1 && (0, import_react99.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react99.createElement)(QueueIcon)),
-            editing?.id === row.id ? (0, import_react99.createElement)(EditField, { text: editing.text, onChange: (text3) => setEditing({ id: row.id, text: text3 }), onSave: saveEdit, onCancel: () => setEditing(null) }) : (0, import_react99.createElement)(
-              import_react99.Fragment,
+            rowCount === 1 && (0, import_react100.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react100.createElement)(QueueIcon)),
+            editing?.id === row.id ? (0, import_react100.createElement)(EditField, { text: editing.text, onChange: (text3) => setEditing({ id: row.id, text: text3 }), onSave: saveEdit, onCancel: () => setEditing(null) }) : (0, import_react100.createElement)(
+              import_react100.Fragment,
               null,
-              attachments.length > 0 && (0, import_react99.createElement)(
+              attachments.length > 0 && (0, import_react100.createElement)(
                 "span",
                 { className: "bt-queue-attachments" },
-                attachments.map((item, index) => item.type === "image" ? (0, import_react99.createElement)(QueueThumb, { key: `${item.attachment.attachmentId}:${index}`, attachment: item.attachment, loadImage: loadImage2, label: t("Queued image") }) : (0, import_react99.createElement)(QueueFile, { key: `${item.attachment.attachmentId}:${item.attachment.name}:${index}`, attachment: item.attachment, label: t("Queued file {name}", { name: item.attachment.name }) }))
+                attachments.map((item, index) => item.type === "image" ? (0, import_react100.createElement)(QueueThumb, { key: `${item.attachment.attachmentId}:${index}`, attachment: item.attachment, loadImage: loadImage2, label: t("Queued image") }) : (0, import_react100.createElement)(QueueFile, { key: `${item.attachment.attachmentId}:${item.attachment.name}:${index}`, attachment: item.attachment, label: t("Queued file {name}", { name: item.attachment.name }) }))
               ),
-              (0, import_react99.createElement)(Preview, { text: row.content.filter((block) => block.type === "text").map((block) => block.text).join(""), renderFactorySlot })
+              (0, import_react100.createElement)(Preview, { text: row.content.filter((block) => block.type === "text").map((block) => block.text).join(""), renderFactorySlot })
             ),
-            queueMutable && (0, import_react99.createElement)(
+            queueMutable && (0, import_react100.createElement)(
               "div",
               { className: "bt-queue-actions" },
-              editing?.id === row.id ? (0, import_react99.createElement)(
-                import_react99.Fragment,
+              editing?.id === row.id ? (0, import_react100.createElement)(
+                import_react100.Fragment,
                 null,
-                (0, import_react99.createElement)(RowButton, { label: t("Save queued message"), disabled: busy !== null || editing.text.trim() === "", onClick: saveEdit }, (0, import_react99.createElement)(CheckIcon)),
-                (0, import_react99.createElement)(RowButton, { label: t("Cancel editing"), disabled: busy !== null, onClick: () => setEditing(null) }, (0, import_react99.createElement)(CloseIcon))
-              ) : (0, import_react99.createElement)(
-                import_react99.Fragment,
+                (0, import_react100.createElement)(RowButton, { label: t("Save queued message"), disabled: busy !== null || editing.text.trim() === "", onClick: saveEdit }, (0, import_react100.createElement)(CheckIcon)),
+                (0, import_react100.createElement)(RowButton, { label: t("Cancel editing"), disabled: busy !== null, onClick: () => setEditing(null) }, (0, import_react100.createElement)(CloseIcon))
+              ) : (0, import_react100.createElement)(
+                import_react100.Fragment,
                 null,
-                (0, import_react99.createElement)(RowButton, { label: t("Edit queued message"), title: text2 === null ? t("Contains non-text content, so editing is not supported yet") : void 0, disabled: busy !== null || text2 === null, onClick: () => {
+                (0, import_react100.createElement)(RowButton, { label: t("Edit queued message"), title: text2 === null ? t("Contains non-text content, so editing is not supported yet") : void 0, disabled: busy !== null || text2 === null, onClick: () => {
                   if (text2 !== null) setEditing({ id: row.id, text: text2 });
-                } }, (0, import_react99.createElement)(PencilIcon)),
-                (0, import_react99.createElement)(RowButton, { label: t("Delete queued message"), disabled: busy !== null, onClick: () => applyAction(row.id, { kind: "remove" }, t("Couldn’t delete the queued message — it may have started already.")) }, (0, import_react99.createElement)(TrashIcon)),
-                (0, import_react99.createElement)(RowButton, { label: t("Steer queued message"), title: running2 ? void 0 : t("Only while a turn is running"), disabled: busy !== null || !running2, onClick: () => applyAction(row.id, { kind: "steer" }, t("Couldn’t steer the queued message. Try again.")) }, (0, import_react99.createElement)(ArrowUpIcon))
+                } }, (0, import_react100.createElement)(PencilIcon)),
+                (0, import_react100.createElement)(RowButton, { label: t("Delete queued message"), disabled: busy !== null, onClick: () => applyAction(row.id, { kind: "remove" }, t("Couldn’t delete the queued message — it may have started already.")) }, (0, import_react100.createElement)(TrashIcon)),
+                (0, import_react100.createElement)(RowButton, { label: t("Steer queued message"), title: running2 ? void 0 : t("Only while a turn is running"), disabled: busy !== null || !running2, onClick: () => applyAction(row.id, { kind: "steer" }, t("Couldn’t steer the queued message. Try again.")) }, (0, import_react100.createElement)(ArrowUpIcon))
               )
             )
           );
         }),
-        listVisible && pendingQueue.map((submission) => (0, import_react99.createElement)(
+        listVisible && pendingQueue.map((submission) => (0, import_react100.createElement)(
           "li",
           { key: submission.requestId, className: "bt-queue-row bt-queue-pending" },
-          rowCount === 1 && (0, import_react99.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react99.createElement)(QueueIcon)),
-          submission.attachments.length > 0 && (0, import_react99.createElement)(
+          rowCount === 1 && (0, import_react100.createElement)("span", { className: "bt-queue-lead", "aria-hidden": true }, (0, import_react100.createElement)(QueueIcon)),
+          submission.attachments.length > 0 && (0, import_react100.createElement)(
             "span",
             { className: "bt-queue-attachments" },
-            submission.attachments.map((attachment, index) => attachment.type === "image" ? (0, import_react99.createElement)("img", { key: `${attachment.value.previewUrl}:${index}`, className: "bt-queue-thumb", src: attachment.value.previewUrl, alt: t("Queued image") }) : (0, import_react99.createElement)(QueueFile, { key: `${attachment.value.attachmentId}:${attachment.value.name}:${index}`, attachment: attachment.value, label: t("Queued file {name}", { name: attachment.value.name }) }))
+            submission.attachments.map((attachment, index) => attachment.type === "image" ? (0, import_react100.createElement)("img", { key: `${attachment.value.previewUrl}:${index}`, className: "bt-queue-thumb", src: attachment.value.previewUrl, alt: t("Queued image") }) : (0, import_react100.createElement)(QueueFile, { key: `${attachment.value.attachmentId}:${attachment.value.name}:${index}`, attachment: attachment.value, label: t("Queued file {name}", { name: attachment.value.name }) }))
           ),
-          (0, import_react99.createElement)(Preview, { text: submission.text, renderFactorySlot }),
-          (0, import_react99.createElement)("span", { className: "bt-queue-status", role: "status" }, t("Sending…")),
-          queueMutable && (0, import_react99.createElement)(
+          (0, import_react100.createElement)(Preview, { text: submission.text, renderFactorySlot }),
+          (0, import_react100.createElement)("span", { className: "bt-queue-status", role: "status" }, t("Sending…")),
+          queueMutable && (0, import_react100.createElement)(
             "div",
             { className: "bt-queue-actions" },
-            (0, import_react99.createElement)(RowButton, { label: t("Edit queued message"), title: t("Sending…"), disabled: true }, (0, import_react99.createElement)(PencilIcon)),
-            (0, import_react99.createElement)(RowButton, { label: t("Delete queued message"), title: t("Sending…"), disabled: true }, (0, import_react99.createElement)(TrashIcon)),
-            (0, import_react99.createElement)(RowButton, { label: t("Steer queued message"), title: t("Sending…"), disabled: true }, (0, import_react99.createElement)(ArrowUpIcon))
+            (0, import_react100.createElement)(RowButton, { label: t("Edit queued message"), title: t("Sending…"), disabled: true }, (0, import_react100.createElement)(PencilIcon)),
+            (0, import_react100.createElement)(RowButton, { label: t("Delete queued message"), title: t("Sending…"), disabled: true }, (0, import_react100.createElement)(TrashIcon)),
+            (0, import_react100.createElement)(RowButton, { label: t("Steer queued message"), title: t("Sending…"), disabled: true }, (0, import_react100.createElement)(ArrowUpIcon))
           )
         ))
       )
@@ -37912,6 +38399,32 @@ var omni = Object.freeze({
   setCanvasRenderer,
   // Parts of the Bot surface a plugin's own views are drawn with.
   ui: Object.freeze({ icons: icons_exports, OmniMark, BotMark, MAIN_LOOK, CHARACTERS, relativeShort, createSource }),
+  // The shared gen-UI kit (#1326): live rows and the person card, drawn inside a plugin's
+  // own tool card. `rows(roster, batchId)` reads the host's slice; the model is the same
+  // words and number formats the kit's cards use, for a card of a plugin's own shape.
+  genui: Object.freeze({
+    PersonCard,
+    ProgressRow,
+    ProgressRows,
+    CoverageRow,
+    rows: genuiRows,
+    revisionOf,
+    loadReadingNote,
+    READING_NOTE,
+    model: Object.freeze({
+      coverageLine,
+      coverageOf,
+      countText: countText2,
+      parseReadingNote,
+      percentOf,
+      personView,
+      rowView,
+      shortDate,
+      spanOf: spanOf2,
+      stateId,
+      stateWord
+    })
+  }),
   // The roster and actions of the running surface, or null before it runs.
   face: () => currentFace?.() ?? null
 });
@@ -38945,6 +39458,7 @@ function apply(ctx) {
     () => installCompiledStyles(VOICE_SETTINGS_CSS, "voice-settings"),
     () => installCompiledStyles(IMAGE_CELL_CSS, "image-cell"),
     () => installCompiledStyles(SUGGEST_CSS, "suggestions"),
+    () => installCompiledStyles(GENUI_CSS, "genui"),
     () => installCompiledStyles(LIVE_CSS, "live"),
     () => {
       const fiber = ctx.inject(["sidebarRightTabs", "sidebarRight"], (scope) => {

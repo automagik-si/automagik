@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { GUARD_DIR, KILL_GUARD_DIR } from "../mods/am-sidebar/workers.js";
-import { AGY_FIXED_DENY } from "../mods/am-sidebar/models.js";
+import { AGY_FIXED_DENY, CLAUDE_PERSON_SETTINGS } from "../mods/am-sidebar/models.js";
 import { WORKER_LINE } from "../mods/am-sidebar/briefingText.mjs";
 import { approveProject, recordFileOf } from "../mods/am-sidebar/approved.js";
 import { DEADLINE_CALL_MS, DEADLINE_MARGIN_MS, DEADLINE_PLACE_MS } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
@@ -325,7 +325,13 @@ test("start --machine: an agent not installed there is refused before anything r
 
 /** The words hc run starts there: after `--`, the `/usr/bin/env` words, then the agent's. */
 const startedWith = (s) => { const run = s.calls().find((c) => c[0] === "run"); return run.slice(run.indexOf("--") + 1); };
-const agentPart = (argv) => (argv[0] === "/usr/bin/env" ? argv.slice(argv.findIndex((w, i) => i > 0 && !/^[A-Z_]+=/.test(w))) : argv);
+// #1558: a Claude launch's person-feature settings are pinned by person-features.test.mjs; the
+// words compared here are the rest of the launch (never another --settings, such as agy's file).
+const withoutPerson = (words) => {
+  const i = words.indexOf("--settings");
+  return i < 0 || words[i + 1] !== CLAUDE_PERSON_SETTINGS ? words : [...words.slice(0, i), ...words.slice(i + 2)];
+};
+const agentPart = (argv) => withoutPerson(argv[0] === "/usr/bin/env" ? argv.slice(argv.findIndex((w, i) => i > 0 && !/^[A-Z_]+=/.test(w))) : argv);
 /** The pack's briefing entry and script in an app home on vm, as an install there puts them. */
 const packAt = (dir) => {
   for (const f of ["automagik-herdr/briefing.mjs", "mods/am-sidebar/briefing.mjs"]) {
@@ -385,7 +391,7 @@ test("start --machine of a Claude bot: it runs on a session id Herdr chose (--se
   assert.equal(pane.labels.bot, HEDGE);
   // Output never shows a session id (RFC 0021): the argv's value and the label are masked, stderr too.
   const out = r.json();
-  assert.deepEqual(out.argv, ["claude", "--permission-mode", "auto", "--session-id", "***"]);
+  assert.deepEqual(out.argv, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto", "--session-id", "***"]);
   assert.equal(out.labels["agent.session"], "***");
   assert.equal(`${r.out}${r.err}`.includes(id), false);
   // The attach row is the starting machine's and names no session.
@@ -427,7 +433,7 @@ test("restart --machine --fresh of a Claude bot: the new conversation runs on a 
   assert.equal(fresh.words.length, 5);
   assert.equal(runLabels(fresh.run)["agent.session"], fresh.words[4], "the new pane's label is the new session, never the old one carried");
   assert.equal(s.hcState().terminals.find((x) => x.address === r.json().terminal || x.address === `vm/${r.json().terminal}`).labels["agent.session"], fresh.words[4]);
-  assert.deepEqual(r.json().argv, ["claude", "--permission-mode", "auto", "--session-id", "***"]);
+  assert.deepEqual(r.json().argv, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto", "--session-id", "***"]);
   assert.equal(`${r.out}${r.err}`.includes(fresh.words[4]), false);
   // A resume keeps its session: --resume <that id>, no --session-id, the label carried.
   const again = s.cli(["restart", "Hedge", ...s.on, "--force", "--json"]);
