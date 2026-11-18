@@ -257,6 +257,12 @@ The transcript replay is independent of the bridge: only an explicit `false` tur
 | `true` | DSH bridge | yes | DSH bridge and its own | yes |
 | `false` | its own only | no | its own only | no |
 
+With the Codex conversation open, choose **Account → Bot settings → Feedback** and look for its
+row under **Permissions**. When the row includes agent details, it reports the DSH bridge state.
+To confirm delivery, check the receiving Bot’s chat. If your team has a native browser Bot
+(such as `@browse`), you can ask it directly to open a page. In a Bot conversation that offers
+a **Browser** tab, you can also open it from **Details → Browser**.
+
 So with `dshTools` absent Codex sees the chat but not the team's tools; those need an explicit
 `true` (two tool sets). A replay reaches an agent in each of these cases, redacted and capped at
 120,000 characters, the oldest messages dropped first with a marker: a move from another
