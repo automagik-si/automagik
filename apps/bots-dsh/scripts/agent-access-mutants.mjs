@@ -102,6 +102,38 @@ const mutants = [
     file: 'test/upload-access.test.js',
     test: 'a relative glob pattern through a link outside the bots root is refused',
   },
+  {
+    name: 'shell path words are not resolved',
+    source: '../src/host/shared-uploads.js',
+    from: 'const real = rt.realBeyond ? await rt.realBeyond(absolute) : absolute',
+    to: 'const real = absolute',
+    file: 'test/upload-access.test.js',
+    test: "a shell path word through a link into another Bot's folder is refused as best effort",
+  },
+  {
+    name: 'shell words split inside quotes',
+    source: '../src/host/shared-uploads.js',
+    from: `    } else if (char === "'" || char === '"') {`,
+    to: '    } else if (false) {',
+    file: 'test/upload-access.test.js',
+    test: 'quoted and escaped shell paths, paths with spaces and flag values are refused',
+  },
+  {
+    name: 'a flag value is not resolved as a path',
+    source: '../src/host/shared-uploads.js',
+    from: 'const shellFlagValue = word => /^-+[^=]+=/.test(word) ? [word, word.slice(word.indexOf(\'=\') + 1)] : [word]',
+    to: 'const shellFlagValue = word => [word]',
+    file: 'test/upload-access.test.js',
+    test: 'quoted and escaped shell paths, paths with spaces and flag values are refused',
+  },
+  {
+    name: 'a bots-root word skips the real-path check',
+    source: '../src/host/shared-uploads.js',
+    from: 'if (flatten(real) === flatten(absolute)) continue',
+    to: 'if (flatten(real) === flatten(absolute) || /\\.automagik\\/bots\\//i.test(flatten(real))) continue',
+    file: 'test/upload-access.test.js',
+    test: "a link inside the shared workspace or the caller's own folder is refused",
+  },
 ]
 for (const mutant of mutants) {
   const source = new URL(mutant.source ?? accessSource.href, import.meta.url)

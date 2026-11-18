@@ -283,11 +283,20 @@ The DSH tool guard refuses another Bot's region and refuses per-chat ACP copies 
 objects unless the caller holds a verified copy or the picture is already in its own history.
 Tool-result images, channel pictures and handoff rows stay readable from that Bot's own
 history; this does not grant another Bot access or authorise an edit. Like private Bots, this is a tool-level
-check: Codex's own tools and indirect shell paths are not seen. Parent-folder walks are not
-blocked; `.gitignore` hides copies only from ignore-aware walks and is not a filesystem fence.
-No permission, Codex profile or read root is widened. If the operating system refuses the
-folder, the picture's text asks the person to allow Automagik access (Files and Folders or
-Full Disk Access on macOS, or a folder writable by their user elsewhere).
+check: Codex's own tools are not seen. Shell commands get only a best-effort check: each word
+that looks like a path is resolved from the command's working folder, and a word that leads to
+another Bot's own folder is refused. A path a command builds, a variable or glob it expands, a
+folder it changes into, or a file a script opens is still not seen.
+
+A Bot with shell access can read what the operating-system user can read; the folder fence covers file tools, and shell commands get only a best-effort check. The per-Bot shell
+capability that can take the shell away from a Bot that must stay fenced is
+[#1471](https://github.com/automagik-si/automagik/issues/1471).
+
+Parent-folder walks are not blocked; `.gitignore` hides copies only from ignore-aware walks
+and is not a filesystem fence. No permission, Codex profile or read root is widened. If the
+operating system refuses the folder, the picture's text asks the person to allow Automagik
+access (Files and Folders or Full Disk Access on macOS, or a folder writable by their user
+elsewhere).
 
 When Codex refuses an edit with `edit-not-isolated`, the image card stays failed and the Bot
 gets its read-only copy's path. At Workspace it may use its own tools to make and check a new
