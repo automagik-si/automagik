@@ -5285,13 +5285,13 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     if (providerGone(plan, gone)) {
       const note = providerGoneNote(resumeId, seat.terminal, gone);
       plan = { ...restartPlan({ ...planned, fresh: true }), note };
+      await recheck(plan.argv);
       resumeId = null;
       say(`${bot.name} starts on a new conversation: ${note}.`);
-      const retryLogin = await recheck(plan.argv);
       const again = await launchSeat(project, bot, { agent: plan.agent, model: plan.model, argv: plan.argv, cwd, place,
         carry: { ...carriedLabels(old), ...(plan.template ? { [WORKER_TEMPLATE_LABEL]: plan.template } : {}),
           ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, session: sessionOfPlan(plan, null), replacing: held.binding,
-        granted: plan.granted, login: retryLogin });
+        granted: plan.granted });
       if (again.running) throw new CliError(`${bot.name} is running in ${again.running} now, so no new pane was started; ${old.address} still runs it, untouched.`);
       for (const w of again.hook.warnings) say(w);
       seat = again;
