@@ -250,19 +250,21 @@ mount --bind /var/lib/docker/volumes/automagik-data/_data "$view"
 
 # Search only: the view itself, then every directory on the way to a readable path.
 setfacl -m "u:$me:--x" "$view"
-setfacl -m "u:$me:--x" "$view/.claude" "$view/.codex" "$view/.automagik"
-setfacl -m "u:$me:--x" "$view/dsh" "$view/dsh/profiles" "$view/dsh/profiles/automagik-web"
-setfacl -m "u:$me:r--" "$view/dsh/profiles/automagik-web/automagik-server-profile"
+for d in .claude .codex .automagik dsh dsh/profiles dsh/profiles/automagik-web; do
+  [ -d "$view/$d" ] && setfacl -m "u:$me:--x" "$view/$d"
+done
+marker=dsh/profiles/automagik-web/automagik-server-profile
+[ -e "$view/$marker" ] && setfacl -m "u:$me:r--" "$view/$marker"
 # Search only into the agent homes: their presence decides the derived-file check.
 for d in .gemini .antigravity; do
   [ -d "$view/$d" ] && setfacl -m "u:$me:--x" "$view/$d"
 done
 
 # Read and search inside the exposed roots only, never over the view.
-setfacl -R -m "u:$me:rX" \
-  "$view/.claude/projects" "$view/.claude/session-archive" \
-  "$view/.codex/sessions" "$view/.codex/archived_sessions" \
-  "$view/.automagik/meter"
+for d in .claude/projects .claude/session-archive .codex/sessions \
+         .codex/archived_sessions .automagik/meter; do
+  [ -d "$view/$d" ] && setfacl -R -m "u:$me:rX" "$view/$d"
+done
 
 # A Gemini or Antigravity workspace: the derived model-name file and nothing else.
 if [ -e "$view/.automagik/measure/model-name.json" ]; then

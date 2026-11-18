@@ -104,15 +104,18 @@ test('the documented grant reads only the exposed roots and denies every credent
   )
   const setup = section.slice(section.indexOf('view=/srv/automagik/measure/automagik-data'))
   assert.ok(setup.length > 0, 'the section is one runnable setup block')
-  // Read and search only on the roots the measurement identity consumes.
+  // Read and search only on the roots the measurement identity consumes, each one guarded so an
+  // absent vendor directory is skipped rather than failing the setup.
   for (const root of [
     '.claude/projects', '.claude/session-archive', '.codex/sessions',
     '.codex/archived_sessions', '.automagik/meter',
   ]) {
-    assert.ok(setup.includes(`"$view/${root}"`), `the grant names ${root}`)
+    assert.ok(setup.includes(root), `the grant names ${root}`)
   }
+  assert.ok(setup.includes('[ -d "$view/$d" ]'), 'the grant skips an absent root')
   assert.ok(
-    setup.includes('"$view/dsh/profiles/automagik-web/automagik-server-profile"'),
+    setup.includes('[ -e "$view/$marker" ]') &&
+      setup.includes('dsh/profiles/automagik-web/automagik-server-profile'),
     'the grant names the seeded marker',
   )
   // The documented grant runs before the view is remounted read-only: setfacl needs a writable
