@@ -1289,6 +1289,30 @@ export function install(rt) {
     if (entry?.turn !== undefined) entry.cut = { texts: entry.texts.length }
   }
 
+  // DSH's desktop history follower normally activates a cold Session in the
+  // background. Keep the history and live events readable without promoting a
+  // Session whose Bot is waiting for a shell choice.
+  const follow = ctx.sessionController?.follow
+  if (typeof follow === 'function') {
+    const controller = ctx.sessionController
+    const admitted = async function* (request, ...rest) {
+      if (request?.activate === true && request.address?.kind === 'session') {
+        await rt.refreshShellChoice?.()
+        try {
+          rt.assertShellChoice?.(request.address.sessionId)
+        } catch (error) {
+          if (error?.code !== 'bot/shell-off-cli') throw error
+          request = { ...request, activate: false }
+        }
+      }
+      yield* follow.call(this, request, ...rest)
+    }
+    ctx.effect(() => {
+      controller.follow = admitted
+      return () => { if (controller.follow === admitted) controller.follow = follow }
+    }, 'ds-bot: keep shell-held Sessions readable without activating them')
+  }
+
   // DSH's prompt admission wraps any unexpected failure as 'session/agent-busy' and
   // keeps the real cause in details.reason, which the window never shows and the log
   // never saw (#424). For a Session this team owns, the reason is written to the
