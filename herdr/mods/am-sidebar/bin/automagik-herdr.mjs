@@ -1619,6 +1619,7 @@ function modelList(agent, pin = null) {
       read: (path) => readText(path),
       write: (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text); },
       rename: (from, to) => renameSync(from, to),
+      remove: fsIo.remove,
       exec: (command, args, options) => {
         const file = programPath(command);
         if (!file) throw new Error(`${command} isn't installed`);

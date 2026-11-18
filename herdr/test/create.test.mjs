@@ -7,7 +7,7 @@ import { registerHooks } from "node:module";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -210,6 +210,40 @@ test("Antigravity (#793): a missing model cache is refreshed once with `agy mode
   assert.equal(execs(), 1);
   await open({ form: "edit", bot: AG.id });
   assert.equal(execs(), 1, "once per session");
+  assert.deepEqual(readdirSync(join(state.appHome, "automagik-herdr")).filter((n) => n.startsWith("antigravity-models.json")),
+    ["antigravity-models.json"], "the form's temp file was moved into place");
+
+  // #809: exercise both Herdr rejecting exec and the real /bin/mv returning a non-zero exit.
+  t.after(() => { delete state.execFault; });
+  for (const result of ["exec rejects", "mv exits non-zero"]) {
+    state.appHome = join(root, result);
+    state.calls = [];
+    const dir = join(state.appHome, "automagik-herdr");
+    const otherTemp = "antigravity-models.json.tmp-unrelated";
+    const rejects = result === "exec rejects";
+    if (rejects) seedAgModels([{ id: "old-model", label: "Old Model" }], "2000-01-01T00:00:00.000Z");
+    else mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, otherTemp), "another refresh");
+    state.execFault = (command, [from, to]) => {
+      if (command !== "/bin/mv") return;
+      if (rejects) return new Error("mv was ended");
+      // A directory of the same name inside the destination makes mv refuse the move.
+      mkdirSync(join(to, from.split("/").pop()), { recursive: true });
+    };
+    const { form: failed } = await open({ form: "edit", bot: AG.id });
+    delete state.execFault;
+    const moves = state.calls.filter((c) => c.kind === "exec" && c.command === "/bin/mv");
+    assert.equal(moves.length, 1, result);
+    assert.match(moves[0].args[0], /antigravity-models\.json\.tmp-\d+-\d+-[a-z0-9]+$/);
+    assert.equal(failed.modelsWhy, "the model cache couldn't be written", result);
+    assert.deepEqual(readdirSync(dir).filter((n) => n.includes(".tmp-")), [otherTemp], result);
+    assert.equal(readFileSync(join(dir, otherTemp), "utf8"), "another refresh", result);
+    if (rejects) {
+      assert.ok(failed.modelInfo("antigravity").models.includes("old-model"), "the old list stays");
+    } else {
+      assert.deepEqual(readdirSync(moves[0].args[1]), [moves[0].args[0].split("/").pop()], "only the blocking folder is at the destination");
+    }
+  }
 });
 
 test("Antigravity (#793): a slow refresh updates both forms and preserves edits typed while it runs", async (t) => {
