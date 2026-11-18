@@ -373,7 +373,7 @@ export function install(rt) {
   // Build each message through ordinary delivery (including its ledger and capabilities)
   // before waking the destination. A distinct user/message still acknowledges each item.
   async function resendTo(target, items) {
-    const warn = error => rt.warn('omni-ui: picking up delivery for %s failed: %s', target, error)
+    const warn = error => rt.warn('omni-ui: sending again what %s was sent failed: %s', target, error)
     const started = (item, destination) => startedTurns?.has(item.recordId ?? item.oldId) || startedTurns?.has(destination)
     const sendable = (agent, item, destination) => (item.recordId !== undefined || sessionFor(item.oldId, item.args) === destination)
       && (!item.args.resumed || !started(item, destination))
