@@ -290,7 +290,7 @@ export function install(rt) {
     if (id === undefined) return
     // DSH closes a cut-off turn as it reopens the Session; that is not the turn finishing.
     const finished = event.type === 'turn/end' && !cutByRestart(event.data?.reason)
-    if (event.type === 'turn/start') startedTurns?.add(id)
+    if (event.type === 'user/message' && event.data?.source?.resumed !== true) startedTurns?.add(id)
     if ((event.type === 'turn/start' || finished) && firstTurn?.has(id) === false) {
       firstTurn.set(id, { type: event.type, turn: event.data?.turn, reason: event.data?.reason })
     }
@@ -374,18 +374,22 @@ export function install(rt) {
   // before waking the destination. A distinct user/message still acknowledges each item.
   async function resendTo(target, items) {
     const warn = error => rt.warn('omni-ui: picking up delivery for %s failed: %s', target, error)
-    const started = item => startedTurns?.has(item.recordId ?? item.oldId) || startedTurns?.has(target)
-    const sendable = (agent, item) => (item.recordId !== undefined || sessionFor(item.oldId, item.args) === target)
-      && (!item.args.resumed || !started(item))
+    const started = (item, destination) => startedTurns?.has(item.recordId ?? item.oldId) || startedTurns?.has(destination)
+    const sendable = (agent, item, destination) => (item.recordId !== undefined || sessionFor(item.oldId, item.args) === destination)
+      && (!item.args.resumed || !started(item, destination))
       && taken?.has(item.args.exchangeId) !== true && !waitingFor(agent).has(item.args.exchangeId)
 
     // Ordinary delivery joins #1569's reply queue when installed. Submit all replies
     // before waiting, and let the other roles use their own single wake.
     const replies = items.filter(item => item.args.role === 'reply').map(async item => {
+      let deliveredTo = target
       const sent = await deliver({ ...item.args, sessionId: target, steer: false, resent: true }, {
-        shouldSend: agent => sendable(agent, item),
+        shouldSend(agent, destination) {
+          deliveredTo = destination
+          return sendable(agent, item, destination)
+        },
       })
-      if (sent !== undefined) resent.add(target)
+      if (sent !== undefined) resent.add(deliveredTo)
     }).map(reply => reply.catch(warn))
 
     const staged = items.filter(item => item.args.role !== 'reply').map(item => {
@@ -408,11 +412,10 @@ export function install(rt) {
     const ids = new Set()
     const batch = prepared.filter(({ agent, item, sent }) => {
       const id = item.args.exchangeId
-      if (sendable(agent, item) && !ids.has(id)) {
+      if (sendable(agent, item, target) && !ids.has(id)) {
         ids.add(id)
         return true
       }
-      if (item.args.resumed && item.recordId === undefined && started(item)) forgetQueued(id)
       sent.resolve(false)
       return false
     })
@@ -688,9 +691,13 @@ export function install(rt) {
         const args = await reconcileEnded(recordId, record)
         return args?.sessionId === target ? { ...item, args } : undefined
       }
-      if (first !== undefined || rt.shellHoldOf?.(record.botId) !== undefined) return undefined
+      if (startedTurns?.has(recordId) || rt.shellHoldOf?.(record.botId) !== undefined) return undefined
       const agent = await rt.resolveAgent(recordId).catch(() => undefined)
-      if (firstTurn?.has(recordId)) return undefined
+      if (startedTurns?.has(recordId)) return undefined
+      if (firstTurn?.get(recordId)?.type === 'turn/end') {
+        const args = await reconcileEnded(recordId, record)
+        return args?.sessionId === target ? { ...item, args } : undefined
+      }
       if (agent?.status === 'running') {
         update(recordId, () => record)
         return undefined

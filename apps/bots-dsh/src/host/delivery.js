@@ -128,7 +128,7 @@ export function install(rt) {
     }
     await rt.ensureCapabilities(targetSessionId)
     const agent = await resolveAgent(targetSessionId)
-    if (shouldSend !== undefined && !shouldSend(agent)) return undefined
+    if (shouldSend !== undefined && !shouldSend(agent, targetSessionId)) return undefined
     // A steered message cuts into a running turn at its next step; a follow-up
     // queues for the next turn (see turns.js for how each is routed).
     const message = createUserMessage({
