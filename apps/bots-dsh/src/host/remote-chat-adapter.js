@@ -60,14 +60,18 @@ function* textBlocks(text, index) {
   yield { type: 'block-end', index, block: { type: 'text', text } }
 }
 
-// Deep-frozen plain data only: an object with its own toJSON, a getter, a Proxy or a class
+// Deep-frozen plain data only: an object with its own function toJSON, a getter, a Proxy or a class
 // prototype could answer one read and behave differently on the next, so it is not a message.
 function plainData(value) {
   if (value === null || typeof value !== 'object') return typeof value !== 'function'
   if (types.isProxy(value)) return false
   const prototype = Object.getPrototypeOf(value)
   if (Array.isArray(value) ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) return false
-  if (Object.hasOwn(value, 'toJSON') || !Object.isFrozen(value)) return false
+  if (!Object.isFrozen(value)) return false
+  // JSON.stringify calls only a function toJSON. A plain data key with that name is ordinary
+  // data a tool argument or a model reply may legitimately carry.
+  const toJSON = Object.getOwnPropertyDescriptor(value, 'toJSON')
+  if (toJSON !== undefined && 'value' in toJSON && typeof toJSON.value === 'function') return false
   for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
     if (!('value' in descriptor)) return false
     if (!plainData(descriptor.value)) return false
@@ -104,6 +108,12 @@ function requestFields(options) {
   if (!text(provider) || !text(model) || !text(sessionId) || messages?.accessor === true || !Array.isArray(messages?.value)) return undefined
   if (purpose?.accessor === true || signal?.accessor === true) return undefined
   return { provider: provider.value, model: model.value, sessionId: sessionId.value, purpose: purpose?.value, messages: messages.value, signal: signal?.value, marked }
+}
+
+function lastMessage(messages) {
+  const length = messages.length
+  const message = length > 0 ? messages[length - 1] : undefined
+  return { length, message, role: length > 0 ? message.role : undefined }
 }
 
 export class RemoteChatAdapter extends LlmAdapter {
@@ -190,7 +200,7 @@ export class RemoteChatAdapter extends LlmAdapter {
     let expected
     try { expected = projectFilesToText(derived.filter(message => message?.role !== 'developer'), filePath) } catch { return false }
     if (expected.length !== request.messages.length || expected.length === 0) return false
-    // Only deep-frozen plain data: no toJSON, accessors, Proxies or class instances can make one
+    // Only deep-frozen plain data: no function toJSON, accessors, Proxies or class instances can make one
     // read (this comparison) differ from the next (the text the adapter actually submits).
     if (!plainData(request.messages)) return false
     const want = expected.map(message => asDispatched(message, request.provider))
@@ -200,11 +210,19 @@ export class RemoteChatAdapter extends LlmAdapter {
   }
 
   // The text one request submits to the remote: the trailing run of person messages.
-  static promptText(messages) {
-    let start = messages.length
-    while (start > 0 && messages[start - 1].role === 'user') start--
-    return messages.slice(start).filter(message => message.source?.kind !== 'acp-session').map(message =>
-      typeof message.content === 'string' ? message.content : (message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')).join('\n\n')
+  static promptText(messages, last = lastMessage(messages)) {
+    const trailing = []
+    let { length, message, role } = last
+    while (length > 0 && role === 'user') {
+      trailing.push(message)
+      if (--length === 0) break
+      message = messages[length - 1]
+      role = message.role
+    }
+    return trailing.reverse().filter(message => message.source?.kind !== 'acp-session').map(message => {
+      const content = message.content
+      return typeof content === 'string' ? content : (content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
+    }).join('\n\n')
   }
 
   // The runtime's own read path for a durable file reference, so the same projection can be
@@ -224,14 +242,34 @@ export class RemoteChatAdapter extends LlmAdapter {
     if (!agent) return yield finish('error', 'Remote Hermes needs a live Automagik chat to show its tools and approvals.')
     this.register(agent)
     let entry = this.live.get(request.sessionId)
-    const continuing = request.messages.at(-1)?.role === 'tool' && entry?.calls.has(request.messages.at(-1)?.toolCallId)
-    if (!continuing && entry) { entry.run.dispose(); this.live.delete(request.sessionId); entry = undefined }
     let index = 0
     let complete = false
     let yieldedTool = false
     const stop = () => { entry?.abortWake?.(); if (entry) void entry.run.stop() }
     request.signal?.addEventListener('abort', stop, { once: true })
     try {
+      // Read once before opening: a marked list can change between reads.
+      const messages = request.messages
+      let last, continuing = false, failed = false, prompt
+      try {
+        last = lastMessage(messages)
+        const toolCallId = last.role === 'tool' ? last.message.toolCallId : undefined
+        continuing = last.role === 'tool' && entry?.calls.has(toolCallId)
+      } catch { failed = true }
+      if (!continuing && entry) {
+        // A replaced chat detaches like a closed one. Waiting for it keeps the old socket's
+        // SSH lease release ahead of the new open, as a plain dispose did. A refused
+        // (unreadable) request opens nothing, so it only disposes.
+        const old = entry
+        this.live.delete(request.sessionId)
+        entry = undefined
+        if (failed) old.run.dispose()
+        else await old.run.release().catch(() => {})
+      }
+      if (failed) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
+      if (!continuing) {
+        try { prompt = { text: RemoteChatAdapter.promptText(messages, last) } } catch { prompt = { failed: true } }
+      }
       if (request.signal?.aborted) return yield finish('aborted', 'Stopped before a remote submit.')
       if (!entry) {
         const identity = this.identity(request.sessionId)
@@ -262,7 +300,9 @@ export class RemoteChatAdapter extends LlmAdapter {
         const rows = this.models()
         const model = rows.find(model => model.id === request.model) ?? (this.attached() ? rows[0] ?? ATTACHED_PLACEHOLDER : undefined)
         if (!model) { complete = true; return yield finish('error', 'Discover this remote model again before using it.') }
-        const text = RemoteChatAdapter.promptText(request.messages)
+        // Recovery above does not need this new message's text.
+        if (prompt.failed) return yield finish('error', 'Remote Hermes answers only enabled Bot chat sessions.')
+        const { text } = prompt
         if (!text) return yield finish('error', 'Remote Hermes accepts text in this delivery.')
         // Prompts never contain the standing credential or a transient ticket.
         await run.submit(run.transport.redact(text), model)

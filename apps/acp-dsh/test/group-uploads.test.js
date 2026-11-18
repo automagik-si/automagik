@@ -379,3 +379,137 @@ for (const change of ['member removed', 'deleted room']) {
     })
   }
 }
+
+async function movedHost(t) {
+  const h = await host(t)
+  const first = Session.create('group-first-part')
+  h.agents.set(first.id, { id: first.id, session: first })
+  h.rooms.delete(h.room.id)
+  h.room.id = first.id
+  h.room.sessionId = h.group.id
+  h.room.parts = [{ sessionId: first.id }]
+  h.rooms.set(h.room.id, h.room)
+  h.owners.set(h.session.id, { roomId: h.room.id, botId: 'a' })
+  h.relay.source.roomId = h.room.id
+  h.relay.source.uploads.roomId = h.room.id
+  h.services.omniTeam.sessionOfRoom = room => {
+    assert.equal(room, h.room)
+    return room.sessionId
+  }
+  return { ...h, first }
+}
+
+function loadedEarlierPart(h, row) {
+  const earlier = Session.create('group-earlier-part')
+  earlier.append('user/message', row, { surfaceOp: 'append' })
+  h.agents.set(earlier.id, { id: earlier.id, session: earlier })
+  h.room.parts.push({ sessionId: earlier.id })
+  return earlier
+}
+
+async function assertMovedCopies(h, preserveHandle = false) {
+  h.save()
+  const projected = h.project()
+  const before = structuredClone(projected)
+  assert.equal((await h.step(projected)).at(-1).reason.kind, 'stop')
+  assert.deepEqual(h.sent[0].prompt, [text('Group OCR marker'),
+    ...(preserveHandle ? [text('\n'), projected[0].content[1]] : []),
+    text(fileHandleText(h.file, h.path(h.file, 'x.txt'))), imageLine(h)])
+  assert.deepEqual(projected, before)
+  for (const [ref, leaf, bytes] of [[h.file, 'x.txt', txt], [h.image, 'image.png', png]]) {
+    const path = h.path(ref, leaf)
+    assert.deepEqual(readFileSync(path), bytes)
+    assert.equal(statSync(path).mode & 0o777, 0o444)
+  }
+  assert.equal(h.sent[0].prompt.some(block => block.type === 'image'), false)
+}
+
+async function assertMovedTextOnly(h) {
+  h.save()
+  const projected = h.project()
+  const before = structuredClone(projected)
+  let reads = 0
+  h.services.attachments = {
+    readImage: () => { reads++; throw new Error('No image read allowed') },
+    readFileStream: () => { reads++; throw new Error('No file read allowed') },
+  }
+  assert.equal((await h.step(projected)).at(-1).reason.kind, 'stop')
+  assert.deepEqual(h.sent[0].prompt, promptOf(projected))
+  assert.deepEqual(projected, before)
+  assert.equal(reads, 0)
+  assert.equal(readdirSync(h.home).includes('.automagik'), false)
+}
+
+test('after a move current-part uploads copy exact bytes and read-only paths', async t => {
+  const h = await movedHost(t)
+  h.relay.content[1].attachment = { ...h.file, name: 'forged.txt' }
+  await assertMovedCopies(h, true)
+})
+
+test('after a move uploads copy using room.sessionId without sessionOfRoom', async t => {
+  const h = await movedHost(t)
+  delete h.services.omniTeam.sessionOfRoom
+  await assertMovedCopies(h)
+})
+
+test('after a move uploads copy from a loaded earlier part distinct from room.id', async t => {
+  const h = await movedHost(t)
+  const earlier = loadedEarlierPart(h, structuredClone(h.person.rows[0]))
+  h.group.deriveMessages = () => []
+  assert.notEqual(earlier.id, h.room.id)
+  assert.equal(h.first.deriveMessages().length, 0)
+  await assertMovedCopies(h)
+})
+
+test('after a move one relay copies uploads from current and loaded earlier parts', async t => {
+  const h = await movedHost(t)
+  const original = h.person.rows[0]
+  const earlierRow = { ...structuredClone(original), id: randomUUID(),
+    content: [text('Earlier upload marker'), structuredClone(original.content[2])] }
+  loadedEarlierPart(h, earlierRow)
+  h.group.deriveMessages = () => [{ ...original, content: original.content.slice(0, 2) }]
+  h.relay.source.uploads.items[1] = { ...h.relay.source.uploads.items[1],
+    messageId: earlierRow.id, blockIndex: 1 }
+  await assertMovedCopies(h)
+})
+
+test('after a move an unloaded earlier part keeps text unchanged without copying', async t => {
+  const h = await movedHost(t)
+  const earlier = loadedEarlierPart(h, structuredClone(h.person.rows[0]))
+  h.group.deriveMessages = () => []
+  h.agents.delete(earlier.id)
+  await assertMovedTextOnly(h)
+})
+
+for (const fault of ['offloaded image', 'kind mismatch']) {
+  test(`after a move first matching current row wins despite ${fault}`, async t => {
+    const h = await movedHost(t)
+    const original = h.person.rows[0]
+    loadedEarlierPart(h, structuredClone(original))
+    h.relay.source.uploads.items = [h.relay.source.uploads.items[1]]
+    h.group.deriveMessages = () => [{ ...original, content: original.content.map(block =>
+      block.type === 'image' ? { ...block,
+        ...(fault === 'offloaded image' ? { offloaded: true } : { type: 'file' }) } : block) }]
+    await assertMovedTextOnly(h)
+  })
+}
+
+for (const fault of ['member removed', 'wrong session', 'deleted room']) {
+  test(`after a move ownership loss from ${fault} keeps text unchanged`, async t => {
+    const h = await movedHost(t)
+    if (fault === 'member removed') h.room.members = []
+    if (fault === 'wrong session') h.room.sessions.a = 'other-session'
+    if (fault === 'deleted room') h.rooms.delete(h.room.id)
+    await assertMovedTextOnly(h)
+  })
+}
+
+test('after a move uploads cannot come from a loaded Session outside the room record', async t => {
+  const h = await movedHost(t)
+  const outside = Session.create('outside-group')
+  const row = { ...structuredClone(h.person.rows[0]), id: randomUUID() }
+  outside.append('user/message', row, { surfaceOp: 'append' })
+  h.agents.set(outside.id, { id: outside.id, session: outside })
+  for (const item of h.relay.source.uploads.items) item.messageId = row.id
+  await assertMovedTextOnly(h)
+})

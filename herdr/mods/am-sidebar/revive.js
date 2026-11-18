@@ -1,6 +1,7 @@
 // Revive over plain data (#939): which bots a reboot left without their agent, the order they
-// come back in, the session an agent that takes no id at launch (dsh-TUI, Antigravity) left on
-// disk for a pane, the one report the project's main bot gets, and the login service's unit.
+// come back in, the session an agent that takes no id at launch (dsh-TUI, Antigravity, Codex, Kimi) left on
+// disk for a pane, the one report the project's main bot gets, and the login service's unit
+// with the caller's PATH kept (#1418).
 // The CLI's `revive` runs it with hc and the files. Pure: no `herdr`, no `node:` import, so
 // `node --test` runs it. Apache-2.0.
 
@@ -24,9 +25,11 @@ export function isBareShell(get) {
 // ---- the session a pane's agent left on disk ----
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A session id found on disk: a UUID, or Kimi's session_<uuid>. */
+const sessionShape = (id) => typeof id === "string" && (UUID.test(id) || (id.startsWith("session_") && UUID.test(id.slice(8))));
 
-/** The agents whose session id is found on disk after the launch: neither takes one at launch. */
-export const DISCOVERED = Object.freeze(["dsh-tui", "antigravity"]);
+/** The agents whose session id is found on disk after the launch: none takes one at launch. */
+export const DISCOVERED = Object.freeze(["dsh-tui", "antigravity", "codex", "kimi"]);
 export const discoversSession = (agentKey) => DISCOVERED.includes(agentKey);
 
 /**
@@ -72,9 +75,66 @@ export function agyCandidates(historyText, folders) {
   return [...by.values()];
 }
 
+/** Codex's home: $CODEX_HOME when it is an absolute path, else <home>/.codex. */
+export const codexHomeOf = (home, env = {}) => (typeof env.CODEX_HOME === "string" && env.CODEX_HOME.startsWith("/") ? env.CODEX_HOME
+  : `${String(home).replace(/\/+$/, "")}/.codex`);
+/** The root of Codex's dated rollout folders. */
+export const codexSessionsDir = (codexHome) => `${String(codexHome).replace(/\/+$/, "")}/sessions`;
+
+/** The creation time in a version-7 UUID (ms), or null for any other id. */
+export const uuidV7Ms = (id) => (typeof id === "string" && UUID.test(id) && id[14] === "7" && /[89ab]/i.test(id[19])
+  ? Number.parseInt(id.slice(0, 8) + id.slice(9, 13), 16) : null);
+
+/** The UUID at the end of a Codex rollout's file name, or null. */
+export function codexRolloutId(fileName) {
+  const id = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(String(fileName ?? ""))?.[1];
+  return id ?? null;
+}
+
+/** A rollout's session_meta: { id, born }, null for another folder, undefined when unreadable. */
+export function codexCandidate(firstLine, folders) {
+  let row = null;
+  try { row = JSON.parse(firstLine); } catch { return undefined; }
+  const id = row?.payload?.id;
+  if (row?.type !== "session_meta" || typeof id !== "string" || !UUID.test(id)) return undefined;
+  const here = new Set(Array.isArray(folders) ? folders : [folders]);
+  if (!here.has(row.payload.cwd)) return null;
+  const at = Date.parse(row.payload.timestamp);
+  return { id, born: uuidV7Ms(id) ?? (Number.isFinite(at) ? at : Date.parse(row.timestamp)) };
+}
+
+/** Kimi's home: $KIMI_CODE_HOME when it is an absolute path, else <home>/.kimi-code. */
+export const kimiHomeOf = (home, env = {}) => (typeof env.KIMI_CODE_HOME === "string" && env.KIMI_CODE_HOME.startsWith("/") ? env.KIMI_CODE_HOME
+  : `${String(home).replace(/\/+$/, "")}/.kimi-code`);
+/** Kimi's append-only session index. */
+export const kimiIndexPath = (kimiHome) => `${String(kimiHome).replace(/\/+$/, "")}/session_index.jsonl`;
+
+/** Kimi's last index row per id, in these folders and strictly under its own sessions root. */
+export function kimiCandidates(indexText, folders, kimiHome) {
+  const here = new Set(Array.isArray(folders) ? folders : [folders]);
+  const by = new Map();
+  for (const line of String(indexText ?? "").split("\n")) {
+    let row = null;
+    try { row = JSON.parse(line); } catch { continue; }
+    const id = row?.sessionId;
+    if (typeof id !== "string" || !id.startsWith("session_") || !UUID.test(id.slice(8))) continue;
+    if (row.deleted === true) by.delete(id);
+    else by.set(id, row);
+  }
+  const normalized = (p) => (typeof p === "string" && p.startsWith("/") && !p.split("/").includes("..")
+    ? `/${p.split("/").filter((s) => s && s !== ".").join("/")}` : null);
+  const root = normalized(`${String(kimiHome).replace(/\/+$/, "")}/sessions`);
+  const out = [];
+  for (const [id, row] of by) {
+    const sessionDir = normalized(row.sessionDir);
+    if (here.has(row.workDir) && root && sessionDir?.startsWith(`${root}/`)) out.push({ id, sessionDir });
+  }
+  return out;
+}
+
 /** How far before a pane's created_ms its session may be stamped (clocks, a slow stat). */
 export const BORN_SLACK_MS = 2000;
-/** How soon after its start a pane's own session must be born: its briefing is its first prompt. */
+/** How soon after its start a pane's own session must be born (Codex's id dates its launch). */
 export const FIRST_SESSION_MS = 120_000;
 
 /**
@@ -93,7 +153,7 @@ export const FIRST_SESSION_MS = 120_000;
  */
 export function pickSession({ createdMs, candidates = [], claimed = new Set(), rivals = [] }) {
   if (!Number.isSafeInteger(createdMs)) return null;
-  const mine = candidates.filter((c) => typeof c?.id === "string" && UUID.test(c.id) && !claimed.has(c.id) && Number.isFinite(c.born)
+  const mine = candidates.filter((c) => sessionShape(c?.id) && !claimed.has(c.id) && Number.isFinite(c.born)
     && c.born >= createdMs - BORN_SLACK_MS && c.born <= createdMs + FIRST_SESSION_MS);
   if (mine.length !== 1) return null;
   const first = mine[0];
@@ -233,6 +293,26 @@ export function reportLine(project, results) {
   return parts.join(" ").replace(/\s*\n\s*/g, " ");
 }
 
+/**
+ * `revive --last` (#1419): the record revive-last.json keeps, as text. `record`: { at, boot_ms, boot,
+ * projects: [{ project, report, sent, unsent }], stopped?: { at, boot, reason } } or null (none);
+ * `path`: where it is kept. An older record has no `boot`: then neither the boot nor by hand is said.
+ */
+export function lastText(record, path) {
+  if (!record) return `No revive pass is on record on this computer (${path}). To see whether the login service that runs it after a restart is installed: am revive service status.`;
+  const stopped = record.stopped ?? null;
+  const at = record.at ?? stopped?.at ?? "an unknown time";
+  const boot = typeof record.at === "string" ? record.boot : stopped?.boot;
+  const lines = [`Last revive pass: ${at}${boot === true ? ", the login service's pass (--boot)" : boot === false ? ", run by hand" : ""}.`];
+  for (const p of record.projects ?? []) {
+    lines.push(p.report ?? `Project ${p.project ?? "(no project)"}: no report.`);
+    lines.push(`  ${p.sent ? `Sent to the main bot (${p.sent}).` : `Not sent: ${p.unsent ?? "no reason given"}.`}`);
+  }
+  if (stopped) lines.push(`A pass stopped early (${stopped.at ?? "an unknown time"}${stopped.boot === true ? ", --boot" : ""}): ${stopped.reason ?? "no reason given"}.`);
+  else if (!record.projects?.length) lines.push("Nothing to bring back: every bot the ledger named ran its agent.");
+  return lines.join("\n");
+}
+
 // ---- the login service ----
 
 export const UNIT_NAME = "automagik-herdr-revive.service";
@@ -243,17 +323,34 @@ export const UNIT_MARK = "# Automagik Herdr: brings the bots back after a restar
 /** How long the service waits for herdr-core before it gives up, in seconds. */
 export const SERVICE_WAIT_S = 600;
 
+/** The caller's PATH kept for login (#1418), without pane guards or project-local bins. */
+export function servicePath(path, { binDir, venv = null, drop = () => false } = {}) {
+  const dirs = new Set();
+  const venvBin = venv ? `${venv.replace(/\/+$/, "")}/bin` : null;
+  for (const dir of path.split(":")) {
+    if (!dir.startsWith("/") || /[\x00-\x1f\x7f-\x9f]/.test(dir)) continue;
+    const clean = dir.replace(/\/+$/, "");
+    if (drop(dir) || /\/node_modules\/\.bin$/.test(clean) || clean === venvBin) continue;
+    dirs.add(dir);
+  }
+  for (const dir of [binDir, "/usr/bin", "/bin"]) if (dir) dirs.add(dir);
+  return [...dirs].join(":");
+}
+
 /** `w` inside a systemd ExecStart: quoted, `%` and `$` doubled, `\` and `"` escaped. */
 const unitWord = (w) => `"${String(w).replace(/[\\"]/g, "\\$&").replace(/%/g, "%%").replace(/\$/g, "$$$$")}"`;
+
+/** Environment= expands `%` specifiers, but leaves `$` literal. */
+const envWord = (w) => `"${String(w).replace(/[\\"]/g, "\\$&").replace(/%/g, "%%")}"`;
 
 /**
  * The systemd user unit: once per login, after the session is up, `<runner> revive --boot
  * --wait <s>` (the CLI's launcher, bin/run.sh, which finds Node itself). The CLI waits for
- * herdr-core, so the unit names no core unit. `env`: variables the run needs ({ HERDR_APP_HOME }
- * when it isn't the default).
+ * herdr-core, so the unit names no core unit. `env`: the kept PATH (#1418) and HERDR_APP_HOME
+ * when it isn't the default.
  */
 export function unitText({ runner, env = {}, wait = SERVICE_WAIT_S }) {
-  const vars = Object.entries(env).filter(([, v]) => typeof v === "string" && v).map(([k, v]) => `Environment=${unitWord(`${k}=${v}`)}`);
+  const vars = Object.entries(env).filter(([, v]) => typeof v === "string" && v).map(([k, v]) => `Environment=${envWord(`${k}=${v}`)}`);
   return [UNIT_MARK, "[Unit]", "Description=Automagik Herdr: bring the bots back after a restart", "",
     "[Service]", "Type=oneshot", ...vars,
     `ExecStart=${unitWord(runner)} revive --boot --wait ${wait}`,
@@ -264,6 +361,9 @@ export function unitText({ runner, env = {}, wait = SERVICE_WAIT_S }) {
 
 /** Whether `text` (a unit file's) is one this pack wrote. */
 export const unitIsOurs = (text) => typeof text === "string" && text.startsWith(`${UNIT_MARK}\n`);
+
+/** Whether the unit keeps the PATH it was installed with (#1418). */
+export const unitKeepsPath = (text) => typeof text === "string" && /^Environment="PATH=/m.test(text);
 
 /** Two boot times (ms) are one boot: os.uptime() jitters by a second or so. */
 export const sameBoot = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 60_000;
