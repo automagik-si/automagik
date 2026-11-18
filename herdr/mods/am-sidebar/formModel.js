@@ -6,7 +6,7 @@
 // so `node --test` runs it. Apache-2.0.
 
 import { MAX_INSTRUCTIONS, OMNI_LOOK, RANKS, defaultLook, descendantsOf, effectiveLead, mainBotOf, newCategoryId, plannedOf } from "./model.js";
-import { AGY_MODE_DEFAULT, AGY_MODES, LEGACY_AGENTS, defaultModelFrom, knownModelsFrom } from "./models.js";
+import { AGY_MODE_DEFAULT, AGY_MODES, LEGACY_AGENTS, defaultModelFrom, knownModelsFrom, offeredModelsFrom } from "./models.js";
 import { hermesPairProblem, hermesPairConflict } from "./hermesPair.js";
 
 /** Waves the stepper offers (the mockup's 1..9); a stored later wave stays reachable. */
@@ -155,12 +155,12 @@ const SOURCES = { claude: "your Claude settings", codex: "your Codex config", an
 
 /**
  * An agent's model facts for the form: its own default (A12, from its config) and where that
- * comes from, and the models a bot may be pinned to. `texts`: configPaths' names mapped to
- * each file's text, as for models.js.
+ * comes from, models (the pick list), and accepted (what a pin may be). `texts`:
+ * configPaths' names mapped to each file's text, as for models.js.
  */
 export function modelInfo(agentKey, texts = {}) {
   const def = agentKey ? defaultModelFrom(agentKey, texts) : null;
-  return { def, from: def ? SOURCES[agentKey] ?? "its own settings" : null, models: agentKey ? knownModelsFrom(agentKey, texts) : [] };
+  return { def, from: def ? SOURCES[agentKey] ?? "its own settings" : null, models: agentKey ? offeredModelsFrom(agentKey, texts) : [], accepted: agentKey ? knownModelsFrom(agentKey, texts) : [] };
 }
 
 /**
@@ -240,7 +240,7 @@ export function problemOf(state, { key = null, loadError = null, file = null, in
   if (state.planned && !(Number.isInteger(state.wave) && state.wave > 0)) return "A planned bot needs a wave: a whole number from 1.";
   if (!state.planned && !state.agent) return "Pick what it runs on (or plan it for later).";
   if (state.pin && !state.agent) return "A model pin needs a coding agent.";
-  if (state.pin && info && !info.models.includes(state.pin)) {
+  if (state.pin && info && !(info.accepted ?? info.models).includes(state.pin)) {
     return `${state.pin} isn't a model ${state.agent} lists; pick one from the list or use the default.`;
   }
   if (state.agyMode !== undefined && !AGY_MODES.includes(state.agyMode)) {

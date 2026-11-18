@@ -515,11 +515,12 @@ am create --name N --agent A [--kind main|member] [--role R] [--code true|false]
        [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
        [--cross-member BOT@DIR]...
        [--character C --colour K | --omni] [--model M] [--rank R]
+       [--effort E] [--tier fast|standard]
        [--agy-mode auto|accept-edits|plan] [--agy-allow RULE]... [--agy-deny RULE]...
        [--planned-wave N [--planned-note T]]
        [--worker-agent A] [--worker-model M] [--worker-effort E] [--worker-agy-mode M]
        [--worker-template T]
-am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=]
+am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
 am rm <bot>
 am category ls | add --title T [--sub S] [--id ID] | edit <id> | rm <id> | order <id>...
 am start <bot> [--space ID] [--tab ID]
@@ -726,10 +727,10 @@ back:
   from a restart of the computer. To keep a bot down across restarts, detach it
   (`am detach <bot>`): a detached bot is never brought back. Every report says so.
 
-Session ids. Claude gets its id from Herdr at launch. dsh-TUI and Antigravity take none at
+Session ids. Claude gets its id from Herdr at launch. dsh-TUI, Antigravity, Codex and Kimi take none at
 launch, so the pack reads the id from what each leaves on disk (DSH's session folders for the
-pane's folder, Antigravity's prompt history: only its time, folder and conversation id) and
-records it as it does Claude's: a session row in the workers ledger and the pane's
+pane's folder, Antigravity's prompt history, Codex's rollout session_meta, Kimi's session index:
+only ids, folders and times) and records it as it does Claude's: a session row in the workers ledger and the pane's
 `agent.session` label. Anyone can leave a session in that folder with no pane the pack knows (a
 terminal of your own, DSH Desktop), so the pack takes only a pane's first conversation: the one
 session born within two minutes after the pane started. It records none, and the bot comes back
@@ -739,7 +740,13 @@ launch the workers ledger names) started within two minutes before the pane or b
 session. A session born later is never taken, and a recorded id is never replaced. What stays
 unknowable: a session someone started outside hc in that folder inside those two minutes, when
 the pane's own agent left none. A conversation started later inside the pane is not followed:
-the bot resumes its first one. DSH's home is `$DSH_HOME`, else `~/.dsh`.
+the bot resumes its first one. Codex's UUIDv7 dates its thread's creation at launch, even if its
+first turn writes the rollout days later; the pack looks in every dated folder from the launch's
+local day minus one onward. DSH's home is `$DSH_HOME`, else `~/.dsh`; Codex's is `$CODEX_HOME`, else
+`~/.codex`; Kimi's is `$KIMI_CODE_HOME`, else `~/.kimi-code` (only absolute overrides count).
+Revive never guesses Codex's or Kimi's latest conversation: with no id of its own, it starts a
+new conversation and the report says why. Manual `am restart` keeps its existing fallback.
+Kimi's index format comes from the 2.5.0 package and has not been verified live.
 
 The login service. `install.sh --revive` (or a yes when it asks; `--yes` never installs it)
 runs `am revive service install`: on Linux a systemd user unit,
@@ -1294,6 +1301,16 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   bot shows the model its pane runs: the one its command line names, else the agent's own
   configured default. A bot that isn't running shows no model in its sidebar row
   ("not running · role"), while `am ls` and `show` print its pin, else that default.
+- `effort` and `tier` are optional Codex settings: the bot's own reasoning effort (`low` …
+  `ultra`) and service tier (`fast` or `standard`). `create|edit --effort E --tier fast|standard`
+  sets them; an empty value clears one. Every start, restart and revive passes them as that
+  launch's own `-c` overrides, after the agent's and its template's own words, so the record wins
+  over a Codex profile and the global config (which is never written). A `--model` change without
+  `--tier` runs the new model on standard, stored and said on the launch line, so a Fast a
+  profile or the host config still names never applies to it. `show` prints both with their
+  source, and `show --json` carries `effort`, `effortSource`, `tier`, `tierSource`,
+  `pinnedEffort` and `pinnedTier`. See
+  [Reasoning effort and service tier](#reasoning-effort-and-service-tier-codex).
 - `codexAuto` is retired (#1125). It used to opt a bot's Codex seat and workers out of Codex's
   auto mode; the owner's ruling (10 and 12 Nov) is that every Codex seat and worker runs in it,
   so `false` no longer opts out: the field is kept as written, ignored, and loading the bots
@@ -1357,7 +1374,7 @@ nothing to it (a Codex seat's template excepted, see [Codex's launch mode](#code
 | Agent | What its launch adds | What that does |
 | --- | --- | --- |
 | Claude Code (`claude`) | `--permission-mode auto` | Claude Code's auto mode: its classifier answers permission requests. |
-| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true`, `--add-dir <folder>` per derived folder | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). No opt-out. |
+| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true`, `--add-dir <folder>` per derived folder; worker starts only: `-c 'projects={"<worktree>"={trust_level="trusted"}}'` when the checks below allow it | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). Worker starts pre-trust only their worktree path (#1420); a withheld trust word gets a warning. No opt-out from the launch mode. |
 | Antigravity (`agy`) | `--dangerously-skip-permissions`, `--mode <agyMode>`, `--settings <file>` | No permission prompt and no classifier: everything the file's deny list does not name runs (see [what runs without a prompt](#antigravitys-permission-list)). The file's `trustedWorkspaces` answers the folder-trust question. |
 | dsh-TUI (`dsh-tui`) | nothing | Its DSH profile on the machine it runs on sets the approval policy; dsh-tui takes no such flag. |
 | Oh My Pi (`omp`) | nothing | omp 18.14.2 has only skip-all flags (`--auto-approve`, `--approval-mode=yolo`). |
@@ -1381,6 +1398,46 @@ helper with no bot to write one for, a command that takes no words) has the flag
 flag does not answer the folder-trust question; the file's `trustedWorkspaces` does (#953).
 `dsh-tui doctor`'s `agy-sandbox` row and `show` say when this computer can't run `--mode auto`.
 
+### Reasoning effort and service tier (Codex)
+
+A Codex bot may store its own reasoning effort and service tier, so two bots on one host can run
+at different ones without touching the person's global Codex config (#1411):
+
+- `effort` is an optional effort level (`low`, `medium`, `high`, `xhigh`, `max`, `ultra`; whatever
+  the Codex CLI lists for the model), set with `am create|edit ... --effort E`.
+- `tier` is optional, `fast` or `standard`, set with `--tier fast|standard`. It stores the menu's
+  words: Fast is Codex's `priority` service tier, Standard its `default` one.
+
+Both are stored on the bot (`am edit <bot> --effort= --tier=` clears them) and passed on every
+launch as that launch's own overrides: `-c model_reasoning_effort=<effort>` and
+`-c service_tier=<priority|default>`. A start, a restart, a revive after a reboot and a linked
+machine's start all rebuild the command from the bot's record, so all three keep the values. The
+global `~/.codex/config.toml` is read for what a bot with neither inherits, and is never written.
+
+What wins, when more than one names a value:
+
+1. the bot's record (`effort`, `tier`), added after the agent's own words;
+2. the hc template the pane runs, whose own `-c` words come first in the command; the record's go
+   after it, so the record wins when both name one;
+3. the Codex profile the launch names (`-p <profile>`), if any: the file
+   `~/.codex/<profile>.config.toml`, which Codex layers on the global config;
+4. the global Codex config.
+
+Codex reads the last `-c` for a key, so a later word wins. A service tier belongs to the model
+choice: `am edit <bot> --model M` without `--tier` in the same call runs the new model on
+Standard, stored as `standard` and passed as `-c service_tier=default`, so a model swapped for a
+standard one never keeps a Fast that the record, a profile, a template or the host's config still
+names. Workers take their agent, model and effort from the worker defaults or a template, never
+from the seat's `effort`/`tier`.
+
+`am show <bot> --json` reports the effective values and their source: `effort`, `effortSource`,
+`tier` and `tierSource`, beside `pinnedEffort` and `pinnedTier` (what the record stores). A source
+is `detected` (what the live pane's command line runs, a template's own words included), `roster`
+(the bot's own value, when it isn't running), `profile` (the Codex profile the live launch names:
+`-p <name>` layers `~/.codex/<name>.config.toml` on the global config), `global` (that global
+config's top level) or `default` (Codex's own default tier, Standard). The text `am show` prints
+the same two lines.
+
 ### Codex's launch mode
 
 The owner's ruling (10 Nov, reaffirmed 12 Nov, #1125): every Codex seat and every worker the pack
@@ -1398,6 +1455,29 @@ a worker and a Restart --tree helper:
   Codex captain's `isn't a terminal hc knows` refusal; it was not reproduced in isolation.
 - `-c sandbox_workspace_write.network_access=true`: the sandbox's own network switch, so `hc`'s
   socket and GitHub (`gh`, git's transport) answer. It is off by default under the auto mode.
+- Worker starts only (#1420): `-c 'projects={"<worktree>"={trust_level="trusted"}}'`, after the
+  mode words and before any extra folders, subcommand or task. Checked on codex-cli 0.169.0:
+  this inline TOML table keeps dots in paths literal, merges with the person's projects table,
+  skips that folder's trust prompt and writes no setting. It trusts the worktree path only,
+  never its repository root, a parent or the home folder. Seats and Restart --tree helpers
+  do not get this word; those are a follow-up.
+  Before adding it, the pack reads `/etc/codex/config.toml`, `/etc/codex/managed_config.toml`
+  and `$CODEX_HOME/config.toml` (the default is `~/.codex/config.toml` when `CODEX_HOME` is unset
+  or empty). A missing file is absent. Codex consults the cwd and its repository root, the
+  parent of the git common dir: the pack checks both, and the project's main checkout too (a git
+  dir kept elsewhere), by written path and resolved aliases,
+  and withholds trust if either has any level other than exactly `trusted` in any read file.
+  A `trusted` entry never blocks it. An invalid worktree path or the home folder, an unknown
+  repository root, an unreadable config, or a relative `CODEX_HOME` also withholds it. So do
+  settings the narrow reader cannot prove: unclosed strings, duplicate project paths, inline
+  project tables, project arrays of tables, non-string trust levels or `project_root_markers`.
+  A Codex run through a wrapper, or one choosing its own folder (`-C`/`--cd`), profile
+  (`-p`/`--profile`) or projects/root markers (`-c`/`--config`), gets no trust word. Proxied
+  workers and Codex template workers keep their commands and get no trust word either.
+  Each withheld case warns why, without printing config contents: its folder wasn't
+  pre-trusted and Codex may stop at its folder-trust prompt until a person answers it in the
+  worker's pane. The pack never observes the pane to answer that prompt. Limit: cloud/MDM
+  Codex layers cannot be read by the pack, so these local checks cannot account for them.
 - `--add-dir <folder>`, derived per launch and only for folders that are there: the launch
   folder's git dirs, which Codex otherwise keeps read-only (`git rev-parse --git-dir
   --git-common-dir`: a checkout's own `.git`; for a linked worktree its own folder under the main
@@ -1583,6 +1663,11 @@ repository's own gates (`node --test`, `node --check`, `bun test`, `scripts/priv
 launch lists only `hc ls`, `hc get`, `hc read`, `hc wait`, `hc send`, the 24 read-only shell
 tools, the test checks, the `gh` reads and a short list of git subcommands (`log`, `diff`,
 `show`, `status`, …). No release verb and no `gh pr merge` is in either list.
+
+Run repository tests only in a checkout you trust. Tests execute checkout code with the access
+available to the test process, so give that process only the files and credentials its work
+needs. Before sending a message, check the intended recipient. The proxy restricts which
+destinations are available, and each recipient handles messages with its own permissions.
 
 The fixed deny rules are always present, the same for a seat and for every worker role, and a
 roster's `agyPermissions` can only add to them:

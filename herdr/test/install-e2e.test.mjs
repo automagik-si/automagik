@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // The public install path end to end (#43): the pack built by release.yml's own Pack lines, served
 // as a file:// release with the tarball's .sha256, installed by install.sh piped into bash as the README's
 // one-liner runs it, on three scratch homes: a fresh one, a v0.4.0 sidebar-only install, and one
@@ -218,6 +219,8 @@ fi
     AUTOMAGIK_HERDR_PACK_KEYS: JSON.stringify({ keys: TEST_KEYS }),
     AUTOMAGIK_HERDR_METER_KEYS: meterKeys.keys, HC_FAKE_STATE: hcState, HC_FAKE_LOG: hcLog,
   };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   return {
     launcher, root, home, appHome, mods: join(appHome, "mods"), state: join(appHome, "automagik-herdr"),
     link: join(home, ".local", "bin", "automagik-herdr"),

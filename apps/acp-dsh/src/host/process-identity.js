@@ -11,6 +11,7 @@ const pidOf = pid => Number.isSafeInteger(pid) && pid > 1
 // every first call at the old 2 s bound), and a timed-out read leaves no usable birth.
 const PS_BOUND_MS = 2000
 const POWERSHELL_BOUND_MS = 10_000
+let ownBirth
 
 export function validBirth(value) {
   if (!value || typeof value !== 'object') return false
@@ -31,10 +32,15 @@ export function parseProcStat(pid, stat) {
   }
 }
 
-export function processBirth(pid, { platform = process.platform, read = readFileSync,
-  exec = execFileSync, systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT,
-  now = Date.now, until = Infinity } = {}) {
+export function processBirth(pid, options = {}) {
+  const { platform = process.platform, read = readFileSync,
+    exec = execFileSync, systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT,
+    now = Date.now, until = Infinity } = options
   if (!pidOf(pid) || now() >= until) return null
+  const supplied = Object(options)
+  const cacheOwnBirth = pid === process.pid
+    && !('platform' in supplied || 'read' in supplied || 'exec' in supplied || 'systemRoot' in supplied)
+  if (cacheOwnBirth && ownBirth) return { ...ownBirth }
   try {
     let value
     if (platform === 'linux') {
@@ -61,7 +67,9 @@ export function processBirth(pid, { platform = process.platform, read = readFile
       } else return null
       value = { platform, start: output.trim().replace(/\s+/g, ' ') }
     }
-    return now() < until && validBirth(value) ? value : null
+    if (!(now() < until && validBirth(value))) return null
+    if (cacheOwnBirth) ownBirth = { ...value }
+    return value
   } catch { return null }
 }
 

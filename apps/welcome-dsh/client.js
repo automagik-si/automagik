@@ -9239,6 +9239,7 @@ var PT_BR = {
   "Installing its connector in the background. This takes a minute or two.": "Instalando o conector em segundo plano. Leva um ou dois minutos.",
   "The connector did not install: {error}": "O conector não foi instalado: {error}",
   "The connector did not install.": "O conector não foi instalado.",
+  "Could not reach the connector registry. Automagik tries again by itself, or press Retry.": "Não foi possível acessar o registro de conectores. O Automagik tenta de novo automaticamente. Para tentar agora, clique em Tentar de novo.",
   "The connector did not start: {error}": "O conector não iniciou: {error}",
   "Install details": "Detalhes da instalação",
   "Log: {path}": "Registro: {path}",
@@ -9289,7 +9290,6 @@ var PT_BR = {
   "Telegram bot": "Bot do Telegram",
   "Telegram": "Telegram",
   "Move its Telegram bot to Omni, with the bot you already know.": "Mova o bot do Telegram do Hermes para o Omni, com o bot que você já conhece.",
-  "We are still mapping how it keeps its bot.": "Ainda estamos mapeando como essa ferramenta guarda o bot.",
   "Coming soon": "Em breve",
   "{name}: coming soon": "{name}: em breve",
   "Move {name} to Omni": "Mover {name} para o Omni",
@@ -9357,6 +9357,11 @@ var PT_BR = {
   "Omni has the channel. Its next update adds your Bot as the one who answers.": "O Omni está com o canal. A próxima atualização do Omni adiciona o seu Bot como quem responde.",
   "Hermes: Telegram off": "Hermes: Telegram desligado",
   "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key.": "O Telegram do Hermes está desligado. O Omni não confirmou qual canal é o da mudança, então verifique os Canais do Omni antes de tentar de novo. O Hermes ainda tem a chave.",
+  "Turn Hermes's Telegram back on": "Religar o Telegram do Hermes",
+  "Hermes's Telegram is back on": "O Telegram do Hermes está de volta",
+  "That is your way back. Hermes has its Telegram again.": "Esse é o caminho de volta. O Hermes está com o Telegram de novo.",
+  "Nothing else changed. If Omni kept a channel from this move, check it in Omni's Channels before moving again.": "Nada mais mudou. Se o Omni ficou com um canal desta mudança, verifique nos Canais do Omni antes de mover de novo.",
+  "No Bot answers in these chats yet. Pick one in Omni's Channels.": "Nenhum Bot responde nesses chats ainda. Escolha um nos Canais do Omni.",
   "Hermes was not running. Its Telegram stays off until you start Hermes again.": "O Hermes não estava rodando. O Telegram fica desligado até você iniciar o Hermes de novo.",
   "Hermes: Telegram was already off": "Hermes: o Telegram já estava desligado",
   "Omni: listening": "Omni: escutando",
@@ -10080,7 +10085,7 @@ function Stage({ title, speech, at: at2, glitching, hero, mark = "AUTOMAGIK", wi
 // src/client/companion.js
 var import_react3 = require("react");
 var IDEAS = ["a sleepy cyan fox with a lantern tail", "a tiny robot made of moonlight", "a round jellyfish that wears headphones"];
-var NAMES = ["Pip", "Nova", "Mochi", "Echo", "Biscuit"];
+var NAMES = ["Pirlim", "Mestrik", "Maguito", "Guizo", "Trunfo"];
 var NAME_RULE = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u;
 var AVATAR_SIZE = 256;
 var MAX_AVATAR = 16e4;
@@ -12123,6 +12128,7 @@ function openChatLogin(provider, scope = globalThis) {
   }
 }
 var POLL_MS2 = 2e3;
+var UNREACHABLE_POLL_MS = 15e3;
 var SETTINGS_SECTION = "acp-agents";
 var cliBusy = (agent) => agent.cli.state === "installing" || agent.cli.updating === true;
 function stateOf(agent) {
@@ -12184,12 +12190,12 @@ function agentLines(agent) {
     if (isNative(agent)) lines.push({ tone: "muted", text: t("Turning it on lets Automagik use the sign-in {name} already has on this computer.", { name }) });
     return lines;
   }
-  const { state, version, error, diagnostic, logPath } = agent.connector;
+  const { state, version, error, diagnostic, logPath, unreachable } = agent.connector;
   if (state === "installing") lines.push({ tone: "wait", text: t("Installing its connector in the background. This takes a minute or two.") });
   if (state === "failed") {
     lines.push({
       tone: "bad",
-      text: error ? t("The connector did not install: {error}", { error: redactText(error) }) : t("The connector did not install."),
+      text: unreachable === true ? t("Could not reach the connector registry. Automagik tries again by itself, or press Retry.") : error ? t("The connector did not install: {error}", { error: redactText(error) }) : t("The connector did not install."),
       action: "retry",
       // What DSH 0.2.2 shows for a failed plugin install: the full diagnostic and its log file.
       // The panel and its expander read this one value, so the shared table runs here too: a
@@ -12233,13 +12239,15 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     void load(true);
   }, [load]);
   const settling = view?.agents?.some((agent) => cliBusy(agent) || agent.on && agent.cli.found && agent.connector.state === "installing" || wanted[agent.id] !== void 0 && wanted[agent.id] !== agent.on) === true;
+  const unreachable = view?.agents?.some((agent) => agent.on && agent.cli.found && agent.connector.state === "failed" && agent.connector.unreachable === true) === true;
+  const pollMs = settling ? POLL_MS2 : unreachable ? UNREACHABLE_POLL_MS : void 0;
   (0, import_react9.useEffect)(() => {
-    if (!settling) return void 0;
+    if (pollMs === void 0) return void 0;
     const timer = setInterval(() => {
       void load(false);
-    }, POLL_MS2);
+    }, pollMs);
     return () => clearInterval(timer);
-  }, [settling, load]);
+  }, [pollMs, load]);
   const say = (id, message) => setProblems((previous) => ({ ...previous, [id]: message }));
   const act = async (id, endpoint, payload) => {
     say(id, null);
@@ -12817,9 +12825,9 @@ function ConnectAiView({ state, rows, subscriptions, open, showAll, glitching, r
 var import_react11 = require("react");
 var TOOLS = [
   { id: "hermes", name: "Hermes", vendor: null, tag: "H", what: "Telegram bot", blurb: "Move its Telegram bot to Omni, with the bot you already know.", ready: true },
-  { id: "openclaw", name: "OpenClaw", vendor: null, tag: "OC", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false },
-  { id: "grok", name: "Grok bot", vendor: "xAI", tag: "X", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false },
-  { id: "muse", name: "Muse", vendor: "Meta", tag: "M", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false }
+  { id: "openclaw", name: "OpenClaw", vendor: null, tag: "OC", ready: false },
+  { id: "grok", name: "Grok bot", vendor: "xAI", tag: "X", ready: false },
+  { id: "muse", name: "Muse", vendor: "Meta", tag: "M", ready: false }
 ];
 var MOVE = [
   { id: "key", label: "Read Hermes's bot key", doing: "It goes straight to Omni, which keeps it private. You never see it here." },
@@ -12926,12 +12934,10 @@ function ToolCard({ tool, onPick }) {
         (0, import_react11.createElement)(
           "div",
           { className: "oai-mig-who" },
-          (0, import_react11.createElement)("strong", null, tool.name, tool.vendor ? (0, import_react11.createElement)("small", null, tool.vendor) : null),
-          (0, import_react11.createElement)("span", null, t(tool.what))
+          (0, import_react11.createElement)("strong", null, tool.name, tool.vendor ? (0, import_react11.createElement)("small", null, tool.vendor) : null)
         )
       ),
-      (0, import_react11.createElement)("span", { className: "oai-soon" }, t("Coming soon")),
-      (0, import_react11.createElement)("p", { className: "oai-mig-blurb" }, t(tool.blurb))
+      (0, import_react11.createElement)("span", { className: "oai-soon" }, t("Coming soon"))
     );
   }
   return (0, import_react11.createElement)(
@@ -13105,6 +13111,7 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     "div",
     { className: "oai-mig-doneview" },
     (0, import_react11.createElement)(BotPanel, { result }),
+    result.recovered === true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("No Bot answers in these chats yet. Pick one in Omni's Channels.")) : null,
     result.connected !== true ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t("Omni has the channel. It is bringing the bot up now.")) : null,
     result.chatUrl ? (0, import_react11.createElement)("a", { className: "oai-pill oai-mig-sayhi", href: result.chatUrl, target: "_blank", rel: "noreferrer" }, t("Say hi to your bot"), Arrow()) : null,
     result.answering === true && result.answerBot ? (0, import_react11.createElement)("p", { className: "oai-mig-answer" }, Check2(), t("Replies through {name}.", { name: result.answerBot.name })) : null,
@@ -13132,19 +13139,34 @@ function DoneCard({ result, onDone, onCheckStatus, canOpenSettings, onOpenSettin
     )
   );
 }
-function ProblemCard({ error, onRetry, onHandoff }) {
+function ProblemCard({ error, note, restoring, onRetry, onHandoff, onRestoreHermes }) {
   const changed = error?.changed ?? {};
   const lines = error?.code === "hermes-still-on" ? "Hermes still has the channel. Nothing was handed to Omni, and its settings were put back." : error?.code === "refused" ? "Hermes would not restart. It may still have a chat open; finish it and try again." : changed.omniUnknown === true ? "Hermes's Telegram is off. Omni did not confirm which channel is the move's, so check Omni's Channels before trying again. Hermes still has the key." : changed.hermesOff === true && changed.omniCreated !== true ? "Hermes's Telegram is off and Omni did not take the bot. Nothing is listening right now. Try again; Hermes still has the key." : "Nothing was changed. Hermes is exactly as it was.";
+  const canRestore = changed.omniUnknown === true && error?.canRestoreHermes === true;
   return (0, import_react11.createElement)(
     "div",
     { className: "oai-mig-problem" },
     (0, import_react11.createElement)("p", { className: "oai-mig-error", role: "alert" }, t(lines)),
     error?.message && !["hermes-still-on", "refused", "omni", "failed"].includes(error.code) ? (0, import_react11.createElement)("p", { className: "oai-mig-fine" }, hidden(error.message)) : null,
+    note ? (0, import_react11.createElement)("p", { className: "oai-mig-note", role: "status" }, t(note)) : null,
     (0, import_react11.createElement)(
       "div",
       { className: "oai-actions" },
-      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", onClick: onHandoff }, t("Set up Omni's Telegram instead")),
-      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onRetry }, t("Try again"))
+      canRestore ? (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", disabled: restoring === true, onClick: onRestoreHermes }, t("Turn Hermes's Telegram back on")) : null,
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-quiet", disabled: restoring === true, onClick: onHandoff }, t("Set up Omni's Telegram instead")),
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", disabled: restoring === true, onClick: onRetry }, t("Try again"))
+    )
+  );
+}
+function RestoredCard({ onDone }) {
+  return (0, import_react11.createElement)(
+    "div",
+    { className: "oai-mig-handoff" },
+    (0, import_react11.createElement)("p", { className: "oai-mig-lede" }, t("Nothing else changed. If Omni kept a channel from this move, check it in Omni's Channels before moving again.")),
+    (0, import_react11.createElement)(
+      "div",
+      { className: "oai-actions" },
+      (0, import_react11.createElement)("button", { type: "button", className: "oai-primary", onClick: onDone }, t("Done"))
     )
   );
 }
@@ -13155,6 +13177,7 @@ var TITLES = {
   moving: "Moving your bot…",
   done: "Omni has your bot",
   problem: "That did not finish",
+  restored: "Hermes's Telegram is back on",
   handoff: "Set up Omni's Telegram"
 };
 var SPEECH = {
@@ -13164,6 +13187,7 @@ var SPEECH = {
   moving: "Moving your bot. The key stays with me the whole time.",
   done: "There it is. Your bot answers on Omni now.",
   problem: "That did not finish. I'll tell you exactly where it stopped.",
+  restored: "That is your way back. Hermes has its Telegram again.",
   handoff: "We will do this Omni's own way."
 };
 function MigrateView({
@@ -13204,7 +13228,10 @@ function MigrateView({
   },
   onCheckStatus = null,
   gatewayStopped = false,
-  aside = null
+  aside = null,
+  onRestoreHermes = () => {
+  },
+  restoring = false
 }) {
   if (aside !== null) {
     return (0, import_react11.createElement)(StepAside, {
@@ -13234,7 +13261,8 @@ function MigrateView({
     phase === "confirm" && probe !== null ? (0, import_react11.createElement)(ConfirmCard, { probe, botId, agreed, busy, onPickBot, onAgree, onStart, onBack }) : null,
     phase === "moving" ? (0, import_react11.createElement)(MovingCard, { steps }) : null,
     phase === "done" && result !== null ? (0, import_react11.createElement)(DoneCard, { result, onDone, onCheckStatus, canOpenSettings, onOpenSettings, gatewayStopped }) : null,
-    phase === "problem" ? (0, import_react11.createElement)(ProblemCard, { error, onRetry, onHandoff }) : null,
+    phase === "problem" ? (0, import_react11.createElement)(ProblemCard, { error, note, restoring, onRetry, onHandoff, onRestoreHermes }) : null,
+    phase === "restored" ? (0, import_react11.createElement)(RestoredCard, { onDone }) : null,
     phase === "handoff" ? (0, import_react11.createElement)(HandoffCard, { handoff, note, onOpenChannels, onCheckAgain, onSkip }) : null
   );
 }
@@ -13283,6 +13311,7 @@ function MigrateStep(props) {
   const [note, setNote] = (0, import_react11.useState)(null);
   const [aside, setAside] = (0, import_react11.useState)(null);
   const [busy, setBusy] = (0, import_react11.useState)(false);
+  const [restoring, setRestoring] = (0, import_react11.useState)(false);
   const alive = (0, import_react11.useRef)(true);
   (0, import_react11.useEffect)(() => () => {
     alive.current = false;
@@ -13417,6 +13446,19 @@ function MigrateStep(props) {
       if (alive.current) setNote(problem.message);
     }
   };
+  const restoreHermes = async () => {
+    if (restoring) return;
+    setRestoring(true);
+    setNote(null);
+    try {
+      await call("migrate-restore-hermes");
+      if (alive.current) setPhase("restored");
+    } catch (problem) {
+      if (alive.current) setNote(problem.message);
+    } finally {
+      if (alive.current) setRestoring(false);
+    }
+  };
   return (0, import_react11.createElement)(MigrateView, {
     phase,
     probe,
@@ -13462,6 +13504,10 @@ function MigrateStep(props) {
     },
     onOpenSettings: openSettingsHere,
     onCheckStatus: checkStatus,
+    onRestoreHermes: () => {
+      void restoreHermes();
+    },
+    restoring,
     gatewayStopped: result?.gatewayStopped === true
   });
 }
@@ -13472,7 +13518,7 @@ var MIGRATE_CSS = `
 .oai-card .oai-mig-tool:hover:not(:disabled){transform:translateY(-2px)}
 .oai-card .oai-mig-tool:active:not(:disabled){${pressed("var(--oai-card)", 4)}}
 .oai-card .oai-mig-tool:focus-visible{outline:3px solid var(--oai-ring);outline-offset:3px}
-.oai-card .oai-mig-tool.oai-mig-is-soon{cursor:default;${recessed("color-mix(in srgb,var(--oai-lilac) 16%,var(--oai-niche))")};box-shadow:inset 2px 3px 4px color-mix(in srgb,var(--oai-niche) var(--oai-lo),var(--oai-umber)),inset -2px -2px 3px color-mix(in srgb,var(--oai-niche) var(--oai-hi),var(--oai-shine))}
+.oai-card .oai-mig-tool.oai-mig-is-soon{cursor:default;align-content:start;${recessed("color-mix(in srgb,var(--oai-lilac) 16%,var(--oai-niche))")};box-shadow:inset 2px 3px 4px color-mix(in srgb,var(--oai-niche) var(--oai-lo),var(--oai-umber)),inset -2px -2px 3px color-mix(in srgb,var(--oai-niche) var(--oai-hi),var(--oai-shine))}
 .oai-mig-top{display:flex;align-items:center;gap:11px;min-width:0}
 .oai-mig-mark{flex:none;width:38px;height:38px;display:grid;place-items:center;border-radius:12px 14px 11px 13px;font:var(--bt-weight-title,800) 13px/1 var(--oai-head);letter-spacing:.02em;${raised("var(--oai-clay)", 2)};color:var(--oai-ink)}
 .oai-mig-tool.oai-mig-is-ready .oai-mig-mark{${raised("var(--oai-cyan)", 2)};color:var(--oai-cyan-ink)}
@@ -13551,6 +13597,7 @@ var MIGRATE_CSS = `
 .oai-card button.oai-mig-soft{justify-self:start;width:auto;min-height:34px;margin:2px 0 0;padding:7px 14px;font-size:12.5px;${raised("var(--oai-card)", 2)};color:var(--oai-ink)}
 .oai-mig-summary{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:var(--oai-ink2);margin:0 0 14px}
 .oai-mig-problem{display:grid;gap:10px}
+.oai-mig-problem .oai-actions{flex-wrap:wrap}
 .oai-mig-error{margin:0;color:var(--oai-bad);font-size:13.5px;line-height:1.5}
 .oai-mig-handoff{display:grid;gap:12px}
 .oai-card .oai-mig-handoff h2{margin:0;font:var(--bt-weight-title,800) 19px/1.25 var(--oai-head);letter-spacing:-.016em}

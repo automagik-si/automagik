@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { AGENTS, canResume, continuesAnywhere, resumeArgs, withoutModel, withoutResume } from "../mods/am-sidebar/models.js";
+import { AGENTS, CODEX_MODE_ARGS, canResume, continuesAnywhere, resumeArgs, withoutModel, withoutResume } from "../mods/am-sidebar/models.js";
 import { carriedLabels, commandArgv, continueRefusal, helperArgs, helperPlan, ledgerSession, launchChange, paneCommand, paneLaunch, paneSession, planText,
   restartAnswer, restartArgs, claudeSlug, restartPlan, restartRefusal, sameSessions, sessionId, sessionOf, sharedFolders, sharedFresh, takesWords, withoutPrompt }
   from "../mods/am-sidebar/restart.js";
@@ -606,4 +606,41 @@ test("a tree restart with one failed helper reports the new lead and warning wit
   assert.equal(r.warnings.length, 1);
   assert.match(r.warnings[0], /review: hc run failed/);
   assert.doesNotMatch(r.warnings[0], /\n|cli.js/);
+});
+
+// ---- a bot's own reasoning effort and service tier (#1411) ----
+
+test("#1411: a Codex seat's own effort and tier are on every plan (resume, fresh, template) and only a Codex plan", () => {
+  const run = ["codex", ...CODEX_MODE_ARGS];
+  const seat = { agent: "codex", model: "gpt-6.1-sol", effort: "high", tier: "fast" };
+  const own = ["-c", "model_reasoning_effort=high", "-c", "service_tier=priority"];
+  // Resume, fresh and a model swap all keep the record's values, after the agent row's words.
+  const resume = restartPlan({ bot: seat, run, runningAgent: "codex", session: SID });
+  assert.deepEqual(resume.argv, [...run, "resume", SID, "--model", "gpt-6.1-sol", ...own]);
+  assert.deepEqual(resume.source, [...run, "--model", "gpt-6.1-sol", ...own],
+    "the source launchChange compares names them too, so a restart never reports them as a change of its own");
+  assert.deepEqual(restartPlan({ bot: seat, run, runningAgent: "codex", fresh: true }).argv, [...run, "--model", "gpt-6.1-sol", ...own]);
+  // A model swap names no tier: the stored Fast doesn't carry over to the new model, which runs
+  // on the default tier said explicitly, so a profile or the host config can't fill the gap.
+  const standard = ["-c", "model_reasoning_effort=high", "-c", "service_tier=default"];
+  assert.deepEqual(restartPlan({ bot: seat, run, runningAgent: "codex", model: "gpt-6.1-terra" }).argv,
+    [...run, "--model", "gpt-6.1-terra", ...standard]);
+  assert.deepEqual(restartPlan({ bot: seat, run, runningAgent: "codex", model: "" }).argv,
+    [...run, ...standard], "clearing the pin swaps the model too");
+  // Naming the model it already runs is no swap: both stay.
+  assert.deepEqual(restartPlan({ bot: seat, run, runningAgent: "codex", model: "gpt-6.1-sol" }).argv,
+    [...run, "--model", "gpt-6.1-sol", ...own]);
+  // An agent swap starts from the new agent's row: a Codex seat that becomes Claude carries no -c word.
+  const claude = restartPlan({ bot: seat, run: ["claude"], runningAgent: "codex", session: SID, agent: "claude" });
+  assert.deepEqual([claude.mode, claude.argv], ["swap", ["claude"]]);
+  // A bot with neither stored adds nothing, and the inherited profile/global values run unchanged.
+  assert.deepEqual(restartPlan({ bot: { agent: "codex" }, run, runningAgent: "codex", fresh: true }).argv, run);
+  // An hc template's current command stays the source, its own words untouched (a profile it
+  // names included); the record's words are added after it through "$@", so the record wins over
+  // the template's and over the profile's.
+  const template = { name: "seat", command: "codex --no-daemon -p sol -m gpt-6.1-sol" };
+  const tpl = restartPlan({ bot: seat, run: ["codex"], runningAgent: "codex", session: SID, template });
+  assert.equal(tpl.template, "seat");
+  assert.deepEqual(tpl.argv, ["sh", "-c", 'codex --no-daemon -p sol -m gpt-6.1-sol "$@"', "sh",
+    ...CODEX_MODE_ARGS.filter((w) => w !== "--no-daemon"), "resume", SID, ...own]);
 });

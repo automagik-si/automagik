@@ -4,6 +4,10 @@ What changed for someone using the plugin. Dates are release dates.
 
 ## Unreleased (the fork's next `-am` build)
 
+- An hc agent that is slow to report work gets its whole timeout to start.
+  Only the same dialog seen in two screen inspections can fail a silent run
+  early; the pane stays open for an answer. A run that starts late and finishes
+  carries a note in history and the panel (#1416).
 - `command:` runs a plain program on a schedule: the scheduler starts it
   itself, with no pane, no agent and no model, as the user it runs as. Exit 0
   is `done`; any other exit, a signal or the timeout is `failed`, with the exit

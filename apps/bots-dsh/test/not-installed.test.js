@@ -113,8 +113,13 @@ test('a crew plugin DSH could not load is not installed either', async (t) => {
 test('a Main Bot cannot send work to a Bot that is not installed', async (t) => {
   const { message, stop } = start({ bundles: [] })
   t.after(stop)
-  assert.equal(await message({ to: 'Genie', message: 'Build the thing.' }),
+  const result = await message({ to: 'Genie', message: 'Build the thing.' })
+  // Since #1447 a refusal is the host's object, so the chat tells it from a delivery.
+  assert.equal(typeof result, 'object')
+  assert.equal(result.sent, false)
+  assert.equal(result.text,
     `Not sent: Genie is not installed in this DSH (the ${GENIE} plugin is missing from this DSH). Ask the user to install it before giving it work.`)
+  assert.equal(result.reason, result.text)
 })
 
 test('without a plugin manager the team answers as it always did', async (t) => {

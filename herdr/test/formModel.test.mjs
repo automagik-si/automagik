@@ -1,3 +1,4 @@
+import { noCoreEnv } from "./no-core-env.mjs";
 // The Create / Edit form's rules (A13, mockup/create-form.dc.html renderVals): state from a
 // bot, lead options, category visibility, the model line and pin list, validation, the
 // entry a save writes and the matching automagik-herdr line.
@@ -366,6 +367,7 @@ function scratch(t) {
   ] };
   writeFileSync(join(project, ".herdr/bots.json"), `${JSON.stringify(file, null, 2)}\n`);
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app };
+  Object.assign(env, { ...noCoreEnv(root, env.PATH) });
   delete env.HC_TERMINAL_ID;
   // Run from the scratch root, not the project: --project must name it.
   const run = (sh, line) => spawnSync(sh, ["-c", line], { cwd: root, env, encoding: "utf8" });
@@ -426,4 +428,22 @@ test("formFrom: a stored gemini bot opens on antigravity with its gemini-era pin
   assert.equal(gem.pin, "");
   const kept = formFrom({ mode: "edit", bot: { ...base, agent: "claude", model: "opus" } });
   assert.deepEqual([kept.agent, kept.pin], ["claude", "opus"]);
+});
+
+test("#1411: the form keeps a stored effort and tier it doesn't edit, and a model or agent change drops what no longer applies", () => {
+  const stored = { ...FILE.bots.find((b) => b.id === "b-devaaaaaaa"), effort: "high", tier: "fast" };
+  const file = { ...FILE, bots: FILE.bots.map((b) => (b.id === stored.id ? stored : b)) };
+  const saved = (state) => applyBotEdit(file, entryOf(state, file).entry).bots.find((b) => b.id === stored.id);
+  // An edit that names neither writes both back as stored.
+  assert.deepEqual([saved(formFrom({ mode: "edit", bot: stored })).effort, saved(formFrom({ mode: "edit", bot: stored })).tier], ["high", "fast"]);
+  // The form's own model change (it has no tier field) runs the new model on standard, said
+  // explicitly, and keeps the effort.
+  const movedModel = saved({ ...formFrom({ mode: "edit", bot: stored }), pin: "gpt-6.1-terra" });
+  assert.deepEqual([movedModel.model, movedModel.effort, movedModel.tier], ["gpt-6.1-terra", "high", "standard"]);
+  // Moving the bot to another agent, where a service tier is not its, drops both.
+  const movedAgent = saved({ ...formFrom({ mode: "edit", bot: stored }), agent: "claude" });
+  assert.deepEqual([movedAgent.agent, movedAgent.effort, movedAgent.tier], ["claude", undefined, undefined]);
+  // A create writes neither.
+  const made = applyBotEdit(FILE, entryOf(create(), FILE).entry);
+  assert.deepEqual([made.bots.at(-1).effort, made.bots.at(-1).tier], [undefined, undefined]);
 });

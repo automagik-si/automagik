@@ -42,6 +42,26 @@ func promptLine(screen string) string {
 	return clipPrompt(fallback)
 }
 
+// dialogLine picks the last question with an answer option below it. A word
+// like "continue" in ordinary output is not enough to call it a dialog.
+func dialogLine(screen string) string {
+	lines := strings.Split(screen, "\n")
+	hasOption := false
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := cleanLine(lines[i])
+		// An option is an answer, never the question, even when it reads like
+		// one ("1. Yes, proceed").
+		if optionLine.MatchString(line) {
+			hasOption = true
+			continue
+		}
+		if hasOption && promptWord.MatchString(line) {
+			return clipPrompt(line)
+		}
+	}
+	return ""
+}
+
 // cleanLine removes escapes and control characters, trims the result, and
 // takes off the box edge a dialog's question can sit inside.
 func cleanLine(line string) string {

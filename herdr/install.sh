@@ -86,6 +86,7 @@ main() {
   BIN_DIR=$HOME/.local/bin
   LINK=$BIN_DIR/automagik-herdr
   AM_LINK=$BIN_DIR/am
+  HINT_PATH=$PATH
   NODE_MIN=22.7
   # How long `herdr-app status` may take: a Herdr that does not answer never holds up a run.
   STATUS_SECONDS=10
@@ -171,10 +172,12 @@ Automagik Herdr installer
 
   install.sh [--yes] [--version <v>] [--adopt] [--no-usagemeter | --usagemeter-local-only]
              [--no-scheduler] [--dsh-tui | --no-dsh-tui] [--revive | --no-revive]
-                                       install or update the pack and the automagik-herdr command
+                                       install or update the pack and the am command
   install.sh --uninstall [--yes]       move the pack out of mods/, put back what was there before;
                                        refused while the layout Herdr shows names a pack mod
   install.sh --help
+
+If am on your PATH is a different program, use automagik-herdr.
 
 --yes answers yes to every question (installing Node on macOS, Herdr from releases.herdr.dev,
 switching Herdr to the automagik layout, starting the automations scheduler at login). It never installs dsh-TUI: that third-party package is
@@ -185,7 +188,7 @@ pack (automagik-herdr-pack-<v>.tgz): not every release does.
 --no-usagemeter leaves ~/.local/bin/usagemeter (the token meter) alone, here and on every linked
 machine: install skips it, and --uninstall keeps it even where this installer put it.
 --usagemeter-local-only installs and removes it on this computer only, never on a linked machine
-(hc machine ls). Both are remembered for 'automagik-herdr update' and the sidebar's sync.
+(hc machine ls). Both are remembered for 'am update herdr.pack' and the sidebar's sync.
 --no-scheduler leaves ~/.local/bin/herdr-automations (the automations scheduler) and its login
 service alone: install skips them, and --uninstall keeps them even where this installer put them.
 Without it the installer puts the build the pack pins there (never over one it did not install),
@@ -196,7 +199,7 @@ login service.
 the installer asks (unless --yes), and a machine with no dsh gets one line saying how to get it.
 --uninstall removes dsh-TUI (the plugin and the shim) when this installer put it there.
 --revive installs the login service that brings the bots back after a restart of this computer
-('automagik-herdr revive --boot': each bot whose pane is gone or a bare shell is restarted in its
+('am revive --boot': each bot whose pane is gone or a bare shell is restarted in its
 place, resumed where its agent allows). Linux only for now: a systemd user unit, enabled, never
 started on the spot. --no-revive leaves it alone. Without either, the installer asks (--yes never
 installs it). --uninstall removes the unit when it is this pack's.
@@ -267,6 +270,34 @@ am_link_is_am() {
   esac
   return 1
 }
+
+# Resolve guidance in the caller's PATH, even if install added a directory for its own checks.
+hint_command() (
+  standalone=${AM_HOME:-$HOME/.automagik}
+  standalone=${standalone%/}/parts/automagik.am/current/bin
+  for name in am automagik-herdr; do
+    found=$(PATH=$HINT_PATH command -v "$name") || continue
+    case $found in */*) ;; *) continue ;; esac
+    if [ ! -f "$found" ] || [ ! -x "$found" ]; then continue; fi
+    if link_ours "$found"; then say "$name"; return; fi
+    if [ "$(readlink "$found" 2>/dev/null)" = "$standalone/$name" ] \
+      && [ -r "$standalone/run.sh" ] && [ -r "$standalone/automagik-herdr.mjs" ]; then
+      [ "$name" != am ] || [ -r "$standalone/am.mjs" ] || continue
+      say "$name"
+      return
+    fi
+  done
+  case ":$HINT_PATH:" in *":$BIN_DIR:"*) return 0 ;; esac
+  for found in "$AM_LINK" "$LINK"; do
+    if [ -f "$found" ] && [ -x "$found" ] && link_ours "$found"; then
+      case $found in
+        *[!a-zA-Z0-9_./-]*) printf "'%s'\n" "$(printf '%s' "$found" | sed "s/'/'\\\\''/g")" ;;
+        *) say "$found" ;;
+      esac
+      return
+    fi
+  done
+)
 
 # The command the link points at, in the sidebar folder the ownership record lists (am-sidebar,
 # else $OLD, a rollback's): its bin/automagik-herdr wrapper when the pack ships one (it finds a node
@@ -881,9 +912,12 @@ fleet() {
   [ -f "$cli" ] || { say "Warning: usagemeter on linked machines: $cli is missing; skipped."; return 0; }
   # A release from before this command (--version <older>) has no meter: nothing to run.
   HERDR_APP_HOME=$APP_HOME node "$cli" help </dev/null 2>/dev/null | grep -q '^  meter install' \
-    || { say "usagemeter on linked machines: skipped (this release's automagik-herdr has no meter install)."; return 0; }
+    || { say "usagemeter on linked machines: skipped (this release has no meter install command)."; return 0; }
   HERDR_APP_HOME=$APP_HOME node "$cli" meter "$@" </dev/null 2>&1 \
-    || say "Warning: usagemeter on linked machines did not finish; 'automagik-herdr meter install' retries it."
+    || {
+      hint_cmd=$(hint_command)
+      say "Warning: usagemeter on linked machines did not finish${hint_cmd:+"; '$hint_cmd meter install' retries it"}."
+    }
 }
 meter_step() {
   if [ "$METER_OK" = 0 ]; then scope=none; elif [ "$FLEET_OK" = 0 ]; then scope=local; else scope=all; fi
@@ -1235,16 +1269,17 @@ uninstall_scheduler() {
 # a machine with no dsh gets the one line the CLI gives, and nothing is written.
 dsh_tui_step() {
   [ "$DSH_TUI" = no ] && { say "Left DSH (dsh-TUI) alone (--no-dsh-tui)."; return 0; }
+  hint_cmd=$(hint_command)
   if ! command -v dsh >/dev/null 2>&1; then
-    say "DSH is not installed (no dsh on PATH): skipped dsh-TUI. Install DSH Desktop or 'npm install -g @deepseek-ai/dsh', then run 'automagik-herdr dsh-tui install'."
+    say "DSH is not installed (no dsh on PATH): skipped dsh-TUI. Install DSH Desktop or 'npm install -g @deepseek-ai/dsh'${hint_cmd:+", then run '$hint_cmd dsh-tui install'"}."
     return 0
   fi
   if [ "$DSH_TUI" = ask ] && [ "$YES" = 1 ]; then
-    say "Left DSH (dsh-TUI) alone: --yes never installs the third-party dsh-TUI package; 'automagik-herdr dsh-tui install' or this installer with --dsh-tui adds it."
+    say "Left DSH (dsh-TUI) alone: --yes never installs the third-party dsh-TUI package; ${hint_cmd:+"'$hint_cmd dsh-tui install' or "}this installer with --dsh-tui adds it."
     return 0
   fi
   if [ "$DSH_TUI" = ask ] && ! ask_opt_in "Install DSH as a Herdr agent (dsh-TUI, its own dsh-tui DSH profile; a third-party package)?"; then
-    say "Left DSH (dsh-TUI) alone; 'automagik-herdr dsh-tui install' adds it later."
+    say "Left DSH (dsh-TUI) alone${hint_cmd:+"; '$hint_cmd dsh-tui install' adds it later"}."
     return 0
   fi
   dsh_rc=0
@@ -1256,23 +1291,37 @@ dsh_tui_step() {
   printf '%s\n' "$dsh_out" | sed 's/^/  /'
 }
 # The login service that runs 'automagik-herdr revive --boot' (#939). The unit is the pack CLI's
-# ('automagik-herdr revive service install'); this step only decides whether to ask. Linux only:
-# on another OS nothing is asked and nothing is written.
+# ('automagik-herdr revive service install'); refresh its PATH (#1418), else decide whether to
+# ask. Linux only: on another OS nothing is asked and nothing is written.
 revive_step() {
   [ "$(uname -s)" = Linux ] || return 0
   [ "$REVIVE" = no ] && { say "Left the revive login service alone (--no-revive)."; return 0; }
   [ -x "$LINK" ] || return 0
-  if [ -f "$REVIVE_UNIT" ] && [ "$REVIVE" = ask ]; then return 0; fi
-  if [ "$REVIVE" = ask ] && [ "$YES" = 1 ]; then
-    say "Left the revive login service alone: --yes never changes what runs at login; 'automagik-herdr revive service install' or this installer with --revive adds it."
+  case ":$PATH:" in *":$BIN_DIR:"*) revive_path=$PATH ;; *) revive_path=$PATH:$BIN_DIR ;; esac
+  if [ -f "$REVIVE_UNIT" ] \
+    && sed -n '1p' "$REVIVE_UNIT" 2>/dev/null | grep -q '^# Automagik Herdr: brings the bots back after a restart' \
+    && ! grep -q '^Environment="PATH=' "$REVIVE_UNIT"; then
+    revive_rc=0
+    revive_out=$(PATH=$revive_path "$LINK" revive service install <"/dev/null" 2>&1) || revive_rc=$?
+    if [ "$revive_rc" != 0 ]; then
+      say "Warning: the revive login service was not installed: $(printf '%s\n' "$revive_out" | sed -n '$p')"
+      return 0
+    fi
+    say "Refreshed the revive login service: it now keeps your PATH (#1418)."
     return 0
   fi
-  if [ "$REVIVE" = ask ] && ! ask_opt_in "Bring the bots back by themselves after a restart of this computer (a login service that runs 'automagik-herdr revive --boot')?"; then
-    say "Left the revive login service alone; 'automagik-herdr revive service install' adds it later."
+  if [ -f "$REVIVE_UNIT" ] && [ "$REVIVE" = ask ]; then return 0; fi
+  hint_cmd=$(hint_command)
+  if [ "$REVIVE" = ask ] && [ "$YES" = 1 ]; then
+    say "Left the revive login service alone: --yes never changes what runs at login; ${hint_cmd:+"'$hint_cmd revive service install' or "}this installer with --revive adds it."
+    return 0
+  fi
+  if [ "$REVIVE" = ask ] && ! ask_opt_in "Bring the bots back by themselves after a restart of this computer (a login service${hint_cmd:+" that runs '$hint_cmd revive --boot'"})?"; then
+    say "Left the revive login service alone${hint_cmd:+"; '$hint_cmd revive service install' adds it later"}."
     return 0
   fi
   revive_rc=0
-  revive_out=$("$LINK" revive service install <"/dev/null" 2>&1) || revive_rc=$?
+  revive_out=$(PATH=$revive_path "$LINK" revive service install <"/dev/null" 2>&1) || revive_rc=$?
   if [ "$revive_rc" != 0 ]; then
     say "Warning: the revive login service was not installed: $(printf '%s\n' "$revive_out" | sed -n '$p')"
     return 0
@@ -1557,6 +1606,8 @@ install() {
       if [ "$changed" = yes ]; then say "Repaired the pack $VERSION in $MODS: what differed from the release is listed above."; fi
     fi
   fi
+  kept_pack=
+  rollback_hint_pending=no
   if [ "$same" = no ]; then
     set -- install --from "$TMP/$TGZ" --version "$VERSION" --mods "$MODS" --setup
     # The pointer's sequence goes into the marker (a --version install records none).
@@ -1572,7 +1623,13 @@ install() {
     sed -n 's/^notice: //p' "$TMP/log" >"$TMP/notice"
     say "Installed the pack $VERSION in $MODS: $(mods_said)."
     if [ -f "$STATE/.prev/.pack" ] && [ "$installed" != none ]; then
-      say "The folders it replaced ($installed) are kept in $STATE/.prev: 'automagik-herdr update --rollback' swaps them back."
+      kept_pack="The folders it replaced ($installed) are kept in $STATE/.prev"
+      hint_cmd=$(hint_command)
+      if [ -n "$hint_cmd" ]; then
+        say "$kept_pack: '$hint_cmd update --rollback' swaps them back."
+      else
+        rollback_hint_pending=yes
+      fi
     fi
   fi
   meter_step
@@ -1620,6 +1677,10 @@ install() {
       changed=yes
     fi
   fi
+  if [ "$rollback_hint_pending" = yes ]; then
+    hint_cmd=$(hint_command)
+    say "$kept_pack${hint_cmd:+": '$hint_cmd update --rollback' swaps them back"}."
+  fi
   fleet_step
   case ":${PATH}:" in
     *":$BIN_DIR:"*) ;;
@@ -1637,7 +1698,14 @@ install() {
     switch_hint
     fail "herdr-app check failed for a mod (above): its output says what to fix. The files match release $VERSION."
   fi
-  if [ "$rc" = 3 ]; then switch_hint; fail "herdr-app check failed for a mod (above); the pack is installed, and 'automagik-herdr update --rollback' swaps the kept set back."; fi
+  if [ "$rc" = 3 ]; then
+    switch_hint
+    if [ -n "$kept_pack" ]; then
+      hint_cmd=$(hint_command)
+      fail "herdr-app check failed for a mod (above); the pack is installed.${hint_cmd:+" Run '$hint_cmd update --rollback' to swap the kept set back."}"
+    fi
+    fail "herdr-app check failed for a mod (above); the pack is installed. This installer with --uninstall moves the pack out of mods/ if the active layout allows it."
+  fi
   if [ "$same" = yes ] && [ "$changed" = no ]; then
     case $out in
       *'"checked":true'*) verified="every file matches the release and every mod passed herdr-app check" ;;
@@ -1647,8 +1715,13 @@ install() {
     switch_hint
     return 0
   fi
-  say "Done: Automagik Herdr $VERSION. Open Herdr (or reload its mods), or in a project folder run:"
-  say "  automagik-herdr create --kind=main --name=<name> --agent=claude && automagik-herdr start <name>"
+  hint_cmd=$(hint_command)
+  if [ -n "$hint_cmd" ]; then
+    say "Done: Automagik Herdr $VERSION. Open Herdr (or reload its mods), or in a project folder run:"
+    say "  $hint_cmd create --kind=main --name=<name> --agent=claude && $hint_cmd start <name>"
+  else
+    say "Done: Automagik Herdr $VERSION. Open Herdr (or reload its mods)."
+  fi
   switch_hint
 }
 

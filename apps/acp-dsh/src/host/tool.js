@@ -125,15 +125,32 @@ async function imageResult(host, live, tool, exec) {
   }
 }
 
-const changed = (tool, signal) => new Promise((resolve) => {
+// `run`: also wake on a question stored for any other call of that run (native-tools mode).
+const changed = (tool, signal, run) => new Promise((resolve) => {
   const done = () => {
     tool.listeners.delete(done)
+    run?.askListeners?.delete(done)
     signal?.removeEventListener('abort', done)
     resolve()
   }
   tool.listeners.add(done)
+  run?.askListeners?.add(done)
   signal?.addEventListener('abort', done, { once: true })
 })
+
+// Native-tools mode (#1564): while this card waits for its call to end, the agent can ask about
+// another call whose card cannot come before this one ends. That is a subagent's nested call
+// (Claude Code's Agent tool waits for its child, the child waits for the answer): its question
+// is asked here, through DSH's approval, naming that call, so it is never left unanswered and
+// a refusal reaches the agent before the call runs. Its own card follows, already answered.
+const nestedQuestion = (live, tool) => {
+  if (live?.native !== true) return undefined
+  for (const other of live.run.tools.values()) {
+    if (other === tool || other.retired === true || other.mirrored === true || other.unanswerable === true) continue
+    if (other.permission !== undefined && other.permission.asked !== true) return other
+  }
+  return undefined
+}
 
 // The executions whose mirror body started. DSH hands one `exec` object to its gates, to the body
 // and to `tools/result`, so the adapter can tell a call that was refused before the body (and
@@ -216,7 +233,14 @@ export function mirrorTool(host) {
               continue
             }
             if (isTerminal(tool) || !live.run.busy) break
-            await changed(tool, exec.signal)
+            const nested = nestedQuestion(live, tool)
+            if (nested !== undefined) {
+              const question = nested.permission
+              question.asked = true
+              question.answer(optionFor(await ask(host, live, nested, exec, question, { review: false }), question.options))
+              continue
+            }
+            await changed(tool, exec.signal, live.native === true ? live.run : undefined)
           }
         } finally {
           // The card's body is done asking, however it left: a question that comes for the call
@@ -348,8 +372,11 @@ function reviewHolds(host, live, tool, exec, permission, record) {
   return isDeepStrictEqual(JSON.parse(JSON.stringify(callArguments(tool))), args)
 }
 
-async function ask(host, live, tool, exec, permission) {
-  const record = reviewed.get(exec); reviewed.delete(exec)
+// `review: false` (a nested call's question, asked from another call's card): the Auto review
+// record of this execution belongs to that card's own call and is left for it.
+async function ask(host, live, tool, exec, permission, { review = true } = {}) {
+  const record = review ? reviewed.get(exec) : undefined
+  if (review) reviewed.delete(exec)
   const approval = host.approval()
   if (!approval || !exec.agent) return 'unavailable'
   if (fullAccess(approval, exec.agent.session, host.sandboxPolicy?.(), host.permissionPresets?.())) return 'allowed-once'
