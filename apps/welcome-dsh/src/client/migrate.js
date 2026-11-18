@@ -8,8 +8,8 @@ import { t } from './i18n.js'
 // person coming from another tool brings its bot over. Hermes is the tool this release can
 // move: the welcome reads Hermes's Telegram bot key only after the person confirms, switches
 // Hermes's Telegram channel off, and starts Omni's with the same bot (src/host/hermes-migrate.js;
-// the key never reaches this page). OpenClaw, Grok bot and Muse are honestly not mapped yet:
-// their cards are labels with a "Coming soon" pill, never a button that does nothing.
+// the key never reaches this page). Until OpenClaw, Grok bot and Muse are surveyed, their cards
+// show only the name and a "Coming soon" pill, never a button that does nothing.
 //
 // The Hermes move is the split's order, one bot and one listener: confirm -> Hermes's Telegram
 // off (its config kept, its gateway restarted for a few seconds) -> Omni on -> Omni's live
@@ -23,9 +23,9 @@ import { t } from './i18n.js'
 // ambiguous; `ready` is this release's truth, not a promise.
 export const TOOLS = [
   { id: 'hermes', name: 'Hermes', vendor: null, tag: 'H', what: 'Telegram bot', blurb: 'Move its Telegram bot to Omni, with the bot you already know.', ready: true },
-  { id: 'openclaw', name: 'OpenClaw', vendor: null, tag: 'OC', what: 'Telegram bot', blurb: 'We are still mapping how it keeps its bot.', ready: false },
-  { id: 'grok', name: 'Grok bot', vendor: 'xAI', tag: 'X', what: 'Telegram bot', blurb: 'We are still mapping how it keeps its bot.', ready: false },
-  { id: 'muse', name: 'Muse', vendor: 'Meta', tag: 'M', what: 'Telegram bot', blurb: 'We are still mapping how it keeps its bot.', ready: false },
+  { id: 'openclaw', name: 'OpenClaw', vendor: null, tag: 'OC', ready: false },
+  { id: 'grok', name: 'Grok bot', vendor: 'xAI', tag: 'X', ready: false },
+  { id: 'muse', name: 'Muse', vendor: 'Meta', tag: 'M', ready: false },
 ]
 
 // The move's steps, in the order the split requires. The host reports the same ids.
@@ -135,10 +135,8 @@ function ToolCard({ tool, onPick }) {
       h('div', { className: 'oai-mig-top' },
         h(ToolMark, { tag: tool.tag }),
         h('div', { className: 'oai-mig-who' },
-          h('strong', null, tool.name, tool.vendor ? h('small', null, tool.vendor) : null),
-          h('span', null, t(tool.what)))),
-      h('span', { className: 'oai-soon' }, t('Coming soon')),
-      h('p', { className: 'oai-mig-blurb' }, t(tool.blurb)))
+          h('strong', null, tool.name, tool.vendor ? h('small', null, tool.vendor) : null))),
+      h('span', { className: 'oai-soon' }, t('Coming soon')))
   }
   return h('button', { type: 'button', className: 'oai-mig-tool oai-mig-is-ready', onClick: () => onPick(tool.id), 'aria-label': t('Move {name} to Omni', { name: tool.name }) },
     h('div', { className: 'oai-mig-top' },
@@ -582,7 +580,7 @@ export const MIGRATE_CSS = `
 .oai-card .oai-mig-tool:hover:not(:disabled){transform:translateY(-2px)}
 .oai-card .oai-mig-tool:active:not(:disabled){${pressed('var(--oai-card)', 4)}}
 .oai-card .oai-mig-tool:focus-visible{outline:3px solid var(--oai-ring);outline-offset:3px}
-.oai-card .oai-mig-tool.oai-mig-is-soon{cursor:default;${recessed('color-mix(in srgb,var(--oai-lilac) 16%,var(--oai-niche))')};box-shadow:inset 2px 3px 4px color-mix(in srgb,var(--oai-niche) var(--oai-lo),var(--oai-umber)),inset -2px -2px 3px color-mix(in srgb,var(--oai-niche) var(--oai-hi),var(--oai-shine))}
+.oai-card .oai-mig-tool.oai-mig-is-soon{cursor:default;align-content:start;${recessed('color-mix(in srgb,var(--oai-lilac) 16%,var(--oai-niche))')};box-shadow:inset 2px 3px 4px color-mix(in srgb,var(--oai-niche) var(--oai-lo),var(--oai-umber)),inset -2px -2px 3px color-mix(in srgb,var(--oai-niche) var(--oai-hi),var(--oai-shine))}
 .oai-mig-top{display:flex;align-items:center;gap:11px;min-width:0}
 .oai-mig-mark{flex:none;width:38px;height:38px;display:grid;place-items:center;border-radius:12px 14px 11px 13px;font:var(--bt-weight-title,800) 13px/1 var(--oai-head);letter-spacing:.02em;${raised('var(--oai-clay)', 2)};color:var(--oai-ink)}
 .oai-mig-tool.oai-mig-is-ready .oai-mig-mark{${raised('var(--oai-cyan)', 2)};color:var(--oai-cyan-ink)}

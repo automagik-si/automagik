@@ -46,6 +46,7 @@ export function configOf(env = process.env) {
     image,
     bin: env.DSH_LAUNCH_BIN?.trim() || resources.bin,
     pnpm: resources.pnpm,
+    launcher: resources.launcher,
     profile: resources.profile,
     seeds: join(image, 'seeds'),
     shim: join(image, 'bin', 'xdg-open'),
@@ -227,9 +228,14 @@ export async function main({ env = process.env, stdin = process.stdin, stdout = 
 
   let running
   try {
+    // The guest takes the desktop's launcher too: plugin installs, updates and removals run the
+    // image's pinned pnpm by absolute path, and a missing one stops this start rather than
+    // falling back to a pnpm PATH finds (the image's shim is for everything else).
     running = await startDsh({
       node: process.execPath,
       bin: config.bin,
+      bundledPnpm: config.pnpm,
+      launcher: config.launcher,
       env: dshEnvironment,
       port: config.port,
       cwd: home,

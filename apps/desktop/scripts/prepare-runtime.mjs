@@ -70,6 +70,13 @@ cpSync(dshTuiRunner, join(dshTuiBuild, 'dsh-tui-run.mjs'))
 cpSync(join(APP, 'src', 'close-inherited.cjs'), join(dshTuiBuild, 'close-inherited.cjs'))
 writeFileSync(join(dshTuiBuild, 'package.json'), DSH_TUI_PACKAGE)
 say(`copied the shared dsh-TUI installer (${DSH_TUI_FILES.join(', ')}) and its runner`)
+// The dsh launcher gives dsh's plugin manager the app's own pnpm (src/dsh-launch.cjs). It runs
+// as Node, so it stays outside the asar too.
+const dshLaunchBuild = join(BUILD, 'dsh-launch')
+rmSync(dshLaunchBuild, { recursive: true, force: true })
+mkdirSync(dshLaunchBuild, { recursive: true })
+cpSync(join(APP, 'src', 'dsh-launch.cjs'), join(dshLaunchBuild, 'dsh-launch.cjs'))
+say('copied the dsh launcher')
 // Omni at the pinned commit: only its plugin folders and the harness they are tested on.
 function omniSource() {
   if (process.env.OMNI_SOURCE) return resolve(process.env.OMNI_SOURCE)

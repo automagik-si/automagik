@@ -9239,6 +9239,7 @@ var PT_BR = {
   "Installing its connector in the background. This takes a minute or two.": "Instalando o conector em segundo plano. Leva um ou dois minutos.",
   "The connector did not install: {error}": "O conector não foi instalado: {error}",
   "The connector did not install.": "O conector não foi instalado.",
+  "Could not reach the connector registry. Automagik tries again by itself, or press Retry.": "Não foi possível acessar o registro de conectores. O Automagik tenta de novo automaticamente. Para tentar agora, clique em Tentar de novo.",
   "The connector did not start: {error}": "O conector não iniciou: {error}",
   "Install details": "Detalhes da instalação",
   "Log: {path}": "Registro: {path}",
@@ -9289,7 +9290,6 @@ var PT_BR = {
   "Telegram bot": "Bot do Telegram",
   "Telegram": "Telegram",
   "Move its Telegram bot to Omni, with the bot you already know.": "Mova o bot do Telegram do Hermes para o Omni, com o bot que você já conhece.",
-  "We are still mapping how it keeps its bot.": "Ainda estamos mapeando como essa ferramenta guarda o bot.",
   "Coming soon": "Em breve",
   "{name}: coming soon": "{name}: em breve",
   "Move {name} to Omni": "Mover {name} para o Omni",
@@ -10080,7 +10080,7 @@ function Stage({ title, speech, at: at2, glitching, hero, mark = "AUTOMAGIK", wi
 // src/client/companion.js
 var import_react3 = require("react");
 var IDEAS = ["a sleepy cyan fox with a lantern tail", "a tiny robot made of moonlight", "a round jellyfish that wears headphones"];
-var NAMES = ["Pip", "Nova", "Mochi", "Echo", "Biscuit"];
+var NAMES = ["Pirlim", "Mestrik", "Maguito", "Guizo", "Trunfo"];
 var NAME_RULE = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,39}$/u;
 var AVATAR_SIZE = 256;
 var MAX_AVATAR = 16e4;
@@ -12123,6 +12123,7 @@ function openChatLogin(provider, scope = globalThis) {
   }
 }
 var POLL_MS2 = 2e3;
+var UNREACHABLE_POLL_MS = 15e3;
 var SETTINGS_SECTION = "acp-agents";
 var cliBusy = (agent) => agent.cli.state === "installing" || agent.cli.updating === true;
 function stateOf(agent) {
@@ -12184,12 +12185,12 @@ function agentLines(agent) {
     if (isNative(agent)) lines.push({ tone: "muted", text: t("Turning it on lets Automagik use the sign-in {name} already has on this computer.", { name }) });
     return lines;
   }
-  const { state, version, error, diagnostic, logPath } = agent.connector;
+  const { state, version, error, diagnostic, logPath, unreachable } = agent.connector;
   if (state === "installing") lines.push({ tone: "wait", text: t("Installing its connector in the background. This takes a minute or two.") });
   if (state === "failed") {
     lines.push({
       tone: "bad",
-      text: error ? t("The connector did not install: {error}", { error: redactText(error) }) : t("The connector did not install."),
+      text: unreachable === true ? t("Could not reach the connector registry. Automagik tries again by itself, or press Retry.") : error ? t("The connector did not install: {error}", { error: redactText(error) }) : t("The connector did not install."),
       action: "retry",
       // What DSH 0.2.2 shows for a failed plugin install: the full diagnostic and its log file.
       // The panel and its expander read this one value, so the shared table runs here too: a
@@ -12233,13 +12234,15 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     void load(true);
   }, [load]);
   const settling = view?.agents?.some((agent) => cliBusy(agent) || agent.on && agent.cli.found && agent.connector.state === "installing" || wanted[agent.id] !== void 0 && wanted[agent.id] !== agent.on) === true;
+  const unreachable = view?.agents?.some((agent) => agent.on && agent.cli.found && agent.connector.state === "failed" && agent.connector.unreachable === true) === true;
+  const pollMs = settling ? POLL_MS2 : unreachable ? UNREACHABLE_POLL_MS : void 0;
   (0, import_react9.useEffect)(() => {
-    if (!settling) return void 0;
+    if (pollMs === void 0) return void 0;
     const timer = setInterval(() => {
       void load(false);
-    }, POLL_MS2);
+    }, pollMs);
     return () => clearInterval(timer);
-  }, [settling, load]);
+  }, [pollMs, load]);
   const say = (id, message) => setProblems((previous) => ({ ...previous, [id]: message }));
   const act = async (id, endpoint, payload) => {
     say(id, null);
@@ -12817,9 +12820,9 @@ function ConnectAiView({ state, rows, subscriptions, open, showAll, glitching, r
 var import_react11 = require("react");
 var TOOLS = [
   { id: "hermes", name: "Hermes", vendor: null, tag: "H", what: "Telegram bot", blurb: "Move its Telegram bot to Omni, with the bot you already know.", ready: true },
-  { id: "openclaw", name: "OpenClaw", vendor: null, tag: "OC", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false },
-  { id: "grok", name: "Grok bot", vendor: "xAI", tag: "X", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false },
-  { id: "muse", name: "Muse", vendor: "Meta", tag: "M", what: "Telegram bot", blurb: "We are still mapping how it keeps its bot.", ready: false }
+  { id: "openclaw", name: "OpenClaw", vendor: null, tag: "OC", ready: false },
+  { id: "grok", name: "Grok bot", vendor: "xAI", tag: "X", ready: false },
+  { id: "muse", name: "Muse", vendor: "Meta", tag: "M", ready: false }
 ];
 var MOVE = [
   { id: "key", label: "Read Hermes's bot key", doing: "It goes straight to Omni, which keeps it private. You never see it here." },
@@ -12926,12 +12929,10 @@ function ToolCard({ tool, onPick }) {
         (0, import_react11.createElement)(
           "div",
           { className: "oai-mig-who" },
-          (0, import_react11.createElement)("strong", null, tool.name, tool.vendor ? (0, import_react11.createElement)("small", null, tool.vendor) : null),
-          (0, import_react11.createElement)("span", null, t(tool.what))
+          (0, import_react11.createElement)("strong", null, tool.name, tool.vendor ? (0, import_react11.createElement)("small", null, tool.vendor) : null)
         )
       ),
-      (0, import_react11.createElement)("span", { className: "oai-soon" }, t("Coming soon")),
-      (0, import_react11.createElement)("p", { className: "oai-mig-blurb" }, t(tool.blurb))
+      (0, import_react11.createElement)("span", { className: "oai-soon" }, t("Coming soon"))
     );
   }
   return (0, import_react11.createElement)(
@@ -13472,7 +13473,7 @@ var MIGRATE_CSS = `
 .oai-card .oai-mig-tool:hover:not(:disabled){transform:translateY(-2px)}
 .oai-card .oai-mig-tool:active:not(:disabled){${pressed("var(--oai-card)", 4)}}
 .oai-card .oai-mig-tool:focus-visible{outline:3px solid var(--oai-ring);outline-offset:3px}
-.oai-card .oai-mig-tool.oai-mig-is-soon{cursor:default;${recessed("color-mix(in srgb,var(--oai-lilac) 16%,var(--oai-niche))")};box-shadow:inset 2px 3px 4px color-mix(in srgb,var(--oai-niche) var(--oai-lo),var(--oai-umber)),inset -2px -2px 3px color-mix(in srgb,var(--oai-niche) var(--oai-hi),var(--oai-shine))}
+.oai-card .oai-mig-tool.oai-mig-is-soon{cursor:default;align-content:start;${recessed("color-mix(in srgb,var(--oai-lilac) 16%,var(--oai-niche))")};box-shadow:inset 2px 3px 4px color-mix(in srgb,var(--oai-niche) var(--oai-lo),var(--oai-umber)),inset -2px -2px 3px color-mix(in srgb,var(--oai-niche) var(--oai-hi),var(--oai-shine))}
 .oai-mig-top{display:flex;align-items:center;gap:11px;min-width:0}
 .oai-mig-mark{flex:none;width:38px;height:38px;display:grid;place-items:center;border-radius:12px 14px 11px 13px;font:var(--bt-weight-title,800) 13px/1 var(--oai-head);letter-spacing:.02em;${raised("var(--oai-clay)", 2)};color:var(--oai-ink)}
 .oai-mig-tool.oai-mig-is-ready .oai-mig-mark{${raised("var(--oai-cyan)", 2)};color:var(--oai-cyan-ink)}

@@ -47,6 +47,9 @@ export function resourcesOf({ packaged, resourcesPath, appPath }) {
   return {
     bin: join(root, 'runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     pnpm: join(root, 'runtime', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
+    // The launcher that gives dsh's plugin manager this pnpm (src/dsh-launch.cjs): outside the
+    // app's asar when packaged, because it runs as Node.
+    launcher: packaged ? join(root, 'dsh-launch', 'dsh-launch.cjs') : join(appPath, 'src', 'dsh-launch.cjs'),
     profile: join(root, 'profile'),
   }
 }
@@ -60,12 +63,14 @@ const batchQuote = text => `"${String(text).replaceAll('%', '%%')}"`
 export const toolFileOf = (dir, name, platform = process.platform) => join(dir, platform === 'win32' ? `${name}.cmd` : name)
 
 /**
- * Write `node` and `pnpm` into `dir` for dsh's PATH: dsh's plugin manager installs plugins
- * (the market, Settings → Plugins) with pnpm, and nothing guarantees a machine has Node or
- * pnpm. Both run on `node`, the app's own binary as Node (ELECTRON_RUN_AS_NODE). Checked at
- * every launch, since the app's path changes with each install; a file that already says the
- * same, and can run, is left as it is. On Windows they are batch files, `node.cmd` and
- * `pnpm.cmd`, which PATH finds by PATHEXT.
+ * Write `node` and `pnpm` into `dir` for dsh's PATH: dsh's commands and the agent CLIs a plugin
+ * starts run with them, and nothing guarantees a machine has Node or pnpm. Plugin installs,
+ * updates and removals do not resolve them here: the app starts dsh through src/dsh-launch.cjs,
+ * which gives the plugin manager the bundled pnpm by absolute path (#1466). Both tools run on
+ * `node`, the app's own binary as Node (ELECTRON_RUN_AS_NODE). Checked at every launch, since
+ * the app's path changes with each install; a file that already says the same, and can run, is
+ * left as it is. On Windows they are batch files, `node.cmd` and `pnpm.cmd`, which PATH finds
+ * by PATHEXT.
  */
 export function writeTools({ dir, node, pnpm, platform = process.platform }) {
   mkdirSync(dir, { recursive: true })
@@ -810,7 +815,8 @@ export const toolDirs = (userHome = homedir()) => [join(userHome, '.local', 'bin
 
 export function dshEnv({ base = process.env, home, electronAsNode = false, binDir, userHome = homedir(), preload = null, privacy = PRIVACY_DEFAULTS, platform = process.platform }) {
   // After the machine's own: a project's commands keep the user's node and pnpm, and then the
-  // usual tool folders, then the app's own node and pnpm.
+  // usual tool folders, then the app's own node and pnpm. dsh's plugin manager does not resolve
+  // pnpm here: startDsh binds it to the bundled pnpm by absolute path (src/dsh-launch.cjs).
   const PATH = [...String(base.PATH ?? '').split(delimiter), ...toolDirs(userHome), ...(binDir ? [binDir] : [])]
     .filter((dir, index, all) => dir !== '' && all.indexOf(dir) === index)
     .join(delimiter)
@@ -853,10 +859,14 @@ export const busyFileOf = home => join(home, 'busy.json')
  * the process at once, so a quit while dsh starts can stop it, and the app can answer its
  * messages (the Bot browser bridge, main.js) from the start. `urlFile` is the file dsh's web
  * app records the URL in: the previous start's is removed, and it is read when output is lost.
+ *
+ * `bundledPnpm` (with `launcher`, src/dsh-launch.cjs) binds dsh's plugin installs, updates and
+ * removals to the app's own pnpm by absolute path, instead of the `pnpm` PATH resolves; a
+ * missing pnpm or launcher fails here, before dsh starts, and never falls back to PATH.
  */
 export function startDsh({
   node, bin, env, port, cwd, log, privacy, timeoutMs = READY_TIMEOUT_MS, onSpawn, urlFile,
-  spawn = nodeSpawn,
+  bundledPnpm, launcher, spawn = nodeSpawn,
 }) {
   // A file left by an earlier start must not sign this one in: dsh writes its own once it is
   // ready, and this start falls back to it when dsh's output is unavailable. A removal that
@@ -872,13 +882,34 @@ export function startDsh({
       log?.write(`automagik: could not remove the previous launch URL ${urlFile}: ${reason}\n`)
     }
   }
+  // The app's package manager comes through the launcher, which imports the pinned dsh and
+  // passes runCli its ProfilePnpmInvocation (src/dsh-launch.cjs). Both are checked here so a
+  // build without them says what is missing instead of dsh starting and failing on PATH.
+  if (bundledPnpm !== undefined && launcher === undefined) {
+    return Promise.reject(new Error('startDsh: bundledPnpm needs the dsh launcher'))
+  }
+  if (launcher !== undefined && bundledPnpm === undefined) {
+    return Promise.reject(new Error("startDsh: the dsh launcher needs the app's bundled pnpm"))
+  }
+  if (bundledPnpm !== undefined && !existsSync(bundledPnpm)) {
+    return Promise.reject(new Error(`the app's bundled pnpm is missing at ${bundledPnpm}`))
+  }
+  if (bundledPnpm !== undefined && !existsSync(launcher)) {
+    return Promise.reject(new Error(`the dsh launcher is missing at ${launcher}`))
+  }
   const args = [
-    '--require', CLOSE_INHERITED, bin, '--profile', PROFILE,
+    '--require', CLOSE_INHERITED, bundledPnpm === undefined ? bin : launcher, '--profile', PROFILE,
     ...(privacy ? ['--patch', privacy] : []),
     '--no-open', '--host', '127.0.0.1', '--port', String(port),
   ]
   const child = spawn(node, args, {
-    cwd, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    cwd,
+    env: bundledPnpm === undefined ? env : {
+      ...env,
+      AUTOMAGIK_DSH_ENTRY: bin,
+      AUTOMAGIK_DSH_PNPM: bundledPnpm,
+    },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
   onSpawn?.(child)
   const ready = new Promise((done, fail) => {

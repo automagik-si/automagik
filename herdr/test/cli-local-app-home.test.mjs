@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // #650: a local start (and restart) gives the pane the CLI's own app home as an env word when
 // the CLI runs with HERDR_APP_HOME set, as a linked machine's pane gets the project's pane-env
 // one (seatOnMachine). With it unset, the argv stays byte for byte as before: the fixture below
@@ -69,6 +70,8 @@ function scene(t, { withAppHome = true } = {}) {
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath, LANG: "C",
     AUTOMAGIK_HERDR_RESTART_STABLE_MS: "100", GIT_CEILING_DIRECTORIES: root };
   if (withAppHome) env.HERDR_APP_HOME = app;
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const cli = (args) => spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
   return { root, project, bin, guardBin, home, app, statePath, logPath, env, cli };
 }
