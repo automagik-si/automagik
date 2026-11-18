@@ -23,6 +23,7 @@ const ENV = {
   AUTOMAGIK_GATE_CLOUD_KEYS_URL: 'https://cloud.invalid/workspace-keys',
   AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL: 'https://cloud.invalid/open/exchange',
   AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN: 'https://rail.invalid',
+  AUTOMAGIK_GATE_CLOUD_REVOCATION_URL: 'https://cloud.invalid/revocations',
 }
 const RAIL = ENV.AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN
 const slot = () => generateKeyPairSync('ed25519')
@@ -33,6 +34,22 @@ const code = () => randomBytes(24).toString('base64url')
 function mint(claims, { kid = 'a', key = slots[kid].privateKey, header = {} } = {}) {
   const input = `${encode({ alg: 'EdDSA', typ: 'JWT', kid, ...header })}.${encode(claims)}`
   return `${input}.${sign(null, Buffer.from(input), key).toString('base64url')}`
+}
+const iso = ms => new Date(ms).toISOString()
+// RFC 7515 detached JWS: the signature covers the header and the exact body bytes.
+function detached(body, { kid = 'a', key = slots[kid].privateKey } = {}) {
+  const header = encode({ alg: 'EdDSA', typ: 'JWT', kid })
+  const input = `${header}.${Buffer.from(body).toString('base64url')}`
+  return `${header}..${sign(null, Buffer.from(input), key).toString('base64url')}`
+}
+const REVOKE = '/_gate/cloud/revocation'
+const SIGN = 'x-automagik-signature'
+async function waitFor(check, timeout = 2000) {
+  const start = Date.now()
+  while (!check()) {
+    if (Date.now() - start > timeout) throw new Error('Timed out waiting for the gate')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
 }
 
 async function listen(server) { server.listen(0, DSH_HOST); await once(server, 'listening'); return server.address().port }
@@ -55,7 +72,7 @@ const form = value => ({ method: 'POST', path: CLOUD_OPEN_PATH, body: value,
 const cookieOf = response => response.headers['set-cookie']?.[0]?.split(';', 1)[0]
 
 // One workspace gate in front of a fake DSH, and the fake Cloud it talks to.
-async function fixture(t, { env = ENV, origin = ORIGIN, cloudState } = {}) {
+async function fixture(t, { env = ENV, origin = ORIGIN, cloudState, pollInterval } = {}) {
   const state = cloudState ?? {
     now: 1_800_000_000_000,
     keys: [jwk('a')],
@@ -65,6 +82,10 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState } = {}) {
     keyFetches: 0,
     exchangeStatus: 200,
     reply: undefined,
+    listFetches: 0,
+    revocationList: undefined,
+    revocationSignature: undefined,
+    revocationStatus: 200,
   }
   const dir = mkdtempSync(join(tmpdir(), 'automagik-cloud-'))
   const config = cloudConfig(env)
@@ -97,6 +118,18 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState } = {}) {
         })
         return
       }
+      if (req.method === 'GET' && req.url === '/revocations') {
+        state.listFetches++
+        const document = state.revocationList ?? { version: 1, workspace: 'workspace-a',
+          issued_at: iso(state.now), expires_at: iso(state.now + 300_000), revoked: [] }
+        const body = JSON.stringify(document)
+        const signature = state.revocationSignature === undefined
+          ? detached(body) : state.revocationSignature
+        const headers = { 'content-type': 'application/json' }
+        if (signature !== null) headers[SIGN] = signature
+        res.writeHead(state.revocationStatus, headers).end(body)
+        return
+      }
       res.writeHead(404).end()
     })
     state.port = await listen(cloudServer)
@@ -106,7 +139,8 @@ async function fixture(t, { env = ENV, origin = ORIGIN, cloudState } = {}) {
     assert.equal(url.origin, new URL(ENV.AUTOMAGIK_GATE_CLOUD_ISSUER).origin, 'Cloud calls go only to configured locations')
     return http.request({ ...options, hostname: DSH_HOST, port: state.port, path: url.pathname }, callback)
   }
-  const cloud = new CloudSignIn(config, { now: () => state.now, request: routed })
+  const cloud = new CloudSignIn(config, { now: () => state.now, request: routed,
+    ...(pollInterval === undefined ? {} : { pollInterval }) })
   const sessions = new SessionStore(dir, { now: () => state.now, memory: true, accepts: cloud.accepts })
   const upstream = http.createServer((req, res) => {
     proxied.push(req.headers)
@@ -425,14 +459,20 @@ test('Cloud settings are all or none, HTTPS only, and never echoed', () => {
   assert.equal(cloudConfig(Object.fromEntries(Object.keys(ENV).map(name => [name, ' ']))), undefined)
   assert.throws(() => cloudConfig({ AUTOMAGIK_GATE_CLOUD_WORKSPACE: 'workspace-a' }), error =>
     error instanceof CloudConfigurationError && /AUTOMAGIK_GATE_CLOUD_ISSUER/.test(error.message) && !error.message.includes('workspace-a'))
+  assert.throws(() => cloudConfig({ ...ENV, AUTOMAGIK_GATE_CLOUD_REVOCATION_URL: '' }), error =>
+    error instanceof CloudConfigurationError &&
+      /AUTOMAGIK_GATE_CLOUD_REVOCATION_URL/.test(error.message))
   for (const [name, value] of [['AUTOMAGIK_GATE_CLOUD_KEYS_URL', 'http://cloud.invalid/keys'], ['AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL', 'https://u:p@cloud.invalid/x'],
     ['AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN', 'https://rail.invalid/path'], ['AUTOMAGIK_GATE_CLOUD_ISSUER', 'https://cloud.invalid/?q=1'],
-    ['AUTOMAGIK_GATE_CLOUD_WORKSPACE', 'has space'], ['AUTOMAGIK_GATE_CLOUD_KEYS_URL', 'https://cloud.invalid/keys#frag']]) {
+    ['AUTOMAGIK_GATE_CLOUD_WORKSPACE', 'has space'],
+    ['AUTOMAGIK_GATE_CLOUD_KEYS_URL', 'https://cloud.invalid/keys#frag'],
+    ['AUTOMAGIK_GATE_CLOUD_REVOCATION_URL', 'http://cloud.invalid/revocations']]) {
     assert.throws(() => cloudConfig({ ...ENV, [name]: value }), CloudConfigurationError, name)
   }
   const config = cloudConfig(ENV)
   assert.equal(config.rail, RAIL)
   assert.equal(config.workspace, 'workspace-a')
+  assert.equal(config.revocation.href, ENV.AUTOMAGIK_GATE_CLOUD_REVOCATION_URL)
 })
 
 test('the entrypoint refuses Access and Cloud together and a partial Cloud setting, naming only settings', () => {
@@ -505,4 +545,247 @@ test('without Cloud settings the open route is an ordinary unauthenticated path'
   const response = await request(port, form(`code=${code()}`))
   assert.equal(response.status, 401)
   assert.equal(response.body, JSON.stringify({ error: 'Session required' }))
+})
+
+// Mutant CLOUD_REVOKE_ANY drops signature verification on the revocation call.
+test('a signed revocation call drops that person\'s sessions and refuses a new open', async t => {
+  const f = await fixture(t)
+  const removed = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  const kept = cookieOf(await f.open(f.issue({ sub: 'person-2' })))
+  const body = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now) })
+  const called = await request(f.port, { method: 'POST', path: REVOKE, body,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(body) } })
+  assert.equal(called.status, 204)
+  assert.equal(called.body, '')
+  assert.equal((await request(f.port, { headers: { cookie: removed } })).status, 401)
+  assert.equal((await request(f.port, { headers: { cookie: kept } })).status, 200)
+  assert.equal(f.sessions.list().length, 1)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 401)
+  assert.equal(f.sessions.list().length, 1, 'a refused open issues no session')
+  // The call is idempotent: a repeat is accepted and changes nothing.
+  assert.equal((await request(f.port, { method: 'POST', path: REVOKE, body,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(body) } })).status, 204)
+  assert.equal(f.sessions.list().length, 1)
+})
+
+// Mutant CLOUD_REVOKE_BODY_TRUSTED reads fields before it checks the signature.
+test('a revocation call is refused unless it is signed by a published key', async t => {
+  const f = await fixture(t)
+  const cookie = cookieOf(await f.open(f.issue()))
+  const body = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now) })
+  const json = { 'content-type': 'application/json' }
+  const cases = [
+    { headers: { ...json }, status: 401 },
+    { headers: { ...json, [SIGN]: '' }, status: 401 },
+    { headers: { ...json, [SIGN]: 'not-a-signature' }, status: 401 },
+    { headers: { ...json, [SIGN]: detached(body, { kid: 'stranger' }) }, status: 401 },
+    { headers: { ...json,
+      [SIGN]: detached(body, { key: slots.stranger.privateKey }) }, status: 401 },
+    { headers: { ...json, [SIGN]: detached(`${body} `) }, status: 401 },
+    { headers: { ...json, [SIGN]: detached(body), authorization: 'Bearer x' }, status: 401 },
+    { headers: { ...json, [SIGN]: detached(body), host: 'other.invalid' }, status: 403 },
+    { headers: { ...json, [SIGN]: detached(body), 'content-type': 'text/plain' }, status: 415 },
+    { method: 'GET', headers: { ...json, [SIGN]: detached(body) }, status: 405 },
+  ]
+  for (const { method = 'POST', headers, status } of cases) {
+    const response = await request(f.port, { method, path: REVOKE,
+      body: method === 'POST' ? body : undefined, headers })
+    assert.equal(response.status, status, JSON.stringify(headers))
+  }
+  assert.equal((await request(f.port, { headers: { cookie } })).status, 200)
+  assert.equal(f.sessions.list().length, 1)
+  assert.ok(f.audit.every(entry => Object.keys(entry).sort().join(',') === 'request_id,status'),
+    'a refused call logs no subject, workspace or signature')
+})
+
+// Mutant CLOUD_REVOKE_FIELDS_ANY accepts an unknown version, event, workspace or reason.
+test('a signed but malformed revocation call changes nothing', async t => {
+  const f = await fixture(t)
+  const cookie = cookieOf(await f.open(f.issue()))
+  const base = { version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now) }
+  const cases = [
+    { version: 2 }, { version: '1' }, { event: 'session.renew' }, { workspace: 'workspace-b' },
+    { subject: '' }, { subject: 'x'.repeat(257) }, { reason: 'deleted' },
+    { issued_at: 'yesterday' }, { issued_at: 1 },
+  ]
+  for (const patch of cases) {
+    const body = JSON.stringify({ ...base, ...patch })
+    const response = await request(f.port, { method: 'POST', path: REVOKE, body,
+      headers: { 'content-type': 'application/json', [SIGN]: detached(body) } })
+    assert.equal(response.status, 401, JSON.stringify(patch))
+  }
+  assert.equal((await request(f.port, { headers: { cookie } })).status, 200)
+})
+
+// Mutant CLOUD_REVOKE_ROLE_CUT_ALL drops the created <= effective_at bound.
+test('role_lowered drops only the sessions that existed at its effective time', async t => {
+  const f = await fixture(t)
+  const early = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  f.state.now += 60_000
+  const late = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  const body = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'role_lowered', issued_at: iso(f.state.now - 30_000) })
+  const called = await request(f.port, { method: 'POST', path: REVOKE, body,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(body) } })
+  assert.equal(called.status, 204)
+  assert.equal((await request(f.port, { headers: { cookie: early } })).status, 401)
+  assert.equal((await request(f.port, { headers: { cookie: late } })).status, 200)
+  // The lowered person may sign in again with the roles Cloud now mints.
+  assert.equal((await f.open(f.issue({ sub: 'person-1', roles: ['admin'] }))).status, 303)
+})
+
+// Mutant CLOUD_POLL_NEVER keeps the fallback from running while sessions exist.
+test('the poll fallback drops sessions from a signed list', async t => {
+  const f = await fixture(t, { pollInterval: 20 })
+  const removed = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  const kept = cookieOf(await f.open(f.issue({ sub: 'person-2' })))
+  assert.equal(typeof f.cloud.poll, 'function')
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now), expires_at: iso(f.state.now + 300_000),
+    revoked: [{ subject: 'person-1', reason: 'removed', effective_at: iso(f.state.now) }] }
+  await waitFor(() => f.sessions.list().length === 1)
+  assert.equal((await request(f.port, { headers: { cookie: removed } })).status, 401)
+  assert.equal((await request(f.port, { headers: { cookie: kept } })).status, 200)
+  assert.ok(f.state.listFetches > 0)
+})
+
+// Mutant CLOUD_POLL_TRUSTS_ANY applies an expired, unsigned or foreign list.
+test('an expired, unsigned or wrong-workspace list changes nothing', async t => {
+  const f = await fixture(t, { pollInterval: 20 })
+  const cookie = cookieOf(await f.open(f.issue()))
+  assert.equal(typeof f.cloud.poll, 'function')
+  const valid = { version: 1, workspace: 'workspace-a', issued_at: iso(f.state.now),
+    expires_at: iso(f.state.now + 300_000),
+    revoked: [{ subject: 'person-1', reason: 'removed', effective_at: iso(f.state.now) }] }
+  for (const document of [
+    { ...valid, workspace: 'workspace-b' },
+    { ...valid, expires_at: iso(f.state.now - 1) },
+    { ...valid, version: 2 },
+    { ...valid, revoked: 'not-an-array' },
+  ]) {
+    f.state.revocationList = document
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal((await request(f.port, { headers: { cookie } })).status, 200,
+      JSON.stringify(document).slice(0, 40))
+  }
+  f.state.revocationList = valid
+  for (const signature of [null, detached('other')]) {
+    f.state.revocationSignature = signature
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal((await request(f.port, { headers: { cookie } })).status, 200)
+  }
+  f.state.revocationSignature = undefined
+  await waitFor(() => f.sessions.list().length === 0)
+})
+
+// Mutant CLOUD_REMOVE_FOREVER never lets Cloud lift a removal for a new open.
+test('a later signed list is Cloud\'s word on a removal: new opens resume', async t => {
+  const f = await fixture(t, { pollInterval: 20 })
+  const old = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  const call = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now) })
+  const called = await request(f.port, { method: 'POST', path: REVOKE, body: call,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(call) } })
+  assert.equal(called.status, 204)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 401)
+  f.state.now += 1000
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now), expires_at: iso(f.state.now + 300_000), revoked: [] }
+  assert.equal(typeof f.cloud.poll, 'function')
+  await f.cloud.poll()
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+  assert.equal((await request(f.port, { headers: { cookie: old } })).status, 401,
+    'a dropped session is never restored')
+})
+
+test('an older revocation call does not replace a newer one', async t => {
+  const f = await fixture(t)
+  const send = at => {
+    const body = JSON.stringify({ version: 1, event: 'session.revoke',
+      workspace: 'workspace-a', subject: 'person-1', reason: 'removed',
+      issued_at: iso(at) })
+    return request(f.port, { method: 'POST', path: REVOKE, body,
+      headers: { 'content-type': 'application/json', [SIGN]: detached(body) } })
+  }
+  assert.equal((await send(f.state.now + 5000)).status, 204)
+  assert.equal(f.cloud.removed.get('person-1').at, f.state.now + 5000)
+  // A replayed older call is still accepted idempotently, but it changes nothing.
+  assert.equal((await send(f.state.now)).status, 204)
+  assert.equal(f.cloud.removed.get('person-1').at, f.state.now + 5000)
+})
+
+test('a replayed call older than a newer list does not undo a re-admission', async t => {
+  const f = await fixture(t, { pollInterval: 20 })
+  const old = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  const issued = iso(f.state.now)
+  const body = JSON.stringify({ version: 1, event: 'session.revoke',
+    workspace: 'workspace-a', subject: 'person-1', reason: 'removed', issued_at: issued })
+  const replay = () => request(f.port, { method: 'POST', path: REVOKE, body,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(body) } })
+  assert.equal((await replay()).status, 204)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 401)
+  f.state.now += 1000
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now), expires_at: iso(f.state.now + 300_000), revoked: [] }
+  await f.cloud.poll()
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+  // Cloud's newer list wins; the replay is accepted idempotently and changes nothing.
+  assert.equal((await replay()).status, 204)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+  assert.equal((await request(f.port, { headers: { cookie: old } })).status, 401)
+})
+
+// Mutant CLOUD_LIST_STALE_APPLIED applies a list issued before the one already applied.
+test('a stale signed list does not undo a newer list or its re-admission', async t => {
+  const f = await fixture(t, { pollInterval: 20 })
+  const old = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  f.state.now += 60_000
+  const kept = cookieOf(await f.open(f.issue({ sub: 'person-2' })))
+  const removal = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now) })
+  assert.equal((await request(f.port, { method: 'POST', path: REVOKE, body: removal,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(removal) } })).status, 204)
+  assert.equal((await request(f.port, { headers: { cookie: old } })).status, 401)
+  // A newer list omits person-1: the removal is lifted and a new open is admitted.
+  f.state.now += 1000
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now), expires_at: iso(f.state.now + 300_000), revoked: [] }
+  await f.cloud.poll()
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+  // A delayed list issued before that one still names the removal and a role cut.
+  const stale = f.state.now - 500
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(stale), expires_at: iso(stale + 300_000),
+    revoked: [{ subject: 'person-1', reason: 'removed', effective_at: iso(stale) },
+      { subject: 'person-2', reason: 'role_lowered', effective_at: iso(stale) }] }
+  await f.cloud.poll()
+  // The newer list stands: the re-admission holds and the older session is untouched.
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
+  assert.equal((await request(f.port, { headers: { cookie: kept } })).status, 200)
+})
+
+// Mutant CLOUD_POLL_IDLE skips the poll when the last session ended, stranding a removal.
+test('the timer re-admits a removed subject after the last session ends', async t => {
+  const f = await fixture(t, { pollInterval: 20 })
+  const last = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  const call = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now) })
+  assert.equal((await request(f.port, { method: 'POST', path: REVOKE, body: call,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(call) } })).status, 204)
+  assert.equal((await request(f.port, { headers: { cookie: last } })).status, 401)
+  assert.equal(f.sessions.families.length, 0, 'the removal ended the last session')
+  const refused = await f.open(f.issue({ sub: 'person-1' }))
+  assert.equal(refused.status, 401, 'a removed subject may not open')
+  const before = f.state.listFetches
+  f.state.now += 1000
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now), expires_at: iso(f.state.now + 300_000), revoked: [] }
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.ok(f.state.listFetches > before,
+    'the timer polls with no sessions while a removal is pending')
+  await waitFor(() => !f.cloud.removed.size)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
 })

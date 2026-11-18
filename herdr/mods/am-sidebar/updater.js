@@ -6,7 +6,7 @@
 // The plain-data rules are updateCheck.js's.
 // Apache-2.0.
 
-import { AUTO_FILE, CHECK_FILE, HELD_FILE, RESTORE_FILE, formatAuto, parseAuto } from "./release.js";
+import { AUTO_FILE, CHECK_FILE, HELD_FILE, RESTORE_FILE, formatAuto, mergeAuto } from "./release.js";
 import {
   FIRST_CHECK_MS, LANDING_WAIT_MS, REQUEST_KEY, RELOAD_GRACE_MS, RETRY_MS, SHOWN_KEY, STATE_KEY, announce, applyNotice, applyPatch, heldRecordFrom,
   applyRefusal, autoFailedNotice, autoFailure, autoPlan, busyOf, checkFrom, checkPatch, claim, coolingDown, finish, heldFrom, heldNotice, landedNotice,
@@ -262,11 +262,9 @@ export class Updater {
   // setting file (update.mjs and the CLI read the same), mirrored in STATE_KEY for the bar.
   async setAuto(on, request) {
     let error = null;
-    let auto = null;
     try {
       const text = await this.readText(this.autoFile);
-      auto = { ...parseAuto(text ?? ""), on };
-      await this.writeText(this.autoFile, formatAuto(auto), text ?? null);
+      await this.writeText(this.autoFile, formatAuto(mergeAuto(text ?? "", { on })), text ?? null);
     } catch (e) { error = String(e?.message ?? e); }
     const state = this.state();
     const shown = { ...(state.auto ?? { managed: false, skip: null, why: null }), ...(error ? {} : { on }), at: this.now() };

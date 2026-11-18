@@ -1544,6 +1544,25 @@ kill -TERM $$
   return { bin, calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean) : []) };
 }
 
+/**
+ * A stand-in herdr-app that passes every check but the one for `mod` (or all of them, with none):
+ * exits `code`, printing `stderr` first when given. 126/127 is the program loader's "never
+ * started"; 1 is a check that ran and judged a mod failed.
+ */
+function fakeCheckExit(dir, { code, stderr = "", mod = null } = {}) {
+  mkdirSync(dir, { recursive: true });
+  const bin = join(dir, "herdr-app"), calls = join(dir, "herdr-app-calls");
+  const only = mod ? `case "$2" in */${mod}) ;; *) exit 0 ;; esac\n` : "";
+  const said = stderr ? `printf '%s\\n' ${JSON.stringify(stderr)} >&2\n` : "";
+  writeFileSync(bin, `#!/bin/sh
+printf '%s\\n' "$*" >> "${calls}"
+[ "$1" = check ] || exit 0
+${only}${said}exit ${code}
+`);
+  chmodSync(bin, 0o755);
+  return { bin, calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean) : []) };
+}
+
 test("a herdr-app check killed by a signal is could-not-run: update kept, no restore, one unchecked note", async () => {
   const h = autoHome(["0.2.0"]);
   const app = fakeCheckKilled(join(h.home, "killed"));
@@ -1562,6 +1581,260 @@ test("a herdr-app check killed by a signal is could-not-run: update kept, no res
     assert.deepEqual([note.version, note.from], ["0.2.0", "0.1.0"]);
     assert.match(note.unavailable, /could not run/);
     assert.equal(app.calls().length, 1, "it stops at the first check that could not run");
+  } finally { h.done(); }
+});
+
+/**
+ * An unchecked update's receipt: no mod was judged, nothing rolled back, and the note the new build
+ * reads says the same. The caller asserts what the runner said on top of this.
+ */
+function assertUncheckedReceipt(h, r, unavailable, version = "0.2.0") {
+  assert.equal(r.installed.version, version, "the update was kept");
+  assert.equal(r.installed.restored, undefined, "nothing was restored");
+  assert.equal(r.installed.restoreError, undefined);
+  assert.deepEqual(r.installed.check, { failed: [], checked: false, unavailable });
+  assert.equal(readVersion(join(h.mods, "am-sidebar")), version, "the release stayed installed");
+  assert.equal(readMarker(h.mods).version, version, "the pack marker names the installed release");
+  assert.equal(existsSync(join(stateDirOf(h.mods), RESTORE_FILE)), false, "no restore receipt was written");
+  assert.equal(existsSync(autoFileOf(h.mods)), false, "no skip was written");
+  assert.equal(readVersion(join(prevSetOf(h.mods), "am-sidebar")), "0.1.0", "the kept set stayed the rollback target");
+  const note = JSON.parse(readFileSync(join(stateDirOf(h.mods), CHECK_FILE), "utf8"));
+  assert.deepEqual([note.version, note.from, note.failed, note.checked, note.unavailable],
+    [version, "0.1.0", [], false, unavailable], "the receipt the new build reads says the same");
+}
+
+test("a check runner that exits 127 is unchecked: receipt fields, no restore, no skip", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "exit-127"), { code: 127 });
+  const lines = [];
+  try {
+    const direct = checkMods({ modsDir: h.mods, mods: toCheck(h.mods, readMarker(h.mods).mods), herdrApp: app.bin,
+      log: (l) => lines.push(l) });
+    assert.deepEqual(direct, { failed: [], checked: false, unavailable: "the herdr-app check could not run (exit 127)" });
+    assert.ok(lines.includes("the herdr-app check could not run (exit 127): no mod was checked"), lines.join("; "));
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assertUncheckedReceipt(h, r, "the herdr-app check could not run (exit 127)");
+  } finally { h.done(); }
+});
+
+test("a check runner that exits 126 is unchecked: receipt fields, no restore, no skip", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "exit-126"), { code: 126 });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assertUncheckedReceipt(h, r, "the herdr-app check could not run (exit 126)");
+  } finally { h.done(); }
+});
+
+test("a 127 with the loader's words keeps them in the reason: unchecked, no restore, no skip", async () => {
+  const h = autoHome(["0.2.0"]);
+  const said = "error while loading shared libraries: libxkbcommon-x11.so.0";
+  const app = fakeCheckExit(join(h.home, "loader-words"), { code: 127, stderr: said });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assertUncheckedReceipt(h, r, `the herdr-app check could not run (exit 127: ${said})`);
+  } finally { h.done(); }
+});
+
+test("a real mod failure still rolls back and records skipCause mods", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "mod-fails"), { code: 1, mod: "am-tabs", stderr: "am-tabs: cannot load" });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assert.deepEqual(r.installed.restored, { version: "0.1.0", failedVersion: "0.2.0", mod: "am-tabs", failed: ["am-tabs"],
+      checked: true, prevRemoved: true });
+    assert.deepEqual(r.installed.check, { failed: ["am-tabs"], checked: true });
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0", "the kept set is back");
+    assert.equal(readMarker(h.mods).version, "0.1.0");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: "0.2.0", skipCause: "mods" },
+      "the skip says a real mod failure caused it");
+    assert.equal(existsSync(join(stateDirOf(h.mods), CHECK_FILE)), false, "a judged failure is not an unchecked note");
+    const note = JSON.parse(readFileSync(join(stateDirOf(h.mods), RESTORE_FILE), "utf8"));
+    assert.deepEqual([note.version, note.failedVersion, note.failed, note.checked], ["0.1.0", "0.2.0", ["am-tabs"], true]);
+  } finally { h.done(); }
+});
+
+test("a mod failure that prints loader words with exit 1 still rolls back", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "mod-words"), { code: 1, mod: "am-tabs",
+    stderr: "error while loading shared libraries: libxkbcommon-x11.so.0" });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assert.deepEqual(r.installed.check, { failed: ["am-tabs"], checked: true },
+      "the words alone are a mod error, not the loader's");
+    assert.equal(r.installed.restored.version, "0.1.0");
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: "0.2.0", skipCause: "mods" });
+  } finally { h.done(); }
+});
+
+test("a later mod's 127 leaves the whole check unchecked, no rollback", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "late-127"), { code: 127, mod: "am-tabs" });
+  try {
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assertUncheckedReceipt(h, r, "the herdr-app check could not run (exit 127)");
+    assert.equal(app.calls().length, 2, "the mod before it passed, then the runner never started");
+  } finally { h.done(); }
+});
+
+test("an old rolled-back install: am update --retry-skipped clears the skip and installs it", async () => {
+  const h = autoHome(["0.2.0"]);
+  try {
+    // The state an install the old updater rolled back keeps: a skip with no recorded cause, and
+    // the restore receipt saying a mod failed (the only thing that code could say).
+    writeAuto(h.mods, { skip: "0.2.0" });
+    writeFileSync(join(stateDirOf(h.mods), RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: "0.2.0",
+      mod: "am-tabs", failed: ["am-tabs"], checked: true, at: Date.now() }));
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: h.mods, env: {}, keys, fetch: fakeFetch(h.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.2.0", "the skipped release is installed");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: null }, "the skip is cleared");
+    assert.equal(existsSync(join(stateDirOf(h.mods), RESTORE_FILE)), false, "the old restore receipt is gone");
+  } finally { h.done(); }
+});
+
+test("a skip recorded from a real mod failure holds through an ordinary update", async () => {
+  const h = autoHome(["0.2.0"]);
+  try {
+    writeAuto(h.mods, { skip: "0.2.0", skipCause: "mods" });
+    const auto = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(auto.installed, null);
+    assert.match(auto.held, /0\.2\.0 was rolled back here/);
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: "0.2.0", skipCause: "mods" }, "an automatic update leaves it");
+    const plain = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0" });
+    assert.equal(plain.installed.version, "0.2.0", "asked for by hand, it installs");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: "0.2.0", skipCause: "mods" }, "and the record holds");
+  } finally { h.done(); }
+});
+
+test("am update --retry-skipped with no skip set just updates", async () => {
+  const h = autoHome(["0.2.0"]);
+  try {
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: h.mods, env: {}, keys, fetch: fakeFetch(h.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: null });
+  } finally { h.done(); }
+});
+
+test("a legacy cause-less skip: auto waits, a newer release moves past, am update installs, --retry-skipped clears", async () => {
+  /** The state the old updater left after a rollback: a skip with no cause, and its restore receipt. */
+  const legacySkip = (mods, version = "0.2.0") => {
+    writeAuto(mods, { skip: version });
+    writeFileSync(join(stateDirOf(mods), RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: version,
+      mod: "am-tabs", failed: ["am-tabs"], checked: true, at: Date.now() }));
+  };
+  const first = autoHome(["0.2.0"]);
+  try {
+    legacySkip(first.mods);
+    // (a) An automatic update still refuses the very version the skip names.
+    const auto = await installUpdate({ keys, fetch: fakeFetch(first.table), env: {}, modsDir: first.mods,
+      expect: "0.2.0", auto: true });
+    assert.equal(auto.installed, null);
+    assert.match(auto.held, /0\.2\.0 was rolled back here/);
+    assert.equal(readVersion(join(first.mods, "am-sidebar")), "0.1.0");
+    assert.deepEqual(readAuto(first.mods), { on: true, skip: "0.2.0" }, "an automatic update leaves the skip");
+    // (b) A newer release is past the skip and installs on its own.
+    first.serve("0.3.0");
+    const newer = await installUpdate({ keys, fetch: fakeFetch(first.table), env: {}, modsDir: first.mods,
+      expect: "0.3.0", auto: true });
+    assert.equal(newer.installed.version, "0.3.0");
+    assert.equal(readVersion(join(first.mods, "am-sidebar")), "0.3.0");
+  } finally { first.done(); }
+  const second = autoHome(["0.2.0"]);
+  try {
+    legacySkip(second.mods);
+    // (c) Asked for by hand, the skipped release installs; the record stays as it was.
+    const plain = await installUpdate({ keys, fetch: fakeFetch(second.table), env: {}, modsDir: second.mods, expect: "0.2.0" });
+    assert.equal(plain.installed.version, "0.2.0");
+    assert.deepEqual(readAuto(second.mods), { on: true, skip: "0.2.0" }, "a plain update leaves the record");
+  } finally { second.done(); }
+  const third = autoHome(["0.2.0"]);
+  try {
+    legacySkip(third.mods);
+    // (d) The explicit retry clears the record and installs the release the old code skipped.
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: third.mods, env: {}, keys, fetch: fakeFetch(third.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.equal(readVersion(join(third.mods, "am-sidebar")), "0.2.0");
+    assert.deepEqual(readAuto(third.mods), { on: true, skip: null }, "the cause-less skip is cleared");
+    assert.equal(existsSync(join(stateDirOf(third.mods), RESTORE_FILE)), false, "and the old receipt is gone");
+  } finally { third.done(); }
+});
+
+/** The auto-update record exactly as the file holds it, unknown fields included. */
+const autoRecordOf = (modsDir) => JSON.parse(readFileSync(autoFileOf(modsDir), "utf8"));
+/** Seeds the auto-update file as a newer release (or a hand edit) would leave it. */
+const seedAutoRecord = (modsDir, record) => {
+  mkdirSync(stateDirOf(modsDir), { recursive: true });
+  writeFileSync(autoFileOf(modsDir), `${JSON.stringify(record, null, 2)}\n`);
+};
+
+test("an unknown skipCause survives the record's writes and the skip still holds", async () => {
+  const h = autoHome(["0.2.0"]);
+  const raw = { auto: true, skip: "0.2.0", skipCause: "vendor-specific", extra: "x" };
+  try {
+    seedAutoRecord(h.mods, raw);
+    const held = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(held.installed, null, "an ordinary update does not install the skipped version");
+    assert.match(held.held, /0\.2\.0 was rolled back here/);
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the first ordinary update keeps the unknown cause");
+    // The setting changer writes the same record: it must carry the cause and the extra field.
+    writeAuto(h.mods, { on: true });
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the setting write keeps the unknown cause");
+    const again = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(again.installed, null, "a second ordinary update still does not install it");
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the second ordinary update keeps the unknown cause");
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.1.0", "the skipped version was never installed");
+  } finally { h.done(); }
+});
+
+test("an unknown extra field beside a skip survives every write of the record", async () => {
+  const h = autoHome(["0.2.0"]);
+  const raw = { auto: true, skip: "0.2.0", skipCause: "mods", keepMe: { nested: ["x"] } };
+  try {
+    seedAutoRecord(h.mods, raw);
+    const held = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, expect: "0.2.0", auto: true });
+    assert.equal(held.installed, null);
+    assert.deepEqual(autoRecordOf(h.mods), raw, "the update keeps it");
+    writeAuto(h.mods, { on: false });
+    assert.deepEqual(autoRecordOf(h.mods), { ...raw, auto: false }, "switching off keeps it");
+    writeAuto(h.mods, { on: true });
+    assert.deepEqual(autoRecordOf(h.mods), raw, "switching on keeps it");
+  } finally { h.done(); }
+});
+
+test("--retry-skipped clears a known skip and its cause but keeps an unknown field", async () => {
+  const h = autoHome(["0.2.0"]);
+  try {
+    seedAutoRecord(h.mods, { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" });
+    const line = await cmdUpdate({ "retry-skipped": true }, [], { modsDir: h.mods, env: {}, keys, fetch: fakeFetch(h.table) });
+    assert.match(line, /^Updated Automagik Herdr 0\.1\.0 → 0\.2\.0\./);
+    assert.deepEqual(autoRecordOf(h.mods), { auto: true, extra: "x" },
+      "the skip and its cause are cleared, the unknown field stays");
+    assert.deepEqual(readAuto(h.mods), { on: true, skip: null });
+  } finally { h.done(); }
+});
+
+test("the setting changer changes on but keeps the skip, its cause and an unknown field", async () => {
+  const h = autoHome([]);
+  try {
+    seedAutoRecord(h.mods, { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" });
+    writeAuto(h.mods, { on: false });
+    assert.deepEqual(autoRecordOf(h.mods), { auto: false, skip: "0.2.0", skipCause: "mods", extra: "x" });
+    writeAuto(h.mods, { on: true });
+    assert.deepEqual(autoRecordOf(h.mods), { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" });
+  } finally { h.done(); }
+});
+
+test("a rollback writes its new skip and cause over an older one, keeping an unknown field", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "bad-new-skip"), { code: 1, mod: "am-tabs", stderr: "am-tabs: cannot load" });
+  try {
+    seedAutoRecord(h.mods, { auto: true, skip: "0.1.0", skipCause: "mods", extra: "x" });
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin });
+    assert.equal(r.installed.restored.version, "0.1.0");
+    assert.deepEqual(autoRecordOf(h.mods), { auto: true, skip: "0.2.0", skipCause: "mods", extra: "x" },
+      "the new skip and cause replace the old ones; the unknown field stays");
   } finally { h.done(); }
 });
 
@@ -1741,21 +2014,12 @@ test("a bad first install with nothing kept cannot restore: a clear reason, no c
   } finally { h.done(); }
 });
 
-test("herdr-app missing after an update: no restore, the update is kept and said unchecked", async () => {
+test("herdr-app missing after an update: receipt fields, no restore, no skip", async () => {
   const h = autoHome(["0.2.0"]);
   try {
     const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods,
       herdrApp: join(h.home, "no-herdr-app") });
-    assert.equal(r.installed.version, "0.2.0");
-    assert.equal(r.installed.restored, undefined);
-    assert.equal(r.installed.restoreError, undefined);
-    assert.deepEqual(r.installed.check, { failed: [], checked: false, unavailable: "herdr-app is not on PATH" });
-    const note = JSON.parse(readFileSync(join(h.home, "automagik-herdr", CHECK_FILE), "utf8"));
-    assert.deepEqual([note.version, note.from, note.unavailable], ["0.2.0", "0.1.0", "herdr-app is not on PATH"],
-      "the new build can say it was not checked");
-    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.2.0", "the update was kept");
-    assert.equal(readVersion(join(prevSetOf(h.mods), "am-sidebar")), "0.1.0");
-    assert.equal(readAuto(h.mods).skip, null);
+    assertUncheckedReceipt(h, r, "herdr-app is not on PATH");
   } finally { h.done(); }
 });
 

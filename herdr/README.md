@@ -530,7 +530,7 @@ am restart <bot> [--fresh] [--agent A] [--model M [--save]] [--force]
 am attach <bot> <terminal> [--move]
 am detach <bot>
 am import --from-hc [--squad-label L] [--apply]
-am whois <terminal> | whois --bot <bot>
+am whois <terminal> | whois --bot <bot> | whois --all
 am history <bot>
 am brief <bot>
 am forget <project>
@@ -538,7 +538,7 @@ am worker "<task>" (--branch B [--base REF] | --worktree DIR)
        [[--agent A] [--model M] [--effort E] | --template T] [--name N] [--role dev|test|review|fix]
        [--task ID [--lead BOT]]
 am worker kill <pane>   # from a bot's pane: end one worker that bot started; any other pane is refused
-am update [--check | --rollback]
+am update [--check | --rollback | --retry-skipped]
 am meter install [--machine M | --linked | --local] | meter uninstall
 am machines [update [--machine M | --linked | --local] | --auto on|off|status [--machine M]]
 am dsh-tui install | update | uninstall | doctor
@@ -807,14 +807,21 @@ am whois <terminal> --json
   { "terminal", "core", "created_ms", "bot", "project", "since" }   or   { "terminal", "core", "created_ms", "bot": null }
 am whois --bot <bot> --json
   the same, or { "terminal": null, "core", "created_ms": null, "bot", "project": null, "since": null }
+am whois --all --json
+  { "core", "bindings": [ { "terminal", "core", "created_ms", "bot", "project", "since",
+                            "address", "machine", "state" } ] }
 ```
 
-`since` is the attach row's `at`; `created_ms` is hc's. Both forms fold and confirm with hc first.
+`since` is the attach row's `at`; `created_ms` is hc's. Both single forms fold and confirm with
+hc first. `--all` lists every binding the ledger holds, live or on a machine that is away
+(`state` is `live` or `unknown`), with the hc address and the machine's name; it is the
+interface for tools that draw a bot beside a terminal without reading labels (`bots.whois-all-json@1`).
 
 **The first run.** With no file yet, the first command that reads it imports today's labels
 once: each live pane on this computer carrying `bot=<id>` of a bot some project here defines
 becomes an attach row with `by: "import"` (one pane per bot: an agent in front, then the
-newest). The file is then made, even empty, so this happens once. The briefing hook reads the
+newest). "Defines" means a folder this run names or remembers, or a project the sidebar knows
+from its project list, a sibling folder, or a cross-project reference. The file is then made, even empty, so this happens once. The briefing hook reads the
 file and never writes it; before the file exists it goes by the label.
 
 ## Workers
@@ -1169,6 +1176,7 @@ still places panes by the walk-up, so a folder joins its own project once it has
 am update --check      # the installed and the latest version
 am update              # download, verify against the signed pointer, install
 am update --rollback   # put the replaced set of mods back
+am update --retry-skipped  # install the release a rollback skipped, and clear that record
 am update --auto off   # Install updates automatically: on (default), off, or status
 ```
 
@@ -1177,7 +1185,14 @@ release, it installs it the same way `am update` does (the signed pointer, the
 sha256, the replaced set kept for `--rollback`), Herdr reloads the mods, and one notice says
 "Automagik Herdr updated to X". Your bots keep running: they live in herdr-core, not in the mods.
 A version you rolled back with `--rollback` is never installed on its own again; it waits for a
-newer one. A failed install posts one notice with the reason, changes nothing, and tries again
+newer one. The skip outlives the run that wrote it, so an install that already rolled back keeps
+the skipped version in `auto-update.json` (with its cause, `skipCause: "mods"`, when the restore
+knew it); to re-attempt it by hand, run `am update --retry-skipped`, which clears the recorded
+skip for the release it installs and then updates. An ordinary `am update` installs the skipped
+release too (the skip holds only automatic updates) but leaves the record, and a skip recorded
+from a real mod failure is never cleared by an ordinary update: only `--retry-skipped` clears it,
+or a newer release moves past it. A failed install posts one notice with the reason, changes
+nothing, and tries again
 4 hours later; each further failure of that release waits longer (8, 16, then 24 hours, then
 daily), with no second notice. Turn it off with `am update --auto off` or the switch
 in the status bar; then a new release is only announced, as before. It applies only to a pack
@@ -1662,13 +1677,16 @@ under that flag agy asks nothing and runs no classifier: a command runs unless a
 runs unasked, on a seat, a worker and a read-only review launch alike:
 
 - inline code and scripts: `python3 -c`, `node -e`, `bash -c`, a heredoc, any script file;
+- the test runners: `node --test` and `bun test` run any test file they are given, so a
+  read-only launch can run code through one, exactly as `node -e` would;
 - shells and wrappers: `sh`, `bash`, `env`, `xargs`, `find -exec` and `-delete`, `awk`, `tee`,
   `sed -i`, and so a pipeline such as `cat x | sh`;
 - the network and other machines: `curl`, `ssh`, `hc run --on`, `gh gist create`;
 - a plain (non-force) `git push`, to `dev` or `main` too: only GitHub's branch protection
   stands there;
 - a child agent started by hand (`claude --dangerously-skip-permissions`, another `agy`,
-  `hc run -- ...`), and text typed into another pane with `hc send`;
+  `hc run -- ...`), and text typed into another pane with `hc send` (an agent's prompt or a
+  shell's, as that pane decides);
 - a write to the launch's own settings file or to the roster (the next pack launch writes the
   file again from the roster);
 - `gh api <endpoint> -X PUT ...` with the endpoint first, `--method=PUT`, `-XPUT` and
