@@ -355,10 +355,12 @@ export function install(rt) {
     }
     // DSH's own ChatGPT or Claude sign-in: its CLI serves that plan, signed in or not.
     for (const entry of entries) if (coveredBy(entry) !== undefined) entry.covered = true
-    if (remember) noteConnected(entries)
-    // A key can arrive without an event (an environment variable at the next start), so
-    // a provider listed with its key again lifts what its missing key blocked.
-    rt.unblockBots?.({ keyed: new Set(entries.filter(entry => !entry.needsKey).map(entry => entry.provider)) })
+    if (remember) {
+      noteConnected(entries)
+      // A key can arrive without an event, so a provider listed with its key again lifts
+      // what its missing key blocked. Catalog reads used to validate a pick stay read-only.
+      rt.unblockBots?.({ keyed: new Set(entries.filter(entry => !entry.needsKey).map(entry => entry.provider)) })
+    }
     await Promise.all(entries.filter(entry => used.has(entry.ref)).map(async (entry) => {
       const reasoning = await reasoningOf(entry.ref, epoch)
       if (reasoning !== undefined) entry.reasoning = reasoning
@@ -456,8 +458,8 @@ export function install(rt) {
 
   // A full `provider/model` ref, or a model id or name that only one provider serves.
   // `checkAccess`: a model that cannot run now (modelAccess) is refused here, before anything
-  // is written. `remember: false` leaves the team's record of connected providers alone, so a
-  // refused pick changes nothing. `keep`: the Bot's current model, never moved (onPlanCli).
+  // is written. `remember: false` leaves team state alone while validating the pick.
+  // `keep`: the Bot's current model, never moved (onPlanCli).
   async function resolveModel(text, { checkAccess = false, remember = true, keep } = {}) {
     const entries = await catalog({ fresh: true, remember })
     const wanted = String(text ?? '').trim()

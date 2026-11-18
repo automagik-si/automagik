@@ -1194,16 +1194,27 @@ export function install(rt) {
   // `threshold` the part is over; 'aside': no route answers beside the agent). The fresh
   // part carries the latest messages that fit, and the old part is archived only once the
   // fresh part's first answer comes from its route.
-  function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, cutoff = false, failed, bare = false, folder = false, fresh = false, manual = false, noNote, target, threshold, hard = overflow || folder || fresh || cutoff || manual } = {}) {
+  function startSwitch(agent, { resume = false, carry = [], info, joined, overflow = false, cutoff = false, failed, bare = false, folder = false, fresh = false, manual = false, noNote, target, threshold, hard = overflow || folder || fresh || cutoff || manual, routeChange } = {}) {
     // DSH agents carry `id`; a host agent (a test double, an adopted session) may only carry
     // the Session it runs. The Session id is the key either way.
     const agentId = agent.id ?? agent.session?.id
     try { rt.assertShellChoice?.(agentId) } catch { return false }
     const place = placeOf(agentId)
     if (place === undefined || switches.has(agentId) || checkpoints.has(agentId) || readOnly() || pinned(agentId)) return false
-    const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, since: Date.now() }
+    const job = { ...place, carry: [...carry], info, joined, resume, overflow, cutoff, failed, bare: bare || fresh, folder, fresh, manual, hard, noNote, target, threshold, routeChange, since: Date.now() }
     switches.set(agentId, job)
-    const running = runSwitch(agent, job)
+    let running = runSwitch(agent, job)
+    if (routeChange !== undefined) {
+      const settled = async (failed = false) => {
+        if (!job.moved) {
+          // Restore before dropping the switch marker so a second pick sees the kept route.
+          await routeChange.rollback()
+          routeChange.note('rolled back')
+        } else if (failed) routeChange.note('failed', 'fresh conversation did not finish')
+        else if (awaiting.get(job.freshId)?.job !== job) routeChange.note('completed')
+      }
+      running = running.then(() => settled(), async error => { await settled(true); throw error })
+    }
     // Settles once the move is over, either way: a fresh part's first answer or failure
     // that comes while it runs waits for it.
     job.done = running.then(() => {}, () => {})
@@ -1356,6 +1367,7 @@ export function install(rt) {
     }
     await ctx.workspaceRegistry.archiveSession(entry.oldId, { stopActivity: true })
       .catch(error => rt.warn('ds-bot: earlier part %s not archived: %s', entry.oldId, error))
+    entry.job?.routeChange?.note('completed')
   }
 
   // The fresh part's first call failed before any answer: the Bot goes back to the part it
@@ -1381,7 +1393,10 @@ export function install(rt) {
     const segments = segmentsOf(entry) ?? []
     if (current !== freshId || segments.at(-1)?.sessionId !== entry.oldId) return
     segments.pop()
-    if (room === undefined && (entry.expected === undefined || bot.model === entry.expected)) rt.revertModel?.(bot, failure)
+    if (room === undefined && (entry.expected === undefined || bot.model === entry.expected)) {
+      if (entry.job?.routeChange !== undefined) await entry.job.routeChange.rollback()
+      else rt.revertModel?.(bot, failure)
+    }
     if (room !== undefined) room.sessions[bot.id] = entry.oldId
     else {
       bot.sessionId = entry.oldId
@@ -1414,6 +1429,7 @@ export function install(rt) {
     rt.warn('ds-bot: the first call in the fresh part of %s failed before any answer; it is back on the part it came from, which was not archived', bot.name)
     await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
       .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', bot.name, error))
+    entry.job?.routeChange?.note('rolled back', 'fresh conversation could not answer')
   }
 
   // What a fresh part holds of the user's input goes back to the part it came from, in
@@ -1569,6 +1585,11 @@ export function install(rt) {
     const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, { dir, group: room !== undefined, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}) })
     const picked = await freshRoute(bot, session, job.target)
     const selected = picked === undefined || await selectRoute(bot, freshId, picked, name)
+    if (job.routeChange !== undefined && !selected) {
+      await ctx.workspaceRegistry.archiveSession(freshId, { stopActivity: true })
+        .catch(error => rt.warn('ds-bot: unused fresh part of %s not archived: %s', name, error))
+      return
+    }
     if (bot !== undefined) await rt.applyPermission(bot, freshId, room)
       .catch(error => rt.warn('ds-bot: permission for the fresh part of %s not applied: %s', name, error))
     // At Full access with the Bot's coding CLI model not served, or not selected just above,
@@ -2507,11 +2528,44 @@ export function install(rt) {
     })
   }
 
+  // A refusal must not open a host or refresh its catalog. Log only bounded refs from the
+  // published catalog; arbitrary picker input is not diagnostic data, even if ref-shaped.
+  function routeAttempt(bot, from, to, entry) {
+    const ref = value => typeof value === 'string' && /^[\w.-]+\/[\w][\w.:/-]*$/.test(value) && value.length <= 200
+      && rt.cachedCatalog?.().some(entry => entry.ref === value)
+      ? value : '(unavailable ref)'
+    return (outcome, reason) => rt.noteFailure?.({
+      level: outcome === 'refused' || outcome === 'rolled back' || outcome === 'failed' ? 'warn' : 'info',
+      source: 'host',
+      bot: bot.id,
+      where: entry,
+      text: `Route change ${ref(from)} → ${ref(to)} ${outcome}${reason === undefined ? '' : ` (${reason})`}`,
+    })
+  }
+
+  async function resolveRouteAgent(bot, note) {
+    try {
+      const agent = await rt.resolveAgent(rt.chatOf(bot.id))
+      if (agent != null) return agent
+    } catch (error) {
+      if (error?.autoClosed === true) {
+        note('refused', 'Auto review disabled')
+        throw refused('refused', 'Turn Auto review back on in Plugins to open this chat.')
+      }
+      if (error?.code === 'session/writer-held') {
+        note('refused', 'conversation writer held')
+        throw refused('refused', `${bot.name}'s conversation is open in another host. Close it there before changing routes.`)
+      }
+    }
+    note('refused', 'conversation unavailable')
+    throw refused('refused', `${bot.name}'s current conversation could not be opened, so its route was kept.`)
+  }
+
   // A route change is a harness change (RFC 0030, Decided 6 and 10): the old harness writes
   // a handoff note while idle and a fresh part opens with it. `bot.model` is the person's new
   // choice; `appliedModel` follows the moment that part takes the route. A conversation with
   // nothing worth carrying is simply taken over.
-  async function switchRoute(botId, model, effort) {
+  async function switchRoute(botId, model, effort, { entry = 'switch-route' } = {}) {
     const bot = rt.botOf(botId)
     if (bot === undefined) throw Object.assign(new Error('Unknown Bot'), { code: 'bot/not-found' })
     if (readOnly()) throw Object.assign(new Error(rt.readOnly()), { code: 'bot/read-only' })
@@ -2519,26 +2573,59 @@ export function install(rt) {
       if (commandCapableAgent(model)) throw refused('shell', shellHoldText(bot))
       return leaveShellHold(bot, model, effort)
     }
-    if (bot.sessionPinned === true) throw refused('refused', pinnedText(bot, 'fresh'))
+    const current = bot.model ?? bot.appliedModel
+    const note = routeAttempt(bot, current, model, entry)
+    const refusePinned = () => {
+      note('refused', 'pinned conversation')
+      throw refused('refused', pinnedText(bot, 'fresh'))
+    }
+    if (bot.sessionPinned === true) refusePinned()
     // The other direction of the shell boundary: a Bot without a shell cannot switch onto an
     // agent whose own tools run commands. The Bot's shell comes on first, or another model.
-    if (bot.shell === false && commandCapableAgent(model)) {
-      throw refused('shell', `${bot.name} has no shell, so it cannot move to ${String(model).split('/')[0]}, `
+    const checkShell = (ref) => {
+      if (bot.shell !== false || !commandCapableAgent(ref)) return
+      note('refused', 'shell off')
+      throw refused('shell', `${bot.name} has no shell, so it cannot move to ${String(ref).split('/')[0]}, `
         + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
     }
-    const current = bot.model ?? bot.appliedModel
+    checkShell(model)
     if (typeof current !== 'string' || !crossesHarness(current, model)) throw refused('refused', `${bot.name} is already on that route.`)
-    await rt.clearAuto?.(bot)
-    const target = await rt.resolveModel(model, { checkAccess: true, keep: bot.model })
     // A level picked with the crossing belongs to the fresh part. Without one, the Bot's
     // current level travels with it; desiredEffort drops it if the new model lacks it.
-    const effortId = effort === undefined ? bot.effort
-      : effort === null || effort === '' ? null
-      : await rt.resolveEffort(target, effort)
-    const agent = await rt.resolveAgent(rt.chatOf(botId))
-    const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort }
+    let target, effortId
+    try {
+      target = await rt.resolveModel(model, { checkAccess: true, remember: false, keep: bot.model })
+      effortId = effort === undefined ? bot.effort
+        : effort === null || effort === '' ? null
+        : await rt.resolveEffort(target, effort)
+    } catch (error) {
+      note('refused', 'model or thinking level unavailable')
+      throw error
+    }
+    const sessionId = rt.chatOf(botId)
+    const agent = await resolveRouteAgent(bot, note)
+    let said = true
+    // The team's kickoff alone can take the route in place. A conversation with history
+    // needs both methods the handoff job calls, even if the host exposes only an idle hook.
+    try { said = saidSomething(agent.session.deriveMessages()) } catch {}
+    if (said && (typeof agent.whenIdle !== 'function' || typeof agent.runMaintenance !== 'function')) {
+      note('refused', 'handoff unavailable')
+      throw refused('refused', `${bot.name}'s current conversation cannot hand off to a new route.`)
+    }
+    const checkCurrent = () => {
+      if (bot.sessionPinned === true) refusePinned()
+      checkShell(target)
+      if (rt.botOf(botId) === bot && rt.chatOf(botId) === sessionId && (agent.id ?? agent.session?.id) === sessionId
+        && (bot.model ?? bot.appliedModel) === current && !switches.has(sessionId) && !checkpoints.has(sessionId)) return
+      note('refused', 'conversation changed or busy')
+      throw refused('busy', `${bot.name}'s conversation changed or is busy. Look again before changing routes.`)
+    }
+    checkCurrent()
+    await rt.clearAuto?.(bot)
+    checkCurrent()
+    const previous = { model: bot.model, effort: bot.effort, appliedModel: bot.appliedModel, appliedEffort: bot.appliedEffort, previousModel: bot.previousModel }
     const restore = () => {
-      for (const key of ['model', 'effort', 'appliedModel', 'appliedEffort']) {
+      for (const key of ['model', 'effort', 'appliedModel', 'appliedEffort', 'previousModel']) {
         if (previous[key] === undefined) delete bot[key]
         else bot[key] = previous[key]
       }
@@ -2548,10 +2635,6 @@ export function install(rt) {
       if (effortId === null) delete bot.effort
       else if (effortId !== undefined) bot.effort = effortId
     }
-    let said = true
-    // The team's own kickoff is not a conversation yet: a Bot still on its greeting simply
-    // takes the new route, with no note to write. Everything a person or another Bot said is.
-    try { said = saidSomething(agent.session.deriveMessages()) } catch {}
     if (!said) {
       rt.noteModelChoice?.(bot, target)
       const takeRoute = async () => {
@@ -2560,26 +2643,32 @@ export function install(rt) {
           await rt.applyModel(bot, { force: true })
         } catch (error) {
           restore()
+          note('rolled back', 'in-place selection failed')
           throw error
         }
       }
       if (rt.whilePicking) await rt.whilePicking(bot, takeRoute)
       else await takeRoute()
       await rt.save()
+      note('completed', 'conversation had no exchange to hand off')
       return { id: botId, model: target, ...(effortId === null ? {} : { effort: effortId }), status: 'switched' }
     }
-    const job = startSwitch(agent, { hard: true, target })
-    if (!job) throw refused('busy', `${bot.name} is already moving to a new conversation.`)
+    const job = startSwitch(agent, { hard: true, target, routeChange: {
+      note,
+      rollback: async () => {
+        if (rt.botOf(botId) !== bot || bot.model !== target) return
+        restore()
+        await rt.save()
+      },
+    } })
+    if (!job) {
+      note('refused', 'conversation busy')
+      throw refused('busy', `${bot.name} is already moving to a new conversation.`)
+    }
     rt.noteModelChoice?.(bot, target)
     putRoute()
+    note('accepted')
     await rt.save()
-    // The fresh part may fail before its first answer: the record goes back with it, so the
-    // Bot never reads as moved to a route that did not take it.
-    void job.done.then(async () => {
-      if (job.moved || bot.model !== target) return
-      restore()
-      await rt.save()
-    }).catch(() => {})
     return { id: botId, model: target, ...(effortId === null ? {} : { effort: effortId }), status: 'switching' }
   }
 
@@ -2829,7 +2918,7 @@ export function install(rt) {
     return true
   }
 
-  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, newPart, switchPart, startFresh, switchRoute, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
+  Object.assign(rt, { sessionTokens: session => tokensOf(session), clock, partsOf, historyEntry, partLines, noteText, earlierPage, chatPage, displayItems, applySteps, followFolder, heldBack, newPart, switchPart, startFresh, switchRoute, routeAttempt, keepAdoptedSession, contextStatus, checkpointBot, switchJobs: () => switches.values(), switchingChat: id => [...switches.values()].some(job => job.botId === id && job.roomId === undefined && job.target !== undefined),
     // A fresh part still waiting for its first answer: its failure goes back with the part.
     awaitingFirstAnswer: id => awaiting.has(id) })
 }

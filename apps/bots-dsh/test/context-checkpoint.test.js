@@ -1257,3 +1257,47 @@ for (const trigger of ['idle', 'pre-step']) {
     assert.deepEqual([...b.rt.switchJobs()], [])
   })
 }
+
+
+// #1631: an explicit managed crossing from an agent that cannot answer beside its turn
+// uses the existing first-answer boundary. Selection alone must not log completion.
+test('an explicit route crossing settles on its first answer or restores its full choice on failure', async (t) => {
+  for (const outcome of ['answer', 'failure', 'newer']) {
+    const b = await switchBench({ perNode: 10, model: 'acp-codex/default' })
+    t.after(b.stop)
+    Object.assign(b.bot, { appliedModel: 'acp-codex/default', effort: 'high', appliedEffort: 'high' })
+    const history = b.session.snapshotEvents()
+    const notes = []
+    b.rt.desiredEffort = async bot => bot.effort
+    b.rt.resolveModel = async ref => ref
+    b.rt.resolveEffort = async (_ref, effort) => effort
+    b.rt.cachedCatalog = () => ['acp-codex/default', 'api/small'].map(ref => ({ ref }))
+    b.rt.noteFailure = entry => notes.push(entry)
+    const result = await b.rt.switchRoute('b1', 'api/small', 'low')
+    assert.equal(result.status, 'switching')
+    assert.ok(await until(() => b.rt.awaitingFirstAnswer('fresh1') && !b.rt.switchingChat('b1')))
+    assert.deepEqual(notes.map(entry => entry.text), ['Route change acp-codex/default → api/small accepted'])
+    assert.deepEqual(b.calls.archived, [])
+    if (outcome === 'newer') Object.assign(b.bot, { model: 'api/big', appliedModel: 'api/big', effort: 'newer', appliedEffort: 'newer' })
+    b.firstTurn('fresh1', { answer: outcome === 'answer' })
+    assert.ok(await until(() => notes.length === 2))
+    assert.equal(notes[1].text, outcome === 'answer'
+      ? 'Route change acp-codex/default → api/small completed'
+      : 'Route change acp-codex/default → api/small rolled back (fresh conversation could not answer)')
+    assert.deepEqual(b.session.snapshotEvents(), history)
+    if (outcome === 'answer') {
+      assert.equal(b.bot.sessionId, 'fresh1')
+      assert.deepEqual(b.calls.archived, ['s1'])
+    } else {
+      assert.equal(b.bot.sessionId, 's1')
+      assert.deepEqual(b.bot.segments, [])
+      assert.deepEqual(b.calls.archived, ['fresh1'])
+      assert.equal(b.bot.model, outcome === 'newer' ? 'api/big' : 'acp-codex/default')
+      assert.equal(b.bot.effort, outcome === 'newer' ? 'newer' : 'high')
+      assert.equal(b.bot.appliedModel, outcome === 'newer' ? 'api/big' : 'acp-codex/default')
+      assert.equal(b.bot.appliedEffort, outcome === 'newer' ? 'newer' : 'high')
+      assert.equal(b.rt.awaitingFirstAnswer('fresh1'), false)
+      assert.equal(b.bot.previousModel, undefined)
+    }
+  }
+})

@@ -606,7 +606,6 @@ export function install(rt) {
     // The tool deny list is checked with the rest, before anything is written: a name this
     // DSH does not serve refuses the update, so a typo cannot quietly weaken the list.
     const denyTools = cleanDenyTools(patch.denyTools)
-    if (denyTools !== undefined && denyTools !== null) await rt.assertDenyTools(rt.chatOf(bot.id), denyTools)
     // The shell capability, checked with the rest: a value that is not true or false
     // refuses the update before anything is written.
     const shell = cleanShell(patch.shell)
@@ -655,19 +654,22 @@ export function install(rt) {
     // old conversation across the harness. Other fields cannot ride along: the switch is its
     // own step, and the caller can update them after it.
     const currentModel = bot.model ?? bot.appliedModel
-    if (modelRef !== undefined && modelRef !== null && currentModel !== undefined && crossesHarness(currentModel, modelRef)) {
-      // A host-owned Session has no DSH agent with `whenIdle`, so no fresh part can be
-      // started here: its host owns the conversation, and the host's in-place move stands.
-      // A DSH agent, pinned included, takes the new-conversation path; the pinned check in
-      // switchRoute refuses it rather than carrying the Session across the harness.
-      const agent = await rt.resolveAgent(rt.chatOf(bot.id)).catch(() => undefined)
-      if (typeof agent?.whenIdle === 'function') {
-        const extra = Object.keys(patch).filter(key => key !== 'id' && key !== 'model' && key !== 'effort')
-        if (extra.length > 0) throw refusal(`${bot.name} needs a new conversation for that route, so change only its model in this step.`)
-        await rt.switchRoute(bot.id, modelRef, patch.effort)
-        return bot
+    if (modelRef != null && currentModel !== undefined && crossesHarness(currentModel, modelRef)) {
+      const entry = actorId === undefined ? 'update-bot' : 'update_bot'
+      // The host owns a pinned chat. Refuse before even resolving its agent, including
+      // mixed edits whose permission validation could otherwise open that Session.
+      if (bot.sessionPinned !== true) {
+        const extra = Object.keys(patch).filter(key => !['id', 'model', 'effort'].includes(key))
+        if (extra.length > 0) {
+          rt.routeAttempt(bot, currentModel, modelRef, entry)('refused', 'mixed edit')
+          throw refusal(`${bot.name} needs a new conversation for that route, so change only its model in this step.`)
+        }
       }
+      await rt.switchRoute(bot.id, modelRef, patch.effort, { entry })
+      return bot
     }
+    // Deny-list validation can open the Session; only do it after crossing eligibility.
+    if (denyTools !== undefined && denyTools !== null) await rt.assertDenyTools(rt.chatOf(bot.id), denyTools)
     // A new level resolves against the model the Bot will run on: the new one, the
     // model it keeps, or — the model cleared — the one it last ran on.
     const effortRef = modelRef === undefined ? bot.model ?? bot.appliedModel : modelRef ?? bot.appliedModel
