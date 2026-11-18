@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 
 const SOURCE_SHA256 = '2ba02e68b152868aef9ba28e24b3648c7d457fe6f25c761f2c2c53fb61a73fc8'
-const TEXT_SHA256 = 'c7224eaa525b085e4152125d5ad531bff915b4e24015089e7e598032cc09a8b3'
+const TEXT_SHA256 = '05361d5d076a5c22c5d74aea384b53bb064bd87cc98a17bdb5f0260d98bd5028'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const fail = message => { console.error(`font rebuild: ${message}`); process.exit(1) }
 
