@@ -102,8 +102,9 @@ export class CliGenerations {
     this.root = root
     this.instance = instance
     // Which installation this app is: one DSH profile. Two installations on one machine keep
-    // their Bot sign-ins under the same root by contract (the path is public), so the record
-    // says which one wrote it and only the same installation fences an account change.
+    // their Bot sign-ins under the same root by contract (the path is public): one Bot account
+    // per person. The record says which one wrote it, so another installation's live app does
+    // not refuse an account change; the claim mutex still excludes every installation.
     this.installId = typeof installId === 'string' && installId.trim() !== '' ? installId.trim() : undefined
     this.held = new Map()
     this.registered = new Set()
@@ -158,14 +159,16 @@ export class CliGenerations {
       && label !== this.installId
   }
 
-  peers(directory, legacy, own, { sweep = false } = {}) {
+  // `liveApps`: the scan is the live-app fence of an account change (otherApps), where another
+  // installation's live app is skipped: the Bot account is one per person, so its change here
+  // is that person's change there too. An unlabelled record is an older build and still fences.
+  // Never for claims (check): the claim is the one mutex over the shared pointer and homes.
+  peers(directory, legacy, own, { sweep = false, liveApps = false } = {}) {
     if (!existsSync(directory)) return
     for (const name of readdirSync(directory)) {
       if (name === own) continue
       const snapshot = ownershipAt(join(directory, name), { legacy })
-      // Another installation's live app changes only its own Bot account; an unlabelled record
-      // is an older build, which is treated as this installation.
-      if (ownershipState(snapshot) !== 'dead' && this.foreign(snapshot)) continue
+      if (liveApps && ownershipState(snapshot) !== 'dead' && this.foreign(snapshot)) continue
       if (ownershipState(snapshot) !== 'dead') throw busy()
       // Empty legacy home markers are evidence of untracked detached logins: retain them.
       if (sweep && !(legacy === 'home' && snapshot.record.marker !== LOGIN_RECORD_VERSION)
@@ -186,8 +189,8 @@ export class CliGenerations {
   }
 
   otherApps(vendor, home) {
-    this.peers(this.instances(vendor), 'root', this.instance, { sweep: true })
-    this.peers(join(home, 'instances'), 'home', this.instance)
+    this.peers(this.instances(vendor), 'root', this.instance, { sweep: true, liveApps: true })
+    this.peers(join(home, 'instances'), 'home', this.instance, { liveApps: true })
   }
 
   check(vendor) {

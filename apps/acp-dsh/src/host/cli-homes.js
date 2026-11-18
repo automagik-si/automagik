@@ -255,8 +255,9 @@ export class CliHomes {
       for (const name of readdirSync(instances)) {
         if (name === this.instance) continue
         const snapshot = ownershipAt(join(instances, name), { legacy: 'home' })
-        // Another installation's live app changes only its own Bot account (see CliGenerations
-        // .foreign): it is not a reason to refuse this one, and an older unlabelled build is.
+        // The Bot account is one per person, shared by every installation on this root: this
+        // change is that person's change there too, so another installation's live app is no
+        // reason to refuse it (see CliGenerations.foreign). An older unlabelled build refuses.
         if (ownershipState(snapshot) !== 'dead' && this.generations.foreign(snapshot)) continue
         if (ownershipState(snapshot) !== 'dead' || !removeDeadOwnership(snapshot)) {
           throw failure('Close other Automagik sessions before changing the Bot account.')

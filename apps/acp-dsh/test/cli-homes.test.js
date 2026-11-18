@@ -60,29 +60,29 @@ test('vendor homes exclude terminal credentials and all inherited auth/config ov
 test('another installation on the same root does not refuse this one\'s account change', t => {
   const root = mkdtempSync(join(tmpdir(), 'bot-cli-scope-'))
   const shared = join(root, 'acp', 'cli-homes')
-  const web = new CliHomes(shared, { installId: 'automagik-web' })
-  const gtm = new CliHomes(shared, { installId: 'automagik-gtm' })
-  t.after(() => { web.dispose(); gtm.dispose(); rmSync(root, { recursive: true, force: true }) })
-  web.environment('claude')
-  gtm.environment('claude')
+  const alpha = new CliHomes(shared, { installId: 'profile-alpha' })
+  const beta = new CliHomes(shared, { installId: 'profile-beta' })
+  t.after(() => { alpha.dispose(); beta.dispose(); rmSync(root, { recursive: true, force: true }) })
+  alpha.environment('claude')
+  beta.environment('claude')
   // The reported case: the other profile's app is live, and signing in here used to be refused.
-  gtm.begin('claude')
-  gtm.end('claude')
-  web.begin('claude')
-  web.end('claude')
+  beta.begin('claude')
+  beta.end('claude')
+  alpha.begin('claude')
+  alpha.end('claude')
   // The record on disk names the installation, so an app can tell a peer from a stranger.
   const directory = join(shared, 'instances', 'claude')
   const labels = readdirSync(directory)
     .map(name => JSON.parse(readFileSync(join(directory, name), 'utf8')).install)
     .sort()
-  assert.deepEqual(labels, ['automagik-gtm', 'automagik-web'])
+  assert.deepEqual(labels, ['profile-alpha', 'profile-beta'])
 })
 
 test('the same installation still fences, and an unlabelled older record still counts', t => {
   const root = mkdtempSync(join(tmpdir(), 'bot-cli-scope-same-'))
   const shared = join(root, 'acp', 'cli-homes')
-  const first = new CliHomes(shared, { installId: 'automagik-web' })
-  const second = new CliHomes(shared, { installId: 'automagik-web' })
+  const first = new CliHomes(shared, { installId: 'profile-alpha' })
+  const second = new CliHomes(shared, { installId: 'profile-alpha' })
   t.after(() => { first.dispose(); second.dispose(); rmSync(root, { recursive: true, force: true }) })
   first.environment('codex')
   second.environment('codex')
@@ -94,6 +94,32 @@ test('the same installation still fences, and an unlabelled older record still c
   t.after(() => older.dispose())
   older.environment('codex')
   assert.throws(() => first.begin('codex'), /Close other Automagik sessions/)
+  // The other way round too: an app that does not know its installation cannot tell a peer from
+  // itself, so any live app, labelled or not, refuses its account change.
+  older.dispose()
+  assert.throws(() => older.begin('codex'), /Close other Automagik sessions/)
+})
+
+// The skip is the live-app fence's only. The claim is the one mutex over the shared pointer and
+// homes: another installation's live claim still excludes a second claim, and still keeps a run
+// from selecting a home in the middle of a reset.
+test('two installations on one root never hold the account claim at the same time', t => {
+  const root = mkdtempSync(join(tmpdir(), 'bot-cli-scope-claim-'))
+  const shared = join(root, 'acp', 'cli-homes')
+  const alpha = new CliHomes(shared, { installId: 'profile-alpha' })
+  const beta = new CliHomes(shared, { installId: 'profile-beta' })
+  t.after(() => { alpha.dispose(); beta.dispose(); rmSync(root, { recursive: true, force: true }) })
+  for (const [holder, other] of [[alpha, beta], [beta, alpha]]) {
+    const reset = holder.reserveReset('codex')
+    try {
+      assert.throws(() => other.reserveReset('codex'), { code: 'acp-account/busy' })
+      assert.throws(() => other.environment('codex'), { code: 'acp-account/busy' })
+      assert.throws(() => other.begin('codex'), { code: 'acp-account/busy' })
+      assert.throws(() => other.generations.exclusive('codex', () => {}), { code: 'acp-account/busy' })
+    } finally { reset.release() }
+    // Once the claim is released the other installation selects a home again.
+    assert.equal(other.environment('codex')[HOME_ENV], holder.home('codex'))
+  }
 })
 
 test('a host that does not name its installation writes an unlabelled record as before', t => {
@@ -110,7 +136,7 @@ test('a host that does not name its installation writes an unlabelled record as 
 })
 
 test('installationOf reads the DSH profile and nothing else', () => {
-  assert.equal(installationOf({ get: name => name === 'profileContext' ? { name: 'automagik-web' } : undefined }), 'automagik-web')
+  assert.equal(installationOf({ get: name => name === 'profileContext' ? { name: 'profile-alpha' } : undefined }), 'profile-alpha')
   assert.equal(installationOf({ get: () => undefined }), undefined)
   assert.equal(installationOf({ get: () => ({ name: '   ' }) }), undefined)
   assert.equal(installationOf({ get: () => { throw new Error('not injected') } }), undefined)
