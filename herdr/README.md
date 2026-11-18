@@ -1613,6 +1613,11 @@ launch lists only `hc ls`, `hc get`, `hc read`, `hc wait`, `hc send`, the 24 rea
 tools, the test checks, the `gh` reads and a short list of git subcommands (`log`, `diff`,
 `show`, `status`, …). No release verb and no `gh pr merge` is in either list.
 
+Run repository tests only in a checkout you trust. Tests execute checkout code with the access
+available to the test process, so give that process only the files and credentials its work
+needs. Before sending a message, check the intended recipient. The proxy restricts which
+destinations are available, and each recipient handles messages with its own permissions.
+
 The fixed deny rules are always present, the same for a seat and for every worker role, and a
 roster's `agyPermissions` can only add to them:
 
