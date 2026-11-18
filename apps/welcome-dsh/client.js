@@ -12067,7 +12067,23 @@ var CREDENTIALS = Object.freeze([
   [/\bAIza[A-Za-z0-9_-]{20,}/g, CREDENTIAL_MARK],
   [/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, CREDENTIAL_MARK],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=*-]{8,}/gi, `$1 ${CREDENTIAL_MARK}`],
-  [/([?&#](?:token|access_token|api_key|apikey|key|secret|password)=)[^&\s"']+/gi, `$1${CREDENTIAL_MARK}`],
+  // Provider and code-host keys whose own prefix the rules above do not cover. Each needs a
+  // long enough body that ordinary words cannot match it.
+  [/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}/g, CREDENTIAL_MARK],
+  [/\bwhsec_[A-Za-z0-9+/=]{12,}/g, CREDENTIAL_MARK],
+  [/\bhf_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bgl(?:pat|oas|rt)-[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bgsk_[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\br8_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bdop_v1_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bshp(?:at|ca|pa|ss)_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bSG\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}/g, CREDENTIAL_MARK],
+  [/\bya29\.[A-Za-z0-9_-]{16,}/g, CREDENTIAL_MARK],
+  [/\bnfp_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bvercel_[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/\bsbp_[a-f0-9]{24,}/gi, CREDENTIAL_MARK],
+  [/\bATBB[A-Za-z0-9]{16,}/g, CREDENTIAL_MARK],
+  [/([?&#](?:token|access[_-]?token|api[_-]?key|apikey|key|secret|password|passwd|auth|authorization|client[_-]?secret|x-api-key|signature|sig|code|ticket)=)[^&#\s"']+/gi, `$1${CREDENTIAL_MARK}`],
   // npm registry credentials: an access token (8+ chars; shorter is indistinguishable from a
   // package name), the .npmrc keys as JSON (quoted key or value), their npm_config_* env
   // spelling, NPM_TOKEN, and any userinfo in an http(s) URL. The userinfo rule is greedy to
@@ -12080,7 +12096,7 @@ var CREDENTIALS = Object.freeze([
   // as a key with = or :, JSON-quoted keys included.
   [/(\b[A-Z0-9_]*(?:NPM_TOKEN|AUTH_TOKEN)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',}]+)/gi, `$1${CREDENTIAL_MARK}`],
   [/(\bhttps?:\/\/)[^/\s]+@/gi, `$1${CREDENTIAL_MARK}@`],
-  [/(["']?(?:api[_-]?key|authorization|x-api-key|password|secret)["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, `$1${CREDENTIAL_MARK}`]
+  [/(["']?(?:(?:[a-z0-9]+[-_.])*(?:api[_-]?key|authorization|x-api-key|x-auth-token|x-amz-security-token|proxy-authorization|auth[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|private[_-]?key|password|passwd|pwd|secret))["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi, `$1${CREDENTIAL_MARK}`]
 ]);
 function redactText(text) {
   let out = String(text ?? "");

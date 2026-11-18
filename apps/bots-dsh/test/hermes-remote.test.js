@@ -558,6 +558,34 @@ test('DSH adapter produces a real mirror tool card then continues the same remot
   assert.equal(f.sent.filter(frame => frame.method === 'prompt.submit').length, 1)
 })
 
+test('a file copy path that changes between asks does not refuse the turn', async t => {
+  // #1340: the guard rebuilds the Session's projection, and the attachment service may name a
+  // different copy on each call. The path is a handle to the same durable bytes, so the turn
+  // must still be accepted; everything else about the handle and the text stays exact.
+  const ref = Object.freeze({ attachmentId: `sha256:${'a'.repeat(64)}`, name: 'sample.txt', bytes: 3 })
+  const fileMessage = Object.freeze({ role: 'user', id: 'm-2', content: Object.freeze([Object.freeze({ type: 'file', attachment: ref })]) })
+  const messages = Object.freeze([
+    Object.freeze({ role: 'user', id: 'm-1', content: Object.freeze([Object.freeze({ type: 'text', text: 'read this' })]) }),
+    fileMessage,
+  ])
+  let calls = 0
+  const ctx = new Context()
+  ctx.provide('attachments'); ctx.set('attachments', { fileHostPath: ref => `/tmp/hermes-copy-${++calls}/${ref.attachmentId.slice(7, 15)}` })
+  ctx.provide('fs'); ctx.set('fs', { processPathFromHostPath: path => path })
+  const adapter = new RemoteChatAdapter({ ctx }, { enabled: () => true, models: () => [{ id: 'sample:model', model: 'model', provider: 'sample' }], identity: () => ({ createKey: randomUUID() }), save: async () => {}, open: async () => { throw Error('not opened') } })
+  t.after(() => adapter.dispose())
+  const session = { deriveMessages: () => [...messages], requestHeader: () => ({ config: { provider: 'hermes-remote', model: 'sample:model' } }) }
+  const agent = { id: 'sample-chat', session }
+  const dispatched = deepFreeze(projectFilesToText([...messages], () => '/tmp/hermes-copy-dispatched/sha256'))
+  const envelope = Object.freeze({ provider: 'hermes-remote', model: 'sample:model', sessionId: 'sample-chat', messages: dispatched })
+  assert.equal(RemoteChatAdapter.ownTurn(envelope, agent, ref => adapter.filePath(ref)), true)
+  // A different durable file under the same shape is still not this turn.
+  const other = deepFreeze(projectFilesToText([...messages], () => '/tmp/hermes-copy-dispatched/sha256').map(projected => projected.role === 'user' && projected.id === 'm-2'
+    ? { ...projected, content: projected.content.map(block => block.type === 'text' ? { ...block, text: block.text.replace(ref.attachmentId.slice(7, 15), 'b'.repeat(16)) } : block) }
+    : projected))
+  assert.equal(RemoteChatAdapter.ownTurn(Object.freeze({ ...envelope, messages: other }), agent, ref => adapter.filePath(ref)), false)
+})
+
 test('a projected agent-loop request still answers, and a hand-built call is still refused', async t => {
   const f = fixture(t)
   const ctx = new Context(), runtime = new LlmRuntime(ctx)
