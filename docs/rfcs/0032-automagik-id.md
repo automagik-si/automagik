@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (delivery 1 authorized by the owner and merged: #1094, #1118, #1377; deliveries 2-5 open; questions (a), (b) and (d) decided by the owner on 2026-11-18, (c) and (e)-(g) open; replaces RFC 0024's identity-provider choice) |
+| Status | In delivery (delivery 1 authorized by the owner and merged: #1094, #1118, #1377; deliveries 2-5 open; questions (a)-(d) decided by the owner on 2026-11-18, (e)-(g) open; replaces RFC 0024's identity-provider choice) |
 | Milestone | none (independent Worker deployment) |
 | Lanes | none: `apps/id/` deploys on its own and no release carries it |
 | Created | 2026-11-11 |
@@ -59,6 +59,12 @@ A small service of our own gives:
    invitation, checked against public keys in the ID's config, used once (its id is
    kept in D1). With no admission key configured, no account can be created. A first
    phone proof for an unknown number needs a ticket too.
+10. **Recovery: staff recovery tickets now, recovery codes later** (owner, 2026-11-18).
+    A person who lost every passkey asks staff, who check it is them the way they hand
+    out invitations, then mint a recovery ticket: the admission ticket naming the
+    account's `sub`, used once and short-lived. It adds a new passkey to that account
+    and ends all its sessions. Self-service recovery codes come in a later delivery.
+    There is no email reset.
 
 ## Design
 
@@ -204,7 +210,8 @@ Content-Security-Policy. Without the `PAGES` binding both routes answer 501.
 ### Residual risks
 
 - Account creation open to anyone, until delivery 2's invite gate and cleanup.
-- One passkey per account and no recovery: a lost authenticator loses the account.
+- One passkey per account and no recovery, until delivery 2 adds a second passkey and the
+  staff recovery ticket; a staff ticket is only as strong as staff's check of the person.
 - No session list or revoke for the person; sign-out ends only the current session.
 - No security headers on API responses, no HSTS and no header CSP yet (delivery 2).
 - No signing-key rotation, and no written plan to rotate `BETTER_AUTH_SECRET`.
@@ -240,6 +247,7 @@ real account; 3 and 4 after 2; 5 after 3.
    - security headers on every response (HSTS, header CSP, `nosniff`,
      `frame-ancestors 'none'`);
    - a second passkey on an existing account, behind a fresh sign-in;
+   - the staff recovery ticket (Decided 10);
    - a session list and revoke, for the person's own sessions;
    - refresh-token tests: rotation, reuse of an old token, revoke, expiry;
    - orphan cleanup: users with no passkey and no phone after a short window;
@@ -278,12 +286,8 @@ Each has a recommendation; the owner's decision is pending.
 - **(b) Open sign-up or invite-only?** Decided: invite-only, as Arca (Decided 9). RFC
   0024's one-use signup links from an operator job are superseded by the admission
   ticket: there is no admin key to mint them.
-- **(c) What does recovery look like?** Recommended: a second passkey now (delivery 2),
-  and, for a person who lost every passkey, a recovery ticket staff mint after they
-  know the person, the way they hand out invitations. It is the admission ticket with
-  the account's `sub`: used once, short-lived, it adds a new passkey to that account and
-  ends all its sessions. Recovery codes only if staff recovery stops scaling. No email
-  reset.
+- **(c) What does recovery look like?** Decided: a staff recovery ticket now, recovery
+  codes later (Decided 10).
 - **(d) What is the public name?** Decided: `id.automagik.si` (Decided 4), before any
   product stores a principal.
 - **(e) A device-code grant for headless clients?** Recommended: not now. Add it when
