@@ -4956,6 +4956,8 @@ async function restartTarget(project, bot, requestedHome, explicitHome) {
   const binding = selected?.core === core && (selected.project == null || selected.project === project.key) ? selected : null;
   let get = binding ? await checkedPane(binding.terminal) : null;
   if (get?.created_ms !== binding?.created_ms) get = null;
+  // A legacy row without a project still needs a launch folder in this checkout.
+  if (get && binding.project == null && (!get.cwd || await keyOf(get.cwd) !== project.key)) get = null;
   const candidates = await labelledPanes(project, bot, get?.address, carriedBinding);
   if (candidates.length > 1) {
     const panes = candidates.map((p) => p.address).join(", ");
@@ -4980,7 +4982,7 @@ async function restartTarget(project, bot, requestedHome, explicitHome) {
   }
   if (!candidate) {
     if (selected?.core === core && selected.project !== project.key && selected.created_ms === (await checkedPane(selected.terminal))?.created_ms) {
-      throw new CliError(`${selected.terminal} already binds this bot id in another project in the selected app home; nothing was started.`,
+      throw new CliError(`${selected.terminal} has an attachment in the selected app home that doesn't identify this project; nothing was started.`,
         1, { refused: "attachment", terminal: selected.terminal });
     }
     return { held: null, dir: requestedHome };
