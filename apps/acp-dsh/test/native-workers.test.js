@@ -3,7 +3,9 @@
 // id. Ingest keeps that link on the call, the mirror card's arguments carry it, and the run's
 // workers() groups the steps under their worker, from today's wire alone.
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { apply, SERVICE } from '../index.js'
 import { parentToolOf, workersOf, WORKER_STEPS_MAX } from '../src/host/acp.js'
 import { callArguments, mirrorTool } from '../src/host/tool.js'
 import { probe } from './support/state-probe.js'
@@ -152,4 +154,40 @@ test('a worker keeps its newest steps and counts the rest', () => {
   assert.equal(worker.steps.length, WORKER_STEPS_MAX)
   assert.equal(worker.more, 5)
   assert.equal(worker.steps.at(-1).title, `step ${WORKER_STEPS_MAX + 4}`)
+})
+
+// The cross-plugin contract bots-dsh reads (its host native-workers.js): the acpAgents
+// service's nativeWorkers() lists each live Session's run.workers(), by DSH Session id, and
+// leaves out a Session with none, with no run yet, or whose run throws.
+test('the acpAgents service lists each live Session\'s workers by Session id', t => {
+  let adapter
+  let service
+  const disposers = []
+  const ctx = {
+    llm: { registerAdapter: (_ids, value) => { adapter = value; return () => {} } },
+    agents: { get: () => undefined, list: () => [] },
+    get: () => undefined,
+    on: () => () => {},
+    effect: execute => disposers.push(execute()),
+    provide: (name, value) => { if (name === SERVICE) service = value },
+    logger: { warn: () => {}, info: () => {} },
+  }
+  apply(ctx, { fakeAgent: join(import.meta.dirname, 'fixtures', 'identity-agent.mjs'), claude: false, codex: false, dshTools: false }, {
+    store: {}, find: () => undefined,
+  })
+  t.after(() => { for (const dispose of disposers) dispose?.() })
+  assert.equal(SERVICE, 'acpAgents')
+  assert.deepEqual(service.nativeWorkers(), {})
+  const worker = { id: 'toolu_a', title: 'Review the adapter bundle', state: 'running', steps: [] }
+  const tools = new Map([['toolu_b', { id: 'toolu_b', title: 'Audit memory writes', structuredName: 'Agent', status: 'completed', ended: true }]])
+  const run = workers => ({ workers, dispose: () => {} })
+  adapter.live.set('s-chat', { run: run(() => [worker]) })
+  adapter.live.set('s-group', { run: run(() => workersOf(tools, ['toolu_b'])) })
+  adapter.live.set('s-none', { run: run(() => []) })
+  adapter.live.set('s-starting', {})
+  adapter.live.set('s-broken', { run: run(() => { throw new Error('gone') }) })
+  assert.deepEqual(service.nativeWorkers(), {
+    's-chat': [worker],
+    's-group': [{ id: 'toolu_b', title: 'Audit memory writes', state: 'failed', result: 'Stopped', stopped: true, steps: [] }],
+  })
 })
