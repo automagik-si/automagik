@@ -727,7 +727,10 @@ test('an ACP task the person stopped reads stopped, not failed', async (t) => {
   host.emit('cut', 'turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'Stopped', code: 'ABORTED' } } })
   await settleState(t, home, () => stateOf(home).tasks.cut.status === 'stopped')
   await settle(() => host.agentOf('a').calls.length === 1)
-  assert.equal(stateOf(home).tasks.cut.status, 'stopped')
+  assert.deepEqual(
+    [stateOf(home).tasks.cut.status, stateOf(home).tasks.cut.summary],
+    ['stopped', 'Stopped before it finished.'],
+  )
   assert.match(text(host.agentOf('a').calls[0]), /was stopped before it finished/)
   assert.doesNotMatch(text(host.agentOf('a').calls[0]), /It failed:/)
 })
