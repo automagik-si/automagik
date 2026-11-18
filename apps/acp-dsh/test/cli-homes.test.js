@@ -122,6 +122,42 @@ test('two installations on one root never hold the account claim at the same tim
   }
 })
 
+test('an empty installation label is no installation: that live app still fences', t => {
+  const root = mkdtempSync(join(tmpdir(), 'bot-cli-scope-empty-'))
+  const shared = join(root, 'acp', 'cli-homes')
+  const alpha = new CliHomes(shared, { installId: 'profile-alpha' })
+  const blank = new CliHomes(shared, { installId: 'profile-beta' })
+  t.after(() => { alpha.dispose(); try { blank.dispose() } catch {} rmSync(root, { recursive: true, force: true }) })
+  blank.environment('claude')
+  // Rewrite that app's live records with an empty label, as a build that wrote one would.
+  for (const directory of [join(shared, 'instances', 'claude'), join(blank.home('claude'), 'instances')]) {
+    const path = join(directory, blank.instance)
+    const record = JSON.parse(readFileSync(path, 'utf8'))
+    writeFileSync(path, JSON.stringify({ ...record, install: '' }))
+  }
+  assert.throws(() => alpha.begin('claude'), /Close other Automagik sessions/)
+})
+
+test('a dead record of another installation is still swept by an account change', t => {
+  const root = mkdtempSync(join(tmpdir(), 'bot-cli-scope-dead-'))
+  const shared = join(root, 'acp', 'cli-homes')
+  // Another installation's app registers and exits without releasing: its records stay, dead.
+  const module = new URL('../src/host/cli-homes.js', import.meta.url).href
+  const gone = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const { CliHomes } = await import(${JSON.stringify(module)})
+    const homes = new CliHomes(${JSON.stringify(shared)}, { installId: 'profile-beta' })
+    homes.environment('claude')
+    process.stdout.write(homes.instance)`], { encoding: 'utf8' })
+  assert.equal(gone.status, 0, gone.stderr)
+  const record = join(shared, 'instances', 'claude', gone.stdout)
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).install, 'profile-beta')
+  const alpha = new CliHomes(shared, { installId: 'profile-alpha' })
+  t.after(() => { alpha.dispose(); rmSync(root, { recursive: true, force: true }) })
+  alpha.begin('claude')
+  alpha.end('claude')
+  assert.equal(existsSync(record), false, 'the dead record of the other installation is swept')
+})
+
 test('a host that does not name its installation writes an unlabelled record as before', t => {
   const root = mkdtempSync(join(tmpdir(), 'bot-cli-scope-old-'))
   const shared = join(root, 'acp', 'cli-homes')
