@@ -698,8 +698,8 @@ jobs:
           retention-days: 14
 
       - name: Remove the shared debug keystore
-        if: always() && steps.debug_key.outputs.present == 'true'
-        run: rm -f "${POCKET_DEBUG_STORE:-}"
+        if: always()
+        run: rm -f "$RUNNER_TEMP/pocket-debug.keystore"
 
       # Evidence only, never a failure: Gradle hides the tests' "Downloading" lines, so this lists
       # the jars this run fetched into ~/.m2. A warm cache fetches none.

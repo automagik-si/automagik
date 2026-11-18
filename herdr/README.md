@@ -515,7 +515,7 @@ am create --name N --agent A [--kind main|member] [--role R] [--code true|false]
        [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
        [--cross-member BOT@DIR]...
        [--character C --colour K | --omni] [--model M] [--rank R]
-       [--effort E] [--tier fast|standard]
+       [--person-features on|off] [--effort E] [--tier fast|standard]
        [--agy-mode auto|accept-edits|plan] [--agy-allow RULE]... [--agy-deny RULE]...
        [--planned-wave N [--planned-note T]]
        [--worker-agent A] [--worker-model M] [--worker-effort E] [--worker-agy-mode M]
@@ -939,7 +939,7 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
   [Ending a worker](#ending-a-worker)). The bot's briefing says so. As an hc child, a worker
   also ends when its bot's program ends; its branch stays.
 - **Cleanup (#567):** a worktree this command made (`created` in the ledger) is removed
-  (`git worktree remove`, no `--force`, then `git worktree prune`) once every worker that ran
+  (`git worktree remove`, no `--force`) once every worker that ran
   in it has ended, done or killed, at least 15 minutes ago (hc's `finished_ms`: restart
   `--tree` runs a bot's workers again one at a time, about 1 + 2k minutes at worst for the k-th),
   and no live terminal works in it. Each `worker` call does
@@ -954,8 +954,13 @@ am worker "Fix the login redirect loop" --task gl-231 --worktree ../proj-gl-231
     included); a tree no longer on the worker's branch; a detached HEAD with commits on no
     remote; commits on no remote branch, unless `gh pr list --head <branch>` shows the
     branch's pull requests all merged or closed (a squash merge). gh missing or failing keeps
-    it. Ignored files (`.env`, build output) do not keep it: they go with the folder, as
-    `git worktree remove` does.
+    it. Ignored files (`.env`, build output) do not keep it, but the cleanup names them before
+    it removes the folder, so what goes with it is never silent; a list git can't give keeps
+    the checkout.
+  - A missing checkout is kept while its recorded repository still lists the worktree, since
+    its actual repository can't be proved. When the repository no longer lists it (a person's
+    `git worktree prune`, say), it is recorded `gone` with a read of `git worktree list`: no
+    remove and no prune. A `removed` or `gone` one is never looked at again (#1143).
   - A worktree only given to a worker (`--worktree`, a branch's existing worktree) is never
     removed. A worker call that waited for a worktree the cleanup removed meanwhile never
     starts in what is left: `--branch` makes the worktree again, `--worktree` is refused.
@@ -1325,6 +1330,12 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   file warns once ("codexAuto false no longer opts out"); remove it. A value that isn't a boolean
   is still dropped with a warning (and refused by `check`). See
   [Codex's launch mode](#codexs-launch-mode).
+- `personFeatures` is an optional boolean, defaulting to `false`: a Claude Code bot's launch
+  turns off the suggested next prompt, the away summary and the subagent progress summaries
+  (#1558, [Claude Code's person features](#claude-codes-person-features-1558)). Set it with
+  `am edit <bot> --person-features on` (create accepts it too) for a seat a person talks to all
+  day; `--person-features off` clears it. A value that isn't a boolean is dropped with a warning
+  (and refused by `check`); any other agent ignores it.
 - `agyMode` is optional: the Antigravity execution mode Start and Restart pass as
   `agy --mode <mode>`. One of `auto` (the default when absent), `accept-edits` or `plan`; any
   other value is refused at launch with one line and never passed to agy. It applies only to
@@ -1393,6 +1404,20 @@ Flags read from claude 2.1.322, codex-cli 0.167.0 and agy 1.5.4. No skip-all-app
 passed for any agent but Antigravity; one for another agent needs the owner's word first.
 `am show <bot>` prints the bot's `auto mode` line (in `--json`, `autoMode`: its
 words, a note, and for an Antigravity bot on this computer whether agy's sandbox can run here).
+
+### Claude Code's person features (#1558)
+
+A Claude Code bot seat launches with the features meant for a person at the keyboard switched
+off: the suggested next prompt and the away summary, as `promptSuggestionEnabled: false` and
+`awaySummaryEnabled: false`, and the progress summaries of running subagents, as
+`CLAUDE_CODE_DISABLE_AGENT_PROGRESS_SUMMARIES=1`. All three ride on the launch's own
+`--settings` inline JSON (its `env` carries the variable), so the host's
+`~/.claude/settings.json` is never written and a person's own session there keeps them. Every
+Claude launch the pack builds gets them: a start, a restart, a linked-machine start, a worker
+and a Restart --tree helper. A run that names its own `--settings` file is left as it is (that
+file is the person's own, and a linked machine's file can't be read here), and an hc template
+owns its command. A bot a person talks to all day keeps them with `personFeatures: true`
+(`am edit <bot> --person-features on`; off is the default); `am restart` applies an edit.
 
 Antigravity is the exception, measured on agy 1.5.4 on Linux and macOS: `--mode auto` is not
 available where agy's terminal sandbox can't run (restricted unprivileged user namespaces, say)
@@ -1491,9 +1516,14 @@ a worker and a Restart --tree helper:
   --git-common-dir`: a checkout's own `.git`; for a linked worktree its own folder under the main
   checkout's `.git/worktrees`, where its index and lock live, then that `.git`), herdr-core's
   state and data folders (`$XDG_STATE_HOME/herdr-core`, `$XDG_DATA_HOME/herdr-core`, else under
-  the home folder: `hc` needs them to reach its core), and the tool caches a build writes: Go's
-  module and build caches (`GOMODCACHE`, `GOCACHE`), npm's (`npm_config_cache`, else `~/.npm`),
-  pnpm's store and cache, and Bun's install cache (`BUN_INSTALL_CACHE_DIR`). Never the root, the
+  the home folder), and the tool caches a build writes: Go's module and build caches (`GOMODCACHE`,
+  `GOCACHE`), npm's (`npm_config_cache`, else `~/.npm`), pnpm's store and cache, and Bun's install
+  cache (`BUN_INSTALL_CACHE_DIR`). The two herdr-core folders are the one pair a running core does
+  not need: #1125's N4 left both out and `hc ls`, `hc get self` and `am brief` still exited 0.
+  They are kept as a narrow defence for the case #1125 did not test, when no core is running and
+  the hc client must start it or take its lock; no isolated check has shown that case works
+  without them, so they stay until one does (#1261). The network word above is required in every
+  case (N3). Never the root, the
   home folder, a folder above it, the app home (its attach binding, locks and ledgers), a folder
   inside it or above it, or a whole XDG, cache, `GOPATH` or Bun folder. Each folder is weighed in
   its canonical form where the launch runs (#1142), resolved the filesystem's way: symlinks

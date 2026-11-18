@@ -143,6 +143,106 @@ How they fit:
   - **Rollback**: the local `POST /api/omni-ui` endpoint `agent-bot-rollback`, payload `{ "agentId": "<original DSH id>" }`, removes only the added membership and restores the original registration and team-tool restrictions. It does not archive Sessions. Remove Main Bot/group roles first; rollback refuses new parts or tasks rather than discarding new team history. Ordinary Bot deletion refuses adopted registrations; roll back first. A failed adoption/rollback save restores the pre-operation records. This cannot reconstruct identities already removed by the older destructive implementation: those require the original registration from a backup and verified preset/avatar information; no identity is inferred from a Bot's name.
 - **Make it yours**: name, role, instructions, model and look (20 characters and 12 colors, or a photo from the ones you added) for each Bot. An adopted DSH identity wears DSH's blue whale until it has a look of its own; ordinary Bots retain their identity-derived defaults and a Genie keeps its genie-clay pet; a theme, an accent color and an avatar animation level (quiet, normal or lively) for the team. A pinned Bot or group chat shows a small pushpin in the sidebar. Settings has these pages: General (look), Bots (Main Bots and each Bot's settings), Group chats (each group's settings), Connectors, Capabilities, Scheduled tasks, Usage, Secrets, Feedback and About DS Bot (versions, updates and links).
 
+## The shared gen-UI kit (`omni.genui`)
+
+Every Omni plugin that loads this client bundle (through `dsh.client.external`) shares one
+module instance, so it also shares the gen-UI kit: live rows a plugin fills while a job runs,
+and the person card. The kit's host half lives here too: one live slice every state answer
+carries, and a media route. Issue #1326 builds it in slices; this is delivery 1, G0, G1 and G5.
+
+```js
+// A plugin's own tool card, drawn by the shared kit.
+omni.toolCards.register('read_history', p => omni.genui.PersonCard({
+  chatId: p.arg('chat'),                 // the Omni chat id
+  revision: omni.genui.revisionOf(p.roster), // refetch while the bot reads
+}))
+// ...and one line per chat for a running batch, published by the plugin's host half.
+omni.genui.ProgressRows({ rows: omni.genui.rows(p.roster, 'run-1') })
+```
+
+### The live slice (host)
+
+A plugin's host half publishes one chat's row through `rt.hooks.genui`:
+
+| Call | What it does |
+|---|---|
+| `publish(batchId, row)` | merges one row by `chatId`, newest field wins; returns whether it took the row |
+| `read(batchId)` | a copy of one batch's rows, or `undefined` |
+| `clear(batchId)` | takes a batch out (a proposal no longer open) |
+
+The slice rides every `/api/omni-ui` state answer as `genui: { revision, batches }` (the
+1.5 s live hook), so a card reads it from its roster: `roster.genui.batches[batchId].rows`.
+`revision` goes up on every change. A batch keeps at most 20 rows (a finished row leaves
+first) and the slice at most 8 batches (the least recently changed leaves first).
+
+A row holds **labels and counts only, never message text**: `publish` rebuilds it from the
+fields it knows, so a `text` a caller happens to pass never reaches a window. The fields:
+
+| Field | Shape |
+|---|---|
+| `chatId` | the chat id (a row without one is refused) |
+| `chat` | the label the line shows (cut at 120 characters) |
+| `channelId` | the channel the chat is on |
+| `state` | `queued`, `reading`, `fetching`, `done`, `phone-did-not-answer`, `cancelled`, `failed` |
+| `outcome` | `done`, `phone-did-not-answer`, `stopped`, `failed`, `not-started`; `null` while running |
+| `page`, `pages` | a reading's page and the window's pages ("page 3 of about 12") |
+| `round`, `oldestReached` | how far a backfill has gone |
+| `counts` | `fetched`, `total`, `stored`, `duplicates`, `mediaDownloaded`, `mediaMissing`, `reactions`, `edits`, `deletions`, `unmatched` (flat counts are accepted too; `totalEstimated` reads as `total`) |
+| `coverage` | `oldest`, `newest`, `count`, `countInWindow`, `mediaMissing`, `deletedCount`, `lastInbound`, `lastOutbound` (ISO times) |
+| `startedAt`, `updatedAt` | ISO times |
+
+The rows are a report: the plugin's job store stays the record, and this slice holds no file.
+
+### The media route (host)
+
+`rt.hooks.media.register(name, fn)` makes a source of bytes a kit card shows; the route is
+`GET /api/omni-ui/genui-media?source=<name>&id=<id>`. `fn(id, request)` returns
+`{ type, body }` (a `Uint8Array`, an `ArrayBuffer`, a string or a stream) or `null` when it
+holds nothing. Only image and audio types are served (`image/jpeg`, `image/png`,
+`image/webp`, `image/gif`, `audio/ogg`, `audio/mpeg`, `audio/mp4`, `audio/aac`, `audio/wav`,
+`audio/webm`); anything else, an unknown source and an unknown id are a 404, and a source's
+own failure is an empty 500. The answer is `private` and `nosniff`, never inline data.
+
+### The person card (G5)
+
+`omni.genui.PersonCard({ chatId, load?, revision? })` reads one chat's reading note, and
+only reads it: the kit has no call that writes a note, and the note is never
+`set_child_notes`. The default `load` calls the host endpoint **`omni-reading-note`**, which
+Omni's channels plugin serves as a read:
+
+```text
+request:  { chat: "<Omni chat id>" }
+response: {
+  chat: { id, name?, channelId? },
+  note: { text, readThrough, updatedAt } | null,
+  coverage: { oldest, newest, count, mediaMissing, deletedCount, lastInbound, lastOutbound } | null
+}
+```
+
+`note` is `null` until the bot saves one, and the card says the chat is not read yet;
+`coverage` is `null` when Omni cannot give it, and the card leaves it out. A chat Omni can
+only name by id draws as "This chat", never the raw id. The note holds the bot's four parts
+("Who:", "Open:", "Last contact:", "Tone:"); the card draws each one, with the host's last
+contact each way under the note's own line, and `Read through <date>` under them. A note
+written as prose is drawn whole, in one part, rather than forced into a part it may not be.
+`revision` refetches it while the bot reads (pass the live slice's revision); `load` replaces
+the endpoint for a plugin with a read of its own.
+
+### What the rest of the kit gives a card
+
+| Export | What it is |
+|---|---|
+| `ProgressRows({ rows, label? })` | one line per chat: name, state, page or counts, media and marks |
+| `ProgressRow({ row })`, `CoverageRow({ coverage })` | the same, one row or one coverage line at a time |
+| `rows(roster, batchId)` | the slice's rows for one batch |
+| `revisionOf(roster)` | the slice's revision, for a card that refreshes while the bot works |
+| `loadReadingNote(chatId)`, `READING_NOTE` | the person card's default read and its endpoint name |
+| `model` | the words and number formats the cards use (`rowView`, `personView`, `parseReadingNote`, `coverageLine`, `spanOf`, `countText`, …) for a card of a plugin's own shape |
+
+Its styles are installed with this plugin's other sheets (`.bt-genui-*`, the same card
+surface and brand variables as the team's own cards); a plugin draws the components and
+needs no stylesheet of its own.
+
 ## Install
 
 The [project page](../../README.md#install) has the full steps for dsh Desktop and dsh Web. In short:

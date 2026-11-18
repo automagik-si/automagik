@@ -12,9 +12,9 @@ import { DEFAULT_PACKAGES, fetchPlugins } from '../fetch-plugins.mjs'
 
 const VERSION = '3.108.0'
 const TAG = `v${VERSION}`
-const REPOSITORY = 'https://github.com/automagik-dev/automagik'
-const API = 'https://api.github.com/repos/automagik-dev/automagik'
-const CUSTOM_API = 'https://api.example.test/repos/automagik-dev/automagik'
+const REPOSITORY = 'https://github.com/automagik-si/automagik'
+const API = 'https://api.github.com/repos/automagik-si/automagik'
+const CUSTOM_API = 'https://api.example.test/repos/automagik-si/automagik'
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const integrityOf = (bytes) => `sha512-${createHash('sha512').update(bytes).digest('base64')}`
@@ -236,7 +236,7 @@ test('a network error on the public download falls back to the API asset route',
 })
 
 test('a repository that is not github.com keeps the public route only', async () => {
-  const repository = 'https://gitlab.com/automagik-dev/automagik'
+  const repository = 'https://gitlab.com/automagik-si/automagik'
   const r = await run({ repository, host: { publicStatus: 504 } })
   assert.ok(r.error, 'the fetch failed')
   assert.match(r.error.message, /HTTP 504/)

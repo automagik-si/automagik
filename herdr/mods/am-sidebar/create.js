@@ -219,6 +219,8 @@ export class BotForm {
           const r = await exec("/bin/mv", [from, to]);
           if (r?.code !== 0) throw new Error(`mv failed (${r?.stderr || `exit ${r?.code}`})`);
         },
+        // #809: clean up this refresh's own temp file after a failed write or move.
+        remove: (path) => fs.unlink(path),
         exec: async (command, args, options) => {
           const file = await this.programFile(command);
           if (!file) throw new Error(`${command} isn't installed`);

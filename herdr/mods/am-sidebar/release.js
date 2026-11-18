@@ -301,9 +301,10 @@ export const noticeText = (update) =>
  */
 export const AUTO_FILE = "auto-update.json";
 /**
- * Beside the record: `{ version, held }`, the mods the last install held for a layout (#420), for the
- * new build's notice. update.mjs writes it after the swap, since the build that asked for the install
- * usually never hears back (updateCheck.js), and removes it when an install holds nothing.
+ * Beside the record: `{ version, held, notes?, landingId? }`, the mods held for layouts (#420)
+ * and the layout guard's advisories (#524) for the new build's notice. When there are advisories,
+ * update.mjs writes them before the swap, and the notice matches them to the sidebar's apply ID.
+ * A later install overwrites the record or removes it if there are no held mods or notes.
  */
 export const HELD_FILE = "held-mods.json";
 /**
@@ -313,7 +314,8 @@ export const HELD_FILE = "held-mods.json";
  * folders swap and Herdr reloads it), so the restored build reads this at load and says it once.
  * `prevRemoved`: the restore removed the failed release's folders instead of keeping them (#671),
  * so no `.prev` is left and a manual rollback has nothing to put back. `warnings`: what the
- * restore could not remove, and where it stays (the update's answer and notice say it too).
+ * restore could not remove, and where it stays. `notes`: the rollback guard's advisories,
+ * written before the swap for the restored build's notice.
  */
 export const RESTORE_FILE = "restored-mods.json";
 /**
