@@ -566,7 +566,7 @@ test('the registry parser treats explicit null type as absent', () => {
   const parsed = parseRegistry(JSON.stringify({ version: 2, bots: [{ id: ID.main, name: 'Native', type: null, agent: 'codex' }] }), { kind: 'home' })
   assert.equal(Object.hasOwn(parsed.file.bots[0], 'type'), false)
   assert.deepEqual(parsed.warnings, [])
-  assert.equal(parsed.raw.bots[0].type, null)
+  assert.equal(Object.hasOwn(parsed.raw.bots[0], 'type'), false)
 })
 
 test('a Herdr registry Bot refuses an unknown terminal agent on save', () => {
@@ -584,4 +584,23 @@ test('a Herdr registry Bot refuses an unknown terminal agent on parse', () => {
 
 test('the client seat agent catalog agrees with the self-contained registry', () => {
   assert.deepEqual(CLIENT_SEAT_AGENTS, SEAT_AGENTS)
+})
+
+
+test('a null type survives parse-save-parse as absent in both registry views', async t => {
+  for (const kind of ['home', 'repo']) {
+    const path = join(tempDir(t), 'bots.json')
+    const text = JSON.stringify({ version: 2, bots: [{ id: ID.main, name: 'Native', main: true, type: null }] })
+    writeFileSync(path, text)
+    const parsed = parseRegistry(text, { kind })
+    assert.equal(Object.hasOwn(parsed.raw.bots[0], 'type'), false, 'the writable view must normalize null')
+    assert.equal(Object.hasOwn(parsed.file.bots[0], 'type'), false)
+    await writeRegistry(path, parsed.raw, text, { kind })
+    const saved = readFileSync(path, 'utf8')
+    assert.equal(Object.hasOwn(JSON.parse(saved).bots[0], 'type'), false, 'saving must write no type field')
+    const again = parseRegistry(saved, { kind })
+    assert.deepEqual(again.warnings, [])
+    assert.equal(Object.hasOwn(again.raw.bots[0], 'type'), false)
+    assert.equal(Object.hasOwn(again.file.bots[0], 'type'), false)
+  }
 })

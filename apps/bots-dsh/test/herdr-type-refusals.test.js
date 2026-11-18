@@ -91,7 +91,7 @@ test('message_bot refuses a terminal-only recipient', async t => {
 
 test('a group post refuses a terminal-only speaker', async t => {
   const { rt, queued, created } = await fixture(t)
-  await assert.rejects(rt.postToRoom(rt.roomOf('r'), rt.botOf('a'), '@Terminal hello'), terminalOnly)
+  await assert.rejects(rt.postToRoom(rt.roomOf('r'), rt.botOf('a'), '@Terminal hello'), { ...terminalOnly, message: 'Terminal: The Bot is terminal-only.' })
   assert.deepEqual(queued, [])
   assert.deepEqual(created, [])
 })
@@ -296,4 +296,36 @@ test('the create endpoint refuses an explicit Herdr Main Bot request', async t =
   assert.equal(result.ok, false)
   assert.equal(result.error.message, 'A Main Bot cannot be a Herdr Bot.')
   assert.deepEqual(created, [])
+})
+
+
+test('a post addressed to Herdr refuses and names the terminal-only member', async t => {
+  const { tool, queued } = await fixture(t)
+  const result = await tool('post_to_group', { group: 'Team', message: '@Terminal hello' })
+  assert.match(result, /^Could not post/)
+  assert.match(result, /Terminal: The Bot is terminal-only\./)
+  assert.deepEqual(queued, [], 'an addressed refusal must queue no native input')
+})
+
+test('a post addressed to native and Herdr members refuses atomically and names Herdr', async t => {
+  const { tool, queued } = await fixture(t)
+  const result = await tool('post_to_group', { group: 'Team', message: '@Native @Terminal hello' })
+  assert.match(result, /^Could not post/, 'mixed explicit addresses must refuse as a whole')
+  assert.match(result, /Terminal: The Bot is terminal-only\./, 'the refusal must name the Herdr member')
+  assert.deepEqual(queued, [], 'mixed addressed refusal must not partially deliver to native members')
+})
+
+test('an all-Herdr group delivers nothing and returns a clear terminal-only notice', async t => {
+  const { rt, tool, queued, created } = await fixture(t)
+  const room = rt.roomOf('r')
+  rt.state.bots.d = { ...rt.botOf('b'), id: 'd', name: 'Second Terminal' }
+  room.members = ['b', 'd']
+  room.admin = 'b'
+  room.mode = 'all'
+  await rt.save()
+  const result = await tool('post_to_group', { group: 'Team', message: 'Please check the plan', report_back: true })
+  assert.equal(result, 'Nothing delivered. Skipped Terminal, Second Terminal: terminal-only.', 'an all-Herdr post must not claim delivery')
+  assert.deepEqual(queued, [], 'an all-Herdr post must not queue any native turn')
+  assert.deepEqual(created, [])
+  assert.ok(rt.groupRows('r', 0, Number.MAX_SAFE_INTEGER).some(row => row.text === result))
 })

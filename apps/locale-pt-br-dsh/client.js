@@ -2875,7 +2875,10 @@ const pack = createPack({
     "This Bot uses only its terminal.": "Este Bot usa apenas o terminal.",
     "A Main Bot cannot be a Herdr Bot.": "Um Bot principal não pode ser um Bot Herdr.",
     "The Bot is terminal-only.": "Este Bot usa apenas o terminal.",
-    "Unknown terminal agent. Choose a supported terminal agent.": "Agente do terminal desconhecido. Escolha um agente compatível."
+    "Unknown terminal agent. Choose a supported terminal agent.": "Agente do terminal desconhecido. Escolha um agente compatível.",
+    "Skipped {names}: terminal-only.": "Ignorados: {names}. Usam apenas o terminal.",
+    "Nothing delivered. Skipped {names}: terminal-only.": "Nada foi entregue. Ignorados: {names}. Usam apenas o terminal.",
+    "{names}: The Bot is terminal-only.": "{names}: este Bot usa apenas o terminal."
   }
 })
 return Object.defineProperty({ ...pack }, Symbol.toStringTag, { value: 'Module' })

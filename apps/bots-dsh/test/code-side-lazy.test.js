@@ -20,14 +20,14 @@ const react = {
 }
 
 /** The flip module as the page gets it, with the platform react stood in for. */
-const flipModule = async () => {
+const flipModule = async (platform = react) => {
   const bundle = await build({
     entryPoints: [fileURLToPath(new URL('../src/client/code-side.js', import.meta.url))],
     bundle: true, format: 'cjs', platform: 'node', write: false, logLevel: 'silent',
     external: ['react'],
   })
   const module = { exports: {} }
-  const sandbox = { module, exports: module.exports, require: name => (name === 'react' ? react : (() => { throw new Error(`no platform module ${name}`) })()), console, URL, URLSearchParams, setTimeout, clearTimeout, TextEncoder, TextDecoder }
+  const sandbox = { module, exports: module.exports, require: name => (name === 'react' ? platform : (() => { throw new Error(`no platform module ${name}`) })()), console, URL, URLSearchParams, setTimeout, clearTimeout, TextEncoder, TextDecoder }
   runInNewContext(bundle.outputFiles[0].text, sandbox)
   return { exports: module.exports, sandbox }
 }
@@ -113,4 +113,31 @@ test('the Bot header selects terminal-only from type, never its model or agent',
     assert.equal(herdr.type, 'span')
     assert.deepEqual(Array.from(herdr.children), ['Terminal'])
   }
+})
+
+
+test('mounting the Herdr header opens its terminal, reads the tree and selects its pane', async () => {
+  const effects = []
+  const { exports, sandbox } = await flipModule({ ...react, useEffect: effect => effects.push(effect) })
+  const BOT = 'b-aaaaaaaaaa'
+  const asked = []
+  sandbox.fetch = async (_url, options) => {
+    const { endpoint } = JSON.parse(options.body)
+    asked.push(endpoint)
+    return { ok: true, json: async () => ({ ok: true, value: { projects: [{ bots: [{ id: BOT, terminal: { id: 't7' }, workers: [] }] }] } }) }
+  }
+  const injected = []
+  const off = exports.installCodeSide({ sessions: {}, slots: { inject: (...args) => { injected.push(args); return () => {} } } })
+  try {
+    exports.BotFaceSwitch({ bot: { id: BOT, type: 'herdr', agent: 'codex' } })
+    for (const effect of effects.splice(0)) effect()
+    // Let the header's own request and its pane selection settle; the test never opens it.
+    await new Promise(resolve => setImmediate(resolve))
+    const state = exports.codeStore.snapshot()
+    assert.equal(state.face, 'terminal', 'the header must open Terminal without a click')
+    assert.equal(state.botId, BOT)
+    assert.deepEqual(JSON.parse(JSON.stringify(state.selected)), { botId: BOT, worker: null }, 'the header must select this Bot pane')
+    assert.deepEqual(asked, ['code-tree'])
+    assert.equal(injected.length, 1, 'the terminal body must replace the conversation')
+  } finally { off(); exports.codeStore.reset() }
 })

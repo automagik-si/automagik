@@ -1,4 +1,4 @@
-import { assertNativeTurn } from './refusal.js'
+import { assertNativeTurn, refusal } from './refusal.js'
 // Group chats: the room log, members' group Sessions, rounds and @mentions, round
 // reports, and the group tools (group_relay, read_own_chat, read_group_chat).
 //
@@ -308,6 +308,7 @@ export function install(rt) {
     if (record.kind === 'permission-stop') return { kind: 'permission-stop', ...who, why: record.why, count: record.count, time }
     if (record.kind !== 'notice') return { kind: record.kind, ...who, time }
     switch (record.reason) {
+      case 'terminal-only': return { kind: 'terminal-only', names: record.names, text: record.text, time }
       case 'failed': return { kind: 'failed', ...who, code: record.code, ...(record.status ? { status: record.status } : {}), text: record.message ?? record.detail, time }
       case 'missed': return { kind: 'missed', ...who, time }
       case 'admin-passed': return { kind: 'admin-passed', ...who, time }
@@ -1278,7 +1279,9 @@ export function install(rt) {
       round.userMessage = true
       rt.goalUserMessage?.(room.id)
       const { all, found } = mentionsIn(post.text ?? '', members)
-      const { speakers, ordered } = openingCall(room, { text: post.text ?? '' })
+      const selection = openingCall(room, { text: post.text ?? '' })
+      noteTerminalSelection(room, selection)
+      const { speakers, ordered } = selection
       callIn(round, speakers, all || found.length > 0 ? 'the user mentioned you' : 'new message from the user', undefined, { ordered })
     }
     releaseParked(room, round)
@@ -1379,6 +1382,7 @@ export function install(rt) {
     const holdsPost = idlePost && room.idlePaused !== undefined
     const named = opener.botId === undefined ? [] : (mentionsOf(opener, everyone) ?? mentionsIn(opener.text ?? '', everyone)).found
     const opened = openingCall(room, opener)
+    noteTerminalSelection(room, opened)
     const speakers = holdsPost ? [] : opened.speakers
     const ordered = holdsPost ? false : opened.ordered
     // A batch's last result wakes the Bot that asked, with the results of the whole batch.
@@ -1642,8 +1646,15 @@ export function install(rt) {
     if (opener.goal !== undefined) return at(admin ? [admin] : [])
     const { all, found: named } = mentionsOf(opener, everyone) ?? mentionsIn(opener.text, everyone, opener.references)
     const found = named.filter(bot => bot.id !== opener.botId)
+    const terminal = members.filter(bot => bot.type === 'herdr')
+    const refused = all ? terminal : found.filter(bot => bot.type === 'herdr')
+    if (refused.length > 0) return { speakers: [], ordered: false, refused }
     if (opener.progress) return at(found)
     if (opener.late) return at(found.length > 0 ? found : members.filter(bot => bot.id === opener.askedBy))
+    if (!all && found.length === 0 && terminal.length > 0) {
+      const speakers = members.filter(bot => bot.type !== 'herdr')
+      return { speakers, ordered: speakers.length > 1, skipped: terminal }
+    }
     if (opener.member) return at(found)
     if (found.length > 0 && !all) return at(found)
     if (!all && room.mode === 'admin' && admin) return at([admin])
@@ -1651,6 +1662,17 @@ export function install(rt) {
     return { speakers, ordered: !all && speakers.length > 1 }
   }
   const openingSpeakers = (room, opener) => openingCall(room, opener).speakers
+
+  const terminalNotice = ({ speakers, skipped = [], refused = [] }) => {
+    if (refused.length > 0) return `${refused.map(bot => bot.name).join(', ')}: The Bot is terminal-only.`
+    if (skipped.length === 0) return undefined
+    const names = skipped.map(bot => bot.name).join(', ')
+    return speakers.length === 0 ? `Nothing delivered. Skipped ${names}: terminal-only.` : `Skipped ${names}: terminal-only.`
+  }
+  const noteTerminalSelection = (room, selection) => {
+    const text = terminalNotice(selection)
+    if (text) say(room, { kind: 'notice', reason: 'terminal-only', names: (selection.refused ?? selection.skipped).map(bot => bot.name), text })
+  }
 
   // A Bot's post that lands while a round runs calls its members in that round at
   // once, as the relay it opens would. Returns whether it called anyone. A post that
@@ -1668,6 +1690,7 @@ export function install(rt) {
     const idlePost = !extra.done && extra.progress !== true && extra.late !== true && isIdleRelayText(text, everyone, [])
     if (!idlePost) clearIdleStreak(room)
     const opened = openingCall(room, post)
+    noteTerminalSelection(room, opened)
     if (idlePost && room.idlePaused !== undefined && holdIdleCalls(room, round, sender, opened.speakers, { named, all: (mentionsOf(post, everyone) ?? mentionsIn(text, everyone)).all === true })) return true
     const { speakers, ordered } = opened
     if (speakers.length === 0) return false
@@ -1690,8 +1713,15 @@ export function install(rt) {
   // once, and the members it calls start in that round, so it is not held back until
   // the round ends and never sits in the group Session's QueueDock (#663).
   async function postToRoom(room, sender, text, extra = {}, files = []) {
-    const { speakers } = openingCall(room, { ...extra, botId: sender.id, text })
-    for (const member of speakers) assertNativeTurn(rt, member.id)
+    const selection = openingCall(room, { ...extra, botId: sender.id, text })
+    const refused = selection.refused ?? selection.speakers.filter(bot => bot.type === 'herdr')
+    if (refused.length) throw refusal(terminalNotice({ ...selection, refused }), { code: 'bot/terminal-only' })
+    const receipt = selection.skipped?.length ? { delivered: selection.speakers.length > 0, notice: terminalNotice(selection) } : undefined
+    if (receipt?.delivered === false) {
+      noteTerminalSelection(room, selection)
+      await rt.save()
+      return receipt
+    }
     const running = [...rt.roomProgress.values()].find(round => round.roomId === room.id && round.nudge !== undefined)
     if (running !== undefined) {
       if (extra.failed !== undefined) {
@@ -1708,7 +1738,7 @@ export function install(rt) {
       callPost(room, running, sender, text, extra)
       if (extra.batchEnd) closeBatch(extra.batch)
       await rt.save()
-      return
+      return receipt
     }
     const agent = await rt.resolveAgent(rt.sessionOfRoom(room))
     agent.followup(createUserMessage({
@@ -1716,6 +1746,7 @@ export function install(rt) {
       source: { kind: SOURCE_KIND, form: 'relay', role: 'post', exchangeId: randomUUID(), senderName: sender.name, senderSessionId: sender.id, roomId: room.id, ...extra },
     }))
     await ctx.sessions.flush(agent.session)
+    return receipt
   }
   rt.postToRoom = postToRoom
 

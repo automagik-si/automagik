@@ -6,8 +6,8 @@
 // The plugin's registry parser and validator. The write half loads node:fs only when called, from
 // Node (the DSH host, the CLI), or takes an `fs` with the same sync calls (tests).
 //
-// Readers keep unknown fields: `raw` is the file exactly as parsed, and a write saves that,
-// edited, so DSH never drops Herdr's fields and Herdr never drops DSH's.
+// Readers keep unknown fields in `raw` when editing and writing, so neither reader drops
+// the other's fields. Null Bot types are normalized to absence in both views.
 
 // An absent type is the native DSH Bot. Never infer it from agent or model.
 export const BOT_TYPES = Object.freeze(['herdr'])
@@ -136,7 +136,7 @@ const ID_RULE = 'id is not b- plus 10 base32 characters or session-<uuid>'
  * otherwise anything it can't use is left out of `file` with a warning, as Herdr's
  * parseBots does. `kind` is "home" or "repo": a repo file's folder, machine and dsh (per
  * Bot) and its projects and shown (top level) are ignored, since a clone brings it.
- * `raw` is a separate copy of the file exactly as read: edit that one to write it back, so
+ * `raw` keeps the file with null types normalized away: edit that one to write it back, so
  * entries and fields left out of `file` survive. `indent` is the file's indentation.
  */
 export function parseRegistry(text, { kind } = {}) {
@@ -146,6 +146,8 @@ export function parseRegistry(text, { kind } = {}) {
   if (!isObject(raw)) throw new Error('bots.json: not an object')
   if (raw.version !== REGISTRY_VERSION) throw new Error(`bots.json: version ${JSON.stringify(raw.version)}, expected ${REGISTRY_VERSION}`)
   if (!Array.isArray(raw.bots)) throw new Error('bots.json: no bots list')
+  // Null has the same meaning as absent, including the writable representation.
+  for (const bot of raw.bots) if (isObject(bot) && bot.type === null) delete bot.type
   const file = JSON.parse(text)
   const warnings = []
   for (const key of [...NEVER_FIELDS, ...UNSAFE_KEYS]) {

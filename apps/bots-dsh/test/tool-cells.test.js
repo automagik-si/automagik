@@ -1582,3 +1582,12 @@ test('a Retry after a failed turn shows as one event line', () => {
   }))
   assert.equal(text(out), 'Went on after the failed turn')
 })
+
+
+test('group replies render terminal-only skip and nothing-delivered notices', () => {
+  for (const message of ['Skipped Writer: terminal-only.', 'Nothing delivered. Skipped Writer, Coder: terminal-only.']) {
+    const replies = [{ kind: 'terminal-only', names: ['Writer'], text: message }]
+    const out = show(call('group_relay', 'terminal-notice', { content: { replies } }), { sessionId: 'room' })
+    assert.ok(text(out).includes(message), 'the group must render the terminal-only notice')
+  }
+})

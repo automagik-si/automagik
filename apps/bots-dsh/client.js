@@ -66,6 +66,9 @@ function SessionFileApproval({ matched: { pending, item }, renderFactorySlot }) 
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
+  "Skipped {names}: terminal-only.": "已跳过 {names}：仅支持终端。",
+  "Nothing delivered. Skipped {names}: terminal-only.": "未发送任何内容。已跳过 {names}：仅支持终端。",
+  "{names}: The Bot is terminal-only.": "{names}：此 Bot 仅支持终端。",
   "A Main Bot cannot be a Herdr Bot.": "主 Bot 不能是 Herdr Bot。",
   "The Bot is terminal-only.": "此 Bot 仅支持终端。",
   "Unknown terminal agent. Choose a supported terminal agent.": "未知的终端代理。请选择受支持的终端代理。",
@@ -3049,6 +3052,9 @@ function t(key, params) {
   return bound ? bound(key, params) : fill(key, params);
 }
 var HOST_TEMPLATES = [
+  "Skipped {names}: terminal-only.",
+  "Nothing delivered. Skipped {names}: terminal-only.",
+  "{names}: The Bot is terminal-only.",
   "This connection’s saved Hermes profile “{profile}” is not served there. Choose a profile again before connecting.",
   "This step is hard to undo: {step}. Allow it once?",
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?",
@@ -18700,6 +18706,7 @@ function useLiveNote(actions, sessionId, id, entry) {
   }, [sessionId, id, key]);
 }
 function RelayEvent({ reply, bot, sessionId, actions }) {
+  if (reply.kind === "terminal-only") return (0, import_react47.createElement)("div", { className: "bt-event", role: "status" }, hostText(reply.text));
   if (reply.kind === "permission-stop") {
     return (0, import_react47.createElement)(
       "div",

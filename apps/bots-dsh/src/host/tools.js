@@ -710,7 +710,7 @@ export function install(rt) {
 
   rt.teamTools.push(defineTool({
     name: 'post_to_group',
-    description: 'Post a message into a group chat as yourself. A Main Bot may post into any group, any other Bot into a group it is in. A Main Bot\'s or the group admin\'s post starts a round: members reply in the group, where the user reads them. Another member\'s post calls only the members it names with "@Name"; without one it is only written into the group.',
+    description: 'Post a message into a group chat as yourself. A Main Bot may post into any group, any other Bot into a group it is in. A Main Bot\'s or the group admin\'s post starts a round: members reply in the group, where the user reads them. Another member\'s post calls only the members it names with "@Name"; without one it is only written into the group. In a group with terminal-only members, an unaddressed post reaches the native members and reports which were skipped. Explicitly addressing a terminal-only member refuses the entire post.',
     parameters: {
       group: GROUP_REF,
       message: { type: 'string', required: true, description: 'What to say; write "@Name" to choose who answers, and a name without "@" to only mention a member' },
@@ -749,15 +749,20 @@ export function install(rt) {
       const work = reportBack ? worksOf(exec).find(id => rt.ownsWork(self, id)) : undefined
       const sub = work === undefined ? undefined : randomUUID()
       if (sub !== undefined) rt.openWork(sub, { from: self, room: room.id, parent: work })
+      let posted
       try {
         // A post that wants the replies names the conversation it was written
         // from, so the report comes back there instead of the own chat.
-        await rt.postToRoom(room, sender, long.text, { mentions, ...(reportBack ? { reportBack: true, ...callerRoom(exec) } : {}), ...(member ? { member: true } : {}), ...(sub ? { sub } : {}), ...(long.length ? { length: long.length } : {}) }, long.files)
+        posted = await rt.postToRoom(room, sender, long.text, { mentions, ...(reportBack ? { reportBack: true, ...callerRoom(exec) } : {}), ...(member ? { member: true } : {}), ...(sub ? { sub } : {}), ...(long.length ? { length: long.length } : {}) }, long.files)
       } catch (failure) {
         if (sub !== undefined) rt.dropWork(sub)
         return `Could not post in "${room.name}": ${failure.message}`
       }
-      if (member && named.length === 0) return `Posted in "${room.name}", where the user and its members read it. Nobody answers it: your post only calls the members you name with @Name.`
+      if (posted?.delivered === false) {
+        if (sub !== undefined) rt.dropWork(sub)
+        return posted.notice
+      }
+      if (member && named.length === 0 && !posted?.notice) return `Posted in "${room.name}", where the user and its members read it. Nobody answers it: your post only calls the members you name with @Name.`
       if (named.length > 0) {
         const turn = turnOf(exec)
         const earlier = calledInPosts.get(exec.agent?.id)
@@ -767,7 +772,7 @@ export function install(rt) {
       }
       const asker = sub === undefined ? undefined : rt.botOf(state.works[work]?.from)?.name
       const waits = asker ? ` End your turn when you have handed on everything: the replies bring you back to this work, and your answer goes to ${asker} once all of it is back.` : ''
-      return `Posted in "${room.name}". Members reply there, where the user reads them${reportBack ? '; their replies also come back to you as a new message when the round ends' : ', and nothing comes back to you'}.${waits}`
+      return `Posted in "${room.name}". Members reply there, where the user reads them${reportBack ? '; their replies also come back to you as a new message when the round ends' : ', and nothing comes back to you'}.${waits}${posted?.notice ? ` ${posted.notice}` : ''}`
     },
   }))
 
