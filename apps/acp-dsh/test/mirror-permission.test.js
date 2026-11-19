@@ -27,6 +27,10 @@ const OPTIONS = [
   { kind: 'allow_once', optionId: 'yes', name: 'Allow' },
   { kind: 'reject_once', optionId: 'no', name: 'Reject' },
 ]
+const ALLOW_ALWAYS = { kind: 'allow_always', optionId: 'always', name: 'Always' }
+const REJECT_ALWAYS = { kind: 'reject_always', optionId: 'never', name: 'Never' }
+const LASTING_OPTIONS = [ALLOW_ALWAYS, OPTIONS[1]]
+const LASTING_REASON = 'Test ACP offered to allow Read README.md only from now on ("Always"), not just once, so Automagik did not approve it.'
 const CANCELLED = { outcome: { outcome: 'cancelled' } }
 const picked = optionId => ({ outcome: { outcome: 'selected', optionId } })
 const tick = () => new Promise(resolve => setImmediate(resolve))
@@ -118,8 +122,8 @@ async function world(t, { preset = 'auto', decision = ALLOW, override = 'ask', a
     run.refuse = (...args) => { refusals.push(args); return refuse.apply(run, args) }
     const live = { provider: PROVIDER, run, name: 'Test ACP', calls: new Set(), toolIds: new Map(), open: true }
     adapter.live.set(session.id, live)
-    const made = calls.map(({ callId = 'acp-call', remote = 'remote-call', path = 'README.md', question = true, known = true, argumentsId }, index) => {
-      const tool = run.seeTool({ toolCallId: remote, title: `Read ${path}`, kind: 'read', status: 'pending', rawInput: { path } })
+    const made = calls.map(({ callId = 'acp-call', remote = 'remote-call', path = 'README.md', title = `Read ${path}`, kind = 'read', question = true, known = true, argumentsId }, index) => {
+      const tool = run.seeTool({ toolCallId: remote, title, kind, status: 'pending', rawInput: { path } })
       // As the adapter's stream does at the agent's tool call.
       if (known) {
         live.calls.add(callId)
@@ -396,15 +400,46 @@ test('Auto: arguments that name another tool never carry the allow to it', async
   assert.equal(w.asked.length, 1, "the other call's question went to the person")
 })
 
-test('Auto: an agent that offers no allow_once is asked as today; the allow never becomes allow_always', async (t) => {
+test('Auto: an agent that offers no allow_once is refused, never asked, and never sent allow_always', async (t) => {
   const w = await world(t)
   const c = w.chat('s1', [{ question: false }])
-  const asked = c.call.ask([{ kind: 'allow_always', optionId: 'always', name: 'Always' }, { kind: 'reject_once', optionId: 'no', name: 'Reject' }])
+  const asked = c.call.ask(LASTING_OPTIONS)
   const running = c.execute()
-  assert.deepEqual(await soon(asked), picked('always'), "the person's answer, mapped as today")
+  assert.deepEqual(await soon(asked), picked('no'))
+  assert.equal(w.asked.length, 0)
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(result.isError, false)
+  assert.equal(result.meta.status, 'failed')
+  assert.deepEqual(result.content, [{ type: 'text', text: LASTING_REASON }])
+})
+
+test("Auto: the person's approval of an escalation still leaves a lasting-only question refused", async (t) => {
+  const w = await world(t, { decision: DENY })
+  const c = w.chat('s1', [{ question: false }])
+  const asked = c.call.ask(LASTING_OPTIONS)
+  const running = c.execute()
+  assert.deepEqual(await soon(asked), picked('no'))
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(w.reviews.length, 1)
   assert.equal(w.asked.length, 1)
-  c.call.close(picked('yes'))
-  assert.equal((await running)[0].isError, false)
+  assert.match(w.asked[0].reason, /^Auto review denied tool "acp_tool"/)
+  assert.equal(result.meta.status, 'failed')
+  assert.deepEqual(result.content, [{ type: 'text', text: LASTING_REASON }])
+})
+
+test('Auto: a denial before the body can still use the agent\'s reject_always', async (t) => {
+  const w = await world(t, { override: 'never', decision: DENY })
+  const c = w.chat('s1', [{ question: false }])
+  const asked = c.call.ask([ALLOW_ALWAYS, REJECT_ALWAYS])
+  const [result] = await c.execute()
+  assert.equal(result.isError, true)
+  assert.equal(result.error.info.code, 'AUTO_REVIEW_DENIED')
+  assert.deepEqual(await soon(asked), picked('never'))
+  assert.deepEqual(c.refusals, [['remote-call', false]])
+  assert.equal(c.call.tool.lastingReason, undefined)
+  assert.doesNotMatch(JSON.stringify(result.content), /offered to allow/)
 })
 
 test('Auto: a question the record check cannot read (a null location) is asked as today', async (t) => {
@@ -487,6 +522,107 @@ test('Full access is not asked and not refused when a question comes late, as to
   assert.equal((await running)[0].isError, false)
   assert.equal(w.asked.length, 0)
   assert.deepEqual(c.refusals, [])
+})
+
+for (const [preset, level] of [['workspace-write', 'Manual'], ['danger-full-access', 'Full access']]) {
+  test(`${level}: a lasting-only question is refused without a dialog`, async (t) => {
+    const w = await world(t, { preset })
+    const c = w.chat('s1', [{ question: false }])
+    const asked = c.call.ask(LASTING_OPTIONS)
+    const running = c.execute()
+    assert.deepEqual(await soon(asked), picked('no'))
+    c.call.close(await asked)
+    const [result] = await running
+    assert.equal(w.asked.length, 0)
+    assert.equal(result.meta.status, 'failed')
+    assert.deepEqual(result.content, [{ type: 'text', text: LASTING_REASON }])
+  })
+}
+
+test('Manual: a lasting-only question with only reject_always is cancelled', async (t) => {
+  const w = await world(t, { preset: 'workspace-write' })
+  const c = w.chat('s1', [{ question: false }])
+  const asked = c.call.ask([ALLOW_ALWAYS, REJECT_ALWAYS])
+  const running = c.execute()
+  assert.deepEqual(await soon(asked), CANCELLED)
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(w.asked.length, 0)
+  assert.equal(result.meta.text, LASTING_REASON)
+})
+
+test('Manual: a reject-only question still goes to the person', async (t) => {
+  const w = await world(t, { preset: 'workspace-write', answer: 'rejected' })
+  const c = w.chat('s1', [{ question: false }])
+  const asked = c.call.ask([REJECT_ALWAYS])
+  const running = c.execute()
+  assert.deepEqual(await soon(asked), picked('never'))
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(w.asked.length, 1)
+  assert.equal(w.asked[0].mirrorCall.allowOnce, false)
+  assert.equal(result.meta.text, '')
+})
+
+test('a lasting-only image question uses its refusal reason as the image failure text', async (t) => {
+  const w = await world(t, { preset: 'workspace-write' })
+  const c = w.chat('s1', [{ title: 'Image generation', kind: 'other', question: false }])
+  const asked = c.call.ask([{ ...ALLOW_ALWAYS, optionId: 'first-always', name: 'Always\n  allow' }, ...LASTING_OPTIONS])
+  const running = c.execute()
+  assert.deepEqual(await soon(asked), picked('no'))
+  c.call.close(await asked)
+  const [result] = await running
+  assert.equal(w.asked.length, 0)
+  assert.equal(result.meta.status, 'failed')
+  assert.deepEqual(result.content, [{ type: 'text', text: 'Test ACP offered to allow Image generation only from now on ("Always allow"), not just once, so Automagik did not approve it.' }])
+})
+
+// A native Agent card waits while its child asks. The child has no DSH call id yet.
+async function waitingParent(w) {
+  const c = w.chat('s1', [
+    { title: 'Look around', kind: 'other', question: false },
+    { callId: 'acp-child', remote: 'remote-child', question: false, known: false },
+  ])
+  c.live.native = true
+  const [parent, child] = c.calls
+  const running = c.execute({ only: [parent] })
+  await until(() => c.run.askListeners.size > 0)
+  assert.equal(c.run.askListeners.size, 1)
+  return { c, parent, child, running }
+}
+
+test('Manual: a waiting parent refuses a nested question that only offers allow_always', async (t) => {
+  const w = await world(t, { preset: 'workspace-write' })
+  const { c, parent, child, running } = await waitingParent(w)
+  const asked = child.ask([{ kind: 'allow_always', optionId: 'always' }])
+  assert.deepEqual(await soon(asked), CANCELLED)
+  child.close(await asked)
+  parent.close(picked('yes'))
+  const [parentResult] = await running
+  const [childResult] = await c.execute({ only: [child] })
+  assert.equal(w.asked.length, 0)
+  assert.equal(parentResult.meta.text, '')
+  assert.equal(childResult.meta.status, 'failed')
+  assert.equal(childResult.meta.text, 'Test ACP offered to allow Read README.md only from now on, not just once, so Automagik did not approve it.')
+})
+
+test('Auto: a lasting-only question spends the review, so a second one-shot question is asked', async (t) => {
+  const w = await world(t)
+  const c = w.chat('s1', [{ question: false }])
+  const first = c.call.ask(LASTING_OPTIONS)
+  const running = c.execute()
+  assert.deepEqual(await soon(first), picked('no'))
+  assert.equal(w.asked.length, 0)
+  const second = c.call.ask()
+  assert.deepEqual(await soon(second), picked('yes'))
+  assert.equal(w.asked.length, 1, 'the review answered only the first question')
+  assert.equal(w.asked[0].mirrorCall.allowOnce, true)
+  c.run.changeTool(c.call.tool, { rawOutput: 'Read complete.' })
+  c.call.close(await second)
+  const [result] = await running
+  assert.equal(w.reviews.length, 1)
+  assert.equal(result.meta.status, 'completed')
+  assert.deepEqual(result.content, [{ type: 'text', text: 'Read complete.' }], 'the lasting-only reason is gone')
 })
 
 // --- other refusals before the body --------------------------------------------------------
