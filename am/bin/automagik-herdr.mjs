@@ -21,7 +21,7 @@ import { actionError } from "../actionError.js";
 import { coreStatus, inTestRoots } from "../coreSocket.mjs";
 
 import { BOT_LABEL, BOTS_PATH, CHARACTERS, COLOURS, KINDS, MAX_INSTRUCTIONS, OMNI_LOOK, applyBotEdit, checkBots, restartAtOf,
-  CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId,
+  CATEGORY_ID, PROJECTS_FILE, RANKS, cleanProjectPath, collectProjectMap, crossMemberWarnings, crossMembersOf, defaultLook, descendantsOf, effectiveLead, leadsBackTo, listedProjects, mainBotOf, newBotId, newCategoryId, rateLimitModeOf,
   botsText, parseBots, plannedOf, projectKeyOf, projectOf, squadOf, withListedProject, writeFolderOf } from "../model.js";
 import { UNANSWERED, agentInForeground, attachRefusal, attachWords, detachWords, hcName, isClaude, leadIdOf, leadPane, newest,
   paneLabels, paneOf, parentArgs, placementFrom, relabel, relabelPlan, relabelWarning, relabelWords, rowsOf, spaceOnly, spacePlace,
@@ -43,7 +43,7 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   taskIdProblem, taskWorkerName, TEMPLATE_SHAPE, codexTemplateRefusal, codexTemplateWarning, templateAgent, workerArgs, workerBranch, workerKillRefusal, workerPlan, workerRole, worktreeFolder,
   workLeft, writesWorktree } from "../workers.js";
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, contextTokensOf, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
-  isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
+  isPaneIdle, pendingDialog, paneCommand, planText as restartText, rateLimitDialog, rateLimitLine, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders, wakeWait } from "../restart.js";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
   countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchdNotLoaded, ledgerRivals,
   lastText, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
@@ -56,7 +56,7 @@ import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { transcriptShape } from "../transcriptFolder.mjs";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
 import { botHistory, historyLines } from "../inspect.js";
-import { CONFIG_VAR, chooseLogin } from "../logins.js";
+import { CONFIG_VAR, DEFAULT_LOGIN, chooseLogin, loginsPath, parseLogins } from "../logins.js";
 import { DocError, docGet } from "../docGet.mjs";
 import { isGuardFolder } from "../hcGuard.mjs";
 import { looksLikeGuardFolder } from "../hcGuard.mjs";
@@ -1299,7 +1299,7 @@ function seatContext(project, bot, live, ledger = workerLedgerRows()) {
  * resolved beyond the selected ledger (#1128); `context` is the measured Claude Code context
  * (#1556). Both sides of the merge are kept: a linked machine keeps its own observation, a
  * local show/ls may pass a resolved binding, and a Claude seat may pass its context. */
-function describe(project, bot, view, hcError, projects = null, observation = null, heldOverride = undefined, context = null) {
+function describe(project, bot, view, hcError, projects = null, observation = null, heldOverride = undefined, context = null, rateLimit = null) {
   const { file } = project;
   const candidate = observation?.candidate;
   const held = heldOverride !== undefined ? heldOverride
@@ -1351,10 +1351,14 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
   const worker = bot.worker && typeof bot.worker === "object" ? { ...bot.worker } : null;
   if (worker && resolveAgent(worker.agent ?? bot.agent) === "antigravity") worker.agyMode = agyModeOf(worker.agyMode);
   let status = "not running";
+  // #1557: a running Claude Code seat whose pane tail shows the rate-limit dialog reports the
+  // added status word, with the dialog's reset time when it shows one. Its core status stays
+  // beside it (`core_status`), so the word is added to the contract, not a replacement.
+  const rateLimited = rateLimit && held && agentInForeground(live) ? rateLimit : null;
   if (bot.planned) status = "planned";
   else if (hcError) status = project.machine ? "unknown" : "hc unavailable";
   else if (!held && view && unknownFor(view, bot.id, project)) status = "unknown"; // its machine isn't answering
-  else if (held) status = agentInForeground(live) ? live.status?.state ?? "running" : "no agent in front";
+  else if (held) status = agentInForeground(live) ? (rateLimited ? "rate-limited" : live.status?.state ?? "running") : "no agent in front";
   // #823: the effective permission lists the launch carries: a seat's on the project folder,
   // and a worker default's (its task worktree is added at its launch).
   const seatAgy = bot.agent === "antigravity"
@@ -1387,6 +1391,8 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
     permissionMode: shownPermission.value, permissionModeSource: shownPermission.source, pinnedPermissionMode: bot.permissionMode ?? null,
     agyMode: bot.agent === "antigravity" ? agyModeOf(bot.agyMode) : (typeof bot.agyMode === "string" && bot.agyMode ? bot.agyMode : null),
     terminal: held?.binding.terminal ?? null, status, duplicate: false, since: held?.binding.at ?? null,
+    ...(rateLimited ? { core_status: live.status?.state ?? null,
+      rate_limited: { question: rateLimited.question ?? null, ...(rateLimited.resets_at ? { resets_at: rateLimited.resets_at } : {}) } } : {}),
     role: bot.role, rank: bot.rank ?? null, code: bot.code !== false, look: bot.look,
     hcProxy: bot.hcProxy === true,
     restartAt: restartAtOf(bot), pinnedRestartAt: bot.restartAt ?? null,
@@ -1653,7 +1659,9 @@ Usage: am <command> [options]                   (every command takes --json and 
        am --version                              the installed pack's version
 
   ls [--all]                    bots with kind, lead, category, rank, agent, model, pane, status
-                               plus planned waves, code opt-outs and Antigravity modes
+                               plus planned waves, code opt-outs and Antigravity modes; a seat
+                               blocked on Claude Code's rate-limit dialog is 'rate-limited'
+                               (with the reset time the dialog shows), never answered
   show <bot>                    one bot in full (--json: the effective effort and tier,
                                 and where each comes from)
                                 Linked ls/show observe target panes without adopting them.
@@ -1743,7 +1751,14 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 macOS: a launchd agent in your own ~/Library/LaunchAgents,
                                 written and left for launchd to load at your next login).
                                 install.sh asks before it installs it.
-  restart --queued [--project DIR] [--json]   List queued restarts.
+  rate-limit [--all] [--dry-run] [--json]
+                                One sweep of #1557: a running Claude Code seat whose pane tail
+                                shows the rate-limit dialog is parked or switched by the
+                                project's onRateLimit (park, the default, queues am restart <bot>
+                                for one minute after the reset; switch restarts it on another
+                                signed-in login with headroom, else parks). One attention item per
+                                episode; am ls shows it. It never types into the dialog.
+  restart --queued [--project DIR] [--json]   List queued restarts (with a parked seat's wake time).
   restart --cancel <bot> [--project DIR] [--json]   Cancel a queued restart.
   restart --due [--all] [--dry-run] [--json]   Restart from a handoff the seats whose Claude Code
                                 context is over their threshold (restartAt; a main bot defaults
@@ -2570,7 +2585,7 @@ async function editProjectFor(opts) {
   return loadProject(key, await writeDirOf(opts, key));
 }
 // The commands that take --machine: the definitions ones (and meter's own --machine).
-const ON_MACHINE = new Set(["ls", "show", "create", "edit", "main", "rm", "category", "start", "restart", "attach", "detach", "whois", "meter", "doc", "machines"]);
+const ON_MACHINE = new Set(["ls", "show", "create", "edit", "main", "rm", "category", "start", "restart", "attach", "detach", "whois", "meter", "doc", "machines", "rate-limit"]);
 // A project's place in --json answers: `machine` only for a linked machine's.
 const placeOf = (project) => ({ project: project.key, ...(project.machine ? { machine: project.machine } : {}) });
 
@@ -2642,10 +2657,12 @@ async function cmdLs(opts) {
     const ledger = workerLedgerRows();
     const bots = await Promise.all(project.file.bots.map(async (b) => {
       const held = await readHeld(project, b, view);
-      return { ...describe(project, b, view, hcError, null, null, held, seatContext(project, b, held?.get ?? null, ledger)),
+      return { ...describe(project, b, view, hcError, null, null, held, seatContext(project, b, held?.get ?? null, ledger),
+        await seatRateLimit(project, b, held?.get ?? null)),
         duplicate: await duplicateLabel(project, b, view) };
     }));
-    projects.push({ project: key, categories: project.file.categories, warnings: project.warnings, bots });
+    // #1557: the open attention items, so one episode shows once here too.
+    projects.push({ project: key, categories: project.file.categories, warnings: project.warnings, bots, attention: openAttention(key) });
   }
   if (opts.json) return { projects };
   return lsLines(projects);
@@ -2665,11 +2682,14 @@ function lsLines(projects) {
       const agy = b.agyMode ? `  agy-mode ${b.agyMode}` : "";
       const perms = b.agyPermissions || b.workerAgyPermissions
         ? `  agy-allow ${(b.agyPermissions ?? b.workerAgyPermissions).allow.length} deny ${(b.agyPermissions ?? b.workerAgyPermissions).deny.length}` : "";
-      const status = b.planned ? `planned, wave ${b.planned.wave}` : b.terminal ? `${b.status} in ${p.machine ? `${p.machine}/` : ""}${b.terminal}` : b.status;
+      const resets = b.rate_limited?.resets_at ? ` (resets ${b.rate_limited.resets_at})` : "";
+      const status = b.planned ? `planned, wave ${b.planned.wave}`
+        : b.terminal ? `${b.status}${resets} in ${p.machine ? `${p.machine}/` : ""}${b.terminal}` : b.status;
       const code = b.code === false ? "  code false" : "";
       const duplicate = b.duplicate ? "  ! duplicate live labels" : "";
       lines.push(`  ${b.id}  ${b.name}${b.rank ? ` (${b.rank})` : ""}  ${where}${code}  ${b.agent ?? "-"}  ${model}${agy}${perms}  ${status}${duplicate}${b.warning ? `  ! ${b.warning}` : ""}`);
     }
+    for (const row of p.attention ?? []) lines.push(`  ! ${row.text}`);
     for (const w of p.warnings ?? []) lines.push(`  ! ${w}`);
     const hcError = p.bots.find((b) => b.hcError)?.hcError;
     if (hcError) lines.push(`  ! panes unknown: ${hcError}`);
@@ -2764,8 +2784,10 @@ async function cmdShow(opts, [ref]) {
   const live = !project.machine && !bot.planned && view ? liveFor(view, bot.id, project)?.get ?? null : null;
   const held = project.machine ? null : await readHeld(project, bot, view, { refuseTwins: true });
   const info = { ...(project.machine ? await describeLinked(project, bot)
-    : { ...describe(project, bot, view, hcError, null, null, held, seatContext(project, bot, held?.get ?? live)),
+    : { ...describe(project, bot, view, hcError, null, null, held, seatContext(project, bot, held?.get ?? live),
+      await seatRateLimit(project, bot, held?.get ?? live)),
       duplicate: await duplicateLabel(project, bot, view) }), instructions: bot.instructions };
+  info.attention = project.machine ? [] : openAttention(project.key).filter((row) => row.botId === bot.id);
   info.hcProxyState = project.machine ? await proxyStateOn(project, bot)
     : approvedProxyState({ project: project.key, bot });
   if (opts.json) return info;
@@ -2801,6 +2823,9 @@ async function cmdShow(opts, [ref]) {
       `  worker agy allow  ${info.workerAgyPermissions.allow.join(", ")}`,
       `  worker agy deny   ${info.workerAgyPermissions.deny.join(", ")}`] : []),
     `  status       ${info.status}${info.terminal ? ` in ${info.terminal} (since ${info.since})` : ""}`,
+    ...(info.rate_limited ? [`  rate limit   ${info.rate_limited.resets_at ? `until ${info.rate_limited.resets_at}` : "no reset time in the dialog"}`
+      + `; waiting on "${info.rate_limited.question}" (Herdr never answers it)`] : []),
+    ...(info.attention?.length ? [`  attention    ${info.attention.map((row) => row.text).join("; ")}`] : []),
     `  context      ${info.context_tokens === null ? "-" : `${info.context_tokens} tokens`}`,
     `  restartAt    ${info.restartAt === null ? "-" : `${info.restartAt} tokens${info.pinnedRestartAt ? "" : " (default)"}`}`,
     ...(info.duplicate ? ["  warning      duplicate live labels"] : []),
@@ -5373,7 +5398,9 @@ async function queuedRestarts(opts, ref) {
       + `${f.notified?.sent ? `; the lead was told in ${f.notified.sent}` : f.notified?.unsent ? `; the lead was not told: ${f.notified.unsent}` : ""}.`;
     const skippedLine = (s) => `Skipped handoff failure row ${s.row}: ${s.reason}.`;
     const lines = [
-      ...entries.map((e) => `${e.botName} (${e.botId}): queued on ${e.terminal} (${e.reason}${e.dialog ? `: "${e.dialog.question}" — ${e.dialog.who} must answer` : ""}) since ${e.at}`),
+      ...entries.map((e) => `${e.botName} (${e.botId}): queued on ${e.terminal} (${e.reason}`
+        + `${e.resets_at ? ` until ${e.resets_at}` : ""}${e.wake_at ? `, wake at ${e.wake_at}` : ""}`
+        + `${e.dialog ? `: "${e.dialog.question}" — ${e.dialog.who} must answer` : ""}) since ${e.at}`),
       ...failures.map(failureLine),
       ...record.skipped.map(skippedLine),
     ];
@@ -5659,11 +5686,18 @@ async function noteHandoffFailure({ botId, botName, project, terminal }, kind, w
 async function runQueuedRestart(opts) {
   const queueId = opts["run-queued"];
   const began = Date.now();
-  const maxMs = Math.max(1000, Number(process.env.AUTOMAGIK_HERDR_QUEUE_MAX_MS) || 86_400_000);
-  const helperMaxMs = Math.max(50, Number(process.env.AUTOMAGIK_HERDR_QUEUE_HELPER_WAIT_MS) || 30_000);
   const current = () => readRestartQueue().find((e) => e.id === queueId);
   let entry = current();
   if (!entry) return PRINTED;
+  // A parked seat's wake is its reset plus the grace; the default cap must outlast a 7-day
+  // window, so a wake beyond it is still honoured (a test can cap the run with the env var).
+  const park = entry.options?.rateLimit === true;
+  const wake = park && entry.wake_at ? Date.parse(entry.wake_at) : NaN;
+  const maxMs = Math.max(1000, Number(process.env.AUTOMAGIK_HERDR_QUEUE_MAX_MS) || 86_400_000,
+    Number.isFinite(wake) ? wake - began + 300_000 : 0);
+  const helperMaxMs = Math.max(50, Number(process.env.AUTOMAGIK_HERDR_QUEUE_HELPER_WAIT_MS) || 30_000);
+  /** How long one parked wait may sleep before looking at the pane again (a cancel, a recovery). */
+  const parkPollMs = Math.max(10, envMs("AUTOMAGIK_HERDR_RATE_LIMIT_POLL_MS", 60_000));
   let helperBlockedSince = null;
   // #1556: a queued handoff restart asks for the handoff once its seat is idle, waits for a
   // file newer than the ask, then runs the same --fresh --tree restart and sends the file as
@@ -5696,6 +5730,28 @@ async function runQueuedRestart(opts) {
           await noteHandoffFailure(entry, "dropped", why, handoffFile);
         }
         return PRINTED;
+      }
+      if (park) {
+        const wait = wakeWait(entry.wake_at);
+        if (wait > 0) {
+          // A seat that recovers on its own before its wake is left running: the dialog is gone
+          // and the pane is idle, so there is nothing to restart. An unreadable or blocked pane
+          // keeps waiting, never guessing.
+          const screen = state.get?.status?.state !== "blocked" ? await readScreenText(entry.terminal) : null;
+          if (screen !== null && !rateLimitDialog(screen) && isPaneIdle(state.get, screen)) {
+            await drop();
+            return PRINTED;
+          }
+          await sleep(Math.min(wait, parkPollMs));
+          entry = current();
+          if (!entry) return PRINTED;
+          continue;
+        }
+        // Its wake is due: replace the dialog's pane now, resuming the conversation. --force is
+        // internal (a blocked pane would otherwise queue again); the person asked for a restart.
+        // cmdRestart consumes the entry itself, so a cancel that lands first still wins.
+        const result = await cmdRestart({ project: entry.project, force: true, json: opts.json, _queuedTarget: entry }, [entry.botId]);
+        return result;
       }
       // A blocked pane is never idle: skip the screen read (an hc RPC on every poll).
       const screen = state.get?.status?.state !== "blocked" && state.get ? await readScreenText(entry.terminal) : null;
@@ -5832,15 +5888,19 @@ async function runQueuedRestart(opts) {
 }
 
 async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered }) {
-  const dialog = pendingDialog(screen) ?? (old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
+  const rateLimited = opts.rateLimit === true;
+  const dialog = pendingDialog(screen) ?? (!rateLimited && old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
   const queueId = randomUUID();
   const entry = await editRestartQueue(async (rows) => {
     const i = rows.findIndex((e) => e.botId === bot.id);
     if (i >= 0) { const [prev] = rows.splice(i, 1); await killQueuedWatcher(prev.watcher); }
     const e = { id: queueId, botId: bot.id, botName: bot.name, project: key, terminal: old.address, created_ms: old.created_ms ?? null,
-      reason: opts.handoff ? "due" : dialog ? "blocked" : "working", dialog, options: { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
+      reason: opts.handoff ? "due" : rateLimited ? "rate-limited" : dialog ? "blocked" : "working", dialog,
+      ...(opts.wakeAt ? { wake_at: opts.wakeAt } : {}), ...(opts.resetsAt ? { resets_at: opts.resetsAt } : {}),
+      options: { fresh: Boolean(opts.fresh), agent: opts.agent ?? null,
         model: opts.model ?? null, save: Boolean(opts.save), tree: Boolean(opts.tree), freshShared: Boolean(opts["fresh-shared"]),
-        cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null,
+        cwd: wanted ?? null, space: opts.space ?? null, tab: opts.tab ?? null, force: Boolean(opts.force),
+        ...(rateLimited ? { rateLimit: true } : {}),
         ...(opts.handoff ? { handoff: true, contextTokens: opts.contextTokens ?? null, restartAt: opts.restartAt ?? null } : {}),
         ...(recovered ? { recoveredHome: true } : {}) }, watcher: null, at: new Date().toISOString() };
     // Persist before starting: the detached process may read immediately, then takes this lock.
@@ -5883,7 +5943,13 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
     return e;
   });
   if (opts.json) return { id: bot.id, queued: true, terminal: old.address, reason: entry.reason, dialog,
+    ...(entry.wake_at ? { wake_at: entry.wake_at } : {}), ...(entry.resets_at ? { resets_at: entry.resets_at } : {}),
     watcher: entry.watcher, mode: plan.mode, agent: plan.agent, model: plan.model };
+  if (rateLimited) {
+    const until = entry.resets_at ? ` until ${entry.resets_at}` : "";
+    return `${bot.name}: rate-limited${until}; parked in ${old.address}, its restart wakes at ${entry.wake_at} `
+      + `(am restart --queued lists it; am restart --cancel ${bot.id} cancels it).`;
+  }
   if (opts.handoff) {
     return `${bot.name}: handoff restart queued for ${old.address} (context ${opts.contextTokens ?? "?"} over restartAt ${opts.restartAt ?? "?"}); `
       + `it writes its handoff at its next idle, then restarts from ${handoffPathOf(bot.id)} (am restart --queued lists it; am restart --cancel ${bot.id} cancels it).`;
@@ -5915,6 +5981,297 @@ async function queuedHandoffFor(botId) {
     }
   }
   return entry;
+}
+
+// ---- #1557: a Claude Code seat blocked on the rate-limit dialog ----
+
+/** A non-negative millisecond override from the environment, or `fallback`. */
+function envMs(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+/** Park restarts a seat this long after the reset the dialog shows (one minute). */
+const RATE_LIMIT_GRACE_MS = envMs("AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS", 60_000);
+/** With no reset time to record, a parked seat is looked at again this much later (15 minutes). */
+const RATE_LIMIT_RETRY_MS = envMs("AUTOMAGIK_HERDR_RATE_LIMIT_RETRY_MS", 15 * 60_000);
+const RATE_LIMIT_KIND = "rate-limit";
+
+/** The attention items file under the app home: one record per episode, never one per sweep. */
+const attentionPath = () => join(appHome(), "automagik-herdr", "attention.json");
+/** How many items are kept (open ones always included first in the file, oldest may go). */
+const ATTENTION_MAX = 200;
+
+/** The recorded attention items, oldest first. A malformed file throws (never read as "none"). */
+function readAttention() {
+  const text = readText(attentionPath());
+  if (text === null) return [];
+  let data;
+  try { data = JSON.parse(text); } catch { throw new CliError(`Can't read ${attentionPath()}: invalid attention items`); }
+  if (!data || !Array.isArray(data.items)) throw new CliError(`Can't read ${attentionPath()}: invalid attention items`);
+  return data.items.filter((row) => row && typeof row === "object");
+}
+
+/** Open items in a read that must not fail the command that shows them: a broken record is a note. */
+function openAttention(project = null) {
+  try {
+    return readAttention().filter((row) => row.open === true && row.kind === RATE_LIMIT_KIND && (!project || row.project === project));
+  } catch (e) {
+    report([`${e?.message ?? e}; no attention items are shown.`]);
+    return [];
+  }
+}
+
+/** Mutates the attention items under one lock and writes them 0600, atomically; returns `edit`'s answer. */
+async function editAttention(edit) {
+  const file = attentionPath();
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  return withLockAsync(`${file}.lock`, async () => {
+    const items = readAttention();
+    const result = await edit(items);
+    const kept = items.slice(-ATTENTION_MAX);
+    const tmp = `${file}.${process.pid}.${randomUUID()}`;
+    try {
+      writeFileSync(tmp, `${JSON.stringify({ version: 1, items: kept }, null, 2)}\n`, { mode: 0o600 });
+      chmodSync(tmp, 0o600);
+      renameSync(tmp, file);
+      chmodSync(file, 0o600);
+    } finally { try { unlinkSync(tmp); } catch {} }
+    return result;
+  });
+}
+
+/**
+ * One attention item for a bot's rate-limit episode: the open item for that project and bot is
+ * returned (`created: false`) instead of a second one, however many sweeps see the same dialog.
+ * A new item is written only when no open episode exists, so a seat that never recovers stays
+ * at one item until a sweep sees it healthy (healRateLimitAttention) and a later dialog starts
+ * a new episode.
+ */
+async function noteRateLimitAttention({ project, bot, terminal, created_ms = null, text, resetsAt = null }) {
+  return editAttention((items) => {
+    const open = items.find((row) => row.open === true && row.kind === RATE_LIMIT_KIND && row.project === project && row.botId === bot.id);
+    if (open) return { row: open, created: false };
+    const row = { id: randomUUID(), kind: RATE_LIMIT_KIND, project, botId: bot.id, botName: bot.name,
+      terminal, created_ms, at: new Date().toISOString(), ...(resetsAt ? { resets_at: resetsAt } : {}), text, open: true };
+    items.push(row);
+    return { row, created: true };
+  });
+}
+
+/** Closes every open rate-limit item of `botId` (its seat is healthy again, or gone). */
+async function healRateLimitAttention(project, botId, why) {
+  // A sweep over a healthy team must not rewrite the store: only an open episode is looked at.
+  if (!readAttention().some((row) => row.open === true && row.kind === RATE_LIMIT_KIND && row.project === project && row.botId === botId)) return 0;
+  return editAttention((items) => {
+    let closed = 0;
+    for (const row of items) {
+      if (row.open !== true || row.kind !== RATE_LIMIT_KIND || row.project !== project || row.botId !== botId) continue;
+      row.open = false;
+      row.closed_at = new Date().toISOString();
+      row.closed_because = why;
+      closed += 1;
+    }
+    return closed;
+  });
+}
+
+/** How a login is named in an item: "the default login", "login 2". */
+const loginNameOf = (id) => (id === DEFAULT_LOGIN ? "the default login" : `login ${id}`);
+
+/** The folder the meter's limits logger writes to (claude-limits.jsonl), as the logger resolves it. */
+const meterDir = () => (process.env.METER_STATE_DIR
+  || (process.env.AM_HOME && isAbsolute(process.env.AM_HOME) ? join(process.env.AM_HOME, "meter") : join(home(), ".automagik/meter")));
+
+/** A login's account fingerprint as the limits logger writes it (sha256 of its oauth account, 16 hex), or null. */
+function accountHashOf(login) {
+  const file = login.id === DEFAULT_LOGIN ? join(home(), ".claude.json") : join(login.dir, ".claude.json");
+  const text = readText(file);
+  if (text === null) return null;
+  try {
+    const uuid = JSON.parse(text)?.oauthAccount?.accountUuid;
+    return typeof uuid === "string" && uuid ? createHash("sha256").update(uuid).digest("hex").slice(0, 16) : null;
+  } catch { return null; }
+}
+
+/** The last limits reading for `account` in the meter's log, or null. */
+function lastLimitReading(account) {
+  try {
+    const text = tailTextOf(join(meterDir(), "claude-limits.jsonl"), 256 * 1024);
+    let found = null;
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      try { const row = JSON.parse(line); if (row && row.account === account) found = row; } catch { /* a cut line */ }
+    }
+    return found;
+  } catch { return null; }
+}
+
+/** Whether a reading proves headroom: a known window under 100%; null when no window is known. */
+function headroomOf(row) {
+  const windows = [row?.five_hour, row?.seven_day].filter((w) => w && typeof w.used_percentage === "number");
+  return windows.length ? windows.every((w) => w.used_percentage < 100) : null;
+}
+
+/**
+ * A second signed-in Claude login with headroom for `live`'s seat (#1557), or null: every login
+ * the app home's `claude-logins.json` lists plus the default one, except the login the pane
+ * runs, whose own account fingerprint appears in the meter's `claude-limits.jsonl` with every
+ * window under 100%. No reading means no proven headroom, never a guess; the caller parks.
+ */
+function switchLoginFor(live) {
+  const currentDir = paneLaunchEnv(live)?.get(CONFIG_VAR);
+  const current = typeof currentDir === "string" && isAbsolute(currentDir) ? (realDir(currentDir) ?? currentDir) : null;
+  let listed = [];
+  try {
+    const record = parseLogins(readText(loginsPath(appHome())) ?? "");
+    if (!record.problem) listed = record.logins;
+  } catch { /* no record: the default login alone */ }
+  const seen = new Set();
+  for (const login of [{ id: DEFAULT_LOGIN, dir: null }, ...listed]) {
+    if (login.id === DEFAULT_LOGIN) {
+      if (!current) continue; // its seat already runs the default login
+    } else {
+      const real = realDir(login.dir) ?? login.dir;
+      if (seen.has(real) || (current && real === current)) continue;
+      seen.add(real);
+    }
+    const account = accountHashOf(login);
+    if (!account) continue; // not signed in here
+    if (headroomOf(lastLimitReading(account)) !== true) continue;
+    return { id: login.id, dir: login.dir, words: login.id === DEFAULT_LOGIN ? ["-u", CONFIG_VAR] : [`${CONFIG_VAR}=${login.dir}`] };
+  }
+  return null;
+}
+
+/** The rate-limit dialog a bot's live Claude Code pane is blocked on, or null. Read-only. */
+async function seatRateLimit(project, bot, live) {
+  if (project?.machine || !live || live.state !== "live" || resolveAgent(bot?.agent) !== "claude") return null;
+  // A working agent is taking a turn; the dialog waits for a person, never behind a turn.
+  if (live.status?.state === "working") return null;
+  return rateLimitDialog(await readScreenText(live.address));
+}
+
+/** This bot's parked rate-limit restart, or null; a dead watcher's entry is dropped first. */
+async function queuedParkFor(botId) {
+  const entry = readRestartQueue().find((e) => e.botId === botId && e.options?.rateLimit === true);
+  if (!entry) return null;
+  if (entry.watcher) {
+    const state = await hcState(entry.watcher);
+    if (["gone", "finished"].includes(state.state)) {
+      await editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === entry.id); if (i >= 0) rows.splice(i, 1); });
+      return null;
+    }
+  }
+  return entry;
+}
+
+/**
+ * The `am rate-limit` sweep (#1557), and the same pass a scheduled `am restart --due` runs
+ * first: every live Claude Code seat whose pane tail shows the rate-limit dialog is reported,
+ * then reacted to by the project's `onRateLimit`. `park` (the default) queues `am restart
+ * <bot>` for one minute after the reset (a retry later when the dialog shows none); `switch`
+ * restarts it now on another signed-in login with headroom, and parks when there is none. One
+ * attention item per episode is written; a seat seen healthy closes its episode. `dry` only
+ * reports. Never types into the dialog.
+ */
+async function rateLimitPass(opts, keys, dry, { blockedOnly = false } = {}) {
+  const out = { rate_limited: [], parked: [], switched: [], attention: [], notes: [] };
+  let { view, hcError } = await viewOrError();
+  if (hcError) {
+    out.notes.push(`hc couldn't list this computer's panes, so no rate-limit dialog was read (${hcError}).`);
+    return out;
+  }
+  for (const key of keys) {
+    let project;
+    try { project = loadProject(key); } catch (e) { out.notes.push(`${key}: ${e.message}`); continue; }
+    if (project.machine) continue;
+    const mode = rateLimitModeOf(project.file);
+    for (const bot of project.file.bots) {
+      if (bot.planned || resolveAgent(bot.agent) !== "claude") continue;
+      const held = await readHeld(project, bot, view);
+      const live = held?.get ?? null;
+      if (!live || live.state !== "live") {
+        if (!dry) await healRateLimitAttention(key, bot.id, "its pane ended");
+        continue;
+      }
+      // The sweep never acts on its own pane: a person running it inside a seat would end it.
+      if (process.env.HC_TERMINAL_ID && live.address === process.env.HC_TERMINAL_ID) {
+        out.notes.push(`${bot.name}: the sweep runs inside its own pane; run it from a timer or another pane.`);
+        continue;
+      }
+      // The scheduled pass looks only at a seat herdr-core reports blocked: that is the modal
+      // dialog waiting on a person. The explicit `am rate-limit` sweep reads every seat.
+      if (blockedOnly && live.status?.state !== "blocked") continue;
+      const screen = await readScreenText(live.address);
+      const dialog = rateLimitDialog(screen);
+      if (!dialog) {
+        if (!dry) await healRateLimitAttention(key, bot.id, "it recovered");
+        continue;
+      }
+      const seen = { id: bot.id, name: bot.name, project: key, terminal: live.address, question: dialog.question,
+        onRateLimit: mode, ...(dialog.resets_at ? { resets_at: dialog.resets_at } : {}) };
+      out.rate_limited.push(seen);
+      if (dry) { out.notes.push(`${bot.name}: blocked on the rate-limit dialog; would be ${mode === "switch" ? "switched or parked" : "parked"}.`); continue; }
+      // `noLogin`: the switch was asked for and no login had proven headroom (the item says so);
+      // a switch that failed for another reason parks without that claim.
+      let noLogin = false;
+      if (mode === "switch") {
+        const other = switchLoginFor(live);
+        if (other) {
+          try {
+            const r = await cmdRestart({ project: key, force: true, json: true, _login: { words: other.words, warnings: [] } }, [bot.id]);
+            const terminal = r && typeof r === "object" ? r.terminal : null;
+            const text = rateLimitLine(bot.name, { outcome: `switched to ${loginNameOf(other.id)}`, resetsAt: dialog.resets_at ?? null });
+            const noted = await noteRateLimitAttention({ project: key, bot, terminal: terminal ?? live.address, created_ms: live.created_ms, text, resetsAt: dialog.resets_at });
+            out.switched.push({ ...seen, login: other.id, terminal: terminal ?? live.address });
+            if (noted.created) out.attention.push(noted.row);
+            viewOnce = null;
+            ({ view } = await viewOrError());
+            continue;
+          } catch (e) {
+            out.notes.push(`${bot.name}: switching to ${loginNameOf(other.id)} failed (${firstSentence(e?.message ?? String(e))}); parking instead.`);
+          }
+        } else { noLogin = true; out.notes.push(`${bot.name}: no second signed-in login with headroom; parking.`); }
+      }
+      const existing = await queuedParkFor(bot.id);
+      const wakeAt = dialog.resets_at
+        ? new Date(Date.parse(dialog.resets_at) + RATE_LIMIT_GRACE_MS).toISOString()
+        : new Date(Date.now() + RATE_LIMIT_RETRY_MS).toISOString();
+      let entry = existing;
+      if (!entry) {
+        entry = await queueRestart({ bot, key, old: live, screen,
+          opts: { json: true, force: true, rateLimit: true, wakeAt, resetsAt: dialog.resets_at ?? null },
+          wanted: null, plan: { mode: "resume", agent: "claude", model: null } });
+      }
+      const text = rateLimitLine(bot.name, { outcome: noLogin ? "parked (no second login with headroom)" : "parked", resetsAt: dialog.resets_at ?? null });
+      const noted = await noteRateLimitAttention({ project: key, bot, terminal: live.address, created_ms: live.created_ms, text, resetsAt: dialog.resets_at });
+      out.parked.push({ ...seen, wake_at: entry.wake_at ?? wakeAt });
+      if (noted.created) out.attention.push(noted.row);
+    }
+  }
+  return out;
+}
+
+/** `am rate-limit [--all] [--dry-run] [--json]`: one sweep of the #1557 detection and reaction. */
+async function cmdRateLimit(opts) {
+  if (opts.machine !== undefined) throw new CliError("rate-limit reads this computer's pane tails; run it on the machine whose seats it acts on.", 2);
+  const keys = [await commandKeyOf(opts)];
+  if (opts.all) for (const key of rememberedKeys()) if (!keys.includes(key)) keys.push(key);
+  const dry = opts["dry-run"] === true;
+  const result = await rateLimitPass(opts, keys, dry);
+  if (opts.json) return result;
+  const lines = [
+    ...result.attention.map((row) => `! ${row.text}`),
+    ...result.rate_limited.filter((r) => !result.parked.some((p) => p.id === r.id) && !result.switched.some((p) => p.id === r.id))
+      .map((r) => `${r.name} (${r.id}) at ${r.terminal}: blocked on the rate-limit dialog "${r.question}"`
+        + `${r.resets_at ? `; resets ${r.resets_at}` : ""}${dry ? " (dry run: nothing was parked or switched)." : "."}`),
+    ...result.parked.map((r) => `${r.name}: parked; its restart wakes at ${r.wake_at} (am restart --queued lists it).`),
+    ...result.switched.map((r) => `${r.name}: switched to ${loginNameOf(r.login)} in ${r.terminal}.`),
+    ...result.notes,
+  ];
+  return lines.length ? lines.join("\n") : "No seat is blocked on the rate-limit dialog.";
 }
 
 /**
@@ -5955,6 +6312,9 @@ async function cmdRestartDue(opts) {
 
 /** The measured, acted-on pass behind `cmdRestartDue` (#1556); `dry` only reports it. */
 async function restartDuePass(opts, keys, dry) {
+  // #1557 first: a seat parked on the rate-limit dialog must not be woken early by this pass,
+  // and this is the scheduled sweep that parks or switches one in the first place.
+  const rate = await rateLimitPass(opts, keys, dry, { blockedOnly: true });
   const { view, hcError } = await viewOrError();
   if (hcError) throw new CliError(`hc couldn't list this computer's panes, so no seat's context was read (${hcError}); nothing was asked or restarted.`);
   const ledger = workerLedgerRows();
@@ -5965,6 +6325,12 @@ async function restartDuePass(opts, keys, dry) {
     try { project = loadProject(key); } catch (e) { notes.push(`${key}: ${e.message}`); continue; }
     for (const bot of project.file.bots) {
       if (bot.planned) continue;
+      // A parked seat has its own wake (its reset plus the grace): no scheduled wake-up before it.
+      const parked = await queuedParkFor(bot.id);
+      if (parked) {
+        notes.push(`${bot.name}: parked on the rate-limit dialog; its wake is ${parked.wake_at ?? "its reset"}; this pass left it alone.`);
+        continue;
+      }
       const threshold = restartAtOf(bot);
       if (threshold === null) continue;
       const live = view ? liveFor(view, bot.id, project) : null;
@@ -5988,15 +6354,19 @@ async function restartDuePass(opts, keys, dry) {
     });
     if (opts.json) return { due: plans.map((r) => ({ id: r.bot.id, name: r.bot.name, project: r.key,
       terminal: r.terminal, context_tokens: r.tokens, restart_at: r.threshold, handoff: r.path,
-      refused: r.refusal ?? null })) };
-    return plans.length
-      ? plans.map((r) => `${line(r)}; ${r.refusal ? `would be refused: ${r.refusal}; it would not be asked and not restarted.`
-        : "would be asked for its handoff, then restarted from it."}`).concat(notes).join("\n")
-      : ["No seat is over its context threshold.", ...notes].join("\n");
+      refused: r.refusal ?? null })), rate_limited: rate.rate_limited, attention: rate.attention, notes: [...rate.notes, ...notes] };
+    return [...plans.map((r) => `${line(r)}; ${r.refusal ? `would be refused: ${r.refusal}; it would not be asked and not restarted.`
+      : "would be asked for its handoff, then restarted from it."}`), ...rate.rate_limited.map((r) => `${r.name} (${r.id}) at ${r.terminal}: blocked on the rate-limit dialog; the sweep would ${r.onRateLimit === "switch" ? "switch or park" : "park"} it.`),
+    ...rate.notes, ...(plans.length || rate.rate_limited.length ? [] : ["No seat is over its context threshold."]), ...notes].join("\n");
   }
   if (!due.length) {
-    if (opts.json) return { due: [], restarted: [], queued: [], failed: [] };
-    return ["No seat is over its context threshold.", ...notes].join("\n");
+    if (opts.json) return { due: [], restarted: [], queued: [], failed: [], rate_limited: rate.rate_limited,
+      parked: rate.parked, switched: rate.switched, attention: rate.attention, notes: [...rate.notes, ...notes] };
+    return [...(rate.attention.length ? rate.attention.map((row) => `! ${row.text}`) : []),
+      ...rate.parked.map((r) => `${r.name}: parked; its restart wakes at ${r.wake_at}.`),
+      ...rate.switched.map((r) => `${r.name}: switched to ${loginNameOf(r.login)}.`),
+      ...rate.notes,
+      ...(rate.rate_limited.length ? [] : ["No seat is over its context threshold."]), ...notes].join("\n");
   }
   const restarted = [], queued = [], failed = [];
   const say = [];
@@ -6115,8 +6485,10 @@ async function restartDuePass(opts, keys, dry) {
   }
   if (failed.length) exitAfter.code = 1;
   if (opts.json) return { due: due.map((r) => ({ id: r.bot.id, name: r.bot.name, project: r.key, terminal: r.terminal,
-    context_tokens: r.tokens, restart_at: r.threshold })), restarted, queued, failed, notes };
-  return [...say, ...notes].join("\n");
+    context_tokens: r.tokens, restart_at: r.threshold })), restarted, queued, failed, rate_limited: rate.rate_limited,
+    parked: rate.parked, switched: rate.switched, attention: rate.attention, notes: [...rate.notes, ...notes] };
+  return [...rate.attention.map((row) => `! ${row.text}`), ...rate.parked.map((r) => `${r.name}: parked; its restart wakes at ${r.wake_at}.`),
+    ...rate.switched.map((r) => `${r.name}: switched to ${loginNameOf(r.login)}.`), ...say, ...rate.notes, ...notes].join("\n");
 }
 
 // Read only env's launch prefix. A template command or foreground process cannot vouch for
@@ -6735,7 +7107,9 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     ...(plan.template ? { [WORKER_TEMPLATE_LABEL]: plan.template } : {}) };
   // The session the new pane runs, for its label and seat row: the id chosen for a new one, or the resumed one.
   const sessionOfPlan = (p, resumed) => p.sessionId ?? (p.mode === "resume" ? resumed : null);
-  const login = await recheck(plan.argv);
+  // #1557: a switch restarts on another login this sweep chose; a person's restart keeps the
+  // selected login (`recheck`), as before.
+  const login = opts._login ?? await recheck(plan.argv);
   // A queued restart claims its entry only once every check passed and the seat is about to
   // start: a cancel between the watcher's read and here wins, and nothing is launched.
   if (opts._queuedTarget) {
@@ -9937,7 +10311,7 @@ export async function cmdLaunchPath(_opts, [program, ...rest]) {
 const COMMANDS = { ls: cmdLs, show: cmdShow, create: cmdCreate, edit: cmdEdit, main: cmdMain, rm: cmdRm, category: cmdCategory,
   start: cmdStart, restart: cmdRestart, attach: cmdAttach, detach: cmdDetach, import: cmdImport, whois: cmdWhois, history: cmdHistory, brief: cmdBrief, update: cmdUpdate,
   tidy: cmdTidy, forget: cmdForget, worker: cmdWorker, reap: cmdReap, meter: cmdMeter, machines: cmdMachines, "dsh-tui": cmdDshTui, doc: cmdDoc,
-  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive };
+  proxy: cmdProxy, "launch-path": cmdLaunchPath, revive: cmdRevive, "rate-limit": cmdRateLimit };
 const NEEDS_BOT = new Set(["show", "edit", "rm", "start", "restart", "attach", "detach", "history", "brief"]);
 
 /** Runs one command line; resolves with the exit code. Output goes to stdout, problems to stderr. */

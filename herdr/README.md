@@ -458,6 +458,25 @@ kept there as a `send` warning: the seat is restarted and the pass exits 0, and 
 person to send by hand. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
 nothing.
 
+**A seat on Claude Code's rate-limit dialog.** A running Claude Code seat whose pane tail shows
+Claude Code's rate-limit dialog is reported as `rate-limited` by `am ls`, `am show` and the
+sidebar, with the reset time the dialog shows (the field is left out when it shows none). The
+detection reads the pane tail only: the dialog is never answered, and no key is sent. The reaction
+is the project file's top-level `onRateLimit` (`"park"` or `"switch"`, written in the project's
+`.herdr/bots.json` beside `version`): `park` (the default) records the reset and queues
+`am restart <bot>` for one minute after it, so `am restart --queued` lists the seat with its wake
+time; when the dialog names no reset, the seat is looked at again 15 minutes later. `switch`
+restarts the seat now on another signed-in login that has headroom, resuming its conversation, and
+parks instead when the host has none: a login proves headroom only through its account's last
+reading in the meter's `claude-limits.jsonl` (every window under 100%). `am rate-limit [--all]
+[--dry-run]` runs one such sweep, and the scheduled `am restart --due` pass runs it first and then
+leaves a parked seat alone until its wake. Each episode writes one attention item
+(`"<bot> is rate-limited until <time>; parked"` or `"… switched to <login>"`) to
+`<app home>/automagik-herdr/attention.json`, shown once by `am ls` and `am show`; a sweep that
+sees the seat healthy closes it, and a later dialog starts a new episode. A setup with Herdr's
+automations scheduler should pause an automation that targets a parked bot until its wake: `am`
+cannot stop the scheduler's own sends.
+
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
 `hc label <terminal> automagik-herdr.needs-owner=` once you have answered). The sidebar draws a

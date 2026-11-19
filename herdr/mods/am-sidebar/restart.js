@@ -798,3 +798,138 @@ export function restartAnswer(r) {
   const raw = String(r?.err ?? "");
   return { refused: actionError(raw, "Restart"), forceable: /pass --force/.test(raw), freshable: /--fresh\b/.test(raw) };
 }
+
+// ---- Claude Code's rate-limit dialog (#1557): detect it in the pane tail, never answer it ----
+
+/**
+ * A limit statement a Claude Code seat shows when its account is out of usage. Deliberately
+ * narrow: a mid-turn retry line ("rate limited, retrying in 30s") is a condition, not the
+ * dialog the owner must answer.
+ */
+const RATE_LIMIT_CUE = /\b(?:rate[\s-]?limit(?:ed)?|usage limit|limit reached|reached (?:your|the) (?:usage\s+|rate\s+)?limit|hit (?:your|the) (?:usage\s+|rate\s+)?limit|out of usage|quota (?:reached|exhausted|exceeded))\b/i;
+/** The dialog's reset or retry words: what makes the cue a wait, not a passing error line. */
+const RATE_LIMIT_RESET_WORDS = /\b(?:resets?|reset at|try again|available again|unlimited again|wait until|comes back|continue in)\b/i;
+/** A numbered choice, or a prompt footer: the dialog is waiting on a person, not the agent. */
+const RATE_LIMIT_CHOICE = /^\s*(?:[>❯›*]\s*)?\d+[.)]\s+\S/;
+const RATE_LIMIT_FOOTER = /\b(?:press enter|enter to (?:confirm|continue|select)|esc to (?:cancel|close|exit)|↑↓|up\/down to|select an option|choose an option)\b/i;
+
+/** The visible tail's lines, ANSI-free, blank lines kept (a dialog's blank lines are its shape). */
+const tailLines = (text, keep = 40) => typeof text === "string"
+  ? text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split("\n").slice(-keep) : [];
+
+const DURATION_UNITS = { s: 1000, sec: 1000, secs: 1000, second: 1000, seconds: 1000,
+  m: 60000, min: 60000, mins: 60000, minute: 60000, minutes: 60000,
+  h: 3600000, hr: 3600000, hrs: 3600000, hour: 3600000, hours: 3600000,
+  d: 86400000, day: 86400000, days: 86400000 };
+
+/** A "2 hours 10 minutes" / "5m" duration in milliseconds, or null. */
+export function durationMs(text) {
+  if (typeof text !== "string" || !text.trim()) return null;
+  let total = 0, found = false;
+  for (const m of text.matchAll(/(\d+)\s*(days?|d|hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)\b/gi)) {
+    const unit = DURATION_UNITS[m[2].toLowerCase()];
+    if (!unit) continue;
+    total += Number(m[1]) * unit;
+    found = true;
+  }
+  return found ? total : null;
+}
+
+/** A clock time in a dialog's words as the next local instant, or null: `3:00 PM`, `15:00`, `5pm`. */
+function clockTime(segment, now, { tomorrow = false } = {}) {
+  const m = /(?:^|\D)(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?(?:\s|$|\()/i.exec(segment);
+  if (!m) return null;
+  let hour = Number(m[1]);
+  const minute = m[2] === undefined ? null : Number(m[2]);
+  const meridiem = m[3]?.toLowerCase().replace(/\./g, "");
+  if (minute === null && !meridiem) return null; // "resets at 5" is not a time to guess
+  if (meridiem && (hour < 1 || hour > 12)) return null;
+  if (minute !== null && (minute > 59 || hour > 23)) return null;
+  if (meridiem) hour = (hour % 12) + (meridiem === "pm" ? 12 : 0);
+  const at = new Date(now);
+  at.setSeconds(0, 0);
+  at.setHours(hour, minute ?? 0, 0, 0);
+  if (at.getTime() <= now) at.setDate(at.getDate() + 1);
+  return at;
+}
+
+/**
+ * The reset instant a rate-limit dialog names, as an ISO string, or null when it names none.
+ * Understood, in this order: an ISO 8601 timestamp; a duration after "resets/try again/… in";
+ * a clock time after "resets/try again/… at"; a clock time with a meridiem anywhere in the
+ * reset sentence; "tomorrow" adds a day to a clock time. A time already past means the next
+ * occurrence, never the past. Nothing is guessed: a bare number, a date without a time or a
+ * duration with no unit leaves it null (the caller omits the time).
+ */
+export function resetTimeFrom(text, now = Date.now()) {
+  const tail = tailLines(text, 40).join("\n");
+  const sentinel = /\b(?:resets?|reset at|try again|available again|unlimited again|comes back|continue in)\b/i;
+  // 1. An explicit timestamp is unambiguous: never reinterpret it.
+  const iso = /\b(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\b/.exec(tail);
+  if (iso) {
+    const t = Date.parse(iso[1]);
+    if (Number.isFinite(t)) return new Date(t).toISOString();
+  }
+  // 2. A duration: "resets in 2 hours 10 minutes", "try again in 5m".
+  const duration = /(?:resets?|reset at|try again|available again|unlimited again|comes back|continue)[^.\n]{0,40}?\bin\s+([^.();\n]{1,60})/i.exec(tail);
+  if (duration) {
+    const ms = durationMs(duration[1]);
+    if (ms !== null && ms > 0) return new Date(now + ms).toISOString();
+  }
+  // 3. A clock time in the same sentence as the reset words.
+  for (const line of tailLines(text, 40)) {
+    if (!sentinel.test(line)) continue;
+    const tomorrow = /\btomorrow\b/i.test(line);
+    const after = /(?:resets?|reset at|try again|available again|unlimited again|comes back)\b[^.\n]{0,30}?\bat\s+([^.\n]{1,40})/i.exec(line);
+    const segment = after ? after[1] : line;
+    const at = clockTime(segment, now, { tomorrow });
+    if (at) return at.toISOString();
+  }
+  return null;
+}
+
+/**
+ * The rate-limit dialog a Claude Code pane is blocked on, from its tail (`hc read`'s text,
+ * ANSI allowed), or null. A limit cue is not enough: the tail must also show the dialog
+ * waiting on a person (a reset or retry sentence, a numbered choice, or a prompt footer) and
+ * the cue must be among the newest lines, so old scrollback and a passing API error never
+ * count. `resets_at` is the dialog's own ISO time when it shows one, absent when it does not.
+ * Detection is read-only: nothing here types into the pane or answers the dialog.
+ */
+export function rateLimitDialog(screenText, now = Date.now()) {
+  if (typeof screenText !== "string" || !screenText.trim()) return null;
+  const lines = tailLines(screenText, 40);
+  const visible = lines.map((line, i) => ({ line, i })).filter(({ line }) => line.trim() !== "");
+  const tail = visible.slice(-15);
+  const cue = [...tail].reverse().find(({ line }) => RATE_LIMIT_CUE.test(line));
+  if (!cue) return null;
+  const window = lines.slice(Math.max(0, cue.i - 3), Math.min(lines.length, cue.i + 12));
+  const waits = window.some((line) => RATE_LIMIT_RESET_WORDS.test(line))
+    || window.some((line) => RATE_LIMIT_CHOICE.test(line))
+    || window.some((line) => RATE_LIMIT_FOOTER.test(line));
+  if (!waits) return null;
+  const question = cue.line.trim().replace(/\s+/g, " ").slice(0, 200);
+  const resetsAt = resetTimeFrom(window.join("\n"), now);
+  return { question, ...(resetsAt ? { resets_at: resetsAt } : {}) };
+}
+
+/** An ISO instant in the person's own clock as "YYYY-MM-DD HH:MM", or an empty string when it is not one. */
+const localMinute = (iso) => {
+  const at = new Date(iso);
+  if (!Number.isFinite(at.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+};
+
+/** `<bot> is rate-limited until <time>; <outcome>`, or without the time when the dialog names none. */
+export function rateLimitLine(botName, { outcome = "parked", resetsAt = null } = {}) {
+  const at = resetsAt ? localMinute(resetsAt) : "";
+  return `${botName} is rate-limited${at ? ` until ${at}` : ""}; ${outcome}`;
+}
+
+/** How long a parked entry still has to wait (ms): 0 when `wakeAt` is due or absent, never negative. */
+export function wakeWait(wakeAt, now = Date.now()) {
+  if (typeof wakeAt !== "string" || !wakeAt) return 0;
+  const at = Date.parse(wakeAt);
+  return Number.isFinite(at) ? Math.max(0, at - now) : 0;
+}
