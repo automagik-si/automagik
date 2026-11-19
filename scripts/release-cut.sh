@@ -19,6 +19,8 @@
 #   RELEASE_CUT_ATTEMPTS  whole attempts, default 3 (1 turns the retry off)
 #   RELEASE_CUT_STARTED   first attempt's start in epoch seconds, default script start
 #   RELEASE_CUT_DEADLINE  optional retry deadline in epoch seconds
+#   RELEASE_CUT_POINTER_WAIT  seconds to wait for Pocket across all attempts, default 300
+#   RELEASE_CUT_POINTER_POLL  seconds between Pocket reads, default 15
 #   RELEASE_GATES         the gates command, default "bash scripts/release-gates.sh" (a test's own)
 set -euo pipefail
 
@@ -37,6 +39,19 @@ if [[ -v RELEASE_CUT_DEADLINE ]]; then
   fi
   deadline=$((10#${RELEASE_CUT_DEADLINE}))
 fi
+
+pointer_wait=${RELEASE_CUT_POINTER_WAIT-300}
+if [[ ! "${pointer_wait}" =~ ^[0-9]+$ ]]; then
+  echo "::error::RELEASE_CUT_POINTER_WAIT must be seconds (0 or more)" >&2
+  exit 1
+fi
+pointer_wait=$((10#${pointer_wait}))
+pointer_poll=${RELEASE_CUT_POINTER_POLL-15}
+if [[ ! "${pointer_poll}" =~ ^[0-9]+$ ]] || (( 10#${pointer_poll} < 1 )); then
+  echo "::error::RELEASE_CUT_POINTER_POLL must be seconds (1 or more)" >&2
+  exit 1
+fi
+pointer_poll=$((10#${pointer_poll}))
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${root}"
@@ -60,19 +75,100 @@ lane_value() {
   sed -n "s/^$1=//p" "$2" | head -1
 }
 
-# A pointer can advance while the gates run. It nominates a baseline for the existing shipping
-# predicate only after a direct lookup confirms the local tag names a published stable release.
-# An uncertain read keeps the gated build. A pointer posted after this check can still race.
+baseline_pattern='^v3\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
+read_lane_pointer() {
+  local part="$1" asset="$2" field="$3" quoted
+  local version_pattern='^"3\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})"$'
+  # Keep the JSON quotes so command substitution cannot strip newlines from the version.
+  quoted=$(timeout --kill-after=5s 20s gh release download "${part}-lane" --repo "${GITHUB_REPOSITORY}" -p "${asset}" -O - 2>/dev/null \
+    | jq -cse --arg field "${field}" 'select(length == 1) | .[0][$field]' 2>/dev/null) || return 1
+  [[ "${quoted}" =~ ${version_pattern} ]] || return 1
+  printf '%s\n' "${quoted}"
+}
+
+wait_for_pocket_post() {
+  local -n observed="$1"
+  local since="$2" asset="$3" field="$4"
+  local old="v${observed:1:-1}" candidate newest ships
+  local started now cap end remaining delay poll_started='' polled tag elapsed
+  [[ "${PRERELEASE:-}" != true ]] && (( pointer_wait >= 26 && pointer_wait >= pointer_poll )) || return 0
+  candidate=$(git tag --list 'v3.*' --sort=-v:refname \
+    | grep -E "${baseline_pattern}" | sed -n '1p') || return 0
+  [[ -n "${candidate}" && "${candidate}" != "${old}" ]] || return 0
+  if [[ -n "${since}" ]]; then
+    [[ "${since}" =~ ${baseline_pattern} && "${candidate}" != "${since}" ]] || return 0
+  fi
+  newest=$(printf '%s\n' "${old}" "${since}" "${candidate}" | LC_ALL=C sort -V | tail -n 1) || return 0
+  [[ "${newest}" == "${candidate}" ]] || return 0
+
+  started=$(date +%s) || return 0
+  cap=${pointer_wait}
+  if [[ -n "${deadline}" ]]; then
+    # Leave time for another attempt of this length and for the push.
+    remaining=$((deadline - started - (started - attempt_started) - 60))
+    if (( remaining < cap )); then cap=${remaining}; fi
+  fi
+  (( cap >= pointer_poll && cap >= 26 )) || return 0
+  # The lookup and the polls share the same allowance across attempts.
+  end=$((started + cap))
+
+  # The APK is attached first. Both uploads have to finish before the post can run.
+  if timeout --kill-after=5s 20s gh release view "${candidate}" --repo "${GITHUB_REPOSITORY}" --json tagName,isDraft,isPrerelease,publishedAt,assets 2>/dev/null \
+    | jq -se --arg tag "${candidate}" --arg apk "automagik-pocket-${candidate#v}.apk" 'length == 1 and (.[0] |
+        .tagName == $tag and .isDraft == false and .isPrerelease == false and .publishedAt != null and
+        any(.assets[]; .name == $apk and .state == "uploaded" and (.size | type == "number" and . > 0)) and
+        any(.assets[]; .name == "latest.json" and .state == "uploaded" and (.size | type == "number" and . > 0)))' >/dev/null 2>&1 &&
+    ships=$(bun scripts/lane.ts pocket "${candidate}") && [[ "${ships}" == no ]]; then
+    poll_started=$(date +%s) || return 0
+    remaining=$((end - poll_started))
+    if (( remaining >= 26 )); then
+      echo "::notice::${candidate} carries its Pocket build but pocket-lane still names ${old}; waiting up to ${remaining}s for its post"
+      while now=$(date +%s) && (( end - now >= 26 )); do
+        # Keep 25 seconds free for the next read, including the timeout's kill grace.
+        delay=$((end - now - 25))
+        if (( pointer_poll < delay )); then delay=${pointer_poll}; fi
+        sleep "${delay}" || break
+        now=$(date +%s) || break
+        (( end - now >= 26 )) || break
+        if polled=$(read_lane_pointer pocket "${asset}" "${field}"); then
+          tag="v${polled:1:-1}"
+          newest=$(printf '%s\n' "${candidate}" "${tag}" | LC_ALL=C sort -V | tail -n 1) || break
+          if [[ "${newest}" == "${tag}" ]]; then
+            observed=${polled}
+            echo "::notice::pocket-lane now names ${tag}"
+            break
+          fi
+        fi
+      done
+      if [[ "v${observed:1:-1}" == "${old}" ]]; then
+        now=$(date +%s) || now=${poll_started}
+        echo "::notice::pocket-lane still names ${old} after $((now - poll_started))s; keeping the Pocket build"
+      fi
+    fi
+  fi
+
+  now=$(date +%s) || return 0
+  elapsed=$((now - started))
+  pointer_wait=$((pointer_wait - elapsed))
+  # Only the polling is left out of the retry estimate: the next attempt repeats the lookup.
+  if [[ -n "${poll_started}" ]]; then
+    pointer_wait_elapsed=$((pointer_wait_elapsed + now - poll_started))
+  fi
+  return 0
+}
+
+# A pointer can advance while the gates run. Its tag must name a published stable release before
+# it can cover the build. Pocket can still race before both assets attach or after the wait ends.
+# A newer tag can also hide an older pending post. The meter can still post after its check.
 build_is_covered() {
   local part="$1" since="$2" asset="$3" field="$4"
   local quoted_version tag newest ships
-  local version_pattern='^"3\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})"$'
-  local baseline_pattern='^v3\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
   [[ -n "${GITHUB_REPOSITORY:-}" ]] || return 1
-  # Keep the JSON quotes so command substitution cannot strip newlines from the version.
-  quoted_version=$(timeout --kill-after=5s 20s gh release download "${part}-lane" --repo "${GITHUB_REPOSITORY}" -p "${asset}" -O - 2>/dev/null \
-    | jq -cse --arg field "${field}" 'select(length == 1) | .[0][$field]' 2>/dev/null) || return 1
-  [[ "${quoted_version}" =~ ${version_pattern} && "${KIND}" != "${part}" ]] || return 1
+  quoted_version=$(read_lane_pointer "${part}" "${asset}" "${field}") || return 1
+  [[ "${KIND}" != "${part}" ]] || return 1
+  if [[ "${part}" == pocket ]]; then
+    wait_for_pocket_post quoted_version "${since}" "${asset}" "${field}"
+  fi
   tag="v${quoted_version:1:-1}"
   if [[ -n "${since}" ]]; then
     [[ "${since}" =~ ${baseline_pattern} && "${tag}" != "${since}" ]] || return 1
@@ -140,11 +236,12 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
   # Start each attempt with its gate inputs. A rejected push discards this checkout's decision.
   pocket="${POCKET}"
   meter="${METER}"
-  if [[ "${POCKET}" == yes ]] && build_is_covered pocket "${pocket_since}" latest.json versionName; then
-    pocket=no
-  fi
+  pointer_wait_elapsed=0
   if [[ "${METER}" == yes ]] && build_is_covered meter "${meter_since}" meter.json version; then
     meter=no
+  fi
+  if [[ "${POCKET}" == yes ]] && build_is_covered pocket "${pocket_since}" latest.json versionName; then
+    pocket=no
   fi
 
   version=$(next_version)
@@ -176,8 +273,9 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
     } >> "${GITHUB_OUTPUT}"
     exit 0
   fi
-  if (( attempt_duration > longest_duration )); then
-    longest_duration=${attempt_duration}
+  retry_duration=$((attempt_duration - pointer_wait_elapsed))
+  if (( retry_duration > longest_duration )); then
+    longest_duration=${retry_duration}
   fi
   git fetch -q origin dev
   if [[ "$(git rev-parse origin/dev)" == "$(git rev-parse HEAD~1)" ]]; then
