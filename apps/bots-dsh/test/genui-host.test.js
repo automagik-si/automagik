@@ -366,3 +366,86 @@ test('the media route serves a registered source\'s bytes and refuses a page, an
   assert.equal((await media('source=photo&id=photo-1')).status, 404)
   assert.ok(MEDIA_TYPES.every(type => /^(?:image|audio)\//.test(type)))
 })
+
+// #1326 K2: the kit's two backfill fields are rebuilt from the fields the card draws, as
+// rt.hooks.genui.publish rebuilds a row. A proposal's chat preview and a run's message text
+// must never reach a window, and a field the card does not know is left out; every other
+// field a view or live hook returns passes through untouched.
+test('the backfill proposal and run fields keep labels, dates and counts only', async t => {
+  const { rt, state, call } = await bench(t)
+  const proposal = {
+    id: '7b2c0d2e-3b4f-4c5d-8e6f-0a1b2c3d4e01',
+    botId: 'm1',
+    from: '2026-03-01T00:00:00.000Z',
+    to: '2026-11-15T23:59:59.999Z',
+    createdAt: 1_763_500_000_000,
+    chats: [{ id: 'c1', name: 'Ana', kind: 'dm', channelId: 'inst-1', channel: 'Shop line', ticked: true, preview: 'the last thing someone wrote' }],
+    preview: 'the last thing someone wrote',
+  }
+  const run = {
+    id: proposal.id,
+    botId: 'm1',
+    from: proposal.from,
+    to: proposal.to,
+    startedAt: 1_763_500_001_000,
+    summary: { total: 1, running: 1, done: 0, phoneDidNotAnswer: 0, stopped: 0, failed: 0, preview: 'private' },
+    rows: [{
+      chatId: 'c1', chat: 'Ana', channelId: 'inst-1', jobId: '9a000000-0000-4000-8000-000000000001',
+      state: 'fetching', outcome: null, round: 1,
+      counts: { fetched: 50, stored: 40, duplicates: 10, mediaDownloaded: 5, mediaMissing: 1, reactions: 2, edits: 1, deletions: 1, unmatched: 0, preview: 7 },
+      oldestReached: '2026-06-01T00:00:00.000Z', coverage: null,
+      startedAt: 1_763_500_001_000, updatedAt: 1_763_500_002_000,
+      text: 'the last thing someone wrote', transcript: 'a voice note',
+    }],
+    text: 'the last thing someone wrote',
+  }
+  const offView = rt.hooks.view(() => ({ omniBackfillProposals: [proposal], other: 1 }))
+  const offLive = rt.hooks.live(() => ({ omniBackfills: [run], pulse: 2 }))
+  t.after(() => { offView(); offLive() })
+  const answer = await state()
+  // The proposal: its labels, dates and ticks only.
+  assert.deepEqual(answer.omniBackfillProposals, [{
+    id: proposal.id,
+    botId: 'm1',
+    from: proposal.from,
+    to: proposal.to,
+    createdAt: 1_763_500_000_000,
+    chats: [{ id: 'c1', name: 'Ana', kind: 'dm', channelId: 'inst-1', channel: 'Shop line', ticked: true }],
+  }])
+  // The run: its summary, its rows' counts and its dates only; outcome:null stays, so a
+  // running row can still be stopped from the card.
+  assert.deepEqual(answer.omniBackfills, [{
+    id: proposal.id,
+    botId: 'm1',
+    from: proposal.from,
+    to: proposal.to,
+    startedAt: 1_763_500_001_000,
+    summary: { total: 1, running: 1, done: 0, phoneDidNotAnswer: 0, stopped: 0, failed: 0 },
+    rows: [{
+      chatId: 'c1', chat: 'Ana', channelId: 'inst-1', jobId: '9a000000-0000-4000-8000-000000000001',
+      state: 'fetching', outcome: null, round: 1,
+      counts: { fetched: 50, stored: 40, duplicates: 10, mediaDownloaded: 5, mediaMissing: 1, reactions: 2, edits: 1, deletions: 1, unmatched: 0 },
+      oldestReached: '2026-06-01T00:00:00.000Z', coverage: null,
+      startedAt: 1_763_500_001_000, updatedAt: 1_763_500_002_000,
+    }],
+  }])
+  // Neither hook's other fields are touched, and no text a caller passed survives anywhere.
+  assert.equal(answer.other, 1)
+  assert.equal(answer.pulse, 2)
+  assert.equal(JSON.stringify(answer).includes('the last thing someone wrote'), false)
+  assert.equal(JSON.stringify(answer).includes('a voice note'), false)
+  // One approval through the host: the plugin's endpoint is dispatched once, with the
+  // chats and dates the person picked. `start_backfill` is an endpoint, never a tool.
+  let started = 0
+  const offStart = rt.hooks.endpoint('start_backfill', body => {
+    started += 1
+    return { runId: body.proposalId, jobs: body.chats.map(chatId => ({ chatId, jobId: 'job-1', state: 'queued' })) }
+  })
+  t.after(offStart)
+  const payload = { proposalId: proposal.id, chats: ['c1'], from: '2026-03-01', to: '2026-11-15' }
+  assert.deepEqual(await call('start_backfill', payload), {
+    ok: true,
+    value: { runId: proposal.id, jobs: [{ chatId: 'c1', jobId: 'job-1', state: 'queued' }] },
+  })
+  assert.equal(started, 1)
+})
