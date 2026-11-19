@@ -40,7 +40,9 @@
 // plugin hook runs. The page refuses it only for a state that page showed; after a reload or in a
 // window that never showed the link, the code reaches that Session record, and only the step's
 // drop keeps it from a model and the transcript. DSH 0.2.2 offers no hook before admission.
-import { ACCOUNT_RECOVERY_CODE, ACCOUNT_RECOVERY_HINT } from '../shared/cli-account.js'
+import {
+  ACCOUNT_RECOVERY_CODE, ACCOUNT_RECOVERY_HINT, installationNameOf,
+} from '../shared/cli-account.js'
 
 const PROVIDERS = new Set(['acp-codex', 'acp-claude'])
 const STATUS = new Set(['starting', 'waiting', 'ready', 'failed', 'cancelled', 'expired'])
@@ -150,6 +152,15 @@ const failureClassOf = error => (typeof error?.code === 'string' && FAILURE_CLAS
 const unmappedFailure = (error) => {
   const kind = failureClassOf(error)
   return kind === '' ? 'Could not continue this sign-in. Try again.' : `Could not continue this sign-in (${kind}). Try again.`
+}
+// The sentence for an account refusal, from the fixed sets only: acp-dsh's own allowlisted
+// message first (its words are the most precise), then a code this side knows. A message or a
+// code the sets do not hold gets no sentence here, so what the CLI printed never fits.
+const accountSentence = (error) => {
+  const code = typeof error?.code === 'string' ? error.code : ''
+  return ACCOUNT_FIXED.get(error?.message)
+    ?? (Object.hasOwn(ERRORS, code) ? ERRORS[code]
+      : Object.hasOwn(ACCOUNT_SENTENCES, code) ? ACCOUNT_SENTENCES[code] : undefined)
 }
 const invalid = () => failed('This sign-in request is not valid.', 'bot/invalid')
 
@@ -281,6 +292,12 @@ export function install(rt) {
   const { ctx } = rt
   const acp = () => {
     try { return ctx.get?.('acpAgents') } catch { return undefined }
+  }
+  // Which installation this app is, for the account card: the DSH profile it runs, the same
+  // label acp-dsh puts on its ownership records. A host that does not name one, or whose
+  // lookup throws, is an unnamed installation and the card leaves the line out.
+  const installation = () => {
+    try { return installationNameOf(ctx.get?.('profileContext')?.name) } catch { return undefined }
   }
 
   /** Whether a text carries a Claude sign-in state acp-dsh showed. Never throws. */
@@ -418,7 +435,12 @@ export function install(rt) {
     if (payload !== undefined && payload !== null && (typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 0)) throw invalid()
     const out = {}
     const service = acp()
-    if (typeof service?.account !== 'function' || typeof service.status !== 'function') return { accounts: out }
+    // The card names the installation it is in (#1399): the Bot sign-in may be shared with
+    // another installation that uses this team's home, and a person should not have to guess
+    // which one this window is. A name, never a path; omitted when the host does not say.
+    const name = installation()
+    const view = accounts => ({ accounts, ...(name === undefined ? {} : { installation: name }) })
+    if (typeof service?.account !== 'function' || typeof service.status !== 'function') return view(out)
     if (service.authScope === 'isolated') {
       for (const id of PROVIDERS) {
         let seen, terminal, recoveryRequired = false
@@ -437,7 +459,7 @@ export function install(rt) {
           ...(terminal?.account ? { terminal: cliAccountView(terminal) } : {}),
         }
       }
-      return { accounts: out }
+      return view(out)
     }
     let rows
     try { rows = (await service.status())?.agents } catch {}
@@ -453,7 +475,7 @@ export function install(rt) {
       if (seen?.id !== id || seen.signedIn !== true || !CONSENTS.has(seen.consent)) continue
       out[id] = { consent: seen.consent, ...(seen.consent === 'carried' && seen.notice === true ? { notice: true, account: cliAccountView(seen) } : {}) }
     }
-    return { accounts: out }
+    return view(out)
   }
 
   const noticed = async (payload) => {
@@ -517,9 +539,7 @@ export function install(rt) {
       // reaches the person: the sentence is only taken from a fixed set. Both code tables are read
       // through Object.hasOwn: `error.code` can name Object.prototype ('toString', '__proto__'),
       // and a plain index would hand back a function or an object in place of the one line.
-      const sentence = ACCOUNT_FIXED.get(error?.message)
-        ?? (Object.hasOwn(ERRORS, code) ? ERRORS[code]
-          : Object.hasOwn(ACCOUNT_SENTENCES, code) ? ACCOUNT_SENTENCES[code] : undefined)
+      const sentence = accountSentence(error)
       throw failed(sentence ?? unmappedFailure(error), Object.hasOwn(ERROR_CODES, code) ? ERROR_CODES[code] : 'bot/refused')
     }
     if (action === 'current' && (value === undefined || value === null)) {
@@ -560,7 +580,10 @@ export function install(rt) {
         if (error?.code === 'acp-account/unverified-login') {
           throw failed(ACCOUNT_RECOVERY_HINT, ACCOUNT_RECOVERY_CODE)
         }
-        throw failed('Account change failed. Close other app windows and try again.')
+        // A refused change says which one it was (#1399): another live session using the Bot
+        // account, a change already running, a failed sign-out. The card used to replace every
+        // one of these with the same line, so the person could not tell whose sign-in held it.
+        throw failed(accountSentence(error) ?? 'Account change failed. Close other app windows and try again.')
       }
     }])),
     'cli-login-connections': connections,

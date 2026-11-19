@@ -463,7 +463,10 @@ or draws with an old ChatGPT grant while its Bot account is signed out. Explicit
 keep their own path. Bot settings show Bot and terminal identities (read-only, when reported),
 label their separation, and offer Sign in, Switch account and Sign out. The latter two stop
 running work before changing only Bot credentials. A failed logout stays paused for retry;
-another app instance sharing that vendor home must be closed before an account change.
+another app instance sharing that vendor home must be closed before an account change. Bot settings
+also name the installation they are in and say that another installation using the same home may
+use that same Bot sign-in; a refused account change keeps the host's plain sentence instead of one
+generic line (#1399).
 The owner-only endpoints add `cli-login-switch` and `cli-login-signout`; account details never
 enter team state, messages, tools, model calls or logs. The earlier confirm step still covers an
 existing account in the Bot's own CLI home. Terminal user settings are not imported; RFC 0003's

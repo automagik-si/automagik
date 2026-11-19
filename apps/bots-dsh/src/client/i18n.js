@@ -486,7 +486,10 @@ const ZH = {
   "Account not shown by the CLI": "CLI 未显示账号",
   "Account change failed. Close other app windows and try again.": "无法更改账号。请关闭其他应用窗口后重试。",
   "Bot accounts": "Bot 账号",
+  "This installation: {installation}": "此安装：{installation}",
   "Bots in this installation share these accounts.": "此安装中的 Bot 共用这些账号。",
+  "Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.":
+    "这台电脑上的其他 Automagik 安装可能使用同一个 Bot 登录。在此更改会同时更改它们的登录。",
   "Your terminal login is separate and stays unchanged.": "终端的登录独立，保持不变。",
   "Bots: {account}": "Bot：{account}",
   "Sign in again in the app to resume Bots": "在应用内重新登录以恢复 Bot",

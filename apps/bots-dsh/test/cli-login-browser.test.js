@@ -83,6 +83,24 @@ test('account settings distinguish terminal and Bot identities and confirm switc
     assert.deepEqual(await page.evaluate(() => window.accountCalls),
       ['switch', 'open', 'signout'])
   })
+test('account settings name this installation and say the Bot sign-in may be shared', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.showAccounts())
+  await page.getByText('This installation: desktop', { exact: true }).waitFor()
+  await page.getByText('Other Automagik installations on this computer may use this same Bot sign-in. A change here changes it for all of them.', {
+    exact: true,
+  }).waitFor()
+})
+test('a busy account change keeps the host sentence instead of one generic line', async t => {
+  const page = await fixture(t)
+  if (!page) return
+  const busy = 'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.'
+  await page.evaluate(message => window.showAccounts('bot/refused', message), busy)
+  await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+  await page.getByRole('button', { name: 'Continue', exact: true }).click()
+  assert.equal(await page.getByRole('alert').innerText(), busy)
+})
 test('blocked account recovery shows the reset action and no private process diagnostic',
   async t => {
     const page = await fixture(t)
