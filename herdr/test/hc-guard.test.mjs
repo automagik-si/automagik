@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 
 import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, stableRootOf, workerArgs } from "../mods/am-sidebar/workers.js";
 import { startArgs } from "../mods/am-sidebar/launchArgs.js";
-import { hcVerbOf } from "../mods/am-sidebar/hcGuard.mjs";
+import { hcVerbOf, launchHomeOf } from "../mods/am-sidebar/hcGuard.mjs";
 
 const ID = {
   main: "b-aaaaaaaaaa", cap: "b-bbbbbbbbbb", dev: "b-cccccccccc",
@@ -74,6 +74,7 @@ process.stderr.write("stub-err " + args[0] + "\\n");
 process.exit(Number(process.env.HC_STUB_CODE ?? 0));
 `;
 
+const launchArgv = (app) => ["/usr/bin/env", `HERDR_APP_HOME=${app}`, "dsh-tui"];
 const get = (address, labels, extra = {}) => ({ address, state: "live", created_ms: 100, labels, ...extra });
 
 /** One hermetic scene: temp app home, project, worktree, stub hc and a ledger-bound bot pane. */
@@ -115,6 +116,7 @@ function scene(t, { caller = "t100" } = {}) {
       "m/t105": get("m/t105", { "worker.of": ID.dev }, { cwd: worktree, name: "worker-m", parent: "t100" }),
     },
   };
+  for (const pane of Object.values(state.get)) pane.argv = launchArgv(app);
   const statePath = join(root, "hc-state.json"), logPath = join(root, "hc.log");
   writeFileSync(statePath, JSON.stringify(state));
   writeFileSync(logPath, "");
@@ -162,6 +164,36 @@ const editPane = (s, address, patch) => {
 const DIALOG_SCREEN = "This command requires approval\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel · Tab to amend";
 /** A free pane: its prompt is the last line, with no dialog below it. */
 const FREE_SCREEN = "all done\n❯ ";
+
+test("launchHomeOf reads only the env prefix and resolves the default lazily (#628)", () => {
+  const defaultHome = () => "/default";
+  const unexpectedDefault = () => { throw new Error("default should never be needed"); };
+  for (const argv of [
+    ["/usr/bin/env", "HERDR_APP_HOME=/seat", "dsh-tui"],
+    ["/usr/bin/env", "HERDR_APP_HOME=/seat///", "dsh-tui"],
+    ["/usr/bin/env", "-u", "CLAUDE_CONFIG_DIR", "HERDR_APP_HOME=/seat", "claude"],
+    ["/usr/bin/env", "-u", "HERDR_APP_HOME", "HERDR_APP_HOME=/old", "HERDR_APP_HOME=/seat", "dsh-tui"],
+  ]) {
+    assert.deepEqual(launchHomeOf(argv, unexpectedDefault), { home: "/seat" }, JSON.stringify(argv));
+  }
+  for (const argv of [
+    ["/usr/bin/env", "-u", "HERDR_APP_HOME", "dsh-tui"],
+    ["/usr/bin/env", "PATH=/bin", "dsh-tui"],
+    ["/usr/bin/env", "dsh-tui", "HERDR_APP_HOME=/ignored"],
+    ["claude", "HERDR_APP_HOME=/ignored"],
+  ]) {
+    assert.deepEqual(launchHomeOf(argv, defaultHome), { home: "/default" }, JSON.stringify(argv));
+  }
+  for (const argv of [
+    null, [], ["claude", 1], ["/usr/bin/env", "-u"], ["/usr/bin/env", "HERDR_APP_HOME=/seat"],
+    ["/usr/bin/env", "HERDR_APP_HOME=relative", "dsh-tui"],
+    ["/usr/bin/env", "HERDR_APP_HOME=/bad\npath", "dsh-tui"],
+  ]) {
+    assert.match(launchHomeOf(argv, defaultHome).error, /caller/, JSON.stringify(argv));
+  }
+  assert.match(launchHomeOf(["claude"], unexpectedDefault).error,
+    /start or restart the bot from the sidebar or with HERDR_APP_HOME set/i);
+});
 
 function assertRefused(r) {
   assert.notEqual(r.status, 0, "a refusal exits non-zero");
@@ -352,7 +384,7 @@ function sharedScene(t) {
   const state = JSON.parse(readFileSync(s.statePath, "utf8"));
   const add = (address, labels, extra = {}) => {
     state.terminals.push({ address, name: address, state: "live" });
-    state.get[address] = get(address, labels, { cwd: s.project, name: address, ...extra });
+    state.get[address] = get(address, labels, { cwd: s.project, name: address, argv: launchArgv(s.app), ...extra });
   };
   add("t200", { bot: SHARED_ID.pm, role: "pm" });
   add("t201", { bot: SHARED_ID.integrator, role: "integrator" });
@@ -959,6 +991,123 @@ const exactRun = (s, over = {}) => workerArgs({
   agent: "dsh-tui", argv: ["dsh-tui"], task: "do it", path: "/usr/bin:/bin", space: "sp1", ...over,
 });
 
+function forgedMainHome(s) {
+  const app = join(s.root, "forged-app");
+  const ledger = join(s.app, "automagik-herdr", "attach.jsonl");
+  const row = JSON.parse(readFileSync(ledger, "utf8"));
+  mkdirSync(join(app, "automagik-herdr"), { recursive: true });
+  writeFileSync(join(app, "automagik-herdr", "attach.jsonl"),
+    `${JSON.stringify({ ...row, bot: ID.main })}\n`, { mode: 0o600 });
+  return { HERDR_APP_HOME: app };
+}
+
+test("a forged invocation home grants neither a foreign send nor a main-only kill (#628)", (t) => {
+  const s = scene(t);
+  const env = forgedMainHome(s);
+  const foreign = guardRun(s, ["send", "t120", "hi"], env);
+  assertRefused(foreign);
+  assert.match(foreign.stderr, /not in the caller's team/);
+  assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+
+  writeFileSync(s.logPath, "");
+  const team = guardRun(s, ["send", "t101", "hi"], env);
+  assert.equal(team.status, 0, team.stderr);
+  assert.deepEqual(calls(s).at(-1), ["send", "t101", "hi"]);
+
+  for (const invoke of [guardRun, shimRun]) {
+    writeFileSync(s.logPath, "");
+    const kill = invoke(s, ["kill", "t120"], env);
+    if (invoke === guardRun) assertRefused(kill);
+    else assertShimRefused(kill);
+    assert.match(kill.stderr, /main bot only/);
+    assert.deepEqual(calls(s), [["get", "t100", "--json"]]);
+  }
+});
+
+test("guarded sends, kills and worker starts require a live caller with a valid launch record (#628)", (t) => {
+  const cases = [
+    ["not found", null, /not resolvable/],
+    ["different address", { address: "t101" }, /not resolvable/],
+    ["finished", { state: "finished" }, /not live/],
+    ["absent argv", { argv: undefined }, /no valid launch argv/],
+    ["non-array argv", { argv: "dsh-tui" }, /no valid launch argv/],
+    ["absent created_ms", { created_ms: undefined }, /no valid created_ms/],
+    ["unsafe created_ms", { created_ms: Number.MAX_SAFE_INTEGER + 1 }, /no valid created_ms/],
+  ];
+  for (const [name, patch, reason] of cases) {
+    const s = killScene(t);
+    if (patch) editPane(s, "t100", patch);
+    else {
+      const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+      delete state.get.t100;
+      writeFileSync(s.statePath, JSON.stringify(state));
+    }
+    for (const args of [["send", "t101", "hi"], ["kill", "t105"], exactRun(s)]) {
+      writeFileSync(s.logPath, "");
+      const r = guardRun(s, args);
+      assertRefused(r);
+      assert.match(r.stderr, reason, name);
+      assert.deepEqual(calls(s), [["get", "t100", "--json"]], name);
+    }
+    writeFileSync(s.logPath, "");
+    assertShimRefused(shimRun(s, ["kill", "t105"]), reason);
+    assert.deepEqual(calls(s), [["get", "t100", "--json"]], name);
+  }
+});
+
+test("a machine-qualified caller is refused before hc is queried (#628)", (t) => {
+  const s = scene(t);
+  const env = { HC_TERMINAL_ID: "m/t101" };
+  const r = guardRun(s, ["send", "t100", "hi"], env);
+  assertRefused(r);
+  assert.match(r.stderr, /caller.*machine-qualified/);
+  assertShimRefused(shimRun(s, ["kill", "t100"], env), /caller.*machine-qualified/);
+  assert.deepEqual(calls(s), []);
+});
+
+test("a binding from an earlier pane lifetime grants no seat (#628)", (t) => {
+  const s = scene(t);
+  editPane(s, "t100", { created_ms: 101 });
+  const r = guardRun(s, ["send", "t101", "hi"]);
+  assertRefused(r);
+  assert.match(r.stderr, /neither bound in the attach ledger nor a worker pane/);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"]]);
+});
+
+test("a worker's caller lookup also supplies its worker.of fallback (#628)", (t) => {
+  const s = scene(t);
+  const r = guardRun(s, ["send", "t100", "hi"], { HC_TERMINAL_ID: "t110" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s).filter((argv) => argv[0] === "get" && argv[1] === "t110"),
+    [["get", "t110", "--json"]]);
+});
+
+test("a worker launch cannot set HERDR_APP_HOME in its env prefix (#628)", (t) => {
+  const s = scene(t);
+  const args = exactRun(s);
+  args.splice(args.indexOf("--") + 3, 0, `HERDR_APP_HOME=${s.app}`);
+  const r = guardRun(s, args);
+  assertRefused(r);
+  assert.match(r.stderr, /worker launch cannot set HERDR_APP_HOME/);
+  assert.deepEqual(calls(s), []);
+});
+
+test("a recognized worker program still requires the caller's real ledger binding (#628)", (t) => {
+  const s = scene(t);
+  const env = forgedMainHome(s);
+  const worker = { agent: "codex", argv: ["codex"], path: `${GUARD_DIR}:/usr/bin:/bin` };
+  const wrongBot = guardRun(s, exactRun(s, { ...worker, botId: ID.main }), env);
+  assertRefused(wrongBot);
+  assert.match(wrongBot.stderr, /worker\.of is not the caller's bot/);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"]]);
+
+  writeFileSync(s.logPath, "");
+  const exact = exactRun(s, worker);
+  const ownBot = guardRun(s, exact, env);
+  assert.equal(ownBot.status, 0, ownBot.stderr);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact]);
+});
+
 test("the exact dsh-tui worker argv reaches the stub unchanged", (t) => {
   const s = scene(t);
   const exact = exactRun(s);
@@ -967,7 +1116,7 @@ test("the exact dsh-tui worker argv reaches the stub unchanged", (t) => {
   writeFileSync(s.logPath, "");
   const r = guardRun(s, exact);
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [exact]);
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact]);
 });
 
 // #1011: a dsh-tui lead's full guard starts a worker of any agent the pack launches, not dsh-tui
@@ -983,7 +1132,7 @@ test("a dsh-tui lead's guard accepts a Claude worker with its session label (#10
   writeFileSync(s.logPath, "");
   const r = guardRun(s, exact);
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [exact], "the Claude worker launch reached hc unchanged");
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact], "the Claude worker launch reached hc unchanged");
 });
 
 test("a dsh-tui lead's guard accepts every other agent kind's worker launch (#1011)", (t) => {
@@ -998,7 +1147,7 @@ test("a dsh-tui lead's guard accepts every other agent kind's worker launch (#10
     writeFileSync(s.logPath, "");
     const r = guardRun(s, exact);
     assert.equal(r.status, 0, `${agent}: ${r.stderr}`);
-    assert.deepEqual(calls(s), [exact], `${agent}: the worker launch reached hc unchanged`);
+    assert.deepEqual(calls(s), [["get", "t100", "--json"], exact], `${agent}: the worker launch reached hc unchanged`);
   }
 });
 
@@ -1073,7 +1222,7 @@ test("a mixed am+pack guard PATH reaches the real hc once, never a guard as hc",
   writeFileSync(s.logPath, "");
   const r = guardRun(s, exact, { PATH: `${amGuard}:${GUARD_DIR}:${s.bin}:${dirname(process.execPath)}` });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(calls(s), [exact], "the real hc got the mixed-PATH worker argv once");
+  assert.deepEqual(calls(s), [["get", "t100", "--json"], exact], "the real hc got the mixed-PATH worker argv once");
   assert.equal(existsSync(marker), false, "the am guard copy was skipped, not run as hc");
 });
 
@@ -1385,9 +1534,9 @@ test("cross-project lead (#850): hc send and proxy require reciprocal crossMembe
     { address: "t201", name: "unrelated", state: "live" },
     { address: "t202", name: "hubtop", state: "live" },
   );
-  st.get.t200 = get("t200", { bot: coordId }, { cwd: hubDir, name: "coord" });
-  st.get.t201 = get("t201", { bot: unrelatedHubId }, { cwd: hubDir, name: "unrelated" });
-  st.get.t202 = get("t202", { bot: hubTopId }, { cwd: hubDir, name: "hubtop" });
+  st.get.t200 = get("t200", { bot: coordId }, { cwd: hubDir, name: "coord", argv: launchArgv(s.app) });
+  st.get.t201 = get("t201", { bot: unrelatedHubId }, { cwd: hubDir, name: "unrelated", argv: launchArgv(s.app) });
+  st.get.t202 = get("t202", { bot: hubTopId }, { cwd: hubDir, name: "hubtop", argv: launchArgv(s.app) });
   writeFileSync(s.statePath, JSON.stringify(st));
   const ledger = join(s.app, "automagik-herdr", "attach.jsonl");
   const rows = [

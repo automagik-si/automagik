@@ -3,9 +3,9 @@ import { startFakeCore } from "./fake-core.mjs";
 // the CLI runs with HERDR_APP_HOME set, as a linked machine's pane gets the project's pane-env
 // one (seatOnMachine). With it unset, the argv stays byte for byte as before: the fixture below
 // was recorded from origin/dev's head (b48b02d5) by this test before the fix, and only compared.
-// The guard rows then run the pack's own hc guard as a pane started this way would: the emitted
-// word is the whole difference between a binding found in that app home's attach ledger and
-// today's unbound refusal. Hermetic: a temp app home, a temp project, a stub hc and a stub
+// The guard rows run the pack's own hc guard against the pane's recorded launch argv. The
+// emitted word selects the attach ledger even when the invocation omits or changes the app home.
+// Hermetic: a temp app home, a temp project, a stub hc and a stub
 // pgrep; the real hc is never run.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -31,14 +31,17 @@ const BOTS = [
   { id: ID.dev, name: "Dev", kind: "member", lead: ID.main },
 ].map((b) => ({ ...b, look: { character: "star", colour: "blue" }, role: "r", instructions: "i", agent: "claude" }));
 
-// The guard's stub hc: Dev's pane t7 answers, any other address is not_found, and every call
+// The guard's stub hc: Dev's pane t7 and the CLI's recorded pane answer, and every call
 // (send included) is one JSON argv line in the same log the CLI's fake hc writes.
-const GUARD_STUB = `import { appendFileSync } from "node:fs";
+const GUARD_STUB = `import { appendFileSync, readFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.HC_STUB_LOG, JSON.stringify(args) + "\\n");
 if (args[0] === "ls") { process.stdout.write(JSON.stringify({ terminals: [{ address: "t7", name: "dev", state: "live" }] }) + "\\n"); process.exit(0); }
 if (args[0] === "get") {
   if (args[1] === "t7") { process.stdout.write(JSON.stringify({ address: "t7", state: "live", created_ms: 100, labels: { bot: "__PEER__" } }) + "\\n"); process.exit(0); }
+  const state = JSON.parse(readFileSync(process.env.HC_FAKE_STATE, "utf8"));
+  const pane = state.terminals.find((terminal) => terminal.address === args[1]);
+  if (pane) { process.stdout.write(JSON.stringify(pane) + "\\n"); process.exit(0); }
   process.stderr.write(JSON.stringify({ error: { kind: "not_found" } }) + "\\n"); process.exit(3);
 }
 process.stdout.write("stub-out " + JSON.stringify(args) + "\\n"); process.exit(0);
@@ -92,7 +95,7 @@ const appHomeWord = (run) => afterDash(run).find((word) => word.startsWith("HERD
 
 const guardRun = (s, terminal, word) => spawnSync(process.execPath, [join(GUARD_DIR, "hc"), "send", "t7", "hi"], {
   env: { PATH: `${GUARD_DIR}:${s.guardBin}:/usr/bin:/bin`, HOME: s.home, HC_TERMINAL_ID: terminal,
-    HC_STUB_LOG: s.logPath, ...(word ? { HERDR_APP_HOME: word } : {}) },
+    HC_STUB_LOG: s.logPath, HC_FAKE_STATE: s.statePath, ...(word ? { HERDR_APP_HOME: word } : {}) },
   encoding: "utf8",
 });
 
@@ -140,8 +143,8 @@ test("a pane started this way resolves its hc guard binding from that app home (
   writeFileSync(s.logPath, "");
   const r = guardRun(s, terminal, word.slice(word.indexOf("=") + 1));
   assert.equal(r.status, 0, r.stderr);
-  // Bound in the app home's ledger: no worker.of fallback (an hc get of t100), and the send runs.
-  assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t7", "--json"], ["read", "t7", "--lines", "40", "--json"], ["send", "t7", "hi"]],
+  // The caller's recorded launch identifies the ledger before the target is checked.
+  assert.deepEqual(calls(s), [["get", terminal, "--json"], ["ls", "--json"], ["get", "t7", "--json"], ["read", "t7", "--lines", "40", "--json"], ["send", "t7", "hi"]],
     "the allowed send reached the stub after its screen was checked (#1414)");
 });
 
@@ -254,7 +257,7 @@ test("#1195 keeps the Accounts switch: an explicit-home restart of a recorded se
   assert.equal(liveFor(s, ID.main).length, 1);
 });
 
-test("without the word, the same send is refused as unbound (#650)", (t) => {
+test("an invocation without HERDR_APP_HOME still resolves the launch home (#628)", (t) => {
   const s = scene(t);
   const started = s.cli(["start", "Genie", "--json"]);
   assert.equal(started.status, 0, started.stderr);
@@ -262,9 +265,25 @@ test("without the word, the same send is refused as unbound (#650)", (t) => {
   assert.ok(appHomeWord(runs(s)[0]), "the start emitted the word this row leaves out, as today's argv does");
   writeFileSync(s.logPath, "");
   const r = guardRun(s, terminal, null);
-  assert.notEqual(r.status, 0, "an unbound caller is refused");
-  assert.match(r.stderr, /neither bound in the attach ledger nor a worker pane/);
-  assert.equal(calls(s).some((call) => same(call, ["send", "t7", "hi"])), false, "the stub never got the send");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, "");
+  assert.equal(calls(s).some((call) => same(call, ["send", "t7", "hi"])), true, "the stub got the send");
+});
+
+test("a CLI-started pane uses its recorded app home despite a forged invocation home (#628)", (t) => {
+  const s = scene(t);
+  const started = s.cli(["start", ID.main, "--json"]);
+  assert.equal(started.status, 0, started.stderr);
+  const terminal = JSON.parse(started.stdout).terminal;
+  const forged = join(s.root, "forged-app");
+  mkdirSync(join(forged, "automagik-herdr"), { recursive: true });
+  const row = readRows(readFileSync(attachPath(s.app), "utf8")).rows.at(-1);
+  writeFileSync(attachPath(forged), `${JSON.stringify({ ...row, bot: "b-cccccccccc" })}\n`, { mode: 0o600 });
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, terminal, forged);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s)[0], ["get", terminal, "--json"]);
+  assert.deepEqual(calls(s).at(-1), ["send", "t7", "hi"]);
 });
 
 // #1128: a restart typed without HERDR_APP_HOME must resolve the same app-home context the

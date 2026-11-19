@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Proposed (owner not yet read; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9 open) |
+| Status | Accepted (approved by the owner's delegate on 2026-11-19; answers: Q1-Q8, 2026-11-10, by the owner, PR #1010; Q9, 2026-11-19, by the owner's delegate, the RFC's recommended option; no question open; no delivery merged) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | none (docs here; every delivery is under `.github/`, `scripts/` or top-level `*.md` such as `AGENTS.md`, which never ship, so none cuts a release) |
 | Created | 2026-11-10 |
@@ -80,6 +80,17 @@ push to `dev`; #962's failed). Nothing in the repository stops that today:
   equivalent) of the PR's own change being exercised ((e)).
 - **Q7. Shadow:** one day and five PRs (D3).
 - **Q8. Merge method:** squash.
+
+## Answers, by the owner's delegate, 2026-11-19
+
+On 2026-11-19 the delegate approved the RFC and took its recommendation for the only open question.
+
+- **Q9. Proof images:** the App uploads each image as an asset of a rolling `review-proof`
+  prerelease (never Latest, holding nothing else, like `pocket-lane`) and links it from its
+  review and its check run; the bot deletes a PR's images 30 days after it merges or closes.
+  Not committed to a branch, where an image would stay in the history for good. Uploading and
+  deleting an asset needs contents write; both keep to (a): the bot service's own tokens stay
+  contents read.
 
 ## Design
 
@@ -254,7 +265,7 @@ without it is not a SHIP. It runs in scratch homes and test servers, under the r
 (never against a live Herdr install, never on the owner's own machine). Text proofs go through
 the privacy check like every post; a screenshot cannot be scanned that way, so it is taken only
 with placeholder names and data, and the Reviewer pass looks at each image before it is posted.
-Where images are kept is Q9.
+Where images are kept is Q9's answer: a rolling `review-proof` prerelease.
 
 This is today's merge rule (2026-11-10: docs on one Reviewer verdict, code on Reviewer and Tester
 in parallel) moved inside the bot. The lanes become:
@@ -395,6 +406,8 @@ verdict on the PR. Today's merge rule stays in force until delivery 5.
   the models each pass may use.
 - **Labels** `owner-review` and `from-review` (new); `do not merge` and `blocked` (kept).
 - **The `release` environment** (deployment rule `dev` only) holding the App's release key.
+- **The rolling `review-proof` prerelease** (Q9): proof images only, never Latest; a PR's images
+  deleted 30 days after it merges or closes.
 - **`pr-reviewer-watch.yml`**, the watch.
 - **The bot's code** under `scripts/pr-reviewer/` (Bun, the repository's tooling rule).
 - **The role name** Dogfooder, replacing Tester.
@@ -479,14 +492,8 @@ Dogfooder; the Orchestrator and the Integrator stop merging; the outside merge h
 
 ## Open questions
 
-**Q9. Where the Dogfooder's screenshots are kept.** A proof image must be reachable from the PR
-in a public repository, and an App cannot upload a PR comment attachment through the API.
-*Recommended:* the App uploads each image as an asset of a rolling `review-proof` prerelease
-(never Latest, holding nothing else, like `pocket-lane`) and links it from its review and its
-check run; the bot deletes a PR's images 30 days after it merges or closes. Not committed to a
-branch, where an image would stay in the history for good.
-
-Q1-Q8 are answered, above.
+None. Q1-Q8 were answered by the owner on 2026-11-10 and Q9 by the owner's delegate on 2026-11-19,
+above.
 
 ## Links
 

@@ -79,7 +79,8 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   if (briefing) writeFileSync(join(app, "mods/am-sidebar/briefing.mjs"), "// stand-in\n");
   const statePath = join(root, "hc.json");
   const logPath = join(root, "hc.log");
-  const terminals = [term("t1", { bot: ID.dev, cwd: project }), term("t2", { cwd: project }), term("t3", { bot: ID.stray, cwd: project }),
+  const caller = { ...term("t1", { bot: ID.dev, cwd: project }), argv: ["/usr/bin/env", `HERDR_APP_HOME=${app}`, "claude"] };
+  const terminals = [caller, term("t2", { cwd: project }), term("t3", { bot: ID.stray, cwd: project }),
     term("t4", { bot: ID.cap, cwd: project })];
   writeFileSync(statePath, JSON.stringify({ terminals, next: 100, templates }));
   writeFileSync(logPath, "");
