@@ -823,6 +823,7 @@ Which pane plays which bot is recorded in one file, `<app home>/automagik-herdr/
 `attach` and `detach`, and any run that reads it and finds a pane ended. The sidebar's Start
 and Attach run the command line too. The `bot` label is a display hint: `hc label` changes
 no row, so relabelling a pane moves no bot.
+`am tidy` identifies local bot panes through the attach ledger and uses `bot=` labels for bots the local ledger has never recorded.
 
 **Which app home a restart uses.** `HERDR_APP_HOME` names it. With it unset, restart resolves
 the home before it writes anything: a pane's launch home wins, live or ended (hc keeps an ended
