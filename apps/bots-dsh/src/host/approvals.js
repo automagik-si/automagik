@@ -9,6 +9,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 
 const OUTCOMES = { allow: 'allowed-once', reject: 'rejected' }
+// The kinds of client that can decide an approval here. A request body's kind is trusted
+// only when it is one of these; anything else is the ordinary web client.
+const CLIENT_KINDS = new Set(['web', 'desktop', 'im', 'pocket', 'relay', 'sdk', 'dsh', 'system'])
 
 // The team's own lookups only read the team: who is on it, their models and capabilities, a
 // chat's or a group's transcript, a memory. A Claude Code session reaches them through its MCP
@@ -81,11 +84,11 @@ export function install(rt) {
     rt.noteApproval?.(sessionId, { tool: entry.tool, reason: entry.reason.slice(0, 200) })
     rt.approvalWaiting?.(entry)
     emit('open', { ...entry, answerable: true })
-    const settle = (outcome) => {
+    const settle = (outcome, decidedBy = 'dsh') => {
       if (!pending.has(id)) return false
       pending.delete(id)
       rt.noteApproval?.(sessionId, undefined)
-      emit('settled', { id, outcome })
+      emit('settled', { id, outcome, decidedBy, at: Date.now() })
       return true
     }
     if (owner === undefined) {
@@ -97,8 +100,8 @@ export function install(rt) {
       const linked = new AbortController()
       request.signal = linked.signal
       return new Promise((resolve, reject) => {
-        const complete = (outcome) => {
-          if (!settle(outcome)) return
+        const complete = (outcome, decidedBy = 'dsh') => {
+          if (!settle(outcome, decidedBy)) return
           resolve(outcome)
           linked.abort()
           if (request.signal === linked.signal) request.signal = original
@@ -124,8 +127,8 @@ export function install(rt) {
     }
     rt.yieldRoomTurn?.(sessionId)
     return new Promise((resolve) => {
-      entry.answer = (outcome) => {
-        if (!settle(outcome)) return
+      entry.answer = (outcome, decidedBy) => {
+        if (!settle(outcome, decidedBy)) return
         resolve(outcome)
       }
       if (request.signal?.aborted) entry.answer('cancelled')
@@ -134,7 +137,7 @@ export function install(rt) {
   }, { prepend: true })
 
   ctx.effect(() => () => {
-    for (const entry of pending.values()) if (entry.child) entry.answer?.('cancelled')
+    for (const entry of pending.values()) if (entry.child) entry.answer?.('cancelled', 'system')
   }, 'ds-bot: cancel held subagent asks')
 
   function childAsk(request, sessionId, owner) {
@@ -172,18 +175,20 @@ export function install(rt) {
   const approvalsView = () => [...pending.values()].map(({ answer, ...entry }) => ({ ...entry, answerable: answer !== undefined }))
   const waitsForApproval = sessionId => [...pending.values()].some(entry => entry.sessionId === sessionId || entry.ownerSessionId === sessionId)
 
-  function answerApproval(id, choice) {
+  function answerApproval(id, choice, client = 'web') {
     const entry = pending.get(String(id ?? ''))
     if (entry?.answer === undefined) throw Object.assign(new Error('This approval is no longer open'), { code: 'bot/stale' })
     const outcome = OUTCOMES[choice]
     if (outcome === undefined) throw Object.assign(new Error('Choose allow or reject'), { code: 'bot/invalid' })
-    entry.answer(outcome)
+    // The record of the decision names the kind of client that made it, and `settle` adds
+    // the moment. The harness's own approval/decided event still carries only id and outcome.
+    entry.answer(outcome, CLIENT_KINDS.has(client) ? client : 'web')
   }
 
   // A group Session that leaves its group has no card left to answer from.
   const cancelApprovals = (sessionId) => {
     for (const entry of pending.values()) {
-      if (entry.sessionId === sessionId || entry.ownerSessionId === sessionId) entry.answer?.('cancelled')
+      if (entry.sessionId === sessionId || entry.ownerSessionId === sessionId) entry.answer?.('cancelled', 'system')
     }
   }
 

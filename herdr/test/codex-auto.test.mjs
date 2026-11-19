@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // Codex auto mode (#946, #1045, #1125): every Codex launch the pack makes passes Codex's
 // `--approve-for-me` and `--disable hooks`, so an approval request goes to Codex's own reviewer
 // instead of stopping for a person, and TUI startup never stops at the "Hooks need review"
@@ -14,7 +15,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
 import { checkBots, parseBots } from "../mods/am-sidebar/model.js";
-import { AGENTS, CODEX_MODE_ARGS, autoModeArgs, withoutBriefing } from "../mods/am-sidebar/models.js";
+import { AGENTS, CLAUDE_PERSON_SETTINGS, CODEX_MODE_ARGS, autoModeArgs, withoutBriefing } from "../mods/am-sidebar/models.js";
 import { helperPlan, restartPlan } from "../mods/am-sidebar/restart.js";
 import { workerArgs, workerPlan } from "../mods/am-sidebar/workers.js";
 import { readJsonLines } from "./log-lines.mjs";
@@ -44,6 +45,8 @@ function scene(t, bots = [MAIN]) {
   // A pinned PATH, so the pane's PATH is the same on every runner.
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     LANG: "C", GIT_CEILING_DIRECTORIES: root, AUTOMAGIK_HERDR_RESTART_STABLE_MS: "1" };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
   const cli = (args) => {
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr };
@@ -113,7 +116,7 @@ test("a Codex worker passes the launch mode from the bot's definition, codexAuto
     .slice(-(MODE.length + 2)), ["codex", ...MODE, "do it"]);
   assert.deepEqual(workerPlan({ ...bot, codexAuto: false }, { agent: "codex" }).argv, ["codex", ...MODE]);
   const other = workerPlan({ ...bot, codexAuto: false }, { agent: "claude" });
-  assert.deepEqual(other.argv, ["claude", "--permission-mode", "auto"]);
+  assert.deepEqual(other.argv, ["claude", "--settings", CLAUDE_PERSON_SETTINGS, "--permission-mode", "auto"]);
 });
 
 test("Restart --tree's Codex worker helper keeps the auto mode from the bot's definition; a template keeps its own command (#946, #1125)", () => {

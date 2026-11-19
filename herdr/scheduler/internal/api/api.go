@@ -22,7 +22,11 @@ type Listing struct {
 	State string `json:"state"`
 	// Kinds are the kinds of work this build runs: prompt, workflow, command.
 	// A panel offers the command form only when it reads "command" here.
-	Kinds       []string     `json:"kinds"`
+	Kinds []string `json:"kinds"`
+	// Targets are the target kinds this build runs: bot, worker. A panel
+	// offers a bot or worker target only when it reads them here, so it never
+	// writes a target to a scheduler that would drop it (#498).
+	Targets     []string     `json:"targets,omitempty"`
 	Automations []Automation `json:"automations"`
 	Invalid     []Invalid    `json:"invalid"`
 }
@@ -43,12 +47,17 @@ type Automation struct {
 	// Command is the program the scheduler runs itself, and Notify the bot its
 	// one-line result goes to (ADR 0013). A command entry has no repo,
 	// workspace or agent.
-	Command        *config.Command `json:"command,omitempty"`
-	Notify         string          `json:"notify,omitempty"`
-	MCPConfig      string          `json:"mcp_config,omitempty"`
-	AgentArgs      []string        `json:"agent_args,omitempty"`
-	TimeoutMinutes int             `json:"timeout_minutes"`
-	CatchUpMinutes int             `json:"catch_up_minutes"`
+	Command *config.Command `json:"command,omitempty"`
+	Notify  string          `json:"notify,omitempty"`
+	// Target is "bot:<id>" or "worker:<id>": who a prompt run hands its prompt
+	// to instead of opening a fresh session (#498). TargetWhenBusy is a bot
+	// target's queue|skip answer.
+	Target         string   `json:"target,omitempty"`
+	TargetWhenBusy string   `json:"target_when_busy,omitempty"`
+	MCPConfig      string   `json:"mcp_config,omitempty"`
+	AgentArgs      []string `json:"agent_args,omitempty"`
+	TimeoutMinutes int      `json:"timeout_minutes"`
+	CatchUpMinutes int      `json:"catch_up_minutes"`
 	// BlockedGraceMinutes is how long an agent may sit on a dialog before the
 	// run fails; the loader fills in the default (2), -1 waits it out.
 	BlockedGraceMinutes int       `json:"blocked_grace_minutes"`
@@ -76,7 +85,10 @@ type Run struct {
 	Seconds    int            `json:"seconds"`
 	Space      string         `json:"space,omitempty"`
 	Terminal   string         `json:"terminal,omitempty"`
-	Error      string         `json:"error,omitempty"`
+	// Target is the automation's target when the run went to a bot or a worker
+	// instead of a terminal of its own (#498); Terminal is that pane.
+	Target string `json:"target,omitempty"`
+	Error  string `json:"error,omitempty"`
 	// A command run's: its exit status (absent when it has none), its one
 	// line, the last lines of its stderr, and what became of the report.
 	// An agent run's done may carry a late-start note in Result.
@@ -99,6 +111,11 @@ func List() (Listing, error) {
 		Kinds:       config.Kinds,
 		Automations: []Automation{}, Invalid: []Invalid{},
 	}
+	// Bots live in herdr-core: backend: herdr refuses every target, so it must
+	// not claim the kinds either. A panel reading this offers none there.
+	if cfg.Backend != config.BackendHerdr {
+		out.Targets = config.Targets
+	}
 	now := time.Now()
 	for _, a := range cfg.Automations {
 		entry := Automation{
@@ -109,6 +126,7 @@ func List() (Listing, error) {
 			CatchUpMinutes: a.CatchUpMinutes, BlockedGraceMinutes: a.BlockedGraceMinutes,
 			Disabled: a.Disabled, Line: a.Line,
 			Command: a.Command, Notify: a.Notify,
+			Target: a.Target, TargetWhenBusy: string(a.TargetWhenBusy),
 		}
 		if a.Template != "" {
 			entry.Agent = "" // the default filled in at load; a template brings its own
@@ -145,7 +163,7 @@ func toRun(r history.Record) Run {
 	return Run{
 		RunID: r.RunID, Automation: r.Automation, Status: r.Status, Trigger: string(r.Trigger),
 		Started: r.Started, At: r.At, Seconds: int(r.At.Sub(r.Started).Seconds()),
-		Space: r.WorkspaceID, Terminal: r.PaneID, Error: r.Error, Seen: r.Seen,
+		Space: r.WorkspaceID, Terminal: r.PaneID, Target: r.Target, Error: r.Error, Seen: r.Seen,
 		ExitCode: r.ExitCode, Result: r.Result, Stderr: r.Stderr, Notified: r.Notified,
 	}
 }

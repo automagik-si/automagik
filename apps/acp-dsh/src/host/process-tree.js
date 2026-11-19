@@ -142,9 +142,12 @@ function readCheckTable(deps) {
   })
 }
 
+// `self` is the pid that is DSH itself: its /proc stat names DSH's own group and it is never
+// signalled. It defaults to this process; a test that fakes a process table sets it, so the
+// case does not depend on the pid the test runner happens to get.
 function checks(records, deps, visit) {
-  const { platform = process.platform, read = readFileSync, kill = process.kill,
-    now, until } = deps
+  const { platform = process.platform, self = process.pid, read = readFileSync,
+    kill = process.kill, now, until } = deps
   const states = new Map()
   const present = new Set()
   for (const record of records) {
@@ -160,12 +163,12 @@ function checks(records, deps, visit) {
     let group
     try {
       if (present.size && now() < until) {
-        group = platform === 'darwin' ? byPid.get(process.pid)?.pgid
-          : parseProcStat(process.pid, read(`/proc/${process.pid}/stat`, 'utf8'))?.pgid
+        group = platform === 'darwin' ? byPid.get(self)?.pgid
+          : parseProcStat(self, read(`/proc/${self}/stat`, 'utf8'))?.pgid
       }
     } catch {}
     return visit({
-      group,
+      group, self,
       state(record) {
         if (!states.has(record.pid)) {
           const state = now() >= until ? 'unknown' : processState(record.pid, record.birth, {
@@ -196,8 +199,8 @@ export function treeStates(records, deps = {}) {
 export function signalTree(records, signal, deps = {}) {
   deps = checkBudget(deps)
   const { kill = process.kill, agentPgid, now, until } = deps
-  return checks(records ?? [], deps, ({ group, state }) => {
-    const safe = pid => pidOf(pid) && pid !== process.pid && pid !== group
+  return checks(records ?? [], deps, ({ group, self, state }) => {
+    const safe = pid => pidOf(pid) && pid !== self && pid !== group
     const byPid = new Map((records ?? []).map(record => [record.pid, record]))
     const targets = new Map()
     // Pick and deduplicate targets before reading any target's identity.

@@ -1,7 +1,8 @@
-// Cloud mode (RFC 0024 (g); contracts v1, sections 4 and 5). Off unless every setting is set.
+// Cloud mode (RFC 0024 (g); contracts v1, sections 4, 5 and 6). Off unless every setting is set.
 // The workspace holds no Cloud credential: on demand only, it fetches the Cloud service's
 // published public keys and trades a single-use open code for a workspace token, server to
 // server. The token never reaches a browser, a URL or a log. The gate never mints one.
+import { isUtf8 } from 'node:buffer'
 import { createHash, createPublicKey, verify } from 'node:crypto'
 import https from 'node:https'
 import { decoded, object } from './gate-access.mjs'
@@ -13,16 +14,29 @@ const SETTINGS = {
   keys: 'AUTOMAGIK_GATE_CLOUD_KEYS_URL',
   exchange: 'AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL',
   rail: 'AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN',
+  revocation: 'AUTOMAGIK_GATE_CLOUD_REVOCATION_URL',
 }
 export const TOKEN_MAX_SECONDS = 300
 export const KEYS_TTL_MS = 5 * 60 * 1000
 export const REFRESH_INTERVAL_MS = 30 * 1000
 export const CLOCK_SKEW_SECONDS = 30
+// RFC 0024 (e): a poll at least every 5 minutes while sessions exist; this is the chosen one.
+export const POLL_INTERVAL_MS = 60 * 1000
+export const MAX_REVOCATIONS = 1024
+// #1666 F6: the gate applies only a list newer than the last one applied, so a future-dated
+// list must be refused or it would move that watermark past every later list. The age bound is
+// the same five minutes the revocation promise gives a removed person, and the poll interval is
+// one minute, so a healthy feed is never near it.
+export const LIST_MAX_AGE_MS = 5 * 60 * 1000
+export const SIGNATURE_HEADER = 'x-automagik-signature'
 // RFC 0011's rotation: the key that signs and the next (or previous) one, never more.
 export const KEY_SLOTS = 2
 export const MAX_EXCHANGES = 8
 const CODE_MEMORY_MS = 15 * 60 * 1000
-const MEMORY_LIMIT = 4096
+// #1666 F7: the open-code replay memory. A code lives here for 15 minutes; at 4096 live codes
+// a new open is refused instead of evicting one, so a flood cannot make a used code replayable.
+// Cloud's single use is still the backstop.
+export const MAX_OPEN_CODES = 4096
 const MAX_RESPONSE_BYTES = 64 * 1024
 const CODE = /^[A-Za-z0-9_-]{16,512}$/
 const ROLES = ['owner', 'admin', 'member', 'guest']
@@ -35,6 +49,14 @@ export class CloudOpenRefused extends Error {
   constructor(status = 401) { super('Workspace open refused'); this.status = status }
 }
 const refused = () => new CloudOpenRefused()
+// RFC 3339, as section 6 requires for every time in the call and the list.
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
+function instant(value) {
+  if (typeof value !== 'string' || value.length > 64 || !RFC3339.test(value)) throw refused()
+  const ms = Date.parse(value)
+  if (!Number.isSafeInteger(ms)) throw refused()
+  return ms
+}
 
 function httpsUrl(name, value) {
   let url
@@ -59,12 +81,15 @@ export function cloudConfig(env) {
   return {
     issuer: values.issuer, identity: values.identity, workspace: values.workspace, rail: rail.origin,
     keys: httpsUrl(SETTINGS.keys, values.keys), exchange: httpsUrl(SETTINGS.exchange, values.exchange),
+    revocation: httpsUrl(SETTINGS.revocation, values.revocation),
   }
 }
 
 // One bounded JSON call with an absolute deadline. No redirect is followed and no credential,
 // cookie or identity header is sent: the workspace has none to send.
-export function requestJson(url, { method = 'GET', body, request = https.request } = {}) {
+export function requestJson(url, {
+  method = 'GET', body, request = https.request, withHeaders = false,
+} = {}) {
   return new Promise((resolve, rejectPromise) => {
     let response
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body))
@@ -83,8 +108,11 @@ export function requestJson(url, { method = 'GET', body, request = https.request
         chunks.push(chunk)
       })
       incoming.on('end', () => {
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))) }
-        catch { rejectPromise(refused()) }
+        try {
+          const raw = Buffer.concat(chunks)
+          const value = JSON.parse(raw.toString('utf8'))
+          resolve(withHeaders ? { value, raw, headers: incoming.headers } : value)
+        } catch { rejectPromise(refused()) }
       })
     })
     const timer = setTimeout(() => req.destroy(refused()), 5000).unref()
@@ -115,15 +143,32 @@ function publicKeys(document) {
 export const samePerson = (a, b) => a.issuer === b.issuer && a.subject === b.subject
 
 export class CloudSignIn {
-  constructor(config, { now = Date.now, request } = {}) {
+  constructor(config, { now = Date.now, request, pollInterval = POLL_INTERVAL_MS } = {}) {
+    if (!Number.isSafeInteger(pollInterval) || pollInterval < 1) {
+      throw new CloudConfigurationError('Invalid Cloud revocation poll interval')
+    }
     this.config = config
     this.now = now
-    this.call = (url, body) => requestJson(url, { ...(body === undefined ? {} : { method: 'POST', body }), ...(request ? { request } : {}) })
+    this.pollInterval = pollInterval
+    this.call = (url, body) => requestJson(url, {
+      ...(body === undefined ? {} : { method: 'POST', body }),
+      ...(request ? { request } : {}),
+    })
+    this.fetch = url => requestJson(url, {
+      ...(request ? { request } : {}), withHeaders: true,
+    })
     this.keys = new Map()
     this.expires = 0
     this.nextFetch = 0
     this.codes = new Map()
     this.inflight = 0
+    // Section 6: removals block new opens and drop sessions; role changes only drop the
+    // sessions that existed at their effective time.
+    this.removed = new Map()
+    this.lowered = new Map()
+    // The newest list is Cloud's current word; a call older than it is a replay.
+    this.listedAt = 0
+    this.polling = undefined
   }
   // The session store's admission check: only a Cloud principal for this one workspace.
   accepts = principal => Boolean(principal) && principal.issuer === this.config.identity &&
@@ -154,7 +199,9 @@ export class CloudSignIn {
     for (const [hash, end] of memory) if (end <= now) memory.delete(hash)
     const hash = digest(value)
     if (memory.has(hash)) return false
-    if (memory.size >= MEMORY_LIMIT) memory.delete(memory.keys().next().value)
+    // #1666 F7: at the bound, refuse. Evicting the oldest would forget a code still inside its
+    // 15-minute window and let a replay past the gate's own single-use record.
+    if (memory.size >= MAX_OPEN_CODES) throw new CloudOpenRefused(429)
     memory.set(hash, until)
     return true
   }
@@ -174,6 +221,8 @@ export class CloudSignIn {
       principal: { issuer: this.config.identity, subject: sub, roles: known, workspace },
       // The session never outlives the token, nor 5 minutes from now, whatever the clocks say.
       expires: Math.min(exp * 1000, now + TOKEN_MAX_SECONDS * 1000),
+      exp,
+      aud,
     }
   }
   async verify(token) {
@@ -196,7 +245,9 @@ export class CloudSignIn {
     if (!valid) throw refused()
     // No token memory: version 1 has no jti, so two opens in one second can carry equal tokens.
     // A token reaches the gate only from its own exchange of a single-use code.
-    return opened
+    // The verified token itself is the renewal proof; the session keeps it server-side only.
+    return { principal: opened.principal, expires: opened.expires,
+      proof: { token, exp: opened.exp, aud: opened.aud } }
   }
   async open(code) {
     if (typeof code !== 'string' || !CODE.test(code)) throw refused()
@@ -209,6 +260,162 @@ export class CloudSignIn {
     finally { this.inflight-- }
     if (!reply || typeof reply !== 'object' || reply.version !== 1 || typeof reply.token !== 'string' ||
       !Number.isSafeInteger(reply.expires_in) || reply.expires_in < 1 || reply.expires_in > TOKEN_MAX_SECONDS) throw refused()
-    return this.verify(reply.token)
+    const opened = await this.verify(reply.token)
+    if (this.isRemoved(opened.principal.subject)) throw refused()
+    return opened
+  }
+  // Delivery 4 (contracts v2): a renewal carries no single-use code and no browser cookie. Its
+  // proof is the current workspace token the gate verified for that session, sent server to
+  // server. Cloud checks that token's signature, aud and exp, then rechecks the person's role
+  // before it answers with a workspace token, the same answer the open path verifies. A held
+  // token past its exp, a removal, a lost role or a token over five minutes refuses the renewal;
+  // the gate never mints a longer session.
+  async renew(principal, proof) {
+    if (!principal || typeof principal.subject !== 'string' || !principal.subject || principal.subject.length > 256) throw refused()
+    if (!proof || typeof proof !== 'object' || Array.isArray(proof) ||
+      Object.keys(proof).sort().join(',') !== 'aud,exp,token' ||
+      typeof proof.token !== 'string' || !proof.token || proof.token.length > 8192 ||
+      typeof proof.aud !== 'string' || proof.aud !== this.config.workspace ||
+      !Number.isSafeInteger(proof.exp) || proof.exp * 1000 <= this.now()) throw refused()
+    if (this.isRemoved(principal.subject)) throw refused()
+    if (this.inflight >= MAX_EXCHANGES) throw new CloudOpenRefused(429)
+    this.inflight++
+    let reply
+    try {
+      // `workspace` is version 1's aud, never a host; the token is the gate's whole proof.
+      reply = await this.call(this.config.exchange,
+        { version: 2, renew: true, workspace: this.config.workspace, token: proof.token })
+    } catch { throw refused() } finally { this.inflight-- }
+    if (!reply || typeof reply !== 'object' || reply.version !== 2 || typeof reply.token !== 'string' ||
+      !Number.isSafeInteger(reply.expires_in) || reply.expires_in < 1 || reply.expires_in > TOKEN_MAX_SECONDS) throw refused()
+    const opened = await this.verify(reply.token)
+    // The answer must be for the same person; its roles are the only roles the new session gets.
+    if (opened.principal.subject !== principal.subject || this.isRemoved(opened.principal.subject)) throw refused()
+    return opened
+  }
+  // A removal applies from its effective time; until then a new open is allowed.
+  isRemoved(subject) {
+    const entry = this.removed.get(subject)
+    return Boolean(entry) && this.now() >= entry.at
+  }
+  // A removal keeps the list poll alive even after it ended the gate's last session.
+  hasPendingRemoval() { return this.removed.size > 0 }
+  // The gate's session store asks this after every call or poll.
+  drops(family) {
+    const subject = family?.principal?.subject
+    const removed = this.removed.get(subject)
+    if (removed && this.now() >= removed.at) return true
+    const lowered = this.lowered.get(subject)
+    return Boolean(lowered) && this.now() >= lowered.at && family.created <= lowered.at
+  }
+  // Section 6 is Open on the envelope: a detached JWS over the exact bytes, in one header,
+  // signed by a key the published set names (the same two-slot set as the workspace token).
+  async verifySigned(payload, compact) {
+    const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload), 'utf8')
+    if (typeof compact !== 'string' || compact.length > 16384) throw refused()
+    const parts = compact.split('.')
+    if (parts.length !== 3 || parts[1] !== '') throw refused()
+    let header, signature
+    try { header = object(parts[0]); signature = decoded(parts[2]) } catch { throw refused() }
+    if (header.alg !== 'EdDSA' || (header.typ !== undefined && header.typ !== 'JWT') ||
+      typeof header.kid !== 'string' || !header.kid || header.kid.length > 256 ||
+      header.crit !== undefined || header.b64 !== undefined) throw refused()
+    const key = await this.key(header.kid)
+    const signed = Buffer.from(`${parts[0]}.${bytes.toString('base64url')}`)
+    let valid = false
+    try { valid = verify(null, signed, key, signature) } catch { valid = false }
+    if (!valid || !isUtf8(bytes)) throw refused()
+    let document
+    try { document = JSON.parse(bytes.toString('utf8')) } catch { throw refused() }
+    if (!document || typeof document !== 'object' || Array.isArray(document)) throw refused()
+    return document
+  }
+  async revokeCall(payload, signature) {
+    const document = await this.verifySigned(payload, signature)
+    const { version, event, workspace, subject, reason, issued_at } = document
+    if (version !== 1 || event !== 'session.revoke' || workspace !== this.config.workspace ||
+      typeof subject !== 'string' || !subject || subject.length > 256 ||
+      (reason !== 'removed' && reason !== 'role_lowered')) throw refused()
+    const at = instant(issued_at)
+    // A list newer than the call already states Cloud's current word; a replay changes nothing.
+    if (at < this.listedAt) return { subject, reason, at }
+    if (reason === 'removed') {
+      const previous = this.removed.get(subject)
+      if (!previous || at >= previous.at) this.removed.set(subject, { issuedAt: at, at })
+    } else {
+      const previous = this.lowered.get(subject)
+      if (!previous || at > previous.at) this.lowered.set(subject, { issuedAt: at, at })
+    }
+    return { subject, reason, at }
+  }
+  // Section 6's list. A malformed, expired or unverifiable list is a failure, not empty.
+  listEntries(document) {
+    const { version, workspace, issued_at, expires_at, revoked } = document
+    if (version !== 1 || workspace !== this.config.workspace) throw refused()
+    const issuedAt = instant(issued_at)
+    const expiresAt = instant(expires_at)
+    const now = this.now()
+    if (expiresAt <= issuedAt || now >= expiresAt) throw refused()
+    // #1666 F6: a list is Cloud's current word only while it is current. A future-dated list
+    // must not move the applied-list watermark forward, or every later list (a removal
+    // included) would be ignored for as long as the bad date; a list older than the five-minute
+    // revocation bound is stale, and a stale feed is a failure, not a current state.
+    if (issuedAt > now + CLOCK_SKEW_SECONDS * 1000 || issuedAt < now - LIST_MAX_AGE_MS) throw refused()
+    if (!Array.isArray(revoked) || revoked.length > MAX_REVOCATIONS) throw refused()
+    const entries = []
+    for (const entry of revoked) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw refused()
+      // An entry a newer contract scopes to another workspace is ignored, not applied here.
+      if (entry.workspace !== undefined && entry.workspace !== this.config.workspace) continue
+      if (typeof entry.subject !== 'string' || !entry.subject || entry.subject.length > 256 ||
+        (entry.reason !== 'removed' && entry.reason !== 'role_lowered')) throw refused()
+      entries.push({ subject: entry.subject, reason: entry.reason,
+        at: instant(entry.effective_at) })
+    }
+    return { issuedAt, expiresAt, entries }
+  }
+  // A list is Cloud's current word: a removed subject it omits may open again, but sessions
+  // already dropped are never restored (a call newer than this list stays in force).
+  applyList({ issuedAt, entries }) {
+    // A list issued before the one already applied is a delayed or replayed copy: applying it
+    // could re-add a removal a newer list omitted, or a stale role cut. Equal instants are not
+    // out of order (the same list, or a same-instant reissue), so only a strictly older list is
+    // ignored, matching the signed call's replay bound.
+    if (issuedAt < this.listedAt) return
+    this.listedAt = issuedAt
+    const listed = new Map()
+    for (const entry of entries) {
+      if (entry.reason !== 'removed') continue
+      const previous = listed.get(entry.subject)
+      if (!previous || previous.at < entry.at) {
+        listed.set(entry.subject, { issuedAt, at: entry.at })
+      }
+    }
+    for (const [subject, entry] of [...this.removed]) {
+      if (!listed.has(subject) && entry.issuedAt < issuedAt) this.removed.delete(subject)
+    }
+    for (const [subject, entry] of listed) {
+      const previous = this.removed.get(subject)
+      if (!previous || previous.issuedAt <= issuedAt) this.removed.set(subject, entry)
+    }
+    for (const entry of entries) {
+      if (entry.reason !== 'role_lowered') continue
+      const previous = this.lowered.get(entry.subject)
+      if (!previous || previous.at < entry.at) {
+        this.lowered.set(entry.subject, { issuedAt, at: entry.at })
+      }
+    }
+  }
+  async poll() {
+    if (this.polling) return this.polling
+    this.polling = (async () => {
+      const reply = await this.fetch(this.config.revocation)
+      const signature = reply.headers[SIGNATURE_HEADER]
+      const document = await this.verifySigned(reply.raw, signature)
+      const list = this.listEntries(document)
+      this.applyList(list)
+      return list
+    })().finally(() => { this.polling = undefined })
+    return this.polling
   }
 }

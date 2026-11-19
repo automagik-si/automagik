@@ -64,7 +64,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
   AUTO_FILE, CATALOG_URL, CHECK_FILE, HELD_FILE, OFF_BY_DEFAULT, OLD_PACK_NAME, PACK_CATALOG_URLS, PACK_KEYS, PACK_KEYS_FILE, PACK_LAYOUT, PACK_NAME, POCKET_LINK, POINTER_SIG_URL,
-  POINTER_URL, RESTORE_FILE, TIMEOUT_MS, V020_LAYOUT_SHA256, autoHold, formatAuto, formatMarker, heldModLine, layoutNeeds, packOfPointer, parseAuto, parseMarker, parseSums,
+  POINTER_URL, RESTORE_FILE, TIMEOUT_MS, V020_LAYOUT_SHA256, autoHold, formatAuto, formatMarker, heldModLine, layoutNeeds, mergeAuto, packOfPointer, parseAuto, parseMarker, parseSums,
   pickUpdate, updatesOff,
 } from "./release.js";
 import { ABSORBED, RENAMES, editTarget, own, renamedFrom } from "./migrate.js";
@@ -123,13 +123,17 @@ export function readVersion(packDir) {
   try { return readFileSync(join(packDir, "VERSION"), "utf8").trim() || UNRELEASED; } catch { return UNRELEASED; }
 }
 
-/** release.js HELD_FILE: this install's held mods, or no file when it holds none, so an old note never outlives its release. */
-function saveHeld(modsDir, version, held) {
-  const file = join(stateDirOf(modsDir), HELD_FILE);
-  if (held.length === 0) { rmSync(file, { force: true }); return; }
-  const tmp = `${file}.${process.pid}`;
-  writeFileSync(tmp, JSON.stringify({ version, held }));
+/** Replace HELD_FILE as a whole, including when restoring the exact bytes of the previous record. */
+function writeHeld(file, body, tmp = `${file}.${process.pid}`) {
+  if (body === null) { rmSync(file, { force: true }); return; }
+  writeFileSync(tmp, body);
   renameSync(tmp, file);
+}
+
+function saveHeld(modsDir, { version, held, notes = [], landingId = null }, tmp) {
+  const body = held.length || notes.length ? JSON.stringify({ version, held,
+    ...(notes.length ? { notes, ...(landingId ? { landingId } : {}) } : {}) }) : null;
+  writeHeld(join(stateDirOf(modsDir), HELD_FILE), body, tmp);
 }
 
 /** release.js RESTORE_FILE: what the restored build says once when the build that updated is gone. */
@@ -161,35 +165,41 @@ function clearNotes(modsDir) {
  * the auto-update's notice and HELD_FILE say it as they say a held mod, then HELD_FILE is rewritten.
  * A held old folder is in `held` already (applyUpdate). A failure to save is a warning, never a failed install.
  */
-export function heldAfterMigration(modsDir, installed, log = () => {}) {
+export function heldAfterMigration(modsDir, installed, log = () => {}, landingId = null) {
   const gone = (installed.migration?.stranded ?? []).filter((s) => s.gone && !installed.held.some((h) => h.mod === s.mod));
   if (gone.length === 0) return;
   installed.held = [...installed.held, ...gone];
   for (const h of gone) log(heldModLine(h, installed.version));
-  try { saveHeld(modsDir, installed.version, installed.held); } catch (error) { log(`warning: the note about held mods was not saved (${error.message})`); }
+  try { saveHeld(modsDir, { ...installed, landingId }); } catch (error) { log(`warning: the note about held mods was not saved (${error.message})`); }
 }
 
 /** The pack's auto-update setting and rollback skip (release.js AUTO_FILE), beside the record. */
 export const autoFileOf = (modsDir) => join(stateDirOf(modsDir), AUTO_FILE);
-export const readAuto = (modsDir) => { try { return parseAuto(readFileSync(autoFileOf(modsDir), "utf8")); } catch { return parseAuto(""); } };
+const readAutoText = (modsDir) => { try { return readFileSync(autoFileOf(modsDir), "utf8"); } catch { return ""; } };
+export const readAuto = (modsDir) => parseAuto(readAutoText(modsDir));
 
 /**
- * Changes the setting (`{ on }` and/or `{ skip }`), written whole through a rename, holding the
- * lock, so a switch never races a rollback's skip. Returns it; throws `locked` while a run holds it.
+ * Changes the setting (`{ on }`) and/or the skip (`{ skip }`, `{ skipCause }`), written whole
+ * through a rename, holding the lock, so a switch never races a rollback's skip. Returns the
+ * parsed view; throws `locked` while a run holds it.
  */
 export function writeAuto(modsDir, patch) {
   const free = takeLock(modsDir);
   try { return writeAutoHeld(modsDir, patch); } finally { free(); }
 }
 
-/** writeAuto for a caller already holding the lock (rollback). */
+/**
+ * writeAuto for a caller already holding the lock (rollback, retry). The record the file holds is
+ * merged into, not rebuilt from the keys this code knows: an unrecognised skipCause or a newer
+ * release's field survives every write, so a cause never degrades into a legacy cause-less skip.
+ */
 function writeAutoHeld(modsDir, patch) {
-  const next = { ...readAuto(modsDir), ...patch };
+  const text = formatAuto(mergeAuto(readAutoText(modsDir), patch));
   mkdirSync(stateDirOf(modsDir), { recursive: true });
   const tmp = join(stateDirOf(modsDir), `.${AUTO_FILE}.${process.pid}`);
-  writeFileSync(tmp, formatAuto(next));
+  writeFileSync(tmp, text);
   renameSync(tmp, autoFileOf(modsDir));
-  return next;
+  return parseAuto(text);
 }
 
 /**
@@ -675,7 +685,7 @@ const replacedLayout = (modsDir) => {
   return (name, body) => name === basename(PACK_LAYOUT) && ((b) => sha256(b) === V020_LAYOUT_SHA256 || (isFile(ref) && b.equals(readFileSync(ref))))(body());
 };
 
-export async function applyUpdate({ tgzPath, version, sequence = null, modsDir = defaultModsDir(), adopt = false, repair = null, log = () => {}, rename = renameSync }) {
+export async function applyUpdate({ tgzPath, version, sequence = null, modsDir = defaultModsDir(), adopt = false, repair = null, log = () => {}, rename = renameSync, landingId = null }) {
   if (typeof version !== "string" || version === "") throw new Error("applyUpdate needs the release's version");
   const state = stateDirOf(modsDir);
   mkdirSync(state, { recursive: true });
@@ -833,7 +843,11 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
     const inMods = retiring.filter((r) => r.at === join(modsDir, r.mod));
     let keep = [];
     let old = null;
-    const prepare = ({ held }) => {
+    const heldFile = join(state, HELD_FILE);
+    const heldTmp = freshPath(staging, `.${HELD_FILE}-`);
+    let previousHeld = null;
+    let stagedHeld = false;
+    const prepare = ({ held, notes }) => {
       for (const r of retiring) {
         const h = held.find((x) => x.mod === r.mod);
         if (h) { plan.held.push(h); record.mods.push(r.mod); continue; }
@@ -843,8 +857,15 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
       mkdirSync(modsDir, { recursive: true });
       for (const h of plan.held) cpSync(join(modsDir, h.mod), join(next, h.mod), { recursive: true, verbatimSymlinks: true });
       keep = [...plan.replaced, ...plan.retired, ...plan.held.map((h) => h.mod)];
+      // A reload can read this record at the first move, before this process answers.
+      if (notes.length) {
+        try { previousHeld = readFileSync(heldFile); } catch (error) { if (error.code !== "ENOENT") throw error; }
+        saveHeld(modsDir, { version, held: plan.held, notes, landingId }, heldTmp);
+        stagedHeld = true;
+      }
       old = keep.length ? setAside(modsDir) : null;
     };
+    let notes = [];
     try {
       const swap = swapAll(modsDir, moves, rename, {
         needed: "hold", mods: inMods.map((r) => r.mod), exclude: replacedLayout(modsDir), stranded: strandedLayouts, prepare,
@@ -854,8 +875,14 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
       });
       // A linked mods/ (#494): nothing done, prepare never ran.
       if (swap.refused) throw new Error(swap.refused);
+      // #524: the layout guard's lines (a retire or rename it could not weigh) are the answer's,
+      // not only stderr's: the sidebar shows the JSON result. They are notes, not warnings: the
+      // update finished, so the CLI's exit 4 (a failed step) stays for real warnings.
+      notes = Array.isArray(swap.notes) ? swap.notes : [];
     } catch (error) {
-      restoreSet(modsDir, old);
+      try { restoreSet(modsDir, old); } finally {
+        if (stagedHeld) writeHeld(heldFile, previousHeld, heldTmp);
+      }
       throw error;
     }
     swapped = true;
@@ -866,7 +893,7 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
     try { writeMarker(modsDir, record); } catch (error) { recorded = false; warnings.push(`the ownership record could not be written (${error.message})`); }
     if (before?.v1) { try { carryV1(modsDir, record, log); writeMarker(modsDir, record); } catch (error) { warnings.push(`v0.2's kept copies stay where they were (${error.message})`); } }
     // Only a note: failing to save it is said here, never a failed install (exit 4 reads as one).
-    if (!repair) { try { saveHeld(modsDir, version, plan.held); } catch (error) { log(`warning: the note about held mods was not saved (${error.message})`); } }
+    if (!repair) { try { saveHeld(modsDir, { version, held: plan.held, notes, landingId }); } catch (error) { log(`warning: the note about held mods was not saved (${error.message})`); } }
     if (keep.length) keepLayout(modsDir, next, warnings);
     keepSet(modsDir, next, keep, before, old, rename, warnings, keptOff);
     for (const h of plan.held) log(heldModLine(h, version));
@@ -884,7 +911,8 @@ export async function applyUpdate({ tgzPath, version, sequence = null, modsDir =
     for (const m of repair ? plan.installed : []) log(`repaired mods/${m}: it was missing; installed ${version}`);
     for (const w of warnings) log(`warning: ${w}`);
     tightenLedgers(dirname(resolve(modsDir)), { log });
-    return { version, mods: record.mods, ...plan, prev: keep.length && !exists(next) ? prevSetOf(modsDir) : null, recorded, warnings };
+    return { version, mods: record.mods, ...plan, prev: keep.length && !exists(next) ? prevSetOf(modsDir) : null, recorded, warnings,
+      ...(notes.length ? { notes } : {}) };
   } finally {
     rmSync(staging, { recursive: true, force: true });
     if (!swapped) rmSync(next, { recursive: true, force: true });
@@ -902,7 +930,7 @@ export function rollback(opts = {}) {
   try { return rollbackLocked({ ...opts, modsDir }); } finally { free(); }
 }
 
-function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir = null, window = false, restore = false }) {
+function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir = null, window = false, restore = false, prepareRestore = null }) {
   const set = readSet(modsDir);
   const prev = prevSetOf(modsDir);
   if (!set || set.mods.length === 0) {
@@ -966,10 +994,12 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
   }
   // The version rolled away from is never installed on its own again (auto-update waits for a
   // newer one). Recorded before the swap: a run that dies after it still leaves the skip; one
-  // whose swap fails leaves that version installed, where the skip changes nothing.
+  // whose swap fails leaves that version installed, where the skip changes nothing. The cause
+  // goes with it: this restore is a check that judged a mod failed (`mods`); a rollback a person
+  // asked for keeps none. `am update --retry-skipped` clears the record.
   const recordSkip = () => {
     if (!/^\d+\.\d+\.\d+$/.test(record.version ?? "") || record.version === UNRELEASED) return;
-    try { writeAutoHeld(modsDir, { skip: record.version }); } catch (error) {
+    try { writeAutoHeld(modsDir, { skip: record.version, skipCause: restore ? "mods" : null }); } catch (error) {
       throw new Error(`the rollback could not be recorded in ${autoFileOf(modsDir)} (${error.message}): nothing rolled back`);
     }
   };
@@ -1005,9 +1035,10 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
     const had = body();
     return !(keptLayout && had.equals(keptLayout)) && had.equals(readFileSync(layoutRefOf(modsDir)));
   };
-  const prepare = () => {
+  const prepare = ({ notes }) => {
     recordSkip();
     for (const [from, to] of carries) carryPrivate(from, to);
+    prepareRestore?.(notes);
   };
   // That gap, said (#503): with no layout kept, the pack's own unedited automagik.json (which the
   // guard above leaves out) stays as the rolled-out pack placed it. Read here, before the swap.
@@ -1016,9 +1047,11 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
     staleLayout = !keptLayout && isFile(packLayout) && !linkedLayout(packLayout) && isFile(layoutRefOf(modsDir))
       && readFileSync(packLayout).equals(readFileSync(layoutRefOf(modsDir)));
   } catch {}
+  let notes = [];
   try {
     const r = swapAll(modsDir, moves, rename, { needed: "refuse", unknown: "warn", then: "roll back", exclude, prepare, log });
     if (r.refused) throw new Error(`nothing rolled back: ${r.refused}`);
+    notes = Array.isArray(r.notes) ? r.notes : [];
   } catch (error) {
     rmSync(next, { recursive: true, force: true });
     throw error;
@@ -1078,7 +1111,8 @@ function rollbackLocked({ modsDir, rename = renameSync, log = () => {}, binDir =
       if (gone.length) log(staleLayoutLine(packLayout, gone));
     } catch {}
   }
-  return { pack: modsDir, prev, mods: set.mods, version: set.version, from: record.version ?? null, layout, reverted: reverted.restored, migration, hooks, warnings };
+  return { pack: modsDir, prev, mods: set.mods, version: set.version, from: record.version ?? null, layout, reverted: reverted.restored, migration, hooks, warnings,
+    ...(notes.length ? { notes } : {}) };
 }
 
 /**
@@ -1326,7 +1360,9 @@ export function placeLayout({ modsDir, tgzDir, record, log = () => {} }) {
  * `herdr-app check` on each of `mods`, its whole output shown on a failure. Returns `{ failed,
  * checked, unavailable }`: the mods whose check failed, whether the check ran at all, and why it
  * could not run (herdr-app not on PATH, or the program could not start or finish: a spawn error,
- * not a mod that failed to load). `checked` false means no mod was judged.
+ * not a mod that failed to load). Exit 126 or 127 is the program loader saying it never started
+ * the check (a missing shared library, a not-executable file): no mod was judged, whatever the
+ * check would have said. `checked` false means no mod was judged.
  */
 /**
  * The record's mods `herdr-app check` should load: all but the ones switched off (in
@@ -1345,6 +1381,17 @@ export function checkMods({ modsDir, mods, log = () => {}, herdrApp = "herdr-app
       execFileSync(herdrApp, ["check", join(modsDir, m)], { stdio: "pipe", timeout: CHECK_TIMEOUT_MS });
       log(`check passed: ${m}`);
     } catch (error) {
+      // The program loader could not start the check (a missing shared library, a not-executable
+      // file): exit 126 or 127 means no mod was judged, whatever the check would have said. The
+      // loader's own words are the reason when it printed them; the status alone is enough, and
+      // the same words on another status are a real failure below.
+      if (error.status === 126 || error.status === 127) {
+        haveHerdr = false;
+        const said = String(error.stderr || error.stdout || "").trim().split("\n")[0];
+        unavailable = `the herdr-app check could not run (exit ${error.status}${said ? `: ${said}` : ""})`;
+        log(`${unavailable}: no mod was checked`);
+        break;
+      }
       // A check that ran and said no: the mod does not load (a non-zero exit, its output shown).
       if (typeof error.status === "number") {
         failed.push(m);
@@ -1469,9 +1516,11 @@ export const olderSequence = (record, pack) =>
  * is another one by now, nothing is downloaded: `{ ..., installed: null, refused: { expected, latest } }`.
  * `auto`: the mod installing on its own. Under the lock, before any download, the setting and the
  * record are read again: when autoHold says no, or another update or rollback runs, nothing is
- * downloaded: `{ ..., installed: null, held: why }`.
+ * downloaded: `{ ..., installed: null, held: why }`. `retrySkipped`: the person asked for the
+ * release this pack rolled away from (`am update --retry-skipped`): its skip is cleared once the
+ * tarball is here and about to be swapped in.
  */
-export async function installUpdate({ fetch = globalThis.fetch, env = process.env, modsDir = defaultModsDir(env), keys, log, binDir = null, window = false, expect = null, auto = false, herdrApp = "herdr-app", projectDir, hcRun } = {}) {
+export async function installUpdate({ fetch = globalThis.fetch, env = process.env, modsDir = defaultModsDir(env), keys, log, binDir = null, window = false, expect = null, auto = false, retrySkipped = false, herdrApp = "herdr-app", projectDir, hcRun, landingId = null } = {}) {
   const found = await checkForUpdate({ fetch, env, modsDir, keys, projectDir, hcRun });
   if (!found.update) return { ...found, installed: null };
   if (expect && found.update.version !== expect) return { ...found, installed: null, refused: { expected: expect, latest: found.update.version } };
@@ -1488,7 +1537,7 @@ export async function installUpdate({ fetch = globalThis.fetch, env = process.en
     if (late) return { ...found, current: late.current, update: null, installed: null };
     const hold = auto ? autoHold(found.update.version, autoStatus(modsDir)) : null;
     if (hold) return { ...found, auto: autoStatus(modsDir), installed: null, held: hold };
-    const done = await downloadAndApply(found, { fetch, modsDir, log, binDir, window, herdrApp, projectDir, hcRun });
+    const done = await downloadAndApply(found, { fetch, modsDir, log, binDir, window, herdrApp, projectDir, hcRun, retrySkipped, landingId });
     // On its own, an install whose record wasn't written is a failure: the record still names the
     // old version, and the next check would install it again. A restore has rewritten its own.
     if (auto && done.installed?.recorded === false && !done.installed?.restored) {
@@ -1631,14 +1680,14 @@ function checkUpdated({ modsDir, mods, version, log = () => {}, herdrApp = "herd
   // A kept set from before VERSION files (or one whose .pack has none) still names a version.
   const backVersion = typeof set.version === "string" && set.version !== ""
     ? set.version : readVersion(join(prevSetOf(modsDir), PACK_NAME));
-  // Written before the swap: Herdr reloads the restored build at once, possibly before this
-  // process answers, and that build says the one notice from it (updater.js `arrive`).
+  const restore = { version: backVersion, failedVersion: version, mod: result.failed[0], failed: [...result.failed], checked: true };
+  // Write the guard's advisory before the swap so the restored build can announce it at load.
+  const prepareRestore = (notes) => {
+    try { saveRestore(modsDir, { ...restore, unavailable, ...(notes.length ? { notes } : {}), at: Date.now() }); }
+    catch (error) { log(`warning: the restore note was not saved (${error.message})`); }
+  };
   try {
-    saveRestore(modsDir, { version: backVersion, failedVersion: version, mod: result.failed[0],
-      failed: [...result.failed], checked: true, unavailable, at: Date.now() });
-  } catch (error) { log(`warning: the restore note was not saved (${error.message})`); }
-  try {
-    const back = rollbackLocked({ modsDir, log, binDir, window, restore: true });
+    const back = rollbackLocked({ modsDir, log, binDir, window, restore: true, prepareRestore });
     const restored = typeof back.version === "string" && back.version !== "" ? back.version : backVersion;
     // The restore removed the failed release's folders instead of keeping them (#671): the note
     // says so, so a manual rollback refuses in those words rather than reinstalling them.
@@ -1647,16 +1696,14 @@ function checkUpdated({ modsDir, mods, version, log = () => {}, herdrApp = "herd
     // rides in the update's answer (installed.warnings) and in the note the restored build reads.
     const warnings = Array.isArray(back.warnings) ? back.warnings.filter((w) => typeof w === "string" && w !== "") : [];
     for (const warning of warnings) log(`warning: ${warning}`);
+    const restoredResult = { ...restore, version: restored, ...(prevRemoved ? { prevRemoved: true } : {}),
+      ...(warnings.length ? { warnings } : {}), ...(back.notes?.length ? { notes: back.notes } : {}) };
     try {
-      saveRestore(modsDir, { version: restored, failedVersion: version, mod: result.failed[0],
-        failed: [...result.failed], checked: true, unavailable, ...(prevRemoved ? { prevRemoved: true } : {}),
-        ...(warnings.length ? { warnings } : {}), at: Date.now() });
+      saveRestore(modsDir, { ...restoredResult, unavailable, at: Date.now() });
     } catch (error) { log(`warning: the restore note was not saved (${error.message})`); }
     notifyMainBotOfRestore({ modsDir, version, restored, failed: result.failed, projectDir, hcRun });
     log(`restored ${restored}: ${result.failed.join(", ")} did not load`);
-    return { ...result, checked: true, unavailable, warnings, restored: { version: restored, failedVersion: version, mod: result.failed[0],
-      failed: [...result.failed], checked: true, ...(prevRemoved ? { prevRemoved: true } : {}), ...(warnings.length ? { warnings } : {}),
-      ...(unavailable ? { unavailable } : {}) } };
+    return { ...result, checked: true, unavailable, warnings, restored: { ...restoredResult, ...(unavailable ? { unavailable } : {}) } };
   } catch (error) {
     // A kept set that is gone, or names a folder that is gone, is the same answer to the person:
     // there is no previous version to put back. Anything else keeps its own why.
@@ -1668,13 +1715,18 @@ function checkUpdated({ modsDir, mods, version, log = () => {}, herdrApp = "herd
   }
 }
 
-async function downloadAndApply(found, { fetch, modsDir, log, binDir, window, herdrApp, projectDir, hcRun }) {
+async function downloadAndApply(found, { fetch, modsDir, log, binDir, window, herdrApp, projectDir, hcRun, retrySkipped = false, landingId }) {
   const dir = mkdtempSync(join(tmpdir(), "automagik-herdr-"));
   try {
     const tgzPath = await downloadUpdate(found.update, { fetch, dir });
     const before = oldSidebarHere(modsDir);
     clearNotes(modsDir); // a previous update's notes are not this one's
-    const installed = await applyUpdate({ tgzPath, version: found.update.version, sequence: found.update.sequence, modsDir, log });
+    // An explicit retry (`am update --retry-skipped`) asks for the release this pack rolled away
+    // from: its skip is cleared here, once the verified tarball is here and the swap is next, so
+    // a download that fails keeps the record. Nothing else clears a skip; a retry that fails the
+    // check again records a fresh one.
+    if (retrySkipped && readAuto(modsDir).skip === found.update.version) writeAutoHeld(modsDir, { skip: null, skipCause: null });
+    const installed = await applyUpdate({ tgzPath, version: found.update.version, sequence: found.update.sequence, modsDir, log, landingId });
     // The swap is the point an update becomes live: check it before anything else touches the home.
     const checked = checkUpdated({ modsDir, mods: installed.mods, version: found.update.version, log, herdrApp, binDir, window, projectDir, hcRun });
     installed.check = { failed: checked.failed, checked: checked.checked, ...(checked.unavailable ? { unavailable: checked.unavailable } : {}) };
@@ -1683,8 +1735,8 @@ async function downloadAndApply(found, { fetch, modsDir, log, binDir, window, he
     if (checked.warnings?.length) installed.warnings.push(...checked.warnings);
     if (!checked.checked) {
       try {
-        saveCheck(modsDir, { version: found.update.version, from: found.current ?? null,
-          unavailable: checked.unavailable, at: Date.now() });
+        saveCheck(modsDir, { version: found.update.version, from: found.current ?? null, failed: [],
+          checked: false, unavailable: checked.unavailable, at: Date.now() });
       } catch (error) { log(`warning: the check note was not saved (${error.message})`); }
     }
     if (checked.restored) {
@@ -1703,7 +1755,7 @@ async function downloadAndApply(found, { fetch, modsDir, log, binDir, window, he
       installed.layout = placeLayout({ modsDir, tgzDir, record: readMarker(modsDir), log });
     } catch (error) { installed.warnings.push(`the automagik layout was not placed (${error.message})`); }
     installed.migration = migrateRefs({ modsDir, log, warnings: installed.warnings });
-    heldAfterMigration(modsDir, installed, log);
+    heldAfterMigration(modsDir, installed, log, landingId);
     installed.hooks = moveHooks({ modsDir, log, warnings: installed.warnings, binDir, window, crossed: crossedRename(modsDir, before), warnLedgers: false });
     return { ...found, installed };
   } finally {
@@ -1753,10 +1805,10 @@ export async function repairInstall({ tgzPath, version, modsDir = defaultModsDir
 
 const USAGE = "usage: node update.mjs check | update [--check] [--json] | apply [--expect <v>] [--auto] | rollback | install --from <tgz> --version <v> [--sequence <n>] [--adopt] [--setup] | repair --from <tgz> --version <v> | pack-out --to <dir> [--layout <file>] [--move <folder>]...  (each takes [--mods <dir>])";
 const FLAGS = {
-  check: [], apply: ["--expect", "--auto"], rollback: [], update: ["--check", "--json"], install: ["--from", "--version", "--sequence", "--adopt", "--setup"],
+  check: [], apply: ["--expect", "--auto", "--landing-id"], rollback: [], update: ["--check", "--json"], install: ["--from", "--version", "--sequence", "--adopt", "--setup"],
   repair: ["--from", "--version"], "pack-out": ["--to", "--layout", "--move"],
 };
-const VALUED = new Set(["--mods", "--from", "--version", "--expect", "--sequence", "--to", "--layout", "--move"]);
+const VALUED = new Set(["--mods", "--from", "--version", "--expect", "--landing-id", "--sequence", "--to", "--layout", "--move"]);
 /** Flags given more than once, collected in order. */
 const REPEATED = new Set(["--move"]);
 
@@ -1825,7 +1877,8 @@ async function main(argv) {
   const host = { binDir: binDirOf(), window: liveHome(modsDir) };
   if (command === "check" || (command === "update" && opts.check)) return checkForUpdate({ modsDir });
   if (command === "apply" || command === "update") {
-    const r = await installUpdate({ modsDir, log: command === "update" ? log : undefined, expect: opts.expect ?? null, auto: Boolean(opts.auto), ...host });
+    const r = await installUpdate({ modsDir, log: command === "update" ? log : undefined, expect: opts.expect ?? null, auto: Boolean(opts.auto),
+      landingId: opts["landing-id"] ?? null, ...host });
     // Exit 5: the release went in, herdr-app check failed and the kept set is back (its own notice).
     if (r.installed?.restored) process.exitCode = 5;
     if (command === "update") notice(r.installed?.hooks?.hooks);

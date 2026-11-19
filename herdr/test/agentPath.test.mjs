@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // agentPath.mjs: the PATH an agent worker starts with when its `#!/usr/bin/env node` (or bun)
 // interpreter isn't on the pane's PATH. Fake agents and fake runtimes in temp folders; no real
 // codex, node install or Herdr is touched. The last test runs the CLI with the fake hc.
@@ -273,6 +274,8 @@ function codexProject(t, extra = [], { terminals = [], env: more = {} } = {}) {
   writeFileSync(log, "");
   const path = `${bin}:${s.empty}`;
   const env = { ...s.env, PATH: path, HERDR_APP_HOME: app, HC_FAKE_STATE: state, HC_FAKE_LOG: log, HC_TERMINAL_ID: "t1", ...more };
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: s.root });
+  Object.assign(env, { ...core.env });
   const cli = (...args) => spawnSync(process.execPath, [CLI, ...args], { cwd: project, env, encoding: "utf8" });
   const run = () => readJsonLines(log).find((c) => c[0] === "run");
   return { s, prefix, path, app, cli, run };
@@ -293,10 +296,10 @@ test("start CLI (#56): a codex bot whose node is only in nvm starts under env PA
   assert.equal(r.status, 0, r.stderr);
   const run = runCall();
   const argv = run.slice(run.indexOf("--") + 1);
-  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"]);
+  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "-c", "allow_login_shell=false"]);
   assert.match(argv[4], /^-c$/);
   assert.match(argv[5], /^developer_instructions="<herdr-bot>\\nAutomagik Herdr briefing/, "codex takes it as a TOML string");
-  assert.deepEqual(noGrants(plain(JSON.parse(r.stdout).argv)), ["codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"]);
+  assert.deepEqual(noGrants(plain(JSON.parse(r.stdout).argv)), ["codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "-c", "allow_login_shell=false"]);
   assert.match(r.stderr, new RegExp(`am: codex runs under node, which isn't on its PATH: ${join(prefix, "bin")} put first on it\\.`));
   // The seat's command as hc would run it: with the caller's PATH alone, env finds no node (127); as started, it runs.
   const bare = spawnSync("codex", [], { env: { PATH: path }, encoding: "utf8" });
@@ -315,7 +318,7 @@ test("restart CLI (#56): restarting a codex bot whose node is only in nvm runs u
   assert.equal(JSON.parse(r.stdout).replaced, "t7");
   const run = runCall();
   const argv = run.slice(run.indexOf("--") + 1);
-  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "resume", "--last"]);
+  assert.deepEqual(noGrants(plain(argv)), ["/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${join(prefix, "bin")}:${path}:/usr/bin:/bin`, `HERDR_APP_HOME=${app}`, "codex", "--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true", "-c", "allow_login_shell=false", "resume", "--last"]);
   assert.ok(argv.findIndex((w) => w.startsWith("developer_instructions=")) < argv.indexOf("resume"), "its -c before the subcommand");
   assert.equal(argv.filter((w) => w.startsWith("developer_instructions=")).length, 1, "never twice after a restart");
   const seat = spawnSync(argv[0], argv.slice(1), { env: {}, encoding: "utf8" });

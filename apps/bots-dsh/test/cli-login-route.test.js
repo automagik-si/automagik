@@ -100,6 +100,114 @@ test('a native failure cannot echo the authorization answer or enter the diagnos
   assert.doesNotMatch(JSON.stringify({ result, state: h.rt.state, logged: h.logged }), /private-authorization-code|expected_state/)
 })
 
+test('a failure with no sentence of its own says which kind it was, never what the CLI printed', async (t) => {
+  const h = await fixture(t)
+  h.acp.loginStart = async () => { throw Object.assign(new Error('private-cli-output token-secret'), { code: 'acp-net/unreachable' }) }
+  const { result } = await h.call('cli-login-start', h.payload)
+  assert.equal(result.error.code, 'bot/refused')
+  assert.equal(result.error.message, 'Could not continue this sign-in (acp-net/unreachable). Try again.')
+  assert.doesNotMatch(JSON.stringify(result), /private-cli-output|token-secret/)
+  // A code that is not a class (a shell error, a pasted shape) is not put in the row.
+  for (const code of ['EACCES', 'weird code with spaces', 'x'.repeat(80), '']) {
+    h.acp.loginStart = async () => { throw Object.assign(new Error('private-cli-output'), { code }) }
+    const { result: failed } = await h.call('cli-login-start', h.payload)
+    assert.equal(failed.error.message, 'Could not continue this sign-in. Try again.', code)
+  }
+})
+
+test('an agent that signs in from its terminal says so', async (t) => {
+  const h = await fixture(t)
+  h.acp.loginStart = async () => { throw Object.assign(new Error('run the CLI'), { code: 'acp-login/terminal' }) }
+  const { result } = await h.call('cli-login-start', h.payload)
+  assert.equal(result.error.message, 'This coding agent signs in from its own terminal. Run its sign-in command there, then try again.')
+})
+
+test('an account confirmation failure says which kind it was, never the CLI text', async (t) => {
+  const h = await fixture(t)
+  h.acp.accountConfirm = async () => { throw Object.assign(new Error('private-cli-output'), { code: 'acp-account/mismatch' }) }
+  const { result } = await h.call('cli-login-confirm', { botId: 'first', provider: 'acp-claude', ref: 'account-ref' })
+  assert.equal(result.error.message, 'The account could not be confirmed (acp-account/mismatch). Try again.')
+  assert.doesNotMatch(JSON.stringify(result), /private-cli-output/)
+})
+
+// Every code acp-dsh can refuse a sign-in with says something the person can act on, and the
+// one this box hit (two Automagik instances, an account change the other one holds) names the
+// other session instead of one dead end.
+test('every refusal a sign-in can meet has its own sentence', async (t) => {
+  const h = await fixture(t)
+  h.acp.loginStart = async () => { throw Object.assign(new Error('native text'), { code: 'acp-account/busy', message: 'Close other Automagik sessions before changing the Bot account.' }) }
+  const { result } = await h.call('cli-login-start', h.payload)
+  assert.equal(result.error.code, 'bot/refused')
+  assert.equal(result.error.message, 'Another Automagik session on this computer is using the Bot account. Close it, then press Sign in again.')
+  const byCode = new Map([
+    ['acp-account/unavailable', 'The Bot account cannot be changed from this session. Use the app on this computer.'],
+    ['acp-account/invalid', 'This sign-in is not available for this Bot.'],
+    ['acp-account/logout', 'Signing out of the Bot account did not finish. Try again.'],
+    ['acp-account/disposed', 'Automagik is restarting. Try again in a moment.'],
+    ['acp-account/changed', 'The account changed. Check it and confirm again.'],
+    ['acp-account/signed-out', 'This coding agent is not signed in any more. Press Sign in again.'],
+    ['acp-login/invalid', 'This sign-in request is no longer valid. Start again.'],
+    ['acp-login/invalid-code', 'Paste the complete code shown by Claude, including the part after #.'],
+    ['acp-login/not-found', 'This sign-in has ended. Start again.'],
+    ['acp-login/unavailable', 'This CLI cannot sign in yet. Check its installation and try again.'],
+    ['acp-login/disposed', 'The connection restarted. Start sign-in again.'],
+    ['acp-login/terminal', 'This coding agent signs in from its own terminal. Run its sign-in command there, then try again.'],
+  ])
+  for (const [code, message] of byCode) {
+    // A code with no sentence of its own still gets its sentence from the code, whatever the
+    // native text says.
+    h.acp.loginStart = async () => { throw Object.assign(new Error('native text private-cli-output'), { code }) }
+    const { result: failed } = await h.call('cli-login-start', h.payload)
+    assert.equal(failed.error.message, message, code)
+    assert.doesNotMatch(JSON.stringify(failed), /native text|private-cli-output/, code)
+  }
+  // The same code with a sentence this side does not know: still actionable, never the text.
+  for (const [native, message] of [
+    ['The Bot account is already changing. Try again when it finishes.', 'The Bot account is already changing. Try again when it finishes.'],
+    ['Sign-out could not be verified. Try again.', 'Signing out of the Bot account could not be verified. Try again.'],
+    ['Bot sign-in was reset. Retry sign-in in the app.', 'The Bot account was reset. Press Sign in again.'],
+  ]) {
+    h.acp.loginStart = async () => { throw Object.assign(new Error(native), { code: 'acp-account/busy' }) }
+    assert.equal((await h.call('cli-login-start', h.payload)).result.error.message, message, native)
+  }
+})
+
+// The reviewer's two medium findings, pinned: a code read straight out of the object can be a
+// name of Object.prototype, and any two-segment string is not a failure class.
+test('a prototype name as a code is refused like any other, not turned into an internal error', async (t) => {
+  const h = await fixture(t)
+  for (const code of ['toString', 'valueOf', 'constructor', '__proto__', 'hasOwnProperty']) {
+    h.acp.accountConfirm = async () => { throw Object.assign(new Error('private-cli-output'), { code }) }
+    const { result } = await h.call('cli-login-confirm', { botId: 'first', provider: 'acp-claude', ref: 'account-ref' })
+    assert.equal(result.error.code, 'bot/refused', code)
+    assert.equal(result.error.message, 'The account could not be confirmed. Try again.', code)
+    assert.doesNotMatch(JSON.stringify(result), /private-cli-output/, code)
+  }
+})
+
+// The sign-in action path reads both of its code tables as own properties, not just the one for
+// codes it knows: a code such as '__proto__' handed the row an inherited value instead.
+test('a prototype name as a sign-in failure code gets the one line, not an inherited value', async (t) => {
+  const h = await fixture(t)
+  for (const code of ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    h.acp.loginStart = async () => { throw Object.assign(new Error('private-cli-output'), { code }) }
+    const { result } = await h.call('cli-login-start', h.payload)
+    assert.equal(result.error.code, 'bot/refused', code)
+    assert.equal(result.error.message, 'Could not continue this sign-in. Try again.', code)
+    assert.doesNotMatch(JSON.stringify(result), /\[object Object\]|native code|private-cli-output/, code)
+  }
+})
+
+test('only an acp failure namespace is said as a class', async (t) => {
+  const h = await fixture(t)
+  for (const code of ['Users/example-user', 'home/example-user', 'Bearer/fake-tok-000000', 'ACP-net/unreachable', 'filesystem/enoent']) {
+    h.acp.loginStart = async () => { throw Object.assign(new Error('private-cli-output'), { code }) }
+    const { result } = await h.call('cli-login-start', h.payload)
+    assert.equal(result.error.message, 'Could not continue this sign-in. Try again.', code)
+    assert.doesNotMatch(JSON.stringify(result), /example-user|fake-tok|private-cli-output/, code)
+  }
+})
+
 test('owner sign-in and account controls preserve a safe recovery action without native details',
   async t => {
     const h = await fixture(t)

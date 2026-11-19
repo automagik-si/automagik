@@ -225,6 +225,9 @@ test('H4: a CLI that stays silent after the code fails at the absolute confirmat
     await settle()
     const view = h.logins.status(CLAUDE, started.attemptId)
     assert.equal(view.status, 'failed')
+    // The fixed cause travels on the ended attempt, so the surface above can say why without
+    // ever moving what the CLI printed.
+    assert.equal(view.cause, 'the CLI did not confirm the sign-in')
     assert.ok(child.kills.includes('SIGTERM'))
     assert.equal(h.ready.length, 0)
   }
@@ -383,6 +386,25 @@ test('device login errors and unsupported results never fall back to local brows
     assert.doesNotMatch(JSON.stringify(failed), /private|secret-account|localhost/)
     assert.equal(h.children.length, 1)
   }
+})
+
+test('an ended attempt carries its fixed cause; a live one carries none', async t => {
+  const h = harness()
+  t.after(() => h.logins.dispose())
+  const started = h.logins.start(CLAUDE)
+  await settle()
+  // Still live: nothing to explain.
+  assert.equal(h.logins.status(CLAUDE, started.attemptId).cause, undefined)
+  // The CLI exits before it prints a link: the cause names that, and never the CLI's output.
+  const child = h.children.at(-1).child
+  child.stdout.write('private-account-name failed to authenticate\n')
+  child.exitCode = 1
+  child.emit('close', 1)
+  await settle()
+  const view = h.logins.status(CLAUDE, started.attemptId)
+  assert.equal(view.status, 'failed')
+  assert.equal(view.cause, 'the CLI exited')
+  assert.doesNotMatch(JSON.stringify(view), /private-account-name/)
 })
 
 test('Claude and Codex run at the same time, independently; the browser block is scoped and cleaned up', async t => {

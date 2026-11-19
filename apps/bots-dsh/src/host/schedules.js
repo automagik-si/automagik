@@ -155,7 +155,11 @@ export function install(rt) {
     return { ids }
   }
   const botOfTaskSession = async sessionId => (await lineageOf(sessionId)).bot
-  const restricted = bot => Array.isArray(bot?.denyTools) && bot.denyTools.length > 0
+  // A Bot with a deny list or no shell: a fresh-Session target would open a Session no
+  // tool-deny layer can bind, so those tasks are paused (tool-deny.js denies the two
+  // schedule tools to the same Bots).
+  const restricted = bot => bot?.shell === false
+    || (Array.isArray(bot?.denyTools) && bot.denyTools.length > 0)
   // Every Session a Bot speaks from now, plus the ones a caller already has.
   const sessionsOf = (bot, extra = []) => {
     const ids = new Set(extra)

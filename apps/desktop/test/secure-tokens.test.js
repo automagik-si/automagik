@@ -674,16 +674,30 @@ test('M1: a token file that is a link to something unreadable is moved as a link
   assert.deepEqual(readdirSync(dir).sort(), [TOKEN_FILE, backups[0]].sort())
 })
 
-test('the store is inert: no desktop flow imports or calls it', () => {
+test('the store is reached only by its wiring: no other desktop flow imports or calls it', () => {
   const src = new URL('../src/', import.meta.url)
   const read = name => readFileSync(new URL(name, src), 'utf8')
+  // C1.2 (#906) wires the store behind <home>/signin.json: account.js keeps the session and
+  // main.js hands it Electron's safeStorage and the app's data folder. Nothing else may.
+  const wiring = new Set(['account.js', 'account-wiring.js', 'main.js'])
   for (const name of readdirSync(src)) {
-    if (!name.endsWith('.js') || name === 'secure-tokens.js') continue
+    if (!name.endsWith('.js') || name === 'secure-tokens.js' || wiring.has(name)) continue
     const source = read(name)
-    assert.doesNotMatch(source, /secure-tokens/, `${name} imports or names the unused store`)
-    assert.doesNotMatch(source, /createTokenStore|detectSecureStore/, `${name} calls the unused store`)
-    assert.doesNotMatch(source, /safeStorage/, `${name} reaches safeStorage outside the store`)
+    assert.doesNotMatch(source, /secure-tokens/, `${name} imports or names the store`)
+    assert.doesNotMatch(source, /createTokenStore|detectSecureStore/, `${name} calls the store`)
+    assert.doesNotMatch(source, /safeStorage/, `${name} reaches safeStorage outside the store or its wiring`)
   }
+  // The wiring is exactly the three files above: Electron's safeStorage is passed in there, never
+  // imported by the flow or the store; only account.js touches the refresh token.
+  const wiringSource = read('account-wiring.js')
+  assert.match(wiringSource, /createTokenStore\(\{ safeStorage, platform, userData \}\)/)
+  const main = read('main.js')
+  assert.match(main, /beginAccount\(\{[\s\S]*?safeStorage,[\s\S]*?userData: app\.getPath\('userData'\)/)
+  const account = read('account.js')
+  assert.doesNotMatch(account, /safeStorage|from 'electron'/)
+  assert.match(account, /store\.(load|rotate|clear)\(/)
+  const flow = read('sign-in.js')
+  assert.doesNotMatch(flow, /secure-tokens|safeStorage|createTokenStore/)
   const module = read('secure-tokens.js')
   // Electron supplies safeStorage from main.js; the module itself is plain Node and testable.
   assert.doesNotMatch(module, /from 'electron'/)

@@ -17,7 +17,8 @@
 //            timeout kind: a link that drops mid-call answers `unavailable`, as does the machine
 //            away, so that, a timeout, no readable answer or Herdr's exec rejecting all count
 //            as lost (only an unknown machine, a needed update or a bad call can't have written): the file is read again, and one that holds the new
-//            text is a success; else the state there is unknown, and the caller is told to check
+//            text is a success. A caller can also opt to recognize the original text as unchanged.
+//            Otherwise the state there is unknown, and the caller is told to check
 //            the file before retrying (a retried create would add the bot twice).
 //   remove   a shell there: the file removed only while it still holds the text read.
 //
@@ -116,7 +117,7 @@ const REMOVE_SH = '[ -f "$1" ] || exit 17; now=$(cat -- "$1"; printf x) || exit 
  * none). Rejects StaleSnapshot when it doesn't (nothing written), RemoteFileError on any other
  * failure. Resolves null.
  */
-export async function writeRemoteText(io, machine, path, text, expected) {
+export async function writeRemoteText(io, machine, path, text, expected, { confirmUnchanged = false } = {}) {
   if (expected === undefined) throw new Error("writeRemoteText: pass the text the edit started from (null for a new file)");
   if (typeof text !== "string") throw new Error("writeRemoteText: the text to write is a string");
   if (utf8Length(expected ?? "") > REMOTE_TEXT_MAX || utf8Length(text) > REMOTE_TEXT_MAX) throw tooLarge(path, machine);
@@ -146,6 +147,9 @@ export async function writeRemoteText(io, machine, path, text, expected) {
   let now;
   try { now = await readRemoteText(io, machine, path); } catch { now = undefined; }
   if (now === text) return null;
+  if (confirmUnchanged && now === expected) {
+    throw new RemoteFileError(`${failure.message}; read-back found the original text`, "unchanged");
+  }
   throw new RemoteFileError(`State unknown: ${failure.message}. The write may or may not have landed; `
     + `check ${path} on ${machine} before trying again.`, "unknown_state");
 }

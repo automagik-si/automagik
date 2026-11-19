@@ -30,6 +30,7 @@ function parseCompose(source, flags = []) {
       AUTOMAGIK_GATE_CLOUD_KEYS_URL: '',
       AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL: '',
       AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN: '',
+      AUTOMAGIK_GATE_CLOUD_REVOCATION_URL: '',
       // Resolve a pass-through public URL even if the developer's environment has none.
       AUTOMAGIK_PUBLIC_URL: 'https://public.invalid/',
     },

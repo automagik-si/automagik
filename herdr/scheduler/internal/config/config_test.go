@@ -679,3 +679,140 @@ func TestPutWritesACommandAndSwitchesKinds(t *testing.T) {
 		t.Fatalf("got %+v", a)
 	}
 }
+
+// A target is stored as one key, "<kind>:<bot id>", and the entry starts no
+// workspace, agent, model or close: the bot's own launch is the whole run
+// (#498). A worker target runs alongside its bot and so carries no busy rule.
+func TestTargetLoadsAndDefaults(t *testing.T) {
+	withConfig(t, `
+backend: hc
+automations:
+  - name: housekeeping
+    cron: "0 9 * * *"
+    repo: /src/project
+    target: "bot:b-6jrz4bmxml"
+    prompt: tidy the house
+  - name: review
+    cron: "0 10 * * *"
+    repo: /src/project
+    target: "worker:b-6jrz4bmxml"
+    prompt: review the queue
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Invalid) != 0 {
+		t.Fatalf("invalid: %+v", cfg.Invalid)
+	}
+	bot := cfg.Find("housekeeping")
+	if bot == nil {
+		t.Fatal("the bot target did not load")
+	}
+	if bot.Target != "bot:b-6jrz4bmxml" || bot.TargetWhenBusy != TargetQueue {
+		t.Fatalf("bot target %q busy %q", bot.Target, bot.TargetWhenBusy)
+	}
+	if bot.Agent != "" || bot.Workspace != "" || bot.CloseWorkspace != "" {
+		t.Fatalf("a target starts no agent or space: %+v", *bot)
+	}
+	if bot.TimeoutMinutes != 60 || bot.CatchUpMinutes != 120 || bot.BlockedGraceMinutes != 2 {
+		t.Fatalf("wait defaults not applied: %+v", *bot)
+	}
+	worker := cfg.Find("review")
+	if worker == nil {
+		t.Fatal("the worker target did not load")
+	}
+	if worker.Target != "worker:b-6jrz4bmxml" || worker.TargetWhenBusy != "" {
+		t.Fatalf("worker target %q busy %q", worker.Target, worker.TargetWhenBusy)
+	}
+}
+
+func TestTargetRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"not a target", `target: t3q1`, "not <kind>:<bot id>"},
+		{"not a bot id", `target: "bot:t3q1"`, "not a bot id"},
+		{"unknown kind", `target: "main:b-6jrz4bmxml"`, "must be bot or worker"},
+		{"a worker has no busy rule", "target: \"worker:b-6jrz4bmxml\"\n    target_when_busy: skip", "target_when_busy is a bot target's"},
+		{"a bad busy rule", "target: \"bot:b-6jrz4bmxml\"\n    target_when_busy: wait", "target_when_busy must be queue or skip"},
+		{"a busy rule without a target", "target_when_busy: skip", "add target: bot:<id> or drop it"},
+		{"a workspace", "target: \"bot:b-6jrz4bmxml\"\n    workspace: worktree", "drop workspace"},
+		{"an agent", "target: \"bot:b-6jrz4bmxml\"\n    agent: claude", "drop agent"},
+		{"a close", "target: \"bot:b-6jrz4bmxml\"\n    close_workspace: on-success", "drop close_workspace"},
+		{"notify", "target: \"bot:b-6jrz4bmxml\"\n    notify: b-6jrz4bmxml", "drop notify"},
+		{"no repo", `target: "bot:b-6jrz4bmxml"`, "needs repo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := "    repo: /src/project\n"
+			if tc.name == "no repo" {
+				repo = ""
+			}
+			withConfig(t, "backend: hc\nautomations:\n  - name: x\n    cron: \"0 9 * * *\"\n"+repo+"    prompt: p\n    "+tc.body+"\n")
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Invalid) != 1 {
+				t.Fatalf("got %d entries, %d invalid: %+v", len(cfg.Automations), len(cfg.Invalid), cfg.Invalid)
+			}
+			if !strings.Contains(cfg.Invalid[0].Message, tc.want) {
+				t.Fatalf("message %q, want it to name %q", cfg.Invalid[0].Message, tc.want)
+			}
+		})
+	}
+}
+
+// A target needs herdr-core, where bots live: under backend: herdr it is a
+// diagnostic, not a run that starts a fresh agent at 3am.
+func TestTargetNeedsHerdrCore(t *testing.T) {
+	withConfig(t, `
+automations:
+  - name: housekeeping
+    cron: "0 9 * * *"
+    repo: /src/project
+    target: "bot:b-6jrz4bmxml"
+    prompt: tidy
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Invalid) != 1 || !strings.Contains(cfg.Invalid[0].Message, "backend: hc") {
+		t.Fatalf("%+v", cfg.Invalid)
+	}
+}
+
+func TestTargetCannotBeACommand(t *testing.T) {
+	withConfig(t, `
+backend: hc
+automations:
+  - name: housekeeping
+    cron: "0 9 * * *"
+    repo: /src/project
+    target: "bot:b-6jrz4bmxml"
+    command:
+      argv: [echo, hi]
+`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Invalid) != 1 || !strings.Contains(cfg.Invalid[0].Message, "a command cannot also name one") {
+		t.Fatalf("%+v", cfg.Invalid)
+	}
+}
+
+func TestSplitTarget(t *testing.T) {
+	kind, bot, err := SplitTarget("worker:b-6jrz4bmxml")
+	if err != nil || kind != TargetWorker || bot != "b-6jrz4bmxml" {
+		t.Fatalf("got %q %q %v", kind, bot, err)
+	}
+	for _, bad := range []string{"", "b-6jrz4bmxml", "bot:", "bot:b-6Jrz4bmxml", "pane:b-6jrz4bmxml", "bot:t7"} {
+		if _, _, err := SplitTarget(bad); err == nil {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+}

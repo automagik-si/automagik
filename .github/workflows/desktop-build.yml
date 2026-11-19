@@ -8,7 +8,10 @@ name: Desktop build
 #
 # The version is Automagik's (package.json), which the app and every plugin here carry; the
 # release already holds the plugins (release.yml makes it and calls this). Dispatch it by hand
-# to rebuild a release's desktop files: gh workflow run desktop-build.yml --field ref=v<version>.
+# to rebuild a release's desktop files: gh workflow run desktop-build.yml --field ref=v<version>
+# [--field replace=true when the release already carries a feed]. A release that already carries
+# a desktop feed is not replaced by accident: the publish job refuses a second feed unless
+# `replace` is true, which a deliberate rebuild must set.
 #
 # macOS signing and notarization are optional: with the MAC_CSC_LINK and
 # MAC_CSC_KEY_PASSWORD secrets (the Developer ID Application certificate as a base64 .p12)
@@ -48,6 +51,11 @@ on:
         required: false
         type: boolean
         default: true
+      replace:
+        description: 'Publish over a desktop feed the release already has (a deliberate rebuild)'
+        required: false
+        type: boolean
+        default: false
       windows:
         description: 'Also build and publish the native Windows app (off since 2026-11-04)'
         required: false
@@ -69,6 +77,11 @@ on:
         required: false
         type: boolean
         default: true
+      replace:
+        description: 'Publish over a desktop feed the release already has (a deliberate rebuild)'
+        required: false
+        type: boolean
+        default: false
       windows:
         description: 'Also build and publish the native Windows app (off since 2026-11-04)'
         required: false
@@ -302,6 +315,11 @@ jobs:
     if: ${{ !cancelled() && needs.version.result == 'success' && inputs.publish != false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # One publish at a time per version: the guard below reads the release, so a second run that
+    # starts after the first must see its feed and refuse it.
+    concurrency:
+      group: desktop-publish-${{ needs.version.outputs.version }}
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
@@ -397,10 +415,22 @@ jobs:
           cat SHA256SUMS
 
       - name: Add the builds to the release
+        env:
+          REPLACE: ${{ inputs.replace }}
         run: |
           set -euo pipefail
           TAG="v${VERSION}"
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          # Read the release here, immediately before the upload: a read in an earlier step is not
+          # proof of what this step will clobber. Only a release GitHub really says is absent may
+          # be created; any other failed read stops the publish.
+          if assets=$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets \
+            --jq '.assets[].name' 2>view.err); then
+            published=$(grep -E '^latest(-mac|-linux)?\.yml$' <<< "${assets}" || true)
+            if [[ -n "${published}" && "${REPLACE}" != true ]]; then
+              printf '::error ::%s already carries %s: refusing a second desktop feed. A deliberate rebuild must set replace=true.\n' \
+                "${TAG}" "$(printf '%s' "${published}" | tr '\n' ' ')"
+              exit 1
+            fi
             # A rebuild replaces the release's desktop files: one this build did not make goes.
             # The cut's own files stay: every one PLUGINS.SHA256SUMS lists (the plugins, the
             # add-ons the lane carries, plugins.json, addons.json), that list itself, and the
@@ -411,7 +441,7 @@ jobs:
             # its jobs' own, and server-image.json is server-image.yml's record of the pushed
             # image digest.
             cut=$(gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" -p PLUGINS.SHA256SUMS -O - 2>/dev/null | awk '{print $2}' || true)
-            for name in $(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name'); do
+            for name in ${assets}; do
               case "${name}" in automagik-*.tgz|plugins.json|PLUGINS.SHA256SUMS|lane.json|lane.json.sig|automagik-pocket-*.apk|latest.json|usagemeter-*|usagemeter.SHA256SUMS|meter.json|meter.json.sig|server-image.json) continue ;; esac
               grep -qxF -- "${name}" <<< "${cut}" && continue
               [[ -e "assets/${name}" ]] || gh release delete-asset "${TAG}" "${name}" --yes --repo "${GITHUB_REPOSITORY}"
@@ -423,6 +453,10 @@ jobs:
               gh release edit "${TAG}" --prerelease=false --latest --repo "${GITHUB_REPOSITORY}"
             fi
           else
+            if ! grep -q 'release not found' view.err; then
+              echo "::error ::could not read ${TAG}: $(cat view.err); refusing to publish blind"
+              exit 1
+            fi
             flags=(--latest)
             [[ "${PRERELEASE}" == "true" ]] && flags=(--prerelease)
             windows=""
