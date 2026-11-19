@@ -63,11 +63,12 @@ import { ConnectorDock, MailDock, CONNECTOR_CSS } from './connectors.js'
 import { CONNECTORS_PAGE_CSS } from './connectors-page.js'
 import { LearningDock, LearningTurnTail, LEARNING_CSS } from './learning-card.js'
 import {
-  CoverageRow, GENUI_CSS, PersonCard, ProgressRow, ProgressRows, READING_NOTE,
-  loadReadingNote, genuiRows, revisionOf,
+  BackfillCard, CANCEL_BACKFILL, CoverageRow, GENUI_CSS, PersonCard, ProgressRow, ProgressRows,
+  READING_NOTE, START_BACKFILL, cancelBackfill, loadReadingNote, genuiRows, revisionOf, startBackfill,
 } from './genui.js'
 import {
-  coverageLine, coverageOf, countText, parseReadingNote, percentOf, personView, rowView,
+  backfillDay, backfillRange, backfillSummaryText, backfillView, canCancel, coverageLine,
+  coverageOf, countText, parseReadingNote, percentOf, personView, proposalView, rowView, runView,
   shortDate, spanOf, stateId, stateWord,
 } from './genui-model.js'
 import { BOT_SETTINGS_CSS } from './bot-settings.js'
@@ -118,11 +119,14 @@ export const omni = Object.freeze({
   // own tool card. `rows(roster, batchId)` reads the host's slice; the model is the same
   // words and number formats the kit's cards use, for a card of a plugin's own shape.
   genui: Object.freeze({
-    PersonCard, ProgressRow, ProgressRows, CoverageRow,
+    PersonCard, ProgressRow, ProgressRows, CoverageRow, BackfillCard,
     rows: genuiRows, revisionOf, loadReadingNote, READING_NOTE,
+    // The backfill card's actions (#1326 K2): one approval, and one job's stop.
+    startBackfill, cancelBackfill, START_BACKFILL, CANCEL_BACKFILL, backfillView,
     model: Object.freeze({
-      coverageLine, coverageOf, countText, parseReadingNote, percentOf, personView, rowView,
-      shortDate, spanOf, stateId, stateWord,
+      backfillDay, backfillRange, backfillSummaryText, backfillView, canCancel, coverageLine,
+      coverageOf, countText, parseReadingNote, percentOf, personView, proposalView, rowView,
+      runView, shortDate, spanOf, stateId, stateWord,
     }),
   }),
   // The roster and actions of the running surface, or null before it runs.

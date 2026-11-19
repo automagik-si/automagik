@@ -464,8 +464,9 @@ label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it 
 **Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
 **Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
 clears the moment the pane works again or the label is removed: the sidebar reads the label from
-the one terminal snapshot it already takes, never by scanning a pane's screen. A label older than
-a day is reported by `am tidy` (`stale-needs-owner`).
+the one terminal snapshot it already takes, never by scanning a pane's screen. It also clears when
+the pane exits or leaves the snapshot, and once the label is past the pack's stale window (a day,
+the same rule as `am tidy`'s `stale-needs-owner`), so a label left behind never keeps asking.
 
 A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
 Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,
@@ -682,12 +683,12 @@ am dsh-tui install | update | uninstall | doctor
   with the shell itself in front, idle, and no job of its own running (`sleep 99 &` left at
   the prompt keeps it: its child processes are asked with `pgrep -P`, and an answer that
   can't be read keeps it too), so the space is never left empty and nothing else is closed.
-  The sidebar's Start knows the panes. When another start opens a space on the project in the
-  same moment, every start uses the first one, and the sidebar closes the extra space it
-  opened while that space holds only its own shell; a space that shows only after the wait is
-  closed the same way, as soon as it appears. `start` from the command line, `--machine` too, reads
-  them from `herdr-app ls`, which counts no mod pane: it closes the tab only when it saw that
-  shell, right after its own `space.new`, as the new space's one tab and that tab's one
+  When two starts open spaces on the project, they use the first one. The sidebar can close the
+  extra space identified by its own `space.new` reply, even if it appears after the wait, while
+  it still has just its original tab with a single idle shell. A lost reply can leave the extra
+  space open. `start` from the command line, `--machine` too, reads the panes from `herdr-app ls`,
+  which counts no mod pane: it closes the tab only when it saw that shell, right after its own
+  `space.new`, as the new space's one tab and that tab's one
   terminal. `AUTOMAGIK_HERDR_TAB_WAIT_MS` sets how long `start` and `worker` wait for Herdr to show
   the new pane (5000 by default); `0` turns this tab setup off.
 - `restart <bot>` (also `am restart <bot>`) queues a working or blocked bot for its next
