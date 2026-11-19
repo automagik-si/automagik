@@ -31,6 +31,53 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "${root}"
 
+# A 404 is the same as bootstrap, including when a lane release was deleted. Other failures
+# leave the lane state unknown, so measure from the start after giving GitHub time to recover.
+probe_lane() (
+  local lane="$1" attempt errors
+  errors=$(mktemp) || return 2
+  trap 'rm -f "${errors}"' EXIT
+  for attempt in 1 2 3; do
+    if timeout --kill-after=5s 20s gh api \
+        "repos/${GITHUB_REPOSITORY}/releases/tags/${lane}" 2>"${errors}"; then
+      return 0
+    fi
+    if grep -Fq 'HTTP 404' "${errors}"; then return 1; fi
+    if (( attempt < 3 )); then sleep 5; fi
+  done
+  echo "::warning::could not check ${lane} after three attempts; measuring from the start" >&2
+  return 2
+)
+
+uploaded_lane_asset() {
+  jq -e --arg asset "$1" 'any(.assets[]; .name == $asset and .state == "uploaded")' \
+    <<< "${lane_release}" >/dev/null 2>&1
+}
+
+read_pocket_manifest() {
+  timeout --kill-after=5s 20s gh release download pocket-lane --repo "${GITHUB_REPOSITORY}" \
+    -p latest.json -O - 2>/dev/null |
+    jq -rse --arg repo "${GITHUB_REPOSITORY}" '
+      select(length == 1) | .[0] | .versionName as $version |
+      select($version | test("^3\\.(0|[1-9][0-9]{0,2})\\.(0|[1-9][0-9]{0,2})\\z")) |
+      ($version | split(".") | map(tonumber)) as [$major, $minor, $patch] |
+      select(.versionCode == ($major * 1000000 + $minor * 1000 + $patch) and
+        .url == "https://github.com/\($repo)/releases/download/v\($version)/automagik-pocket-\($version).apk" and
+        (.sha256 | test("^[0-9a-f]{64}\\z"))) | $version' 2>/dev/null
+}
+
+# A complete download with a bad signature needs the poster's explicit replacement override.
+read_meter_version() (
+  local dir
+  dir=$(mktemp -d) || return 1
+  trap 'rm -rf "${dir}"' EXIT
+  timeout --kill-after=5s 20s gh release download meter-lane --repo "${GITHUB_REPOSITORY}" \
+    -p meter.json -p meter.json.sig -D "${dir}" >/dev/null 2>&1 || return 1
+  [[ -f "${dir}/meter.json" && -f "${dir}/meter.json.sig" ]] || return 1
+  bun scripts/meter-lane.ts verify "${dir}/meter.json" "${dir}/meter.json.sig" >/dev/null 2>&1 || return 2
+  jq -er '.version | select(test("^3\\.[0-9]+\\.[0-9]+\\z"))' "${dir}/meter.json" 2>/dev/null || return 2
+)
+
 # The lane decision: what the commits since the last release are, and which parts this release
 # rebuilds. It is the same decision the workflow's "Which lane" step used to make inline (plus
 # `ships`, which the re-cut needs), so a lane value cannot mean two things; release-cut.sh re-runs
@@ -38,6 +85,8 @@ cd "${root}"
 lane() {
   local out="${1:-${GITHUB_OUTPUT:?GITHUB_OUTPUT is not set}}"
   local full last kind herdr lane_version pocket_since pocket meter_version prerelease_tags meter_since meter ships
+  local lane_release probe_status meter_read_status=0
+  local -a prereleases
   full=$(git tag --list 'v3.*.0' --sort=-v:refname | grep -E '^v3\.(0|[1-9][0-9]{0,3})\.0$' | head -1 || true)
   last=$(git tag --list 'v3.*' --sort=-v:refname | grep -E '^v3\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$' | head -1 || true)
   kind=$(bun scripts/lane.ts kind "${full}" "${last}")
@@ -46,8 +95,19 @@ lane() {
   # Pocket's app is rebuilt when apps/pocket/ shipped something since the build phones have: the
   # version pocket-lane names (a prerelease never moves it, so a Pocket change in one comes
   # again), or the last release when there is no lane yet (scripts/lane.ts pocket-since).
-  lane_version=$(gh release download pocket-lane --repo "${GITHUB_REPOSITORY}" -p latest.json -O - 2>/dev/null | jq -r '.versionName // empty' 2>/dev/null || true)
+  if ! lane_version=$(read_pocket_manifest) ||
+    ! git rev-parse --verify --quiet "refs/tags/v${lane_version}^{commit}" >/dev/null; then
+    lane_version=''
+  fi
   pocket_since=$(bun scripts/lane.ts pocket-since "${last}" "${lane_version}")
+  if [[ -z "${lane_version}" ]]; then
+    probe_status=0
+    probe_lane pocket-lane >/dev/null || probe_status=$?
+    if (( probe_status != 1 )); then
+      pocket_since=''
+      echo "::notice::pocket-lane has no readable latest.json; this release rebuilds Pocket to restore it"
+    fi
+  fi
   pocket=$(bun scripts/lane.ts pocket "${pocket_since}")
   # The meter is built when meter/usagemeter/ shipped something since the build machines have:
   # the version meter-lane names, else the newest stable release (a prerelease never moves the
@@ -55,10 +115,24 @@ lane() {
   # change when no release has carried the meter yet (scripts/lane.ts meter-since). It answers
   # no while the lane is held: no key listed, or RFC 0021's contract not in (meterHeld). The
   # prerelease list must be read: an error here stops the run rather than guess a base.
-  meter_version=$(gh release download meter-lane --repo "${GITHUB_REPOSITORY}" -p meter.json -O - 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)
+  meter_version=$(read_meter_version) || meter_read_status=$?
+  if (( meter_read_status != 0 )); then meter_version=''; fi
   prerelease_tags=$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease) | .tagName')
   mapfile -t prereleases <<< "${prerelease_tags}"
   meter_since=$(bun scripts/lane.ts meter-since "${last}" "${meter_version}" "${prereleases[@]}")
+  if (( meter_read_status != 0 )); then
+    probe_status=0
+    lane_release=$(probe_lane meter-lane) || probe_status=$?
+    if (( probe_status != 1 )); then
+      meter_since=''
+      if (( meter_read_status == 2 )) || uploaded_lane_asset meter.json || uploaded_lane_asset meter.json.sig; then
+        echo "::warning::meter-lane has an incomplete or unreadable pointer;" \
+          "the post refuses it unless dispatched with replace_unverified_meter_pointer"
+      elif (( probe_status == 0 )); then
+        echo "::notice::meter-lane has no pointer; this release posts a new pointer"
+      fi
+    fi
+  fi
   meter=$(bun scripts/lane.ts meter "${meter_since}")
   # A merge can leave nothing that reaches an install (a revert of everything since the last
   # release): the re-cut then has nothing to cut, and the queued run finds the same.

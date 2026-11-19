@@ -66,10 +66,16 @@ case "$*" in
   "scripts/lane.ts herdr "*) echo "\${FAKE_HERDR:-no}"; exit 0 ;;
   "scripts/lane.ts pocket-since "*) echo v3.0.0; exit 0 ;;
   "scripts/lane.ts pocket v3.0.2") echo "\${FAKE_POCKET_SHIPS:-no}"; exit 0 ;;
+  "scripts/lane.ts pocket ") echo "\${FAKE_POCKET_FROM_START:-yes}"; exit 0 ;;
   "scripts/lane.ts pocket "*) echo "\${FAKE_POCKET:-no}"; exit 0 ;;
   "scripts/lane.ts meter-since "*) echo v3.0.0; exit 0 ;;
   "scripts/lane.ts meter v3.0.2") echo "\${FAKE_METER_SHIPS:-no}"; exit 0 ;;
+  "scripts/lane.ts meter ") echo "\${FAKE_METER_FROM_START:-yes}"; exit 0 ;;
   "scripts/lane.ts meter "*) echo "\${FAKE_METER:-no}"; exit 0 ;;
+  "scripts/meter-lane.ts verify "*)
+    [[ -f "$3" && -f "$4" && "\${FAKE_METER_VERIFY:-ok}" == ok ]] || exit 1
+    pairs=$(awk '$1 == "release" && $2 == "download" && $3 == "meter-lane" && / -D / { n++ } END { print n+0 }' "\${GH_LOG}")
+    (( pairs >= \${FAKE_METER_VERIFY_ON_READ:-1} )); exit $? ;;
   "scripts/lane.ts ships "*) echo "\${FAKE_SHIPS:-yes}"; exit 0 ;;
 esac
 ${logCall}
@@ -100,10 +106,25 @@ case "$*" in
   "release view "*)
     tag="$3"
     apk="automagik-pocket-\${tag#v}.apk"
+    if [[ -n "\${FAKE_VIEW_SECONDS:-}" ]]; then sleep "\${FAKE_VIEW_SECONDS}"; fi
+    mode_var="FAKE_VIEW_MODE_\${tag//./_}"
+    if [[ "\${!mode_var:-\${FAKE_VIEW_MODE:-error}}" == rate-limited ]]; then
+      echo 'HTTP 429: rate limit' >&2; exit 1
+    fi
+    if [[ "$7" == body ]]; then
+      note=''
+      case "\${FAKE_VIEW_BODY:-none}" in
+        pocket) printf -v note '%s%s%s' $'\x60' "$apk" $'\x60 follows' ;;
+        meter) printf -v note '%s%s%s' $'usagemeter: \x60' usagemeter-darwin-arm64 $'\x60' ;;
+      esac
+      printf '{"body":"%s"}\\n' "$note"
+      exit 0
+    fi
     latest=latest.json
     prerelease=false; draft=false; published='"2026-11-19T00:00:00Z"'
+    published="\${FAKE_VIEW_PUBLISHED:-$published}"
     apk_state=uploaded; latest_size=1
-    case "\${FAKE_VIEW_MODE:-error}" in
+    case "\${!mode_var:-\${FAKE_VIEW_MODE:-error}}" in
       ok) ;;
       prerelease) prerelease=true ;;
       draft) draft=true ;;
@@ -116,10 +137,28 @@ case "$*" in
       malformed) echo '{'; exit 0 ;;
       *) exit 1 ;;
     esac
-    printf '{"tagName":"%s","isDraft":%s,"isPrerelease":%s,"publishedAt":%s,"assets":[{"name":"%s","state":"%s","size":1},{"name":"%s","state":"uploaded","size":%s}]}\\n' \
-      "$tag" "$draft" "$prerelease" "$published" "$apk" "$apk_state" "$latest" "$latest_size"
+    printf -v apk_asset '{"name":"%s","state":"%s","size":1}' "$apk" "$apk_state"
+    printf -v pocket_assets '%s,{"name":"%s","state":"uploaded","size":%s}' "$apk_asset" "$latest" "$latest_size"
+    meter_assets='{"name":"meter.json","state":"uploaded","size":1},{"name":"meter.json.sig","state":"uploaded","size":1}'
+    case "\${FAKE_VIEW_ASSETS:-pocket}" in
+      pocket) assets="$pocket_assets" ;;
+      meter) assets="$meter_assets" ;;
+      both) assets="$pocket_assets,$meter_assets" ;;
+      apk-only) assets="$apk_asset" ;;
+      none) assets='' ;;
+    esac
+    printf '{"tagName":"%s","isDraft":%s,"isPrerelease":%s,"publishedAt":%s,"assets":[%s]}\\n' \
+      "$tag" "$draft" "$prerelease" "$published" "$assets"
+    exit 0 ;;
+  "api repos/owner/repo/releases/tags/pocket-lane" | "api repos/owner/repo/releases/tags/meter-lane")
+    case "\${FAKE_LANE_API:-404}" in
+      404) echo 'HTTP 404' >&2; exit 1 ;;
+      error) echo 'HTTP 502' >&2; exit 1 ;;
+      ok) printf '{"assets":%s}\\n' "\${FAKE_LANE_ASSETS:-[]}" ;;
+    esac
     exit 0 ;;
   "api repos/owner/repo/releases/tags/"*)
+    if [[ -n "\${FAKE_COVERAGE_SECONDS:-}" ]]; then sleep "\${FAKE_COVERAGE_SECONDS}"; fi
     [[ "\${FAKE_RELEASE_MODE:-stable}" != error ]] || exit 1
     tag="\${2##*/}"
     case "\${FAKE_RELEASE_MODE:-stable}" in
@@ -149,7 +188,28 @@ if [[ "$part" == pocket && -n "\${FAKE_POCKET_POINTER_LATE:-}" ]]; then
     version="\${FAKE_POCKET_POINTER_LATE}"
   fi
 fi
-printf '{"%s":"%s"}\\n' "$field" "$version"
+if [[ "$part" == meter && -n "\${FAKE_METER_POINTER_LATE:-}" ]]; then
+  reads=$(awk '$1 == "release" && $2 == "download" && $3 == "meter-lane" { n++ } END { print n+0 }' "\${GH_LOG}")
+  if (( reads > FAKE_METER_POINTER_AFTER )); then
+    version="\${FAKE_METER_POINTER_LATE}"
+  fi
+fi
+if [[ "$part" == meter && "$*" == *" -D "* ]]; then
+  [[ "\${FAKE_METER_DOWNLOAD:-ok}" != error ]] || exit 1
+  dir="\${!#}"
+  printf '{"version":"%s"}\\n' "$version" > "$dir/meter.json"
+  if [[ "\${FAKE_METER_SIG:-ok}" == ok ]]; then echo signed > "$dir/meter.json.sig"; fi
+elif [[ "$part" == pocket ]]; then
+  if [[ -n "\${FAKE_POCKET_MANIFEST:-}" ]]; then printf '%s\\n' "$FAKE_POCKET_MANIFEST"; exit 0; fi
+  code=0
+  if [[ "$version" =~ ^3\\.([0-9]{1,3})\\.([0-9]{1,3})$ ]]; then
+    code=$((3000000 + 1000 * 10#\${BASH_REMATCH[1]} + 10#\${BASH_REMATCH[2]}))
+  fi
+  printf '{"versionName":"%s","versionCode":%s,"url":"https://github.com/%s/releases/download/v%s/automagik-pocket-%s.apk","sha256":"%064d"}\\n' \
+    "$version" "$code" "$5" "$version" "$version" 0
+else
+  printf '{"%s":"%s"}\\n' "$field" "$version"
+fi
 `);
   writeFileSync(join(bin, 'timeout'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -235,6 +295,7 @@ exec bash ${JSON.stringify(join(work, 'scripts', 'release-gates.sh'))} "$@"
         PATH: `${bin}:${process.env.PATH ?? ''}`,
         BUN_LOG: bunLog,
         GATE_LOG: gateLog,
+        GH_LOG: ghLog,
         GITHUB_REPOSITORY: 'owner/repo',
         GITHUB_OUTPUT: output,
         ...env,
@@ -943,5 +1004,437 @@ describe('the workflow runs the gates and the cut from their scripts', () => {
     // The cut keeps the bounded retry and the atomic push.
     expect(cutScript).toContain('RELEASE_CUT_ATTEMPTS');
     expect(cutScript).toContain('git push -q --atomic origin HEAD:refs/heads/dev "refs/tags/v${version}"');
+  });
+});
+
+describe('the shared wait for published lane posts (#668)', () => {
+  const start = 1_800_000_000;
+  const published = (age: number) => JSON.stringify(new Date((start - age) * 1000).toISOString().replace('.000Z', 'Z'));
+  const pocketRead = 'release download pocket-lane --repo owner/repo -p latest.json -O -';
+  const coverage = (tag: string) => `api repos/owner/repo/releases/tags/${tag}`;
+  const views = (gh: string[]) => gh.filter(call => call.startsWith('release view') && !call.endsWith('--json body'));
+  const bodies = (gh: string[]) => gh.filter(call => call.endsWith('--json body'));
+  const pairs = (gh: string[]) => gh.filter(call => call.startsWith('release download meter-lane') && call.includes(' -D '));
+  const pocket = { POCKET: 'yes', POCKET_SINCE: 'v3.0.0', FAKE_POCKET_POINTER_VERSION: '3.0.0' };
+  const meter = { METER: 'yes', METER_SINCE: 'v3.0.0', FAKE_METER_POINTER_VERSION: '3.0.0' };
+  const latePocket = { FAKE_POCKET_POINTER_AFTER: '2', FAKE_POCKET_POINTER_LATE: '3.0.2' };
+  const lateMeter = { FAKE_METER_POINTER_AFTER: '1', FAKE_METER_POINTER_LATE: '3.0.2' };
+
+  function withClock(check: (repo: ReturnType<typeof repository>, env: Record<string, string>) => void) {
+    const repo = repository();
+    try {
+      repo.tag('v3.0.2');
+      const clock = join(repo.dir, 'clock');
+      writeFileSync(clock, `${start}\n`);
+      const date = join(repo.bin, 'date');
+      const sleep = join(repo.bin, 'sleep');
+      writeFileSync(date, '#!/usr/bin/env bash\ncat "$FAKE_CUT_CLOCK"\n');
+      writeFileSync(sleep, '#!/usr/bin/env bash\nread -r now < "$FAKE_CUT_CLOCK"\nprintf "%s\\n" "$((now + $1))" > "$FAKE_CUT_CLOCK"\n');
+      chmodSync(date, 0o755);
+      chmodSync(sleep, 0o755);
+      check(repo, { FAKE_CUT_CLOCK: clock, FAKE_VIEW_MODE: 'ok' });
+    } finally {
+      repo.cleanup();
+    }
+  }
+
+  for (const assets of ['none', 'apk-only']) {
+    test(`young Pocket notes trigger the wait with ${assets} assets`, () => {
+      withClock((repo, env) => {
+        const run = repo.run({
+          ...env, ...pocket, ...latePocket, RELEASE_CUT_POINTER_POLL: '1',
+          FAKE_VIEW_ASSETS: assets, FAKE_VIEW_BODY: 'pocket', FAKE_VIEW_PUBLISHED: published(600),
+        });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain('pocket=no\n');
+        expect(run.out).toContain('v3.0.2 is still building its Pocket build');
+        expect(bodies(run.gh)).toHaveLength(1);
+        expect(run.gh.filter(call => call === pocketRead)).toHaveLength(3);
+      });
+    });
+  }
+
+  for (const [reason, age, body, bodyReads] of [
+    ['notes omit Pocket', 600, 'none', 1],
+    ['the release is 50 minutes old', 3000, 'pocket', 0],
+  ] as const) {
+    test(`a stable tag without attached assets keeps Pocket when ${reason}`, () => {
+      withClock((repo, env) => {
+        const run = repo.run({
+          ...env, ...pocket, ...latePocket,
+          FAKE_VIEW_ASSETS: 'none', FAKE_VIEW_BODY: body, FAKE_VIEW_PUBLISHED: published(age),
+        });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain('pocket=yes\n');
+        expect(run.gh.filter(call => call === pocketRead)).toHaveLength(1);
+        expect(bodies(run.gh)).toHaveLength(bodyReads);
+        expect(run.bun).not.toContain('scripts/lane.ts pocket v3.0.2');
+      });
+    });
+  }
+
+  test('Pocket stops at the end of the publication window while meter keeps polling', () => {
+    withClock((repo, env) => {
+      const run = repo.run({
+        ...env, ...pocket, ...meter, ...latePocket, ...lateMeter, FAKE_METER_POINTER_AFTER: '4',
+        FAKE_VIEW_ASSETS: 'meter', FAKE_VIEW_BODY: 'pocket', FAKE_VIEW_PUBLISHED: published(2700 - 27),
+        RELEASE_CUT_POINTER_WAIT: '40', RELEASE_CUT_POINTER_POLL: '1',
+      });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\nmeter=no\n');
+      expect(run.out).toContain('waiting up to 27s for its post');
+      expect(run.gh.filter(call => call === pocketRead)).toHaveLength(2);
+      expect(pairs(run.gh)).toHaveLength(5);
+      expect(readFileSync(env.FAKE_CUT_CLOCK, 'utf8').trim()).toBe(String(start + 4));
+    });
+  });
+
+  test('walks past a prerelease and a draft to the stable attachment', () => {
+    withClock((repo, env) => {
+      repo.tag('v3.0.4');
+      repo.tag('v3.0.3');
+      const run = repo.run({
+        ...env, ...pocket, ...latePocket, RELEASE_CUT_POINTER_POLL: '1',
+        FAKE_VIEW_MODE_v3_0_4: 'prerelease', FAKE_VIEW_MODE_v3_0_3: 'draft',
+      });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=no\n');
+      expect(views(run.gh).map(call => call.split(' ')[2])).toEqual(['v3.0.4', 'v3.0.3', 'v3.0.2']);
+    });
+  });
+
+  test('both parts share the three-view discovery ceiling', () => {
+    withClock((repo, env) => {
+      for (const tag of ['v3.0.6', 'v3.0.5', 'v3.0.4', 'v3.0.3']) repo.tag(tag);
+      const run = repo.run({
+        ...env, ...pocket, ...meter, FAKE_VIEW_ASSETS: 'both',
+        FAKE_VIEW_MODE_v3_0_6: 'prerelease', FAKE_VIEW_MODE_v3_0_5: 'draft', FAKE_VIEW_MODE_v3_0_4: 'unpublished',
+      });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\nmeter=yes\n');
+      expect(views(run.gh).map(call => call.split(' ')[2])).toEqual(['v3.0.6', 'v3.0.5', 'v3.0.4']);
+      expect(bodies(run.gh)).toHaveLength(0);
+    });
+  });
+
+  test('both parts share release notes and only the named meter build triggers a wait', () => {
+    withClock((repo, env) => {
+      const run = repo.run({
+        ...env, ...pocket, ...meter, ...lateMeter, RELEASE_CUT_POINTER_POLL: '1',
+        FAKE_VIEW_ASSETS: 'none', FAKE_VIEW_BODY: 'meter', FAKE_VIEW_PUBLISHED: published(600),
+      });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\nmeter=no\n');
+      expect(run.out).toContain('v3.0.2 is still building its meter build');
+      expect(views(run.gh)).toHaveLength(1);
+      expect(bodies(run.gh)).toHaveLength(1);
+      expect(run.gh.filter(call => call === pocketRead)).toHaveLength(1);
+    });
+  });
+
+  test('a rate-limited view stops optional calls for both parts', () => {
+    withClock((repo, env) => {
+      repo.tag('v3.0.3');
+      const run = repo.run({ ...env, ...pocket, ...meter, FAKE_VIEW_MODE_v3_0_3: 'rate-limited' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\nmeter=yes\n');
+      expect(run.gh).toHaveLength(3);
+      expect(views(run.gh).map(call => call.split(' ')[2])).toEqual(['v3.0.3']);
+      expect(readFileSync(env.FAKE_CUT_CLOCK, 'utf8').trim()).toBe(String(start));
+    });
+  });
+
+  for (const [name, verify, verifyOnRead, expected, pairReads] of [
+    ['a verified pair', 'ok', '1', 'no', 2],
+    ['a torn pair that verifies on the next poll', 'ok', '2', 'no', 3],
+    ['a pair that never verifies', 'fail', '1', 'yes', 3],
+  ] as const) {
+    test(`an attached meter build with ${name} leaves meter=${expected}`, () => {
+      withClock((repo, env) => {
+        const run = repo.run({
+          ...env, ...meter, ...lateMeter, FAKE_VIEW_ASSETS: 'meter',
+          FAKE_METER_VERIFY: verify, FAKE_METER_VERIFY_ON_READ: verifyOnRead,
+          RELEASE_CUT_POINTER_WAIT: '29', RELEASE_CUT_POINTER_POLL: '1',
+        });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain(`meter=${expected}\n`);
+        expect(pairs(run.gh)).toHaveLength(pairReads);
+        expect(run.bun.filter(call => call.startsWith('scripts/meter-lane.ts verify '))).toHaveLength(pairReads);
+      });
+    });
+  }
+
+  test('the default 300-second wait picks up both posts in one loop', () => {
+    withClock((repo, env) => {
+      const run = repo.run({ ...env, ...pocket, ...meter, ...latePocket, ...lateMeter, FAKE_VIEW_ASSETS: 'both' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=no\nmeter=no\n');
+      expect(run.out.match(/waiting up to 300s for its post/g)).toHaveLength(2);
+      expect(views(run.gh)).toHaveLength(1);
+      expect(run.gh.indexOf(pocketRead)).toBe(1);
+      expect(pairs(run.gh)).toHaveLength(2);
+      expect(readFileSync(env.FAKE_CUT_CLOCK, 'utf8').trim()).toBe(String(start + 30));
+    });
+  });
+
+  test('an intermediate covering pointer ends the wait before the candidate posts', () => {
+    withClock((repo, env) => {
+      repo.tag('v3.0.3');
+      const run = repo.run({ ...env, ...pocket, ...latePocket, RELEASE_CUT_POINTER_POLL: '1' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=no\n');
+      expect(run.out).toContain('pocket-lane now names v3.0.2');
+      expect(run.gh.filter(call => call === pocketRead)).toHaveLength(3);
+      expect(readFileSync(env.FAKE_CUT_CLOCK, 'utf8').trim()).toBe(String(start + 2));
+    });
+  });
+
+  test('a slow view cannot start a body lookup without time for its timeout', () => {
+    withClock((repo, env) => {
+      const run = repo.run({
+        ...env, ...pocket, FAKE_VIEW_SECONDS: '20', FAKE_VIEW_ASSETS: 'none',
+        FAKE_VIEW_BODY: 'pocket', FAKE_VIEW_PUBLISHED: published(600), RELEASE_CUT_POINTER_WAIT: '45',
+      });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\n');
+      expect(views(run.gh)).toHaveLength(1);
+      expect(bodies(run.gh)).toHaveLength(0);
+    });
+  });
+
+  test('re-reads an unpolled pointer before allowing it to cover after the wait', () => {
+    withClock((repo, env) => {
+      const run = repo.run({
+        ...env, ...pocket, ...meter, ...lateMeter, FAKE_VIEW_ASSETS: 'meter',
+        FAKE_POCKET_POINTER_VERSION: '3.0.2', FAKE_POCKET_POINTER_SECOND: '3.0.0',
+        RELEASE_CUT_POINTER_POLL: '1',
+      });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\nmeter=no\n');
+      expect(run.gh.filter(call => call === pocketRead)).toHaveLength(2);
+      expect(run.gh.at(-1)).toBe(pocketRead);
+    });
+  });
+
+  test('a final meter verification retry also refreshes an unpolled Pocket pointer', () => {
+    withClock((repo, env) => {
+      const run = repo.run({
+        ...env, ...pocket, ...meter, FAKE_METER_POINTER_VERSION: '3.0.2', FAKE_METER_VERIFY_ON_READ: '2',
+        FAKE_POCKET_POINTER_VERSION: '3.0.2', FAKE_POCKET_POINTER_SECOND: '3.0.0',
+        RELEASE_CUT_POINTER_WAIT: '28', RELEASE_CUT_POINTER_POLL: '1',
+      });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\nmeter=no\n');
+      expect(views(run.gh)).toHaveLength(0);
+      expect(pairs(run.gh)).toHaveLength(2);
+      expect(run.gh.filter(call => call === pocketRead)).toHaveLength(2);
+    });
+  });
+
+  for (const [delay, expected] of [[73, 'admitted'], [77, 'skipped']] as const) {
+    test(`a retry is ${expected} after discounting slow discovery and counting mandatory coverage`, () => {
+      withClock((repo, env) => {
+        repo.move();
+        const git = join(repo.bin, 'git');
+        writeFileSync(git, `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == push && ! -f "$FAKE_CUT_CLOCK.push" ]]; then
+  touch "$FAKE_CUT_CLOCK.push"
+  sleep ${delay}
+fi
+exec ${JSON.stringify(Bun.which('git'))} "$@"
+`);
+        chmodSync(git, 0o755);
+        const run = repo.run({
+          ...env, ...pocket, ...latePocket, FAKE_POCKET_POINTER_LATE_UNTIL: '3',
+          FAKE_VIEW_SECONDS: '20', FAKE_COVERAGE_SECONDS: '20', RELEASE_CUT_POINTER_POLL: '1',
+          RELEASE_CUT_STARTED: String(start - 40), RELEASE_CUT_DEADLINE: String(start + 250),
+          FAKE_POCKET: 'yes', HAS_KEYSTORE: 'true', HAS_PASSWORD: 'true',
+        });
+        expect(run.status).toBe(0);
+        expect(run.out).toContain('waiting up to 30s for its post');
+        expect(run.err).toContain(`push rejected after ${82 + delay}s`);
+        if (expected === 'admitted') {
+          expect(run.out).toContain('re-cutting on the new tip');
+          expect(run.output).toContain('pocket=yes\n');
+        } else {
+          expect(run.err).toContain('131s left in the release cut budget (longest attempt: 137s)');
+          expect(run.output).toBe('');
+        }
+      });
+    });
+  }
+
+  for (const [name, overrides, expected, pairReads] of [
+    ['unverifiable pair', { FAKE_METER_VERIFY: 'fail' }, 'yes', 1],
+    ['missing signature', { FAKE_METER_SIG: 'missing' }, 'yes', 1],
+    ['verified version without a local tag', { FAKE_METER_POINTER_LATE: '3.0.9', FAKE_METER_POINTER_AFTER: '1' }, 'yes', 1],
+    ['verified version with a local covering tag', { FAKE_METER_POINTER_LATE: '3.0.3', FAKE_METER_POINTER_AFTER: '1' }, 'no', 1],
+    ['verified pair', {}, 'no', 1],
+    ['pair that verifies on retry', { FAKE_METER_VERIFY_ON_READ: '2', RELEASE_CUT_POINTER_WAIT: '28' }, 'no', 2],
+    ['pair without time for a retry', { FAKE_METER_VERIFY_ON_READ: '2', RELEASE_CUT_POINTER_WAIT: '45', FAKE_COVERAGE_SECONDS: '20' }, 'yes', 1],
+  ] as const) {
+    test(`final meter coverage with a ${name} leaves meter=${expected}`, () => {
+      withClock((repo, env) => {
+        if (overrides.FAKE_METER_POINTER_LATE === '3.0.3') repo.tag('v3.0.3');
+        const run = repo.run({
+          ...env, ...meter, FAKE_METER_POINTER_VERSION: '3.0.2',
+          RELEASE_CUT_POINTER_WAIT: '0', RELEASE_CUT_POINTER_POLL: '1', ...overrides,
+        });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain(`meter=${expected}\n`);
+        expect(pairs(run.gh)).toHaveLength(pairReads);
+        if (overrides.FAKE_METER_POINTER_LATE === '3.0.3') {
+          expect(run.gh).toContain(coverage('v3.0.3'));
+          expect(run.out).toContain('meter-lane advanced to v3.0.3 and covers this checkout');
+        }
+      });
+    });
+  }
+});
+
+describe('lane repair on a plugin-only release (#668)', () => {
+  const asset = (name: string) => ({ name, state: 'uploaded' });
+  const pocketAsset = asset('latest.json');
+  const meterAssets = [asset('meter.json'), asset('meter.json.sig')];
+  const producerManifest = {
+    versionName: '3.0.2',
+    versionCode: 3000002,
+    url: 'https://github.com/owner/repo/releases/download/v3.0.2/automagik-pocket-3.0.2.apk',
+    sha256: 'a'.repeat(64),
+  };
+
+  function lane(repo: ReturnType<typeof repository>, env: Record<string, string>) {
+    const sleep = join(repo.bin, 'sleep');
+    writeFileSync(sleep, '#!/usr/bin/env bash\nprintf "%s\\n" "$1" >> "$FAKE_LANE_SLEEP_LOG"\n');
+    chmodSync(sleep, 0o755);
+    const sleepLog = join(repo.dir, 'lane-sleep.log');
+    writeFileSync(sleepLog, '');
+    const done = repo.runGates(['lane'], {
+      FAKE_POCKET_POINTER_VERSION: '3.0.0', FAKE_METER_POINTER_VERSION: '3.0.0',
+      FAKE_LANE_SLEEP_LOG: sleepLog, ...env,
+    });
+    return {
+      ...done, output: readFileSync(join(repo.dir, 'gates-output'), 'utf8'),
+      gh: readFileSync(join(repo.dir, 'gh.log'), 'utf8').trim().split('\n'),
+      sleeps: readFileSync(sleepLog, 'utf8').trim().split('\n').filter(Boolean),
+    };
+  }
+
+  for (const [mode, expected, probes] of [
+    ['ok', 'pocket=yes\npocket_since=\n', 1],
+    ['404', 'pocket=no\npocket_since=v3.0.0\n', 1],
+    ['error', 'pocket=yes\npocket_since=\n', 3],
+  ] as const) {
+    test(`Pocket repair handles a ${mode} lane probe`, () => {
+      const repo = repository();
+      try {
+        const run = lane(repo, { FAKE_LANE_API: mode, FAKE_POCKET_MANIFEST: '{}' });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain('kind=plugins\n');
+        expect(run.output).toContain(expected);
+        expect(run.gh.filter(call => call.endsWith('/pocket-lane'))).toHaveLength(probes);
+        expect(run.sleeps).toEqual(mode === 'error' ? ['5', '5'] : []);
+        if (mode === 'error') expect(run.stderr).toContain('::warning::could not check pocket-lane after three attempts');
+        if (mode !== '404') expect(run.stdout).toContain('pocket-lane has no readable latest.json');
+      } finally {
+        repo.cleanup();
+      }
+    });
+  }
+
+  for (const [name, field] of [
+    ['leading zero in versionName', { versionName: '3.00.2' }],
+    ['versionCode mismatch', { versionCode: 3000003 }],
+    ['wrong repository URL', { url: producerManifest.url.replace('owner/repo', 'other/repo') }],
+    ['uppercase hash', { sha256: 'A'.repeat(64) }],
+  ] as const) {
+    test(`a Pocket manifest with ${name} is unusable in both scripts`, () => {
+      const repo = repository();
+      try {
+        repo.tag('v3.0.2');
+        const FAKE_POCKET_MANIFEST = JSON.stringify({ ...producerManifest, ...field });
+        const cut = repo.run({ POCKET: 'yes', POCKET_SINCE: 'v3.0.0', FAKE_POCKET_MANIFEST });
+        expect(cut.status).toBe(0);
+        expect(cut.output).toContain('pocket=yes\n');
+        expect(cut.gh).toHaveLength(1);
+        const run = lane(repo, { FAKE_POCKET_MANIFEST, FAKE_LANE_API: 'ok', FAKE_LANE_ASSETS: JSON.stringify([pocketAsset]) });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain('pocket=yes\npocket_since=\n');
+        expect(run.stdout).toContain('pocket-lane has no readable latest.json');
+      } finally {
+        repo.cleanup();
+      }
+    });
+  }
+
+  test('Pocket repairs a valid manifest whose version has no local tag', () => {
+    const repo = repository();
+    try {
+      const run = lane(repo, {
+        FAKE_POCKET_MANIFEST: JSON.stringify(producerManifest),
+        FAKE_LANE_API: 'ok', FAKE_LANE_ASSETS: JSON.stringify([pocketAsset]),
+      });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\npocket_since=\n');
+      expect(run.gh).toContain('api repos/owner/repo/releases/tags/pocket-lane');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  for (const [name, mode, assets, overrides, result, notice] of [
+    ['empty lane', 'ok', [], { FAKE_METER_SIG: 'missing' }, 'meter=yes\nmeter_since=\n', '::notice::meter-lane has no pointer; this release posts a new pointer'],
+    ['missing signature asset', 'ok', meterAssets.slice(0, 1), { FAKE_METER_SIG: 'missing' }, 'meter=yes\nmeter_since=\n', '::warning::meter-lane has an incomplete or unreadable pointer'],
+    ['unverifiable pair', 'ok', meterAssets, { FAKE_METER_VERIFY: 'fail' }, 'meter=yes\nmeter_since=\n', '::warning::meter-lane has an incomplete or unreadable pointer'],
+    ['failed download with both assets', 'ok', meterAssets, { FAKE_METER_DOWNLOAD: 'error' }, 'meter=yes\nmeter_since=\n', '::warning::meter-lane has an incomplete or unreadable pointer'],
+    ['indeterminate lane probe', 'error', [], { FAKE_METER_DOWNLOAD: 'error' }, 'meter=yes\nmeter_since=\n', '::warning::could not check meter-lane after three attempts'],
+    ['bootstrap', '404', [], { FAKE_METER_DOWNLOAD: 'error' }, 'meter=no\nmeter_since=v3.0.0\n', ''],
+    ['held meter', 'ok', [], { FAKE_METER_SIG: 'missing', FAKE_METER_FROM_START: 'no' }, 'meter=no\nmeter_since=\n', '::notice::meter-lane has no pointer'],
+  ] as const) {
+    test(`meter repair measures the right baseline for a ${name}`, () => {
+      const repo = repository();
+      try {
+        const run = lane(repo, { FAKE_LANE_API: mode, FAKE_LANE_ASSETS: JSON.stringify(assets), ...overrides });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain('kind=plugins\n');
+        expect(run.output).toContain(result);
+        expect(run.gh.filter(call => call.endsWith('/meter-lane'))).toHaveLength(mode === 'error' ? 3 : 1);
+        expect(run.sleeps).toEqual(mode === 'error' ? ['5', '5'] : []);
+        if (notice) expect(run.stdout + run.stderr).toContain(notice);
+        if (notice.includes('incomplete')) expect(run.stdout).toContain('the post refuses it unless dispatched with replace_unverified_meter_pointer');
+      } finally {
+        repo.cleanup();
+      }
+    });
+  }
+});
+
+describe('release notes and the lane post windows (#668)', () => {
+  test('the published notes announce both builds with the cut’s search text', () => {
+    const note = (part: string) => workflow.split('\n').find(line => line.includes('"${' + part + '}"') && line.includes('notes="${notes}')) ?? '';
+    const pocketNote = '`automagik-pocket-${VERSION}.apk` follows';
+    const meterNote = 'usagemeter: `usagemeter-darwin-arm64`';
+    expect(note('POCKET').replaceAll('\\`', '`')).toContain(pocketNote);
+    expect(note('METER').replaceAll('\\`', '`')).toContain(meterNote);
+    const searched = cutScript.replaceAll('\\`', '`');
+    expect(searched).toContain('`${asset}` follows');
+    expect(searched).toContain(meterNote);
+  });
+
+  test('the post windows cover each producing job and five additional minutes', () => {
+    function timeoutMinutes(job: string) {
+      const jobBody = workflow.split(`\n  ${job}:\n`)[1]?.split(/\n  [\w-]+:\n/)[0];
+      const minutes = Number(jobBody?.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
+      expect(minutes).toBeGreaterThan(0);
+      return minutes;
+    }
+    for (const [part, jobs] of [
+      ['pocket', ['pocket', 'pocket-lane']],
+      ['meter', ['meter', 'meter-attach', 'meter-lane']],
+    ] as const) {
+      const window = Number(cutScript.match(new RegExp(`^${part}_post_window=(\\d+)$`, 'm'))?.[1]);
+      expect(window).toBeGreaterThanOrEqual((5 + jobs.reduce((sum, job) => sum + timeoutMinutes(job), 0)) * 60);
+    }
   });
 });

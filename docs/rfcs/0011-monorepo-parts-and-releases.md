@@ -294,7 +294,10 @@ README, recipe, keys, licence and preview beside the mod, as the pack's mods kee
   release when there is no lane yet. It is not simply the last tag, because a prerelease never moves
   `pocket-lane`. A Pocket change that shipped only in a prerelease (or whose lane post failed) is
   therefore still ahead of the lane, and the next release builds it again, even when that release
-  changes nothing under `apps/pocket/`. Never shipped in the part: its top-level `*.md`, `docs/`, unit tests (`test/`) and
+  changes nothing under `apps/pocket/`. A missing or unreadable `latest.json` on an existing
+  `pocket-lane` makes the next release measure from the start and rebuild Pocket to restore it,
+  and the cut can wait a bounded time for a previous stable release's Pocket post (#668).
+  Never shipped in the part: its top-level `*.md`, `docs/`, unit tests (`test/`) and
   `android/scripts/` (the terminal page's test, the vendoring script).
 - A release whose shipping changes since the last release are all under `apps/pocket/`, or under
   `apps/pocket/` and the herdr part (`herdr/`, `herdr-layout/`), is a `pocket` patch: 3.N.P, the APK (and the pack when `herdr/`
