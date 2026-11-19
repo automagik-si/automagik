@@ -363,6 +363,7 @@ test('serveBrowserReads answers a resend from the cache when the first submit fa
   browsers.read = (...args) => { reads += 1; return readPage(...args) }
   const results = []
   const polls = []
+  const waits = []
   let offline = true
   const post = (endpoint, payload, signal) => {
     if (endpoint === 'browser-result') {
@@ -371,13 +372,20 @@ test('serveBrowserReads answers a resend from the cache when the first submit fa
       return Promise.resolve(true)
     }
     if (endpoint !== 'browser-wait') return Promise.resolve(true)
+    waits.push(payload)
     return new Promise((resolve, reject) => {
       polls.push(resolve)
       signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
     })
   }
-  const stop = serveBrowserReads({ browsers, post, clientId: 'w1' })
+  // The desktop window also changes Electron's hold when the host asks.
+  const held = []
+  const release = Promise.withResolvers()
+  const confirms = [release.promise, Promise.resolve(false)]
+  const holdView = (botId, value) => { held.push([botId, value]); return confirms.shift() }
+  const stop = serveBrowserReads({ browsers, post, clientId: 'w1', holdView })
   await tick()
+  assert.equal(waits[0].native, true)
   // The first submit fails; the host's resend gets the cached answer, no re-read.
   polls.at(-1)([{ id: 'read-1', botId: 'a' }])
   await tick(); await tick()
@@ -389,6 +397,26 @@ test('serveBrowserReads answers a resend from the cache when the first submit fa
   assert.equal(reads, 1)
   assert.deepEqual(results[1], results[0])
   assert.equal(results[1].ok, true)
+  assert.equal(results[1].clientId, undefined)
+  // A release is acknowledged only once Electron confirms it, with this window's id; a
+  // resend while it is pending shares the one change.
+  polls.at(-1)([{ id: 'read-2', botId: 'a', held: false }])
+  await tick(); await tick()
+  polls.at(-1)([{ id: 'read-2', botId: 'a', held: false }])
+  await tick(); await tick()
+  assert.deepEqual(held, [['a', false]])
+  assert.equal(results.length, 2)
+  release.resolve(true)
+  await tick(); await tick()
+  const released = { id: 'read-2', clientId: 'w1', held: false, ok: true }
+  assert.deepEqual(results.slice(2), [released, released])
+  // A change Electron does not confirm is reported as failed.
+  polls.at(-1)([{ id: 'read-3', botId: 'a', held: true }])
+  await tick(); await tick()
+  assert.deepEqual(held, [['a', false], ['a', true]])
+  const { error, ...refused } = results.at(-1)
+  assert.deepEqual(refused, { id: 'read-3', clientId: 'w1', held: true, ok: false })
+  assert.match(error, /did not change browser control/)
   stop()
 })
 
