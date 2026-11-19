@@ -12,7 +12,7 @@
 // one (~/.automagik/bots), so neither sees the other's Bots or Sessions. Omni's own folder
 // (~/.omni: its sandbox, the Bun its channels download) is Omni's.
 import { execFile, spawn as nodeSpawn } from 'node:child_process'
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { cp, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
@@ -20,7 +20,7 @@ import { homedir } from 'node:os'
 import { delimiter, join, resolve, win32 } from 'node:path'
 import { DEFAULTS as PRIVACY_DEFAULTS, privacyEnv } from './privacy.js'
 import { CLOSE_INHERITED } from './child-paths.js'
-import { mergePatch } from './profile-patch.mjs'
+import { mergePatch, replaceProfilePatch } from './profile-patch.mjs'
 
 export const PROFILE = 'omni'
 const READY_TIMEOUT_MS = 120_000
@@ -406,15 +406,7 @@ export async function installProfile({ dshHome, source }) {
     const shippedPatch = readFileSync(join(source, 'cordis.patch.yml'), 'utf8')
     const merged = existsSync(patch) ? mergeProfilePatch(readFileSync(patch, 'utf8'), shippedPatch) : shippedPatch
     if (merged !== null) {
-      const scratch = mkdtempSync(join(target, '.profile-patch-'))
-      try {
-        const replacement = join(scratch, 'cordis.patch.yml')
-        const mode = existsSync(patch) ? statSync(patch).mode & 0o777 : 0o644
-        writeFileSync(replacement, merged, { mode })
-        renameSync(replacement, patch)
-      } finally {
-        rmSync(scratch, { recursive: true, force: true })
-      }
+      replaceProfilePatch(patch, merged, existsSync(patch) ? statSync(patch).mode & 0o777 : undefined)
     }
   }
   writeFileSync(marker, stamp)
