@@ -831,8 +831,11 @@ old account consent. It requires fresh in-app sign-in, preserves Bot models and 
 does not log out or copy the old account. Bot CLI user settings also start empty; project
 settings still load from the workspace. The previous physical folder and its unproved records
 remain at their original path: it is never renamed and reused. A surviving vendor process can
-write only to the abandoned generation. Cleanup removes it later only when exit is proven;
-unproved generations, including Windows crash records, stay retained. Both serialization and
+write only to the abandoned generation. The retired folder stays readable at its bound path: its
+`RETIRED.json` holds the disposition, and later starts remove nothing until the measurement
+side's complete post-last-write scan with the root frozen, its retirement record, and the
+session-absorption receipt hold; a `KEEP` file in the home opts out. Unproved generations,
+including Windows crash records, stay retained. Both serialization and
 app registrations sit outside the
 replaceable home. Captured launches check the installation's current-generation pointer as well
 as local version markers; delayed account reads and image tickets are invalidated by Reset.

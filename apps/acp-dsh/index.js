@@ -33,6 +33,7 @@ import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNA
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
+import { retiredLine } from './src/host/retired-home.js'
 import { enginesFor, PRESSURE_METHOD, pressureGuard } from './src/host/pressure.js'
 import { redactorFor } from './src/host/redact.js'
 import { agentRoute, carryEffort, crossed } from './src/host/switch.js'
@@ -158,6 +159,7 @@ export function apply(ctx, config = {}, {
 } = {}) {
   const homes = cliHome === undefined ? undefined : new CliHomes(cliHome, {
     onRecordError: vendor => warn(ctx, `the ${vendor} generation record could not be saved at startup`),
+    onRetired: (vendor, kept) => info(ctx, retiredLine(vendor, kept)),
   })
   if (homes) for (const vendor of ['claude', 'codex']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.
