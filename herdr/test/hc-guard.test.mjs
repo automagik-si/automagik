@@ -1995,3 +1995,148 @@ test("#1728 the CLI vouches for skewed guard entries only at recognized install 
     ["empty path", ""],
   ]) assert.equal(isInstalledGuardFolder(dir, env), false, name);
 });
+
+test("#628 send forwards a name at its checked address and keeps flags and text", (t) => {
+  const s = scene(t);
+  for (const [args, expected] of [
+    [["send", "cap", "hello"], ["send", "t101", "hello"]],
+    [["send", "--if", "idle", "cap", "--", "hi"], ["send", "--if", "idle", "t101", "--", "hi"]],
+    [["send", "cap", "--", "--on", "m"], ["send", "t101", "--", "--on", "m"]],
+  ]) {
+    const r = guardRun(s, args);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(calls(s).at(-1), expected);
+  }
+});
+
+test("#628 send preserves direct terminal IDs and existing --on sends by ID", (t) => {
+  const s = scene(t);
+  for (const args of [["send", "t101", "hello"], ["send", "--on", "m", "t101", "hello"]]) {
+    const r = guardRun(s, args);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(calls(s).at(-1), args);
+  }
+});
+
+test("#628 send with --on forwards the bare checked terminal ID", (t) => {
+  const s = scene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get["m/cap"] = state.get["m/t101"];
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const [args, expected] of [
+    [["send", "--on", "m", "cap", "hello"], ["send", "--on", "m", "t101", "hello"]],
+    [["send", "--on=m", "cap", "--", "hello"], ["send", "--on=m", "t101", "--", "hello"]],
+    [["send", "--on=m", "m/t101", "hello"], ["send", "--on=m", "t101", "hello"]],
+  ]) {
+    const r = guardRun(s, args);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(calls(s).at(-1), expected);
+  }
+});
+
+test("#628 send with --on refuses an address off the named machine", (t) => {
+  const s = scene(t);
+  for (const address of ["t101", "other/t101"]) {
+    editPane(s, "m/t101", { address });
+    const r = guardRun(s, ["send", "--on", "m", "t101", "hello"]);
+    assertRefused(r);
+    assert.match(r.stderr, /hc resolved the target off the --on machine/);
+  }
+  assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+});
+
+test("#628 a machine address returned only by get is refused for every checked non-send verb", (t) => {
+  const s = killScene(t);
+  editPane(s, "ghost", get("m/t120", { bot: ID.cap, "worker.of": ID.dev }, {
+    cwd: s.project, parent: "t100",
+  }));
+  for (const args of [
+    ["read", "ghost"], ["get", "ghost"], ["wait", "ghost"],
+    ["label", "ghost", "role=dev"], ["kill", "ghost"], ["rm", "ghost"],
+    ["events", "--terminal", "ghost"], ["events", "--children-of=ghost"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const caller = args[0] === "kill" ? "t103" : "t100";
+    const r = guardRun(s, args, { HC_TERMINAL_ID: caller });
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.ok(calls(s).some((argv) => same(argv, ["get", "ghost", "--json"])));
+    assert.equal(calls(s).some((argv) => same(argv, args)), false, `${args.join(" ")} never reaches hc`);
+  }
+});
+
+test("#628 read and events forward a local alias resolved only by get", (t) => {
+  const s = scene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.alias = state.get.t101;
+  writeFileSync(s.statePath, JSON.stringify(state));
+  const read = guardRun(s, ["read", "alias"]);
+  assert.equal(read.status, 0, read.stderr);
+  assert.deepEqual(calls(s).at(-1), ["read", "t101"]);
+  const events = guardRun(s, ["events", "--terminal=alias"]);
+  assert.equal(events.status, 0, events.stderr);
+  assert.deepEqual(calls(s).at(-1), ["events", "--terminal=t101"]);
+});
+
+test("#628 a name shaped like a terminal ID can resolve through get alone", (t) => {
+  const s = scene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.terminals = state.terminals.filter((row) => row.name !== "tester");
+  writeFileSync(s.statePath, JSON.stringify(state));
+  const r = guardRun(s, ["send", "tester", "hello"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["get", "tester", "--json"])));
+  assert.deepEqual(calls(s).at(-1), ["send", "t108", "hello"]);
+});
+
+test("#628 the guard refuses invalid terminal addresses from get", (t) => {
+  const s = scene(t);
+  for (const address of ["cap", "", "t 1", 101, "m/n/t1"]) {
+    editPane(s, "t101", { address });
+    const r = guardRun(s, ["send", "cap", "hello"]);
+    assertRefused(r);
+    assert.match(r.stderr, /the target's address from hc is not a terminal id/);
+  }
+  assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+});
+
+test("#628 the guard refuses when ls and get resolve to different panes", (t) => {
+  const s = scene(t);
+  editPane(s, "t101", { address: "t103" });
+  for (const target of ["cap", "t101"]) {
+    const r = guardRun(s, ["send", target, "hello"]);
+    assertRefused(r);
+    assert.match(r.stderr, /hc resolved the target to two different panes/);
+  }
+  assert.equal(calls(s).some((argv) => argv[0] === "send"), false);
+});
+
+test("#628 the kill shim forwards a get-only alias by address and preserves --json", (t) => {
+  const s = killScene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.alias = state.get.t105;
+  writeFileSync(s.statePath, JSON.stringify(state));
+  const r = shimRun(s, ["--json", "kill", "alias"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(killsSeen(s), [["--json", "kill", "t105"]]);
+});
+
+test("#628 checked verbs forward get-only local aliases at their canonical addresses", (t) => {
+  const s = killScene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.memberAlias = state.get.t101;
+  state.get.workerAlias = state.get.t105;
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const [args, expected, caller] of [
+    [["get", "memberAlias"], ["get", "t101"], "t100"],
+    [["wait", "memberAlias"], ["wait", "t101"], "t100"],
+    [["label", "workerAlias", "role=dev"], ["label", "t105", "role=dev"], "t100"],
+    [["rm", "workerAlias"], ["rm", "t105"], "t100"],
+    [["kill", "workerAlias"], ["kill", "t105"], "t103"],
+    [["events", "--children-of=memberAlias"], ["events", "--children-of=t101"], "t100"],
+  ]) {
+    const r = guardRun(s, args, { HC_TERMINAL_ID: caller });
+    assert.equal(r.status, 0, `${args.join(" ")}: ${r.stderr}`);
+    assert.deepEqual(calls(s).at(-1), expected);
+  }
+});
