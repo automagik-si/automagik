@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09 and 2026-11-10; delivery 7's replay at a harness change to be replaced by [RFC 0030](0030-code-mode-in-the-app.md)'s handoff note, owner 2026-11-10, its Q7) |
+| Status | In delivery (deliveries 1-4, 6 and 7: #187, #189, #537, #557, #558, #559, #563, #569, #585, #594; 5 (Gemini) open; amended 2026-11-06, 2026-11-08, 2026-11-09, 2026-11-10 and 2026-11-19 (#969 8b: the bridge credential survives a bridge process exit); delivery 7's replay at a harness change to be replaced by [RFC 0030](0030-code-mode-in-the-app.md)'s handoff note, owner 2026-11-10, its Q7) |
 | Milestone | 2. One message box (route descriptor); 3. Other agents in the same chat (ACP) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-10-30 |
@@ -170,12 +170,12 @@ patch is removed in the release whose DSH carries the change.
   `{ name, value }`. The bridge itself never listens on a port. It reaches DSH over a per-session
   back-channel to acp-dsh, authenticated with `DSH_BRIDGE_CREDENTIAL`: a per-session, unguessable
   value minted by acp-dsh at spawn and passed only in that bridge's `env`. It binds a request to
-  its Session and is revoked when that bridge exits; a fork mints a new one. It is not a boundary
-  against same-user code: third-party code running as the person can read the bridge's
-  environment. What holds regardless is server-side: the credential carries no approval, and
-  every DSH tool call enters DSH's approval service keyed to the Session. It offers the Session's
-  preset's tools, filtered by the Session's level, and answers every DSH tool call through DSH's
-  approval service. Its failure is the turn's: a bridge the adapter skipped (a same-named server
+  its Session. A bridge process exit detaches it, and a respawn can re-attach with the same
+  credential. The host revokes it when the ACP session ends, its agent process exits, a fork
+  replaces it, or the probe ends. Code running as the same user can read the bearer and
+  impersonate a replacement. The bridge offers the Session's preset tools filtered by its level,
+  and answers every DSH tool call through DSH's server-side approval service. Its failure is
+  the turn's: a bridge the adapter skipped (a same-named server
   in the person's Codex config) fails the turn instead of running with half a tool set.
 - Setting `dshTools` (absent means the per-agent default; false is the kill switch): the bridge
   and live
@@ -205,11 +205,11 @@ means the per-agent default (Contracts).
   no listen socket (no port, so no address another process on the machine can reach) and dies
   with the adapter. "Nothing on the machine can address it" is true of this leg only: the
   bridge→DSH leg is a per-session back-channel that has an address by construction. Its
-  credential `DSH_BRIDGE_CREDENTIAL` binds a request to its Session and is revoked with the
-  bridge; it is not a boundary against third-party code running as the person, which can read the
-  bridge's environment (Amendments, "The bridge"). The boundary that does not depend on it is
-  server-side: the credential cannot approve, and DSH's approval service owns every DSH tool call
-  for the Session. The stdio leg's transport is spiked; the credential-bearing back-channel shipped
+  credential `DSH_BRIDGE_CREDENTIAL` binds a request to its Session. A bridge process exit
+  detaches it, and the same credential lets a respawn re-attach. The host owns revocation
+  (Amendments, "The bridge"). Code running as the same user can read the bearer and impersonate
+  a replacement. DSH's server-side approval service owns every DSH tool call for the Session.
+  The stdio leg's transport is spiked; the credential-bearing back-channel shipped
   (#537), and delivery 6 probes both refusals (Deliveries, 6). (`dshTools` off.) No
   bridge exists, so neither leg does.
 - **Credentials.** Stored with mode 0600 or in the OS keychain. Never returned to the client.
@@ -351,12 +351,14 @@ own arguments, named `dsh`. Two legs, one credential story:
   acp-dsh, authenticated with `DSH_BRIDGE_CREDENTIAL`: a per-session, unguessable value minted by
   acp-dsh at spawn and passed only in that bridge's `session/new` `env`. DSH accepts a request
   only with the value minted for that Session; it refuses a missing or another Session's value.
-  The credential is revoked when that bridge exits, and a fork mints a new one. It is not a
-  boundary against same-user code: a process running as the person can read the bridge's
-  environment and reuse the value. The boundary that does not depend on it is server-side: the
-  credential has no approval, every DSH tool call enters DSH's approval service under the
-  Session's level, and a call waits for the person exactly as DSH's own tools do. Delivery 6
-  probes the refusal without the credential, the revocation on fork, and that a credential alone
+  The host revokes the credential when the ACP session ends, its agent process exits, a fork
+  replaces it, or the probe ends. Each bridge process has its own attachment ID. An exit detaches
+  that process and ends its calls. A replacement can list tools with the same credential and a
+  new ID. Only the current attachment can act, and the host revokes the credential on the 65th
+  retirement. Code running as the same user can read the bearer and impersonate a replacement.
+  Approval stays server-side under the Session's level, and a call waits for the person exactly
+  as DSH's own tools do. Delivery 6 probes the refusal without the credential, the revocation on
+  fork, and that a credential alone
   cannot approve. The spike's server was an echo with no DSH link, so no part of this leg ran.
 
 Each call arrives with the ACP session it belongs to; the bridge resolves it to DSH's Session and

@@ -1062,7 +1062,7 @@ export class AcpAdapter extends LlmAdapter {
     if (record === undefined) return
     this.backchannel.announce(record)
     const deadline = Date.now() + (agent.bridgeReadyMs ?? BRIDGE_READY_MS)
-    while (!record.listed && !record.closed) {
+    while (!record.listed && !record.closed && !record.disconnected) {
       if (Date.now() > deadline) {
         const error = new Error(`the ${BRIDGE_NAME} bridge did not reach DSH (a server of that name in the agent's own config skips it)`)
         error.code = 'acp_bridge_missing'
@@ -1070,7 +1070,7 @@ export class AcpAdapter extends LlmAdapter {
       }
       await new Promise(resolve => setTimeout(resolve, BRIDGE_READY_POLL_MS).unref?.())
     }
-    if (record.closed) {
+    if (record.closed || record.disconnected) {
       const error = new Error(`the ${BRIDGE_NAME} bridge closed before it listed its tools`)
       error.code = 'acp_bridge_missing'
       throw error
@@ -1094,6 +1094,8 @@ export class AcpAdapter extends LlmAdapter {
       native: live.twinsOff === true,
     })
     live.bridge = next
+    // The source is done running tools before the fork starts.
+    this.backchannel.revoke(previous)
     try {
       await live.run.held(() => live.run.fork({
         cwd: dshAgent?.session?.header?.cwd ?? homedir(),
@@ -1111,7 +1113,6 @@ export class AcpAdapter extends LlmAdapter {
       if (previous !== undefined) this.backchannel.revoke(previous)
       throw error
     }
-    this.backchannel.revoke(previous)
     return next
   }
 
@@ -1354,17 +1355,15 @@ export class AcpAdapter extends LlmAdapter {
           live = undefined
         }
       }
-      // A bridge that closed (its process ended and said so) is not coming back: the agent on
-      // that session has lost DSH's tools for good, and would answer this turn without them.
-      // Its session ends here and the turn starts a new one, which the replay carries the chat
-      // to, as for an agent that is no longer alive (#969).
+      // If the bridge process exited and the adapter has yet to re-attach by the next turn,
+      // start a new agent session with DSH's tools and replay the chat to it (#969).
       let full = false
       try { full = levelOf(this.ctx.get?.('approval'), dshAgent?.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets')).full === true } catch {}
       // Native-tools mode keeps the agent's own tools, so it keeps the hard ask rules too: the
       // person's own allow rules must not silently skip the ask for a hard Bash or file case.
       const native = this.nativeOn(agent, sessionId)
       const asks = typeof agent.hardAsk === 'function' && !(this.bridgeOn(agent, sessionId) && agent.disableBuiltInTools === true && !native) && !full
-      const bridgeGone = live?.bridge?.closed === true && this.bridgeOn(agent, sessionId)
+      const bridgeGone = (live?.bridge?.closed === true || live?.bridge?.disconnected === true) && this.bridgeOn(agent, sessionId)
       if (bridgeGone) this.warn(`${live.name} lost its ${BRIDGE_NAME} bridge: its session was ended and a new one starts`)
       // A flip of the mode is a new tool set: the next turn starts a new agent session on it.
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
@@ -1499,7 +1498,12 @@ export class AcpAdapter extends LlmAdapter {
             })
             state.run = run
             this.live.set(sessionId, state)
-            await run.start({ signal: options.signal })
+            const starting = run.start({ signal: options.signal })
+            run.gone?.catch(() => {
+              // A fork can replace the bridge on this run. A startup retry can replace the run.
+              if (state.run === run && state.bridge !== undefined) this.backchannel.revoke(state.bridge)
+            })
+            await starting
             if (fileOwner && (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined)) throw new Error('Image permission changed during startup.')
             try { agent.proven?.() } catch {}
             break
