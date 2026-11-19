@@ -1709,6 +1709,16 @@ reports no status to hc can't say it is waiting for an approval: restart refuses
 --machine, on that machine (there it needs --force, since it runs at once); a bot whose helpers
 end with its pane there is refused until each helper's pane is ended (hc kill M/tN).
 
+When HC_TERMINAL_ID identifies a requesting terminal, new linked starts and all linked
+restarts refuse: am cannot verify their return route, including --force/--fresh/swaps/--save
+and --tree. A verified already-running start can still return without launching. With no
+caller identity, ordinary non-orchestrated linked launches remain available.
+For orchestration, launch from the origin HC terminal with hc run --bg --on M, retaining
+its real default or explicit HC parent and supplying first-task/report instructions. Use
+the returned M/tN address at the origin. Do not guess reverse aliases or target-local
+addresses for the origin. Remote exec of local am loses origin provenance; this patch
+cannot detect or repair that case and does not promise report delivery for it.
+
 For a code agent: the am skill teaches these commands,
 https://github.com/automagik-si/automagik/blob/dev/skills/am/SKILL.md
 Install it: npx skills add automagik-si/automagik --skill am
@@ -3372,6 +3382,7 @@ async function windowPlaceOn(machine, key) {
  * { running } when the ledger names a pane for the bot by the time its lock is taken.
  */
 async function seatOnMachine(project, bot, over = {}) {
+  refuseLinkedCaller(project);
   const { file, key, machine } = project;
   if (over.recheck) await over.recheck();
   else {
@@ -3525,6 +3536,19 @@ const seatOnJson = (bot, seat) => ({ id: bot.id, terminal: seat.terminal, machin
   argv: maskedArgv(seat.argv, seat.labels?.[SESSION_LABEL] ?? null), labels: maskedLabels(seat.labels),
   space: seat.place?.space ?? null, tab: seat.place?.tab ?? null, hookWritten: seat.hookWritten ?? false, warnings: seat.warnings });
 
+/** The remote seat briefing has no supported cross-origin parent/return registration.
+ * Refuse orchestration rather than fabricate a reverse alias or forward a bare caller id.
+ * A target-local am invoked through remote exec has already lost that origin provenance;
+ * absence of HC_TERMINAL_ID here cannot detect or repair that case.
+ */
+function refuseLinkedCaller(project) {
+  if (!project.machine || !process.env.HC_TERMINAL_ID) return;
+  throw new CliError(`Linked am launch cannot verify a return route to the requesting HC terminal; nothing was started or restarted. `
+    + `From the origin HC terminal use hc run --bg --on ${project.machine} with its real default or explicit HC parent and explicit first-task/report instructions. `
+    + `Use the returned ${project.machine}/tN address at the origin. Remote exec of local am loses origin provenance and is not a supported return-route workaround.`,
+  1, { refused: "linked-return-route" });
+}
+
 /** start --machine: the bot's pane there (seatOnMachine); one that runs already is reported. */
 async function startOnMachine(opts, project, bot) {
   const observed = await linkedObservation(project, bot);
@@ -3532,6 +3556,7 @@ async function startOnMachine(opts, project, bot) {
     const at = observed.candidate.get.address;
     return opts.json ? { id: bot.id, running: at.split("/")[1], machine: project.machine } : `${bot.name} is already running in ${at}.`;
   }
+  refuseLinkedCaller(project);
   if (opts.space) throw new CliError("--space and --tab are this computer's window places; a start on a linked machine finds its own.", 2);
   const seat = await seatOnMachine(project, bot);
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
@@ -5329,6 +5354,8 @@ async function cmdRestart(opts, [ref]) {
   const bot = await botIn(project, ref, opts);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
+  // Before swap validation, preparation or a delegated tree transaction.
+  refuseLinkedCaller(project);
   if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
   if (project.machine) {
     // Observe before swap/model validation can refresh a caller-side model cache.

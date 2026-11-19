@@ -7,6 +7,7 @@ import { startFakeCore } from "./fake-core.mjs";
 // ever sends a pane keys. The real hc and window are never touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,7 +34,7 @@ const exe = (path, text) => { writeFileSync(path, text); chmodSync(path, 0o755);
 /** The warning a start on a machine with no `hc kill` shim prints (#955). */
 const NO_KILL_SHIM = /^\S.* runs on vm without the hc kill shim \(#955\): /;
 
-function scene(t, { terminals = [], tui = true } = {}) {
+function scene(t, { terminals = [], tui = true, caller = false } = {}) {
   const root = scratchRoot(t, "hb-panes-");
   const bin = join(root, "bin"), home = join(root, "home"), app = join(root, "app"), vm = join(root, "vm"), vmBin = join(root, "vm-bin");
   for (const d of [bin, home, app, vm, vmBin]) mkdirSync(d, { recursive: true });
@@ -64,11 +65,18 @@ function scene(t, { terminals = [], tui = true } = {}) {
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog,
     AUTOMAGIK_HERDR_RESTART_STABLE_MS: "300", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "4000", AUTOMAGIK_HERDR_TAB_WAIT_MS: "300",
     GIT_CEILING_DIRECTORIES: root };
+  if (caller) {
+    const state = JSON.parse(readFileSync(statePath));
+    state.terminals.push({ address: "t1", state: "live", created_ms: 1, cwd: home, labels: {},
+      foreground: { argv: ["codex", "--no-daemon"] }, status: { state: "working", app: "codex" } });
+    writeFileSync(statePath, JSON.stringify(state));
+  }
   const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
   Object.assign(env, { ...core.env });
   Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
-  // Run from a pane (t1), as a bot would: hc run's default parent is the calling terminal.
-  env.HC_TERMINAL_ID = "t1";
+  // Ordinary linked launches have no requesting HC parent. Dedicated caller tests
+  // include a real fixture terminal, rather than inheriting the test runner's identity.
+  env.HC_TERMINAL_ID = caller ? "t1" : "";
   const cli = (args, more = {}) => {
     core.control({ ...env, ...more });
     const r = spawnSync(process.execPath, [CLI, ...args], { cwd: root, env: { ...env, ...more }, encoding: "utf8" });
@@ -1792,4 +1800,105 @@ test("#1634 a second target label appearing during restart preparation refuses b
   assert.deepEqual(linkedBytes(s), before);
   assert.equal(s.hcState().terminals[0].state, "live");
   noLaunchOrKill(s);
+});
+
+// #1635 snapshots all caller/target configuration trees and the fake window,
+// distinguishing read-only transport probes from settings/hooks/delegated execution.
+function linkedFiles(s) {
+  const out = {};
+  const visit = (path) => {
+    // The existing CLI records refused commands in its diagnostic log. That is
+    // not a settings/roster/attachment mutation or a launch preparation step.
+    if (path === join(s.app, "automagik-herdr/actions.log")) return;
+    if (!existsSync(path)) return;
+    if (statSync(path).isDirectory()) {
+      out[path] = "directory";
+      for (const name of readdirSync(path).sort()) visit(join(path, name));
+    } else out[path] = createHash("sha256").update(readFileSync(path)).digest("hex");
+  };
+  for (const path of [s.app, s.home, join(s.root, "vm"), join(s.root, "herdr-app.json")]) visit(path);
+  return out;
+}
+function noLinkedPreparation(s, from = 0) {
+  const calls = s.calls().slice(from);
+  noLaunchOrKill(s, from);
+  assert.deepEqual(calls.filter((c) => c[0] === "file" && c[1] !== "read"), []);
+  // Project identity needs only test/git. No shell script, environment preparation,
+  // delegated CLI, settings/hook writer, window creation or interaction is permitted.
+  assert.deepEqual(calls.filter((c) => c[0] === "exec" && !["test", "git"].includes(c[c.indexOf("--") + 1])), []);
+  assert.deepEqual(s.appCalls(), []);
+}
+
+for (const attached of [false, true]) test(`#1635 caller-context linked launches refuse before mutation (${attached ? "confirmed pane" : "stopped"})`, (t) => {
+  const s = scene(t, { caller: true, terminals: attached ? [atlasPane({ labels: { bot: ATLAS }, status: { state: "idle", app: "hermes" } })] : [] });
+  seedCallerLedger(s, attached ? [linkedRow(s)] : []);
+  s.fakeWindow({ spaces: [] });
+  const before = linkedFiles(s);
+  const cases = [
+    ["restart", "Atlas"],
+    ["restart", "Atlas", "--force", "--fresh"],
+    ["restart", "Atlas", "--agent", "claude", "--save"],
+    ["restart", "Atlas", "--agent", "antigravity", "--model", "uncached-model", "--save", "--force"],
+    ["restart", "Atlas", "--tree", "--force"],
+    ["restart", "Atlas", "--tree", "--force", "--fresh", "--fresh-shared", "--agent", "codex", "--model", "unvalidated-model", "--save"],
+    ...(!attached ? [["start", "Atlas"], ["start", "Atlas", "--force", "--fresh"]] : []),
+  ];
+  for (const args of cases) {
+    const r = s.cli([...args, ...s.on, "--json"]);
+    assert.equal(r.code, 1, `${args.join(" ")}: ${r.out} ${r.err}`);
+    assert.match(r.err, /cannot verify a return route/);
+    assert.match(r.err, /origin HC terminal.*hc run --bg --on vm/);
+    assert.match(r.err, /real.*parent.*first-task.*report instructions/);
+    assert.match(r.err, /returned vm\/tN/);
+    assert.doesNotMatch(r.err, /--no-parent|hc send t1(?:\s|$)/);
+    assert.equal(r.json().refused, "linked-return-route");
+  }
+  assert.deepEqual(linkedFiles(s), before);
+  noLinkedPreparation(s);
+  if (attached) assert.equal(s.hcState().terminals.find((p) => p.address === "vm/t8").state, "live");
+});
+
+test("#1635 caller-context start may report the verified existing target without launching or adopting", (t) => {
+  const s = scene(t, { caller: true, terminals: [atlasPane({ labels: { bot: ATLAS }, status: { state: "working", app: "hermes" } })] });
+  seedCallerLedger(s);
+  s.fakeWindow({ spaces: [] });
+  const before = linkedFiles(s);
+  const r = s.cli(["start", "Atlas", ...s.on, "--force", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), { id: ATLAS, running: "t8", machine: "vm" });
+  assert.deepEqual(linkedFiles(s), before);
+  noLinkedPreparation(s);
+});
+
+for (const state of ["unknown", "duplicate"]) test(`#1635 caller-context start does not turn ${state} target state into an already-running success`, (t) => {
+  const s = scene(t, { caller: true, terminals: [atlasPane({ labels: { bot: ATLAS } })] });
+  seedCallerLedger(s);
+  s.fakeWindow({ spaces: [] });
+  s.setState((data) => {
+    if (state === "unknown") data.failGet = ["vm/t8"];
+    else data.terminals.push(atlasPane({ address: "vm/t9", created_ms: 9, cwd: s.project, labels: { bot: ATLAS } }));
+  });
+  const before = linkedFiles(s);
+  const r = s.cli(["start", "Atlas", ...s.on, "--force", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  // Transport CliErrors have stderr only; structured refusals also emit JSON.
+  if (r.out.trim()) assert.equal(r.json().running, undefined);
+  assert.match(r.err, state === "unknown" ? /hc get vm\/t8 failed/ : /duplicate live labels/);
+  assert.deepEqual(linkedFiles(s), before);
+  noLinkedPreparation(s);
+});
+
+test("#1635 no-caller member start and restart remain ordinary non-orchestrated launches", (t) => {
+  const s = scene(t, { caller: false });
+  seedCallerLedger(s);
+  const start = s.cli(["start", "Hedge", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  const restart = s.cli(["restart", "Hedge", ...s.on, "--fresh", "--force", "--json"]);
+  assert.equal(restart.code, 0, restart.err);
+  assert.equal(restart.json().replaced, start.json().terminal);
+  const runs = s.calls().filter((c) => c[0] === "run");
+  assert.equal(runs.length, 2);
+  assert.ok(runs.every((c) => c.includes("--on") && c.includes("--no-parent")));
+  assert.deepEqual(keysSent(s.calls()), []);
+  // Compatibility only: this does not prove a cross-origin return/report route.
 });
