@@ -63,8 +63,9 @@ must leave the profile args, the separator and the command intact.
 
 With `DSH_SANDBOX_MASK=1` the wrapper first adds `--unshare-net` (unless the profile already
 carries `--unshare-net` or `--unshare-all`), so the pane gets a fresh network namespace whose
-`lo` is only its own. It then inserts these mounts after the profile args and before the
-`--`, in this order:
+`lo` is only its own. A profile that pairs either of those with `--share-net` is refused: bwrap
+would re-enable the host network, and the wrapper never starts a pane on it. It then inserts
+these mounts after the profile args and before the `--`, in this order:
 
 1. `--tmpfs <dirname(AM_HC_REAL_SOCKET)>` - hides the core socket and the holder sockets beside
    it (and any other listener in the core's runtime folder).
@@ -126,6 +127,8 @@ Before running `bwrap`, the wrapper refuses with one `hc-socket-mask: ` line and
   another pane's proxy could be impersonated);
 - `HOME` is absent or not absolute (the runner will not guess where `~/.ssh` is);
 - the runner arguments have no `--` separator (the command cannot be preserved);
+- the profile carries `--share-net` together with `--unshare-all` or `--unshare-net`: bwrap
+  would re-enable the host network, so the pane would not have its own namespace;
 - `--pack-root` is relative, missing or not a folder, or is not
   `<data home>/automagik-herdr/dsh-sandbox` (the data parent could not be made read-only);
 - the proxy parent is not the `automagik-hc-proxy` folder, or it is the real socket path or an
@@ -174,11 +177,15 @@ wrapper.
   else is added; there is no host loopback, no LAN route and no port list.
 - **The filter is the host-side egress proxy.** The relay forwards every connection to a Unix
   socket in a 0700 host folder; the wrapper serves an HTTP CONNECT proxy there. The broker
-  resolves the requested name once, checks the resolved address and connects to that literal:
-  loopback, link-local, the RFC 1918/ULA/CGNAT ranges, multicast/reserved ranges, documentation
-  ranges and every address this host itself owns are refused with 403. A name that later
-  changes cannot turn into a LAN destination because the check and the connect use the same
-  address. Only CONNECT is accepted; a plain HTTP absolute-URI request gets 405.
+  normalizes the requested host before any range check - lower-case, zone id dropped, the full
+  IPv6 form expanded, an IPv4-mapped IPv6 address folded to its IPv4, and an IPv4 in inet_aton's
+  decimal/octal/hex spellings read as that IPv4 - then resolves the name once, checks the
+  normalized address with `net.BlockList` and connects to that same pinned literal: loopback,
+  link-local, the RFC 1918/ULA/CGNAT ranges, multicast/reserved ranges, documentation ranges and
+  every address this host itself owns are refused with 403. A name that later changes cannot
+  turn into a LAN destination because the resolver is never consulted again, and anything
+  unparseable (userinfo, brackets, an unparseable numeric spelling) fails closed. Only CONNECT
+  is accepted; a plain HTTP absolute-URI request gets 405.
 - **The pane gets a proxy environment.** The wrapper starts bwrap with `HTTPS_PROXY`,
   `HTTP_PROXY`, `ALL_PROXY` (and their lower-case forms) set to `http://127.0.0.1:3128`,
   `NO_PROXY=127.0.0.1,localhost,::1`, and `NODE_USE_ENV_PROXY=1`, so DSH's own proxy installer,

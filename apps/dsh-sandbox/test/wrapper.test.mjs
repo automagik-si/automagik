@@ -37,11 +37,14 @@ import {
   isPublicIpv4,
   isPublicIpv6,
   makeEgressDir,
+  mappedIpv4,
   maskArgs,
   MSG_PREFIX,
   NETNS_FLAG,
   netnsCapabilityProblem,
   netnsPlatformProblem,
+  normalizeAddress,
+  normalizeTargetHost,
   parseConnectTarget,
   parseRelayArgs,
   PROXY_SOCKET,
@@ -313,6 +316,23 @@ test('switch on unshares the network, masks the real dir, ~/.ssh and the proxy, 
   assert.ok(args.includes(inside), args.join(' '));
   assert.ok(args.includes(join(inside, EGRESS_RELAY_NAME)), args.join(' '));
   assert.ok(args.includes(join(inside, EGRESS_SOCKET_NAME)), args.join(' '));
+
+  // A profile that unshares all namespaces already has the network namespace, so the wrapper
+  // adds no second switch. --share-net after it must not silently re-enable the host network:
+  // that pair is refused instead of trusted to bwrap's argument order.
+  const fixtures = { containerSockets: [], egressDir: fixture.egress, relaySource: WRAPPER };
+  const all = maskArgs(['--unshare-all', '--ro-bind', '/', '/', '--', ...COMMAND], env, fixtures);
+  assert.equal(all.fatal, null);
+  assert.equal(all.args.includes(NETNS_FLAG), false, 'no second switch next to --unshare-all');
+  const shared = maskArgs(
+    ['--unshare-all', '--share-net', '--ro-bind', '/', '/', '--', ...COMMAND], env, fixtures);
+  assert.match(shared.fatal, /--share-net/);
+  assert.match(shared.fatal, /refusing to start the pane on the host network/);
+  assert.equal(shared.netns, false);
+  const both = maskArgs(
+    [NETNS_FLAG, '--share-net', '--ro-bind', '/', '/', '--', ...COMMAND], env, fixtures);
+  assert.match(both.fatal, /--share-net/);
+  assert.equal(both.netns, false);
 });
 
 test('the pane gets the proxy environment, so only the relay is reachable', () => {
@@ -957,15 +977,37 @@ test('only public unicast destinations pass the egress filter', () => {
   for (const blocked of ['127.0.0.1', '10.1.2.3', '192.168.1.10', '172.16.4.5',
     '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1', '255.255.255.255',
     '192.0.2.9', '203.0.113.7', '::1', '::', 'fe80::1', 'fc00::1', 'ff02::1',
-    '::ffff:127.0.0.1', '::ffff:10.0.0.1', '::ffff:7f00:1']) {
+    '::ffff:127.0.0.1', '::ffff:10.0.0.1', '::ffff:7f00:1', '::ffff:c0a8:101',
+    // The reviewer's exact reproduction: the full-form IPv4-mapped spellings.
+    '0:0:0:0:0:ffff:127.0.0.1', '0:0:0:0:0:ffff:c0a8:101', '0:0:0:0:0:ffff:7f00:1',
+    // The full-form unspecified and loopback addresses.
+    '0:0:0:0:0:0:0:0', '0:0:0:0:0:0:0:1',
+    // IPv4 in inet_aton's decimal, octal and hex spellings, and a zone id on a mapped form.
+    '0177.0.0.1', '0x7f.1', '0x7f000001', '2130706433', '::ffff:127.0.0.1%lo',
+    // A trailing dot and case variants of a reserved name are never an address.
+    '127.0.0.1.', 'localhost', 'LOCALHOST', 'localhost.']) {
     assert.equal(isPublicAddress(blocked, { hostAddresses }), false, blocked);
   }
-  for (const allowed of ['93.184.216.34', '1.1.1.1', '8.8.8.8', '2001:4860:4860::8888']) {
+  for (const allowed of ['93.184.216.34', '1.1.1.1', '8.8.8.8', '2001:4860:4860::8888',
+    '2606:4700:4700::1111']) {
     assert.equal(isPublicAddress(allowed, { hostAddresses }), true, allowed);
   }
   assert.equal(isPublicIpv4('198.51.100.4'), false);
   assert.equal(isPublicIpv6('2001:4860:4860::8888'), true);
   assert.equal(hostAddressSet().size > 0, true);
+  // Normalization runs before the range check, so every spelling of one host agrees.
+  assert.equal(normalizeAddress('0:0:0:0:0:ffff:127.0.0.1'), '127.0.0.1');
+  assert.equal(normalizeAddress('0:0:0:0:0:ffff:c0a8:101'), '192.168.1.1');
+  assert.equal(normalizeAddress('0177.0.0.1'), '127.0.0.1');
+  assert.equal(normalizeAddress('0x7f.1'), '127.0.0.1');
+  assert.equal(normalizeAddress('2130706433'), '127.0.0.1');
+  assert.equal(normalizeAddress('FE80::1%eth0'), 'fe80:0:0:0:0:0:0:1');
+  assert.equal(normalizeAddress('0:0:0:0:0:0:0:1'), '0:0:0:0:0:0:0:1');
+  assert.equal(normalizeAddress('not an address'), null);
+  assert.equal(mappedIpv4('0:0:0:0:0:ffff:7f00:1'), '127.0.0.1');
+  assert.deepEqual(normalizeTargetHost('LOCALHOST.'), { kind: 'name', name: 'localhost' });
+  assert.equal(normalizeTargetHost('user@127.0.0.1'), null);
+  assert.equal(normalizeTargetHost('08.0.0.1'), null);
 });
 
 /** Read a complete HTTP response line from a socket. */
@@ -985,7 +1027,7 @@ function responseLine(socket) {
   });
 }
 
-test('the egress proxy refuses host, loopback and LAN, and tunnels a public target', async () => {
+test('the egress proxy refuses every non-public spelling and tunnels the pinned public address', async () => {
   const root = temp();
   const socketPath = join(root, 'egress.sock');
   const echo = net.createServer((socket) => socket.pipe(socket));
@@ -993,10 +1035,24 @@ test('the egress proxy refuses host, loopback and LAN, and tunnels a public targ
   await new Promise((resolve) => echo.listen(0, '127.0.0.1', resolve));
   const echoPort = echo.address().port;
   const connects = [];
+  const lookups = new Map();
   const broker = await startEgressBroker({
     path: socketPath,
     hostAddresses: new Set(['127.0.0.1', '10.9.9.9']),
-    lookup: async () => [{ address: '93.184.216.34', family: 4 }],
+    lookup: async (name) => {
+      const count = (lookups.get(name) ?? 0) + 1;
+      lookups.set(name, count);
+      // A name is resolved once per request. rebind.test answers a public address first and
+      // 127.0.0.1 on every later answer: the first tunnel must still go to the pinned address.
+      if (name === 'rebind.test') {
+        return count === 1
+          ? [{ address: '93.184.216.34', family: 4 }]
+          : [{ address: '127.0.0.1', family: 4 }];
+      }
+      // A name whose answer is a full-form IPv4-mapped loopback address.
+      if (name === 'mapped.test') return [{ address: '0:0:0:0:0:ffff:127.0.0.1', family: 6 }];
+      return [{ address: '93.184.216.34', family: 4 }];
+    },
     connect: (options) => {
       connects.push(options);
       return net.connect(echoPort, '127.0.0.1');
@@ -1009,17 +1065,34 @@ test('the egress proxy refuses host, loopback and LAN, and tunnels a public targ
       responseLine(client).then((result) => { resolve({ client, ...result }); }).catch(reject);
     });
 
-    for (const target of ['127.0.0.1:80', '10.9.9.9:443', 'localhost:8080', '[::1]:80']) {
+    const refused = [
+      '127.0.0.1:80', '10.9.9.9:443', 'localhost:8080', '[::1]:80',
+      // The reviewer's exact reproduction, compressed and full form, and the full-form ::1.
+      '[0:0:0:0:0:ffff:127.0.0.1]:80', '[0:0:0:0:0:ffff:c0a8:101]:443',
+      '[0:0:0:0:0:ffff:7f00:1]:80', '[::ffff:127.0.0.1]:80',
+      '[0:0:0:0:0:0:0:1]:80', '[::]:80',
+      // IPv4 in decimal, octal and hex spellings; the resolver must never see them.
+      '0177.0.0.1:80', '0x7f.1:80', '2130706433:80',
+      // Userinfo, bracketed and trailing-dot/case variants of a refused name.
+      'user@127.0.0.1:80', 'user:secret@localhost:80', 'localhost.:8080', 'LOCALHOST:8080',
+      // A DNS name whose resolved address is refused (checked after normalizing it).
+      'mapped.test:443',
+    ];
+    for (const target of refused) {
       const { client, head } = await proxyConnect(target);
       assert.match(head, /^HTTP\/1\.1 403 /, target);
       client.destroy();
     }
     assert.equal(connects.length, 0, 'no host socket was opened for a refused target');
+    for (const numeric of ['0177.0.0.1', '0x7f.1', '2130706433']) {
+      assert.equal(lookups.has(numeric), false, `${numeric} is parsed and normalized, never resolved`);
+    }
+    assert.equal(lookups.get('mapped.test'), 1, 'the name was resolved exactly once');
 
     const { client, head, rest } = await proxyConnect('example.com:443');
     assert.match(head, /^HTTP\/1\.1 200 /);
-    assert.deepEqual(connects[0].host, '93.184.216.34');
-    assert.equal(connects[0].port, 443);
+    assert.deepEqual(connects[0], { host: '93.184.216.34', port: 443, family: 4 },
+      'the connect uses the normalized address the filter checked');
     client.write('ping');
     const echoed = await new Promise((resolve) => {
       let text = rest;
@@ -1030,6 +1103,25 @@ test('the egress proxy refuses host, loopback and LAN, and tunnels a public targ
     });
     assert.match(echoed, /ping/);
     client.destroy();
+
+    const v6 = await proxyConnect('[2001:4860:4860::8888]:8443');
+    assert.match(v6.head, /^HTTP\/1\.1 200 /);
+    assert.deepEqual(connects[1], { host: '2001:4860:4860:0:0:0:0:8888', port: 8443, family: 6 },
+      'a genuinely public IPv6 target is pinned in its expanded form');
+    v6.client.destroy();
+
+    const rebound = await proxyConnect('rebind.test:443');
+    assert.match(rebound.head, /^HTTP\/1\.1 200 /);
+    assert.deepEqual(connects[2], { host: '93.184.216.34', port: 443, family: 4 },
+      'the tunnel goes to the address that was checked, never to a re-resolution');
+    assert.equal(lookups.get('rebind.test'), 1, 'the name was resolved once for the tunnel');
+    rebound.client.destroy();
+
+    const after = await proxyConnect('rebind.test:443');
+    assert.match(after.head, /^HTTP\/1\.1 403 /,
+      'the changed resolution is refused on the next request');
+    assert.equal(connects.length, 3, 'no socket was opened for the changed resolution');
+    after.client.destroy();
   } finally {
     await broker.close();
   }

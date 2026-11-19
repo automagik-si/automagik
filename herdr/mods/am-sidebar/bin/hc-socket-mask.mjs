@@ -18,7 +18,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { chmodSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
-import { createServer, connect as netConnect, isIP } from 'node:net';
+import { BlockList, createServer, connect as netConnect, isIP } from 'node:net';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -159,7 +159,12 @@ export function makeEgressDir({ base = egressBase(), mkdtemp = mkdtempSync } = {
   return { dir, socket: join(dir, EGRESS_SOCKET_NAME) };
 }
 
-/** The fixed IPv4 ranges that are never a public internet destination. */
+/**
+ * The fixed ranges that are never a public internet destination, expressed once as a
+ * `net.BlockList` (Node's own address matcher) so both families are checked by one primitive.
+ * IPv4-mapped IPv6 is folded to its IPv4 by normalizeAddress before it reaches this list: the
+ * same host must be refused under every spelling (0:0:0:0:0:ffff:7f00:1 is 127.0.0.1).
+ */
 const V4_BLOCKED = Object.freeze([
   ['0.0.0.0', 8],
   ['10.0.0.0', 8],
@@ -177,69 +182,164 @@ const V4_BLOCKED = Object.freeze([
   ['224.0.0.0', 4],
   ['240.0.0.0', 4],
 ]);
+const V6_BLOCKED = Object.freeze([
+  ['::', 96], // unspecified, loopback and the deprecated IPv4-compatible forms
+  ['64:ff9b::', 96], // NAT64: could embed a private v4
+  ['2001:db8::', 32], // documentation
+  ['fc00::', 7], // unique-local
+  ['fe80::', 10], // link-local
+  ['ff00::', 8], // multicast
+]);
+const BLOCKED = new BlockList();
+for (const [base, bits] of V4_BLOCKED) BLOCKED.addSubnet(base, bits, 'ipv4');
+for (const [base, bits] of V6_BLOCKED) BLOCKED.addSubnet(base, bits, 'ipv6');
 
-const ipv4Number = (address) => address.split('.').reduce((n, part) => (n * 256) + Number(part), 0);
+/** A numeric IPv4 part as inet_aton reads it: 0x hex, a leading 0 octal, the rest decimal. */
+const NUMERIC_LABEL = /^(?:0[xX][0-9a-fA-F]+|0[0-7]*|[0-9]+)$/;
 
-const inV4Range = (address, base, bits) => {
-  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-  return (ipv4Number(address) & mask) === (ipv4Number(base) & mask);
-};
+function ipv4Part(text) {
+  if (/^0[xX][0-9a-fA-F]+$/.test(text)) return Number.parseInt(text.slice(2), 16);
+  if (/^0[0-7]*$/.test(text)) return text.length === 1 ? 0 : Number.parseInt(text.slice(1), 8);
+  if (/^[1-9][0-9]*$/.test(text)) return Number(text);
+  return null;
+}
+
+/**
+ * The dotted-quad IPv4 an inet_aton spelling denotes, or null when the text is not one. It
+ * runs before any resolver, so `0177.0.0.1`, `0x7f.1` and `2130706433` are read as 127.0.0.1
+ * here instead of being handed to a libc that may accept them after the check.
+ */
+function numericIpv4(text) {
+  const parts = text.split('.');
+  if (parts.length < 1 || parts.length > 4) return null;
+  const values = parts.map(ipv4Part);
+  if (values.some((value) => value === null || !Number.isSafeInteger(value))) return null;
+  const [a, b, c, d] = values;
+  let value;
+  if (parts.length === 1) value = a;
+  else if (parts.length === 2) {
+    if (a > 255 || b > 0xffffff) return null;
+    value = (a * 0x1000000) + b;
+  } else if (parts.length === 3) {
+    if (a > 255 || b > 255 || c > 0xffff) return null;
+    value = (a * 0x1000000) + (b * 0x10000) + c;
+  } else {
+    if (values.some((part) => part > 255)) return null;
+    value = (a * 0x1000000) + (b * 0x10000) + (c * 0x100) + d;
+  }
+  if (value > 0xffffffff) return null;
+  return [value >>> 24, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join('.');
+}
+
+/** The eight 16-bit words of an IPv6 spelling (zone id dropped), or null when it is not one. */
+function ipv6Words(address) {
+  const text = address.toLowerCase().replace(/%.*$/, '');
+  if (isIP(text) !== 6) return null;
+  const expand = (part) => {
+    if (part === '') return [];
+    const groups = part.split(':');
+    const last = groups[groups.length - 1];
+    if (last.includes('.')) {
+      const quad = numericIpv4(last);
+      if (quad === null) return null;
+      const [a, b, c, d] = quad.split('.').map(Number);
+      groups.splice(groups.length - 1, 1, ((a << 8) | b).toString(16), ((c << 8) | d).toString(16));
+    }
+    const words = groups.map((word) => Number.parseInt(word, 16));
+    return words.some((word) => !Number.isInteger(word) || word < 0 || word > 0xffff) ? null : words;
+  };
+  const compressed = text.includes('::');
+  const [left, right] = compressed ? text.split('::') : [text, null];
+  const head = expand(left);
+  const tail = right === null ? [] : expand(right);
+  if (head === null || tail === null) return null;
+  if (!compressed) return head.length === 8 ? head : null;
+  const zeros = 8 - head.length - tail.length;
+  if (zeros < 1) return null;
+  return [...head, ...Array(zeros).fill(0), ...tail];
+}
+
+/**
+ * The canonical spelling of an address, before any range check: lower-case, zone id dropped,
+ * the full IPv6 form expanded, and an IPv4-mapped IPv6 address folded to its IPv4. So
+ * `127.0.0.1`, `0177.0.0.1` and `0x7f.1` all normalize to `127.0.0.1`, and
+ * `0:0:0:0:0:ffff:c0a8:101` normalizes to `192.168.1.1`. null is not an address we accept.
+ */
+export function normalizeAddress(address) {
+  if (typeof address !== 'string' || address === '') return null;
+  const bare = address.toLowerCase().replace(/%.*$/, '');
+  if (isIP(bare) === 4) return numericIpv4(bare);
+  if (isIP(bare) === 6) {
+    const mapped = mappedIpv4(bare);
+    if (mapped !== null) return mapped;
+    const words = ipv6Words(bare);
+    return words === null ? null : words.map((word) => word.toString(16)).join(':');
+  }
+  return numericIpv4(bare);
+}
+
+/** The IPv4 address inside an IPv4-mapped IPv6 form (::ffff:1.2.3.4, 0:0:0:0:0:ffff:0102:0304). */
+export function mappedIpv4(address) {
+  if (typeof address !== 'string') return null;
+  const words = ipv6Words(address);
+  if (words === null) return null;
+  if (words.slice(0, 5).some((word) => word !== 0) || words[5] !== 0xffff) return null;
+  return [words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255].join('.');
+}
 
 /** An IPv4 address that is public unicast: not loopback, private, link-local, multicast or doc. */
 export function isPublicIpv4(address) {
-  if (isIP(address) !== 4) return false;
-  const parts = address.split('.').map(Number);
-  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  if (parts[0] === 255 && parts[1] === 255 && parts[2] === 255 && parts[3] === 255) return false;
-  return !V4_BLOCKED.some(([base, bits]) => inV4Range(address, base, bits));
+  const normalized = normalizeAddress(address);
+  if (normalized === null || isIP(normalized) !== 4) return false;
+  try {
+    return !BLOCKED.check(normalized, 'ipv4');
+  } catch {
+    return false;
+  }
 }
 
-/** The IPv4 address inside an IPv4-mapped IPv6 form (::ffff:1.2.3.4 or ::ffff:0102:0304). */
-export function mappedIpv4(address) {
-  const match = /^::ffff:(.+)$/i.exec(address);
-  if (!match) return null;
-  if (isIP(match[1]) === 4) return match[1];
-  const words = match[1].split(':');
-  if (words.length !== 2) return null;
-  const hi = Number.parseInt(words[0], 16);
-  const lo = Number.parseInt(words[1], 16);
-  if (!Number.isInteger(hi) || !Number.isInteger(lo)) return null;
-  return [hi >> 8, hi & 255, lo >> 8, lo & 255].join('.');
-}
-
-/** An IPv6 address that is public unicast: not ::, ::1, mapped v4, ULA, link-local or multicast. */
+/** An IPv6 address that is public unicast: not ::/96, mapped v4, ULA, link-local or multicast. */
 export function isPublicIpv6(address) {
-  if (isIP(address) !== 6) return false;
-  const text = address.toLowerCase();
-  const mapped = mappedIpv4(text);
+  if (typeof address !== 'string') return false;
+  const bare = address.toLowerCase().replace(/%.*$/, '');
+  if (isIP(bare) !== 6) return false;
+  const mapped = mappedIpv4(bare);
   if (mapped !== null) return isPublicIpv4(mapped);
-  if (text === '::' || text === '::1') return false;
-  const first = Number.parseInt(text.split(':')[0] || '0', 16);
-  if (!Number.isInteger(first)) return false;
-  if ((first & 0xffc0) === 0xfe80) return false; // fe80::/10 link-local
-  if ((first & 0xfe00) === 0xfc00) return false; // fc00::/7 unique-local
-  if ((first & 0xff00) === 0xff00) return false; // ff00::/8 multicast
-  if (text.startsWith('64:ff9b:')) return false; // NAT64: could embed a private v4
-  if (text.startsWith('2001:db8:')) return false; // documentation
-  return true;
+  const normalized = normalizeAddress(bare);
+  if (normalized === null || isIP(normalized) !== 6) return false;
+  try {
+    return !BLOCKED.check(normalized, 'ipv6');
+  } catch {
+    return false;
+  }
 }
 
 /** Whether an address is a public internet destination for the egress proxy. */
 export function isPublicAddress(address, { hostAddresses = hostAddressSet() } = {}) {
   if (typeof address !== 'string') return false;
-  if (hostAddresses.has(address.toLowerCase())) return false;
-  const family = isIP(address);
-  if (family === 4) return isPublicIpv4(address);
-  if (family === 6) return isPublicIpv6(address);
+  const normalized = normalizeAddress(address);
+  if (normalized === null) return false;
+  // This host's own addresses are never an egress destination, whatever spelling they arrive in.
+  const raw = address.toLowerCase();
+  for (const entry of hostAddresses ?? []) {
+    if (typeof entry !== 'string') continue;
+    if (entry.toLowerCase() === raw || normalizeAddress(entry) === normalized) return false;
+  }
+  const family = isIP(normalized);
+  if (family === 4) return isPublicIpv4(normalized);
+  if (family === 6) return isPublicIpv6(normalized);
   return false;
 }
 
-/** Every address this host owns, lower-cased: the proxy never reaches the host itself. */
+/** Every address this host owns, normalized: the proxy never reaches the host itself. */
 export function hostAddressSet(interfaces = networkInterfaces()) {
   const addresses = new Set();
   for (const entries of Object.values(interfaces ?? {})) {
     for (const entry of entries ?? []) {
-      if (typeof entry?.address === 'string') addresses.add(entry.address.toLowerCase());
+      if (typeof entry?.address !== 'string') continue;
+      addresses.add(entry.address.toLowerCase());
+      const normalized = normalizeAddress(entry.address);
+      if (normalized !== null) addresses.add(normalized);
     }
   }
   return addresses;
@@ -292,6 +392,15 @@ export function maskArgs(args, env = process.env, options = {}) {
   if (!command) {
     return failed(args,
       "the runner arguments have no '--' separator; refusing to guess the command");
+  }
+  // --unshare-all already unshares the network, so the wrapper adds no second switch beside it.
+  // --share-net re-enables the host network and is order-sensitive in bwrap: with the network
+  // already unshared by the profile it would leave the pane on the host network while the
+  // wrapper skipped its own --unshare-net. Refuse that combination instead of trusting order.
+  const unsharesNetwork = profileArgs.includes(NETNS_FLAG) || profileArgs.includes('--unshare-all');
+  if (unsharesNetwork && profileArgs.includes('--share-net')) {
+    return failed(args, 'the profile carries --share-net with the network unshared: bwrap would '
+      + 'share the host network with the pane (refusing to start the pane on the host network)');
   }
   if (!env.HOME || !isAbsolute(env.HOME)) {
     return failed(args, 'HOME is not set to an absolute path: cannot hide ~/.ssh');
@@ -425,10 +534,10 @@ export function maskArgs(args, env = process.env, options = {}) {
     mounts.push('--bind', '/dev/null', canonical);
   }
   // The pane's own network namespace. When the profile already unshares the network (or all
-  // namespaces), it is there already and no second switch is added.
-  const netns = profileArgs.includes(NETNS_FLAG) || profileArgs.includes('--unshare-all')
-    ? []
-    : [NETNS_FLAG];
+  // namespaces), it is there already and no second switch is added; a profile that also carries
+  // --share-net was refused above. A lone --share-net is harmless here: the wrapper's own
+  // --unshare-net comes later in argv and is the last word on the network.
+  const netns = unsharesNetwork ? [] : [NETNS_FLAG];
   // The command runs behind the relay: the relay listens on the namespace's loopback at
   // EGRESS_PORT and forwards to the host-side egress proxy over the bound Unix socket.
   const relayCommand = [
@@ -492,6 +601,36 @@ function splitHostPort(target) {
   return [target.slice(0, colon), target.slice(colon + 1)];
 }
 
+/** The characters a plain DNS name may carry; anything else is refused, never resolved. */
+const PLAIN_NAME = /^[a-z0-9._-]+$/;
+
+/**
+ * A CONNECT target host normalized before any range check: an address literal folded to its
+ * canonical form, or a lower-case DNS name with its trailing dots dropped (`LOCALHOST.` becomes
+ * `localhost`). Anything else - userinfo (`user@host`), brackets, a second port, a zone id on a
+ * name, an unparseable numeric spelling - is refused here, never handed to a resolver.
+ */
+export function normalizeTargetHost(host) {
+  if (typeof host !== 'string' || host === '') return null;
+  const name = host.toLowerCase().replace(/\.+$/, '');
+  if (name === '') return null;
+  const address = normalizeAddress(name);
+  if (address !== null) return { kind: 'ip', address, family: isIP(address) };
+  // A spelling built only of numeric labels that did not parse is refused, not resolved: libc
+  // may read some of these spellings (08.0.0.1, 999.0.0.1) differently than Node's parser.
+  if (name.split('.').every((label) => NUMERIC_LABEL.test(label))) return null;
+  if (name.length > 253 || !PLAIN_NAME.test(name)) return null;
+  if (name.split('.').some((label) => label === '' || label.length > 63)) return null;
+  return { kind: 'name', name };
+}
+
+/** RFC 6761 loopback names: never resolved, whatever a hosts file or a resolver says. */
+export function isLoopbackName(name) {
+  if (typeof name !== 'string') return false;
+  const text = name.toLowerCase().replace(/\.+$/, '');
+  return text === 'localhost' || text.endsWith('.localhost');
+}
+
 /**
  * The host-side egress proxy: one Unix socket, CONNECT only, and every destination resolved
  * and checked against the public-address rule before any host socket is opened. This is the
@@ -541,31 +680,38 @@ export function createEgressBroker({
         reply(405, 'Only CONNECT Is Allowed');
         return;
       }
-      // The reserved loopback names never reach a resolver: a hosts file or a resolver that
-      // maps them somewhere else must not turn them into an egress destination.
-      const name = target.host.toLowerCase();
-      if (name === 'localhost' || name.endsWith('.localhost')) {
+      // Normalize the target host first, then run every range check on the normalized address.
+      // Reserved loopback names never reach a resolver: a hosts file or a resolver that maps
+      // them somewhere else must not turn them into an egress destination.
+      const normalized = normalizeTargetHost(target.host);
+      if (normalized === null
+        || (normalized.kind === 'name' && isLoopbackName(normalized.name))) {
         deny();
         return;
       }
       consumed = true;
       client.pause();
       const rest = handshake.subarray(end + 4);
-      // Resolve once, check the address, and connect to that literal: a name that changes
-      // between the check and the connect cannot turn into a loopback or LAN destination.
+      // Resolve once, check the normalized address, and connect to that same literal: a name
+      // that changes between the check and the connect cannot turn into a loopback or LAN
+      // destination, because the resolver is never consulted again.
       (async () => {
-        const addresses = isIP(target.host)
-          ? [{ address: target.host, family: isIP(target.host) }]
-          : await lookup(target.host);
+        const addresses = normalized.kind === 'ip'
+          ? [{ address: normalized.address, family: normalized.family }]
+          : await lookup(normalized.name);
         const allowed = (Array.isArray(addresses) ? addresses : [addresses])
-          .filter((entry) => isPublicAddress(entry?.address, { hostAddresses }))
+          .map((entry) => {
+            const address = normalizeAddress(entry?.address);
+            return address === null ? null : { address, family: isIP(address) };
+          })
+          .filter((entry) => entry !== null && isPublicAddress(entry.address, { hostAddresses }))
           .sort((a, b) => (a.family === 4 ? 0 : 1) - (b.family === 4 ? 0 : 1));
         if (allowed.length === 0) return deny();
-        const [chosen] = allowed;
+        const pinned = allowed[0];
         const upstream = track(connect({
-          host: chosen.address,
+          host: pinned.address,
           port: target.port,
-          family: chosen.family,
+          family: pinned.family,
         }));
         upstream.on('error', () => {
           if (!client.destroyed) client.destroy();
