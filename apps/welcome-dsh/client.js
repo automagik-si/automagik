@@ -9228,6 +9228,7 @@ var PT_BR = {
   "Could not tell whether you are signed in to {name}.": "Não foi possível saber se há login no {name}.",
   "Sign in": "Entrar",
   "No Bot chat to sign in from here. Run {command} in a terminal instead.": "Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.",
+  "Sign-in needs a Bot chat. If you have no Bot yet, set one up first.": "Para entrar, você precisa de um chat de Bot. Se ainda não tiver um Bot, configure um primeiro.",
   "Sign in from the Bot's chat, then come back to finish setting up.": "Entre pelo chat do Bot e volte para terminar a configuração.",
   "Back to setup": "Voltar à configuração",
   "Off. Turn it on to use {name} as a model in DSH.": "Desligado. Ligue para usar o {name} como modelo no DSH.",
@@ -12103,6 +12104,7 @@ var import_react9 = require("react");
 var CLI_OF = { "acp-claude": "claude", "acp-codex": "codex", "acp-hermes": "hermes", "acp-antigravity": "agy", "acp-omp": "omp" };
 var LOGO_OF = { "acp-claude": "CC", "acp-codex": "CX", "acp-hermes": "HM", "acp-antigravity": "AG", "acp-omp": "OM" };
 var isNative = (agent) => agent?.connector?.native === true;
+var isolatedSignIn = (agent) => agent.authScope === "isolated" && !isNative(agent);
 var signInCommand = (agent) => agent.cli?.signInHint ?? SIGN_IN_OF[agent.id] ?? CLI_OF[agent.id] ?? agent.key;
 var SIGN_IN_OF = { "acp-claude": "claude auth login", "acp-codex": "codex login" };
 var CHAT_LOGIN = /* @__PURE__ */ Symbol.for("automagik.cli-login");
@@ -12169,7 +12171,7 @@ function agentLines(agent) {
   if (agent.signedIn === false && isNative(agent)) lines.push({ tone: "bad", text: t("Not signed in to {name}. Run {command} in a terminal, then check again.", { name, command: signInCommand(agent) }), action: "check" });
   if (agent.signedIn === false && !isNative(agent) && !cliBusy(agent)) {
     lines.push({ tone: "bad", text: t("Not signed in to {name}. Sign in from a Bot's chat.", { name }), action: "login" });
-    lines.push({ tone: "muted", text: t("Or run {command} in a terminal, then check again.", { command: SIGN_IN_OF[agent.id] ?? cli }), action: "check" });
+    if (!isolatedSignIn(agent)) lines.push({ tone: "muted", text: t("Or run {command} in a terminal, then check again.", { command: SIGN_IN_OF[agent.id] ?? cli }), action: "check" });
   }
   if (agent.signedIn === void 0 && !cliBusy(agent) && (agent.on || !isNative(agent))) {
     const text = agent.signInCheck === "timeout" ? t("Could not check the sign-in to {name}: {cli} took too long to answer.", { name, cli }) : agent.signInCheck === "unreadable" ? t("Could not tell whether you are signed in to {name}.", { name }) : t("The sign-in to {name} has not been checked yet.", { name });
@@ -12269,12 +12271,11 @@ function useAcp(request2 = call, { onLoginOpen, open = openChatLogin } = {}) {
     refresh: () => load(true),
     // Reads the agents again without asking the CLIs (after the host changed a switch).
     reload: () => load(false),
-    // Opens the sign-in row in a Bot's chat; nothing is asked of the host here. Without the Bot
-    // team (or a Bot), the row says to use the terminal.
+    // Opens the sign-in row in a Bot's chat. An isolated sign-in needs that chat.
     login: (agent) => {
       say(agent.id, null);
       if (!open(agent.id)) {
-        say(agent.id, t("No Bot chat to sign in from here. Run {command} in a terminal instead.", { command: signInCommand(agent) }));
+        say(agent.id, isolatedSignIn(agent) ? t("Sign-in needs a Bot chat. If you have no Bot yet, set one up first.") : t("No Bot chat to sign in from here. Run {command} in a terminal instead.", { command: signInCommand(agent) }));
         return false;
       }
       onLoginOpen?.(agent);

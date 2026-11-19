@@ -282,6 +282,7 @@ export const PT_BR = {
   'Could not tell whether you are signed in to {name}.': 'Não foi possível saber se há login no {name}.',
   'Sign in': 'Entrar',
   'No Bot chat to sign in from here. Run {command} in a terminal instead.': 'Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.',
+  'Sign-in needs a Bot chat. If you have no Bot yet, set one up first.': 'Para entrar, você precisa de um chat de Bot. Se ainda não tiver um Bot, configure um primeiro.',
   'Sign in from the Bot\'s chat, then come back to finish setting up.': 'Entre pelo chat do Bot e volte para terminar a configuração.',
   'Back to setup': 'Voltar à configuração',
   'Off. Turn it on to use {name} as a model in DSH.': 'Desligado. Ligue para usar o {name} como modelo no DSH.',

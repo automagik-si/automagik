@@ -55,6 +55,7 @@ export function agentView(agent) {
     key: agent.key,
     name: agent.name,
     on: agent.on === true,
+    ...(agent.authScope === 'isolated' ? { authScope: 'isolated' } : {}),
     // The CLI as acp-dsh's own store has it (#749): installing, failed or ready, its version and
     // an update under way, redacted like the connector's.
     cli: {
