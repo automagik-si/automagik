@@ -15,6 +15,12 @@ import { refreshTokens, invalidGrant, discover, beginBrowser, exchange } from '.
 
 const GOOGLE_SCOPES = 'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify'
 const MAX_REQUESTS = 20
+const MAIL_ADD_REFUSALS = new Set([
+  'The mail service refused the login (Unsafe Login). Enable IMAP/SMTP in the mailbox settings and use its authorization code, not the account password.',
+  'The password was refused. Use the mailbox app password or authorization code, not the account password.',
+  'Could not reach the mail server. Check the server address.',
+  'The mail connection closed during verification',
+])
 
 // One reading of a recipient field, by the mail library's own address parser: the grammar the
 // library addresses a mail by. A quoted name or a comment is a name, never an address, and a
@@ -377,20 +383,20 @@ export function install(rt, host) {
       const address = String(body.address ?? '').trim().toLowerCase()
       if (body.google === true) {
         if (!googleReady()) throw refusal('NOT SET UP: configure an Automagik Google sign-in app')
-        if (address !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) throw new Error('Enter an email address')
+        if (address !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) throw refusal('Enter an email address')
         return beginGoogle(address)
       }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) throw new Error('Enter an email address')
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) throw refusal('Enter an email address')
       if (adding.has(address)) return adding.get(address)
       const pending = (async () => {
         const password = String(body.password ?? '').trim()
-        if (password === '') throw new Error('Enter the authorization code or app password')
+        if (password === '') throw refusal('Enter the authorization code or app password')
         const preset = presetOf(address)
         const provider = typeof body.provider === 'string' ? body.provider : preset?.id ?? 'other'
         const chosen = PRESETS.find(p => p.id === provider)
         const imap = chosen && provider !== 'other' ? chosen.imap : { host: String(body.imapHost ?? '').trim(), port: Number(body.imapPort) || 993, secure: body.imapTls !== false }
         const smtp = chosen && provider !== 'other' ? chosen.smtp : { host: String(body.smtpHost ?? '').trim(), port: Number(body.smtpPort) || 465, secure: body.smtpTls !== false }
-        if (imap.host === '' || smtp.host === '') throw new Error('Enter the IMAP and SMTP hosts')
+        if (imap.host === '' || smtp.host === '') throw refusal('Enter the IMAP and SMTP hosts')
         const existing = accountOf(address)
         const id = existing?.id ?? `m${randomUUID().slice(0, 8)}`
         const account = { ...existing, id, address, provider, auth: 'password', imap, smtp, createdAt: existing?.createdAt ?? Date.now() }
@@ -401,7 +407,8 @@ export function install(rt, host) {
         try {
           session = await openImap(account, password)
         } catch (error) {
-          throw new Error(mailError(error))
+          const text = mailError(error)
+          throw MAIL_ADD_REFUSALS.has(text) ? refusal(text) : new Error(text)
         }
         await old?.close?.().catch(() => {})
         try {
@@ -421,7 +428,7 @@ export function install(rt, host) {
     },
     async 'mail-account-remove'(body) {
       const account = accountOf(body.id ?? body.address)
-      if (account === undefined) throw new Error('No such account')
+      if (account === undefined) throw refusal('No such account')
       await rt.loadSecrets()
       // Secrets are per address; a duplicate row from before adds were merged still needs them.
       const shared = accountList().some(other => other.id !== account.id && other.address === account.address)
@@ -453,7 +460,7 @@ export function install(rt, host) {
         }
         return undefined
       })()
-      if (found === undefined || found.request.status !== 'pending') throw new Error('This card was already answered')
+      if (found === undefined || found.request.status !== 'pending') throw refusal('This card was already answered')
       const { botId, request } = found
       if (body.fields && typeof body.fields === 'object' && !Array.isArray(body.fields)) {
         if (typeof body.fields.to === 'string' && body.fields.to.trim() !== '') request.to = body.fields.to.trim()
