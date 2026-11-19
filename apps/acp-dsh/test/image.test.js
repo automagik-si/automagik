@@ -194,6 +194,16 @@ test('offered tools: only the fixed list and the image tool pass; anything else,
   }
 })
 
+test('offered tools: the newest Codex\'s asynchronous message to the user is on the fixed list, and a name it does not offer still refuses', () => {
+  // Codex 0.170 offers this one with every switch the run turns off still off; its own
+  // `send_message_to_user_async` switch reports off and does not take it away. It sends the
+  // person a message and reads no file or command, so it belongs on the fixed list (#1021). A
+  // name the list does not hold still stops the draw: the list stays a guard.
+  const offered = { tools: ['functions.exec', 'functions.wait', 'functions.send_message_to_user_async', 'collaboration.send_message'], nested: ['apply_patch'] }
+  checkOffered(offered)
+  assert.throws(() => checkOffered({ ...offered, tools: [...offered.tools, 'functions.send_message_to_user'] }), error => error.kind === 'unsupported' && /does not allow/.test(error.message))
+})
+
 test('nested tools: one declaration per tool in the one form Codex writes; any other form is refused', () => {
   const one = name => `### \`${name}\`\nWhat it does.\n\nexec tool declaration:\n\`\`\`ts\ndeclare const tools: { ${name}(args: {\n  // It's a comment with a { brace and a "quote.\n  path?: string; kind: "a" | 'b';\n  each?: Array<{ at: number }>;\n}): Promise<{\n  output: string;\n}>; };\n\`\`\``
   assert.deepEqual(nestedTools(`Run JavaScript code, for example \`await tools.exec_command(...)\`.\n${one('apply_patch')}\n## clock\n${one('clock__curr_time')}`), ['apply_patch', 'clock__curr_time'])
