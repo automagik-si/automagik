@@ -109,6 +109,38 @@ const mutations = [
     edits: [['../../.github/workflows/ci.yml', 'ID_PAGES_BROWSER: required', 'ID_PAGES_BROWSER: optional']],
   },
   {
+    name: 'drop the Content-Security-Policy',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', "'content-security-policy': \"default-src", "'x-csp-dropped': \"default-src"]],
+  },
+  {
+    name: 'let inline script run',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', "script-src 'self'; style", "script-src 'self' 'unsafe-inline'; style"]],
+  },
+  {
+    name: 'drop nosniff',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', "  'x-content-type-options': 'nosniff',\n", '']],
+  },
+  {
+    name: 'send static files and API answers without the headers',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', 'return withSecurityHeaders(await router.route(request, env, ctx));',
+      'return router.route(request, env, ctx);']],
+  },
+  {
+    name: 'let a direct .html path bypass the page',
+    test: 'security headers on every answer',
+    edits: [['src/index.ts', 'if (directPage(url.pathname)) return', 'if (false) return']],
+  },
+  {
+    name: 'rebuild the headers and lose the cookies',
+    test: 'security headers keep Better Auth redirects',
+    edits: [['src/index.ts', '  const headers = new Headers(response.headers);\n  for (const [name',
+      '  const headers = new Headers();\n  for (const [name']],
+  },
+  {
     name: 'lengthen the access token lifetime',
     test: 'token lifetimes are 15 minutes',
     edits: [['src/auth.ts', 'ACCESS_TOKEN_TTL = 15 * 60;', 'ACCESS_TOKEN_TTL = 60 * 60;']],

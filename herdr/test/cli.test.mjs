@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // automagik-herdr, the command line (A11): every subcommand run as a program against scratch git
 // projects under $TMPDIR, with a fake `hc` first on PATH (test/fake-hc.mjs) that records
 // each call and answers from a state file, and a fake `herdr-app` (test/fake-herdr-app.mjs; no
@@ -9,19 +10,29 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { checkBots, parseBots } from "../mods/am-sidebar/model.js";
+import { checkBots, parseBots, PROJECTS_FILE } from "../mods/am-sidebar/model.js";
 import { writeBotsFile, findBot, CliError, listProject, causeLine } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
 import { GUARD_DIR, KILL_GUARD_DIR, ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
-import { AGY_FIXED_DENY, AGY_SHELL_READ, agySettingsDir, agySettingsFile, withoutBriefing } from "../mods/am-sidebar/models.js";
+import { AGY_FIXED_DENY, AGY_SHELL_READ, CLAUDE_PERSON_SETTINGS, agySettingsDir, agySettingsFile, withoutBriefing } from "../mods/am-sidebar/models.js";
 import { WORKER_LINE, amPartHookCommand } from "../mods/am-sidebar/briefingText.mjs";
 import { restartAnswer } from "../mods/am-sidebar/restart.js";
 // Start and Restart put each bot's briefing in its agent's command (models.js withBriefing);
 // the tests on the rest of the command compare it with those words out.
 const strip = (words) => withoutBriefing("codex", withoutBriefing("claude", words));
-const plain = (argv) => { const i = argv.indexOf("--"); return i < 0 ? strip(argv) : [...argv.slice(0, i + 1), ...strip(argv.slice(i + 1))]; };
+// #1558: a Claude launch's person-feature settings are pinned by person-features.test.mjs; the
+// tests here compare the other words, so this takes that one pair out (never another --settings).
+const withoutPerson = (words) => {
+  const i = words.indexOf("--settings");
+  return i < 0 || words[i + 1] !== CLAUDE_PERSON_SETTINGS ? words : [...words.slice(0, i), ...words.slice(i + 2)];
+};
+const plain = (argv) => {
+  const i = argv.indexOf("--");
+  return withoutPerson(i < 0 ? strip(argv) : [...argv.slice(0, i + 1), ...strip(argv.slice(i + 1))]);
+};
 // #1125: Codex's launch mode, spelled out, and a Codex run's --add-dir grants taken apart from its
 // other words (the tool-cache grants follow the runner's environment, so tests compare the words).
-const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"];
+const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+  "-c", "allow_login_shell=false"];
 const grantsApart = (words) => {
   const rest = [];
   const dirs = [];
@@ -128,12 +139,17 @@ function scene(t, { terminals = [], briefing = true, amPart = false, window = { 
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog, AUTOMAGIK_HERDR_TAB_WAIT_MS: "300", AGY_FAKE_LOG: agyLog, GIT_CEILING_DIRECTORIES: root };
   delete env.HC_TERMINAL_ID;
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   delete env.HERMES_HOME; // a runner's own hermes home must not decide the hermes tests
   const cli = (args, { cwd = project, input, env: extra = {} } = {}) => {
+    core.control({ ...env, ...extra });
     const r = spawnSync(RUNTIME, [CLI, ...args], { cwd, env: { ...env, ...extra }, input, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
   const cliAsync = (args, { env: extra = {} } = {}) => new Promise((resolve) => {
+    core.control({ ...env, ...extra });
     execFile(RUNTIME, [CLI, ...args], { cwd: project, env: { ...env, ...extra }, encoding: "utf8" }, (e, out, err) => resolve({ code: e ? e.code : 0, out, err }));
   });
   const calls = () => readJsonLines(logPath);
@@ -1328,9 +1344,12 @@ test("ls by the ledger: a shell pane shows no agent in front; the import takes t
   writeFileSync(join(s.app, "shared.json"), JSON.stringify({ "spaces-agents.projects": [{ key: other, machine: null }, { key: join(s.root, "gone"), machine: null }, { key: "/r", machine: "vps" }] }));
   const by = Object.fromEntries(s.cli(["ls", "--json"]).json().projects[0].bots.map((b) => [b.name, b]));
   // The first run imports the labels: Genie's only pane, though a shell is in front; of
-  // Captain's two, the newest with an agent in front. The ledger then ties one pane each.
+  // Captain's two, the newest with an agent in front. The ledger then ties one pane each; the
+  // second live label is still reported (#1195), and whois keeps naming the imported pane.
   assert.deepEqual([by.Genie.terminal, by.Genie.status], ["t1", "no agent in front"]);
-  assert.deepEqual([by.Captain.terminal, by.Captain.duplicate, by.Captain.model], ["t3", false, "opus"]);
+  assert.deepEqual([by.Captain.terminal, by.Captain.duplicate, by.Captain.model], ["t3", true, "opus"]);
+  assert.equal(by.Genie.duplicate, false);
+  assert.equal(s.cli(["whois", "--bot", ID.cap, "--json"]).json().terminal, "t3");
   const all = s.cli(["ls", "--all", "--json"]).json().projects;
   assert.deepEqual(all.map((p) => p.project), [s.project, other]);
 });
@@ -2224,6 +2243,31 @@ test("start: an edit landing during hc run relabels the new pane; a failed relab
   const r = s.cli(["start", "Dev"]);
   assert.equal(r.code, 0, r.err);
   assert.match(r.err, /t101's labels role=reviewer weren't set\./);
+  // #223: hc's reason, said once; the pane stays Dev's seat with the labels it started with.
+  assert.deepEqual(r.err.split("\n").filter((l) => l.startsWith("am: t101's labels role=reviewer weren't set.")),
+    ["am: t101's labels role=reviewer weren't set. label refused on t101 (exit 1)"], r.err);
+  const seatKept = (address) => {
+    const pane = s.hcState().terminals.find((x) => x.address === address);
+    assert.equal(pane?.state, "live", JSON.stringify(pane));
+    assert.equal(pane.labels.bot, ID.dev);
+    assert.equal(pane.labels.category, "eng");
+    assert.equal(pane.labels.role, undefined, JSON.stringify(pane.labels));
+  };
+  seatKept("t101");
+  // #223: with --json, an hc gone from PATH for the relabel (exit 127, so hc() throws): one
+  // warning that says so, exit 0, the seat kept.
+  s.seed(team());
+  const st3 = s.hcState();
+  st3.terminals = [];
+  st3.failLabel = "t102";
+  st3.failLabelExit = 127;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st3));
+  const j = s.cli(["start", "Dev", "--json"]);
+  assert.equal(j.code, 0, j.err);
+  assert.equal(j.json().terminal, "t102", j.out);
+  assert.deepEqual(j.json().warnings.filter((w) => w.startsWith("t102's labels")),
+    ["t102's labels role=reviewer weren't set. hc (herdr-core) is not on PATH."], j.out);
+  seatKept("t102");
 });
 
 // ---- restart ----
@@ -2237,14 +2281,16 @@ const ledgerOf = (s) => readLedger(existsSync(ledgerPath(s.app)) ? readFileSync(
 const attachOf = (s) => readRows(existsSync(attachFile(s.app)) ? readFileSync(attachFile(s.app), "utf8") : "").rows;
 
 /** Genie's live pane t5 in the project, placed in sp9/tb3, with a Claude session and a squad. */
-function restartScene(t, { status = "idle", extra = [], session = SID, runAs, runScreen, paneArgv = null } = {}) {
-  const s = scene(t);
+function restartScene(t, { status = "idle", extra = [], session = SID, runAs, runScreen, paneArgv = null,
+  window = { down: true }, placed = true } = {}) {
+  const s = scene(t, { window });
   s.seed(team());
   const old = term("t5", { bot: ID.main, cwd: s.project, status });
   old.foreground.cwd = s.project;
   // A pane started with words the bot's definition may no longer name (hc get's launch argv).
   if (paneArgv) { old.argv = paneArgv; old.foreground.argv = paneArgv; }
-  old.labels = { ...old.labels, role: "main", "herdr.space": "sp9", "herdr.tab": "tb3", squad: "core", ...(session ? { "agent.session": session } : {}) };
+  old.labels = { ...old.labels, role: "main", ...(placed ? { "herdr.space": "sp9", "herdr.tab": "tb3" } : {}),
+    squad: "core", ...(session ? { "agent.session": session } : {}) };
   writeFileSync(join(s.root, "hc.json"), JSON.stringify({ terminals: [old, ...extra], next: 100, ...(runAs ? { runAs } : {}), ...(runScreen ? { runScreen } : {}) }));
   return s;
 }
@@ -2291,6 +2337,19 @@ test("restart: the new pane resumes the session in the old one's space and tab, 
   assert.deepEqual(plain(s.calls().filter((c) => c[0] === "run")[1]).slice(-5), ["claude", "--permission-mode", "auto", "--resume", SID]);
 });
 
+// #217 item 1: an old pane with no herdr.space label has no place to keep. The restart must not
+// fall through to the start path, which opens a space for an unseen pane; it runs unseen instead.
+test("restart: an old pane with no herdr.space label asks no window and opens no space", (t) => {
+  const s = restartScene(t, { window: { spaces: [] }, placed: false });
+  const r = s.cli(["restart", "Genie"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.err, /No open Herdr space shows .* it runs, unseen/);
+  assert.deepEqual(s.appCalls(), [], "no herdr-app ls and no space.new");
+  const run = runCall(s.calls());
+  assert.equal(run.some((w) => w.startsWith("herdr.space=") || w.startsWith("herdr.tab=")), false, run.join(" "));
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t100").state, "live");
+});
+
 test("restart rebuilds the launch from the bot's source, never the old pane's argv (#597)", (t) => {
   // The Housekeeper repro: a pane once started with a retired proxy and -c. Its definition
   // (agent, model) no longer names them, so restart launches from the source and says so.
@@ -2299,7 +2358,7 @@ test("restart rebuilds the launch from the bot's source, never the old pane's ar
   const r = s.cli(["restart", "Genie"]);
   assert.equal(r.code, 0, r.err);
   assert.deepEqual(plain(agentWords(runCall(s.calls()))), ["claude", "--permission-mode", "auto", "--resume", SID], "the source's command, resumed by the session");
-  assert.match(r.err, /Genie: its pane's command differs from its source now \(drops --proxy=\*\*\*; adds --permission-mode=\*\*\*\): restarting from the source/);
+  assert.match(r.err, /Genie: its pane's command differs from its source now \(drops --proxy=\*\*\*; adds --settings=\*\*\*, --permission-mode=\*\*\*\): restarting from the source/);
   assert.equal(r.err.includes("proxy.example"), false, "the value is masked");
   // --fresh: the source's command, and never the old pane's resume words.
   const f = restartScene(t, { paneArgv: stale });
@@ -3058,7 +3117,8 @@ test("restart (#341): a teammate re-seated in a worktree still left its omp conv
   seats(moved, wt, "t9");
   const note = fresh(moved);
   assert.match(note, /Captain \(t7, ended\) also ran Oh My Pi in /);
-  assert.doesNotMatch(note, /t9/, "the worktree pane isn't in this folder");
+  // The note quotes the project path, whose random scratch name can itself spell `t9`; match the pane the note names.
+  assert.doesNotMatch(note, /Captain \(t9[,)]/, "the worktree pane isn't in this folder");
 });
 
 test("restart (#328 review): a teammate's omp inside the keep wrapper is a sharer", (t) => {
@@ -3344,7 +3404,7 @@ test("restart #597: a hand-started codex bot comes back from its source, not its
   assert.equal(r.code, 0, r.err);
   const run = runCall(s.calls());
   assert.deepEqual(codexWords(plain(agentWords(run))), ["codex", ...CODEX_MODE, "resume", SID], "the source's command, resumed by its session");
-  assert.match(r.err, /Captain: its pane's command differs from its source now \(drops -m=\*\*\*, -c=\*\*\*; adds --approve-for-me, --disable=\*\*\*, --no-daemon=\*\*\*\)/);
+  assert.match(r.err, /Captain: its pane's command differs from its source now \(drops -m=\*\*\*; adds --approve-for-me, --disable=\*\*\*, --no-daemon=\*\*\*; changes -c=\*\*\*\)/);
   assert.equal(r.err.includes("gpt-a"), false, "the value is masked");
   assert.equal(r.json().session, "***"); // RFC 0021: masked
   assert.equal(run[run.indexOf("--cwd") + 1], s.project);
@@ -3644,7 +3704,7 @@ test("restart --tree #453: the bot's own -u launch is rebuilt on login 2; a Clau
   assert.deepEqual(bot.env.slice(1), [`HERDR_APP_HOME=${s.app}`, `CLAUDE_CONFIG_DIR=${two}`],
     "the app home and login 2: no env word lost or leaked (#650)");
   assert.deepEqual(plain(bot.words), ["claude", "--permission-mode", "auto", "--resume", SID], "the source's command, never the pane's --model");
-  assert.match(r.err, /Genie: its pane's command differs from its source now \(drops --model=\*\*\*; adds --permission-mode=\*\*\*\)/);
+  assert.match(r.err, /Genie: its pane's command differs from its source now \(drops --model=\*\*\*; adds --settings=\*\*\*, --permission-mode=\*\*\*\)/);
   assert.deepEqual(claude.env.slice(1), [`CLAUDE_CONFIG_DIR=${two}`], "a helper (workerArgs) keeps its env words");
   assert.equal(claude.words[0], "claude");
   assert.equal(codex.words[0], "codex");
@@ -3708,7 +3768,8 @@ test("restart --tree: six codex helpers in one folder resume each its own sessio
   assert.match(fresh.json().helpers[0].note, /no session id, and its folder .*integration has other codex sessions \(--fresh-shared\)/);
   // #1125: these panes ran an hc template but are no template worker (no worker.template label):
   // each keeps its command and gets the launch-mode words it lacks after it, through "$@".
-  const lacking = ["--approve-for-me", "--disable", "hooks", "-c", "sandbox_workspace_write.network_access=true"];
+  const lacking = ["--approve-for-me", "--disable", "hooks", "-c", "sandbox_workspace_write.network_access=true",
+    "-c", "allow_login_shell=false"];
   assert.ok(runs(bare).slice(1).every((w) => JSON.stringify(codexWords(agentWords(w))) === JSON.stringify(["sh", "-c", `${cmd} "$@"`, "sh", ...lacking])),
     JSON.stringify(runs(bare).slice(1).map(agentWords)));
   assert.equal(s.cli(["restart", "Genie", "--fresh-shared"]).code, 2, "--fresh-shared goes with --tree");
@@ -4735,8 +4796,8 @@ test("reap #899: a finished launch's end row and its branch's pr rows reach work
   writeFileSync(ledgerPath(s.app), `${JSON.stringify(start)}\n`, { mode: 0o600 });
   const first = s.cli(["reap"]);
   assert.equal(first.code, 0, first.err);
-  assert.equal(first.out.trim(), `kept ${start.worktree}: `
-    + "can't verify missing worktree repository ownership");
+  assert.equal(first.out.trim(), `gone ${start.worktree}: its repository no longer lists it`,
+    "a checkout the repository forgot is gone, never kept forever (#1143)");
   const open = { event: "pr", project: s.project, branch: "fix/213", task: "gh-213", pr: 12, state: "open", first_commit_at: "2026-02-03T04:05:06.000Z",
     opened_at: "2026-02-03T05:00:00.000Z", merged_at: null, closed_at: null, core: "fakecore0000" };
   const at = (rows) => rows.map(({ at: _at, ...row }) => row);
@@ -5109,6 +5170,313 @@ test("#805 a busy parent's doomed helpers still refuse before queueing", (t) => 
   assert.equal(runCall(s.calls()), undefined);
 });
 
+// ---- #1411: a Codex bot's own reasoning effort and service tier ----
+
+/** The fake home's Codex model list (what `--model` pins from), and its global config when given. */
+function codexHome(s, text = null) {
+  mkdirSync(join(s.home, ".codex"), { recursive: true });
+  writeFileSync(join(s.home, ".codex/models_cache.json"),
+    JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }, { slug: "gpt-6.1-terra" }, { slug: "gpt-6-astra" }] }));
+  const config = join(s.home, ".codex/config.toml");
+  if (text !== null) writeFileSync(config, text);
+  return config;
+}
+/** A Codex profile file beside that config, which `-p <name>` layers on it: the file's path. */
+function codexProfile(s, name, text) {
+  const path = join(s.home, `.codex/${name}.config.toml`);
+  writeFileSync(path, text);
+  return path;
+}
+const codexSeatWords = (run) => codexWords(agentWords(run));
+
+test("#1411: create stores a Codex bot's effort and tier; start and restart pass them; show reports each with its source", (t) => {
+  const s = scene(t);
+  const config = codexHome(s);
+  const made = s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "fast", "--json"]);
+  assert.equal(made.code, 0, made.err);
+  assert.deepEqual([s.bots().bots[0].effort, s.bots().bots[0].tier], ["high", "fast"], "stored on the bot's record");
+  const shown = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([shown.effort, shown.effortSource, shown.tier, shown.tierSource, shown.pinnedEffort, shown.pinnedTier],
+    ["high", "roster", "fast", "roster", "high", "fast"]);
+  assert.match(s.cli(["show", "Genie"]).out, /effort {7}high \(roster\)/);
+  // Start: the record's words come after the agent's own, and the global Codex config is never written.
+  const started = s.cli(["start", "Genie", "--json"]);
+  assert.equal(started.code, 0, started.err);
+  assert.deepEqual(codexSeatWords(runCall(s.calls())).slice(-6),
+    ["--model", "gpt-6.1-sol", "-c", "model_reasoning_effort=high", "-c", "service_tier=priority"]);
+  assert.equal(existsSync(config), false, "no global config file was made");
+  // A live pane: show reports what it really runs, detected on its command line.
+  const live = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([live.effort, live.effortSource, live.tier, live.tierSource], ["high", "detected", "fast", "detected"]);
+  // Restart keeps both, from the record.
+  const restarted = s.cli(["restart", "Genie", "--force", "--json"]);
+  assert.equal(restarted.code, 0, restarted.err);
+  assert.deepEqual(codexSeatWords(s.calls().filter((c) => c[0] === "run").at(-1)).slice(-6),
+    ["--model", "gpt-6.1-sol", "-c", "model_reasoning_effort=high", "-c", "service_tier=priority"]);
+  assert.equal(existsSync(config), false);
+});
+
+test("#1411: two Codex bots on one host run different tiers; one that stores none inherits the host's config, which is never written", (t) => {
+  const s = scene(t);
+  const text = 'model = "gpt-6-astra"\nmodel_reasoning_effort = "low"\nservice_tier = "priority"\n';
+  const config = codexHome(s, text);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "standard", "--json"]).code, 0);
+  assert.equal(s.cli(["create", "--name", "Captain", "--agent", "codex", "--model", "gpt-6.1-sol", "--json"]).code, 0);
+  assert.equal(s.cli(["start", "Genie", "--json"]).code, 0);
+  assert.equal(s.cli(["start", "Captain", "--json"]).code, 0);
+  const [genie, captain] = s.calls().filter((c) => c[0] === "run").slice(0, 2).map(codexSeatWords);
+  // The first bot's own Standard beats the host's Fast; the second adds nothing and gets the host's pair.
+  assert.deepEqual(genie.slice(-6), ["--model", "gpt-6.1-sol", "-c", "model_reasoning_effort=high", "-c", "service_tier=default"]);
+  assert.equal(captain.some((w) => w.startsWith("service_tier=")), false, "no tier stored: the host's config applies");
+  assert.equal(captain.some((w) => w.startsWith("model_reasoning_effort=")), false);
+  const shown = s.cli(["show", "Captain", "--json"]).json();
+  assert.deepEqual([shown.effort, shown.effortSource, shown.tier, shown.tierSource, shown.pinnedEffort, shown.pinnedTier],
+    ["low", "global", "fast", "global", null, null]);
+  assert.equal(readFileSync(config, "utf8"), text, "the global Codex config is never written");
+});
+
+test("#1411: a Fast model changed to a standard one doesn't keep Fast; --tier with the model picks the new tier; empty clears", (t) => {
+  const s = scene(t);
+  codexHome(s);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "fast", "--json"]).code, 0);
+  // Sol -> Astra naming no tier: the stored Fast goes, and the new model runs on standard.
+  const changed = s.cli(["edit", "Genie", "--model", "gpt-6-astra"]);
+  assert.equal(changed.code, 0, changed.err);
+  assert.match(changed.err, /service tier doesn't carry over to a new model; it runs standard unless --tier fast is passed with --model/);
+  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier, s.bots().bots[0].effort], ["gpt-6-astra", "standard", "high"]);
+  // The launch says the default tier itself, rather than leaving it out for a host to fill in.
+  assert.equal(s.cli(["start", "Genie", "--json"]).code, 0);
+  assert.deepEqual(codexSeatWords(runCall(s.calls())).slice(-6),
+    ["--model", "gpt-6-astra", "-c", "model_reasoning_effort=high", "-c", "service_tier=default"]);
+  // Naming the tier with the model stores the new choice, and the next restart passes it.
+  assert.equal(s.cli(["edit", "Genie", "--model", "gpt-6.1-terra", "--tier", "fast"]).code, 0);
+  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier], ["gpt-6.1-terra", "fast"]);
+  assert.equal(s.cli(["restart", "Genie", "--force", "--json"]).code, 0);
+  assert.deepEqual(codexSeatWords(s.calls().filter((c) => c[0] === "run").at(-1)).slice(-2), ["-c", "service_tier=priority"]);
+  // An empty value clears one; a value this pack has no word for, or an effort off the shape, is a usage mistake.
+  assert.equal(s.cli(["edit", "Genie", "--tier="]).code, 0);
+  assert.equal(s.bots().bots[0].tier, undefined);
+  assert.equal(s.cli(["edit", "Genie", "--tier", "flex"]).code, 2);
+  const badEffort = s.cli(["edit", "Genie", "--effort", "banana"]);
+  assert.equal(badEffort.code, 2);
+  assert.match(badEffort.err, /--effort: reasoning effort "banana" isn't one of low, medium, high, xhigh, max, ultra\./);
+  assert.equal(s.cli(["edit", "Genie", "--effort", "high value"]).code, 2, "an effort is one word");
+  assert.equal(s.cli(["edit", "Genie", "--effort="]).code, 0);
+  assert.equal(s.bots().bots[0].effort, undefined);
+});
+
+test("#1411: a model change to a Fast model with --tier fast keeps Fast on the launch", (t) => {
+  const s = scene(t);
+  codexHome(s);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "fast", "--json"]).code, 0);
+  // Sol -> Terra is a model change to another Fast-capable model, and the person keeps Fast in
+  // the same call: the new model still runs Fast, never the default tier.
+  const changed = s.cli(["edit", "Genie", "--model", "gpt-6.1-terra", "--tier", "fast"]);
+  assert.equal(changed.code, 0, changed.err);
+  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier], ["gpt-6.1-terra", "fast"]);
+  assert.equal(s.cli(["start", "Genie", "--json"]).code, 0);
+  assert.deepEqual(codexSeatWords(runCall(s.calls())).slice(-4),
+    ["-c", "model_reasoning_effort=high", "-c", "service_tier=priority"]);
+  assert.equal(codexSeatWords(runCall(s.calls())).includes("service_tier=default"), false,
+    "the default tier is for a model change that chose no tier of its own");
+});
+
+test("#1411: effort and tier are a Codex bot's: moving to another agent clears them, and another agent refuses them", (t) => {
+  const s = scene(t);
+  codexHome(s);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--effort", "high", "--tier", "fast", "--json"]).code, 0);
+  const moved = s.cli(["edit", "Genie", "--agent", "claude"]);
+  assert.equal(moved.code, 0, moved.err);
+  assert.match(moved.err, /its reasoning effort and service tier were cleared/);
+  assert.deepEqual([s.bots().bots[0].agent, s.bots().bots[0].effort, s.bots().bots[0].tier], ["claude", undefined, undefined]);
+  const badTier = s.cli(["edit", "Genie", "--tier", "fast"]);
+  assert.equal(badTier.code, 2);
+  assert.match(badTier.err, /--effort and --tier are a Codex bot's; Genie runs claude/);
+  const badEffort = s.cli(["create", "--name", "Second", "--agent", "claude", "--effort", "high"]);
+  assert.equal(badEffort.code, 2);
+  const unknown = s.cli(["create", "--name", "Second", "--agent", "codex", "--effort", "banana"]);
+  assert.equal(unknown.code, 2);
+  assert.match(unknown.err, /--effort: reasoning effort "banana" isn't one of/);
+  assert.equal(s.bots().bots.length, 1, "nothing written");
+});
+
+// ---- #1413: a Claude Code bot's own permission mode ----
+
+test("#1413: a Claude bot's own permission mode is stored, shown, passed on start and restart, cleared, and a value Claude Code doesn't accept is refused", (t) => {
+  const s = scene(t);
+  const made = s.cli(["create", "--name", "Orchestrator", "--agent", "claude", "--permission-mode", "bypassPermissions", "--json"]);
+  assert.equal(made.code, 0, made.err);
+  assert.equal(s.bots().bots[0].permissionMode, "bypassPermissions", "stored on the bot's record");
+  const shown = s.cli(["show", "Orchestrator", "--json"]).json();
+  assert.deepEqual([shown.permissionMode, shown.permissionModeSource, shown.pinnedPermissionMode],
+    ["bypassPermissions", "roster", "bypassPermissions"]);
+  assert.match(s.cli(["show", "Orchestrator"]).out, /permission\s+bypassPermissions \(roster\)/);
+  // Start: the record's mode reaches the launch instead of the pack's auto default.
+  const started = s.cli(["start", "Orchestrator", "--json"]);
+  assert.equal(started.code, 0, started.err);
+  const words = plain(agentWords(runCall(s.calls())));
+  assert.equal(words[words.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.equal(s.cli(["show", "Orchestrator", "--json"]).json().permissionModeSource, "detected",
+    "a running pane reports the mode its command line runs");
+  // Restart rebuilds the same words from the record.
+  const restarted = s.cli(["restart", "Orchestrator", "--force", "--json"]);
+  assert.equal(restarted.code, 0, restarted.err);
+  const again = plain(agentWords(s.calls().filter((c) => c[0] === "run").at(-1)));
+  assert.equal(again[again.indexOf("--permission-mode") + 1], "bypassPermissions");
+  // A value Claude Code doesn't accept is refused by name, and nothing is saved.
+  const before = readFileSync(s.botsPath, "utf8");
+  const bad = s.cli(["edit", "Orchestrator", "--permission-mode", "banana"]);
+  assert.equal(bad.code, 2);
+  assert.match(bad.err, /--permission-mode: permission mode "banana" isn't one of acceptEdits, auto, bypassPermissions, manual, dontAsk, plan/);
+  assert.equal(readFileSync(s.botsPath, "utf8"), before, "nothing was saved");
+  // Another agent has no such mode: refused, never dropped.
+  const codex = s.cli(["create", "--name", "Coder", "--agent", "codex", "--permission-mode", "auto"]);
+  assert.equal(codex.code, 2);
+  assert.match(codex.err, /--permission-mode: .*Claude Code.*Codex has none/);
+  assert.equal(s.bots().bots.length, 1, "nothing was written");
+  // Empty clears the record, and the next restart is back on the pack's auto mode.
+  assert.equal(s.cli(["edit", "Orchestrator", "--permission-mode="]).code, 0);
+  assert.equal(s.bots().bots[0].permissionMode, undefined);
+  assert.equal(s.cli(["restart", "Orchestrator", "--force", "--json"]).code, 0);
+  const back = plain(agentWords(s.calls().filter((c) => c[0] === "run").at(-1)));
+  assert.equal(back[back.indexOf("--permission-mode") + 1], "auto");
+  const cleared = s.cli(["show", "Orchestrator", "--json"]).json();
+  assert.deepEqual([cleared.permissionMode, cleared.permissionModeSource, cleared.pinnedPermissionMode], ["auto", "detected", null]);
+});
+
+test("#1413: moving a bot off Claude Code clears its permission mode, and naming one again stores it", (t) => {
+  const s = scene(t);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "claude", "--permission-mode", "manual", "--json"]).code, 0);
+  const moved = s.cli(["edit", "Genie", "--agent", "codex"]);
+  assert.equal(moved.code, 0, moved.err);
+  assert.match(moved.err, /its permission mode was cleared/);
+  assert.equal(s.bots().bots[0].permissionMode, undefined);
+  assert.equal(s.cli(["edit", "Genie", "--agent", "claude", "--permission-mode", "plan"]).code, 0);
+  assert.equal(s.bots().bots[0].permissionMode, "plan");
+  assert.equal(s.cli(["show", "Genie", "--json"]).json().permissionMode, "plan");
+});
+
+test("#1413 F1: show never claims a live pane runs the record's permission mode", (t) => {
+  const s = scene(t, { terminals: [term("t1", { bot: ID.main, argv: ["claude"], cwd: "/x" })] });
+  s.seed(team({ bots: [bot(ID.main, "main", { name: "Orchestrator", permissionMode: "bypassPermissions" })] }));
+  const shown = s.cli(["show", "Orchestrator", "--json"]);
+  assert.equal(shown.code, 0, shown.err);
+  const info = shown.json();
+  assert.equal(info.terminal, "t1", "the pane is live, so its command line is what runs");
+  assert.equal(info.permissionMode, null, "a live pane that names no mode has no effective mode to report");
+  assert.equal(info.permissionModeSource, "live");
+  assert.equal(info.pinnedPermissionMode, "bypassPermissions", "the record still says what the next start runs");
+  const text = s.cli(["show", "Orchestrator"]).out;
+  assert.match(text, /permission\s+not named by its live command line/);
+  assert.match(text, /its record's bypassPermissions applies to its next start/);
+  assert.doesNotMatch(text, /permission\s+bypassPermissions \(roster\)/);
+  assert.doesNotMatch(text, /auto mode\s+--permission-mode bypassPermissions/);
+  // The same pane started with a mode of its own is reported as what it runs, never the record.
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify({ terminals: [term("t1", { bot: ID.main, argv: ["claude", "--permission-mode", "plan"] })], next: 100 }));
+  const detected = s.cli(["show", "Orchestrator", "--json"]).json();
+  assert.deepEqual([detected.permissionMode, detected.permissionModeSource], ["plan", "detected"]);
+});
+
+test("#1413 F3: a hand-edited bad permission mode warns on start, and the launch uses the default", (t) => {
+  const s = scene(t);
+  s.seed(team({ bots: [bot(ID.main, "main", { name: "Genie", permissionMode: "bypassPermission" })] }));
+  const started = s.cli(["start", "Genie"]);
+  assert.equal(started.code, 0, started.err);
+  const warnings = started.err.split("\n").filter((l) => /permission mode/.test(l));
+  assert.equal(warnings.length, 1, started.err);
+  assert.match(warnings[0], /b-aaaaaaaaaa: permission mode "bypassPermission" isn't one of acceptEdits, auto, bypassPermissions, manual, dontAsk, plan; ignored/);
+  const words = plain(agentWords(runCall(s.calls())));
+  assert.equal(words[words.indexOf("--permission-mode") + 1], "auto", "the dropped value never reaches the launch");
+  // Show reads the same record and says the same sentence, once.
+  const shown = s.cli(["show", "Genie"]);
+  assert.equal(shown.code, 0, shown.err);
+  assert.equal(shown.err.split("\n").filter((l) => /permission mode "bypassPermission"/.test(l)).length, 1, shown.err);
+});
+
+// ---- #1411 FIX-FIRST: a standard model keeps the default tier over a profile's or the host's
+// Fast, and show reads the profile a launch names. ----
+
+test("#1411: a model changed to a standard one says the default tier itself, over the host's Fast", (t) => {
+  const s = scene(t);
+  // The host's own Codex config asks for Fast and a low effort: neither may reach the new model.
+  const text = 'model = "gpt-6-astra"\nmodel_reasoning_effort = "low"\nservice_tier = "fast"\n';
+  const config = codexHome(s, text);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "high", "--tier", "fast", "--json"]).code, 0);
+  const changed = s.cli(["edit", "Genie", "--model", "gpt-6-astra"]);
+  assert.equal(changed.code, 0, changed.err);
+  assert.deepEqual([s.bots().bots[0].model, s.bots().bots[0].tier], ["gpt-6-astra", "standard"], "standard is stored, not left out");
+  assert.equal(s.cli(["start", "Genie", "--json"]).code, 0);
+  // The launch's own -c words come last and say standard; the host's Fast can't fill a gap.
+  assert.deepEqual(codexSeatWords(runCall(s.calls())).slice(-4),
+    ["-c", "model_reasoning_effort=high", "-c", "service_tier=default"]);
+  assert.equal(readFileSync(config, "utf8"), text, "the host's Codex config is never written");
+});
+
+test("#1411: a restart through a template naming a Fast profile still runs the standard tier the record says", (t) => {
+  const s = scene(t);
+  codexHome(s);
+  // The owner's fleet profile: Fast, high effort, for the Fast model the bot is on now.
+  const profile = codexProfile(s, "sol", 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\nservice_tier = "fast"\n');
+  const f = team();
+  f.bots[0] = { ...f.bots[0], agent: "codex", model: "gpt-6.1-sol", effort: "high", tier: "fast" };
+  s.seed(f);
+  // Its pane came from a template whose command names that profile (-p sol): hc still lists it.
+  const state = s.hcState();
+  state.templates = [{ name: "codex-sol", command: "codex -p sol -m gpt-6.1-sol" }];
+  state.terminals.push({ address: "t70", name: "t70", cwd: s.project, state: "live", created_ms: 7, labels: { bot: ID.main },
+    template: "codex-sol", argv: ["sh", "-c", "codex -p sol -m gpt-6.1-sol"],
+    foreground: { argv: ["codex", "-p", "sol", "-m", "gpt-6.1-sol"], cwd: s.project }, status: { app: "codex", state: "idle" } });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  // Sol -> Astra naming no tier: the new model runs standard, said after the profile's own words.
+  const changed = s.cli(["edit", "Genie", "--model", "gpt-6-astra"]);
+  assert.equal(changed.code, 0, changed.err);
+  assert.equal(s.bots().bots[0].tier, "standard");
+  const restarted = s.cli(["restart", "Genie", "--force", "--json"]);
+  assert.equal(restarted.code, 0, restarted.err);
+  const words = agentWords(runs(s).at(-1));
+  assert.match(words[2], /-p sol/, "the template's own command still names the Fast profile");
+  assert.deepEqual(words.slice(-4), ["-c", "model_reasoning_effort=high", "-c", "service_tier=default"]);
+  assert.equal(readFileSync(profile, "utf8").includes("service_tier = \"fast\""), true, "the profile is read, never written");
+});
+
+test("#1411: show reads the profile a launch names for the effort and tier it states", (t) => {
+  const s = scene(t);
+  // The host's config says low effort and the default tier; the profile the launch names says
+  // high and Fast, so the profile is what runs (Codex layers it on the host's config).
+  const config = codexHome(s, 'model = "gpt-6-astra"\nmodel_reasoning_effort = "low"\nservice_tier = "default"\n');
+  codexProfile(s, "sol", 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\nservice_tier = "fast"\n');
+  const f = team();
+  f.bots[0] = { ...f.bots[0], agent: "codex", model: "gpt-6.1-sol" };
+  s.seed(f);
+  const state = s.hcState();
+  state.terminals.push({ address: "t70", name: "t70", cwd: s.project, state: "live", created_ms: 7, labels: { bot: ID.main },
+    argv: ["sh", "-c", "codex -p sol -m gpt-6.1-sol"],
+    foreground: { argv: ["codex", "-p", "sol", "-m", "gpt-6.1-sol"], cwd: s.project }, status: { app: "codex", state: "idle" } });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const shown = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([shown.effort, shown.effortSource, shown.tier, shown.tierSource, shown.pinnedEffort, shown.pinnedTier],
+    ["high", "profile", "fast", "profile", null, null]);
+  assert.match(s.cli(["show", "Genie"]).out, /effort {7}high \(profile\)/);
+  assert.match(s.cli(["show", "Genie"]).out, /tier {9}fast \(profile\)/);
+  // A -c word on the pane's own command line is what runs: it wins over the profile it also names.
+  const now = s.hcState();
+  now.terminals.find((x) => x.address === "t70").foreground.argv = ["codex", "--profile=sol", "-m", "gpt-6.1-sol", "-c", "service_tier=priority", "-c", "model_reasoning_effort=xhigh"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(now));
+  const detected = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([detected.effort, detected.effortSource, detected.tier, detected.tierSource, detected.pinnedEffort, detected.pinnedTier],
+    ["xhigh", "detected", "fast", "detected", null, null]);
+  // A profile name that can't be one file's isn't read: the host's values stand, under its own name.
+  const unsafe = s.hcState();
+  unsafe.terminals.find((x) => x.address === "t70").foreground.argv = ["codex", "-p", "../config"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(unsafe));
+  const fallback = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([fallback.effort, fallback.effortSource, fallback.tier, fallback.tierSource], ["low", "global", "standard", "global"]);
+  // Nothing names either anywhere: no effort, and Codex's own default tier, Standard.
+  rmSync(config);
+  const own = s.cli(["show", "Genie", "--json"]).json();
+  assert.deepEqual([own.effort, own.effortSource, own.tier, own.tierSource], [null, null, "standard", "default"]);
+});
+
 test("#1415 create records a Claude Fable 5.2 pin with an absent or differing default", (t) => {
   for (const model of [null, "claude-opus-5-5"]) {
     const s = scene(t);
@@ -5150,4 +5518,205 @@ test("#1415 an unknown Claude model is refused with Fable 5.2 in the choices", (
   assert.equal(refused.code, 1, refused.err);
   assert.match(refused.err, /isn't a known claude model\. Pick one of: .*claude-fable-5-2(?:,|\.)/);
   assert.equal(existsSync(s.botsPath), false, "nothing written");
+});
+
+// ---- #738 main: hand the main role over in one whole-roster save ----
+const HAND = { zed: "b-ffffffffff", ops: "b-dddddddddd", aide: "b-gggggggggg" };
+/** Implicit members around the participants in a non-alphabetical file order; Aide names the main bot explicitly. */
+const handTeam = (edit = (f) => f) => edit(team({ bots: [
+  bot(ID.main, "main", { name: "Genie", category: "eng" }),
+  bot(HAND.zed, "member", { name: "Zed" }),
+  bot(ID.cap, "member", { name: "Captain", category: "eng" }),
+  bot(ID.dev, "member", { name: "Dev", lead: ID.cap }),
+  bot(HAND.aide, "member", { name: "Aide", lead: ID.main }),
+  bot(HAND.ops, "member", { name: "Ops" }),
+  bot(ID.plan, "member", { name: "Studio", agent: undefined, planned: { wave: 3 } }),
+] }));
+const handPreview = (lead = "Captain (b-bbbbbbbbbb)") => [
+  `Genie (b-aaaaaaaaaa) becomes a member reporting to ${lead}.`,
+  "Captain (b-bbbbbbbbbb) becomes the main bot.",
+  "Members with no stored lead that will follow Captain (b-bbbbbbbbbb):",
+  "  Zed (b-ffffffffff)", "  Ops (b-dddddddddd)", "  Studio (b-eeeeeeeeee)",
+];
+const IMPLICIT = [{ id: HAND.zed, name: "Zed" }, { id: HAND.ops, name: "Ops" }, { id: ID.plan, name: "Studio" }];
+
+test("#738 main: the implied lead is stored as an omission; one JSON value on stdout, the preview on stderr; read-back agrees", (t) => {
+  const s = scene(t);
+  const seeded = handTeam();
+  s.seed(seeded);
+  const r = s.cli(["main", "Captain", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), { id: ID.cap, project: s.project, previousMain: ID.main, oldLead: ID.cap,
+    implicitMembers: IMPLICIT, displacedLinks: [], saved: true, relabelled: [] });
+  assert.equal(r.err, handPreview().map((l) => `am: ${l}\n`).join(""));
+  const after = s.bots();
+  const genie = after.bots[0], captain = after.bots[2];
+  assert.equal(genie.kind, "member");
+  assert.equal(Object.hasOwn(genie, "lead"), false, "the default lead is an omission, never a second spelling");
+  assert.equal(genie.category, "eng", "an implied lead keeps the old main's category");
+  assert.equal(captain.kind, "main");
+  assert.equal(Object.hasOwn(captain, "category"), false);
+  assert.deepEqual(after.bots.filter((b) => b.kind === "main").map((b) => b.id), [ID.cap]);
+  // Every other row stays as it was, in place.
+  for (const i of [1, 3, 4, 5, 6]) assert.deepEqual(after.bots[i], JSON.parse(JSON.stringify(seeded.bots[i])));
+  assert.deepEqual(checkBots(after), []);
+  assert.equal(s.cli(["show", "Genie", "--json"]).json().lead, ID.cap);
+  assert.equal(s.cli(["show", "Studio", "--json"]).json().lead, ID.cap);
+  assert.equal(s.cli(["show", "Aide", "--json"]).json().lead, ID.main, "an explicit lead still names the old main");
+});
+
+test("#738 main --old-lead: an alternate lead is saved explicitly, checked in the proposed graph, and read back", (t) => {
+  const s = scene(t);
+  s.seed(handTeam());
+  // Ops reports implicitly to Genie today; after the hand-over it follows Captain, so Genie -> Ops is no cycle.
+  const r = s.cli(["main", "Captain", "--old-lead", "Ops"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, [...handPreview("Ops (b-dddddddddd)"), `Main bot hand-over saved in ${s.botsPath}.`].map((l) => `${l}\n`).join(""));
+  assert.equal(r.err, "");
+  const genie = s.bots().bots[0];
+  assert.deepEqual([genie.kind, genie.lead, Object.hasOwn(genie, "category")], ["member", HAND.ops, false]);
+  assert.equal(s.cli(["show", "Genie", "--json"]).json().lead, HAND.ops);
+  assert.equal(s.cli(["show", "Ops", "--json"]).json().lead, ID.cap);
+});
+
+test("#738 main refusals: self, planned, missing, ambiguous, cycle, an invalid roster, not one main; exact bytes kept", (t) => {
+  const s = scene(t, { terminals: [term("t1", { bot: ID.main }), term("t7", { bot: ID.cap })] });
+  const twins = (f) => { f.bots.push(bot("b-hhhhhhhhhh", "member", { name: "Twin" }), bot("b-iiiiiiiiii", "member", { name: "Twin" })); return f; };
+  const rows = [
+    [handTeam(), ["Genie"], /^am: Genie is already the main bot\.\n$/],
+    [handTeam(), ["Studio"], /^am: Studio is planned, so it can't be the main bot yet\.\n$/],
+    [handTeam(), ["Nobody"], /No bot "Nobody" in this project\./],
+    [handTeam(twins), ["Twin"], /2 bots are named "Twin" \(b-hhhhhhhhhh, b-iiiiiiiiii\); use the id\./],
+    [handTeam(), ["Captain", "--old-lead", "Genie"], /^am: Genie can't lead itself\.\n$/],
+    [handTeam(), ["Captain", "--old-lead", "Studio"], /^am: Studio is planned, so it can't lead a bot yet\.\n$/],
+    [handTeam(), ["Captain", "--old-lead", "Nobody"], /No bot "Nobody" in this project\./],
+    [handTeam(twins), ["Captain", "--old-lead", "Twin"], /2 bots are named "Twin"/],
+    // Aide names Genie as its lead: Genie -> Aide -> Genie.
+    [handTeam(), ["Captain", "--old-lead", "Aide"], /^am: Not saved: .*b-aaaaaaaaaa: lead b-gggggggggg leads back to this bot/],
+    [handTeam((f) => { f.bots[5].lead = "b-zzzzzzzzzz"; return f; }), ["Captain"], /^am: Not saved: .*lead b-zzzzzzzzzz is missing/],
+    [handTeam((f) => { f.bots[0].kind = "member"; return f; }), ["Captain"], /0 main bots; a project has exactly one/],
+    [handTeam((f) => { f.bots[1].kind = "main"; return f; }), ["Captain"], /2 main bots; a project has exactly one/],
+  ];
+  for (const [file, args, why] of rows) {
+    s.seed(file);
+    const before = readFileSync(s.botsPath, "utf8");
+    const labels = labelCalls(s.calls()).length;
+    for (const extra of [[], ["--dry-run"]]) {
+      const r = s.cli(["main", ...args, ...extra]);
+      const what = [...args, ...extra].join(" ");
+      assert.equal(r.code, 1, `${what}: ${r.err}`);
+      assert.match(r.err, why, what);
+      assert.equal(r.out, "", `${what}: no preview for a refusal`);
+      assert.equal(readFileSync(s.botsPath, "utf8"), before, `${what}: exact bytes kept`);
+    }
+    // --json: one error value on stdout, the same message on stderr.
+    const j = s.cli(["main", ...args, "--json"]);
+    assert.equal(j.code, 1);
+    assert.match(j.err, why);
+    assert.equal(j.json().error, j.err.replace(/^am: /, "").trimEnd());
+    assert.equal(readFileSync(s.botsPath, "utf8"), before);
+    assert.equal(labelCalls(s.calls()).length, labels, `${args.join(" ")}: no relabel`);
+  }
+});
+
+test("#738 main --dry-run: same preview twice, byte for byte; no save, no listing, no relabel; then the real run does both", (t) => {
+  const s = scene(t, { terminals: [term("t1", { bot: ID.main }), term("t7", { bot: ID.cap }), term("t8", { bot: ID.dev })] });
+  s.seed(handTeam());
+  const before = readFileSync(s.botsPath, "utf8"), mtime = statSync(s.botsPath).mtimeMs;
+  const listFile = join(s.app, PROJECTS_FILE);
+  assert.equal(existsSync(listFile), false);
+  const runs = [1, 2].map(() => s.cli(["main", "Captain", "--dry-run"]));
+  for (const r of runs) assert.equal(r.code, 0, r.err);
+  assert.equal(runs[0].out, handPreview().map((l) => `${l}\n`).join(""));
+  assert.deepEqual([runs[1].out, runs[1].err], [runs[0].out, runs[0].err]);
+  const json = [1, 2].map(() => s.cli(["main", "Captain", "--dry-run", "--json"]));
+  assert.deepEqual([json[1].code, json[1].out, json[1].err], [json[0].code, json[0].out, json[0].err]);
+  assert.deepEqual(json[0].json(), { id: ID.cap, project: s.project, previousMain: ID.main, oldLead: ID.cap,
+    implicitMembers: IMPLICIT, displacedLinks: [], saved: false, relabelled: [] });
+  assert.equal(json[0].err, handPreview().map((l) => `am: ${l}\n`).join(""));
+  assert.equal(readFileSync(s.botsPath, "utf8"), before);
+  assert.equal(statSync(s.botsPath).mtimeMs, mtime);
+  assert.equal(existsSync(listFile), false, "no project listing");
+  assert.deepEqual(labelCalls(s.calls()), [], "no relabel");
+  // The real run with the same snapshot saves, lists and relabels.
+  const real = s.cli(["main", "Captain", "--json"]);
+  assert.equal(real.code, 0, real.err);
+  assert.notEqual(readFileSync(s.botsPath, "utf8"), before);
+  assert.equal(existsSync(listFile), true, "a real save lists the project");
+  assert.ok(real.json().relabelled.length > 0, JSON.stringify(real.json()));
+  assert.ok(labelCalls(s.calls()).length > 0);
+});
+
+test("#738 main arguments: unrelated, empty or repeated selectors and a stray --old-lead exit 2 before any I/O", (t) => {
+  const s = scene(t);
+  s.seed(handTeam());
+  const before = readFileSync(s.botsPath, "utf8");
+  const gone = join(s.root, "gone");
+  const rows = [
+    [["main"], /usage: am main <bot>/],
+    [["main", "Captain", "Dev"], /usage: am main <bot>/],
+    [["main", ""], /usage: am main <bot>/],
+    [["main", "  "], /usage: am main <bot>/],
+    [["main", "Captain", "--old-lead", ""], /--old-lead needs a value/],
+    [["main", "Captain", "--old-lead=  "], /--old-lead needs a value/],
+    [["main", "Captain", "--project", ""], /--project needs a value/],
+    [["main", "Captain", "--old-lead", "Dev", "--old-lead", "Ops"], /Give --old-lead once/],
+    [["main", "Captain", "--dry-run", "--dry-run"], /Give --dry-run once/],
+    [["main", "Captain", "--project", gone, "--project", gone], /Give --project once/],
+    [["main", "Captain", "--role", "x", "--project", gone], /--role isn't an option for main/],
+    [["main", "Captain", "--lead", "Dev"], /--lead isn't an option for main/],
+    [["main", "Captain", "--all"], /--all isn't an option for main/],
+    [["edit", "Dev", "--old-lead", "Captain"], /^am: --old-lead is only for main\.\n$/],
+    [["ls", "--old-lead", "Captain", "--project", gone], /^am: --old-lead is only for main\.\n$/],
+    [["create", "--name", "New", "--agent", "claude", "--old-lead", "Dev"], /^am: --old-lead is only for main\.\n$/],
+  ];
+  for (const [args, why] of rows) {
+    const r = s.cli(args);
+    assert.equal(r.code, 2, `${args.join(" ")}: ${r.err}`);
+    assert.match(r.err, why, args.join(" "));
+    assert.doesNotMatch(r.err, /is not a folder|No bot/, `${args.join(" ")}: refused before reading anything`);
+    assert.equal(readFileSync(s.botsPath, "utf8"), before);
+  }
+  assert.deepEqual(s.calls(), [], "nothing asked of hc");
+  assert.equal(existsSync(gone), false);
+});
+
+test("#738 main: displaced external leads on the two edited rows are cleared and reported; other rows and the other project stay", (t) => {
+  const s = scene(t);
+  const ext = join(s.root, "ext");
+  mkdirSync(join(ext, ".herdr"), { recursive: true });
+  const O = "b-oooooooooo", Q = "b-qqqqqqqqqq", P = "b-pppppppppp";
+  const extText = `${JSON.stringify({ version: 1, categories: [], bots: [
+    bot(O, "main", { name: "Hub", crossMembers: [{ id: ID.main, project: s.project }, { id: HAND.ops, project: s.project }] }),
+    bot(Q, "member", { name: "Desk", crossMembers: [{ id: ID.cap, project: s.project }] }),
+    bot(P, "member", { name: "Far", lead: ID.main, leadProject: s.project }),
+  ] }, null, 2)}\n`;
+  writeFileSync(join(ext, ".herdr/bots.json"), extText);
+  const seeded = handTeam((f) => {
+    Object.assign(f.bots[0], { lead: O, leadProject: ext, crossMembers: [{ id: P, project: ext }] });
+    Object.assign(f.bots[2], { lead: Q, leadProject: ext });
+    Object.assign(f.bots[5], { lead: O, leadProject: ext });
+    return f;
+  });
+  s.seed(seeded);
+  const r = s.cli(["main", "Captain", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const out = r.json();
+  assert.deepEqual(out.displacedLinks, [
+    { id: ID.main, name: "Genie", lead: O, leadProject: ext },
+    { id: ID.cap, name: "Captain", lead: Q, leadProject: ext },
+  ]);
+  assert.deepEqual(out.implicitMembers, [{ id: HAND.zed, name: "Zed" }, { id: ID.plan, name: "Studio" }], "Ops has a stored lead");
+  for (const [who, lead] of [["Genie", O], ["Captain", Q]]) {
+    assert.ok(r.err.includes(`am: Displaced external lead: ${who} (${who === "Genie" ? ID.main : ID.cap}) → ${lead} in ${ext}. `
+      + "Remove the reciprocal entry there manually.\n"), r.err);
+  }
+  const [genie, , captain, , , ops] = s.bots().bots;
+  for (const row of [genie, captain]) {
+    assert.equal(Object.hasOwn(row, "lead"), false, row.name);
+    assert.equal(Object.hasOwn(row, "leadProject"), false, row.name);
+  }
+  assert.deepEqual(genie.crossMembers, [{ id: P, project: ext }], "crossMembers untouched");
+  assert.deepEqual(ops, JSON.parse(JSON.stringify(seeded.bots[5])), "another row's external link stays");
+  assert.equal(readFileSync(join(ext, ".herdr/bots.json"), "utf8"), extText, "the other project's file is never written");
 });

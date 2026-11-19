@@ -40,31 +40,56 @@ export function programForApp(app, known = []) {
   return listed.find((x) => x.key === key) ?? { key, name: AGENTS[key]?.name ?? key, icon: null, tint: false };
 }
 
+const machineOfAddress = (a) => (typeof a === "string" && a.includes("/") ? a.slice(0, a.indexOf("/")) : null);
+// A ledger binding's terminal address (the full one: `hx/t4`), and the project id of the
+// project it plays in, or null.
+const bindingAddress = (b) => (typeof b?.address === "string" && b.address ? b.address
+  : (b?.machine && typeof b?.terminal === "string" && !b.terminal.includes("/") ? `${b.machine}/${b.terminal}` : b?.terminal ?? null));
+const bindingProject = (b) => (b?.project
+  ? projectId({ machine: b.machine ?? machineOfAddress(bindingAddress(b)), key: b.project }) : null);
+
 /**
- * The live map: bot id -> its live pane, from `terminals()` rows. A terminal counts while it
- * is live, carries `bot=<id>` for a bot in `known` (every id when `known` is null) and has an
- * agent in front. On any machine: the view shows remote bots too (launch.js' liveTerminalOf
- * is this computer's only, for Start and Attach). Several holders: the newest by
- * `created_ms` counts, flagged `duplicate`. `argv`: the pane's foreground command line when
- * the row carries it (`foreground.argv`), else what `argvOf(address, created_ms)` gives (the
- * command line the view read with `hc get` for that very pane: see argvReader), else null. `parent`: the hc parent of that terminal (null:
- * none), where its click opens a tab. `panes`, only with several holders: every holder's
- * address, the counted one first (the parent mark compares with all of them). By project and id (paneCounts): `keyOf(row)` gives a
- * pane's project key or null; a pane with one is at liveKey(id, its projectId), the newest of
- * that project's panes and those with none; a bot's panes with none at its bare id. Read it
- * with liveOf.
+ * The live map: bot id -> its live pane, from `terminals()` rows. With `bindings` (the attach
+ * ledger's `whois --all` answer, rows with `{ bot, address, project, machine, state }`), the
+ * ledger names each bot's pane: a terminal counts while it is live and has an agent in front,
+ * whatever its `bot=` label says, and only the bindings that are `live` count. Without
+ * `bindings` (`null`), a terminal counts while it is live, carries `bot=<id>` for a bot in
+ * `known` (every id when `known` is null) and has an agent in front. On any machine: the view
+ * shows remote bots too (launch.js' liveTerminalOf is this computer's only, for Start and
+ * Attach). Several holders: the newest by `created_ms` counts, flagged `duplicate`. `argv`:
+ * the pane's foreground command line when the row carries it (`foreground.argv`), else what
+ * `argvOf(address, created_ms)` gives (the command line the view read with `hc get` for that
+ * very pane: see argvReader), else null. `parent`: the hc parent of that terminal (null: none),
+ * where its click opens a tab. `panes`, only with several holders: every holder's address, the
+ * counted one first (the parent mark compares with all of them). By project and id
+ * (paneCounts): `keyOf(row)` gives a pane's project key or null, or the binding's `project`;
+ * a pane with one is at liveKey(id, its projectId), the newest of that project's panes and
+ * those with none; a bot's panes with none at its bare id. Read it with liveOf.
  */
-export function liveFrom(terminals, known = null, argvOf = () => null, keyOf = () => null) {
+export function liveFrom(terminals, known = null, argvOf = () => null, keyOf = () => null, bindings = null) {
   const readArgv = (t) => { const v = argvOf(addressOf(t), t.created_ms ?? null); return Array.isArray(v) ? v : null; };
   // id -> { any: the panes with no project, at: Map project id -> that project's panes }
   const holders = new Map();
-  for (const t of terminals ?? []) {
-    const id = t?.labels?.[BOT_LABEL];
-    if (!id || (known && !known.has(id)) || t.state !== "live" || !addressOf(t) || !agentInFront(t, readArgv)) continue;
+  const hold = (id, pid, t) => {
     if (!holders.has(id)) holders.set(id, { any: [], at: new Map() });
-    const h = holders.get(id), pid = paneProject(t, keyOf);
+    const h = holders.get(id);
     if (pid === null) h.any.push(t);
     else h.at.set(pid, [...(h.at.get(pid) ?? []), t]);
+  };
+  if (bindings !== null) {
+    const rows = new Map((terminals ?? []).filter((t) => addressOf(t)).map((t) => [addressOf(t), t]));
+    for (const b of bindings ?? []) {
+      const id = b?.bot;
+      if (!id || (known && !known.has(id)) || (b.state && b.state !== "live")) continue;
+      const t = rows.get(bindingAddress(b));
+      if (t && t.state === "live" && agentInFront(t, readArgv)) hold(id, bindingProject(b), t);
+    }
+  } else {
+    for (const t of terminals ?? []) {
+      const id = t?.labels?.[BOT_LABEL];
+      if (!id || (known && !known.has(id)) || t.state !== "live" || !addressOf(t) || !agentInFront(t, readArgv)) continue;
+      hold(id, paneProject(t, keyOf), t);
+    }
   }
   const entry = (rows) => {
     const pick = rows.reduce((a, b) => ((b.created_ms ?? -1) > (a.created_ms ?? -1) ? b : a));
@@ -93,7 +118,31 @@ export const liveKey = (botId, pid = null) => (pid === null ? botId : `${pid}\n$
 /** Bot `botId`'s live pane for `project` in liveFrom()'s map (paneCounts), or null. */
 export const liveOf = (live, project, botId) => live?.[liveKey(botId, projectId(project))] ?? live?.[botId] ?? null;
 
-const machineOfAddress = (a) => (typeof a === "string" && a.includes("/") ? a.slice(0, a.indexOf("/")) : null);
+/**
+ * The terminal address -> bot id map the sidebar draws rows from: the ledger's live bindings
+ * when it answers (`bindings`), never the pane's `bot=` label; the labels when it can't answer
+ * (`null`), so a CLI without `whois --all` still draws its rows. `known`: the ids a project
+ * defines; a binding for any other id is no bot row.
+ */
+export function botTerminals(terminals, known, bindings = null) {
+  const rows = new Map((terminals ?? []).filter((t) => addressOf(t)).map((t) => [addressOf(t), t]));
+  const out = new Map();
+  if (bindings !== null) {
+    for (const b of bindings ?? []) {
+      const id = b?.bot;
+      if (!id || (known && !known.has(id)) || (b.state && b.state !== "live")) continue;
+      const t = rows.get(bindingAddress(b));
+      if (t) out.set(addressOf(t), id);
+    }
+    return out;
+  }
+  for (const t of rows.values()) {
+    const id = t?.labels?.[BOT_LABEL];
+    if (id && known.has(id)) out.set(addressOf(t), id);
+  }
+  return out;
+}
+
 // An address on `machine`: a bare id given for a pane there is that machine's, so two
 // addresses compare on the same machine (box/t1 and t1 reported by a box pane are one).
 const onMachine = (a, machine) => (machine && !a.includes("/") ? `${machine}/${a}` : a);
@@ -177,6 +226,31 @@ export function poseOf(live, now) {
 export const NEEDS_YOU = "Needs you";
 export const NEEDS_YOU_PERMISSION = "Permission";
 export const needsYouText = (report) => (waitsOnPermission(report) ? NEEDS_YOU_PERMISSION : NEEDS_YOU);
+
+// The documented marker a stopped agent sets on its own pane with `hc label`: the short text of
+// what it waits on (tidy.js's NEEDS_OWNER_LABEL, one label with two readers; a test holds them
+// equal). The sidebar draws it apart from the blocked chip; it never scans a pane's screen.
+export const NEEDS_OWNER_LABEL = "automagik-herdr.needs-owner";
+// The owner-question chip's word, drawn by main.js status().
+export const OWNER_QUESTION = "Question";
+/** How much of the label one line can carry; the rest is cut, keeping the chip and its tooltip small. */
+export const OWNER_TEXT_MAX = 160;
+
+/**
+ * The question a pane's needs-owner label carries while it waits on the person, or null. A
+ * working, blocked or failed pane has no owner question: the chip clears in the drawing the
+ * moment the agent works again, even before it removes the label. `status` is the row's drawn
+ * status (a bot row draws `error` as blocked). Blank and whitespace labels say nothing; a long
+ * one is cut to OWNER_TEXT_MAX characters on one line.
+ */
+export function ownerQuestionOf(row, status = row?.status) {
+  if (status === "working" || status === "blocked" || status === "error") return null;
+  const text = row?.labels?.[NEEDS_OWNER_LABEL];
+  if (typeof text !== "string") return null;
+  const line = text.trim().replace(/\s+/g, " ");
+  if (!line) return null;
+  return line.length > OWNER_TEXT_MAX ? `${line.slice(0, OWNER_TEXT_MAX - 3)}...` : line;
+}
 
 /** When the next idle bot turns asleep (ms since the epoch), or null: the view's one wake-up. */
 export function nextWake(live, now) {
@@ -684,16 +758,36 @@ export function clickActionOf(terminal, panes) {
 }
 
 /**
- * The live terminal labelled with bot `botId` when liveFrom doesn't count it (no agent seen in
- * front yet: the `sh -c` wrapper, a command line not read yet, a shell): the bot row's click
- * still goes to it (clickActionOf), never nowhere. Of several, one a pane shows (`panes`:
- * panes() rows) first, then the newest by `created_ms`. Null when the bot has no live terminal.
- * With `project`, only the terminals that count for it (paneCounts, `keyOf` as liveFrom's).
+ * The live terminal a bot's row holds when liveFrom doesn't count it (no agent seen in front
+ * yet: the `sh -c` wrapper, a command line not read yet, a shell): the bot row's click still
+ * goes to it (clickActionOf), never nowhere. With `bindings` (liveFrom's ledger answer) the
+ * ledger names it, never the `bot=` label; a bound terminal still counts, and an unbound label
+ * names nothing. Without (`null`), the live terminal labelled with bot `botId`. Of several, one
+ * a pane shows (`panes`: panes() rows) first, then the newest by `created_ms`. Null when the
+ * bot has no live terminal. With `project`, only the terminals that count for it (paneCounts,
+ * `keyOf` as liveFrom's; the binding's project with `bindings`).
  */
-export function heldTerminalOf(botId, terminals, panes = [], project = null, keyOf = () => null) {
+export function heldTerminalOf(botId, terminals, panes = [], project = null, keyOf = () => null, bindings = null) {
   const shown = new Set((panes ?? []).map((p) => p?.terminal).filter(Boolean));
-  const held = (terminals ?? []).filter((t) => botId && t?.labels?.[BOT_LABEL] === botId && t.state === "live" && addressOf(t)
-    && (!project || paneCounts(t, project, keyOf)));
+  let held;
+  if (bindings !== null) {
+    const rows = new Map((terminals ?? []).filter((t) => addressOf(t)).map((t) => [addressOf(t), t]));
+    const pid = project ? projectId(project) : null;
+    held = [];
+    const seen = new Set();
+    for (const b of bindings ?? []) {
+      if (b?.bot !== botId || (b.state && b.state !== "live")) continue;
+      if (pid !== null && bindingProject(b) !== pid) continue;
+      const address = bindingAddress(b);
+      const t = rows.get(address);
+      if (!t || t.state !== "live" || seen.has(address)) continue;
+      seen.add(address);
+      held.push(t);
+    }
+  } else {
+    held = (terminals ?? []).filter((t) => botId && t?.labels?.[BOT_LABEL] === botId && t.state === "live" && addressOf(t)
+      && (!project || paneCounts(t, project, keyOf)));
+  }
   if (!held.length) return null;
   const rank = (t) => [shown.has(addressOf(t)) ? 1 : 0, t.created_ms ?? -1];
   const pick = held.reduce((a, b) => {
@@ -707,7 +801,7 @@ export function heldTerminalOf(botId, terminals, panes = [], project = null, key
  * A held bot row's click, decided at click time from fresh `terminals` and `panes`: focus or
  * peek its live terminal (clickActionOf), or null when it holds none any more (do nothing).
  */
-export function heldClickOf(botId, terminals, panes, project = null, keyOf = () => null) {
-  const held = heldTerminalOf(botId, terminals, panes, project, keyOf);
+export function heldClickOf(botId, terminals, panes, project = null, keyOf = () => null, bindings = null) {
+  const held = heldTerminalOf(botId, terminals, panes, project, keyOf, bindings);
   return held ? clickActionOf(held, panes) : null;
 }

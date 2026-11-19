@@ -1,3 +1,4 @@
+import { startFakeCore } from "./fake-core.mjs";
 // Revive (#939): the bots come back after a restart of this computer. revive.js over plain data,
 // then `automagik-herdr revive` run as a program against a scratch project, a scratch home and
 // app home, a fake `hc` (test/fake-hc.mjs), a fake `herdr-app` and a fake `systemctl`. No live
@@ -13,8 +14,8 @@ import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { helperPlan } from "../mods/am-sidebar/restart.js";
 import { AGENTS } from "../mods/am-sidebar/models.js";
-import { FIRST_SESSION_MS, KEEP_DOWN, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
-  pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
+import { FIRST_SESSION_MS, KEEP_DOWN, PLIST_DECL, PLIST_LABEL, PLIST_MARK, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, launchdNotLoaded, ledgerRivals,
+  pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
 import { readJsonLines } from "./log-lines.mjs";
 import { servicePath, unitKeepsPath } from "../mods/am-sidebar/revive.js";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -23,6 +24,8 @@ import { codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir, kimiCand
 // #1417: every CLI run below reads Codex's and Kimi's homes under its scratch home only.
 delete process.env.CODEX_HOME;
 delete process.env.KIMI_CODE_HOME;
+// A host's real DSH home must not stand in for the scratch one the session cases build.
+delete process.env.DSH_HOME;
 
 const SID = "0f3c2a4e-1b2d-4c5e-9f60-718293a4b5c6";
 const SID2 = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
@@ -194,6 +197,39 @@ test("unitText: a oneshot user unit that runs revive --boot and waits for herdr-
   assert.equal(sameBoot(null, 5), false);
 });
 
+test("plistText: a launchd agent that runs revive --boot at login, marked on its second line, with the kept PATH (#939, #1418)", () => {
+  const text = plistText({ runner: "/Users/u/.local/bin/automagik-herdr", env: { HERDR_APP_HOME: "/Users/u/my app/100%", PATH: `/opt/my tools/bin:/opt/$x:/opt/&<>"` }, wait: 600 });
+  assert.ok(text.startsWith(`${PLIST_DECL}\n${PLIST_MARK}\n`), text);
+  assert.ok(text.includes(`<key>Label</key><string>${PLIST_LABEL}</string>`), "the label launchd knows the job by");
+  assert.match(text, /<key>ProgramArguments<\/key><array>\n\s*<string>\/Users\/u\/\.local\/bin\/automagik-herdr<\/string>\n\s*<string>revive<\/string>\n\s*<string>--boot<\/string>\n\s*<string>--wait<\/string>\n\s*<string>600<\/string>\n\s*<\/array>/, text);
+  assert.match(text, /<key>RunAtLoad<\/key><true\/>/, "it runs at login");
+  assert.match(text, /<key>KeepAlive<\/key><false\/>/, "once: it never restarts itself");
+  assert.doesNotMatch(text, /StartInterval|StartCalendarInterval/, "no schedule of its own");
+  assert.match(text, /<key>HERDR_APP_HOME<\/key><string>\/Users\/u\/my app\/100%<\/string>/, "a % is literal in a plist");
+  assert.ok(text.includes(`<key>PATH</key><string>/opt/my tools/bin:/opt/$x:/opt/&amp;&lt;&gt;&quot;</string>`), text);
+  assert.equal(plistIsOurs(text), true);
+  assert.equal(plistKeepsPath(text), true);
+  assert.equal(plistKeepsPath(plistText({ runner: "/r", env: { HERDR_APP_HOME: "/a" } })), false);
+  assert.equal(plistIsOurs(`${PLIST_DECL}\n<plist version="1.0"><dict/></plist>\n`), false, "the declaration alone is anyone's");
+  assert.equal(plistIsOurs(`<?xml version="1.0"?>\n${PLIST_MARK}\n`), false, "a comment may not come before the declaration");
+  assert.equal(plistIsOurs(null), false);
+  assert.equal(plistPath("/Users/u/"), "/Users/u/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist");
+  assert.ok(plistPath("/Users/u").startsWith("/Users/u/Library/LaunchAgents/"), "the person's own launch agents, never a system folder");
+});
+
+test("launchdNotLoaded: only launchctl's own exit 113 or its exact 'Could not find service' says the job is not loaded (#939)", () => {
+  const r = (code, stderr = "", stdout = "") => ({ code, stderr, stdout });
+  assert.equal(launchdNotLoaded(r(113)), true, "113 is launchd's not-found");
+  assert.equal(launchdNotLoaded(r(0, "", "Could not find service")), true, "the exact words, whatever the exit");
+  assert.equal(launchdNotLoaded(r(1, "Could not find service \"x\" in domain for user gui: 501")), true);
+  assert.equal(launchdNotLoaded(r(1, "print failed")), false, "a failed probe is not a not-found");
+  assert.equal(launchdNotLoaded(r(64, "usage: launchctl print <domain-target>")), false);
+  assert.equal(launchdNotLoaded(r(1, "Operation not permitted")), false);
+  assert.equal(launchdNotLoaded(r(5, "Input/output error")), false);
+  assert.equal(launchdNotLoaded(r(0, "Could not find servicex")), false, "the exact message, not a word that starts it");
+  assert.equal(launchdNotLoaded(r(0)), false, "exit 0 with no words is loaded");
+});
+
 test("helperPlan: a helper that is a bare shell names its agent by its launch command only when revive asks", () => {
   const get = { address: "t8", name: "side", cwd: "/p", state: "live", labels: { "agent.session": SID }, argv: ["/usr/bin/env", "PATH=/bin", "claude", "--session-id", SID, "do the thing"],
     foreground: { argv: ["zsh"], cwd: "/p" } };
@@ -226,7 +262,7 @@ const pane = (address, { bot: b, front = ["zsh"], argv = ["claude"], cwd, create
   address, name: address, cwd, state: "live", parent, die_with_parent: die, created_ms: created, argv, labels: { ...(b ? { bot: b } : {}), ...labels },
   foreground: { argv: front, cwd }, status: { app: "claude-code", state: status } });
 
-function world(t, { file = team(), terminals = () => [], attach = null, hcExtra = {} } = {}) {
+function world(t, { file = team(), terminals = () => [], attach = null, hcExtra = {}, os = null } = {}) {
   const root = scratchRoot(t, "hb-revive-");
   const project = scratchProject(root, "proj", { isGit: true, commit: true });
   const bin = join(root, "bin");
@@ -236,6 +272,23 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
   exe(join(bin, "pgrep"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_PGREP}" "$@"\n`);
   exe(join(bin, "agy"), `#!/bin/sh\nexec "${process.execPath}" "${FAKE_AGY}" "$@"\n`);
   for (const name of ["claude", "codex", "dsh-tui"]) exe(join(bin, name), "#!/bin/sh\nexit 0\n");
+  // A system that says it is another one (`os`): both the installer and the CLI read uname -s.
+  if (os) exe(join(bin, "uname"), `#!/bin/sh\necho ${os}\n`);
+  // launchd's stand-in: it logs every call. A job is loaded only when the test says so, and a
+  // bootout fails only when it asks for that. A test can also make `print` itself fail, with the
+  // exit and the words it wants, to test that only launchd's own not-found answer means "not
+  // loaded". The real launchctl is never reached.
+  const lcLog = join(root, "launchctl.log");
+  exe(join(bin, "launchctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${lcLog}"\ncase $1 in
+  print)
+    if [ -n "\${LAUNCHCTL_PRINT_EXIT:-}" ]; then printf '%s\\n' "\${LAUNCHCTL_PRINT_TEXT:-}" >&2; exit "$LAUNCHCTL_PRINT_EXIT"; fi
+    if [ -n "\${LAUNCHCTL_PRINT_OUT:-}" ]; then printf '%s\\n' "$LAUNCHCTL_PRINT_OUT"; exit 0; fi
+    [ "\${LAUNCHCTL_LOADED:-}" = 1 ] && exit 0
+    echo "Could not find service" >&2; exit 113 ;;
+  bootout) [ "\${LAUNCHCTL_BOOTOUT_FAIL:-}" = 1 ] && { echo "Boot-out failed: Input/output error" >&2; exit 1; }; exit 0 ;;
+esac
+exit 0
+`);
   const sysLog = join(root, "systemctl.log");
   exe(join(bin, "systemctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${sysLog}"\n[ -n "$SYSTEMCTL_FAIL" ] && { echo "Failed to connect to bus" >&2; exit 1; }\nexit 0\n`);
   const home = join(root, "home");
@@ -263,7 +316,11 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
     AUTOMAGIK_HERDR_TAB_WAIT_MS: "100", AUTOMAGIK_HERDR_RESTART_STABLE_MS: "200", AUTOMAGIK_HERDR_RESTART_WAIT_MS: "3000",
     AUTOMAGIK_HERDR_TREE_TURN_WAIT_MS: "1000", AUTOMAGIK_HERDR_REVIVE_SETTLE_MS: "0" };
   for (const k of ["HC_TERMINAL_ID", "HC_SOCKET", "HERMES_HOME", "AUTOMAGIK_HERDR_BOOT_MS", "CLAUDE_CONFIG_DIR"]) delete env[k];
+  const core = startFakeCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
+  Object.assign(env, { ...core.env });
+  Object.assign(env, { HC_SOCKET: "", HC_SESSION: "" });
   const cli = (args, { env: extra = {}, cwd = project } = {}) => {
+    core.control({ ...env, ...extra });
     const r = spawnSync(RUNTIME, [CLI, ...args], { cwd, env: { ...env, ...extra }, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr, json: () => JSON.parse(r.stdout) };
   };
@@ -273,7 +330,8 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
   const attachRows = () => readAttach(readFileSync(attachPath(app), "utf8")).rows;
   const lastReport = () => JSON.parse(readFileSync(join(app, "automagik-herdr/revive-last.json"), "utf8"));
   const sysCalls = () => (existsSync(sysLog) ? readFileSync(sysLog, "utf8").split("\n").filter(Boolean) : []);
-  return { root, project, home, app, env, cli, calls, hcState, ledger, attachRows, lastReport, sysCalls };
+  const lcCalls = () => (existsSync(lcLog) ? readFileSync(lcLog, "utf8").split("\n").filter(Boolean) : []);
+  return { root, project, home, app, env, cli, calls, hcState, ledger, attachRows, lastReport, sysCalls, lcCalls };
 }
 const runsOf = (s) => s.calls().filter((c) => c[0] === "run");
 const wordsOf = (run) => run.slice(run.indexOf("--") + 1);
@@ -322,6 +380,19 @@ test("revive: after a reboot each bot at a bare shell is restarted in its place,
   assert.equal(again.code, 0, again.err);
   assert.match(again.out, /nothing to bring back/);
   assert.equal(runsOf(s).length, 2);
+});
+
+test("#1413: revive after a reboot starts a Claude bot with its own permission mode", (t) => {
+  const s = world(t, {
+    file: team({ main: { permissionMode: "bypassPermissions" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })],
+  });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = wordsOf(runsOf(s)[0]);
+  const at = words.indexOf("--permission-mode");
+  assert.notEqual(at, -1, words.join(" "));
+  assert.equal(words[at + 1], "bypassPermissions");
 });
 
 test("revive --dry-run prints the plan and touches nothing", (t) => {
@@ -557,6 +628,162 @@ test("revive service: installs and enables a systemd user unit that runs revive 
   assert.equal(s.cli(["revive", "service", "start"]).code, 2);
 });
 
+test("revive service on macOS: writes the LaunchAgent in the person's own LaunchAgents, starts nothing, and uninstalls only after launchd lets go of the label", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  const label = PLIST_LABEL;
+  // The command as install.sh links it: what the agent runs.
+  mkdirSync(join(s.home, ".local/bin"), { recursive: true });
+  exe(join(s.home, ".local/bin/automagik-herdr"), "#!/bin/sh\nexit 0\n");
+  assert.match(s.cli(["revive", "service", "status"]).out, /isn't installed/);
+  assert.deepEqual(s.lcCalls(), [], "status asks launchd nothing");
+
+  const r = s.cli(["revive", "service", "install", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const text = readFileSync(plist, "utf8");
+  assert.equal(plistIsOurs(text), true);
+  assert.ok(text.includes(`<string>${join(s.home, ".local/bin/automagik-herdr")}</string>`), text);
+  assert.ok(text.includes("<string>revive</string>") && text.includes("<string>--boot</string>"), text);
+  assert.ok(text.includes(`<key>HERDR_APP_HOME</key><string>${s.app}</string>`), text);
+  const installed = r.json();
+  assert.equal(installed.enabled, true);
+  assert.equal(installed.label, label);
+  assert.equal(installed.path, plist);
+  assert.ok(installed.kept_path.split(":").includes(join(s.home, ".local/bin")), installed.kept_path);
+  assert.deepEqual(s.lcCalls(), [], "written only: never bootstrapped, so the pass never runs while the person is using the computer");
+  assert.deepEqual(changes(s), [], "no pane was touched");
+  const status = s.cli(["revive", "service", "status", "--json"]).json();
+  assert.deepEqual([status.path, status.installed, status.ours, status.enabled, status.path_kept], [plist, true, true, true, true]);
+  assert.match(s.cli(["revive", "service", "status"]).out, /Automagik Herdr's, runs at your next login/);
+
+  // Not loaded yet (no login since the install): the file goes, and launchd is only asked first.
+  const gone = s.cli(["revive", "service", "uninstall", "--json"]);
+  assert.equal(gone.code, 0, gone.err);
+  assert.equal(existsSync(plist), false);
+  assert.equal(gone.json().loaded, false);
+  assert.deepEqual(s.lcCalls(), [`print gui/${uid}/${label}`]);
+  assert.match(s.cli(["revive", "service", "status"]).out, /isn't installed/);
+
+  // Loaded (a login ran it): bootout comes first, then the plist goes: no label is left behind.
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  const u2 = s.cli(["revive", "service", "uninstall", "--json"], { env: { LAUNCHCTL_LOADED: "1" } });
+  assert.equal(u2.code, 0, u2.err);
+  assert.equal(u2.json().loaded, true);
+  assert.equal(existsSync(plist), false);
+  assert.deepEqual(s.lcCalls().slice(-2), [`print gui/${uid}/${label}`, `bootout gui/${uid}/${label}`]);
+
+  // A bootout that fails while launchd holds the job: refused, and the plist is left whole.
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  const before = readFileSync(plist, "utf8");
+  const no = s.cli(["revive", "service", "uninstall"], { env: { LAUNCHCTL_LOADED: "1", LAUNCHCTL_BOOTOUT_FAIL: "1" } });
+  assert.equal(no.code, 1);
+  assert.match(no.err, /launchd still holds dev\.herdr\.automagik-herdr-revive and its bootout failed \(Boot-out failed: Input\/output error\), so .* was left in place/);
+  assert.ok(no.err.includes(`launchctl bootout gui/${uid}/${label}`), no.err);
+  assert.equal(readFileSync(plist, "utf8"), before, "no orphaned plist: it is left exactly as it was");
+
+  // Someone else's plist at that path is left as it is, by install and by uninstall.
+  writeFileSync(plist, '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict/></plist>\n');
+  for (const verb of ["install", "uninstall"]) {
+    const theirs = s.cli(["revive", "service", verb]);
+    assert.equal(theirs.code, 1);
+    assert.match(theirs.err, /isn't one Automagik Herdr wrote, so it was left as it is/);
+  }
+  assert.match(readFileSync(plist, "utf8"), /<dict\/>/);
+});
+
+test("revive service uninstall on macOS refuses when launchctl print fails, whatever the failure; the plist stays and the command is named (#939)", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  const command = ["launchctl", "bootout", `gui/${uid}/${PLIST_LABEL}`].join(" ");
+  const cases = [
+    ["exit 1", { LAUNCHCTL_PRINT_EXIT: "1", LAUNCHCTL_PRINT_TEXT: "print failed" }],
+    ["exit 64", { LAUNCHCTL_PRINT_EXIT: "64", LAUNCHCTL_PRINT_TEXT: "usage: launchctl print <domain-target>" }],
+    ["an I/O error", { LAUNCHCTL_PRINT_EXIT: "5", LAUNCHCTL_PRINT_TEXT: "Input/output error" }],
+  ];
+  for (const [why, env] of cases) {
+    assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+    const before = readFileSync(plist, "utf8");
+    const r = s.cli(["revive", "service", "uninstall"], { env });
+    assert.notEqual(r.code, 0, `${why}: a failed probe is a refusal, not a removal`);
+    assert.equal(readFileSync(plist, "utf8"), before, `${why}: the plist is left exactly as it was`);
+    assert.ok(r.err.includes(command), `${why}: names the command that finishes by hand (${r.err})`);
+  }
+  // A launchctl that cannot be executed at all (EPERM/EACCES) is a refusal too, never a not-found.
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  const lc = join(s.root, "bin", "launchctl");
+  chmodSync(lc, 0o644);
+  const denied = s.cli(["revive", "service", "uninstall"]);
+  assert.notEqual(denied.code, 0, denied.err);
+  assert.equal(existsSync(plist), true, "a permission failure is not a not-found");
+  assert.ok(denied.err.includes(command), denied.err);
+  chmodSync(lc, 0o755);
+});
+
+test("revive service uninstall on macOS reads only 113 or the exact 'Could not find service' as not loaded (#939)", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  const cases = [
+    ["exit 113", { LAUNCHCTL_PRINT_EXIT: "113", LAUNCHCTL_PRINT_TEXT: `Could not find service "${PLIST_LABEL}" in domain for user gui: ${uid}` }],
+    ["exit 0 with the words", { LAUNCHCTL_PRINT_OUT: `Could not find service "${PLIST_LABEL}" in domain for user gui: ${uid}` }],
+  ];
+  for (const [why, env] of cases) {
+    assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+    const asked = s.lcCalls().length;
+    const r = s.cli(["revive", "service", "uninstall", "--json"], { env });
+    assert.equal(r.code, 0, `${why}: ${r.err}`);
+    assert.equal(r.json().loaded, false, why);
+    assert.equal(existsSync(plist), false, why);
+    assert.deepEqual(s.lcCalls().slice(asked), [`print gui/${uid}/${PLIST_LABEL}`], `${why}: not loaded, so no bootout`);
+  }
+});
+
+test("revive service uninstall on macOS, with no plist, still asks launchd and boots out a label an earlier run left behind (#939)", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  // What a run that removed the plist while launchd held the label left: no file, a loaded label.
+  const r = s.cli(["revive", "service", "uninstall", "--json"], { env: { LAUNCHCTL_LOADED: "1" } });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual([r.json().removed, r.json().loaded, r.json().booted_out], [false, true, true]);
+  assert.equal(existsSync(plist), false);
+  assert.deepEqual(s.lcCalls(), [`print gui/${uid}/${PLIST_LABEL}`, `bootout gui/${uid}/${PLIST_LABEL}`], "asked, then booted out");
+  const said = s.cli(["revive", "service", "uninstall"], { env: { LAUNCHCTL_LOADED: "1" } });
+  assert.equal(said.code, 0, said.err);
+  assert.match(said.out, /plist is gone .*launchd still held .*booted it out/i);
+  // And once launchd no longer holds it either, there is nothing left to say.
+  const none = s.cli(["revive", "service", "uninstall"]);
+  assert.equal(none.code, 0, none.err);
+  assert.match(none.out, /isn't installed/);
+});
+
+test("revive service on macOS refuses when it cannot ask launchd, and on a system with no login service it says why and writes nothing", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const plist = plistPath(s.home);
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  assert.equal(existsSync(plist), true);
+  // A PATH with only the fake uname: launchctl is nowhere, so no real one can be reached either.
+  const bare = join(s.root, "bare-bin");
+  mkdirSync(bare);
+  exe(join(bare, "uname"), "#!/bin/sh\necho Darwin\n");
+  const no = s.cli(["revive", "service", "uninstall"], { env: { PATH: bare } });
+  assert.equal(no.code, 1);
+  assert.match(no.err, /launchctl isn't here, so whether launchd holds dev\.herdr\.automagik-herdr-revive can't be read, and .* was left in place/);
+  assert.equal(existsSync(plist), true, "removing it blind could orphan a loaded job");
+
+  // Any other system: every verb refuses, naming the services that exist, and nothing is written.
+  const other = world(t, { os: "FreeBSD" });
+  for (const verb of ["install", "uninstall", "status"]) {
+    const r = other.cli(["revive", "service", verb]);
+    assert.equal(r.code, 1);
+    assert.match(r.err, /The revive login service is built for Linux \(a systemd user unit\) and macOS \(a launchd agent\), not for FreeBSD: nothing was written or removed\./);
+  }
+  assert.equal(existsSync(join(other.home, "Library")), false);
+  assert.equal(existsSync(join(other.home, ".config/systemd")), false);
+});
+
 // ---- #992 review ----
 
 /** DSH session folders for the project, each born at its time. */
@@ -642,6 +869,21 @@ test("revive --boot prints counts only: no folder and no bot name reaches the us
   assert.match(r.out, /^revive: 1 resumed, 0 on a new conversation, 0 not back, 0 left alone, in 1 project;/);
   for (const text of [r.out, r.err]) for (const word of [s.project, s.home, s.root, "Genie", SID]) assert.ok(!text.includes(word), text);
   assert.equal(s.lastReport().projects[0].project, s.project, "the kept report still names the project");
+});
+
+// #1411: a reboot's recovery rebuilds a Codex seat from its record, the seat's own reasoning
+// effort and service tier included.
+test("#1411: revive passes a Codex seat's own effort and tier to its replacement pane", (t) => {
+  const file = team({ main: { agent: "codex", effort: "high", tier: "fast" } });
+  const s = world(t, { file, terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })] });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const run = runsOf(s)[0];
+  const words = wordsOf(run);
+  assert.ok(hasSeq(words, ["-c", "model_reasoning_effort=high"]), run.join(" "));
+  assert.ok(hasSeq(words, ["-c", "service_tier=priority"]), run.join(" "));
+  assert.ok(hasSeq(words, ["resume", SID]), "resumed by its own id");
+  assert.equal(r.out.includes(SID), false, "no session id printed");
 });
 
 // ---- #1417: Codex and Kimi, whose ids are found on disk after the launch ----

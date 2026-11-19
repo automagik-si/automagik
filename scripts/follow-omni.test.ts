@@ -49,11 +49,51 @@ describe('Follow Omni triggers', () => {
     expect(workflow.jobs.follow.if).toBeUndefined();
   });
 
-  test('keeps the dispatch fast path, schedule fallback and shared concurrency', () => {
+  test('keeps the dispatch fast path, the outside daily clock, the schedule backstop and shared concurrency', () => {
     expect(Object.keys(workflow.on).sort()).toEqual(['repository_dispatch', 'schedule', 'workflow_dispatch', 'workflow_run']);
-    expect(workflow.on.repository_dispatch).toEqual({ types: ['omni-release'] });
+    expect(workflow.on.repository_dispatch).toEqual({ types: ['omni-release', 'daily-carry'] });
     expect(workflow.on.schedule).toEqual([{ cron: '11,41 * * * *' }]);
     expect(workflow.concurrency).toEqual({ group: 'follow-omni', 'cancel-in-progress': false });
+  });
+
+  test('a daily-carry dispatch is the clock, not an Omni hint: it looks the newest Omni up itself', () => {
+    const newest = runOf('The newest Omni release');
+    // Only Omni's own dispatch logs (and waits for) a hinted release; the daily clock has none.
+    expect(newest).toContain('"${EVENT_ACTION}" == omni-release');
+    expect(jobOf('follow').map(line => line.trim())).toContain('EVENT_ACTION: ${{ github.event.action }}');
+    // The hold still decides whether that run carries: the dispatch adds no skip input.
+    expect(workflow.on.repository_dispatch.types).toContain('daily-carry');
+    expect(workflow.on.workflow_dispatch.inputs.skip_daily_hold.default).toBe(false);
+  });
+
+  test('a daily-carry dispatch never reads Omni\'s payload as a hint; omni-release still does', () => {
+    const newest = runOf('The newest Omni release');
+    const hint = newest.split('\n');
+    const start = hint.findIndex(line => line.includes('GITHUB_EVENT_NAME}" == repository_dispatch'));
+    expect(start).toBeGreaterThan(-1);
+    const indent = hint[start].length - hint[start].trimStart().length;
+    const end = hint.findIndex((line, i) => i > start && line.trim() === 'fi' && line.length - line.trimStart().length === indent);
+    expect(end).toBeGreaterThan(start);
+    const block = hint.slice(start, end + 1).join('\n');
+    const prelude = 'set -euo pipefail\nlookup() { :; }\nabove() { return 1; }\nnewest=2.261115.8\n';
+    const run = (action: string) => spawnSync('bash', ['-c', `${prelude}\n${block}`], {
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH ?? '',
+        GITHUB_EVENT_NAME: 'repository_dispatch',
+        EVENT_ACTION: action,
+        HINT_VERSION: '2.261115.9',
+        HINT_TAG: 'v2.261115.9',
+        HINT_SHA: '36c548a556887514c65874b385f33d3f6ef968d2',
+        GITHUB_STEP_SUMMARY: '/dev/null',
+      },
+    });
+    const daily = run('daily-carry');
+    expect(daily.status).toBe(0);
+    expect(daily.stdout).toBe('');
+    const omni = run('omni-release');
+    expect(omni.status).toBe(0);
+    expect(omni.stdout).toContain('Omni dispatched 2.261115.9');
   });
 });
 

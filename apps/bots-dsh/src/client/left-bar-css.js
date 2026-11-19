@@ -18,10 +18,12 @@ const SIZES = {
   '--lb-tile-r': '12px',
   '--lb-tile-icon': '28px',
   '--lb-rail-gap': '10px',
-  // The rows: one line each. A Bot's and a group's carry art; a channel's and a chat's do not.
+  // The rows: one line each. A Bot's and a group's carry art; a channel carries its glyph, a
+  // chat its person's face.
   '--lb-row-h': '34px',
   '--lb-channel-h': '26px',
   '--lb-chat-h': '25px',
+  '--lb-chat-face': '16px',
   '--lb-label-h': '26px',
   '--lb-label-first-gap': '8px',
   '--lb-row-r': 'var(--st-r-seg,8px)',
@@ -90,7 +92,10 @@ const RAIL = `
 .lb-rail{flex:none;display:flex;flex-direction:column;align-items:center;gap:var(--lb-rail-gap);width:var(--lb-rail-w);padding:12px 0;box-sizing:border-box;border-right:1px solid var(--lb-line);overflow-y:auto;scrollbar-width:none}
 .lb-tile{position:relative;flex:none;display:block;width:var(--lb-tile);height:var(--lb-tile);margin:0;padding:0;border:0;border-radius:var(--lb-tile-r);background:none;color:var(--bt-ink);font:inherit;cursor:pointer}
 .lb-tile-face{display:grid;place-items:center;width:100%;height:100%;border-radius:inherit;background:var(--lb-tile-ground)}
-.lb-tile:hover .lb-tile-face{background:var(--bt-active)}
+/* The computer mark has no opening; only actionable tiles promise one on hover. */
+.lb-tile:not(.lb-tile-still):hover .lb-tile-face{background:var(--bt-active)}
+/* Keep the focus ring while the resting mark stops offering a pointer action. */
+.lb-tile-still{cursor:default}
 .lb-tile[aria-current]{outline:1.5px solid var(--bt-ink);outline-offset:1.5px}
 .lb-tile[aria-current] .lb-tile-face{background:var(--lb-tile-open)}
 .lb-tile-letter .lb-tile-face,.lb-tile-letter:hover .lb-tile-face,.lb-tile-letter[aria-current] .lb-tile-face{background:color-mix(in srgb,var(--st-lilac,var(--bt-active)) 72%,var(--st-paper,var(--bt-card)));color:var(--st-lilac-ink,var(--bt-ink));font:var(--bt-weight-title,600) 18px/1 var(--bt-head-font,var(--bt-font))}
@@ -107,7 +112,9 @@ body[data-ds-dark-theme] .lb-tile .lb-on-light,body:not([data-ds-dark-theme]) .l
 // rows lie under it, the line runs the list's whole width and the rows fade over their last
 // --lb-edge-fade before it, so a row cut by the edge reads as scrolling on, not as a row that
 // was sliced. The upper edge does the same once the list has moved. --lb-inset and --lb-chat-inset are where a
-// channel's and a chat's name start: they follow the art by default, and either can be set.
+// channel's and a chat's name start: they follow the art by default, and either can be set. A
+// chat starts one step under its channel: its person's face stands where the channel's name
+// begins, so its own name sits under that.
 const ROWS = `
 .lb-scroll{position:relative;flex:1;display:flex;flex-direction:column;min-height:0}
 .lb-scroll::before,.lb-scroll::after{content:'';position:absolute;left:8px;right:8px;height:14px;pointer-events:none}
@@ -136,13 +143,28 @@ const ROWS = `
 .lb-row-off .lb-art{filter:grayscale(1);opacity:.55}
 .lb-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .lb-row-channel{height:var(--lb-channel-h);gap:8px;padding-left:var(--lb-inset,calc(8px + var(--lb-art) + var(--lb-art-gap)))}
-.lb-row-chat{height:var(--lb-chat-h);padding-left:var(--lb-chat-inset,calc(16px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph)))}
+.lb-row-chat{height:var(--lb-chat-h);gap:7px;padding-right:8px;padding-left:var(--lb-chat-inset,calc(8px + var(--lb-art) + var(--lb-art-gap) + var(--lb-glyph) + 8px))}
+.lb-row-chat .lb-st{gap:5px}
+.lb-count{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:var(--bt-hover);color:var(--bt-ink);font:600 10px/1 var(--bt-font)}
+/* A chat's person: the photo, else their initials, on the incoming tone Omni's chat view uses
+   for the other side; the owner's own chat adds the outgoing tone as a ring. Every chat mark is
+   one tile, so the initials sit like a photo does. Omni shares --oc-in/--oc-out with the bar
+   today, and PR 1777's names --oc-them/--oc-me stand beside them for when it lands; the
+   fallbacks are the formulas its own chat view uses, so a row and that chat agree. */
+.lb-chat-face{position:relative;flex:none;display:grid;place-items:center;width:var(--lb-chat-face);height:var(--lb-chat-face);box-sizing:border-box;border-radius:50%;overflow:hidden;background:var(--oc-in,var(--oc-them,var(--bt-card)));color:var(--bt-ink)}
+body[data-ds-dark-theme] .lb-chat-face{background:var(--oc-in,var(--oc-them,var(--bt-bubble)))}
+.lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,var(--oc-me,color-mix(in srgb,var(--bt-accent) 14%,var(--bt-card))))}
+body[data-ds-dark-theme] .lb-chat-face[data-self]{box-shadow:inset 0 0 0 1.5px var(--oc-out,var(--oc-me,color-mix(in srgb,var(--bt-accent) 26%,var(--bt-bubble))))}
+.lb-chat-face img{position:absolute;inset:1px;width:calc(100% - 2px);height:calc(100% - 2px);border-radius:50%;object-fit:cover}
+.lb-chat-face-initials{font:600 7.5px/1 var(--bt-head-font,var(--bt-font));letter-spacing:.02em}
+.lb-row-chat .lb-chat-face-initials{color:inherit}
 .lb-row-channel .lb-name,.lb-row-chat .lb-name{font:400 13.5px/1.3 var(--bt-font);letter-spacing:0}
 .lb-row-chat .lb-name{color:var(--lb-muted)}
 .lb-row-chat.lb-row-hot .lb-name,.lb-row-chat[aria-current] .lb-name{color:var(--bt-ink)}
 .lb-glyph{flex:none;display:grid;place-items:center;width:var(--lb-glyph);height:var(--lb-glyph);color:var(--lb-muted)}
 .lb-glyph svg{display:block;width:100%;height:100%}
 .lb-chev{flex:none;display:block;color:var(--lb-muted);opacity:.8}
+.lb-chev-open{transform:rotate(90deg)}
 .lb-sec{flex:none;display:flex;align-items:flex-end;height:var(--lb-label-h);padding:0 10px 5px;box-sizing:border-box;font:var(--bt-weight-title,600) 10.5px/1.3 var(--bt-head-font,var(--bt-font));letter-spacing:.16em;text-transform:uppercase;color:var(--lb-muted)}
 .lb-sec-first{margin-top:var(--lb-label-first-gap)}
 `
@@ -192,8 +214,10 @@ const HOST = `
 .lb-bar[data-lb-host] .lb-rail{border-right:0}
 .lb-railcol{flex:none;display:flex;flex-direction:column;align-items:center;width:var(--lb-rail-w);min-height:0}
 .lb-railcol .lb-rail{flex:1;min-height:0}
-.lb-railcol .bt-side-collapse{flex:none;width:36px;height:36px;margin:0 0 10px;border:0;border-radius:var(--lb-tile-r);background:none;box-shadow:none;color:var(--lb-muted)}
-.lb-railcol .bt-side-collapse:hover{background:var(--bt-hover);color:var(--bt-ink)}
+/* Both wide and drawer seats use the rail's existing control face. */
+.lb-railcol .bt-side-collapse,.bt-side-collapse.bt-foot-toggle{flex:none;width:36px;height:36px;margin:0 0 10px;border:0;border-radius:var(--lb-tile-r);background:none;box-shadow:none;color:var(--lb-muted)}
+/* The footer seat has the same hover affordance as the drawer's rail control. */
+.lb-railcol .bt-side-collapse:hover,.bt-side-collapse.bt-foot-toggle:hover{background:var(--bt-hover);color:var(--bt-ink)}
 .lb-bar[data-lb-host] .lb-list{flex:1;width:auto}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host){position:relative;margin:var(--lb-panel-gap)!important;height:calc(100% - 2 * var(--lb-panel-gap))!important;padding:0!important;border-radius:var(--lb-panel-r);background:var(--lb-ground)!important}
 html body [class*="_sidebarCol"]>[data-slot=sidebar]>[class*="_root"]:has(.lb-host)::before{content:'';position:absolute;left:calc(var(--lb-rail-w) - 1px);top:0;bottom:0;width:1px;background:var(--lb-line);pointer-events:none}
@@ -204,6 +228,14 @@ html body [class*="_frame"][data-sidebar-drawer] [class*="_sidebarCol"]:has(.lb-
 [class*="_root"]:has(.lb-host) [class*="_scrollArea"]:has(.lb-host){grid-template-columns:0 minmax(0,1fr) 0;grid-template-rows:0 max-content 0 minmax(0,1fr);margin:0}
 [class*="_root"]:has(.lb-host) [class*="_scrollFade"]{display:none}
 [class*="_root"]:has(.lb-host)>[class*="_footArea"]{margin-left:var(--lb-rail-w);padding-left:10px!important}
+/* Anchor against the card so footer entries and a scrolling list cannot move the toggle. */
+html:not([data-windows-titlebar]):not([data-platform=darwin]) [class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.lb-host) .bt-foot-toggle{position:absolute;left:calc(10px - var(--lb-panel-gap));bottom:calc(18px - var(--lb-panel-gap));margin:0}
+/* The rail draws its icons at 18px (DSH's rail spec), so the glyph keeps its size across the fold. */
+.bt-side-collapse.bt-foot-toggle svg{width:18px;height:18px}
+/* Keep the drawer's rail control until a footer seat takes over outside the drawer. */
+[class*="_frame"]:not([data-sidebar-drawer]) [class*="_root"]:has(.bt-foot-toggle) .lb-railcol .bt-side-collapse{display:none}
+/* The drawer retains its rail control and its existing placement. */
+[class*="_frame"][data-sidebar-drawer] .bt-foot-toggle{display:none}
 .lb-head{flex:none;display:flex;align-items:center;gap:4px;height:52px;padding:0 8px 0 14px;box-sizing:border-box}
 .lb-brand{flex:1;min-width:0;display:flex;align-items:center;overflow:hidden}
 .lb-brand .omni-wordmark{display:block;flex:none;max-width:100%;height:auto}

@@ -70,6 +70,28 @@ not spend an agent on running one script.
 
 Exactly one of `prompt` / `workflow` / `command` is required.
 
+A prompt may name a **target** instead of opening a session: the prompt goes to
+a bot's own terminal, or to a worker of that bot started for the run. It needs
+`backend: hc` at the top of the file (bots live in herdr-core), and the bot is
+named by its id from the project's `.herdr/bots.json`, never by a terminal
+address:
+
+```yaml
+  - name: housekeeping
+    cron: "0 9 * * *"
+    repo: ~/Projects/house       # the project whose .herdr/bots.json names the bot
+    target: bot:b-6jrz4bmxml    # the bot's own terminal, started when it is not running
+    target_when_busy: queue     # queue (default) or skip; bot targets only
+    prompt: |
+      Tidy the house.
+```
+
+`target: worker:b-6jrz4bmxml` starts a worker of that bot for each run and ends
+it when the run finishes. A target entry takes no `workspace`, `agent`, `model`,
+`template`, `mcp_config`, `agent_args` or `notify`: the bot's own launch and
+permissions apply. Find the id with `am ls --json --project <repo>`; don't
+invent one, and don't write an address instead.
+
 ## Rules
 
 - **Read the existing file first and append.** Never rewrite entries you didn't
@@ -79,6 +101,8 @@ Exactly one of `prompt` / `workflow` / `command` is required.
   the rest still run, so check `herdr-automations list` after writing: it names
   what did not load, with the line to fix.
 - Times are local to the machine running the Herdr server.
+- **Name a bot by its id**, never by a terminal address (`t3q1`, `build-box/t9`):
+  an address changes on every restart, the id does not.
 - **Always set `model`** on kinds that accept it (`claude`, `codex`, `cursor`,
   `gemini`, `opencode`). Omitting it leaves an unattended run on whatever the
   agent defaults to. Match the model to the job: a summary or a triage pass is

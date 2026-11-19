@@ -12,6 +12,7 @@ import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar }
 import { exec, hc, home, theme, terminals, spaces, run, notify, pickFolder, watchFolder, knownAgents } from "herdr";
 import { offeredAgents, RETIRED } from "./agents.js";
 import { addressWarning, argsText, autoArgs, envText, modeOf, parseArgs, parseEnv, splitPermission, templateMode, withoutPermission } from "./modes.js";
+import { RUNS_AS, parseTarget, targetLine, targetWarning } from "./targets.js";
 import { SCHEDULER, repairCommand } from "./scheduler.js";
 
 // The scheduler's release pin and install line live in scheduler.js: pure, so the Node pin check
@@ -69,6 +70,8 @@ export default class Automations extends View {
     this.installing = false; // while the Install button's command runs
     this.handle = cx.focus_handle();
     this.bin = null; this.ours = false; this.watching = false;
+    this.rosters = new Map(); // expanded project folder -> { list, note } (#498)
+    this.amBin = null; // the am CLI that read a project's bots
     cx.spawn((cx) => this.refresh(cx));
     cx.timer.every(30000, (cx) => this.refresh(cx)); // next-run times and the scheduler's pid
   }
@@ -116,6 +119,7 @@ export default class Automations extends View {
       if (!this.templates) this.templates = await this.loadTemplates();
       this.error = null;
       this.announce();
+      this.loadTargetRosters(cx);
       if (!this.watching) { this.watching = true; this.watch(cx); }
     } catch (e) { this.error = String(e.message ?? e); }
     cx.notify();
@@ -147,6 +151,73 @@ export default class Automations extends View {
   // #938: whether this scheduler runs a plain command. Its ls --json says so (kinds); a build
   // that does not would drop the command key from a put, so the form never offers it there.
   get commands() { return Boolean(this.list?.kinds?.includes("command")); }
+
+  // #498: whether this scheduler build runs targets (ls --json's targets), and the kinds it
+  // names. A build that predates them has no Target field, so it cannot return a saved target
+  // in ls: the form shows an ordinary entry, offers none, and a save sends no target key (put
+  // keeps the hand-written one).
+  get targets() { return Array.isArray(this.list?.targets) ? this.list.targets : null; }
+  canTarget(kind) { return Boolean(this.targets?.includes(kind)); }
+  get targetable() { return this.canTarget("bot") || this.canTarget("worker"); }
+
+  // A target names a bot by its id; the name a person reads comes from the project's roster
+  // (`am ls --json --project`, the CLI's own read). Cached per folder, failures included, so a
+  // form and a refresh do not ask twice.
+  rosterDir(repo) { return repo?.startsWith("~/") ? home() + repo.slice(1) : repo ?? ""; }
+  rosterOf(repo) { return this.rosters.get(this.rosterDir(repo))?.list ?? null; }
+  botName(repo, id) { return this.rosterOf(repo)?.find((b) => b?.id === id)?.name ?? null; }
+
+  // The form's and the detail's bot list for one project, or why there is none.
+  async loadBots(repo, { fresh = false } = {}) {
+    const dir = this.rosterDir(repo);
+    if (!dir) return { list: null, note: "Choose the project folder first: its bots come from its .herdr/bots.json." };
+    const hit = this.rosters.get(dir);
+    if (hit && !fresh) return hit;
+    // `am` is the command; a pack that predates it installs the same CLI as
+    // `automagik-herdr`.
+    const bins = this.amBin ? [this.amBin]
+      : ["am", "automagik-herdr", `${home()}/.local/bin/am`, `${home()}/.local/bin/automagik-herdr`];
+    let why = null;
+    for (const bin of bins) {
+      let r;
+      try { r = await exec(bin, ["ls", "--json", "--project", dir]); } catch (e) { why = String(e.message ?? e); continue; }
+      if (r.code === 127) { why = "the am CLI is not installed"; continue; }
+      this.amBin = bin;
+      if (r.code !== 0) {
+        const miss = { list: null, note: `The project's bots could not be read: ${(r.stderr || r.stdout || `exit ${r.code}`).trim().split("\n").pop()}` };
+        this.rosters.set(dir, miss);
+        return miss;
+      }
+      try {
+        const project = JSON.parse(r.stdout)?.projects?.[0];
+        if (!project) { const miss = { list: null, note: "The project's bots could not be read: am ls gave no project." }; this.rosters.set(dir, miss); return miss; }
+        if (project.error) { const miss = { list: null, note: `The project's bots could not be read: ${project.error}` }; this.rosters.set(dir, miss); return miss; }
+        const list = (project.bots ?? []).map((b) => ({ id: b.id, name: b.name, planned: b.planned ?? null }));
+        const ok = { list, note: null };
+        this.rosters.set(dir, ok);
+        return ok;
+      } catch (e) {
+        const miss = { list: null, note: `The project's bots could not be read: ${String(e.message ?? e)}` };
+        this.rosters.set(dir, miss);
+        return miss;
+      }
+    }
+    const miss = { list: null, note: `The project's bots could not be read (${why ?? "am ls failed"}).` };
+    this.rosters.set(dir, miss);
+    return miss;
+  }
+
+  // Existing target entries show their bot's name in the list and detail without opening a
+  // form: one roster read per project, once.
+  loadTargetRosters(cx) {
+    for (const a of this.list?.automations ?? []) {
+      if (!a.target) continue;
+      const dir = this.rosterDir(a.repo);
+      if (!dir || this.rosters.has(dir)) continue;
+      this.rosters.set(dir, { list: null, note: null });
+      cx.spawn(async (cx) => { await this.loadBots(a.repo, { fresh: true }); cx.notify(); });
+    }
+  }
 
   live(address) { return terminals().find((t) => t.address === address && t.state === "live"); }
   liveFor(name) { return terminals().find((t) => t.labels?.automation === name && t.state === "live"); }
@@ -204,6 +275,10 @@ export default class Automations extends View {
       s.on("change", (_e, cx) => this.preview(cx));
       return s;
     };
+    // #498: who the prompt goes to, from the entry's own target. A build that does not announce
+    // targets keeps the saved key untouched ("kept") and offers none.
+    const saved = parseTarget(a.target);
+    const keptTarget = Boolean(a.target) && !this.canTarget(saved?.kind);
     this.form = {
       // #938: a command entry has no repo, space or agent; switched to a prompt it starts on the
       // defaults a new one gets.
@@ -213,6 +288,9 @@ export default class Automations extends View {
       env: field(envText(a.command?.env), 'optional: KEY=value KEY2="two words"'),
       notify: field(a.notify, "optional: a bot id (b-…) or a terminal name"),
       original, workspace: a.workspace || "worktree", workspace_id: a.workspace_id ?? "",
+      target: saved && this.canTarget(saved.kind) ? saved.kind : a.target ? "kept" : "none", bot: saved?.bot ?? "",
+      busy: a.target_when_busy || "queue", savedTarget: a.target ?? "",
+      bots: null, botsNote: null,
       // #498 (D2): a new entry closes its fresh space on success; an existing one shows what
       // ls --json reports, "on-success" or "never".
       close: original ? a.close_workspace === "on-success" : true,
@@ -243,6 +321,10 @@ export default class Automations extends View {
     cx.spawn(async (cx) => {
       this.templates = (await this.loadTemplates()) ?? this.templates;
       try { this.installed = (await knownAgents()).filter((a) => a.installed).map((a) => a.key); } catch { this.installed = null; }
+      if (this.form === f && a.target) {
+        const r = await this.loadBots(f.repo.value());
+        f.bots = r.list; f.botsNote = r.note;
+      }
       cx.notify();
     });
     this.preview(cx);
@@ -252,6 +334,20 @@ export default class Automations extends View {
     const f = this.form, num = parseInt(f.timeout.value(), 10);
     const expand = (p) => (p.startsWith("~/") ? home() + p.slice(1) : p);
     const timeout_minutes = Number.isFinite(num) ? num : 0;
+    // #498: a target hands the prompt to a bot (or a worker of one). Every agent and space key
+    // goes empty, which put removes: the scheduler refuses a target that still names one, and
+    // the bot's own launch supplies them. The bot is named by id, never by an address.
+    if (f.kind !== "command" && (f.target === "bot" || f.target === "worker")) return {
+      ...(f.wasCommand ? { command: null, notify: "" } : {}),
+      name: f.name.value().trim(), cron: f.cron.value().trim(), repo: expand(f.repo.value().trim()),
+      prompt: f.prompt.value(), timeout_minutes,
+      target: `${f.target}:${f.bot}`,
+      target_when_busy: f.target === "bot" ? f.busy : "",
+      workspace: "", workspace_id: "", session: "", agent: "", template: "", model: "",
+      mcp_config: "", agent_args: [], close_workspace: "", workflow: "", notify: "",
+      ...Object.fromEntries(Object.entries({ catch_up_minutes: f.untouched.catch_up_minutes, disabled: f.untouched.disabled })
+        .filter(([, v]) => v !== undefined && v !== null)),
+    };
     // #938: a command. Every agent and space key goes empty, which put removes: the scheduler
     // refuses a command that still names one. What the form does not edit stays as it came.
     if (f.kind === "command") return {
@@ -260,6 +356,7 @@ export default class Automations extends View {
       notify: f.notify.value().trim(),
       repo: "", workspace: "", workspace_id: "", session: "", agent: "", template: "", model: "", prompt: "", workflow: "",
       mcp_config: "", agent_args: [], blocked_grace_minutes: 0, close_workspace: "",
+      ...(this.targetable || f.savedTarget ? { target: "", target_when_busy: "" } : {}),
       ...Object.fromEntries(Object.entries({ catch_up_minutes: f.untouched.catch_up_minutes, disabled: f.untouched.disabled })
         .filter(([, v]) => v !== undefined && v !== null)),
     };
@@ -276,6 +373,9 @@ export default class Automations extends View {
       // put drop the key (its api.Automation has no field). A shared space can never close: the
       // scheduler refuses on-success with workspace: existing, so the hidden switch reads as never.
       ...(this.ours ? { close_workspace: f.workspace !== "existing" && f.close ? "on-success" : "never" } : {}),
+      // #498: switching back to a new session removes the target, but only where the build
+      // knows the key; an older one keeps the hand-written value it cannot run.
+      ...(this.targetable || f.savedTarget ? { target: "", target_when_busy: "" } : {}),
     };
   }
 
@@ -313,6 +413,12 @@ export default class Automations extends View {
 
   async put(dryRun) {
     const f = this.form, args = ["put", ...(f.original ? ["--original", f.original] : []), ...(dryRun ? ["--dry-run"] : [])];
+    // #498: a kept target on a build that cannot run one is never rewritten: its keys would be
+    // dropped or its agent/space keys refused. Installing our build is the fix.
+    if (f.target === "kept") return { problem: `This entry targets ${targetLine(f.savedTarget, (id) => this.botName(f.repo.value(), id))}; `
+      + `this scheduler build cannot run a target (ours is ${SCHEDULER.version}). Install it before editing this entry.` };
+    if (f.kind !== "command" && (f.target === "bot" || f.target === "worker") && !f.bot)
+      return { problem: "Choose a bot: a target needs one." };
     // A word in ENV that is not KEY=value is said here: the scheduler would never see it.
     const env = f.kind === "command" ? parseEnv(f.env.value()) : {};
     if (env.problem) return { problem: env.problem };
@@ -339,9 +445,32 @@ export default class Automations extends View {
     f.warning = f.kind === "command" ? null : addressWarning(f.prompt.value());
     cx.spawn(async (cx) => {
       try {
+        // #498: the roster is read again for this folder before a target is
+        // saved: a bot that left it, or a planned one, is said now, not at 3am.
+        if (f.kind !== "command" && (f.target === "bot" || f.target === "worker")) {
+          if (!f.bot) { f.seq += 1; f.result = { problem: "Choose a bot: a target needs one." }; cx.notify(); return; }
+          const r = await this.loadBots(f.repo.value(), { fresh: true });
+          f.bots = r.list; f.botsNote = r.note;
+          const why = targetWarning(`${f.target}:${f.bot}`, f.bots);
+          if (why) { f.seq += 1; f.result = { problem: why }; cx.notify(); return; }
+        }
         const res = await this.put(false);
         if (res.problem) f.result = res;
-        else { this.view = { kind: "detail", name: this.entry().name }; this.form = null; }
+        else if (f.kind !== "command" && (f.target === "bot" || f.target === "worker")) {
+          // #498: the capability is a claim until the save is read back. A build that says it
+          // runs targets but drops the key must not look like a successful save.
+          const want = `${f.target}:${f.bot}`, name = f.name.value().trim();
+          let kept = null, why = null;
+          try { kept = (JSON.parse(await this.cli(["ls", "--json"]))?.automations ?? []).find((a) => a.name === name)?.target ?? null; }
+          catch (e) { why = String(e.message ?? e); }
+          if (kept !== want) {
+            f.seq += 1;
+            f.result = { problem: `The scheduler took the save but does not keep ${targetLine(want, (id) => this.botName(f.repo.value(), id))}`
+              + `${why ? ` (${why})` : ""}: it does not run targets. Install a build whose ls --json names them.` };
+            cx.notify(); return;
+          }
+          this.view = { kind: "detail", name }; this.form = null;
+        } else { this.view = { kind: "detail", name: this.entry().name }; this.form = null; }
       } catch (e) { f.result = { problem: String(e.message ?? e) }; }
       await this.refresh(cx);
     });
@@ -441,7 +570,7 @@ export default class Automations extends View {
     const live = this.liveFor(a.name);
     // A command has no terminal to be live in: its running record is the sign.
     const color = live ? (live.status === "blocked" ? t.blocked : t.working)
-      : a.command && a.last?.status === "running" ? t.working
+      : (a.command || a.target) && a.last?.status === "running" ? t.working
       : a.disabled || this.list.paused ? t.dim : a.last?.status === "failed" || a.last?.status === "missed" ? t.ansi1 : t.idle;
     return div().size(8).rounded(4).flex_none().bg(color);
   }
@@ -482,7 +611,7 @@ export default class Automations extends View {
 
   row(a, t) {
     const live = this.liveFor(a.name);
-    const sub = live ? `running · ${live.status ?? "starting"}` : a.command && a.last?.status === "running" ? "running"
+    const sub = live ? `running · ${live.status ?? "starting"}` : (a.command || a.target) && a.last?.status === "running" ? "running"
       : a.disabled ? "paused"
       : `${human(a.cron)} · ${this.list.paused ? "held" : until(a.next)}`;
     return v_flex().id(`auto-${a.name}`).mx(8).px(8).py(7).gap(2).rounded(7).cursor_pointer().hover((s) => s.bg(t.hover))
@@ -492,6 +621,7 @@ export default class Automations extends View {
       .child(div().pl(15).text_size(11).text_color(t.muted).truncate().child(sub))
       .child(div().id(`auto-kind-${a.name}`).pl(15).text_size(11).text_color(t.dim).truncate().child(a.command
         ? `command · ${argsText(a.command.argv)}${a.notify ? ` · tells ${a.notify}` : ""}`
+        : a.target ? `${targetLine(a.target, (id) => this.botName(a.repo, id))} · its own launch`
         : `${a.template ? "template " + a.template : a.agent + (a.model ? " · " + a.model : "")} · ${a.workspace} · ${this.modeLine(a)}`));
   }
 
@@ -533,9 +663,15 @@ export default class Automations extends View {
         .child(kv("Next", a.disabled ? "paused" : this.list.paused ? "held: all paused" : until(a.next)))
         .when(!a.command, (el) => el
           .child(kv("Repo", tilde(a.repo)))
-          .child(kv("Runs in", WORKSPACES.find(([w]) => w === a.workspace)?.[1] ?? a.workspace))
-          .child(kv(a.template ? "Template" : "Agent", a.template || `${a.agent}${a.model ? " · " + a.model : ""}`))
-          .child(kv("Permissions", this.modeLine(a))))
+          .when(Boolean(a.target), (el2) => el2
+            .child(kv("Target", targetLine(a.target, (id) => this.botName(a.repo, id))))
+            .child(kv("Launch", "the bot's own"))
+            .when(String(a.target).startsWith("bot:") && a.target_when_busy === "skip",
+              (el3) => el3.child(kv("When busy", "skip the run"))))
+          .when(!a.target, (el2) => el2
+            .child(kv("Runs in", WORKSPACES.find(([w]) => w === a.workspace)?.[1] ?? a.workspace))
+            .child(kv(a.template ? "Template" : "Agent", a.template || `${a.agent}${a.model ? " · " + a.model : ""}`))
+            .child(kv("Permissions", this.modeLine(a)))))
         // #938: a command runs as you, in its folder, with no agent; these are its own lines.
         .when(Boolean(a.command), (el) => el
           // Short enough for the 320 px panel's value column (#938: "no agent, no model" was cut).
@@ -620,10 +756,22 @@ export default class Automations extends View {
       .when(this.commands, (el) => el.child(label("RUNS")).child(this.pills("f-kind", KINDS, f.kind, t, (v, cx) => { f.kind = v; this.preview(cx); cx.notify(); })))
       .when(!this.commands, (el) => el.child(div().id("f-kind-old").pt(6).text_size(11).text_color(t.muted)
         .child("This scheduler build runs agent prompts only. A newer herdr-automations also runs a plain command, with no model.")))
+      // #498: who the prompt goes to. Offered only by a scheduler whose ls --json names the
+      // kinds; a build that does not would drop the key from a put.
+      .when(f.kind !== "command" && (this.targetable || f.target === "kept"), (el) => el
+        .child(label("RUNS AS"))
+        .child(this.pills("f-runs", RUNS_AS.filter(([v]) => v === "none" || this.canTarget(v)), f.target, t, (v, cx) => {
+          f.target = v; if (v === "none") f.bot = "";
+          this.loadBotsForForm(f, cx);
+          this.preview(cx); cx.notify();
+        })))
+      .when(f.kind !== "command" && f.target === "kept", (el) => el.child(div().id("f-target-kept").pt(6).text_size(11).text_color(t.blocked)
+        .child(`This entry targets ${targetLine(f.savedTarget, (id) => this.botName(f.repo.value(), id))}; this scheduler build `
+          + `cannot run a target (ours is ${SCHEDULER.version}). Pick New session to remove it, or install our build.`)))
       .when(f.kind === "command", (el) => this.commandForm(el, f, t, label, input))
       .when(f.kind !== "command", (el) => this.agentForm(el, f, t, label, input, agents, agentValue))
       .child(label("TIMEOUT (MINUTES)")).child(input("f-timeout", f.timeout))
-      .when(f.kind !== "command", (el) => el.child(label("MCP CONFIG")).child(input("f-mcp", f.mcp)))
+      .when(f.kind !== "command" && f.target !== "bot" && f.target !== "worker", (el) => el.child(label("MCP CONFIG")).child(input("f-mcp", f.mcp)))
       .child(div().id("f-result").pt(8).text_size(12)
         .when(Boolean(res?.problem), (el) => el.text_color(t.ansi1).child(res.problem))
         .when(Boolean(res && !res.problem && res.next), (el) => el.text_color(t.muted)
@@ -652,15 +800,65 @@ export default class Automations extends View {
       .child(note("f-notify-note", "The run's one line (its last line of output, or why it failed) is sent to this bot with hc send."));
   }
 
-  // The agent kind's fields: where it runs, the agent, its permissions and its prompt.
-  agentForm(el, f, t, label, input, agents, agentValue) {
+  // #498: a target's fields. The bot comes from the project's roster, never typed as an address;
+  // its launch is the bot's own, so there is no agent, model or permission choice here.
+  targetForm(el, f, t, label) {
+    const note = (id, text) => div().id(id).text_size(11).text_color(t.muted).child(text);
+    const bots = f.bots;
+    const nameOf = (id) => bots?.find((b) => b?.id === id)?.name ?? null;
+    const options = (bots ?? []).filter((b) => b && !b.planned).map((b) => [b.id, b.name || b.id]);
+    if (f.bot && !options.some(([id]) => id === f.bot)) options.push([f.bot, nameOf(f.bot) || f.bot, true]);
+    const why = f.target === "kept" ? targetWarning(f.savedTarget, bots)
+      : f.bot ? targetWarning(`${f.target}:${f.bot}`, bots) : null;
     return el
-      .child(label("REPO")).child(h_flex().gap(6).child(div().flex_1().child(input("f-repo", f.repo)))
-        .child(this.button("f-pick", "Choose…", t, (cx) => cx.spawn(async (cx) => {
-          const dir = await pickFolder({ prompt: "Repository for this automation" });
-          if (dir) { f.repo.set_value(tilde(dir)); this.preview(cx); }
-          cx.notify();
-        }), { h: 30 })))
+      .child(label("BOT"))
+      .child(h_flex().gap(6).items_center().flex_wrap()
+        .when(Boolean(bots) && (bots.length > 0 || f.bot), (el2) => el2
+          .child(this.pills("f-bot", options, f.bot, t, (v, cx) => { f.bot = v; this.preview(cx); cx.notify(); })))
+        .child(this.button("f-bots-reload", "Reload", t, (cx) => this.loadBotsForForm(f, cx, { fresh: true }), { h: 22, px: 6 })))
+      .when(bots === null, (el2) => el2.child(note("f-bots-note", f.botsNote || "Looking up the project's bots…")))
+      .when(Array.isArray(bots) && bots.length === 0, (el2) => el2.child(note("f-bots-empty",
+        "This project's .herdr/bots.json names no bots. A target needs one.")))
+      .when(f.target === "bot", (el2) => el2
+        .child(label("WHEN THE BOT IS BUSY"))
+        .child(this.pills("f-busy", [["queue", "Queue it"], ["skip", "Skip this run"]], f.busy, t, (v, cx) => {
+          f.busy = v; this.preview(cx); cx.notify();
+        })))
+      .child(note("f-target-note", f.target === "bot"
+        ? "The prompt goes into the bot's own terminal with hc send; a stopped bot is started first. "
+          + "The bot's own launch and permissions apply."
+        : "A worker starts under the bot, takes the prompt in a fresh worktree, and is ended when the run finishes. "
+          + "The bot's own worker launch and permissions apply."))
+      .when(Boolean(why), (el2) => el2.child(div().id("f-target-warn").pt(2).text_size(11).text_color(t.blocked).child(why)));
+  }
+
+  // Ask the project's roster again for a target form (the pills ask on pick; Reload forces it).
+  loadBotsForForm(f, cx, { fresh = false } = {}) {
+    if (f.target !== "bot" && f.target !== "worker") return;
+    cx.spawn(async (cx) => {
+      const r = await this.loadBots(f.repo.value(), { fresh });
+      if (this.form !== f) return;
+      f.bots = r.list; f.botsNote = r.note;
+      cx.notify();
+    });
+  }
+
+  // The agent kind's fields: where it runs, the agent, its permissions and its prompt. A target
+  // replaces all of that with the bot's own launch; a kept target shows only the project and the
+  // prompt, because this build cannot edit one.
+  agentForm(el, f, t, label, input, agents, agentValue) {
+    const targeted = f.target === "bot" || f.target === "worker";
+    const held = f.target === "kept";
+    const repoRow = h_flex().gap(6).child(div().flex_1().child(input("f-repo", f.repo)))
+      .child(this.button("f-pick", "Choose…", t, (cx) => cx.spawn(async (cx) => {
+        const dir = await pickFolder({ prompt: "Repository for this automation" });
+        if (dir) { f.repo.set_value(tilde(dir)); this.preview(cx); }
+        cx.notify();
+      }), { h: 30 }));
+    if (held) return this.promptForm(el.child(label("PROJECT")).child(repoRow), f, t, label);
+    if (targeted) return this.promptForm(this.targetForm(el.child(label("PROJECT")).child(repoRow), f, t, label), f, t, label);
+    return this.promptForm(el
+      .child(label("REPO")).child(repoRow)
       .child(label("RUNS IN")).child(this.pills("f-ws", WORKSPACES, f.workspace, t, (v, cx) => { f.workspace = v; this.preview(cx); cx.notify(); }))
       .when(f.workspace === "existing", (el) => el.child(this.pills("f-space",
         spaces().filter((s) => !s.machine).map((s) => [s.id, s.name]), f.workspace_id, t,
@@ -682,9 +880,15 @@ export default class Automations extends View {
         this.preview(cx); cx.notify();
       }))
       .when(!f.template, (el) => el.child(label("MODEL")).child(input("f-model", f.model)))
-      .child(label("PERMISSIONS")).child(this.modeForm(f, t, input))
-      .child(label("PROMPT")).child(div().id("f-prompt").p(8).rounded(7).border_1().border_color(t.input)
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(f.prompt).w_full().text_size(12)))
-      .when(Boolean(f.warning), (el) => el.child(div().id("f-address").pt(2).text_size(11).text_color(t.blocked).child(f.warning)));
+      .child(label("PERMISSIONS")).child(this.modeForm(f, t, input)), f, t, label);
   }
+
+  // The prompt is the same field for every agent-kind run; the target and held forms append it
+  // last so no builder fragment is built twice.
+  promptForm(el, f, t, label) {
+    return el.child(label("PROMPT")).child(div().id("f-prompt").p(8).rounded(7).border_1().border_color(t.input)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(f.prompt).w_full().text_size(12)))
+      .when(Boolean(f.warning), (el2) => el2.child(div().id("f-address").pt(2).text_size(11).text_color(t.blocked).child(f.warning)));
+  }
+
 }

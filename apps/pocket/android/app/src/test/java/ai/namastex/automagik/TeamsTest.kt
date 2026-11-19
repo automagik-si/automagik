@@ -2,6 +2,7 @@ package ai.namastex.automagik
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -695,6 +696,39 @@ class TeamsTest {
             done!!.invoke(true)
             assertEquals(reason, listOf("k"), recorded)
         }
+    }
+
+    /** A card scope cancelled mid-motion is not a finished motion: no return, no finish, and the failed answer is not counted. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun aCancelledCardScopeDoesNotCountTheMotionAsFinished() = runTest {
+        var returns = 0
+        var recorded = false
+        var finished: Boolean? = null
+        var done: ((Boolean) -> Unit)? = null
+        val scope = CoroutineScope(Job() + StandardTestDispatcher(testScheduler))
+        DeckSend(scope, record = { recorded = true }, finish = { finished = it }, returnMotion = { returns++ })
+            .send("k", dispatch = { done = it }, exit = { awaitCancellation() })
+        runCurrent()
+        done!!.invoke(false)
+        runCurrent()
+        assertNull("not finished while the exit runs", finished)
+        scope.cancel()
+        runCurrent()
+        assertFalse("a failed answer is not recorded", recorded)
+        assertEquals("a cancelled scope plays no return motion", 0, returns)
+        assertNull("a cancelled motion is not counted as finished", finished)
+    }
+
+    /** A failed answer re-enables Yes and No only after the card has returned, not while it flies back (#1068). */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun aFailedAnswerFinishesOnlyAfterItsReturnMotion() = runTest {
+        val events = mutableListOf<String>()
+        val scope = CoroutineScope(Job() + StandardTestDispatcher(testScheduler))
+        DeckSend(scope, record = {}, finish = { events += "finish:$it" }, returnMotion = { events += "return" })
+            .send("k", dispatch = { done -> done(false) }, exit = {})
+        runCurrent()
+        assertEquals(listOf("return", "finish:false"), events)
+        scope.cancel()
     }
 
     @Test fun theSampleDeckDoesNotShowAllClearWhileChatsWait() {
