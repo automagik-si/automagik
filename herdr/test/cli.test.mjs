@@ -3432,6 +3432,18 @@ test("restart #213/#597: an omp bot from a template, in a worktree, comes back o
   assert.doesNotMatch(again.err, /differs from/);
 });
 
+test("#1418: restart through a live template records its name on the new pane and seat row", (t) => {
+  const template = { name: "dev-kimi", command: "omp --auto-approve --model kimi/k3" };
+  const s = captainScene(t, { templates: [template], over: { template: template.name,
+    argv: ["sh", "-c", "omp --model old"], foreground: { argv: ["omp", "--model", "old"] } } });
+  const r = s.cli(["restart", "Captain", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().terminal, "t100");
+  assert.deepEqual(agentWords(runCall(s.calls())), ["sh", "-c", `${template.command} "$@"`, "sh", "--continue"]);
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t100").labels["worker.template"], template.name);
+  assert.deepEqual(seatRows(s).map((row) => [row.terminal, row.botId, row.agent, row.template]), [["t100", ID.cap, "omp", template.name]]);
+});
+
 test("restart #597: a template hc no longer lists falls back to the agent row; its line names the template, not its text", (t) => {
   const cmd = 'env PATH="$HOME/.bun/bin:$PATH" omp --auto-approve --model kimi/k3';
   const s = captainScene(t, { templates: [], over: {
@@ -3720,6 +3732,26 @@ test("restart --tree: a helper that is itself a bot (started under the pane, the
   assert.deepEqual(rows.slice(-2).map((x) => [x.event, x.terminal, x.by, x.reason ?? null]), [["detach", "t8", "start", "moved"], ["attach", "t101", "start", null]]);
   assert.equal(s.cli(["whois", "--bot", ID.dev, "--json"]).json().terminal, "t101");
   assert.deepEqual(ledgerOf(s).filter((x) => x.terminal === "t101").map((x) => [x.kind, x.botId, x.worktree]), [["seat", ID.dev, wt]]);
+});
+
+test("#1418: restart --tree records the native template of a bound helper on its rebuilt pane and seat row", (t) => {
+  const s = restartScene(t);
+  const wt = join(s.root, "proj.worktrees", "dev");
+  mkdirSync(wt, { recursive: true });
+  const command = "claude --model custom";
+  const st = s.hcState();
+  st.terminals.push({ ...term("t8", { bot: ID.dev, parent: "t5", cwd: wt }), die_with_parent: true,
+    argv: ["sh", "-c", command], template: "child-dev" });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  assert.equal(s.cli(["whois", "--bot", ID.dev, "--json"]).json().terminal, "t8");
+  const r = s.cli(["restart", "Genie", "--tree", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().helpers.map((h) => [h.replaced, h.terminal, h.bot, h.up]), [["t8", "t101", ID.dev, true]]);
+  assert.deepEqual(agentWords(runs(s)[1]), ["sh", "-c", `${command} "$@"`, "sh", "--continue"]);
+  const helper = s.hcState().terminals.find((p) => p.address === "t101");
+  assert.deepEqual([helper.parent, helper.labels["worker.template"]], ["t100", "child-dev"]);
+  const rows = seatRows(s).filter((row) => row.terminal === "t101");
+  assert.deepEqual(rows.map((row) => [row.botId, row.agent, row.template, row.created_ms]), [[ID.dev, "claude", "child-dev", helper.created_ms]]);
 });
 
 // ---- Claude logins (#453): claude-logins.json read at each launch, start, restart and --tree ----
@@ -4748,6 +4780,32 @@ test("RFC 0021: attach writes a seat row with role, lead, squad, core and create
   assert.equal(r.code, 0, r.err);
   const row = seatRows(s)[0];
   assert.deepEqual([row.terminal, row.core, row.created_ms, row.role, row.lead, row.squad], ["t7", "fakecore0000", 4242, "captain", ID.main, ID.cap]);
+});
+
+test("#1418: attach records the trimmed native template or the pane's template label", (t) => {
+  const s = scene(t);
+  s.seed(team());
+  const terminals = [
+    { ...term("t7", { cwd: s.project }), template: " native ", labels: { "worker.template": "older" } },
+    { ...term("t8", { cwd: s.project }), template: " ", labels: { "worker.template": " carried " } },
+  ];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ ...s.hcState(), terminals }));
+  for (const [bot, address] of [["Captain", "t7"], ["Dev", "t8"]]) {
+    const r = s.cli(["attach", bot, address]);
+    assert.equal(r.code, 0, r.err);
+  }
+  assert.deepEqual(seatRows(s).map((row) => [row.terminal, row.botId, row.template]), [["t7", ID.cap, "native"], ["t8", ID.dev, "carried"]]);
+  assert.equal(s.calls().some((c) => c[0] === "templates"), false);
+});
+
+test("#1418: a plain start has no template label and writes a null seat template", (t) => {
+  const s = scene(t);
+  s.seed(team());
+  const r = s.cli(["start", "Genie", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(agentWords(runCall(s.calls()))[0], "claude");
+  assert.equal(s.hcState().terminals.find((p) => p.address === "t100").labels["worker.template"], undefined);
+  assert.deepEqual(seatRows(s).map((row) => [row.terminal, row.botId, row.template]), [["t100", ID.main, null]]);
 });
 
 test("RFC 0021: restart --tree ends the replaced launches, keeps a worker's frozen squad, tags the seat", (t) => {
