@@ -499,3 +499,280 @@ describe('wish-reap: preserve what is not a regular file', () => {
     expect(existsSync(join(preserve, 'copy', '.wish-reap-commits.txt'))).toBe(false);
   });
 });
+
+/** Run `fn` with environment overrides, restoring every key (present or absent) afterwards. */
+function withEnv<T>(overrides: Record<string, string>, fn: () => T): T {
+  const saved = Object.entries(overrides).map(([key, value]) => [key, process.env[key]] as const);
+  for (const [key, value] of Object.entries(overrides)) process.env[key] = value;
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/** The identity the fixture's own commits use; the in-process reaper's git calls need it too. */
+const IDENTITY = {
+  GIT_AUTHOR_NAME: 'Fixture',
+  GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+  GIT_COMMITTER_NAME: 'Fixture',
+  GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+};
+
+/**
+ * A `git` shim placed first on PATH. It counts `status` calls and, on the second one, either
+ * fails (the pre-removal recheck) or stashes a product change first (work that appears between
+ * the decision and the removal).
+ */
+function gitShim(dir: string) {
+  const shimDir = join(dir, 'shim');
+  mkdirSync(shimDir);
+  const count = join(shimDir, 'count');
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(shimDir, 'git'), `#!/bin/sh
+is_status=0
+for arg in "$@"; do
+  [ "$arg" = status ] && is_status=1
+done
+if [ "$is_status" = 1 ]; then
+  n=$(cat "$WISH_REAP_SHIM_COUNT" 2>/dev/null || printf 0)
+  n=$((n + 1))
+  printf '%s\\n' "$n" > "$WISH_REAP_SHIM_COUNT"
+  if [ "$n" -ge 2 ]; then
+    case "$WISH_REAP_SHIM_ACTION" in
+      fail-status)
+        printf 'shim: status failed\\n' >&2
+        exit 128
+        ;;
+      stash)
+        printf 'shim stashed product\\n' > product.txt
+        ${JSON.stringify(real)} stash push -q -m 'shim stash' >/dev/null 2>&1 || true
+        ;;
+    esac
+  fi
+fi
+exec ${JSON.stringify(real)} "$@"
+`);
+  chmodSync(join(shimDir, 'git'), 0o755);
+  return { shimDir, count };
+}
+
+/** Reap in-process with the git shim first on PATH. */
+function reapWithShim(fixture: { root: string; preserve: string }, shim: { shimDir: string;
+  count: string }, action: string, extra: string[] = []) {
+  return withEnv({
+    ...IDENTITY,
+    PATH: `${shim.shimDir}:${process.env.PATH ?? ''}`,
+    WISH_REAP_SHIM_COUNT: shim.count,
+    WISH_REAP_SHIM_ACTION: action,
+  }, () => reap(parseArgs(['--root', fixture.root, '--preserve', fixture.preserve,
+    '--apply', ...extra])));
+}
+
+describe('wish-reap: a stash or a note is work too', () => {
+  /** A clean copy under its own root; the fake remote only advertises its seed commit. */
+  function copyOf(name = 'copy') {
+    const { dir, remote } = remoteFixture();
+    const root = join(dir, 'copies');
+    mkdirSync(root);
+    const copy = join(root, name);
+    git(dir, 'clone', '-q', remote, copy);
+    return { dir, remote, root, copy, preserve: join(dir, 'preserved') };
+  }
+
+  test('a git stash holding a product change keeps the copy and names refs/stash', () => {
+    const f = copyOf();
+    writeFileSync(join(f.copy, 'product.txt'), 'stashed product\n');
+    git(f.copy, 'stash', 'push', '-m', 'product work');
+    expect(git(f.copy, 'stash', 'list')).toContain('product work');
+    expect(git(f.copy, 'status', '--porcelain')).toBe('');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('unpublished');
+    expect(entry.detail).toContain('refs/stash');
+    expect(result.exitCode).toBe(1);
+    expect(result.summary.keptForLostWork).toEqual(['copy']);
+    expect(existsSync(f.copy)).toBe(true);
+    expect(git(f.copy, 'stash', 'list')).toContain('product work');
+    expect(readFileSync(join(f.copy, 'product.txt'), 'utf8')).toBe('one\n');
+  });
+
+  test('a refs/notes/commits entry keeps the copy and names the ref', () => {
+    const f = copyOf();
+    git(f.copy, 'notes', 'add', '-m', 'a local note', 'HEAD');
+    const note = git(f.copy, 'rev-parse', 'refs/notes/commits');
+    expect(note).toMatch(/^[0-9a-f]{40}$/);
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('unpublished');
+    expect(entry.detail).toContain('refs/notes/commits');
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(f.copy)).toBe(true);
+    expect(git(f.copy, 'rev-parse', 'refs/notes/commits')).toBe(note);
+  });
+
+  test('a note the remote advertises is published and the copy goes', () => {
+    const f = copyOf();
+    git(f.copy, 'notes', 'add', '-m', 'a published note', 'HEAD');
+    git(f.copy, 'push', '-q', 'origin', 'refs/notes/commits');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('remove');
+    expect(entry.reason).toBe('head-on-remote');
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(f.copy)).toBe(false);
+  });
+
+  test('a stale refs/remotes ref is cache, not local work, and does not keep the copy', () => {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', 'gone');
+    writeFileSync(join(f.copy, 'product.txt'), 'gone product\n');
+    git(f.copy, 'commit', '-qam', 'gone product');
+    const gone = git(f.copy, 'rev-parse', 'HEAD');
+    git(f.copy, 'push', '-q', 'origin', 'gone');
+    git(f.copy, 'checkout', '-q', 'dev');
+    git(f.copy, 'branch', '-D', 'gone');
+    git(f.remote, 'branch', '-D', 'gone');
+    git(f.copy, 'update-ref', 'refs/remotes/origin/gone', gone);
+    expect(git(f.remote, 'for-each-ref', '--format=%(refname)', 'refs/heads'))
+      .toBe('refs/heads/dev');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('remove');
+    expect(entry.reason).toBe('head-on-remote');
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(f.copy)).toBe(false);
+  });
+
+  test('a stash created between the decision and the removal keeps the copy', () => {
+    const f = copyOf();
+    backdate(f.copy);
+    const shim = gitShim(f.dir);
+    // `--idle-minutes 0` so the freshly made stash is caught by the ref scan, not by `recent`.
+    const result = reapWithShim(f, shim, 'stash', ['--idle-minutes', '0']);
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('unpublished');
+    expect(entry.detail).toContain('refs/stash');
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(f.copy)).toBe(true);
+    expect(git(f.copy, 'stash', 'list')).toContain('shim stash');
+  });
+});
+
+describe('wish-reap: a failure to read is not an empty copy', () => {
+  function copyOf(name = 'copy') {
+    const { dir, remote } = remoteFixture();
+    const root = join(dir, 'copies');
+    mkdirSync(root);
+    const copy = join(root, name);
+    git(dir, 'clone', '-q', remote, copy);
+    return { dir, remote, root, copy, preserve: join(dir, 'preserved') };
+  }
+
+  test('a git status failure on the pre-removal recheck keeps the copy and exits 3', () => {
+    const f = copyOf();
+    backdate(f.copy);
+    const shim = gitShim(f.dir);
+    const result = reapWithShim(f, shim, 'fail-status');
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('inspection-failed');
+    expect(entry.detail).toContain('recheck');
+    expect(entry.readFailure).toBe(true);
+    expect(entry.lostWork).toBe(false);
+    expect(result.summary.readErrors).toEqual(['copy']);
+    expect(result.summary.keptForLostWork).toEqual([]);
+    expect(result.exitCode).toBe(3);
+    expect(existsSync(f.copy)).toBe(true);
+    expect(readFileSync(join(f.copy, 'product.txt'), 'utf8')).toBe('one\n');
+  });
+
+  test('an unreadable handoffs/ during inspection keeps the copy and exits 3', () => {
+    const f = copyOf();
+    backdate(f.copy);
+    const handoffs = join(f.copy, 'handoffs');
+    chmodSync(handoffs, 0o000);
+    let result;
+    try {
+      result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    } finally {
+      chmodSync(handoffs, 0o755);
+    }
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('inspection-failed');
+    expect(entry.detail).toContain('handoffs');
+    expect(entry.readFailure).toBe(true);
+    expect(result.summary.readErrors).toEqual(['copy']);
+    expect(result.exitCode).toBe(3);
+    expect(existsSync(f.copy)).toBe(true);
+  });
+
+  test('a read failure during inspection is never counted as kept lost work', () => {
+    const f = copyOf();
+    backdate(f.copy);
+    const docs = join(f.copy, 'docs');
+    chmodSync(docs, 0o000);
+    let result;
+    try {
+      result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve]));
+    } finally {
+      chmodSync(docs, 0o755);
+    }
+    expect(result.copies[0].readFailure).toBe(true);
+    expect(result.summary.keptForLostWork).toEqual([]);
+    expect(result.exitCode).toBe(3);
+  });
+});
+
+describe('wish-reap: two refs, one preserved path', () => {
+  function copyOf() {
+    const { dir, remote } = remoteFixture();
+    const root = join(dir, 'copies');
+    mkdirSync(root);
+    const copy = join(root, 'copy');
+    git(dir, 'clone', '-q', remote, copy);
+    return { dir, remote, root, copy, preserve: join(dir, 'preserved') };
+  }
+
+  /** Commit a docs change with a fixed committer time, so "newest" is not wall-clock luck. */
+  function commitDocs(copy: string, body: string, when: string) {
+    writeFileSync(join(copy, 'docs', 'note.md'), body);
+    git(copy, 'add', '-A');
+    execFileSync('git', ['commit', '-qm', `docs ${body.trim()}`], {
+      cwd: copy, encoding: 'utf8', stdio: 'pipe',
+      env: { ...ENV, GIT_AUTHOR_DATE: when, GIT_COMMITTER_DATE: when },
+    });
+    return git(copy, 'rev-parse', 'HEAD');
+  }
+
+  test('the newest ref wins the same docs path instead of the last visited one', () => {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', 'a-older');
+    const older = commitDocs(f.copy, 'older\n', '2026-01-01T00:00:00 +0000');
+    git(f.copy, 'checkout', '-q', 'dev');
+    git(f.copy, 'checkout', '-q', '-b', 'z-newer');
+    const newer = commitDocs(f.copy, 'newest\n', '2026-06-01T00:00:00 +0000');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('remove');
+    expect(entry.reason).toBe('local-only-handoffs');
+    expect(readFileSync(join(f.preserve, 'copy', 'docs', 'note.md'), 'utf8')).toBe('newest\n');
+    const record = readFileSync(join(f.preserve, 'copy', '.wish-reap-commits.txt'), 'utf8');
+    expect(record).toContain(older);
+    expect(record).toContain(newer);
+    expect(result.exitCode).toBe(0);
+  });
+});

@@ -5,16 +5,24 @@
  * every direct child of --root that is a git checkout and removes it only when all gates hold:
  *
  *   1. clean       `git status --porcelain --untracked-files=all` is empty
- *   2. safe work   every commit reachable from every local branch, every local tag and HEAD is
- *                  advertised by the remote as it answers `git ls-remote` now. Local
- *                  remote-tracking refs are never consulted: a stale `origin/*` cannot hide a
- *                  commit the remote no longer advertises. A copy whose local-only commits all
- *                  touch only handoffs/ or docs/ is report-only: those files are copied into
- *                  --preserve before the copy goes. A symlink is carried as a link, never as
- *                  its target's bytes. FIFOs, sockets and devices cannot be carried, so a copy
- *                  that holds one is kept and the path and kind are named
+ *   2. safe work   every commit reachable from every local ref under `refs/` (branches, tags,
+ *                  `refs/stash`, `refs/notes/*`, `refs/replace/*`, and anything else there
+ *                  except `refs/remotes/*`) and HEAD is advertised by the remote as it answers
+ *                  `git ls-remote` now. `refs/remotes/*` is deliberately excluded: a
+ *                  remote-tracking ref is this clone's cached copy of an answer the remote gave
+ *                  earlier, not the remote's current advertisement. Trusting one as "published"
+ *                  could hide a commit the remote no longer has, and it can never hold work that
+ *                  exists only here, so it is neither proof nor loss. A copy whose local-only
+ *                  commits all touch only handoffs/ or docs/ is report-only: those files are
+ *                  copied into --preserve before the copy goes. A symlink is carried as a link,
+ *                  never as its target's bytes. FIFOs, sockets and devices cannot be carried, so
+ *                  a copy that holds one is kept and the path and kind are named
  *   3. idle        nothing in the copy changed in the last --idle-minutes (default 30)
  *   4. unlocked    no `*.lock` file anywhere under the copy's git dir or common dir
+ *
+ * Before --apply removes a copy it repeats the whole scan (refs included), so a stash or note
+ * made between the decision and the removal keeps the copy. A failure to read the copy at any
+ * point keeps it and exits 3: an unreadable copy is never "nothing to lose".
  *
  * Removal is `git worktree remove` when the copy is a registered worktree of the shared clone
  * (--shared), otherwise `rm -rf` for a plain clone. It never forces. After worktree removals
@@ -28,7 +36,8 @@
  * project's folder, whose direct children are the copies. --preserve defaults to
  * <root>/.wish-preserved. One line per copy; --json prints the machine-readable list instead.
  * Exit 0 clean; 1 a copy was kept for lost work (dirty, or unpublished product changes);
- * 2 invalid usage; 3 a removal or prune failed after a copy was judged removable.
+ * 2 invalid usage; 3 a copy could not be read, preserved, removed or pruned. A read failure
+ * exits 3 even though the copy is kept, and is reported apart from kept lost work.
  */
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, realpathSync,
@@ -161,6 +170,17 @@ function keep(entry, reason, detail = null, lostWork = false) {
   return entry;
 }
 
+/**
+ * Keep because the copy could not be read: unlike lost work, this is not a verdict about what
+ * the copy holds, and it exits 3. The entry is still a keep, never a removal.
+ */
+function keepUnreadable(entry, reason, detail = null) {
+  keep(entry, reason, detail, false);
+  entry.error = true;
+  entry.readFailure = true;
+  return entry;
+}
+
 function markForRemoval(entry, reason, options) {
   entry.decision = 'remove';
   entry.reason = reason;
@@ -191,16 +211,16 @@ function scanCopy(copy) {
 }
 
 /**
- * What the remote advertises right now, cached by URL so one call serves every copy. Branch
- * heads, tags (including the peeled entries `ls-remote` prints for annotated tags) and
- * pull-request heads all count. Nothing here reads a local remote-tracking ref.
+ * What the remote advertises right now, cached by URL so one call serves every copy. Every ref
+ * the remote answers counts: branch heads, tags (including the peeled entries `ls-remote` prints
+ * for annotated tags), pull-request heads, and notes or replace refs when the remote carries
+ * them. Nothing here reads a local remote-tracking ref.
  */
 function remoteRefs(copy, url, cache) {
   const local = !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) && !url.startsWith('/');
   const key = `${local ? `${copy}\0` : ''}${url}`;
   if (!cache.has(key)) {
-    const result = runGit(copy,
-      ['ls-remote', url, 'refs/heads/*', 'refs/tags/*', 'refs/pull/*/head'], 60_000);
+    const result = runGit(copy, ['ls-remote', url], 60_000);
     if (!result.ok) {
       cache.set(key, { ok: false, error: result.err || `git ls-remote exited ${result.code}` });
     } else {
@@ -236,18 +256,24 @@ function existingCommits(copy, shas) {
   return present;
 }
 
-/** Every local branch and tag that resolves to a commit, plus HEAD itself; null on failure. */
+/**
+ * Every local ref that resolves to a commit, plus HEAD itself; null on failure. Everything under
+ * `refs/` counts, so a stash, a note and a replace ref cannot hide unpublished work, except
+ * `refs/remotes/*`: those are cached copies of an earlier remote answer, not the remote's current
+ * advertisement. Trusting one could hide a commit the remote no longer has, and one cannot hold
+ * work that exists only locally, so it is neither proof of publication nor lost work.
+ */
 function localRefs(copy, head) {
-  const listed = runGit(copy,
-    ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags']);
+  const listed = runGit(copy, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/']);
   if (!listed.ok) return null;
   const refs = [];
   const seen = new Set();
   for (const line of listed.out.split('\n')) {
     const [ref, sha] = line.split(' ');
     if (!ref || !sha) continue;
+    if (ref.startsWith('refs/remotes/')) continue;
     const commit = runGit(copy, ['rev-parse', '--verify', `${ref}^{commit}`]);
-    if (!commit.ok) continue; // a tag to a tree or blob carries no commits
+    if (!commit.ok) continue; // a ref to a tree, blob or missing object carries no commits
     if (seen.has(ref)) continue;
     seen.add(ref);
     refs.push({ ref, sha: commit.out });
@@ -520,6 +546,37 @@ function preserveConflict(files) {
   return null;
 }
 
+/**
+ * A preserved path may be changed by commits on two different local refs. Carrying whichever was
+ * visited last would silently choose one, so the newest committer time wins; equal times with
+ * different bytes are ambiguous and the caller keeps the copy instead.
+ */
+function preservedWinner(copy, current, candidate) {
+  const a = treeEntryAt(copy, current.sha, current.path);
+  const b = treeEntryAt(copy, candidate.sha, candidate.path);
+  if (a.error) return { error: a.error };
+  if (b.error) return { error: b.error };
+  if (a.missing && b.missing) return { item: current };
+  if (a.object !== undefined && a.object === b.object) return { item: current };
+  const ta = commitTime(copy, current.sha);
+  if (ta === null) return { error: `cannot read the commit time of ${current.sha.slice(0, 12)}` };
+  const tb = commitTime(copy, candidate.sha);
+  if (tb === null) {
+    return { error: `cannot read the commit time of ${candidate.sha.slice(0, 12)}` };
+  }
+  if (tb > ta) return { item: candidate };
+  if (ta > tb) return { item: current };
+  return { conflict: true };
+}
+
+/** Committer time of a commit in seconds; null when it cannot be read. */
+function commitTime(copy, sha) {
+  const shown = runGit(copy, ['show', '-s', '--format=%ct', sha]);
+  if (!shown.ok) return null;
+  const seconds = Number(shown.out);
+  return Number.isFinite(seconds) ? seconds : null;
+}
+
 /** The first symlink ancestor of `relative` inside `target`; writing below it would escape. */
 function linkAncestor(target, relative) {
   let current = target;
@@ -598,7 +655,7 @@ function preserveFiles(copy, entry, options) {
 function inspect(copy, options, cache) {
   const entry = emptyEntry(copy);
   const gitDir = runGit(copy, ['rev-parse', '--git-dir']);
-  if (!gitDir.ok) return keep(entry, 'inspection-failed', 'git dir cannot be resolved');
+  if (!gitDir.ok) return keepUnreadable(entry, 'inspection-failed', 'git dir cannot be resolved');
   const gitDirPath = resolve(copy, gitDir.out);
   const common = runGit(copy, ['rev-parse', '--git-common-dir']);
   const lockDirs = [...new Set([gitDirPath,
@@ -606,22 +663,24 @@ function inspect(copy, options, cache) {
   const locks = locksIn(lockDirs);
   if (locks.length) return keep(entry, 'locked', `lock files: ${locks.join(', ')}`);
   const head = runGit(copy, ['rev-parse', '--verify', 'HEAD']);
-  if (!head.ok) return keep(entry, 'no-head', 'HEAD does not resolve to a commit');
+  if (!head.ok) return keepUnreadable(entry, 'no-head', 'HEAD does not resolve to a commit');
   entry.sha = head.out;
   const special = scanPreservedTree(copy);
-  if (special.error) return keep(entry, 'inspection-failed', special.error);
+  if (special.error) return keepUnreadable(entry, 'inspection-failed', special.error);
   if (special.unpreservable.length) {
     const first = special.unpreservable[0];
     return keep(entry, 'unpreservable', `${first.path} (${first.kind})`, true);
   }
   const status = runGit(copy,
     ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all']);
-  if (!status.ok) return keep(entry, 'inspection-failed', status.err || 'git status failed');
+  if (!status.ok) {
+    return keepUnreadable(entry, 'inspection-failed', status.err || 'git status failed');
+  }
   if (status.out) {
     return keep(entry, 'dirty', `${status.out.split('\n').length} changed path(s)`, true);
   }
   const scan = scanCopy(copy);
-  if (!scan) return keep(entry, 'inspection-failed', 'copy cannot be read');
+  if (!scan) return keepUnreadable(entry, 'inspection-failed', 'copy cannot be read');
   entry.sizeBytes = scan.bytes;
   const age = Date.now() - scan.newest;
   if (age < options.idleMinutes * 60_000) {
@@ -631,15 +690,18 @@ function inspect(copy, options, cache) {
   const url = runGit(copy, ['config', '--get', `remote.${options.remote}.url`]);
   if (!url.ok || !url.out) return keep(entry, 'no-remote', `no ${options.remote} remote`);
   const refs = remoteRefs(copy, url.out, cache);
-  if (!refs.ok) return keep(entry, 'remote-check-failed', refs.error);
+  if (!refs.ok) return keepUnreadable(entry, 'remote-check-failed', refs.error);
   const advertised = existingCommits(copy, refs.advertised);
   const localRefList = localRefs(copy, head.out);
-  if (!localRefList) return keep(entry, 'inspection-failed', 'local refs cannot be listed');
+  if (!localRefList) {
+    return keepUnreadable(entry, 'inspection-failed', 'local refs cannot be listed');
+  }
   const bySha = new Map();
   for (const { ref, sha } of localRefList) {
     const commits = localOnlyCommits(copy, sha, advertised);
     if (!commits) {
-      return keep(entry, 'inspection-failed', `local-only commits of ${ref} cannot be listed`);
+      return keepUnreadable(entry, 'inspection-failed',
+        `local-only commits of ${ref} cannot be listed`);
     }
     for (const commit of commits) {
       if (!bySha.has(commit)) bySha.set(commit, new Set());
@@ -669,7 +731,9 @@ function inspect(copy, options, cache) {
   const unsafe = [];
   for (const sha of [...local].reverse()) {
     const changed = commitPaths(copy, sha);
-    if (!changed) return keep(entry, 'inspection-failed', `cannot read ${sha.slice(0, 12)}`);
+    if (!changed) {
+      return keepUnreadable(entry, 'inspection-failed', `cannot read ${sha.slice(0, 12)}`);
+    }
     const ref = preferredRef(bySha.get(sha));
     if (changed.merge) {
       return keep(entry, 'unpublished',
@@ -677,7 +741,22 @@ function inspect(copy, options, cache) {
     }
     for (const path of changed.paths) {
       if (underPreserved(path)) {
-        if (safeRelativePath(path)) preserved.set(path, { sha, path });
+        if (!safeRelativePath(path)) continue;
+        const candidate = { sha, path, ref };
+        const current = preserved.get(path);
+        if (!current) {
+          preserved.set(path, candidate);
+          continue;
+        }
+        const winner = preservedWinner(copy, current, candidate);
+        if (winner.error) {
+          return keepUnreadable(entry, 'inspection-failed', winner.error);
+        }
+        if (winner.conflict) {
+          return keep(entry, 'preserve-conflict',
+            `${path} differs between ${current.ref} and ${ref} at the same commit time`, true);
+        }
+        preserved.set(path, winner.item);
       } else {
         unsafe.push({ ref, sha, path });
       }
@@ -690,7 +769,7 @@ function inspect(copy, options, cache) {
       `${first.sha.slice(0, 12)}:${first.path}`, true);
   }
   const classified = classifyPreserved(copy, preserved);
-  if (classified.error) return keep(entry, 'inspection-failed', classified.error);
+  if (classified.error) return keepUnreadable(entry, 'inspection-failed', classified.error);
   if (classified.unsupported) {
     return keep(entry, 'unpreservable',
       `${classified.unsupported.path} (${classified.unsupported.kind})`, true);
@@ -714,47 +793,31 @@ function inspect(copy, options, cache) {
   return markForRemoval(entry, 'local-only-handoffs', options);
 }
 
-/** Re-run the cheap gates just before a removal; git re-checks a worktree, git status a clone. */
-function recheck(entry) {
-  const special = scanPreservedTree(entry.path);
-  if (special.error) {
-    return { reason: 'inspection-failed', detail: `recheck: ${special.error}` };
+/**
+ * Repeat the whole decision immediately before removing: the same ref scan (stash, notes and
+ * every other local ref included), the same lock, idle, dirty and preserve gates. A stash or note
+ * made between the decision and the removal therefore keeps the copy, and a failure to read now
+ * keeps it with an error instead of reading as a clean copy. `{ fresh }` means it is still a
+ * removal; `{ keep }` carries the reason it is not.
+ */
+function recheck(entry, options, cache) {
+  let fresh;
+  try {
+    fresh = inspect(entry.path, options, cache);
+  } catch (error) {
+    return { keep: { reason: 'inspection-failed', detail: `recheck: ${error.message}`,
+      error: true, readFailure: true } };
   }
-  if (special.unpreservable.length) {
-    const first = special.unpreservable[0];
-    return { reason: 'unpreservable', detail: `recheck: ${first.path} (${first.kind})`,
-      lostWork: true };
+  if (fresh.decision !== 'remove') {
+    return { keep: {
+      reason: fresh.reason,
+      detail: `recheck: ${fresh.detail ?? 'the copy changed'}`,
+      lostWork: Boolean(fresh.lostWork),
+      error: Boolean(fresh.error),
+      readFailure: Boolean(fresh.readFailure),
+    } };
   }
-  if (special.links.length || special.emptyDirs.length) {
-    const files = new Map((entry.preserveFiles ?? []).map((file) => [file.path, file]));
-    for (const file of worktreePreserved(special)) {
-      if (!files.has(file.path)) files.set(file.path, file);
-    }
-    const conflict = preserveConflict([...files.values()]);
-    if (conflict) {
-      return { reason: 'unpreservable',
-        detail: `recheck: ${conflict.path} (symlink conflicts with ${conflict.other})`,
-        lostWork: true };
-    }
-    entry.preserveFiles = [...files.values()];
-    entry.preservePaths = [...files.keys()].sort();
-    entry.localCommits ??= [];
-  }
-  if (entry.method !== 'rm-rf') return null;
-  const gitDir = runGit(entry.path, ['rev-parse', '--git-dir']);
-  if (!gitDir.ok) return { reason: 'inspection-failed', detail: 'recheck: git dir unreadable' };
-  const common = runGit(entry.path, ['rev-parse', '--git-common-dir']);
-  const dirs = [...new Set([resolve(entry.path, gitDir.out),
-    common.ok ? resolve(entry.path, common.out) : resolve(entry.path, gitDir.out)])];
-  const locks = locksIn(dirs);
-  if (locks.length) {
-    return { reason: 'locked', detail: `recheck: lock appeared (${locks[0]})` };
-  }
-  const status = runGit(entry.path,
-    ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all']);
-  if (!status.ok) return { reason: 'inspection-failed', detail: 'recheck: git status failed' };
-  if (status.out) return { reason: 'dirty', detail: 'changed while reaping', lostWork: true };
-  return null;
+  return { fresh };
 }
 
 function removeEntry(entry) {
@@ -793,7 +856,7 @@ export function reap(options) {
     try {
       entry = inspect(copy, options, cache);
     } catch (error) {
-      entry = keep(emptyEntry(copy), 'inspection-failed', error.message);
+      entry = keepUnreadable(emptyEntry(copy), 'inspection-failed', error.message);
     }
     copies.push(entry);
   }
@@ -803,14 +866,29 @@ export function reap(options) {
     const owners = new Set();
     for (const entry of copies) {
       if (entry.decision !== 'remove') continue;
-      const changed = recheck(entry);
-      if (changed) {
-        Object.assign(entry, {
-          decision: 'keep', reason: changed.reason, detail: changed.detail,
-          lostWork: Boolean(changed.lostWork), preservedTo: undefined,
-        });
+      const checked = recheck(entry, options, cache);
+      if (checked.keep) {
+        entry.decision = 'keep';
+        entry.reason = checked.keep.reason;
+        entry.detail = checked.keep.detail;
+        entry.lostWork = checked.keep.lostWork;
+        delete entry.preservedTo;
+        if (checked.keep.error) entry.error = true;
+        else delete entry.error;
+        if (checked.keep.readFailure) entry.readFailure = true;
+        else delete entry.readFailure;
         continue;
       }
+      Object.assign(entry, {
+        sha: checked.fresh.sha,
+        sizeBytes: checked.fresh.sizeBytes,
+        method: checked.fresh.method,
+        owner: checked.fresh.owner,
+        localCommits: checked.fresh.localCommits,
+        preserveFiles: checked.fresh.preserveFiles,
+        preservePaths: checked.fresh.preservePaths,
+        preserveTo: checked.fresh.preserveTo,
+      });
       if (entry.localCommits?.length || entry.preservePaths?.length) {
         const preserved = preserveFiles(entry.path, entry, options);
         if (!preserved.ok) {
@@ -842,14 +920,17 @@ export function reap(options) {
     }
   }
   const kept = copies.filter((entry) => entry.decision === 'keep');
-  const removalErrors = copies.filter((entry) => entry.error).map((entry) => entry.name);
-  const failed = removalErrors.length > 0 || pruneErrors.length > 0;
+  const readErrors = copies.filter((entry) => entry.readFailure).map((entry) => entry.name);
+  const removalErrors = copies.filter((entry) => entry.error && !entry.readFailure)
+    .map((entry) => entry.name);
+  const failed = readErrors.length > 0 || removalErrors.length > 0 || pruneErrors.length > 0;
   const summary = {
     total: copies.length,
     remove: copies.filter((entry) => entry.decision === 'remove').length,
     keep: kept.length,
     removed: copies.filter((entry) => entry.removed).length,
     keptForLostWork: kept.filter((entry) => entry.lostWork).map((entry) => entry.name),
+    readErrors,
     removalErrors,
     pruned,
   };
@@ -882,10 +963,12 @@ function printHuman(result) {
   }
   const mode = result.apply ? '' : ' (dry run)';
   const lost = result.summary.keptForLostWork.length;
+  const unreadable = result.summary.readErrors.length;
   const moved = result.apply ? result.summary.removed : result.summary.remove;
   const verb = result.apply ? 'removed' : 'to remove';
+  const unread = unreadable ? `, ${unreadable} unreadable` : '';
   console.log(`wish-reap: ${result.summary.total} copies, ${moved} ${verb}, ` +
-    `${result.summary.keep} kept, ${lost} kept for lost work${mode}`);
+    `${result.summary.keep} kept, ${lost} kept for lost work${unread}${mode}`);
 }
 
 const invoked = (() => {
