@@ -164,7 +164,9 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   offers no runs-as. An older build has no `Target` field, so its `ls` cannot show a hand-written
   target, it ignores the key and runs a fresh session, and a panel save (which sends no target key)
   leaves the key in place. After a target save the panel reads the entry back and fails the save if
-  the build claimed `targets` but dropped the key.
+  the build claimed `targets` but dropped the key. A target run's history row has a second line
+  naming the bot, and clicking it looks up the bot in the automation's current project with `am ls`
+  to focus or peek its terminal, or says why the terminal is unavailable.
 - **Address warning** (#498): a prompt holding an hc address (`t3q1`, `build-box/t9`: a `t`, a
   digit, then letters and digits) is warned about on every preview and on Save, "… is a terminal
   address; it changes on restart. Name the bot instead"; it is saved all the same. A name given with
