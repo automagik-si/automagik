@@ -417,8 +417,8 @@ export function install(rt) {
   // destination is published before delivery; a recurring new reservation is private.
   // A destination must never borrow a different root's folder for one reminder.
   async function checkScheduledReadScope(sessionId) {
-    if (rt.resolveReadScope === undefined) return
-    const held = () => new Error('A scheduled delivery is held because its root Session’s file-tool folder could not be bound.')
+    if (service === null) return
+    const held = cause => new Error('A scheduled delivery is held because its root Session’s file-tool folder could not be bound.', { cause })
     try {
       const entries = await service.catalog()
       const exact = entries.filter(entry => entry.target?.sessionId === sessionId || entry.lastDelivery?.targetSessionId === sessionId)
@@ -440,7 +440,10 @@ export function install(rt) {
       }
       if (unresolved.size > 0) await rt.markScheduledReadCandidates(sessionId, unresolved)
     } catch (cause) {
-      throw Object.assign(held(), { cause })
+      // A host without enough Session metadata still serves ordinary reminders
+      // when its policy store has no configured folder.
+      try { rt.assertNoConfiguredReadScope() }
+      catch { throw held(cause) }
     }
   }
   // The last line for a delivery: if the check has not run yet, or a task could not be
@@ -448,14 +451,19 @@ export function install(rt) {
   // DSH drives deliveries through this waterfall, before the prompt runs. It must never
   // await a management write: that would queue behind the delivery's own serialized drive.
   ctx.on('schedule/resolve-agent', async (sessionId, next) => {
-    if (service !== null) await checkScheduledReadScope(sessionId)
-    if (swept && stuck.size === 0) return openedLevel(sessionId, await next())
-    if (await botOfTaskSession(sessionId) !== undefined) return next()
-    const unsafe = teamLoaded ? await unsafeDelivery(sessionId) : true
-    if (!unsafe) return openedLevel(sessionId, await next())
-    void revokeNewSchedules()
-      .catch(error => rt.warn('ds-bot: fresh-Session tasks were not checked: %s', error))
-    throw new Error('ds-bot: a scheduled delivery is blocked until its task can be paused')
+    if (!swept || stuck.size > 0) {
+      if (await botOfTaskSession(sessionId) !== undefined) {
+        await checkScheduledReadScope(sessionId)
+        return next()
+      }
+      if (!teamLoaded || await unsafeDelivery(sessionId)) {
+        void revokeNewSchedules()
+          .catch(error => rt.warn('ds-bot: fresh-Session tasks were not checked: %s', error))
+        throw new Error('ds-bot: a scheduled delivery is blocked until its task can be paused')
+      }
+    }
+    await checkScheduledReadScope(sessionId)
+    return openedLevel(sessionId, await next())
   })
 
   async function schedulesView() {

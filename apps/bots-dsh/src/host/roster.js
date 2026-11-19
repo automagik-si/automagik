@@ -279,13 +279,13 @@ export function install(rt) {
   // `pickModel` leaves the model to the user: the chat opens on a model card, and the
   // greeting waits until a model is chosen. So does a Bot made when no model it can
   // run on is served.
-  async function createBot(options) {
+  async function createBot(options, { readScopeSource = rt.callerSessionId?.() } = {}) {
     const cleanName = String(options.name ?? '').trim().slice(0, 40)
     const problem = nameProblem(cleanName)
     if (problem !== undefined) throw refusal(problem)
     if (botNameTaken(cleanName)) throw refusal(`A Bot named ${cleanName} already exists`)
     const existing = options.existingSessionId
-    if (existing === undefined) return holdName('bot', cleanName, () => buildBot(cleanName, options))
+    if (existing === undefined) return holdName('bot', cleanName, () => buildBot(cleanName, options, readScopeSource))
     if (typeof existing !== 'string' || !existing.trim()) throw refusal('An existing Session needs its id')
     const readOnly = rt.readOnly()
     if (readOnly !== undefined) throw refusal(readOnly)
@@ -298,7 +298,7 @@ export function install(rt) {
     }
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }) {
+  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }, readScopeSource) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
@@ -352,9 +352,10 @@ export function install(rt) {
     const permission = existingSessionId !== undefined ? undefined
       : creator !== undefined ? rt.inheritedPermission(creator, opener) ?? state.prefs.permission
         : personPermission
+    if (existingSessionId === undefined && createdBy !== undefined && readScopeSource === undefined) rt.assertNoConfiguredReadScope()
     // A host adapter may already own a configured root Session. Adopt it without creating
     // another Session or moving its workspace; this option is internal, not a user payload.
-    const id = existingSessionId ?? await createSession(cleanName, { dir, readScopeSource: options.readScopeSource })
+    const id = existingSessionId ?? await createSession(cleanName, { dir, readScopeSource })
     // Checked against the Session's own tool surface, before the Bot record exists: a name
     // this DSH does not serve refuses the create (the catch below archives the Session).
     if (denyTools) await rt.assertDenyTools(id, denyTools)

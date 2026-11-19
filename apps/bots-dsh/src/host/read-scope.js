@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync } from 'node:fs'
 import { mkdir, open, unlink } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { READ_SCOPE_CODE } from '../shared/read-scope.js'
@@ -21,8 +21,7 @@ export function install(rt) {
   // Session records are keyed by exact DSH ids. An absent record can mean unset
   // only after the caller's root identity is established. Invalid records and
   // failed reads propagate to the guard.
-  function recordOf(id) {
-    const path = fileOf(id)
+  function recordAt(path) {
     let fd
     try { fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)) }
     catch (error) {
@@ -37,13 +36,30 @@ export function install(rt) {
     } finally {
       closeSync(fd)
     }
-    if (record?.version !== 1 || record.id !== id) throw refused(BINDING_REFUSAL)
+    if (record?.version !== 1 || !validId(record.id) || fileOf(record.id) !== path) throw refused(BINDING_REFUSAL)
+    const { id } = record
     const keys = Object.keys(record).length
     if (keys === 3 && (record.folder === null || (typeof record.folder === 'string' && isAbsolute(record.folder)))) return record
     if (keys === 4 && validId(record.rootId) && record.rootId !== id && typeof record.continuation === 'boolean') return record
     if (keys === 3 && Array.isArray(record.candidateRoots)
       && record.candidateRoots.length > 0 && record.candidateRoots.every(root => validId(root) && root !== id)) return record
     throw refused(BINDING_REFUSAL)
+  }
+  const recordOf = id => recordAt(fileOf(id))
+
+  // With missing lineage, the default is safe only while there is no configured
+  // folder. Read the durable records so this also works before the team loads.
+  function assertNoConfiguredReadScope() {
+    let entries
+    try { entries = readdirSync(directory) }
+    catch (error) {
+      if (error?.code === 'ENOENT' && lstatSync(directory, { throwIfNoEntry: false }) === undefined) return
+      throw error
+    }
+    for (const name of entries) {
+      if (!/^[a-f0-9]{64}\.json$/.test(name)) continue
+      if (recordAt(join(directory, name))?.folder) throw refused(BINDING_REFUSAL)
+    }
   }
 
   async function publish(id, data) {
@@ -65,7 +81,7 @@ export function install(rt) {
   }
 
   async function headerOf(id) {
-    const live = ctx.sessions.get(id)
+    const live = ctx.sessions?.get?.(id)
     return live?.header ?? (await ctx.get('sessionPersistence')?.stat(id))?.header
   }
 
@@ -96,7 +112,7 @@ export function install(rt) {
         continue
       }
       // A legacy team task has Bot ownership but no initiating root to inherit.
-      if (rt.own(rt.state.tasks, id)?.from !== undefined) break
+      if (rt.own(rt.state.tasks, id)?.from !== undefined) return { unbound: true, editable: false }
       // A group member works in the room's conversation, including members made
       // before the setting existed. New members and continued parts bind at creation.
       const group = rt.groupOwners?.get(id)
@@ -119,6 +135,10 @@ export function install(rt) {
 
   function boundFolder(binding) {
     if (binding.rootId !== undefined) return folderOf(binding.rootId)
+    if (binding.unbound) {
+      assertNoConfiguredReadScope()
+      return null
+    }
     if (binding.candidateRoots.some(rootId => folderOf(rootId) !== null)) throw refused(BINDING_REFUSAL)
     return null
   }
@@ -138,9 +158,14 @@ export function install(rt) {
   // Use DSH's reserved Session id so a new workload cannot run before its
   // association is durable. Save even an unset root so later changes reach it.
   async function reserveReadScope(source, { continuation = false } = {}) {
-    const { rootId } = await resolveReadScope(source)
+    let scope
+    try { scope = await resolveReadScope(source) }
+    catch {
+      assertNoConfiguredReadScope()
+      return undefined
+    }
     const sessionId = `session-${randomUUID()}`
-    await publish(sessionId, { rootId, continuation })
+    await publish(sessionId, { rootId: scope.rootId, continuation })
     return sessionId
   }
 
@@ -164,7 +189,7 @@ export function install(rt) {
   }
 
   const prepared = new WeakMap()
-  ctx.on('tools/pre-execute', async (exec, next) => {
+  ctx.on('tools/pre-execute', async function prepareReadScope(exec, next) {
     if (Object.hasOwn(READ_PATH, exec.name)) {
       const session = exec.agent?.session
       try {
@@ -198,7 +223,7 @@ export function install(rt) {
     return next()
   })
   ctx.on('tools/result', (exec, result) => {
-    const info = result.error?.info
+    const info = result?.error?.info
     if (info?.code !== READ_SCOPE_CODE) return
     rt.noteStop?.(exec.agent?.session?.id, {
       why: 'rule', tool: exec.name, callId: exec.callId, text: info.reason ?? result.error.message,
@@ -225,5 +250,5 @@ export function install(rt) {
     return { editable: true, folder: real }
   }))
 
-  Object.assign(rt, { resolveReadScope, reserveReadScope, bindScheduledReadScope, markScheduledReadCandidates })
+  Object.assign(rt, { resolveReadScope, reserveReadScope, assertNoConfiguredReadScope, bindScheduledReadScope, markScheduledReadCandidates })
 }
