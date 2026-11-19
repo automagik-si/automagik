@@ -2,17 +2,19 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued |
+| Status | Approved |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-14 |
+
+> Approved by Guga's delegation while the owner is away (19/11); the owner may amend on return.
 
 ## Summary
 
 Propose sending images from Pocket to a DSH chat through the desktop's upload admission.
 The phone would show attachment rows, upload progress and explicit Retry, with previews on tap.
-This proposes an amendment to RFC 0015's chat route and DSH-write amendment; the owner has not
-yet read it. Formats, caps and compatibility below are proposals, not accepted decisions.
+This amends RFC 0015's chat route and DSH-write amendment. Formats, caps and compatibility below
+are starting bounds, subject to the measurements and answers named in the open questions.
 
 ## Motivation
 
@@ -172,7 +174,7 @@ Proposed order: plugin, Pocket Link, Pocket, as in the DSH-write rollout
 its peers negotiate support. Owner answers precede any delivery they block.
 
 0. **Docs only.** This RFC and both indexes; precise proposed amendment to 0015.
-   *Check:* citations verified and owner blockers recorded. *Rollback:* revert proposal docs.
+   *Check:* citations verified and owner blockers recorded. *Rollback:* revert the docs.
 1. **Plugin (3.N.P).** Gated socket admission, receipt sends, attachment rows and authorized
    thumbnail reads. *Check:* real DSH admission fixtures reject foreign Session/device receipts,
    prove bounded memory and interruption cleanup, and retry once after acknowledgement loss.

@@ -2,10 +2,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued (amends RFC 0015; owner not yet read) |
+| Status | Approved (amends RFC 0015) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), herdr (Pocket Link), pocket |
 | Created | 2026-11-19 |
+
+> Approved by Guga's delegation while the owner is away (19/11); the owner may amend on return.
 
 ## Summary
 
@@ -13,7 +15,7 @@ Propose managing a listed, visible DSH Bot from a paired phone. In order, Pocket
 edit and add memory, list, pause, resume and edit scheduled tasks, then change the Bot's name,
 model and an owner-approved permission level. Each applied write would return the affected
 state in the same reply. RFC 0015 currently keeps Bot settings and permission levels on the
-computer. This amendment requires the owner's approval.
+computer. This RFC amends that rule.
 
 ## Motivation
 
@@ -109,8 +111,8 @@ computer remains there.
 
 ## Deliveries
 
-0. **Proposal review.** Review the proposed operations, source references and open questions.
-   Implementation requires owner approval of the proposed amendment to RFC 0015.
+0. **Review.** Review the operations, source references and open questions.
+   Implementation follows the approved amendment to RFC 0015.
 1. **Memory.** Check authorized read, edit and add with the new state in the write reply, and
    refusal of other scopes or revoked phones. Withdraw the methods to roll back remote access.
    Completed edits remain on the computer.
@@ -120,7 +122,7 @@ computer remains there.
    model and approved level changes, including the saved level with partial application. Withdraw
    the methods to roll back remote access. The computer keeps its last saved settings.
 
-After owner approval, each feature ships as separate plugin, Pocket Link and Pocket PRs in that
+After approval, each feature ships as separate plugin, Pocket Link and Pocket PRs in that
 order, gated until the peers support it. Extend existing `pocket-chat`, `memory`, `schedules`,
 `roster`, `permission-change-failure`, bridge `dsh-source` and `chat`, and Android `ChatClientTest`
 coverage as applicable. Check older peers, revocation and zero follow-up reads after each write.

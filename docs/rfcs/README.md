@@ -9,6 +9,7 @@ issue ships as a plain fix and needs no RFC.
 | Status | Meaning |
 |---|---|
 | Queued | Written, not yet in delivery. Its open questions wait for the owner. |
+| Approved | The design is approved by the owner or a named delegation; no delivery is scheduled yet. |
 | Accepted | Scheduled by the owner, with no delivery merged yet. Its deliveries are filed in milestone order. |
 | In delivery | Accepted, with some deliveries merged and the rest still open. A question left open is answered before the delivery it blocks. |
 | Delivered | Every delivery merged. The RFC is kept as the record of the design. |
@@ -65,8 +66,9 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0030](0030-code-mode-in-the-app.md) | Code mode inside the Automagik app | Proposed (owner not yet read; owner's direction 2026-11-10, #1007: the app draws the coding team and its herdr-core terminals, the pack's mods become DSH plugins; replaces 0013's D27; amends 0003's live switching at a harness change; Decided 10, the selector's route, 2026-11-10; Q1-Q14 open) | none (ships outside the five milestones) |
 | [0031](0031-auto-permission-level.md) | Auto, a permission level where a model decides each step | Queued (amends RFC 0003 with its delivery 2; numbers 0028 to 0030 are taken by open pull requests) | none (ships outside the five milestones) |
 | [0032](0032-automagik-id.md) | Automagik ID | In delivery (delivery 1 merged: #1094, #1118, #1377; deliveries 2-5 open; questions (a)-(g) open; replaces RFC 0024's identity-provider sections) | none (independent Worker deployment) |
-| [0033](0033-attachments-from-pocket.md) | Attachments from Pocket | Queued (amends RFC 0015's chat route: attachments; owner not yet read) | none (ships outside the five milestones) |
-| [0034](0034-vault-plugin-bitwarden-first.md) | Vault plugin, Bitwarden first | Queued (owner not yet read; the issue calls it 0033, taken by Attachments from Pocket; amended 2026-11-19: the freshness, approval-binding and dual-name rules as contracts; Q11 asks for the additive `request_secret` `command` and `shell` and the `secret-allow` vault branch, and Q12 for one connection; re-amended: `bw sync` gates every read and an auth failure locks, `bots-dsh` reads `vault-sources.json` with the plugin off, and the grant binds command, shell and folder) | none (ships outside the five milestones) |
+| [0033](0033-attachments-from-pocket.md) | Attachments from Pocket | Approved (amends RFC 0015's chat route: attachments; approved by Guga's delegation 19/11) | none (ships outside the five milestones) |
+| [0034](0034-vault-plugin-bitwarden-first.md) | Vault plugin, Bitwarden first | Approved (Q1-Q12 decided 2026-11-19, Q6 from #1668; the issue calls it 0033, taken by Attachments from Pocket; the freshness rule pins `bw` 2026.10.1 and tolerates only its network allowlist, every other failure refuses and locks; the approval binds command, shell and folder; a dual name is refused; `bots-dsh` reads `vault-sources.json` with the plugin off) | none (ships outside the five milestones) |
+| [0036](0036-bot-management-from-pocket.md) | Bot management from Pocket | Approved (amends RFC 0015; approved by Guga's delegation 19/11) | none (ships outside the five milestones) |
 
 Milestones, in the owner's order:
 
