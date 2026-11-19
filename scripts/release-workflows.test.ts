@@ -1241,8 +1241,7 @@ describe('an empty selected signing slot never falls back to the other one (#170
       expect(lines.filter(line => new RegExp(`^\\s+${lane.secret}: \\$\\{\\{`).test(line)).length).toBe(3);
       expect(text).not.toContain(`|| secrets.${lane.secret} }}`);
     }
-    // The herdr pack's binding is not this issue's: it stays as it was.
-    expect(binding('Version, commit and tag', 'HERDR_PACK_KEY')).toBe("vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY");
+    expect(binding('Version, commit and tag', 'HERDR_PACK_KEY')).toBe(strict('HERDR_PACK_KEY', 'HERDR_PACK_SIGNER'));
   });
 
   test('the selector picks one slot, whether or not either secret is filled', () => {
