@@ -464,8 +464,9 @@ label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it 
 **Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
 **Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
 clears the moment the pane works again or the label is removed: the sidebar reads the label from
-the one terminal snapshot it already takes, never by scanning a pane's screen. A label older than
-a day is reported by `am tidy` (`stale-needs-owner`).
+the one terminal snapshot it already takes, never by scanning a pane's screen. It also clears when
+the pane exits or leaves the snapshot, and once the label is past the pack's stale window (a day,
+the same rule as `am tidy`'s `stale-needs-owner`), so a label left behind never keeps asking.
 
 A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
 Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,

@@ -2,12 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { load, setSnapshot, sidebar } from "./sidebar-tree.mjs";
 import { parseBots } from "../mods/am-sidebar/model.js";
+import { STALE_NEEDS_OWNER_MS } from "../mods/am-sidebar/tidy.js";
 import { index, nodes, textOf } from "./gpui-stub.mjs";
 
 const Spaces = await load();
 const LABEL = "automagik-herdr.needs-owner";
 const bot = "b-adaaaaaaaa";
 const program = { key: "claude", name: "Claude Code", agent: true };
+const NOW = 1_800_000_000_000;
 
 // A terminal that reports a status; `labels` carries the marker the agent set with hc label.
 function terminal(address, status, extra = {}) {
@@ -56,10 +58,13 @@ const tooltips = (node) => {
   walk(node);
   return out.join(" | ");
 };
-function draw(snap) {
-  setSnapshot(snap);
+function draw(snap, collapsed = false) {
+  setSnapshot(snap, collapsed);
   const s = sidebar(Spaces, snap);
-  index(s.render({ notify() {} }));
+  // One clock for the whole render, so a label's age is read against a fixed now.
+  const real = Date.now;
+  Date.now = () => NOW;
+  try { index(s.render({ notify() {} })); } finally { Date.now = real; }
   return s;
 }
 
@@ -117,4 +122,45 @@ test("the narrow rail marks a waiting space's glyph in the waiting colour, not t
   setSnapshot(snap, true);
   index(sidebar(Spaces, snap).render({ notify() {} }));
   assert.match(textOf(nodes.get("space-s1")), /·/);
+});
+
+test("a label older than the pack's stale window draws no chip, space dot or rail glyph", () => {
+  const snap = scene();
+  const carrying = (t) => typeof t.labels?.[LABEL] === "string" && Boolean(t.labels[LABEL].trim());
+  // A fresh wait, all labels set: the chip, the dot and the rail's waiting glyph.
+  for (const t of snap.terminals) if (carrying(t)) t.status_ms = NOW - 1000;
+  draw(snap);
+  assert.match(textOf(nodes.get("ag-t1")), /Question/);
+  assert.ok(nodes.has("owner-s1"));
+  draw(snap, true);
+  assert.match(textOf(nodes.get("space-s1")), /●/);
+
+  // The same rows, labels and statuses: only the waiting terminals' clocks move past the window.
+  for (const t of snap.terminals) if (carrying(t)) t.status_ms = NOW - STALE_NEEDS_OWNER_MS - 1;
+  draw(snap);
+  for (const id of ["ag-t1", "sub-t3", `row-b:${bot}`, "row-h:t5"]) {
+    assert.ok(nodes.has(id), id);
+    assert.doesNotMatch(textOf(nodes.get(id)), /Question/, id);
+  }
+  assert.equal(nodes.has("owner-s1"), false);
+  draw(snap, true);
+  assert.match(textOf(nodes.get("space-s1")), /·/);
+});
+
+test("a label on a dead pane, or one whose terminal left the snapshot, draws no chip or dot", () => {
+  // The label row survives (on disk and in the app's agent list), but the terminal exited.
+  const dead = scene();
+  for (const t of dead.terminals) if (t.labels?.[LABEL]) { t.state = "exited"; t.status_ms = NOW - 1000; }
+  draw(dead);
+  assert.ok(nodes.has("ag-t1"));
+  assert.doesNotMatch(textOf(nodes.get("ag-t1")), /Question/);
+  assert.equal(nodes.has("owner-s1"), false);
+
+  // The terminal is gone from the snapshot entirely while its agent and pane rows survive.
+  const gone = scene();
+  gone.terminals = gone.terminals.filter((t) => !t.labels?.[LABEL]);
+  draw(gone);
+  assert.ok(nodes.has("ag-t1"));
+  assert.doesNotMatch(textOf(nodes.get("ag-t1")), /Question/);
+  assert.equal(nodes.has("owner-s1"), false);
 });
