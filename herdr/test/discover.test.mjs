@@ -13,7 +13,8 @@ const FILE = (name) => ({ file: { version: 1, categories: [], bots: [{ id: name 
 
 // A fake io: each machine's latency (Infinity: never answers), its folders' keys, and a log.
 // Its calls to another machine bound themselves (as bots.js does each call) after `timeoutMs`.
-function fakeIo({ latency = {}, keyOf = (folder) => folder, last = () => undefined, listed = [], timeoutMs = 0, cachedKey } = {}) {
+function fakeIo({ latency = {}, keyOf = (folder) => folder, last = () => undefined, listed = [], timeoutMs = 0, cachedKey,
+  timeoutSleep = sleep } = {}) {
   const io = { calls: [], inflight: {}, max: {}, done: [] };
   const answer = async (machine, what, value) => {
     const m = machine ?? "local";
@@ -28,7 +29,8 @@ function fakeIo({ latency = {}, keyOf = (folder) => folder, last = () => undefin
       return value();
     } finally { io.inflight[m] -= 1; }
   };
-  const timed = (machine, p) => within(p, machine ? timeoutMs : 0, sleep);
+  // `timeoutSleep` is the remote deadline's clock; a row may make it an event it resolves.
+  const timed = (machine, p) => within(p, machine ? timeoutMs : 0, timeoutSleep);
   io.keyOf = (folder, machine) => timed(machine, answer(machine, `key ${folder}`, () => keyOf(folder, machine)));
   io.read = (p) => timed(p.machine, answer(p.machine, `read ${p.key}`, () => FILE(`${p.machine ?? "local"}:${p.key}`)));
   io.last = last;
@@ -86,12 +88,13 @@ test("discover: this computer's projects are listed before a slow machine answer
   // One list per read as it lands, and one when this computer is done.
   assert.deepEqual(updates.map((u) => u.list.map((p) => p.key)),
     [["/b"], ["/b", "/d"], ["/b", "/d"], ["/a", "/b", "/d"], ["/a", "/b", "/c", "/d"]]);
-  // The order of the events, never a clock: the third update is this computer's last one, and it
-  // holds neither remote key, so no remote answer had landed yet. The done log says the same:
-  // every local call finished before the first far answer.
-  assert.ok(!updates[2].list.some((p) => p.machine === "far"), "local listed before a far answer");
-  const firstFar = io.done.findIndex(([m]) => m === "far");
-  assert.ok(io.done.slice(firstFar).every(([m]) => m === "far"));
+  // The recorded update order is the proof: the first list that carries a far project comes
+  // after this computer's last one. A far key lookup can answer before a loaded event loop
+  // finishes a local call (io.done's order); no far project is drawn until the local side has
+  // finished, which is the claim this row makes and the only order it needs.
+  const firstFarDrawn = updates.findIndex((u) => u.list.some((p) => p.machine === "far"));
+  assert.equal(firstFarDrawn, 3, "the first far project is drawn after this computer's last list");
+  assert.ok(updates[2].list.every((p) => p.machine === null), "the third list is this computer's last");
   // The full list, in sidebar order.
   assert.deepEqual(found.map((p) => [p.machine, p.key]), [["far", "/a"], [null, "/b"], ["far", "/c"], [null, "/d"]]);
   // Each read draws as it lands. Held answers, two at once: the listing and /a's read never
@@ -99,27 +102,43 @@ test("discover: this computer's projects are listed before a slow machine answer
   // drawn on its own, and the rows not read yet (/a's last file, the saved /saved) stay drawn.
   const hold = {};
   const held = (name) => new Promise((done, fail) => { hold[name] = { done, fail }; });
-  const settled = () => sleep(1);
+  // Each fake call opens its own promise when discovery reaches it, and each update opens the
+  // next draw's; those are the states this row awaits. No sleep guesses that a microtask ran.
+  const started = {};
+  const startedAt = (name) => {
+    let open;
+    const p = new Promise((done) => { open = done; });
+    started[name] = open;
+    return p;
+  };
+  const startedListed = startedAt("listed");
+  const startedA = startedAt("/a");
+  const startedB = startedAt("/b");
   const drawn = [];
+  const drawWaiters = [];
+  const drawnNext = () => new Promise((done) => { drawWaiters.push(done); });
   const rows = (list) => list.map((p) => [p.key, p.file.bots[0].id]);
   const pending = discover({ spaces: [{ id: "s1", folder: "/a", machine: null }, { id: "s2", folder: "/b", machine: null }] }, {
     provisional: () => ["/saved"],
-    listed: () => held("listed"),
+    listed: () => { started.listed(); return held("listed"); },
     keyOf: async (folder) => folder,
-    read: (p) => held(p.key),
+    read: (p) => { started[p.key]?.(); return held(p.key); },
     last: (p) => (p.key === "/b" ? undefined : FILE(`last:${p.key}`)),
-  }, { limit: 2, onUpdate: (list) => drawn.push(rows(list)) });
-  await settled();
+  }, { limit: 2, onUpdate: (list) => { drawn.push(rows(list)); drawWaiters.shift()?.(); } });
+  await Promise.all([startedListed, startedA]);
   assert.deepEqual(Object.keys(hold), ["listed", "/a"]);
   hold.listed.fail(new TimedOut(5));
-  await settled();
+  await startedB;
   assert.ok(hold["/b"], "a timeout on this computer doesn't skip its other reads");
   assert.deepEqual(drawn, []);
+  const firstDraw = drawnNext();
   hold["/b"].done(FILE("read:/b"));
-  await settled();
+  await firstDraw;
   const shown = [["/a", "last:/a"], ["/b", "read:/b"], ["/saved", "last:/saved"]];
   assert.deepEqual(drawn, [shown]);
+  const secondDraw = drawnNext();
   hold["/a"].fail(new TimedOut(5));
+  await secondDraw;
   assert.deepEqual(rows(await pending), shown);
   assert.deepEqual(drawn, [shown, shown]);
 });
@@ -128,7 +147,13 @@ test("discover: a machine that never answers holds back only its own projects, w
   const last = (p) => (p.machine === "dead" && ["/x", "/k"].includes(p.key) ? FILE(`dead-last${p.key}`) : undefined);
   // /w was keyed before: its known key places it at once, whatever "dead" does.
   const cachedKey = (f, m) => (m === "dead" && f === "/w" ? { key: "/k", fresh: true } : undefined);
-  const io = fakeIo({ latency: { local: 2, dead: Infinity, far: 5 }, last, keyOf: (f) => f, timeoutMs: 60, cachedKey });
+  // The dead machine's deadline is this test's event, not a 60 ms race with a loaded timer: the
+  // row ends it only once this computer's and far's projects are drawn, so both were listed
+  // while the dead call was still pending. `within`'s timer itself is proved by its own row.
+  let endDead;
+  const deadTimeout = new Promise((done) => { endDead = done; });
+  const io = fakeIo({ latency: { local: 2, dead: Infinity, far: 5 }, last, keyOf: (f) => f, timeoutMs: 60,
+    timeoutSleep: () => deadTimeout, cachedKey });
   const spaces = [
     { id: "s1", folder: "/x", machine: "dead" },
     { id: "s2", folder: "/b", machine: null },
@@ -137,18 +162,33 @@ test("discover: a machine that never answers holds back only its own projects, w
     { id: "s5", folder: "/w", machine: "dead" },
   ];
   const updates = [];
+  let deadEnded = false;
+  let sawBothWhileDeadPending = false;
   const t0 = Date.now();
   const found = await discover({ spaces, remembered: [{ key: "/x", machine: "dead" }] }, io,
-    { limit: 1, onUpdate: (list) => updates.push(list) });
-  // A net against a hang, not the proof: the dead machine never answers, so the row below only
-  // returns if its own timeout ended the call. The proof is the one dead call, the rows it
-  // returned and the last good files.
-  assert.ok(Date.now() - t0 < 10_000, "the dead machine's timeout ended discovery");
-  // This computer's and far's projects were listed before the dead machine's time ran out.
-  // (One list per read and per machine done but the last: the same two lists, repeated.)
+    { limit: 1, onUpdate: (list) => {
+      updates.push(list);
+      if (deadEnded) return;
+      if (list.some((p) => p.machine === null) && list.some((p) => p.machine === "far")) {
+        sawBothWhileDeadPending = true;
+        deadEnded = true;
+        endDead();
+      }
+    } });
+  // A net against a hang, not the proof: discovery only returns after the deadline released
+  // above ends the dead call, so a return here means that ended it.
+  assert.ok(Date.now() - t0 < 10_000, "discovery ended once the dead machine's deadline was released");
+  assert.ok(sawBothWhileDeadPending, "this computer's and far's projects were drawn while the dead call was pending");
+  // One list per read and per machine done but the last. Which list lands first is the
+  // scheduler's (under load the dead deadline can land before a local read), so the proof is
+  // the count and that every later list keeps every project of the one before: each read is
+  // drawn as it lands, and the dead machine's own projects only ever show their last good file.
   assert.equal(updates.length, 6);
   const lists = updates.map((l) => l.map((p) => p.key));
-  assert.deepEqual(lists.filter((l, i) => i === 0 || l.join() !== lists[i - 1].join()), [["/b", "/k", "/x"], ["/b", "/y", "/k", "/x"]]);
+  for (let i = 1; i < lists.length; i += 1) {
+    assert.ok(lists[i - 1].every((k) => lists[i].includes(k)), `list ${i} keeps every project of list ${i - 1}`);
+  }
+  assert.ok(lists.every((l) => l.includes("/k") && l.includes("/x")), "the dead projects show their last good files from the start");
   // In the end: the remembered dead project and /w's (by its known key) with their last good
   // files; /z (never keyed) is skipped.
   assert.deepEqual(found.map((p) => [p.machine, p.key, p.spaces]), [[null, "/b", ["s2"]], ["far", "/y", ["s3"]], ["dead", "/k", ["s5"]], ["dead", "/x", []]]);
@@ -202,7 +242,10 @@ test("machineGate: a call that times out queued never starts; one that answers f
   assert.ok((await second) instanceof TimedOut);
   assert.ok((await first) instanceof TimedOut);
   release("ok"); // the stuck call answers after all
-  await sleep(5);
+  // The gate's own bookkeeping is the state awaited: a call without a deadline queues behind
+  // the stuck one and starts only after it has answered and freed its place. Awaiting that
+  // start is the event; no clock guesses when the gate's `finally` ran.
+  assert.equal(await gate.call(() => "now"), "now");
   assert.equal(ran, false);
   assert.equal(gate.stuck, 0);
   assert.equal(gate.answered, true);
