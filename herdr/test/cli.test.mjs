@@ -1791,6 +1791,126 @@ test("detach unties the bot from its ledger pane and takes the label off every l
   assert.match(s.cli(["detach", "Captain"]).out, /no pane on this computer/);
 });
 
+test("tidy ledger: a pane relabelled after start still gets the started bot's role and category", (t) => {
+  const s = scene(t, { window: {} });
+  const file = team();
+  file.bots.find((b) => b.id === ID.dev).rank = "reviewer";
+  s.seed(file);
+  const started = s.cli(["start", "Dev", "--json"]);
+  assert.equal(started.code, 0, started.err);
+  const { terminal } = started.json();
+  const rows = readRows(readFileSync(attachFile(s.app), "utf8")).rows;
+  assert.equal(foldRows(rows).byBot.get(ID.dev)?.terminal, terminal);
+  const state = s.hcState();
+  const pane = state.terminals.find((p) => p.address === terminal);
+  Object.assign(pane.labels, { bot: ID.main, role: "main" });
+  delete pane.labels.category;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["tidy", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().filter((a) => a.terminal === terminal && a.kind === "relabel" && !a.visual).map((a) => a.set),
+    [{ role: "reviewer", category: "eng" }]);
+});
+
+test("tidy ledger: attach --move attempts the tidy relabel only on the new holder in the same run", (t) => {
+  const s = scene(t);
+  const old = term("t1", { bot: ID.dev, cwd: s.project, app: "codex", argv: ["codex"] });
+  const next = term("t2", { cwd: s.project, app: "codex", argv: ["codex"] });
+  // Attach also tries to clear this copied squad, making its label write distinct from tidy's.
+  next.labels = { squad: "old", "automagik-herdr.squad": "old" };
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ terminals: [old, next], failLabels: ["t1", "t2"] }));
+  const file = team();
+  file.bots.find((b) => b.id === ID.dev).rank = "reviewer";
+  s.seed(file);
+  const r = s.cli(["attach", "Dev", "t2", "--move", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().movedFrom, ["t1"]);
+  assert.match(r.err, /the ledger has it, but hc label t2 bot=b-cccccccccc failed/);
+  assert.match(r.err, /tidy: t2's labels role=reviewer category=eng weren't set: label refused on t2/);
+  assert.doesNotMatch(r.err, /tidy: t1's labels/);
+  assert.deepEqual(labelCalls(s.calls()), [["label", "t1", "bot="], ["label", "t2", `bot=${ID.dev}`],
+    ["label", "t2", "role=reviewer", "category=eng", "squad=", "automagik-herdr.squad="], ["label", "t2", "role=reviewer", "category=eng"]]);
+});
+
+test("tidy ledger: a label left after detach does not revive the pane's bot identity", (t) => {
+  const s = scene(t, { window: {} });
+  s.seed(team());
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ terminals: [term("t1", { bot: ID.cap, cwd: s.project })], failLabel: "t1" }));
+  const detached = s.cli(["detach", "Captain", "--json"]);
+  assert.equal(detached.code, 0, detached.err);
+  assert.deepEqual(detached.json().detached, ["t1"]);
+  assert.match(detached.err, /Captain is detached, but hc label t1 bot= failed/);
+  assert.equal(s.hcState().terminals[0].labels.bot, ID.cap);
+  const r = s.cli(["tidy", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), []);
+});
+
+test("tidy ledger: a failed get on the holder does not let a second pane claim its bot", (t) => {
+  const s = scene(t, { window: {} });
+  s.seed(team());
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ terminals: [term("t1", { cwd: s.project, app: "codex", argv: ["codex"] })] }));
+  const attached = s.cli(["attach", "Captain", "t1"]);
+  assert.equal(attached.code, 0, attached.err);
+  const state = s.hcState();
+  state.terminals.push(term("t2", { bot: ID.cap, cwd: s.project }));
+  state.failGet = ["t1"];
+  const path = attachFile(s.app);
+  const before = readFileSync(path, "utf8");
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["tidy", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json(), []);
+  assert.equal(readFileSync(path, "utf8"), before);
+
+  state.fail = ["server"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const refused = s.cli(["tidy", "--json"]);
+  assert.equal(refused.code, 1, refused.err);
+  assert.match(refused.err, /Can't plan: hc server status failed: hc: can't reach the server/);
+});
+
+test("tidy ledger: mode 0664 refuses a plan and warns once after a successful create", (t) => {
+  const s = scene(t, { window: {} });
+  s.seed(team());
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ terminals: [term("t1", { bot: ID.cap, cwd: s.project })] }));
+  const path = attachFile(s.app);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "");
+  chmodSync(path, 0o664);
+  const r = s.cli(["tidy", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /Can't plan: .*mode 664.*chmod 600/);
+  assert.equal(r.out, "");
+
+  const made = s.cli(["create", "--name", "Helper", "--agent", "codex", "--json"]);
+  assert.equal(made.code, 0, made.err);
+  assert.equal(made.json().bot.name, "Helper");
+  const warnings = made.err.split("\n").filter((line) => line.startsWith("am: tidy:"));
+  assert.equal(warnings.length, 1, made.err);
+  assert.match(warnings[0], /mode 664.*chmod 600/);
+  assert.deepEqual(labelCalls(s.calls()), []);
+});
+
+test("tidy ledger: an absent or empty file gives the label plan without writing or asking for the core", (t) => {
+  const s = scene(t, { window: {} });
+  s.seed(team());
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify({ terminals: [term("t1", { bot: ID.cap, cwd: s.project })], fail: ["server"] }));
+  const path = attachFile(s.app);
+  const absent = s.cli(["tidy", "--json"]);
+  assert.equal(absent.code, 0, absent.err);
+  assert.deepEqual(absent.json().filter((a) => a.kind === "relabel").map((a) => [a.terminal, a.set]), [["t1", { role: "captain", category: "eng" }]]);
+  assert.equal(existsSync(path), false);
+
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, "", { mode: 0o600 });
+  const empty = s.cli(["tidy", "--json"]);
+  assert.equal(empty.code, 0, empty.err);
+  assert.deepEqual(empty.json(), absent.json());
+  assert.equal(readFileSync(path, "utf8"), "");
+  assert.equal(s.calls().some((c) => c[0] === "server"), false);
+});
+
 // ---- brief, errors ----
 
 test("brief: a member blocked on a permission reads 'stuck (waiting for a permission answer)'", (t) => {

@@ -9245,7 +9245,17 @@ function autoSetting(opts, io) {
 
 // ---- tidy (sidebar-rules Group 2) ----
 
-const tidyIo = () => ({ run: runProgram, home: home(), appHome: appHome(), prune: (keys) => unlistProjects(keys) });
+const tidyIo = () => ({ run: runProgram, home: home(), appHome: appHome(), prune: (keys) => unlistProjects(keys),
+  // Read the file again after a command writes it, without importing labels or ending rows.
+  ledger: async () => {
+    const rows = readAttachFile();
+    if (rows === null) return null;
+    const known = [...new Set(rows.filter((row) => row.machine == null).map((row) => row.bot))];
+    const { byBot } = foldAttach(rows);
+    if (!byBot.size) return { bindings: [], known };
+    const core = await coreId();
+    return { bindings: [...byBot.values()].filter((row) => row.core === core), known };
+  } });
 
 /** `tidy`: the plan (tidy.js), read from hc, herdr-app, git and the files; it changes nothing. */
 async function cmdTidy(opts) {
