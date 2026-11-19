@@ -142,11 +142,13 @@ remove_copy() {
   if [ "$git_dir" = "$common_dir" ]; then
     die "not a linked worktree (this is a clone's main tree): $copy; use scripts/wish-reap.mjs"
   fi
-  for lock in "$git_dir/index.lock" "$git_dir/HEAD.lock" "$common_dir/config.lock"; do
-    if [ -e "$lock" ]; then
-      die "copy is locked ($lock); refusing to remove: $copy"
-    fi
-  done
+  if ! locks=$(find "$git_dir" "$common_dir" -name '*.lock' -print 2>/dev/null); then
+    die "cannot inspect lock files; refusing to remove: $copy"
+  fi
+  if [ -n "$locks" ]; then
+    first=$(printf '%s\n' "$locks" | sed -n '1p')
+    die "copy is locked ($first); refusing to remove: $copy"
+  fi
   if [ -n "$(git -C "$copy" --no-optional-locks status --porcelain --untracked-files=all)" ]; then
     printf '%s: refusing to remove a dirty worktree (never forced): %s\n' "$PROG" "$copy" >&2
     git -C "$copy" --no-optional-locks status --short --untracked-files=all >&2 || true

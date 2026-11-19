@@ -5,11 +5,14 @@
  * every direct child of --root that is a git checkout and removes it only when all gates hold:
  *
  *   1. clean       `git status --porcelain --untracked-files=all` is empty
- *   2. safe work   HEAD is advertised by the remote (a branch head or a pull-request head), or
- *                  every local-only commit touches only handoffs/ or docs/ and the files at
- *                  HEAD are copied into --preserve before the copy goes
+ *   2. safe work   every commit reachable from every local branch, every local tag and HEAD is
+ *                  advertised by the remote as it answers `git ls-remote` now. Local
+ *                  remote-tracking refs are never consulted: a stale `origin/*` cannot hide a
+ *                  commit the remote no longer advertises. A copy whose local-only commits all
+ *                  touch only handoffs/ or docs/ is report-only: those files are copied into
+ *                  --preserve before the copy goes
  *   3. idle        nothing in the copy changed in the last --idle-minutes (default 30)
- *   4. unlocked    no index.lock, HEAD.lock or config.lock in the copy's git dir
+ *   4. unlocked    no `*.lock` file anywhere under the copy's git dir or common dir
  *
  * Removal is `git worktree remove` when the copy is a registered worktree of the shared clone
  * (--shared), otherwise `rm -rf` for a plain clone. It never forces. After worktree removals
@@ -22,17 +25,21 @@
  * --root defaults to $WISH_COPIES_ROOT, else the host's top-level wish folder; point it at one
  * project's folder, whose direct children are the copies. --preserve defaults to
  * <root>/.wish-preserved. One line per copy; --json prints the machine-readable list instead.
- * Exit 1 when a copy was kept for lost work (dirty, or unpublished product changes), else 0.
+ * Exit 0 clean; 1 a copy was kept for lost work (dirty, or unpublished product changes);
+ * 2 invalid usage; 3 a removal or prune failed after a copy was judged removable.
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync,
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync,
   rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const DEFAULT_IDLE_MINUTES = 30;
-export const LOCK_FILES = ['index.lock', 'HEAD.lock', 'config.lock'];
+/** Named for callers and docs; the gate itself finds every `*.lock` under the git dirs. */
+export const LOCK_FILES = ['index.lock', 'HEAD.lock', 'config.lock', 'packed-refs.lock',
+  'shallow.lock'];
+export const EXIT = { ok: 0, lostWork: 1, usage: 2, failure: 3 };
 export const PRESERVED_PREFIXES = ['handoffs', 'docs'];
 export const PRESERVE_DIR = '.wish-preserved';
 export const PRESERVE_RECORD = '.wish-reap-commits.txt';
@@ -58,6 +65,24 @@ function runGit(cwd, args, timeout = 120_000) {
     code: result.status,
     out: (result.stdout ?? '').trimEnd(),
     err: (result.stderr ?? '').trim(),
+  };
+}
+
+/** Run one git command in `cwd` and keep stdout as bytes (preserved files need that). */
+function runGitBuffer(cwd, args, timeout = 120_000) {
+  const result = spawnSync('git', args, {
+    cwd,
+    encoding: null,
+    maxBuffer: 64 * 1024 * 1024,
+    timeout,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+  });
+  if (result.error) return { ok: false, code: -1, out: Buffer.alloc(0), err: result.error.message };
+  return {
+    ok: result.status === 0,
+    code: result.status,
+    out: result.stdout ?? Buffer.alloc(0),
+    err: (result.stderr ?? Buffer.alloc(0)).toString().trim(),
   };
 }
 
@@ -163,52 +188,85 @@ function scanCopy(copy) {
   return { newest, bytes };
 }
 
-/** The refs a freshly asked remote advertises, cached by URL so one call serves every copy. */
+/**
+ * What the remote advertises right now, cached by URL so one call serves every copy. Branch
+ * heads, tags (including the peeled entries `ls-remote` prints for annotated tags) and
+ * pull-request heads all count. Nothing here reads a local remote-tracking ref.
+ */
 function remoteRefs(copy, url, cache) {
   const local = !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) && !url.startsWith('/');
   const key = `${local ? `${copy}\0` : ''}${url}`;
   if (!cache.has(key)) {
-    const result = runGit(copy, ['ls-remote', url, 'refs/heads/*', 'refs/pull/*/head'], 60_000);
+    const result = runGit(copy,
+      ['ls-remote', url, 'refs/heads/*', 'refs/tags/*', 'refs/pull/*/head'], 60_000);
     if (!result.ok) {
       cache.set(key, { ok: false, error: result.err || `git ls-remote exited ${result.code}` });
     } else {
-      const heads = new Set();
-      const pulls = new Set();
+      const advertised = new Set();
       for (const line of result.out.split('\n')) {
         const [sha, ref] = line.split('\t');
-        if (!sha || !ref) continue;
-        if (ref.startsWith('refs/heads/')) heads.add(sha);
-        else if (ref.startsWith('refs/pull/')) pulls.add(sha);
+        if (sha && ref) advertised.add(sha);
       }
-      cache.set(key, { ok: true, heads, pulls });
+      cache.set(key, { ok: true, advertised });
     }
   }
   return cache.get(key);
 }
 
-function hasCommit(copy, sha) {
-  return runGit(copy, ['cat-file', '-e', `${sha}^{commit}`]).ok;
-}
-
-function isAncestor(copy, ancestor, descendant) {
-  return runGit(copy, ['merge-base', '--is-ancestor', ancestor, descendant]).ok;
-}
-
-/** `{ ok: true, via }` when the remote advertises HEAD or a branch head contains it. */
-function headPublished(copy, head, refs) {
-  if (refs.heads.has(head) || refs.pulls.has(head)) return { ok: true, via: 'ref' };
-  for (const sha of refs.heads) {
-    if (sha === head || !hasCommit(copy, sha)) continue;
-    if (isAncestor(copy, head, sha)) return { ok: true, via: `ancestor of ${sha.slice(0, 12)}` };
+/** Advertised commits this copy actually has; only those can bound a `rev-list --not`. */
+function existingCommits(copy, shas) {
+  const unique = [...new Set(shas)];
+  if (!unique.length) return new Set();
+  const result = spawnSync('git', ['cat-file', '--batch-check=%(objectname) %(objecttype)'], {
+    cwd: copy,
+    input: `${unique.join('\n')}\n`,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 60_000,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
+  });
+  const present = new Set();
+  if (result.error || result.status !== 0) return present; // nothing proven published
+  for (const line of (result.stdout ?? '').split('\n')) {
+    const [sha, type] = line.trim().split(/\s+/);
+    if (sha && type === 'commit') present.add(sha);
   }
-  return { ok: false };
+  return present;
 }
 
-/** Commits reachable from HEAD but not from any local remote-tracking ref; null on failure. */
-function localOnlyCommits(copy, head) {
-  const result = runGit(copy, ['rev-list', head, '--not', '--remotes']);
+/** Every local branch and tag that resolves to a commit, plus HEAD itself; null on failure. */
+function localRefs(copy, head) {
+  const listed = runGit(copy,
+    ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads', 'refs/tags']);
+  if (!listed.ok) return null;
+  const refs = [];
+  const seen = new Set();
+  for (const line of listed.out.split('\n')) {
+    const [ref, sha] = line.split(' ');
+    if (!ref || !sha) continue;
+    const commit = runGit(copy, ['rev-parse', '--verify', `${ref}^{commit}`]);
+    if (!commit.ok) continue; // a tag to a tree or blob carries no commits
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    refs.push({ ref, sha: commit.out });
+  }
+  refs.push({ ref: 'HEAD', sha: head });
+  return refs;
+}
+
+/** Commits reachable from `sha` that no advertised commit reaches; null on failure. */
+function localOnlyCommits(copy, sha, advertised) {
+  const args = ['rev-list', sha];
+  if (advertised.size) args.push('--not', ...advertised);
+  const result = runGit(copy, args);
   if (!result.ok) return null;
   return result.out ? result.out.split('\n') : [];
+}
+
+/** The ref to name when a commit is at fault; prefer a real branch/tag over HEAD. */
+function preferredRef(refs) {
+  const list = [...(refs ?? [])];
+  return list.find((ref) => ref !== 'HEAD') ?? 'HEAD';
 }
 
 /** Paths a commit changes; `{ merge: true }` when it is a merge and the diff is ambiguous. */
@@ -229,6 +287,32 @@ function underPreserved(path) {
 function safeRelativePath(path) {
   return path.length > 0 && !path.startsWith('/') && !path.includes('\0')
     && !path.split('/').includes('..');
+}
+
+/** Every `*.lock` below `dir`, as paths relative to it; symlinks are listed, never followed. */
+function findLocks(dir) {
+  const found = [];
+  const stack = [{ abs: dir, rel: '' }];
+  while (stack.length) {
+    const { abs, rel } = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(abs, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.name.endsWith('.lock')) found.push(path);
+      if (entry.isDirectory()) stack.push({ abs: join(abs, entry.name), rel: path });
+    }
+  }
+  return found;
+}
+
+/** The locks in any of these git dirs; `git_dir` is often nested under `common_dir`. */
+function locksIn(dirs) {
+  return [...new Set(dirs.flatMap(findLocks))].sort();
 }
 
 /** The clone a common git dir belongs to: a normal clone's parent, or a bare clone itself. */
@@ -282,24 +366,34 @@ function worktreeInfo(copy, options) {
   return { method: 'worktree-remove', owner };
 }
 
-/** Copy the local-only files out, then record the commits they came from. */
+/** The blob `path` had at `sha`; `missing` when the commit did not change it to a file. */
+function blobAt(copy, sha, path) {
+  const tree = runGit(copy, ['ls-tree', '-z', sha, '--', path]);
+  if (!tree.ok) return { error: `cannot read ${sha.slice(0, 12)}:${path}` };
+  const record = tree.out.split('\0').find(Boolean);
+  if (!record) return { missing: true };
+  const match = /^(\d{6}) (\w+) ([0-9a-f]+)\t/.exec(record);
+  if (!match || match[2] !== 'blob' || match[1] === '120000') return { missing: true };
+  const blob = runGitBuffer(copy, ['cat-file', 'blob', match[3]]);
+  if (!blob.ok) return { error: `cannot read blob of ${sha.slice(0, 12)}:${path}` };
+  return { body: blob.out, mode: match[1] === '100755' ? 0o755 : 0o644 };
+}
+
+/** Copy the local-only files out of the commits themselves, then record those commits. */
 function preserveFiles(copy, entry, options) {
   const target = join(options.preserve, entry.name);
+  const files = entry.preserveFiles
+    ?? (entry.preservePaths ?? []).map((path) => ({ sha: entry.sha, path }));
   try {
-    for (const path of entry.preservePaths) {
+    for (const { sha, path } of files) {
       if (!safeRelativePath(path)) continue;
-      const source = join(copy, path);
-      let info;
-      try {
-        info = lstatSync(source);
-      } catch {
-        continue; // deleted by a later local commit
-      }
-      if (!info.isFile()) continue;
+      const blob = blobAt(copy, sha, path);
+      if (blob.error) return { ok: false, error: blob.error };
+      if (blob.missing) continue;
       const destination = join(target, path);
       mkdirSync(dirname(destination), { recursive: true });
-      copyFileSync(source, destination);
-      chmodSync(destination, info.mode & 0o777);
+      writeFileSync(destination, blob.body);
+      chmodSync(destination, blob.mode);
     }
     mkdirSync(target, { recursive: true });
     writeFileSync(join(target, PRESERVE_RECORD), `${entry.localCommits.join('\n')}\n`);
@@ -318,8 +412,7 @@ function inspect(copy, options, cache) {
   const common = runGit(copy, ['rev-parse', '--git-common-dir']);
   const lockDirs = [...new Set([gitDirPath,
     common.ok ? resolve(copy, common.out) : gitDirPath])];
-  const locks = [...new Set(lockDirs.flatMap((dir) => LOCK_FILES
-    .filter((name) => existsSync(join(dir, name)))))];
+  const locks = locksIn(lockDirs);
   if (locks.length) return keep(entry, 'locked', `lock files: ${locks.join(', ')}`);
   const head = runGit(copy, ['rev-parse', '--verify', 'HEAD']);
   if (!head.ok) return keep(entry, 'no-head', 'HEAD does not resolve to a commit');
@@ -342,41 +435,59 @@ function inspect(copy, options, cache) {
   if (!url.ok || !url.out) return keep(entry, 'no-remote', `no ${options.remote} remote`);
   const refs = remoteRefs(copy, url.out, cache);
   if (!refs.ok) return keep(entry, 'remote-check-failed', refs.error);
-  const published = headPublished(copy, head.out, refs);
-  if (published.ok) {
+  const advertised = existingCommits(copy, refs.advertised);
+  const localRefList = localRefs(copy, head.out);
+  if (!localRefList) return keep(entry, 'inspection-failed', 'local refs cannot be listed');
+  const bySha = new Map();
+  for (const { ref, sha } of localRefList) {
+    const commits = localOnlyCommits(copy, sha, advertised);
+    if (!commits) {
+      return keep(entry, 'inspection-failed', `local-only commits of ${ref} cannot be listed`);
+    }
+    for (const commit of commits) {
+      if (!bySha.has(commit)) bySha.set(commit, new Set());
+      bySha.get(commit).add(ref);
+    }
+  }
+  const local = [...bySha.keys()];
+  if (!local.length) {
     const info = worktreeInfo(copy, options);
     if (info.error) return keep(entry, info.reason ?? 'worktree-unresolved', info.error);
     entry.method = info.method;
     if (info.owner) entry.owner = info.owner;
     return markForRemoval(entry, 'head-on-remote', options);
   }
-  const local = localOnlyCommits(copy, head.out);
-  if (!local) return keep(entry, 'inspection-failed', 'local-only commits cannot be listed');
-  if (!local.length) {
-    return keep(entry, 'unpublished', 'HEAD is not advertised by the remote', true);
-  }
-  const paths = new Set();
+  const preserved = new Map();
   const unsafe = [];
-  for (const sha of local) {
+  for (const sha of [...local].reverse()) {
     const changed = commitPaths(copy, sha);
     if (!changed) return keep(entry, 'inspection-failed', `cannot read ${sha.slice(0, 12)}`);
+    const ref = preferredRef(bySha.get(sha));
     if (changed.merge) {
-      return keep(entry, 'unpublished', `local-only commit ${sha.slice(0, 12)} is a merge`, true);
+      return keep(entry, 'unpublished',
+        `ref ${ref} carries local-only merge ${sha.slice(0, 12)}`, true);
     }
     for (const path of changed.paths) {
-      if (underPreserved(path)) paths.add(path);
-      else unsafe.push(`${sha.slice(0, 12)}:${path}`);
+      if (underPreserved(path)) {
+        if (safeRelativePath(path)) preserved.set(path, { sha, path });
+      } else {
+        unsafe.push({ ref, sha, path });
+      }
     }
   }
   if (unsafe.length) {
-    return keep(entry, 'unpublished', `local-only product change ${unsafe[0]}`, true);
+    const first = unsafe[0];
+    return keep(entry, 'unpublished',
+      `ref ${first.ref} carries unpublished product change ` +
+      `${first.sha.slice(0, 12)}:${first.path}`, true);
   }
   const info = worktreeInfo(copy, options);
   if (info.error) return keep(entry, info.reason ?? 'worktree-unresolved', info.error);
   entry.method = info.method;
   if (info.owner) entry.owner = info.owner;
   entry.localCommits = local;
-  entry.preservePaths = [...paths].sort();
+  entry.preserveFiles = [...preserved.values()];
+  entry.preservePaths = [...preserved.keys()].sort();
   return markForRemoval(entry, 'local-only-handoffs', options);
 }
 
@@ -388,12 +499,9 @@ function recheck(entry) {
   const common = runGit(entry.path, ['rev-parse', '--git-common-dir']);
   const dirs = [...new Set([resolve(entry.path, gitDir.out),
     common.ok ? resolve(entry.path, common.out) : resolve(entry.path, gitDir.out)])];
-  for (const dir of dirs) {
-    for (const name of LOCK_FILES) {
-      if (existsSync(join(dir, name))) {
-        return { reason: 'locked', detail: 'recheck: lock appeared' };
-      }
-    }
+  const locks = locksIn(dirs);
+  if (locks.length) {
+    return { reason: 'locked', detail: `recheck: lock appeared (${locks[0]})` };
   }
   const status = runGit(entry.path,
     ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all']);
@@ -456,11 +564,11 @@ export function reap(options) {
         });
         continue;
       }
-      if (entry.preservePaths?.length) {
+      if (entry.localCommits?.length || entry.preservePaths?.length) {
         const preserved = preserveFiles(entry.path, entry, options);
         if (!preserved.ok) {
           Object.assign(entry, {
-            decision: 'keep', reason: 'preserve-failed', detail: preserved.error, lostWork: true,
+            decision: 'keep', reason: 'preserve-failed', detail: preserved.error, error: true,
           });
           continue;
         }
@@ -482,16 +590,21 @@ export function reap(options) {
     }
   }
   const kept = copies.filter((entry) => entry.decision === 'keep');
-  const errors = copies.some((entry) => entry.error) || pruneErrors.length > 0;
+  const removalErrors = copies.filter((entry) => entry.error).map((entry) => entry.name);
+  const failed = removalErrors.length > 0 || pruneErrors.length > 0;
   const summary = {
     total: copies.length,
     remove: copies.filter((entry) => entry.decision === 'remove').length,
     keep: kept.length,
     removed: copies.filter((entry) => entry.removed).length,
     keptForLostWork: kept.filter((entry) => entry.lostWork).map((entry) => entry.name),
+    removalErrors,
     pruned,
   };
   if (pruneErrors.length) summary.pruneErrors = pruneErrors;
+  const exitCode = failed
+    ? EXIT.failure
+    : summary.keptForLostWork.length > 0 ? EXIT.lostWork : EXIT.ok;
   return {
     root: options.root,
     apply: options.apply,
@@ -501,7 +614,7 @@ export function reap(options) {
     remote: options.remote,
     copies,
     summary,
-    exitCode: summary.keptForLostWork.length > 0 || errors ? 1 : 0,
+    exitCode,
   };
 }
 

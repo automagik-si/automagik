@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync,
   writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const SCRIPT = join(import.meta.dir, 'wish-worktree.sh');
 const ENV = {
@@ -98,4 +98,34 @@ test('create refuses an existing copy, a duplicate branch, and a missing base', 
   expect(missing.code).toBe(1);
   expect(missing.stderr).toContain('base not found');
   expect(existsSync(join(dir, 'copies', 'two'))).toBe(false);
+});
+
+test('remove refuses every *.lock under the shared git dir', () => {
+  const { dir, remote } = remoteFixture();
+  const shared = join(dir, 'shared');
+  const copies = join(dir, 'copies');
+  mkdirSync(copies);
+  const copy = join(copies, 'one');
+  expect(run(['--shared', shared, 'create', remote, copy, 'wish/one', 'origin/dev']).code).toBe(0);
+  const stale = join(copies, 'stale');
+  expect(run(['--shared', shared, 'create', remote, stale, 'wish/stale', 'origin/dev']).code)
+    .toBe(0);
+  rmSync(stale, { recursive: true, force: true });
+  const locks = ['.git/packed-refs.lock', '.git/refs/heads/wish.lock', '.git/shallow.lock'];
+  for (const lock of locks) {
+    const path = join(shared, lock);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '');
+    const refused = run(['--shared', shared, 'remove', copy]);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('locked');
+    expect(existsSync(copy)).toBe(true);
+    expect(git(shared, 'worktree', 'list', '--porcelain')).toContain(copy);
+    rmSync(path);
+  }
+  const removed = run(['--shared', shared, 'remove', copy]);
+  expect(removed.code).toBe(0);
+  expect(existsSync(copy)).toBe(false);
+  const admin = join(shared, '.git', 'worktrees');
+  expect(existsSync(admin) ? readdirSync(admin).length : 0).toBe(0);
 });

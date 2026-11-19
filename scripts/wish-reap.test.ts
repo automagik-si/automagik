@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync,
-  utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
+  rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { parseArgs, reap } from './wish-reap.mjs';
 
 const SCRIPT = join(import.meta.dir, 'wish-reap.mjs');
@@ -173,5 +173,200 @@ describe('wish-reap', () => {
     expect(result.summary.pruned).toEqual([shared]);
     expect(existsSync(copy)).toBe(false);
     expect(git(shared, 'worktree', 'list', '--porcelain')).not.toContain(copy);
+  });
+});
+
+describe('wish-reap: no ref may hide unpublished work', () => {
+  /** A clean copy under its own root (the fixture's `seed` is not inside it). */
+  function copyOf(name = 'copy') {
+    const { dir, remote } = remoteFixture();
+    const root = join(dir, 'copies');
+    mkdirSync(root);
+    const copy = join(root, name);
+    git(dir, 'clone', '-q', remote, copy);
+    return { dir, remote, root, copy, preserve: join(dir, 'preserved') };
+  }
+
+  test('a stale local origin/* ref cannot hide an unpublished product commit', () => {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', 'feature');
+    writeFileSync(join(f.copy, 'product.txt'), 'stale product\n');
+    git(f.copy, 'commit', '-qam', 'product change');
+    const product = git(f.copy, 'rev-parse', 'HEAD');
+    git(f.copy, 'push', '-q', 'origin', 'feature');
+    git(f.remote, 'branch', '-D', 'feature');
+    writeFileSync(join(f.copy, 'handoffs', 'follow.md'), 'follow up\n');
+    git(f.copy, 'add', '-A');
+    git(f.copy, 'commit', '-qm', 'docs on top');
+    const tip = git(f.copy, 'rev-parse', 'HEAD');
+    git(f.copy, 'update-ref', 'refs/remotes/origin/feature', product);
+    expect(git(f.copy, 'rev-parse', 'origin/feature')).toBe(product);
+    expect(git(f.remote, 'for-each-ref', '--format=%(refname)', 'refs/heads'))
+      .toBe('refs/heads/dev');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    expect(result.copies).toHaveLength(1);
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('unpublished');
+    expect(entry.detail).toContain('refs/heads/feature');
+    expect(entry.detail).toContain('product.txt');
+    expect(result.exitCode).toBe(1);
+    expect(existsSync(join(f.copy, 'product.txt'))).toBe(true);
+    expect(git(f.copy, 'rev-parse', 'feature')).toBe(tip);
+  });
+
+  test('a published HEAD cannot authorize removing an unpublished local branch', () => {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', 'wip');
+    writeFileSync(join(f.copy, 'product.txt'), 'wip product\n');
+    git(f.copy, 'commit', '-qam', 'wip product');
+    const wip = git(f.copy, 'rev-parse', 'HEAD');
+    git(f.copy, 'checkout', '-q', 'dev');
+    expect(git(f.copy, 'rev-parse', 'HEAD')).toBe(git(f.remote, 'rev-parse', 'dev'));
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    expect(result.copies).toHaveLength(1);
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('unpublished');
+    expect(entry.detail).toContain('refs/heads/wip');
+    expect(result.exitCode).toBe(1);
+    expect(git(f.copy, 'rev-parse', 'wip')).toBe(wip);
+  });
+
+  test('a local tag to an unpublished commit keeps the copy', () => {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', 'tagged');
+    writeFileSync(join(f.copy, 'product.txt'), 'tagged product\n');
+    git(f.copy, 'commit', '-qam', 'tagged product');
+    git(f.copy, 'tag', 'v-local');
+    git(f.copy, 'checkout', '-q', 'dev');
+    git(f.copy, 'branch', '-D', 'tagged');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('keep');
+    expect(entry.reason).toBe('unpublished');
+    expect(entry.detail).toContain('refs/tags/v-local');
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('a commit advertised only by a pull-request ref is published', () => {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', 'pr');
+    writeFileSync(join(f.copy, 'product.txt'), 'pull product\n');
+    git(f.copy, 'commit', '-qam', 'pull product');
+    const pull = git(f.copy, 'rev-parse', 'HEAD');
+    git(f.copy, 'push', '-q', 'origin', `HEAD:refs/pull/77/head`);
+    git(f.copy, 'checkout', '-q', 'dev');
+    expect(git(f.remote, 'rev-parse', 'refs/pull/77/head')).toBe(pull);
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('remove');
+    expect(entry.reason).toBe('head-on-remote');
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(f.copy)).toBe(false);
+  });
+
+  test('a local tag is published when a remote tag advertises its commit', () => {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', 'tagged');
+    writeFileSync(join(f.copy, 'product.txt'), 'remote tagged product\n');
+    git(f.copy, 'commit', '-qam', 'remote tagged product');
+    const sha = git(f.copy, 'rev-parse', 'HEAD');
+    git(f.copy, 'tag', 'v-local');
+    git(f.copy, 'push', '-q', 'origin', `${sha}:refs/tags/v-remote`);
+    git(f.copy, 'checkout', '-q', 'dev');
+    git(f.copy, 'branch', '-D', 'tagged');
+    expect(git(f.remote, 'rev-parse', 'refs/tags/v-remote')).toBe(sha);
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('remove');
+    expect(entry.reason).toBe('head-on-remote');
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(f.copy)).toBe(false);
+  });
+
+  test('docs-only commits on non-HEAD branches are preserved before removal', () => {
+    const f = copyOf();
+    git(f.copy, 'checkout', '-q', '-b', 'wip-notes');
+    writeFileSync(join(f.copy, 'handoffs', 'wip.md'), 'wip report\n');
+    git(f.copy, 'add', '-A');
+    git(f.copy, 'commit', '-qm', 'wip report');
+    const wip = git(f.copy, 'rev-parse', 'HEAD');
+    git(f.copy, 'checkout', '-q', 'dev');
+    git(f.copy, 'checkout', '-q', '-b', 'docs-notes');
+    writeFileSync(join(f.copy, 'docs', 'other.md'), 'other docs\n');
+    git(f.copy, 'add', '-A');
+    git(f.copy, 'commit', '-qm', 'other docs');
+    const docs = git(f.copy, 'rev-parse', 'HEAD');
+    git(f.copy, 'checkout', '-q', 'dev');
+    backdate(f.copy);
+    const result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    const entry = result.copies[0];
+    expect(entry.decision).toBe('remove');
+    expect(entry.reason).toBe('local-only-handoffs');
+    expect(existsSync(f.copy)).toBe(false);
+    expect(readFileSync(join(f.preserve, 'copy', 'handoffs', 'wip.md'), 'utf8'))
+      .toBe('wip report\n');
+    expect(readFileSync(join(f.preserve, 'copy', 'docs', 'other.md'), 'utf8'))
+      .toBe('other docs\n');
+    const record = readFileSync(join(f.preserve, 'copy', '.wish-reap-commits.txt'), 'utf8');
+    expect(record).toContain(wip);
+    expect(record).toContain(docs);
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('every *.lock under .git keeps the copy, and locks alone exit 0', () => {
+    const f = copyOf();
+    const cases: Array<[string, string]> = [
+      ['index', '.git/index.lock'],
+      ['head', '.git/HEAD.lock'],
+      ['config', '.git/config.lock'],
+      ['packed', '.git/packed-refs.lock'],
+      ['ref', '.git/refs/heads/wish.lock'],
+      ['shallow', '.git/shallow.lock'],
+    ];
+    for (const [name, lock] of cases) {
+      const copy = join(f.root, name);
+      git(f.dir, 'clone', '-q', f.remote, copy);
+      mkdirSync(dirname(join(copy, lock)), { recursive: true });
+      writeFileSync(join(copy, lock), '');
+      backdate(copy);
+    }
+    rmSync(f.copy, { recursive: true, force: true });
+    const dry = reap(parseArgs(['--root', f.root, '--preserve', f.preserve]));
+    expect(dry.copies).toHaveLength(cases.length);
+    for (const [name, lock] of cases) {
+      const entry = dry.copies.find((item: { name: string }) => item.name === name);
+      expect(entry?.decision).toBe('keep');
+      expect(entry?.reason).toBe('locked');
+      expect(entry?.detail).toContain(lock.slice('.git/'.length));
+    }
+    expect(dry.exitCode).toBe(0);
+    const applied = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    expect(applied.summary.removed).toBe(0);
+    for (const [name] of cases) expect(existsSync(join(f.root, name))).toBe(true);
+  });
+
+  test('a failed removal exits 3, not 1, and is not reported as lost work', () => {
+    const f = copyOf();
+    backdate(f.copy);
+    chmodSync(f.copy, 0o500);
+    let result;
+    try {
+      result = reap(parseArgs(['--root', f.root, '--preserve', f.preserve, '--apply']));
+    } finally {
+      chmodSync(f.copy, 0o700);
+    }
+    expect(result.copies[0].decision).toBe('keep');
+    expect(result.copies[0].reason).toBe('remove-failed');
+    expect(result.copies[0].error).toBe(true);
+    expect(result.summary.keptForLostWork).toEqual([]);
+    expect(result.summary.removalErrors).toEqual(['copy']);
+    expect(result.exitCode).toBe(3);
   });
 });
