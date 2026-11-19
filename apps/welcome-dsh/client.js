@@ -9224,6 +9224,8 @@ var PT_BR = {
   "Not signed in to {name}. Run {command} in a terminal, then check again.": "Sem login no {name}. Rode {command} em um terminal e verifique de novo.",
   "Turning it on lets Automagik use the sign-in {name} already has on this computer.": "Ao ligar, o Automagik passa a usar o login que o {name} já tem neste computador.",
   "The sign-in to {name} has not been checked yet.": "O login no {name} ainda não foi verificado.",
+  "Could not check the sign-in to {name}: {cli} took too long to answer.": "Não foi possível verificar o login no {name}: o {cli} demorou demais para responder.",
+  "Could not tell whether you are signed in to {name}.": "Não foi possível saber se há login no {name}.",
   "Sign in": "Entrar",
   "No Bot chat to sign in from here. Run {command} in a terminal instead.": "Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.",
   "Sign in from the Bot's chat, then come back to finish setting up.": "Entre pelo chat do Bot e volte para terminar a configuração.",
@@ -12169,7 +12171,10 @@ function agentLines(agent) {
     lines.push({ tone: "bad", text: t("Not signed in to {name}. Sign in from a Bot's chat.", { name }), action: "login" });
     lines.push({ tone: "muted", text: t("Or run {command} in a terminal, then check again.", { command: SIGN_IN_OF[agent.id] ?? cli }), action: "check" });
   }
-  if (agent.signedIn === void 0 && !cliBusy(agent) && (agent.on || !isNative(agent))) lines.push({ tone: "muted", text: t("The sign-in to {name} has not been checked yet.", { name }), action: "check" });
+  if (agent.signedIn === void 0 && !cliBusy(agent) && (agent.on || !isNative(agent))) {
+    const text = agent.signInCheck === "timeout" ? t("Could not check the sign-in to {name}: {cli} took too long to answer.", { name, cli }) : agent.signInCheck === "unreadable" ? t("Could not tell whether you are signed in to {name}.", { name }) : t("The sign-in to {name} has not been checked yet.", { name });
+    lines.push({ tone: "muted", text, action: "check" });
+  }
   if (!agent.on) {
     lines.push({ tone: "muted", text: t("Off. Turn it on to use {name} as a model in DSH.", { name }) });
     if (isNative(agent)) lines.push({ tone: "muted", text: t("Turning it on lets Automagik use the sign-in {name} already has on this computer.", { name }) });
