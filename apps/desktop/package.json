@@ -29,7 +29,8 @@
   },
   "dependencies": {
     "electron-updater": "6.8.10",
-    "ws": "8.18.3"
+    "ws": "8.18.3",
+    "yaml": "2.9.1"
   },
   "bugs": {
     "url": "https://github.com/automagik-si/automagik/issues"

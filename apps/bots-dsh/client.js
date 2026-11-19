@@ -66,6 +66,9 @@ function SessionFileApproval({ matched: { pending, item }, renderFactorySlot }) 
 // src/client/i18n.js
 var NAMESPACE = "omni-ui";
 var ZH = {
+  "File-tool folder": "文件工具的文件夹",
+  "Folder for these four file tools": "这四个文件工具使用的文件夹",
+  "Clear folder": "清除文件夹",
   "The operating system blocked read or write access to {folder}. Allow Automagik to use this folder: on macOS, open System Settings > Privacy & Security > Files and Folders (or Full Disk Access); elsewhere, allow your user to read and write the folder. Your folder choice has been kept.": "操作系统阻止了对 {folder} 的读取或写入。请允许 Automagik 使用此文件夹：在 macOS 上，打开系统设置 > 隐私与安全性 > 文件与文件夹（或完全磁盘访问权限）；在其他系统上，允许你的用户读取和写入该文件夹。你选择的文件夹已保留。",
   "What will it do?": "它会做什么？",
   "Add instructions": "添加说明",
@@ -4404,10 +4407,10 @@ function bodyOf(def, paint, flat = false) {
   }
 }
 var PUPIL = "#0a0f1f";
-var pupilMarkup = ([cx, cy, w, h96, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h96 / 2}" width="${w}" height="${h96}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h96 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h96 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
-var blushMarkup = ([cx, cy, w, h96, tilt]) => `<ellipse cx="${cx}" cy="${cy + h96 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
-var eyeMarkup = ([cx, cy, w, h96, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h96 / 2}" width="${w}" height="${h96}" rx="${w / 2}"/></g>`;
-var happyEyeMarkup = ([cx, cy, w, h96, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h96 * 0.14}Q0 ${-h96 * 0.42} ${w * 0.62} ${h96 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
+var pupilMarkup = ([cx, cy, w, h97, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><g class="bt-eye"><rect x="${-w / 2}" y="${-h97 / 2}" width="${w}" height="${h97}" rx="${w / 2}" fill="${PUPIL}"/><circle cx="${w * 0.12}" cy="${-h97 * 0.24}" r="${w * 0.3}" fill="#fff"/><circle cx="${-w * 0.16}" cy="${h97 * 0.22}" r="${w * 0.12}" fill="#fff" fill-opacity=".7"/></g></g>`;
+var blushMarkup = ([cx, cy, w, h97, tilt]) => `<ellipse cx="${cx}" cy="${cy + h97 * 0.56}" rx="${w * 0.78}" ry="${w * 0.4}" transform="rotate(${tilt} ${cx} ${cy})" fill="#ff5fb8" fill-opacity=".42"/>`;
+var eyeMarkup = ([cx, cy, w, h97, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><rect class="bt-eye" x="${-w / 2}" y="${-h97 / 2}" width="${w}" height="${h97}" rx="${w / 2}"/></g>`;
+var happyEyeMarkup = ([cx, cy, w, h97, tilt]) => `<g transform="translate(${cx} ${cy}) rotate(${tilt})"><path class="bt-eye-happy" opacity="0" d="M${-w * 0.62} ${h97 * 0.14}Q0 ${-h97 * 0.42} ${w * 0.62} ${h97 * 0.14}" fill="none" stroke="#000" stroke-width="${w * 0.5}" stroke-linecap="round"/></g>`;
 var maskBox = (size) => `maskUnits="userSpaceOnUse" x="${-size}" y="${-size}" width="${size * 3}" height="${size * 3}"`;
 var holes = (def, eyes) => `<rect x="${-def.size}" y="${-def.size}" width="${def.size * 3}" height="${def.size * 3}" fill="#fff"/>${eyes}`;
 var MASK_ID = "%MASK%";
@@ -4522,12 +4525,12 @@ function liveSprings(apply2) {
     const dt = Math.min(0.5, Math.max(1e-3, (now - last) / 1e3));
     last = now;
     const steps = Math.ceil(dt * 240);
-    const h96 = dt / steps;
+    const h97 = dt / steps;
     let moving = false;
     for (const [key, value] of values) {
       for (let index = 0; index < steps; index += 1) {
-        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h96;
-        value.x += value.v * h96;
+        value.v += (-value.k * (value.x - value.to) - value.c * value.v) * h97;
+        value.x += value.v * h97;
       }
       if (Math.abs(value.x - value.to) < 0.05 && Math.abs(value.v) < 1) {
         value.x = value.to;
@@ -17868,6 +17871,9 @@ function splitCanvases(text2) {
 }
 var hasCanvas = (text2) => String(text2 ?? "").includes(`\`\`\`${FENCE2}`);
 
+// src/shared/read-scope.js
+var READ_SCOPE_CODE = "SESSION_READ_SCOPE_DENIED";
+
 // src/client/cells.js
 var import_react46 = require("react");
 var import_react_dom7 = require("react-dom");
@@ -19152,7 +19158,8 @@ function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus
     return entry ? [[call2.callId, stopLine(entry), entry.why]] : [];
   }))) : "[]";
   const stops = new Map(JSON.parse(stopKeys).map(([id, line, why]) => [id, { line, why }]));
-  const drawn2 = calls.filter((call2) => DRAWN.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.renderer(toolName(call2)) || agentImage(call2) || stops.has(call2.callId));
+  const readRefused = (call2) => call2.isError === true && call2.error?.code === READ_SCOPE_CODE;
+  const drawn2 = calls.filter((call2) => readRefused(call2) || DRAWN.has(toolName(call2)) || isComputerCall(toolName(call2)) || toolCards.renderer(toolName(call2)) || agentImage(call2) || stops.has(call2.callId));
   const running2 = root.kind === "tool-result" ? void 0 : calls.findLast((call2) => call2.kind !== "tool-result");
   const note = running2 ? toolActivity(toolName(running2), toolArgs(running2).text, findBot2, roster.byId[sessionId]) : null;
   useLiveNote(actions, sessionId, `tool:${root.callId ?? node.key}`, note);
@@ -19161,6 +19168,13 @@ function ToolCell({ node, sessionId, useRoster, useUi, useWork, useSessionStatus
   const env = { sessionId, roster, actions, useUi, useWork, useSessionStatus, findBot: findBot2, heldCards, hooks: { useBrowserHolds, useBrowserTabs, useBrowserPages, useComputer } };
   return (0, import_react46.createElement)(import_react46.Fragment, null, drawn2.map((call2, index) => {
     const stop3 = stops.get(call2.callId);
+    if (readRefused(call2)) {
+      return (0, import_react46.createElement)(
+        "div",
+        { key: call2.callId ?? index, className: "bt-event bt-event-error", role: "status" },
+        call2.error.reason ?? contentText(call2.content)
+      );
+    }
     return (0, import_react46.createElement)(
       import_react46.Fragment,
       { key: call2.callId ?? index },
@@ -39376,6 +39390,103 @@ function singleFlight(map, key, run2) {
   return tracked;
 }
 
+// src/client/read-scope.js
+var import_react101 = require("react");
+var import_react_dom18 = require("react-dom");
+var READ_FOLDER_LABEL = "Folder for these four file tools";
+function ReadScopeControl({ sessionId }) {
+  return typeof sessionId === "string" ? (0, import_react101.createElement)(SessionReadScope, { key: sessionId, sessionId }) : null;
+}
+function SessionReadScope({ sessionId }) {
+  const { isOpen, shownPlace, leaving, button, menu, open, close } = useAnchoredMenu();
+  const [scope, setScope] = (0, import_react101.useState)(null);
+  const [draft, setDraft] = (0, import_react101.useState)("");
+  const [error, setError] = (0, import_react101.useState)("");
+  const [saving, setSaving] = (0, import_react101.useState)(false);
+  const load = async (signal) => {
+    try {
+      const value = await call("session-read-scope", { sessionId }, signal);
+      setScope(value);
+      setDraft(value.folder ?? "");
+      setError("");
+    } catch (failure) {
+      if (!signal?.aborted) setError(failure.message);
+    }
+  };
+  (0, import_react101.useEffect)(() => {
+    const lifetime = new AbortController();
+    void load(lifetime.signal);
+    return () => lifetime.abort();
+  }, [sessionId]);
+  if (scope?.editable === false || scope === null && error === "") return null;
+  const save = async (folder) => {
+    setSaving(true);
+    setError("");
+    try {
+      const value = await call("set-session-read-scope", { sessionId, folder });
+      setScope(value);
+      setDraft(value.folder ?? "");
+      close();
+    } catch (failure) {
+      setError(failure.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (0, import_react101.createElement)(
+    import_react101.Fragment,
+    null,
+    (0, import_react101.createElement)("button", {
+      ref: button,
+      type: "button",
+      className: "bt-plus",
+      "aria-expanded": isOpen,
+      "aria-label": t("File-tool folder"),
+      title: scope?.folder ?? t(READ_FOLDER_LABEL),
+      onClick: () => {
+        if (isOpen) close();
+        else {
+          setDraft(scope?.folder ?? "");
+          if (scope === null) void load();
+          open();
+        }
+      }
+    }, (0, import_react101.createElement)(FolderIcon)),
+    shownPlace ? (0, import_react_dom18.createPortal)((0, import_react101.createElement)(
+      "form",
+      {
+        ref: menu,
+        className: "bt-menu bt-folder-menu",
+        "aria-label": t(READ_FOLDER_LABEL),
+        style: shownPlace,
+        "data-leaving": leaving || void 0,
+        onSubmit: (event) => {
+          event.preventDefault();
+          if (scope?.editable && !saving && draft !== "") void save(draft);
+        }
+      },
+      (0, import_react101.createElement)(
+        "label",
+        { className: "bt-folder-view bt-folder-here" },
+        t(READ_FOLDER_LABEL),
+        (0, import_react101.createElement)("span", { className: "bt-folder-path" }, "read, read_image, glob, grep"),
+        (0, import_react101.createElement)("input", {
+          className: "bt-folder-input",
+          value: draft,
+          spellCheck: false,
+          autoComplete: "off",
+          placeholder: t("Full path of a folder"),
+          disabled: scope === null || saving,
+          onChange: (event) => setDraft(event.target.value)
+        })
+      ),
+      (0, import_react101.createElement)("button", { type: "submit", className: "bt-folder-use", disabled: scope === null || saving || draft === "" }, t("Use this folder")),
+      (0, import_react101.createElement)("button", { type: "button", disabled: scope?.folder == null || saving, onClick: () => void save(null) }, t("Clear folder")),
+      error ? (0, import_react101.createElement)("div", { className: "bt-folder-error", role: "alert" }, error) : null
+    ), document.body) : null
+  );
+}
+
 // src/client/index.js
 var inject = ["sessions", "uiWorkspace", "uiConversation", "slots", "theme", "layout"];
 var LIVE_OWN = /* @__PURE__ */ new Set(["revision", "unchanged", "activity", "work", "memoryNews", "memoryReviews", "liveKey", "computerLive"]);
@@ -40622,6 +40733,7 @@ function apply(ctx) {
     () => shadow("conversation.composer.dock", { id: "btw", order: 2, priority: BOT_PRIORITY, inject: face }, BtwDock),
     () => shadow("conversation.input.left", { id: "bot-plus", order: -100, inject: face }, ComposerPlus),
     () => shadow("conversation.input.left", { id: "bot-permission-chip", order: -99, inject: face }, ComposerPermission),
+    () => shadow("conversation.input.left", { id: "session-read-scope", order: -98 }, ReadScopeControl),
     () => shadow("conversation.input.right", { id: "bot-voice", order: 100, inject: face }, ComposerVoice),
     () => shadow("conversation.composer", {
       priority: BOT_PRIORITY,

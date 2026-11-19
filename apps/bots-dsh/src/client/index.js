@@ -96,6 +96,7 @@ import { QueueDock, QUEUE_CSS } from './queue-dock.js'
 import { noticeApprovals } from './approval-notices.js'
 import { listedOpener } from './open-listed.js'
 import { agentSessionToReuse, singleFlight } from './agent-new.js'
+import { ReadScopeControl } from './read-scope.js'
 
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 // What a state answer carries that is not roster data, or is kept apart from it.
@@ -1361,6 +1362,7 @@ export function apply(ctx) {
     () => shadow('conversation.composer.dock', { id: 'btw', order: 2, priority: BOT_PRIORITY, inject: face }, BtwDock),
     () => shadow('conversation.input.left', { id: 'bot-plus', order: -100, inject: face }, ComposerPlus),
     () => shadow('conversation.input.left', { id: 'bot-permission-chip', order: -99, inject: face }, ComposerPermission),
+    () => shadow('conversation.input.left', { id: 'session-read-scope', order: -98 }, ReadScopeControl),
     () => shadow('conversation.input.right', { id: 'bot-voice', order: 100, inject: face }, ComposerVoice),
     () => shadow('conversation.composer', {
       priority: BOT_PRIORITY,

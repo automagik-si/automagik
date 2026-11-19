@@ -39,6 +39,7 @@ WORKDIR /build
 COPY apps/desktop/runtime/package.json apps/desktop/runtime/package-lock.json /build/apps/desktop/runtime/
 COPY apps/desktop/runtime/patches /build/apps/desktop/runtime/patches
 COPY apps/desktop/scripts/prune-runtime.mjs apps/desktop/scripts/runtime-patches.mjs /build/apps/desktop/scripts/
+COPY apps/desktop/src/profile-patch.mjs /build/apps/desktop/src/
 COPY server /build/server
 
 RUN node /build/server/assemble.mjs \
@@ -144,6 +145,7 @@ COPY --from=builder /build/out/profile /opt/automagik/profile
 COPY --from=builder /build/out/versions.json /opt/automagik/versions.json
 COPY --from=builder /build/out/offline-store /opt/automagik/offline-store
 COPY server/entrypoint.mjs server/healthcheck.mjs server/lib.mjs server/gate*.mjs server/profile-*.mjs server/plugin-payload.mjs server/volume-lock.mjs /opt/automagik/
+COPY apps/desktop/src/profile-patch.mjs /opt/apps/desktop/src/
 # No /home/<user> in the image's account record: the distroless nonroot home is replaced with
 # the uid the image actually runs as. The scanner's home check then has nothing to excuse.
 COPY server/passwd /etc/passwd

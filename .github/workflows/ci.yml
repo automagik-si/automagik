@@ -1338,6 +1338,12 @@ jobs:
           bun install --frozen-lockfile
           [ -d dev/harness/node_modules ] || bun run harness
 
+      - name: Desktop dependencies for ACP lifecycle tests
+        # The app-build upgrade case calls Desktop's profile merger, which resolves yaml here.
+        if: matrix.app == 'acp-dsh'
+        working-directory: apps/desktop
+        run: npm ci --omit=dev --ignore-scripts --no-fund --no-audit
+
       - name: Omni's plugins at the pinned release
         # The welcome lists the tools Omni's channels and canvases register; its test reads
         # them from Omni at the release apps/desktop/omni.json pins.
