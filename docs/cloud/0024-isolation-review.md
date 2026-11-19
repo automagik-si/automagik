@@ -12,9 +12,10 @@
 
 This is a desk review of the repository at that commit. It ran no VM, no Incus instance, no real
 workspace and no credential. Where a guarantee cannot be shown from this repository, the text says
-**unproven here** and names what would prove it. Section 5 defines the probes C4.3 must run; none of
-them has been run for this record. Values in `{...}` are placeholders; no real workspace id, host,
-key or credential appears here.
+**unproven here** and names what would prove it. Section 5 defines the probes C4.3 must run, marks
+each one by where its proof can come from, and requires evidence of no path rather than a refusal;
+none of them has been run for this record. Values in `{...}` are placeholders; no real workspace
+id, host, key or credential appears here.
 
 **Short answer.** The repository is strong on the gate's own edge. A workspace token is
 audience-bound, a gate session is short and origin-bound, an open code is single-use, revocation is
@@ -36,10 +37,10 @@ fixes the unit and the reachability list:
 - one Incus VM per workspace, never a privileged container; an unprivileged system container only
   for the operator's own workspaces (`docs/rfcs/0024-automagik-cloud.md:650-655`; Decided 15 at
   `:137-139`);
-- its own volume and network. The internet and the Cloud service's public-key and revocation
-  endpoints (and, later, the model gateway) are reachable. The private network, the build host,
-  the hosting platform's control socket, the identity service's admin routes and other workspaces
-  are not. It is reached only through the Cloud edge, on its own origin
+- its own volume and network. The internet, the Cloud service's public-key and revocation
+  endpoints and the named model gateway (RFC 0025 (i)) are reachable. The private network, the
+  build host, the hosting platform's control socket, the identity service's admin routes and other
+  workspaces are not. It is reached only through the Cloud edge, on its own origin
   (`docs/rfcs/0024-automagik-cloud.md:656-662`);
 - its own secrets, valid nowhere else (`docs/rfcs/0024-automagik-cloud.md:663`);
 - CPU, memory and disk limits from the plan (`docs/rfcs/0024-automagik-cloud.md:664`);
@@ -385,10 +386,11 @@ the token's sha256 in the workspace's own `agent-tokens.json`, and `agent-token-
 tombstone (`apps/bots-dsh/src/host/agent-access.js:422-437`), tested at
 `apps/bots-dsh/test/agent-access.test.js:83` and `:245` and documented at
 `server/README.md:1004-1012`. What is not here is the cross-workspace case: no test puts a token
-issued in A's home in front of B's listener and requires a refusal, and the direct listener admits
-a request with no `Origin`, so the VM and network boundary is what keeps B away. The gate-held DSH
-credential is one owner credential for the whole workspace; it is held by the gate, but a Bot with
-a shell can read the launch file and mint its own. That is the within-workspace limit at
+issued in A's home in front of B's listener and requires a refusal. That is a missing repository
+test (P14), not a missing feature, and the direct listener admits a request with no `Origin`, so
+the VM and network boundary is what keeps B away. The gate-held DSH credential is one owner
+credential for the whole workspace; it is held by the gate, but a Bot with a shell can read the
+launch file and mint its own. That is the within-workspace limit at
 `server/README.md:730-736`, not a cross-workspace path, as long as the VM boundary holds.
 
 ### 2.8 File modes
@@ -486,10 +488,11 @@ with no shared disk or network. The private record may name the hosts; this docu
 
 The private network, the build host, the hosting platform's control socket, the identity service's
 admin routes and other workspaces are said to be unreachable, while the internet, the Cloud key and
-revocation endpoints and the model gateway are said to be reachable (RFC 0024 (g)). There is no
-probe, no network policy file and no firewall test in the repository. **What would prove it:** the
-C4.3 probes in section 5, run from inside a test VM A against a test VM B and the host, with the
-commands and results recorded. A probe that only checks from the host or the edge is not enough.
+revocation endpoints and the model gateway are said to be reachable (RFC 0024 (g), amended by
+RFC 0025 (i)). There is no probe, no network policy file and no firewall test in the repository.
+**What would prove it:** the C4.3 probes in section 5, run from inside a test VM A against a test
+VM B and the host, with the commands and results recorded. A probe that only checks from the host
+or the edge is not enough.
 
 ### U3. The node is not the build host; no root-equal group (blocking)
 
@@ -607,9 +610,10 @@ and revocation are in this repository: `agent-token-create` keeps only the sha25
 workspace's own home and `agent-token-revoke` writes a tombstone (`:422-437`), tested at
 `apps/bots-dsh/test/agent-access.test.js:83` and `:245`, and documented at
 `server/README.md:1004-1012`. What is missing is the cross-workspace refusal: no test issues a
-token in A's home and presents it to B's listener. **What would prove it:** a two-home test (two
-`createAgentAccess` fixtures with separate homes) in which A's token gets `401` at B's listener,
-and the P5/P14 probes from inside a test VM A against B's address.
+token in A's home and presents it to B's listener. **What would prove it:** a two-home repository
+test (two `createAgentAccess` fixtures with separate homes) in which A's token gets `401` at B's
+direct listener and at B's gate origin while A's token still works at A; that is P14. P5 covers the
+network path from inside a test VM A.
 
 ### U15. No per-workspace storage prefix on the server (low)
 
@@ -648,12 +652,12 @@ repository is not a VM probe; the "Covered today by" column says which.
 
 | ID | Condition | Covered today by | Status |
 |---|---|---|---|
-| I1 | Each workspace is one Incus VM from the pinned template; no two workspaces share a kernel, volume or network. | Contract only: RFC 0024 (g), Decided 15. No code or test. | Unproven here |
-| I2 | The unreachable list and the reachable list are true from inside a test VM, with a probe per line. | Nothing. C4.3 owns the probes; section 5 defines them. | Unproven here |
-| I3 | The workspace node is not the build host; no agent account holds `incus-admin` or a root-equal group. | Contract only: delivery 4 acceptance; the proof is a private host record. | Unproven here |
-| I4 | Each workspace's secrets (model keys, Omni credentials, Bot secrets) are issued for it and valid nowhere else. | Nothing for per-workspace issuance. The gate holds no Cloud credential (code + README). | Partly; issuance unproven here |
-| I5 | CPU, memory and disk limits from the plan are enforced. | Nothing. | Unproven here |
-| I6 | Each workspace has its own origin; A's session and browser storage are not usable at B. | Contract: RFC 0024 (g) "its own origin". Gate test: origin-bound store (`server/test/gate.test.mjs:177-200`). No two-origin browser test. | Partly |
+| I1 | Each workspace is one Incus VM from the pinned template; no two workspaces share a kernel, volume or network. | Contract only: RFC 0024 (g), Decided 15. P5/P6 test the consequence (no shared network or volume), not the creation. | Unproven here |
+| I2 | The unreachable list and the reachable list are true from inside a test VM, with a probe per line; each unreachable line is recorded as no path, never as a refusal or an error page. | Nothing run. P1-P6 are VM/network unreachability probes with a two-sided control; P7/P8 are positive reachability probes; P9/P10 are not provable today. Section 5 defines them. | Unproven here |
+| I3 | The workspace node is not the build host; no agent account holds `incus-admin` or a root-equal group. | Contract only: delivery 4 acceptance. P11 shows A's groups and capabilities from the VM; P2/P3 need a host/network control; the node identity is a private host record. | Unproven here |
+| I4 | Each workspace's secrets (model keys, Omni credentials, Bot secrets) are issued for it and valid nowhere else. | Nothing for per-workspace issuance. The gate holds no Cloud credential (code + README). P12 is a two-VM canary and needs Cloud's issuance record. | Partly; issuance unproven here |
+| I5 | CPU, memory and disk limits from the plan are enforced. | Nothing. P10 needs the Cloud's plan-to-limits source; no plan numbers exist in this repository, so the probe is not provable today. | Unproven here |
+| I6 | Each workspace has its own origin; A's session and browser storage are not usable at B. | Contract: RFC 0024 (g) "its own origin". Gate test: origin-bound store (`server/test/gate.test.mjs:177-200`). P13 is the browser probe; no two-origin browser test and no Cloud origin allocation here. | Partly |
 | I7 | A's workspace token is refused by B even with a valid signature. | Test: `server/test/gate-cloud.test.mjs:229-256`; contract: v1 section 4. In-process, not a VM probe. | Covered by a test |
 | I8 | A's gate session ends at the token's expiry and in at most five minutes; it is origin-bound; a new open replaces it; revocation closes it and its sockets. | Tests: `server/test/gate-cloud.test.mjs:395-419`, `server/test/gate.test.mjs:177-200`; contract: v1 section 4. | Covered by a test |
 | I9 | Only a Cloud principal for this workspace and identity issuer, with a known role and owner/admin, is admitted; a lowered role drops old sessions and a role that no longer grants access is refused. | Tests: `server/test/gate-cloud.test.mjs:422-436`, `:661-675`, `:830-1002`; contract: v2. The Cloud recheck is a fake. | Gate side covered; Cloud side unproven |
@@ -662,7 +666,7 @@ repository is not a VM probe; the "Covered today by" column says which.
 | I12 | Only an EdDSA/Ed25519 token with a published `kid`, two key slots, no private key and no header-supplied key is accepted; rotation works and an unknown key id fails. | Tests: `server/test/gate-cloud.test.mjs:271-295`, `:367-392`; contract: v1 section 4. Key publication is Cloud's, not here. | Gate side covered; key custody unproven |
 | I13 | The gate store is private to the gate; Cloud sessions are memory-only; no raw session secret is written; the workspace's own data is not the gate's store. | Tests: `server/test/gate.test.mjs:184`, `:209`; code. No fresh-Incus `/data/secrets` test; no same-uid Bot test. | Covered for the gate store; workspace modes unproven |
 | I14 | The gate's workspace id is bound to the VM and its Cloud record, not copied text; a reused workspace id does not revive an old token. | Nothing. | Unproven here |
-| I15 | The non-browser MCP Bearer is scoped to one workspace and refused at another's origin. | Gate route test: `server/test/gate-mcp.test.mjs:60-99`; plugin issuance and revocation tests: `apps/bots-dsh/test/agent-access.test.js:83`, `:245`. No two-home A/B refusal test. | Partly |
+| I15 | The non-browser MCP Bearer is scoped to one workspace and refused at another's origin, on the gate route and the plugin's direct listener. | The plugin's token issuance and revocation are in this repository (`apps/bots-dsh/src/host/agent-access.js:422-437`, tested at `apps/bots-dsh/test/agent-access.test.js:83` and `:245`, documented at `server/README.md:1004-1012`); the gate route test is `server/test/gate-mcp.test.mjs:60-99`. The only missing piece is the two-home A/B refusal test (P14), a repository test. | Partly |
 | I16 | The image a workspace runs is the release's recorded digest, not `:latest` or another tag. | Contract/docs: `server/README.md:63-80`; record code. No workspace-side check here. | Contract only |
 
 The pass list is not met. An owner sign-off could record an accepted risk for some of these; it
@@ -676,27 +680,49 @@ compares workspaces. The private record may name the hosts and addresses; this p
 placeholders. A probe is not a screenshot of a policy; it is a command, its exit status and its
 output, run on the image digest the workspace will use.
 
-| Probe | From | Target | Expected | Evidence to keep |
-|---|---|---|---|---|
-| P1 private network | A | a private-network test endpoint, `{private-address}:{port}` | no route, timeout or refusal; no DNS answer for a private name | command, exit status, timing, the route table |
-| P2 build host | A | the build host's private name/address, `{build-host}` | no route, timeout or refusal | command, exit status, `getent hosts` result |
-| P3 control socket | A | the hosting platform's control socket path, `{control-socket}` | the path is absent or the connection is refused; no mount of the socket | `ls`, `ss`, `stat`, mount table |
-| P4 identity admin | A | the identity service's admin origin/path, `{identity-admin-url}` | 403/404/timeout; no admin token; public sign-in endpoints may answer | HTTP status, TLS result, no credential |
-| P5 other workspace | A | B's private address, volume or network, `{workspace-b}` | no route, no volume, no shared mount | command, exit status, mount table, `ip route` |
-| P6 volume | A | a sentinel file on B's volume and a host-side path | the sentinel is unreadable; no B volume is mounted | `findmnt`, `ls`, exit status, the private path hashed or redacted |
-| P7 internet | A | a public HTTPS endpoint | success | status, certificate check, timing |
-| P8 Cloud keys and revocation | A | the configured key and revocation URLs | 200 and valid JSON; no credential sent | status, content type, response size |
-| P9 model gateway | A | the gateway route with A's gateway token | success with A's token; 401 without it | status, token scope, no token printed |
-| P10 limits | A | the VM's cgroup and disk limits | the plan's numbers; a stress run reaches the limit and B is unaffected | `memory.max`, `cpu.max`, disk quota, stress result |
-| P11 no root-equal group | A | `id`, groups, capabilities, `incus` | no `incus-admin`, no root-equal group, no control socket, `incus` refused | command output, capability set |
-| P12 own secrets | A | A's model key and Omni credential at B | both fail at B; A's works | canary status only; no secret printed |
-| P13 browser origin | a browser at A | B's origin | 401 without a B session; A's cookie is not accepted; A's `localStorage` is not visible | browser test, cookie jar, storage dump redacted |
-| P14 MCP Bearer | A | B's MCP route with A's Bearer | 401 | status; no Bearer printed |
+**What counts as proof.** A probe that asks "is this unreachable?" may pass only on evidence of
+**no path**: A has no route to the address, or A's packets get no response *and* a positive control
+shows the same target answers from where it should (its own side, the host or the network). A TCP
+refusal (RST), a TLS error after a completed handshake, or any HTTP status, including 401, 403 and
+404, is an answer from a reachable target; it fails the probe. A timeout from A alone is not proof
+either: it is equally consistent with a dead target, a filtered port or a black hole, and only the
+control separates those. A failed control makes the probe **not provable from here**, not passed.
+P7, P8 and P12-P14 are not unreachability probes: they expect the target to answer, and a missing
+answer fails them.
 
-The node-identity line (I3) is a host record, not a probe from inside A: from inside A one can
-show that the build host is unreachable, not that the node is a different machine. The private
-record must compare a host fingerprint with the build host's. That is a gap in the acceptance text,
-not in the gate code.
+**Three-way mark.** `Repository` means provable from this repository: a test in this repository
+can prove the line without a VM (only P14). `VM/Cloud` means provable only on the VM/Cloud side:
+only evidence from a workspace VM, the host, the network or the Cloud service can (P1-P8,
+P11-P13); this desk review cannot produce it. `Not provable` means not provable at all with today's
+evidence: no source exists, so the probe stays unrun and the gate stays open (P9, P10).
+
+| Probe | From | Target | Pass only on | Three-way mark | Whose evidence |
+|---|---|---|---|---|---|
+| P1 private network | A | a private-network test endpoint, `{private-address}:{port}` | no route to the prefix, or no response plus a control that the endpoint answers from the private-network side; any refusal or HTTP status fails | VM/Cloud | VM A's route table and timing; network/endpoint control |
+| P2 build host | A | the build host's private name/address, `{build-host}` | no DNS answer and no route, or no response plus a control that the build host answers from its own network; any refusal or HTTP status fails | VM/Cloud | VM A's `getent hosts` and route table; build-host control |
+| P3 control socket | A | the hosting platform's control socket path, `{control-socket}` | no socket file at the path, no mount of it and no abstract socket, plus a host control that the socket exists and answers there; a refused connect alone is not proof | VM/Cloud | VM A's `stat`, `findmnt`, `ss -xl`; host control |
+| P4 identity admin | A | the identity service's admin origin/path, `{identity-admin-url}` | no TCP handshake and no HTTP response; any status including 401/403/404 fails; controls that A reaches the same identity host's public sign-in path and an operator network gets a response from the admin route (that response only shows the route exists) | VM/Cloud | VM A; identity/network operator control |
+| P5 other workspace | A | B's private address, volume or network, `{workspace-b}` | no route or no response plus a control that B answers on its own side; no B volume or mount in A; any refusal or HTTP status fails | VM/Cloud | VM A and VM B/host |
+| P6 volume | A | a sentinel file on B's volume and a host-side path | no B volume, block device or mount in A and no shared mount; the sentinel is absent, not merely unreadable; a host/B control shows the volume and sentinel on B | VM/Cloud | VM A's `findmnt` and `/dev`; host/B control |
+| P7 internet | A | a public HTTPS endpoint | a successful HTTPS fetch with a valid certificate; a timeout or error fails and does not prove the internet is cut | VM/Cloud | VM A and the public endpoint |
+| P8 Cloud keys and revocation | A | the configured key and revocation URLs | 200 and valid JSON (a key set that verifies a token; a list that parses); no credential sent; any 401/403/404 or error fails | VM/Cloud | VM A and the Cloud service |
+| P9 model gateway | A | the gateway route with A's gateway token | success with A's token and 401 without it; the gateway is Cloud's (RFC 0025 (i)) and its route and token are not pinned here (`docs/cloud/contracts-v1.md:674-678`), so this is deferred, not passed | Not provable | Cloud service (gateway and token contract) |
+| P10 limits | A | the VM's cgroup and disk limits | the plan's numbers, a stress run that reaches A's limit and leaves B unaffected; no plan-to-limits source exists in this repository or the Cloud service today | Not provable | Cloud service's plan catalog plus VM/host |
+| P11 no root-equal group | A | `id`, groups, capabilities | no `incus-admin` group, no group with gid 0, and no root-equal capability; the control socket is P3, so `incus` failing is not evidence here | VM/Cloud | VM A |
+| P12 own secrets | A | A's model key and Omni credential at B | A's credential works at A, B answers 401 for it at B, and B's own credential works; a 401 is the expected scope evidence, so B must answer | VM/Cloud | VM A/B and the Cloud/secret record |
+| P13 browser origin | a browser at A | B's origin | no B session; A's cookie is refused at B and A's `localStorage` is not visible there; the Cloud edge gives A and B distinct origins, and a 401 is the expected refusal, so B must answer | VM/Cloud | Cloud edge origin allocation and the browser/VM |
+| P14 MCP Bearer | A | B's MCP route with A's Bearer, on B's gate origin and B's direct listener | 401 from both routes; A's Bearer works at A; a missing answer fails | Repository | this repository: two `createAgentAccess` fixtures with separate homes and two gate origins; no VM needed |
+
+The 14 probes are still 14: **1 provable from this repository** (P14), **11 provable only on the
+VM/Cloud side** (P1-P8, P11-P13), and **2 not provable at all with today's evidence** (P9, P10).
+None has been run for this record, so the gate stays open. P14 is a missing repository test, not a
+VM probe; P9 and P10 remain probes and are not removed to make the count work. The 16 items in
+section 3 and 16 pass conditions in section 4 are unchanged; only the probe split is new.
+
+The node-identity line (I3) is a host record, not a probe from inside A: from inside A one can show
+its own groups and capabilities (P11), and that the build host does not answer (P2), but not that
+the node is a different machine. The private record must compare a host fingerprint with the build
+host's. That is a gap in the acceptance text, not in the gate code.
 
 ## 6. Smaller findings, not isolation blockers
 
@@ -736,7 +762,7 @@ not in the gate code.
 | Command | Result |
 |---|---|
 | `node herdr/scripts/privacy-check.mjs` (through `scripts/capped-run`) | clean; two folders still pending #795 |
-| `node server/secrecy.mjs --repo .` (through `scripts/capped-run`) | clean: 2956 tracked text files, no Stripe key, price or account id |
+| `node server/secrecy.mjs --repo .` (through `scripts/capped-run`) | clean: 2957 tracked text files, no Stripe key, price or account id |
 | `node --test server/test/gate-cloud.test.mjs` | 37 tests, 37 passed, 0 failed |
 | `node --test server/test/gate.test.mjs` | 19 tests, 19 passed, 0 failed |
 | `node --test server/test/gate-mcp.test.mjs` | 3 tests, 3 passed, 0 failed |
