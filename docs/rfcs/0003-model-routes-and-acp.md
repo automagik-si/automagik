@@ -942,7 +942,11 @@ For edits, the Image read boundary's text-only-input statement gains this except
 bots-dsh reads the person's verified upload from DSH's store and acp-dsh passes it inline
 when image prompts are supported and writes a 0400 copy in the per-draw scratch. No read
 root is added. Only an acknowledged per-draw profile permits an edit; fallback refuses it
-(D3's recommended default). The scratch and input copy are removed afterwards. Codex still
+(D3's recommended default). Any edit the locked run cannot be set up for (sign-in, account,
+configuration, switch check, profile acknowledgement, an older ACP service, a connector or
+session that cannot start) is refused with
+`reason: edit-not-isolated`, so bots-dsh gives the Bot its own verified copy to edit the file
+itself; the original stays unchanged. The scratch and input copy are removed afterwards. Codex still
 selects its image-tool paths without an adapter pre-read hook; acknowledgement is not proof
 of scratch-only reads, and #870 remains open. Real-app acceptance must demonstrate that
 Codex preserves the reference picture's distinctive shapes and text before this ships.
