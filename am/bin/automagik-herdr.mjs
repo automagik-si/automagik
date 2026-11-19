@@ -1648,7 +1648,7 @@ export const USAGE = `am: Automagik Herdr's bots and updates from the command li
 Usage: am <command> [options]                   (every command takes --json and --project <folder>)
        am <command> --machine M --project <folder there> ...
                                                  ls, show, create, edit, main, rm, category, start,
-                                                 restart, attach, detach and whois on a linked
+                                                 restart, attach, detach, whois and history on a linked
                                                  machine (hc machine ls), through hc
        am --version                              the installed pack's version
 
@@ -1816,7 +1816,9 @@ Usage: am <command> [options]                   (every command takes --json and 
   whois <terminal> | whois --bot <bot> | whois --all
                                 who plays where, by the attach ledger (--all: every place it holds)
   history <bot>                 what the bot did, by the attach and workers ledgers: its panes,
-                                starts, sessions (and the newest transcript) and workers
+                                starts, sessions (and the newest transcript) and workers. With
+                                --machine M --project <folder there>, the attach, detach and end
+                                events this computer recorded for that machine's project
   brief <bot>                   print the bot's briefing with its team's live state, as it is now
   tidy                          what drifted in the window, labels and project list, as a plan;
                                 changes nothing (--json: the plan's actions)
@@ -1842,11 +1844,13 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 runs it on about one task in three, by rule. Each call then
                                 removes up to 5 ended workers' worktrees made by this command
                                 in the launching repository, keeping unknown ownership or work
-  worker kill <pane>            from a bot's pane: end one worker that bot started (its
-                                worker.of label names the calling bot) once its turn is over.
-                                Any other pane -- a bot's seat, another bot's worker, your own
-                                pane, a worker still working -- is refused. hc kill itself is
-                                for a project's main bot only
+  worker kill <pane>            from a bot's pane: end a worker it started with am worker once
+                                its turn is over. Its worker.of label names the calling bot, which
+                                still owns it after its seat restarts. Bot seats (including your own),
+                                other bots' workers and workers still working are refused. Only the
+                                project's main bot can end a plain hc run child, including after a
+                                handoff or restart. The CLI rechecks the ledger and target before
+                                kill. hc has no conditional kill.
   reap                          explicitly check all ended workers' created worktrees, across
                                 repositories. Remove only with verified ownership and current
                                 HEAD pushed or proven merged, including squash merges. Keep
@@ -2569,8 +2573,8 @@ async function editProjectFor(opts) {
   const key = await commandKeyOf(opts);
   return loadProject(key, await writeDirOf(opts, key));
 }
-// The commands that take --machine: the definitions ones (and meter's own --machine).
-const ON_MACHINE = new Set(["ls", "show", "create", "edit", "main", "rm", "category", "start", "restart", "attach", "detach", "whois", "meter", "doc", "machines"]);
+// The commands that take --machine.
+const ON_MACHINE = new Set(["ls", "show", "create", "edit", "main", "rm", "category", "start", "restart", "attach", "detach", "whois", "history", "meter", "doc", "machines"]);
 // A project's place in --json answers: `machine` only for a linked machine's.
 const placeOf = (project) => ({ project: project.key, ...(project.machine ? { machine: project.machine } : {}) });
 
@@ -7419,21 +7423,31 @@ function scrubIds(value, ids) {
 }
 
 async function cmdHistory(opts, [ref]) {
+  const machine = opts.machine;
+  // Resolve the linked project even for a bare id so machine and project errors are reported.
+  const project = machine === undefined ? null : await projectFor(opts);
   // A bare id needs no definition (as detach): a removed bot's history is still there.
   const bareId = BOT_ID_SHAPE.test(ref ?? "");
   let bot = null;
-  try { bot = findBot((await projectFor(opts)).file, ref); } catch (e) { if (!bareId || !(e instanceof CliError)) throw e; }
+  try { bot = findBot((project ?? await projectFor(opts)).file, ref); } catch (e) { if (!bareId || !(e instanceof CliError)) throw e; }
   const id = bot?.id ?? ref;
-  const ledgerRows = workerLedgerRows();
+  const core = project ? (await machineNamed(machine))?.id : null;
+  if (project && !core) throw new CliError(`${machine} isn't a linked machine (hc machine ls).`);
+  const attachRows = (readAttachFile() ?? []).filter((r) => project
+    ? r.machine && r.core === core && r.project === project.key
+    : !r.machine);
+  // Worker ledger terminals belong to this computer.
+  const ledgerRows = project ? [] : workerLedgerRows();
   // RFC 0021: no session id is printed, in --json or text: every id the ledger holds is shown as
   // *** wherever it appears (its rows, the timeline, a transcript path named after it).
   const ids = new Set(ledgerRows.map((r) => holdId(r?.session)).filter((x) => typeof x === "string" && x.length >= 4));
-  const h = scrubIds(botHistory({ attachRows: readAttachFile() ?? [], ledgerRows, botId: id }), ids);
-  if (opts.json) return { id, name: bot?.name ?? null, ...h };
+  const h = scrubIds(botHistory({ attachRows, ledgerRows, botId: id }), ids);
+  if (opts.json) return { id, name: bot?.name ?? null, ...(project ? { machine } : {}), ...h };
   const { timeline, workers, transcript } = historyLines(h);
+  const empty = project ? `nothing recorded by this computer for ${machine}` : "nothing recorded on this computer";
   return [
-    `${bot?.name ?? `bot ${id}`} (${id})`,
-    "  what happened", ...(timeline.length ? timeline.map((e) => `    ${e.text}`) : ["    nothing recorded on this computer"]),
+    `${bot?.name ?? `bot ${id}`} (${id})${project ? ` on ${machine}` : ""}`,
+    "  what happened", ...(timeline.length ? timeline.map((e) => `    ${e.text}`) : [`    ${empty}`]),
     ...(workers.length ? ["  workers", ...workers.map((w) => `    ${w}`)] : []),
     ...(transcript ? [`  transcript   ${transcript}`] : []),
   ].join("\n");
@@ -8567,11 +8581,37 @@ async function cmdWorkerKill(opts, panes) {
   const self = me.address ?? process.env.HC_TERMINAL_ID;
   const target = await hcGet(pane);
   const address = target ? (target.address ?? pane) : pane;
-  const bound = target ? Boolean((await attachView()).byTerminal.get(address)?.binding?.bot) : false;
+  const view = await attachView();
+  const bound = target ? Boolean(view.byTerminal.get(address)?.binding?.bot) : false;
   const why = workerKillRefusal({ target: target ? { ...target, address } : null, botId: bot.id, self, bound });
   if (why) throw new CliError(`${why === "that isn't a terminal hc knows" ? `${pane} isn't a terminal hc knows` : why}. Nothing was ended.`);
-  if (target.state && target.state !== "live") {
-    return opts.json ? { terminal: address, ended: false, state: target.state } : `${address} has already ended (${target.state}).`;
+
+  let current = target;
+  if (!target.state || target.state === "live") {
+    // Read the ledger again without importing, sweeping or locking it. The first view is cached.
+    try {
+      const { byKey } = foldAttach(readAttachFile(view.path) ?? []);
+      const callerKey = attachKey(view.byTerminal.get(self).binding);
+      const caller = byKey.get(callerKey);
+      if (caller?.bot !== bot.id || addressOf(caller, view.machines) !== self) {
+        throw new CliError(`The attach ledger no longer binds ${self} to ${bot.name}`);
+      }
+      if (byKey.has(attachKey({ core: view.core, terminal: address, created_ms: target.created_ms }))) {
+        throw new CliError(`The attach ledger now binds ${address} to a bot`);
+      }
+      current = await hcGet(address);
+    } catch (e) {
+      throw new CliError(`Couldn't recheck ${address}: ${e?.message ?? e}. Nothing was ended.`);
+    }
+    if (!Number.isSafeInteger(target.created_ms) || current?.address !== address
+        || current.created_ms !== target.created_ms || typeof current.state !== "string" || !current.state) {
+      throw new CliError(`${address} could not be confirmed as the same terminal. Nothing was ended.`);
+    }
+    const changed = workerKillRefusal({ target: current, botId: bot.id, self });
+    if (changed) throw new CliError(`${changed}. Nothing was ended.`);
+  }
+  if (current.state !== "live") {
+    return opts.json ? { terminal: address, ended: false, state: current.state } : `${address} has already ended (${current.state}).`;
   }
   // The real hc (in a sandbox, the proxy's socket, which ends only the caller's own worker):
   // the pane's guard refuses a member's own `hc kill`, and this verb is the checked way around it.
@@ -9972,7 +10012,7 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     if (command === "main") checkMainArgs(rest, tokens);
     if (NEEDS_BOT.has(command) && !rest[0] && !(command === "restart" && (opts.queued || opts["run-queued"] || opts.due))) throw new CliError(`${command} needs a bot (its id or name).`, 2);
     if (opts.machine !== undefined && !ON_MACHINE.has(command)) {
-      throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, main, rm, category, start, restart, attach, detach, whois, meter, machines and doc.`, 2);
+      throw new CliError(`${command} works on this computer only for now; --machine goes with ls, show, create, edit, main, rm, category, start, restart, attach, detach, whois, history, meter, machines and doc.`, 2);
     }
     exitAfter.code = 0;
     const out = command === "proxy" ? await run(opts, rest, io) : await run(opts, rest);

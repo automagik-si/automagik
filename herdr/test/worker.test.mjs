@@ -439,6 +439,49 @@ test("worker kill (#955): a bot ends a worker it started and nothing else: a sea
   assert.equal(kills().length, 1);
 });
 
+test("worker kill #1129: a plain hc run child is refused whatever its parent says, and a worker that changes before the kill is not ended", (t) => {
+  const s = scene(t);
+  const kills = () => s.calls().filter((c) => c[0] === "kill");
+  const gets = (address) => s.calls().filter((c) => c[0] === "get" && c[1] === address).length;
+  const edit = (address, change) => {
+    const st = s.hcState();
+    change(st.terminals.find((x) => x.address === address));
+    writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  };
+  // A plain child of the caller's own pane, its turn over: hc's parent is no proof of who started it.
+  const st = s.hcState();
+  st.terminals.push({ ...term("t7", { cwd: st.terminals[0].cwd }), parent: "t1" });
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st));
+  const plain = s.cli(["worker", "kill", "t7"]);
+  assert.equal(plain.code, 1, plain.err);
+  assert.match(plain.err, /t7 isn't a worker \(it has no worker\.of label\)\. Only the project's main bot can end a terminal started with plain hc run, and worker kill ends only a worker you started\. Nothing was ended\./);
+  assert.deepEqual(kills(), []);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t7").state, "live", "the child is still there");
+
+  // A worker that exits between the first look and the recheck: said, never killed.
+  const one = s.cli(["worker", "fix the login form", "--branch", "feat/login", "--json"]);
+  assert.equal(one.code, 0, one.err);
+  const gone = one.json().terminal;
+  edit(gone, (x) => { x.status = { state: "idle" }; x.exitAfterGets = 1; });
+  const before = gets(gone);
+  const exited = s.cli(["worker", "kill", gone]);
+  assert.equal(exited.code, 0, exited.err);
+  assert.match(exited.out, /has already ended \(finished\)/);
+  assert.equal(gets(gone) - before, 2, "a first look and one recheck");
+  assert.deepEqual(kills(), []);
+
+  // A worker whose id is another terminal by the recheck: refused, never killed.
+  const two = s.cli(["worker", "tidy the docs", "--branch", "feat/docs", "--json"]);
+  assert.equal(two.code, 0, two.err);
+  const reused = two.json().terminal;
+  edit(reused, (x) => { x.status = { state: "idle" }; x.reuseAfterGets = 1; x.reuseCreated = 77; });
+  const swapped = s.cli(["worker", "kill", reused]);
+  assert.equal(swapped.code, 1, swapped.err);
+  assert.match(swapped.err, new RegExp(`${reused} could not be confirmed as the same terminal\\. Nothing was ended\\.`));
+  assert.deepEqual(kills(), []);
+  assert.equal(s.hcState().terminals.find((x) => x.address === reused).state, "live");
+});
+
 test("worker: a bot with no worker field runs its own agent, with that agent's default model and effort", (t) => {
   const file = team();
   delete file.bots[2].worker;
@@ -1430,6 +1473,30 @@ test("the bot briefing says a bot doesn't code: one worker per task, checked, en
   assert.match(WORKER_LINE, /end it with `am worker kill <terminal>` once the task merges/);
   assert.doesNotMatch(WORKER_LINE, /hc kill/, "hc kill is the main bot's only (#955)");
   assert.ok(text.length <= BRIEFING_LIMIT);
+});
+
+test("the briefing #1129: a member is told a plain hc run child is the main bot's to end, in both renders; the main bot isn't", async () => {
+  const { briefingText, launchBriefingText, PLAIN_RUN_LINE, WORKER_LINE, BRIEFING_LIMIT } = await import("../mods/am-sidebar/briefingText.mjs");
+  const file = parseBots(JSON.stringify(team())).file;
+  const [main, , member] = file.bots;
+  assert.match(PLAIN_RUN_LINE, /plain `hc run`/);
+  assert.match(PLAIN_RUN_LINE, /`am worker kill` refuses it/);
+  assert.match(PLAIN_RUN_LINE, /Only the project's main bot can end it, including after a handoff or restart/);
+  assert.match(PLAIN_RUN_LINE, /Start with `am worker`/);
+  const cleanup = "A plain `hc run` starts an ordinary terminal. "
+    + "Only the project's main bot can end it, including after a handoff or restart.";
+  for (const render of [briefingText, launchBriefingText]) {
+    const mine = render({ self: member, file });
+    assert.ok(mine.includes(PLAIN_RUN_LINE), `${render.name}: a member`);
+    assert.ok(mine.includes(WORKER_LINE), `${render.name}: the worker line stays`);
+    assert.ok(mine.length <= BRIEFING_LIMIT);
+    for (const [mode, self, isGit] of [["outside git", member, false], ["opted out", { ...member, code: false }, true]]) {
+      const text = render({ self, file, isGit });
+      assert.ok(text.includes(cleanup), `${render.name}: ${mode}`);
+      assert.doesNotMatch(text, /worker/i, `${render.name}: ${mode}`);
+    }
+    assert.doesNotMatch(render({ self: main, file }), /A plain `hc run`/, `${render.name}: the main bot`);
+  }
 });
 
 // ---- review fixes ----

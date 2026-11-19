@@ -16,6 +16,7 @@ import {
 } from "../mods/am-sidebar/update.mjs";
 import { CHECK_FILE, RESTORE_FILE, formatMarker, OFF_BY_DEFAULT, parseMarker } from "../mods/am-sidebar/release.js";
 import { cmdUpdate } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
+import { assertNoFixtureManifest, quietOuterManifestEnv } from "./outer-manifest.mjs";
 import { keys, pointerBytes, signatureOf } from "./pointer.mjs";
 
 /** The herdr-lane release serving the pointer to `version` (pointerBytes' options), signed with the test key. */
@@ -130,6 +131,20 @@ test("packOfPointer refuses what is not this pack's pointer", () => {
   bad({ sequence: "570001" }, /has no sequence/);
   bad({ sequence: -1 }, /has no sequence/);
   assert.equal(packOf("3.57.1").sequence, 570001);
+});
+
+test("packOfPointer refuses a pointer whose signed publisher, repository or tag is not this pack's", () => {
+  const bad = (extra, re) => assert.throws(() => packOfPointer({ ...JSON.parse(pointerBytes("3.57.1")), ...extra }), re);
+  bad({ publisher: "someone-else" }, /unexpected publisher: refusing it/);
+  bad({ publisher: undefined }, /unexpected publisher/);
+  bad({ repository: "https://github.com/someone/automagik" }, /unexpected repository: refusing it/);
+  bad({ repository: undefined }, /unexpected repository/);
+  bad({ tag: "v3.57.2" }, /must name tag v3\.57\.1: refusing it/);
+  bad({ tag: undefined }, /must name tag v3\.57\.1/);
+  // Both signers' repositories are accepted: the current one and the historical one.
+  for (const repository of ["https://github.com/automagik-si/automagik", "https://github.com/automagik-dev/automagik"]) {
+    assert.equal(packOf("3.57.1", { repository }).version, "3.57.1", repository);
+  }
 });
 
 test("fetchPointer: a good signature names the pack; a bad one, an untrusted key or no signature is refused", async () => {
@@ -501,8 +516,10 @@ test("update.mjs runs from a copy of the pack outside the repository (no package
   try {
     const pack = join(home, "mods", "am-sidebar");
     cpSync(fileURLToPath(new URL("../mods/am-sidebar", import.meta.url)), pack, { recursive: true });
+    assertNoFixtureManifest(home, dirname(pack), pack);
     const r = spawnSync(process.execPath, [join(pack, "update.mjs"), "check"], {
-      env: { ...process.env, HERDR_APP_HOME: home, AUTOMAGIK_HERDR_NO_UPDATE: "1", NODE_OPTIONS: "" }, encoding: "utf8",
+      env: { ...process.env, HERDR_APP_HOME: home, AUTOMAGIK_HERDR_NO_UPDATE: "1", NODE_OPTIONS: "", ...quietOuterManifestEnv(home) },
+      encoding: "utf8",
     });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, "");
@@ -1691,6 +1708,25 @@ test("an old rolled-back install: am update --retry-skipped clears the skip and 
     assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.2.0", "the skipped release is installed");
     assert.deepEqual(readAuto(h.mods), { on: true, skip: null }, "the skip is cleared");
     assert.equal(existsSync(join(stateDirOf(h.mods), RESTORE_FILE)), false, "the old restore receipt is gone");
+  } finally { h.done(); }
+});
+
+test("#1486: --retry-skipped on the affected machine, whose check runner still never starts, keeps the release unchecked", async () => {
+  const h = autoHome(["0.2.0"]);
+  const app = fakeCheckExit(join(h.home, "still-127"), { code: 127 });
+  try {
+    // The old updater's rollback, made by a runner that never started (#1486).
+    writeAuto(h.mods, { skip: "0.2.0" });
+    writeFileSync(join(stateDirOf(h.mods), RESTORE_FILE), JSON.stringify({ version: "0.1.0", failedVersion: "0.2.0",
+      mod: "am-tabs", failed: ["am-tabs"], checked: true, at: Date.now() }));
+    const r = await installUpdate({ keys, fetch: fakeFetch(h.table), env: {}, modsDir: h.mods, herdrApp: app.bin, retrySkipped: true });
+    assert.equal(r.installed.version, "0.2.0", "the skipped release is installed and kept");
+    assert.equal(r.installed.restored, undefined, "nothing was rolled back again");
+    assert.deepEqual(r.installed.check, { failed: [], checked: false, unavailable: "the herdr-app check could not run (exit 127)" });
+    assert.equal(readVersion(join(h.mods, "am-sidebar")), "0.2.0");
+    assert.equal(readAuto(h.mods).skip, null, "the skip is cleared, and no new one is written");
+    assert.equal(existsSync(join(stateDirOf(h.mods), RESTORE_FILE)), false, "the old restore receipt is gone");
+    assert.equal(existsSync(join(stateDirOf(h.mods), CHECK_FILE)), true, "the unchecked note is written");
   } finally { h.done(); }
 });
 

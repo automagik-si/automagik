@@ -13,9 +13,11 @@
 // `hc kill` is for the seat of a project's main bot only (#955): a member's seat and every
 // worker are refused, and end their own workers with `automagik-herdr worker kill <pane>`.
 // Every other agent's pane gets the kill shim instead (`hc-kill/hc`, runKillGuard below): that
-// shim also refuses a prefixed send to an agent or an unknown target (#1421). A pane can still
-// start an agent between the check and delivery: a guardrail, not a guarantee. The real fix
-// for every sender is in herdr-core. Allowed prefixed sends use the address that was checked;
+// shim also refuses a prefixed send to an agent or an unknown target (#1421). Both wrappers
+// refuse a send to a pane held by a dialog (#1414): they look at the target's status and, when
+// it is neither working nor blocked, its screen, and never type into or answer the dialog. A pane
+// can still start an agent between the check and delivery: a guardrail, not a guarantee. The real
+// fix for every sender is in herdr-core. Allowed prefixed sends use the address that was checked;
 // every other hc call passes to the real hc untouched.
 //
 // The caller comes from the attach ledger (attach.js), the authority: a worker pane has no
@@ -40,6 +42,7 @@ import { readApprovedRecord } from "./approved.js";
 import { attachPath, foldAttach, modeProblem, readAttach } from "./attach.js";
 import { cleanProjectPath, crossMembersOf, descendantsOf, effectiveLead, inferProjectOf, mainBotOf, parseBots, projectEntriesOf, projectFileOf, RANKS } from "./model.js";
 import { agentKeyOfArgv, resolveAgent } from "./models.js";
+import { pendingDialog } from "./dialog.js";
 import { ENV, KILL_GUARD_NAME, SESSION_LABEL, WORKER_AGY_MODE_LABEL, WORKER_EFFORT_LABEL, WORKER_MODEL_LABEL,
   WORKER_OF_LABEL, isKillGuardWord } from "./workers.js";
 
@@ -118,6 +121,10 @@ export async function runGuard(argv, env = process.env) {
       if (typeof hit === "string") return refused(`send: ${hit}`);
       const why = sendTextProblem(send.texts, hit.get);
       if (why) return refused(`send: ${why}; start it with other text (your name, say)`);
+      if (send.texts.length) {
+        const held = heldTarget(real, hit, env);
+        if (held) return heldRefusal(held);
+      }
       if (send.texts.some((text) => commandPrefixOf(text))) args[send.targetIndex] = hit.address;
       return passthrough(real, args, env);
     }
@@ -195,14 +202,18 @@ export async function runKillGuard(argv, env = process.env) {
   if (verb === "send" && !asksHelp) {
     const send = sendArgs(args);
     const prefix = send.texts.map(commandPrefixOf).find(Boolean);
-    if (prefix) {
+    if (send.target && send.texts.length) {
+      let hit;
       try {
-        const hit = resolvedTargetOf(real, send.target, send.on, env);
-        if (sendTextProblem(send.texts, hit.get)) return sendRefused(prefix, send.target);
-        args[send.targetIndex] = hit.address;
+        hit = resolvedTargetOf(real, send.target, send.on, env);
       } catch {
-        return sendRefused(prefix, send.target, "the target could not be checked");
+        if (prefix) return sendRefused(prefix, send.target, "the target could not be checked");
+        return passthrough(real, args, env, { plain: true });
       }
+      if (prefix && sendTextProblem(send.texts, hit.get)) return sendRefused(prefix, send.target);
+      const held = heldTarget(real, hit, env);
+      if (held) return heldRefusal(held);
+      if (prefix && hit.address) args[send.targetIndex] = hit.address;
     }
     return passthrough(real, args, env, { plain: true });
   }
@@ -332,6 +343,37 @@ function hcJson(real, args, env) {
 }
 
 const rowsOf = (ls) => (Array.isArray(ls?.terminals) ? ls.terminals : Array.isArray(ls) ? ls : []);
+
+/**
+ * The target a send must not be typed into (#1414), or null: a pane herdr-core reports blocked
+ * is waiting for a person, and a pane whose status says idle, done or nothing at all can still
+ * show a visible dialog (a linked machine, a revived pane). A working pane is mid-turn, not
+ * asking, so it is left alone. The screen look is the pack's own pendingDialog; a screen that
+ * cannot be read is left to hc's own send, never guessed at. Returns the resolved address.
+ */
+export function heldTarget(real, hit, env) {
+  if (!hit?.get) return null;
+  // A finished pane has no live dialog: its last screen may still show one, and hc's own
+  // `finished` refusal is the answer the sender needs (#1414).
+  if (hit.get.state && hit.get.state !== "live") return null;
+  if (hit.get.status?.state === "blocked") return hit.address;
+  if (hit.get.status?.state === "working") return null;
+  const read = hcJson(real, ["read", hit.address, "--lines", "40"], env);
+  if (typeof read?.text !== "string") return null;
+  return pendingDialog(read.text) ? hit.address : null;
+}
+
+/**
+ * One hc-style error line and exit 9 (hc's own `blocked` code), so a relay can tell a held pane
+ * from a transport error and route elsewhere. Names the pane, never the dialog's text, a folder
+ * or a host: the sender needs the pane and the reason, not the person's screen.
+ */
+function heldRefusal(address) {
+  const message = `${address} is held by a dialog: a person must answer a question, permission or sign-in in it, so nothing was sent.`;
+  const hint = "Answer the dialog in that pane, or route this message to another pane; it was not typed and was not dropped.";
+  say(JSON.stringify({ error: { kind: "blocked", message, hint } }));
+  return 9;
+}
 
 // ---- caller: the attach ledger is the authority; a worker pane's worker.of is the fallback ----
 
