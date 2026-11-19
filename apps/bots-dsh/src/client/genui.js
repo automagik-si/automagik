@@ -290,7 +290,7 @@ export function BackfillCard({ roster, start, cancel }) {
         }))),
       run.more > 0 ? h('div', { className: 'bt-genui-more' }, t('{count} more chats', { count: countText(run.more) })) : null,
       errors[`run:${run.id}`] !== undefined ? h('div', { className: 'bt-genui-foot' }, h('span', { className: 'bt-genui-error', role: 'status' }, errors[`run:${run.id}`])) : null)),
-    view.moreRuns > 0 ? h('div', { className: 'bt-genui-more' }, t('{count} earlier runs', { count: countText(view.moreRuns) })) : null)
+    view.moreRuns > 0 ? h('div', { className: 'bt-genui-more' }, t('Showing only {count} runs', { count: countText(view.runs.length) })) : null)
   return h(Fragment, null, waitingNode, pickers, runsNode)
 }
 

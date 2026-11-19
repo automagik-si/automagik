@@ -140,16 +140,19 @@ test('a run says its range and how its chats move, and only a live job can be st
   assert.equal(runView({ rows }), undefined)
 })
 
-test('the card reads the roster: newest runs first, capped, with the earlier ones counted', () => {
-  const runs = Array.from({ length: 5 }, (_, index) => ({
-    id: `r${index}`, from: FROM, to: TO, startedAt: 1_795_003_201_000,
+test('the card shows the first three valid runs in producer order', () => {
+  const runs = Array.from({ length: 20 }, (_, index) => ({
+    id: `r${index}`, from: FROM, to: TO, startedAt: 1_795_003_201_000 + index * 86_400_000,
     rows: [{ chatId: `c${index}`, chat: `C${index}`, jobId: `j${index}`, state: 'queued', outcome: null, counts: {} }],
   }))
   const roster = { omniBackfillProposals: [PROPOSAL], omniBackfills: runs, other: 1 }
   const view = backfillView(roster)
   assert.deepEqual(view.proposals.map(proposal => proposal.id), ['p1'])
   assert.deepEqual(view.runs.map(run => run.id), ['r0', 'r1', 'r2'])
-  assert.equal(view.moreRuns, 2)
+  assert.equal(view.moreRuns, 17)
+  const full = backfillView({ omniBackfills: [null, ...runs.slice(0, 3), { rows: [] }] })
+  assert.deepEqual(full.runs.map(run => run.id), ['r0', 'r1', 'r2'])
+  assert.equal(full.moreRuns, 0)
   // Many chats on one run: the card draws the first twenty and says how many more.
   const many = { id: 'r1', rows: Array.from({ length: 25 }, (_, index) => ({ chatId: `c${index}`, chat: `C${index}`, jobId: `j${index}`, state: 'queued', outcome: null })) }
   assert.equal(runView(many).rows.length, 20)

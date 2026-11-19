@@ -419,10 +419,14 @@ function backfillRowView(row) {
   return { ...rowView(row), chatId, jobId: backfillId(row.jobId) ?? null, cancelable: canCancel(row) }
 }
 
+function backfillRunId(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return backfillId(value.id)
+}
+
 /** One run: its range, its started day, how its chats stand, and its rows as they move. */
 export function runView(value) {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const id = backfillId(value.id)
+  const id = backfillRunId(value)
   if (id === undefined) return undefined
   const rows = Array.isArray(value.rows) ? value.rows : []
   const shown = rows.slice(0, BACKFILL_ROWS_SHOWN).map(backfillRowView).filter(Boolean)
@@ -438,14 +442,15 @@ export function runView(value) {
   }
 }
 
-/** The card's roster view: the open proposals, then the newest runs and how many came before. */
+/** The open proposals and the first runs in roster order. */
 export function backfillView(roster) {
   const proposals = Array.isArray(roster?.omniBackfillProposals) ? roster.omniBackfillProposals : []
   const runs = Array.isArray(roster?.omniBackfills) ? roster.omniBackfills : []
-  const shown = runs.slice(0, BACKFILL_RUNS_SHOWN).map(runView).filter(Boolean)
+  const validRuns = runs.filter(run => backfillRunId(run) !== undefined)
+  const shown = validRuns.slice(0, BACKFILL_RUNS_SHOWN).map(runView)
   return {
     proposals: proposals.map(proposalView).filter(Boolean),
     runs: shown,
-    moreRuns: Math.max(0, runs.length - shown.length),
+    moreRuns: validRuns.length - shown.length,
   }
 }

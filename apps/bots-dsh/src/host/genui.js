@@ -208,6 +208,18 @@ export function backfillRunOf(value) {
   return run
 }
 
+function cappedBackfillEntries(values, limit, sanitize) {
+  if (!Array.isArray(values)) return []
+  const accepted = []
+  for (let index = 0; index < values.length; index += 1) {
+    const entry = sanitize(values[index])
+    if (entry === undefined) continue
+    accepted.push(entry)
+    if (accepted.length === limit) break
+  }
+  return accepted
+}
+
 /**
  * Wraps the view and live hooks a plugin registers, so the two kit fields are rebuilt on
  * their way into the team's answers. Every other field a hook returns passes through as it
@@ -224,10 +236,8 @@ export function guardBackfillFields(hooks) {
       const hasRuns = Object.hasOwn(value, 'omniBackfills')
       if (!hasProposals && !hasRuns) return value
       const out = { ...value }
-      if (hasProposals) out.omniBackfillProposals = Array.isArray(value.omniBackfillProposals)
-        ? value.omniBackfillProposals.slice(0, GENUI_MAX_BACKFILL_PROPOSALS).map(backfillProposalOf).filter(Boolean) : []
-      if (hasRuns) out.omniBackfills = Array.isArray(value.omniBackfills)
-        ? value.omniBackfills.slice(0, GENUI_MAX_BACKFILL_RUNS).map(backfillRunOf).filter(Boolean) : []
+      if (hasProposals) out.omniBackfillProposals = cappedBackfillEntries(value.omniBackfillProposals, GENUI_MAX_BACKFILL_PROPOSALS, backfillProposalOf)
+      if (hasRuns) out.omniBackfills = cappedBackfillEntries(value.omniBackfills, GENUI_MAX_BACKFILL_RUNS, backfillRunOf)
       return out
     })
   }

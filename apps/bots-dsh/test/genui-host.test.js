@@ -454,22 +454,25 @@ test('the backfill proposal and run fields keep labels, dates and counts only', 
 
 test('the backfill fields cap the proposals and runs published, and each element keeps its own cap', async t => {
   const { rt, state } = await bench(t)
-  // A roster can grow without bound while each element is already capped. Five thousand of
-  // each still publishes only the kit's bound, while one element's chats and rows stay at
-  // their own per-element caps.
+  // Invalid entries can precede the first usable entry by more than the per-element cap.
   const chats = Array.from({ length: 500 }, (_, index) => ({ id: `c${index}`, ticked: false }))
   const rows = Array.from({ length: 500 }, (_, index) => ({ chatId: `c${index}`, state: 'queued', outcome: null }))
-  const proposals = Array.from({ length: 5000 }, (_, index) => ({ id: `p${index}`, chats: index === 0 ? chats : [] }))
-  const runs = Array.from({ length: 5000 }, (_, index) => ({ id: `r${index}`, rows: index === 0 ? rows : [] }))
+  const invalid = Array(201).fill(null)
+  const cappedInput = (limit, make) => {
+    const entries = [...invalid, ...Array.from({ length: limit }, (_, index) => make(index))]
+    Object.defineProperty(entries, entries.length, {
+      get() { throw new Error('the guard read past the last publication slot') },
+    })
+    return entries
+  }
+  const proposals = cappedInput(GENUI_MAX_BACKFILL_PROPOSALS, index => ({ id: `p${index}`, chats: index === 0 ? chats : [] }))
+  const runs = cappedInput(GENUI_MAX_BACKFILL_RUNS, index => ({ id: `r${index}`, rows: index === 0 ? rows : [] }))
   const offView = rt.hooks.view(() => ({ omniBackfillProposals: proposals }))
   const offLive = rt.hooks.live(() => ({ omniBackfills: runs }))
   t.after(() => { offView(); offLive() })
   const answer = await state()
-  assert.equal(answer.omniBackfillProposals.length, GENUI_MAX_BACKFILL_PROPOSALS)
-  assert.equal(answer.omniBackfills.length, GENUI_MAX_BACKFILL_RUNS)
-  // The array keeps its front (the newest runs first, as the card reads them).
-  assert.deepEqual(answer.omniBackfillProposals.map(proposal => proposal.id).slice(0, 3), ['p0', 'p1', 'p2'])
-  assert.deepEqual(answer.omniBackfills.map(run => run.id).slice(0, 3), ['r0', 'r1', 'r2'])
+  assert.deepEqual(answer.omniBackfillProposals.map(proposal => proposal.id), Array.from({ length: 20 }, (_, index) => `p${index}`))
+  assert.deepEqual(answer.omniBackfills.map(run => run.id), Array.from({ length: 20 }, (_, index) => `r${index}`))
   assert.equal(answer.omniBackfillProposals[0].chats.length, 200)
   assert.equal(answer.omniBackfills[0].rows.length, 200)
 })
