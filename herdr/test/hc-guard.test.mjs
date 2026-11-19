@@ -463,6 +463,24 @@ test("hc kill (#955): a main bot's seat ends a pane; the roster's kind decides, 
   }
 });
 
+test("with the proxy off, a main bot's kill refuses a machine-resolving name and the direct address (#628)", (t) => {
+  // `edit <bot> --hc-proxy off` leaves this guard as the only hc check. `worker-m` is a pane
+  // `hc ls` resolves to `m/t105`; the guard refuses the resolved address, never forwards the
+  // name, and the main bot still ends a local pane at the address it checked.
+  const s = killScene(t);
+  for (const args of [["kill", "worker-m"], ["kill", "m/t105"]]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args, { HC_TERMINAL_ID: "t103" });
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.deepEqual(killsSeen(s), [], `${args.join(" ")} never reaches hc`);
+  }
+  writeFileSync(s.logPath, "");
+  const local = guardRun(s, ["kill", "worker"], { HC_TERMINAL_ID: "t103" });
+  assert.equal(local.status, 0, local.stderr);
+  assert.deepEqual(killsSeen(s), [["kill", "t105"]], "the checked address is the one forwarded");
+});
+
 test("hc kill (#955): a flag before the command is refused for everyone, the main bot too; an unknown caller is refused", (t) => {
   const s = killScene(t);
   for (const terminal of ["t103", "t101", "t100", "t105"]) {
@@ -735,6 +753,42 @@ test("with the proxy off, a machine target named by a name is refused (#628)", (
     assert.equal(calls(s).some((argv) => same(argv, [args[0], address])), false,
       `${args.join(" ")} never forwards its machine address`);
   }
+});
+
+test("with the proxy off, label and events refuse a machine-resolving name and the direct address (#628)", (t) => {
+  // `edit <bot> --hc-proxy off` leaves this guard as the only hc check. A name passes the
+  // lexical check; the address hc resolves decides, and the checked address is what is
+  // forwarded. `worker-m` is the caller's own worker on a machine, so label's own-worker
+  // check passes and only the resolved-address rule refuses it.
+  const s = scene(t);
+  for (const args of [
+    ["label", "worker-m", "role=reviewer"], ["label", "m/t105", "role=reviewer"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.equal(calls(s).some((argv) => argv[0] === "label"), false, `${args.join(" ")} never reaches hc`);
+  }
+  for (const args of [
+    ["events", "--terminal", "cap-m"], ["events", "--terminal=m/t101"],
+    ["events", "--children-of", "worker-m"], ["events", "--children-of=m/t105"],
+  ]) {
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, args);
+    assertRefused(r);
+    assert.match(r.stderr, /machine target/, args.join(" "));
+    assert.equal(calls(s).some((argv) => argv[0] === "events"), false, `${args.join(" ")} never reaches hc`);
+  }
+  // A local name still passes, at the address the guard checked.
+  writeFileSync(s.logPath, "");
+  const label = guardRun(s, ["label", "worker", "role=dev"]);
+  assert.equal(label.status, 0, label.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["label", "t105", "role=dev"])), JSON.stringify(calls(s)));
+  writeFileSync(s.logPath, "");
+  const events = guardRun(s, ["events", "--terminal", "cap"]);
+  assert.equal(events.status, 0, events.stderr);
+  assert.ok(calls(s).some((argv) => same(argv, ["events", "--terminal", "t101"])), JSON.stringify(calls(s)));
 });
 
 test("a machine target named by an hc events option is refused", (t) => {

@@ -1050,8 +1050,9 @@ caller as `--parent`, `worker.of=<the caller's bot>`, a `--cwd` under the projec
 refused with one stderr line naming #624, #628 and #631, and the real `hc` is never called:
 `exec`, any other `run` (including a template or another agent), file writes, edits and reads,
 `machine`, `server`, `update`, `connect`, `put`, `keys`, `attach`, a `machine/t7` target on
-every verb but `send`, whether typed as an address or reached by a name that `hc ls` resolves
-to one (`hc events --terminal`/`--children-of` included), and any `--on` outside
+every verb but `send` — typed as an address or reached by a name that `hc ls` resolves to one
+(`read`, `get`, `wait`, `label`, `kill`, `rm` and both `hc events` target options resolve the
+target and refuse a machine address before the real `hc` runs) — and any `--on` outside
 an allowed `send`.
 
 `send` is scoped to the caller's team: its lead chain (`effectiveLead` up), its declared lead
