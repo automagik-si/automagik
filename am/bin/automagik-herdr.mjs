@@ -1588,7 +1588,9 @@ in step on this computer.
 
 Which pane plays which bot is the attach ledger's answer (<app home>/automagik-herdr/attach.jsonl,
 written by start, attach and detach only); the bot label is a display hint, and relabelling a
-pane with hc label changes nothing.
+pane with hc label changes nothing. With HERDR_APP_HOME unset, restart reads the home the
+bot's pane was launched with and the project's own app home (<project>/.herdr/app-home) too,
+and refuses before starting anything when two app homes both name the bot.
 
 A bot is its id or its name in the project. The project is the one the current folder
 keys to (its git main checkout), or --project's. With --machine, --project is an absolute
@@ -5126,13 +5128,85 @@ async function duplicateLabel(project, bot, view) {
   try { return (await labelledPanes(project, bot, bound)).length > 1; } catch { return false; }
 }
 
+/** A project's own app home (RFC 0021 delivery 3): `<project>/.herdr/app-home`. */
+const projectAppHomeOf = (key) => under(key, ".herdr/app-home");
+
+/**
+ * The bot's binding in one app home's ledger, or null: only this computer's core and this
+ * project (or a row that names none, from before rows carried a project) own it (#1128). An
+ * unreadable ledger is refused by readAttachFile, never taken for an empty one.
+ */
+function bindingInHome(home, botId, core, key) {
+  const row = heldIn(foldAttach(readAttachFile(attachPath(home)) ?? []), botId);
+  if (!row || row.core !== core || !(row.project == null || row.project === key)) return null;
+  return row;
+}
+
+/** The pane a binding still names (same core, terminal and created_ms), or null when it is gone. */
+async function bindingPane(row, key) {
+  const get = await checkedPane(row.terminal);
+  if (get?.created_ms !== row.created_ms) return null;
+  if (row.project == null && (!get.cwd || await keyOf(get.cwd) !== key)) return null;
+  return get;
+}
+
+/** The app home a pane's launch word names (#650), when it is a usable absolute path; else null. */
+function launchHomeOf(pane) {
+  const dir = paneLaunchEnv(pane)?.get("HERDR_APP_HOME");
+  if (typeof dir !== "string" || !isAbsolute(dir) || /[\x00-\x1f\x7f]/.test(dir)
+      || (process.env.AUTOMAGIK_HERDR_TEST_ROOTS && !inTestRoots(dir))) return null;
+  return dir.replace(/\/+$/, "");
+}
+
+/**
+ * The app homes the bot's ended panes still name (#1128). A finished terminal hc keeps under
+ * the bot's label carries the home its launch was given (#650), and the ledger there binds that
+ * very launch (core, terminal, created_ms): the launch's own record, retained. One home per
+ * launch; two launches naming different homes are ambiguous. [] when hc keeps none (removed, or
+ * a reboot took them), so the caller falls back to the ledgers it can derive.
+ */
+async function endedLaunchHomes(project, bot, core) {
+  const reply = await hcJson(["ls", "--all", "--label", `${BOT_LABEL}=${bot.id}`]);
+  if (!Array.isArray(reply) && !Array.isArray(reply?.terminals)) {
+    throw new CliError(`hc ls gave no pane list for ${bot.name}; nothing was started.`);
+  }
+  const homes = new Map();
+  for (const row of rowsOf(reply)) {
+    if (typeof row?.address !== "string" || !local(row.address) || row.state !== "finished") continue;
+    const get = await hcLookup(row.address).catch(() => null);
+    if (!get || get.state !== "finished" || !Number.isSafeInteger(get.created_ms)) continue;
+    if (!get.labels || get.labels[BOT_LABEL] !== bot.id) continue;
+    const dir = launchHomeOf(get);
+    if (!dir) continue;
+    const rowThere = bindingInHome(dir, bot.id, core, project.key);
+    if (!rowThere || rowThere.terminal !== row.address || rowThere.created_ms !== get.created_ms) continue;
+    homes.set(realDir(dir) ?? dir, dir);
+  }
+  return [...homes.values()];
+}
+
+/** Two app homes both name the bot: never pick one, and never write a third row (#1128). */
+function appHomeConflict(bot, homes) {
+  return new CliError(`${bot.name} has bindings in two app homes (${homes.map((h) => attachPath(h)).join(", ")}); `
+    + `inspect both ledgers before restarting, and set HERDR_APP_HOME to the home that owns it.`,
+    1, { refused: "app-home" });
+}
+
+/**
+ * Which app home a restart on this computer writes in, decided before anything is written
+ * (#1128). With HERDR_APP_HOME set, that home is the selection. Without it, the home a pane of
+ * this bot was launched with is retained (#650's env word), even one that ended while hc still
+ * keeps it; then a live binding wins over a stale one; then the project's own app home
+ * (`<project>/.herdr/app-home`, RFC 0021 delivery 3) is used when it names the bot and the
+ * selected home does not. Two bindings no launch record decides between are refused, never
+ * merged: restart writes the one authoritative ledger or nothing at all.
+ */
 async function restartTarget(project, bot, requestedHome, explicitHome, allowImport = false) {
   const core = await coreId();
   const bindingIn = (dir) => heldIn(foldAttach(readAttachFile(attachPath(dir)) ?? []), bot.id);
   const carriedBinding = (pane) => {
-    const dir = paneLaunchEnv(pane)?.get("HERDR_APP_HOME");
-    if (typeof dir !== "string" || !isAbsolute(dir) || /[\x00-\x1f\x7f]/.test(dir)
-        || (process.env.AUTOMAGIK_HERDR_TEST_ROOTS && !inTestRoots(dir))) return null;
+    const dir = launchHomeOf(pane);
+    if (dir === null) return null;
     const row = bindingIn(dir);
     return row?.core === core && row.terminal === pane.address && row.created_ms === pane.created_ms ? row : null;
   };
@@ -5171,6 +5245,26 @@ async function restartTarget(project, bot, requestedHome, explicitHome, allowImp
       throw new CliError(`${selected.terminal} has an attachment in the selected app home that doesn't identify this project; nothing was started.`,
         1, { refused: "attachment", terminal: selected.terminal });
     }
+    // #1128: no live label to read the home from. Without an explicit selection, retain the
+    // home a pane of this bot was launched with (#650's env word), even one that ended: hc keeps
+    // it until removed, and its ledger row there proves the launch. Two launches naming
+    // different homes are ambiguous.
+    if (!explicitHome) {
+      const ended = await endedLaunchHomes(project, bot, core);
+      if (ended.length > 1) throw appHomeConflict(bot, ended);
+      if (ended.length === 1) return { held: null, dir: ended[0] };
+    }
+    // The project's own app home may hold this bot too: one row there (its pane gone, or live
+    // without its label) is the authority; a row here too is a conflict, never a second one.
+    const other = projectAppHomeOf(project.key);
+    if (!explicitHome && !sameHome(other, requestedHome)) {
+      const rowOther = bindingInHome(other, bot.id, core, project.key);
+      if (rowOther) {
+        if (binding) throw appHomeConflict(bot, [requestedHome, other]);
+        const live = await bindingPane(rowOther, project.key);
+        return live ? { held: { binding: rowOther, get: live }, dir: other } : { held: null, dir: other };
+      }
+    }
     return { held: null, dir: requestedHome };
   }
   if (!get && row?.project === project.key) {
@@ -5179,6 +5273,18 @@ async function restartTarget(project, bot, requestedHome, explicitHome, allowImp
         1, { refused: "app-home", terminal: candidate.address });
     }
     return { held: { binding: row, get: candidate }, dir: carried };
+  }
+  // #1128: a pane launched before #650 carries no app-home word; the project's own app home
+  // still proves it, by the row's own terminal identity. Without an explicit selection, read
+  // that row rather than refuse, and never write the selected home's ledger for it.
+  if (!get && !explicitHome) {
+    const other = projectAppHomeOf(project.key);
+    if (!sameHome(other, requestedHome)) {
+      const rowOther = bindingInHome(other, bot.id, core, project.key);
+      if (rowOther && rowOther.terminal === candidate.address && rowOther.created_ms === candidate.created_ms) {
+        return { held: { binding: rowOther, get: candidate }, dir: other };
+      }
+    }
   }
   // A deliberately selected app home still gets its documented one-time import. Never
   // use import to decide which home owns an unbound pane when the caller lost its home.
@@ -7845,6 +7951,18 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
         : me && [t.terminal, states.get(t.terminal)?.get?.name].includes(me) ? "revive runs inside its pane; run it from another terminal" : null;
     return { ...t, name: nameOf(t), bot: t.bot, def: bot, refuse: why, via: parentTarget(t) };
   });
+  // #1128: a bot whose recorded pane is gone may still run in a pane that carries its label
+  // from another app home. Never start a twin: that live pane is named and left alone.
+  for (const p of plan) {
+    if (p.refuse || p.pane !== "gone" || !p.def || !p.project) continue;
+    try {
+      const live = (await labelledPanes(projectOfKey(p.project), p.def, null, () => null))
+        .filter((g) => !(g.address === p.terminal && g.created_ms === p.created_ms));
+      if (live.length) p.refuse = `a live pane carries its label (${live.map((g) => g.address).join(", ")}), so it was left running, not started again`;
+    } catch (e) {
+      p.refuse = `its live panes couldn't be checked (${stoppedReason(e)}), so nothing was started`;
+    }
+  }
   for (const s of skipped) projectOfKey(s.project).results.push({ name: nameOf(s), bot: s.bot, outcome: "skipped", why: s.why, terminal: s.terminal, helpers: [] });
   if (dry) {
     const lines = plan.map((p) => `${p.name} (${p.bot}) in ${p.project ?? "no project"}: ${p.refuse ? `left alone, ${p.refuse}`
