@@ -9,6 +9,9 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createHash, generateKeyPairSync } from 'node:crypto';
+import * as amLane from './am-lane';
+import * as meterLane from './meter-lane';
 import { pluginNames } from './release-plugins';
 
 const workflow = (name: string) => readFileSync(join(import.meta.dir, '..', '.github', 'workflows', name), 'utf8').split('\n');
@@ -799,7 +802,7 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     expect(lines[at('The meter lane\'s signing key') + 1].trim()).toBe('id: meterkey');
     expect(lines[at('The meter lane\'s signing key') + 2].trim()).toBe("if: steps.new.outputs.release == 'true' && steps.lane.outputs.meter == 'yes'");
     const key = lines.slice(at('The meter lane\'s signing key'), at('The meter lane\'s signing key') + 6).join('\n');
-    expect(key).toContain("METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}");
+    expect(key).toContain("METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || vars.METER_LANE_SIGNER != 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY || '' }}");
     expect(key).toContain('run: bash scripts/release-gates.sh meter-key');
     // The gate script holds the command, so a re-cut on a moved dev runs it again (#1653).
     expect(script('release-gates.sh').join('\n')).toContain('bun scripts/meter-lane.ts check-key');
@@ -1136,5 +1139,216 @@ describe("the release's plugin set", () => {
     expect(packed).toEqual(named);
     // No release asset names an Unfold plugin (they left with RFC 0020).
     expect(packed.filter((name) => name.startsWith('unfold-'))).toEqual([]);
+  });
+});
+
+// #1703: an empty selected signing slot never falls back to the other one. The am and meter keys
+// reach their three steps through one expression each; GitHub evaluates it, so this file holds a
+// small model of the expression semantics those bindings use (==, !=, &&, ||, string literals,
+// vars.* and secrets.*), applied to the text release.yml carries. It is a model, not GitHub.
+type ExprValue = string | boolean | null;
+interface ExprContext { vars: Record<string, string>; secrets: Record<string, string> }
+
+function evaluateExpression(source: string, context: ExprContext): ExprValue {
+  const tokens: string[] = [];
+  const lexer = /\s*(==|!=|&&|\|\||'(?:[^']|'')*'|[A-Za-z_][\w.-]*)/y;
+  while (lexer.lastIndex < source.trimEnd().length) {
+    const match = lexer.exec(source);
+    if (!match) throw new Error(`expression: cannot read ${source.slice(lexer.lastIndex)}`);
+    tokens.push(match[1]);
+  }
+  let at = 0;
+  const truthy = (value: ExprValue) => value !== '' && value !== false && value !== null;
+  const number = (value: ExprValue) => value === null ? 0 : typeof value === 'boolean' ? Number(value) : value.trim() === '' ? 0 : Number(value);
+  const equal = (a: ExprValue, b: ExprValue) => {
+    if (typeof a === 'string' && typeof b === 'string') return a.toLowerCase() === b.toLowerCase();
+    if (a === null && b === null) return true;
+    return number(a) === number(b);
+  };
+  const primary = (): ExprValue => {
+    const token = tokens[at++];
+    if (token === undefined) throw new Error('expression: ends early');
+    if (token.startsWith("'")) return token.slice(1, -1).replace(/''/g, "'");
+    if (token === 'true' || token === 'false') return token === 'true';
+    if (token === 'null') return null;
+    const [scope, name, ...rest] = token.split('.');
+    if (rest.length > 0 || !name || (scope !== 'vars' && scope !== 'secrets')) throw new Error(`expression: the model does not read ${token}`);
+    // An unset variable or secret reads as the empty string.
+    return context[scope][name] ?? '';
+  };
+  const comparison = (): ExprValue => {
+    const left = primary();
+    const op = tokens[at];
+    if (op !== '==' && op !== '!=') return left;
+    at++;
+    const same = equal(left, primary());
+    return op === '==' ? same : !same;
+  };
+  const conjunction = (): ExprValue => {
+    let value = comparison();
+    while (tokens[at] === '&&') { at++; const right = comparison(); value = truthy(value) ? right : value; }
+    return value;
+  };
+  const disjunction = (): ExprValue => {
+    let value = conjunction();
+    while (tokens[at] === '||') { at++; const right = conjunction(); value = truthy(value) ? value : right; }
+    return value;
+  };
+  const value = disjunction();
+  if (at !== tokens.length) throw new Error(`expression: left over ${tokens.slice(at).join(' ')}`);
+  return value;
+}
+
+// What an `env:` value becomes: null is empty, a boolean its word.
+const asEnv = (value: ExprValue) => value === null ? '' : String(value);
+
+describe('an empty selected signing slot never falls back to the other one (#1703)', () => {
+  const lines = workflow('release.yml');
+  const text = lines.join('\n');
+  const at = (name: string) => lines.findIndex(line => line.trim() === `- name: ${name}`);
+  // The expression a step binds `name` to, from that step's own lines.
+  const binding = (step: string, name: string) => {
+    const start = at(step);
+    expect(start).toBeGreaterThan(-1);
+    for (const line of lines.slice(start + 1)) {
+      if (line.trim().startsWith('- name:') || /^  [a-z-]+:$/.test(line)) break;
+      const match = new RegExp(`^\\s+${name}: \\$\\{\\{ (.*) \\}\\}$`).exec(line);
+      if (match) return match[1];
+    }
+    throw new Error(`${step} binds no ${name}`);
+  };
+  // Throwaway keys, made for this run only: no private key is ever committed.
+  const pair = () => {
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    return { pub: publicKey.export({ type: 'spki', format: 'pem' }).toString(), priv: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() };
+  };
+  const lanes = [
+    { secret: 'AM_LANE_KEY', signer: 'AM_LANE_SIGNER', steps: ['The am lane\'s signing key', 'Version, commit and tag', 'Sign and post the am lane'] },
+    { secret: 'METER_LANE_KEY', signer: 'METER_LANE_SIGNER', steps: ['The meter lane\'s signing key', 'Version, commit and tag', 'Attach the binaries, usagemeter.SHA256SUMS and the signed pointer'] },
+  ] as const;
+  const strict = (secret: string, signer: string) => `vars.${signer} == '${secret}_NEXT' && secrets.${secret}_NEXT || vars.${signer} != '${secret}_NEXT' && secrets.${secret} || ''`;
+  const fallback = (secret: string, signer: string) => `vars.${signer} == '${secret}_NEXT' && secrets.${secret}_NEXT || secrets.${secret}`;
+  const run = (expression: string, lane: (typeof lanes)[number], selector: string | undefined, primary: string, next: string) =>
+    asEnv(evaluateExpression(expression, {
+      vars: selector === undefined ? {} : { [lane.signer]: selector },
+      secrets: { [lane.secret]: primary, [`${lane.secret}_NEXT`]: next },
+    }));
+
+  test('each lane\'s three steps bind its key with the same strict expression, and the old fallback is gone', () => {
+    for (const lane of lanes) {
+      const bound = lane.steps.map(step => binding(step, lane.secret));
+      expect(bound).toEqual([0, 1, 2].map(() => strict(lane.secret, lane.signer)));
+      expect(lines.filter(line => new RegExp(`^\\s+${lane.secret}: \\$\\{\\{`).test(line)).length).toBe(3);
+      expect(text).not.toContain(`|| secrets.${lane.secret} }}`);
+    }
+    // The herdr pack's binding is not this issue's: it stays as it was.
+    expect(binding('Version, commit and tag', 'HERDR_PACK_KEY')).toBe("vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY");
+  });
+
+  test('the selector picks one slot, whether or not either secret is filled', () => {
+    for (const lane of lanes) {
+      for (const step of lane.steps) {
+        const expression = binding(step, lane.secret);
+        for (const selector of [undefined, '', lane.secret, `${lane.secret}_NEXT`]) {
+          for (const primary of ['primary-pem', '']) {
+            for (const next of ['next-pem', '']) {
+              const want = selector === `${lane.secret}_NEXT` ? next : primary;
+              const label = `${step} [${selector}] [${primary}] [${next}]`;
+              expect(`${label}: ${run(expression, lane, selector, primary, next)}`).toBe(`${label}: ${want}`);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  test('the issue\'s case: NEXT selected and empty, the primary listed and filled, gives an empty key, which am skips and the meter refuses', () => {
+    const primary = pair();
+    const amKeys = [{ keyId: amLane.KEY_ID, publicKey: primary.pub }];
+    const meterKeys = [{ keyId: meterLane.KEY_ID, publicKey: primary.pub }];
+    // The control: the primary itself is a key each lane would sign with.
+    expect(amLane.keyVerdict(primary.priv, amKeys).verdict).toBe('sign');
+    expect(meterLane.keyVerdict(primary.priv, meterKeys).verdict).toBe('sign');
+    for (const lane of lanes) {
+      for (const step of lane.steps) {
+        const got = run(binding(step, lane.secret), lane, `${lane.secret}_NEXT`, primary.priv, '');
+        expect(got).toBe('');
+        expect(got).not.toBe('false');
+        expect(got).not.toBe(primary.priv);
+        // No signature comes from an empty key.
+        expect(() => amLane.signPointer(Buffer.from('{}'), got)).toThrow();
+        expect(() => meterLane.signPointer(Buffer.from('{}'), got)).toThrow();
+      }
+      // The old expression fell back to the primary here: the case this test tells apart.
+      expect(run(fallback(lane.secret, lane.signer), lane, `${lane.secret}_NEXT`, primary.priv, '')).toBe(primary.priv);
+    }
+    expect(amLane.keyVerdict('', amKeys)).toEqual({ verdict: 'skip', message: 'AM_LANE_KEY is not set: this release attaches automagik-am-<v>.tgz but posts no am-lane pointer, so installed ams do not update to it. Add the key (bun scripts/am-lane.ts keygen; RFC 0012)' });
+    expect(meterLane.keyVerdict('', meterKeys)).toEqual({ verdict: 'fail', message: 'METER_LANE_KEY is not set (the slot METER_LANE_SIGNER names): a meter build is never attached unsigned' });
+  });
+
+  test('NEXT selected and filled signs with NEXT: its public key verifies the pointer and the primary\'s does not', () => {
+    const primary = pair();
+    const next = pair();
+    const dir = mkdtempSync(join(tmpdir(), 'signing-slot-'));
+    try {
+      const commit = 'a'.repeat(40);
+      const tgz = join(dir, 'automagik-am-3.109.1.tgz');
+      writeFileSync(tgz, 'the am');
+      const meterDir = join(dir, 'meter');
+      mkdirSync(meterDir);
+      const sums = Object.values(meterLane.ARTIFACTS).map(name => {
+        writeFileSync(join(meterDir, name), `the ${name}`);
+        return `${createHash('sha256').update(`the ${name}`).digest('hex')}  ${name}\n`;
+      });
+      writeFileSync(join(meterDir, meterLane.SUMS), sums.join(''));
+      const pointers = {
+        AM_LANE_KEY: { keyId: amLane.KEY_ID, bytes: Buffer.from(JSON.stringify(amLane.pointer(tgz, { version: '3.109.1', commit, issuedAt: 'x' }))), sign: amLane.signPointer, verify: amLane.verify, keyVerdict: amLane.keyVerdict },
+        METER_LANE_KEY: { keyId: meterLane.KEY_ID, bytes: Buffer.from(JSON.stringify(meterLane.pointer(meterDir, { version: '3.109.1', commit, issuedAt: 'x' }))), sign: meterLane.signPointer, verify: meterLane.verify, keyVerdict: meterLane.keyVerdict },
+      };
+      for (const lane of lanes) {
+        const p = pointers[lane.secret];
+        // During a rotation both public keys are listed; the pointer names the keyId it is signed under.
+        const listed = [{ keyId: 'old-slot', publicKey: primary.pub }, { keyId: p.keyId, publicKey: next.pub }];
+        for (const step of lane.steps) {
+          const got = run(binding(step, lane.secret), lane, `${lane.secret}_NEXT`, primary.priv, next.priv);
+          expect(got).toBe(next.priv);
+          expect(p.keyVerdict(got, listed).verdict).toBe('sign');
+          const sig = p.sign(p.bytes, got);
+          expect(p.verify(p.bytes, sig, listed).version).toBe('3.109.1');
+          expect(() => p.verify(p.bytes, sig, [{ keyId: p.keyId, publicKey: primary.pub }])).toThrow(/signature does not match/);
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('no selector, or the primary named, signs with the primary', () => {
+    const primary = pair();
+    const next = pair();
+    for (const lane of lanes) {
+      for (const step of lane.steps) {
+        for (const selector of [undefined, lane.secret]) {
+          expect(run(binding(step, lane.secret), lane, selector, primary.priv, next.priv)).toBe(primary.priv);
+          expect(run(binding(step, lane.secret), lane, selector, primary.priv, '')).toBe(primary.priv);
+        }
+      }
+    }
+  });
+
+  test('before any key is listed, am skips and the meter stays held, whatever the slot gives', () => {
+    const primary = pair();
+    const next = pair();
+    for (const lane of lanes) {
+      for (const step of lane.steps) {
+        for (const selector of [undefined, lane.secret, `${lane.secret}_NEXT`]) {
+          for (const [p, n] of [[primary.priv, next.priv], [primary.priv, ''], ['', next.priv], ['', '']]) {
+            const got = run(binding(step, lane.secret), lane, selector, p, n);
+            if (lane.secret === 'AM_LANE_KEY') expect(amLane.keyVerdict(got, []).verdict).toBe('skip');
+            else expect(meterLane.keyVerdict(got, []).verdict).toBe('fail');
+          }
+        }
+      }
+    }
   });
 });
