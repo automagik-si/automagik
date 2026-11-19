@@ -27,9 +27,12 @@ env:
   USAGEMETER_CHANGED_PATHS: '^(meter/(usagemeter|schema)/|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
   SANDBOX_CHANGED_PATHS: '^(apps/dsh-sandbox/|\.github/workflows/ci\.yml$)'
 
+# Cancel only pull_request runs: a push to dev or main finishes, and
+# a manual run is never cancelled by a push. A pull request push
+# cancels the older run. GitHub keeps one pending run per group.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
