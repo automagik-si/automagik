@@ -12,6 +12,9 @@ import { dirname, join } from 'node:path';
 import { pluginNames } from './release-plugins';
 
 const workflow = (name: string) => readFileSync(join(import.meta.dir, '..', '.github', 'workflows', name), 'utf8').split('\n');
+// The cut's lane decision and gates moved into scripts/ (#668), so the cut can re-run them on a
+// moved dev; the shell is still tested as written.
+const script = (name: string) => readFileSync(join(import.meta.dir, name), 'utf8').split('\n');
 
 function bash(script: string, args: string[] = [], env: Record<string, string> = {}, cwd = process.cwd()) {
   const run = spawnSync('bash', ['-c', `set -euo pipefail\n${script}`, 'bash', ...args], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', ...env } });
@@ -822,12 +825,15 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
 
   // The Reviewer's L2: the prerelease list is read (never guessed) and passed to meter-since.
   test('meter-since is told which releases are prereleases, and a failure to list them stops the run', () => {
-    const first = lines.findIndex(line => line.trim().startsWith('prerelease_tags=$(gh release list'));
-    const call = lines.findIndex(line => line.trim().startsWith('meter_since=$(bun scripts/lane.ts meter-since'));
+    // The lane decision is release-gates.sh's now, so the cut can re-run it on a new dev (#668).
+    expect(lines.join('\n')).toContain('run: bash scripts/release-gates.sh lane');
+    const gates = script('release-gates.sh');
+    const first = gates.findIndex(line => line.trim().startsWith('prerelease_tags=$(gh release list'));
+    const call = gates.findIndex(line => line.trim().startsWith('meter_since=$(bun scripts/lane.ts meter-since'));
     expect(first).toBeGreaterThan(-1);
     expect(call).toBe(first + 2);
-    expect(lines[first]).toContain('select(.isPrerelease)');
-    const block = lines.slice(first, call + 1).join('\n');
+    expect(gates[first]).toContain('select(.isPrerelease)');
+    const block = gates.slice(first, call + 1).join('\n');
     expect(block).not.toContain('|| true');
     const run = (gh: string) => {
       const dir = mkdtempSync(join(tmpdir(), 'meter-since-'));
@@ -875,8 +881,10 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     // Wherever a herdr patch is told apart, a meter patch is too.
     const herdrOnly = lines.filter(line => /kind != 'herdr'|lane != 'herdr'|LANE != 'herdr'/.test(line));
     for (const line of herdrOnly) expect(line).toMatch(/!= 'meter'/);
-    // And it is a patch: 3.N.P on the newest 3.N.
-    expect(text).toContain('|| "${KIND}" == "meter" ]]; then version=$(bun scripts/lane.ts next-patch)');
+    // And it is a patch: 3.N.P on the newest 3.N (release-cut.sh, where the cut decides).
+    const cut = script('release-cut.sh').join('\n');
+    expect(cut).toContain('" plugins " | " herdr " | " pocket " | " am " | " meter ") bun scripts/lane.ts next-patch');
+    expect(cut).toContain('*) bun scripts/version.ts next');
   });
 
   // The dry run: the attach step as written, with the four binaries the matrix uploads, part.json and
