@@ -318,6 +318,11 @@ if (OUR) FIELDS.push("close_workspace");
 // A build with the command kind (#938): its put writes command and notify, its ls names the kinds.
 const COMMANDS = process.env.STUB_COMMANDS === "1";
 if (COMMANDS) FIELDS.push("command", "notify");
+// A build with targets (#498): its put writes target and target_when_busy, its ls names the kinds.
+const TARGETS = process.env.STUB_TARGETS === "1";
+if (TARGETS) FIELDS.push("target", "target_when_busy");
+// A build that claims targets but drops the key anyway (#498 read-back).
+const DROP_TARGET = process.env.STUB_DROP_TARGET === "1";
 const yaml = path.join(home, ".config/herdr-automations/automations.yaml");
 const read = () => JSON.parse(fs.readFileSync(yaml, "utf8"));
 const out = (x) => process.stdout.write(JSON.stringify(x));
@@ -328,8 +333,11 @@ if (args[0] === "version") process.stdout.write(version + "\n");
 else if (args[0] === "ls") out({ automations: read().map(({ session, ...a }) => {
   if (OUR) a.close_workspace = a.close_workspace ?? "never";
   else delete a.close_workspace; // upstream's api.Automation has no field for it
+  // An older build has no Target field either: its ls cannot return the key.
+  if (!TARGETS) { delete a.target; delete a.target_when_busy; }
   return a;
-}), invalid: [], scheduler: { pid: 1 }, paused: false, ...(COMMANDS ? { kinds: ["prompt", "workflow", "command"] } : {}) });
+}), invalid: [], scheduler: { pid: 1 }, paused: false, ...(COMMANDS ? { kinds: ["prompt", "workflow", "command"] } : {}),
+  ...(TARGETS ? { targets: ["bot", "worker"] } : {}) });
 else if (args[0] === "history") out(JSON.parse(process.env.STUB_HISTORY || "[]"));
 else if (args[0] === "put") {
   const entry = JSON.parse(input), list = read();
@@ -340,6 +348,7 @@ else if (args[0] === "put") {
       && (v === undefined || v === null || v === "" || v === 0 || v === false || (Array.isArray(v) && !v.length));
     const into = at >= 0 ? list[at] : {};
     for (const [k, v] of Object.entries(entry)) if (!FIELDS.includes(k) || empty(k, v)) delete into[k]; else into[k] = v;
+    if (DROP_TARGET) { delete into.target; delete into.target_when_busy; }
     if (at < 0) list.push(into);
     fs.writeFileSync(yaml, JSON.stringify(list, null, 2));
   }
@@ -347,7 +356,7 @@ else if (args[0] === "put") {
 } else { process.stderr.write("stub: not offered: " + args.join(" ")); process.exit(2); }
 `;
 
-function stubScheduler(automations, { version = "0.12.1", commands = false, history = [] } = {}) {
+function stubScheduler(automations, { version = "0.12.1", commands = false, targets = false, dropTarget = false, bots = [], history = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "am-automations-"));
   mkdirSync(join(dir, ".local/bin"), { recursive: true });
   mkdirSync(join(dir, ".config/herdr-automations"), { recursive: true });
@@ -358,9 +367,19 @@ function stubScheduler(automations, { version = "0.12.1", commands = false, hist
   writeFileSync(yaml, JSON.stringify(automations, null, 2));
   state.home = dir;
   let running = version; // the installed build; useVersion() swaps it, like a repair does
+  // The pack's am CLI, for a target's project roster (#498): `am ls --json --project <folder>`.
+  const am = (command, args) => {
+    if (command !== "am" && command !== join(dir, ".local/bin/am")) return null;
+    if (args[0] === "ls") return { code: 0, stdout: JSON.stringify({ projects: [{ project: args[3], bots }] }), stderr: "" };
+    return { code: 2, stdout: "", stderr: "stub am: not offered" };
+  };
   state.exec = (command, args) => new Promise((resolve) => {
+    const answered = am(command, args);
+    if (answered) { resolve(answered); return; }
     if (command !== "sh" && command !== bin) { resolve({ code: 127, stdout: "", stderr: `cannot run ${command}: refused` }); return; }
-    execFile(command, args, { env: { PATH: "/usr/bin:/bin", STUB_HOME: dir, STUB_VERSION: running, STUB_COMMANDS: commands ? "1" : "0", STUB_HISTORY: JSON.stringify(history) } }, (err, stdout, stderr) =>
+    execFile(command, args, { env: { PATH: "/usr/bin:/bin", STUB_HOME: dir, STUB_VERSION: running, STUB_COMMANDS: commands ? "1" : "0",
+      STUB_TARGETS: targets ? "1" : "0", STUB_DROP_TARGET: dropTarget ? "1" : "0",
+      STUB_HISTORY: JSON.stringify(history) } }, (err, stdout, stderr) =>
       resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }));
   });
   const calls = () => readFileSync(join(dir, "argv.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -1180,3 +1199,173 @@ for (const c of PARITY.cases) {
     } finally { s.done(); }
   });
 }
+
+// ---- targets (#498): a bot, or a worker of one, instead of a fresh session ----
+
+const housekeeper = { id: "b-6jrz4bmxml", name: "Housekeeper" };
+const targetEntry = { name: "housekeeping", cron: "0 9 * * *", repo: "/r", prompt: "tidy", target: "bot:b-6jrz4bmxml" };
+
+/** A new form on a target-aware stub, with the name, repo and prompt filled in. */
+async function fillTarget(view, cx, draw, { runs = "bot", bot = housekeeper.id, prompt = "tidy the house" } = {}) {
+  view.edit(null, cx);
+  await cx.settle();
+  view.form.name.type("housekeeping", cx);
+  view.form.repo.type("/r", cx);
+  view.form.prompt.type(prompt, cx);
+  draw().get(`f-runs-${runs}`).click({}, cx);
+  await cx.settle();
+  draw().get(`f-bot-${bot}`).click({}, cx);
+  await cx.settle();
+}
+
+test("a scheduler that names targets: a bot target saves the bot's id, no agent and no space (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([], { targets: true, bots: [housekeeper] });
+  try {
+    view.edit(null, cx);
+    await cx.settle();
+    assert.ok(draw().has("f-runs-none"), "New session stays the first choice");
+    assert.ok(draw().has("f-runs-bot"), "a bot is offered");
+    assert.ok(draw().has("f-runs-worker"), "a worker of a bot is offered");
+    view.form.name.type("housekeeping", cx);
+    view.form.repo.type("/r", cx);
+    view.form.prompt.type("tidy the house", cx);
+    draw().get("f-runs-bot").click({}, cx);
+    await cx.settle();
+    assert.equal(textOf(draw().get("f-bot-b-6jrz4bmxml")), "Housekeeper", "the roster names the bot");
+    assert.ok(draw().has("f-busy-queue") && draw().has("f-busy-skip"), "busy is configurable");
+    draw().get("f-bot-b-6jrz4bmxml").click({}, cx);
+    await cx.settle();
+    assert.equal(view.form.bot, housekeeper.id);
+    assert.match(textOf(draw().get("f-target-note")), /bot's own terminal with hc send/);
+    view.save(cx);
+    await cx.settle();
+    const saved = s.saves();
+    assert.equal(saved.length, 1);
+    const e = saved[0].entry;
+    assert.equal(e.target, "bot:b-6jrz4bmxml");
+    assert.equal(e.target_when_busy, "queue", "queue is the default");
+    assert.equal(e.workspace, "");
+    assert.equal(e.agent, "");
+    assert.deepEqual(e.agent_args, []);
+    assert.equal(s.yaml()[0].target, "bot:b-6jrz4bmxml");
+    assert.ok(!s.yaml()[0].agent, "a target writes no agent");
+    assert.ok(!s.yaml()[0].workspace, "a target opens no space");
+  } finally { s.done(); }
+});
+
+test("a bot target told to skip a busy bot saves target_when_busy: skip (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([], { targets: true, bots: [housekeeper] });
+  try {
+    await fillTarget(view, cx, draw);
+    draw().get("f-busy-skip").click({}, cx);
+    await cx.settle();
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves()[0].entry.target_when_busy, "skip");
+    assert.equal(s.yaml()[0].target_when_busy, "skip");
+  } finally { s.done(); }
+});
+
+test("a worker target saves no busy rule, and the row and detail name the bot (#498)", async () => {
+  const entry = { ...targetEntry, target: "worker:b-6jrz4bmxml" };
+  const { s, view, cx, draw } = await stubPanel([entry], { targets: true, bots: [housekeeper] });
+  try {
+    await cx.settle();
+    assert.match(textOf(draw().get("auto-kind-housekeeping")), /a worker of Housekeeper · its own launch/);
+    view.view = { kind: "detail", name: "housekeeping" };
+    const detail = textOf(view.render(cx));
+    assert.match(detail, /Target/);
+    assert.match(detail, /a worker of Housekeeper/);
+    assert.match(detail, /the bot's own/);
+    view.edit("housekeeping", cx);
+    await cx.settle();
+    assert.equal(view.form.target, "worker");
+    assert.equal(view.form.bot, housekeeper.id);
+    assert.ok(!draw().has("f-busy-queue"), "a worker runs alongside its bot and has no busy rule");
+    assert.match(textOf(draw().get("f-target-note")), /fresh worktree, and is ended when the run finishes/);
+    view.form.prompt.type(" again", cx);
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves()[0].entry.target, "worker:b-6jrz4bmxml");
+    assert.equal(s.saves()[0].entry.target_when_busy, "");
+    assert.equal(s.yaml()[0].target, "worker:b-6jrz4bmxml");
+    assert.ok(!s.yaml()[0].target_when_busy, "no busy rule is written");
+  } finally { s.done(); }
+});
+
+test("a bot that left the roster is warned about, and Save refuses (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([targetEntry], { targets: true, bots: [] });
+  try {
+    view.edit("housekeeping", cx);
+    await cx.settle();
+    const warn = textOf(draw().get("f-target-warn"));
+    assert.match(warn, /no longer in this project's bots.json/);
+    view.form.prompt.type(" again", cx);
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves().length, 0, "nothing was written for a bot this project no longer has");
+    assert.match(textOf(draw().get("f-result")), /no longer in this project's bots.json/);
+  } finally { s.done(); }
+});
+
+test("switching a target back to a new session removes it and restores the agent keys (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([targetEntry], { targets: true, bots: [housekeeper] });
+  try {
+    view.edit("housekeeping", cx);
+    await cx.settle();
+    draw().get("f-runs-none").click({}, cx);
+    await cx.settle();
+    assert.ok(draw().has("f-agent-claude"), "the agent picker is back");
+    assert.ok(draw().has("f-ws-worktree"), "the space picker is back");
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves()[0].entry.target, "");
+    assert.equal("target" in s.yaml()[0], false, "the key is removed");
+    assert.equal(s.yaml()[0].agent, "claude");
+    assert.equal(s.yaml()[0].workspace, "worktree");
+  } finally { s.done(); }
+});
+
+test("an older scheduler cannot see a hand-written target, and an edit keeps it (#498)", async () => {
+  // A real older build has no Target field: its ls --json cannot return the key. The panel
+  // shows an ordinary fresh-session entry, and the old build ignores the key when it runs.
+  const { s, view, cx, draw } = await stubPanel([targetEntry], { bots: [housekeeper] });
+  try {
+    view.edit("housekeeping", cx);
+    await cx.settle();
+    assert.ok(!draw().has("f-runs-bot"), "no target on a build that does not name the kind");
+    assert.ok(!draw().has("f-target-kept"), "an older ls has no target to show read-only");
+    assert.equal(view.form.target, "none");
+    view.form.prompt.type(" again", cx);
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves().length, 1, "an older build still edits the entry");
+    assert.equal("target" in s.saves()[0].entry, false, "the panel cannot send a key it cannot see");
+    assert.equal(s.yaml()[0].target, "bot:b-6jrz4bmxml", "put keeps a key it was not given");
+  } finally { s.done(); }
+});
+
+test("a scheduler that claims targets but drops the key fails the save (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([], { targets: true, dropTarget: true, bots: [housekeeper] });
+  try {
+    await fillTarget(view, cx, draw);
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves().length, 1);
+    assert.equal(s.yaml()[0].target, undefined, "the stub dropped the key");
+    assert.match(textOf(draw().get("f-result")), /does not keep bot Housekeeper/);
+    assert.ok(view.form, "the form stays open when the save did not take");
+  } finally { s.done(); }
+});
+
+test("a scheduler without targets: an agent save carries no target key (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([nightly("claude")], { bots: [housekeeper] });
+  try {
+    await fillNew(view, cx, draw, "claude");
+    view.form.name.set_value("plain");
+    view.save(cx);
+    await cx.settle();
+    assert.equal("target" in s.saves()[0].entry, false);
+    assert.equal("target" in s.yaml()[0], false);
+  } finally { s.done(); }
+});

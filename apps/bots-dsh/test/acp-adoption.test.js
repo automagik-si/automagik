@@ -93,7 +93,7 @@ async function start(team, {
     },
     sessionController: {
       create: async () => ({ sessionId: 's1' }),
-      resolveAgent: async sessionId => ({ agent: { session: { id: sessionId }, followup() {}, cancel() {} } }),
+      resolveAgent: async sessionId => ({ agent: { session: { id: sessionId, deriveMessages: () => [] }, followup() {}, cancel() {} } }),
       selectModel: async request => { selected.push(request) },
       page: async () => ({ records: [], hasMore: false }),
     },
@@ -596,7 +596,7 @@ test('a plugin that is still loading is not a route that disappeared', async (t)
   const host = await start(moved, { acp: false, services: { loader } })
   t.after(host.stop)
   await host.call('state', {})
-  await new Promise(resolve => setTimeout(resolve, 100))
+  await until(() => host.saved().bots.m1.acpMoved !== undefined, { label: 'the recovered record was saved' })
   const state = host.saved()
   assert.equal(state.bots.m1.model, 'acp-claude/opus')
   assert.equal(state.claudeAcpMoved, true)
@@ -848,6 +848,126 @@ test('a direct update-bot route crossing takes the new-conversation path', async
   const res = await host.call('update-bot', { id: 'm1', model: 'deepseek/deepseek-v4-flash' })
   assert.equal(res.ok, true)
   assert.deepEqual(switched, [['m1', 'deepseek/deepseek-v4-flash', undefined]])
+  // #1631: the Bot tool sends only what it was given, so a model-only update_bot takes the
+  // same path instead of tripping the "change only its model" guard on absent fields.
+  const updateTool = args => host.ctx.provided.get('omniTeam').teamTools.find(d => d.name === 'update_bot')
+    .execute(args, { agent: { id: 'm1' } })
+  assert.equal(await updateTool({ model: 'acp-claude/opus' }), 'Updated Omni.')
+  assert.deepEqual(switched.at(-1), ['m1', 'acp-claude/opus', undefined])
+  // A real mixed edit on a managed crossing still meets the guard, with nothing switched.
+  assert.equal(await updateTool({ model: 'deepseek/deepseek-v4-flash', role: 'Chief' }),
+    'Could not update the Bot: Omni needs a new conversation for that route, so change only its model in this step.')
+  assert.equal(switched.length, 2)
+  assert.equal(host.saved().bots.m1.role, 'Boss')
+})
+
+// #1631: an ACP-hosted Bot (adopted, so pinned) picked onto a native route, through every
+// entry point a person or a Bot can use. Each answers a final refusal at once: no agent lookup,
+// no fresh Session, no selection, no archive, the stored record as it was, and one redacted
+// record in Feedback and the downloaded log.
+test('a pinned ACP-hosted Bot refuses a native route from the picker, update-bot and update_bot', async (t) => {
+  const pinnedBot = {
+    id: 'p1', sessionId: 'p1', name: 'Secretario', role: 'Assist', instructions: '', createdAt: 4,
+    model: 'acp-claude/opus', appliedModel: 'acp-claude/opus', effort: 'high', appliedEffort: 'high', sessionPinned: true,
+  }
+  const lookups = []
+  let watching = false
+  const host = await start(seed({ p1: pinnedBot }), {
+    onRuntime: (rt) => {
+      const resolve = rt.resolveAgent
+      rt.resolveAgent = async (id, ...rest) => {
+        if (watching) { lookups.push(id); throw new Error('pinned host must never be opened') }
+        return resolve(id, ...rest)
+      }
+    },
+  })
+  t.after(host.stop)
+  await host.call('state', {})
+  await new Promise(resolve => setTimeout(resolve, 80))
+  const rt = host.ctx.provided.get('omniTeam')
+  const created = []
+  const archived = []
+  host.ctx.sessionController.create = async (...args) => { created.push(args); return { sessionId: 'fresh' } }
+  host.ctx.workspaceRegistry.archiveSession = async id => { archived.push(id) }
+  const before = host.saved().bots.p1
+  const liveBefore = structuredClone(rt.botOf('p1'))
+  const history = [{ role: 'user', content: 'private retained conversation' }]
+  const historyBefore = structuredClone(history)
+  host.ctx.sessionController.page = async () => ({ records: history, hasMore: false })
+  rt.assertDenyTools = async () => { assert.fail('pinned crossing must precede Session permission validation') }
+  rt.noteModelChoice = () => { assert.fail('refusal must not remember a pick') }
+  const selectedBefore = host.selected.length
+  const reason = 'Secretario speaks in the conversation its host runs, so it cannot start a new one here.'
+  watching = true
+
+  const picker = await host.call('switch-route', { id: 'p1', model: 'deepseek/deepseek-v4-flash' })
+  assert.deepEqual(picker, { ok: false, error: { code: 'bot/refused', message: reason, details: {} } })
+  const direct = await host.call('update-bot', { id: 'p1', model: 'deepseek/deepseek-v4-flash' })
+  assert.deepEqual(direct, { ok: false, error: { code: 'bot/refused', message: reason, details: {} } })
+  const tool = await rt.teamTools.find(d => d.name === 'update_bot')
+    .execute({ model: 'deepseek/deepseek-v4-flash' }, { agent: { id: 'p1' } })
+  assert.equal(tool, `Could not update the Bot: ${reason}`)
+
+  const mixed = await host.call('update-bot', { id: 'p1', model: 'deepseek/deepseek-v4-flash', role: 'Changed', permission: 'full', denyTools: ['shell'] })
+  assert.deepEqual(mixed, { ok: false, error: { code: 'bot/refused', message: reason, details: {} } })
+  watching = false
+  assert.deepEqual(rt.botOf('p1'), liveBefore)
+  assert.deepEqual(history, historyBefore)
+  assert.equal([...rt.switchJobs()].length, 0)
+  assert.deepEqual(lookups, [])
+  assert.deepEqual(created, [])
+  assert.deepEqual(archived, [])
+  assert.equal(host.selected.length, selectedBefore)
+  assert.equal(rt.switchingChat('p1'), false)
+  assert.deepEqual(host.saved().bots.p1, before)
+  const live = (await host.teamNow()).p1
+  assert.equal(live.model, 'acp-claude/opus')
+  assert.equal(live.sessionId, 'p1')
+
+  const records = (await rt.diagnostics.entries()).filter(entry => entry.bot === 'p1')
+  assert.deepEqual(records.map(({ level, source, where, text }) => ({ level, source, where, text })),
+    ['switch-route', 'update-bot', 'update_bot', 'update-bot'].map(where => ({
+      level: 'warn', source: 'host', where,
+      text: 'Route change acp-claude/opus → deepseek/deepseek-v4-flash refused (pinned conversation)',
+    })))
+  const log = await rt.diagnostics.logText()
+  assert.equal(log.split('\n').filter(line => line.includes('Route change acp-claude/opus → deepseek/deepseek-v4-flash refused (pinned conversation)')).length, 4)
+  const feedback = (await host.call('diagnostics', {})).value
+  assert.ok(feedback.entries.some(entry => entry.text?.includes('refused (pinned conversation)')))
+})
+
+// #1631: an unpinned Bot whose conversation cannot be opened (its host cannot start) gets a
+// final refusal from update-bot, rather than falling through to an in-place selection.
+test('a direct update-bot crossing whose conversation cannot be opened refuses with nothing written', async (t) => {
+  let failing = false
+  const host = await start(seed(), {
+    onRuntime: (rt) => {
+      const resolve = rt.resolveAgent
+      rt.resolveAgent = async (id, ...rest) => {
+        if (failing) throw new Error('fs sandbox helper failed with status exit status: 71: sandbox-exec: execvp() failed')
+        return resolve(id, ...rest)
+      }
+    },
+  })
+  t.after(host.stop)
+  await host.moved()
+  const rt = host.ctx.provided.get('omniTeam')
+  const before = host.saved().bots.m1
+  const selectedBefore = host.selected.length
+  failing = true
+  const res = await host.call('update-bot', { id: 'm1', model: 'deepseek/deepseek-v4-flash' })
+  failing = false
+  assert.deepEqual(res, { ok: false, error: {
+    code: 'bot/refused', message: 'Omni\'s current conversation could not be opened, so its route was kept.', details: {},
+  } })
+  assert.deepEqual(host.saved().bots.m1, before)
+  assert.equal(host.selected.length, selectedBefore)
+  assert.equal(rt.switchingChat('m1'), false)
+  const records = (await rt.diagnostics.entries()).filter(entry => entry.bot === 'm1' && entry.text.startsWith('Route change'))
+  assert.deepEqual(records.map(entry => [entry.where, entry.text]), [
+    ['update-bot', 'Route change acp-claude/opus → deepseek/deepseek-v4-flash refused (conversation unavailable)'],
+  ])
+  assert.equal(JSON.stringify(records).includes('sandbox'), false)
 })
 
 test('the switch-route endpoint passes the level chosen with the crossing', async (t) => {
@@ -859,4 +979,81 @@ test('the switch-route endpoint passes the level chosen with the crossing', asyn
   const res = await host.call('switch-route', { id: 'm1', model: 'deepseek/deepseek-v4-flash', effort: 'high' })
   assert.equal(res.ok, true)
   assert.deepEqual(switched, [['m1', 'deepseek/deepseek-v4-flash', 'high']])
+})
+
+
+test('history-bearing crossings refuse missing capabilities through both host entry points', async (t) => {
+  for (const endpoint of ['switch-route', 'update-bot']) {
+    for (const missing of ['whenIdle', 'runMaintenance', 'lookup', 'unreadable history']) {
+      await t.test(`${endpoint}: ${missing}`, async (t) => {
+        const host = await start(seed())
+        t.after(host.stop)
+        await host.moved()
+        const rt = host.ctx.provided.get('omniTeam')
+        const before = structuredClone(rt.botOf('m1'))
+        const saved = host.saved().bots.m1
+        const selected = host.selected.length
+        const history = [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'private history' }] }]
+        const agent = {
+          id: 'm1', session: { id: 'm1', deriveMessages: () => history },
+          whenIdle: async () => { assert.fail('must refuse before idle') },
+          runMaintenance: async () => { assert.fail('must refuse before handoff') },
+        }
+        delete agent[missing]
+        if (missing === 'unreadable history') {
+          delete agent.whenIdle
+          agent.session.deriveMessages = () => { throw new Error('history unavailable') }
+        }
+        rt.resolveAgent = async () => {
+          if (missing === 'lookup') throw new Error('private sandbox path and credential')
+          return agent
+        }
+        rt.clearAuto = async () => { assert.fail('must refuse before permission changes') }
+        rt.noteModelChoice = () => { assert.fail('must refuse before model choice writes') }
+        rt.createSession = async () => { assert.fail('must refuse before create') }
+        const result = await host.call(endpoint, { id: 'm1', model: 'deepseek/deepseek-v4-flash' })
+        assert.deepEqual(result, { ok: false, error: { code: 'bot/refused', details: {}, message: missing === 'lookup'
+          ? "Omni's current conversation could not be opened, so its route was kept."
+          : "Omni's current conversation cannot hand off to a new route." } }, `${endpoint}: ${missing}`)
+        assert.deepEqual(rt.botOf('m1'), before)
+        assert.deepEqual(host.saved().bots.m1, saved)
+        assert.equal(host.selected.length, selected)
+        assert.equal([...rt.switchJobs()].length, 0)
+      })
+    }
+  }
+})
+
+test('update_bot optional fields are sparse, with explicit empty clears and caller checks retained', async (t) => {
+  const host = await start(seed())
+  t.after(host.stop)
+  await host.moved()
+  const rt = host.ctx.provided.get('omniTeam')
+  const calls = []
+  rt.updateBot = async (id, patch, actor, session) => { calls.push({ id, patch, actor, session }); return rt.botOf(id) }
+  const tool = rt.teamTools.find(tool => tool.name === 'update_bot')
+  assert.equal(await tool.execute({ model: 'deepseek/deepseek-v4-flash' }, { agent: { id: 'm1' } }), 'Updated Omni.')
+  assert.deepEqual(calls[0], { id: 'm1', patch: { model: 'deepseek/deepseek-v4-flash' }, actor: 'm1', session: 'm1' })
+  for (const key of ['name', 'role', 'instructions', 'color']) assert.equal(Object.hasOwn(calls[0].patch, key), false)
+  await tool.execute({ role: '', instructions: '', effort: '' }, { agent: { id: 'm1' } })
+  assert.deepEqual(calls[1].patch, { role: '', instructions: '', effort: '' })
+  const count = calls.length
+  await tool.execute({ bot: 'Omni', role: 'Changed' }, { agent: { id: 'w2' } })
+  assert.equal(calls.length, count, 'another member cannot edit the Main Bot')
+})
+
+test('a pinned Bot can still pick its own route model and clear its effort', async (t) => {
+  const host = await start(seed())
+  t.after(host.stop)
+  await host.moved()
+  const rt = host.ctx.provided.get('omniTeam')
+  rt.botOf('m1').sessionPinned = true
+  const result = await host.call('update-bot', { id: 'm1', model: 'acp-claude/haiku', effort: '' })
+  assert.equal(result.ok, true)
+  assert.equal(rt.botOf('m1').model, 'acp-claude/haiku')
+  assert.equal(rt.botOf('m1').appliedModel, 'acp-claude/haiku')
+  assert.equal(rt.botOf('m1').effort, undefined)
+  assert.equal(rt.botOf('m1').appliedEffort, undefined)
+  assert.equal(rt.botOf('m1').sessionId, 'm1')
+  assert.equal(rt.botOf('m1').sessionPinned, true)
 })

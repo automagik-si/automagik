@@ -772,6 +772,92 @@ fn a_window_with_no_evidence_is_a_measured_zero_in_words() {
     );
 }
 
+/// Issue 966 (Low 2): a headline zero is a measurement only when every source is readable. With
+/// an unreadable source it must read unknown, as the repo lines already do, not "a measured 0".
+#[test]
+fn a_zero_headline_reads_unknown_when_a_source_cannot_be_read() {
+    let s = scenes::no_evidence();
+    let store = s.store();
+    store.set_meta("codex_status", "unsupported").unwrap();
+    drop(store);
+    let v = report(&s, &["--json", "--window", "d1"]);
+    assert_eq!(v["all_vouch"], false);
+    let d1 = window(&v, "d1");
+    assert_eq!(int(&d1["totals"]["attributed"]), 0);
+    assert!(int(&d1["totals"]["total"]) > 0);
+    assert_eq!(d1["bot_coverage"], json!(0.0));
+    let r = coverage::run(&args(&["--window", "d1"]), &ctx(&s));
+    assert_eq!(r.code, 0, "{:?}", r.stderr);
+    assert!(
+        r.stdout.contains("bot_coverage unknown"),
+        "an unvouched zero is unknown: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("a measured 0"),
+        "a measured 0 needs every source readable: {}",
+        r.stdout
+    );
+}
+
+/// Issue 966 (Low 1): each bot share is rounded on its own, so three equal bots sum to 0.9999
+/// while the attributed share is 1.0000. The text must say the shares are rounded per line.
+#[test]
+fn bot_shares_say_they_are_rounded_per_line() {
+    let mut s = Scene::migrated("2026-11-07T23:30:00Z", &[]);
+    let base = t("2026-11-08T09:00:00Z");
+    for (i, bot) in ["one", "two", "three"].into_iter().enumerate() {
+        let worktree = wt(&format!("cov-share-{i}"));
+        let branch = format!("feat/cov-share-{i}");
+        let session = format!("s-share-{i}");
+        s.start(Start {
+            session: Some(&session),
+            ..worker(
+                &format!("t-share-{i}"),
+                bot,
+                "dev",
+                "lark",
+                "claude",
+                &worktree,
+                &branch,
+                base + i as i64 * 60_000,
+            )
+        });
+        s.add(
+            Usage::new(
+                H::Claude,
+                &session,
+                &worktree,
+                Some(&branch),
+                at(&["2026-11-08T10"]),
+            )
+            .tokens([1, 0, 0, 0, 0, 0]),
+        );
+    }
+    s.sync();
+    let v = report(&s, &["--json", "--window", "d1"]);
+    let d1 = window(&v, "d1");
+    assert_eq!(int(&d1["totals"]["attributed"]), 3);
+    assert_eq!(int(&d1["bots_shown"]), 3);
+    let shares: f64 = d1["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["share"].as_f64().unwrap())
+        .sum();
+    assert!(
+        (shares - 1.0).abs() > 0.0,
+        "three equal shares round to 0.9999, not 1.0: {shares}"
+    );
+    let r = coverage::run(&args(&["--window", "d1"]), &ctx(&s));
+    assert_eq!(r.code, 0, "{:?}", r.stderr);
+    assert!(
+        r.stdout.contains("rounded to four decimals") && r.stdout.contains("sum"),
+        "the text says the shares are rounded per line: {}",
+        r.stdout
+    );
+}
+
 /// T6: logs restore the evidence classes; a frozen row without a log keeps its old total.
 #[test]
 fn t6_the_backfill_moves_before_evidence_into_the_classes_and_keeps_every_total() {

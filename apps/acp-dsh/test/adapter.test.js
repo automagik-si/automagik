@@ -12,7 +12,7 @@ import { apply } from '../index.js'
 import { structuredNameOf } from '../src/host/acp.js'
 import { AcpAdapter, aside, choose, NOTICE_KIND, promptOf, SIDE_MODEL } from '../src/host/adapter.js'
 import { AGENTS } from '../src/host/agents.js'
-import { Backchannel, offeredTools, presetOf } from '../src/host/backchannel.js'
+import { Backchannel, NATIVE_TWIN_TOOLS, offeredTools, presetOf } from '../src/host/backchannel.js'
 import { CliHomes } from '../src/host/cli-homes.js'
 import { isAuthRequired, SYNTHETIC_KIND } from '../src/host/names.js'
 import { credentialShapes } from '../src/host/redact.js'
@@ -926,11 +926,18 @@ const cordisTools = () => [
 // `preset` is the Session's DSH preset (RFC 0003): `standard` normally, `cordis` when the
 // Session is in creator mode. DSH records it in the creation header; its `agentPreset`
 // projection reads it back, which the fixture models directly.
-function dshHost({ env = {}, answer = 'allowed-once', sandbox = 'workspace-write', redactor, spec: extra = {}, trace, toolsOn = true, preset = 'standard' } = {}) {
+// `provider`/`base` run the host on another agent row (the real `acp-codex` spec, with the fake
+// agent's spawn); `definitions` replaces the preset's tools; `botIdentity` is bots-dsh's reader.
+function dshHost({
+  env = {}, answer = 'allowed-once', sandbox = 'workspace-write', redactor, spec: extra = {}, trace,
+  toolsOn = true, preset = 'standard', provider = 'acp-fake', base = {}, definitions: served,
+  botIdentity,
+} = {}) {
   const session = Session.create('s1', undefined, preset === 'standard' ? undefined : { version: 4, id: 's1', createdAt: 0, isSeeded: false, agentPreset: preset })
   session.append('turn/start', { turn: 1 })
   session.append('step/start', { turn: 1, step: 0 })
-  const definitions = preset === 'cordis' ? [...bridgeTools(), ...cordisTools()] : bridgeTools()
+  const definitions = served
+    ?? (preset === 'cordis' ? [...bridgeTools(), ...cordisTools()] : bridgeTools())
   const asked = []
   const executed = []
   const agent = { session, ctx: { tools: { register: () => () => {} } } }
@@ -965,6 +972,7 @@ function dshHost({ env = {}, answer = 'allowed-once', sandbox = 'workspace-write
   const catalog = { models: async () => [{ id: 'default', name: 'Fake agent' }], model: async () => undefined, ownEffort: () => undefined, dispose() {} }
   const spec = {
     name: 'Fake agent',
+    ...base,
     catalog,
     installed: () => true,
     spawn: () => ({ command: process.execPath, args: [FAKE], env: { ...(trace === undefined ? {} : { FAKE_ACP_TRACE: trace }), ...env } }),
@@ -973,8 +981,8 @@ function dshHost({ env = {}, answer = 'allowed-once', sandbox = 'workspace-write
   const backchannel = new Backchannel({ ctx })
   // `toolsOn` is true/false, or a getter for a live switch a test flips mid-run.
   const dshTools = typeof toolsOn === 'function' ? toolsOn : () => toolsOn
-  const adapter = new AcpAdapter(ctx, new Map([['acp-fake', spec]]),
-    { dshTools, backchannel, redactor })
+  const adapter = new AcpAdapter(ctx, new Map([[provider, spec]]),
+    { dshTools, backchannel, redactor, ...(botIdentity === undefined ? {} : { botIdentity }) })
   const close = () => { adapter.dispose(); backchannel.dispose() }
   return { adapter, spec, ctx, agent, session, definitions, asked, executed, backchannel, close }
 }
@@ -996,6 +1004,81 @@ test('with dshTools on, DSH approves a DSH tool call and the bridge writes its c
     assert.ok(events.some(event => event.type === 'tool/result' && event.data.message.isError === false))
   } finally {
     h.close()
+  }
+})
+
+// #1639: a Genie's role tools are DSH tools registered by its plugins (`grant_wish`,
+// `message_bot`, `start_task`, ...), and its Bot runs on `acp-codex`, which keeps its own
+// built-in tools. With no explicit `dshTools`, this session used to get no bridge at all, so the
+// model was never offered any of them (Codex's own `bash`, `read`... were its whole tool set).
+// The Bot's identity, which bots-dsh sends, says its role tools live in DSH; the bridge is then
+// on and drops only DSH's twins of Codex's built-ins, not the whole set. The names are the
+// Genie's real ones plus six twins, sorted so the wire's preset order equals the expected order.
+const GENIE_DSH_TOOLS = Object.freeze([
+  'bash', 'grant_wish', 'message_bot', 'read', 'send_message',
+  'start_task', 'subagent', 'todo_write', 'write',
+])
+const genieTools = () => GENIE_DSH_TOOLS.map(name => ({
+  name, description: `${name} tool`, parameters: { type: 'object', properties: {} },
+}))
+
+test('a Genie on acp-codex keeps its whole DSH tool set, without DSH twins', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'acp-dsh-genie-codex-'))
+  const genieTrace = join(dir, 'genie.ndjson')
+  const genie = dshHost({
+    trace: genieTrace,
+    toolsOn: () => undefined,
+    provider: 'acp-codex',
+    base: AGENTS['acp-codex'],
+    env: { FAKE_ACP_MODES: 'read-only,workspace-write,agent,agent-full-access' },
+    definitions: genieTools(),
+    botIdentity: id => (id === 's1' ? {
+      name: 'Genie', role: 'Grants your wishes', instructions: 'Grant wishes.', needsDshTools: true,
+    } : undefined),
+  })
+  const plainTrace = join(dir, 'plain.ndjson')
+  const plain = dshHost({
+    trace: plainTrace,
+    toolsOn: () => undefined,
+    provider: 'acp-codex',
+    base: AGENTS['acp-codex'],
+    env: { FAKE_ACP_MODES: 'read-only,workspace-write,agent,agent-full-access' },
+    definitions: genieTools(),
+  })
+  try {
+    const ask = text => [{
+      role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }],
+    }]
+    const messages = ask('bridge grant_wish')
+    const chunks = await step(genie.adapter, messages, { provider: 'acp-codex' })
+    const events = traceEvents(genieTrace)
+    const opened = events.find(event => event.event === 'new-session')
+    assert.deepEqual(opened.servers, ['dsh'], 'the bridge is offered to the agent')
+    // The wire's real tools/list: every DSH tool the Genie's role delivers that Codex has no
+    // equivalent for, and none of DSH's twins of Codex's own tools. The expected list is derived
+    // from the twin list itself, so the test states the rule rather than a snapshot.
+    const listed = events.find(event => event.event === 'mcp-list' && event.server === 'dsh')
+    const expected = GENIE_DSH_TOOLS.filter(name => !NATIVE_TWIN_TOOLS.has(name)).sort()
+    for (const name of ['grant_wish', 'message_bot', 'start_task']) assert.ok(expected.includes(name), name)
+    const twins = GENIE_DSH_TOOLS.filter(name => NATIVE_TWIN_TOOLS.has(name))
+    assert.ok(twins.length >= 4, `the fixture carries twins of Codex's own tools: ${twins.join(', ')}`)
+    assert.deepEqual(listed.tools, expected)
+    for (const name of twins) assert.ok(!listed.tools.includes(name), `${name} is Codex's own tool, not a bridge tool`)
+    assert.equal(chunks.at(-1).reason.kind, 'stop', JSON.stringify(chunks.at(-1).reason))
+    assert.match(textIn(chunks), /The bridge said: ran grant_wish/)
+    assert.deepEqual(genie.executed, ['grant_wish'])
+    assert.equal(genie.asked[0].toolName, 'grant_wish')
+    // A Codex Session whose Bot needs no DSH tools keeps today's default: no bridge, no list.
+    const plainMessages = ask('plain')
+    await step(plain.adapter, plainMessages, { provider: 'acp-codex' })
+    const plainEvents = traceEvents(plainTrace)
+    const plainOpened = plainEvents.find(event => event.event === 'new-session')
+    assert.deepEqual(plainOpened.servers, [])
+    assert.equal(plainEvents.some(event => event.event === 'mcp-list'), false)
+  } finally {
+    genie.close()
+    plain.close()
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 

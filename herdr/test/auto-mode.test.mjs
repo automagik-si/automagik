@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 import {
   AGENTS, AGY_FIXED_DENY, AGY_READ_ALLOW, AGY_SKIP_PERMISSIONS, AUTO_MODE, AUTO_MODE_NONE,
-  AGY_KILL_DENY, agyGuarded, agyModeWarning, agySettingsDir, agySettingsPlan, autoModeArgs, launchRun, mayHcKill,
+  AGY_KILL_DENY, agyGuarded, agyModeWarning, agySettingsDir, agySettingsPlan, autoModeArgs, CLAUDE_PERSON_SETTINGS, launchRun, mayHcKill,
 } from "../mods/am-sidebar/models.js";
 import { helperPlan, restartPlan } from "../mods/am-sidebar/restart.js";
 import { workerArgs, workerKillRefusal, workerPlan } from "../mods/am-sidebar/workers.js";
@@ -25,12 +25,15 @@ const ID = "b-aaaaaaaaaa";
 const APP = "/home/u/.config/herdr-app";
 // The flags that answer every approval with yes. Only Antigravity's may be on a launch line, and
 // only beside its deny list (the owner's word, #955).
+// The person-feature settings every Claude launch carries unless its bot keeps them (#1558).
+const PERSON = ["--settings", CLAUDE_PERSON_SETTINGS];
 const SKIP_ALL = ["--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--auto-approve",
   "--approval-mode=yolo", "--force", "--allow-all-tools", "--dangerously-allow-all", "bypassPermissions"];
 // What each kind's launch adds, written out here so a change to the table is a change to this list.
 const EXPECTED = {
   claude: ["--permission-mode", "auto"],
-  codex: ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"],
+  codex: ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+    "-c", "allow_login_shell=false"],
   antigravity: ["--dangerously-skip-permissions"],
 };
 
@@ -47,7 +50,7 @@ for (const key of Object.keys(AGENTS)) {
     const bot = { id: ID, name: "Genie", agent: key };
     const run = AGENTS[key].run;
     const auto = EXPECTED[key] ?? [];
-    const head = [...run, ...auto];
+    const head = [...run, ...(key === "claude" ? PERSON : []), ...auto];
     // A start (launchSeat and seatOnMachine build their line from launchRun).
     assert.deepEqual(launchRun(key, run, bot), head);
     // A restart, here and on a linked machine: the callers hand restartPlan launchRun's words.
@@ -73,15 +76,15 @@ for (const key of Object.keys(AGENTS)) {
 }
 
 test("a run that already picks its approvals (programs.json) is left as the person wrote it, except Codex's (#1125)", () => {
-  assert.deepEqual(launchRun("claude", ["claude", "--permission-mode", "manual"], {}), ["claude", "--permission-mode", "manual"]);
-  assert.deepEqual(launchRun("claude", ["claude", "--permission-mode=plan"], {}), ["claude", "--permission-mode=plan"]);
+  assert.deepEqual(launchRun("claude", ["claude", "--permission-mode", "manual"], {}), ["claude", "--permission-mode", "manual", ...PERSON]);
+  assert.deepEqual(launchRun("claude", ["claude", "--permission-mode=plan"], {}), ["claude", "--permission-mode=plan", ...PERSON]);
   // Codex's own approval words go and its launch mode comes, codexAuto false or not (codex-mode.test.mjs has the forms).
   assert.deepEqual(launchRun("codex", ["codex", "-a", "never"], {}), ["codex", ...EXPECTED.codex]);
   assert.deepEqual(launchRun("antigravity", ["agy", AGY_SKIP_PERMISSIONS], {}), ["agy", AGY_SKIP_PERMISSIONS]);
   assert.deepEqual(autoModeArgs("codex", { codexAuto: false }, ["codex"]), EXPECTED.codex);
   assert.deepEqual(autoModeArgs("claude", { codexAuto: false }, ["claude"]), ["--permission-mode", "auto"]);
   // A flag after `--` is a prompt word, never the run's own choice.
-  assert.deepEqual(launchRun("claude", ["claude", "--", "--permission-mode"], {}), ["claude", "--", "--permission-mode", "--permission-mode", "auto"]);
+  assert.deepEqual(launchRun("claude", ["claude", "--", "--permission-mode"], {}), ["claude", ...PERSON, "--", "--permission-mode", "--permission-mode", "auto"]);
 });
 
 // ---- Antigravity: skip-permissions only beside the deny list ----
@@ -336,4 +339,16 @@ test("workerKillRefusal: only a worker of the calling bot may be ended; a seat, 
   for (const status of [{ state: "idle" }, { state: "done" }, null]) assert.equal(workerKillRefusal({ target: { ...mine, status }, botId: ID, self: "t1" }), null);
   assert.equal(workerKillRefusal({ target: { ...mine, state: "finished", status: { state: "working" } }, botId: ID, self: "t1" }), null);
   assert.match(workerKillRefusal({ target: mine, botId: null, self: "t1" }), /another bot's worker/, "no caller bot, no kill");
+  // #1129: hc's parent is the caller's own word at hc run, not proof of who started it, so it
+  // authorizes nothing. A plain child is refused however its parent reads; the main bot ends it.
+  const plain = /^t2 isn't a worker \(it has no worker\.of label\)\. Only the project's main bot can end a terminal started with plain hc run, and worker kill ends only a worker you started$/;
+  const child = { address: "t2", state: "live", labels: {} };
+  assert.match(workerKillRefusal({ target: { ...child, parent: "t1", status: { state: "idle" } }, botId: ID, self: "t1" }), plain, "a finished direct child");
+  assert.match(workerKillRefusal({ target: { ...child, parent: "t4", status: { state: "idle" } }, botId: ID, self: "t1" }), plain, "another pane's child");
+  assert.match(workerKillRefusal({ target: { ...child, parent: "t1", status: { state: "working" } }, botId: ID, self: "t1" }), plain, "a working direct child");
+  assert.match(workerKillRefusal({ target: { ...child, parent: "t0", status: { state: "idle" } }, botId: ID, self: "t1" }), plain, "a child of the caller's old pane");
+  assert.match(workerKillRefusal({ target: { address: "t4", parent: "t1", labels: { bot: "b-bbbbbbbbbb" } }, botId: ID, self: "t1" }), /^t4 is a bot's pane, not a worker/, "a seat started from the caller");
+  assert.match(workerKillRefusal({ target: { ...mine, parent: "t1", labels: { "worker.of": "b-bbbbbbbbbb" } }, botId: ID, self: "t1" }), /^t9 is another bot's worker/, "the label beats the parent");
+  // Ownership is the bot's, not the pane's: after a handoff or restart its worker is still its own.
+  assert.equal(workerKillRefusal({ target: { ...mine, parent: "t0" }, botId: ID, self: "t1" }), null);
 });

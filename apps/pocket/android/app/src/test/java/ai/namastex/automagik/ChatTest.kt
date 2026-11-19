@@ -7,6 +7,9 @@ import org.junit.Test
 
 /** The chat's model, its button gate and its text rendering (RFC 0015 delivery 5). */
 class ChatTest {
+    /** Every way a chat row could reach a log, a store or a preference (docs/privacy.md); the guard below runs it. */
+    private val banned = Regex("""android\.util\.Log|\bLog\.[a-z]+\(|\bprintln\(|\bprint\(|printStackTrace|Timber|SharedPreferences|getSharedPreferences|DataStore|openFileOutput|FileOutputStream|FileWriter|writeText|writeBytes|@Dao|@Entity|SQLiteDatabase|\.edit\(\)|\bprefs\b""")
+
     private fun j(text: String) = JSONObject(text)
     private fun state(terminal: String = "t1") = Chat.reduce(Chat.State(terminal), j("""{"type":"snapshot","reset":false,"rows":[],"screen":[],
         "status":{"state":"idle","kind":null,"msg":""},"approval":null,"held":[]}"""))
@@ -342,10 +345,16 @@ class ChatTest {
         val from = vm.indexOf("// ---- The live chat (RFC 0015 delivery 5)")
         val to = vm.indexOf("fun startTerminal(")
         assertTrue("live-chat section not found", from in 0 until to)
-        val banned = Regex("""android\.util\.Log|\bLog\.[a-z]\(|\bprintln\(|\bprint\(|printStackTrace|Timber|SharedPreferences|getSharedPreferences|DataStore|openFileOutput|FileOutputStream|FileWriter|writeText|writeBytes|@Dao|@Entity|SQLiteDatabase|\.edit\(\)|\bprefs\b""")
         val sources = files.map { it.name to it.readText() } + ("PocketViewModel.kt (live chat)" to vm.substring(from, to))
         val hits = sources.flatMap { (name, text) -> text.lines().mapIndexedNotNull { i, l -> if (banned.containsMatchIn(l)) "$name:${i + 1}: ${l.trim()}" else null } }
         assertEquals(emptyList<String>(), hits)
+    }
+
+    /** The guard must catch every platform log call, not only the single-letter ones (#1333). */
+    @Test fun theLogGuardCatchesEveryPlatformLogCall() {
+        for (line in listOf("""Log.e("chat", row.text)""", """Log.wtf("chat", row.text)""",
+            """Log.println(Log.ERROR, "chat", row.text)""", """println(row.text)"""))
+            assertTrue(line, banned.containsMatchIn(line))
     }
 
     @Test fun refusedAndUnansweredSends() {

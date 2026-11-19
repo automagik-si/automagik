@@ -69,7 +69,10 @@ type Record struct {
 	Session     string `json:"session,omitempty"`
 	WorkspaceID string `json:"workspace_id,omitempty"`
 	PaneID      string `json:"pane_id,omitempty"`
-	Error       string `json:"error,omitempty"`
+	// Target is the automation's target when the run was handed to a bot or a
+	// worker instead of a terminal of its own (#498); PaneID is that terminal.
+	Target string `json:"target,omitempty"`
+	Error  string `json:"error,omitempty"`
 	// ExitCode, Stderr and Notified are a command run's (ADR 0013).
 	// ExitCode is the program's exit status, absent when it has none (it never
 	// started, the timeout or a signal ended it).

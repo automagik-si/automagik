@@ -1003,3 +1003,15 @@ test('an adapter event during the first status read leaves the next catalog dirt
   assert.equal((await h.rt.catalog())[0].needsSignIn, true)
   assert.equal(h.reads(), 1)
 })
+
+
+test('validating a model pick leaves blocked Bots alone; a remembered catalog still lifts them', async () => {
+  const { rt } = bench()
+  const lifted = []
+  rt.unblockBots = fix => lifted.push([...fix.keyed])
+  assert.equal(await rt.resolveModel('deepseek/v4-flash', { remember: false }), 'deepseek/v4-flash')
+  assert.deepEqual(lifted, [])
+  await rt.catalog({ fresh: true })
+  assert.equal(lifted.length, 1)
+  assert.ok(lifted[0].includes('deepseek'))
+})

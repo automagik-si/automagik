@@ -7,7 +7,7 @@ import { registerHooks } from "node:module";
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scratchProject, scratchRoot } from "./scratch-project.mjs";
@@ -210,6 +210,40 @@ test("Antigravity (#793): a missing model cache is refreshed once with `agy mode
   assert.equal(execs(), 1);
   await open({ form: "edit", bot: AG.id });
   assert.equal(execs(), 1, "once per session");
+  assert.deepEqual(readdirSync(join(state.appHome, "automagik-herdr")).filter((n) => n.startsWith("antigravity-models.json")),
+    ["antigravity-models.json"], "the form's temp file was moved into place");
+
+  // #809: exercise both Herdr rejecting exec and the real /bin/mv returning a non-zero exit.
+  t.after(() => { delete state.execFault; });
+  for (const result of ["exec rejects", "mv exits non-zero"]) {
+    state.appHome = join(root, result);
+    state.calls = [];
+    const dir = join(state.appHome, "automagik-herdr");
+    const otherTemp = "antigravity-models.json.tmp-unrelated";
+    const rejects = result === "exec rejects";
+    if (rejects) seedAgModels([{ id: "old-model", label: "Old Model" }], "2000-01-01T00:00:00.000Z");
+    else mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, otherTemp), "another refresh");
+    state.execFault = (command, [from, to]) => {
+      if (command !== "/bin/mv") return;
+      if (rejects) return new Error("mv was ended");
+      // A directory of the same name inside the destination makes mv refuse the move.
+      mkdirSync(join(to, from.split("/").pop()), { recursive: true });
+    };
+    const { form: failed } = await open({ form: "edit", bot: AG.id });
+    delete state.execFault;
+    const moves = state.calls.filter((c) => c.kind === "exec" && c.command === "/bin/mv");
+    assert.equal(moves.length, 1, result);
+    assert.match(moves[0].args[0], /antigravity-models\.json\.tmp-\d+-\d+-[a-z0-9]+$/);
+    assert.equal(failed.modelsWhy, "the model cache couldn't be written", result);
+    assert.deepEqual(readdirSync(dir).filter((n) => n.includes(".tmp-")), [otherTemp], result);
+    assert.equal(readFileSync(join(dir, otherTemp), "utf8"), "another refresh", result);
+    if (rejects) {
+      assert.ok(failed.modelInfo("antigravity").models.includes("old-model"), "the old list stays");
+    } else {
+      assert.deepEqual(readdirSync(moves[0].args[1]), [moves[0].args[0].split("/").pop()], "only the blocking folder is at the destination");
+    }
+  }
 });
 
 test("Antigravity (#793): a slow refresh updates both forms and preserves edits typed while it runs", async (t) => {
@@ -1346,17 +1380,43 @@ test("menu busy labels: only the running action's item changes", async () => {
 
 // ---- automagik#206: a project on a linked machine ("vm": its files are scratch paths here) ----
 
-test("menu on a linked machine: Configure, Prompt and Run there; no What happened yet; Configure opens the form there", async () => {
+test("menu on a linked machine: Configure, Prompt, Run and What happened there; Configure opens the form there", async () => {
   seed([MAIN, OMP]);
   const { draw, click } = await menu({ machine: "vm" });
   draw();
-  for (const id of ["menu-configure", "menu-prompt", "menu-start", "menu-restart"]) assert.ok(nodes.has(id), id);
-  for (const id of ["menu-attach", "menu-detach", "menu-focus", "menu-inspect"]) assert.ok(!nodes.has(id), id);
-  assert.match(textOf(nodes.get("menu-remote-note")), /On vm\. What happened isn't shown/);
+  for (const id of ["menu-configure", "menu-prompt", "menu-start", "menu-restart", "menu-inspect"]) assert.ok(nodes.has(id), id);
+  for (const id of ["menu-attach", "menu-detach", "menu-focus"]) assert.ok(!nodes.has(id), id);
+  // #206: the scope is said: the events this computer recorded for that machine, nothing more.
+  assert.equal(textOf(nodes.get("menu-remote-note")), "Attach, detach and end events recorded by this computer for vm.");
   assert.doesNotMatch(textOf(nodes.get("bot-form-body")), /work from that computer/);
   state.opened = [];
   await click("menu-configure");
   assert.deepEqual(state.opened[0].props, { form: "edit", bot: OMP.id, project, machine: "vm" });
+});
+
+test("menu What happened on a linked machine asks history --machine and shows its rows, or names the machine when empty (#206)", async () => {
+  seed([MAIN, OMP]);
+  const at = (m) => `2026-11-03T10:0${m}:00.000Z`;
+  const args = fakeCli({ id: OMP.id, name: OMP.name, machine: "vm", bot: OMP.id,
+    attach: [{ v: 1, event: "attach", bot: OMP.id, terminal: "t8", core: "core-of-vm", machine: "vm", by: "attach", at: at(1) },
+      { v: 1, event: "detach", bot: OMP.id, terminal: "t8", core: "core-of-vm", machine: "vm", by: "detach", at: at(2) }],
+    starts: [], workers: [], sessions: [], transcript: null });
+  const { draw, click } = await menu({ machine: "vm" });
+  draw();
+  await click("menu-inspect");
+  const text = textOf(draw());
+  assert.deepEqual(args(), [`history ${OMP.id} --project ${project} --machine vm --json`]);
+  assert.match(text, /2026-11-03 10:02 detached from t8 · by detach/);
+  assert.match(text, /2026-11-03 10:01 attached to t8 · by attach/);
+  assert.match(textOf(nodes.get("menu-remote-note")), /recorded by this computer for vm/);
+  assert.ok(!nodes.has("menu-transcript"));
+
+  seed([MAIN, OMP]);
+  fakeCli({ id: OMP.id, name: OMP.name, machine: "vm", bot: OMP.id, attach: [], starts: [], workers: [], sessions: [], transcript: null });
+  const none = await menu({ machine: "vm" });
+  none.draw();
+  await none.click("menu-inspect");
+  assert.match(textOf(none.draw()), /Nothing recorded by this computer for vm yet\./);
 });
 
 test("menu on a linked machine, running: Focus and Detach its pane there; Attach only to a pane of that machine; actions pass --machine", async () => {
@@ -1684,4 +1744,46 @@ test("menu Restart with its helpers on a Herdr that takes no exec timeout: not r
   assert.throws(() => args(), /ENOENT/, "no restart reached the CLI");
   assert.match(form.error, /cannot wait long enough for a restart with its helpers; restart it from a terminal/);
   assert.equal(form.busy, false);
+});
+
+// ---- #1172: a paired Hermes bot's menu explains the binding before offering a restart ----
+
+const HERMES_BOT = { id: "b-hermesaaaa", name: "hermes-bot", kind: "member", look: look("star", "blue"), role: "r", instructions: "",
+  agent: "hermes", hermes: { home: "/srv/hermes", profile: "default" } };
+
+test("#1172 a paired Hermes bot's menu explains the pairing and offers only the restarts it can take", async () => {
+  seed([MAIN, HERMES_BOT]);
+  const running = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes", live: "t5", terminal: "t5" });
+  running.draw();
+  assert.ok(nodes.has("menu-focus") && nodes.has("menu-restart"), "Focus and Restart stay");
+  assert.equal(nodes.has("menu-restart-fresh"), false, "no fresh session for a paired bot");
+  assert.equal(nodes.has("menu-restart-on"), false, "no other agent for a paired bot");
+  assert.match(textOf(nodes.get("menu-paired-note")), /Paired to its Hermes Bot Chat \(profile default\)/);
+  assert.match(textOf(nodes.get("menu-paired-note")), /Configure… clears it/);
+  assert.match(textOf(nodes.get("menu-configure")), /Configure… \(unpair\)/);
+  const off = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes" });
+  off.draw();
+  assert.ok(nodes.has("menu-start") && nodes.has("menu-restart"), "Start and Restart stay");
+  assert.equal(nodes.has("menu-restart-fresh"), false);
+  assert.equal(nodes.has("menu-restart-on"), false);
+});
+
+test("#1172 a paired bot's menu on a linked machine explains the pairing there too", async () => {
+  seed([MAIN, HERMES_BOT]);
+  const { draw } = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes",
+    machine: "vm", live: "vm/t8", terminal: "vm/t8" });
+  draw();
+  assert.ok(nodes.has("menu-restart") && nodes.has("menu-focus"));
+  assert.equal(nodes.has("menu-restart-fresh"), false);
+  assert.equal(nodes.has("menu-restart-on"), false);
+  assert.match(textOf(nodes.get("menu-paired-note")), /profile default/);
+});
+
+test("#1172 a paired bot's menu from a stale linked roster snapshot still names the pairing and how to unpair", async () => {
+  seed([MAIN, HERMES_BOT]);
+  const { draw } = await menu({ bot: HERMES_BOT.id, name: HERMES_BOT.name, hermes: HERMES_BOT.hermes, agent: "hermes", machine: "vm", stale: true });
+  draw();
+  assert.ok(!nodes.has("menu-configure") && !nodes.has("menu-restart-on"), "nothing to press while vm is away");
+  assert.match(textOf(nodes.get("menu-remote-note")), /vm isn't answering/);
+  assert.match(textOf(nodes.get("menu-remote-note")), /paired to its Hermes Bot Chat \(profile default\): Configure… unpairs it once vm is back/);
 });

@@ -8,11 +8,11 @@ import { runInNewContext } from 'node:vm'
 import { build } from 'esbuild'
 
 const bundle = await build({
-  entryPoints: [fileURLToPath(new URL('../src/client/model-menu.js', import.meta.url))],
+  stdin: { contents: "export * from './src/client/model-menu.js'; export { SettingsDialog } from './src/client/settings.js'", resolveDir: fileURLToPath(new URL('..', import.meta.url)) },
   bundle: true, format: 'cjs', platform: 'node', write: false,
   external: ['react', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 })
-const SLOTS = []
+let SLOTS = []
 let at = 0
 let rootProps
 let rootTree
@@ -25,18 +25,22 @@ const draw = () => {
 }
 const module = { exports: {} }
 const react = {
+  Component: class {},
+  useCallback: fn => fn, useMemo: fn => fn(), useId: () => 'id',
+  createContext: value => ({ value }), useContext: ctx => ctx.value,
   Fragment: 'Fragment',
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
   useState: (initial) => {
     const index = at++
     if (!(index in SLOTS)) SLOTS[index] = { kind: 'state', value: typeof initial === 'function' ? initial() : initial }
+    const owner = SLOTS
     const slot = SLOTS[index]
     if (slot.kind !== 'state') throw new Error('hook order changed')
     // The anchored menu starts with two null states; the stub keeps it open for the test.
     if (slot.value === null && initial === null) slot.value = { ...PLACE }
     const set = (value) => {
       slot.value = typeof value === 'function' ? value(slot.value) : value
-      draw()
+      if (SLOTS === owner) draw()
     }
     return [slot.value, set]
   },
@@ -131,4 +135,45 @@ test('a saved Bot\'s settings picker keeps its onPick but still switches the rou
   assert.deepEqual(JSON.parse(JSON.stringify(picked)), [['acp-claude/haiku', { routeChange: true }]])
   assert.deepEqual(switched, [])
   assert.deepEqual(updated, [])
+})
+
+
+test('a rejected Settings crossing shows its final error and the same menu can reopen and retry', async () => {
+  const dialogSlots = [], formSlots = [], menuSlots = []
+  const render = (slots, work) => {
+    SLOTS = slots
+    at = 0
+    return work()
+  }
+  const roster = { ...rosterOf(), mainBotIds: [], rooms: [], roomsById: {}, prefs: {} }
+  roster.byId.b1.sessionPinned = true
+  const before = JSON.stringify(roster.byId.b1)
+  const message = 'Ops speaks in the conversation its host runs, so it cannot start a new one here.'
+  const calls = []
+  const actions = {
+    closeSettings() {}, refreshModels() {},
+    updateBot() { assert.fail('a crossing must use switchRoute') },
+    switchRoute: async (...args) => { calls.push(args); throw Object.assign(new Error(message), { code: 'bot/refused' }) },
+  }
+  const settings = () => render(dialogSlots, () => module.exports.SettingsDialog({ page: 'bots', id: 'b1', roster, actions }))
+  const form = find(settings(), node => node.type?.name === 'BotSettingsForm')
+  const menu = find(render(formSlots, () => form.type(form.props)), node => node.type?.name === 'ModelMenu')
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    // Reuse the same menu's state, just as a reopen during its exit animation does.
+    SLOTS = menuSlots
+    const steps = openModels(roster, menu.props)
+    click(steps, node => node.props.role === 'menuitemradio' && node.props.title === 'acp-claude/haiku')
+    const confirm = await confirmNow()
+    confirm.props.onConfirm()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const alert = find(settings(), node => node.props.role === 'alert')
+    assert.ok(alert)
+    assert.deepEqual(Array.from(alert.children), [message])
+    assert.equal(calls.length, attempt)
+    assert.equal(JSON.stringify(roster.byId.b1), before)
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ['b1', 'acp-claude/haiku', {}], ['b1', 'acp-claude/haiku', {}],
+  ])
+  SLOTS = []
 })

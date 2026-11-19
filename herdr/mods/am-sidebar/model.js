@@ -3,7 +3,7 @@
 // default look. Pure: no `herdr`, `gpui-kit`, `gpui-base` or `fs`, so `node --test` runs it.
 // Apache-2.0.
 
-import { AGY_MODES, LEGACY_AGENTS, agyRuleProblem, normalizeAgyPermissions } from "./models.js";
+import { AGY_MODES, LEGACY_AGENTS, agyRuleProblem, codexEffortProblem, normalizeAgyPermissions, permissionModeProblem, resolveAgent, tierProblem } from "./models.js";
 import { hermesPairProblem, hermesPairConflict } from "./hermesPair.js";
 
 /** The hc label key that ties a terminal to a bot; its value is the bot id (A9). */
@@ -13,6 +13,25 @@ export const MAX_INSTRUCTIONS = 4000;
 /** A project's definitions file, relative to its key folder. */
 export const BOTS_PATH = ".herdr/bots.json";
 export const KINDS = ["main", "member"];
+/** A main bot's context threshold when none is stored (#1556): restart it from a handoff over this. */
+export const DEFAULT_MAIN_RESTART_AT = 250_000;
+
+/**
+ * The context threshold a bot restarts at (#1556), in tokens: its own `restartAt` when stored
+ * (a positive whole number), else a main bot's default, else null (a member's, unset until one
+ * is configured). The sidebar, the CLI and the briefing read this one number.
+ */
+export function restartAtOf(bot) {
+  if (Number.isInteger(bot?.restartAt) && bot.restartAt > 0) return bot.restartAt;
+  return bot?.kind === "main" ? DEFAULT_MAIN_RESTART_AT : null;
+}
+
+/** Why a `restartAt` can't be used, or null: a positive whole number of tokens. */
+export function restartAtProblem(value) {
+  if (value === undefined || value === null || value === "") return null;
+  return Number.isInteger(value) && value > 0
+    ? null : `restartAt ${JSON.stringify(value)} isn't a positive whole number of tokens`;
+}
 /**
  * A bot's rank (A16): a closed set, for the pane's `role=` label the event meter reads. The
  * free-text `role` stays for the briefing. Optional. `main` is not a rank: role=main is the
@@ -187,6 +206,12 @@ export function parseBots(text) {
       warnings.push(`${where}: codexAuto false no longer opts out: every Codex seat and worker runs in auto mode `
         + "(--approve-for-me) with its sandbox on (#1125); remove the field");
     }
+    // Claude Code's person-feature opt-out (#1558): a boolean, true to keep them. Anything else is
+    // ignored, so a hand-written value never changes what a launch turns off.
+    if (bot.personFeatures !== undefined && typeof bot.personFeatures !== "boolean") {
+      warnings.push(`${where}: personFeatures is not a boolean; ignored`);
+      delete bot.personFeatures;
+    }
     if (!ID_SHAPE.test(bot.id)) warnings.push(`${where}: id is not b- plus 10 base32 characters`);
     if (typeof bot.role !== "string") { if (bot.role !== undefined) warnings.push(`${where}: role is not text`); bot.role = ""; }
     if (typeof bot.instructions !== "string") { if (bot.instructions !== undefined) warnings.push(`${where}: instructions are not text`); bot.instructions = ""; }
@@ -205,6 +230,41 @@ export function parseBots(text) {
     if (bot.agent !== undefined && !isText(bot.agent)) delete bot.agent;
     if (!bot.agent && !bot.planned) warnings.push(`${where}: no coding agent`);
     if (bot.model !== undefined && typeof bot.model !== "string") delete bot.model;
+    // #1411: a bot's own reasoning effort and service tier, Codex's: stored as words the roster
+    // reads, dropped with a warning when malformed or when the bot runs another agent.
+    const effortWhy = typeof bot.effort === "string" ? codexEffortProblem(bot.effort) : null;
+    if (bot.effort !== undefined && (typeof bot.effort !== "string" || effortWhy)) {
+      warnings.push(`${where}: ${typeof bot.effort === "string" ? effortWhy : `effort ${JSON.stringify(bot.effort)} isn't an effort level`}; ignored`);
+      delete bot.effort;
+    }
+    const tierWhy = tierProblem(bot.tier);
+    if (bot.tier !== undefined && tierWhy) {
+      warnings.push(`${where}: ${tierWhy}; ignored`);
+      delete bot.tier;
+    }
+    if ((bot.effort !== undefined || bot.tier !== undefined) && resolveAgent(bot.agent) !== "codex") {
+      warnings.push(`${where}: reasoning effort and service tier are Codex's; ignored`);
+      delete bot.effort;
+      delete bot.tier;
+    }
+    // #1556: the context threshold this seat restarts at, in tokens. A malformed one is
+    // ignored, so a hand-written value never makes a seat restart at an unintended size.
+    const restartWhy = restartAtProblem(bot.restartAt);
+    if (bot.restartAt !== undefined && restartWhy) {
+      warnings.push(`${where}: ${restartWhy}; ignored`);
+      delete bot.restartAt;
+    }
+    // #1413: a bot's own Claude Code permission mode. Kept as text so `show` can report what was
+    // written; a value Claude Code doesn't accept, or one on another agent, is dropped with the
+    // reason (the CLI refuses it before saving, and checkBots refuses a hand-written file).
+    if (bot.permissionMode === "") delete bot.permissionMode;
+    else if (bot.permissionMode !== undefined) {
+      const why = permissionModeProblem(resolveAgent(bot.agent), bot.permissionMode);
+      if (typeof bot.permissionMode !== "string" || why) {
+        warnings.push(`${where}: ${typeof bot.permissionMode === "string" ? why : `permission mode ${JSON.stringify(bot.permissionMode)} isn't text`}; ignored`);
+        delete bot.permissionMode;
+      }
+    }
     // Antigravity's launch mode: kept when it is text, even an unknown one, so a start refuses
     // it by name instead of silently launching on the default.
     if (bot.agyMode !== undefined) {
@@ -622,10 +682,30 @@ export function checkBots(file, before = null, { project = null, projects = null
     if (b.codexAuto !== undefined && typeof b.codexAuto !== "boolean") {
       errors.push(`${at}: codexAuto is not a boolean`);
     }
+    if (b.personFeatures !== undefined && typeof b.personFeatures !== "boolean") {
+      errors.push(`${at}: personFeatures is not a boolean`);
+    }
     if (typeof b.instructions !== "string") errors.push(`${at}: no instructions`);
     else if (b.instructions.length > MAX_INSTRUCTIONS) errors.push(`${at}: instructions longer than ${MAX_INSTRUCTIONS} characters`);
     if (b.planned !== undefined && (!isObject(b.planned) || !isWave(b.planned.wave))) errors.push(`${at}: planned needs a positive whole wave`);
     if (!b.planned && !isText(b.agent)) errors.push(`${at}: no coding agent`);
+    // #1411: a bot's own reasoning effort and service tier are Codex's.
+    if (b.effort !== undefined) {
+      const why = typeof b.effort === "string" ? codexEffortProblem(b.effort) : `effort ${JSON.stringify(b.effort)} isn't an effort level`;
+      if (why) errors.push(`${at}: ${why}`);
+    }
+    const tierIssue = tierProblem(b.tier);
+    if (tierIssue) errors.push(`${at}: ${tierIssue}`);
+    if ((b.effort !== undefined || b.tier !== undefined) && resolveAgent(b.agent) !== "codex") {
+      errors.push(`${at}: reasoning effort and service tier are Codex's (this bot runs ${b.agent ?? "no agent"})`);
+    }
+    const restartIssue = restartAtProblem(b.restartAt);
+    if (restartIssue) errors.push(`${at}: ${restartIssue}`);
+    // #1413: a bot's own permission mode is Claude Code's, and one of its own names.
+    if (b.permissionMode !== undefined) {
+      const why = permissionModeProblem(resolveAgent(b.agent), b.permissionMode);
+      if (why) errors.push(`${at}: ${why}`);
+    }
     if (b.agyMode !== undefined && b.agyMode !== "" && !AGY_MODES.includes(b.agyMode)) {
       errors.push(`${at}: agyMode ${JSON.stringify(b.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
@@ -861,9 +941,10 @@ export function newCategoryId(title, categories = []) {
  * A copy of `raw` (parseBots' raw file, or a new one) with one bot created or edited, the
  * Create form's write-back. `entry` holds every field the form edits; an optional one it
  * leaves out or empty is removed (planned, lead, leadProject, category, agent, model, agyMode);
- * other keys the stored entry had are kept. `rank` (A16) and `worker` are removed only when
- * `entry` names them empty, so a front end that doesn't edit them (the form has no worker fields)
- * keeps the stored ones; a `worker` with none of its fields left is removed too.
+ * other keys the stored entry had are kept. `rank` (A16), `worker`, `effort` and `tier` (#1411)
+ * and `permissionMode` (#1413) are removed only when `entry` names them empty, so a front end
+ * that doesn't edit them (the form has no worker, effort, tier or permission-mode fields) keeps
+ * the stored ones; a `worker` with none of its fields left is removed too.
  * A lead equal to the main bot (with no leadProject) is stored as no lead; a category goes only
  * with the main bot as lead; `newCategory` ({ title, sub }) is added to the categories and used.
  */
@@ -892,16 +973,41 @@ export function applyBotEdit(raw, entry, newCategory = null) {
   }
   const i = out.bots.findIndex((b) => b?.id === bot.id);
   const merged = i >= 0 ? { ...out.bots[i], ...bot } : bot;
+  // #1411: a bot's own effort and tier are a Codex bot's, and a tier goes with the model it was
+  // stored for. An edit that now runs another agent drops them; one that runs another model
+  // while naming no tier stores standard, so the launch says -c service_tier=default and neither
+  // a profile nor the host config can leave Fast on the new model. `model` here is the entry's
+  // own field when it has one (a front end's), else the stored one it leaves alone.
+  if (resolveAgent(merged.agent) !== "codex") {
+    delete merged.effort;
+    delete merged.tier;
+  } else if (i >= 0) {
+    const modelAfter = "model" in bot ? (bot.model || null) : (out.bots[i].model ?? null);
+    if ((out.bots[i].model ?? null) !== modelAfter && !("tier" in bot)) merged.tier = "standard";
+  }
+  // #1413: a stored permission mode is Claude Code's; an edit that now runs another agent drops
+  // it, and one that names it empty clears it (the loop below).
+  if (resolveAgent(merged.agent) !== "claude") delete merged.permissionMode;
   if (Object.hasOwn(bot, "hermes") && bot.hermes === undefined) delete merged.hermes;
   for (const k of ["planned", "lead", "leadProject", "category", "agent", "model", "agyMode", "agyPermissions"]) {
     if (!(k in bot) || bot[k] === undefined || bot[k] === null || bot[k] === "") delete merged[k];
   }
+  // #1411/#1413: a front end with no effort, tier or permission mode field keeps the stored
+  // ones; one that names the field empty clears it.
+  for (const k of ["effort", "tier", "permissionMode"]) {
+    if (k in bot && (bot[k] === undefined || bot[k] === null || bot[k] === "")) delete merged[k];
+  }
+  // #1556: the context threshold a seat restarts at. A front end that doesn't edit it keeps the
+  // stored one; one that names it empty (--no-restart-at) clears it.
+  if ("restartAt" in bot && (bot.restartAt === undefined || bot.restartAt === null || bot.restartAt === "")) delete merged.restartAt;
   if (("crossMembers" in entry || "members" in entry) && !bot.crossMembers) {
     delete merged.crossMembers;
     delete merged.members;
   }
   if ("rank" in bot && (bot.rank === undefined || bot.rank === null || bot.rank === "")) delete merged.rank;
   if ("code" in bot && (bot.code === undefined || bot.code === null || bot.code === "")) delete merged.code;
+  // Off is the default: only a bot that keeps Claude Code's person features stores the field (#1558).
+  if ("personFeatures" in bot && bot.personFeatures !== true) delete merged.personFeatures;
   if (isObject(merged.worker) && merged.worker.agyMode === "") {
     merged.worker = { ...merged.worker };
     delete merged.worker.agyMode;
