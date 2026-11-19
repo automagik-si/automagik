@@ -570,7 +570,7 @@ am forget <project>
 am worker "<task>" (--branch B [--base REF] | --worktree DIR)
        [[--agent A] [--model M] [--effort E] | --template T] [--name N] [--role dev|test|review|fix]
        [--task ID [--lead BOT]]
-am worker kill <pane>   # from a bot's pane: end one worker that bot started; any other pane is refused
+am worker kill <pane>   # end a worker you started with am worker. Plain hc run cleanup belongs to the project's main bot.
 am update [--check | --rollback | --retry-skipped]
 am meter install [--machine M | --linked | --local] | meter uninstall
 am machines [update [--machine M | --linked | --local] | --auto on|off|status [--machine M]]
@@ -1927,6 +1927,15 @@ terminal's `worker.of` label names the calling bot (the bot the attach ledger bi
 caller's pane to), it is not a bot's seat, it is not the caller's own pane, it is on this
 computer, and hc does not report it as `working`. A worker stuck mid-turn is the main bot's to
 end.
+
+`am worker` registers the worker to the bot's ID in `worker.of`. The same bot can still end
+its worker from its new seat after a restart. Only the project's main bot can end a terminal
+started with plain `hc run`, including after a handoff or restart. Start with `am worker` when
+you need to end the worker yourself.
+
+Before ending a registered worker, the CLI rereads the caller's and target's attach bindings
+and asks hc again for the target's identity, ownership and turn status. hc provides no
+conditional kill, so the bindings or terminal can still change between the recheck and the kill.
 
 Where the rule is enforced:
 
