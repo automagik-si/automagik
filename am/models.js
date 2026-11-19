@@ -1354,16 +1354,97 @@ function runNames(run, flags) {
   return false;
 }
 
+// ---- A bot's own permission mode (Claude Code, #1413) ----
+//
+// Claude Code's --permission-mode names what a session may run without asking. The pack starts
+// every Claude launch in its auto mode (AUTO_MODE); a bot's record may name another of Claude
+// Code's own modes instead, and the launch passes that one from the definition on every path
+// (start, restart, revive, linked start, worker and a worker's tree helper). It is independent
+// of the model, reasoning effort and service tier. The names are Claude Code 2.1.328's `--help`
+// list; herdr/test/permission-mode.test.mjs reads the `--help` of the Claude Code on the PATH of
+// the gate and fails when the two lists differ, so a CLI upgrade is seen before a mode the newer
+// CLI accepts is refused. Update this list and the README's table together when it fails.
+export const CLAUDE_PERMISSION_MODES = Object.freeze(["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"]);
+
+/** What a Claude launch runs without a stored permission mode. */
+export const PERMISSION_MODE_DEFAULT = "auto";
+
+/** One line for each mode: what it runs without asking (Claude Code's own meanings). */
+export const PERMISSION_MODE_WHAT = Object.freeze({
+  acceptEdits: "Claude Code's acceptEdits mode: reads and file edits run without a prompt",
+  auto: "Claude Code's auto mode: its classifier answers permission requests",
+  bypassPermissions: "Claude Code's bypassPermissions mode: every tool call runs without a prompt",
+  manual: "Claude Code's manual mode: it asks before anything but reads",
+  dontAsk: "Claude Code's dontAsk mode: anything not already allowed is refused instead of asked",
+  plan: "Claude Code's plan mode: it reads and plans; edits wait for a person's approval",
+});
+
+/** The agents with a per-bot permission mode, and the names each accepts; null for the others. */
+export const PERMISSION_MODES = Object.freeze({ claude: CLAUDE_PERMISSION_MODES });
+
+/** The permission mode names `agentKey` takes, or null. */
+export function permissionModesOf(agentKey) {
+  return PERMISSION_MODES[agentKey] ?? null;
+}
+
+/** Why `mode` can't be stored for `agentKey`, or null (absent or one of its names: fine). One line. */
+export function permissionModeProblem(agentKey, mode) {
+  if (mode === undefined || mode === null || mode === "") return null;
+  if (typeof mode !== "string") return `permission mode ${JSON.stringify(mode)} isn't text`;
+  const modes = permissionModesOf(agentKey);
+  if (!modes) {
+    if (!agentKey) return "permission mode is Claude Code's (--permission-mode); this bot has no coding agent";
+    const name = AGENTS[agentKey]?.name ?? agentKey;
+    // F2: say what to use instead, so a refusal names the control that does exist.
+    const instead = agentKey === "codex" ? "use its fixed launch mode (#1125) instead"
+      : agentKey === "antigravity" ? "use its execution mode (agyMode) instead" : null;
+    return `permission mode is Claude Code's (--permission-mode); ${name} has none${instead ? `: ${instead}` : ""}`;
+  }
+  return modes.includes(mode) ? null : `permission mode ${JSON.stringify(mode)} isn't one of ${modes.join(", ")}`;
+}
+
+/**
+ * The words that start `agentKey` on permission mode `mode`: Claude Code's own flag, [] for an
+ * agent with no per-bot mode. No mode names the pack's default, auto.
+ */
+export function permissionModeArgs(agentKey, mode = null) {
+  if (!permissionModesOf(agentKey)) return [];
+  return ["--permission-mode", typeof mode === "string" && mode ? mode : PERMISSION_MODE_DEFAULT];
+}
+
+/**
+ * The permission mode a launch's own command line names, or null: the last --permission-mode
+ * before any `--` (Claude Code reads the last one), or bypassPermissions for its older
+ * --dangerously-skip-permissions spelling. Used by `show` to report what a live pane runs.
+ */
+export function permissionModeFrom(argv) {
+  const { args } = agentArgv(argv);
+  let found = null;
+  for (let i = 0; i < args.length; i += 1) {
+    const w = args[i];
+    if (w === "--") break;
+    if (w === "--dangerously-skip-permissions") found = "bypassPermissions";
+    else if (w === "--permission-mode") found = args[i + 1] ?? null;
+    else if (w.startsWith("--permission-mode=")) found = w.slice("--permission-mode=".length);
+  }
+  return found;
+}
+
 /**
  * The words `agentKey`'s automatic mode adds to `run` for `bot`: AUTO_MODE's, [] for an agent
- * with none and for a run that already picks its own approvals (a programs.json override).
- * Codex always gets its launch mode (#1125): launchRun leaves the source's own approval and
- * sandbox words out instead.
+ * with none and for a run that already picks its own approvals (a programs.json override). A
+ * Claude bot whose record names a permission mode (#1413) gets that mode instead of auto, even
+ * when its run names one: the record is the later word and wins. Codex always gets its launch
+ * mode (#1125): launchRun leaves the source's own approval and sandbox words out instead.
  */
 export function autoModeArgs(agentKey, bot = null, run = []) {
-  const mode = AUTO_MODE[agentKey];
   if (agentKey === "codex") return codexAutoArgs(agentKey);
-  if (!mode || runNames(run, mode.own)) return [];
+  const mode = AUTO_MODE[agentKey];
+  if (!mode) return [];
+  if (agentKey === "claude" && typeof bot?.permissionMode === "string" && CLAUDE_PERMISSION_MODES.includes(bot.permissionMode)) {
+    return permissionModeArgs("claude", bot.permissionMode);
+  }
+  if (runNames(run, mode.own)) return [];
   return [...mode.args];
 }
 
