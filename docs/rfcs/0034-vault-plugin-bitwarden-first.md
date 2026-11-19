@@ -24,17 +24,18 @@ one, today the person types the value into the Bot's card. That makes a second c
 `<team home>/secrets.json` (mode 0600) and in the Bot team's process
 (`apps/bots-dsh/src/host/secrets.js:609`, `:729`). The Bot asks with `request_secret` and sees only
 the variable name; `list_secrets` lists names and scopes, never values (`:1048`, `:1109`). Masking
-replaces exact copies on tool results and model requests (`:1139`, `:1153`), and the README says
-it does not cover encoded, split or reversed values, or a shell that sends one out.
+replaces the value and its JSON-escaped and URL-encoded forms on tool results and model requests
+(`:1139`, `:1153`, `:130-136`); it does not cover base64, hex, split or reversed forms, and a
+command that sends the value out has already done so before its result is masked (`:1139`).
 
 What today's handling does not do:
 
 - **Revocation and lock.** Deleting or rotating the item does nothing to the copy in a file or a
   running shell; Automagik cannot tell the vault changed, and no vault lock stands behind a saved
   value.
-- **Item-level access.** Scope is every Bot or a list of them (`secrets.js:40`), not one item and
-  one field. Every secret a Bot may use goes into every shell call it makes, not only the command
-  that names it (`secrets.js:1166`).
+- **Item-level access.** Scope is every Bot, a list of them, or one Session for a mounted
+  capability (`secrets.js:40-43`), not one item and one field. Every secret a Bot may use goes
+  into every shell call it makes, not only the command that names it (`secrets.js:1166`).
 - **One source of truth.** The person maintains the vault and the card separately, so the vault's
   2FA, audit and lock do not apply to the copy.
 - **Least privilege for non-shell consumers.** MCP capabilities, the GitHub connector and Remote
@@ -171,9 +172,13 @@ and never travel over a plain-HTTP page off loopback.
 - `<team home>/vault-sources.json`, mode 0600, version 1: name, provider, connection label, item,
   field, scope, purpose, requester and timestamps. No value, ever. The connection is a label;
   `bw config server` owns the server address, so Automagik stores no host.
-- `secrets.json` is unchanged (version 1, values only). An older `bots-dsh` ignores
-  `vault-sources.json`: its vault names are then unavailable and no value appears. Restoring the
-  newer plugin restores the mappings, and nothing is converted.
+- `secrets.json` is unchanged (version 1: each entry's name, value, purpose, scope, Session,
+  requester and timestamps; `secrets.js:613`, `:698-708`). No reference is added. An older
+  `bots-dsh` ignores `vault-sources.json`: its vault names are then unavailable and no value
+  appears. Restoring the newer plugin restores the mappings, and nothing is converted.
+- A Session-scoped secret (`secrets.js:38-43`) stays outside the first cut: it is never a Bot's
+  and reaches no shell (`:1191`), and a vault mapping is refused for a name `secrets.json` holds
+  scoped to a Session. Delivery 5 decides how a Session mount reaches a vault source.
 - The existing `POST /api/omni-ui` route (the browser session cookie) gains `secret-source-set`,
   `secret-source-clear`, `vault-unlock`, `vault-lock` and `vault-status`; they are refused when
   `secretSources` is absent. Older clients ignore them; the source row appears only when the
@@ -201,7 +206,9 @@ grant is bound to one execution, and there is no network listener.
 - **Prompt injection or a compromised Bot.** A request gives no authority. The approval is the
   boundary: it names the exact command or destination, and covers one execution. If the person
   approves a command that sends the value out, the Bot can leak it; masking is a safety net, not a
-  boundary. A Bot that encodes, splits or reverses a value can still leak it, as the README says.
+  boundary. A Bot that base64-encodes, hex-encodes, splits or reverses a value can still leak it:
+  the redactor builds only the value, its JSON-escaped forms and its URL-encoded forms
+  (`secrets.js:130-136`).
   Only OS isolation or the sandbox ([RFC 0010](0010-desktop-sandbox.md)) stops same-user
   processes.
 - **A Bot running the manager CLI itself.** Unlock variables are removed from every Bot shell and
