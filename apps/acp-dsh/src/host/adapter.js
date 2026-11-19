@@ -1324,6 +1324,7 @@ export class AcpAdapter extends LlmAdapter {
       // guard above remains the sole continuation rule; no approval creates a prompt.
       let fileOwner
       let fileContext
+      let keepsFiles = () => false
       if (agent.sessionFiles === true) {
         const level = levelOf(this.ctx.get?.('approval'), dshAgent.session, this.ctx.get?.('sandboxPolicy'), this.ctx.get?.('permissionPresets'))
         let strictChat = restrictedLevel(level)
@@ -1340,9 +1341,12 @@ export class AcpAdapter extends LlmAdapter {
           fileOwner = this.sessionFiles.owner(dshAgent, options.provider)
           entry.fileStartup = true
           try {
+            const fileGrant = fileOwner.grant
             const files = await this.sessionFiles.activate(fileOwner, last, options.signal)
             if (!this.sessionFiles.valid(fileOwner) || entry.held !== undefined) throw new Error('Image permission changed before startup.')
             fileContext = { sandbox: level.sandbox, files }
+            keepsFiles = () => fileOwner !== undefined && this.sessionFiles.valid(fileOwner)
+              && fileOwner.grant === fileGrant && entry.held === undefined
           } catch (error) {
             this.endSession(sessionId)
             return yield finish('error', error.message)
@@ -1372,7 +1376,7 @@ export class AcpAdapter extends LlmAdapter {
       const remade = live !== undefined && (live.provider !== options.provider || !live.run.alive
         || bridgeGone || live.asks !== asks || (live.native === true) !== native)
       if (remade) {
-        this.end(sessionId, live)
+        this.end(sessionId, live, { preserveFiles: keepsFiles() })
         live = undefined
       }
       // The account this CLI is signed in to waits for the person's word (index.js, consent.js):
@@ -1405,7 +1409,7 @@ export class AcpAdapter extends LlmAdapter {
         // `alive` and the map: the Stop's own wait (reap) may have ended it meanwhile.
         if (!ended || !live.run.alive || this.live.get(sessionId) !== live) {
           if (!ended) this.warn(`${agent.name} did not stop its last answer within ${waited(this.cancelWaitMs)}: a new session replaces it`)
-          this.end(sessionId, live)
+          this.end(sessionId, live, { preserveFiles: keepsFiles() })
           live = undefined
         }
       }
