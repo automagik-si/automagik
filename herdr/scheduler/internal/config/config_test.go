@@ -738,6 +738,7 @@ func TestTargetRefusals(t *testing.T) {
 		{"unknown kind", `target: "main:b-6jrz4bmxml"`, "must be bot or worker"},
 		{"a worker has no busy rule", "target: \"worker:b-6jrz4bmxml\"\n    target_when_busy: skip", "target_when_busy is a bot target's"},
 		{"a bad busy rule", "target: \"bot:b-6jrz4bmxml\"\n    target_when_busy: wait", "target_when_busy must be queue or skip"},
+		{"a busy rule without a target", "target_when_busy: skip", "add target: bot:<id> or drop it"},
 		{"a workspace", "target: \"bot:b-6jrz4bmxml\"\n    workspace: worktree", "drop workspace"},
 		{"an agent", "target: \"bot:b-6jrz4bmxml\"\n    agent: claude", "drop agent"},
 		{"a close", "target: \"bot:b-6jrz4bmxml\"\n    close_workspace: on-success", "drop close_workspace"},

@@ -41,10 +41,26 @@ func botStatus(state string) *struct {
 	}{State: state}
 }
 
+// livePane is what `hc get` answers for a bot's running terminal: live, still
+// labelled with the bot, in the project, with a program in front.
+func livePane(address, cwd, bot, state string, argv ...string) hc.Terminal {
+	t := hc.Terminal{
+		Address: address, State: "live", Cwd: cwd,
+		Labels:     map[string]string{"bot": bot},
+		Foreground: &hc.Foreground{Argv: argv},
+	}
+	if state != "" {
+		t.Status = botStatus(state)
+	}
+	return t
+}
+
 // A bot target hands the prompt to the bot's own live terminal, never to a
 // fresh agent, and never kills the bot when the run is done (#498).
 func TestBotTargetSendsToTheBotsOwnTerminal(t *testing.T) {
-	f := &fakeHC{terminals: []string{"t7"}, term: hc.Terminal{Status: botStatus("idle")}}
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
 	h := targetHost(f)
 	a := targetAutomation("bot:b-6jrz4bmxml")
 	s, err := h.Provision(a)
@@ -80,7 +96,9 @@ func TestBotTargetSendsToTheBotsOwnTerminal(t *testing.T) {
 // leaves no terminal labelled with the bot fails the run, never falls back to
 // a fresh session.
 func TestBotTargetStartsAStoppedBot(t *testing.T) {
-	f := &fakeHC{termSeq: [][]string{{}, {}, {"t7"}}, term: hc.Terminal{Status: botStatus("idle")}}
+	f := &fakeHC{termSeq: [][]string{{}, {}, {"t7"}}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
 	h := targetHost(f)
 	var calls []string
 	h.amFn = func(args, _ []string) (string, error) {
@@ -152,7 +170,8 @@ func TestTargetRefusesAPlannedBot(t *testing.T) {
 		return []byte(`{"version":1,"bots":[{"id":"b-6jrz4bmxml","name":"Housekeeper","planned":{"wave":3}}]}`), nil
 	}
 	_, err := h.Provision(targetAutomation("bot:b-6jrz4bmxml"))
-	if err == nil || !strings.Contains(err.Error(), "is planned and starts no runs") {
+	if err == nil || !strings.Contains(err.Error(), "is planned and starts no runs") ||
+		!strings.Contains(err.Error(), "/src/project/.herdr/bots.json") {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -160,7 +179,9 @@ func TestTargetRefusesAPlannedBot(t *testing.T) {
 // Busy is configurable: skip drops the occurrence (a skip, not a failure),
 // queue still hands the prompt over for the bot's next turn.
 func TestBotTargetBusySkipAndQueue(t *testing.T) {
-	f := &fakeHC{terminals: []string{"t7"}, term: hc.Terminal{Status: botStatus("working")}}
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "working", "claude"),
+	}}
 	h := targetHost(f)
 	a := targetAutomation("bot:b-6jrz4bmxml")
 	a.TargetWhenBusy = config.TargetSkip
@@ -183,15 +204,23 @@ func TestBotTargetBusySkipAndQueue(t *testing.T) {
 }
 
 // A worker target starts the pack's worker under the bot with the automation's
-// worktree and prompt, then ends it when the run's turn is over (#498).
+// worktree and prompt, then ends it through the pack's checked `am worker
+// kill` when the run's turn is over (#498).
 func TestWorkerTargetStartsAndEndsAWorker(t *testing.T) {
-	f := &fakeHC{terminals: []string{"t7"}}
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
 	h := targetHost(f)
 	var got []string
 	var env []string
+	var ends []string
 	h.amFn = func(args, extraEnv []string) (string, error) {
 		if args[0] != "worker" {
 			t.Fatalf("am %v", args)
+		}
+		if len(args) > 1 && args[1] == "kill" {
+			ends = append(ends, strings.Join(args, " ")+" env="+strings.Join(extraEnv, ","))
+			return `{"terminal":"t9","ended":true}`, nil
 		}
 		got, env = args, extraEnv
 		return `{"terminal":"t9","warnings":["a warning"]}`, nil
@@ -202,7 +231,7 @@ func TestWorkerTargetStartsAndEndsAWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.PaneID != "t9" || s.Target != a.Target || s.TargetName != "Housekeeper" {
+	if s.PaneID != "t9" || s.Target != a.Target || s.TargetName != "Housekeeper" || s.TargetParent != "t7" {
 		t.Fatalf("session %+v", s)
 	}
 	repo, branch, path := f.worktree[0], f.worktree[1], f.worktree[2]
@@ -219,39 +248,50 @@ func TestWorkerTargetStartsAndEndsAWorker(t *testing.T) {
 	if err := h.Do(s, a, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	var killed, removed bool
-	for _, call := range f.calls {
-		killed = killed || call == "kill t9"
-		removed = removed || call == "rm t9"
+	if len(ends) != 1 || ends[0] != "worker kill t9 --json env=HC_TERMINAL_ID=t7" {
+		t.Fatalf("the run's worker was not ended through am worker kill: %v", ends)
 	}
-	if !killed || !removed {
-		t.Fatalf("the run's worker was not ended: %v", f.calls)
+	for _, call := range f.calls {
+		if call == "kill t9" || call == "rm t9" {
+			t.Fatalf("the checked path was bypassed: %v", f.calls)
+		}
 	}
 	if err := h.Close(s, a); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// A failing worker run still ends its worker: nothing is left running.
+// A failing worker run still ends its worker through the checked path.
 func TestWorkerTargetEndsItsWorkerOnFailure(t *testing.T) {
-	f := &fakeHC{terminals: []string{"t7"}}
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
 	h := targetHost(f)
-	h.amFn = func([]string, []string) (string, error) { return `{"terminal":"t9"}`, nil }
+	var ends []string
+	h.amFn = func(args, env []string) (string, error) {
+		if len(args) > 1 && args[1] == "kill" {
+			ends = append(ends, strings.Join(args, " ")+" env="+strings.Join(env, ","))
+			return `{"terminal":"t9","ended":true}`, nil
+		}
+		return `{"terminal":"t9"}`, nil
+	}
 	f.waits = []hc.Wait{{Ended: true, Reason: "status", Status: "error"}}
 	if _, err := h.Provision(targetAutomation("worker:b-6jrz4bmxml")); err != nil {
 		t.Fatal(err)
 	}
-	s := Session{PaneID: "t9", Target: "worker:b-6jrz4bmxml", TargetName: "Housekeeper"}
+	s := Session{PaneID: "t9", Target: "worker:b-6jrz4bmxml", TargetName: "Housekeeper", TargetParent: "t7"}
 	if err := h.Do(s, targetAutomation("worker:b-6jrz4bmxml"), time.Minute); err == nil {
 		t.Fatal("an agent error was recorded as done")
 	}
-	if !strings.Contains(strings.Join(f.calls, " "), "kill t9") {
-		t.Fatalf("calls %v", f.calls)
+	if len(ends) != 1 || !strings.HasPrefix(ends[0], "worker kill t9 --json") {
+		t.Fatalf("calls %v", ends)
 	}
 }
 
 func TestWorkerTargetStartFailureIsClear(t *testing.T) {
-	f := &fakeHC{terminals: []string{"t7"}}
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
 	h := targetHost(f)
 	h.amFn = func([]string, []string) (string, error) {
 		return "", errors.New("Only a bot starts workers, from its own pane")
@@ -263,10 +303,66 @@ func TestWorkerTargetStartFailureIsClear(t *testing.T) {
 	}
 }
 
+// A labelled pane is not enough: a shell in front is a bot that quit, so the
+// bot is started instead of sending the prompt into a dead shell (#498).
+func TestLiveBotIgnoresAStaleShell(t *testing.T) {
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "", "/bin/zsh", "-l"),
+	}}
+	h := targetHost(f)
+	addr, remote, err := h.liveBot("/src/project", "b-6jrz4bmxml")
+	if err != nil || addr != "" || remote != "" {
+		t.Fatalf("liveBot = %q %q %v, want no pane", addr, remote, err)
+	}
+}
+
+// Two live panes carrying one bot label cannot both be the bot: refuse, never
+// take the first (#498).
+func TestLiveBotRefusesDuplicateLabels(t *testing.T) {
+	f := &fakeHC{terminals: []string{"t7", "t8"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+		"t8": livePane("t8", "/src/project", "b-6jrz4bmxml", "idle", "codex"),
+	}}
+	h := targetHost(f)
+	_, _, err := h.liveBot("/src/project", "b-6jrz4bmxml")
+	if err == nil || !strings.Contains(err.Error(), "has 2 live terminals (t7, t8)") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+// A same-id bot labelled in another project is not this project's bot: pick
+// the pane whose folder is this project (#498).
+func TestLiveBotIgnoresAnotherProjectsPane(t *testing.T) {
+	f := &fakeHC{terminals: []string{"t7", "t8"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/other/project", "b-6jrz4bmxml", "idle", "claude"),
+		"t8": livePane("t8", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
+	h := targetHost(f)
+	addr, _, err := h.liveBot("/src/project", "b-6jrz4bmxml")
+	if err != nil || addr != "t8" {
+		t.Fatalf("liveBot = %q %v, want t8", addr, err)
+	}
+}
+
+// Among labelled panes, the one whose foreground is the agent wins; a shell
+// is not a live bot (#498).
+func TestLiveBotPicksTheForegroundAgent(t *testing.T) {
+	f := &fakeHC{terminals: []string{"t7", "t8"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "", "/bin/bash"),
+		"t8": livePane("t8", "/src/project", "b-6jrz4bmxml", "idle", "claude"),
+	}}
+	h := targetHost(f)
+	addr, _, err := h.liveBot("/src/project", "b-6jrz4bmxml")
+	if err != nil || addr != "t8" {
+		t.Fatalf("liveBot = %q %v, want t8", addr, err)
+	}
+}
+
 // What a person sees when the target cannot be reached: the bot's name, its
 // id and the terminal, then the reason.
 func TestBotTargetSendFailureIsClear(t *testing.T) {
-	f := &fakeHC{terminals: []string{"t7"}, sendErr: errors.New("terminal is blocked on a dialog")}
+	f := &fakeHC{terminals: []string{"t7"}, sendErr: errors.New("terminal is blocked on a dialog"),
+		gets: map[string]hc.Terminal{"t7": livePane("t7", "/src/project", "b-6jrz4bmxml", "idle", "claude")}}
 	h := targetHost(f)
 	a := targetAutomation("bot:b-6jrz4bmxml")
 	s, err := h.Provision(a)
@@ -282,7 +378,9 @@ func TestBotTargetSendFailureIsClear(t *testing.T) {
 // The roster is read from the project above a repo subfolder, and a broken
 // one is a diagnostic, never a silent fresh session.
 func TestTargetRosterWalksUpAndRefusesBadJSON(t *testing.T) {
-	f := &fakeHC{terminals: []string{"t7"}}
+	f := &fakeHC{terminals: []string{"t7"}, gets: map[string]hc.Terminal{
+		"t7": livePane("t7", "/src/project/sub", "b-6jrz4bmxml", "idle", "claude"),
+	}}
 	h := targetHost(f)
 	h.roster = func(path string) ([]byte, error) {
 		if path == "/src/project/.herdr/bots.json" {

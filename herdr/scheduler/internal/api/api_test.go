@@ -290,3 +290,29 @@ automations:
 		}
 	}
 }
+
+// Bots live in herdr-core: a backend: herdr scheduler refuses every target,
+// so it must not name the kinds in ls --json either (#498).
+func TestListDoesNotClaimTargetsUnderHerdr(t *testing.T) {
+	setup(t, `automations:
+  - name: night
+    cron: "0 9 * * *"
+    repo: /x
+    agent: claude
+    prompt: tidy
+`)
+	l, err := List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Targets != nil {
+		t.Fatalf("targets = %v under backend: herdr", l.Targets)
+	}
+	raw, err := json.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"targets"`) {
+		t.Errorf("ls --json still names targets: %s", raw)
+	}
+}

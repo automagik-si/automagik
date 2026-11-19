@@ -42,6 +42,10 @@ type Session struct {
 	// TargetName is that bot's name from the project's bots.json, for the
 	// lines a person reads.
 	TargetName string
+	// TargetParent is the bot's terminal a worker target runs under. The
+	// worker is ended through the pack's checked `am worker kill`, which asks
+	// that pane whose worker this is; a bot target leaves it empty.
+	TargetParent string
 }
 
 // Host provisions somewhere for a run to happen, and does the work there.

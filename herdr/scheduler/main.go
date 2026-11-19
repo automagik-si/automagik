@@ -400,6 +400,13 @@ func putCmd(args []string) error {
 	for k := range sent {
 		given = append(given, k)
 	}
+	// Removing a target removes its busy answer in the same put: target_when_busy
+	// without a target is a load diagnostic, not a key to leave behind (#498).
+	if _, sentTarget := sent["target"]; sentTarget && in.Target == "" {
+		if _, sentBusy := sent["target_when_busy"]; !sentBusy {
+			given = append(given, "target_when_busy")
+		}
+	}
 	a := config.Automation{
 		Name: in.Name, Cron: in.Cron, Repo: in.Repo, Workspace: in.Workspace, WorkspaceID: in.WorkspaceID,
 		Agent: in.Agent, Model: in.Model, Template: in.Template, Prompt: in.Prompt, Workflow: in.Workflow,

@@ -145,15 +145,23 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   `stderr`, `notified`). A running command has no terminal: its dot is `working` while its last
   record says `running`.
 - **Targets** (#498): `target: <kind>:<bot id>` sends the prompt to a bot instead of a new session.
-  `bot:<id>` finds the bot's live terminal (`hc ls --label bot=<id>`), starts it with
-  `am start <id> --project <repo>` when it is not running, waits up to 2 min for its terminal, then
-  pastes the prompt with `hc send`; the run is `done` when the bot takes it. `worker:<id>` starts
-  `am worker "<prompt>" --worktree <dir> --project <repo>` with `HC_TERMINAL_ID` set to the bot's
-  pane, so the worker inherits the bot's worker launch and permissions, then waits for its turn and
-  ends it. A bot that is gone from the roster, planned, on another machine, or unreachable is a
+  `bot:<id>` resolves the bot's live terminal through the pack's own checks: `hc ls --label
+  bot=<id>` supplies candidates, each `hc get` says live, still labelled with that id, an agent in
+  front (a shell is a bot that quit), and in this project's folder; two live candidates are refused,
+  never guessed between. It starts a stopped bot with `am start <id> --project <repo>`, waits up to
+  2 min for its terminal, then pastes the prompt with `hc send`; the run is `done` when the bot
+  takes it. `worker:<id>` starts `am worker "<prompt>" --worktree <dir> --project <repo>` with
+  `HC_TERMINAL_ID` set to the bot's pane, so the worker inherits the bot's worker launch and
+  permissions, then waits for its turn and ends it through the checked `am worker kill <pane>
+  --json` (the finished terminal stays as the run's address, so the history still points at where
+  it ran). A bot that is gone from the roster, planned, on another machine, or unreachable is a
   `failed` run whose line names it; it never falls back to a fresh agent. `target_when_busy: skip`
-  records a busy bot's run `skipped`. Our build names `targets` in `ls --json`; without it the
-  form offers no runs-as and a saved target is kept and never rewritten.
+  records a busy bot's run `skipped`, keeping the pane and target it resolved. Our build names
+  `targets` in `ls --json` only when its backend can run one (`hc`, or `auto`); without it the form
+  offers no runs-as. An older build has no `Target` field, so its `ls` cannot show a hand-written
+  target, it ignores the key and runs a fresh session, and a panel save (which sends no target key)
+  leaves the key in place. After a target save the panel reads the entry back and fails the save if
+  the build claimed `targets` but dropped the key.
 - **Address warning** (#498): a prompt holding an hc address (`t3q1`, `build-box/t9`: a `t`, a
   digit, then letters and digits) is warned about on every preview and on Save, "… is a terminal
   address; it changes on restart. Name the bot instead"; it is saved all the same. A name given with

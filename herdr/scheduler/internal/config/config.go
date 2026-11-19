@@ -318,6 +318,9 @@ func (a *Automation) validate(backend Backend) error {
 	if a.Target != "" {
 		return a.validateTarget(backend)
 	}
+	if a.TargetWhenBusy != "" {
+		return fmt.Errorf("%s: target_when_busy is a bot target's; add target: bot:<id> or drop it", a.Name)
+	}
 	if a.Command != nil {
 		return a.validateCommand()
 	}

@@ -26,7 +26,7 @@ type Listing struct {
 	// Targets are the target kinds this build runs: bot, worker. A panel
 	// offers a bot or worker target only when it reads them here, so it never
 	// writes a target to a scheduler that would drop it (#498).
-	Targets     []string     `json:"targets"`
+	Targets     []string     `json:"targets,omitempty"`
 	Automations []Automation `json:"automations"`
 	Invalid     []Invalid    `json:"invalid"`
 }
@@ -85,7 +85,10 @@ type Run struct {
 	Seconds    int            `json:"seconds"`
 	Space      string         `json:"space,omitempty"`
 	Terminal   string         `json:"terminal,omitempty"`
-	Error      string         `json:"error,omitempty"`
+	// Target is the automation's target when the run went to a bot or a worker
+	// instead of a terminal of its own (#498); Terminal is that pane.
+	Target string `json:"target,omitempty"`
+	Error  string `json:"error,omitempty"`
 	// A command run's: its exit status (absent when it has none), its one
 	// line, the last lines of its stderr, and what became of the report.
 	// An agent run's done may carry a late-start note in Result.
@@ -106,8 +109,12 @@ func List() (Listing, error) {
 	out := Listing{
 		Backend: cfg.Backend, Paused: cfg.Paused, Scheduler: pid, Config: config.Path(), State: config.StateDir(),
 		Kinds:       config.Kinds,
-		Targets:     config.Targets,
 		Automations: []Automation{}, Invalid: []Invalid{},
+	}
+	// Bots live in herdr-core: backend: herdr refuses every target, so it must
+	// not claim the kinds either. A panel reading this offers none there.
+	if cfg.Backend != config.BackendHerdr {
+		out.Targets = config.Targets
 	}
 	now := time.Now()
 	for _, a := range cfg.Automations {
@@ -156,7 +163,7 @@ func toRun(r history.Record) Run {
 	return Run{
 		RunID: r.RunID, Automation: r.Automation, Status: r.Status, Trigger: string(r.Trigger),
 		Started: r.Started, At: r.At, Seconds: int(r.At.Sub(r.Started).Seconds()),
-		Space: r.WorkspaceID, Terminal: r.PaneID, Error: r.Error, Seen: r.Seen,
+		Space: r.WorkspaceID, Terminal: r.PaneID, Target: r.Target, Error: r.Error, Seen: r.Seen,
 		ExitCode: r.ExitCode, Result: r.Result, Stderr: r.Stderr, Notified: r.Notified,
 	}
 }

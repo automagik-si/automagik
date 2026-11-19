@@ -11,7 +11,8 @@ What changed for someone using the plugin. Dates are release dates.
 - `target:` hands a prompt to a bot (`bot:<id>`) or to a worker of one
   (`worker:<id>`) instead of opening a fresh session: the bot's own terminal is
   used, a stopped bot is started with `am start`, and a worker is started under
-  it with `am worker` and ended when the run ends. `target_when_busy: queue`
+  it with `am worker` and ended through `am worker kill` when the run ends.
+  `target_when_busy: queue`
   (default) or `skip` answers a busy bot. The bot is named by its id from the
   project's `.herdr/bots.json`, never by an address. `ls --json` names the
   target kinds a build runs, so an older panel offers none (ADR 0014).

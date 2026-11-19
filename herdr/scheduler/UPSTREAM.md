@@ -210,19 +210,25 @@ An invalid value is refused by the loader. Keep the patch to this list.
 Issue #498, the target (ADR 0014). A prompt automation may name `target:
 bot:<id>` or `worker:<id>` instead of opening a session. The bot is resolved by
 its id from the project's `.herdr/bots.json` (the nearest one above `repo`),
-never by a terminal address. A bot target finds the live terminal labelled
-`bot=<id>`, starts a stopped bot with the pack's `am start <id> --project
+never by a terminal address. A bot target resolves the live terminal labelled
+`bot=<id>` through `hc get`: live, still labelled with that id, an agent in the
+foreground and the pane's folder in this project; two live candidates are
+refused. It starts a stopped bot with the pack's `am start <id> --project
 <project>` and waits up to `paneReady` for the terminal, then `hc send`s the
 prompt; `target_when_busy: skip` records a run of a working or blocked bot as
-`skipped` (`ErrTargetBusy`), while the default `queue` pastes it. A worker
-target makes the run's worktree, runs `am worker "<prompt>" --worktree <dir>
---project <project> --json` with `HC_TERMINAL_ID` set to the bot's terminal, so
-the bot's worker launch, template and permissions apply, waits for the worker's
-turn, and ends (kills and removes) the worker when the run ends. A bot that is
-gone from the roster, planned, on a linked machine or not reachable within the
-wait is a done failure with a line naming it, never a fresh session. A target
-needs `backend: hc` (or `auto`) and refuses workspace, session, agent, template,
-model, args, MCP, notify and a close; `ls --json` names the kinds in `targets`
+`skipped` (`ErrTargetBusy`, keeping the pane and target on the row), while the
+default `queue` pastes it. A worker target makes the run's worktree, runs
+`am worker "<prompt>" --worktree <dir> --project <project> --json` with
+`HC_TERMINAL_ID` set to the bot's terminal, so the bot's worker launch,
+template and permissions apply, waits for the worker's turn, and ends it
+through the checked `am worker kill <pane> --json` when the run ends (the
+finished terminal stays as the run's address). A bot that is gone from the
+roster, planned, on a linked machine or not reachable within the wait is a
+done failure with a line naming it, never a fresh session. A target needs
+`backend: hc` (or `auto`) and refuses workspace, workspace_id, session, agent,
+template, model, args, MCP config, notify and a close, as well as
+`target_when_busy` without a target; `ls --json` names the kinds in `targets`
+only when the backend can run them
 so an older panel offers none and a saved key is kept.
 
 ## Refreshing

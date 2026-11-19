@@ -153,8 +153,9 @@ export default class Automations extends View {
   get commands() { return Boolean(this.list?.kinds?.includes("command")); }
 
   // #498: whether this scheduler build runs targets (ls --json's targets), and the kinds it
-  // names. A build that predates them would drop the key from a put, so the form offers none
-  // there and a saved target is kept as it is.
+  // names. A build that predates them has no Target field, so it cannot return a saved target
+  // in ls: the form shows an ordinary entry, offers none, and a save sends no target key (put
+  // keeps the hand-written one).
   get targets() { return Array.isArray(this.list?.targets) ? this.list.targets : null; }
   canTarget(kind) { return Boolean(this.targets?.includes(kind)); }
   get targetable() { return this.canTarget("bot") || this.canTarget("worker"); }
@@ -455,7 +456,21 @@ export default class Automations extends View {
         }
         const res = await this.put(false);
         if (res.problem) f.result = res;
-        else { this.view = { kind: "detail", name: this.entry().name }; this.form = null; }
+        else if (f.kind !== "command" && (f.target === "bot" || f.target === "worker")) {
+          // #498: the capability is a claim until the save is read back. A build that says it
+          // runs targets but drops the key must not look like a successful save.
+          const want = `${f.target}:${f.bot}`, name = f.name.value().trim();
+          let kept = null, why = null;
+          try { kept = (JSON.parse(await this.cli(["ls", "--json"]))?.automations ?? []).find((a) => a.name === name)?.target ?? null; }
+          catch (e) { why = String(e.message ?? e); }
+          if (kept !== want) {
+            f.seq += 1;
+            f.result = { problem: `The scheduler took the save but does not keep ${targetLine(want, (id) => this.botName(f.repo.value(), id))}`
+              + `${why ? ` (${why})` : ""}: it does not run targets. Install a build whose ls --json names them.` };
+            cx.notify(); return;
+          }
+          this.view = { kind: "detail", name }; this.form = null;
+        } else { this.view = { kind: "detail", name: this.entry().name }; this.form = null; }
       } catch (e) { f.result = { problem: String(e.message ?? e) }; }
       await this.refresh(cx);
     });

@@ -23,6 +23,7 @@ type fakeHC struct {
 	worktree   [3]string // repo, branch, path
 	waits      []hc.Wait
 	term       hc.Terminal
+	gets       map[string]hc.Terminal // per-address `hc get` answers; nil falls back to term
 	screen     string
 	screenErr  error
 	terminals  []string
@@ -96,7 +97,15 @@ func (f *fakeHC) Wait(string, time.Duration) (hc.Wait, error) {
 	return w, nil
 }
 
-func (f *fakeHC) Get(string) (hc.Terminal, error) { return f.term, nil }
+func (f *fakeHC) Get(address string) (hc.Terminal, error) {
+	if f.gets != nil {
+		if t, ok := f.gets[address]; ok {
+			return t, nil
+		}
+		return hc.Terminal{}, hc.ErrNotFound
+	}
+	return f.term, nil
+}
 
 func (f *fakeHC) MainCheckout(string) (string, error) { return "/src/myapp", nil }
 

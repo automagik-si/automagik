@@ -179,6 +179,33 @@ func TestRunRecordsAFailureToProvision(t *testing.T) {
 	}
 }
 
+// A busy bot target told to skip is a dropped occurrence, not a failure: the
+// Provision error keeps the pane it already resolved and the target it names,
+// so the row says where the skipped run would have gone (#498).
+func TestRunRecordsABusySkippedTargetAsSkipped(t *testing.T) {
+	t.Setenv("HERDR_PLUGIN_STATE_DIR", t.TempDir())
+	h := &fakeHost{provision: func(config.Automation) (host.Session, error) {
+		return host.Session{PaneID: "t7", Target: "bot:b-6jrz4bmxml", TargetName: "Housekeeper"},
+			fmt.Errorf("housekeeping: %w: Housekeeper was working", host.ErrTargetBusy)
+	}}
+
+	if err := New(h).Run(automation(), "cron"); err == nil {
+		t.Fatal("want the busy skip returned")
+	}
+	want := []history.Status{history.StatusScheduled, history.StatusSkipped}
+	got := statuses(t, "triage")
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("trail = %v, want %v", got, want)
+	}
+	last := runs(t)[0]
+	if last.Error == "" {
+		t.Error("a skipped run has to say why")
+	}
+	if last.PaneID != "t7" || last.Target != "bot:b-6jrz4bmxml" {
+		t.Errorf("the skipped run lost its pane or target: %+v", last)
+	}
+}
+
 func TestRunRecordsAClosedWorkspaceAsCancelledNotFailed(t *testing.T) {
 	// Closing a run's workspace is how you call one off. Nothing broke,
 	// somebody decided — and the board dims it rather than colouring it red.

@@ -73,13 +73,14 @@ func (h *hcHost) targetProvision(a config.Automation) (Session, error) {
 			"(a bot on a linked machine is not a target here)", botID, filepath.Join(project, ".herdr", "bots.json"))
 	}
 	if len(bot.Planned) > 0 && string(bot.Planned) != "null" {
-		return Session{}, fmt.Errorf("%s (%s) is planned and starts no runs", bot.Name, botID)
+		return Session{}, fmt.Errorf("%s (%s) is planned and starts no runs (%s): clear planned there, "+
+			"or pick a bot that is not planned", bot.Name, botID, filepath.Join(project, ".herdr", "bots.json"))
 	}
 	name := bot.Name
 	if name == "" {
 		name = botID
 	}
-	addr, remote, err := h.liveBot(botID)
+	addr, remote, err := h.liveBot(project, botID)
 	if err != nil {
 		return Session{}, fmt.Errorf("looking for %s (%s): %w", name, botID, err)
 	}
@@ -95,7 +96,7 @@ func (h *hcHost) targetProvision(a config.Automation) (Session, error) {
 			return Session{}, err
 		}
 	}
-	s := Session{PaneID: addr, Target: a.Target, TargetName: name}
+	s := Session{PaneID: addr, Target: a.Target, TargetName: name, TargetParent: addr}
 	if kind == config.TargetBot {
 		// Busy is answered before the run is recorded as running: a queue
 		// hands the prompt over now, a skip drops the occurrence.
@@ -146,14 +147,18 @@ func (h *hcHost) targetDo(s Session, a config.Automation, timeout time.Duration)
 	return nil
 }
 
-// endWorker ends the worker this run started and removes its terminal, so a
-// target run leaves nothing running behind it. A worker already gone is fine.
+// endWorker ends the worker this run started through the pack's checked path:
+// `am worker kill`, with the bot's own pane as the caller, so the pack's guard
+// confirms this really is that bot's worker and no bot's seat. The finished
+// terminal stays, so the run's saved PaneID still names where the worker ran.
 func (h *hcHost) endWorker(s Session) {
-	if err := h.ops.Kill(s.PaneID); err != nil && !errors.Is(err, hc.ErrNotFound) {
-		log.Printf("could not end the run's worker on %s: %v", s.PaneID, err)
+	if s.TargetParent == "" {
+		log.Printf("could not end the run's worker %s through am worker kill: the bot's pane is unknown", s.PaneID)
+		return
 	}
-	if err := h.ops.Rm(s.PaneID); err != nil && !errors.Is(err, hc.ErrNotFound) {
-		log.Printf("could not remove the run's worker terminal %s: %v", s.PaneID, err)
+	if _, err := h.am([]string{"worker", "kill", s.PaneID, "--json"},
+		[]string{"HC_TERMINAL_ID=" + s.TargetParent}); err != nil {
+		log.Printf("could not end the run's worker %s through am worker kill: %v", s.PaneID, err)
 	}
 }
 
@@ -169,11 +174,19 @@ func (h *hcHost) botState(address string) string {
 
 // liveBot is the bot's running terminal on this computer, if it has one.
 // remote names a pane on a linked machine when that is all there is.
-func (h *hcHost) liveBot(id string) (address, remote string, err error) {
+//
+// A label is only a hint: the pack's own Start/attach resolution asks each
+// labelled pane what it is, and so does this. A candidate counts only when
+// `hc get` says it is live, still carries this bot's label, has an agent in
+// front (not a shell left after the agent quit), and its folder belongs to
+// this project. More than one such pane is refused, never guessed between;
+// a duplicate id in another project's roster is not this project's bot.
+func (h *hcHost) liveBot(project, id string) (address, remote string, err error) {
 	addrs, err := h.ops.Terminals(map[string]string{"bot": id})
 	if err != nil {
 		return "", "", err
 	}
+	var local []string
 	for _, a := range addrs {
 		if a == "" {
 			continue
@@ -182,9 +195,122 @@ func (h *hcHost) liveBot(id string) (address, remote string, err error) {
 			remote = a
 			continue
 		}
-		return a, "", nil
+		local = append(local, a)
 	}
-	return "", remote, nil
+	var live []string
+	for _, a := range local {
+		t, err := h.ops.Get(a)
+		if errors.Is(err, hc.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("reading the pane %s: %w", a, err)
+		}
+		if t.Address != "" && t.Address != a {
+			continue
+		}
+		if t.State != "live" || t.Labels["bot"] != id {
+			continue
+		}
+		if !agentInForeground(t.Foreground) {
+			continue
+		}
+		ours, err := h.inProject(project, t.Cwd)
+		if err != nil {
+			return "", "", err
+		}
+		if !ours {
+			continue
+		}
+		live = append(live, a)
+	}
+	switch len(live) {
+	case 0:
+		return "", remote, nil
+	case 1:
+		return live[0], "", nil
+	default:
+		return "", "", fmt.Errorf("bot %s has %d live terminals (%s) in %s; inspect them and leave one, "+
+			"or remove the duplicate label, before targeting it", id, len(live), strings.Join(live, ", "), project)
+	}
+}
+
+// inProject reports whether dir is inside project's own checkout, where the
+// nearest .herdr/bots.json at or above it is project's. A folder under another
+// project (a different roster, a different checkout) is not ours.
+func (h *hcHost) inProject(project, dir string) (bool, error) {
+	if dir == "" {
+		return false, nil
+	}
+	project, dir = cleanPath(project), cleanPath(dir)
+	if dir == "" || project == "" {
+		return false, nil
+	}
+	for {
+		if dir == project {
+			return true, nil
+		}
+		_, err := os.Stat(filepath.Join(dir, ".herdr", "bots.json"))
+		switch {
+		case err == nil:
+			// A roster nearer than the project's owns this folder.
+			return false, nil
+		case !os.IsNotExist(err):
+			return false, fmt.Errorf("%s: %w", filepath.Join(dir, ".herdr", "bots.json"), err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false, nil
+		}
+		dir = parent
+	}
+}
+
+// cleanPath is an absolute, symlink-resolved path when the filesystem can say
+// so, else the absolute path it was given.
+func cleanPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
+}
+
+// agentInForeground reports whether a pane's foreground is a program other
+// than a shell: the same rule the pack's launchArgs.js uses, keep wrapper and
+// login shell included. A shell in front is a pane whose agent has quit.
+func agentInForeground(f *hc.Foreground) bool {
+	if f == nil {
+		return false
+	}
+	argv := f.Argv
+	if len(argv) >= 5 && shells[baseName(argv[0])] && argv[1] == "-c" && argv[2] == keepWrapper {
+		argv = argv[4:]
+	}
+	if len(argv) == 0 {
+		return false
+	}
+	name := baseName(argv[0])
+	return name != "" && !shells[name]
+}
+
+// keepWrapper is hc's keep wrapper (hc run --keep): once the program exits it
+// execs the pane's shell, so the foreground is a shell again.
+const keepWrapper = `"$@"; exec "${SHELL:-sh}" -i`
+
+var shells = map[string]bool{
+	"sh": true, "zsh": true, "bash": true, "fish": true, "dash": true,
+	"ksh": true, "tcsh": true, "csh": true, "nu": true, "login": true,
+}
+
+func baseName(path string) string {
+	return strings.TrimPrefix(filepath.Base(path), "-")
 }
 
 // startBot starts a stopped bot with the pack's CLI, the same `am start` a
@@ -203,7 +329,7 @@ func (h *hcHost) startBot(project string, bot *rosterBot) error {
 func (h *hcHost) awaitBot(project string, bot *rosterBot) (string, error) {
 	deadline := time.Now().Add(h.knobs.paneReady)
 	for {
-		address, remote, err := h.liveBot(bot.ID)
+		address, remote, err := h.liveBot(project, bot.ID)
 		if err != nil {
 			return "", fmt.Errorf("looking for %s (%s) after starting it: %w", bot.Name, bot.ID, err)
 		}

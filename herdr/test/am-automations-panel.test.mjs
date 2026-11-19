@@ -321,6 +321,8 @@ if (COMMANDS) FIELDS.push("command", "notify");
 // A build with targets (#498): its put writes target and target_when_busy, its ls names the kinds.
 const TARGETS = process.env.STUB_TARGETS === "1";
 if (TARGETS) FIELDS.push("target", "target_when_busy");
+// A build that claims targets but drops the key anyway (#498 read-back).
+const DROP_TARGET = process.env.STUB_DROP_TARGET === "1";
 const yaml = path.join(home, ".config/herdr-automations/automations.yaml");
 const read = () => JSON.parse(fs.readFileSync(yaml, "utf8"));
 const out = (x) => process.stdout.write(JSON.stringify(x));
@@ -331,6 +333,8 @@ if (args[0] === "version") process.stdout.write(version + "\n");
 else if (args[0] === "ls") out({ automations: read().map(({ session, ...a }) => {
   if (OUR) a.close_workspace = a.close_workspace ?? "never";
   else delete a.close_workspace; // upstream's api.Automation has no field for it
+  // An older build has no Target field either: its ls cannot return the key.
+  if (!TARGETS) { delete a.target; delete a.target_when_busy; }
   return a;
 }), invalid: [], scheduler: { pid: 1 }, paused: false, ...(COMMANDS ? { kinds: ["prompt", "workflow", "command"] } : {}),
   ...(TARGETS ? { targets: ["bot", "worker"] } : {}) });
@@ -344,6 +348,7 @@ else if (args[0] === "put") {
       && (v === undefined || v === null || v === "" || v === 0 || v === false || (Array.isArray(v) && !v.length));
     const into = at >= 0 ? list[at] : {};
     for (const [k, v] of Object.entries(entry)) if (!FIELDS.includes(k) || empty(k, v)) delete into[k]; else into[k] = v;
+    if (DROP_TARGET) { delete into.target; delete into.target_when_busy; }
     if (at < 0) list.push(into);
     fs.writeFileSync(yaml, JSON.stringify(list, null, 2));
   }
@@ -351,7 +356,7 @@ else if (args[0] === "put") {
 } else { process.stderr.write("stub: not offered: " + args.join(" ")); process.exit(2); }
 `;
 
-function stubScheduler(automations, { version = "0.12.1", commands = false, targets = false, bots = [], history = [] } = {}) {
+function stubScheduler(automations, { version = "0.12.1", commands = false, targets = false, dropTarget = false, bots = [], history = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "am-automations-"));
   mkdirSync(join(dir, ".local/bin"), { recursive: true });
   mkdirSync(join(dir, ".config/herdr-automations"), { recursive: true });
@@ -373,7 +378,8 @@ function stubScheduler(automations, { version = "0.12.1", commands = false, targ
     if (answered) { resolve(answered); return; }
     if (command !== "sh" && command !== bin) { resolve({ code: 127, stdout: "", stderr: `cannot run ${command}: refused` }); return; }
     execFile(command, args, { env: { PATH: "/usr/bin:/bin", STUB_HOME: dir, STUB_VERSION: running, STUB_COMMANDS: commands ? "1" : "0",
-      STUB_TARGETS: targets ? "1" : "0", STUB_HISTORY: JSON.stringify(history) } }, (err, stdout, stderr) =>
+      STUB_TARGETS: targets ? "1" : "0", STUB_DROP_TARGET: dropTarget ? "1" : "0",
+      STUB_HISTORY: JSON.stringify(history) } }, (err, stdout, stderr) =>
       resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }));
   });
   const calls = () => readFileSync(join(dir, "argv.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -1320,20 +1326,35 @@ test("switching a target back to a new session removes it and restores the agent
   } finally { s.done(); }
 });
 
-test("an older scheduler offers no target and keeps a hand-written one as it is (#498)", async () => {
+test("an older scheduler cannot see a hand-written target, and an edit keeps it (#498)", async () => {
+  // A real older build has no Target field: its ls --json cannot return the key. The panel
+  // shows an ordinary fresh-session entry, and the old build ignores the key when it runs.
   const { s, view, cx, draw } = await stubPanel([targetEntry], { bots: [housekeeper] });
   try {
     view.edit("housekeeping", cx);
     await cx.settle();
     assert.ok(!draw().has("f-runs-bot"), "no target on a build that does not name the kind");
-    assert.equal(view.form.target, "kept");
-    assert.match(textOf(draw().get("f-target-kept")), /cannot run a target/);
+    assert.ok(!draw().has("f-target-kept"), "an older ls has no target to show read-only");
+    assert.equal(view.form.target, "none");
     view.form.prompt.type(" again", cx);
     view.save(cx);
     await cx.settle();
-    assert.equal(s.saves().length, 0, "the entry is never rewritten");
-    assert.match(textOf(draw().get("f-result")), /cannot run a target/);
-    assert.equal(s.yaml()[0].target, "bot:b-6jrz4bmxml", "the hand-written target is kept");
+    assert.equal(s.saves().length, 1, "an older build still edits the entry");
+    assert.equal("target" in s.saves()[0].entry, false, "the panel cannot send a key it cannot see");
+    assert.equal(s.yaml()[0].target, "bot:b-6jrz4bmxml", "put keeps a key it was not given");
+  } finally { s.done(); }
+});
+
+test("a scheduler that claims targets but drops the key fails the save (#498)", async () => {
+  const { s, view, cx, draw } = await stubPanel([], { targets: true, dropTarget: true, bots: [housekeeper] });
+  try {
+    await fillTarget(view, cx, draw);
+    view.save(cx);
+    await cx.settle();
+    assert.equal(s.saves().length, 1);
+    assert.equal(s.yaml()[0].target, undefined, "the stub dropped the key");
+    assert.match(textOf(draw().get("f-result")), /does not keep bot Housekeeper/);
+    assert.ok(view.form, "the form stays open when the save did not take");
   } finally { s.done(); }
 });
 

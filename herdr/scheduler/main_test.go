@@ -338,8 +338,8 @@ func TestPutCarriesATarget(t *testing.T) {
 
 	t.Run("sending an empty target removes it", func(t *testing.T) {
 		_, plain := runPut(t, after, `{"name":"housekeeping","cron":"0 9 * * *","repo":"/x","prompt":"tidy","target":""}`, "--original", "housekeeping")
-		if strings.Contains(plain, "target:") {
-			t.Fatalf("an empty target left the key:\n%s", plain)
+		if strings.Contains(plain, "target:") || strings.Contains(plain, "target_when_busy:") {
+			t.Fatalf("an empty target left its keys behind:\n%s", plain)
 		}
 	})
 }
