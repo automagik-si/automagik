@@ -1376,21 +1376,27 @@ revive_launchd_not_loaded() {
 # runtime and the installer already requires it; if it is missing here the probe fails closed to
 # the installer's own launchctl fallback. Read-only, with its own status query. Linux has always
 # answered, so nothing is asked there.
+#
+# The question is also bounded: a hung or broken command is "cannot answer" in a few seconds,
+# never a blocked uninstall. Node runs the read-only question with a timeout and SIGKILL.
 revive_cli_can_answer() {
   [ "$REVIVE_OS" = Darwin ] || return 0
-  revive_answer=$("$LINK" revive service status --json </dev/null 2>/dev/null) || return 1
   command -v node >/dev/null 2>&1 || return 1
-  printf '%s\n' "$revive_answer" | node -e '
-const answer = require("node:fs").readFileSync(0, "utf8");
+  node - "$LINK" <<'NODE'
+const { spawnSync } = require("node:child_process");
+const r = spawnSync(process.argv[2], ["revive", "service", "status", "--json"], {
+  encoding: "utf8", timeout: 3000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"],
+});
+if (r.error || r.status !== 0) process.exit(1);
 let status;
-try { status = JSON.parse(answer); } catch { process.exit(1); }
+try { status = JSON.parse(r.stdout); } catch { process.exit(1); }
 if (status === null || typeof status !== "object" || Array.isArray(status)) process.exit(1);
 if (status.label !== "dev.herdr.automagik-herdr-revive" || typeof status.path !== "string") process.exit(1);
 const parts = status.path.split("/");
 if (parts.some((part) => part === "..")) process.exit(1);
 const at = parts.findIndex((part, i) => part === "Library" && parts[i + 1] === "LaunchAgents");
 if (at < 0 || at + 2 >= parts.length || parts[at + 2] === "") process.exit(1);
-' || return 1
+NODE
 }
 # --uninstall: the service goes through the command that wrote it, while the pack and its link
 # are still in place, and only when the file carries the pack's mark (revive.js UNIT_MARK, or

@@ -278,6 +278,26 @@ exit 0
   };
 }
 
+/**
+ * Make the pack's command log every call it gets, then run the pack's own wrapper and `.mjs`:
+ * this shows which of the command's own verbs the installer asked for, not a stand-in's.
+ */
+function logCliCalls(s) {
+  const log = join(s.root, "cli.log");
+  writeFileSync(log, "");
+  const real = join(s.pack, "bin", "automagik-herdr-real");
+  cpSync(join(s.pack, "bin", "automagik-herdr"), real);
+  chmodSync(real, 0o755);
+  exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
+printf '%s\\n' "$*" >> "${log}"
+exec "${real}" "$@"
+`);
+  return log;
+}
+const cliCalls = (log) => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : []);
+/** The command's own `revive` calls: the installer also asks it about dsh-TUI on the way. */
+const reviveCalls = (log) => cliCalls(log).filter((line) => line.startsWith("revive "));
+
 test("install.sh is POSIX sh", () => {
   execFileSync("sh", ["-n", INSTALL]);
 });
@@ -2887,7 +2907,9 @@ test("--uninstall on macOS removes the real pack from before the login service: 
   // Linux host it must see the Mac the fake uname already describes, as the review's reproduction
   // did.
   const preload = join(s.root, "darwin-platform.mjs");
-  writeFileSync(preload, 'Object.defineProperty(process, "platform", { value: "darwin", configurable: true });\n');
+  // The installer's own `node -` probe helper is not the CLI: leave its platform alone, so only
+  // the command under test sees the Mac the fake uname describes.
+  writeFileSync(preload, 'if (process.argv[1] !== "-") Object.defineProperty(process, "platform", { value: "darwin", configurable: true });\n');
   s.extraEnv.NODE_OPTIONS = `--import ${preload}`;
   // The review's finding: the pre-PR CLI answers `service status` with exit 0. Its answer names
   // the systemd unit, and neither a launchd label nor a LaunchAgents path, so exit status alone
@@ -2984,6 +3006,53 @@ exit 1
     assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], `${pct}%: the fallback asked launchd`);
     assert.equal(readFileSync(cliLog, "utf8").includes("revive service uninstall"), false, `${pct}%: the command's uninstall was never called`);
   }
+});
+
+test("--uninstall on macOS lets the head's own launchd-aware command remove the service itself (#939)", (t) => {
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  const lc = launchctlFake(s);
+  assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
+  assert.equal(existsSync(REVIVE_PLIST(s)), false);
+  const said = logCliCalls(s);
+  lc.set("gone");
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+  assert.equal(u.code, 0, u.out + u.err);
+  assert.equal(existsSync(s.pack), false, "the pack leaves");
+  assert.equal(existsSync(s.link), false, "the link leaves");
+  assert.doesNotMatch(u.out, /doesn't know macOS's login service/, "the head command is asked to remove it");
+  assert.match(u.out, /revive login service isn't installed/, "the command says what it found");
+  assert.deepEqual(reviveCalls(said), ["revive service status --json", "revive service uninstall"], "the probe, then its own uninstall");
+  assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "its uninstall asked launchd once, from the command");
+});
+
+test("--uninstall on macOS doesn't block on a command whose status never answers (#939)", (t) => {
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  const lc = launchctlFake(s);
+  assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
+  const said = join(s.root, "cli.log");
+  writeFileSync(said, "");
+  exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
+printf '%s\\n' "$*" >> "${said}"
+case "$*" in
+  "revive service status --json") exec sleep 30 ;;
+esac
+exit 0
+`);
+  lc.set("gone");
+  const started = Date.now();
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+  const took = Date.now() - started;
+  assert.equal(u.code, 0, `the installer must not block on the command: ${u.out}${u.err}`);
+  assert.ok(took < 10_000, `the probe bounded the hung command (took ${took}ms)`);
+  assert.equal(existsSync(s.pack), false, "the pack leaves after the installer's own probe");
+  assert.equal(existsSync(s.link), false, "the link leaves too");
+  assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, "it treats no answer as no answer");
+  assert.deepEqual(reviveCalls(said), ["revive service status --json"], "the hung command is never told to uninstall");
+  assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "the installer asked launchd itself");
 });
 
 test("--dsh-tui writes minimumReleaseAgeExclude: [] for a release older than the profile's gate", (t) => {
