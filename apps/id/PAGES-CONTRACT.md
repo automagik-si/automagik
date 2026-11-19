@@ -220,7 +220,9 @@ ask the person to sign in again.
 
 `POST /api/auth/revoke-session` with `{id: string}` signs out that one session.
 Success is `{status: true}`. A body without a string `id` returns 400 with code
-`INVALID_SESSION_ID`; any other field, a `token` included, is ignored. A session of
+`INVALID_SESSION_ID`; any other field, a `token` included, is ignored. The caller
+is authenticated before the id is looked up, and the lookup is scoped to the
+caller's sessions, so a signed-out request reads no session row. A session of
 another person, or an unknown id, is left untouched and still answers
 `{status: true}`, so the answer reveals nothing about other sessions.
 

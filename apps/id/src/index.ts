@@ -143,17 +143,24 @@ const router = {
       request = new Request(request, { headers });
     }
     if (path === '/revoke-session' && request.method === 'POST') {
-      // The session list carries ids, never tokens, so a page names the session by id. The
-      // token is looked up here; Better Auth still checks that it belongs to the caller.
+      // The session list carries ids, never tokens, so a page names the session by id.
+      // Validate the body first (no database access), then authenticate the caller before any
+      // lookup: an unauthenticated request must never make the Worker read a session row.
       let id: unknown;
       try { ({ id } = await request.clone().json() as { id?: unknown }); } catch { id = undefined; }
       if (typeof id !== 'string' || !id) {
         return Response.json({ code: 'INVALID_SESSION_ID', message: 'A session id is required' },
           { status: 400 });
       }
-      const row = await env.DB.prepare('SELECT token FROM session WHERE id = ?').bind(id)
-        .first<{ token: string }>();
-      // An unknown id still reaches Better Auth, so a signed-out caller gets the same 401.
+      const caller = await auth.api.getSession({ headers: request.headers });
+      if (!caller) {
+        return Response.json({ message: 'Unauthorized', code: 'UNAUTHORIZED' }, { status: 401 });
+      }
+      // Scoped to the caller: another person's id finds no row, so its token is never read.
+      const row = await env.DB.prepare('SELECT token FROM session WHERE id = ? AND userId = ?')
+        .bind(id, caller.user.id).first<{ token: string }>();
+      // An id the caller does not own still reaches Better Auth, which leaves it alone and
+      // answers {status: true}, exactly as before.
       const token = row?.token ?? crypto.randomUUID();
       const headers = new Headers(request.headers);
       headers.delete('content-length');

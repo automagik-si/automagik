@@ -43,12 +43,15 @@ receiving number, sender, code and secret are never logged.
 A signed-in person can list their own sessions and sign out of one or all of them
 (`/api/auth/list-sessions`, `/revoke-session`, `/revoke-sessions`; see
 PAGES-CONTRACT.md). The list never carries a session token; one session is named
-by its id, and Better Auth refuses to touch a session of another person.
+by its id. The Worker authenticates the caller before it looks an id up and only
+within that caller's sessions, so a signed-out request reads no session row at
+all, and Better Auth refuses to touch a session of another person.
 
 Requesting passkey registration options creates the user row before a passkey
 exists. A scheduled run (hourly cron in `wrangler.toml`, `src/cleanup.ts`) removes
 up to 100 such users per run once they are a day old and still have no passkey,
-phone number or OAuth client, with their sessions, accounts and challenges.
+phone number, OAuth client or live session, with their sessions, accounts and
+challenges.
 
 Sessions, WebAuthn and WhatsApp challenges, OAuth codes, grants, signing keys,
 and rate limits live in D1. There is no secondary storage or session cookie cache.
@@ -138,7 +141,7 @@ PKCE, relax redirects, enable public registration, move rate limits to memory,
 serve a page file directly as `.html`, take the passkey site name from the host,
 start on (or configure) a host outside it, accept a look-alike host, let CI
 skip the page browser tests, return tokens in the session list, let the cleanup
-ignore the passkey, age, phone-number or batch-size condition, drop the
+ignore the passkey, age, phone-number, live-session or batch-size condition, drop the
 Content-Security-Policy or nosniff, let inline script run, send files and API
 answers without the security headers, let a direct `.html` path through, rebuild
 the headers losing Better Auth's cookies, lengthen a token lifetime and allow

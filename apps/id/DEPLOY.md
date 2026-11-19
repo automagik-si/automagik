@@ -139,12 +139,12 @@ entries receive `requirePKCE: true` and the supported grant/scope lists.
 
 `wrangler.toml` carries one cron trigger (`17 * * * *`, hourly) that the deploy
 uploads with the Worker. Each run removes up to 100 users created more than
-24 hours ago that have no passkey, no phone number and no OAuth client: accounts
-left by a passkey ceremony that was never finished. Their sessions, accounts and
-registration challenges go in the same D1 transaction. A larger backlog clears over
-later runs. The trigger needs no extra secret or permission. To pause it, remove the
-`[triggers]` table in a reviewed change and redeploy; the Worker's cron settings
-in the dashboard show the next run.
+24 hours ago that have no passkey, no phone number, no OAuth client and no live
+session: accounts left by a passkey ceremony that was never finished. Their
+sessions, accounts and registration challenges go in the same D1 transaction. A
+larger backlog clears over later runs. The trigger needs no extra secret or
+permission. To pause it, remove the `[triggers]` table in a reviewed change and
+redeploy; the Worker's cron settings in the dashboard show the next run.
 
 ## Upload and trial
 

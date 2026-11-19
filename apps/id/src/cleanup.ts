@@ -15,15 +15,19 @@ export const ORPHAN_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 export const ORPHAN_BATCH_LIMIT = 100;
 
 // A user is an orphan only when every condition holds: older than the cutoff, no passkey, no
-// verified phone number (WhatsApp accounts have no passkey but sign in by phone), and no OAuth
-// client of its own. The date columns hold ISO 8601 strings, which compare in time order.
+// verified phone number (WhatsApp accounts have no passkey but sign in by phone), no OAuth
+// client of its own, and no live session. The live-session guard is explicit rather than
+// relying on the invariant that a real account always has one of the other three: an expired
+// session row is cleanup's to remove with its user, a live one is in use. The date columns hold
+// ISO 8601 strings, which compare in time order.
 // The order makes LIMIT pick the same rows in every statement of the batch.
 const ORPHANS = `SELECT u.id FROM "user" u
   WHERE u.createdAt < ?1
     AND NOT EXISTS (SELECT 1 FROM passkey p WHERE p.userId = u.id)
     AND u.phoneNumber IS NULL
     AND NOT EXISTS (SELECT 1 FROM oauthClient c WHERE c.userId = u.id)
-  ORDER BY u.createdAt, u.id LIMIT ?2`;
+    AND NOT EXISTS (SELECT 1 FROM session s WHERE s.userId = u.id AND s.expiresAt > ?2)
+  ORDER BY u.createdAt, u.id LIMIT ?3`;
 
 /**
  * Removes up to ORPHAN_BATCH_LIMIT orphan users with their sessions, accounts and passkey
@@ -31,7 +35,8 @@ const ORPHANS = `SELECT u.id FROM "user" u
  */
 export async function cleanupOrphanUsers(db: D1Database, now = Date.now()): Promise<number> {
   const cutoff = new Date(now - ORPHAN_MIN_AGE_MS).toISOString();
-  const bind = (sql: string) => db.prepare(sql).bind(cutoff, ORPHAN_BATCH_LIMIT);
+  const at = new Date(now).toISOString();
+  const bind = (sql: string) => db.prepare(sql).bind(cutoff, at, ORPHAN_BATCH_LIMIT);
   // Better Auth keeps a registration challenge in `verification` with the user id inside its JSON
   // value; other verification values need not be JSON, so only valid JSON is inspected.
   const results = await db.batch([

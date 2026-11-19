@@ -119,9 +119,16 @@ const mutations = [
     edits: [['src/cleanup.ts', 'AND u.phoneNumber IS NULL', '']],
   },
   {
+    name: 'let cleanup remove a user with a live session',
+    test: 'cleanup keeps an old user that still has a live session',
+    edits: [['src/cleanup.ts',
+      'AND NOT EXISTS (SELECT 1 FROM session s WHERE s.userId = u.id AND s.expiresAt > ?2)',
+      'AND ?2 IS NOT NULL']],
+  },
+  {
     name: 'let cleanup ignore the batch limit',
     test: 'cleanup is bounded per run',
-    edits: [['src/cleanup.ts', 'LIMIT ?2', 'LIMIT -1 + 0 * ?2']],
+    edits: [['src/cleanup.ts', 'LIMIT ?3', 'LIMIT -1 + 0 * ?3']],
   },
   {
     name: 'return session tokens in the session list',
