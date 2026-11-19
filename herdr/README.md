@@ -764,15 +764,31 @@ new conversation and the report says why. Manual `am restart` keeps its existing
 Kimi's index format comes from the 2.5.0 package and has not been verified live.
 
 The login service. `install.sh --revive` (or a yes when it asks; `--yes` never installs it)
-runs `am revive service install`: on Linux a systemd user unit,
-`~/.config/systemd/user/automagik-herdr-revive.service`, enabled and never started on the spot.
-The unit has no start timeout (the pass bounds its own waits), and what the pass prints, which
-the user journal keeps, is counts only: no folder, no bot name.
+runs `am revive service install`. On Linux it writes the systemd user unit
+`~/.config/systemd/user/automagik-herdr-revive.service` and enables it; the unit has no start
+timeout (the pass bounds its own waits). On macOS it writes the launchd agent
+`~/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist`, which launchd loads at your next
+login: it is never bootstrapped, because that would run the pass now. Neither is started on the
+spot, and what the pass prints — the user journal on Linux, launchd's unified log on macOS — is
+counts only: no folder, no bot name.
 At login it runs `am revive --boot --wait 600`: it waits for herdr-core, runs once
 per boot, and also takes the bots whose ended pane another command swept since the boot.
-`loginctl enable-linger` makes it run at boot with nobody logged in.
-`am revive service uninstall` (and `install.sh --uninstall`) removes the unit when
-it is the pack's. macOS (launchd) is not built yet: run `am revive` by hand there.
+`loginctl enable-linger` makes the unit run at boot with nobody logged in.
+`am revive service uninstall` (and `install.sh --uninstall`) removes the file when it is the
+pack's. On macOS it asks launchd first and removes the plist only when launchd says the job is
+not loaded: exit 113, or its exact "Could not find service". Any other answer — a usage error,
+EPERM, an I/O error — is a refusal that leaves the plist, exits non-zero and names
+`launchctl bootout gui/<uid>/dev.herdr.automagik-herdr-revive`, so a job launchd still holds is
+never orphaned. It asks even when the plist is already gone, so a second run boots out a label an
+earlier run left behind and says so. `install.sh --uninstall` follows the same rule: it calls that
+command first when its read-only `revive service status --json` answer parses as JSON and carries
+the exact launchd label and a path under `Library/LaunchAgents` — also when the plist is gone. A
+pack from before the macOS agent answers `status` with exit 0, but names the systemd unit and no
+launchd job, and refuses only `uninstall`, so its `uninstall` is never asked. A truncated or
+unparseable answer, a missing field, a wrong type or a label without that path falls back the same
+way. When the command is gone, or its bounded read-only question doesn't answer, it asks launchd
+itself — with the same 113/exact-words rule — before it removes the pack and its link. It never
+overrules a refusal from a command that answered.
 Panes on a linked machine are that machine's own to bring back.
 
 ## The attach ledger
