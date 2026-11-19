@@ -1138,6 +1138,17 @@ paragraph only for a dsh-tui bot; a claude, omp or hermes briefing is unchanged.
 machine the seat uses the guard folder that machine has, beside its own `automagik-herdr`; with
 none it gets no guard, no briefing paragraph claiming one, and one warning naming #624.
 
+A send to a pane held by a dialog is refused before anything is typed (#1414). The wrapper
+reads the target's herdr-core status and, when it is neither working nor blocked, its screen
+(the restart planner's `pendingDialog`); a blocked pane or a visible question, permission or
+sign-in dialog gets one JSON error line on stderr, kind `blocked`, naming the pane, and exit 9
+(hc's own `blocked` code), so a relay can tell it from a transport error and route the message
+elsewhere. It never presses a key and never answers the dialog, and `--force` does not bypass
+it. A free pane's send is unchanged; a screen that cannot be read is left to hc's own send, so
+nothing is queued or dropped. This is the pack's wrapper: a sender that bypasses it with an
+absolute hc path, `hc connect` or a raw socket still reaches herdr-core's delivery, where the
+hold belongs.
+
 **This is a guardrail, not a boundary.** A bot can bypass it with an absolute path to the real
 `hc`, a raw socket client, or `hc connect`. The team data is still writable: a bot that edits
 its project's `.herdr/bots.json` can widen its own `send` scope (for example by giving itself
