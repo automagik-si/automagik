@@ -87,7 +87,7 @@ install the release.
 ## Build from source
 
 ```sh
-cd android && ./gradlew :app:assembleDebug
+cd android && ./gradlew :app:assembleGithubDebug
 ```
 
 Requirements, tests and the emulator: [docs/guides/development.md](docs/guides/development.md).
