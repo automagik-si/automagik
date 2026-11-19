@@ -71,6 +71,10 @@ export class BotForm {
     if (this.mode === "menu") {
       // The sections opened in place ("prompt", "inspect"), the prompt as read (its file's
       // text is the save's snapshot) and the history as the CLI answered it.
+      // #1172: the stored pairing, from the sidebar's roster snapshot (a linked machine's may be
+      // stale): a paired Hermes bot has no fresh-session or swap restart to offer, only Configure.
+      this.paired = Boolean(this.p.hermes && typeof this.p.hermes === "object");
+      this.hermesProfile = this.paired && typeof this.p.hermes.profile === "string" ? this.p.hermes.profile : null;
       this.shown = new Set();
       this.prompt = TextareaState.new({ placeholder: "What it does, how it works, whom it reports to" });
       this.prompt.set_auto_grow(4, 10);
@@ -171,14 +175,27 @@ export class BotForm {
   // Null when it isn't there, so the form and the CLI agree on the program they run.
   async programFile(program) {
     if (typeof program !== "string" || !program) return null;
-    if (program.includes("/")) return (await fs.exists(program)) ? program : null;
-    const env = typeof process === "undefined" ? {} : process.env;
-    const execPath = typeof process === "undefined" ? "" : process.execPath;
-    const dirs = [...String(env.PATH ?? "").split(":"), `${home()}/.local/bin`,
-      String(execPath ?? "").replace(/\/[^/]*$/, "")].filter(Boolean);
-    for (const dir of dirs) {
-      const file = `${dir.replace(/\/+$/, "")}/${program}`;
-      if (await fs.exists(file)) return file;
+    const files = new Set();
+    if (program.includes("/")) {
+      files.add(program);
+    } else {
+      const env = typeof process === "undefined" ? {} : process.env;
+      const execPath = typeof process === "undefined" ? "" : process.execPath;
+      const dirs = [...String(env.PATH ?? "").split(":"), `${home()}/.local/bin`,
+        String(execPath ?? "").replace(/\/[^/]*$/, "")];
+      for (const dir of dirs) {
+        if (dir) files.add(`${dir.replace(/\/+$/, "")}/${program}`);
+      }
+    }
+    for (const file of files) {
+      if (!(await fs.exists(file))) continue;
+      try {
+        const result = await exec("/bin/test", ["-x", file]);
+        if (result?.code === 1) continue;
+      } catch {
+        // Some systems lack /bin/test. Keep the existence result when the probe cannot run.
+      }
+      return file;
     }
     return null;
   }
@@ -206,6 +223,8 @@ export class BotForm {
           const r = await exec("/bin/mv", [from, to]);
           if (r?.code !== 0) throw new Error(`mv failed (${r?.stderr || `exit ${r?.code}`})`);
         },
+        // #809: clean up this refresh's own temp file after a failed write or move.
+        remove: (path) => fs.unlink(path),
         exec: async (command, args, options) => {
           const file = await this.programFile(command);
           if (!file) throw new Error(`${command} isn't installed`);
@@ -334,6 +353,7 @@ export class BotForm {
       const fresh = formFrom({ mode: "create", file, id: this.s.id, agent });
       this.s = { ...this.s, kind: fresh.kind, agent, lead: "", category: "" };
       await this.refreshModels();
+      this.models.clear();
     }
   }
 
@@ -750,6 +770,8 @@ export class BotForm {
     const local = (x) => (typeof x === "string" && x && (this.machine ? x.startsWith(`${this.machine}/`) : !x.includes("/")) ? x : null);
     const pane = local(this.p.terminal), live = local(this.p.live);
     const items = new Set(menuItems({ planned: Boolean(this.p.planned), live, pane }));
+    // #1172: both contradict an explicit Bot Chat binding; the CLI would only refuse them.
+    if (this.paired) { items.delete("restart-fresh"); items.delete("restart-on"); }
     const item = (id, label, onClick) => h_flex().id(id).h(30).px(10).items_center().rounded(7).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => onClick(cx)).child(label);
     const label = (s) => div().px(10).pt(8).pb(2).text_size(10).font_semibold().text_color(t.dim).child(s);
@@ -757,7 +779,10 @@ export class BotForm {
     const note = (s) => div().px(10).text_size(12).text_color(t.muted).child(s);
     const fresh = items.has("restart-fresh") || this.freshable;
     return v_flex().p(6).gap(2)
-      .child(item("menu-configure", "Configure…", () => this.edit(project, bot)))
+      .child(item("menu-configure", this.paired ? "Configure… (unpair)" : "Configure…", () => this.edit(project, bot)))
+      .when(this.paired, (el) => el.child(div().id("menu-paired-note").px(10).pt(4).pb(6).text_size(12).text_color(t.muted)
+        .child(`Paired to its Hermes Bot Chat${this.hermesProfile ? ` (profile ${this.hermesProfile})` : ""}. `
+          + "A new conversation or another agent needs that pairing cleared first: Configure… clears it.")))
       .child(item("menu-prompt", `Prompt ${fold("prompt")}`, (cx) => this.toggle("prompt", cx)))
       .when(this.shown.has("prompt"), (el) => el.child(this.promptView(t)))
       .when(items.has("start") || items.has("focus"), (el) => el.child(label("RUN")))
@@ -798,8 +823,11 @@ export class BotForm {
   // A linked machine that isn't answering (its rows drawn from the last run of Herdr,
   // props.stale): nothing to press until it is back.
   remoteMenu(t) {
+    const paired = this.paired
+      ? ` It is paired to its Hermes Bot Chat${this.hermesProfile ? ` (profile ${this.hermesProfile})` : ""}: Configure… unpairs it once ${this.machine} is back.`
+      : "";
     return v_flex().p(6).child(div().id("menu-remote-note").px(10).pt(6).pb(4).text_size(12).text_color(t.muted)
-      .child(`${this.machine} isn't answering, so ${this.p.name} shows as last seen. Its menu works once it is back.`));
+      .child(`${this.machine} isn't answering, so ${this.p.name} shows as last seen. Its menu works once it is back.${paired}`));
   }
 
   // The prompt in place: the bot's instructions, Save writes them as the Edit form would.

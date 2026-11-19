@@ -767,6 +767,38 @@ test("the exact dsh-tui worker argv reaches the stub unchanged", (t) => {
   assert.deepEqual(calls(s), [exact]);
 });
 
+// #1011: a dsh-tui lead's full guard starts a worker of any agent the pack launches, not dsh-tui
+// alone. Claude carries its agent.session label and its login words (the default login puts
+// `-u CLAUDE_CONFIG_DIR` before PATH); every other agent kind starts from its own program.
+test("a dsh-tui lead's guard accepts a Claude worker with its session label (#1011)", (t) => {
+  const s = scene(t);
+  const exact = exactRun(s, {
+    agent: "claude", argv: ["claude", "--session-id", "session-1"], session: "session-1", login: ["-u", "CLAUDE_CONFIG_DIR"],
+    path: `${GUARD_DIR}:/usr/bin:/bin`,
+  });
+  assert.ok(exact.includes("agent.session=session-1"), exact.join(" "));
+  writeFileSync(s.logPath, "");
+  const r = guardRun(s, exact);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(calls(s), [exact], "the Claude worker launch reached hc unchanged");
+});
+
+test("a dsh-tui lead's guard accepts every other agent kind's worker launch (#1011)", (t) => {
+  const s = scene(t);
+  const starts = {
+    codex: ["codex"], antigravity: ["agy", "--mode", "auto"], omp: ["omp"], pi: ["pi"],
+    opencode: ["opencode"], cursor: ["cursor-agent"], copilot: ["copilot"], amp: ["amp"], grok: ["grok"],
+    kimi: ["kimi"], kiro: ["kiro-cli"], hermes: ["hermes"], qoder: ["qodercli"], crush: ["crush"],
+  };
+  for (const [agent, argv] of Object.entries(starts)) {
+    const exact = exactRun(s, { agent, argv, task: "do it", path: `${GUARD_DIR}:/usr/bin:/bin` });
+    writeFileSync(s.logPath, "");
+    const r = guardRun(s, exact);
+    assert.equal(r.status, 0, `${agent}: ${r.stderr}`);
+    assert.deepEqual(calls(s), [exact], `${agent}: the worker launch reached hc unchanged`);
+  }
+});
+
 test("a run that is not the worker shape is refused before hc", (t) => {
   const s = scene(t);
   const exact = exactRun(s);
@@ -777,15 +809,15 @@ test("a run that is not the worker shape is refused before hc", (t) => {
   const noGuardPath = [...exact];
   noGuardPath[noGuardPath.indexOf("--") + 2] = "PATH=/usr/bin:/bin";
   const template = [...exact.slice(0, parentAt), "--label", "worker.template=dev-sol", ...exact.slice(parentAt)];
-  const otherAgent = [...exact];
-  otherAgent[otherAgent.indexOf("--") + 3] = "claude";
+  const notAnAgent = [...exact];
+  notAnAgent[notAnAgent.indexOf("--") + 3] = "bash";
   const wrongCwd = exactRun(s, { cwd: s.project });
   const foreignParent = exactRun(s, { parent: "t101" });
   const foreignBot = exactRun(s, { botId: ID.cap });
   const bare = ["run", "--bg", "--parent", "t100", "--", "/usr/bin/env", `PATH=${GUARD_DIR}:/usr/bin`, "dsh-tui", "--", "task"];
   const cases = [
     ["bare", bare], ["foreign parent", foreignParent], ["foreign worker.of", foreignBot],
-    ["cwd outside the worktrees", wrongCwd], ["template", template], ["another agent", otherAgent],
+    ["cwd outside the worktrees", wrongCwd], ["template", template], ["not an agent", notAnAgent],
     ["no parent", withoutParent], ["outlive-parent", withFlag("--outlive-parent")], ["keep", withFlag("--keep")],
     ["--on", withFlag("--on")], ["no guard on PATH", noGuardPath],
   ];
@@ -1225,4 +1257,211 @@ test("cross-project lead (#850): hc send and proxy require reciprocal crossMembe
   assertRefused(guardRun(s, ["send", "t200", "nope-member-team"], { HC_TERMINAL_ID: "t100" }));
   assertRefused(guardRun(s, ["send", "t100", "nope-member-team"], { HC_TERMINAL_ID: "t200" }));
   assertRefused(guardRun(s, ["send", "t103", "nope-from-hubtop"], { HC_TERMINAL_ID: "t202" }));
+});
+
+// ---- #1421: send text must not become an agent command ----
+
+test("#1421 commandPrefixOf truth table: only a leading ! or / after whitespace", async () => {
+  const { commandPrefixOf } = await import("../mods/am-sidebar/hcGuard.mjs");
+  for (const [text, expected] of [
+    ["!x", "!"], ["/x", "/"], ["!", "!"], ["/", "/"],
+    [" \t!x", "!"], [" \t/x", "/"], ["\n!x", "!"], ["\r\n /x", "/"],
+    ["hello /x", null], ["a!b", null], ["x", null], ["", null], [" \n\t", null],
+    [null, null], [undefined, null], [42, null], [{}, null],
+  ]) assert.equal(commandPrefixOf(text), expected, JSON.stringify(text));
+});
+
+test("#1421 prefixTarget truth table: status agents, stale shell argv, other and unknown", async () => {
+  const { prefixTarget } = await import("../mods/am-sidebar/hcGuard.mjs");
+  for (const [value, expected] of [
+    [null, "unknown"], [undefined, "unknown"], [false, "unknown"], [42, "unknown"], ["bash", "unknown"],
+    [{}, "other"], [{ status: {} }, "other"], [{ foreground: { argv: [] } }, "other"],
+    [{ status: { app: "bash" }, foreground: { argv: ["bash"] } }, "other"],
+    [{ status: { app: "python3" }, foreground: { argv: ["python3", "script.py"] } }, "other"],
+    ...["claude-code", "codex", "dsh-tui", "antigravity"].map((app) => [{ status: { app } }, "agent"]),
+    [{ status: { app: "bash" }, foreground: { argv: ["claude"] } }, "agent"],
+    [{ foreground: { argv: ["claude"] } }, "agent"],
+  ]) assert.equal(prefixTarget(value), expected, JSON.stringify(value));
+});
+
+test("#1421 sendTextProblem truth table: prefixed texts refuse agents and unknown targets only", async () => {
+  const { sendTextProblem } = await import("../mods/am-sidebar/hcGuard.mjs");
+  const targets = [
+    ["unknown", null, true], ["missing", undefined, true],
+    ...["claude-code", "codex", "dsh-tui", "antigravity"].map((app) => [app, { status: { app } }, true]),
+    ["stale bash", { status: { app: "bash" }, foreground: { argv: ["claude"] } }, true],
+    ["bash", { status: { app: "bash" }, foreground: { argv: ["bash"] } }, false],
+    ["python3", { status: { app: "python3" }, foreground: { argv: ["python3", "script.py"] } }, false],
+    ["empty object", {}, false],
+  ];
+  for (const [name, target, refusesPrefix] of targets) {
+    for (const [texts, prefix] of [
+      [[], null], [["hello /x", "a!b", "x"], null], [["", " \n"], null],
+      [["!x"], "!"], [["/x"], "/"], [[" \n\t!x"], "!"], [["\n /x"], "/"],
+      [["hello", "/x"], "/"], [["/x", "!x"], "/"], [["!x", "/x"], "!"],
+    ]) {
+      const expected = prefix && refusesPrefix
+        ? `a message starting with "${prefix}" would run as a command in that agent, not reach it as text (#1421)`
+        : null;
+      assert.equal(sendTextProblem(texts, target), expected, `${name}: ${JSON.stringify(texts)}`);
+    }
+  }
+});
+
+test("#1421 shim refuses prefixed sends to each agent, unknown targets and option/name forms", async (t) => {
+  const agentCases = [
+    ...["claude-code", "codex", "dsh-tui", "antigravity"].map((app) => [app, { status: { app } }]),
+    ["claude argv under stale bash", { status: { app: "bash" }, foreground: { argv: ["claude"] } }],
+  ];
+  const cases = agentCases.flatMap(([name, report]) => ["!x", "/x"].map((text) => ({
+    name: `${name}: ${text}`, report, args: ["send", "t101", text], target: "t101", prefix: text[0],
+  })));
+  cases.push(
+    { name: "leading space before !", args: ["send", "t101", " \t!x"], target: "t101", prefix: "!" },
+    { name: "leading space before /", args: ["send", "t101", " \t/x"], target: "t101", prefix: "/" },
+    { name: "leading newline before !", args: ["send", "t101", "\n!x"], target: "t101", prefix: "!" },
+    { name: "leading newline before /", args: ["send", "t101", "\n/x"], target: "t101", prefix: "/" },
+    { name: "global --json send", args: ["--json", "send", "t101", "/x"], target: "t101", prefix: "/" },
+    { name: "--if idle and --", args: ["send", "--if", "idle", "t101", "--", "/x"], target: "t101", prefix: "/" },
+    { name: "name resolved through ls", args: ["send", "cap", "!x"], target: "cap", prefix: "!" },
+    { name: "later text word", args: ["send", "t101", "hello", "/x"], target: "t101", prefix: "/" },
+    { name: "unresolvable address", args: ["send", "t999", "!x"], target: "t999", prefix: "!" },
+    { name: "unresolvable name", args: ["send", "missing", "/x"], target: "missing", prefix: "/" },
+    { name: "get returns an error", report: { error: { kind: "not_found" } }, args: ["send", "t101", "/x"], target: "t101", prefix: "/" },
+  );
+  for (const c of cases) {
+    await t.test(c.name, (t) => {
+      const s = killScene(t);
+      const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+      Object.assign(state.get.t101, c.report ?? { status: { app: "claude-code" } });
+      writeFileSync(s.statePath, JSON.stringify(state));
+      const r = shimRun(s, c.args);
+      assert.ifError(r.error);
+      assert.equal(r.status, 2, r.stderr);
+      assert.equal(r.stdout, "");
+      assert.equal(r.stderr.trim().split("\n").length, 1, JSON.stringify(r.stderr));
+      assert.match(r.stderr, /^hc send: refused a message starting with /);
+      assert.ok(r.stderr.includes(`starting with "${c.prefix}" to ${c.target}:`), r.stderr);
+      assert.match(r.stderr, /#1421/);
+      assert.match(r.stderr, /Start it with other text/);
+      assert.match(r.stderr, /a real command goes with hc keys/);
+      assert.match(r.stderr, /would run as a command/);
+      assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "no send reached hc");
+      if (c.target === "cap") {
+        assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t101", "--json"]], "ls resolves the name before get");
+      }
+    });
+  }
+});
+
+test("#1421 shim passes prefixed sends to bash and python3 at the resolved address", async (t) => {
+  for (const app of ["bash", "python3"]) {
+    for (const [args, expected] of [
+      [["send", "cap", "!x"], ["send", "t101", "!x"]],
+      [["--json", "send", "cap", "\n/x"], ["--json", "send", "t101", "\n/x"]],
+      [["send", "--if", "idle", "cap", "--", "/x"], ["send", "--if", "idle", "t101", "--", "/x"]],
+    ]) {
+      await t.test(`${app}: ${JSON.stringify(args)}`, (t) => {
+        const s = killScene(t);
+        const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+        state.get.t101.status = { app };
+        state.get.t101.foreground = { argv: [app] };
+        writeFileSync(s.statePath, JSON.stringify(state));
+        const r = shimRun(s, args, { HC_STUB_CODE: "7" });
+        assert.ifError(r.error);
+        assert.equal(r.status, 7, r.stderr);
+        assert.equal(r.stdout, `stub-out ${JSON.stringify(expected)}\n`);
+        assert.equal(r.stderr, `stub-err ${expected[0]}\n`);
+        assert.deepEqual(calls(s), [["ls", "--json"], ["get", "t101", "--json"], expected]);
+      });
+    }
+  }
+});
+
+test("#1421 shim plain texts pass unchanged with exactly one stub call", (t) => {
+  const s = killScene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.t101.status = { app: "claude-code" };
+  state.get.t101.foreground = { argv: ["claude"] };
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const target of ["t101", "cap", "t999"]) {
+    for (const text of ["hello /x", "a!b", "x"]) {
+      for (const args of [["send", target, text], ["--json", "send", target, text]]) {
+        writeFileSync(s.logPath, "");
+        const r = shimRun(s, args);
+        assert.ifError(r.error);
+        assert.equal(r.status, 0, r.stderr);
+        assert.equal(r.stdout, `stub-out ${JSON.stringify(args)}\n`);
+        assert.equal(r.stderr, `stub-err ${args[0]}\n`);
+        assert.deepEqual(calls(s), [args], "no lookup or target rewrite for plain text");
+      }
+    }
+  }
+});
+
+test("#1421 full guard refuses !x and /x to a team agent without hc keys advice", async (t) => {
+  for (const text of ["!x", "/x"]) {
+    await t.test(text, (t) => {
+      const s = scene(t);
+      const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+      state.get.t101.status = { app: "claude-code" };
+      state.get.t101.foreground = { argv: ["claude"] };
+      writeFileSync(s.statePath, JSON.stringify(state));
+      const r = guardRun(s, ["send", "cap", text], { HC_TERMINAL_ID: "t100" });
+      assert.ifError(r.error);
+      assertRefused(r);
+      assert.equal(r.status, 2);
+      assert.match(r.stderr, /^hc guard: refused send: /);
+      assert.match(r.stderr, /#1421/);
+      assert.ok(r.stderr.includes(`starting with "${text[0]}"`), r.stderr);
+      assert.match(r.stderr, /start it with other text/);
+      assert.doesNotMatch(r.stderr, /hc keys/);
+      assert.ok(calls(s).some((argv) => same(argv, ["get", "t101", "--json"])), "checks the resolved team target");
+      assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "no send reached hc");
+    });
+  }
+});
+
+test("#1421 full guard keeps the non-team or unresolvable target's own refusal reason", async (t) => {
+  for (const [target, reason] of [
+    ["t120", /the target is not in the caller's team/],
+    ["t999", /the target is not resolvable with hc/],
+  ]) {
+    for (const text of ["!x", "/x"]) {
+      await t.test(`${target}: ${text}`, (t) => {
+        const s = scene(t);
+        const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+        state.get.t120.status = { app: "claude-code" };
+        state.get.t120.foreground = { argv: ["claude"] };
+        writeFileSync(s.statePath, JSON.stringify(state));
+        const r = guardRun(s, ["send", target, text], { HC_TERMINAL_ID: "t100" });
+        assert.ifError(r.error);
+        assertRefused(r);
+        assert.equal(r.status, 2);
+        assert.match(r.stderr, reason);
+        assert.doesNotMatch(r.stderr, /#1421|hc keys|would run as a command/);
+        assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false, "no send reached hc");
+      });
+    }
+  }
+});
+
+test("#1421 full guard passes prefixed sends to a shell team target at its address", (t) => {
+  const s = scene(t);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.get.t101.status = { app: "bash" };
+  state.get.t101.foreground = { argv: ["bash"] };
+  writeFileSync(s.statePath, JSON.stringify(state));
+  for (const args of [["send", "cap", "!x"], ["send", "--if", "idle", "cap", "--", "/x"]]) {
+    writeFileSync(s.logPath, "");
+    const expected = args.map((word) => word === "cap" ? "t101" : word);
+    const r = guardRun(s, args, { HC_TERMINAL_ID: "t100" });
+    assert.ifError(r.error);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, `stub-out ${JSON.stringify(expected)}\n`);
+    assert.equal(r.stderr, "stub-err send\n");
+    assert.ok(calls(s).some((argv) => same(argv, ["ls", "--json"])));
+    assert.ok(calls(s).some((argv) => same(argv, ["get", "t101", "--json"])));
+    assert.deepEqual(calls(s).filter((argv) => hcVerbOf(argv) === "send"), [expected]);
+  }
 });

@@ -103,12 +103,19 @@ Several tools on a machine install and run the same usagemeter. They rely on thi
 
 Antigravity:
 
-- A refused or incomplete generation holds the cursor before itself. Rows after it are still read
-  and counted, and the source reports `unsupported` or `degraded` until the row becomes readable.
+- A refused generation, or an incomplete one while its database is recent, holds the cursor before
+  itself. Rows after it are still read and counted, and the source reports `unsupported` or `degraded`
+  until the row becomes readable.
   One permanently bad row therefore keeps the source visibly not counted rather than hiding later
   usage or vouching a zero.
 - An input-only generation counts what it holds once its database and WAL have been quiet for 30
   minutes; output written after that is not added, because the cursor is already past the row.
+- The reader assumes existing generations stop changing once the newest available modification time
+  of the database and its nonempty `-wal` is at least 30 minutes behind the sync clock. Nothing checks
+  this.
+- A generation with absent or empty usage, or with recognized counts that are all zero, waits while
+  the database is recent. Once quiet, it emits no event and the source can report `ok`. If a later
+  sync resumes at or beyond that row, it misses usage filled in afterwards.
 - A new call that reuses an index and the previous call's first step time keeps the old dedupe
   key and is not counted. That includes a same-index retry that keeps the old step; the format
   writes a new call's steps with new times, so this is a stated limit, not a path the reader
@@ -352,6 +359,15 @@ widening it re-imports), `--budget-secs N` (default 20), `--no-publish`, `--doc 
   to have its attribution recomputed from today's ledgers and labels. It runs under the budget,
   one transaction per chunk, and later syncs go on with it until it is done. Codex threads, usage
   whose logs are gone, and rows written before schema 3 keep their hours before evidence.
+- Duplicate evidence rows (issue 1229): a call whose evidence is already written is never
+  adopted again. `usagemeter status` counts them under `evidence.duplicates` (`groups`,
+  `extra_rows`, `exact_groups`, `exact_extra_rows`, and `hours` with each hour's `groups` and
+  `extra_rows`, up to 50 hours plus `hours_omitted`) without removing anything; a group is one
+  time, request id and logging, so two real calls that reuse a request id at different times stay
+  distinct. When the rows are exact copies and the hour's rollup already counts the distinct
+  requests, the store can be repaired from its own evidence: deleting the extra rows changes no
+  rollup total and brings evidence back to the rollup. Rows that differ, or an hour whose rollup
+  does not agree, need the provenance reconciliation in #1126 and stay unresolved.
 - A store a newer meter wrote is refused (exit 12) before anything is opened for writing.
 - A write to an existing store's schema (a reset, the schema 3 migration, or the query's index on
   an older store) needs twice the store's size free (else exit 4, nothing changed). Before a reset
@@ -458,14 +474,19 @@ are counted (`repos_omitted`, `bots_omitted`) and summed into an `other` line, s
 includes every repo and bot, and `truncated` says when a list was capped. A zero class share or a
 repo with no usage is a vouched 0 only when every source is `ok` or `absent` and no old folder's
 store is degraded; otherwise it is `unknown` (a null share / `state: unknown`), and the record
-names the unreadable sources (`incomplete_sources`, `all_vouch`). Ratios are always over counted
-usage, never a bound; only token totals are lower bounds while ingestion is incomplete, stale or
-the window is clipped. It opens the store read-only as `status` does and creates nothing (SQLite
-may add an empty `-wal` and a `-shm` beside the store, as for the query): exit 0 reported, 1
-error, 2 bad request, 10 no store, 11 no snapshot in time, 12 store from a newer meter, 13 store
-only `sync` can migrate. The 64 KiB output ceiling is the RFC 0018 reference-workload bound; the
-record itself is capped by the 50/50 lists, and delivery 5's per-machine entry bound cuts it
-further.
+names the unreadable sources (`incomplete_sources`, `all_vouch`). A *vouched zero* is exactly
+that: the meter shows 0 only when every source that could have contributed was readable, so the
+absence is a measurement; with an unreadable source a zero may be missing usage, so the class
+share is null, the headline reads `unknown` instead of a measured 0, and a repo with no usage is
+`unknown` rather than `no_usage`. Each bot's share is rounded to four decimals on its own, so the
+shares can sum to slightly more or less than the attributed share; the bot token totals are
+exact. Ratios are always over counted usage, never a bound; only token totals are lower bounds
+while ingestion is incomplete, stale or the window is clipped. It opens the store read-only as
+`status` does and creates nothing (SQLite may add an empty `-wal` and a `-shm` beside the store,
+as for the query): exit 0 reported, 1 error, 2 bad request, 10 no store, 11 no snapshot in time,
+12 store from a newer meter, 13 store only `sync` can migrate. The 64 KiB output ceiling is the
+RFC 0018 reference-workload bound; the record itself is capped by the 50/50 lists, and delivery
+5's per-machine entry bound cuts it further.
 
 ## Outcomes
 

@@ -626,10 +626,11 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
  * Answers `read_browser` for this window: a long poll (`browser-wait`) reports which Bots
  * have a page open here and brings back read requests, each answered with
  * `browser-result`. A change in the open pages ends the poll so the host learns at once.
- * @param {{ browsers: ReturnType<typeof createBotBrowsers>, post: (endpoint:string, payload:any, signal?:AbortSignal) => Promise<any>, clientId?: string, retryMs?: number }} options
+ * A native window also acknowledges Electron's hold changes on this channel.
+ * @param {{ browsers: ReturnType<typeof createBotBrowsers>, post: (endpoint:string, payload:any, signal?:AbortSignal) => Promise<any>, clientId?: string, retryMs?: number, holdView?: (botId: string, held: boolean) => Promise<boolean> }} options
  * @returns {() => void} stop
  */
-export function serveBrowserReads({ browsers, post, clientId = globalThis.crypto.randomUUID(), retryMs = 1000 }) {
+export function serveBrowserReads({ browsers, post, clientId = globalThis.crypto.randomUUID(), retryMs = 1000, holdView }) {
   let stopped = false
   let poll
   let reported = ''
@@ -637,16 +638,21 @@ export function serveBrowserReads({ browsers, post, clientId = globalThis.crypto
   // the moment it starts, so a resend during a slow read shares it, and a resend
   // after a failed submit posts the cached answer again.
   const answered = new Map()
-  const answer = async ({ id, botId }) => {
+  const answer = async ({ id, botId, held }) => {
     let job = answered.get(id)
     if (job === undefined) {
       job = (async () => {
+        const result = typeof held === 'boolean' ? { id, clientId, held } : { id }
         try {
-          const result = { id, ok: true, page: await browsers.read(botId) }
+          if (typeof held === 'boolean') {
+            if (await holdView?.(botId, held) !== true) throw new Error('The Desktop app did not change browser control.')
+            return { ...result, ok: true }
+          }
+          const page = await browsers.read(botId)
           browsers.noteRead(botId)
-          return result
+          return { ...result, ok: true, page }
         } catch (error) {
-          return { id, ok: false, error: error instanceof Error ? error.message : String(error) }
+          return { ...result, ok: false, error: error instanceof Error ? error.message : String(error) }
         }
       })()
       answered.set(id, job)
@@ -661,7 +667,7 @@ export function serveBrowserReads({ browsers, post, clientId = globalThis.crypto
       const open = browsers.openPages()
       reported = JSON.stringify(open)
       try {
-        const response = await post('browser-wait', { clientId, open }, poll.signal)
+        const response = await post('browser-wait', { clientId, open, ...(holdView ? { native: true } : {}) }, poll.signal)
         browsers.setHolds?.(response?.holds)
         failures = 0
         const requests = Array.isArray(response) ? response : response?.requests

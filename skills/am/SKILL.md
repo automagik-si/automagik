@@ -58,6 +58,11 @@ am restart <bot> --agent <agent> --model <model> --save  # this run, and the def
 `--agent` or `--model` alone works in all three. `am edit <bot> --no-model` clears the model, so
 the agent's own default applies.
 
+A Claude Code Bot's permission mode is its own: `am edit <bot> --permission-mode <mode>` (one of
+`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`; `auto` is the default
+and an empty value restores it). Every start, restart and revive passes it, independent of the
+model. Any other agent has no per-bot permission mode, so a value for one is refused.
+
 ## Workers
 
 A Bot starts a worker from its own pane. Nothing else can.
@@ -68,7 +73,17 @@ am worker "<task>" --worktree <folder>    # in a worktree that already exists
 am worker kill <terminal>                 # end a worker you started, once its turn is over
 ```
 
-- `am worker` prints the worker's terminal. Keep it: `am worker kill` takes it.
+The pane starts first. Then am records the worker in the workers ledger and, for an agent that
+takes no task on its command line, sends the task as its first message. A failure of either is
+a warning, not an error: `am: ...` lines on stderr; with `--json`, the `warnings` field.
+The receipt prints the terminal on its first line (`--json`: `terminal`), then role, worktree,
+branch and agent (or template), and the kill line. Keep the terminal: `am worker kill` takes it.
+Read the warnings: a terminal alone does not prove the task arrived. Check the pane with
+`hc read <terminal>` before starting another. If the launch itself fails, am exits non-zero and
+prints no receipt. `am history <bot>` lists a Bot's workers.
+
+- The worker belongs to the Bot that started it (`worker.of`); only that Bot ends it.
+  A Bot starts workers only in its own project.
 - `--base <ref>` goes with `--branch` and sets where a new branch starts.
 - `--agent`, `--model` and `--effort` choose the worker's agent. Without them the Bot's own worker
   defaults apply.
@@ -110,9 +125,13 @@ down across restarts, run `am detach <bot>`.
 
 ## Install
 
-The Herdr pack's installer (`herdr/install.sh`, the Herdr README's install line) links `am` and
-`automagik-herdr` into `~/.local/bin`. That `am` runs the Bot, worker and revive commands on this page; `am self` and `am rollback
-automagik.am` need am's own part.
+There are two routes:
+
+- The Herdr pack's installer (`herdr/install.sh`, the Herdr README's install line) links `am` and
+  `automagik-herdr` into `~/.local/bin`. That `am` runs the Bot, worker and revive commands here.
+- For am alone, with no Herdr app, follow [am's install guide](https://github.com/automagik-si/automagik/blob/dev/am/README.md).
+
+`am self` and `am rollback automagik.am` need am's own part.
 
 am's own part (`am self install`, `am self doctor`) comes from an unpacked am release
 (`automagik-am-<version>.tgz`): run `sh <that folder>/bin/am self install`, then `am self doctor`.
@@ -129,9 +148,17 @@ am rollback herdr.pack     # the pack back to the one it replaced
 `am rollback` is am's own part's command (see Install): the pack's own `am` has no `rollback`, so with
 the pack alone the same step is `am update --rollback`.
 
-Every update is checked against its signature and checksum, and am never installs an older
-version. `am update --auto on|off|status` sets whether Herdr installs new releases by itself (on
-by default).
+Every update is checked against its signature and checksum. `am update` refuses a pointer older
+than the newest this machine took. `am update --auto on|off|status` sets whether Herdr installs
+new releases by itself (on by default).
+
+## When am cannot do it
+
+If `am` is not on PATH, use `~/.local/bin/am` and say so. Never put `automagik-herdr` or a pack
+CLI path in its place to get around a refusal or a missing command. If am refuses, or a command
+or flag you need does not exist, stop. Say what you ran and what it printed, and
+[report it](https://github.com/automagik-si/automagik/issues) with the command, output,
+`am --version` and `am self doctor --json`.
 
 ## Help
 

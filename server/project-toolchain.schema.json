@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://automagik.si/schema/server/project-toolchain/v1.json",
+  "title": "Automagik project toolchain manifest",
+  "description": "What a project's gate needs, pinned so a per-project bootstrap can install it into that project's own volume. The common server image is never changed: the manifest travels with the project.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "tools", "gate"],
+  "properties": {
+    "$schema": {
+      "description": "Optional editor hint; the bootstrap ignores it.",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "bun": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "sha256"],
+          "properties": {
+            "version": {
+              "description": "An exact Bun release, without a leading v and without a range or tag.",
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+            },
+            "sha256": {
+              "description": "The sha256 of the official Bun release zip, per Linux platform. Only platform hashes pinned here can be installed.",
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "linux-x64": { "$ref": "#/$defs/sha256" },
+                "linux-arm64": { "$ref": "#/$defs/sha256" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "gate": {
+      "description": "The project's real gate. A native worker runs this command from the workspace with the bootstrap's bin directory on PATH.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^\\S(?:[^\\r\\n]*\\S)?$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

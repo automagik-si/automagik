@@ -6,6 +6,12 @@ edited afterwards. `screens/manifest.json` records the checkout, the runtime, ea
 pinned source and the SHA-256 of every image; `landing.test.mjs` fails if an image no longer
 matches its digest.
 
+The default companion is now Pirlim. The committed captures were recorded when it was Pip,
+so their descriptions below name Pip; the capture scripts already hatch Pirlim. Regeneration
+waits for a release containing this change, since the fixture accepts only pinned release
+files. Then the images, their descriptions, page alt text, derived art and manifests will be
+updated together.
+
 ## What rendered them
 
 | Part | Version | Source |
@@ -200,7 +206,9 @@ rectangle of the same view's dark capture, which the page shows to a visitor who
 is dark. On phone-width screens the home and Desktop pages show the phone-width capture
 instead of a shrunken window. `assets/art/manifest.json` records each file's source, the
 source's SHA-256, the rectangle and the output's SHA-256; the page test checks all of them,
-and that every capture-derived file's source digest matches this manifest.
+re-derives every committed file from its source rectangle so a stale crop cannot pass on a
+self-consistent manifest, and checks that every capture-derived file's source digest matches
+this manifest.
 
 ## Re-capture, 2026-11-12
 

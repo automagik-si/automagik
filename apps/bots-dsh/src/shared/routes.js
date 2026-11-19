@@ -56,6 +56,34 @@ export function routeOf(provider, { piAi = new Set(SUBSCRIPTION_ROUTES) } = {}) 
   return { harness: 'dsh', connectedBy: 'native' }
 }
 
+// Providers whose model runs an agent with tools of its own, which can run commands: an
+// ACP agent, the retired Claude Code plugin, Remote Hermes, and bots-dsh's carried local
+// agents. A Bot without a shell must not be paired with one, because its own tool policy
+// cannot reach the agent's tools. `opencode` is deliberately absent: it is also a DSH
+// provider whose loop uses DSH's tools.
+const LEGACY_LOCAL_CLIS = Object.freeze([
+  'codex-cli', 'devin-cli', 'gemini-cli', 'grok-cli', 'cursor-cli', 'cline', 'qwen-code', 'goose',
+])
+/** The actual CLI reference that needs a shell choice. */
+export function shellHoldModelOf(bot) {
+  if (bot?.shell !== false) return undefined
+  return [bot.model, bot.appliedModel].find(commandCapableAgent)
+}
+
+/** The line a held Bot says: the reason, and the two choices that lift the hold. */
+export function shellHoldText(bot, cli = bot?.shellHeld?.cli) {
+  return `${bot?.name ?? 'This Bot'} has no shell, so it cannot run on ${cli ?? 'a coding CLI'}, `
+    + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.'
+}
+
+export function commandCapableAgent(ref) {
+  const provider = String(ref ?? '').split('/')[0]
+  if (provider === '') return false
+  if (provider === 'hermes-remote' || isClaudeCode(provider)) return true
+  if (provider.startsWith('acp-') || provider.startsWith('local-')) return true
+  return LEGACY_LOCAL_CLIS.includes(provider)
+}
+
 // The selector's first level (RFC 0030, issue #1016): the route the person is crossing to.
 // Native is DSH's own loop; ACP is an agent of the person's, over its sign-in; Herdr is the
 // agent's native terminal on herdr-core, wired by #1007. A route is a public word: keep it.

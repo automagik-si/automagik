@@ -20,13 +20,16 @@ const table = new Map([
   [42, stat(42, 1, 42)], [43, stat(43, 42, 42)], [44, stat(44, 43, 44)],
   [45, stat(45, 44, 44)], [46, stat(46, 1, 46)],
 ])
+// The checks read this pid to find DSH's own group and never signal it. A pure case sets it
+// to this fixture value, so a fake pid can never be the pid the test runner happens to get.
+const self = 4242
 function fakeDeps(entries = table) {
   return {
-    platform: 'linux', list: () => [...entries.keys()].map(String),
+    platform: 'linux', self, list: () => [...entries.keys()].map(String),
     read: path => {
       if (path.endsWith('boot_id')) return boot
       const pid = Number(/^\/proc\/(\d+)\/stat$/.exec(path)?.[1])
-      if (pid === process.pid) return stat(pid, 1, 20)
+      if (pid === self) return stat(pid, 1, 20)
       if (!entries.has(pid)) throw Object.assign(new Error('not found'), { code: 'ENOENT' })
       return entries.get(pid)
     },
@@ -128,7 +131,7 @@ test('never signals DSH, its group, unsafe ids or a group whose identity is unkn
   const signals = []
   deps.kill = (pid, signal) => { if (signal !== 0) signals.push(pid) }
   const record = (pid, pgid) => ({ pid, pgid, ppid: 42, birth })
-  signalTree([record(0, 0), record(1, 1), record(-1, -1), record(process.pid, process.pid),
+  signalTree([record(0, 0), record(1, 1), record(-1, -1), record(self, self),
     record(20, 20), record(50, 20)], 'SIGTERM', deps)
   assert.deepEqual(signals, [50])
   signals.length = 0
@@ -266,6 +269,18 @@ function groupGone(pid) {
     return true
   }
 }
+// The stop path kills what it captured at KILL_AFTER_MS. A loaded host can delay that SIGKILL,
+// its identity check and the process-table proof past stop()'s own 5 s deadline, so these cases
+// wait for the death itself with a bound of their own. If the deadline fired first, the
+// product's contract is to try again: the retry proves the tree it has already killed.
+const GONE_MS = 10_000
+async function confirmedStop(run, stopFailure, dead, ms) {
+  await until(() => dead.every(([pid, birth]) => processState(pid, birth) === 'dead'), ms)
+  const error = await stopFailure
+  if (error === undefined) return
+  assert.match(error.message, /has not stopped/)
+  await run.stop()
+}
 
 for (const stubborn of ['no', 'yes']) {
   test(`dispose ends a detached grandchild (ignores TERM: ${stubborn})`, linuxOnly, async t => {
@@ -374,16 +389,18 @@ test('stop kills a captured leader that moved to another captured group', linuxO
     },
   }
   const stopped = run.stop()
+  const stopFailure = stopped.then(() => undefined, error => error)
   assert.deepEqual(run.detached.map(record => record.pid).sort((a, b) => a - b), [h, l])
   for (const record of run.detached) assert.equal(record.pgid, record.pid)
   await until(() => {
     const stat = readFileSync(`/proc/${l}/stat`, 'utf8')
     return parseProcStat(l, stat)?.pgid === h
-  })
-  await until(() => processState(h, observed.get(h)) === 'dead')
+  }, GONE_MS)
+  await until(() => processState(h, observed.get(h)) === 'dead', GONE_MS)
   assert.equal(processState(l, observed.get(l)), 'live')
   assert.equal(groupGone(l), true)
-  await stopped
+  await confirmedStop(run, stopFailure, [[h, observed.get(h)], [l, observed.get(l)]],
+    KILL_AFTER_MS + GONE_MS)
   assert.ok(signals.some(([pid, signal]) => pid === -l && signal === 'SIGKILL'))
   assert.ok(signals.some(([pid, signal]) => pid === l && signal === 'SIGKILL'))
   assert.equal(processState(l, observed.get(l)), 'dead')
@@ -473,18 +490,20 @@ test('stop kills a moved leader while its child stays in the old group', linuxOn
     },
   }
   const stopped = run.stop()
+  const stopFailure = stopped.then(() => undefined, error => error)
   const groups = new Map(run.detached.map(record => [record.pid, record.pgid]))
   assert.deepEqual(groups, new Map([[h, h], [l, l], [m, l]]))
   await until(() => {
     const stat = readFileSync(`/proc/${l}/stat`, 'utf8')
     return parseProcStat(l, stat)?.pgid === h
-  })
-  await until(() => processState(h, observed.get(h)) === 'dead')
+  }, GONE_MS)
+  await until(() => processState(h, observed.get(h)) === 'dead', GONE_MS)
   assert.equal(processState(l, observed.get(l)), 'live')
   assert.equal(processState(m, observed.get(m)), 'live')
   assert.equal(parseProcStat(m, readFileSync(`/proc/${m}/stat`, 'utf8')).pgid, l)
   assert.equal(groupGone(l), false)
-  await stopped
+  await confirmedStop(run, stopFailure, [[h, observed.get(h)], [l, observed.get(l)],
+    [m, observed.get(m)]], KILL_AFTER_MS + GONE_MS)
   assert.ok(signals.some(([pid, signal]) => pid === -l && signal === 'SIGKILL'))
   assert.ok(signals.some(([pid, signal]) => pid === l && signal === 'SIGKILL'))
   assert.equal(processState(l, observed.get(l)), 'dead')
@@ -603,7 +622,7 @@ test('group leaders are checked once and failed checks never authorize their pid
 
 test('macOS uses one table per signal call and per state check batch', async () => {
   const output = [
-    `${process.pid} 1 20 Fri Nov 6 13:14:15 2026`,
+    `${self} 1 20 Fri Nov 6 13:14:15 2026`,
     ...Array.from({ length: 10 }, (_, i) => `${44 + i} 42 44 Fri Nov 6 13:14:15 2026`),
   ].join('\n')
   const records = parsePsTable(output).slice(1)
@@ -611,7 +630,7 @@ test('macOS uses one table per signal call and per state check batch', async () 
   const probes = []
   const signals = []
   const deps = {
-    platform: 'darwin', execAsync: (command, args, options, callback) => {
+    platform: 'darwin', self, execAsync: (command, args, options, callback) => {
       calls++
       assert.equal(command, '/bin/ps')
       assert.deepEqual(args, ['-A', '-o', 'pid=,ppid=,pgid=,lstart='])
@@ -634,7 +653,7 @@ test('macOS uses one table per signal call and per state check batch', async () 
 test('TERM gets its own async check after the snapshot budget is spent', async () => {
   let clock = 0
   const output = [
-    `${process.pid} 1 20 Fri Nov 6 13:14:15 2026`,
+    `${self} 1 20 Fri Nov 6 13:14:15 2026`,
     '42 1 42 Fri Nov 6 13:14:15 2026',
     '44 42 44 Fri Nov 6 13:14:15 2026',
   ].join('\n')
@@ -642,7 +661,7 @@ test('TERM gets its own async check after the snapshot budget is spent', async (
   const timeouts = []
   const signals = []
   const deps = {
-    platform: 'darwin', now: () => clock,
+    platform: 'darwin', self, now: () => clock,
     exec: (command, args, options) => {
       timeouts.push(options.timeout)
       clock += 1200
@@ -741,7 +760,7 @@ test('partial snapshots signal known tools and allow retries of unknown proof', 
 
 test('unsupported POSIX platforms keep group-only shutdown', async t => {
   const deps = {
-    platform: 'freebsd', read: () => assert.fail('must not read identities'),
+    platform: 'freebsd', self, read: () => assert.fail('must not read identities'),
     exec: () => assert.fail('must not run ps'), list: () => assert.fail('must not take a snapshot'),
   }
   const { run, warnings, events } = fakeRun(t, deps)
@@ -765,14 +784,14 @@ test('endTree sends agent TERM and arms timers before detached identity reads', 
 
 test('macOS stop reads one table per iteration', async t => {
   const output = [
-    `${process.pid} 1 20 Fri Nov 6 13:14:15 2026`,
+    `${self} 1 20 Fri Nov 6 13:14:15 2026`,
     '44 42 44 Fri Nov 6 13:14:15 2026',
     '45 44 44 Fri Nov 6 13:14:15 2026',
   ].join('\n')
   let calls = 0
   let probes = 0
   const deps = {
-    platform: 'darwin',
+    platform: 'darwin', self,
     execAsync: (command, args, options, callback) => { calls++; callback(null, output) },
     kill: () => {
       probes++
@@ -826,7 +845,7 @@ function realTimers(t, run) {
 test('400 ms async tables allow detached TERM, KILL and stop proof', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
   const output = [
-    `${process.pid} 1 20 Fri Nov 6 13:14:15 2026`,
+    `${self} 1 20 Fri Nov 6 13:14:15 2026`,
     '42 1 42 Fri Nov 6 13:14:15 2026',
     '44 42 44 Fri Nov 6 13:14:15 2026',
   ].join('\n')
@@ -834,7 +853,7 @@ test('400 ms async tables allow detached TERM, KILL and stop proof', async t => 
   const signals = []
   let alive = true
   const deps = {
-    platform: 'darwin', exec: () => output,
+    platform: 'darwin', self, exec: () => output,
     execAsync: slowPs(output, timeouts),
     kill: (pid, signal) => {
       if (!alive) throw Object.assign(new Error('gone'), { code: 'ESRCH' })
@@ -873,7 +892,7 @@ test('400 ms async tables allow detached TERM, KILL and stop proof', async t => 
 test('four disposals share a snapshot budget and deliver the outer timer on time', async t => {
   await new Promise(resolve => setImmediate(resolve))
   const output = [
-    `${process.pid} 1 20 Fri Nov 6 13:14:15 2026`,
+    `${self} 1 20 Fri Nov 6 13:14:15 2026`,
     '42 1 42 Fri Nov 6 13:14:15 2026',
     '44 42 44 Fri Nov 6 13:14:15 2026',
   ].join('\n')
@@ -881,7 +900,7 @@ test('four disposals share a snapshot budget and deliver the outer timer on time
   const checks = []
   let alive = true
   const deps = {
-    platform: 'darwin',
+    platform: 'darwin', self,
     exec: (command, args, options) => {
       snapshots.push(options.timeout)
       const end = performance.now() + Math.min(1400, options.timeout)
@@ -923,7 +942,7 @@ test('four disposals share a snapshot budget and deliver the outer timer on time
 
 test('a timed out TERM still permits KILL and a later stop rechecks unknown states', async t => {
   const output = [
-    `${process.pid} 1 20 Fri Nov 6 13:14:15 2026`,
+    `${self} 1 20 Fri Nov 6 13:14:15 2026`,
     '42 1 42 Fri Nov 6 13:14:15 2026',
     '44 42 44 Fri Nov 6 13:14:15 2026',
   ].join('\n')
@@ -933,7 +952,7 @@ test('a timed out TERM still permits KILL and a later stop rechecks unknown stat
   let reads = 0
   const signals = []
   const deps = {
-    platform: 'darwin', now: () => clock, exec: () => output,
+    platform: 'darwin', self, now: () => clock, exec: () => output,
     execAsync: (command, args, options, callback) => {
       reads++
       assert.equal(options.timeout, 2000)
@@ -975,7 +994,7 @@ test('stop proves an already gone detached tool dead without a timed out table',
   let calls = 0
   const probes = []
   const deps = {
-    platform: 'darwin',
+    platform: 'darwin', self,
     execAsync: (command, args, options, callback) => { calls++; callback(new Error('timeout')) },
     kill: (pid, signal) => {
       probes.push([pid, signal])
@@ -1005,7 +1024,7 @@ test('dead probes survive a table timeout while present and denied pids stay unk
   const probes = []
   let probesBeforeTable
   const deps = {
-    platform: 'darwin', now: () => clock,
+    platform: 'darwin', self, now: () => clock,
     execAsync: (command, args, options, callback) => {
       probesBeforeTable = [...probes]
       clock += 2000
@@ -1024,7 +1043,7 @@ test('dead probes survive a table timeout while present and denied pids stay unk
 test('Linux dead probes need no proc reads even after the identity deadline', () => {
   let reads = 0
   const deps = {
-    platform: 'linux', until: 0, now: () => 1,
+    platform: 'linux', self, until: 0, now: () => 1,
     read: () => { reads++; throw new Error('unreadable') },
     kill: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
   }

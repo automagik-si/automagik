@@ -11,9 +11,9 @@ import { MAX_AVATAR_IMAGE, ROOM_MAX_MEMBERS, ROOM_MODES, ROOM_NAME_MAX, ROOM_NOT
 import { currentColor, isColor, normalize, unquote } from './text.js'
 import { nameProblem } from '../shared/mentions.js'
 import { contextPatch } from '../shared/context-policy.js'
-import { crossesHarness } from '../shared/routes.js'
+import { commandCapableAgent, crossesHarness, shellHoldModelOf, shellHoldText } from '../shared/routes.js'
 import { cleanPetId, shippedPet } from './pets.js'
-import { cleanDenyTools } from './tool-deny.js'
+import { cleanDenyTools, cleanShell } from './tool-deny.js'
 
 // A Bot's role: a few words of plain text on one line, shown beside the first Main Bot's
 // name in the sidebar and under a Bot's name elsewhere. Line breaks and control
@@ -106,13 +106,26 @@ export function install(rt) {
 
   // Under the PTC preset (DSH Desktop's default) a model may call only run_code, which
   // turns down the group_relay call that a group chat's Session is given. A Session
-  // keeps the preset it is made with.
-  async function botPreset(profile) {
+  // keeps the preset it is made with, so a group Session stays on the standard preset,
+  // where group_relay is directly callable. A Bot's own chat asks for no preset at all
+  // and so inherits DSH's default, as a DSH bot made from the UI does.
+  async function botPreset(profile, { group = false } = {}) {
+    // Both ask for no preset whatever the service answers, so a missing or failing
+    // preset service still makes their Session (fix-first #1438).
+    if (profile === null) return {} // Adopted default DSH preset, not the team's standard.
+    if (profile === undefined && !group) return {}
     const presets = ctx.get?.('agentPresets')
     if (presets === undefined) return {}
-    const served = (await presets.list()).filter(preset => preset.broken === undefined)
+    // A list that cannot be read leaves the Session on DSH's default instead of failing
+    // it: a group loses the standard pin, never its Session.
+    let served = []
+    try {
+      const listed = await presets.list?.()
+      served = (Array.isArray(listed) ? listed : []).filter(preset => preset?.broken === undefined)
+    } catch (error) {
+      rt.warn('ds-bot: the agent presets could not be listed; the Session keeps DSH\'s default: %s', error?.message ?? error)
+    }
     if (profile !== undefined) {
-      if (profile === null) return {} // Adopted default DSH preset, not the team's standard.
       if (!served.some(preset => preset.id === profile)) throw refusal(`The preset ${profile} is not available in this DSH`)
       return { agentPreset: profile }
     }
@@ -135,7 +148,7 @@ export function install(rt) {
   // `dir` is a working folder outside the team workspace. Such a Session is made by cwd
   // alone, so it joins no DSH workspace and the user's own project lists stay as they are —
   // unless the folder is already registered as a workspace, which it then joins (#710).
-  async function createSession(title, { dir, profile } = {}) {
+  async function createSession(title, { dir, profile, group = false, botId } = {}) {
     // A Bot's tools run here too; while another dsh holds the team, a new Session would
     // belong to no saved Bot.
     const readOnly = rt.readOnly()
@@ -157,7 +170,9 @@ export function install(rt) {
         place = { cwd: fallback }
       }
     }
-    const { sessionId } = await ctx.sessionController.create({ ...place, ...await botPreset(profile) })
+    const preset = await botPreset(profile, { group })
+    rt.assertShellChoice?.(undefined, botId)
+    const { sessionId } = await ctx.sessionController.create({ ...place, ...preset })
     if (blockedFolder) rt.sessionFolderWarnings?.set(sessionId, blockedFolder)
     const agent = await rt.resolveAgent(sessionId)
     await ctx.sessionTitle.rename(agent.session, title)
@@ -280,12 +295,15 @@ export function install(rt) {
     }
   }
 
-  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, denyTools: denyToolsInput, section, sectionId }) {
+  async function buildBot(cleanName, { role = '', instructions = '', color, brief = '', createdBy, main = false, avatar, model, effort, workDir, copyOf, pickModel = false, kind, existingSessionId, inheritAuto, private: privateInput, shell: shellInput, denyTools: denyToolsInput, section, sectionId }) {
     const opener = createdBy === undefined ? undefined : { level: rt.callerLevel?.(), roomId: rt.callerGroup?.() }
     const cleanAvatarValue = cleanAvatar(avatar)
     const roleText = cleanRole(role)
-    // Checked before the Session exists, so a bad list creates no Bot and leaves no orphan.
+    // Checked before the Session exists, so a bad list or shell choice creates no Bot and
+    // leaves no orphan.
     const denyTools = cleanDenyTools(denyToolsInput)
+    const shell = cleanShell(shellInput)
+    const isPrivate = privateInput === true
     // The model is fixed at creation, so a later change of the DSH default leaves it alone.
     // A model that cannot run now (an agent whose CLI is signed out) refuses the Bot before
     // its Session exists.
@@ -301,10 +319,27 @@ export function install(rt) {
     const dir = workDir === undefined || workDir === null ? undefined : await rt.cleanWorkDir(workDir)
     const clash = dir === undefined ? undefined : await rt.privateClash(dir)
     if (clash) throw refusal(`${dir} is in or around the folder of ${clash.name}, a private Bot, so ${cleanName} cannot work there`)
+    // A Bot created private is a new private-folder Bot: it needs a folder of its own and
+    // cannot be the Main Bot, and the same overlap checks an update runs apply here before a
+    // Session exists. It starts without a shell unless the caller explicitly gives it one.
+    if (isPrivate) {
+      if (main) throw refusal(`${cleanName} cannot be a Main Bot and private`)
+      await rt.checkPrivacyChange({ id: 'new-bot', name: cleanName, private: false, workDir: dir }, { flag: true, moving: true, workDir: dir })
+    }
     if (!main && (section !== undefined || sectionId !== undefined)) resolveSectionInput({ section, sectionId }, { allowCreate: false })
     // A Bot made by another Bot takes its creator's level, before its Session is made; else
     // the team default. A Session adopted from a host keeps its own.
     const creator = rt.botOf(createdBy)
+    // A Bot another Bot makes also keeps that creator's shell fence: a shell-less Bot must
+    // not give itself one by spawning a Bot that has it. Only the user turns it back on.
+    const shellOff = shell === undefined ? isPrivate || creator?.shell === false : shell === false
+    // A command-capable agent runs its tools outside this plugin, so a Bot without a shell
+    // cannot be paired with it: the fence would not reach the agent. Refuse before a Session
+    // exists, with the way out.
+    if (shellOff && commandCapableAgent(modelRef)) {
+      throw refusal(`${cleanName} has no shell, so it cannot run on ${String(modelRef).split('/')[0]}, `
+        + 'whose own tools can run commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
+    }
     const carried = Array.isArray(creator?.denyTools) ? creator.denyTools : []
     const denied = carried.length === 0 ? denyTools : cleanDenyTools([...new Set([...carried, ...(denyTools ?? [])])])
     // Keep the existing unset representation when the profile already starts at
@@ -343,6 +378,12 @@ export function install(rt) {
         ...(existingSessionId !== undefined ? { sessionPinned: true } : {}),
         // What a team member brought in by its own plugin is for (omni: Omni's channels).
         ...(BOT_KINDS.includes(kind) ? { kind } : {}),
+        // A private-folder Bot. Its shell defaults to off; changing `private` later never
+        // changes a stored Bot's shell (updateBot).
+        ...(isPrivate ? { private: true } : {}),
+        // Every new Bot states its capability. Readers still treat an absent field (a Bot
+        // saved before this existed) as a shell, so nothing is migrated.
+        shell: !shellOff,
         // The tools this Bot never gets, enforced on every Session it speaks from.
         ...(denied ? { denyTools: denied } : {}),
         ...(resolvedSecId ? { sectionId: resolvedSecId } : {}),
@@ -390,9 +431,9 @@ export function install(rt) {
       } else {
         await rt.applyPermission(bot, id, undefined, undefined, { start: true })
       }
-      if (denied) {
+      if (denied || shellOff) {
         await rt.applyToolDeny(bot)
-          .catch(error => rt.warn('ds-bot: the denied tools of %s not applied: %s', cleanName, error))
+          .catch(error => rt.warn('ds-bot: the restricted tools of %s not applied: %s', cleanName, error))
       }
       if (modelRef === undefined) {
         bot.kickoff = greeting
@@ -513,6 +554,9 @@ export function install(rt) {
       workDir,
       sectionId: bot.sectionId,
       copyOf: bot.id,
+      // A copy keeps a shell the original was denied: the copy is new, but taking a
+      // capability away here would not be the user's choice either.
+      ...(bot.shell === false ? { shell: false } : {}),
     })
   }
 
@@ -520,6 +564,13 @@ export function install(rt) {
     if (['permissionAuto', 'permissionRev', 'autoStamp'].some(key => Object.hasOwn(patch, key))) throw refusal('Only the person turns Auto on, from the Bot\'s permission choice.')
     const bot = rt.botOf(id)
     if (bot === undefined) throw refusal('Unknown Bot')
+    const checkHeldChoice = () => {
+      if (bot.shellHeld !== undefined && rt.pickingModel?.(id)
+        && ['shell', 'model', 'effort', 'workDir'].some(key => patch[key] !== undefined)) {
+        throw refusal(`${bot.name} is already changing models.`)
+      }
+    }
+    checkHeldChoice()
     // A Bot whose model menu its plugin owns (host-models.js): the model and level are the
     // plugin's, picked by the person only; the rest of the patch goes on as for any Bot.
     if (rt.hostOwned?.(bot) && (patch.model !== undefined || patch.effort !== undefined)) {
@@ -533,11 +584,14 @@ export function install(rt) {
     if (patch.browserGrants !== undefined && actorId !== undefined) {
       throw refusal(`Only the user can set what ${bot.name} may do in the browser`)
     }
-    // The deny list is the Bot's hard restriction, so a Bot cannot lift or narrow it by
-    // editing itself (or through a Main Bot's call): only the user's settings change it.
-    // Same rule as the browser grants above (#584).
+    // The deny list and the shell capability are the Bot's hard restrictions, so a Bot
+    // cannot lift or narrow either by editing itself (or through a Main Bot's call): only
+    // the user's settings change them. Same rule as the browser grants above (#584).
     if (patch.denyTools !== undefined && actorId !== undefined) {
       throw refusal(`Only the user can set what ${bot.name} may use`)
+    }
+    if (patch.shell !== undefined && actorId !== undefined) {
+      throw refusal(`Only the user can give ${bot.name} a shell or take it away`)
     }
     if (patch.private !== undefined && actorId !== undefined) {
       throw refusal(`Only the user can make ${bot.name} private or open`)
@@ -552,7 +606,9 @@ export function install(rt) {
     // The tool deny list is checked with the rest, before anything is written: a name this
     // DSH does not serve refuses the update, so a typo cannot quietly weaken the list.
     const denyTools = cleanDenyTools(patch.denyTools)
-    if (denyTools !== undefined && denyTools !== null) await rt.assertDenyTools(rt.chatOf(bot.id), denyTools)
+    // The shell capability, checked with the rest: a value that is not true or false
+    // refuses the update before anything is written.
+    const shell = cleanShell(patch.shell)
     // Checked first, so a folder, model or level that does not pass leaves the rest
     // unchanged too.
     const role = patch.role === undefined ? undefined : cleanRole(patch.role)
@@ -564,28 +620,56 @@ export function install(rt) {
     }
     const flag = patch.private === undefined ? undefined : patch.private === true
     await rt.checkPrivacyChange(bot, { flag, moving, workDir })
+    const held = bot.shellHeld !== undefined
+    if (held && patch.shell !== true && (patch.model !== undefined || patch.effort !== undefined)) {
+      if (actorId !== undefined || !patch.model || commandCapableAgent(patch.model)) throw refusal(shellHoldText(bot))
+      const extra = Object.keys(patch).filter(key => !['id', 'model', 'effort'].includes(key))
+      if (extra.length > 0) throw refusal(`${bot.name} needs a new route, so change only its model in this step.`)
+      await rt.switchRoute(bot.id, patch.model, patch.effort)
+      return bot
+    }
     const modelRef = patch.model === undefined ? undefined
       : patch.model === null || patch.model === '' ? null
       : await rt.resolveModel(patch.model, { checkAccess: true, remember: false, keep: bot.model })
+    // The shell and the model are one boundary: a Bot without a shell cannot run on an
+    // agent whose own tools run commands, and such a Bot's shell cannot be turned off.
+    const nextShell = shell === undefined ? bot.shell : shell
+    // A cleared model (`null` or '') leaves the Bot running on the model it last applied
+    // until a new one replaces it, so that is the one the boundary must test.
+    const nextModel = modelRef === undefined ? bot.model ?? bot.appliedModel
+      : modelRef === null ? bot.appliedModel
+      : modelRef
+    const cliRef = shellHoldModelOf({ shell: nextShell, model: nextModel, appliedModel: bot.appliedModel })
+    if (cliRef !== undefined && (!held || shell !== undefined || modelRef !== undefined)) {
+      const provider = cliRef.split('/')[0]
+      throw refusal(commandCapableAgent(bot.model ?? bot.appliedModel)
+        ? `${bot.name} runs on ${provider}, whose own tools can run commands, so its shell `
+          + 'cannot be turned off. Pick a model that uses DeepSeek Harness\'s tools first.'
+        : `${bot.name} has no shell, so it cannot run on ${provider}, whose own tools can run `
+          + 'commands. Pick a model that uses DeepSeek Harness\'s tools, or turn its shell on.')
+    }
     // A model on another route, or another ACP agent, is a new conversation with a handoff
     // note (RFC 0030, Decided 6 and 10). The menu uses switchRoute for it; a direct update-bot
     // is the same person's pick, so it takes that path too rather than silently carrying the
     // old conversation across the harness. Other fields cannot ride along: the switch is its
     // own step, and the caller can update them after it.
     const currentModel = bot.model ?? bot.appliedModel
-    if (modelRef !== undefined && modelRef !== null && currentModel !== undefined && crossesHarness(currentModel, modelRef)) {
-      // A host-owned Session has no DSH agent with `whenIdle`, so no fresh part can be
-      // started here: its host owns the conversation, and the host's in-place move stands.
-      // A DSH agent, pinned included, takes the new-conversation path; the pinned check in
-      // switchRoute refuses it rather than carrying the Session across the harness.
-      const agent = await rt.resolveAgent(rt.chatOf(bot.id)).catch(() => undefined)
-      if (typeof agent?.whenIdle === 'function') {
-        const extra = Object.keys(patch).filter(key => key !== 'id' && key !== 'model' && key !== 'effort')
-        if (extra.length > 0) throw refusal(`${bot.name} needs a new conversation for that route, so change only its model in this step.`)
-        await rt.switchRoute(bot.id, modelRef, patch.effort)
-        return bot
+    if (modelRef != null && currentModel !== undefined && crossesHarness(currentModel, modelRef)) {
+      const entry = actorId === undefined ? 'update-bot' : 'update_bot'
+      // The host owns a pinned chat. Refuse before even resolving its agent, including
+      // mixed edits whose permission validation could otherwise open that Session.
+      if (bot.sessionPinned !== true) {
+        const extra = Object.keys(patch).filter(key => !['id', 'model', 'effort'].includes(key))
+        if (extra.length > 0) {
+          rt.routeAttempt(bot, currentModel, modelRef, entry)('refused', 'mixed edit')
+          throw refusal(`${bot.name} needs a new conversation for that route, so change only its model in this step.`)
+        }
       }
+      await rt.switchRoute(bot.id, modelRef, patch.effort, { entry })
+      return bot
     }
+    // Deny-list validation can open the Session; only do it after crossing eligibility.
+    if (denyTools !== undefined && denyTools !== null) await rt.assertDenyTools(rt.chatOf(bot.id), denyTools)
     // A new level resolves against the model the Bot will run on: the new one, the
     // model it keeps, or — the model cleared — the one it last ran on.
     const effortRef = modelRef === undefined ? bot.model ?? bot.appliedModel : modelRef ?? bot.appliedModel
@@ -626,8 +710,9 @@ export function install(rt) {
     try {
       if (nextName !== undefined) {
         bot.name = nextName
-        const agent = await rt.resolveAgent(rt.chatOf(id))
-        await ctx.sessionTitle.rename(agent.session, nextName)
+        const sessionId = rt.chatOf(id)
+        const session = bot.shellHeld !== undefined ? ctx.sessions?.get?.(sessionId) : (await rt.resolveAgent(sessionId)).session
+        if (session !== undefined) await ctx.sessionTitle.rename(session, nextName)
         await followMemberNames(Object.values(state.rooms).filter(room => room.members.includes(id)))
       }
       if (role !== undefined) bot.role = role
@@ -663,6 +748,12 @@ export function install(rt) {
       if (denyTools === null) delete bot.denyTools
       else bot.denyTools = denyTools
     }
+    checkHeldChoice()
+    // A change states the capability on the record. An absent field still reads as a
+    // shell: that is how every Bot saved before this capability existed keeps its own.
+    const shellBefore = bot.shell
+    const holdBefore = bot.shellHeld
+    if (shell !== undefined) bot.shell = shell
     if (flag === true) bot.private = true
     else if (flag === false) delete bot.private
     if (patch.section !== undefined || patch.sectionId !== undefined) {
@@ -680,15 +771,27 @@ export function install(rt) {
       else bot[key] = value
     }
     if (!bot.permissionAuto && markOf(bot.model) !== markBefore && bot.permissionRev === revBefore) rt.movePermissionRev(bot)
-    await rt.save()
-    // The list changed: every Session of this Bot is lifted and re-set from the new one, so
-    // a name added now disappears at once and a name removed comes back.
-    if (denyTools !== undefined) {
+    try {
+      await rt.save({ required: shell !== undefined })
+    } catch (error) {
+      if (shell !== undefined) {
+        if (shellBefore === undefined) delete bot.shell
+        else bot.shell = shellBefore
+        if (holdBefore === undefined) delete bot.shellHeld
+        else bot.shellHeld = holdBefore
+      }
+      throw error
+    }
+    // The list or the shell changed: every Session of this Bot is lifted and re-set from
+    // the new record, so a shell tool added or removed here takes effect at once.
+    if (denyTools !== undefined || shell !== undefined) {
       await rt.applyToolDeny(bot)
-      if (bot.permissionAuto) rt.endAuto(bot)
-      // The list changed either way: a restricted Bot's already-armed fresh-Session tasks
-      // would keep opening Sessions no deny layer can bind (#584, L5), and a Bot that just
-      // became unrestricted releases a task whose pause had been stuck.
+      if (shell === true && holdBefore !== undefined) await rt.applyModel(bot, { force: true })
+        .catch(error => rt.warn('ds-bot: the model of %s could not be applied after restoring its shell: %s', bot.name, error))
+      if (denyTools !== undefined && bot.permissionAuto) rt.endAuto(bot)
+      // A restricted Bot's already-armed fresh-Session tasks would keep opening Sessions no
+      // deny layer can bind (#584, L5), and a Bot that just became unrestricted releases a
+      // task whose pause had been stuck.
       try {
         await rt.revokeNewSchedules?.(bot.id)
       } catch (error) {
@@ -708,7 +811,7 @@ export function install(rt) {
     // reply. The same edit made from a group Session reaches no own-chat turn, so
     // the notice still goes out.
     const selfEditInChat = actorId === bot.id && fromSessionId === rt.chatOf(bot.id)
-    if (notes.length > 0 && bot.kickoff === undefined && !selfEditInChat) {
+    if (notes.length > 0 && bot.shellHeld === undefined && bot.kickoff === undefined && !selfEditInChat) {
       void rt.deliver({ toId: bot.id, text: notes.join('\n'), role: 'update' })
         .catch(error => rt.warn('omni-ui: profile update for %s not delivered: %s', bot.name, error?.message ?? error))
     }
@@ -740,42 +843,60 @@ export function install(rt) {
     }
   }
 
+  const picking = new Map()
+  async function whilePicking(bot, run) {
+    picking.set(bot.id, (picking.get(bot.id) ?? 0) + 1)
+    try {
+      return await run()
+    } finally {
+      const remaining = picking.get(bot.id) - 1
+      if (remaining === 0) picking.delete(bot.id)
+      else picking.set(bot.id, remaining)
+    }
+  }
+
   // An accepted switch undone because the rest of its update was refused: the old fields back,
   // and the old selection on the Bot's Sessions again (applyModel saves the record it restores).
   async function restoreModel(bot, before) {
-    putModelFields(bot, before)
-    try {
-      await rt.applyModel(bot, { force: true })
-    } catch (error) {
-      rt.warn('ds-bot: the model of %s was not selected again: %s', bot.name, error?.message ?? error)
-    }
-    putModelFields(bot, before)
+    return whilePicking(bot, async () => {
+      putModelFields(bot, before)
+      try {
+        await rt.applyModel(bot, { force: true })
+      } catch (error) {
+        rt.warn('ds-bot: the model of %s was not selected again: %s',
+          bot.name, error?.message ?? error)
+      }
+      putModelFields(bot, before)
+    })
   }
 
   async function switchModel(bot, patch, modelRef, effortId) {
     const before = modelFields(bot)
     const blockedBefore = bot.blocked
-    if (patch.model !== undefined) {
-      rt.noteModelChoice?.(bot, modelRef ?? undefined)
-      // A failure that blocked the Bot was its old model's (turns.js).
-      if ((modelRef ?? undefined) !== bot.model) delete bot.blocked
-      if (modelRef === null) delete bot.model
-      else bot.model = modelRef
-    }
-    if (patch.effort !== undefined) {
-      if (effortId === null) delete bot.effort
-      else bot.effort = effortId
-    }
-    try {
-      await rt.applyModel(bot, { force: true })
-    } catch (error) {
-      putModelFields(bot, before)
-      if (blockedBefore !== undefined) bot.blocked = blockedBefore
-      rt.warn('ds-bot: the model of %s was not changed: %s', bot.name, error?.message ?? error)
-      if (typeof error?.code === 'string' && error.code.startsWith('bot/')) throw error
-      const wanted = patch.model === undefined ? 'this thinking level' : modelRef ?? 'no model'
-      throw refusal(`${bot.name} could not switch to ${wanted}. It stays on ${before.model ?? 'its current model'}.`, { cause: error })
-    }
+    return whilePicking(bot, async () => {
+      if (patch.model !== undefined) {
+        rt.noteModelChoice?.(bot, modelRef ?? undefined)
+        // A failure that blocked the Bot was its old model's (turns.js).
+        if ((modelRef ?? undefined) !== bot.model) delete bot.blocked
+        if (modelRef === null) delete bot.model
+        else bot.model = modelRef
+      }
+      if (patch.effort !== undefined) {
+        if (effortId === null) delete bot.effort
+        else bot.effort = effortId
+      }
+      try {
+        await rt.applyModel(bot, { force: true })
+      } catch (error) {
+        putModelFields(bot, before)
+        if (blockedBefore !== undefined) bot.blocked = blockedBefore
+        rt.warn('ds-bot: the model of %s was not changed: %s', bot.name, error?.message ?? error)
+        if (typeof error?.code === 'string' && error.code.startsWith('bot/')) throw error
+        const wanted = patch.model === undefined ? 'this thinking level' : modelRef ?? 'no model'
+        throw refusal(`${bot.name} could not switch to ${wanted}. `
+          + `It stays on ${before.model ?? 'its current model'}.`, { cause: error })
+      }
+    })
   }
 
   async function setFlags(id, { pinned, hidden, sectionId }) {
@@ -935,7 +1056,7 @@ export function install(rt) {
     const title = custom || autoRoomName(members)
     // The group's own Session only relays; like a member's it moves to a fresh part
     // in the group's folder once the group has one (parts.js).
-    const id = await createSession(title)
+    const id = await createSession(title, { group: true })
     try {
       // A member deleted while the Session was made stays out, and the group is checked
       // again as it is written.
@@ -1163,15 +1284,29 @@ export function install(rt) {
     if (bot === undefined) throw refusal('Unknown Bot')
     if (main && bot.private === true) throw refusal(`${bot.name} is private, so it cannot be a Main Bot`)
     const others = state.mainBotIds.filter(other => other !== id)
+    if (main && replace !== undefined) {
+      const unavailable = rt.readOnly()
+      if (unavailable !== undefined) throw refusal(unavailable)
+      if (deletions.has(id)) throw refusal('This Bot is being deleted')
+      if (!state.mainBotIds.includes(replace) || rt.botOf(replace) === undefined) throw refusal('Only a Main Bot can be replaced')
+      if (rt.isMain(id)) throw refusal('Choose a Bot that is not already a Main Bot')
+      const next = state.mainBotIds.with(state.mainBotIds.indexOf(replace), id)
+      const apply = team => {
+        team.mainBotIds = next
+        delete team.bots[id].hidden
+        if (team.bots[replace].kickoff?.main) delete team.bots[replace].kickoff
+        if (team.bots[next[0]]) delete team.bots[next[0]].sectionId
+      }
+      // Publish the replacement only after the required copy reaches disk. Other
+      // writes see either the earlier roster or the committed one.
+      await rt.saveCopy(apply, { afterWrite: () => apply(state) })
+      return
+    }
     let next
     if (!main) {
       if (!rt.isMain(id)) return
       if (others.length === 0) throw refusal('The team needs at least one Main Bot')
       next = others
-    } else if (replace !== undefined && replace !== id) {
-      const at = others.indexOf(replace)
-      if (at === -1) throw refusal('Only a Main Bot can be replaced')
-      next = others.with(at, id)
     } else if (primary) {
       next = [id, ...others]
     } else {
@@ -1391,6 +1526,7 @@ export function install(rt) {
   }
 
   Object.assign(rt, {
+    pickingModel: id => picking.has(id), whilePicking,
     ensureWorkspace, keepTeamFolder, createSession, createBot, duplicateBot, updateBot, setFlags,
     saveSection, reorderSections, deleteSection,
     roomBusy, autoRoomName, retitleRoom, createRoom, updateRoom, deleteRoom,

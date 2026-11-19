@@ -94,8 +94,33 @@ How they fit:
   | Group admin | Manage its own group only (name, notice, members, reply mode) |
   | Member | Speak in the group, `@` another member, and post into its groups from outside them |
 
-- **Scheduled tasks and restricted Bots**: a Bot with a deny list cannot create or
-  edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
+- **Shell access**: each Bot either has a shell or does not. Every new Bot states its
+  capability; a new private-folder Bot states off, and a Bot saved before it existed has
+  no field and reads as a shell, with no migration. Only the user changes the switch in
+  its settings. A Bot without a shell gets no `bash`, `pwsh` or terminal tool,
+  and no tool that runs a command or starts one for it: a DSH task (`start_task`), an ACP
+  agent's execute call (`acp_tool`; its reads and edits stay), a local CLI's command
+  approval (`approve_agent_action`), an MCP server that would start a command
+  (`save_capability`, `attach_capability`) and the computer-use tools (`cua`,
+  `cua_driver_native__*`). The rule holds on the Bot's own chat, a group Session, a task, a
+  subagent (delegation stays, its child is bound to the parent's fence), a renamed or
+  aliased tool, and a skill. It is enforced where DSH grants tools — the tools are removed,
+  not forbidden by an instruction — and not with an operating-system sandbox. A Bot with
+  shell access can read what the operating-system user can read: that is the honest limit
+  of the folder fence for shell commands.
+
+  A shell-less Bot cannot be paired with a model whose agent runs its own tools: the Bot
+  team refuses it at creation, at the model pick, at a route switch and at the Remote
+  Hermes pairing, both when the shell is switched off and when the agent is set. The
+  automatic move of a Bot off a retired plan route to its coding CLI skips a shell-less
+  Bot, keeps it where it is and says once why (the CLI brings its own shell); if that plan
+  route no longer answers, the Bot asks for a model instead of looking like it works. An
+  MCP server mounted before the shell was turned off keeps running, but a command tool it
+  exposes is refused; a server mounted after the switch is refused too. The settings card
+  says what this capability does not fence: another Bot with a shell, or the
+  operating-system user, can still read files this Bot can read.
+- **Scheduled tasks and restricted Bots**: a Bot with a deny list or no shell cannot create
+  or edit a scheduled task, because a `new` or `new_once` target opens a Session no deny
   layer binds; the tasks it already armed are paused and their record stays. A
   delivery no team lineage can bind is refused while such a task cannot be paused;
   when the pause lands, dsh is asked to drive again and the refused delivery goes
@@ -117,6 +142,106 @@ How they fit:
 - **Adopting a DSH bot**: **Adopt as Bot** adds team membership without replacing the DSH identity, native conversation surface, preset, avatar or capabilities. The newest Session becomes its team chat and earlier Sessions remain readable parts; nothing is renamed or recreated. `list_bots`, messages, groups, capabilities and tasks become available. Fresh parts, group member Sessions and tasks inherit its preset. The original DSH registration stays saved with an `adoptedBotId` reference, but is hidden from the standalone roster to avoid duplicate rows.
   - **Rollback**: the local `POST /api/omni-ui` endpoint `agent-bot-rollback`, payload `{ "agentId": "<original DSH id>" }`, removes only the added membership and restores the original registration and team-tool restrictions. It does not archive Sessions. Remove Main Bot/group roles first; rollback refuses new parts or tasks rather than discarding new team history. Ordinary Bot deletion refuses adopted registrations; roll back first. A failed adoption/rollback save restores the pre-operation records. This cannot reconstruct identities already removed by the older destructive implementation: those require the original registration from a backup and verified preset/avatar information; no identity is inferred from a Bot's name.
 - **Make it yours**: name, role, instructions, model and look (20 characters and 12 colors, or a photo from the ones you added) for each Bot. An adopted DSH identity wears DSH's blue whale until it has a look of its own; ordinary Bots retain their identity-derived defaults and a Genie keeps its genie-clay pet; a theme, an accent color and an avatar animation level (quiet, normal or lively) for the team. A pinned Bot or group chat shows a small pushpin in the sidebar. Settings has these pages: General (look), Bots (Main Bots and each Bot's settings), Group chats (each group's settings), Connectors, Capabilities, Scheduled tasks, Usage, Secrets, Feedback and About DS Bot (versions, updates and links).
+
+## The shared gen-UI kit (`omni.genui`)
+
+Every Omni plugin that loads this client bundle (through `dsh.client.external`) shares one
+module instance, so it also shares the gen-UI kit: live rows a plugin fills while a job runs,
+and the person card. The kit's host half lives here too: one live slice every state answer
+carries, and a media route. Issue #1326 builds it in slices; this is delivery 1, G0, G1 and G5.
+
+```js
+// A plugin's own tool card, drawn by the shared kit.
+omni.toolCards.register('read_history', p => omni.genui.PersonCard({
+  chatId: p.arg('chat'),                 // the Omni chat id
+  revision: omni.genui.revisionOf(p.roster), // refetch while the bot reads
+}))
+// ...and one line per chat for a running batch, published by the plugin's host half.
+omni.genui.ProgressRows({ rows: omni.genui.rows(p.roster, 'run-1') })
+```
+
+### The live slice (host)
+
+A plugin's host half publishes one chat's row through `rt.hooks.genui`:
+
+| Call | What it does |
+|---|---|
+| `publish(batchId, row)` | merges one row by `chatId`, newest field wins; returns whether it took the row |
+| `read(batchId)` | a copy of one batch's rows, or `undefined` |
+| `clear(batchId)` | takes a batch out (a proposal no longer open) |
+
+The slice rides every `/api/omni-ui` state answer as `genui: { revision, batches }` (the
+1.5 s live hook), so a card reads it from its roster: `roster.genui.batches[batchId].rows`.
+`revision` goes up on every change. A batch keeps at most 20 rows (a finished row leaves
+first) and the slice at most 8 batches (the least recently changed leaves first).
+
+A row holds **labels and counts only, never message text**: `publish` rebuilds it from the
+fields it knows, so a `text` a caller happens to pass never reaches a window. The fields:
+
+| Field | Shape |
+|---|---|
+| `chatId` | the chat id (a row without one is refused) |
+| `chat` | the label the line shows (cut at 120 characters) |
+| `channelId` | the channel the chat is on |
+| `state` | `queued`, `reading`, `fetching`, `done`, `phone-did-not-answer`, `cancelled`, `failed` |
+| `outcome` | `done`, `phone-did-not-answer`, `stopped`, `failed`, `not-started`; `null` while running |
+| `page`, `pages` | a reading's page and the window's pages ("page 3 of about 12") |
+| `round`, `oldestReached` | how far a backfill has gone |
+| `counts` | `fetched`, `total`, `stored`, `duplicates`, `mediaDownloaded`, `mediaMissing`, `reactions`, `edits`, `deletions`, `unmatched` (flat counts are accepted too; `totalEstimated` reads as `total`) |
+| `coverage` | `oldest`, `newest`, `count`, `countInWindow`, `mediaMissing`, `deletedCount`, `lastInbound`, `lastOutbound` (ISO times) |
+| `startedAt`, `updatedAt` | ISO times |
+
+The rows are a report: the plugin's job store stays the record, and this slice holds no file.
+
+### The media route (host)
+
+`rt.hooks.media.register(name, fn)` makes a source of bytes a kit card shows; the route is
+`GET /api/omni-ui/genui-media?source=<name>&id=<id>`. `fn(id, request)` returns
+`{ type, body }` (a `Uint8Array`, an `ArrayBuffer`, a string or a stream) or `null` when it
+holds nothing. Only image and audio types are served (`image/jpeg`, `image/png`,
+`image/webp`, `image/gif`, `audio/ogg`, `audio/mpeg`, `audio/mp4`, `audio/aac`, `audio/wav`,
+`audio/webm`); anything else, an unknown source and an unknown id are a 404, and a source's
+own failure is an empty 500. The answer is `private` and `nosniff`, never inline data.
+
+### The person card (G5)
+
+`omni.genui.PersonCard({ chatId, load?, revision? })` reads one chat's reading note, and
+only reads it: the kit has no call that writes a note, and the note is never
+`set_child_notes`. The default `load` calls the host endpoint **`omni-reading-note`**, which
+Omni's channels plugin serves as a read:
+
+```text
+request:  { chat: "<Omni chat id>" }
+response: {
+  chat: { id, name?, channelId? },
+  note: { text, readThrough, updatedAt } | null,
+  coverage: { oldest, newest, count, mediaMissing, deletedCount, lastInbound, lastOutbound } | null
+}
+```
+
+`note` is `null` until the bot saves one, and the card says the chat is not read yet;
+`coverage` is `null` when Omni cannot give it, and the card leaves it out. A chat Omni can
+only name by id draws as "This chat", never the raw id. The note holds the bot's four parts
+("Who:", "Open:", "Last contact:", "Tone:"); the card draws each one, with the host's last
+contact each way under the note's own line, and `Read through <date>` under them. A note
+written as prose is drawn whole, in one part, rather than forced into a part it may not be.
+`revision` refetches it while the bot reads (pass the live slice's revision); `load` replaces
+the endpoint for a plugin with a read of its own.
+
+### What the rest of the kit gives a card
+
+| Export | What it is |
+|---|---|
+| `ProgressRows({ rows, label? })` | one line per chat: name, state, page or counts, media and marks |
+| `ProgressRow({ row })`, `CoverageRow({ coverage })` | the same, one row or one coverage line at a time |
+| `rows(roster, batchId)` | the slice's rows for one batch |
+| `revisionOf(roster)` | the slice's revision, for a card that refreshes while the bot works |
+| `loadReadingNote(chatId)`, `READING_NOTE` | the person card's default read and its endpoint name |
+| `model` | the words and number formats the cards use (`rowView`, `personView`, `parseReadingNote`, `coverageLine`, `spanOf`, `countText`, …) for a card of a plugin's own shape |
+
+Its styles are installed with this plugin's other sheets (`.bt-genui-*`, the same card
+surface and brand variables as the team's own cards); a plugin draws the components and
+needs no stylesheet of its own.
 
 ## Install
 
@@ -283,14 +408,26 @@ The DSH tool guard refuses another Bot's region and refuses per-chat ACP copies 
 objects unless the caller holds a verified copy or the picture is already in its own history.
 Tool-result images, channel pictures and handoff rows stay readable from that Bot's own
 history; this does not grant another Bot access or authorise an edit. Like private Bots, this is a tool-level
-check: Codex's own tools and indirect shell paths are not seen. Parent-folder walks are not
-blocked; `.gitignore` hides copies only from ignore-aware walks and is not a filesystem fence.
-No permission, Codex profile or read root is widened. If the operating system refuses the
-folder, the picture's text asks the person to allow Automagik access (Files and Folders or
-Full Disk Access on macOS, or a folder writable by their user elsewhere).
+check: Codex's own tools are not seen. Shell commands get only a best-effort check: each word
+that looks like a path is resolved from the command's working folder, and a word that leads to
+another Bot's own folder is refused. A path a command builds, a variable or glob it expands, a
+folder it changes into, or a file a script opens is still not seen.
 
-When Codex refuses an edit with `edit-not-isolated`, the image card stays failed and the Bot
-gets its read-only copy's path. At Workspace it may use its own tools to make and check a new
+A Bot with shell access can read what the operating-system user can read; the folder fence covers file tools, and shell commands get only a best-effort check. The per-Bot shell
+capability that can take the shell away from a Bot that must stay fenced is
+[#1471](https://github.com/automagik-si/automagik/issues/1471).
+
+Parent-folder walks are not blocked; `.gitignore` hides copies only from ignore-aware walks
+and is not a filesystem fence. No permission, Codex profile or read root is widened. If the
+operating system refuses the folder, the picture's text asks the person to allow Automagik
+access (Files and Folders or Full Disk Access on macOS, or a folder writable by their user
+elsewhere).
+
+When the locked run cannot be set up — Codex is not signed in, its account is unconfirmed,
+its configuration or switch check fails, its connector or session cannot start, the ACP plugin
+is older, or the adapter does not acknowledge the image profile — the refusal carries
+`edit-not-isolated`, the image card stays failed and the Bot gets its read-only copy's path. At
+Workspace it may use its own tools to make and check a new
 file, and must only claim an edit when that file exists; otherwise it says it could not edit.
 At Read only it tells the person that Workspace in Details allows editing as a file. A copy
 failure gives the OS guidance or says that the picture could not be edited here.
@@ -335,7 +472,7 @@ enter team state, messages, tools, model calls or logs. The earlier confirm step
 existing account in the Bot's own CLI home. Terminal user settings are not imported; RFC 0003's
 isolation amendment records the settings migration.
 
-**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table): with it absent, both get the chat's history as a redacted replay, Claude Code gets the team's tools over the bridge, and Codex keeps only its own tools; the team's tools on Codex need an explicit `dshTools: true`.
+**Agents' tools and history**: what Claude Code and Codex see follows acp-dsh's `dshTools` (its README has the table): with it absent, both get the chat's history as a redacted replay, Claude Code gets the team's tools over the bridge, and Codex keeps only its own tools; the team's tools on Codex need an explicit `dshTools: true`. A Genie is the exception: its role tool (`grant_wish`) is a DSH tool, so bots-dsh tells acp-dsh (`needsDshTools` in the Bot identity) and that Codex Session gets DSH's extras without the setting, never a second copy of the tools Codex already has. A wish's task Session does not.
 
 - Give every model a `contextWindow`. DS Bot takes its lines from it: the usable window is the window minus the reply reserve (`maxTokens`), the hard line is 95% of that, and the check line is `checkRatio` of it. A model without `contextWindow` gets the adapter's default (262,144 tokens for `llm-pi-ai`), which may be wrong for that model; a model that reports no window at all counts as 500,000.
 - To send images, the provider needs `defaultInput: [ text, image ]`.
@@ -416,6 +553,22 @@ targets too. The lists are shared with the Bot browser, so changing them cannot 
 With both lists empty, prompt-injected channel text can still reach localhost services
 (#521); add a deny entry or disable that row.
 
+## Member wall (off)
+
+The package carries the first piece of the wall between people who share one DSH (RFC 0024
+(f)): `@automagik/bots-dsh/member-wall/fs`, a read fence on DSH's file access. Members stay
+off: no profile applies it yet, and with `members: false` (the default) it is DSH's own
+sandboxed filesystem, unchanged. Its rows are in `src/host/member-wall/profile.yml`.
+
+With members on, a session recorded as a member's may read, list, search and load skills only
+in its own area and in the shared roots, never in a denied root; a link out of the area is
+refused too, and a listing leaves out each child that reaches or walks through one, name and
+metadata included, even when the child's final target is allowed.
+Only a session recorded as the owner's acts as the owner; any other session, and
+every session while the record cannot be trusted, is held to a member's rules. The owner's own
+sessions and the owner's interface read as before. A member's commands are not fenced by this
+piece.
+
 ## Bot browser
 
 Every Bot has a browser of its own, on by default (`browserPlugin: false` turns it off). It is the Chrome, Edge, Chromium or Brave already on this computer, driven through `playwright-core`: nothing is downloaded. Without one, a Bot that needs a browser says so and asks you to install Chrome.
@@ -466,14 +619,14 @@ When a Bot needs an API key, token or password, it calls `request_secret`, and a
 - **Fill in**: the field hides what you type, is not part of a form and is not autofilled. Choose "All Bots" or "Only this Bot" and select Save. A value must have at least 4 characters (a 4-digit PIN works). A value of 8 characters or more is hidden wherever it appears; a shorter one only where no letter or digit touches it, so ordinary words stay intact.
 - **Allow**: if the secret is already saved but this Bot is not allowed to use it, the card only asks whether to allow it. You can also replace the value there.
 - **Use**: the value goes into the Bot's shell environment as `DSH_SECRET_<NAME>` (`$DSH_SECRET_NAME` in bash, `$env:DSH_SECRET_NAME` in PowerShell). `list_secrets` lists the names a Bot can use. An MCP capability can also take `$DSH_SECRET_<NAME>` in its env, its headers and its URL (path or query); in the URL the value is URL-encoded. Use headers when the server accepts them.
-- **Masking**: before a tool result is saved and before each request goes to the model, every copy of a secret value is replaced with `[secret:<NAME>]`.
+- **Masking**: before a tool result is saved and before each request goes to the model, every copy of a secret value that the redactor recognizes is replaced with `[secret:<NAME>]`.
 - **Manage**: Settings → Secrets lists every secret by name, purpose, the Bot that asked and the last use. You can change who may use it, replace the value, delete it or add one. Deleting a Bot removes it from every secret.
 - **Storage**: `<DSH_HOME>/bot/secrets.json`, file mode 600, written atomically. Values are never in `state.json` or logs.
 
 Limits:
 
 - On Windows, the file mode has no effect; the file is protected by your user folder only.
-- Only exact copies of a value are masked. A Bot that encodes, splits or reverses a value can still print it. Do not give important secrets to a Bot you do not trust.
+- Masking covers a value and its JSON-escaped and URL-encoded forms (`src/host/secrets.js`, the redactor). Base64, hex, split and reversed forms are not covered; a Bot that prints one can still leak it. Do not give important secrets to a Bot you do not trust.
 - On a page that is not HTTPS (for example dsh Web opened over http on a LAN), the value crosses the network in clear text. The card warns you.
 - Group chats show no cards; a Bot asks in its own chat.
 
@@ -532,6 +685,22 @@ The chats themselves are dsh Sessions and are not in `bot/`: they are in `~/.dsh
 
 **dsh Web and Desktop at the same time**: by default both use the same `~/.dsh`. The dsh that loads the team first takes `bot/state.lock` and can change the team. The other one is read-only: it shows the team and follows changes to the file, but refuses changes (`bot/read-only`, "open in another dsh"), and its Bots cannot start new Sessions. When the first one exits, the other one takes over on its next request. To change the team from both at once, give one of them a different `DSH_HOME` (two separate teams).
 
+## Seed the shared Bot registry (RFC 0014)
+
+The Code side and the left bar's seats read the shared Bot registry, version 2: `$AUTOMAGIK_HOME/bots/bots.json` (the home file: `projects[]` and the project's main Bot as its seat) and `<project>/.automagik/bots/bots.json` (the repo file: that project's Bots). Herdr keeps a project's roster in `.herdr/bots.json`, version 1; the plugin ships the readers but does not convert it by itself. This seed writes both version 2 files from a roster that already exists:
+
+```sh
+node apps/bots-dsh/scripts/seed-registry.mjs --project <project> --home <automagik-home>
+```
+
+`--project` defaults to the current folder; `--home` defaults to `$AUTOMAGIK_HOME`, else `~/.automagik`. The second is the Automagik home, not the team's `AUTOMAGIK_BOTS_HOME`: it is where `bots/bots.json` lives (`~/.automagik/bots/bots.json` by default). The image ships the same script inside the installed plugin:
+
+```sh
+node /opt/automagik/profile/node_modules/@automagik/bots-dsh/scripts/seed-registry.mjs --project /data/workspace --home /data
+```
+
+It creates a missing file and leaves an identical one untouched, so re-running is safe. A repo file that differs is refused rather than overwritten; an existing home file is merged, keeping its other projects, picks and unknown fields, and a conflicting project entry or main Bot in it is refused. It never mints Bot ids: a project with no `.herdr/bots.json` is refused, because creating a team and its ids is Herdr's job. It keeps unknown fields, checks that the roster has exactly one main Bot, and removes `sessionId`, `sessions` and `segments` at every depth (including under `dsh`) before writing. The report it prints is the read-back: both files' Bot counts, any parser warnings and each file's `sha256`.
+
 ## Development
 
 You need Node 24 (DSH and the tests run on it), Bun (installs), pnpm and a deepseek-harness checkout with its dependencies installed, next to this repository (`../deepseek-harness`, or set `DSH_HARNESS`). The Desktop test bench also needs `xvfb-run` and `ffmpeg`. Web screenshots need Chrome or Chromium (`CHROME_BIN`; by default `google-chrome` or `chromium`).
@@ -567,6 +736,7 @@ dev/check.sh                             # all checks (see below)
 | `src/script-child/` | Source of the process a `browser_exec` script runs in: a QuickJS interpreter (WebAssembly) and the two functions it is given; `pins.json` holds the interpreter's version and the sha256 of each of its files |
 | `src/host/browser/script-child.js` | Built from `src/script-child/` and the pinned interpreter by `scripts/build-script-child.mjs` (esbuild) as one file; committed |
 | `web-search.js` | The `auto` search provider; independent of the team code |
+| `src/host/member-wall/` | The member wall (off): the read fence (`fs`), the principal record (`principals`), its profile rows |
 | `test/` | Unit tests and fixtures |
 | `dev/characters.mjs` | Builds the characters (small 3D models traced to outlines) into the `CHARACTERS` table in `src/client/characters.js` |
 | `dev/` | Mock model, test benches, smoke test, Desktop scripts, real-model tools (steward evaluation, logging pass-through) |

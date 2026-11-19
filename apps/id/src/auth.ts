@@ -3,6 +3,7 @@ import { jwt } from 'better-auth/plugins';
 import { passkey } from '@better-auth/passkey';
 import { oauthProvider } from '@better-auth/oauth-provider';
 import { whatsappEnabled, whatsappPlugin } from './whatsapp';
+import { passkeySiteName } from './site';
 
 function strictRedirectUri(uri: string, registered: readonly string[], defaultResult: boolean) {
   const url = new URL(uri);
@@ -17,6 +18,8 @@ export interface Env {
   DB: D1Database;
   BETTER_AUTH_URL: string;
   BETTER_AUTH_SECRET: string;
+  /** The passkey site name (WebAuthn relying-party ID); automagik.si for real use. */
+  PASSKEY_RP_ID: string;
   WHATSAPP_RECEIVING_NUMBER?: string;
   OMNI_INBOUND_TOKEN?: string;
   PAGES?: Fetcher;
@@ -26,6 +29,7 @@ export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>) {
   if (!env.BETTER_AUTH_SECRET || env.BETTER_AUTH_SECRET.length < 32) {
     throw new Error('BETTER_AUTH_SECRET must be provisioned');
   }
+  const rpID = passkeySiteName(env);
   const origin = new URL(env.BETTER_AUTH_URL).origin;
   return betterAuth({
     appName: 'Automagik ID',
@@ -48,7 +52,7 @@ export function createAuth(env: Env, ctx: Pick<ExecutionContext, 'waitUntil'>) {
     },
     plugins: [
       passkey({
-        rpID: new URL(origin).hostname,
+        rpID,
         rpName: 'Automagik ID',
         origin,
         authenticatorSelection: { residentKey: 'required', userVerification: 'required' },

@@ -202,6 +202,16 @@ export function BotSettingsForm({ bot, roster, actions, run }) {
         h(InlineText, { label: t('Instructions'), value: bot.instructions, multiline: true, placeholder: t('What this Bot is responsible for…'), onSave: instructions => save({ instructions }) }))),
     h(BotCapabilitiesCard, { bot, roster, actions, run, Card, SwitchRow }),
     h(Card, { title: t('Tools') },
+      h(SwitchRow, {
+        label: t('Shell access'),
+        hint: t('A Bot with shell access can read what the operating-system user can read.'),
+        on: bot.shell !== false,
+        onChange: value => save({ shell: value }),
+      }),
+      h('div', { className: 'bt-bs-shell-note' },
+        t('The Bot team enforces this at the tool grant: it removes the tools; it does not put a shell in an operating-system sandbox.')),
+      h('div', { className: 'bt-bs-shell-note' },
+        t('This removes this Bot\'s own shell tools; it does not stop another Bot with a shell, or the operating-system user, from reading files this Bot can read.')),
       h(Row, {
         label: t('Denied tools'),
         hint: t('Exact tool names, one per line or comma separated, case-sensitive. Empty allows every tool.'),
@@ -258,6 +268,7 @@ export const BOT_SETTINGS_CSS = ADVANCED_SETTINGS_CSS + `
 .bt-bs-sub{font-size:13px;line-height:18px;color:var(--bt-ink-2)}
 .bt-bs .bt-avedit{left:0;transform:none;width:min(284px,calc(100vw - 32px))}
 .bt-bs-row{min-height:48px}
+.bt-bs-shell-note{font-size:12px;line-height:16px;padding:0 16px 12px;color:color-mix(in srgb,var(--bt-ink-2) 50%,var(--bt-ink-3))}
 label.bt-bs-row{cursor:text}
 .bt-bs-row>.bt-set-copy{flex:1 1 auto}
 .bt-bs-label{font-size:13px;line-height:18px;font-weight:500}

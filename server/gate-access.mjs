@@ -57,13 +57,13 @@ export function fetchAccessKeys(url, { request = https.get } = {}) {
   })
 }
 
-function decoded(segment) {
+export function decoded(segment) {
   if (!/^[A-Za-z0-9_-]+$/.test(segment)) throw reject()
   const bytes = Buffer.from(segment, 'base64url')
   if (bytes.toString('base64url') !== segment) throw reject()
   return bytes
 }
-function object(segment) {
+export function object(segment) {
   const bytes = decoded(segment)
   if (!isUtf8(bytes)) throw reject()
   const value = JSON.parse(bytes.toString('utf8'))

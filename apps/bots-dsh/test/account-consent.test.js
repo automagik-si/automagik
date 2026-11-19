@@ -93,7 +93,7 @@ function fakeAcp(rows = {}, { consented = true, bridge = false } = {}) {
   return { state, calls, service, box, called: name => calls.filter(([what]) => what === name) }
 }
 
-async function start(team, { acp = fakeAcp(), providers = ['deepseek', 'acp-claude', 'acp-codex'], records = {}, defaultModel } = {}) {
+async function start(team, { acp = fakeAcp(), providers = ['deepseek', 'acp-claude', 'acp-codex'], records = {}, defaultModel, emptySessions = [] } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'ds-bot-consent-'))
   writeFileSync(join(home, 'state.json'), JSON.stringify(team))
   const ctx = fakeContext({
@@ -119,6 +119,8 @@ async function start(team, { acp = fakeAcp(), providers = ['deepseek', 'acp-clau
     'acp-codex': [{ id: 'default' }, { id: 'gpt-6.1-sol' }],
     'acp-claude': [{ id: 'default' }, { id: 'opus' }],
   })
+  // Only callers that establish an untouched chat opt into an empty projection.
+  // turn() probes stream access; it appends no Session exchange.
   const selected = []
   Object.assign(ctx, {
     llm: {
@@ -130,7 +132,7 @@ async function start(team, { acp = fakeAcp(), providers = ['deepseek', 'acp-clau
     workspaceRegistry: { get: () => undefined, resolveByPath: async () => undefined, create: async path => ({ id: 'w1', path }), archiveSession: async () => {} },
     sessionController: {
       create: async () => ({ sessionId: 's1' }),
-      resolveAgent: async sessionId => ({ agent: { session: { id: sessionId }, followup() {}, cancel() {} } }),
+      resolveAgent: async sessionId => ({ agent: { session: { id: sessionId, ...(emptySessions.includes(sessionId) ? { deriveMessages: () => [] } : {}) }, followup() {}, cancel() {} } }),
       selectModel: async (request) => { selected.push(request) },
       page: async () => ({ records: [], hasMore: false }),
     },
@@ -219,7 +221,7 @@ test('upgrade: a carried vendor keeps answering, and so does one whose state acp
     ['an acp-dsh that says nothing of consent', { signedIn: true }],
     ['a sign-in that could not be read', { signedIn: undefined }],
   ]) {
-    const h = await start(TEAM(), { acp: fakeAcp({ 'acp-claude': row }) })
+    const h = await start(TEAM(), { acp: fakeAcp({ 'acp-claude': row }), emptySessions: ['chief'] })
     t.after(h.stop)
     await h.call('state', {})
     const turn = await h.turn('coder')
@@ -261,7 +263,7 @@ test('the menu still offers an unconfirmed agent, marked, and no Bot starts on i
 
 test('the confirm step comes before any sign-in starts, shows the account, and applies the staged model', async (t) => {
   const acp = fakeAcp({ 'acp-claude': unconfirmed() })
-  const h = await start(TEAM(), { acp })
+  const h = await start(TEAM(), { acp, emptySessions: ['chief'] })
   t.after(h.stop)
   await h.call('state', {})
   // The explicit entry with the model the person chose (company, then model, then level).
@@ -290,7 +292,7 @@ test('the confirm step comes before any sign-in starts, shows the account, and a
 
 test('while the staged model is being applied, the view still shows it as pending (#1039)', async (t) => {
   const acp = fakeAcp({ 'acp-claude': unconfirmed() })
-  const h = await start(TEAM(), { acp })
+  const h = await start(TEAM(), { acp, emptySessions: ['chief'] })
   t.after(h.stop)
   await h.call('state', {})
   // The update lands on the record, then holds before it returns, as a slow selection or a
