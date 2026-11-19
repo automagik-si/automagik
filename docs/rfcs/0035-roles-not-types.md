@@ -67,9 +67,11 @@ Bot and no new kind. This RFC records that shape as the plan.
 
 **One Bot; roles make the difference.** Five rules follow from it:
 
-1. **One implementation.** Every team Bot is the same record and the same runtime. The model,
-   permission, folder, shell, channels, memory and Sessions are the person's settings on that
-   Bot; no product changes them. The Main Bot stays a team-level power, not a product.
+1. **One implementation for the team's Bots.** Every Bot the person creates is the same record
+   and the same runtime. The model, permission, folder, shell, channels, memory and Sessions are
+   that Bot's settings; no product changes them. The Main Bot stays a team-level power, not a
+   product. The remaining crew kinds (`omni`, `unfold`) are compatibility records converted by a
+   later RFC (Out of scope).
 2. **A role adds, never changes.** A role may add tools, one prompt part, UI rows, its own
    settings and declared capabilities. It may not change the Bot's kind, model, route,
    permission, shell, folder, channels, memory, Sessions or Main Bot powers, nor its name,
@@ -304,8 +306,8 @@ process, and this RFC does not claim they do. That is why community roles wait f
 9. **Kind stays a stored field.** `genie` is read as the built-in role from P1 and as the
    installed package from P6. No product may add a new crew kind; a role is the extension point.
 10. **Release artifacts.** An official role is `automagik-role-<id>-<version>.tgz` plus its
-    `.sha256`, attached to the release; the signed index travels inside the bots-dsh release.
-    Nothing is published to npm.
+    `.sha256`, attached to the release; the signed `roles.json` on that release names it. Nothing
+    is published to npm.
 
 ## Deliveries
 
@@ -422,9 +424,10 @@ being created and is migrated.
    capability API and no host imports.** A container per role costs start-up and a platform
    story; DSH's own sandbox does not yet bound a plugin's host code. The process is the smallest
    boundary that can be enforced and killed on detach.
-8. **Where does the official catalog come from?** **Recommend the signed index inside the
-   bots-dsh release, with each artifact on that release.** It reuses the plugin lane's existing
-   trust path and adds no service; a hosted index is a Cloud question, not a plugin one.
+8. **Where does the official catalog come from?** **Recommend a signed `roles.json` on each
+   release, beside the role artifacts, using the plugin lane's key.** It reuses the lane's
+   existing trust path and adds no service; a separately hosted index is a Cloud question, not a
+   plugin one.
 9. **What is the product word?** **Recommend "role" in the UI and "role package" in docs.** The
    Bot's existing free-text `bot.role` label keeps its field and is shown as the Bot's
    description; "Role" names the product. The working name "agents bazaar" describes the shop,
