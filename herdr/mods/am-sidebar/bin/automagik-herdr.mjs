@@ -390,43 +390,52 @@ function launchPath(program, cwd = null) {
 }
 
 /**
- * Why a launch's PATH word does not resolve `hc` to the pack's guard shim by absolute path, or
- * null. The pack puts the guard folder (an absolute path) first on a guarded pane's PATH; this
- * resolves the first `hc` on that same PATH and requires it to be the guard folder's own shim.
- * A guard folder with no executable shim, or a first `hc` that is some other file (a wrapper a
- * login startup would have put ahead of it), refuses the launch instead of starting the agent
- * with its kill guard shadowed (#1133). A linked machine's `--on` start is checked there, so it
- * is left to that machine. A launch with no PATH word (a template that owns its env, an unguarded
- * pane) is unchanged.
+ * Why a launch's PATH word does not resolve `hc` to the pack's guard shim, or null.
+ *
+ * The pack puts one of its guard folders (the mod's `guard` or `hc-kill`, or the dsh-tui
+ * sandbox's stable copy) at the front of a guarded pane's PATH. The launch is guarded exactly
+ * when one of those known folders is on this PATH at all: every guarded launch puts one there
+ * (guardPathWith), so a PATH with none is an unguarded launch (an agentless helper, a template
+ * that owns its env) and is left as it was. A folder's name is never the signal: an ordinary
+ * folder named first is as suspect as one named `guard`.
+ *
+ * On a guarded PATH this resolves the first executable `hc` the shell would run and requires
+ * it to realpath to the known guard's own shim. A different first `hc` (a login startup or a
+ * PATH entry ahead of the guard), a guard with no executable shim, a PATH whose first hc can't
+ * be resolved (a relative or empty entry ahead of the guard), and a PATH with no `hc` at all
+ * refuse the launch instead of starting the agent with its kill guard shadowed (#1133).
+ *
+ * A linked machine's `--on` start is checked on that machine, so it is left there. Only an hc
+ * option before the command's `--` counts: an agent argument or a task word equal to `--on`
+ * after it is the command's, never hc's. A launch with no PATH word is unchanged.
  */
 export function launchGuardProblem(args, who = null) {
   const list = Array.isArray(args) ? args.map(String) : [];
-  if (list.includes("--on")) return null;
-  const word = list.find((w) => w.startsWith("PATH="));
+  const commandAt = list.indexOf("--");
+  const options = commandAt < 0 ? list : list.slice(0, commandAt);
+  if (options.some((w) => w === "--on" || w.startsWith("--on="))) return null;
+  const body = commandAt < 0 ? list : list.slice(commandAt + 1);
+  const word = body.find((w) => w.startsWith("PATH="));
   if (!word) return null;
   const dirs = word.slice("PATH=".length).split(":");
-  const guard = dirs[0];
-  if (!guard || !isAbsolute(guard)) return `the launch PATH's first word ${guard ? `(${guard})` : "(none)"} is not an absolute guard folder; refusing to start ${who ?? "the agent"} (#1133)`;
-  // The absolute path the pack put first must be one of its own: the mod's guard or kill shim,
-  // or the dsh-tui sandbox's stable copy. A shadow folder named first is refused, never trusted.
-  // A launch with no guard at all (an agentless helper, say) has no shim to preserve: its first
-  // word is no guard-looking folder, and it is left as it is.
-  const known = new Set([realDir(GUARD_DIR), realDir(KILL_GUARD_DIR)]);
-  let stableGuard = null, stableKill = null;
-  try {
-    stableGuard = stableGuardDir(stableRootOf());
-    stableKill = stableKillDir(stableRootOf());
-    known.add(realDir(stableGuard));
-    known.add(realDir(stableKill));
-  } catch { /* no HOME/XDG_DATA_HOME: this copy has no stable guard */ }
-  const realGuard = realDir(guard);
-  const belongs = (realGuard !== null && known.has(realGuard))
-    || (stableGuard !== null && guard === stableGuard) || (stableKill !== null && guard === stableKill);
-  if (!belongs) {
-    if (!/(^|\/)(guard|hc-kill)\/?$/.test(guard)) return null;
-    return `the launch PATH's first word ${guard} is not the pack's guard folder; refusing to start ${who ?? "the agent"} `
-      + `with a shadowing folder ahead of its hc kill shim (#1133). Reinstall or repair the pack, then try again.`;
-  }
+  const bare = (p) => String(p).replace(/\/+$/, "") || "/";
+  // The folders this copy can call its own: the mod's guard and kill shim, plus the dsh-tui
+  // sandbox's stable copies when this host has a data root. Matched by the path as written and,
+  // when both exist, by realpath (a symlinked copy of the guard counts; a deleted guard still
+  // counts by its written path, so its missing shim is refused rather than read as no guard).
+  const known = [];
+  const addKnown = (dir) => { if (dir) known.push({ dir: bare(dir), real: realDir(dir) }); };
+  addKnown(GUARD_DIR);
+  addKnown(KILL_GUARD_DIR);
+  try { const root = stableRootOf(); addKnown(stableGuardDir(root)); addKnown(stableKillDir(root)); }
+  catch { /* no HOME/XDG_DATA_HOME: this copy has no stable guard */ }
+  const knownGuard = (dir) => {
+    if (!dir) return null;
+    const real = realDir(dir);
+    return known.find((g) => g.dir === bare(dir) || (real !== null && g.real === real)) ?? null;
+  };
+  const guard = dirs.find((d) => knownGuard(d) !== null);
+  if (guard === undefined) return null; // no known guard anywhere on this PATH: not a guarded launch
   const shim = join(guard, "hc");
   let shimReal = null;
   try {
@@ -436,19 +445,29 @@ export function launchGuardProblem(args, who = null) {
     return `the pack's hc kill shim is missing or not executable at ${shim}; refusing to start ${who ?? "the agent"} without its kill guard (#1133). `
       + "Reinstall the pack, and for the dsh-tui sandbox's stable copy run `am dsh-tui install`.";
   }
-  // The absolute path the shell will run first: not a name lookup, the first `hc` on this PATH.
+  // The first hc the shell would run, resolved independently of the guard's position: a relative
+  // or empty entry ahead of it can't be resolved here, so the first hc can't be proved and the
+  // launch is refused rather than trusted.
   let first = null;
   for (const dir of dirs) {
-    if (!dir || !isAbsolute(dir)) continue;
+    if (!isAbsolute(dir)) {
+      return `the launch PATH names ${dir ? `the relative folder ${dir}` : "an empty entry"} before the pack's hc kill shim at ${shim}, `
+        + `so the first hc cannot be resolved; refusing to start ${who ?? "the agent"} with an unproved kill guard (#1133). `
+        + `Put ${guard} first on PATH, then try again.`;
+    }
     const file = join(dir, "hc");
     try {
       if (statSync(file).isFile() && (accessSync(file, constants.X_OK), true)) { first = realpathSync(file); break; }
     } catch { /* the next word */ }
   }
-  if (!first) return `no hc is on the launch PATH for ${who ?? "the agent"}; refusing to start it with no kill guard (#1133)`;
+  if (first === null) {
+    return `no hc is on the launch PATH, though its guard folder ${guard} is; expected the pack's hc kill shim at ${shim}; `
+      + `refusing to start ${who ?? "the agent"} with no kill guard (#1133). Reinstall the pack, then try again.`;
+  }
   if (first !== shimReal) {
-    return `the hc this launch would run resolves to ${first}, not the pack's kill shim at ${shimReal}; `
-      + `refusing to start ${who ?? "the agent"} with its kill guard shadowed (#1133). Reinstall or repair the pack, then try again.`;
+    return `the first hc on the launch PATH resolves to ${first}, not the pack's hc kill shim at ${shim}; `
+      + `refusing to start ${who ?? "the agent"} with its kill guard shadowed (#1133). `
+      + `A shell startup or a PATH entry ahead of ${guard} is shadowing it: remove that hc, or put ${guard} first on PATH, then try again.`;
   }
   return null;
 }

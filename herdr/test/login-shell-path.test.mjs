@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { startArgs } from "../mods/am-sidebar/launchArgs.js";
 import { launchRun } from "../mods/am-sidebar/models.js";
 import { restartPlan } from "../mods/am-sidebar/restart.js";
-import { KILL_GUARD_DIR, guardPathWith, workerArgs } from "../mods/am-sidebar/workers.js";
+import { GUARD_DIR, KILL_GUARD_DIR, guardPathWith, workerArgs } from "../mods/am-sidebar/workers.js";
 
 const ID = { main: "b-aaaaaaaaaa", dev: "b-cccccccccc" };
 
@@ -192,16 +192,51 @@ test("the same holds for a zsh-style login startup (#1133)", { skip: !existsSync
   assert.equal(read(s.shadowLog), "");
 });
 
-test("the launch refuses a PATH whose first word is a shadow folder, and a guard with no shim (#1133)", async (t) => {
+test("a guarded launch refuses a shadowing first hc, whatever its folder is called (#1133)", async (t) => {
   const { launchGuardProblem } = await import("../mods/am-sidebar/bin/automagik-herdr.mjs");
   const s = scene(t);
-  const shadowPath = `PATH=${join(s.shadow, "guard")}:${KILL_GUARD_DIR}:${s.bin}:/usr/bin:/bin`;
-  const why = launchGuardProblem(["--", "/usr/bin/env", shadowPath, "codex"], "dev");
-  assert.match(why, /is not the pack's guard folder; refusing to start dev/);
-  // No guard at all (an agentless helper): nothing to preserve, left as it was.
+  const guarded = (...dirs) => launchGuardProblem(["--", "/usr/bin/env", `PATH=${dirs.join(":")}`, "codex"], "dev");
+  // The reported shape: an ordinary-named folder first, a real guard folder later, and `hc`
+  // resolving to the ordinary folder's copy. The basename gate at 6880d444 returned null.
+  const shadowPath = `${s.shadow}:${KILL_GUARD_DIR}:${s.bin}:/usr/bin:/bin`;
+  const why = guarded(s.shadow, KILL_GUARD_DIR, s.bin, "/usr/bin", "/bin");
+  assert.match(why, /the first hc on the launch PATH resolves to .*stand in dir\/hc/);
+  assert.match(why, /not the pack's hc kill shim at .*hc-kill\/hc/);
+  assert.match(why, /remove that hc, or put .*hc-kill first on PATH/);
+  // That PATH really does resolve hc to the ordinary folder, not the shim.
+  const found = spawnSync("/bin/sh", ["-c", "command -v hc"], { env: { ...s.env, PATH: shadowPath }, encoding: "utf8" });
+  assert.equal(found.status, 0, found.stderr);
+  assert.equal(found.stdout.trim(), join(s.shadow, "hc"));
+  // The named shadow from the first review still refuses, now because its hc is first, not
+  // because of its name.
+  const namedShadow = join(s.shadow, "guard");
+  mkdirSync(namedShadow, { recursive: true });
+  writeFileSync(join(namedShadow, "hc"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(namedShadow, "hc"), 0o755);
+  const named = guarded(namedShadow, KILL_GUARD_DIR, s.bin, "/usr/bin", "/bin");
+  assert.match(named, /the first hc on the launch PATH resolves to .*guard\/hc/);
+  // A dsh-tui pane's full guard later on the PATH is the same shape.
+  const full = guarded(s.shadow, GUARD_DIR, s.bin, "/usr/bin", "/bin");
+  assert.match(full, /not the pack's hc kill shim at .*guard\/hc/);
+  // No guard at all (an agentless helper): nothing to preserve, left as it was, whatever the
+  // first word is called or whether it is relative.
   assert.equal(launchGuardProblem(["--", "/usr/bin/env", `PATH=${s.bin}:/usr/bin:/bin`, "sh"], "dev"), null);
-  // The pack's own guard first is fine.
+  assert.equal(launchGuardProblem(["--", "/usr/bin/env", `PATH=${namedShadow}:${s.bin}:/usr/bin:/bin`, "sh"], "dev"), null);
+  assert.equal(launchGuardProblem(["--", "/usr/bin/env", `PATH=relative/bin:${s.bin}:/usr/bin:/bin`, "sh"], "dev"), null);
+  // The pack's own guard first is fine, the kill shim and the full guard alike.
   assert.equal(launchGuardProblem(["--", "/usr/bin/env", `PATH=${KILL_GUARD_DIR}:${s.bin}:/usr/bin:/bin`, "codex"], "dev"), null);
+  assert.equal(launchGuardProblem(["--", "/usr/bin/env", `PATH=${GUARD_DIR}:${s.bin}:/usr/bin:/bin`, "dsh-tui"], "dev"), null);
+  // `--on` after the command's -- is the command's word, not hc's: the launch is still checked.
+  assert.match(launchGuardProblem(["--", "/usr/bin/env", `PATH=${shadowPath}`, "codex", "--on", "x"], "dev"),
+    /the first hc on the launch PATH resolves to/);
+  // Only an hc `--on` before the command's -- leaves a linked start to that machine.
+  assert.equal(launchGuardProblem(["run", "--on", "m", "--bg", "--", "/usr/bin/env", `PATH=${shadowPath}`, "codex"], "dev"), null);
+  // A relative or empty word before the guard cannot prove the first hc: refused on a guarded PATH.
+  const relative = launchGuardProblem(["--", "/usr/bin/env", `PATH=relative/bin:${KILL_GUARD_DIR}:${s.bin}:/usr/bin:/bin`, "codex"], "dev");
+  assert.match(relative, /the relative folder relative\/bin before the pack's hc kill shim/);
+  assert.match(relative, /first hc cannot be resolved/);
+  const empty = launchGuardProblem(["--", "/usr/bin/env", `PATH=:${KILL_GUARD_DIR}:${s.bin}:/usr/bin:/bin`, "codex"], "dev");
+  assert.match(empty, /an empty entry before the pack's hc kill shim/);
   // The dsh-tui sandbox's stable copy with no shim: refused, never started unguarded.
   const data = join(s.root, "data"), stableGuard = join(data, "automagik-herdr", "dsh-sandbox", "guard");
   mkdirSync(stableGuard, { recursive: true });

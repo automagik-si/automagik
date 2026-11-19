@@ -1517,8 +1517,10 @@ a worker and a Restart --tree helper:
   command time. The shell's non-login startup and every tool the pane PATH holds still resolve;
   no shell startup file is edited. A template worker keeps its own command and is warned when
   it does not name this word. A start, restart, worker or `--tree` helper also refuses to run
-  when the PATH it built does not resolve `hc` to the pack's guard shim by absolute path (a
-  shadowing first folder, a missing shim), instead of starting the agent unguarded.
+  when the guarded PATH it built does not resolve its first `hc` to the pack's guard shim (an
+  ordinary-named folder ahead of the guard, a missing shim, a relative first word), naming what
+  it found and how to repair; a launch with no guard folder on its PATH (an agentless helper) is
+  left as it was.
 - Worker starts only (#1420): `-c 'projects={"<worktree>"={trust_level="trusted"}}'`, after the
   mode words and before any extra folders, subcommand or task. Checked on codex-cli 0.169.0:
   this inline TOML table keeps dots in paths literal, merges with the person's projects table,
@@ -1832,7 +1834,8 @@ What the shim does not do, plainly:
   the deny list. **The boundary is the hc-proxy sandbox, never the shim.**
 - A shell a command starts can still prepend a folder. The pack's Codex launch tells Codex not
   to use a login shell for its commands (`-c allow_login_shell=false`, #1133), and a launch
-  refuses a PATH whose first word is not the pack's guard or whose first `hc` is not the shim;
+  whose PATH holds a pack guard folder refuses when its first `hc` is not that guard's shim,
+  whatever the folder ahead is called; a launch with no guard on its PATH is left as it is, and
   a template worker that keeps its own command is warned, not rewritten.
 - A worker started from an hc template in hc's own form (`<template> <task>`) keeps the
   template's command and environment, so it gets no shim; a template the pack rebuilds for a

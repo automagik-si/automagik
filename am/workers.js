@@ -642,7 +642,28 @@ export function codexCommandCheck(command, agents = AGENTS, where = null) {
   const options = runs.map((r) => split(r.args)[0]);
   const all = (test) => options.length > 0 && options.every((a) => test(a));
   const pair = (args, flag, value) => args.some((w, i) => (w === flag && args[i + 1] === value) || w === `${flag}=${value}`);
-  const config = (args, value) => pair(args, "-c", value) || pair(args, "--config", value) || args.includes(`-c${value}`);
+  // A config word's text as Codex reads it: `-c key=value`, `-c=key=value`,
+  // `--config key=value`, `--config=key=value` (or joined `-ckey=value`). The key and value
+  // are trimmed around `=`, so a valid TOML spelling (`-c 'allow_login_shell = false'`) reads
+  // as the same word, not as a missing one or a different key.
+  const configWords = (args) => {
+    const texts = [];
+    for (let i = 0; i < args.length; i += 1) {
+      const w = args[i];
+      if ((w === "-c" || w === "--config") && typeof args[i + 1] === "string") { texts.push(args[i + 1]); i += 1; }
+      else if (typeof w === "string" && w.startsWith("--config=")) texts.push(w.slice("--config=".length));
+      else if (typeof w === "string" && w.startsWith("-c") && w.length > 2) texts.push(w.slice(2));
+    }
+    return texts;
+  };
+  const config = (args, entry) => {
+    const want = /^([^=]+?)\s*=\s*(.*)$/.exec(String(entry).trim());
+    if (!want) return false;
+    return configWords(args).some((text) => {
+      const got = /^([^=]+?)\s*=\s*(.*)$/.exec(text.trim());
+      return Boolean(got) && got[1].trim() === want[1].trim() && got[2].trim() === want[2].trim();
+    });
+  };
   const missing = [];
   if (!all((a) => a.includes("--approve-for-me"))) missing.push("--approve-for-me");
   if (!all((a) => pair(a, "--disable", "hooks") || config(a, "features.hooks=false"))) missing.push("--disable", "hooks");

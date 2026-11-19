@@ -344,6 +344,10 @@ test("codexCommandCheck reads a template's Codex words; the --no-daemon warning 
     /runs Codex in a login shell.*allow_login_shell=false/,
     "the owner's bypass template: the guard-preserving word is named, never refused");
   assert.equal(codexTemplateWarning("mac-dev", `codex --no-daemon --dangerously-bypass-approvals-and-sandbox -c ${CODEX_LOGIN_SHELL} -m x`), null);
+  // #1133 follow-up: a valid TOML spelling reads as the same word, not a false login-shell warning.
+  assert.equal(codexTemplateWarning("mac-dev", "codex --no-daemon -c 'allow_login_shell = false'"), null);
+  assert.equal(codexTemplateWarning("mac-dev", "codex --no-daemon --config 'allow_login_shell = false'"), null);
+  assert.match(codexTemplateWarning("mac-dev", "codex --no-daemon -c 'allow_login_shell = true'"), /runs Codex in a login shell/);
   assert.equal(codexTemplateWarning("rev", "claude --model x"), null);
 });
 
