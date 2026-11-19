@@ -11,7 +11,7 @@
 // someone's edit since, is never lost. A project on a linked machine (props.machine, or the
 // focused space's) is read there and written there through herdr-core (bots.js writeBots),
 // by the same rule, and its bots start, restart, attach and detach there (the CLI's --machine);
-// What happened stays this computer's for now (automagik#206). Apache-2.0.
+// What happened shows the events this computer recorded for the bot (automagik#206). Apache-2.0.
 
 import { div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Popover, Button, Scrollbar } from "gpui-base";
@@ -623,7 +623,7 @@ export class BotForm {
     }
     if (section === "inspect" && !this.history) {
       cx.spawn(async (cx) => {
-        const r = await runCli(["history", this.p.bot, "--project", this.p.project]);
+        const r = await runCli(["history", this.p.bot, "--project", this.p.project, ...(this.machine ? ["--machine", this.machine] : [])]);
         this.history = r.code === 0 && r.out ? r.out : { error: r.err || `am history failed (exit ${r.code}).` };
         cx.notify();
       });
@@ -812,12 +812,11 @@ export class BotForm {
         : this.swapAgents.map((a) => item(`menu-restart-on-${a.key}`, `    ${a.name ?? a.key}`, (cx) => this.restart(project, bot, cx, { agent: a.key })))))
       .when(items.has("attach"), (el) => el.child(item("menu-attach", this.busy === "attach" ? "Attaching…" : `Attach to the focused pane (${pane})`, (cx) => this.attach(project, bot, cx))))
       .when(items.has("detach"), (el) => el.child(item("menu-detach", this.busy === "detach" ? "Detaching…" : `Detach from ${live}`, (cx) => this.detach(cx))))
-      // What happened reads this computer's ledgers; a linked machine's comes with part (c).
-      .when(!this.machine, (el) => el.child(label("INSPECT"))
-        .child(item("menu-inspect", `What happened ${fold("inspect")}`, (cx) => this.toggle("inspect", cx)))
-        .when(this.shown.has("inspect"), (el) => el.child(this.historyView(t, note))))
-      .when(Boolean(this.machine), (el) => el.child(div().id("menu-remote-note").px(10).pt(6).pb(4).text_size(12).text_color(t.muted)
-        .child(`On ${this.machine}. What happened isn't shown for its bots yet.`)));
+      .child(label("INSPECT"))
+      .child(item("menu-inspect", `What happened ${fold("inspect")}`, (cx) => this.toggle("inspect", cx)))
+      .when(Boolean(this.machine), (el) => el.child(note(`Attach, detach and end events recorded by this computer for ${this.machine}.`)
+        .id("menu-remote-note").pt(6).pb(4)))
+      .when(this.shown.has("inspect"), (el) => el.child(this.historyView(t, note)));
   }
 
   // A linked machine that isn't answering (its rows drawn from the last run of Herdr,
@@ -856,8 +855,9 @@ export class BotForm {
     if (this.history.error) return box.child(div().px(10).text_size(12).text_color(t.ansi1).child(this.history.error));
     const { timeline, workers, transcript } = historyLines(this.history);
     const line = (id, s) => div().id(id).px(10).min_w(0).truncate().text_color(t.foreground).child(s);
+    const empty = this.machine ? `Nothing recorded by this computer for ${this.machine} yet.` : "Nothing recorded on this computer yet.";
     return box
-      .children(timeline.length ? timeline.map((e, i) => line(`menu-history-${i}`, e.text)) : [note("Nothing recorded on this computer yet.")])
+      .children(timeline.length ? timeline.map((e, i) => line(`menu-history-${i}`, e.text)) : [note(empty)])
       .when(Boolean(transcript), (el) => el.child(h_flex().id("menu-transcript").px(10).gap(6).items_center().rounded(6).cursor_pointer()
         .hover((s) => s.bg(t.hover)).tooltip(transcript)
         .on_click((_e, cx) => { cx.write_to_clipboard(transcript); this.copiedTranscript = true; cx.notify(); })

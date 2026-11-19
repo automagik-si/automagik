@@ -464,8 +464,9 @@ label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it 
 **Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
 **Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
 clears the moment the pane works again or the label is removed: the sidebar reads the label from
-the one terminal snapshot it already takes, never by scanning a pane's screen. A label older than
-a day is reported by `am tidy` (`stale-needs-owner`).
+the one terminal snapshot it already takes, never by scanning a pane's screen. It also clears when
+the pane exits or leaves the snapshot, and once the label is past the pack's stale window (a day,
+the same rule as `am tidy`'s `stale-needs-owner`), so a label left behind never keeps asking.
 
 A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
 Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,
@@ -482,9 +483,10 @@ once am is installed there, its per-turn hook in that project's
 bot gets the briefing as text. A start never creates an app home on another machine, which may be
 shared: when that app home isn't a folder there, a Claude bot starts with one warning and no
 briefing file or hook. Codex and Hermes bots start there without it, since their own
-config, which may hold a prompt the briefing would replace, is only read on this computer. What
-happened isn't shown for those bots yet. A machine that isn't answering shows its bots as last
-seen, dimmed, and its menu says so.
+config, which may hold a prompt the briefing would replace, is only read on this computer.
+**What happened** shows the attach, detach and end events this computer recorded for the bot on
+that machine and project. A machine that isn't answering shows its bots as last seen, dimmed,
+and its menu says so.
 
 A project there can carry a pane-env file, `<project>/.herdr/pane-env` on that machine, for its
 bots' panes only: other panes there never read it. It takes two keys, one per line:
@@ -662,8 +664,10 @@ am dsh-tui install | update | uninstall | doctor
   conversation started there by hand. A pane that reports
   no status to hc (Hermes) can't say whether it is waiting for an approval, so `restart` refuses
   it unless `--force`. No command ever sends a pane keys: `--force` starts the new pane and ends
-  the old one only once the new one is up. `worker`, `brief`, `history` and `tidy` stay this
-  computer's.
+  the old one only once the new one is up. `worker`, `brief` and `tidy` stay this computer's.
+- `history <bot> --machine M --project <folder>` shows the attach, detach and end events
+  this computer recorded for that machine's core and project. `--json` adds `machine` beside
+  the bot's identity. Plain `history <bot>` shows this computer's bots' history.
 - A bot is named by its id or by its name. A refusal exits 1, a usage mistake (such as a
   missing `--project` folder) exits 2, and nothing is written.
 - `start` runs the bot's agent in a new pane with `hc run`, labelled `bot=<id>`, and records it
@@ -679,12 +683,12 @@ am dsh-tui install | update | uninstall | doctor
   with the shell itself in front, idle, and no job of its own running (`sleep 99 &` left at
   the prompt keeps it: its child processes are asked with `pgrep -P`, and an answer that
   can't be read keeps it too), so the space is never left empty and nothing else is closed.
-  The sidebar's Start knows the panes. When another start opens a space on the project in the
-  same moment, every start uses the first one, and the sidebar closes the extra space it
-  opened while that space holds only its own shell; a space that shows only after the wait is
-  closed the same way, as soon as it appears. `start` from the command line, `--machine` too, reads
-  them from `herdr-app ls`, which counts no mod pane: it closes the tab only when it saw that
-  shell, right after its own `space.new`, as the new space's one tab and that tab's one
+  When two starts open spaces on the project, they use the first one. The sidebar can close the
+  extra space identified by its own `space.new` reply, even if it appears after the wait, while
+  it still has just its original tab with a single idle shell. A lost reply can leave the extra
+  space open. `start` from the command line, `--machine` too, reads the panes from `herdr-app ls`,
+  which counts no mod pane: it closes the tab only when it saw that shell, right after its own
+  `space.new`, as the new space's one tab and that tab's one
   terminal. `AUTOMAGIK_HERDR_TAB_WAIT_MS` sets how long `start` and `worker` wait for Herdr to show
   the new pane (5000 by default); `0` turns this tab setup off.
 - `restart <bot>` (also `am restart <bot>`) queues a working or blocked bot for its next
@@ -1137,6 +1141,17 @@ labels). Any target outside that team is refused. The launch briefing carries th
 paragraph only for a dsh-tui bot; a claude, omp or hermes briefing is unchanged. On a linked
 machine the seat uses the guard folder that machine has, beside its own `automagik-herdr`; with
 none it gets no guard, no briefing paragraph claiming one, and one warning naming #624.
+
+A send to a pane held by a dialog is refused before anything is typed (#1414). The wrapper
+reads the target's herdr-core status and, when it is neither working nor blocked, its screen
+(the restart planner's `pendingDialog`); a blocked pane or a visible question, permission or
+sign-in dialog gets one JSON error line on stderr, kind `blocked`, naming the pane, and exit 9
+(hc's own `blocked` code), so a relay can tell it from a transport error and route the message
+elsewhere. It never presses a key and never answers the dialog, and `--force` does not bypass
+it. A free pane's send is unchanged; a screen that cannot be read is left to hc's own send, so
+nothing is queued or dropped. This is the pack's wrapper: a sender that bypasses it with an
+absolute hc path, `hc connect` or a raw socket still reaches herdr-core's delivery, where the
+hold belongs.
 
 **This is a guardrail, not a boundary.** A bot can bypass it with an absolute path to the real
 `hc`, a raw socket client, or `hc connect`. The team data is still writable: a bot that edits

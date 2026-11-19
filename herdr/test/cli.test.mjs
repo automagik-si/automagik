@@ -1755,6 +1755,30 @@ test("attach: a label write that fails only warns: the ledger has the move", (t)
   assert.match(r.err, /the ledger has it, but hc label t2 bot=b-cccccccccc failed/);
   assert.equal(s.cli(["whois", "t2", "--json"]).json().bot, ID.dev);
   assert.equal(s.cli(["whois", "t1", "--json"]).json().bot, null);
+
+  // When bot= is already present, Attach first tries role= and tidy retries it.
+  // Both failed writes are one warning, with the first reason retained.
+  const duplicate = scene(t, { terminals: [term("t8", { bot: ID.dev, app: "codex", argv: ["codex"] })] });
+  const ranked = team();
+  ranked.bots.find((bot) => bot.id === ID.dev).rank = "reviewer";
+  delete ranked.bots.find((bot) => bot.id === ID.cap).category;
+  duplicate.seed(ranked);
+  const state = duplicate.hcState();
+  state.failLabel = "t8";
+  state.failLabelReasons = { t8: ["initial refusal", "tidy retry refusal"] };
+  writeFileSync(join(duplicate.root, "hc.json"), JSON.stringify(state));
+  const attached = duplicate.cli(["attach", "Dev", "t8", "--json"]);
+  assert.equal(attached.code, 0, attached.err);
+  assert.equal(attached.json().terminal, "t8");
+  assert.equal(duplicate.cli(["whois", "t8", "--json"]).json().bot, ID.dev);
+  const relabels = labelCalls(duplicate.calls()).filter((call) => call[1] === "t8");
+  assert.equal(relabels.length, 2, JSON.stringify(relabels));
+  assert.deepEqual(relabels, [["label", "t8", "role=reviewer"], ["label", "t8", "role=reviewer"]]);
+  assert.equal(attached.json().warnings.filter((warning) => warning.includes("hc label t8")).length, 1, attached.out);
+  const warning = attached.json().warnings.find((line) => line.includes("hc label t8"));
+  assert.match(warning, /initial refusal \(exit 1\)$/);
+  assert.doesNotMatch(`${attached.out}\n${attached.err}`, /tidy retry refusal/);
+  assert.equal(attached.err.split("\n").filter((line) => line === `am: ${warning}`).length, 1, attached.err);
 });
 
 test("detach unties the bot from its ledger pane and takes the label off every local pane carrying it", (t) => {
@@ -2268,6 +2292,30 @@ test("start: an edit landing during hc run relabels the new pane; a failed relab
   assert.deepEqual(j.json().warnings.filter((w) => w.startsWith("t102's labels")),
     ["t102's labels role=reviewer weren't set. hc (herdr-core) is not on PATH."], j.out);
   seatKept("t102");
+
+  // Start's failed write and tidy's retry get different reasons; the first survives once.
+  // A second pane's distinct failed relabel still gets its own warning.
+  s.seed(team());
+  const st4 = s.hcState();
+  st4.terminals = [term("t9", { bot: ID.cap, cwd: s.project })];
+  st4.failLabelExit = 1;
+  st4.failLabels = ["t103", "t9"];
+  st4.failLabelReasons = { t103: [`first ${"x".repeat(330)}\nignored second line`, "retry reason"], t9: ["other pane\nignored line"] };
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(st4));
+  const distinct = s.cli(["start", "Dev", "--json"]);
+  assert.equal(distinct.code, 0, distinct.err);
+  assert.equal(distinct.json().terminal, "t103");
+  const warnings = distinct.json().warnings.filter((line) => /^(?:t103's labels|tidy: t9's labels)/.test(line));
+  assert.equal(warnings.length, 2, distinct.out);
+  const first = warnings.find((line) => line.startsWith("t103's labels"));
+  assert.match(first, /role=reviewer weren't set\. first /);
+  assert.equal(first.split("weren't set. ")[1].length, 300, first);
+  assert.match(warnings.find((line) => line.includes("t9's labels")), /other pane \(exit 1\)$/);
+  assert.doesNotMatch(`${distinct.out}\n${distinct.err}`, /retry reason|ignored second line|ignored line/);
+  for (const warning of warnings) {
+    assert.equal(distinct.err.split("\n").filter((line) => line === `am: ${warning}`).length, 1, distinct.err);
+  }
+  seatKept("t103");
 });
 
 // ---- restart ----
@@ -3247,7 +3295,39 @@ test("history: the bot's panes, starts, sessions (only while it held the pane) a
   assert.equal(ledgerOf(s).length, 4);
 });
 
-test("history: no ledgers is an empty history; a removed bot by its bare id; an unknown name is refused", (t) => {
+test("history (#206): a linked machine's rows for the same bot and terminal id never show here or move a local session", (t) => {
+  const s = scene(t);
+  s.seed(team());
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  const at = (m) => `2026-11-03T10:0${m}:00.000Z`;
+  const row = (event, b, terminal, when, by, extra = {}) => ({ v: 1, event, bot: b, project: s.project, terminal, core: "c1", created_ms: 1, machine: null, by, at: when, ...extra });
+  const vm = { machine: "vm", core: "core-of-vm" };
+  writeFileSync(attachFile(s.app), [
+    row("attach", ID.dev, "t5", at(1), "start"),
+    // On vm, Dev's own id in vm's t5: attached, then detached before the local session began.
+    row("attach", ID.dev, "t5", "2026-11-03T10:01:10.000Z", "attach", vm),
+    row("detach", ID.dev, "t5", "2026-11-03T10:01:30.000Z", "detach", vm),
+  ].map((r) => `${JSON.stringify(r)}\n`).join(""), { mode: 0o600 });
+  writeFileSync(ledgerPath(s.app), [
+    { event: "session", terminal: "t5", session: "11111111-aaaa", transcript: "/x/dev.jsonl", at: at(2) },
+  ].map((r) => `${JSON.stringify(r)}\n`).join(""));
+  const json = s.cli(["history", "Dev", "--json"]);
+  assert.equal(json.code, 0, json.err);
+  const h = json.json();
+  // The local shape, with no machine key.
+  assert.deepEqual(Object.keys(h), ["id", "name", "bot", "attach", "starts", "workers", "sessions", "transcript"]);
+  assert.deepEqual(h.attach.map((r) => [r.event, r.terminal, r.machine]), [["attach", "t5", null]]);
+  // vm's detach of its own t5 leaves the local t5 Dev's: the session is still Dev's.
+  assert.deepEqual(h.sessions.map((r) => [r.terminal, r.session]), [["t5", "***"]]);
+  assert.equal(h.transcript, "/x/dev.jsonl");
+  const text = s.cli(["history", "Dev"]);
+  assert.equal(text.code, 0, text.err);
+  assert.doesNotMatch(text.out, /detached from/);
+  assert.match(text.out, /^Dev \(b-cccccccccc\)\n/);
+  assert.equal(attachOf(s).length, 3);
+});
+
+test("history: no ledgers is an empty history;a removed bot by its bare id; an unknown name is refused", (t) => {
   const s = scene(t);
   s.seed(team());
   assert.match(s.cli(["history", "Studio"]).out, /nothing recorded on this computer/);

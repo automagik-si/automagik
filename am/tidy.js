@@ -34,6 +34,17 @@ export const SPACE_LABEL = "herdr.space";
 export const NEEDS_OWNER_LABEL = "automagik-herdr.needs-owner";
 export const STALE_NEEDS_OWNER_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Whether a terminal's needs-owner label is over the pack's stale window (a day). The label has
+ * no clock of its own: its age is the terminal's status age, else its creation age, and a
+ * missing clock is never stale. One rule, two readers: tidy's stale-needs-owner report and the
+ * sidebar's Question chip (rows.js).
+ */
+export function needsOwnerStale(t, now = Date.now()) {
+  const since = t?.status_ms ?? t?.created_ms;
+  return Number.isFinite(since) && now - since > STALE_NEEDS_OWNER_MS;
+}
+
 const machineOf = (address) => (String(address).includes("/") ? String(address).split("/")[0] : null);
 const baseOf = (p) => p.replace(/\/+$/, "").slice(p.replace(/\/+$/, "").lastIndexOf("/") + 1);
 const at = (machine, key) => JSON.stringify([machine ?? null, key]);
@@ -277,8 +288,7 @@ export function terminalRule(ctx) {
     } else if (!botOf(t) && !tiedTo(t) && !shown.has(t.address) && t.labels?.[SPACE_LABEL] && machine == null) {
       out.push(report("foreign", { terminal: t.address }, `${t.address} is parked and tied to no bot, so no row shows it`));
     }
-    const since = t.status_ms ?? t.created_ms;
-    if (t.labels?.[NEEDS_OWNER_LABEL] && Number.isFinite(since) && now - since > STALE_NEEDS_OWNER_MS) {
+    if (t.labels?.[NEEDS_OWNER_LABEL] && needsOwnerStale(t, now)) {
       out.push(report("stale-needs-owner", { terminal: t.address }, `${t.address} has waited on the owner for over a day: "${t.labels[NEEDS_OWNER_LABEL]}"`));
     }
   }
