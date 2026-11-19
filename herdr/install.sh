@@ -203,7 +203,9 @@ the installer asks (unless --yes), and a machine with no dsh gets one line sayin
 place, resumed where its agent allows). Linux: a systemd user unit, enabled. macOS: a launchd
 agent in your own ~/Library/LaunchAgents, which launchd loads at your next login. Neither is
 started on the spot. --no-revive leaves it alone. Without either, the installer asks (--yes never
-installs it). --uninstall removes the unit or the plist when it is this pack's.
+installs it). --uninstall removes the unit or the plist when it is this pack's; on macOS it asks
+launchd first and refuses, naming the launchctl command, when launchd can't say whether the job
+is still loaded.
 EOF
 }
 
@@ -1357,8 +1359,10 @@ revive_step() {
 }
 # --uninstall: the service goes through the command that wrote it, while the pack and its link
 # are still in place, and only when the file carries the pack's mark (revive.js UNIT_MARK, or
-# PLIST_MARK in the macOS plist). The fallback removes the file itself: on macOS only after
-# launchd lets go of the label, so a job is never orphaned.
+# PLIST_MARK in the macOS plist). The fallback runs only when that command is gone, never after
+# it refused; on macOS it asks launchd first and removes the file only on launchd's own
+# not-found answer (113, or the exact "Could not find service"), so a job is never orphaned. A
+# refusal leaves the file and stops the uninstall, naming the command that finishes by hand.
 revive_uninstall() {
   REVIVE_OS=$(uname -s 2>/dev/null)
   REVIVE_UNIT=$(revive_service_file)
@@ -1372,23 +1376,33 @@ revive_uninstall() {
     revive_rc=0
     revive_out=$("$LINK" revive service uninstall <"/dev/null" 2>&1) || revive_rc=$?
     if [ "$revive_rc" = 0 ]; then printf '%s\n' "$revive_out" | sed 's/^/  /'; return 0; fi
+    # The CLI is here and refused: its answer (which names the command that finishes by hand) is
+    # the one to show. The fallback must never overrule it: a blind remove here is how a label
+    # launchd still holds gets orphaned.
+    printf '%s\n' "$revive_out" | sed 's/^/  /'
+    fail "the revive login service was not removed and $REVIVE_UNIT was left in place; the answer above says how to finish."
   fi
   if [ "$REVIVE_OS" = Darwin ]; then
     label=dev.herdr.automagik-herdr-revive
+    domain="gui/$(id -u)"
     if ! command -v launchctl >/dev/null 2>&1; then
-      say "Left $REVIVE_UNIT: launchctl isn't here, so whether launchd holds $label can't be read."
-      return 0
+      fail "Left $REVIVE_UNIT: launchctl isn't here, so whether launchd holds $label can't be read. Run launchctl bootout $domain/$label, then run this again."
     fi
-    launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || {
-      if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
-        say "Left $REVIVE_UNIT: launchd still holds $label and it could not be booted out."
-        return 0
-      fi
-    }
+    # Ask first, and read only launchd's own not-found answer as "not loaded": exit 113, or the
+    # exact "Could not find service". Every other failure is a refusal, never a removal.
+    revive_rc=0
+    revive_out=$(launchctl print "$domain/$label" 2>&1) || revive_rc=$?
+    if [ "$revive_rc" = 113 ] || printf '%s\n' "$revive_out" | grep -q '^Could not find service'; then
+      :
+    elif [ "$revive_rc" != 0 ]; then
+      fail "Left $REVIVE_UNIT: launchctl print $domain/$label failed (exit $revive_rc${revive_out:+: $(printf '%s\n' "$revive_out" | sed -n '1p')}), so whether launchd holds $label can't be read. Run launchctl bootout $domain/$label, then run this again."
+    elif ! launchctl bootout "$domain/$label" >/dev/null 2>&1; then
+      fail "Left $REVIVE_UNIT: launchd still holds $label and it could not be booted out. Run launchctl bootout $domain/$label, then run this again."
+    fi
     if rm -f "$REVIVE_UNIT"; then
-      say "Removed $REVIVE_UNIT (launchd drops the job with it)."
+      say "Removed $REVIVE_UNIT (launchd no longer holds $label)."
     else
-      say "Warning: $REVIVE_UNIT could not be removed; remove it by hand."
+      fail "$REVIVE_UNIT could not be removed; remove it by hand."
     fi
     return 0
   fi

@@ -45,7 +45,7 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
 import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
-  countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, ledgerRivals,
+  countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchdNotLoaded, ledgerRivals,
   lastText, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
@@ -8031,8 +8031,10 @@ async function reviveSystemd(opts, verb) {
 /**
  * `revive service ...` on macOS: a LaunchAgent in the person's own LaunchAgents (#939). Installing
  * writes the plist only: launchd loads it at the next login, and a bootstrap here would run the
- * pass now (RunAtLoad). Uninstalling boots the job out before it removes the file, so launchd
- * never keeps a label whose plist is gone; when it cannot be sure, it refuses and leaves both.
+ * pass now (RunAtLoad). Uninstalling asks launchd first, even when the plist is already gone, and
+ * reads only exit 113 or launchctl's exact "Could not find service" as not loaded: any other
+ * failure is a refusal that leaves the file and names the bootout command, so launchd never keeps
+ * a label whose plist is gone and a second run can still boot out one an earlier run left.
  */
 async function reviveLaunchd(opts, verb) {
   const plist = plistPath(home());
@@ -8053,15 +8055,38 @@ async function reviveLaunchd(opts, verb) {
   if (present && !ours) throw new CliError(`${plist} is there and isn't one Automagik Herdr wrote, so it was left as it is.`);
   const notes = [];
   if (verb === "uninstall") {
-    if (!present) return opts.json ? { path: plist, removed: false, notes } : `The revive login service isn't installed (${plist}).`;
-    // launchd is asked first: a job it never loaded (no login since the install) is no label to
-    // remove, and one it still holds is never orphaned by taking the plist away.
+    // launchd is asked first, even when the plist is already gone: a run that removed the file
+    // while launchd still held the label leaves an orphan, and only launchd can say. Only exit
+    // 113 or launchctl's exact "Could not find service" means not loaded; any other failure is a
+    // refusal, because taking the plist away then could orphan a job launchd still holds.
     const held = await launchctl(["print", `${domain}/${PLIST_LABEL}`]);
-    if (held.code === 127 || held.killed) {
-      throw new CliError(`launchctl isn't here, so whether launchd holds ${PLIST_LABEL} can't be read, and ${plist} was left in place: removing it now could orphan the job. `
+    const notLoaded = launchdNotLoaded(held);
+    if (held.code === 127 && !held.killed) {
+      const state = present ? `and ${plist} was left in place (removing it now could orphan the job)`
+        : `and there is no plist at ${plist} (a label launchd still holds could not be checked)`;
+      throw new CliError(`launchctl isn't here, so whether launchd holds ${PLIST_LABEL} can't be read, ${state}. `
         + `Run launchctl bootout ${domain}/${PLIST_LABEL}, then am revive service uninstall again.`);
     }
-    const loaded = held.code === 0;
+    if (held.code !== 0 && !notLoaded) {
+      const why = held.killed ? "it timed out" : `it failed (${said(held)})`;
+      const state = present ? `${plist} was left in place: removing it now could orphan the job`
+        : `no plist is at ${plist}: a label launchd still holds was not ruled out`;
+      throw new CliError(`launchctl couldn't say whether launchd holds ${PLIST_LABEL}: ${why}, so ${state}. `
+        + `Run launchctl bootout ${domain}/${PLIST_LABEL}, then am revive service uninstall again.`);
+    }
+    const loaded = !notLoaded;
+    if (!present) {
+      if (!loaded) return opts.json ? { path: plist, label: PLIST_LABEL, removed: false, loaded: false, notes } : `The revive login service isn't installed (${plist}).`;
+      // The plist is gone but launchd still holds the label (an earlier run removed it too early):
+      // boot it out, so a second run is the way back instead of "isn't installed" and an orphan.
+      const off = await launchctl(["bootout", `${domain}/${PLIST_LABEL}`]);
+      if (off.code !== 0) {
+        throw new CliError(`launchd still holds ${PLIST_LABEL} and its bootout failed (${said(off)}), so nothing was removed. `
+          + `Run launchctl bootout ${domain}/${PLIST_LABEL}, then am revive service uninstall again.`);
+      }
+      return opts.json ? { path: plist, label: PLIST_LABEL, removed: false, loaded: true, booted_out: true, notes }
+        : `The plist is gone (${plist}), but launchd still held ${PLIST_LABEL}: booted it out, so no orphaned label is left.`;
+    }
     if (loaded) {
       const off = await launchctl(["bootout", `${domain}/${PLIST_LABEL}`]);
       if (off.code !== 0) {

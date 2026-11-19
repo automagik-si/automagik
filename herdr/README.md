@@ -760,15 +760,19 @@ runs `am revive service install`. On Linux it writes the systemd user unit
 timeout (the pass bounds its own waits). On macOS it writes the launchd agent
 `~/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist`, which launchd loads at your next
 login: it is never bootstrapped, because that would run the pass now. Neither is started on the
-spot, and what the pass prints, which the user journal keeps, is counts only: no folder, no bot
-name.
+spot, and what the pass prints — the user journal on Linux, launchd's unified log on macOS — is
+counts only: no folder, no bot name.
 At login it runs `am revive --boot --wait 600`: it waits for herdr-core, runs once
 per boot, and also takes the bots whose ended pane another command swept since the boot.
 `loginctl enable-linger` makes the unit run at boot with nobody logged in.
 `am revive service uninstall` (and `install.sh --uninstall`) removes the file when it is the
-pack's; on macOS it boots the job out of launchd before it removes the plist, so no label is
-left behind, and when launchd can't be asked it refuses and leaves both, naming the command that
-finishes the job.
+pack's. On macOS it asks launchd first and removes the plist only when launchd says the job is
+not loaded: exit 113, or its exact "Could not find service". Any other answer — a usage error,
+EPERM, an I/O error — is a refusal that leaves the plist, exits non-zero and names
+`launchctl bootout gui/<uid>/dev.herdr.automagik-herdr-revive`, so a job launchd still holds is
+never orphaned. It asks even when the plist is already gone, so a second run boots out a label an
+earlier run left behind and says so. `install.sh --uninstall` follows the same rule, and takes
+its own fallback only when the pack's command is gone, never after that command refused.
 Panes on a linked machine are that machine's own to bring back.
 
 ## The attach ledger

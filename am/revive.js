@@ -385,6 +385,15 @@ export const plistIsOurs = (text) => typeof text === "string" && text.startsWith
 /** Whether the plist keeps the PATH it was installed with (#1418). */
 export const plistKeepsPath = (text) => typeof text === "string" && text.includes("<key>PATH</key>");
 
+/**
+ * Whether a `launchctl print` answer says the job is not loaded: exit 113 (launchd's own
+ * not-found) or the exact "Could not find service" words. Every other failure — usage (64),
+ * EPERM, an I/O error, a timeout — is "can't tell", never "not loaded": a plist removed on such
+ * an answer can leave a label launchd still holds (#939).
+ */
+export const launchdNotLoaded = (r) => r?.code === 113
+  || /^Could not find service\b/m.test(`${r?.stderr ?? ""}\n${r?.stdout ?? ""}`);
+
 /** `w` as XML text: the five characters a plist string may not carry as they are. */
 const xml = (w) => String(w).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 

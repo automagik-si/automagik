@@ -231,6 +231,38 @@ esac
   return { root, bin, home, apps, appHome, mods, state, where, pack, old, link, run, piped, publish, publishMeter, publishScheduler, schedulerBuilds, meterKey: meterKeyOf, meterCalls, meterBuilds, herdrInstallerCalls, brewCalls, addHerdrApp, show, herdrCalls, checks, mark, versions, all, extraEnv, herdrLog };
 }
 
+/**
+ * A stand-in launchctl for a test, driven by a mode file the test rewrites between runs: `gone`
+ * (exit 113 and launchd's words), `gone-exit-0` (exit 0 and the same words), `loaded` (exit 0),
+ * `probe-1`/`probe-64`/`probe-io` (a print that fails), `bootout-fails` (a loaded label whose
+ * bootout fails). It logs every call, so a test tells the CLI's probe from the fallback's.
+ */
+function launchctlFake(s) {
+  const log = join(s.root, "launchctl.log"), mode = join(s.root, "launchctl-mode");
+  writeFileSync(log, "");
+  writeFileSync(mode, "gone\n");
+  exe(join(s.bin, "launchctl"), `#!/bin/sh
+printf '%s\\n' "$*" >> "${log}"
+m=$(cat "${mode}" 2>/dev/null)
+case $1 in
+  print) case $m in
+    gone) echo "Could not find service" >&2; exit 113 ;;
+    gone-exit-0) echo "Could not find service"; exit 0 ;;
+    loaded|bootout-fails) exit 0 ;;
+    probe-1) echo "print failed" >&2; exit 1 ;;
+    probe-64) echo "usage: launchctl print <domain-target>" >&2; exit 64 ;;
+    probe-io) echo "Input/output error" >&2; exit 5 ;;
+  esac; exit 0 ;;
+  bootout) [ "$m" = bootout-fails ] && { echo "Boot-out failed: Input/output error" >&2; exit 1; }; exit 0 ;;
+esac
+exit 0
+`);
+  return {
+    set: (m) => writeFileSync(mode, `${m}\n`),
+    calls: () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : []),
+  };
+}
+
 test("install.sh is POSIX sh", () => {
   execFileSync("sh", ["-n", INSTALL]);
 });
@@ -2664,6 +2696,78 @@ test("--uninstall on macOS boots a loaded LaunchAgent out before it removes the 
   assert.equal(existsSync(plist), false, "no orphaned plist");
   assert.deepEqual(calls(), [`print gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`,
     `bootout gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`], "booted out, so no label is left");
+});
+
+test("--uninstall on macOS never falls back when the pack's CLI refused: the plist stays and the command is named (#939)", (t) => {
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  const lc = launchctlFake(s);
+  const plist = join(s.home, "Library", "LaunchAgents", "dev.herdr.automagik-herdr-revive.plist");
+  const command = ["launchctl", "bootout", `gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`].join(" ");
+  assert.equal(s.run("--revive", "--no-usagemeter").code, 0);
+  assert.equal(existsSync(plist), true);
+  lc.set("probe-1");
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+  assert.notEqual(u.code, 0, `a CLI refusal is a failed uninstall: ${u.out}${u.err}`);
+  assert.equal(existsSync(plist), true, "a failed probe never removes the plist");
+  assert.ok((u.out + u.err).includes(command), `names the command (${u.out}${u.err})`);
+  assert.deepEqual(lc.calls(), [`print gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`], "only the CLI asked; the fallback never ran");
+});
+
+test("--uninstall on macOS falls back only when the pack's CLI is gone, and the fallback refuses a failed probe (#939)", (t) => {
+  for (const mode of ["probe-1", "probe-64", "probe-io"]) {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    const plist = join(s.home, "Library", "LaunchAgents", "dev.herdr.automagik-herdr-revive.plist");
+    const command = ["launchctl", "bootout", `gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`].join(" ");
+    assert.equal(s.run("--revive", "--no-usagemeter").code, 0);
+    unlinkSync(s.link);
+    lc.set(mode);
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+    assert.notEqual(u.code, 0, `${mode}: a failed probe is a failed uninstall: ${u.out}${u.err}`);
+    assert.equal(existsSync(plist), true, `${mode}: the fallback never removes a plist on a probe it cannot read`);
+    assert.ok((u.out + u.err).includes(command), `${mode}: names the command (${u.out}${u.err})`);
+    assert.deepEqual(lc.calls(), [`print gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`], `${mode}: asked first: a failed print is a refusal, never not-loaded`);
+  }
+});
+
+test("--uninstall on macOS fallback refuses when launchd holds the label and its bootout fails (#939)", (t) => {
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  const lc = launchctlFake(s);
+  const plist = join(s.home, "Library", "LaunchAgents", "dev.herdr.automagik-herdr-revive.plist");
+  const uid = process.getuid();
+  const command = ["launchctl", "bootout", `gui/${uid}/dev.herdr.automagik-herdr-revive`].join(" ");
+  assert.equal(s.run("--revive", "--no-usagemeter").code, 0);
+  unlinkSync(s.link);
+  lc.set("bootout-fails");
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+  assert.notEqual(u.code, 0, `a bootout that failed is a failed uninstall: ${u.out}${u.err}`);
+  assert.equal(existsSync(plist), true, "launchd still holds the job, so the plist stays");
+  assert.ok((u.out + u.err).includes(command), `names the command (${u.out}${u.err})`);
+  assert.deepEqual(lc.calls(), [`print gui/${uid}/dev.herdr.automagik-herdr-revive`, `bootout gui/${uid}/dev.herdr.automagik-herdr-revive`]);
+});
+
+test("--uninstall on macOS fallback removes the plist only after launchd's own not-found answer (#939)", (t) => {
+  for (const mode of ["gone", "gone-exit-0"]) {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    const plist = join(s.home, "Library", "LaunchAgents", "dev.herdr.automagik-herdr-revive.plist");
+    const uid = process.getuid();
+    assert.equal(s.run("--revive", "--no-usagemeter").code, 0);
+    unlinkSync(s.link);
+    lc.set(mode);
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+    assert.equal(u.code, 0, `${mode}: ${u.out}${u.err}`);
+    assert.equal(existsSync(plist), false, `${mode}: launchd says it is not loaded, so the file goes`);
+    assert.deepEqual(lc.calls(), [`print gui/${uid}/dev.herdr.automagik-herdr-revive`], `${mode}: asked first, and no bootout for a label that is not there`);
+  }
 });
 
 test("--dsh-tui writes minimumReleaseAgeExclude: [] for a release older than the profile's gate", (t) => {

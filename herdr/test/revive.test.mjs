@@ -14,7 +14,7 @@ import { attachPath, readAttach } from "../mods/am-sidebar/attach.js";
 import { ledgerPath, readLedger } from "../mods/am-sidebar/workers.js";
 import { helperPlan } from "../mods/am-sidebar/restart.js";
 import { AGENTS } from "../mods/am-sidebar/models.js";
-import { FIRST_SESSION_MS, KEEP_DOWN, PLIST_DECL, PLIST_LABEL, PLIST_MARK, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, ledgerRivals,
+import { FIRST_SESSION_MS, KEEP_DOWN, PLIST_DECL, PLIST_LABEL, PLIST_MARK, UNIT_MARK, UNIT_NAME, agyCandidates, agyHistoryPath, byHandCommand, countsLine, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, launchdNotLoaded, ledgerRivals,
   pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, sweptSince, unitIsOurs, unitPath, unitText } from "../mods/am-sidebar/revive.js";
 import { readJsonLines } from "./log-lines.mjs";
 import { servicePath, unitKeepsPath } from "../mods/am-sidebar/revive.js";
@@ -217,6 +217,19 @@ test("plistText: a launchd agent that runs revive --boot at login, marked on its
   assert.ok(plistPath("/Users/u").startsWith("/Users/u/Library/LaunchAgents/"), "the person's own launch agents, never a system folder");
 });
 
+test("launchdNotLoaded: only launchctl's own exit 113 or its exact 'Could not find service' says the job is not loaded (#939)", () => {
+  const r = (code, stderr = "", stdout = "") => ({ code, stderr, stdout });
+  assert.equal(launchdNotLoaded(r(113)), true, "113 is launchd's not-found");
+  assert.equal(launchdNotLoaded(r(0, "", "Could not find service")), true, "the exact words, whatever the exit");
+  assert.equal(launchdNotLoaded(r(1, "Could not find service \"x\" in domain for user gui: 501")), true);
+  assert.equal(launchdNotLoaded(r(1, "print failed")), false, "a failed probe is not a not-found");
+  assert.equal(launchdNotLoaded(r(64, "usage: launchctl print <domain-target>")), false);
+  assert.equal(launchdNotLoaded(r(1, "Operation not permitted")), false);
+  assert.equal(launchdNotLoaded(r(5, "Input/output error")), false);
+  assert.equal(launchdNotLoaded(r(0, "Could not find servicex")), false, "the exact message, not a word that starts it");
+  assert.equal(launchdNotLoaded(r(0)), false, "exit 0 with no words is loaded");
+});
+
 test("helperPlan: a helper that is a bare shell names its agent by its launch command only when revive asks", () => {
   const get = { address: "t8", name: "side", cwd: "/p", state: "live", labels: { "agent.session": SID }, argv: ["/usr/bin/env", "PATH=/bin", "claude", "--session-id", SID, "do the thing"],
     foreground: { argv: ["zsh"], cwd: "/p" } };
@@ -262,10 +275,16 @@ function world(t, { file = team(), terminals = () => [], attach = null, hcExtra 
   // A system that says it is another one (`os`): both the installer and the CLI read uname -s.
   if (os) exe(join(bin, "uname"), `#!/bin/sh\necho ${os}\n`);
   // launchd's stand-in: it logs every call. A job is loaded only when the test says so, and a
-  // bootout fails only when it asks for that. The real launchctl is never reached.
+  // bootout fails only when it asks for that. A test can also make `print` itself fail, with the
+  // exit and the words it wants, to test that only launchd's own not-found answer means "not
+  // loaded". The real launchctl is never reached.
   const lcLog = join(root, "launchctl.log");
   exe(join(bin, "launchctl"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${lcLog}"\ncase $1 in
-  print) [ "\${LAUNCHCTL_LOADED:-}" = 1 ] && exit 0; echo "Could not find service" >&2; exit 113 ;;
+  print)
+    if [ -n "\${LAUNCHCTL_PRINT_EXIT:-}" ]; then printf '%s\\n' "\${LAUNCHCTL_PRINT_TEXT:-}" >&2; exit "$LAUNCHCTL_PRINT_EXIT"; fi
+    if [ -n "\${LAUNCHCTL_PRINT_OUT:-}" ]; then printf '%s\\n' "$LAUNCHCTL_PRINT_OUT"; exit 0; fi
+    [ "\${LAUNCHCTL_LOADED:-}" = 1 ] && exit 0
+    echo "Could not find service" >&2; exit 113 ;;
   bootout) [ "\${LAUNCHCTL_BOOTOUT_FAIL:-}" = 1 ] && { echo "Boot-out failed: Input/output error" >&2; exit 1; }; exit 0 ;;
 esac
 exit 0
@@ -658,6 +677,73 @@ test("revive service on macOS: writes the LaunchAgent in the person's own Launch
     assert.match(theirs.err, /isn't one Automagik Herdr wrote, so it was left as it is/);
   }
   assert.match(readFileSync(plist, "utf8"), /<dict\/>/);
+});
+
+test("revive service uninstall on macOS refuses when launchctl print fails, whatever the failure; the plist stays and the command is named (#939)", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  const command = ["launchctl", "bootout", `gui/${uid}/${PLIST_LABEL}`].join(" ");
+  const cases = [
+    ["exit 1", { LAUNCHCTL_PRINT_EXIT: "1", LAUNCHCTL_PRINT_TEXT: "print failed" }],
+    ["exit 64", { LAUNCHCTL_PRINT_EXIT: "64", LAUNCHCTL_PRINT_TEXT: "usage: launchctl print <domain-target>" }],
+    ["an I/O error", { LAUNCHCTL_PRINT_EXIT: "5", LAUNCHCTL_PRINT_TEXT: "Input/output error" }],
+  ];
+  for (const [why, env] of cases) {
+    assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+    const before = readFileSync(plist, "utf8");
+    const r = s.cli(["revive", "service", "uninstall"], { env });
+    assert.notEqual(r.code, 0, `${why}: a failed probe is a refusal, not a removal`);
+    assert.equal(readFileSync(plist, "utf8"), before, `${why}: the plist is left exactly as it was`);
+    assert.ok(r.err.includes(command), `${why}: names the command that finishes by hand (${r.err})`);
+  }
+  // A launchctl that cannot be executed at all (EPERM/EACCES) is a refusal too, never a not-found.
+  assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+  const lc = join(s.root, "bin", "launchctl");
+  chmodSync(lc, 0o644);
+  const denied = s.cli(["revive", "service", "uninstall"]);
+  assert.notEqual(denied.code, 0, denied.err);
+  assert.equal(existsSync(plist), true, "a permission failure is not a not-found");
+  assert.ok(denied.err.includes(command), denied.err);
+  chmodSync(lc, 0o755);
+});
+
+test("revive service uninstall on macOS reads only 113 or the exact 'Could not find service' as not loaded (#939)", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  const cases = [
+    ["exit 113", { LAUNCHCTL_PRINT_EXIT: "113", LAUNCHCTL_PRINT_TEXT: `Could not find service "${PLIST_LABEL}" in domain for user gui: ${uid}` }],
+    ["exit 0 with the words", { LAUNCHCTL_PRINT_OUT: `Could not find service "${PLIST_LABEL}" in domain for user gui: ${uid}` }],
+  ];
+  for (const [why, env] of cases) {
+    assert.equal(s.cli(["revive", "service", "install"]).code, 0);
+    const asked = s.lcCalls().length;
+    const r = s.cli(["revive", "service", "uninstall", "--json"], { env });
+    assert.equal(r.code, 0, `${why}: ${r.err}`);
+    assert.equal(r.json().loaded, false, why);
+    assert.equal(existsSync(plist), false, why);
+    assert.deepEqual(s.lcCalls().slice(asked), [`print gui/${uid}/${PLIST_LABEL}`], `${why}: not loaded, so no bootout`);
+  }
+});
+
+test("revive service uninstall on macOS, with no plist, still asks launchd and boots out a label an earlier run left behind (#939)", (t) => {
+  const s = world(t, { os: "Darwin" });
+  const uid = process.getuid();
+  const plist = plistPath(s.home);
+  // What a run that removed the plist while launchd held the label left: no file, a loaded label.
+  const r = s.cli(["revive", "service", "uninstall", "--json"], { env: { LAUNCHCTL_LOADED: "1" } });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual([r.json().removed, r.json().loaded, r.json().booted_out], [false, true, true]);
+  assert.equal(existsSync(plist), false);
+  assert.deepEqual(s.lcCalls(), [`print gui/${uid}/${PLIST_LABEL}`, `bootout gui/${uid}/${PLIST_LABEL}`], "asked, then booted out");
+  const said = s.cli(["revive", "service", "uninstall"], { env: { LAUNCHCTL_LOADED: "1" } });
+  assert.equal(said.code, 0, said.err);
+  assert.match(said.out, /plist is gone .*launchd still held .*booted it out/i);
+  // And once launchd no longer holds it either, there is nothing left to say.
+  const none = s.cli(["revive", "service", "uninstall"]);
+  assert.equal(none.code, 0, none.err);
+  assert.match(none.out, /isn't installed/);
 });
 
 test("revive service on macOS refuses when it cannot ask launchd, and on a system with no login service it says why and writes nothing", (t) => {
