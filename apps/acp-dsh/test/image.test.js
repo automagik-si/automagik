@@ -16,6 +16,12 @@ const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-image-agent.mjs')
 // The also-off features the fake Codex lists and has not removed (dev/fake-image-agent.mjs).
 const EXTRAS = ['unified_exec', 'code_mode', 'multi_agent', 'multi_agent_v2', 'apps', 'plugins', 'browser_use', 'sleep_tool']
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+// The debug renders of one draw: the session's config, and one proof per required switch with
+// only that switch on (the effect the run requires; see image.js `takesEffect`).
+const debugCalls = trace => trace.filter(entry => entry.event === 'cli' && entry.args[0] === 'debug')
+const sameArgs = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+const sessionArgs = config => ['debug', 'prompt-input', ...configArgs(config)]
+const effectArgs = (config, name) => ['debug', 'prompt-input', ...configArgs({ ...config, features: { ...config.features, [name]: true } })]
 
 function setup(mode, env = {}) {
   const home = mkdtempSync(join(tmpdir(), 'acp-image-test-'))
@@ -69,14 +75,18 @@ test('one image: an empty read-only scratch session, the feature on for this run
   assert.deepEqual(config.mcp_servers, {})
   assert.deepEqual(config.skills, { bundled: { enabled: false }, config: [] })
   // The checks come first, each through the `cli` passthrough and in the folder the session
-  // then gets; the tools are read under the very config the session then gets.
+  // then gets; the tools are read under the very config the session then gets. The last two
+  // renders prove each required switch's effect with only that switch on.
   const clis = trace.filter(entry => entry.event === 'cli')
-  assert.deepEqual(clis.map(entry => entry.cwd), Array(3).fill(run.scratches[0].replace(run.home, realpathSync(run.home))))
+  assert.deepEqual(clis.map(entry => entry.cwd), Array(6).fill(run.scratches[0].replace(run.home, realpathSync(run.home))))
   assert.deepEqual(clis[0].args, ['mcp', 'list', '--json', '-c', `projects={ '${run.scratches[0]}' = { trust_level = 'trusted' } }`], 'the person\'s MCP servers are listed first')
   assert.deepEqual(clis[1].args, ['features', 'list', '-c', 'features={ image_generation = true, shell_tool = false, view_image = false }'])
-  assert.deepEqual(clis[2].args, ['debug', 'prompt-input', ...configArgs(config)])
-  assert.equal(clis.length, 3)
-  assert.ok(trace.indexOf(clis[2]) < trace.indexOf(start), 'the checks end before the session starts')
+  assert.deepEqual(clis[2].args, sessionArgs(config))
+  assert.deepEqual(clis[3].args, ['features', 'list', ...configArgs(config)], 'the switches are read again under the session\'s config')
+  assert.deepEqual(clis[4].args, effectArgs(config, 'shell_tool'), 'shell_tool turned on offers a command tool')
+  assert.deepEqual(clis[5].args, effectArgs(config, 'view_image'), 'view_image turned on offers the picture tool')
+  assert.equal(clis.length, 6)
+  assert.ok(trace.indexOf(clis[5]) < trace.indexOf(start), 'the checks end before the session starts')
   assert.equal(start.codexHome, process.env.CODEX_HOME ?? null, 'CODEX_HOME is never set by the run')
   assert.equal(start.codexPath, '/fake/codex')
   const session = trace.find(entry => entry.event === 'new-session')
@@ -262,6 +272,27 @@ test('a tool Codex still offers that is not on the list stops the draw, whatever
   assert.equal((await drawImage({ spawn: hosted.spawn, prompt: 'a fox', scratch: hosted.scratch })).base64, PNG)
 })
 
+test('a required switch Codex lists but does not act on stops the draw', async (t) => {
+  const unsupported = /could not turn off.*Update Automagik and try again/
+  for (const feature of ['shell_tool', 'view_image']) {
+    const run = setup('ok', { FAKE_TOOLS: JSON.stringify({ inert: [feature] }) })
+    t.after(run.cleanup)
+    const logged = []
+    let caught
+    await assert.rejects(drawImage({ spawn: run.spawn, prompt: 'a fox', scratch: run.scratch, log: line => logged.push(line) }), (error) => {
+      caught = error.message
+      assert.equal(error.code, UNAVAILABLE, feature)
+      assert.match(error.message, unsupported, feature)
+      return true
+    }, `${feature}: the switch is reported off, but turning it on offers no tool`)
+    assert.match(logged[0], new RegExp(`unsupported.*${feature}`), `${feature}: the log names the switch`)
+    assert.doesNotMatch(caught, new RegExp(feature), `${feature}: the refusal shown does not`)
+    const trace = run.trace()
+    assert.equal(trace.some(entry => entry.event === 'start' || entry.event === 'new-session'), false, `${feature}: no session is started`)
+    assert.equal(existsSync(run.scratches[0]), false, `${feature}: the scratch folder of the checks is removed`)
+  }
+})
+
 test('a Codex config that cannot be loaded says so', async (t) => {
   const broken = await refusedBeforeStart(t, { FAKE_MCP_LIST: 'broken' }, /could not load its own configuration/, 'a broken config')
   assert.match(broken.logged[0], /config/)
@@ -274,14 +305,14 @@ test('the person\'s own skills are turned off by name, and the tools read again 
   const trace = run.trace()
   const config = JSON.parse(trace.find(entry => entry.event === 'start').codexConfig)
   assert.deepEqual(config.skills, { bundled: { enabled: false }, config: [{ name: 'my-notes', enabled: false }, { name: 'visualize:visualize', enabled: false }] })
-  const renders = trace.filter(entry => entry.event === 'cli' && entry.args[0] === 'debug')
-  assert.equal(renders.length, 2)
-  assert.deepEqual(renders[1].args, ['debug', 'prompt-input', ...configArgs(config)], 'the last render is the session\'s config')
+  const renders = debugCalls(trace)
+  assert.equal(renders.length, 4)
+  assert.deepEqual(renders[1].args, sessionArgs(config), 'the second skill pass is the session\'s config')
   // A skill that stays listed is not a tool: the draw goes on (a read it invites is refused).
   const sticky = setup('ok', { FAKE_TOOLS: JSON.stringify({ skills: ['my-notes'], sticky: true }) })
   t.after(sticky.cleanup)
   assert.equal((await drawImage({ spawn: sticky.spawn, prompt: 'a fox', scratch: sticky.scratch })).base64, PNG)
-  assert.equal(sticky.trace().filter(entry => entry.event === 'cli' && entry.args[0] === 'debug').length, 2, 'two renders at most')
+  assert.equal(debugCalls(sticky.trace()).length, 4, 'two skill renders at most, plus the two effects')
 })
 
 test('imageSetup runs every check outside a project and keeps names only', async (t) => {
@@ -295,7 +326,7 @@ test('imageSetup runs every check outside a project and keeps names only', async
   }
   const made = await imageSetup({ command: '/node', args: ['/adapter.js'], env: { CODEX_PATH: '/codex' } }, { run })
   assert.deepEqual(made, { servers: ['github'], extras: ['apps'], skills: [], overrides: imageOverrides({ servers: ['github'], extras: ['apps'] }) })
-  assert.deepEqual(calls.map(call => call.args.slice(0, 2)), [['mcp', 'list'], ['features', 'list'], ['debug', 'prompt-input']])
+  assert.deepEqual(calls.map(call => call.args.slice(0, 2)), [['mcp', 'list'], ['features', 'list'], ['debug', 'prompt-input'], ['features', 'list']])
   assert.equal(new Set(calls.map(call => call.cwd)).size, 1)
   assert.equal(calls[0].cwd, tmpdir())
   // In the run's folder when there is one, trusted as the session will trust it.
@@ -303,7 +334,7 @@ test('imageSetup runs every check outside a project and keeps names only', async
   const folder = realpathSync(mkdtempSync(join(tmpdir(), 'acp-image-folder-')))
   t.after(() => rmSync(folder, { recursive: true, force: true }))
   const inside = await imageSetup({ command: '/node' }, { run, cwd: folder })
-  assert.deepEqual(calls.map(call => call.cwd), [folder, folder, folder])
+  assert.deepEqual(calls.map(call => call.cwd), [folder, folder, folder, folder])
   assert.deepEqual(inside.overrides.projects, { [folder]: { trust_level: 'trusted' } })
   assert.equal(calls[2].args.at(-1), `projects={ '${folder}' = { trust_level = 'trusted' } }`)
   // An exit code is Codex's own no (an update is needed); a timeout or a spawn failure is not.
@@ -387,9 +418,10 @@ test('the person\'s own MCP servers are each turned off by name, never left to a
   const start = run.trace().find(entry => entry.event === 'start')
   assert.deepEqual(JSON.parse(start.codexConfig).mcp_servers, { github: { enabled: false }, 'docs.search': { enabled: false } })
   assert.doesNotMatch(start.codexConfig, /gh-mcp|TOKEN|redacted/, 'nothing but the names is kept')
-  // The tools were read with those servers off: the last render is the session's own config.
-  const render = run.trace().filter(entry => entry.event === 'cli' && entry.args[0] === 'debug').at(-1)
-  assert.deepEqual(render.args, ['debug', 'prompt-input', ...configArgs(JSON.parse(start.codexConfig))])
+  // The tools were read with those servers off: the session's own render carries them all.
+  const config = JSON.parse(start.codexConfig)
+  const render = debugCalls(run.trace()).find(entry => sameArgs(entry.args, sessionArgs(config)))
+  assert.ok(render, 'the session config is rendered')
   assert.ok(render.args.some(arg => arg.startsWith('mcp_servers={ github = { enabled = false }')))
 })
 
@@ -647,9 +679,10 @@ test('each draw uses the home profile before checks and waits for its mode ackno
   assert.deepEqual(config.permissions[profile.id].filesystem, IMAGE_PROFILE_GRANTS)
   assert.ok(observations.length > 0)
   assert.deepEqual(observations, trace.filter(entry => entry.event === 'cli').map(entry => ({ cwd: entry.cwd, scratch: true, project: false })))
-  for (const check of trace.filter(entry => entry.event === 'cli')) {
+  for (const check of debugCalls(trace)) {
     assert.equal(check.cwd, session.cwd)
-    if (check.args[0] === 'debug') assert.deepEqual(check.args, ['debug', 'prompt-input', ...configArgs(config)])
+    assert.ok([sessionArgs(config), effectArgs(config, 'shell_tool'), effectArgs(config, 'view_image')]
+      .some(candidate => sameArgs(candidate, check.args)), 'a debug check is the session config or a feature-effect proof')
   }
   const mode = `permission-profile:${session.profileId}`
   assert.deepEqual(trace.filter(entry => entry.event === 'mode').map(entry => entry.modeId), [mode])

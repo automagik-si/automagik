@@ -400,6 +400,35 @@ export async function removeLocal(io, { appHome, name, symlink, path }) {
   const where = `${appHome}/${path ?? `mods/${name}`}`;
   if (symlink) return void (await run(io, "rm", [where]));   // only the link; the folder it points to stays
   if (await present(io, where)) await moveAside(io, appHome, where, name);
+  // The record said this folder was the pack's; it is not any more, so a folder of the person's
+  // put at that name is theirs, and the pack's update leaves it alone (#219).
+  await forgetPackMod(io, appHome, name);
+}
+
+/**
+ * The pack installer's record text without `name` in its `mods=` list, every other line as it
+ * was; null when it does not list it (nothing to write). Only that one line changes, so
+ * `version=`, `layout=`, `before=`, `installed=` and the usagemeter lines stay as they were (#219).
+ */
+export function packMarkerWithout(text, name) {
+  if (typeof text !== "string") return null;
+  const m = /^mods=(.*)$/m.exec(text);
+  if (!m) return null;                    // a v1 (v0.2.x) marker has no mods= line
+  const names = m[1].split(",").map((s) => s.trim()).filter(Boolean);
+  if (!names.includes(name)) return null;
+  const line = `mods=${names.filter((n) => n !== name).join(",")}`;
+  return text.slice(0, m.index) + line + text.slice(m.index + m[0].length);
+}
+
+/** Drops `name` from the pack's ownership record after the manager moved its folder out (#219). */
+async function forgetPackMod(io, appHome, name) {
+  const path = `${appHome}/${PACK_MARKER}`;
+  let text = null;
+  try { text = await io.readText(path); } catch { return false; }
+  const next = packMarkerWithout(text, name);
+  if (next == null) return false;
+  await io.writeText(path, next);
+  return true;
 }
 
 // The person's mods folder: Herdr's own (listed in installed.json), the manager's and the rest.

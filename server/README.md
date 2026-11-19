@@ -218,6 +218,116 @@ docker exec automagik /nodejs/bin/node \
 at first start. An image-managed seed follows newer image releases on subsequent starts, as
 described below; a profile whose `package.json` the owner changed stays owner-managed.
 
+## Measurement access (read-only)
+
+A DSH container mounts **one volume, at `/data`** (the `--volume` in Run). `/data/workspace` is a
+directory inside it, not a second mount, and the vendor homes and the meter's state default into
+it too: the image sets `HOME=/data`. The optional gate container has its own `/data`
+(`gate-data`) and reads the DSH volume at `/dsh:ro`; that read-only DSH view is the gate's, not
+the workspace's measurement view.
+
+The image bakes no host path. Resolve the workspace volume's host path per runtime:
+
+- Docker: `docker volume inspect automagik-data --format '{{.Mountpoint}}'`, normally
+  `/var/lib/docker/volumes/automagik-data/_data`.
+- Incus: each instance's volume is the custom volume attached at `/data`. A `dir` pool keeps it
+  at `/var/lib/incus/storage-pools/<pool>/custom/<volume>` (confirm with `incus storage volume
+  show <pool> <volume>`). A pool driver with no host path (`zfs`, `lvm`, `ceph`) has none to
+  read: export a read-only copy for measurement instead.
+
+The node's existing measurement user reads that host path through the node's own SSH alias. The
+image adds no account, key, link, home move or remote shell. On the node, expose one path per
+workspace, here `/srv/automagik/measure/<workspace>`. Grant first, then remount read-only: a
+read-only mount refuses `setfacl`. The volume is owned by the image's uid 1000, so a POSIX ACL
+grants without changing ownership; `<measurement>` is the node's existing measurement account:
+
+```sh
+install -d -m 0755 /srv/automagik/measure
+view=/srv/automagik/measure/automagik-data
+me=<measurement>
+
+mount --bind /var/lib/docker/volumes/automagik-data/_data "$view"
+
+# Search only: the view itself, then every directory on the way to a readable path.
+setfacl -m "u:$me:--x" "$view"
+for d in .claude .codex .automagik dsh dsh/profiles dsh/profiles/automagik-web; do
+  [ -d "$view/$d" ] && setfacl -m "u:$me:--x" "$view/$d"
+done
+marker=dsh/profiles/automagik-web/automagik-server-profile
+[ -e "$view/$marker" ] && setfacl -m "u:$me:r--" "$view/$marker"
+# Search only into the agent homes: their presence decides the derived-file check.
+for d in .gemini .antigravity; do
+  [ -d "$view/$d" ] && setfacl -m "u:$me:--x" "$view/$d"
+done
+
+# Read and search inside the exposed roots only, never over the view.
+for d in .claude/projects .claude/session-archive .codex/sessions \
+         .codex/archived_sessions .automagik/meter; do
+  [ -d "$view/$d" ] && setfacl -R -m "u:$me:rX" "$view/$d"
+done
+
+# A Gemini or Antigravity workspace: the derived model-name file and nothing else.
+if [ -e "$view/.automagik/measure/model-name.json" ]; then
+  setfacl -m "u:$me:--x" "$view/.automagik/measure"
+  setfacl -m "u:$me:r--" "$view/.automagik/measure/model-name.json"
+fi
+
+# Never readable, whatever the file mode: credentials and raw settings.
+for f in .claude/.credentials.json .codex/auth.json .claude.json \
+         .claude/settings.json .gemini/settings.json \
+         .gemini/antigravity-cli/settings.json .antigravity/settings.json; do
+  [ -e "$view/$f" ] && setfacl -m "u:$me:---" "$view/$f"
+done
+
+mount -o remount,ro,bind "$view"
+```
+
+For `/etc/fstab`, the same source and target with `none bind,ro 0 0`, but apply the grants first
+through a temporary writable bind, or to the volume's source path: a read-only mount refuses
+`setfacl`. With Incus, bind the `dir` pool's `source` the same way; with another driver, export
+the read-only copy there. Never `setfacl -R` on the view: that makes the credential files
+readable, and rerun the deny loop after a vendor writes a new credential file.
+
+Inside that view the measurement identity may read, per workspace:
+
+| Agent | Read-only roots |
+|---|---|
+| Claude | `.claude/projects/`, `.claude/session-archive/` |
+| Codex | `.codex/sessions/`, `.codex/archived_sessions/` |
+| Meter | `.automagik/meter/`: `meter.db` and `claude-limits.jsonl` |
+| Gemini / Antigravity | `.automagik/measure/model-name.json` (the derived model name only) |
+
+The meter's state directory follows `usagemeter`'s own rule: `METER_STATE_DIR`, else
+`<AM_HOME>/meter` (an absolute `AM_HOME`), else `~/.automagik/meter`; with this image's
+`HOME=/data` the default is `/data/.automagik/meter`. Without `claude-limits.jsonl` no plan
+counts as measured.
+
+This image runs no Gemini or Antigravity agent. Where a workspace adds one, expose only its log
+directory, conversation databases and generated transcripts. Before the view is mounted, generate
+`.automagik/measure/model-name.json` inside the volume from the raw settings with the measurement
+project's field allowlist, never by copying the settings file; it holds exactly
+`{"model":"<name>"}` and nothing else. That one file is the only settings-shaped path exposed,
+and without it the usage reads "model unknown". Never the agent's raw settings file.
+
+Never exposed, in whole or in part: `.claude/.credentials.json`, `.codex/auth.json`,
+`.claude.json` (the combined Claude configuration, which can carry MCP server environment
+values), `.claude/settings.json`, and any Gemini or Antigravity settings file that carries an API
+key or an MCP environment value (`.gemini/settings.json`, `.gemini/antigravity-cli/settings.json`,
+`.antigravity/settings.json`). The Claude account block is not exposed here; until the
+measurement project's RFC 0006 decides, that usage reads "unattributed".
+
+The pilot's check runs on the node as the measurement identity, against the read-only view. It
+exits non-zero when the view is absent, is stale (no seeded profile marker), finds an exposed
+root unreadable or writable, misses the meter's files in an existing meter directory, cannot read
+`.automagik/measure/model-name.json` while a Gemini or Antigravity agent is present, finds that
+file readable but not exactly one model name, or lets the identity read a file listed above:
+
+```sh
+node server/measurement-check.mjs /srv/automagik/measure/<workspace>
+```
+
+The check is host-side and is not shipped in the image.
+
 ## Update a workspace through its image
 
 Arca and host operators update by changing the pinned image digest and restarting on the **same
@@ -632,7 +742,7 @@ checks the two-volume topology and gate `401`; CI builds, smokes and scans the i
 
 ## Self-hosted claim, passkeys and recovery (#908)
 
-Leave all three `AUTOMAGIK_GATE_ACCESS_*` settings and all six `AUTOMAGIK_GATE_CLOUD_*` settings
+Leave all three `AUTOMAGIK_GATE_ACCESS_*` settings and all seven `AUTOMAGIK_GATE_CLOUD_*` settings
 unset to use this mode. It makes no outside
 authentication connection. The verifier is the maintained, MIT-licensed
 [`@simplewebauthn/server` 14.1.0](https://github.com/MasterKale/SimpleWebAuthn/releases/tag/v14.1.0),
@@ -741,11 +851,11 @@ smoke checks private claim output and host control in the built runtime.
 
 A Cloud workspace's gate takes no claim and no passkey. A person opens the workspace from the
 Cloud rail, and the gate turns that open into its own session. It follows RFC 0024 (g) and the
-[version 1 contracts](../docs/cloud/contracts-v1.md), sections 4 and 5. Delivery state: the
+[version 1 contracts](../docs/cloud/contracts-v1.md), sections 4, 5 and 6. Delivery state: the
 gate side is built and tested against a fake Cloud service; the Cloud service's side (minting
-open codes and tokens) is not built yet.
+open codes and tokens, and sending revocation) is not built yet.
 
-Set all six values on the gate container, with your own values on the host:
+Set all seven values on the gate container, with your own values on the host:
 
 | Setting | Value |
 |---|---|
@@ -755,8 +865,9 @@ Set all six values on the gate container, with your own values on the host:
 | `AUTOMAGIK_GATE_CLOUD_KEYS_URL` | the HTTPS URL of the Cloud service's published key set |
 | `AUTOMAGIK_GATE_CLOUD_EXCHANGE_URL` | the HTTPS URL of the Cloud service's open-code exchange |
 | `AUTOMAGIK_GATE_CLOUD_RAIL_ORIGIN` | the exact HTTPS origin of the Cloud rail page that opens workspaces |
+| `AUTOMAGIK_GATE_CLOUD_REVOCATION_URL` | the HTTPS URL of the Cloud service's revocation list |
 
-All six unset leaves the other modes unchanged and opens no Cloud connection. Some but not all
+All seven unset leaves the other modes unchanged and opens no Cloud connection. Some but not all
 of them refuses startup and names the missing settings, never their values. Cloud and Access
 together refuse startup. In Cloud mode no claim, passkey route, recovery or host reset socket
 exists, and no owner record is read or written. None of the values is a secret: the workspace
@@ -795,8 +906,22 @@ restart ends them. To keep working, the person opens the workspace from the rail
 open replaces the browser's previous session. The session list and "sign out everywhere" cover
 only the signed-in person's own sessions.
 
-Not in this mode yet: the Cloud service's revocation call and its poll fallback. Until they land,
-the 5-minute session bound is what ends a removed person's access.
+**Revocation.** The Cloud service sends `POST /_gate/cloud/revocation` to the gate's origin as
+`application/json`, with the version 1 call body. The call carries a detached JWS in
+`x-automagik-signature`: the header, an empty payload segment, and a signature over the header and
+the base64url of the exact body bytes, made with a key the same two-slot published set names. The
+gate verifies it before it reads a field and changes nothing on a missing or wrong signature. A
+valid `session.revoke` for this workspace drops that `subject`'s gate sessions before it answers
+`204`; a `role_lowered` call drops only the sessions that existed at `issued_at`. A `removed`
+subject is refused a new open until a later signed list omits them.
+
+If the call does not land, the gate polls the list at `AUTOMAGIK_GATE_CLOUD_REVOCATION_URL` every
+60 seconds while it holds sessions or a removal is pending. The list body is JSON and its
+`x-automagik-signature` is a detached JWS over the exact body, checked against the same key set.
+A list for another workspace, past `expires_at`, malformed or unverifiable is a failure that
+changes nothing, never an empty list. An entry a newer contract scopes to another workspace is
+ignored. The call is idempotent: a repeat is accepted and changes nothing. The gate keeps no
+Cloud credential and logs only a status and a generated request id.
 
 ## Interim Cloudflare Access sign-in
 
@@ -842,7 +967,7 @@ an assertion; it never silently replaces a revoked family. Signing out ends gate
 Access can still authenticate a new session after that cookie is cleared. End the Access
 session too when signing out of the identity provider. Gate sessions retain the normal 12-hour
 idle limit; Access policy enforcement at public ingress remains the operator's responsibility
-until #909 supplies workspace-token revocation.
+until Cloud mode replaces Access sign-in.
 
 Access assertions are exchanged only on HTTP requests. WebSocket upgrades require an existing
 gate session cookie and never create an owner, session or browser cookie. Complete HTTP sign-in

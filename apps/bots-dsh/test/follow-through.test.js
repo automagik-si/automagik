@@ -695,6 +695,48 @@ test('a task the restart pass leaves cut reads stopped from the time it was cut;
   assert.equal(host.agentOf('a').calls.length, 0)
 })
 
+test('an ACP task cut by a restart stays working and is resumed, not failed and reported', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = freshHome(t)
+  const now = Date.now()
+  taskTeam(home, { tasks: { cut: working('Reviewer #1570', now - 60_000) } })
+  // What acp-dsh records when the host's SIGTERM reaches its agent before DSH stops the turn.
+  const interrupted = { kind: 'error', error: { message: 'Claude Code was interrupted before it finished.', code: 'AGENT_INTERRUPTED' } }
+  const first = await start(home)
+  first.emit('cut', 'turn/end', { turn: 1, reason: interrupted })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual([stateOf(home).tasks.cut.status, first.agentOf('a').calls.length], ['working', 0])
+  await first.stop()
+
+  const second = await start(home)
+  withLog(second, 'cut', [{ type: 'turn/start', time: now - 60_000 }, { type: 'turn/end', time: now - 1000, data: { reason: interrupted } }])
+  t.mock.timers.tick(3000)
+  const done = await second.ctx.get('omniTeam').resumesDone
+  assert.deepEqual(done.resumed, ['cut'])
+  const note = second.agentOf('cut').calls[0]
+  assert.deepEqual([note.source.kind, note.source.resumed], ['user', true])
+  assert.match(text(note), /^\[DeepSeek Harness restarted\]\n/)
+  assert.equal(stateOf(home).tasks.cut.status, 'working')
+})
+
+test('an ACP task the person stopped reads stopped, not failed', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const home = freshHome(t)
+  taskTeam(home, { tasks: { cut: working('Reviewer', Date.now() - 60_000) } })
+  const host = await start(home)
+  // The task's Session runs on an ACP agent: a prompt cancelled there ends as the ABORTED error.
+  host.agentOf('cut').session.requestHeader = () => ({ config: { provider: 'acp-claude', model: 'opus' } })
+  host.emit('cut', 'turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'Stopped', code: 'ABORTED' } } })
+  await settleState(t, home, () => stateOf(home).tasks.cut.status === 'stopped')
+  await settle(() => host.agentOf('a').calls.length === 1)
+  assert.deepEqual(
+    [stateOf(home).tasks.cut.status, stateOf(home).tasks.cut.summary],
+    ['stopped', 'Stopped before it finished.'],
+  )
+  assert.match(text(host.agentOf('a').calls[0]), /was stopped before it finished/)
+  assert.doesNotMatch(text(host.agentOf('a').calls[0]), /It failed:/)
+})
+
 test('a task that really ends while the pass opens its Session keeps its real end', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const home = freshHome(t)

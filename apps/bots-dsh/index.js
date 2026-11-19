@@ -29,6 +29,7 @@ import * as handoffs from './src/host/handoffs.js'
 import * as requests from './src/host/requests.js'
 import * as delivery from './src/host/delivery.js'
 import * as roster from './src/host/roster.js'
+import * as installed from './src/host/installed.js'
 import * as folders from './src/host/folders.js'
 import * as privateBots from './src/host/private-bots.js'
 import * as agents from './src/host/agents.js'
@@ -68,6 +69,7 @@ import * as channel from './src/host/channel.js'
 import * as codeSide from './src/host/code-side.js'
 import * as agentSpace from './src/host/agent-space.js'
 import * as feed from './src/host/feed.js'
+import * as genui from './src/host/genui.js'
 import * as appManifest from './src/host/app-manifest.js'
 import * as pocketChat from './src/host/pocket-chat.js'
 import * as seatChat from './src/host/seat-chat.js'
@@ -88,10 +90,11 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 // installed: channels are Omni's, and a local CLI runs a Bot through the ACP plugin's routes only.
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
-  turns, steer, handoffs, requests, delivery, roster, folders, agents, toolDeny, privateBots, prompt, timeContext,
+  turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
-  update, dshUpdate, thinking, agentSpace, feed, codeSide, channel, appManifest, pocketChat, seatChat, hermesRemote, officeSkills, goalSkills,
+  update, dshUpdate, thinking, agentSpace, feed, codeSide, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,
+  officeSkills, goalSkills,
 ]
 
 // Other Omni plugins inject the runtime as `omniTeam` and add to it through rt.hooks

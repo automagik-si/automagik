@@ -30,7 +30,7 @@ function start() {
 test('apply provides the runtime as omniTeam, with the hooks other Omni plugins add through', async (t) => {
   const { rt, stop } = start()
   t.after(stop)
-  assert.deepEqual(Object.keys(rt.hooks).sort(), ['botModels', 'endpoint', 'live', 'mainRules', 'sessionOwner', 'view'])
+  assert.deepEqual(Object.keys(rt.hooks).sort(), ['botModels', 'endpoint', 'genui', 'live', 'mainRules', 'media', 'sessionOwner', 'view'])
   for (const name of ['load', 'save', 'botOf', 'isMain', 'selfOf', 'createBot', 'createTaskSession', 'startTask', 'deliver', 'resolveAgent', 'readOnly', 'home']) assert.ok(name in rt, name)
 })
 

@@ -13,7 +13,7 @@
 // `automagik-herdr restart <bot>` for the bots still on the old account or login, once the person
 // confirms.
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, Scrollbar } from "gpui-base";
 import { exec, hc, theme, appHome, home, readTextFile, window as appWindow, writeTextFile } from "herdr";
 import { client, QuotaSampler } from "./proxy.js";
 import { credentialTarget, tokenIdentity, TARGETS } from "./translate.js";
@@ -1261,7 +1261,7 @@ export default class AmQuota extends View {
     }
     root.child(lines);
 
-    const body = v_flex().flex_1().min_h(0).overflow_y_scrollbar().pt(6).pb(10).gap(10);
+    const body = v_flex().pt(6).pb(10).gap(10);
     const claude = this.tool === "claude" ? this.view("claude") : null;
     if (claude?.problem) {
       // One red line naming the problem; no switch until it is fixed (section 2). The CLI never repairs it.
@@ -1289,7 +1289,10 @@ export default class AmQuota extends View {
       for (const r of v.others) list.child(this.row(t, v, r));
       body.child(list);
     }
-    root.child(body);
+    // Keep the scroll area in flow so its rows give the footer popup its body height.
+    root.child(v_flex().relative().flex_1().min_h(0)
+      .child(div().id("am-quota-body").flex_1().min_h(0).overflow_y_scroll().child(body))
+      .child(Scrollbar.vertical("am-quota-body").absolute().inset_0()));
 
     const url = openUrl(this.config);
     const foot = h_flex().flex_none().px(14).py(10).gap(10).items_center().border_t(1).border_color(t.border)

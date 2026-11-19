@@ -685,6 +685,45 @@ export function codexTemplateWarning(template, command, agents = AGENTS) {
     + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`;
 }
 
+/**
+ * The instruction every worker task ends with (#1278 cause 5): before it reports done it commits
+ * or discards everything it changed, so the sweep never finds an uncommitted worktree to keep.
+ * A writer's work is preserved once committed; a reviewer's own scratch files are discarded. One
+ * line, so it adds one argument to the agent's argv.
+ */
+export const WORKER_DONE_LINE = "Before you report done: commit or discard every change you made "
+  + "and leave the worktree clean (`git status --porcelain` prints nothing).";
+
+/** A worker's task text: the task as given, then the worktree-clean instruction (#1278 cause 5). */
+export function workerTaskText(task) {
+  return `${task}\n\n${WORKER_DONE_LINE}`;
+}
+
+/**
+ * The host a git remote names, of both forms git writes (`https://host/…`, `git@host:…`), or
+ * null for a local path. Only host discovery; the forge itself is `forgeOf`.
+ */
+export function forgeHost(remote) {
+  const text = String(remote ?? "").trim();
+  if (!text) return null;
+  try { return new URL(text).hostname || null; } catch { /* a scp-like remote, below */ }
+  const m = /^(?:[^@/]+@)?([^:/]+):/.exec(text);
+  return m && !/^[A-Za-z]$/.test(m[1]) ? m[1] : null;
+}
+
+/**
+ * The forge a git remote names (#1278 cause 3): "glab" for a GitLab host, "gh" for GitHub, else
+ * null. A local path names no forge. An unknown host is left to the caller (it may try the forge
+ * tool it has).
+ */
+export function forgeOf(remote) {
+  const host = forgeHost(remote);
+  if (!host) return null;
+  if (/gitlab/i.test(host)) return "glab";
+  if (/github/i.test(host)) return "gh";
+  return null;
+}
+
 /** The env program agent workers start under, by its full path (macOS and Linux both have it). */
 export const ENV = "/usr/bin/env";
 
@@ -1097,10 +1136,11 @@ export function reapCandidates(rows, reaps = [], ownerOf = (project) => orNull(p
  * detached HEAD with commits on no remote is kept whatever its branch's pull requests say. Commits
  * on no remote keep it unless a MERGED pull request names that exact head (a squash merge
  * leaves its commits on no remote once the branch is deleted). CLOSED or an older merge is
- * no proof that the current work is preserved.
+ * no proof that the current work is preserved. `forge` names the tool the proof came from
+ * ("gh" or "glab") for the reason said (#1278 cause 3).
  */
 export function workLeft({ changes, unpushed, prs = null, head = null,
-  branch = null, expected = null }) {
+  branch = null, expected = null, forge = "gh" }) {
   if (changes > 0) return "uncommitted changes";
   if (!branch) {
     return unpushed > 0 ? `HEAD is detached with ${unpushed} ${unpushed === 1 ? "commit" : "commits"} on no remote`
@@ -1115,7 +1155,7 @@ export function workLeft({ changes, unpushed, prs = null, head = null,
     if (/^[0-9a-f]{40,64}$/.test(head ?? "") && Array.isArray(prs)
       && prs.some((p) => p?.state === "MERGED" && p.headRefOid === head)) return null;
     const commits = `${unpushed} ${unpushed === 1 ? "commit" : "commits"} on no remote`;
-    if (prs === null) return `${commits}; gh couldn't prove ${branch}'s current HEAD is merged`;
+    if (prs === null) return `${commits}; ${forge} couldn't prove ${branch}'s current HEAD is merged`;
     if (!prs.length) return `${commits}; ${branch} has no pull request`;
     return `${commits}; no merged pull request proves ${branch}'s current HEAD is preserved`;
   }

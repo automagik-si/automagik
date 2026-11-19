@@ -387,6 +387,9 @@ export function install(rt) {
 
   // What a Bot is doing, in one line for the Bots that work with it.
   function statusOf(botId) {
+    // A Bot whose plugin is not installed is not idle: it cannot run at all (installed.js).
+    const installation = rt.installationOf?.(rt.botOf(botId))
+    if (installation?.installed === false) return `not installed (${installation.reason})`
     const chat = rt.chatOf(botId)
     const sessions = [...new Set([chat, ...(rt.groupSessionsOf?.(botId) ?? [])])]
     const place = sessionId => {

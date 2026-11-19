@@ -292,6 +292,10 @@ test("README (#955): Antigravity's section says what runs without a prompt, that
   assert.match(readme, /a plain \(non-force\) `git push`, to `dev` or `main` too/);
   assert.match(readme, /The real boundary is the hc-proxy sandbox/);
   assert.match(readme, /read-only by its brief only/);
+  // #876: the read-only role's test runners and hc send, named plainly beside the other
+  // program-running forms (the list is a guardrail, not a boundary).
+  assert.match(readme, /`node --test` and `bun test` run any test file they are given/);
+  assert.match(readme, /`hc send` \(an agent's prompt or a\s+shell's, as that pane decides\)/);
   // The paragraphs that claimed the narrow allow list or the per-command sh guard still hold are gone.
   assert.doesNotMatch(readme, /still needs `sh` to be allowed/);
   assert.doesNotMatch(readme, /The allow list is as narrow as the launch\s+needs/);

@@ -14,11 +14,11 @@ import {
   isAgentLoopRequest, offloadedImageText,
 } from '@deepseek-ai/dsh-llm'
 import { AgentRun, isStopped, isUnanswered, valuesOf, waited } from './acp.js'
-import { recordDrift } from './backchannel.js'
+import { advertise, openStepOf, recordDrift, routeOf } from './backchannel.js'
 import { DEFAULT_MODEL } from './catalog.js'
 import { SessionFiles, restrictedLevel } from './session-files.js'
 import { chatProfileModes } from './codex-chat-profiles.js'
-import { BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
+import { AGENT_INTERRUPTED, BRIDGE_NAME, CREDENTIAL_ENV, isAuthRequired, MODEL_ACCESS_REQUIRED, SYNTHETIC_KIND, URL_ENV } from './names.js'
 import { shownText } from './shown-text.js'
 import { agentRoute, answered, boundaryNotice, isHandoff, lastProviderOf, missedBy, replayBlocks, turnStart } from './switch.js'
 import { ImageLinks, savedPathsOf } from './agent-image.js'
@@ -204,6 +204,29 @@ export function promptOf(messages, redact = text => text) {
     .map(message => (isHandoff(message) ? redact(textOf(message.content)) : textOf(message.content)))
     .filter(Boolean).join('\n\n')
   return [{ type: 'text', text: text || (own.some(message => message.source?.kind === 'retry') ? 'Continue.' : '') }]
+}
+
+// Recovery sends a marked user note. The preceding cut turn may have accepted its
+// brief without ever reaching the CLI, so recover its durable user rows on a fresh run.
+function cutUserRows(messages, session) {
+  if (!promptRows(messages).own.some(row => row.source?.kind === 'user' && row.source.resumed === true)) return []
+  const rows = []
+  let cut
+  for (let seq = (session?.seq ?? 0) - 1; seq >= 0; seq -= 1) {
+    const event = session.eventAt?.(seq)
+    if (event === undefined) break
+    if (cut === undefined) {
+      if (event.type !== 'turn/end') continue
+      const reason = event.data?.reason
+      if (reason?.kind !== 'interrupted' && !(reason?.kind === 'aborted' && reason.reason?.kind === 'disposed')) return []
+      cut = event.data?.turn
+    } else if (event.type === 'turn/start' && event.data?.turn === cut) {
+      return rows.reverse()
+    } else if (event.type === 'user/message' && event.data?.source?.kind === 'user' && event.data.source.resumed !== true) {
+      rows.push(event.data)
+    }
+  }
+  return []
 }
 
 // A group relay carries pointers only. Both Sessions and the current membership must
@@ -541,13 +564,16 @@ export class AcpAdapter extends LlmAdapter {
    */
   constructor(ctx, agents, {
     dshTools = () => false, nativeTools = () => undefined, backchannel, redactor, onSignedOut, images = () => undefined,
-    botIdentity = () => undefined, access, holds, ownMode = () => undefined,
+    botIdentity = () => undefined, access, holds, ownMode = () => undefined, hostStopping = () => false,
     ownModeWaitMs = OWN_MODE_WAIT_MS, holdWaitMs = HOLD_WAIT_MS, cancelWaitMs = CANCEL_WAIT_MS,
     fileDrainMs = 6000, timers = globalThis,
   } = {}) {
     super()
     this.cancelWaitMs = cancelWaitMs
     this.timers = timers
+    // Whether the host itself is stopping (index.js watches its SIGTERM/SIGINT): a prompt the
+    // agent then cancels was cut by the restart, not stopped by the person or by its own policy.
+    this.hostStopping = hostStopping
     // The turn gates (index.js `holdTurns`): asked before an agent acts for a Session. They
     // only ever refuse; with none registered nothing is asked.
     this.ownMode = ownMode
@@ -588,6 +614,7 @@ export class AcpAdapter extends LlmAdapter {
       cancelled: (sessionId, live) => this.reap(sessionId, live),
       bridgeApprovals: (sessionId, position, signal) =>
         this.backchannel?.awaitApprovals?.(sessionId, position, signal),
+      runNested: (...args) => this.runNested(...args),
       approval: () => ctx.get?.('approval'),
       sandboxPolicy: () => ctx.get?.('sandboxPolicy'),
       permissionPresets: () => ctx.get?.('permissionPresets'),
@@ -644,6 +671,53 @@ export class AcpAdapter extends LlmAdapter {
       try { this.ctx.logger?.warn?.(`acp-dsh: a reviewed call was not recorded: ${error?.message ?? error}`) } catch {}
     }
     return next()
+  }
+
+  /**
+   * Run one subagent's nested call as its own DSH card inside the step its Agent card holds
+   * open. At Auto this is what puts the call through DSH's review gate: the reviewer answers a
+   * real execution, and the mirror body answers the agent's question. The call's rows are
+   * written in that step; the agent's queued update later finds `cardExecuted` and draws no
+   * second card. A failure leaves the question unanswered for the direct ask that follows.
+   * @returns {Promise<boolean>} whether the nested question got its answer
+   */
+  async runNested(live, nested, exec) {
+    const session = exec.agent?.session
+    const position = openStepOf(session)
+    const tools = this.ctx.get?.('tools')
+    const question = nested.permission
+    if (session === undefined || position === undefined || tools?.execute === undefined
+      || exec.toolSet === undefined || question === undefined) return false
+    const id = `acp_${randomUUID()}`
+    const raw = JSON.stringify(callArguments(nested))
+    let hide
+    try {
+      hide = advertise(session, position, routeOf(session), { id, name: TOOL_NAME, raw }, message => this.warn(message))
+    } catch (error) {
+      this.warn(`a nested call was not advertised: ${error?.message ?? error}`)
+      return false
+    }
+    // The execution is admitted by the step's own tool set: the mirror is a conditional tool.
+    nested.cardExecuted = id
+    live.calls.add(id)
+    live.toolIds.set(id, nested.id)
+    try {
+      await tools.execute({
+        calls: [{ id, name: TOOL_NAME, arguments: raw }],
+        agent: exec.agent,
+        signal: exec.signal,
+        toolSet: exec.toolSet,
+        log: position,
+      })
+    } catch (error) {
+      this.warn(`a nested call was not recorded: ${error?.message ?? error}`)
+    } finally {
+      hide()
+      live.calls.delete(id)
+      live.toolIds.delete(id)
+      if (nested.permission === question) nested.cardExecuted = undefined
+    }
+    return nested.permission !== question
   }
 
   /**
@@ -1633,9 +1707,15 @@ export class AcpAdapter extends LlmAdapter {
         }
       }
       if (!uploadValid()) return yield uploadStopped()
-      const prompt = prepared ?? (live.replay !== undefined
-        ? [...live.replay, ...promptOf(options.messages, this.redact)]
-        : promptOf(options.messages, this.redact))
+      const cutRows = prepared === undefined && fresh && live.replay === undefined
+        ? cutUserRows(options.messages, dshAgent?.session) : []
+      const cutIds = new Set(cutRows.map(row => row.id))
+      const current = cutRows.length === 0 ? options.messages : options.messages.filter(row => !cutIds.has(row.id))
+      const recovered = cutRows.length === 0 ? [] : [
+        ...replayBlocks(cutRows, { redact: this.redact, to: agent.name, renewed: true }),
+        { type: 'text', text: 'The previous turn was interrupted. Check any tool outcomes before repeating work.' },
+      ]
+      const prompt = prepared ?? [...(live.replay ?? recovered), ...promptOf(current, this.redact)]
       if (prepared !== undefined) {
         try { checkUploadSize(uploadRun.sessionId, prompt) } catch (error) {
           return yield finish('error', error.message, 'acp_upload_content')
@@ -1682,6 +1762,9 @@ export class AcpAdapter extends LlmAdapter {
         // Its entry went with a fork or retirement.
         if (tool === undefined) continue
         this.diagnostics?.call(sessionId, live, tool)
+        // A subagent's nested call at Auto already ran through the pipeline inside its Agent
+        // card's step: its card is written, so this queued update is not a second one.
+        if (tool.cardExecuted !== undefined) continue
         // A DSH tool call is not a mirror call: the bridge writes its rows and DSH draws the one
         // card from them. On `acp-codex` no structured name is proven, so any MCP call there is
         // left to the bridge too; its own tools keep their cards.
@@ -1724,6 +1807,14 @@ export class AcpAdapter extends LlmAdapter {
         }
         yield* shown()
         yield* blocks.close()
+        // A cancel the app did not ask for (the turn's Stop would have aborted the signal) while
+        // the host itself is stopping came from outside: its SIGTERM reached the agent, which
+        // answered with `cancelled`. That is an interruption, not the person's Stop, and not a
+        // model failure: the Bot team resumes the work after the restart.
+        if (event.stopReason === 'cancelled' && options.signal?.aborted !== true
+            && live.run.cancelled !== true && this.hostStopping()) {
+          return yield finish('error', `${agent.name} was interrupted before it finished.`, AGENT_INTERRUPTED)
+        }
         if (event.stopReason === 'cancelled') return yield finish('aborted', 'Stopped', 'ABORTED')
         return yield finish(FINISH[event.stopReason] ?? 'stop')
       } else if (event.type === 'error') {
@@ -1733,6 +1824,12 @@ export class AcpAdapter extends LlmAdapter {
         if (isAuthRequired(event)) {
           this.signedOut(options.provider)
           return yield signInFailure(agent, event)
+        }
+        // The agent process took the host's SIGTERM while its prompt was in flight: the work
+        // was cut while running, so it is reported as an interruption rather than a failure.
+        if (options.signal?.aborted !== true && live.run.cancelled !== true
+            && (this.hostStopping() || live.run.exited?.signal === 'SIGTERM' || live.run.exited?.signal === 'SIGINT')) {
+          return yield finish('error', `${agent.name}: ${event.message}`, AGENT_INTERRUPTED)
         }
         return yield finish('error', `${agent.name}: ${event.message}`)
       } else if (event.type === 'aborted') {

@@ -890,3 +890,62 @@ test("#1411: effort and tier are a Codex bot's; a malformed value warns and is i
   assert.deepEqual([got.file.bots[1].effort, got.file.bots[1].tier], [undefined, undefined]);
   assert.ok(got.warnings.some((line) => /reasoning effort and service tier are Codex's; ignored/.test(line)));
 });
+
+// #738 `am main`: the hand-over candidate is one whole roster, validated against the proposed graph.
+test("#738 main hand-over candidate: default omission follows the new main; an alternate lead is checked in the new graph", () => {
+  const AIDE = "b-ffffffffff";
+  const before = sample((f) => { f.bots.push(bot(AIDE, "member", { lead: ID.main })); return f; });
+  const handOver = (edit = () => {}) => {
+    const f = structuredClone(before);
+    const old = f.bots.find((b) => b.id === ID.main), next = f.bots.find((b) => b.id === ID.cap);
+    old.kind = "member";
+    next.kind = "main";
+    delete next.category;
+    edit(old, f);
+    return f;
+  };
+  // Implied lead: no lead key on the old main, which then follows the new main, as does the planned implicit member.
+  const implied = handOver();
+  assert.deepEqual(checkBots(implied, text(before)), []);
+  assert.equal(Object.hasOwn(implied.bots[0], "lead"), false);
+  for (const id of [ID.main, ID.plan, ID.dev]) assert.equal(effectiveLead(implied, id).lead, ID.cap, id);
+  assert.equal(effectiveLead(implied, AIDE).lead, ID.main, "an explicit lead stays on the old main");
+  // Alternate lead: valid in the proposed graph (dev -> cap, now main), though a main bot can't have one.
+  const alternate = handOver((old) => { old.lead = ID.dev; });
+  assert.deepEqual(checkBots(alternate, text(before)), []);
+  assert.equal(effectiveLead(alternate, ID.main).lead, ID.dev);
+  const unhanded = structuredClone(before);
+  unhanded.bots[0].lead = ID.dev;
+  assert.ok(checkBots(unhanded).some((e) => /a main bot has no lead/.test(e)));
+  // Induced cycle: the old main led by a bot that names it as its lead.
+  const cycle = handOver((old) => { old.lead = AIDE; });
+  assert.ok(checkBots(cycle, text(before)).some((e) => /leads back to this bot/.test(e)), JSON.stringify(checkBots(cycle)));
+  // Exactly one main: a half-applied hand-over is refused either way.
+  const twoMains = handOver((old) => { old.kind = "main"; });
+  assert.ok(checkBots(twoMains).includes("2 main bots; a project has exactly one"));
+  const noMain = structuredClone(before);
+  noMain.bots[0].kind = "member";
+  assert.ok(checkBots(noMain).includes("0 main bots; a project has exactly one"));
+});
+
+test("#738 main hand-over: a reciprocal crossMembers entry left in the other project warns as one-sided, never refuses", () => {
+  const LINK = "b-gggggggggg";
+  const home = sample((f) => { Object.assign(f.bots[0], { lead: LINK, leadProject: "/work/ext" }); return f; });
+  const ext = { version: 1, categories: [], bots: [bot(LINK, "main", { crossMembers: [{ id: ID.main, project: "/work/home" }] })] };
+  const linked = new Map([["/work/home", home], ["/work/ext", ext]]);
+  assert.deepEqual(checkBots(home, null, { project: "/work/home", projects: linked }), []);
+  assert.deepEqual(crossMemberWarnings(ext, LINK, { project: "/work/ext", projects: linked }), []);
+  // The hand-over clears lead and leadProject on the old main; the other project's file is not written.
+  const after = structuredClone(home);
+  after.bots[0].kind = "member";
+  delete after.bots[0].lead;
+  delete after.bots[0].leadProject;
+  after.bots[1].kind = "main";
+  delete after.bots[1].category;
+  const handed = new Map([["/work/home", after], ["/work/ext", ext]]);
+  assert.deepEqual(checkBots(after, text(home), { project: "/work/home", projects: handed }), []);
+  assert.deepEqual(checkBots(ext, null, { project: "/work/ext", projects: handed }), []);
+  const left = crossMemberWarnings(ext, LINK, { project: "/work/ext", projects: handed });
+  assert.equal(left.length, 1);
+  assert.match(left[0], new RegExp(`^crossMember ${ID.main} in /work/home is one-sided`));
+});

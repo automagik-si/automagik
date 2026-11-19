@@ -7,8 +7,10 @@ import { headOf, textOf } from './text.js'
 export function install(rt) {
   const { ctx, state } = rt
 
-  const resolveAgent = async (sessionId) => {
+  const resolveAgent = async (sessionId, botId) => {
+    rt.assertShellChoice?.(sessionId, botId)
     const resolved = await ctx.sessionController.resolveAgent(sessionId)
+    rt.assertShellChoice?.(sessionId, botId)
     if ('error' in resolved) {
       const error = Object.assign(new Error(resolved.error?.message ?? 'Session unavailable'), { code: resolved.error?.code })
       throw rt.autoClosed?.(sessionId, error) ?? error
@@ -17,7 +19,7 @@ export function install(rt) {
     return resolved.agent
   }
 
-  const headerFor = (role, fromName, roomName, audience, note = 'new message', deferred = false, { resumed = false, retried = false, resent = false, abandoned = false, asker, noReply = false, plural = false } = {}) => {
+  const headerFor = (role, fromName, roomName, audience, note = 'new message', deferred = false, { resumed = false, retried = false, resent = false, abandoned = false, asker, noReply = false, plural = false, hasSender = false } = {}) => {
     // What came back for work another Bot gave this one says where its answer goes.
     const goesOn = asker === undefined ? '' : ` · for the work ${asker} asked you for; your answer goes to ${asker} once everything you handed on is back`
     // A wait the user gave up reads as its own thing: the other Bot never answered.
@@ -36,8 +38,9 @@ export function install(rt) {
     if (resumed && role !== 'room') return plural
       ? `[Messages from ${fromName} · DeepSeek Harness restarted while you were working on them]`
       : `[Message from ${fromName} · DeepSeek Harness restarted while you were working on it]`
-    if (resent && role === 'reply') return `[Reply from ${fromName} · DeepSeek Harness restarted before it could reach you]`
-    if (resent && role !== 'room') return `[Message from ${fromName} · DeepSeek Harness restarted before it could reach you]`
+    if (resent && role === 'reply' && hasSender) return `[Reply from ${fromName} · DeepSeek Harness restarted before it could reach you]`
+    if (resent && role === 'task-done') return `[Task "${note}" finished · DeepSeek Harness restarted before this report could reach you · its last words follow; tell the user what matters in a line or two]`
+    if (resent && hasSender && role !== 'room') return `[Message from ${fromName} · DeepSeek Harness restarted before it could reach you]`
     if (role === 'reply') return `[Reply from ${fromName}${goesOn}]`
     if (role === 'stopped') return `[Stopped by ${fromName}]`
     if (role === 'room') return `[Group chat "${roomName}" · ${note}]`
@@ -130,10 +133,12 @@ export function install(rt) {
       // The Bot may have switched part while the replies waited: they go to its part now.
       const target = targetOf(queue)
       queue.sessionId = target
+      rt.assertShellChoice?.(target, queue.toId)
       let agent = sendable.find(item => item.sessionId === target)?.agent
       if (agent === undefined) {
         await rt.ensureCapabilities(target)
-        agent = await resolveAgent(target)
+        agent = await resolveAgent(target, queue.toId)
+        rt.assertShellChoice?.(target, queue.toId)
       }
       if (rt.live?.get?.(target)?.turn !== undefined || agent.status === 'running') {
         // A turn opened while the exchanges were written, or the agent has not settled
@@ -142,15 +147,23 @@ export function install(rt) {
         queue.waiting = true
         return
       }
+      // A recovery reply can have been consumed while this queue waited for idle.
+      rt.assertShellChoice?.(target, queue.toId)
+      const remaining = sendable.filter(item => {
+        if (item.shouldSend === undefined || item.shouldSend(agent, target)) return true
+        item.delivered(false)
+        return false
+      })
+      if (remaining.length === 0) return
       if (typeof agent.inject === 'function') {
-        for (const item of sendable.slice(0, -1)) agent.inject(item.message)
-        agent.followup(sendable.at(-1).message)
+        for (const item of remaining.slice(0, -1)) agent.inject(item.message)
+        agent.followup(remaining.at(-1).message)
       } else {
         // An older host without inject still gets the replies, one turn each.
-        for (const item of sendable) agent.followup(item.message)
+        for (const item of remaining) agent.followup(item.message)
       }
       await ctx.sessions.flush(agent.session)
-      for (const item of sendable) item.delivered(target)
+      for (const item of remaining) item.delivered(target)
     } catch (error) {
       for (const item of batch) item.fail(error)
     } finally {
@@ -159,7 +172,7 @@ export function install(rt) {
       else if (!queue.waiting) scheduleReplies(key)
     }
   }
-  const queueReply = (sessionId, toId, work, message) => {
+  const queueReply = (sessionId, toId, work, message, shouldSend) => {
     const key = replyKey(toId, rt.groupOwners?.get?.(sessionId)?.roomId, work)
     let queue = replyQueues.get(key)
     if (queue === undefined) replyQueues.set(key, queue = { sessionId, toId, work, items: [], timer: undefined, running: false, waiting: false })
@@ -169,6 +182,7 @@ export function install(rt) {
     let markFailed
     const item = {
       message,
+      shouldSend,
       sessionId,
       agent: undefined,
       ready: new Promise((resolve, reject) => { markReady = resolve; markUnready = reject }),
@@ -213,7 +227,7 @@ export function install(rt) {
   // result that came back goes on with. `merged`: a request that takes in an earlier
   // one its recipient had not read, under that one's exchange. `uploads`: the person's
   // uploads of a group turn, for a member over ACP.
-  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }) {
+  async function deliver({ fromId, fromName: senderName, toId, sessionId, text, role, replyTo, roomId, audience, note, exchangeId = randomUUID(), steer = false, deferred = false, resumed = false, retried = false, resent = false, merged = false, noReply = false, joined, abandoned = false, recordExchange = true, askedBy, fromRoomId, images = [], forwarded = false, files = [], uploads = [], length, work, taskSessionId }, { enqueue, shouldSend } = {}) {
     const from = rt.botOf(fromId)
     const to = rt.botOf(toId)
     if (to === undefined) throw new Error(`Unknown Bot ${toId}`)
@@ -226,7 +240,7 @@ export function install(rt) {
       form: 'relay',
       role,
       exchangeId,
-      senderName: fromName,
+      ...(role !== 'task-done' || fromId !== undefined || senderName !== undefined ? { senderName: fromName } : {}),
       ...(work ? { work } : {}),
       ...(fromId ? { senderSessionId: fromId } : {}),
       ...(forwarded && images.length > 0 ? { forwarded: { v: 1 } } : {}),
@@ -245,6 +259,7 @@ export function install(rt) {
       ...(abandoned ? { abandoned: true } : {}),
     }
     const targetSessionId = sessionId ?? rt.chatOf(toId)
+    rt.assertShellChoice?.(targetSessionId, toId)
     // Where the message went: a reply that waited for a busy Bot may reach a later part.
     let deliveredTo = targetSessionId
     // On disk before it goes out: a message the book could not keep is not sent, so none is
@@ -255,7 +270,7 @@ export function install(rt) {
     // queues for the next turn (see turns.js for how each is routed).
     const message = createUserMessage({
       content: [
-        { type: 'text', text: `${headerFor(role, fromName, room?.name, audience, note, deferred, { resumed, retried, resent, abandoned, asker, noReply, plural: (joined?.length ?? 0) > 0 })}\n${text}` },
+        { type: 'text', text: `${headerFor(role, fromName, room?.name, audience, note, deferred, { resumed, retried, resent, abandoned, asker, hasSender: fromId !== undefined || senderName !== undefined, noReply, plural: (joined?.length ?? 0) > 0 })}\n${text}` },
         ...images.map(attachment => ({ type: 'image', attachment })),
         ...files.map(attachment => ({ type: 'file', attachment })),
       ],
@@ -263,18 +278,27 @@ export function install(rt) {
     })
     // A reply joins its recipient's batch before anything is awaited, so every reply one
     // finished turn produces lands in the same batch and one turn reads them all.
-    const queued = role === 'reply' && !steer ? queueReply(targetSessionId, toId, work, message) : undefined
+    const queued = role === 'reply' && !steer && enqueue === undefined
+      ? queueReply(targetSessionId, toId, work, message, shouldSend) : undefined
     try {
       if (book !== undefined && (merged || !rt.ledger.records(book).some(record => record.event === undefined && record.id === exchangeId))) {
         rt.ledger.append(book, { id: exchangeId, from: fromId, to: toId, role, text, time: Date.now(), ...(length !== undefined ? { length, files } : {}), ...(replyTo ? { replyTo } : {}), ...(audience === 'user' ? { audience } : {}), ...(roomId ? { roomId } : {}) })
         await rt.ledger.written(book)
       }
+      rt.assertShellChoice?.(targetSessionId, toId)
       await rt.ensureCapabilities(targetSessionId)
-      const agent = await resolveAgent(targetSessionId)
+      const agent = await resolveAgent(targetSessionId, toId)
+      rt.assertShellChoice?.(targetSessionId, toId)
       if (queued !== undefined) {
         queued.agent = agent
         queued.made()
-        deliveredTo = await queued.sent ?? targetSessionId
+        const destination = await queued.sent
+        if (destination === false) return undefined
+        deliveredTo = destination ?? targetSessionId
+      } else if (shouldSend !== undefined && !shouldSend(agent, targetSessionId)) {
+        return undefined
+      } else if (enqueue !== undefined) {
+        if (!await enqueue(agent, message)) return undefined
       } else {
         if (steer) agent.steer(message)
         else agent.followup(message)
