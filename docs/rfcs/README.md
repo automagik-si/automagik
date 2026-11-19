@@ -66,7 +66,7 @@ Security gaps are named by title only until their fix merges. Details go to a pr
 | [0031](0031-auto-permission-level.md) | Auto, a permission level where a model decides each step | Queued (amends RFC 0003 with its delivery 2; numbers 0028 to 0030 are taken by open pull requests) | none (ships outside the five milestones) |
 | [0032](0032-automagik-id.md) | Automagik ID | In delivery (delivery 1 merged: #1094, #1118, #1377; deliveries 2-5 open; questions (a)-(g) open; replaces RFC 0024's identity-provider sections) | none (independent Worker deployment) |
 | [0033](0033-attachments-from-pocket.md) | Attachments from Pocket | Queued (amends RFC 0015's chat route: attachments; owner not yet read) | none (ships outside the five milestones) |
-| [0034](0034-vault-plugin-bitwarden-first.md) | Vault plugin, Bitwarden first | Queued (owner not yet read; the issue calls it 0033, taken by Attachments from Pocket; amended 2026-11-19: the freshness, approval-binding and dual-name rules as contracts, Q11 asks for the additive `request_secret` command argument and Q12 for one connection) | none (ships outside the five milestones) |
+| [0034](0034-vault-plugin-bitwarden-first.md) | Vault plugin, Bitwarden first | Queued (owner not yet read; the issue calls it 0033, taken by Attachments from Pocket; amended 2026-11-19: the freshness, approval-binding and dual-name rules as contracts; Q11 asks for the additive `request_secret` `command` and `shell` and the `secret-allow` vault branch, and Q12 for one connection; re-amended: `bw sync` gates every read and an auth failure locks, `bots-dsh` reads `vault-sources.json` with the plugin off, and the grant binds command, shell and folder) | none (ships outside the five milestones) |
 
 Milestones, in the owner's order:
 
