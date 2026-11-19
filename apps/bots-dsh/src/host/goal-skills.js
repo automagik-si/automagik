@@ -1,11 +1,11 @@
-// The ds-bot goal skill `goal-grill`: how the admin aligns a group goal with the
+// The Bot team's goal skill `goal-grill`: how the admin aligns a group goal with the
 // user before writing it. Registered when a `skills` service exists, like the
 // Office skills, so the plugin runs the same everywhere.
 import { readFileSync } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const PROVIDER = 'ds-bot-goal'
+const PROVIDER = 'automagik-bots-goal'
 const SKILL = 'goal-grill'
 const DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), 'skills', SKILL)
 const LOCATOR = join(DIRECTORY, 'SKILL.md')
