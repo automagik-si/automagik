@@ -202,6 +202,7 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
     HOME: f.root,
     AUTOMAGIK_HOME: join(f.root, 'automagik'),
     AUTOMAGIK_BOTS_HOME: team,
+    AUTOMAGIK_APP_BROWSER: '1',
     HERDR_APP_HOME: join(f.root, 'herdr-app'),
     HERDR_HC: FAKE,
     FAKE_CORE_TERMINALS: join(f.root, 'terminals.json'),
@@ -209,7 +210,11 @@ test('a real Cordis plugin stop lets the typing attach go', async (t) => {
     FAKE_CORE_KEEP_OPEN: '1',
   }
   for (const [key, value] of Object.entries(env)) { saved[key] = process.env[key]; process.env[key] = value }
+  const send = process.send
+  process.send = () => true
   t.after(() => {
+    if (send === undefined) delete process.send
+    else process.send = send
     for (const key of Object.keys(saved)) {
       if (saved[key] === undefined) delete process.env[key]
       else process.env[key] = saved[key]
