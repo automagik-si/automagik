@@ -241,7 +241,7 @@ esac
   /** Every pack folder's release (its VERSION), by name, on or off. */
   const versions = () => Object.fromEntries(PACK_MODS.map((m) => [m, /\/\/ release (\S+)\n$/.exec(readFileSync(join(where(m), "main.js"), "utf8"))?.[1]]));
   const all = (v) => Object.fromEntries(PACK_MODS.map((m) => [m, v]));
-  return { root, bin, home, apps, appHome, mods, state, where, pack, old, link, run, runCli, piped, publish, publishMeter, publishScheduler, schedulerBuilds, meterKey: meterKeyOf, meterCalls, meterBuilds, herdrInstallerCalls, brewCalls, addHerdrApp, show, herdrCalls, checks, mark, versions, all, extraEnv, herdrLog };
+  return { root, bin, home, tmp, apps, appHome, mods, state, where, pack, old, link, run, runCli, piped, publish, publishMeter, publishScheduler, schedulerBuilds, meterKey: meterKeyOf, meterCalls, meterBuilds, herdrInstallerCalls, brewCalls, addHerdrApp, show, herdrCalls, checks, mark, versions, all, extraEnv, herdrLog };
 }
 
 /**
@@ -2811,6 +2811,8 @@ test("--uninstall on macOS fallback removes the plist only after launchd's own n
 // pack and its link only after launchd answered.
 const REVIVE_LABEL = `gui/${process.getuid()}/dev.herdr.automagik-herdr-revive`;
 const REVIVE_PLIST = (s) => join(s.home, "Library", "LaunchAgents", "dev.herdr.automagik-herdr-revive.plist");
+/** The probe's own temp files under this scratch home's TMPDIR. */
+const probeLeftovers = (s) => readdirSync(s.tmp).filter((name) => name.startsWith("automagik-herdr-revive-status."));
 
 test("--uninstall on macOS with the plist gone still boots a loaded label out, then removes the pack and link (#939)", (t) => {
   for (const via of ["pack's command", "fallback"]) {
@@ -2946,6 +2948,8 @@ test("--uninstall on macOS reads every status answer but launchd's own as a pack
     ["a wrong label", `printf '%s\\n' '{"path":${launchd},"label":"dev.herdr.someone-else","installed":false}'; exit 0`],
     ["a label of the wrong type", `printf '%s\\n' '{"path":${launchd},"label":7,"installed":false}'; exit 0`],
     ["a path of the wrong type", `printf '%s\\n' '{"path":[${launchd}],"label":"${label}","installed":false}'; exit 0`],
+    ["the label only in an unrelated field", `printf '%s\\n' '{"path":${launchd},"installed":false,"service":{"label":"${label}"}}'; exit 0`],
+    ["a path with a .. segment", `printf '%s\\n' '{"path":"/x/Library/../Library/LaunchAgents/${label}.plist","label":"${label}"}'; exit 0`],
   ];
   for (const [what, body] of answers) {
     const s = scratch(t, { os: "Darwin" });
@@ -2964,6 +2968,24 @@ exit 1
     assert.equal(existsSync(s.pack), false, `${what}: the pack leaves`);
     assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], `${what}: the fallback asked launchd`);
   }
+});
+
+test("--uninstall on macOS falls back when node is not on PATH, failing closed (#939)", (t) => {
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  const lc = launchctlFake(s);
+  assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
+  // The probe's own runtime is gone: its check must return the launchd fallback, never accept
+  // anything. The rest of the uninstall also runs without node.
+  s.extraEnv.PATH = `${s.bin}:/usr/bin:/bin:/usr/sbin:/sbin`;
+  lc.set("gone");
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+  assert.equal(u.code, 0, `a missing node fails closed: ${u.out}${u.err}`);
+  assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, "says why");
+  assert.equal(existsSync(s.pack), false, "the pack leaves");
+  assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "asked launchd");
+  assert.deepEqual(probeLeftovers(s), [], "no temp file is left");
 });
 
 test("--uninstall on macOS reads a truncated launchd status as a pack from before the login service (#939)", (t) => {
@@ -3053,6 +3075,145 @@ exit 0
   assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, "it treats no answer as no answer");
   assert.deepEqual(reviveCalls(said), ["revive service status --json"], "the hung command is never told to uninstall");
   assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "the installer asked launchd itself");
+});
+
+// A status answer with a NUL at each place that, once dropped, leaves the whole launchd-aware
+// answer: this is the byte a POSIX shell variable silently loses.
+const NUL_PLACEMENTS = (() => {
+  const label = "dev.herdr.automagik-herdr-revive";
+  const launchd = `/x/Library/LaunchAgents/${label}.plist`;
+  const answer = `{"path":${JSON.stringify(launchd)},"label":${JSON.stringify(label)},"installed":false}`;
+  const splitAt = (index) => [answer.slice(0, index), answer.slice(index)];
+  return {
+    "at the start of the answer": ["", answer],
+    "between the JSON tokens": splitAt(1),
+    "inside the path string": splitAt(answer.indexOf("LaunchAgents") + "Launch".length),
+    "inside the label string": splitAt(answer.indexOf(label) + "dev.herdr.automagik-".length),
+    "at the end of the answer": [answer, ""],
+  };
+})();
+for (const [what, [before, after]] of Object.entries(NUL_PLACEMENTS)) {
+  test(`--uninstall on macOS reads a status answer with a NUL byte ${what} as a pack from before the login service (#939)`, (t) => {
+    // A POSIX shell variable cannot hold a NUL: `x=$(...)` drops the byte. At f01e76d2 the answer
+    // was captured that way, so dropping the NUL left valid JSON with both signals and the
+    // command's own uninstall ran. The byte must reach the parser.
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0, `${what}: install`);
+    const cliLog = join(s.root, "cli.log");
+    writeFileSync(cliLog, "");
+    // Two printfs, not one string: the shell never holds the NUL; printf writes it.
+    exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
+printf '%s\\n' "$*" >> "${cliLog}"
+case "$*" in *"status --json"*) printf '%s' '${before}'; printf '\\0'; printf '%s' '${after}'; exit 0 ;; esac
+exit 1
+`);
+    lc.set("gone");
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+    assert.equal(u.code, 0, `${what}: a NUL is not an answer, so the installer falls back: ${u.out}${u.err}\n  command: ${readFileSync(cliLog, "utf8")}\n  launchctl: ${JSON.stringify(lc.calls())}`);
+    assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, `${what}: says why`);
+    assert.equal(existsSync(s.pack), false, `${what}: the pack leaves`);
+    assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], `${what}: the fallback asked launchd`);
+    assert.equal(readFileSync(cliLog, "utf8").includes("revive service uninstall"), false, `${what}: the command's uninstall was never called`);
+    assert.deepEqual(probeLeftovers(s), [], `${what}: the answer's temp file is gone`);
+  });
+}
+
+test("--uninstall on macOS reads a status answer that is not valid UTF-8 as a pack from before the login service (#939)", (t) => {
+  // Node's utf8 decoding replaces an invalid byte with U+FFFD, which would still be a string and
+  // still satisfy the structural path rule. The parser must read the bytes and refuse, not let a
+  // lossy decode turn a malformed answer into a launchd-aware one.
+  const label = "dev.herdr.automagik-herdr-revive";
+  const answer = `{"path":"/x/Library/LaunchAgents/${label}.plist","label":"${label}"}`;
+  const split = answer.indexOf(".plist");
+  const s = scratch(t, { os: "Darwin" });
+  s.addHerdrApp();
+  s.publish("9.9.0");
+  const lc = launchctlFake(s);
+  assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
+  const cliLog = join(s.root, "cli.log");
+  writeFileSync(cliLog, "");
+  exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
+printf '%s\\n' "$*" >> "${cliLog}"
+case "$*" in *"status --json"*) printf '%s' '${answer.slice(0, split)}'; printf '\\377'; printf '%s' '${answer.slice(split)}'; exit 0 ;; esac
+exit 1
+`);
+  lc.set("gone");
+  const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+  assert.equal(u.code, 0, `an invalid byte is not an answer: ${u.out}${u.err}\n  command: ${readFileSync(cliLog, "utf8")}\n  launchctl: ${JSON.stringify(lc.calls())}`);
+  assert.match(u.out, /doesn't know macOS's login service, so this installer asked launchd itself/, "says why");
+  assert.equal(existsSync(s.pack), false, "the pack leaves");
+  assert.deepEqual(lc.calls(), [`print ${REVIVE_LABEL}`], "the fallback asked launchd");
+  assert.equal(readFileSync(cliLog, "utf8").includes("revive service uninstall"), false, "the command's uninstall was never called");
+  assert.deepEqual(probeLeftovers(s), [], "the answer's temp file is gone");
+});
+
+test("--uninstall on macOS never leaves the status answer's temp file behind (#939)", (t) => {
+  const label = "dev.herdr.automagik-herdr-revive";
+  const answer = `{"path":"/x/Library/LaunchAgents/${label}.plist","label":"${label}"}`;
+  const fakeStatus = (s, log) => exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
+printf '%s\\n' "$*" >> "${log}"
+case "$*" in *"status --json"*) printf '\\0'; printf '%s' '${answer}'; exit 0 ;; esac
+exit 1
+`);
+  // Success: a launchd-aware command answers, so its own uninstall runs and the file is removed
+  // after the parser read it.
+  {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    assert.equal(s.run("--revive", "--no-usagemeter").code, 0);
+    lc.set("loaded");
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter");
+    assert.equal(u.code, 0, `success: ${u.out}${u.err}`);
+    assert.doesNotMatch(u.out, /doesn't know macOS's login service/, "success: the command's own uninstall ran");
+    assert.deepEqual(probeLeftovers(s), [], "success: no temp file is left");
+  }
+  // Fallback: a NUL answer is refused, and the file goes before launchd is asked.
+  {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
+    fakeStatus(s, join(s.root, "cli.log"));
+    lc.set("gone");
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+    assert.equal(u.code, 0, `fallback: ${u.out}${u.err}`);
+    assert.deepEqual(probeLeftovers(s), [], "fallback: no temp file is left");
+  }
+  // Error: the same answer, but a launchd the fallback cannot read fails the uninstall afterwards.
+  {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    const lc = launchctlFake(s);
+    assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
+    fakeStatus(s, join(s.root, "cli.log"));
+    lc.set("probe-1");
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+    assert.notEqual(u.code, 0, `error: the failed launchd probe fails the uninstall: ${u.out}${u.err}`);
+    assert.deepEqual(probeLeftovers(s), [], "error: no temp file is left");
+  }
+  // Interrupt: the command signals the installer while it waits for the status answer. The same
+  // EXIT trap that removes the answer file runs on the signal's exit.
+  {
+    const s = scratch(t, { os: "Darwin" });
+    s.addHerdrApp();
+    s.publish("9.9.0");
+    launchctlFake(s);
+    assert.equal(s.run("--no-revive", "--no-usagemeter", "--no-dsh-tui").code, 0);
+    exe(join(s.pack, "bin", "automagik-herdr"), `#!/bin/sh
+case "$*" in *"status --json"*) kill -TERM "$(ps -o ppid= -p "$PPID")"; exit 0 ;; esac
+exit 1
+`);
+    const u = s.run("--uninstall", "--yes", "--no-usagemeter", "--no-dsh-tui");
+    assert.equal(u.code, 130, `interrupt: the installer stops on the signal: ${u.out}${u.err}`);
+    assert.deepEqual(probeLeftovers(s), [], "interrupt: no temp file is left");
+  }
 });
 
 test("--dsh-tui writes minimumReleaseAgeExclude: [] for a release older than the profile's gate", (t) => {

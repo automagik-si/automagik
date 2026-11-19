@@ -160,7 +160,8 @@ main() {
   fi
 
   TMP=
-  trap 'rm -rf "$TMP"' EXIT
+  REVIVE_ANSWER=
+  trap 'rm -rf "$TMP"; [ -z "$REVIVE_ANSWER" ] || rm -f "$REVIVE_ANSWER"' EXIT
   trap 'exit 130' INT TERM
 
   if [ "$UNINSTALL" = 1 ]; then uninstall; else install; fi
@@ -1369,27 +1370,42 @@ revive_launchd_not_loaded() {
 # on macOS that command's `service status` exits 0 anyway (it reports the systemd unit as not
 # installed); only `service uninstall` refuses. Exit status therefore proves nothing. Parse the
 # status answer as JSON and require what only a launchd-aware command emits: `label` exactly the
-# launchd label, and `path` a file structurally under a `Library/LaunchAgents` folder. A pre-PR
-# command's answer names the systemd unit and has no label; a refusal, a non-zero exit, an
-# unparseable or truncated answer, a missing field, a wrong type, a wrong label or a path that
-# merely contains the string is "pre-PR pack", never "launchd-aware". Node is the command's own
-# runtime and the installer already requires it; if it is missing here the probe fails closed to
-# the installer's own launchctl fallback. Read-only, with its own status query. Linux has always
-# answered, so nothing is asked there.
-#
-# The question is also bounded: a hung or broken command is "cannot answer" in a few seconds,
-# never a blocked uninstall. Node runs the read-only question with a timeout and SIGKILL.
+# launchd label, and `path` a file structurally under a `Library/LaunchAgents` folder. The answer
+# goes into a temp file, never a shell variable: a POSIX command substitution drops NUL bytes, and
+# dropping one can turn a malformed answer into valid JSON. Node runs the read-only question with a
+# timeout and SIGKILL, writes the raw bytes straight to that file, and the parser refuses any NUL
+# or invalid UTF-8 before it parses. A refusal, a non-zero exit, an unparseable or truncated
+# answer, a missing field, a wrong type, a wrong label or a path that merely contains the string is
+# "pre-PR pack", never "launchd-aware". Node is the command's own runtime and the installer already
+# requires it; if it is missing here the probe fails closed to the installer's own launchctl
+# fallback. Read-only, with its own status query. Linux has always answered, so nothing is asked
+# there.
 revive_cli_can_answer() {
   [ "$REVIVE_OS" = Darwin ] || return 0
   command -v node >/dev/null 2>&1 || return 1
-  node - "$LINK" <<'NODE'
+  revive_answer_file=$(mktemp "${TMPDIR:-/tmp}/automagik-herdr-revive-status.XXXXXX") || return 1
+  REVIVE_ANSWER=$revive_answer_file
+  revive_rc=0
+  node - "$LINK" "$REVIVE_ANSWER" <<'NODE' || revive_rc=$?
 const { spawnSync } = require("node:child_process");
-const r = spawnSync(process.argv[2], ["revive", "service", "status", "--json"], {
-  encoding: "utf8", timeout: 3000, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"],
-});
+const fs = require("node:fs");
+const [link, file] = process.argv.slice(2);
+let fd;
+try { fd = fs.openSync(file, "w"); } catch { process.exit(1); }
+let r;
+try {
+  r = spawnSync(link, ["revive", "service", "status", "--json"], {
+    timeout: 3000, killSignal: "SIGKILL", stdio: ["ignore", fd, "ignore"],
+  });
+} finally { fs.closeSync(fd); }
 if (r.error || r.status !== 0) process.exit(1);
+let bytes;
+try { bytes = fs.readFileSync(file); } catch { process.exit(1); }
+if (bytes.includes(0)) process.exit(1);
+let answer;
+try { answer = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { process.exit(1); }
 let status;
-try { status = JSON.parse(r.stdout); } catch { process.exit(1); }
+try { status = JSON.parse(answer); } catch { process.exit(1); }
 if (status === null || typeof status !== "object" || Array.isArray(status)) process.exit(1);
 if (status.label !== "dev.herdr.automagik-herdr-revive" || typeof status.path !== "string") process.exit(1);
 const parts = status.path.split("/");
@@ -1397,6 +1413,9 @@ if (parts.some((part) => part === "..")) process.exit(1);
 const at = parts.findIndex((part, i) => part === "Library" && parts[i + 1] === "LaunchAgents");
 if (at < 0 || at + 2 >= parts.length || parts[at + 2] === "") process.exit(1);
 NODE
+  rm -f "$REVIVE_ANSWER"
+  REVIVE_ANSWER=
+  [ "$revive_rc" = 0 ]
 }
 # --uninstall: the service goes through the command that wrote it, while the pack and its link
 # are still in place, and only when the file carries the pack's mark (revive.js UNIT_MARK, or
