@@ -6653,6 +6653,7 @@ test("#1728 restart from a skewed member pane ends the member seat it replaces",
   const s = captainScene(t, { agent: "codex", extra: [term("t8", { bot: ID.dev })] });
   const state = s.hcState();
   for (const pane of state.terminals) pane.cwd = pane.foreground.cwd = s.project;
+  state.terminals.find((pane) => pane.address === "t8").argv = ["/usr/bin/env", `HERDR_APP_HOME=${s.app}`, "codex"];
   writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
   attachSeat(s, "Dev", "t8");
   const bin = join(s.root, "bin");

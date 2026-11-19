@@ -21,9 +21,10 @@
 // kill, rm and events targets, use the address that was checked; every other hc call passes to
 // the real hc untouched.
 //
-// The caller comes from the attach ledger (attach.js), the authority: a worker pane has no
-// ledger row, so its `worker.of` label names its bot and its cwd's project is the team's
-// project. The target is resolved with the real hc: `hc ls` rows carry no labels, `hc get`
+// The caller comes from the attach ledger (attach.js) in the app home recorded in the
+// caller pane's launch argv (#628). A worker pane has no ledger row, so its `worker.of`
+// label names its bot and its cwd's project is the team's project. The target is resolved
+// with the real hc: `hc ls` rows carry no labels, `hc get`
 // does, as the pack's workersIn does. The team is model.js's graph: the caller's lead chain
 // (effectiveLead), the declared lead chain it names (`bot.lead`, a planned lead included),
 // its members (descendantsOf), the project's main bot (mainBotOf), its own workers
@@ -49,7 +50,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -136,7 +137,7 @@ export async function runGuard(argv, env = process.env) {
     const real = findRealHc(env);
     if (!real) return failedClosed("the real hc is not on PATH");
     if (verb === "run") {
-      const why = runProblem(args, env, terminal);
+      const why = runProblem(real, args, env, terminal);
       if (why) return refused(`run: ${why}`);
       return passthrough(real, args, env);
     }
@@ -202,7 +203,9 @@ function docOnly(args) {
 }
 
 function terminalOf(env) {
-  return typeof env.HC_TERMINAL_ID === "string" ? env.HC_TERMINAL_ID.trim() : "";
+  const terminal = typeof env.HC_TERMINAL_ID === "string" ? env.HC_TERMINAL_ID.trim() : "";
+  if (isMachineAddress(terminal)) throw new Error("the caller's pane is machine-qualified");
+  return terminal;
 }
 
 // ---- the kill shim: kill and prefixed-send rules for every other agent's pane (#955, #1421) ----
@@ -468,8 +471,55 @@ function heldRefusal(address) {
 
 const appHome = (env) => (env.HERDR_APP_HOME || join(env.HOME || homedir(), ".config/herdr-app")).replace(/\/+$/, "");
 
-function foldOf(env) {
-  const path = attachPath(appHome(env));
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Read the recorded launch prefix. Returns { home } or { error }; defaultHome is lazy. */
+export function launchHomeOf(argv, defaultHome) {
+  if (!Array.isArray(argv) || argv.length === 0) return { error: "the caller has no valid launch argv" };
+  for (const word of argv) {
+    if (typeof word !== "string") return { error: "the caller has no valid launch argv" };
+  }
+  if (argv[0] === ENV) {
+    let index = 1;
+    // Leading unsets have already removed the variable unless a later assignment sets it.
+    while (argv[index] === "-u") {
+      if (index + 1 === argv.length) return { error: "the caller's launch has an -u without a name" };
+      index += 2;
+    }
+    let home;
+    while (index < argv.length && ENV_ASSIGNMENT.test(argv[index])) {
+      const word = argv[index++];
+      if (word.startsWith("HERDR_APP_HOME=")) home = word.slice("HERDR_APP_HOME=".length);
+    }
+    if (index === argv.length) return { error: "the caller's launch has no program" };
+    if (home !== undefined) {
+      if (!isAbsolute(home) || /[\x00-\x1f\x7f]/.test(home)) {
+        return { error: "the caller's launch has an invalid HERDR_APP_HOME" };
+      }
+      return { home: home.replace(/\/+$/, "") || "/" };
+    }
+  }
+  try {
+    return { home: defaultHome() };
+  } catch {
+    return { error: "the default app home could not be read. Start or restart the bot from the sidebar or with HERDR_APP_HOME set, so its launch records the app home" };
+  }
+}
+
+function callerLaunch(real, env, terminal) {
+  const get = hcJson(real, ["get", terminal], env);
+  if (!get || typeof get !== "object" || get.error || get.address !== terminal) {
+    throw new Error("the caller's pane is not resolvable with hc");
+  }
+  if (get.state !== "live") throw new Error("the caller's pane is not live");
+  if (!Number.isSafeInteger(get.created_ms)) throw new Error("the caller's pane has no valid created_ms");
+  const { home, error } = launchHomeOf(get.argv, () => join(userInfo().homedir, ".config/herdr-app"));
+  if (error) throw new Error(error);
+  return { home, get };
+}
+
+function foldOf(home) {
+  const path = attachPath(home);
   let st;
   try {
     st = statSync(path);
@@ -482,14 +532,14 @@ function foldOf(env) {
   return foldAttach(readAttach(readFileSync(path, "utf8")).rows);
 }
 
-/** The newest this-computer binding of `terminal`, or null. */
-function boundCaller(env, terminal) {
-  let best = null;
-  for (const binding of foldOf(env).byKey.values()) {
-    if (binding.terminal !== terminal || binding.machine) continue;
-    if (!best || (binding.created_ms ?? 0) > (best.created_ms ?? 0)) best = binding;
+/** The local binding for this lifetime of `terminal`, or null. */
+function boundCaller(terminal, launch) {
+  for (const binding of foldOf(launch.home).byKey.values()) {
+    if (binding.terminal !== terminal || binding.machine || typeof binding.bot !== "string") continue;
+    if (!Number.isSafeInteger(binding.created_ms) || binding.created_ms !== launch.get.created_ms) continue;
+    return { bot: binding.bot, project: typeof binding.project === "string" ? binding.project : null, worker: false };
   }
-  return best && typeof best.bot === "string" ? { bot: best.bot, project: typeof best.project === "string" ? best.project : null, worker: false } : null;
+  return null;
 }
 
 /** The project a folder belongs to: a worktree's main checkout, else the nearest .herdr/bots.json. */
@@ -517,10 +567,11 @@ function projectOfFolder(folder) {
  * project is the main checkout above its worktree, else the nearest .herdr/bots.json above its cwd.
  */
 function callerOf(real, env, terminal) {
-  const bound = boundCaller(env, terminal);
-  if (bound) return { ...bound, project: bound.project ?? null };
-  const get = hcJson(real, ["get", terminal], env);
-  const of = get && typeof get === "object" && get.labels && typeof get.labels === "object" ? get.labels[WORKER_OF_LABEL] : null;
+  const launch = callerLaunch(real, env, terminal);
+  const bound = boundCaller(terminal, launch);
+  if (bound) return bound;
+  const { get } = launch;
+  const of = labelsOf(get)[WORKER_OF_LABEL];
   if (typeof of !== "string" || !of) return "the caller is neither bound in the attach ledger nor a worker pane";
   return { bot: of, project: projectOfFolder(get.cwd), worker: true };
 }
@@ -986,7 +1037,7 @@ function killProblem(real, args, env, terminal) {
   return { index: at.index, address: hit.address };
 }
 
-// ---- run: exactly the worker start workers.js emits for dsh-tui ----
+// ---- run: exactly the worker start workers.js emits ----
 
 /** Canonical `cwd` under the project's .claude/worktrees/; false for a link or a path outside it. */
 function underWorktrees(cwd, project) {
@@ -999,8 +1050,8 @@ function underWorktrees(cwd, project) {
   return realCwd !== root && realCwd.startsWith(`${root}${sep}`);
 }
 
-/** Why `args` is not the worker shape, or null. */
-function runProblem(args, env, terminal) {
+/** The worker shape, or a refusal reason. This does not ask hc about the caller. */
+function workerRunShape(args, terminal) {
   let bg = false, seenJson = false, cwd = null, parent = null, seenName = false, dashes = false;
   const labels = new Map();
   let i = 1;
@@ -1057,10 +1108,6 @@ function runProblem(args, env, terminal) {
   if (parent !== terminal) return "--parent is not the caller's pane";
   if (labels.get(WORKER_OF_LABEL) === undefined) return `no --label ${WORKER_OF_LABEL}=<caller's bot>`;
   for (const key of labels.keys()) if (!WORKER_LABELS.has(key)) return `--label ${key} is not the worker shape`;
-  const caller = boundCaller(env, terminal);
-  if (!caller) return "only a bot pane the attach ledger binds starts a worker";
-  if (labels.get(WORKER_OF_LABEL) !== caller.bot) return `${WORKER_OF_LABEL} is not the caller's bot`;
-  if (!underWorktrees(cwd, caller.project)) return "--cwd is not under the caller's project .claude/worktrees/";
   const rest = args.slice(i);
   if (rest[0] !== ENV) return `the program is not ${ENV}`;
   // `/usr/bin/env` words: a login option first (Claude's default login unsets its config
@@ -1074,15 +1121,31 @@ function runProblem(args, env, terminal) {
   const first = rest[at].slice("PATH=".length).split(delimiter)[0];
   if (!isGuardFolder(first) || isKillGuardWord(first)) return "the PATH word does not start with a guard";
   at += 1;
-  while (at < rest.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[at])) at += 1;
+  let hasAppHome = false;
+  while (at < rest.length && ENV_ASSIGNMENT.test(rest[at])) {
+    if (rest[at].startsWith("HERDR_APP_HOME=")) hasAppHome = true;
+    at += 1;
+  }
   const launch = rest.slice(at);
   // dsh-tui runs from `-- <task>` exactly; every other agent the pack launches starts from its
   // own program, with whatever flags the pack gave it (#1011).
   if (launch[0] !== "dsh-tui") {
     const agent = agentKeyOfArgv(launch);
     if (!agent || agent === "dsh-tui") return "the program is not a coding agent";
-    return null;
+  } else if (launch.length !== 3 || launch[1] !== "--" || typeof launch[2] !== "string") {
+    return "the task is not the one -- <task> word";
   }
-  if (launch.length !== 3 || launch[1] !== "--" || typeof launch[2] !== "string") return "the task is not the one -- <task> word";
+  return { cwd, workerOf: labels.get(WORKER_OF_LABEL), hasAppHome };
+}
+
+/** Why this worker start is refused, or null. */
+function runProblem(real, args, env, terminal) {
+  const shape = workerRunShape(args, terminal);
+  if (typeof shape === "string") return shape;
+  if (shape.hasAppHome) return "a worker launch cannot set HERDR_APP_HOME";
+  const caller = boundCaller(terminal, callerLaunch(real, env, terminal));
+  if (!caller) return "only a bot pane the attach ledger binds starts a worker";
+  if (shape.workerOf !== caller.bot) return `${WORKER_OF_LABEL} is not the caller's bot`;
+  if (!underWorktrees(shape.cwd, caller.project)) return "--cwd is not under the caller's project .claude/worktrees/";
   return null;
 }
