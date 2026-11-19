@@ -141,6 +141,67 @@ for (const [name, env] of [
   assert.equal(draw.trace().some(entry => entry.event === 'prompt'), false)
 })
 
+test('an edit whose spawn throws carries the own-copy reason, a draw does not', async t => {
+  const edit = setup(t)
+  await assert.rejects(drawImage({ ...edit, spawn: () => { throw new Error('connector missing') }, input,
+    prompt: 'edit' }), error => {
+    assert.equal(error.code, UNAVAILABLE)
+    assert.equal(error.reason, 'edit-not-isolated', error.message)
+    return true
+  })
+  assert.equal(edit.scratches.length, 0)
+  const draw = setup(t)
+  await assert.rejects(drawImage({ ...draw, spawn: () => { throw new Error('connector missing') },
+    prompt: 'draw' }), error => {
+    assert.equal(error.code, UNAVAILABLE)
+    assert.equal(error.reason, undefined)
+    assert.match(error.message, /Codex cannot draw yet: connector missing/)
+    return true
+  })
+  assert.equal(draw.scratches.length, 0)
+})
+
+test('an edit whose session never starts before the timeout carries the own-copy reason, a draw does not', async t => {
+  const never = class {
+    constructor(spec) { this.spec = spec }
+    async start() { return new Promise(() => {}) }
+    dispose() {}
+  }
+  const edit = setup(t)
+  await assert.rejects(drawImage({ ...edit, input, prompt: 'edit', Run: never, timeoutMs: 80 }), error => {
+    assert.equal(error.code, TIMED_OUT)
+    assert.equal(error.reason, 'edit-not-isolated', error.message)
+    return true
+  })
+  assert.equal(existsSync(edit.scratches[0]), false)
+  const draw = setup(t)
+  await assert.rejects(drawImage({ ...draw, prompt: 'draw', Run: never, timeoutMs: 80 }), error => {
+    assert.equal(error.code, TIMED_OUT)
+    assert.equal(error.reason, undefined)
+    assert.match(error.message, /did not start in time/)
+    return true
+  })
+  assert.equal(existsSync(draw.scratches[0]), false)
+})
+
+test('an edit whose scratch cannot be made carries the own-copy reason, a draw keeps the error', async t => {
+  const edit = setup(t)
+  await assert.rejects(drawImage({ ...edit, input, prompt: 'edit',
+    scratch: async () => { throw new Error('no scratch') } }), error => {
+    assert.equal(error.code, UNAVAILABLE)
+    assert.equal(error.reason, 'edit-not-isolated', error.message)
+    assert.match(error.message, /scratch folder could not be prepared/)
+    return true
+  })
+  const draw = setup(t)
+  await assert.rejects(drawImage({ ...draw, prompt: 'draw',
+    scratch: async () => { throw new Error('no scratch') } }), error => {
+    assert.equal(error.message, 'no scratch')
+    assert.equal(error.reason, undefined)
+    return true
+  })
+})
+
 test('edits reject a second image or any other tool, including an injected file-read request', async t => {
   for (const mode of ['twice', 'peek', 'late', 'ask']) {
     const run = setup(t, { mode })

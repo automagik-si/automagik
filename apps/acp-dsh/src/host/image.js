@@ -818,11 +818,21 @@ async function draw({
   try {
     launch = spawn()
   } catch (error) {
-    throw imageRefusal(UNAVAILABLE, `Codex cannot draw yet: ${String(error?.message ?? error).slice(0, 200)}`)
+    throw editFallback(imageRefusal(UNAVAILABLE, `Codex cannot draw yet: ${String(error?.message ?? error).slice(0, 200)}`), input)
   }
   // The lockdown is checked against this Codex before anything of it starts, in the folder
   // the session would get: no session and no model request exist when a check does not hold.
-  const dir = await scratch()
+  // A scratch folder that cannot be made is the same pre-session stop for an edit: the Bot is
+  // given its own copy; a draw keeps the original error unchanged.
+  let dir
+  try {
+    dir = await scratch()
+  } catch (error) {
+    if (input === undefined) throw error
+    if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was started.')
+    try { log?.('the Codex image run was not started: the scratch folder could not be prepared') } catch {}
+    throw editFallback(imageRefusal(UNAVAILABLE, 'The scratch folder could not be prepared, so the image was not started. Try again.'), input)
+  }
   const file = input ? `input.${{ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[input.mimeType]}` : undefined
   let profile = imageProfileFor(launch.profileModes)
   if (typeof launch.env?.CODEX_HOME !== 'string') profile = undefined
@@ -931,7 +941,7 @@ async function draw({
       await Promise.race([started, settled.then(() => { throw undefined })])
     } catch (error) {
       if (signal?.aborted) throw imageRefusal(STOPPED, 'The image was stopped before it was finished.')
-      if (error === undefined) throw imageRefusal(TIMED_OUT, 'Codex did not start in time. Try again.')
+      if (error === undefined) throw editFallback(imageRefusal(TIMED_OUT, 'Codex did not start in time. Try again.'), input)
       if (isAuthRequired(error)) throw editFallback(signedOut(), input)
       if (error?.code === UNAVAILABLE) throw editFallback(error, input)
       throw editFallback(imageRefusal(UNAVAILABLE, `Codex did not start: ${String(error?.message ?? error).slice(0, 200)}`), input)

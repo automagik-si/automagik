@@ -424,9 +424,10 @@ access (Files and Folders or Full Disk Access on macOS, or a folder writable by 
 elsewhere).
 
 When the locked run cannot be set up — Codex is not signed in, its account is unconfirmed,
-its configuration or switch check fails, the ACP plugin is older, or the adapter does not
-acknowledge the image profile — the refusal carries `edit-not-isolated`, the image card stays
-failed and the Bot gets its read-only copy's path. At Workspace it may use its own tools to make and check a new
+its configuration or switch check fails, its connector or session cannot start, the ACP plugin
+is older, or the adapter does not acknowledge the image profile — the refusal carries
+`edit-not-isolated`, the image card stays failed and the Bot gets its read-only copy's path. At
+Workspace it may use its own tools to make and check a new
 file, and must only claim an edit when that file exists; otherwise it says it could not edit.
 At Read only it tells the person that Workspace in Details allows editing as a file. A copy
 failure gives the OS guidance or says that the picture could not be edited here.

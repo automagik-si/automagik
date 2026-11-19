@@ -51,13 +51,25 @@ const refused = message => Object.assign(new Error(message), { code: 'bot/unavai
 // the Bot to make the change itself. `detail` names the check that stopped it, never a key.
 const editWithoutLockedRun = (detail, message) => Object.assign(refused(message), { reason: 'edit-not-isolated', detail })
 // Why Codex cannot edit now, in words the Bot can hand the person beside its own copy's path.
+// The legacy-grant branch is reached for any not-ready shared Codex, so the state decides the
+// sentence: a configuration failure is never reported as a missing sign-in, and vice versa.
 const codexEditDetail = (codex) => {
+  if (codex === undefined) return 'no image service is connected'
   if (codex?.reason === 'account') return 'its account is not confirmed for Automagik'
   if (codex?.unsupported === true) return 'this Codex version does not take the locked image run'
   if (codex?.reason === 'config') return 'Codex could not load its own configuration'
   if (codex?.reason === 'unreadable') return 'Codex could not be checked for safe editing'
   if (codex?.signedIn === false) return 'Codex is not signed in here'
-  return 'no image service is connected'
+  return 'Codex is not ready to edit here'
+}
+// What the person can do about it, naming the same access state and never a key.
+const codexEditGuidance = (codex) => {
+  if (codex?.reason === 'account') return 'Editing a picture needs Codex\'s account confirmed. Ask the user to confirm it in a Bot\'s chat (choose a Codex model there), then try again.'
+  if (codex?.unsupported === true) return 'Editing a picture needs a Codex that takes the locked image run. Ask the user to update Automagik, then try again.'
+  if (codex?.reason === 'config') return 'Editing a picture needs Codex to load its configuration. Ask the user to fix Codex\'s config file, then try again.'
+  if (codex?.reason === 'unreadable') return 'Editing a picture needs Codex checked for safe editing. Ask the user to try again later.'
+  if (codex?.signedIn === false) return 'Editing a picture needs Codex signed in. Ask the user to sign in to Codex from a Bot\'s chat, then try again.'
+  return 'Editing a picture needs Codex ready on this computer. Ask the user to check Codex and try again.'
 }
 
 /** The ChatGPT account id inside an access token, or undefined. */
@@ -159,7 +171,7 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
     const payload = grant?.kind === 'grant' ? grant.payload : undefined
     if (payload && typeof payload.access === 'string') {
       const live = refresh ? await chatgptToken(payload) : payload
-      if (live) return { kind: 'chatgpt', token: live.access, accountId: live.accountId ?? accountIdOf(live.access) }
+      if (live) return { kind: 'chatgpt', token: live.access, accountId: live.accountId ?? accountIdOf(live.access), access }
     }
     return undefined
   }
@@ -262,7 +274,9 @@ export function createImageGen({ credentials: credentialsOf, codex: codexOf = ()
     const chatgpt = found.kind === 'chatgpt'
     note(callId, { phase: 'generating', via: found.kind, partials: [], started: now(), error: undefined })
     if (input && chatgpt) {
-      const error = editWithoutLockedRun('Codex is not signed in here', 'Editing a picture needs Codex signed in. Ask the user to sign in to Codex from a Bot\'s chat.')
+      const access = found.access
+      const detail = codexEditDetail(access)
+      const error = editWithoutLockedRun(detail, codexEditGuidance(access))
       note(callId, { phase: 'failed', error: error.message })
       throw error
     }
