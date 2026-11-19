@@ -120,6 +120,47 @@ export function pruneExtras(nodeModules) {
   return removed
 }
 
+// What the web profile never composes (proved by its --dump-config graph): the office
+// conversion wasm, the voice engine, the inspector, the alternate app bundles' optional
+// extras and the other platforms' native prebuilds. npm installs dsh's whole dependency
+// list; the automagik-web tree names none of these entries.
+const RUNTIME_PRUNE = [
+  // office-kit is a composed entry (libreoffice-kit-wasm included), so its stack stays
+  '@deepseek-ai/dsh-experimental-inspector', '@deepseek-ai/dsh-experimental-inspector-profile',
+  '@deepseek-ai/dsh-experimental-session-inspector',
+  '@deepseek-ai/dsh-experimental-client-ui-forge', '@deepseek-ai/dsh-experimental-forge',
+  '@deepseek-ai/dsh-experimental-forge-bundle', '@deepseek-ai/dsh-experimental-forge-github',
+  '@deepseek-ai/dsh-experimental-forge-session',
+  '@deepseek-ai/dsh-experimental-liveshare', '@deepseek-ai/dsh-experimental-liveshare-protocol',
+  '@deepseek-ai/dsh-experimental-auto-review', '@deepseek-ai/dsh-experimental-badge-skill-bundle',
+  '@deepseek-ai/dsh-experimental-cot-translation-bundle', '@deepseek-ai/dsh-experimental-client-ui-cot-translation',
+  '@deepseek-ai/dsh-experimental-translator',
+  '@deepseek-ai/dsh-experimental-voice-input-bundle', '@deepseek-ai/dsh-experimental-client-ui-voice-input',
+  '@deepseek-ai/dsh-experimental-speech-to-text', '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice',
+  '@deepseek-ai/dsh-experimental-api-speech-to-text', 'sherpa-onnx-linux-x64', 'sherpa-onnx-node',
+  '@deepseek-ai/dsh-experimental-plugin-market-bundle', '@deepseek-ai/dsh-experimental-ralph-bundle',
+  '@deepseek-ai/dsh-experimental-session-search', '@deepseek-ai/dsh-experimental-session-titles-bundle',
+  '@deepseek-ai/dsh-experimental-terminal-bundle', '@deepseek-ai/dsh-experimental-tool-worktree',
+  '@deepseek-ai/dsh-experimental-worktree',
+  '@img/sharp-libvips-linuxmusl-x64', '@img/sharp-linuxmusl-x64',
+  'node-pty/prebuilds/win32-arm64', 'node-pty/prebuilds/win32-x64',
+  'node-pty/prebuilds/darwin-arm64', 'node-pty/prebuilds/darwin-x64', 'node-pty/prebuilds/linux-arm64',
+  // The server image is glibc Linux: the musl native addon and pnpm's non-Linux reflink
+  // binaries are never loaded there.
+  'node-addon-require-builtin-linux-x64-musl',
+  'pnpm/dist/reflink.darwin-arm64-2HJ4WGO6.node',
+  'pnpm/dist/reflink.darwin-x64-3G3H6IW4.node',
+  'pnpm/dist/reflink.win32-arm64-msvc-Q6BARPPB.node',
+  'pnpm/dist/reflink.win32-x64-msvc-J2TZHRQI.node',
+]
+
+export function pruneRuntime(nodeModules) {
+  for (const name of RUNTIME_PRUNE) rmSync(join(nodeModules, name), { recursive: true, force: true })
+  const pruned = pruneNodeModules(nodeModules, { keepDocsOf: (name) => name.startsWith('@deepseek-ai/') })
+  const extras = pruneExtras(nodeModules)
+  return { pruned, extras }
+}
+
 /**
  * Apply the desktop's carried runtime patches to an installed runtime, logging each file's
  * result. `patchRuntime` checks the dsh version, every package version and every file hash
@@ -191,50 +232,14 @@ export async function assemble({ out, version = '3.90.1', dsh = '0.2.2-rc.2', re
   rmSync(join(installDir, '.plugin-manager'), { recursive: true, force: true })
   pinStore(installDir, '/data/dsh')
 
-  // What the web profile never composes (proved by its --dump-config graph): the office
-  // conversion wasm, the voice engine, the inspector, the alternate app bundles' optional
-  // extras and the other platforms' native prebuilds. npm installs dsh's whole dependency
-  // list; the automagik-web tree names none of these entries.
-  const PRUNE = [
-    // office-kit is a composed entry (libreoffice-kit-wasm included), so its stack stays
-    '@deepseek-ai/dsh-experimental-inspector', '@deepseek-ai/dsh-experimental-inspector-profile',
-    '@deepseek-ai/dsh-experimental-session-inspector',
-    '@deepseek-ai/dsh-experimental-client-ui-forge', '@deepseek-ai/dsh-experimental-forge',
-    '@deepseek-ai/dsh-experimental-forge-bundle', '@deepseek-ai/dsh-experimental-forge-github',
-    '@deepseek-ai/dsh-experimental-forge-session',
-    '@deepseek-ai/dsh-experimental-liveshare', '@deepseek-ai/dsh-experimental-liveshare-protocol',
-    '@deepseek-ai/dsh-experimental-auto-review', '@deepseek-ai/dsh-experimental-badge-skill-bundle',
-    '@deepseek-ai/dsh-experimental-cot-translation-bundle', '@deepseek-ai/dsh-experimental-client-ui-cot-translation',
-    '@deepseek-ai/dsh-experimental-translator',
-    '@deepseek-ai/dsh-experimental-voice-input-bundle', '@deepseek-ai/dsh-experimental-client-ui-voice-input',
-    '@deepseek-ai/dsh-experimental-speech-to-text', '@deepseek-ai/dsh-experimental-speech-to-text-sensevoice',
-    '@deepseek-ai/dsh-experimental-api-speech-to-text', 'sherpa-onnx-linux-x64', 'sherpa-onnx-node',
-    '@deepseek-ai/dsh-experimental-plugin-market-bundle', '@deepseek-ai/dsh-experimental-ralph-bundle',
-    '@deepseek-ai/dsh-experimental-session-search', '@deepseek-ai/dsh-experimental-session-titles-bundle',
-    '@deepseek-ai/dsh-experimental-terminal-bundle', '@deepseek-ai/dsh-experimental-tool-worktree',
-    '@deepseek-ai/dsh-experimental-worktree',
-    '@img/sharp-libvips-linuxmusl-x64', '@img/sharp-linuxmusl-x64',
-    'node-pty/prebuilds/win32-arm64', 'node-pty/prebuilds/win32-x64',
-    'node-pty/prebuilds/darwin-arm64', 'node-pty/prebuilds/darwin-x64', 'node-pty/prebuilds/linux-arm64',
-    // The server image is glibc Linux: the musl native addon and pnpm's non-Linux reflink
-    // binaries are never loaded there.
-    'node-addon-require-builtin-linux-x64-musl',
-    'pnpm/dist/reflink.darwin-arm64-2HJ4WGO6.node',
-    'pnpm/dist/reflink.darwin-x64-3G3H6IW4.node',
-    'pnpm/dist/reflink.win32-arm64-msvc-Q6BARPPB.node',
-    'pnpm/dist/reflink.win32-x64-msvc-J2TZHRQI.node',
-  ]
-  for (const name of PRUNE) rmSync(join(runtimeDir, 'node_modules', name), { recursive: true, force: true })
-
   say('pruning what the runtime and the profile nothing read')
-  const runtimePruned = pruneNodeModules(join(runtimeDir, 'node_modules'), { keepDocsOf: (name) => name.startsWith('@deepseek-ai/') })
+  const { pruned: runtimePruned, extras: runtimeExtras } = pruneRuntime(join(runtimeDir, 'node_modules'))
   const profilePruned = pruneNodeModules(join(installDir, 'node_modules'), {
     keepDocsOf: (name) => name.startsWith('@deepseek-ai/') || DEFAULT_PACKAGES.includes(name),
     docs: false,
   })
   say(`runtime: left out ${runtimePruned.files} files, ${mib(runtimePruned.bytes)}`)
   say(`profile: left out ${profilePruned.files} files, ${mib(profilePruned.bytes)}`)
-  const runtimeExtras = pruneExtras(join(runtimeDir, 'node_modules'))
   const profileExtras = pruneExtras(join(installDir, 'node_modules'))
   say(`runtime: left out ${runtimeExtras.files} test/example files, ${mib(runtimeExtras.bytes)}`)
   say(`profile: left out ${profileExtras.files} test/example files, ${mib(profileExtras.bytes)}`)
