@@ -1533,7 +1533,7 @@ so the pack adds no flag to it (put the mode in the template's command if it nee
 `permissionModeSource` and `pinnedPermissionMode`. A source is `detected` (what the live pane's
 command line runs), `roster` (the bot's own value while it isn't running) or `default` (the pack's
 `auto` when the record stores none). A hand-written value the CLI wouldn't accept is dropped with
-a warning when the file is read, and `check` refuses it.
+a warning when the file is read, so it never reaches the launch.
 
 ### Codex's launch mode
 
