@@ -211,12 +211,14 @@ the instance, so a token for a destroyed workspace whose id is reused would be a
 new VM if the same key and id were used. The key set's authenticity rests on the configured HTTPS
 URL and the platform's CA/DNS trust; the repository does not pin the key, the certificate or the
 key's custody. A Cloud signing-key leak mints a token for every gate; nothing here would detect it.
-The contract leaves the signing algorithm, the key type, the JWKS endpoint, the key ids and the
-rotation overlap open (`docs/cloud/contracts-v1.md:398-403`); the gate's EdDSA/Ed25519, two-slot,
-five-minute and 30-second choices are implementation choices the Cloud service must match, not
-values the public contract pins. The token's `sub` and `roles` are Cloud's claims; the gate cannot
-prove them. And the token is held in process memory for renewal; a memory read on the gate's host
-is outside the gate's own defense.
+The contract leaves the signing algorithm, the key type, the JWKS endpoint and its refresh
+interval, the key ids and the rotation overlap open (`docs/cloud/contracts-v1.md:398-403`); the
+gate's EdDSA/Ed25519, 30-second skew, five-minute key-set cache and 30-second unknown-`kid`
+refetch are implementation choices the Cloud service must match. It does pin the two key slots
+(`docs/cloud/contracts-v1.md:372-379`), the five-minute token life (`:355`, `:391`) and the
+five-minute session bound (`docs/cloud/contracts-v2.md:147-149`). The token's `sub` and `roles`
+are Cloud's claims; the gate cannot prove them. And the token is held in process memory for
+renewal; a memory read on the gate's host is outside the gate's own defense.
 
 ### 2.4 The single-use open code
 
@@ -342,7 +344,7 @@ stolen renewal proof; the gate's memory read is the same exposure as section 2.3
 also a new session every time, so a person who can keep passing Cloud's recheck stays signed in;
 that is intended, not isolation.
 
-### 2.7 The DSH hop and the non-browser MCP entry
+### 2.7 The DSH hop and the non-browser MCP entries
 
 Every ordinary request and WebSocket goes through the gate to a loopback DSH listener. The upstream
 headers are an allowlist: accept, content type and length, conditional and range headers, the
@@ -353,23 +355,40 @@ principal. Browser cookies, `Authorization`, forwarding and identity headers nev
 DSH restart and never replays a mutating body (`server/gate-upstream.mjs:15-42`;
 `server/gate.mjs:286-298`; tests at `server/test/gate.test.mjs:123-141` and `:220-254`).
 
-There is one non-browser route: `/api/omni-mcp` (`server/gate.mjs:231-259`). It is reached before
-the gate session, checks the exact Host, the Origin if present and `sec-fetch-site`, then forwards
-the caller's Bearer and the gate-held DSH cookie to DSH's `/api/omni-mcp`. The gate does not create
-a session and does not check the Bearer; the plugin at the upstream route does
-(`server/README.md:1002-1015`; tests at `server/test/gate-mcp.test.mjs:60-99`).
+There are two non-browser entries. The gate's is `/api/omni-mcp` (`server/gate.mjs:231-259`). It
+is reached before the gate session, checks the exact Host, the Origin if present and
+`sec-fetch-site`, then forwards the caller's Bearer and the gate-held DSH cookie to DSH's
+`/api/omni-mcp`. The gate does not create a session and does not check the Bearer; the plugin at
+the upstream route does (`server/README.md:1002-1015`; tests at `server/test/gate-mcp.test.mjs:60-99`).
+
+The plugin's own entry is a separate HTTP MCP listener that `createAgentAccess` starts on
+`agentAccessHost`/`agentAccessPort` (`apps/bots-dsh/src/host/agent-access.js:373-410`), loopback
+by default (`:108-115`). It admits loopback, private, carrier-grade-NAT, unique-local and
+link-local addresses and refuses a public or wildcard bind
+(`apps/bots-dsh/test/agent-access.test.js:479`), and it advertises its URL in the owner view
+(`apps/bots-dsh/src/host/agent-access.js:416-419`). It requires a valid agent Bearer on every call
+(`:212-239`); its origin check is an optional allowlist that also admits a request with no
+`Origin` (`:99-105`, `:221-245`). It is not behind the gate, so the gate's Host and Origin checks
+do not apply to it.
 
 **What it proves.** A browser cannot smuggle a cookie, Authorization header, forwarded host or
 principal to DSH; the gate replaces the principal and strips DSH's cookie from responses. The MCP
 route is exact-path, refuses a browser cookie or a wrong Bearer at the plugin, and does not create
-a gate session (`server/test/gate-mcp.test.mjs:60-87`).
+a gate session (`server/test/gate-mcp.test.mjs:60-87`). The plugin's own listener refuses a
+missing, wrong or revoked token before dispatch, and persists the revocation across a restart
+(`apps/bots-dsh/test/agent-access.test.js:83`, `:245`).
 
 **What it does not prove.** The MCP Bearer is a second authentication path with its own scope. The
-gate only checks Host and Origin; a non-browser client can set Origin. The workspace scope of the
-Bearer is the plugin's, and the plugin's token issuance and revocation are not in this repository.
-A Bearer that is valid at A's MCP route is not proved invalid at B's. The gate-held DSH credential
-is one owner credential for the whole workspace; it is held by the gate, but a Bot with a shell can
-read the launch file and mint its own. That is the within-workspace limit at
+gate route's only request checks are Host, Origin and `sec-fetch-site`; a non-browser client can
+set Origin. The plugin does issue and revoke these tokens itself: `agent-token-create` stores only
+the token's sha256 in the workspace's own `agent-tokens.json`, and `agent-token-revoke` writes a
+tombstone (`apps/bots-dsh/src/host/agent-access.js:422-437`), tested at
+`apps/bots-dsh/test/agent-access.test.js:83` and `:245` and documented at
+`server/README.md:1004-1012`. What is not here is the cross-workspace case: no test puts a token
+issued in A's home in front of B's listener and requires a refusal, and the direct listener admits
+a request with no `Origin`, so the VM and network boundary is what keeps B away. The gate-held DSH
+credential is one owner credential for the whole workspace; it is held by the gate, but a Bot with
+a shell can read the launch file and mint its own. That is the within-workspace limit at
 `server/README.md:730-736`, not a cross-workspace path, as long as the VM boundary holds.
 
 ### 2.8 File modes
@@ -417,8 +436,9 @@ and reads DSH's volume read-only at `/dsh` (`server/compose.gate.yml:31-36`;
 `server/README.md:223-227`, `:688-692`). The gate's store is not in the DSH volume in that
 topology. There is no per-workspace server storage prefix in this repository: the workspace id is a
 configuration value and a token claim, not a directory name. The host-side measurement view is one
-path per workspace (`server/README.md:238-242`); it is an operator read path, not tenant storage,
-and a shared measurement account can read every workspace it is granted. It is outside the tenant
+path per workspace (`server/README.md:238-242`), checked one view at a time by
+`server/measurement-check.mjs`; it is an operator read path, not tenant storage, and a shared
+measurement account can read every workspace it is granted. It is outside the tenant
 boundary but it is a real cross-workspace read path on the host and belongs in the private record.
 
 **What it proves.** The reviewed code adds no new browser storage namespace and keeps the gate's
@@ -576,30 +596,49 @@ prove it:** the Cloud edge's origin allocation, a browser test that A's cookie a
 that A's `localStorage` is not visible at B, and a statement that no two workspaces share a host
 (and, if they share a host, that the cookie's host scope is acceptable).
 
-### U14. The non-browser MCP Bearer (medium)
+### U14. The non-browser MCP Bearer and its missing cross-workspace test (medium)
 
 `/api/omni-mcp` bypasses the gate session and authenticates with a Bearer at the plugin
 (`server/gate.mjs:231-259`; `server/test/gate-mcp.test.mjs:60-99`). The gate checks Host and
-Origin; a non-browser can set Origin. The Bearer's workspace scope and revocation are outside this
-repository. **What would prove it:** the plugin's token scope and per-workspace issuance, and a
-test that A's MCP Bearer is refused at B's origin.
+Origin; a non-browser can set Origin. The plugin also starts its own HTTP MCP listener, which is
+not behind the gate and admits a no-`Origin` request
+(`apps/bots-dsh/src/host/agent-access.js:99-115`, `:373-410`, `:221-245`). The token's issuance
+and revocation are in this repository: `agent-token-create` keeps only the sha256 in the
+workspace's own home and `agent-token-revoke` writes a tombstone (`:422-437`), tested at
+`apps/bots-dsh/test/agent-access.test.js:83` and `:245`, and documented at
+`server/README.md:1004-1012`. What is missing is the cross-workspace refusal: no test issues a
+token in A's home and presents it to B's listener. **What would prove it:** a two-home test (two
+`createAgentAccess` fixtures with separate homes) in which A's token gets `401` at B's listener,
+and the P5/P14 probes from inside a test VM A against B's address.
 
 ### U15. No per-workspace storage prefix on the server (low)
 
 There is no per-workspace server storage prefix; `omni-ui:` is a browser prefix. The volume and
 host path carry the workspace identity, and the host-side measurement view is a shared read path
-(section 2.9). **What would prove it:** the volume's per-workspace identity from the host record,
-and a measurement grant that is per workspace, not a shared account over every workspace.
+(section 2.9). The per-workspace view and its ACL procedure are documented
+(`server/README.md:238-290`), and `server/measurement-check.mjs` checks one workspace's read-only
+view as the measurement identity: the exposed roots are readable and not writable, a credential
+or settings file that is readable fails, and a stale view fails. Its tests are
+`server/test/measurement-check.test.mjs`. **What would prove it:** the private host record that
+every workspace has its own `/srv/automagik/measure/<workspace>` view, a run of the checker
+against each, and a grant for the shared measurement account that covers only those paths.
 
 ### U16. Hard-coded choices the Cloud side must match (low)
 
-The gate hard-codes 300 seconds, five minutes of key and session cache, 30 seconds of skew, a
-60-second poll, two key slots, eight exchanges, 1024 revocations, a 15-minute code memory, a
-64 KiB response bound, EdDSA/Ed25519, the `x-automagik-signature` header and the four roles
-(`server/gate-cloud.mjs:19-45`, `:137-170`). None is wrong; several are left open by the contract.
-The Cloud service must match them. **What would prove it:** those values in the Cloud service's
+The gate hard-codes values the contract partly pins and partly leaves open
+(`server/gate-cloud.mjs:19-45`, `:137-170`). Pinned, and so not open questions: the token's
+`exp - iat` at most 300 seconds and its five-minute life (`docs/cloud/contracts-v1.md:355`,
+`:391`), the five-minute session bound (`docs/cloud/contracts-v2.md:147-149`), two key slots
+(`docs/cloud/contracts-v1.md:372-379`), the four roles (`:352`) and a poll at least every five
+minutes (`:570`). Still the gate's own choices, which the contract leaves open: EdDSA/Ed25519
+(the algorithm and key type, `:398`), the five-minute key-set cache and 30-second unknown-`kid`
+refetch (the JWKS endpoint and refresh interval, `:398`), 30 seconds of clock skew (no accepted
+skew is named at `:398-403`), the 60-second poll below the five-minute ceiling (`:584`), eight
+in-flight exchanges, 1024 revocation entries, the 15-minute code memory, the 64 KiB response
+bound and the `x-automagik-signature` detached-JWS envelope (`:581-586`). The Cloud service must
+match these for interoperability. **What would prove it:** those open values in the Cloud service's
 contract or configuration, a joint test, and a note in the contract or the RFC that they are now
-the chosen values, not open questions.
+the chosen values.
 
 ## 4. What must be true before this gate can be called done
 
@@ -623,7 +662,7 @@ repository is not a VM probe; the "Covered today by" column says which.
 | I12 | Only an EdDSA/Ed25519 token with a published `kid`, two key slots, no private key and no header-supplied key is accepted; rotation works and an unknown key id fails. | Tests: `server/test/gate-cloud.test.mjs:271-295`, `:367-392`; contract: v1 section 4. Key publication is Cloud's, not here. | Gate side covered; key custody unproven |
 | I13 | The gate store is private to the gate; Cloud sessions are memory-only; no raw session secret is written; the workspace's own data is not the gate's store. | Tests: `server/test/gate.test.mjs:184`, `:209`; code. No fresh-Incus `/data/secrets` test; no same-uid Bot test. | Covered for the gate store; workspace modes unproven |
 | I14 | The gate's workspace id is bound to the VM and its Cloud record, not copied text; a reused workspace id does not revive an old token. | Nothing. | Unproven here |
-| I15 | The non-browser MCP Bearer is scoped to one workspace and refused at another's origin. | Gate route test: `server/test/gate-mcp.test.mjs:60-99`; plugin scope: nothing. | Partly |
+| I15 | The non-browser MCP Bearer is scoped to one workspace and refused at another's origin. | Gate route test: `server/test/gate-mcp.test.mjs:60-99`; plugin issuance and revocation tests: `apps/bots-dsh/test/agent-access.test.js:83`, `:245`. No two-home A/B refusal test. | Partly |
 | I16 | The image a workspace runs is the release's recorded digest, not `:latest` or another tag. | Contract/docs: `server/README.md:63-80`; record code. No workspace-side check here. | Contract only |
 
 The pass list is not met. An owner sign-off could record an accepted risk for some of these; it
@@ -674,9 +713,10 @@ not in the gate code.
 - **The session store has no family cap.** A browser without a cookie can create many Cloud
   sessions until each expires; `MAX_EXCHANGES` caps concurrent exchanges, not stored families.
   This is a within-workspace memory-growth issue, not a cross-workspace one.
-- **`/api/omni-mcp` trusts Origin like any other browser marker.** A non-browser can set it; the
-  Bearer is the real authentication. The test is honest about this, but the README should not read
-  as if the gate authenticates that route.
+- **The non-browser MCP entries leave Origin a browser marker.** A non-browser can set it on the
+  gate's `/api/omni-mcp`, and the plugin's direct listener admits a request with no `Origin` at
+  all; the Bearer is the real authentication. The tests are honest about this, but the README
+  should not read as if the gate authenticates that route.
 
 ## 7. What this record does not do
 
