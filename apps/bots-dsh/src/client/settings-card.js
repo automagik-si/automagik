@@ -36,7 +36,8 @@ export function settingsTarget({ page, bot: botRef, group: groupRef }, roster, p
   const bot = page === 'bots' ? findBot(roster, botRef) : undefined
   const room = page === 'groups' ? findRoom(roster, groupRef) : undefined
   const focusBot = page === 'schedules' || page === 'usage' ? findBot(roster, botRef) : undefined
-  const id = bot?.id ?? room?.id ?? (focusBot ? (page === 'usage' ? `bot:${focusBot.id}` : focusBot.id) : null)
+  // Usage names its focus the way its route does: `owner:<key>`, and a Bot's owner key is its id.
+  const id = bot?.id ?? room?.id ?? (focusBot ? (page === 'usage' ? `owner:${focusBot.id}` : focusBot.id) : null)
   const label = pluginPage ? pluginPage.label : page === 'hermes-remote' ? t('Remote Hermes') : own ? t(own[1]) : String(page ?? '')
   const title = bot?.name ?? room?.name ?? (focusBot ? `${label} · ${focusBot.name}` : label)
   return { known, page, id, bot, room, pluginPage, label, title }

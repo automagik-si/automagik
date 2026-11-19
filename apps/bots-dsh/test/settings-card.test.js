@@ -35,7 +35,7 @@ const load = (text) => {
   return module.exports
 }
 const card = load(await bundle("export * from './src/client/settings-card.js'; export { parseProposal, applySteps } from './src/shared/proposals.js'"))
-const settings = load(await bundle("export { PAGE_ICONS, PageBoundary, SettingsPage, SettingsDialog } from './src/client/settings.js'"))
+const settings = load(await bundle("export { PAGE_ICONS, PageBoundary, SettingsPage, SettingsDialog } from './src/client/settings.js'; export { SETTINGS_PAGES } from './src/shared/settings-pages.js'"))
 
 const walk = (node, match, out = []) => {
   if (Array.isArray(node)) { node.forEach(child => walk(child, match, out)); return out }
@@ -51,6 +51,15 @@ const room = { id: 'r1', name: 'Team', members: ['b2'] }
 const roster = { byId: { b2: writer }, roomsById: { r1: room }, bots: [writer], rooms: [room], models: [], prefs: {} }
 const args = values => ({ text: key => values[key], value: key => values[key] })
 
+// The component each page of the shared list must draw. A page without a branch in
+// SettingsPage would draw nothing here, which is the empty-card defect this guards.
+const PAGE_COMPONENTS = {
+  general: 'GeneralPage', models: 'ProvidersPage', bots: 'BotsPage', groups: 'GroupsPage',
+  connectors: 'ConnectorsPage', capabilities: 'CapabilitiesPage', browser: 'BrowserPage',
+  computer: 'ComputerPage', schedules: 'SchedulesPage', usage: 'UsagePage', secrets: 'SecretsPage',
+  'agent-access': 'AgentAccessPage', privacy: 'PrivacyPage', feedback: 'FeedbackPage', about: 'AboutPage',
+}
+
 test('the card opens a Bot\'s own form, a group\'s, or a Bot\'s view of a page', () => {
   const bots = card.settingsTarget({ page: 'bots', bot: 'writer' }, roster)
   assert.equal(bots.known, true)
@@ -60,7 +69,7 @@ test('the card opens a Bot\'s own form, a group\'s, or a Bot\'s view of a page',
   const groups = card.settingsTarget({ page: 'groups', group: 'Team' }, roster)
   assert.equal(groups.room, room)
   assert.equal(groups.id, 'r1')
-  assert.equal(card.settingsTarget({ page: 'usage', bot: 'Writer' }, roster).id, 'bot:b2')
+  assert.equal(card.settingsTarget({ page: 'usage', bot: 'Writer' }, roster).id, 'owner:b2')
   assert.equal(card.settingsTarget({ page: 'schedules', bot: 'b2' }, roster).id, 'b2')
   assert.equal(card.settingsTarget({ page: 'computer', bot: 'Writer' }, roster).id, null, 'a Bot named on another page opens the page itself')
   assert.equal(card.settingsTarget({ page: 'computer' }, roster).title, 'Computer use')
@@ -111,6 +120,35 @@ test('open, the card draws the Settings dialog\'s own page with the same props',
     assert.equal(page.props.actions, actions)
     const drawn = settings.SettingsPage(page.props)
     assert.equal(walk(drawn, node => typeof node.type === 'function' && node.type.name === 'BotSettingsForm').length, 1)
+  } finally {
+    release()
+  }
+})
+
+test('every page the Settings list has draws its own component, not an empty fragment', () => {
+  const actions = { openSettings() {} }
+  const draw = shown => settings.SettingsPage({ shown, roster, actions, run: async () => true, useUpdate: () => undefined, close() {} })
+  assert.equal(Array.from(settings.SETTINGS_PAGES, ([id]) => id).sort().join(' '), Object.keys(PAGE_COMPONENTS).sort().join(' '),
+    'the test names every page the list has, so a page added without a branch fails here')
+  for (const [page] of settings.SETTINGS_PAGES) {
+    const components = walk(draw(page), node => typeof node.type === 'function')
+    assert.equal(components.length, 1, `${page} draws one Settings component`)
+    assert.equal(components[0].type.name, PAGE_COMPONENTS[page], `${page} draws ${PAGE_COMPONENTS[page]}`)
+  }
+})
+
+test('the usage card opens UsagePage focused on the Bot it names', () => {
+  const release = card.setSettingsPages({ PAGE_ICONS: settings.PAGE_ICONS, PageBoundary: settings.PageBoundary, SettingsPage: settings.SettingsPage })
+  try {
+    states = [true, '']
+    const target = card.settingsTarget({ page: 'usage', bot: 'Writer' }, roster)
+    assert.equal(target.id, 'owner:b2', 'the usage route names the Bot as its owner')
+    const tree = card.SettingsCard({ target, roster, actions: { openSettings() {} } })
+    const [page] = walk(tree, node => node.type === settings.SettingsPage)
+    assert.equal(page.props.shown, 'usage')
+    const [usage] = walk(settings.SettingsPage(page.props), node => typeof node.type === 'function' && node.type.name === 'UsagePage')
+    assert.ok(usage, 'the card body is UsagePage, not the empty Fragment')
+    assert.equal(usage.props.focusId, 'owner:b2')
   } finally {
     release()
   }

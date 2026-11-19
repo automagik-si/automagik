@@ -416,6 +416,10 @@ export function SettingsPage({ shown, id, bot, room, pluginPage, roster, actions
     shown === 'browser' ? h(BrowserPage, { roster, actions, run, Section: SetSection, Row: SetRow }) : null,
     shown === 'computer' ? h(ComputerPage, { roster, actions, run, Section: SetSection, Row: SetRow, Switch }) : null,
     shown === 'schedules' ? h(SchedulesPage, { roster, actions, start: id ?? undefined }) : null,
+    // The dialog keeps Usage mounted across its own levels (it is drawn beside this page), but
+    // the chat card has no dialog around it, so the page goes through here too. Its route id
+    // is `owner:<key>` or `model:<key>`, as the dialog's is.
+    shown === 'usage' ? h(UsagePage, { roster, actions, focusId: id ?? undefined }) : null,
     shown === 'secrets' ? h(SecretsPage, { roster, actions, run, Section: SetSection }) : null,
     shown === 'agent-access' ? h(AgentAccessPage, { roster, actions, run, Section: SetSection }) : null,
     shown === 'privacy' ? h(PrivacyPage, { actions, run, Section: SetSection, Row: SetRow }) : null,

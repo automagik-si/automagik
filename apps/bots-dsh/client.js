@@ -17966,7 +17966,7 @@ function settingsTarget({ page, bot: botRef, group: groupRef }, roster, plugins 
   const bot = page === "bots" ? findBot(roster, botRef) : void 0;
   const room2 = page === "groups" ? findRoom(roster, groupRef) : void 0;
   const focusBot = page === "schedules" || page === "usage" ? findBot(roster, botRef) : void 0;
-  const id = bot?.id ?? room2?.id ?? (focusBot ? page === "usage" ? `bot:${focusBot.id}` : focusBot.id : null);
+  const id = bot?.id ?? room2?.id ?? (focusBot ? page === "usage" ? `owner:${focusBot.id}` : focusBot.id : null);
   const label = pluginPage ? pluginPage.label : page === "hermes-remote" ? t("Remote Hermes") : own ? t(own[1]) : String(page ?? "");
   const title = bot?.name ?? room2?.name ?? (focusBot ? `${label} · ${focusBot.name}` : label);
   return { known: known2, page, id, bot, room: room2, pluginPage, label, title };
@@ -33151,6 +33151,10 @@ function SettingsPage({ shown: shown2, id, bot, room: room2, pluginPage, roster,
     shown2 === "browser" ? (0, import_react88.createElement)(BrowserPage, { roster, actions, run: run3, Section: SetSection, Row: SetRow }) : null,
     shown2 === "computer" ? (0, import_react88.createElement)(ComputerPage, { roster, actions, run: run3, Section: SetSection, Row: SetRow, Switch }) : null,
     shown2 === "schedules" ? (0, import_react88.createElement)(SchedulesPage, { roster, actions, start: id ?? void 0 }) : null,
+    // The dialog keeps Usage mounted across its own levels (it is drawn beside this page), but
+    // the chat card has no dialog around it, so the page goes through here too. Its route id
+    // is `owner:<key>` or `model:<key>`, as the dialog's is.
+    shown2 === "usage" ? (0, import_react88.createElement)(UsagePage, { roster, actions, focusId: id ?? void 0 }) : null,
     shown2 === "secrets" ? (0, import_react88.createElement)(SecretsPage, { roster, actions, run: run3, Section: SetSection }) : null,
     shown2 === "agent-access" ? (0, import_react88.createElement)(AgentAccessPage, { roster, actions, run: run3, Section: SetSection }) : null,
     shown2 === "privacy" ? (0, import_react88.createElement)(PrivacyPage, { actions, run: run3, Section: SetSection, Row: SetRow }) : null,
