@@ -1313,12 +1313,24 @@ test("Claude logins (#453 review M2): a check that never answers lands as didn't
   // that never handled the reload into a named failure instead of a hang. A panel that starts
   // the round anyway is named by the asks assertion. The wait ends on either outcome so a
   // broken panel fails on that assertion, not on the queue marker's 10 s net.
-  await bounded(new Promise((resolve) => {
-    const seen = () => (view.probeAgain || asks() > 2 ? resolve() : setImmediate(seen));
-    seen();
-  }), "the reloads asked for while a round runs to reach its queue", {
-    where: 'herdr/test/am-quota-panel.test.mjs, the "held round" row',
-  });
+  //
+  // One immediate at a time, cleared in `finally`: when bounded() gives up, the poll stops with
+  // it. A poll that kept scheduling would keep the event loop alive, so the row would report its
+  // failure and the file would still not exit.
+  let pollHandle;
+  try {
+    await bounded(new Promise((resolve) => {
+      const seen = () => {
+        if (view.probeAgain || asks() > 2) return resolve();
+        pollHandle = setImmediate(seen);
+      };
+      seen();
+    }), "the reloads asked for while a round runs to reach its queue", {
+      where: 'herdr/test/am-quota-panel.test.mjs, the "held round" row',
+    });
+  } finally {
+    clearImmediate(pollHandle);
+  }
   assert.equal(asks(), 2, "no round beside the one running");
   assert.equal(view.probeAgain, true, "the reload is queued behind the held round");
   assert.equal(view.probing, true, "the held round is still the one running");
