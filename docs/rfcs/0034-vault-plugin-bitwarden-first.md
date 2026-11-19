@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Queued |
+| Status | Accepted (2026-11-19, approved by the owner's delegate) |
 | Milestone | none (ships outside the five milestones) |
 | Lanes | plugin (3.N.P), desktop (3.N) |
 | Created | 2026-11-19 |
@@ -14,8 +14,8 @@ Propose an optional Vault plugin, `@automagik/vault-dsh`, that makes a password 
 **source** for a Bot's secret instead of another place the value is copied to. A Bot still asks
 `request_secret` by name and uses `$DSH_SECRET_<NAME>`; the value is read from the vault when an
 approved command needs it and is not saved by Automagik. Bitwarden's `bw` is first, read-only,
-and the Bot team keeps every authorization decision. The owner has not read this proposal; the
-numbered questions below decide it. The issue calls it RFC 0033, but 0033 is
+and the Bot team keeps every authorization decision. The owner's delegate approved it on 2026-11-19
+and answered every numbered question below as recommended. The issue calls it RFC 0033, but 0033 is
 [Attachments from Pocket](0033-attachments-from-pocket.md), so this is 0034.
 
 The contract is stated as rules with numbers, not as intentions: a read's gate is a `bw sync`
@@ -61,9 +61,9 @@ replace DSH's `ctx.credentials`, the profile's model-key store (`apps/welcome-ds
 
 ### The decision, and the options
 
-The decision is whether a password manager becomes a secret source, and under which boundary and
-first manager. The recommendation is (b) below: an optional plugin, Bitwarden `bw` first,
-read-only, with `bots-dsh` keeping authorization.
+The decision was whether a password manager becomes a secret source, and under which boundary and
+first manager. The owner's delegate chose (b) below on 2026-11-19, as recommended: an optional
+plugin, Bitwarden `bw` first, read-only, with `bots-dsh` keeping authorization.
 
 | Decision | Options and trade-offs | Recommended |
 |---|---|---|
@@ -344,7 +344,7 @@ this rule. `vault-sources.json` is an object keyed by name. The rule:
 ### Lock, cache and quit
 
 The value cache is zero by default. The vault locks after an idle time the person sets, default
-5–15 minutes and at most 8 hours, and when the app quits or the plugin is turned off. On lock the
+5 minutes (Q4) and at most 8 hours, and when the app quits or the plugin is turned off. On lock the
 plugin drops the session key and runs `bw lock`. The next use says the vault is locked; only the
 person unlocks. Unlock credentials are typed into the host's Settings, never into a Bot's chat,
 and never travel over a plain-HTTP page off loopback.
@@ -434,11 +434,11 @@ read it while a child runs.
   scoped to a Session.
 - **`request_secret`, changed additively:** it gains the optional `command` and `shell` arguments
   above, both required for a vault-backed name and both ignored for a typed one. Two optional
-  strings; no new tool, no rename, no other argument, note or return value changed. The owner is
-  asked to approve this Bot-facing change in Q11; delivery 2 carries it.
+  strings; no new tool, no rename, no other argument, note or return value changed. The owner's
+  delegate approved this Bot-facing change in Q11 (2026-11-19); delivery 2 carries it.
 - **`secret-allow`, changed additively:** the existing handler (`secrets.js:904-907`) gains the
   vault branch that issues the one-execution grant and writes the audit row; it adds no value and
-  no scope. It is not a new endpoint and the Bot cannot call it. The owner is asked in Q11.
+  no scope. It is not a new endpoint and the Bot cannot call it. Approved in Q11 (2026-11-19).
 - The secret-request row gains `command`, `commandDigest`, `shell` and `workdir`, and never gains
   the provider, item, field or connection. The command is the Bot's own tool-call argument and the
   shell is its new argument, both already in the session transcript; the folder is the Session's.
@@ -591,42 +591,65 @@ Vault writes are not a delivery. They need an owner rule and a later RFC.
 
 ## Open questions
 
+None left. The owner's delegate approved this RFC on 2026-11-19 and answered every question as the
+RFC recommends; Q4 recommends a range, so its default is the range's conservative end. The questions
+stay below as written, as the record, each followed by its answer.
+
 1. **Transport for the first cut.** Wrap the installed `bw` CLI, or speak the Vault Management
    API? **Recommend the CLI**, because it reaches Bitwarden cloud, self-hosted and Vaultwarden
    through the person's existing login, and the API is not a stable personal-vault contract. Add
    `bws` as the least-privilege route in delivery 4. `bw serve` is rejected for the listener.
+   *Answered (2026-11-19):* the installed `bw` CLI; `bws` comes in delivery 4; `bw serve` stays
+   rejected.
 2. **First use: shell or MCP?** **Recommend the shell command first**, because most Bot work runs
    there and the grant can name the exact command and shell. The MCP destination route is safer
    but needs the mount rework in delivery 5. If the owner answers against Q11, this answer
    changes with it: without a command and shell on the approval, the shell first cut has nothing
    to bind.
+   *Answered (2026-11-19):* the shell command first; MCP destinations come with delivery 5. Q11 is
+   yes, so the shell grant has its command and shell to bind.
 3. **Default approval: once, session or standing?** The first cut ships **allow once only**, for
    the named command, shell and folder, 10 minutes, one execution. Should a timed or standing
    grant be added later? **Recommend not before it has a contract**: a standing grant needs a
    record (bot, name, command digest, shell and folder, issuedAt, ttl ≤ 24 h), a revoke in
    Settings, an audit row on issue, use and revoke, and a delivery of its own. Until then, allow
    once is the only grant.
+   *Answered (2026-11-19):* allow once only: the named command, shell and folder, 10 minutes, one
+   execution. No timed or standing grant before it has the contract described here.
 4. **Idle lock time.** **Recommend 5–15 minutes by default**, person-set, with an 8-hour maximum.
    A longer lock weakens revocation; a much shorter one makes a Bot fail often.
+   *Answered (2026-11-19):* 5 minutes by default, the conservative end of the recommended range:
+   person-set, at most 8 hours.
 5. **Where the mapping lives.** **Recommend the separate 0600 `vault-sources.json`**, not a
    `source` field in `secrets.json`. It satisfies #1271's rule that the reference never appears in
    `secrets.json`, and an older `bots-dsh` cannot drop it into a value store.
+   *Answered (2026-11-19):* the separate 0600 `vault-sources.json`.
 6. **A machine without the vault, and an offline vault.** **Recommend unavailable with a reason**,
    never a typed fallback and never a queued read. A successful `bw sync` is the gate; a non-auth
    sync failure is tolerated only within 300 seconds of the last successful sync, and an auth
    failure always refuses and locks. Confirm the 300-second bound.
+   *Answered (2026-11-19):* unavailable with a reason, never a typed fallback or a queued read. A
+   successful `bw sync` is the gate; a non-auth sync failure is tolerated only within 300 seconds of
+   the last successful sync (the bound is confirmed), and an auth failure always refuses and locks.
 7. **Typed secrets and every shell.** Should typed secrets also reach only the command that names
    them? **Recommend yes, later and behind a per-team switch first**, because it changes existing
    teams' behavior and needs its own rollback.
+   *Answered (2026-11-19):* yes, later, behind a per-team switch first. Typed secrets keep today's
+   behavior until then.
 8. **Vault writes.** **Recommend never in this RFC.** Writes need an owner rule, their own audit
    and a separate RFC.
+   *Answered (2026-11-19):* never in this RFC.
 9. **#384, the machine's `gh` login.** **Recommend keeping it separate.** It is ambient
    credentials with no item and no vault approval; the same seam can serve it later.
+   *Answered (2026-11-19):* kept separate. #384 was closed with that decision on 2026-11-19.
 10. **Cloud and remote routes.** **Recommend `bws` service accounts only in Cloud**, and approve
     but never unlock from Pocket or remote. A person's personal vault never opens in Cloud. The
     `bws` access token has no store in the first cut; it needs the Cloud profile's secure storage
     with its own rotation and revocation, so **recommend Cloud waits** for that and stays out of
     the first cut.
+    *Answered (2026-11-19):* Cloud waits and stays out of the first cut. When it comes, only `bws`
+    service accounts, after the Cloud profile's secure storage exists; Pocket and remote routes
+    approve and never unlock.
 11. **May `request_secret` gain `command` and `shell`, and may `secret-allow` issue a vault
     grant?** **Recommend yes.** `command` and `shell` are the only way the card can name the
     command and shell the Bot will actually use: two optional strings, both required for a
@@ -639,10 +662,13 @@ Vault writes are not a delivery. They need an owner rule and a later RFC.
     changes are additive, so an older host and every typed caller keep working. If the owner
     declines, delivery 2 and 3 cannot ship a vault grant, and the design returns with no approval
     path.
+    *Answered (2026-11-19):* yes: the two optional strings on `request_secret` and the vault branch
+    of `secret-allow`.
 12. **More than one vault connection?** **Recommend one in the first cut.** A second account or
     server needs its own `bw` data directory and session, and the plugin's one-connection refusal
     is honest until that exists; a later delivery adds per-connection directories and a picker.
     Answering yes now moves the mapping file and delivery 3's acceptance.
+    *Answered (2026-11-19):* one connection in the first cut.
 
 Three rules are contracts, not questions, because there is no safe alternative to write: a name
 in both stores is unavailable from both (no precedence, no fallback); `bots-dsh` reads
@@ -650,8 +676,8 @@ in both stores is unavailable from both (no precedence, no fallback); `bots-dsh`
 key is limited by the same-user boundary (there is no "never seen" claim). An owner answer against
 any of them would reopen the boundary, not tune it.
 
-Q2 and Q5 restate what the design already fixes; an answer against them moves delivery 3's
-acceptance and the Contracts above, so the owner should say so before delivery 3 is filed.
+Q2 and Q5 restate what the design already fixes. Both were answered as recommended, so delivery 3's
+acceptance and the Contracts above stand as written.
 
 ## Links
 
