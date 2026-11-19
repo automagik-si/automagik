@@ -41,7 +41,8 @@ automations:
   # bot; the bot is named by its id, never by a terminal address.
   # `bot:` pastes the prompt into the bot's own terminal (starting it first when
   # it is not running); `worker:` starts a worker of it for the run and ends it
-  # when the run does.
+  # once its turn finishes. A worker still mid-turn at the timeout is refused by
+  # the checked end and stays, logged (ADR 0014).
   #
   # - name: housekeeping
   #   cron: "0 9 * * *"

@@ -3,7 +3,7 @@ import { call } from './api.js'
 import { OmniMark, installFavicon } from './logo.js'
 import * as icons from './icons.js'
 import { setCanvasRenderer } from './canvas-slot.js'
-import { badges, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons, mountShellInstallers, nav, onShell, registerComposerPack, sidebarTools, toolCards } from './extend.js'
+import { badges, botChannels, botChildren, botSettings, chatSuggestions, composerPacks, headerButtons, mountShellInstallers, nav, onShell, registerComposerPack, sidebarTools, toolCards } from './extend.js'
 import { BUILTIN_PACKS, packCellSync, stepsAside } from './composer-packs.js'
 import { COMPOSER_PACK_CSS, packModelCell } from './composer-pack-cells.js'
 import { agentRowSessions, TASK_CSS } from './task-card.js'
@@ -110,7 +110,7 @@ export const omni = Object.freeze({
   // Copy in this plugin's namespace; addStrings brings a plugin's Chinese copy.
   t, addStrings, hostText, language, dateLocale,
   // The Bot surface: what runs while it is up, and what draws in its places.
-  onShell, toolCards, nav, badges, botChildren, headerButtons, sidebarTools, botSettings, chatSuggestions, registerComposerPack, setCanvasRenderer,
+  onShell, toolCards, nav, badges, botChildren, botChannels, headerButtons, sidebarTools, botSettings, chatSuggestions, registerComposerPack, setCanvasRenderer,
   // Parts of the Bot surface a plugin's own views are drawn with.
   ui: Object.freeze({ icons, OmniMark, BotMark, MAIN_LOOK, CHARACTERS, relativeShort, createSource }),
   // The shared gen-UI kit (#1326): live rows and the person card, drawn inside a plugin's

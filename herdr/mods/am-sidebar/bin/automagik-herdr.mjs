@@ -31,7 +31,7 @@ import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, co
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -44,9 +44,9 @@ import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, 
   workLeft, writesWorktree } from "../workers.js";
 import { SESSION_MASK, carriedLabels, maskSession, commandArgv, continueRefusal, contextTokensOf, doomedHelpers, helperArgs, helperCwd, helperPlan, launchChange, ledgerSession, maskedArgv,
   isPaneIdle, pendingDialog, paneCommand, planText as restartText, restartAnswer, restartPlan, sharedFresh, claudeSlug, claudeTranscriptPath, paneSession, restartRefusal, sameSessions, sessionFor, sessionId, sharedFolders } from "../restart.js";
-import { BORN_SLACK_MS, FIRST_SESSION_MS, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
-  countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, ledgerRivals,
-  lastText, pickSession, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
+import { BORN_SLACK_MS, FIRST_SESSION_MS, PLIST_LABEL, SERVICE_WAIT_S, UNIT_NAME, agyCandidates, agyHistoryPath, codexCandidate, codexHomeOf, codexRolloutId, codexSessionsDir,
+  countsLine, discoversSession, dshHomeOf, dshSessionOf, dshSessionsDir, isBareShell, kimiCandidates, kimiHomeOf, kimiIndexPath, launchdNotLoaded, ledgerRivals,
+  lastText, pickSession, plistIsOurs, plistKeepsPath, plistPath, plistText, reportLine, reviveOrder, reviveTargets, sameBoot, servicePath, sweptSince, unitIsOurs, unitKeepsPath, unitPath, unitText, uuidV7Ms } from "../revive.js";
 import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, installUpdate, liveHome, managedPack, readMarker, relinkCli, rollback as rollbackPack, stateDirOf, writeAuto, writeMarker } from "../update.mjs";
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
@@ -226,6 +226,8 @@ async function runStartedByName(name) {
  * failed start; a timeout with no live terminal under `name`, or any other failure, throws.
  */
 async function hcStartRun(run, args, name) {
+  const guardWhy = launchGuardProblem(args, name);
+  if (guardWhy) throw new CliError(guardWhy);
   const r = await run(args, { timeout: HC_RUN_TIMEOUT_MS });
   let late = null;
   if (r.killed) {
@@ -386,6 +388,89 @@ function launchPath(program, cwd = null) {
   if (dir && !dirs.includes(dir)) dirs.push(dir);
   for (const d of ["/usr/bin", "/bin"]) if (!dirs.includes(d)) dirs.push(d);
   return { path: dirs.join(":"), note: runPath.note };
+}
+
+/**
+ * Why a launch's PATH word does not resolve `hc` to the pack's guard shim, or null.
+ *
+ * The pack puts one of its guard folders (the mod's `guard` or `hc-kill`, or the dsh-tui
+ * sandbox's stable copy) at the front of a guarded pane's PATH. The launch is guarded exactly
+ * when one of those known folders is on this PATH at all: every guarded launch puts one there
+ * (guardPathWith), so a PATH with none is an unguarded launch (an agentless helper, a template
+ * that owns its env) and is left as it was. A folder's name is never the signal: an ordinary
+ * folder named first is as suspect as one named `guard`.
+ *
+ * On a guarded PATH this resolves the first executable `hc` the shell would run and requires
+ * it to realpath to the known guard's own shim. A different first `hc` (a login startup or a
+ * PATH entry ahead of the guard), a guard with no executable shim, a PATH whose first hc can't
+ * be resolved (a relative or empty entry ahead of the guard), and a PATH with no `hc` at all
+ * refuse the launch instead of starting the agent with its kill guard shadowed (#1133).
+ *
+ * A linked machine's `--on` start is checked on that machine, so it is left there. Only an hc
+ * option before the command's `--` counts: an agent argument or a task word equal to `--on`
+ * after it is the command's, never hc's. A launch with no PATH word is unchanged.
+ */
+export function launchGuardProblem(args, who = null) {
+  const list = Array.isArray(args) ? args.map(String) : [];
+  const commandAt = list.indexOf("--");
+  const options = commandAt < 0 ? list : list.slice(0, commandAt);
+  if (options.some((w) => w === "--on" || w.startsWith("--on="))) return null;
+  const body = commandAt < 0 ? list : list.slice(commandAt + 1);
+  const word = body.find((w) => w.startsWith("PATH="));
+  if (!word) return null;
+  const dirs = word.slice("PATH=".length).split(":");
+  const bare = (p) => String(p).replace(/\/+$/, "") || "/";
+  // The folders this copy can call its own: the mod's guard and kill shim, plus the dsh-tui
+  // sandbox's stable copies when this host has a data root. Matched by the path as written and,
+  // when both exist, by realpath (a symlinked copy of the guard counts; a deleted guard still
+  // counts by its written path, so its missing shim is refused rather than read as no guard).
+  const known = [];
+  const addKnown = (dir) => { if (dir) known.push({ dir: bare(dir), real: realDir(dir) }); };
+  addKnown(GUARD_DIR);
+  addKnown(KILL_GUARD_DIR);
+  try { const root = stableRootOf(); addKnown(stableGuardDir(root)); addKnown(stableKillDir(root)); }
+  catch { /* no HOME/XDG_DATA_HOME: this copy has no stable guard */ }
+  const knownGuard = (dir) => {
+    if (!dir) return null;
+    const real = realDir(dir);
+    return known.find((g) => g.dir === bare(dir) || (real !== null && g.real === real)) ?? null;
+  };
+  const guard = dirs.find((d) => knownGuard(d) !== null);
+  if (guard === undefined) return null; // no known guard anywhere on this PATH: not a guarded launch
+  const shim = join(guard, "hc");
+  let shimReal = null;
+  try {
+    if (statSync(shim).isFile()) { accessSync(shim, constants.X_OK); shimReal = realpathSync(shim); }
+  } catch { shimReal = null; }
+  if (!shimReal) {
+    return `the pack's hc kill shim is missing or not executable at ${shim}; refusing to start ${who ?? "the agent"} without its kill guard (#1133). `
+      + "Reinstall the pack, and for the dsh-tui sandbox's stable copy run `am dsh-tui install`.";
+  }
+  // The first hc the shell would run, resolved independently of the guard's position: a relative
+  // or empty entry ahead of it can't be resolved here, so the first hc can't be proved and the
+  // launch is refused rather than trusted.
+  let first = null;
+  for (const dir of dirs) {
+    if (!isAbsolute(dir)) {
+      return `the launch PATH names ${dir ? `the relative folder ${dir}` : "an empty entry"} before the pack's hc kill shim at ${shim}, `
+        + `so the first hc cannot be resolved; refusing to start ${who ?? "the agent"} with an unproved kill guard (#1133). `
+        + `Put ${guard} first on PATH, then try again.`;
+    }
+    const file = join(dir, "hc");
+    try {
+      if (statSync(file).isFile() && (accessSync(file, constants.X_OK), true)) { first = realpathSync(file); break; }
+    } catch { /* the next word */ }
+  }
+  if (first === null) {
+    return `no hc is on the launch PATH, though its guard folder ${guard} is; expected the pack's hc kill shim at ${shim}; `
+      + `refusing to start ${who ?? "the agent"} with no kill guard (#1133). Reinstall the pack, then try again.`;
+  }
+  if (first !== shimReal) {
+    return `the first hc on the launch PATH resolves to ${first}, not the pack's hc kill shim at ${shim}; `
+      + `refusing to start ${who ?? "the agent"} with its kill guard shadowed (#1133). `
+      + `A shell startup or a PATH entry ahead of ${guard} is shadowing it: remove that hc, or put ${guard} first on PATH, then try again.`;
+  }
+  return null;
 }
 
 // ---- the definitions file ----
@@ -1251,6 +1336,17 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
     ? shownCodexSetting({ argv: observedArgv, pinned: bot.tier, key: "service_tier", map: tierName, fallback: project.machine ? null : "standard",
       levels: [["profile", profile?.tier], ["global", global?.tier]] })
     : { value: null, source: null };
+  // #1413 F1: the Claude Code permission mode this bot runs now, read from its live pane's
+  // command line; only when it isn't running does the record say what its next start runs. A
+  // live pane whose command line names none has no effective mode to report: the record's mode
+  // is not this process's, so claiming it (source "roster") would lie about what runs.
+  const permissionModes = permissionModesOf(agentKey);
+  const paneArgv = Array.isArray(live?.foreground?.argv) ? live.foreground.argv : null;
+  const detectedPermission = paneArgv && permissionModes ? permissionModeFrom(paneArgv) : null;
+  const shownPermission = !permissionModes ? { value: null, source: null }
+    : paneArgv ? (detectedPermission ? { value: detectedPermission, source: "detected" } : { value: null, source: "live" })
+      : bot.permissionMode ? { value: bot.permissionMode, source: "roster" }
+        : { value: PERMISSION_MODE_DEFAULT, source: "default" };
   // The workers' Antigravity mode is shown as the default (auto) when their agent is Antigravity.
   const worker = bot.worker && typeof bot.worker === "object" ? { ...bot.worker } : null;
   if (worker && resolveAgent(worker.agent ?? bot.agent) === "antigravity") worker.agyMode = agyModeOf(worker.agyMode);
@@ -1270,6 +1366,14 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
   const workerTrusted = ["<worktree>"];
   const workerAgy = workerAgent === "antigravity"
     ? agyPermissionPlan({ bot, scope: "worker", role: workerRoleOf, folder: null, realpath: realDir, homeDir: home() }) : null;
+  // #1413 F1: the `auto mode` line is what the live pane runs too, never the mode a restart
+  // would apply; a live command line this pack reads no mode on says exactly that.
+  const auto = bot.agent ? autoModeOf(bot, !project.machine) : null;
+  const autoMode = auto && permissionModes && paneArgv
+    ? { ...auto, args: detectedPermission ? permissionModeArgs("claude", detectedPermission) : [],
+      note: detectedPermission ? PERMISSION_MODE_WHAT[detectedPermission]
+        : "this pack reads no --permission-mode on its live command line" }
+    : auto;
   const out = {
     id: bot.id, name: bot.name, kind: bot.kind, ...placeOf(project),
     lead: lead.lead || null, leadName,
@@ -1280,13 +1384,14 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
     model: shown.model, modelSource: shown.source, pinnedModel: bot.model ?? null,
     effort: shownEffort.value, effortSource: shownEffort.source, pinnedEffort: bot.effort ?? null,
     tier: shownTier.value, tierSource: shownTier.source, pinnedTier: bot.tier ?? null,
+    permissionMode: shownPermission.value, permissionModeSource: shownPermission.source, pinnedPermissionMode: bot.permissionMode ?? null,
     agyMode: bot.agent === "antigravity" ? agyModeOf(bot.agyMode) : (typeof bot.agyMode === "string" && bot.agyMode ? bot.agyMode : null),
     terminal: held?.binding.terminal ?? null, status, duplicate: false, since: held?.binding.at ?? null,
     role: bot.role, rank: bot.rank ?? null, code: bot.code !== false, look: bot.look,
     hcProxy: bot.hcProxy === true,
     restartAt: restartAtOf(bot), pinnedRestartAt: bot.restartAt ?? null,
     context_tokens: context && Number.isFinite(context.tokens) ? context.tokens : null,
-    autoMode: bot.agent ? autoModeOf(bot, !project.machine) : null,
+    autoMode,
     worker,
     ...(seatAgy ? { agyPermissions: { allow: seatAgy.allow, deny: seatAgy.deny, trustedWorkspaces: seatAgy.trustedWorkspaces } } : {}),
     ...(workerAgy ? { workerAgyPermissions: { allow: workerAgy.allow, deny: workerAgy.deny, trustedWorkspaces: workerTrusted } } : {}),
@@ -1517,7 +1622,7 @@ const OPTIONS = {
   character: { type: "string" }, colour: { type: "string" }, color: { type: "string" }, omni: { type: "boolean" },
   model: { type: "string" }, "no-model": { type: "boolean" }, rank: { type: "string" }, "hc-proxy": { type: "string" },
   "restart-at": { type: "string" }, "no-restart-at": { type: "boolean" }, due: { type: "boolean" },
-  "person-features": { type: "string" },
+  "person-features": { type: "string" }, "permission-mode": { type: "string" },
   "agy-mode": { type: "string" }, "worker-agy-mode": { type: "string" },
   "hermes-home": { type: "string" }, "hermes-profile": { type: "string" }, "no-hermes": { type: "boolean" },
   "agy-allow": { type: "string", multiple: true }, "agy-deny": { type: "string", multiple: true },
@@ -1562,6 +1667,9 @@ Usage: am <command> [options]                   (every command takes --json and 
          [--code true|false]            false omits the worker instruction; default true
          [--person-features on|off]     Claude Code only: keep the prompt suggestions, away
                                        summaries and subagent progress summaries; default off
+         [--permission-mode MODE]       Claude Code only: the bot's own --permission-mode
+                                       (acceptEdits, auto, bypassPermissions, manual, dontAsk,
+                                       plan); default auto, empty on edit clears it
          [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
          [--cross-member BOT@DIR]...   reciprocal cross-project member(s) reporting to this lead
          [--character C --colour K | --omni] [--model M] [--rank R]
@@ -1585,7 +1693,7 @@ Usage: am <command> [options]                   (every command takes --json and 
              [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
              [--restart-at N | --no-restart-at]   a context threshold in tokens (#1556):
                                        a main bot defaults to 250000, a member has none
-             [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
+             [--permission-mode=] [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
              [--agy-mode=auto] [--worker-agy-mode=auto]   (empty: cleared; auto is the default)
              [--person-features on|off]   (Claude Code only; default off)
              [--agy-allow=] [--agy-deny=] [--no-agy-permissions] [--cross-member=]   (empty: cleared)
@@ -1596,6 +1704,11 @@ Usage: am <command> [options]                   (every command takes --json and 
   that names no --tier runs the new model on standard, said explicitly on the launch line, so
   a Fast a profile, a template or the host config still names never applies to it. am show
   --json reports the effective values and their source.
+  Permission mode (Claude Code): --permission-mode MODE stores one of Claude Code's own
+  --permission-mode names (acceptEdits, auto, bypassPermissions, manual, dontAsk, plan); every
+  start, restart and revive passes it, independent of the model, effort and tier, and a value
+  Claude Code doesn't accept is refused. --permission-mode= clears it back to the pack's auto
+  mode. Another agent has no per-bot permission mode: a value for one is refused, never dropped.
   main <bot> [--old-lead <bot>] [--dry-run]
                                 hand over the main role and list the members that follow it
                                 --old-lead sets the previous main's lead. --dry-run previews the hand-over.
@@ -1627,7 +1740,9 @@ Usage: am <command> [options]                   (every command takes --json and 
   revive service install | uninstall | status
                                 the login service that runs revive --boot (Linux: a systemd
                                 user unit, written and enabled, never started on the spot;
-                                macOS comes next, #939). install.sh asks before it installs it.
+                                macOS: a launchd agent in your own ~/Library/LaunchAgents,
+                                written and left for launchd to load at your next login).
+                                install.sh asks before it installs it.
   restart --queued [--project DIR] [--json]   List queued restarts.
   restart --cancel <bot> [--project DIR] [--json]   Cancel a queued restart.
   restart --due [--all] [--dry-run] [--json]   Restart from a handoff the seats whose Claude Code
@@ -2006,9 +2121,12 @@ function autoModeOf(bot, local = true) {
   const key = resolveAgent(bot.agent ?? "", agentTable());
   if (!key) return null;
   const args = autoModeArgs(key, bot, agentTable()[key]?.run ?? []);
+  // #1413: a Claude bot's own permission mode says what its launch does instead of auto's note.
+  const chosen = key === "claude" && permissionModesOf(key)?.includes(bot.permissionMode) ? bot.permissionMode : null;
   // Codex's launch mode has no opt-out (#1125): a source's own approval words are left out.
-  const note = args.length ? AUTO_MODE[key].what
-    : AUTO_MODE[key] ? "its own run words already pick its approvals" : (AUTO_MODE_NONE[key] ?? "none this pack knows");
+  const note = chosen ? PERMISSION_MODE_WHAT[chosen]
+    : args.length ? AUTO_MODE[key].what
+      : AUTO_MODE[key] ? "its own run words already pick its approvals" : (AUTO_MODE_NONE[key] ?? "none this pack knows");
   return { args, note, ...(key === "antigravity" && local ? { sandbox: hostAgySandbox() } : {}) };
 }
 
@@ -2158,6 +2276,23 @@ export function entryFrom(opts, base, project, { creating, listOf = null }) {
     // after the template's and the profile's own words and neither can keep Fast on it.
     entry.tier = "standard";
     if (storedTier) report([`${entry.name}: its service tier doesn't carry over to a new model; it runs standard unless --tier fast is passed with --model.`]);
+  }
+  // #1413: a bot's own Claude Code permission mode (--permission-mode), passed on every launch
+  // path and independent of the model, effort and tier. Empty clears it. A value Claude Code
+  // doesn't accept, or one on another agent, is refused with the reason and nothing is saved;
+  // an agent change that leaves a stale stored one clears it and says so.
+  const claudeBot = entry.agent ? resolveAgent(entry.agent, agentTable()) === "claude" : false;
+  if (opts["permission-mode"] !== undefined && opts["permission-mode"] !== "") {
+    const why = permissionModeProblem(entry.agent ? resolveAgent(entry.agent, agentTable()) : null, opts["permission-mode"]);
+    if (why) throw new CliError(`--permission-mode: ${why} (or --permission-mode= to clear).`, 2);
+    entry.permissionMode = opts["permission-mode"];
+  } else if (opts["permission-mode"] === "") {
+    entry.permissionMode = "";
+  }
+  const storedPermission = entry.permissionMode !== undefined && entry.permissionMode !== "";
+  if (storedPermission && !claudeBot) {
+    entry.permissionMode = "";
+    report([`${entry.name}: its permission mode was cleared, since it is Claude Code's and it runs ${entry.agent || "no agent"}.`]);
   }
   // Antigravity's execution mode: applied at launch (auto unless another is stored), so the
   // default is written as no field at all and auto clears a stored one.
@@ -2403,6 +2538,21 @@ async function projectFor(opts) {
   if (opts.machine !== undefined) return loadRemoteProject(await remoteKeyOf(opts), opts.machine);
   return loadProject(await commandKeyOf(opts));
 }
+
+// #1413 F3: a warning the loader raised about a bot's record (a hand-edited permission mode it
+// dropped, say) is said on every command that reads the record, not only `am ls` and `am worker`.
+// Warn, never refuse: the rest of the record is valid and the launch runs the field's default, so
+// refusing would keep an operator from starting the bot they must fix. The sentence is the
+// loader's own, once per command; `botId` narrows it to the bot a command is about.
+const saidWarnings = new Set();
+function warnProject(project, botId = null) {
+  for (const w of project?.warnings ?? []) {
+    if (botId && !w.startsWith(`${botId}: `)) continue;
+    if (saidWarnings.has(w)) continue;
+    saidWarnings.add(w);
+    report([w]);
+  }
+}
 /**
  * Where this command's edit is written (RFC 0014 Q16, #234): the git top level of the folder
  * it was run in or named with --project (a worktree's own folder), else the project key (a
@@ -2609,6 +2759,7 @@ async function checkLinkedProxy(project, bot, agent, warn = reportProxyWarning) 
 async function cmdShow(opts, [ref]) {
   const project = await projectFor(opts);
   const bot = await botIn(project, ref, opts);
+  warnProject(project, bot.id);
   const { view, hcError } = project.machine ? {} : await viewOrError();
   const live = !project.machine && !bot.planned && view ? liveFor(view, bot.id, project)?.get ?? null : null;
   const held = project.machine ? null : await readHeld(project, bot, view, { refuseTwins: true });
@@ -2634,6 +2785,11 @@ async function cmdShow(opts, [ref]) {
       `  effort       ${info.effort ? `${info.effort} (${info.effortSource})` : "-"}`,
       `  tier         ${info.tier ? `${info.tier} (${info.tierSource})` : "-"}`,
     ] : []),
+    ...(info.permissionMode ? [`  permission   ${info.permissionMode} (${info.permissionModeSource})`]
+      : info.permissionModeSource === "live"
+        ? [`  permission   not named by its live command line (${info.pinnedPermissionMode
+          ? `its record's ${info.pinnedPermissionMode} applies to its next start` : "the pack's auto mode applies to its next start"})`]
+        : []),
     ...(info.agyMode ? [`  agy mode     ${info.agyMode}`] : []),
     ...(info.autoMode ? [`  auto mode    ${info.autoMode.args.length ? `${info.autoMode.args.join(" ")} (${info.autoMode.note})` : `none: ${info.autoMode.note}`}`] : []),
     ...(info.autoMode?.sandbox && info.autoMode.sandbox.state !== "available"
@@ -3199,6 +3355,7 @@ async function cmdStart(opts, [ref]) {
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
   const bot = await botIn(project, ref, opts);
+  warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
   // launch.js checks the folder Start launches in against the project (attachRefusal on
@@ -4981,7 +5138,10 @@ async function rerunHelpers(plans, parent, say) {
       try { writeAgySettingsFile(p.agySettings, { name: p.name ?? p.replaced }); }
       catch (e) { failed(e.message); continue; }
     }
-    const r = await hc(helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login }));
+    const helperRun = helperArgs({ name, cwd: p.cwd, labels: p.labels, parent, ...command, login });
+    const guardWhy = launchGuardProblem(helperRun, name ?? p.name);
+    if (guardWhy) { failed(guardWhy); continue; }
+    const r = await hc(helperRun);
     let address = null;
     try { address = JSON.parse(r.stdout).address ?? null; } catch { address = null; }
     if (r.code !== 0 || !address) { failed(`hc run failed (${(r.stderr || r.stdout).trim()})`); continue; }
@@ -6365,6 +6525,7 @@ async function cmdRestart(opts, [ref]) {
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
   const bot = await botIn(project, ref, opts);
+  warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
   // Before swap validation, preparation or a delegated tree transaction.
@@ -9007,7 +9168,7 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
     if (!projects.has(key)) {
       let loaded = null;
       try { loaded = key ? loadProject(key) : null; } catch { loaded = null; }
-      projects.set(key, { key, file: loaded?.text ? loaded.file : null, results: [] });
+      projects.set(key, { key, file: loaded?.text ? loaded.file : null, warnings: loaded?.warnings ?? [], results: [] });
     }
     return projects.get(key);
   };
@@ -9026,6 +9187,8 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
         : me && [t.terminal, states.get(t.terminal)?.get?.name].includes(me) ? "revive runs inside its pane; run it from another terminal" : null;
     return { ...t, name: nameOf(t), bot: t.bot, def: bot, refuse: why, via: parentTarget(t) };
   });
+  // #1413 F3: a record warning about a bot being brought back is said once, as start and restart do.
+  for (const p of plan) if (p.def) warnProject(projectOfKey(p.project), p.bot);
   // #1128: a bot whose recorded pane is gone may still run in another app home — a pane that
   // carries its label, or a live binding in the project's own home the label was lost from.
   // Never start a twin: that live binding is named and left alone.
@@ -9146,27 +9309,61 @@ function reviveLast(opts, verb) {
 
 /**
  * `revive service install|uninstall|status`: the login service that runs `revive --boot` after a
- * restart of this computer. Linux: a systemd user unit (revive.js unitText), written and
- * enabled, never started here (starting it would restart bots now). Only a unit this pack wrote
- * is replaced or removed. macOS (launchd) is the next delivery of #939.
+ * restart of this computer. Linux: a systemd user unit (revive.js unitText). macOS: a launchd
+ * agent in the person's own `~/Library/LaunchAgents` (revive.js plistText), never bootstrapped
+ * here (RunAtLoad would run the pass now and restart bots under the person's hands). Neither is
+ * ever started on the spot. Only a file this pack wrote is replaced or removed; any other
+ * system is refused, naming the systems that have one.
  */
 async function reviveService(opts, verb, more = []) {
   if (!["install", "uninstall", "status"].includes(verb) || more.length) throw new CliError(REVIVE_USAGE, 2);
+  const os = await serviceOs();
+  if (os === "Linux") return reviveSystemd(opts, verb);
+  if (os === "Darwin") return reviveLaunchd(opts, verb);
+  throw new CliError(`The revive login service is built for Linux (a systemd user unit) and macOS (a launchd agent), not for ${os}: `
+    + "nothing was written or removed. Run am revive by hand after a restart of this computer.");
+}
+
+/**
+ * Which login service this computer takes: `uname -s`, the same name install.sh reads. A test
+ * fakes `uname` on PATH, so both the installer and this command see one system.
+ */
+async function serviceOs() {
+  const r = await runProgram("uname", ["-s"], { timeout: 10_000 });
+  const name = r.code === 0 ? r.stdout.trim() : "";
+  if (name) return name;
+  return process.platform === "darwin" ? "Darwin" : process.platform === "linux" ? "Linux" : process.platform;
+}
+
+/** The command as people run it (the link install.sh makes, which an update keeps), else the wrapper beside this file. */
+function reviveRunner() {
+  const link = join(binDirOf(), "automagik-herdr");
+  return existsSync(link) ? link : join(dirname(fileURLToPath(import.meta.url)), "automagik-herdr");
+}
+
+/** The PATH a login service keeps (#1418): the caller's, without a pane's guard folders or a project's bins. */
+function reviveKeptPath() {
+  // A pane's guard folders (this copy's, am's, or an older version's) never become the boot pass's.
+  const guardWord = (dir) => isGuardFolder(dir) || looksLikeGuardFolder(dir);
+  return servicePath(process.env.PATH ?? "", { binDir: binDirOf(), venv: process.env.VIRTUAL_ENV ?? null, drop: guardWord });
+}
+
+/** The service's environment: the kept PATH, and the app home when it isn't the default. */
+const reviveServiceEnv = (keptPath) => ({ ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}), PATH: keptPath });
+
+/** `revive service ...` on Linux: the systemd user unit in ~/.config/systemd/user. */
+async function reviveSystemd(opts, verb) {
   const unit = unitPath(home());
   const text = readText(unit);
   const systemctl = (args) => runProgram("systemctl", ["--user", ...args], { timeout: 20_000 });
   const said = (r) => (r.stderr || r.stdout).trim().split("\n")[0] || `exit ${r.code}`;
   if (verb === "status") {
-    const enabled = process.platform === "linux" && text !== null ? (await systemctl(["is-enabled", UNIT_NAME])).code === 0 : false;
+    const enabled = text !== null ? (await systemctl(["is-enabled", UNIT_NAME])).code === 0 : false;
     const out = { path: unit, installed: text !== null, ours: unitIsOurs(text), enabled,
       ...(text !== null ? { path_kept: unitKeepsPath(text) } : {}) };
     return opts.json ? out : !out.installed ? `The revive login service isn't installed (${unit}).`
       : `${unit}: ${out.ours ? "Automagik Herdr's" : "not one Automagik Herdr wrote"}, ${enabled ? "enabled" : "not enabled"}.`
         + (out.ours && !out.path_kept ? " It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install." : "");
-  }
-  if (process.platform !== "linux") {
-    throw new CliError("The revive login service is built for Linux (a systemd user unit) so far; macOS (launchd) is the next delivery of #939. "
-      + "Until then, run am revive by hand after a restart of this computer.");
   }
   if (text !== null && !unitIsOurs(text)) throw new CliError(`${unit} is there and isn't one Automagik Herdr wrote, so it was left as it is.`);
   const notes = [];
@@ -9178,13 +9375,9 @@ async function reviveService(opts, verb, more = []) {
     await systemctl(["daemon-reload"]);
     return opts.json ? { path: unit, removed: true, notes } : [`Removed the revive login service (${unit}).`, ...notes].join("\n");
   }
-  // The command as people run it (the link install.sh makes, which an update keeps), else the wrapper beside this file.
-  const link = join(binDirOf(), "automagik-herdr");
-  const runner = existsSync(link) ? link : join(dirname(fileURLToPath(import.meta.url)), "automagik-herdr");
-  // A pane's guard folders (this copy's, am's, or an older version's) never become the boot pass's.
-  const guardWord = (dir) => isGuardFolder(dir) || looksLikeGuardFolder(dir);
-  const keptPath = servicePath(process.env.PATH ?? "", { binDir: binDirOf(), venv: process.env.VIRTUAL_ENV ?? null, drop: guardWord });
-  const unitBody = unitText({ runner, env: { ...(process.env.HERDR_APP_HOME ? { HERDR_APP_HOME: appHome() } : {}), PATH: keptPath }, wait: SERVICE_WAIT_S });
+  const runner = reviveRunner();
+  const keptPath = reviveKeptPath();
+  const unitBody = unitText({ runner, env: reviveServiceEnv(keptPath), wait: SERVICE_WAIT_S });
   mkdirSync(dirname(unit), { recursive: true });
   writeFileSync(unit, unitBody, { mode: 0o644 });
   const reload = await systemctl(["daemon-reload"]);
@@ -9194,6 +9387,87 @@ async function reviveService(opts, verb, more = []) {
   notes.push("The unit keeps this PATH to find the agents and hc; rerunning am revive service install refreshes it.");
   return opts.json ? { path: unit, installed: true, enabled: on.code === 0, runner, kept_path: keptPath, notes }
     : [`Installed the revive login service (${unit}): after a restart it runs ${runner} revive --boot.`, ...notes].join("\n");
+}
+
+/**
+ * `revive service ...` on macOS: a LaunchAgent in the person's own LaunchAgents (#939). Installing
+ * writes the plist only: launchd loads it at the next login, and a bootstrap here would run the
+ * pass now (RunAtLoad). Uninstalling asks launchd first, even when the plist is already gone, and
+ * reads only exit 113 or launchctl's exact "Could not find service" as not loaded: any other
+ * failure is a refusal that leaves the file and names the bootout command, so launchd never keeps
+ * a label whose plist is gone and a second run can still boot out one an earlier run left.
+ */
+async function reviveLaunchd(opts, verb) {
+  const plist = plistPath(home());
+  const text = readText(plist);
+  const domain = `gui/${process.getuid?.() ?? 0}`;
+  const launchctl = (args) => runProgram("launchctl", args, { timeout: 20_000 });
+  const said = (r) => (r.stderr || r.stdout).trim().split("\n")[0] || `exit ${r.code}`;
+  const present = text !== null;
+  const ours = plistIsOurs(text);
+  if (verb === "status") {
+    const enabled = present && ours;
+    const out = { path: plist, label: PLIST_LABEL, installed: present, ours, enabled,
+      ...(present ? { path_kept: plistKeepsPath(text) } : {}) };
+    return opts.json ? out : !present ? `The revive login service isn't installed (${plist}).`
+      : `${plist}: ${ours ? "Automagik Herdr's, runs at your next login" : "not one Automagik Herdr wrote"}.`
+        + (ours && !out.path_kept ? " It keeps no PATH, so after a restart it may start other agent programs than your terminal does: rerun am revive service install." : "");
+  }
+  if (present && !ours) throw new CliError(`${plist} is there and isn't one Automagik Herdr wrote, so it was left as it is.`);
+  const notes = [];
+  if (verb === "uninstall") {
+    // launchd is asked first, even when the plist is already gone: a run that removed the file
+    // while launchd still held the label leaves an orphan, and only launchd can say. Only exit
+    // 113 or launchctl's exact "Could not find service" means not loaded; any other failure is a
+    // refusal, because taking the plist away then could orphan a job launchd still holds.
+    const held = await launchctl(["print", `${domain}/${PLIST_LABEL}`]);
+    const notLoaded = launchdNotLoaded(held);
+    if (held.code === 127 && !held.killed) {
+      const state = present ? `and ${plist} was left in place (removing it now could orphan the job)`
+        : `and there is no plist at ${plist} (a label launchd still holds could not be checked)`;
+      throw new CliError(`launchctl isn't here, so whether launchd holds ${PLIST_LABEL} can't be read, ${state}. `
+        + `Run launchctl bootout ${domain}/${PLIST_LABEL}, then am revive service uninstall again.`);
+    }
+    if (held.code !== 0 && !notLoaded) {
+      const why = held.killed ? "it timed out" : `it failed (${said(held)})`;
+      const state = present ? `${plist} was left in place: removing it now could orphan the job`
+        : `no plist is at ${plist}: a label launchd still holds was not ruled out`;
+      throw new CliError(`launchctl couldn't say whether launchd holds ${PLIST_LABEL}: ${why}, so ${state}. `
+        + `Run launchctl bootout ${domain}/${PLIST_LABEL}, then am revive service uninstall again.`);
+    }
+    const loaded = !notLoaded;
+    if (!present) {
+      if (!loaded) return opts.json ? { path: plist, label: PLIST_LABEL, removed: false, loaded: false, notes } : `The revive login service isn't installed (${plist}).`;
+      // The plist is gone but launchd still holds the label (an earlier run removed it too early):
+      // boot it out, so a second run is the way back instead of "isn't installed" and an orphan.
+      const off = await launchctl(["bootout", `${domain}/${PLIST_LABEL}`]);
+      if (off.code !== 0) {
+        throw new CliError(`launchd still holds ${PLIST_LABEL} and its bootout failed (${said(off)}), so nothing was removed. `
+          + `Run launchctl bootout ${domain}/${PLIST_LABEL}, then am revive service uninstall again.`);
+      }
+      return opts.json ? { path: plist, label: PLIST_LABEL, removed: false, loaded: true, booted_out: true, notes }
+        : `The plist is gone (${plist}), but launchd still held ${PLIST_LABEL}: booted it out, so no orphaned label is left.`;
+    }
+    if (loaded) {
+      const off = await launchctl(["bootout", `${domain}/${PLIST_LABEL}`]);
+      if (off.code !== 0) {
+        throw new CliError(`launchd still holds ${PLIST_LABEL} and its bootout failed (${said(off)}), so ${plist} was left in place: removing it now would orphan the job. `
+          + `Run launchctl bootout ${domain}/${PLIST_LABEL}, then am revive service uninstall again.`);
+      }
+    }
+    unlinkSync(plist);
+    return opts.json ? { path: plist, label: PLIST_LABEL, removed: true, loaded, notes } : [`Removed the revive login service (${plist}).`, ...notes].join("\n");
+  }
+  // Install: the file is what launchd loads at the next login, never a bootstrap (RunAtLoad would
+  // run the pass now). A plist already there and ours is replaced; anyone else's was refused above.
+  const runner = reviveRunner();
+  const keptPath = reviveKeptPath();
+  mkdirSync(dirname(plist), { recursive: true });
+  writeFileSync(plist, plistText({ runner, env: reviveServiceEnv(keptPath), wait: SERVICE_WAIT_S }), { mode: 0o644 });
+  notes.push("launchd loads it at your next login after a restart of this computer, and it is not started now.");
+  notes.push("The agent keeps this PATH to find the agents and hc; rerunning am revive service install refreshes it.");
+  return opts.json ? { path: plist, label: PLIST_LABEL, installed: true, enabled: true, runner, kept_path: keptPath, notes }
+    : [`Installed the revive login service (${plist}): after a restart it runs ${runner} revive --boot.`, ...notes].join("\n");
 }
 
 // ---- usagemeter on every linked machine (meterFleet.js) ----

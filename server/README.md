@@ -890,8 +890,12 @@ the code and its own workspace id to the exchange URL itself, server to server, 
 workspace token there. The browser never sees the token. A code or token in a URL gets `400`;
 a token in a header or a form field is refused. A code is single use: the gate refuses a code it
 has already seen without asking the Cloud service, and the Cloud service refuses any replay.
-At most 8 exchanges run at once; more get `429` and leave their code unused. Refusals log
-only a status and a generated request id, never a code or a token.
+The gate remembers at most 4096 unexpired codes at a time. At that bound it refuses a new open
+with `429` before it calls Cloud and keeps every code it remembered; it never evicts the oldest
+to make room, because forgetting a live code would make a replay pass the gate's own record. A
+code's 15-minute expiry frees its slot, and the refused code is not consumed. At most 8 exchanges
+run at once; more get `429` and leave their code unused. Refusals log only a status and a
+generated request id, never a code or a token.
 
 **The token.** The gate checks that the token is signed with EdDSA (Ed25519) by a key the
 published key set names, with the token's key id. The set holds one or two keys: the
@@ -946,10 +950,14 @@ subject is refused a new open until a later signed list omits them.
 If the call does not land, the gate polls the list at `AUTOMAGIK_GATE_CLOUD_REVOCATION_URL` every
 60 seconds while it holds sessions or a removal is pending. The list body is JSON and its
 `x-automagik-signature` is a detached JWS over the exact body, checked against the same key set.
-A list for another workspace, past `expires_at`, malformed or unverifiable is a failure that
-changes nothing, never an empty list. An entry a newer contract scopes to another workspace is
-ignored. The call is idempotent: a repeat is accepted and changes nothing. The gate keeps no
-Cloud credential and logs only a status and a generated request id.
+A list is applied only while it is current: its `issued_at` may be at most 30 seconds ahead of
+the gate's clock and at most 5 minutes behind it, with no grace. A future-dated list is refused
+rather than being allowed to move the applied-list watermark, which would make every later list
+— a removal included — look stale; a list older than the bound is a stale feed and a failure that
+changes nothing. A list for another workspace, past `expires_at`, malformed or unverifiable is a
+failure that changes nothing, never an empty list. An entry a newer contract scopes to another
+workspace is ignored. The call is idempotent: a repeat is accepted and changes nothing. The gate
+keeps no Cloud credential and logs only a status and a generated request id.
 
 ## Interim Cloudflare Access sign-in
 

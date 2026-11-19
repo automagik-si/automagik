@@ -23,12 +23,20 @@ export const CLOCK_SKEW_SECONDS = 30
 // RFC 0024 (e): a poll at least every 5 minutes while sessions exist; this is the chosen one.
 export const POLL_INTERVAL_MS = 60 * 1000
 export const MAX_REVOCATIONS = 1024
+// #1666 F6: the gate applies only a list newer than the last one applied, so a future-dated
+// list must be refused or it would move that watermark past every later list. The age bound is
+// the same five minutes the revocation promise gives a removed person, and the poll interval is
+// one minute, so a healthy feed is never near it.
+export const LIST_MAX_AGE_MS = 5 * 60 * 1000
 export const SIGNATURE_HEADER = 'x-automagik-signature'
 // RFC 0011's rotation: the key that signs and the next (or previous) one, never more.
 export const KEY_SLOTS = 2
 export const MAX_EXCHANGES = 8
 const CODE_MEMORY_MS = 15 * 60 * 1000
-const MEMORY_LIMIT = 4096
+// #1666 F7: the open-code replay memory. A code lives here for 15 minutes; at 4096 live codes
+// a new open is refused instead of evicting one, so a flood cannot make a used code replayable.
+// Cloud's single use is still the backstop.
+export const MAX_OPEN_CODES = 4096
 const MAX_RESPONSE_BYTES = 64 * 1024
 const CODE = /^[A-Za-z0-9_-]{16,512}$/
 const ROLES = ['owner', 'admin', 'member', 'guest']
@@ -191,7 +199,9 @@ export class CloudSignIn {
     for (const [hash, end] of memory) if (end <= now) memory.delete(hash)
     const hash = digest(value)
     if (memory.has(hash)) return false
-    if (memory.size >= MEMORY_LIMIT) memory.delete(memory.keys().next().value)
+    // #1666 F7: at the bound, refuse. Evicting the oldest would forget a code still inside its
+    // 15-minute window and let a replay past the gate's own single-use record.
+    if (memory.size >= MAX_OPEN_CODES) throw new CloudOpenRefused(429)
     memory.set(hash, until)
     return true
   }
@@ -344,7 +354,13 @@ export class CloudSignIn {
     if (version !== 1 || workspace !== this.config.workspace) throw refused()
     const issuedAt = instant(issued_at)
     const expiresAt = instant(expires_at)
-    if (expiresAt <= issuedAt || this.now() >= expiresAt) throw refused()
+    const now = this.now()
+    if (expiresAt <= issuedAt || now >= expiresAt) throw refused()
+    // #1666 F6: a list is Cloud's current word only while it is current. A future-dated list
+    // must not move the applied-list watermark forward, or every later list (a removal
+    // included) would be ignored for as long as the bad date; a list older than the five-minute
+    // revocation bound is stale, and a stale feed is a failure, not a current state.
+    if (issuedAt > now + CLOCK_SKEW_SECONDS * 1000 || issuedAt < now - LIST_MAX_AGE_MS) throw refused()
     if (!Array.isArray(revoked) || revoked.length > MAX_REVOCATIONS) throw refused()
     const entries = []
     for (const entry of revoked) {

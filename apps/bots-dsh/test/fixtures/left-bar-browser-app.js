@@ -13,6 +13,8 @@ import { Wordmark } from '../../src/client/logo.js'
 import { LEFT_BAR_CSS, tokenCss } from '../../src/client/left-bar-css.js'
 import { StatusMark } from '../../src/client/left-bar-status.js'
 import { TeamRows } from '../../src/client/left-bar-team.js'
+import { channelGlyph } from '../../src/client/left-bar.js'
+import { botChannels } from '../../src/client/extend.js'
 import { ProjectRail } from '../../src/client/left-bar-rail.js'
 import { FaceSwitch } from '../../src/client/left-bar-faces.js'
 // The brand's own marks, unchanged (docs/brand, "Which logo file"): ink on a light ground, cream
@@ -56,23 +58,46 @@ window.setTheme = (id, dark) => {
 }
 
 const bot = (id, name, shape, color, more = {}) => ({ id, name, avatar: { shape }, color, status: 'idle', ...more })
-const chat = (id, name, status = 'idle') => ({ id, name, status })
-const HELP = { id: 'ch-help', kind: 'whatsapp', name: 'Help desk', chats: [chat('mika', 'Mika', 'working'), chat('tess', 'Tess', 'needs')] }
-const STORE = { id: 'ch-store', kind: 'telegram', name: 'Storefront', chats: [chat('order', 'Order 1042')] }
-const FRONT = { id: 'ch-front', kind: 'telegram', name: 'Front desk', chats: [chat('noa', 'Noa', 'working'), chat('bakery', 'Corner bakery'), chat('ivo', 'Ivo', 'needs'), chat('weekend', 'Weekend crew')] }
+// Made-up faces: a drawn head on a colour, never a real person's picture.
+const portrait = (hue, hair) => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="hsl(${hue} 42% 84%)"/><circle cx="16" cy="12.5" r="5.6" fill="hsl(${hue} 38% ${hair}%)"/><path d="M4 32c0-6.8 5.4-10.6 12-10.6S28 25.2 28 32z" fill="hsl(${hue} 38% ${hair}%)"/></svg>`)}`
+const person = (name, photo = null, more = {}) => ({ name, photo, self: false, ...more })
+const chat = (id, name, status = 'idle', more = {}) => ({ id, name, status, who: person(name), ...more })
+const HELP = { id: 'ch-help', kind: 'whatsapp', name: 'Help desk', status: 'connected', chats: [
+  chat('mika', 'Mika', 'answering', { lastAt: 3, unread: 4, who: person('Mika', portrait(196, 30)) }),
+  chat('tess', 'Tess Alves', 'needs-someone', { lastAt: 4, who: person('Tess Alves', portrait(340, 26)) }),
+  chat('notes', 'Me (notes)', 'idle', { lastAt: 2, who: person('Me (notes)', null, { self: true }) }),
+] }
+const STORE = { id: 'ch-store', kind: 'telegram', name: 'Storefront', status: 'connected', chats: [chat('order', 'Order 1042', 'idle', { lastAt: 1, who: person('Order 1042', portrait(150, 32)) })] }
+const FRONT = { id: 'ch-front', kind: 'telegram', name: 'Front desk', status: 'connected', chats: [
+  chat('noa', 'Noa', 'answering', { lastAt: 3, who: person('Noa', portrait(258, 34)) }),
+  chat('bakery', 'Corner bakery', 'idle', { lastAt: 1 }),
+  chat('ivo', 'Ivo', 'needs-someone', { lastAt: 4, who: person('Ivo', portrait(24, 30)) }),
+  chat('weekend', 'Weekend crew', 'idle', { lastAt: 2, who: person('Weekend crew', portrait(110, 36)) }),
+] }
+
+// A fake channels plugin, registered the way Omni's will be: one source per Bot, chats read only
+// while the Bot is open, and the same faces and status words the real source returns.
+const CHANNELS = { pip: [HELP, STORE], kit: [FRONT] }
+for (const id of Object.keys(CHANNELS)) {
+  botChannels.register({
+    id: `fixture-channels-${id}`, botId: id,
+    useChannels: (_, { open }) => CHANNELS[id].map(channel => (open ? channel : { ...channel, chats: undefined })),
+    open: chatId => window.opened.push(`chat:${chatId}`),
+  })
+}
 const JUNO = bot('juno', 'Juno', 'octopus', 'deepseek', { status: 'working' })
 const WREN = bot('wren', 'Wren', 'moon', 'violet', { unread: true })
 const OTTO = bot('otto', 'Otto', 'acorn', 'orange')
-const pip = store => bot('pip', 'Pip', 'star', 'cyan', { status: 'needs', channels: [HELP, store] })
+const pip = bot('pip', 'Pip', 'star', 'cyan', { status: 'needs' })
 const CREW = { id: 'crew', name: 'Launch crew', members: ['wren', 'otto'] }
 
 const TEAMS = {
-  team: { frontId: 'juno', bots: [JUNO, pip(STORE), WREN, OTTO], groups: [CREW] },
+  team: { frontId: 'juno', bots: [JUNO, pip, WREN, OTTO], groups: [CREW] },
   many: {
     frontId: 'juno',
     bots: [
-      JUNO, pip({ ...STORE, folded: true }),
-      bot('kit', 'Kit', 'bunny', 'magenta', { status: 'working', channels: [FRONT] }),
+      JUNO, pip,
+      bot('kit', 'Kit', 'bunny', 'magenta', { status: 'working' }),
       bot('zuri', 'Zuri', 'hex', 'orange', { status: 'needs' }),
       WREN, bot('lark', 'Lark', 'gumdrop', 'red', { unread: true }), bot('miso', 'Miso', 'kitty', 'yellow', { status: 'working' }), OTTO, bot('nico', 'Nico', 'gem', 'cyan'),
       bot('bram', 'Bram', 'peanut', 'green'), bot('sol', 'Sol', 'saucer', 'yellow'), bot('tully', 'Tully', 'pebbles', 'blue', { status: 'off' }),
@@ -97,12 +122,6 @@ const PROJECTS = [
   { id: 'harbor', name: 'Harbor' },
 ]
 
-// A channel's glyph is the channels plugin's to draw; these two stand in for it, in one colour.
-const GLYPHS = {
-  whatsapp: [h('path', { key: 'a', d: 'M12 3.6a8.4 8.4 0 0 0-7.2 12.8L3.7 20.3l4-1.1A8.4 8.4 0 1 0 12 3.6z', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinejoin: 'round' }), h('path', { key: 'b', d: 'M9.2 8.3c-.3 0-.7.1-.9.5-.3.5-.5 1.2-.2 2.1.6 1.8 2.3 3.5 4.1 4.1.9.3 1.6.1 2.1-.2.4-.2.5-.6.5-.9l-.1-.4-1.6-.8-.9 1c-1-.4-1.9-1.3-2.3-2.3l1-.9-.8-1.6z', fill: 'currentColor' })],
-  telegram: [h('path', { key: 'a', d: 'M20.5 4.5 3.5 11.2l5.3 1.9 2 6.1 3-3.3 4.4 3.3z', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinejoin: 'round' }), h('path', { key: 'b', d: 'M8.8 13.1 16.8 8', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round' })],
-}
-const renderGlyph = channel => h('svg', { viewBox: '0 0 24 24' }, GLYPHS[channel.kind])
 const line = (paths, size = 18) => h('svg', { width: size, height: size, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, paths.map(d => h('path', { key: d, d })))
 
 // The open Bot's view, as a quiet stand-in: the bar is compared beside it, as in the design's
@@ -131,7 +150,7 @@ function Page({ kase, skin, fill }) {
       h('section', { className: 'lb-list' },
         h('div', { className: 'fx-head' }, h(Wordmark, { height: 28 }), h('span', { className: 'fx-grow' }),
           h('span', { className: 'fx-tool' }, line(['M9 14.5a5.5 5.5 0 1 0 0-11 5.5 5.5 0 0 0 0 11z', 'M13.2 13.2 17 17'])), h('span', { className: 'fx-tool' }, line(['M10 4.5v11M4.5 10h11']))),
-        h(TeamRows, { team, current: kase === 'marks' ? undefined : 'bot:juno', skin, renderGlyph, onOpen: row => window.opened.push(row.key) }),
+        h(TeamRows, { team, current: kase === 'marks' ? undefined : 'bot:juno', skin, renderGlyph: channelGlyph, loads: () => true, folded: new Set(['pip/ch-store']), onOpen: row => window.opened.push(row.key) }),
         h('div', { className: 'fx-flip' }, line(['M4.5 4h11A1.5 1.5 0 0 1 17 5.5v9a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 14.5v-9A1.5 1.5 0 0 1 4.5 4z', 'M6.5 8l2.5 2.5L6.5 13', 'M11 13h3.5']), 'Code', h('span', { className: 'fx-grow' }),
           live ? h('span', { className: 'fx-count' }, h(StatusMark, { status: 'working' }), '2') : null, live ? h('span', { className: 'fx-count' }, h(StatusMark, { status: 'needs' }), '1') : null),
         h('div', { className: 'fx-foot' }, h('span', { className: 'fx-me' }, line(['M10 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M4.5 16.5c.5-3 2.7-4.5 5.5-4.5s5 1.5 5.5 4.5'])), 'Account'))),

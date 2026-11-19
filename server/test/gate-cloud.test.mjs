@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
-import { cloudConfig, CloudConfigurationError, CloudSignIn, KEYS_TTL_MS, MAX_EXCHANGES, REFRESH_INTERVAL_MS } from '../gate-cloud.mjs'
+import { cloudConfig, CloudConfigurationError, CloudSignIn, KEYS_TTL_MS, LIST_MAX_AGE_MS, MAX_EXCHANGES, MAX_OPEN_CODES, REFRESH_INTERVAL_MS } from '../gate-cloud.mjs'
 import { CLOUD_OPEN_PATH, createGate } from '../gate.mjs'
 import { COOKIE, SessionStore } from '../gate-store.mjs'
 import { DSH_HOST } from '../gate-upstream.mjs'
@@ -491,6 +491,25 @@ test('exchanges in flight are capped; the rest get 429 without using their code'
   assert.equal((await f.open(value)).status, 303)
 })
 
+// #1666 F7: the open-code table is bounded, and at the bound a new open is refused rather than
+// evicting a remembered code. An eviction would make an already-used code replayable at the
+// gate; refusing keeps the single-use record whole and lets its 15-minute expiry free the slot.
+test('the open-code table refuses a new open at its 4096 bound and never evicts one', async t => {
+  const f = await fixture(t)
+  assert.equal(MAX_OPEN_CODES, 4096)
+  for (let i = 0; i < MAX_OPEN_CODES; i++) f.cloud.codes.set(`hash-${i}`, f.state.now + 60_000)
+  const before = f.state.exchanges.length
+  const value = f.issue({ sub: 'person-1' })
+  const refused = await f.open(value)
+  assert.equal(refused.status, 429)
+  assert.equal(f.state.exchanges.length, before, 'a full table refuses before it calls Cloud')
+  assert.equal(f.cloud.codes.size, MAX_OPEN_CODES, 'no remembered code is evicted to make room')
+  assert.ok(f.cloud.codes.has('hash-0'), 'the oldest remembered code is kept')
+  // Expiry frees a slot; the refused code was not remembered or exchanged, so it opens now.
+  f.cloud.codes.set('hash-0', f.state.now)
+  assert.equal((await f.open(value)).status, 303)
+})
+
 test('Cloud settings are all or none, HTTPS only, and never echoed', () => {
   assert.equal(cloudConfig({}), undefined)
   assert.equal(cloudConfig(Object.fromEntries(Object.keys(ENV).map(name => [name, ' ']))), undefined)
@@ -802,6 +821,45 @@ test('a stale signed list does not undo a newer list or its re-admission', async
   // The newer list stands: the re-admission holds and the older session is untouched.
   assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 303)
   assert.equal((await request(f.port, { headers: { cookie: kept } })).status, 200)
+})
+
+// #1666 F6a: a list dated in the future used to move the applied-list watermark forward, so
+// every later list -- including the one carrying a removal -- was ignored forever. A list more
+// than the clock skew ahead is now refused and does not move the watermark.
+test('a future-dated list cannot freeze the list watermark and hold a removal', async t => {
+  const f = await fixture(t)
+  await f.open(f.issue({ sub: 'person-1' }))
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now + 3_600_000), expires_at: iso(f.state.now + 3_900_000), revoked: [] }
+  await assert.rejects(f.cloud.poll(), /refused/)
+  assert.equal(f.cloud.listedAt, 0, 'a future-dated list is not applied')
+  // A list issued now is still newer than the last applied one, so its removal takes effect.
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now), expires_at: iso(f.state.now + 300_000),
+    revoked: [{ subject: 'person-1', reason: 'removed', effective_at: iso(f.state.now) }] }
+  await f.cloud.poll()
+  assert.equal(f.cloud.isRemoved('person-1'), true)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 401)
+})
+
+// #1666 F6b: the age bound on the list itself. A list issued before the 5-minute revocation
+// bound is not applied, so a frozen or replayed copy cannot lift a removal it predates.
+test('a list older than the revocation age bound is refused and cannot lift a removal', async t => {
+  const f = await fixture(t)
+  const cookie = cookieOf(await f.open(f.issue({ sub: 'person-1' })))
+  const removal = JSON.stringify({ version: 1, event: 'session.revoke', workspace: 'workspace-a',
+    subject: 'person-1', reason: 'removed', issued_at: iso(f.state.now - 10 * 60_000) })
+  assert.equal((await request(f.port, { method: 'POST', path: REVOKE, body: removal,
+    headers: { 'content-type': 'application/json', [SIGN]: detached(removal) } })).status, 204)
+  assert.equal((await request(f.port, { headers: { cookie } })).status, 401)
+  // The list omits person-1, but it was issued before the bound, so applying it would lift the
+  // removal. It is stale: a failure, not an empty revocation state.
+  f.state.revocationList = { version: 1, workspace: 'workspace-a',
+    issued_at: iso(f.state.now - LIST_MAX_AGE_MS - 1000),
+    expires_at: iso(f.state.now + 300_000), revoked: [] }
+  await assert.rejects(f.cloud.poll(), /refused/)
+  assert.equal((await f.open(f.issue({ sub: 'person-1' }))).status, 401)
+  assert.equal(f.cloud.removed.has('person-1'), true, 'the pending removal survives the stale list')
 })
 
 // Mutant CLOUD_POLL_IDLE skips the poll when the last session ended, stranding a removal.

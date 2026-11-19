@@ -549,11 +549,11 @@ am create --name N --agent A [--kind main|member] [--role R] [--code true|false]
        [--cross-member BOT@DIR]...
        [--character C --colour K | --omni] [--model M] [--rank R]
        [--person-features on|off] [--effort E] [--tier fast|standard]
-       [--agy-mode auto|accept-edits|plan] [--agy-allow RULE]... [--agy-deny RULE]...
+       [--permission-mode MODE] [--agy-mode auto|accept-edits|plan] [--agy-allow RULE]... [--agy-deny RULE]...
        [--planned-wave N [--planned-note T]]
        [--worker-agent A] [--worker-model M] [--worker-effort E] [--worker-agy-mode M]
        [--worker-template T]
-am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
+am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=] [--permission-mode=]
 am rm <bot>
 am category ls | add --title T [--sub S] [--id ID] | edit <id> | rm <id> | order <id>...
 am start <bot> [--space ID] [--tab ID]
@@ -785,15 +785,31 @@ new conversation and the report says why. Manual `am restart` keeps its existing
 Kimi's index format comes from the 2.5.0 package and has not been verified live.
 
 The login service. `install.sh --revive` (or a yes when it asks; `--yes` never installs it)
-runs `am revive service install`: on Linux a systemd user unit,
-`~/.config/systemd/user/automagik-herdr-revive.service`, enabled and never started on the spot.
-The unit has no start timeout (the pass bounds its own waits), and what the pass prints, which
-the user journal keeps, is counts only: no folder, no bot name.
+runs `am revive service install`. On Linux it writes the systemd user unit
+`~/.config/systemd/user/automagik-herdr-revive.service` and enables it; the unit has no start
+timeout (the pass bounds its own waits). On macOS it writes the launchd agent
+`~/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist`, which launchd loads at your next
+login: it is never bootstrapped, because that would run the pass now. Neither is started on the
+spot, and what the pass prints — the user journal on Linux, launchd's unified log on macOS — is
+counts only: no folder, no bot name.
 At login it runs `am revive --boot --wait 600`: it waits for herdr-core, runs once
 per boot, and also takes the bots whose ended pane another command swept since the boot.
-`loginctl enable-linger` makes it run at boot with nobody logged in.
-`am revive service uninstall` (and `install.sh --uninstall`) removes the unit when
-it is the pack's. macOS (launchd) is not built yet: run `am revive` by hand there.
+`loginctl enable-linger` makes the unit run at boot with nobody logged in.
+`am revive service uninstall` (and `install.sh --uninstall`) removes the file when it is the
+pack's. On macOS it asks launchd first and removes the plist only when launchd says the job is
+not loaded: exit 113, or its exact "Could not find service". Any other answer — a usage error,
+EPERM, an I/O error — is a refusal that leaves the plist, exits non-zero and names
+`launchctl bootout gui/<uid>/dev.herdr.automagik-herdr-revive`, so a job launchd still holds is
+never orphaned. It asks even when the plist is already gone, so a second run boots out a label an
+earlier run left behind and says so. `install.sh --uninstall` follows the same rule: it calls that
+command first when its read-only `revive service status --json` answer parses as JSON and carries
+the exact launchd label and a path under `Library/LaunchAgents` — also when the plist is gone. A
+pack from before the macOS agent answers `status` with exit 0, but names the systemd unit and no
+launchd job, and refuses only `uninstall`, so its `uninstall` is never asked. A truncated or
+unparseable answer, a missing field, a wrong type or a label without that path falls back the same
+way. When the command is gone, or its bounded read-only question doesn't answer, it asks launchd
+itself — with the same 113/exact-words rule — before it removes the pack and its link. It never
+overrules a refusal from a command that answered.
 Panes on a linked machine are that machine's own to bring back.
 
 ## The attach ledger
@@ -1382,6 +1398,16 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   source, and `show --json` carries `effort`, `effortSource`, `tier`, `tierSource`,
   `pinnedEffort` and `pinnedTier`. See
   [Reasoning effort and service tier](#reasoning-effort-and-service-tier-codex).
+- `permissionMode` is optional: a Claude Code bot's own `--permission-mode`, set with
+  `am create|edit ... --permission-mode MODE`. One of Claude Code's names (`acceptEdits`, `auto`,
+  `bypassPermissions`, `manual`, `dontAsk`, `plan`); `auto` is the pack's default when the field
+  is absent, and an empty value clears a stored one. Every start, restart, revive and Claude
+  worker helper launch passes it from the record, independent of the model, reasoning effort and
+  service tier. A value Claude Code doesn't accept, or one on another agent, is refused with the
+  accepted names rather than passed through or dropped. `show` prints it with its source
+  (`detected`, `live`, `roster` or `default`), and `show --json` carries `permissionMode`,
+  `permissionModeSource` and `pinnedPermissionMode`. See
+  [Permission mode](#permission-mode-claude-code).
 - `codexAuto` is retired (#1125). It used to opt a bot's Codex seat and workers out of Codex's
   auto mode; the owner's ruling (10 and 12 Nov) is that every Codex seat and worker runs in it,
   so `false` no longer opts out: the field is kept as written, ignored, and loading the bots
@@ -1451,15 +1477,23 @@ nothing to it (a Codex seat's template excepted, see [Codex's launch mode](#code
 | Agent | What its launch adds | What that does |
 | --- | --- | --- |
 | Claude Code (`claude`) | `--permission-mode auto` | Claude Code's auto mode: its classifier answers permission requests. |
-| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true`, `--add-dir <folder>` per derived folder; worker starts only: `-c 'projects={"<worktree>"={trust_level="trusted"}}'` when the checks below allow it | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). Worker starts pre-trust only their worktree path (#1420); a withheld trust word gets a warning. No opt-out from the launch mode. |
+| Codex (`codex`) | `--approve-for-me --disable hooks --no-daemon -c sandbox_workspace_write.network_access=true -c allow_login_shell=false`, `--add-dir <folder>` per derived folder; worker starts only: `-c 'projects={"<worktree>"={trust_level="trusted"}}'` when the checks below allow it | Codex's auto mode: its reviewer answers approval requests, inside the workspace-write sandbox (#946), its hooks are off (#1045), so startup never stops at "Hooks need review" and never runs an untrusted `.codex/hooks.json` command in an unattended pane, and it runs in its pane, with network and the folders it needs (#1125). Its commands run in a non-login shell, so a login startup cannot shadow the pane's hc kill shim (#1133). Worker starts pre-trust only their worktree path (#1420); a withheld trust word gets a warning. No opt-out from the launch mode. |
 | Antigravity (`agy`) | `--dangerously-skip-permissions`, `--mode <agyMode>`, `--settings <file>` | No permission prompt and no classifier: everything the file's deny list does not name runs (see [what runs without a prompt](#antigravitys-permission-list)). The file's `trustedWorkspaces` answers the folder-trust question. |
 | dsh-TUI (`dsh-tui`) | nothing | Its DSH profile on the machine it runs on sets the approval policy; dsh-tui takes no such flag. |
 | Oh My Pi (`omp`) | nothing | omp 18.14.2 has only skip-all flags (`--auto-approve`, `--approval-mode=yolo`). |
 | Hermes (`hermes`) | nothing | Hermes 0.22.5 has only a skip-all flag (`--yolo`). |
 | Pi, OpenCode, Cursor, Copilot, Amp, Grok, Kimi, Kiro, Qoder, Crush | nothing | Not checked: none is installed where the flags were read (2026-11-10), and the pack adds no flag it has not seen an agent's own help name. |
 
-Flags read from claude 2.1.322, codex-cli 0.167.0 and agy 1.5.4. No skip-all-approvals flag is
-passed for any agent but Antigravity; one for another agent needs the owner's word first.
+A Claude Code bot may name another of Claude Code's own permission modes for its seat (and its
+Claude workers and helpers) with `permissionMode` / `am edit <bot> --permission-mode MODE`; the
+launch then passes that mode instead of `auto`, and the rest of the table is unchanged. See
+[Permission mode](#permission-mode-claude-code). Codex's and Antigravity's modes are not per-bot
+settings: Codex's launch mode is fixed (#1125), and Antigravity always runs without prompts under
+its deny list, its execution mode set by `agyMode`.
+
+Flags read from claude 2.1.322 (the permission-mode list from 2.1.328), codex-cli 0.167.0 and agy
+1.5.4. No skip-all-approvals flag is passed for any agent but Antigravity; one for another agent
+needs the owner's word first.
 `am show <bot>` prints the bot's `auto mode` line (in `--json`, `autoMode`: its
 words, a note, and for an Antigravity bot on this computer whether agy's sandbox can run here).
 
@@ -1529,6 +1563,55 @@ is `detected` (what the live pane's command line runs, a template's own words in
 config's top level) or `default` (Codex's own default tier, Standard). The text `am show` prints
 the same two lines.
 
+### Permission mode (Claude Code)
+
+Claude Code's `--permission-mode` decides what a session may run without asking. The pack starts
+every Claude launch in `auto` ([Automatic mode](#automatic-mode)); a Claude Code bot may store one
+of Claude Code's own modes instead, in `.herdr/bots.json` as `permissionMode`:
+
+| Mode | Runs without asking |
+| --- | --- |
+| `manual` | reads only; anything else asks a person |
+| `acceptEdits` | reads and file edits |
+| `plan` | reads and plans; edits wait for a person's approval |
+| `auto` | everything, through Claude Code's classifier (the default) |
+| `dontAsk` | only what is already allowed; anything else is refused instead of asked |
+| `bypassPermissions` | every tool call, with no prompt |
+
+`am create ... --permission-mode MODE` stores one and `am edit <bot> --permission-mode MODE`
+changes it; `am edit <bot> --permission-mode=` clears it back to `auto`. Only Claude Code's own
+names are accepted: another word is refused with the list, and so is a mode on an agent that has
+none (Codex's launch mode is fixed, #1125; Antigravity's execution mode is `agyMode`), never
+passed through or dropped. `bypassPermissions` is the one that runs an orchestrator seat with no
+prompt at all; use it only for a bot the owner means to run that way.
+
+Every launch path the pack builds rebuilds the command from the record: a start, a restart, a
+revive after a reboot, a linked machine's start, a worker and a worker's Restart --tree helper.
+It is independent of the model, reasoning effort and service tier: a model change never rewrites
+it, and it never changes the model. A Claude worker helper inherits its seat's mode; a non-worker
+helper keeps the command a person gave it, its own `--permission-mode` included, and the seat's
+mode is never added to one that names none; a worker template owns its command, so the pack adds
+no flag to it (put the mode in the template's command if it needs one).
+
+`am show <bot>` prints `permission <mode> (<source>)`; `show --json` carries `permissionMode`,
+`permissionModeSource` and `pinnedPermissionMode`. A source is `detected` (what the live pane's
+command line runs), `live` (the pane is running and the pack reads no `--permission-mode` in its
+command line: `permissionMode` is `null`, and the record's mode, or the pack's `auto`, applies to
+the next start), `roster` (the bot's own value while it isn't running) or `default` (the pack's
+`auto` when the record stores none). A live pane is never reported as running the record's mode:
+for one that names none, `am show` says the live command line names none and the record's mode
+applies to the next start, and its `auto mode` line names what the pane actually runs.
+A hand-written value the CLI wouldn't accept is dropped with a warning when the file is read, so
+it never reaches the launch; every command that reads the record says that warning once, `am
+start`, `am restart`, `am revive` and `am show` included, not only `am ls` and `am worker`.
+
+The accepted names are pinned, never read from the CLI at launch: `CLAUDE_PERMISSION_MODES` holds
+Claude Code 2.1.328's `--help` list. `herdr/test/permission-mode.test.mjs` compares it with the
+`--help` of the Claude Code on the PATH of a gate that has one and fails when the lists differ, so
+an upgrade that adds a mode is seen in the gate instead of silently refusing a valid value. The
+test skips where Claude Code isn't installed, so the manual step stays: re-read `claude --help` and
+update `CLAUDE_PERMISSION_MODES` in `models.js` and this table together.
+
 ### Codex's launch mode
 
 The owner's ruling (10 Nov, reaffirmed 12 Nov, #1125): every Codex seat and every worker the pack
@@ -1546,6 +1629,17 @@ a worker and a Restart --tree helper:
   Codex captain's `isn't a terminal hc knows` refusal; it was not reproduced in isolation.
 - `-c sandbox_workspace_write.network_access=true`: the sandbox's own network switch, so `hc`'s
   socket and GitHub (`gh`, git's transport) answer. It is off by default under the auto mode.
+- `-c allow_login_shell=false` (#1133): Codex runs every command through the account's login
+  shell by default, and a login startup that prepends a folder (macOS's `/etc/zprofile`, a
+  person's `.bash_profile` or `.zprofile`) puts its own `hc` or `automagik-herdr` ahead of the
+  pane PATH, hiding the hc kill shim. A non-login shell keeps the launch PATH's guard first at
+  command time. The shell's non-login startup and every tool the pane PATH holds still resolve;
+  no shell startup file is edited. A template worker keeps its own command and is warned when
+  it does not name this word. A start, restart, worker or `--tree` helper also refuses to run
+  when the guarded PATH it built does not resolve its first `hc` to the pack's guard shim (an
+  ordinary-named folder ahead of the guard, a missing shim, a relative first word), naming what
+  it found and how to repair; a launch with no guard folder on its PATH (an agentless helper) is
+  left as it was.
 - Worker starts only (#1420): `-c 'projects={"<worktree>"={trust_level="trusted"}}'`, after the
   mode words and before any extra folders, subcommand or task. Checked on codex-cli 0.169.0:
   this inline TOML table keeps dots in paths literal, merges with the person's projects table,
@@ -1857,6 +1951,11 @@ What the shim does not do, plainly:
 - It stops the honest path only. The real `hc` by its full path, a copy of it, a raw socket,
   `hc connect`, or a `PATH` the agent changes goes around it, as it goes around the guard and
   the deny list. **The boundary is the hc-proxy sandbox, never the shim.**
+- A shell a command starts can still prepend a folder. The pack's Codex launch tells Codex not
+  to use a login shell for its commands (`-c allow_login_shell=false`, #1133), and a launch
+  whose PATH holds a pack guard folder refuses when its first `hc` is not that guard's shim,
+  whatever the folder ahead is called; a launch with no guard on its PATH is left as it is, and
+  a template worker that keeps its own command is warned, not rewritten.
 - A worker started from an hc template in hc's own form (`<template> <task>`) keeps the
   template's command and environment, so it gets no shim; a template the pack rebuilds for a
   Claude login has no PATH word either.

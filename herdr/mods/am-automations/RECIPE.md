@@ -149,12 +149,15 @@ measured 0 there and the popup showed the header alone (#938). In a layout block
   bot=<id>` supplies candidates, each `hc get` says live, still labelled with that id, an agent in
   front (a shell is a bot that quit), and in this project's folder; two live candidates are refused,
   never guessed between. It starts a stopped bot with `am start <id> --project <repo>`, waits up to
-  2 min for its terminal, then pastes the prompt with `hc send`; the run is `done` when the bot
-  takes it. `worker:<id>` starts `am worker "<prompt>" --worktree <dir> --project <repo>` with
-  `HC_TERMINAL_ID` set to the bot's pane, so the worker inherits the bot's worker launch and
-  permissions, then waits for its turn and ends it through the checked `am worker kill <pane>
-  --json` (the finished terminal stays as the run's address, so the history still points at where
-  it ran). A bot that is gone from the roster, planned, on another machine, or unreachable is a
+  2 min for its terminal, then re-reads the pane just before `hc send` (still live, still labelled,
+  an agent in front, the same `created_ms`) and refuses the send, naming the pane, if it changed;
+  the run is `done` when the bot takes it. `worker:<id>` starts `am worker "<prompt>" --worktree
+  <dir> --project <repo>` with `HC_TERMINAL_ID` set to the bot's pane, so the worker inherits the
+  bot's worker launch and permissions, then waits for its turn and ends it through the checked
+  `am worker kill <pane> --json` once the turn has finished (a worker still mid-turn at the
+  timeout is refused by that verb and stays, logged; the finished terminal stays as the run's
+  address, so the history still points at where it ran). A bot that is gone from the roster,
+  planned, on another machine, or unreachable is a
   `failed` run whose line names it; it never falls back to a fresh agent. `target_when_busy: skip`
   records a busy bot's run `skipped`, keeping the pane and target it resolved. Our build names
   `targets` in `ls --json` only when its backend can run one (`hc`, or `auto`); without it the form

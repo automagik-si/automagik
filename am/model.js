@@ -3,7 +3,7 @@
 // default look. Pure: no `herdr`, `gpui-kit`, `gpui-base` or `fs`, so `node --test` runs it.
 // Apache-2.0.
 
-import { AGY_MODES, LEGACY_AGENTS, agyRuleProblem, codexEffortProblem, normalizeAgyPermissions, resolveAgent, tierProblem } from "./models.js";
+import { AGY_MODES, LEGACY_AGENTS, agyRuleProblem, codexEffortProblem, normalizeAgyPermissions, permissionModeProblem, resolveAgent, tierProblem } from "./models.js";
 import { hermesPairProblem, hermesPairConflict } from "./hermesPair.js";
 
 /** The hc label key that ties a terminal to a bot; its value is the bot id (A9). */
@@ -253,6 +253,17 @@ export function parseBots(text) {
     if (bot.restartAt !== undefined && restartWhy) {
       warnings.push(`${where}: ${restartWhy}; ignored`);
       delete bot.restartAt;
+    }
+    // #1413: a bot's own Claude Code permission mode. Kept as text so `show` can report what was
+    // written; a value Claude Code doesn't accept, or one on another agent, is dropped with the
+    // reason (the CLI refuses it before saving, and checkBots refuses a hand-written file).
+    if (bot.permissionMode === "") delete bot.permissionMode;
+    else if (bot.permissionMode !== undefined) {
+      const why = permissionModeProblem(resolveAgent(bot.agent), bot.permissionMode);
+      if (typeof bot.permissionMode !== "string" || why) {
+        warnings.push(`${where}: ${typeof bot.permissionMode === "string" ? why : `permission mode ${JSON.stringify(bot.permissionMode)} isn't text`}; ignored`);
+        delete bot.permissionMode;
+      }
     }
     // Antigravity's launch mode: kept when it is text, even an unknown one, so a start refuses
     // it by name instead of silently launching on the default.
@@ -690,6 +701,11 @@ export function checkBots(file, before = null, { project = null, projects = null
     }
     const restartIssue = restartAtProblem(b.restartAt);
     if (restartIssue) errors.push(`${at}: ${restartIssue}`);
+    // #1413: a bot's own permission mode is Claude Code's, and one of its own names.
+    if (b.permissionMode !== undefined) {
+      const why = permissionModeProblem(resolveAgent(b.agent), b.permissionMode);
+      if (why) errors.push(`${at}: ${why}`);
+    }
     if (b.agyMode !== undefined && b.agyMode !== "" && !AGY_MODES.includes(b.agyMode)) {
       errors.push(`${at}: agyMode ${JSON.stringify(b.agyMode)} isn't one of ${AGY_MODES.join(", ")}`);
     }
@@ -926,9 +942,9 @@ export function newCategoryId(title, categories = []) {
  * Create form's write-back. `entry` holds every field the form edits; an optional one it
  * leaves out or empty is removed (planned, lead, leadProject, category, agent, model, agyMode);
  * other keys the stored entry had are kept. `rank` (A16), `worker`, `effort` and `tier` (#1411)
- * are removed only when `entry` names them empty, so a front end that doesn't edit them (the
- * form has no worker, effort or tier fields) keeps the stored ones; a `worker` with none of its
- * fields left is removed too.
+ * and `permissionMode` (#1413) are removed only when `entry` names them empty, so a front end
+ * that doesn't edit them (the form has no worker, effort, tier or permission-mode fields) keeps
+ * the stored ones; a `worker` with none of its fields left is removed too.
  * A lead equal to the main bot (with no leadProject) is stored as no lead; a category goes only
  * with the main bot as lead; `newCategory` ({ title, sub }) is added to the categories and used.
  */
@@ -969,13 +985,16 @@ export function applyBotEdit(raw, entry, newCategory = null) {
     const modelAfter = "model" in bot ? (bot.model || null) : (out.bots[i].model ?? null);
     if ((out.bots[i].model ?? null) !== modelAfter && !("tier" in bot)) merged.tier = "standard";
   }
+  // #1413: a stored permission mode is Claude Code's; an edit that now runs another agent drops
+  // it, and one that names it empty clears it (the loop below).
+  if (resolveAgent(merged.agent) !== "claude") delete merged.permissionMode;
   if (Object.hasOwn(bot, "hermes") && bot.hermes === undefined) delete merged.hermes;
   for (const k of ["planned", "lead", "leadProject", "category", "agent", "model", "agyMode", "agyPermissions"]) {
     if (!(k in bot) || bot[k] === undefined || bot[k] === null || bot[k] === "") delete merged[k];
   }
-  // #1411: a front end with no effort or tier field keeps the stored ones; one that names the
-  // field empty clears it.
-  for (const k of ["effort", "tier"]) {
+  // #1411/#1413: a front end with no effort, tier or permission mode field keeps the stored
+  // ones; one that names the field empty clears it.
+  for (const k of ["effort", "tier", "permissionMode"]) {
     if (k in bot && (bot[k] === undefined || bot[k] === null || bot[k] === "")) delete merged[k];
   }
   // #1556: the context threshold a seat restarts at. A front end that doesn't edit it keeps the

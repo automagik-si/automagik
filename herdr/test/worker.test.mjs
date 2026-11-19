@@ -6,7 +6,7 @@ import net from "node:net";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -90,6 +90,13 @@ function scene(t, { file = team(), branch = "main", briefing = true, templates =
   writeFileSync(appLog, "");
   const env = { ...process.env, XDG_DATA_HOME: join(root, "data"), PATH: `${bin}:${process.env.PATH}`, HOME: home, HERDR_APP_HOME: app, HC_FAKE_STATE: statePath, HC_FAKE_LOG: logPath,
     HERDR_APP_FAKE_STATE: appState, HERDR_APP_FAKE_LOG: appLog, AUTOMAGIK_HERDR_TAB_WAIT_MS: "300", GIT_CEILING_DIRECTORIES: root };
+  // The dsh-tui install's stable copies a sandboxed worker's PATH names (guard and kill shim).
+  const stable = join(env.XDG_DATA_HOME, "automagik-herdr", "dsh-sandbox");
+  for (const [dir, from] of [["guard", GUARD_DIR], ["hc-kill", KILL_GUARD_DIR]]) {
+    mkdirSync(join(stable, dir), { recursive: true });
+    copyFileSync(join(from, "hc"), join(stable, dir, "hc"));
+    chmodSync(join(stable, dir, "hc"), 0o755);
+  }
   const core = startStatusCore(t, { ...env, AUTOMAGIK_HERDR_TEST_ROOTS: root });
   Object.assign(env, { ...core.env });
   Object.assign(env, { HC_SESSION: "" });
@@ -339,7 +346,8 @@ test("a dsh-tui worker reads its bot's approved switch; other agents keep the or
 
 // #1125: Codex's launch mode, spelled out, and a Codex run's --add-dir grants taken apart from its
 // other words (the tool-cache grants follow the runner's environment, so they are not compared).
-const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true"];
+const CODEX_MODE = ["--approve-for-me", "--disable", "hooks", "--no-daemon", "-c", "sandbox_workspace_write.network_access=true",
+  "-c", "allow_login_shell=false"];
 // #1420: a Codex worker start's per-launch trust word for exactly its worktree.
 const TRUST = (worktree) => ["-c", `projects={"${worktree}"={trust_level="trusted"}}`];
 const grantsApart = (words) => {

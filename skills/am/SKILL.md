@@ -66,6 +66,11 @@ am restart <bot> --agent <agent> --model <model> --save  # this run, and the def
 `--agent` or `--model` alone works in all three. `am edit <bot> --no-model` clears the model, so
 the agent's own default applies.
 
+A Claude Code Bot's permission mode is its own: `am edit <bot> --permission-mode <mode>` (one of
+`acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`; `auto` is the default
+and an empty value restores it). Every start, restart and revive passes it, independent of the
+model. Any other agent has no per-bot permission mode, so a value for one is refused.
+
 ## Workers
 
 A Bot starts a worker from its own pane. Nothing else can.
