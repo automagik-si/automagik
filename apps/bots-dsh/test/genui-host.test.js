@@ -15,7 +15,9 @@ import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as Bots from '../index.js'
 import { GENUI_MEDIA_ROUTE } from '../src/host/constants.js'
-import { GENUI_MAX_BATCHES, GENUI_MAX_ROWS, MEDIA_TYPES } from '../src/host/genui.js'
+import {
+  GENUI_MAX_BACKFILL_PROPOSALS, GENUI_MAX_BACKFILL_RUNS, GENUI_MAX_BATCHES, GENUI_MAX_ROWS, MEDIA_TYPES,
+} from '../src/host/genui.js'
 import { rowView } from '../src/client/genui-model.js'
 import { omniSyncSource, pageHeader, readingOfHeader, rowOfEvent } from './fixtures/omni-sync-source.js'
 
@@ -448,4 +450,26 @@ test('the backfill proposal and run fields keep labels, dates and counts only', 
     value: { runId: proposal.id, jobs: [{ chatId: 'c1', jobId: 'job-1', state: 'queued' }] },
   })
   assert.equal(started, 1)
+})
+
+test('the backfill fields cap the proposals and runs published, and each element keeps its own cap', async t => {
+  const { rt, state } = await bench(t)
+  // A roster can grow without bound while each element is already capped. Five thousand of
+  // each still publishes only the kit's bound, while one element's chats and rows stay at
+  // their own per-element caps.
+  const chats = Array.from({ length: 500 }, (_, index) => ({ id: `c${index}`, ticked: false }))
+  const rows = Array.from({ length: 500 }, (_, index) => ({ chatId: `c${index}`, state: 'queued', outcome: null }))
+  const proposals = Array.from({ length: 5000 }, (_, index) => ({ id: `p${index}`, chats: index === 0 ? chats : [] }))
+  const runs = Array.from({ length: 5000 }, (_, index) => ({ id: `r${index}`, rows: index === 0 ? rows : [] }))
+  const offView = rt.hooks.view(() => ({ omniBackfillProposals: proposals }))
+  const offLive = rt.hooks.live(() => ({ omniBackfills: runs }))
+  t.after(() => { offView(); offLive() })
+  const answer = await state()
+  assert.equal(answer.omniBackfillProposals.length, GENUI_MAX_BACKFILL_PROPOSALS)
+  assert.equal(answer.omniBackfills.length, GENUI_MAX_BACKFILL_RUNS)
+  // The array keeps its front (the newest runs first, as the card reads them).
+  assert.deepEqual(answer.omniBackfillProposals.map(proposal => proposal.id).slice(0, 3), ['p0', 'p1', 'p2'])
+  assert.deepEqual(answer.omniBackfills.map(run => run.id).slice(0, 3), ['r0', 'r1', 'r2'])
+  assert.equal(answer.omniBackfillProposals[0].chats.length, 200)
+  assert.equal(answer.omniBackfills[0].rows.length, 200)
 })

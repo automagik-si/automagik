@@ -84,6 +84,12 @@ function countsOf(value) {
 const BACKFILL_ID_MAX = 200
 const BACKFILL_CHATS_MAX = 200
 const BACKFILL_ROWS_MAX = 200
+// The card draws every open proposal and the newest three runs (BACKFILL_RUNS_SHOWN in the
+// model), so the slice publishes at most this many of each. Twenty leaves room for a busy
+// team's open proposals and for the runs the card counts beyond the three it draws, and
+// with the per-element caps it keeps the published slice small even when every run is full.
+export const GENUI_MAX_BACKFILL_PROPOSALS = 20
+export const GENUI_MAX_BACKFILL_RUNS = 20
 const BACKFILL_STATES = new Set(['queued', 'fetching', 'done', 'phone-did-not-answer', 'cancelled', 'failed'])
 const BACKFILL_OUTCOMES = new Set(['done', 'phone-did-not-answer', 'stopped', 'failed', 'not-started'])
 const BACKFILL_SUMMARY = ['total', 'running', 'done', 'phoneDidNotAnswer', 'stopped', 'failed']
@@ -218,8 +224,10 @@ export function guardBackfillFields(hooks) {
       const hasRuns = Object.hasOwn(value, 'omniBackfills')
       if (!hasProposals && !hasRuns) return value
       const out = { ...value }
-      if (hasProposals) out.omniBackfillProposals = Array.isArray(value.omniBackfillProposals) ? value.omniBackfillProposals.map(backfillProposalOf).filter(Boolean) : []
-      if (hasRuns) out.omniBackfills = Array.isArray(value.omniBackfills) ? value.omniBackfills.map(backfillRunOf).filter(Boolean) : []
+      if (hasProposals) out.omniBackfillProposals = Array.isArray(value.omniBackfillProposals)
+        ? value.omniBackfillProposals.slice(0, GENUI_MAX_BACKFILL_PROPOSALS).map(backfillProposalOf).filter(Boolean) : []
+      if (hasRuns) out.omniBackfills = Array.isArray(value.omniBackfills)
+        ? value.omniBackfills.slice(0, GENUI_MAX_BACKFILL_RUNS).map(backfillRunOf).filter(Boolean) : []
       return out
     })
   }
