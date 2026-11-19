@@ -5297,6 +5297,62 @@ test("#1411: effort and tier are a Codex bot's: moving to another agent clears t
   assert.equal(s.bots().bots.length, 1, "nothing written");
 });
 
+// ---- #1413: a Claude Code bot's own permission mode ----
+
+test("#1413: a Claude bot's own permission mode is stored, shown, passed on start and restart, cleared, and a value Claude Code doesn't accept is refused", (t) => {
+  const s = scene(t);
+  const made = s.cli(["create", "--name", "Orchestrator", "--agent", "claude", "--permission-mode", "bypassPermissions", "--json"]);
+  assert.equal(made.code, 0, made.err);
+  assert.equal(s.bots().bots[0].permissionMode, "bypassPermissions", "stored on the bot's record");
+  const shown = s.cli(["show", "Orchestrator", "--json"]).json();
+  assert.deepEqual([shown.permissionMode, shown.permissionModeSource, shown.pinnedPermissionMode],
+    ["bypassPermissions", "roster", "bypassPermissions"]);
+  assert.match(s.cli(["show", "Orchestrator"]).out, /permission\s+bypassPermissions \(roster\)/);
+  // Start: the record's mode reaches the launch instead of the pack's auto default.
+  const started = s.cli(["start", "Orchestrator", "--json"]);
+  assert.equal(started.code, 0, started.err);
+  const words = plain(agentWords(runCall(s.calls())));
+  assert.equal(words[words.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.equal(s.cli(["show", "Orchestrator", "--json"]).json().permissionModeSource, "detected",
+    "a running pane reports the mode its command line runs");
+  // Restart rebuilds the same words from the record.
+  const restarted = s.cli(["restart", "Orchestrator", "--force", "--json"]);
+  assert.equal(restarted.code, 0, restarted.err);
+  const again = plain(agentWords(s.calls().filter((c) => c[0] === "run").at(-1)));
+  assert.equal(again[again.indexOf("--permission-mode") + 1], "bypassPermissions");
+  // A value Claude Code doesn't accept is refused by name, and nothing is saved.
+  const before = readFileSync(s.botsPath, "utf8");
+  const bad = s.cli(["edit", "Orchestrator", "--permission-mode", "banana"]);
+  assert.equal(bad.code, 2);
+  assert.match(bad.err, /--permission-mode: permission mode "banana" isn't one of acceptEdits, auto, bypassPermissions, manual, dontAsk, plan/);
+  assert.equal(readFileSync(s.botsPath, "utf8"), before, "nothing was saved");
+  // Another agent has no such mode: refused, never dropped.
+  const codex = s.cli(["create", "--name", "Coder", "--agent", "codex", "--permission-mode", "auto"]);
+  assert.equal(codex.code, 2);
+  assert.match(codex.err, /--permission-mode: .*Claude Code.*Codex has none/);
+  assert.equal(s.bots().bots.length, 1, "nothing was written");
+  // Empty clears the record, and the next restart is back on the pack's auto mode.
+  assert.equal(s.cli(["edit", "Orchestrator", "--permission-mode="]).code, 0);
+  assert.equal(s.bots().bots[0].permissionMode, undefined);
+  assert.equal(s.cli(["restart", "Orchestrator", "--force", "--json"]).code, 0);
+  const back = plain(agentWords(s.calls().filter((c) => c[0] === "run").at(-1)));
+  assert.equal(back[back.indexOf("--permission-mode") + 1], "auto");
+  const cleared = s.cli(["show", "Orchestrator", "--json"]).json();
+  assert.deepEqual([cleared.permissionMode, cleared.permissionModeSource, cleared.pinnedPermissionMode], ["auto", "detected", null]);
+});
+
+test("#1413: moving a bot off Claude Code clears its permission mode, and naming one again stores it", (t) => {
+  const s = scene(t);
+  assert.equal(s.cli(["create", "--name", "Genie", "--agent", "claude", "--permission-mode", "manual", "--json"]).code, 0);
+  const moved = s.cli(["edit", "Genie", "--agent", "codex"]);
+  assert.equal(moved.code, 0, moved.err);
+  assert.match(moved.err, /its permission mode was cleared/);
+  assert.equal(s.bots().bots[0].permissionMode, undefined);
+  assert.equal(s.cli(["edit", "Genie", "--agent", "claude", "--permission-mode", "plan"]).code, 0);
+  assert.equal(s.bots().bots[0].permissionMode, "plan");
+  assert.equal(s.cli(["show", "Genie", "--json"]).json().permissionMode, "plan");
+});
+
 // ---- #1411 FIX-FIRST: a standard model keeps the default tier over a profile's or the host's
 // Fast, and show reads the profile a launch names. ----
 

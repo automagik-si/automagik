@@ -519,11 +519,11 @@ am create --name N --agent A [--kind main|member] [--role R] [--code true|false]
        [--cross-member BOT@DIR]...
        [--character C --colour K | --omni] [--model M] [--rank R]
        [--person-features on|off] [--effort E] [--tier fast|standard]
-       [--agy-mode auto|accept-edits|plan] [--agy-allow RULE]... [--agy-deny RULE]...
+       [--permission-mode MODE] [--agy-mode auto|accept-edits|plan] [--agy-allow RULE]... [--agy-deny RULE]...
        [--planned-wave N [--planned-note T]]
        [--worker-agent A] [--worker-model M] [--worker-effort E] [--worker-agy-mode M]
        [--worker-template T]
-am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
+am edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category] [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=] [--permission-mode=]
 am rm <bot>
 am category ls | add --title T [--sub S] [--id ID] | edit <id> | rm <id> | order <id>...
 am start <bot> [--space ID] [--tab ID]
@@ -1337,6 +1337,16 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   source, and `show --json` carries `effort`, `effortSource`, `tier`, `tierSource`,
   `pinnedEffort` and `pinnedTier`. See
   [Reasoning effort and service tier](#reasoning-effort-and-service-tier-codex).
+- `permissionMode` is optional: a Claude Code bot's own `--permission-mode`, set with
+  `am create|edit ... --permission-mode MODE`. One of Claude Code's names (`acceptEdits`, `auto`,
+  `bypassPermissions`, `manual`, `dontAsk`, `plan`); `auto` is the pack's default when the field
+  is absent, and an empty value clears a stored one. Every start, restart, revive and Claude
+  worker or helper launch passes it from the record, independent of the model, reasoning effort
+  and service tier. A value Claude Code doesn't accept, or one on another agent, is refused with
+  the accepted names rather than passed through or dropped. `show` prints it with its source
+  (`detected`, `roster` or `default`), and `show --json` carries `permissionMode`,
+  `permissionModeSource` and `pinnedPermissionMode`. See
+  [Permission mode](#permission-mode-claude-code).
 - `codexAuto` is retired (#1125). It used to opt a bot's Codex seat and workers out of Codex's
   auto mode; the owner's ruling (10 and 12 Nov) is that every Codex seat and worker runs in it,
   so `false` no longer opts out: the field is kept as written, ignored, and loading the bots
@@ -1413,6 +1423,13 @@ nothing to it (a Codex seat's template excepted, see [Codex's launch mode](#code
 | Hermes (`hermes`) | nothing | Hermes 0.22.5 has only a skip-all flag (`--yolo`). |
 | Pi, OpenCode, Cursor, Copilot, Amp, Grok, Kimi, Kiro, Qoder, Crush | nothing | Not checked: none is installed where the flags were read (2026-11-10), and the pack adds no flag it has not seen an agent's own help name. |
 
+A Claude Code bot may name another of Claude Code's own permission modes for its seat (and its
+Claude workers and helpers) with `permissionMode` / `am edit <bot> --permission-mode MODE`; the
+launch then passes that mode instead of `auto`, and the rest of the table is unchanged. See
+[Permission mode](#permission-mode-claude-code). Codex's and Antigravity's modes are not per-bot
+settings: Codex's launch mode is fixed (#1125), and Antigravity always runs without prompts under
+its deny list, its execution mode set by `agyMode`.
+
 Flags read from claude 2.1.322, codex-cli 0.167.0 and agy 1.5.4. No skip-all-approvals flag is
 passed for any agent but Antigravity; one for another agent needs the owner's word first.
 `am show <bot>` prints the bot's `auto mode` line (in `--json`, `autoMode`: its
@@ -1483,6 +1500,40 @@ is `detected` (what the live pane's command line runs, a template's own words in
 `-p <name>` layers `~/.codex/<name>.config.toml` on the global config), `global` (that global
 config's top level) or `default` (Codex's own default tier, Standard). The text `am show` prints
 the same two lines.
+
+### Permission mode (Claude Code)
+
+Claude Code's `--permission-mode` decides what a session may run without asking. The pack starts
+every Claude launch in `auto` ([Automatic mode](#automatic-mode)); a Claude Code bot may store one
+of Claude Code's own modes instead, in `.herdr/bots.json` as `permissionMode`:
+
+| Mode | Runs without asking |
+| --- | --- |
+| `manual` | reads only; anything else asks a person |
+| `acceptEdits` | reads and file edits |
+| `plan` | reads and plans; edits wait for a person's approval |
+| `auto` | everything, through Claude Code's classifier (the default) |
+| `dontAsk` | only what is already allowed; anything else is refused instead of asked |
+| `bypassPermissions` | every tool call, with no prompt |
+
+`am create ... --permission-mode MODE` stores one and `am edit <bot> --permission-mode MODE`
+changes it; `am edit <bot> --permission-mode=` clears it back to `auto`. Only Claude Code's own
+names are accepted: another word is refused with the list, and so is a mode on an agent that has
+none (Codex's launch mode is fixed, #1125; Antigravity's execution mode is `agyMode`), never
+passed through or dropped. `bypassPermissions` is the one that runs an orchestrator seat with no
+prompt at all; use it only for a bot the owner means to run that way.
+
+Every launch path rebuilds the command from the record: a start, a restart, a revive after a
+reboot, a linked machine's start, a worker and a Restart --tree helper. It is independent of the
+model, reasoning effort and service tier: a model change never rewrites it, and it never changes
+the model. A Claude worker or helper inherits its seat's mode; a worker template owns its command,
+so the pack adds no flag to it (put the mode in the template's command if it needs one).
+
+`am show <bot>` prints `permission <mode> (<source>)`; `show --json` carries `permissionMode`,
+`permissionModeSource` and `pinnedPermissionMode`. A source is `detected` (what the live pane's
+command line runs), `roster` (the bot's own value while it isn't running) or `default` (the pack's
+`auto` when the record stores none). A hand-written value the CLI wouldn't accept is dropped with
+a warning when the file is read, and `check` refuses it.
 
 ### Codex's launch mode
 

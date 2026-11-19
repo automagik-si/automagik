@@ -331,6 +331,19 @@ test("revive: after a reboot each bot at a bare shell is restarted in its place,
   assert.equal(runsOf(s).length, 2);
 });
 
+test("#1413: revive after a reboot starts a Claude bot with its own permission mode", (t) => {
+  const s = world(t, {
+    file: team({ main: { permissionMode: "bypassPermissions" } }),
+    terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } })],
+  });
+  const r = s.cli(["revive", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  const words = wordsOf(runsOf(s)[0]);
+  const at = words.indexOf("--permission-mode");
+  assert.notEqual(at, -1, words.join(" "));
+  assert.equal(words[at + 1], "bypassPermissions");
+});
+
 test("revive --dry-run prints the plan and touches nothing", (t) => {
   const s = world(t, { terminals: (p) => [pane("t5", { bot: ID.main, cwd: p, labels: { "agent.session": SID } }), pane("t6", { bot: ID.cap, cwd: p, front: ["claude"] })],
     attach: () => [{ bot: ID.main, terminal: "t5", created_ms: 1 }, { bot: ID.cap, terminal: "t6", created_ms: 1 }, { bot: ID.dev, terminal: "t44", created_ms: 9 }] });
