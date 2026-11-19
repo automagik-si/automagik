@@ -77,7 +77,7 @@ plugin, Bitwarden `bw` first, read-only, with `bots-dsh` keeping authorization.
 | Locked vault | (a) Refuse, name the lock, and let the person unlock in Settings, then retry. (b) Ask for the master password in the Bot's chat: the Bot and the chat see it. (c) Use a cached value. | **(a)**; never (b) or (c) |
 | Offline vault | (a) Refuse unless a `bw sync` just succeeded, or the failure is one of the recognized network failures of the pinned `bw` version; the local cache is never the authority. (b) Read `bw`'s local encrypted cache whenever it is unlocked: it works offline, and it also serves a deleted or rotated item forever. | **(a)**; there is no default-off cache option in the first cut |
 | A revoked session | (a) Trust `bw status`'s `unlocked`: the local vault still decrypts, so a recognized network failure can still serve the old value. (b) Make `bw sync` the gate and treat an auth failure as decisive: refuse and `bw lock` regardless of `lastSync`. | **(b)** |
-| A name in both stores | (a) The typed value wins: the vault's revocation silently stops applying. (b) The vault mapping wins: a hand-edit or a stale mapping can shadow a typed secret. (c) Refuse the name in both directions and serve neither value. | **(c)** |
+| A name in both stores | (a) The typed value wins: the vault's revocation silently stops applying. (b) The vault mapping wins: a hand-edit or an outdated mapping can shadow a typed secret. (c) Refuse the name in both directions and serve neither value. | **(c)** |
 | Bot on a machine without the vault | (a) Unavailable, with a reason; the person can install the plugin or map a typed secret explicitly. (b) Fall back to a stored value: that recreates the copy. (c) Queue the read: a command must not run with a value that arrives later. | **(a)**; never (b) or (c) |
 
 ### The shape and the seam
@@ -216,8 +216,9 @@ mapped.
 - If the vault is locked, the card says so and offers the person the unlock in Settings. The Bot
   gets a note and no value, and no grant is issued.
 - `list_secrets` shows the name, purpose, scope, and one availability word: available, locked or
-  unavailable (a stale connection, a name defined twice and a mapped name with the plugin off all
-  read unavailable). It never shows the provider, item, field, reference or value.
+  unavailable (a name defined twice and a mapped name with the plugin off read unavailable).
+  `stale` is a read result, never an availability word. It never shows the provider, item, field,
+  reference or value.
 - The Bot may read exactly the one value, in the one approved execution. It cannot list, search,
   export, read another field, write, unlock, change scope, or supply a vault reference.
 - The first cut reaches the shell only, through `$DSH_SECRET_<NAME>`. MCP capabilities, the
@@ -313,7 +314,7 @@ a real `bw`.
   current at sync time, and the next read refuses. The residual window is one read, not a clock.
 - **A locked vault is checked first.** `bw status` reports `locked` or `unauthenticated`; the read
   then refuses as locked (`The vault is locked. Unlock it in Settings › Vault and ask again;
-  nothing was read.`) and never syncs with a stale session key.
+  nothing was read.`) and never syncs while the status says the vault is locked or unauthenticated.
 
 **Revocation.** The freshness rule is what makes a revocation visible; it is not a retraction.
 What each revocation means:
@@ -396,14 +397,14 @@ and never travel over a plain-HTTP page off loopback.
 
 **The session key's exposure.** `bw` takes the session key through `BW_SESSION` or `--session`.
 The plugin passes it only as `BW_SESSION` in the environment of each short-lived `bw` child it
-runs — one child per invocation, so `bw status`, `bw sync` and `bw get` are three children, and
-`bw lock` runs without it — never in argv, never in a temp file, never in DSH's own environment,
-never in the profile or `ctx.credentials`, never in a Bot shell's declared variables. Each child's
-environment exposes the key for that child's run (and until it exits); the plugin starts no
-long-lived process. A same-user process can read a child's environment (`/proc/<pid>/environ`,
-`ps eww`) or its memory while it runs, and a Bot's shell is such a process. The boundary is that
-no file, log, session, diagnostics or audit ever holds the key — not that no same-user process can
-read it while a child runs.
+runs — one child per invocation, so `bw --version`, `bw status`, `bw sync` and `bw get` are four
+children, and `bw lock` runs without it — never in argv, never in a temp file, never in DSH's own
+environment, never in the profile or `ctx.credentials`, never in a Bot shell's declared variables.
+Each child's environment exposes the key for that child's run (and until it exits); the plugin
+starts no long-lived process. A same-user process can read a child's environment
+(`/proc/<pid>/environ`, `ps eww`) or its memory while it runs, and a Bot's shell is such a
+process. The boundary is that no file, log, session, diagnostics or audit ever holds the key —
+not that no same-user process can read it while a child runs.
 
 ### Boundaries
 
@@ -411,10 +412,11 @@ read it while a child runs.
   session key or API token, the master password, the item reference and path, the field, the
   connection label, and raw manager output. An error is reduced to a code before it is shown or
   logged. The audit holds a command digest, never the command text.
-- **Bot-facing refusals carry the secret name only.** A deleted item, a renamed field, a revoked
-  session and a stale vault each answer the Bot with the name it asked for and a generic reason;
-  the item, field, connection and manager output stay in the person's Settings view. A refusal
-  returned to the Bot is part of its session, so it is written to the same boundary as a value.
+- **Bot-facing refusals carry the secret name only.** A deleted item, a renamed field and a
+  revoked session each answer the Bot with the name it asked for and a generic reason; the item,
+  field, connection and manager output stay in the person's Settings view. A tolerated `stale`
+  read is not a refusal: it returns the value and audits `stale`. A refusal returned to the Bot is
+  part of its session, so it is written to the same boundary as a value.
 - **The person must approve:** the mapping (name to provider, item and field, with whose Bots may
   ask), the unlock, each use (allow once, for the named command, shell and folder), turning the
   plugin on, and a new connection. A Bot can never approve any of these.
