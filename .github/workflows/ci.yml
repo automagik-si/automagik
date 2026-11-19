@@ -683,8 +683,24 @@ jobs:
           restore-keys: |
             robolectric-m2-${{ runner.os }}-${{ steps.robolectric.outputs.version }}-
 
-      # Validates the wrapper checksum and caches Gradle's dependencies.
+      # Gradle's dependencies and wrapper, keyed on the files that can change resolution: a Gradle
+      # file change starts a fresh key (the restore-key still seeds it) and a source-only change
+      # reuses the warm cache, so a normal run resolves nothing over the network (#1675).
+      - name: Cache Gradle's dependencies and wrapper (~/.gradle)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-pocket-${{ runner.os }}-${{ hashFiles('apps/pocket/android/**/*.gradle.kts', 'apps/pocket/android/**/*.toml', 'apps/pocket/android/gradle/wrapper/gradle-wrapper.properties', 'apps/pocket/android/gradle.properties') }}
+          restore-keys: |
+            gradle-pocket-${{ runner.os }}-
+
+      # Wrapper checksum validation only: the explicit cache above owns ~/.gradle, and setup-gradle
+      # stands down when that directory already exists, so its own cache is off here (#1675).
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
+        with:
+          cache-disabled: true
 
       # One shared debug key for PR APKs (docs/decisions/shared-debug-signing-key.md). With the
       # secret, the job signs with it and publishes the APK; without it (a fork), the default key.
@@ -709,8 +725,23 @@ jobs:
         id: build
         working-directory: apps/pocket/android
         run: |
+          set -euo pipefail
           touch "$RUNNER_TEMP/m2-marker"
-          ./gradlew --stacktrace :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+          args=(--no-daemon --max-workers=2 --stacktrace :app:assembleDebug :app:testDebugUnitTest :app:lintDebug)
+          first="$RUNNER_TEMP/gradle-first-attempt.log"
+          status=0
+          ./gradlew "${args[@]}" 2>&1 | tee "$first" || status=$?
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          # A dropped connection (a plugin marker or a dependency that did not resolve) is retried
+          # exactly once; a test, lint or compile failure is not, and a second failure fails the
+          # job, so a genuinely disappeared artifact is still obvious (#1675).
+          if ! grep -Eq 'Plugin .* was not found|Could not resolve|Could not GET' "$first"; then
+            exit "$status"
+          fi
+          echo "resolution failed, retrying once"
+          ./gradlew "${args[@]}"
 
       # The certificate is public evidence that two PR runs share a key; the APK is what a tester installs.
       - name: Debug APK certificate
