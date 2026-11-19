@@ -7,8 +7,8 @@ use std::fs;
 use std::path::Path;
 
 use common::{Env, serial};
-use meter::evidence::SessionKey;
 use meter::event::key_hash;
+use meter::evidence::SessionKey;
 use meter::hc::{Labels, Terminal};
 use meter::time::{format_rfc3339, parse_rfc3339};
 use rusqlite::{Connection, params};
