@@ -45,9 +45,11 @@ function repository() {
   const bunLog = join(dir, 'bun.log');
   const gatesLog = join(dir, 'gates.log');
   const gateLog = join(dir, 'gate.log');
+  const ghLog = join(dir, 'gh.log');
   writeFileSync(bunLog, '');
   writeFileSync(gatesLog, '');
   writeFileSync(gateLog, '');
+  writeFileSync(ghLog, '');
   // Every stub logs `<folder> :: <argv>` to the gate log; the version/lane decisions are kept out of
   // it, so the gate commands are asserted in the exact order release-gates.sh ran them.
   const logCall = `printf '%s :: %s\\n' "\${PWD##*/}" "$*" >> "\${GATE_LOG:-/dev/null}"`;
@@ -62,9 +64,11 @@ case "$*" in
   "scripts/version.ts check") exit 0 ;;
   "scripts/lane.ts kind "*) echo "\${FAKE_KIND:-plugins}"; exit 0 ;;
   "scripts/lane.ts herdr "*) echo "\${FAKE_HERDR:-no}"; exit 0 ;;
-  "scripts/lane.ts pocket-since "*) echo 3.0.0; exit 0 ;;
+  "scripts/lane.ts pocket-since "*) echo v3.0.0; exit 0 ;;
+  "scripts/lane.ts pocket v3.0.2") echo "\${FAKE_POCKET_SHIPS:-no}"; exit 0 ;;
   "scripts/lane.ts pocket "*) echo "\${FAKE_POCKET:-no}"; exit 0 ;;
-  "scripts/lane.ts meter-since "*) echo 3.0.0; exit 0 ;;
+  "scripts/lane.ts meter-since "*) echo v3.0.0; exit 0 ;;
+  "scripts/lane.ts meter v3.0.2") echo "\${FAKE_METER_SHIPS:-no}"; exit 0 ;;
   "scripts/lane.ts meter "*) echo "\${FAKE_METER:-no}"; exit 0 ;;
   "scripts/lane.ts ships "*) echo "\${FAKE_SHIPS:-yes}"; exit 0 ;;
 esac
@@ -89,17 +93,50 @@ exit 0
 `);
   writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bash
 set -euo pipefail
+echo "$*" >> "\${GH_LOG}"
 case "$*" in
-  *"release download"*) exit 1 ;;
+  "release download pocket-lane "*) part=pocket; field=versionName ;;
+  "release download meter-lane "*) part=meter; field=version ;;
+  "api repos/owner/repo/releases/tags/"*)
+    [[ "\${FAKE_RELEASE_MODE:-stable}" != error ]] || exit 1
+    tag="\${2##*/}"
+    case "\${FAKE_RELEASE_MODE:-stable}" in
+      prerelease) prerelease=true; draft=false; published='"2026-11-19T00:00:00Z"' ;;
+      draft) prerelease=false; draft=true; published=null ;;
+      unpublished) prerelease=false; draft=false; published=null ;;
+      *) prerelease=false; draft=false; published='"2026-11-19T00:00:00Z"' ;;
+    esac
+    printf '{"tag_name":"%s","draft":%s,"prerelease":%s,"published_at":%s}\\n' "$tag" "$draft" "$prerelease" "$published"
+    exit 0 ;;
   *) exit 0 ;;
 esac
+[[ "\${FAKE_POINTER_MODE:-ok}" != error ]] || exit 1
+if [[ "\${FAKE_POINTER_MODE:-ok}" == malformed ]]; then echo '{'; exit 0; fi
+version="\${FAKE_POINTER_VERSION:-3.0.2}"
+if [[ "$part" == pocket && -n "\${FAKE_POCKET_POINTER_VERSION:-}" ]]; then version="\${FAKE_POCKET_POINTER_VERSION}"; fi
+if [[ "$part" == meter && -n "\${FAKE_METER_POINTER_VERSION:-}" ]]; then version="\${FAKE_METER_POINTER_VERSION}"; fi
+if [[ "$part" == pocket && -n "\${FAKE_POCKET_POINTER_SECOND:-}" ]]; then
+  reads=$(awk '$1 == "release" && $2 == "download" && $3 == "pocket-lane" { n++ } END { print n+0 }' "\${GH_LOG}")
+  if (( reads > 1 )); then version="\${FAKE_POCKET_POINTER_SECOND}"; fi
+fi
+printf '{"%s":"%s"}\\n' "$field" "$version"
 `);
-  writeFileSync(join(bin, 'jq'), '#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n');
+  writeFileSync(join(bin, 'timeout'), `#!/usr/bin/env bash
+set -euo pipefail
+shift 2
+if [[ "$*" == *"gh api "* && "\${FAKE_TIMEOUT_API:-}" == true ]]; then exit 124; fi
+if [[ "$*" == *"gh release download"* && "\${FAKE_TIMEOUT_POINTER:-}" == true ]]; then exit 124; fi
+exec "$@"
+`);
   chmodSync(join(bin, 'bun'), 0o755);
   chmodSync(join(bin, 'node'), 0o755);
   chmodSync(join(bin, 'shellcheck'), 0o755);
   chmodSync(join(bin, 'gh'), 0o755);
-  chmodSync(join(bin, 'jq'), 0o755);
+  chmodSync(join(bin, 'timeout'), 0o755);
+  writeFileSync(join(bin, 'cargo'), `#!/usr/bin/env bash
+[[ "$1" == metadata ]] || exit 2
+`);
+  chmodSync(join(bin, 'cargo'), 0o755);
   // The scripts find the repository from their own path, so they run from this work tree. The gate
   // commands need the folders the workflow's gates run in, and the herdr-app check's install.sh.
   mkdirSync(join(work, 'scripts'));
@@ -109,6 +146,11 @@ esac
   mkdirSync(join(work, 'am'));
   mkdirSync(join(work, 'herdr'));
   writeFileSync(join(work, 'herdr', 'install.sh'), '');
+  mkdirSync(join(work, 'apps', 'pocket', 'android'), { recursive: true });
+  writeFileSync(join(work, 'apps', 'pocket', 'android', 'gradlew'), `#!/usr/bin/env bash
+printf 'android :: %s\\n' "$*" >> "\${GATE_LOG:-/dev/null}"
+`);
+  chmodSync(join(work, 'apps', 'pocket', 'android', 'gradlew'), 0o755);
   // A logging delegator, not a fake: every call, `all` included, is the real release-gates.sh.
   writeFileSync(join(bin, 'gates'), `#!/usr/bin/env bash
 set -euo pipefail
@@ -137,6 +179,7 @@ exec bash ${JSON.stringify(join(work, 'scripts', 'release-gates.sh'))} "$@"
         BUN_LOG: bunLog,
         GATES_LOG: gatesLog,
         GATE_LOG: gateLog,
+        GH_LOG: ghLog,
         GITHUB_REPOSITORY: 'owner/repo',
         RELEASE_GATES: join(bin, 'gates'),
         KIND: 'plugins',
@@ -148,7 +191,7 @@ exec bash ${JSON.stringify(join(work, 'scripts', 'release-gates.sh'))} "$@"
       },
     });
     const lines = (path: string) => { try { return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } };
-    return { status: done.status, out: done.stdout, err: done.stderr, output: readFileSync(output, 'utf8'), bun: lines(bunLog), gates: lines(gatesLog), gateCalls: lines(gateLog) };
+    return { status: done.status, out: done.stdout, err: done.stderr, output: readFileSync(output, 'utf8'), bun: lines(bunLog), gh: lines(ghLog), gates: lines(gatesLog), gateCalls: lines(gateLog) };
   };
   // The real gates script, with the stub toolchain on PATH: the dispatch, its order and its
   // failures are the script's own.
@@ -168,7 +211,8 @@ exec bash ${JSON.stringify(join(work, 'scripts', 'release-gates.sh'))} "$@"
       },
     });
   };
-  return { dir, work, bin, bare, mover, run, runGates, move, remote, gateLog, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  const tag = (name: string) => git(work, 'tag', name, 'v3.0.0');
+  return { dir, work, bin, bare, mover, run, runGates, move, remote, tag, gateLog, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 describe('a cut that dev has not moved past', () => {
@@ -177,7 +221,7 @@ describe('a cut that dev has not moved past', () => {
     try {
       const run = repo.run();
       expect(run.status).toBe(0);
-      expect(run.output).toBe('version=3.0.1\nsha=' + repo.remote('rev-parse', 'refs/heads/dev') + '\n');
+      expect(run.output).toBe('version=3.0.1\nsha=' + repo.remote('rev-parse', 'refs/heads/dev') + '\npocket=no\nmeter=no\n');
       expect(run.gates).toEqual([]);
       expect(repo.remote('log', '-1', '--format=%s', 'dev')).toBe('chore(release): v3.0.1');
       expect(repo.remote('rev-parse', 'refs/tags/v3.0.1^{commit}')).toBe(repo.remote('rev-parse', 'refs/heads/dev'));
@@ -238,7 +282,7 @@ describe('the cut budget (#1663)', () => {
       expect(run.gates.length).toBe(2);
       expect(run.gates[0].startsWith('lane ')).toBe(true);
       expect(run.gates[1]).toBe('all plugins no no no');
-      expect(run.output).toBe('version=3.0.1\nsha=' + repo.remote('rev-parse', 'refs/heads/dev') + '\n');
+      expect(run.output).toBe('version=3.0.1\nsha=' + repo.remote('rev-parse', 'refs/heads/dev') + '\npocket=no\nmeter=no\n');
       expect(repo.remote('log', '-1', '--format=%s', 'dev^')).toBe('fix: a merge during the cut');
       expect(repo.remote('rev-parse', 'refs/tags/v3.0.1^{commit}')).toBe(repo.remote('rev-parse', 'refs/heads/dev'));
     } finally {
@@ -265,6 +309,83 @@ describe('the cut budget (#1663)', () => {
   }
 });
 
+describe('a pointer that advances after the gates (#668)', () => {
+  test('Pocket and meter decide independently against a published stable tag', () => {
+    const repo = repository();
+    try {
+      repo.tag('v3.0.2');
+      const run = repo.run({ POCKET: 'yes', METER: 'yes', POCKET_SINCE: 'v3.0.0', METER_SINCE: 'v3.0.0', FAKE_METER_SHIPS: 'yes' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=no\nmeter=yes\n');
+      expect(run.gh.filter(call => call.startsWith('release download'))).toHaveLength(2);
+      expect(run.gh.filter(call => call === 'api repos/owner/repo/releases/tags/v3.0.2')).toHaveLength(2);
+      expect(run.bun).toContain('scripts/lane.ts pocket v3.0.2');
+      expect(run.bun).toContain('scripts/lane.ts meter v3.0.2');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  test('an initially unselected lane is never re-read', () => {
+    const repo = repository();
+    try {
+      repo.tag('v3.0.2');
+      const run = repo.run({ POCKET: 'no', METER: 'yes', METER_SINCE: 'v3.0.0' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=no\nmeter=no\n');
+      expect(run.gh.some(call => call.includes('pocket-lane'))).toBe(false);
+      expect(run.gh.some(call => call.includes('meter-lane'))).toBe(true);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  for (const [name, env] of [
+    ['shipping changes remain', { FAKE_POCKET_SHIPS: 'yes' }],
+    ['the pointer is stale', { FAKE_POINTER_VERSION: '3.0.0' }],
+    ['the pointer is unreadable', { FAKE_POINTER_MODE: 'malformed' }],
+    ['the pointer read fails', { FAKE_POINTER_MODE: 'error' }],
+    ['the pointer read times out', { FAKE_TIMEOUT_POINTER: 'true' }],
+    ['the local tag is missing', { FAKE_POINTER_VERSION: '3.0.9' }],
+    ['the candidate release is a prerelease', { FAKE_RELEASE_MODE: 'prerelease' }],
+    ['the candidate release is unpublished', { FAKE_RELEASE_MODE: 'unpublished' }],
+    ['the candidate release lookup fails', { FAKE_RELEASE_MODE: 'error' }],
+    ['the candidate release lookup times out', { FAKE_TIMEOUT_API: 'true' }],
+  ] as const) {
+    test(`keeps Pocket selected when ${name}`, () => {
+      const repo = repository();
+      try {
+        repo.tag('v3.0.2');
+        const run = repo.run({ POCKET: 'yes', POCKET_SINCE: 'v3.0.0', ...env });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain('pocket=yes\nmeter=no\n');
+      } finally {
+        repo.cleanup();
+      }
+    });
+  }
+
+  test('a retry publishes the decision for the checkout it actually tags', () => {
+    const repo = repository();
+    try {
+      repo.tag('v3.0.2');
+      repo.move();
+      const run = repo.run({ POCKET: 'yes', POCKET_SINCE: 'v3.0.0', FAKE_POCKET: 'yes', FAKE_POCKET_POINTER_SECOND: '3.0.0', HAS_KEYSTORE: 'true', HAS_PASSWORD: 'true' });
+      expect(run.status).toBe(0);
+      expect(run.out).toContain('skipping the pocket build for this attempt');
+      expect(run.out).toContain('re-cutting on the new tip');
+      expect(run.output).toContain('pocket=yes\nmeter=no\n');
+      expect(run.gates).toContain('all plugins no yes no');
+      // One lane recalculation read sits between the two post-gate rechecks.
+      expect(run.gh.filter(call => call.startsWith('release download pocket-lane'))).toHaveLength(3);
+      expect(run.gh.filter(call => call === 'api repos/owner/repo/releases/tags/v3.0.2')).toHaveLength(1);
+      expect(repo.remote('rev-parse', 'refs/tags/v3.0.1^{commit}')).toBe(repo.remote('rev-parse', 'refs/heads/dev'));
+    } finally {
+      repo.cleanup();
+    }
+  });
+});
+
 describe('a merge that lands while the gates run', () => {
   test('re-cuts on the new tip: re-decides the lane, re-runs the gates, tags the new dev', () => {
     const repo = repository();
@@ -276,7 +397,7 @@ describe('a merge that lands while the gates run', () => {
       expect(run.gates.length).toBe(2);
       expect(run.gates[0].startsWith('lane ')).toBe(true);
       expect(run.gates[1]).toBe('all plugins no no no');
-      expect(run.output).toBe('version=3.0.1\nsha=' + repo.remote('rev-parse', 'refs/heads/dev') + '\n');
+      expect(run.output).toBe('version=3.0.1\nsha=' + repo.remote('rev-parse', 'refs/heads/dev') + '\npocket=no\nmeter=no\n');
       expect(repo.remote('log', '-1', '--format=%s', 'dev')).toBe('chore(release): v3.0.1');
       // The merge is the release commit's parent: the tag names the tree the second gates saw.
       expect(repo.remote('log', '-1', '--format=%s', 'dev^')).toBe('fix: a merge during the cut');
@@ -496,9 +617,20 @@ describe('the workflow runs the gates and the cut from their scripts', () => {
   test('the cut step calls release-cut.sh with the lane it gated and the keys a re-cut re-checks', () => {
     const cut = step('Version, commit and tag');
     expect(cut).toContain('run: bash scripts/release-cut.sh');
-    for (const name of ['KIND', 'HERDR', 'POCKET', 'METER']) expect(cut).toContain(`${name}: \${{ steps.lane.outputs.`);
+    for (const name of ['KIND', 'HERDR', 'POCKET', 'POCKET_SINCE', 'METER', 'METER_SINCE']) expect(cut).toContain(`${name}: \${{ steps.lane.outputs.`);
     // The signing-key checks read the tree, so the retry needs the same secrets their steps got.
     for (const name of ['HERDR_PACK_KEY', 'AM_LANE_KEY', 'METER_LANE_KEY', 'HAS_KEYSTORE', 'HAS_PASSWORD']) expect(cut).toContain(`${name}:`);
+  });
+
+  test('release notes and downstream jobs use the successful cut flags', () => {
+    expect(workflow).toContain('pocket: ${{ steps.cut.outputs.pocket }}');
+    expect(workflow).toContain('meter: ${{ steps.cut.outputs.meter }}');
+    const notes = step('Publish the release');
+    expect(notes).toContain('POCKET: ${{ steps.cut.outputs.pocket }}');
+    expect(notes).toContain('METER: ${{ steps.cut.outputs.meter }}');
+    expect(workflow).toContain("needs.cut.outputs.pocket == 'yes'");
+    expect(workflow).toContain("needs.cut.outputs.meter == 'yes'");
+    expect(workflow).toContain('pocket_since: ${{ steps.lane.outputs.pocket_since }}');
   });
 
   test('the cut job starts its clock first and passes a deadline inside its timeout (#1663)', () => {
@@ -548,7 +680,7 @@ describe('the workflow runs the gates and the cut from their scripts', () => {
       'bun run check',
     ]) expect(gatesScript).toContain(command);
     // The lane decision moved into the script, every key it writes intact.
-    for (const key of ['kind', 'herdr', 'pocket', 'pocket_since', 'meter', 'ships', 'base']) expect(gatesScript).toContain(`echo "${key}=`);
+    for (const key of ['kind', 'herdr', 'pocket', 'pocket_since', 'meter', 'meter_since', 'ships', 'base']) expect(gatesScript).toContain(`echo "${key}=`);
     // `all` calls gate functions, never a case label as a command (the #1653 defect).
     const allBody = gatesScript.slice(gatesScript.indexOf('\nall() {'), gatesScript.indexOf('\ncase "${1:-}"'));
     for (const gate of ['gate_base', 'gate_herdr', 'gate_herdr_imports', 'gate_herdr_app', 'gate_herdr_key', 'gate_am', 'gate_am_key', 'gate_meter', 'gate_meter_key', 'gate_pocket', 'gate_pocket_key', 'gate_addons']) {
