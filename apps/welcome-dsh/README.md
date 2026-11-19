@@ -178,7 +178,7 @@ while its CLI is missing, installing or failed, or signed in but not answering y
 - whether the CLI is signed in, as the CLI itself says (`claude auth status`, `codex login
   status`; only yes or no is read). Signed out, the row has **Sign in**, and the command to run
   in a terminal as the other way (`claude auth login`, `codex login`); not checked yet, it says
-  so, with **Check again**;
+  so; a check that timed out or could not tell says that instead; both with **Check again**;
 - the connector acp-dsh installs in the background: installing, failed with its last error and
   **Retry**, or ready with its version;
 - once ready and signed in, *Ready: pick Claude Code in the model picker*. The model appears
@@ -274,7 +274,7 @@ The shape was read from DSH 0.2.1-rc.2:
 | `provider-key`, `signin-*` | see `src/host/providers.js` | A key, or a sign-in run through DSH's authorization service. |
 | `omni-plugins` | none | The Omni plugins (`@automagik/bots-dsh`, `@automagik/omni-channels-dsh`, `-canvas-dsh`): each one's version and whether it is installed, `ready` once they run here, and the install in progress. |
 | `omni-plugins-install` | none | Installs the missing ones in order through DSH's plugin manager (`installBundle`: the Bot team from this plugin's own source pointed at its sibling, else this release's tarball; Omni's from Omni's repository at the pinned release), switching on any that are off. Pressing Omni's power button in the team step calls it. |
-| `acp` | `{ refresh? }` | Claude Code and Codex, from acp-dsh's `acpAgents` service: `{ available, agents: [{ id, key, name, on, cli: { found, installUrl?, state?, version?, updating?, error?, diagnostic?, logPath? }, connector: { state, version?, error? }, signedIn?, listed, restartNeeded }] }`. `refresh` looks for the CLIs again and asks each whether it is signed in. `{ available: false }` without acp-dsh. |
+| `acp` | `{ refresh? }` | Claude Code and Codex, from acp-dsh's `acpAgents` service: `{ available, agents: [{ id, key, name, on, cli: { found, installUrl?, state?, version?, updating?, error?, diagnostic?, logPath? }, connector: { state, version?, error? }, signedIn?, signInCheck?, listed, restartNeeded }] }`. `signInCheck` is `timeout` or `unreadable`: why the last check could not tell, only while `signedIn` is absent. `refresh` looks for the CLIs again and asks each whether it is signed in. `{ available: false }` without acp-dsh. |
 | `acp-switch` | `{ id, on }` | Writes acp-dsh's `claude` or `codex` setting in the entry its service names (`settingsEntry`, else `acp-dsh`) at the revision `describe()` gave. |
 | `acp-retry` | `{ id }` | Starts a failed connector install again. |
 | `bot-type` | `{ type: 'omni' }` | What the Omni Bot starts with, as groups: model and thinking (DSH's default), plugins with versions, tool groups with their switches, skills, folder and permissions. |

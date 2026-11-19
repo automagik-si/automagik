@@ -278,6 +278,8 @@ export const PT_BR = {
   'Not signed in to {name}. Run {command} in a terminal, then check again.': 'Sem login no {name}. Rode {command} em um terminal e verifique de novo.',
   'Turning it on lets Automagik use the sign-in {name} already has on this computer.': 'Ao ligar, o Automagik passa a usar o login que o {name} já tem neste computador.',
   'The sign-in to {name} has not been checked yet.': 'O login no {name} ainda não foi verificado.',
+  'Could not check the sign-in to {name}: {cli} took too long to answer.': 'Não foi possível verificar o login no {name}: o {cli} demorou demais para responder.',
+  'Could not tell whether you are signed in to {name}.': 'Não foi possível saber se há login no {name}.',
   'Sign in': 'Entrar',
   'No Bot chat to sign in from here. Run {command} in a terminal instead.': 'Não há chat de Bot para entrar por aqui. Rode {command} em um terminal.',
   'Sign in from the Bot\'s chat, then come back to finish setting up.': 'Entre pelo chat do Bot e volte para terminar a configuração.',
