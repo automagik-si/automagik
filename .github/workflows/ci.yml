@@ -193,7 +193,12 @@ jobs:
   landing:
     name: Landing page and browser
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Measured on 2026-11-19: the ffmpeg step was still installing when the old 10-minute cap
+    # cancelled the job 9m57s into that step (run 44488373957: job 08:32:21, step 08:32:40,
+    # cancelled 08:42:37), so bun install, both test files and the Chrome check never ran. Those
+    # steps are short; 20 leaves a cold apt install room to finish, while a genuinely hung step
+    # still fails. A package-cache hit removes the download entirely.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -208,11 +213,53 @@ jobs:
           bun-version: 1.4.4
 
       # The page gate re-derives every committed WebP from its recorded source; that check
-      # calls ffprobe, which the runner image does not carry.
+      # calls ffprobe and ffmpeg, which the runner image does not carry. The archive cache lets
+      # a later run install the packages it already downloaded instead of fetching them again;
+      # the key carries the hosted image (ImageOS/ImageVersion) and a suffix to bump when this
+      # step changes. A miss still installs, bounded below, rather than assuming a hit.
+      - name: Prepare the apt archive cache
+        id: image
+        run: |
+          set -euo pipefail
+          # ImageOS/ImageVersion are runner process variables, not workflow env, so read them
+          # here; the cache key must move when the hosted image (and its apt indexes) moves.
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+          sudo mkdir -p /var/cache/apt/archives/partial
+          # actions/cache restores as the runner user; the install then hands the cache to apt.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+          sudo chmod -R u+rwX /var/cache/apt/archives
+
+      - name: Restore the ffmpeg package cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ steps.image.outputs.image }}-v1
+
       - name: ffmpeg for the derived art check
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          set -euo pipefail
+          sudo chown -R _apt:root /var/cache/apt/archives
+          sudo chmod -R u+rwX,go+rX /var/cache/apt/archives
+          # A stalled mirror must fail and retry, not hold the step open until the job cap.
+          apt_opts=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+          )
+          # ubuntu-24.04 ships apt indexes, so install from them (or the cache) first and refresh
+          # only if that fails: a cache hit then needs no network at all, and a stale index costs
+          # one retry. ffprobe is not a separate package on Ubuntu, so ffmpeg still provides both
+          # binaries; --no-install-recommends only drops the extras this check does not use.
+          for attempt in 1 2; do
+            if sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" install -y -qq --no-install-recommends ffmpeg; then
+              break
+            fi
+            if [ "$attempt" = 2 ]; then exit 1; fi
+            echo "::warning::the first ffmpeg install failed; refreshing apt indexes once before retrying"
+            sudo apt-get "${apt_opts[@]}" update -qq
+          done
+          # Hand the downloaded debs back to the runner user so actions/cache can save them.
+          sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: node --test apps/landing/landing.test.mjs apps/landing/waitlist.test.mjs
