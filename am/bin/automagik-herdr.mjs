@@ -2452,7 +2452,7 @@ async function cmdShow(opts, [ref]) {
   const bot = await botIn(project, ref, opts);
   const { view, hcError } = project.machine ? {} : await viewOrError();
   const info = { ...(project.machine ? await describeLinked(project, bot)
-    : { ...describe(project, bot, view, hcError, null, null, await readHeld(project, bot, view)),
+    : { ...describe(project, bot, view, hcError, null, null, await readHeld(project, bot, view, { refuseTwins: true })),
       duplicate: await duplicateLabel(project, bot, view) }), instructions: bot.instructions };
   info.hcProxyState = project.machine ? await proxyStateOn(project, bot)
     : approvedProxyState({ project: project.key, bot });
@@ -5352,10 +5352,22 @@ async function projectHomeHeld(project, bot) {
 
 /** The live binding ls, show and brief print for `bot`: the selected home's, else the one the
  * project's own app home holds (#1128). With no view (hc unavailable) a read prints none, as
- * before: it never turns a failed hc into a second lookup. */
-async function readHeld(project, bot, view) {
+ * before: it never turns a failed hc into a second lookup. `refuseTwins` makes show and whois
+ * refuse a second live binding in the project's own app home, as restart does, instead of
+ * printing the selected one as the whole truth. `direct` is a binding the caller already read
+ * from the view (whois by bare id answers outside a project, where the project filter would
+ * hide it). */
+async function readHeld(project, bot, view, { refuseTwins = false, direct: chosen = undefined } = {}) {
   if (!view || bot.planned) return null;
-  return liveFor(view, bot.id, project) ?? await projectHomeHeld(project, bot);
+  const direct = chosen !== undefined ? chosen : liveFor(view, bot.id, project);
+  if (!direct || !project || project.machine || Boolean(process.env.HERDR_APP_HOME)) {
+    return direct ?? await projectHomeHeld(project, bot);
+  }
+  if (!refuseTwins) return direct;
+  const { rows } = await botBindings(project, bot.id, { requestedHome: appHome(), explicit: false });
+  const other = rows.find((r) => r.get && attachKey(r.binding) !== attachKey(direct.binding));
+  if (other) throw appHomeConflict(bot, [appHome(), other.home]);
+  return direct;
 }
 
 /** The app home a pane's launch word names (#650), when it is a usable absolute path; else null. */
@@ -5445,8 +5457,10 @@ async function restartTarget(project, bot, requestedHome, explicitHome, allowImp
   const row = candidate ? carriedBinding(candidate) : null;
   if (get && (!candidate || candidate.address === get.address && candidate.created_ms === get.created_ms)) {
     if (row?.project === project.key && !sameHome(requestedHome, carried)) {
-      throw new CliError(`${get.address} has matching attachments in two app homes; inspect both ledgers before restarting.`,
-        1, { refused: "app-home", terminal: get.address });
+      // The one-time label import can record the same launch in both ledgers. The resolver
+      // treats that as one binding, but a restart still refuses to choose an authority here;
+      // name both ledgers, as every other app-home refusal does (#1128).
+      throw appHomeConflict(bot, [requestedHome, carried]);
     }
     // #1128: a live binding here never licenses a second live binding in the project's own app
     // home (its pane may have lost the label am attach only warns about). The same launch
@@ -5457,6 +5471,16 @@ async function restartTarget(project, bot, requestedHome, explicitHome, allowImp
       if (other) throw appHomeConflict(bot, [requestedHome, other.home]);
     }
     return { held: { binding, get }, dir: requestedHome };
+  }
+  // #1128: the selected home's live binding and the labelled pane in another home are two live
+  // bindings too, whichever of them lost the label. The branch above catches the orientation
+  // where the label is on the selected pane; this is its reverse, and without this check it
+  // would fall to the "no matching attachment" error below, naming neither ledger. Same twin
+  // check, same refusal.
+  if (get && candidate && (candidate.address !== get.address || candidate.created_ms !== get.created_ms)) {
+    const { rows } = await botBindings(project, bot.id, { requestedHome, explicit: explicitHome, extraHomes: [carried] });
+    const other = rows.find((r) => r.get && attachKey(r.binding) !== attachKey(binding));
+    if (other) throw appHomeConflict(bot, [requestedHome, other.home]);
   }
   if (!candidate) {
     if (selected?.core === core && selected.project !== project.key && selected.created_ms === (await checkedPane(selected.terminal))?.created_ms) {
@@ -6410,9 +6434,11 @@ async function cmdWhois(opts, [terminal]) {
     const there = opts.machine !== undefined ? await connectedMachine(opts.machine, "nothing to answer") : null;
     const view = await attachView();
     // #1128: the same resolver start and restart read, so a live binding in the project's own
-    // app home answers here too, over a stale row in the selected one.
+    // app home answers here too, over a stale row in the selected one, and a two-live split
+    // refuses rather than showing one. A bare id outside a project still answers from the
+    // view's own row, which the project filter would hide.
     const held = there ? view.liveAt.get(atKey(id, there.id)) ?? null
-      : view.live.get(id) ?? await projectHomeHeld(project, { id });
+      : await readHeld(project, { id }, view, { refuseTwins: true, direct: view.live.get(id) ?? null });
     const out = held ? whoisOf(held) : { terminal: null, core: there ? there.id : view.core, created_ms: null, bot: id, project: null, since: null };
     if (opts.json) return out;
     return held ? `${id} plays in ${addressOf(held.binding, view.machines)} (${out.project}) since ${out.since}.` : `${id} is attached to no terminal.`;

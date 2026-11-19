@@ -485,6 +485,68 @@ test("#1128 two live bindings refuse before any write, even when one lost its la
   assert.deepEqual(readFileSync(attachPath(home)), beforeProject, "the project home's ledger untouched");
 });
 
+// The Reviewer's HIGH (#1128), the symmetric orientation: the selected home's live binding lost
+// the label and the project's own home holds the labelled pane. The same twin check must run
+// before the fall-through, so the refusal names both ledgers instead of "attachment".
+test("#1128 the symmetric two-live split refuses naming both ledgers", (t) => {
+  const s = scene(t);
+  const home = withProjectHome(s);
+  const terminal = startIn(s, home); // labelled in the project's own home
+  const row = attachRowsIn(home).at(-1);
+  // The selected (default) home's own live pane for the same bot, unlabelled: the split #1128
+  // leaves behind, the reverse of the test above.
+  mkdirSync(join(defaultHomePath(s), "automagik-herdr"), { recursive: true });
+  writeFileSync(defaultLedgerPath(s), `${JSON.stringify({ ...row, terminal: "t8", created_ms: 100 })}\n`, { mode: 0o600 });
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  const projectPane = state.terminals.find((x) => x.address === terminal);
+  state.terminals.push({ ...projectPane, address: "t8", name: "twin", created_ms: 100, labels: {} });
+  writeFileSync(s.statePath, JSON.stringify(state));
+  assert.ok(projectPane.labels?.bot, "the project home's pane keeps the label");
+  const beforeDefault = readFileSync(defaultLedgerPath(s)), beforeProject = readFileSync(attachPath(home));
+  writeFileSync(s.logPath, "");
+  const r = cliWith(s, {}, ["HERDR_APP_HOME"], ["restart", "Genie", "--json"]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.equal(JSON.parse(r.stdout).refused, "app-home");
+  assert.ok(r.stderr.includes(attachPath(defaultHomePath(s))), `the selected ledger's path: ${r.stderr}`);
+  assert.ok(r.stderr.includes(attachPath(home)), `the project home's path: ${r.stderr}`);
+  assert.deepEqual(calls(s).filter((call) => ["run", "kill"].includes(call[0])), [], "nothing launched or ended");
+  assert.deepEqual(readFileSync(defaultLedgerPath(s)), beforeDefault, "the default ledger untouched");
+  assert.deepEqual(readFileSync(attachPath(home)), beforeProject, "the project home's ledger untouched");
+  // The read path resolves too: show and whois refuse the same split instead of naming the
+  // selected pane with duplicate:false while the project home binds the labelled pane.
+  for (const args of [["whois", "--bot", ID.main, "--json"], ["show", "Genie", "--json"]]) {
+    const read = cliWith(s, {}, ["HERDR_APP_HOME"], args);
+    assert.equal(read.status, 1, `${args[0]}: ${read.stdout}`);
+    assert.equal(JSON.parse(read.stdout).refused, "app-home", args[0]);
+    assert.ok(read.stderr.includes(attachPath(defaultHomePath(s))), `${args[0]} names the selected ledger: ${read.stderr}`);
+    assert.ok(read.stderr.includes(attachPath(home)), `${args[0]} names the project home: ${read.stderr}`);
+  }
+  assert.deepEqual(readFileSync(defaultLedgerPath(s)), beforeDefault, "the reads wrote nothing to the default ledger");
+  assert.deepEqual(readFileSync(attachPath(home)), beforeProject, "the reads wrote nothing to the project home's ledger");
+});
+
+// The one-time label import can record the same launch in both ledgers. One pane, but two homes
+// naming it: restart refuses to choose an authority, names both ledgers, and writes nothing.
+test("#1128 the same launch in two app homes refuses naming both ledgers", (t) => {
+  const s = scene(t);
+  const home = withProjectHome(s);
+  const terminal = startIn(s, home);
+  const row = attachRowsIn(home).at(-1);
+  mkdirSync(join(defaultHomePath(s), "automagik-herdr"), { recursive: true });
+  writeFileSync(defaultLedgerPath(s), `${JSON.stringify(row)}\n`, { mode: 0o600 });
+  idlePane(s, terminal);
+  const beforeDefault = readFileSync(defaultLedgerPath(s)), beforeProject = readFileSync(attachPath(home));
+  writeFileSync(s.logPath, "");
+  const r = cliWith(s, {}, ["HERDR_APP_HOME"], ["restart", "Genie", "--json"]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.equal(JSON.parse(r.stdout).refused, "app-home");
+  assert.ok(r.stderr.includes(attachPath(defaultHomePath(s))), `the selected ledger's path: ${r.stderr}`);
+  assert.ok(r.stderr.includes(attachPath(home)), `the project home's path: ${r.stderr}`);
+  assert.deepEqual(calls(s).filter((call) => ["run", "kill"].includes(call[0])), [], "nothing launched or ended");
+  assert.deepEqual(readFileSync(defaultLedgerPath(s)), beforeDefault, "the default ledger untouched");
+  assert.deepEqual(readFileSync(attachPath(home)), beforeProject, "the project home's ledger untouched");
+});
+
 // The same live-over-stale rule on a direct read path: whois (and show) use the one resolver,
 // so the live project-home binding answers there too. A mutation that reads the selected map
 // alone (attachView().live) fails this test.
