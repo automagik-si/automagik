@@ -1348,7 +1348,10 @@ test('the idle pause survives a restart and the user lifts it', async (t) => {
   const post = sent.find(entry => entry.sessionId === room.id && entry.message.source.role === 'post')
   await emit(room.id, { type: 'user/message', data: { source: post.message.source, content: post.message.content } })
   const quiet = relay(room.id, 'relay-1')
-  await settle()
+  // Wait for the status post's round to finish (a real event, not a fixed window): a relay
+  // that lands while that round is still starting joins a round that then ends with nothing
+  // to do, and the user's message never opens the next one.
+  await quiet
   assert.equal(sent.filter(entry => entry.message.source.role === 'room').length, 0, 'no round starts on its own after a restart')
 
   await emit(room.id, { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '@Writer 继续' }] } })
@@ -1357,7 +1360,6 @@ test('the idle pause survives a restart and the user lifts it', async (t) => {
   assert.ok(turn, "the user's message opens a round again")
   await answer(turn.sessionId, turn.message.source.exchangeId, '继续核对', 1)
   await resumed
-  await quiet
   assert.equal(state().idlePaused, undefined)
 })
 
