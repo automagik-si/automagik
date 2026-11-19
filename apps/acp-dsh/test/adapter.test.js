@@ -791,6 +791,16 @@ test("DSH's answer maps to the option the agent offered", () => {
   assert.deepEqual(optionFor('cancelled', options), { outcome: { outcome: 'cancelled' } })
 })
 
+test('a mirror answer never substitutes a standing permission', () => {
+  const allowAlways = { optionId: 'a', kind: 'allow_always' }
+  const rejectOnce = { optionId: 'r', kind: 'reject_once' }
+  const rejectAlways = { optionId: 'n', kind: 'reject_always' }
+  const cancelled = { outcome: { outcome: 'cancelled' } }
+  assert.deepEqual(optionFor('allowed-once', [allowAlways, rejectOnce]), cancelled)
+  assert.deepEqual(optionFor('lasting-only', [allowAlways, rejectAlways]), cancelled)
+  assert.deepEqual(optionFor('lasting-only', [allowAlways, rejectOnce, rejectAlways]), { outcome: { outcome: 'selected', optionId: 'r' } })
+})
+
 test("the agent's own models and each one's efforts are DSH's models and efforts", async () => {
   const h = host()
   try {

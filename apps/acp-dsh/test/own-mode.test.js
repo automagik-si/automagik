@@ -494,7 +494,7 @@ test('one reviewer refusal followed by text does not claim a refusal stop', asyn
   assert.equal(chunks.findLast(chunk => chunk.type === 'finish').reason.kind, 'aborted', JSON.stringify(chunks))
   assert.equal(c.session.snapshotEvents().some(e => e.data?.source?.stop === 'refusals'), false)
 })
-for (const always of [false, true]) test(`mirror asks carry current input and one-shot availability: ${always}`, async t => {
+for (const always of [false]) test(`mirror asks carry current input and one-shot availability: ${always}`, async t => {
   const w = await world(t, { level: WRITE, modes: MODES, modeFor: AGENTS['acp-codex'].modeFor, env: { FAKE_ACP_ALWAYS_ONLY: always ? '1' : '0' } })
   const c = w.chat('ada'); c.say('ask edited'); const chunks = await c.step()
   const block = chunks.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call').block
@@ -505,6 +505,20 @@ for (const always of [false, true]) test(`mirror asks carry current input and on
   assert.equal(Object.hasOwn(w.asked[0].mirrorCall, 'locations'), false)
   await c.step()
   assert.match(JSON.stringify(c.messages), /It printed/)
+})
+
+test('a mirror question with only a lasting allow lets the fake agent report the refusal', async t => {
+  const w = await world(t, { level: WRITE, modes: MODES, modeFor: AGENTS['acp-codex'].modeFor, env: { FAKE_ACP_ALWAYS_ONLY: '1' } })
+  const c = w.chat('ada'); c.say('ask edited'); const chunks = await c.step()
+  const block = chunks.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call').block
+  await c.run(block)
+  assert.equal(w.asked.length, 0)
+  const tool = c.messages.find(message => message.role === 'tool' && message.toolCallId === block.id)
+  assert.deepEqual(tool.content, [{ type: 'text', text: 'Fake agent offered to allow Run echo first only from now on ("Allow"), not just once, so Automagik did not approve it.' }])
+  const next = await c.step()
+  assert.equal(next.findLast(chunk => chunk.type === 'finish').reason.kind, 'stop')
+  assert.match(c.messages.at(-1).content.map(part => part.text).join(''), /I was not allowed to run it/)
+  assert.doesNotMatch(JSON.stringify(c.messages), /It printed/)
 })
 
 for (const [answer, text] of [['rejected', 'The person rejected bash.'], ['unavailable', 'DSH could not approve bash: nobody could answer its approval request.']]) test(`plain bridge ${answer} keeps its existing text`, async t => {

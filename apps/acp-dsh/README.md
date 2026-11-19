@@ -29,9 +29,10 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   (`approval/asked`, `approval/decided`) and gives the agent DSH's answer. On DSH's Auto
   review level that answer is the review. A call the reviewer allowed, or that the person
   allowed in the dialog the reviewer raised, gets `allow_once` for the agent's first question
-  about it, with no second dialog; this holds in a subagent child too. These still ask as before:
-  a later question, a call the agent changed after its review (in its question or after it), an
-  agent that offers no `allow_once`, and a level that changed since the call.
+  about it, with no second dialog; this holds in a subagent child too. Later questions, calls
+  the agent changes after review, and level changes can still raise a dialog. When the mirror
+  body gets a question offering `allow_always` without `allow_once`, it replies with `reject_once`
+  if offered or cancels the question, skips its dialog, and explains why in the result text.
 - **DSH's own tools over the bridge (`dshTools`).** On, the agent gets the Session's preset tool
   set (standard, or cordis in creator mode) over one stdio MCP server per ACP session, named
   `dsh` and spawned by the adapter with that session's arguments. The bridge has no port; it
@@ -1035,7 +1036,7 @@ tool name `acp_tool` are public: Sessions keep them.
 
 `acpAgents.ownMode` can request Claude Code's `auto` mode or Codex's `agent` mode, including bridged sessions. Two exact `true` answers are required before a prompt. Strict sessions retain their existing mode handling.
 
-A bridge approval carries `bridgeCall: { agentAsked }`. This is false at the start of each prompt and becomes true when a CLI in its own mode asks permission. A judge may set `bridgeCall.judged = { reason }` when rejecting; the bridge reports `Auto's judge refused <tool>: <reason>.` without attributing it to the person. A mirror approval carries `mirrorCall: { title, kind, input, allowOnce }`, plus `locations` when the call has some, captured from the current permission request immediately before asking. It is plain JSON: DSH passes an approval it does not answer on to its remote approval card only as lossless JSON, so no member is ever `undefined`. A judge may set `mirrorCall.judged = { reason }` when rejecting; the call's result then reads `Auto's judge refused <title>: <reason>.` and the agent gets its own reject option. Only an offered `allow_once` permits an automatic one-shot decision. The person's answer retains the existing `allow_always` fallback.
+A bridge approval carries `bridgeCall: { agentAsked }`. This is false at the start of each prompt and becomes true when a CLI in its own mode asks permission. A judge may set `bridgeCall.judged = { reason }` when rejecting; the bridge reports `Auto's judge refused <tool>: <reason>.` without attributing it to the person. A mirror approval carries `mirrorCall: { title, kind, input, allowOnce }`, plus `locations` when the call has some, captured from the current permission request immediately before asking. It is plain JSON: DSH passes an approval it does not answer on to its remote approval card only as lossless JSON, so no member is ever `undefined`. A judge may set `mirrorCall.judged = { reason }` when rejecting; the call's result then reads `Auto's judge refused <title>: <reason>.` and the agent gets its own reject option. Only an offered `allow_once` permits a one-shot allow in the mirror body. Questions with no allow option keep their flow. The bridge's own answers and DSH's Auto review before the mirror body keep their existing behavior.
 
 Codex review events are counted per prompt. When an own-mode prompt ends after three consecutive or ten total refusals, or immediately after a refusal without subsequent activity, an `acp-session` notice with `stop: 'refusals'` explains that replying can continue; refused steps stay refused. The turn finishes as `stop`. Strict prompts keep their existing ending.
 
