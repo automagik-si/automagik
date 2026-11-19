@@ -33,6 +33,7 @@ import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNA
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
+import { retiredLine } from './src/host/retired-home.js'
 import { enginesFor, PRESSURE_METHOD, pressureGuard } from './src/host/pressure.js'
 import { redactorFor } from './src/host/redact.js'
 import { agentRoute, carryEffort, crossed } from './src/host/switch.js'
@@ -158,6 +159,7 @@ export function apply(ctx, config = {}, {
 } = {}) {
   const homes = cliHome === undefined ? undefined : new CliHomes(cliHome, {
     onRecordError: vendor => warn(ctx, `the ${vendor} generation record could not be saved at startup`),
+    onRetired: (vendor, retired) => info(ctx, retiredLine(vendor, retired)),
   })
   if (homes) for (const vendor of ['claude', 'codex']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.
@@ -1231,13 +1233,17 @@ export function apply(ctx, config = {}, {
       }
     }
     checkAccount()
-    if (!access.ready && access.reason === 'account') throw imageRefusal(UNAVAILABLE, 'Codex is signed in on this computer, but you have not confirmed its account for Automagik. Confirm it in a Bot\'s chat (choose a Codex model there), then try again.')
+    // An edit whose locked run could not be started answers with the reason bots-dsh's
+    // generate_image uses to hand the Bot its own verified copy, so the change is made on the
+    // file itself. A draw keeps its own refusal.
+    const editFallback = refusal => input === undefined ? refusal : Object.assign(refusal, { reason: 'edit-not-isolated' })
+    if (!access.ready && access.reason === 'account') throw editFallback(imageRefusal(UNAVAILABLE, 'Codex is signed in on this computer, but you have not confirmed its account for Automagik. Confirm it in a Bot\'s chat (choose a Codex model there), then try again.'))
     // A Codex config that does not load, or a check that keeps breaking, may have been put
     // right since it was remembered: the draw's own check answers for those.
     if (!access.ready && access.reason !== 'config' && access.reason !== 'unreadable') {
-      if (access.signedIn === false) throw imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, then try again.')
-      if (access.unsupported === true) throw unsupported()
-      throw imageRefusal(UNAVAILABLE, 'Codex cannot draw images here yet: it is off, not installed, or its sign-in could not be checked.')
+      if (access.signedIn === false) throw editFallback(imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, then try again.'))
+      if (access.unsupported === true) throw editFallback(unsupported())
+      throw editFallback(imageRefusal(UNAVAILABLE, 'Codex cannot draw images here yet: it is off, not installed, or its sign-in could not be checked.'))
     }
     try {
       return await drawImage({ spawn: () => {

@@ -783,6 +783,21 @@ Which pane plays which bot is recorded in one file, `<app home>/automagik-herdr/
 and Attach run the command line too. The `bot` label is a display hint: `hc label` changes
 no row, so relabelling a pane moves no bot.
 
+**Which app home a restart uses.** `HERDR_APP_HOME` names it. With it unset, restart resolves
+the home before it writes anything: a pane's launch home wins, live or ended (hc keeps an ended
+pane until it is removed, and its launch carries the home); else a live binding wins over a
+stale one; else the project's own app home (`<project>/.herdr/app-home`, RFC 0021 delivery 3)
+is used when it names the bot and the default does not. A binding is **live** while hc still
+gives its terminal with the same `created_ms` (a finished, vanished or reused terminal is
+**stale**), and that one rule is what `restart`, `attach`, `show`, `whois` and `revive` resolve
+with: the live binding is the bot's wherever the command was typed. `ls`, `brief` and `start`
+read the selected home first and fall back to the project's own home when it names nothing
+live. Two live bindings on different panes, and two stale ledgers that both name the bot, have
+no launch record to decide between them: `restart`, `show` and `whois` refuse them, naming both
+ledgers, before anything starts or is written. Set `HERDR_APP_HOME` to the home that owns it.
+`am revive` leaves a bot alone when a live pane carries its label or the project's own home
+still binds it live, so a stale row in another home never brings back a twin.
+
 The file is made with mode 0600; one that is group- or world-writable is refused (every
 command that reads it exits 1, naming the fix: `chmod 600`). Each row is one line, written
 with one append, under the file's lock (`attach.jsonl.lock`), so two runs never attach one bot:
