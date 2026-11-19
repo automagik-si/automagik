@@ -18,9 +18,9 @@ permissions:
 # (apps/pocket/docs/decisions/teams-v1.md), and Pocket Link's covers the shared transcript
 # fixture, its only repository input outside its own folder.
 env:
-  HERDR_CHANGED_PATHS: '^(herdr/|herdr-layout/|\.github/workflows/(ci|release)\.yml$|\.github/scripts/herdr-app-check\.mjs$|scripts/(lane|version)\.ts$)'
+  HERDR_CHANGED_PATHS: '^(herdr/|herdr-layout/|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|\.github/scripts/herdr-app-check\.mjs$|scripts/(lane|version)\.ts$)'
   SCHEDULER_CHANGED_PATHS: '^(herdr/scheduler/|\.github/workflows/ci\.yml$)'
-  AM_CHANGED_PATHS: '^(am/|herdr/mods/am-sidebar/|plugin-lane/keys\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(am-copies\.mjs|am-lane\.ts|lane\.ts|version\.ts)$)'
+  AM_CHANGED_PATHS: '^(am/|herdr/mods/am-sidebar/|plugin-lane/keys\.json$|\.github/workflows/(ci|release)\.yml$|\.github/node-versions\.json$|scripts/(am-copies\.mjs|am-lane\.ts|lane\.ts|version\.ts)$)'
   POCKET_CHANGED_PATHS: '^(apps/pocket/|apps/bots-dsh/src/host/pets/genie-clay/|apps/bots-dsh/src/client/pet(-poses)?\.js$|package\.json$|\.github/workflows/(ci|release)\.yml$|scripts/(lane|version)\.ts$)'
   POCKET_LINK_CHANGED_PATHS: '^(herdr/mods/pocket-link/|herdr/test/fixtures/transcript-folder-rule\.json$|\.github/workflows/ci\.yml$)'
   METER_CHANGED_PATHS: '^(meter/statusline/|\.github/workflows/ci\.yml$)'
@@ -131,6 +131,41 @@ jobs:
             cat "${report}" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
+  nodes:
+    # The Node versions the herdr and am gates run on, read once from .github/node-versions.json
+    # (#1645). The release cut reads the same file, so the version a release runs is always a
+    # version a pull request ran: CI's 22 + latest 24 missed the release's 24.9.0, where a
+    # symlink/rmSync difference (24.0-24.13 followed the link, 24.18 unlinked it) failed every
+    # release for hours with every PR check green. Its own job, not an output of `changes`: a
+    # failed detection must still run every area (#895), so the matrix cannot live there.
+    name: Node versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Read the gates' Node versions
+        id: read
+        run: |
+          set -euo pipefail
+          matrix=$(jq -c '.ci' .github/node-versions.json)
+          release=$(jq -r '.release' .github/node-versions.json)
+          # The release must be an exact version that is a matrix leg, or it can float away from
+          # what a pull request ran: that is the skew this file exists to end.
+          if [[ ! "${release}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release Node version '${release}' in .github/node-versions.json is not exact x.y.z"
+            exit 1
+          fi
+          if ! jq -e --arg version "${release}" '.ci | index($version)' .github/node-versions.json > /dev/null; then
+            echo "::error::release Node version '${release}' is not one of the ci matrix legs in .github/node-versions.json"
+            exit 1
+          fi
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
   repo:
     # One version everywhere, the release tooling's tests, and the market index: DSH's own
     # parser, and every pinned commit holds the package it lists (so it needs history).
@@ -146,7 +181,7 @@ jobs:
       # scripts/test-guard.test.ts runs real `node --test` runs, on the plugins' Node.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -166,7 +201,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -205,7 +240,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -248,7 +283,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
@@ -274,7 +309,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - run: node herdr/scripts/privacy-check.mjs
 
@@ -292,15 +327,16 @@ jobs:
     # Only when herdr/ changed, or the workflows and lane tooling that test and pack it: the
     # `changes` job's herdr output decides it before this job takes a runner.
     name: herdr pack (Node ${{ matrix.node }})
-    needs: changes
+    needs: [changes, nodes]
     if: ${{ !cancelled() && needs.changes.outputs.herdr != 'false' }}
     runs-on: ubuntu-24.04
     # The full CLI/worker suites plus the local/linked start matrix exceed ten minutes.
     timeout-minutes: 15
     strategy:
       fail-fast: false
+      # One list for CI and the release (#1645): .github/node-versions.json.
       matrix:
-        node: ['22', '24']
+        node: ${{ fromJSON(needs.nodes.outputs.matrix) }}
     defaults:
       run:
         working-directory: herdr
@@ -513,14 +549,15 @@ jobs:
     # Only when am/, what it copies, or the workflows and tooling that release it changed: the
     # `changes` job's am output decides it before this job takes a runner.
     name: am (Node ${{ matrix.node }})
-    needs: changes
+    needs: [changes, nodes]
     if: ${{ !cancelled() && needs.changes.outputs.am != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
+      # One list for CI and the release (#1645): .github/node-versions.json.
       matrix:
-        node: ['22', '24']
+        node: ${{ fromJSON(needs.nodes.outputs.matrix) }}
     defaults:
       run:
         working-directory: am
@@ -1124,7 +1161,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -1231,7 +1268,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -1383,7 +1420,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - name: Install
         run: npm ci --no-fund --no-audit
@@ -1415,7 +1452,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: 24.9.0
 
       - name: Test
         run: node --test test/batch-spawn.test.js test/process-identity.test.js

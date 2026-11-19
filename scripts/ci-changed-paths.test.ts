@@ -51,8 +51,10 @@ const RULES: Record<string, [string, string, string]> = {
 const CROSS = [
   ['HERDR_CHANGED_PATHS', 'herdr-layout/layouts/automagik.json'],
   ['HERDR_CHANGED_PATHS', 'scripts/lane.ts'],
+  ['HERDR_CHANGED_PATHS', '.github/node-versions.json'],
   ['SCHEDULER_CHANGED_PATHS', '.github/workflows/ci.yml'],
   ['AM_CHANGED_PATHS', 'herdr/mods/am-sidebar/bin/run.sh'],
+  ['AM_CHANGED_PATHS', '.github/node-versions.json'],
   ['POCKET_CHANGED_PATHS', 'package.json'],
   ['POCKET_LINK_CHANGED_PATHS', 'herdr/test/fixtures/transcript-folder-rule.json'],
   ['USAGEMETER_CHANGED_PATHS', 'meter/schema/query/v1/envelope.schema.json'],

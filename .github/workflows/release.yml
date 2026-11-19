@@ -204,9 +204,30 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      # One Node version for both jobs (#1645): the release reads the same file CI's herdr and am
+      # matrix reads, and runs the exact `release` version, which must be one of that matrix's
+      # legs. They have to stay in step: a Node minor can change filesystem, network or process
+      # behaviour, and 24.0-24.13.0's rmSync followed a symlink to a directory where 24.18
+      # unlinked it, so a release on 24.9.0 failed for hours while every PR check on 22 + latest
+      # 24 passed. Do not write a Node version into either workflow outside this file.
+      - name: The Node version CI gates the release on
+        id: node
+        run: |
+          set -euo pipefail
+          release=$(jq -r '.release' .github/node-versions.json)
+          if [[ ! "${release}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release Node version '${release}' in .github/node-versions.json is not exact x.y.z"
+            exit 1
+          fi
+          if ! jq -e --arg version "${release}" '.ci | index($version)' .github/node-versions.json > /dev/null; then
+            echo "::error::release Node version '${release}' is not one of the ci matrix legs in .github/node-versions.json"
+            exit 1
+          fi
+          echo "version=${release}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
-          node-version: 24.9
+          node-version: ${{ steps.node.outputs.version }}
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
