@@ -31,7 +31,7 @@ import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, co
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, resolveAgent, resumeAfterTurn, resumesById,
+import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -1257,6 +1257,17 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
     ? shownCodexSetting({ argv: observedArgv, pinned: bot.tier, key: "service_tier", map: tierName, fallback: project.machine ? null : "standard",
       levels: [["profile", profile?.tier], ["global", global?.tier]] })
     : { value: null, source: null };
+  // #1413 F1: the Claude Code permission mode this bot runs now, read from its live pane's
+  // command line; only when it isn't running does the record say what its next start runs. A
+  // live pane whose command line names none has no effective mode to report: the record's mode
+  // is not this process's, so claiming it (source "roster") would lie about what runs.
+  const permissionModes = permissionModesOf(agentKey);
+  const paneArgv = Array.isArray(live?.foreground?.argv) ? live.foreground.argv : null;
+  const detectedPermission = paneArgv && permissionModes ? permissionModeFrom(paneArgv) : null;
+  const shownPermission = !permissionModes ? { value: null, source: null }
+    : paneArgv ? (detectedPermission ? { value: detectedPermission, source: "detected" } : { value: null, source: "live" })
+      : bot.permissionMode ? { value: bot.permissionMode, source: "roster" }
+        : { value: PERMISSION_MODE_DEFAULT, source: "default" };
   // The workers' Antigravity mode is shown as the default (auto) when their agent is Antigravity.
   const worker = bot.worker && typeof bot.worker === "object" ? { ...bot.worker } : null;
   if (worker && resolveAgent(worker.agent ?? bot.agent) === "antigravity") worker.agyMode = agyModeOf(worker.agyMode);
@@ -1276,6 +1287,14 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
   const workerTrusted = ["<worktree>"];
   const workerAgy = workerAgent === "antigravity"
     ? agyPermissionPlan({ bot, scope: "worker", role: workerRoleOf, folder: null, realpath: realDir, homeDir: home() }) : null;
+  // #1413 F1: the `auto mode` line is what the live pane runs too, never the mode a restart
+  // would apply; a live command line this pack reads no mode on says exactly that.
+  const auto = bot.agent ? autoModeOf(bot, !project.machine) : null;
+  const autoMode = auto && permissionModes && paneArgv
+    ? { ...auto, args: detectedPermission ? permissionModeArgs("claude", detectedPermission) : [],
+      note: detectedPermission ? PERMISSION_MODE_WHAT[detectedPermission]
+        : "this pack reads no --permission-mode on its live command line" }
+    : auto;
   const out = {
     id: bot.id, name: bot.name, kind: bot.kind, ...placeOf(project),
     lead: lead.lead || null, leadName,
@@ -1286,11 +1305,12 @@ function describe(project, bot, view, hcError, projects = null, observation = nu
     model: shown.model, modelSource: shown.source, pinnedModel: bot.model ?? null,
     effort: shownEffort.value, effortSource: shownEffort.source, pinnedEffort: bot.effort ?? null,
     tier: shownTier.value, tierSource: shownTier.source, pinnedTier: bot.tier ?? null,
+    permissionMode: shownPermission.value, permissionModeSource: shownPermission.source, pinnedPermissionMode: bot.permissionMode ?? null,
     agyMode: bot.agent === "antigravity" ? agyModeOf(bot.agyMode) : (typeof bot.agyMode === "string" && bot.agyMode ? bot.agyMode : null),
     terminal: held?.binding.terminal ?? null, status, duplicate: false, since: held?.binding.at ?? null,
     role: bot.role, rank: bot.rank ?? null, code: bot.code !== false, look: bot.look,
     hcProxy: bot.hcProxy === true,
-    autoMode: bot.agent ? autoModeOf(bot, !project.machine) : null,
+    autoMode,
     worker,
     ...(seatAgy ? { agyPermissions: { allow: seatAgy.allow, deny: seatAgy.deny, trustedWorkspaces: seatAgy.trustedWorkspaces } } : {}),
     ...(workerAgy ? { workerAgyPermissions: { allow: workerAgy.allow, deny: workerAgy.deny, trustedWorkspaces: workerTrusted } } : {}),
@@ -1520,7 +1540,7 @@ const OPTIONS = {
   category: { type: "string" }, "no-category": { type: "boolean" },
   character: { type: "string" }, colour: { type: "string" }, color: { type: "string" }, omni: { type: "boolean" },
   model: { type: "string" }, "no-model": { type: "boolean" }, rank: { type: "string" }, "hc-proxy": { type: "string" },
-  "person-features": { type: "string" },
+  "person-features": { type: "string" }, "permission-mode": { type: "string" },
   "agy-mode": { type: "string" }, "worker-agy-mode": { type: "string" },
   "hermes-home": { type: "string" }, "hermes-profile": { type: "string" }, "no-hermes": { type: "boolean" },
   "agy-allow": { type: "string", multiple: true }, "agy-deny": { type: "string", multiple: true },
@@ -1565,6 +1585,9 @@ Usage: am <command> [options]                   (every command takes --json and 
          [--code true|false]            false omits the worker instruction; default true
          [--person-features on|off]     Claude Code only: keep the prompt suggestions, away
                                        summaries and subagent progress summaries; default off
+         [--permission-mode MODE]       Claude Code only: the bot's own --permission-mode
+                                       (acceptEdits, auto, bypassPermissions, manual, dontAsk,
+                                       plan); default auto, empty on edit clears it
          [--instructions TEXT | --instructions-file F|-] [--lead BOT [--lead-project DIR]] [--category ID]
          [--cross-member BOT@DIR]...   reciprocal cross-project member(s) reporting to this lead
          [--character C --colour K | --omni] [--model M] [--rank R]
@@ -1586,7 +1609,7 @@ Usage: am <command> [options]                   (every command takes --json and 
          [--worker-template T]          (an hc template: owns the command, so it wins)
   edit <bot> [the create options] [--code true|false] [--unplanned] [--no-model] [--no-category]
              [--no-lead-project] [--no-cross-members] [--rank=] [--effort=] [--tier=]
-             [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
+             [--permission-mode=] [--worker-agent=] [--worker-model=] [--worker-effort=] [--worker-template=]
              [--agy-mode=auto] [--worker-agy-mode=auto]   (empty: cleared; auto is the default)
              [--person-features on|off]   (Claude Code only; default off)
              [--agy-allow=] [--agy-deny=] [--no-agy-permissions] [--cross-member=]   (empty: cleared)
@@ -1597,6 +1620,11 @@ Usage: am <command> [options]                   (every command takes --json and 
   that names no --tier runs the new model on standard, said explicitly on the launch line, so
   a Fast a profile, a template or the host config still names never applies to it. am show
   --json reports the effective values and their source.
+  Permission mode (Claude Code): --permission-mode MODE stores one of Claude Code's own
+  --permission-mode names (acceptEdits, auto, bypassPermissions, manual, dontAsk, plan); every
+  start, restart and revive passes it, independent of the model, effort and tier, and a value
+  Claude Code doesn't accept is refused. --permission-mode= clears it back to the pack's auto
+  mode. Another agent has no per-bot permission mode: a value for one is refused, never dropped.
   main <bot> [--old-lead <bot>] [--dry-run]
                                 hand over the main role and list the members that follow it
                                 --old-lead sets the previous main's lead. --dry-run previews the hand-over.
@@ -1998,9 +2026,12 @@ function autoModeOf(bot, local = true) {
   const key = resolveAgent(bot.agent ?? "", agentTable());
   if (!key) return null;
   const args = autoModeArgs(key, bot, agentTable()[key]?.run ?? []);
+  // #1413: a Claude bot's own permission mode says what its launch does instead of auto's note.
+  const chosen = key === "claude" && permissionModesOf(key)?.includes(bot.permissionMode) ? bot.permissionMode : null;
   // Codex's launch mode has no opt-out (#1125): a source's own approval words are left out.
-  const note = args.length ? AUTO_MODE[key].what
-    : AUTO_MODE[key] ? "its own run words already pick its approvals" : (AUTO_MODE_NONE[key] ?? "none this pack knows");
+  const note = chosen ? PERMISSION_MODE_WHAT[chosen]
+    : args.length ? AUTO_MODE[key].what
+      : AUTO_MODE[key] ? "its own run words already pick its approvals" : (AUTO_MODE_NONE[key] ?? "none this pack knows");
   return { args, note, ...(key === "antigravity" && local ? { sandbox: hostAgySandbox() } : {}) };
 }
 
@@ -2137,6 +2168,23 @@ export function entryFrom(opts, base, project, { creating, listOf = null }) {
     // after the template's and the profile's own words and neither can keep Fast on it.
     entry.tier = "standard";
     if (storedTier) report([`${entry.name}: its service tier doesn't carry over to a new model; it runs standard unless --tier fast is passed with --model.`]);
+  }
+  // #1413: a bot's own Claude Code permission mode (--permission-mode), passed on every launch
+  // path and independent of the model, effort and tier. Empty clears it. A value Claude Code
+  // doesn't accept, or one on another agent, is refused with the reason and nothing is saved;
+  // an agent change that leaves a stale stored one clears it and says so.
+  const claudeBot = entry.agent ? resolveAgent(entry.agent, agentTable()) === "claude" : false;
+  if (opts["permission-mode"] !== undefined && opts["permission-mode"] !== "") {
+    const why = permissionModeProblem(entry.agent ? resolveAgent(entry.agent, agentTable()) : null, opts["permission-mode"]);
+    if (why) throw new CliError(`--permission-mode: ${why} (or --permission-mode= to clear).`, 2);
+    entry.permissionMode = opts["permission-mode"];
+  } else if (opts["permission-mode"] === "") {
+    entry.permissionMode = "";
+  }
+  const storedPermission = entry.permissionMode !== undefined && entry.permissionMode !== "";
+  if (storedPermission && !claudeBot) {
+    entry.permissionMode = "";
+    report([`${entry.name}: its permission mode was cleared, since it is Claude Code's and it runs ${entry.agent || "no agent"}.`]);
   }
   // Antigravity's execution mode: applied at launch (auto unless another is stored), so the
   // default is written as no field at all and auto clears a stored one.
@@ -2382,6 +2430,21 @@ async function projectFor(opts) {
   if (opts.machine !== undefined) return loadRemoteProject(await remoteKeyOf(opts), opts.machine);
   return loadProject(await commandKeyOf(opts));
 }
+
+// #1413 F3: a warning the loader raised about a bot's record (a hand-edited permission mode it
+// dropped, say) is said on every command that reads the record, not only `am ls` and `am worker`.
+// Warn, never refuse: the rest of the record is valid and the launch runs the field's default, so
+// refusing would keep an operator from starting the bot they must fix. The sentence is the
+// loader's own, once per command; `botId` narrows it to the bot a command is about.
+const saidWarnings = new Set();
+function warnProject(project, botId = null) {
+  for (const w of project?.warnings ?? []) {
+    if (botId && !w.startsWith(`${botId}: `)) continue;
+    if (saidWarnings.has(w)) continue;
+    saidWarnings.add(w);
+    report([w]);
+  }
+}
 /**
  * Where this command's edit is written (RFC 0014 Q16, #234): the git top level of the folder
  * it was run in or named with --project (a worktree's own folder), else the project key (a
@@ -2585,6 +2648,7 @@ async function checkLinkedProxy(project, bot, agent, warn = reportProxyWarning) 
 async function cmdShow(opts, [ref]) {
   const project = await projectFor(opts);
   const bot = await botIn(project, ref, opts);
+  warnProject(project, bot.id);
   const { view, hcError } = project.machine ? {} : await viewOrError();
   const info = { ...(project.machine ? await describeLinked(project, bot)
     : { ...describe(project, bot, view, hcError, null, null, await readHeld(project, bot, view, { refuseTwins: true })),
@@ -2608,6 +2672,11 @@ async function cmdShow(opts, [ref]) {
       `  effort       ${info.effort ? `${info.effort} (${info.effortSource})` : "-"}`,
       `  tier         ${info.tier ? `${info.tier} (${info.tierSource})` : "-"}`,
     ] : []),
+    ...(info.permissionMode ? [`  permission   ${info.permissionMode} (${info.permissionModeSource})`]
+      : info.permissionModeSource === "live"
+        ? [`  permission   not named by its live command line (${info.pinnedPermissionMode
+          ? `its record's ${info.pinnedPermissionMode} applies to its next start` : "the pack's auto mode applies to its next start"})`]
+        : []),
     ...(info.agyMode ? [`  agy mode     ${info.agyMode}`] : []),
     ...(info.autoMode ? [`  auto mode    ${info.autoMode.args.length ? `${info.autoMode.args.join(" ")} (${info.autoMode.note})` : `none: ${info.autoMode.note}`}`] : []),
     ...(info.autoMode?.sandbox && info.autoMode.sandbox.state !== "available"
@@ -3171,6 +3240,7 @@ async function cmdStart(opts, [ref]) {
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
   const bot = await botIn(project, ref, opts);
+  warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
   // launch.js checks the folder Start launches in against the project (attachRefusal on
@@ -5727,6 +5797,7 @@ async function cmdRestart(opts, [ref]) {
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
   const bot = await botIn(project, ref, opts);
+  warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
   // Before swap validation, preparation or a delegated tree transaction.
@@ -8362,7 +8433,7 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
     if (!projects.has(key)) {
       let loaded = null;
       try { loaded = key ? loadProject(key) : null; } catch { loaded = null; }
-      projects.set(key, { key, file: loaded?.text ? loaded.file : null, results: [] });
+      projects.set(key, { key, file: loaded?.text ? loaded.file : null, warnings: loaded?.warnings ?? [], results: [] });
     }
     return projects.get(key);
   };
@@ -8381,6 +8452,8 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
         : me && [t.terminal, states.get(t.terminal)?.get?.name].includes(me) ? "revive runs inside its pane; run it from another terminal" : null;
     return { ...t, name: nameOf(t), bot: t.bot, def: bot, refuse: why, via: parentTarget(t) };
   });
+  // #1413 F3: a record warning about a bot being brought back is said once, as start and restart do.
+  for (const p of plan) if (p.def) warnProject(projectOfKey(p.project), p.bot);
   // #1128: a bot whose recorded pane is gone may still run in another app home — a pane that
   // carries its label, or a live binding in the project's own home the label was lost from.
   // Never start a twin: that live binding is named and left alone.
