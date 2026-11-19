@@ -482,9 +482,10 @@ once am is installed there, its per-turn hook in that project's
 bot gets the briefing as text. A start never creates an app home on another machine, which may be
 shared: when that app home isn't a folder there, a Claude bot starts with one warning and no
 briefing file or hook. Codex and Hermes bots start there without it, since their own
-config, which may hold a prompt the briefing would replace, is only read on this computer. What
-happened isn't shown for those bots yet. A machine that isn't answering shows its bots as last
-seen, dimmed, and its menu says so.
+config, which may hold a prompt the briefing would replace, is only read on this computer.
+**What happened** shows the attach, detach and end events this computer recorded for the bot on
+that machine and project. A machine that isn't answering shows its bots as last seen, dimmed,
+and its menu says so.
 
 A project there can carry a pane-env file, `<project>/.herdr/pane-env` on that machine, for its
 bots' panes only: other panes there never read it. It takes two keys, one per line:
@@ -662,8 +663,10 @@ am dsh-tui install | update | uninstall | doctor
   conversation started there by hand. A pane that reports
   no status to hc (Hermes) can't say whether it is waiting for an approval, so `restart` refuses
   it unless `--force`. No command ever sends a pane keys: `--force` starts the new pane and ends
-  the old one only once the new one is up. `worker`, `brief`, `history` and `tidy` stay this
-  computer's.
+  the old one only once the new one is up. `worker`, `brief` and `tidy` stay this computer's.
+- `history <bot> --machine M --project <folder>` shows the attach, detach and end events
+  this computer recorded for that machine's core and project. `--json` adds `machine` beside
+  the bot's identity. Plain `history <bot>` shows this computer's bots' history.
 - A bot is named by its id or by its name. A refusal exits 1, a usage mistake (such as a
   missing `--project` folder) exits 2, and nothing is written.
 - `start` runs the bot's agent in a new pane with `hc run`, labelled `bot=<id>`, and records it
