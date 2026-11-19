@@ -13,6 +13,7 @@ import { agentRowSessions } from './task-card.js'
 import { ProjectRail } from './left-bar-rail.js'
 import { TeamRows, drawBot } from './left-bar-team.js'
 import { LEFT_BAR_SKIN } from './left-bar-css.js'
+import { mock1540On } from './self-update-flag.js'
 
 // A channel's glyph in its kind's shape, in one colour: colour in the bar only ever means a
 // status, so the glyph says what kind of channel a row is. Anything unknown wears a chat bubble.
@@ -227,8 +228,14 @@ function SpaceNote({ anchor, onClose }) {
  * and Code switch, where the app has Herdr). `open(row)` opens a row as today's rows do,
  * `menu(row, event)` its context menu, `renderAfter(row)` draws what hangs under a row and
  * `renderEnd(row)` what other plugins add at the end of a Bot's row.
+ *
+ * The owner's new top row (Search and New, every other tool at the foot) is the approved
+ * self-update mock's layout, so it sits behind the mock's own flag (`?mock-1540`, #1546): without
+ * it the bar draws exactly what dev draws, with the wordmark and the tools up top.
  */
 export function LeftBar({ roster, order, marked, seats = [], useSessions, useSessionStatus, useWork, actions, open, menu, renderAfter, renderEnd, tools, notice, foot, empty, collapse, onKeyDown }) {
+  // Read at render time, so the flag turns the new layout on and off in a running page.
+  const mock = mock1540On()
   const shownId = useSessions(list => list.ids.find(id => (list.byId[id]?.retainedBy?.mainView ?? 0) > 0) ?? '')
   const current = currentKey(roster, shownId)
   const status = useTeamStatus({ roster, useSessionStatus, useWork })
@@ -272,13 +279,17 @@ export function LeftBar({ roster, order, marked, seats = [], useSessions, useSes
         collapse ?? null),
       h('div', { className: 'lb-list' },
         h('div', { className: 'lb-head' },
-          h('span', { className: 'lb-brand' }, h(Wordmark, { height: 22 })),
-          tools,
+          // Without the flag: the wordmark and the tools, exactly where dev draws them. With it:
+          // Search and New only, and the tools move to the foot below.
+          mock ? null : h('span', { className: 'lb-brand' }, h(Wordmark, { height: 22 })),
+          mock ? null : tools,
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('Search'), title: t('Search'), onClick: () => actions.openPalette() }, h(SearchIcon)),
           h('button', { type: 'button', className: 'bt-round', 'aria-label': t('New…'), title: t('New…'), onClick: () => actions.openNewChat('new') }, h(PlusIcon))),
         notice,
         team.bots.length === 0 && empty ? empty
           : h(TeamRows, { team, current, skin: LEFT_BAR_SKIN, renderArt, renderGlyph: channelGlyph, onOpen: press, onMenu: menu, renderAfter, renderEnd, folded, loads, worded: narrow ? NO_WORDS : undefined, label: t('Bot list') }),
-        foot ? h('div', { className: 'lb-foot' }, foot) : null)),
+        mock
+          ? h('div', { className: 'lb-foot' }, tools, foot ?? null)
+          : foot ? h('div', { className: 'lb-foot' }, foot) : null)),
     note ? h(SpaceNote, { anchor: note, onClose: () => setNote(null) }) : null)
 }
