@@ -783,9 +783,9 @@ const ZH = {
   'The Bot team could not start. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'Bot 团队启动失败。原因在引擎的启动输出里——它的控制台，或应用的启动错误框。',
   'The Bot team could not start. {error}. The engine’s startup output — its console, or the app’s startup error box — has the cause.': 'Bot 团队启动失败。{error}。原因在引擎的启动输出里——它的控制台，或应用的启动错误框。',
   'Automation tasks': '自动化任务',
-  Connectors: '连接器',
-  'Search connectors': '搜索连接器',
-  'No connectors': '暂无连接器',
+  Apps: '应用',
+  'Search apps': '搜索应用',
+  'No apps': '暂无应用',
   IM: 'IM',
   'via {platform}': '来自 {platform}',
   'Your IM bots': '我的 IM 机器人',
@@ -2251,7 +2251,7 @@ const ZH = {
   'Who to chat with…': '想和谁聊…',
   'Add at least one more Bot': '再至少添加一个 Bot',
   Members: '成员',
-  // Connectors and scheduled tasks
+  // Apps and scheduled tasks
   'Scheduled tasks': '定时任务',
   'Every day': '每天',
   'Every {count} days': '每 {count} 天',
@@ -2684,7 +2684,7 @@ const ZH = {
   'Design': '设计',
   'Data': '数据',
   'Commerce': '商务',
-  'No connectors connected': '未连接任何连接器',
+  'No apps connected': '未连接任何应用',
   '{bot} needs {name}': '{bot} 需要 {name}',
   '{bot} wants to send an email': '{bot} 想发送一封邮件',
   'Mail': '邮件',
@@ -2998,6 +2998,23 @@ Object.assign(ZH, {
   "{name} was refused {count} times in this turn, the last time on {tool}. Let it keep working?": "{name} 在本轮被拒绝了 {count} 次，最近一次是 {tool}。让它继续工作吗？",
   "Let it keep working?": "让它继续工作吗？",
   "Allow once lets it keep working: nothing that was refused runs. Reject stops it here.": "“允许一次”让它继续工作：被拒绝的步骤都不会执行。“拒绝”让它在这里停止。"
+})
+// The Apps page's Automagik overlay (official.js).
+Object.assign(ZH, {
+  'Automagik official': 'Automagik 官方',
+  'Official': '官方',
+  'Install': '安装',
+  'Installed': '已安装',
+  'Not installed': '未安装',
+  'State': '状态',
+  'SAMPLE DATA': '示例数据',
+  'Included with Automagik': '随 Automagik 提供',
+  'Sample row: nothing is installed from this preview.': '示例行：此预览不会安装任何内容。',
+  'A mock of the Apps page. Nothing here installs; click a row to expand it.': '应用页面的模型：这里不会安装任何内容；点击一行即可展开。',
+  'The Main Bot: your team, channels, and memory': '主 Bot：你的团队、频道和记忆',
+  'Plans, works, and reports on wishes': '规划、执行并汇报愿望',
+  'Claude Code through the Agent Client Protocol': '通过 Agent Client Protocol 使用 Claude Code',
+  'OpenAI Codex through the Agent Client Protocol': '通过 Agent Client Protocol 使用 OpenAI Codex',
 })
 Object.assign(ZH, HOST_ZH)
 

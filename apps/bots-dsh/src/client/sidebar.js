@@ -809,7 +809,7 @@ export function AccountLauncher({ seat = true, settingsOpen, openSettings, openO
     [
       [t('Usage'), GaugeIcon, () => actions.openSettings('usage')],
       [t('Plugins'), PlugIcon, () => actions.selectPanel('plugins')],
-      [t('Connectors'), ConnectorIcon, () => actions.openConnectors()],
+      [t('Apps'), ConnectorIcon, () => actions.openConnectors()],
       // Rows other Omni plugins add (extend.js), such as Automations.
       ...navRows.map(row => [row.label(), row.icon, () => row.run(actions)]),
       [t('Bot settings'), GearIcon, () => actions.openSettings('general')],

@@ -1,6 +1,6 @@
 {
   "set": "final-triskle-seam",
-  "what": "The approved Automagik logo: the three-colour triskle, the lowercase wordmark and the lockup, with Automagik's violet sparkle. Each file is a byte copy of the named file of the final set; never edit one, replace it from a new set and record it here.",
+  "what": "The approved Automagik brand set: the three-colour triskle, the lowercase wordmark and the lockup, with Automagik's violet sparkle, and each product's own one-colour mark, Genie's flat lamp and Omni's tentacle vortex, in ink for light grounds and cream for dark grounds. Each file is a byte copy of the named file of the final set; never edit one, replace it from a new set and record it here.",
   "files": {
     "triskle-three-colours.svg": {
       "from": "svg/triskle-three-colours.svg",
@@ -41,6 +41,26 @@
       "from": "lockups/svg/automagik-wordmark-cream.svg",
       "bytes": 4313,
       "sha256": "a61a32f40807e6a72536de7dc44a88aaa524079499171206388cab04b81a2ea1"
+    },
+    "omni-mark-ink-32.svg": {
+      "from": "svg/omni-mark-ink-32.svg",
+      "bytes": 4315,
+      "sha256": "9de3588852dc64ae54783e63fbb53de22b83626ad47139c17655a1e943cb9e2e"
+    },
+    "omni-mark-cream-32.svg": {
+      "from": "svg/omni-mark-cream-32.svg",
+      "bytes": 4315,
+      "sha256": "6fb43b5a6fc57c4365bbfc37b696def28fab5cdd8b739d97907621ef5293a5d9"
+    },
+    "genie-lamp-ink.svg": {
+      "from": "svg/genie-lamp-ink.svg",
+      "bytes": 2811,
+      "sha256": "a837a92a18fb4a319ce17b1d91e0f3f347c2feb3e8c49aaa696ea1e5154b6914"
+    },
+    "genie-lamp-cream.svg": {
+      "from": "svg/genie-lamp-cream.svg",
+      "bytes": 2811,
+      "sha256": "ef94842939a9219c21d1c75b6570605500e9dcb03ec133b3e9a2b527d5514724"
     }
   }
 }
