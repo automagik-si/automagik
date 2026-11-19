@@ -5915,6 +5915,148 @@ test("#1556 a detached watcher's handoff timeout is recorded and the lead is tol
   assert.equal(s.calls().some((c) => c[0] === "kill"), false, "nothing was ended");
 });
 
+/** Captain (t6) over its handoff threshold, Genie (the main bot) live in t5. */
+function captainDueScene(t, { status = "working" } = {}) {
+  const capSession = "5e4f4a3b-8c2d-4e6f-9a8b-7c6d5e4f3a2b";
+  const s = restartScene(t);
+  const captain = term("t6", { bot: ID.cap, cwd: s.project, status });
+  captain.labels = { ...captain.labels, "agent.session": capSession };
+  const initial = s.hcState();
+  initial.terminals.push(captain);
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(initial));
+  attachSeat(s, "Genie", "t5");
+  attachSeat(s, "Captain", "t6");
+  assert.equal(s.cli(["edit", "Captain", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, capSession, [assistantUsage(5000)]);
+  return s;
+}
+
+/** Queues Captain's handoff restart through --due and returns the queue entry. */
+function queueCaptainDue(s) {
+  const due = s.cli(["restart", "--due", "--json"]);
+  assert.equal(due.code, 0, due.err);
+  assert.equal(due.json().queued.length, 1, due.out);
+  return JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8"))[0];
+}
+
+const handoffRecord = (s) => JSON.parse(readFileSync(join(s.app, "automagik-herdr/handoff-failures.json"), "utf8")).failures[0];
+
+/** Waits for a detached watcher to give up, then returns the record. On a silent drop the
+ * failure names both missing signals (the row and the main-bot message) instead of a bare timeout. */
+async function waitForDroppedHandoff(s) {
+  const record = join(s.app, "automagik-herdr/handoff-failures.json");
+  const queue = join(s.app, "automagik-herdr/queued-restarts.json");
+  try {
+    await waitUntil("the dropped handoff's record", () => existsSync(record)
+      && JSON.parse(readFileSync(queue, "utf8")).length === 0, 20_000);
+  } catch (e) {
+    const told = s.hcState().sent?.some((m) => m.to === "t5" && /handoff restart failed/.test(m.text));
+    assert.fail(`${e.message}; record written: ${existsSync(record)}; lead told: ${Boolean(told)}`);
+  }
+  return record;
+}
+
+test("#1556 a queued handoff whose pane is gone before the restart is recorded and the lead is told", async (t) => {
+  const s = captainDueScene(t);
+  const entry = queueCaptainDue(s);
+  const run = s.calls().find((c) => c[0] === "run" && c.includes("--run-queued"));
+  assert.ok(run, "the pass started a detached watcher");
+  // The agent exits before the watcher ever sees it idle: hc no longer knows the terminal.
+  const state = s.hcState();
+  state.terminals = state.terminals.filter((x) => x.address !== "t6");
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  startRecordedWatcher(s, run, { AUTOMAGIK_HERDR_QUEUE_POLL_MS: "5" });
+  const record = await waitForDroppedHandoff(s);
+  assert.equal(statSync(record).mode & 0o777, 0o600, "the record stays 0600");
+  const failure = handoffRecord(s);
+  const why = "Captain: its pane t6 is gone before the queued handoff restart, so it was dropped and not restarted.";
+  const { at, ...row } = failure;
+  assert.ok(Number.isFinite(Date.parse(at)), at);
+  assert.deepEqual(row, { kind: "dropped", botId: ID.cap, botName: "Captain", project: s.project,
+    terminal: "t6", handoff: handoffFile(s, ID.cap), why,
+    report: "Captain: a handoff restart failed (dropped): its pane t6 is gone before the queued handoff restart, so it was dropped and not restarted.",
+    notified: { sent: "t5", unsent: null } });
+  assert.ok(s.hcState().sent.some((m) => m.to === "t5" && /Captain.*handoff restart failed \(dropped\).*pane t6 is gone/.test(m.text)),
+    JSON.stringify(s.hcState().sent));
+  // The existing reader answers after the watcher's --rm pane is gone.
+  assert.match(s.cli(["restart", "--queued"]).out, /Captain \(b-bbbbbbbbbb\): handoff restart dropped at .*: Captain: its pane t6 is gone/);
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
+  assert.equal(s.calls().some((c) => c[0] === "kill"), false, "nothing was ended");
+});
+
+test("#1556 a queued handoff whose pane was reused before the restart is recorded and the lead is told", async (t) => {
+  const s = captainDueScene(t);
+  const entry = queueCaptainDue(s);
+  const run = s.calls().find((c) => c[0] === "run" && c.includes("--run-queued"));
+  assert.ok(run, "the pass started a detached watcher");
+  // Another pane now answers t6: the same address, a different created_ms.
+  const state = s.hcState();
+  state.terminals.find((x) => x.address === "t6").created_ms = entry.created_ms + 1;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  startRecordedWatcher(s, run, { AUTOMAGIK_HERDR_QUEUE_POLL_MS: "5" });
+  const record = await waitForDroppedHandoff(s);
+  const failure = handoffRecord(s);
+  const why = `Captain: its pane t6 was reused (created_ms ${entry.created_ms} -> ${entry.created_ms + 1}) before the queued handoff restart, so it was dropped and not restarted.`;
+  const { at, ...row } = failure;
+  assert.ok(Number.isFinite(Date.parse(at)), at);
+  assert.deepEqual(row, { kind: "dropped", botId: ID.cap, botName: "Captain", project: s.project,
+    terminal: "t6", handoff: handoffFile(s, ID.cap), why,
+    report: `Captain: a handoff restart failed (dropped): its pane t6 was reused (created_ms ${entry.created_ms} -> ${entry.created_ms + 1}) before the queued handoff restart, so it was dropped and not restarted.`,
+    notified: { sent: "t5", unsent: null } });
+  assert.ok(s.hcState().sent.some((m) => m.to === "t5" && /Captain.*handoff restart failed \(dropped\).*reused/.test(m.text)),
+    JSON.stringify(s.hcState().sent));
+  assert.match(s.cli(["restart", "--queued"]).out, /handoff restart dropped at .*: Captain: its pane t6 was reused/);
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
+});
+
+test("#1556 the direct pass records a pane that ends before the ask", (t) => {
+  const s = captainDueScene(t, { status: "idle" });
+  // The pass measures the seat live, then hc answers finished at paneNow (the pane's next look).
+  const state = s.hcState();
+  state.terminals.find((x) => x.address === "t6").exitAfterGets = 1;
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["restart", "--due", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().failed, [], "a seat already gone is not a pass failure");
+  const failure = handoffRecord(s);
+  assert.match(r.err, /Captain: not running in t6 any more; nothing was asked or restarted/);
+  assert.equal(s.calls().some((c) => c[0] === "send" && c[1] === "t6"), false, "the seat was never asked");
+  assert.equal(s.calls().some((c) => c[0] === "run" || c[0] === "kill"), false, "nothing was started or ended");
+  const why = "not running in t6 any more; nothing was asked or restarted.";
+  const { at, ...row } = failure;
+  assert.ok(Number.isFinite(Date.parse(at)), at);
+  assert.deepEqual(row, { kind: "dropped", botId: ID.cap, botName: "Captain", project: s.project,
+    terminal: "t6", handoff: handoffFile(s, ID.cap), why,
+    report: "Captain: a handoff restart failed (dropped): not running in t6 any more; nothing was asked or restarted.",
+    notified: null }, "a foreground pass reports to the person, not the lead");
+});
+
+test("#1556 the direct pass records a pane that ends after the handoff", (t) => {
+  const s = captainDueScene(t, { status: "idle" });
+  const path = handoffFile(s, ID.cap);
+  const state = s.hcState();
+  // The ask writes the handoff as it lands; the seat then takes a turn, so the restart queues;
+  // the cancel of that plain entry happens just as the pane ends.
+  state.onSendWrite = { terminal: "t6", path, text: "Racing handoff: the pane ends after the ask.\n" };
+  state.onRead = { terminal: "t6", nth: 2, status: "working" };
+  state.afterKill = { terminal: "t6", patch: { state: "finished" } };
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const r = s.cli(["restart", "--due", "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(r.json().failed, [], "a seat already gone is not a pass failure");
+  const failure = handoffRecord(s);
+  assert.match(r.err, /Captain: its pane ended \(finished\) after the handoff was written/);
+  const why = "its pane ended (finished) after the handoff was written, so it was not queued for a handoff restart.";
+  const { at, ...row } = failure;
+  assert.ok(Number.isFinite(Date.parse(at)), at);
+  assert.deepEqual(row, { kind: "dropped", botId: ID.cap, botName: "Captain", project: s.project,
+    terminal: "t6", handoff: path, why,
+    report: "Captain: a handoff restart failed (dropped): its pane ended (finished) after the handoff was written, so it was not queued for a handoff restart.",
+    notified: null });
+  assert.equal(readFileSync(path, "utf8"), "Racing handoff: the pane ends after the ask.\n", "the handoff is kept for a person");
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing was restarted");
+});
+
 test("#1556 a failed first-message send is a recorded warning, not a failed restart", async (t) => {
   const s = restartScene(t);
   attachSeat(s, "Genie", "t5");

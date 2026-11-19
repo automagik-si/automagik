@@ -5476,7 +5476,19 @@ async function runQueuedRestart(opts) {
         return PRINTED;
       }
       const state = await hcState(entry.terminal);
-      if (["gone", "finished"].includes(state.state) || (state.get && entry.created_ms != null && state.get.created_ms !== entry.created_ms)) {
+      const moved = Boolean(state.get && entry.created_ms != null && state.get.created_ms !== entry.created_ms);
+      if (["gone", "finished"].includes(state.state) || moved) {
+        if (handoff) {
+          // A detached watcher's stderr dies with its --rm pane: a seat that ends or is reused
+          // before the restart must leave the same record — and word to the lead — as every
+          // other failed handoff, never a silent return (#1556).
+          const why = state.state === "gone"
+            ? `${entry.botName}: its pane ${entry.terminal} is gone before the queued handoff restart, so it was dropped and not restarted.`
+            : state.state === "finished"
+              ? `${entry.botName}: its pane ${entry.terminal} finished before the queued handoff restart, so it was dropped and not restarted.`
+              : `${entry.botName}: its pane ${entry.terminal} was reused (created_ms ${entry.created_ms} -> ${state.get.created_ms}) before the queued handoff restart, so it was dropped and not restarted.`;
+          await noteHandoffFailure(entry, "dropped", why, handoffFile);
+        }
         return PRINTED;
       }
       // A blocked pane is never idle: skip the screen read (an hc RPC on every poll).
@@ -5540,7 +5552,21 @@ async function runQueuedRestart(opts) {
         const result = await cmdRestart(callOpts, [entry.botId]);
         if (result !== RETRY_QUEUED) {
           if (!handoff) return result;
-          if (result === PRINTED) return PRINTED;
+          if (result === PRINTED) {
+            // cmdRestart's fire-time look can find the seat no longer its live pane. A person's
+            // cancel already removed the entry, so only a surviving entry is a drop (#1556).
+            if (current()) {
+              const now = await hcState(entry.terminal);
+              const moved = Boolean(now.get && entry.created_ms != null && now.get.created_ms !== entry.created_ms);
+              const why = ["gone", "finished"].includes(now.state)
+                ? `${entry.botName}: its pane ${now.state === "gone" ? "is gone" : "finished"} at the restart, so the queued handoff restart was dropped and it was not restarted.`
+                : moved
+                  ? `${entry.botName}: its pane was reused (created_ms ${entry.created_ms} -> ${now.get.created_ms}) at the restart, so the queued handoff restart was dropped and it was not restarted.`
+                  : `${entry.botName}: its pane ${entry.terminal} is no longer its live seat at the restart, so the queued handoff restart was dropped and it was not restarted.`;
+              await noteHandoffFailure(entry, "dropped", why, handoffFile);
+            }
+            return PRINTED;
+          }
           const terminal = typeof result === "object" && result ? result.terminal : null;
           const warning = terminal
             ? await sendHandoffMessage(terminal, handoffText, handoffFile)
@@ -5794,7 +5820,12 @@ async function restartDuePass(opts, keys, dry) {
     try {
       const now = await paneNow(r.terminal);
       if (now.state !== "live") {
-        say.push(`${r.bot.name}: not running in ${r.terminal} any more; nothing was asked or restarted.`);
+        // The measured seat ended before the ask. A foreground pass tells its person; the record
+        // is also kept so `am restart --queued` can answer for it later (#1556).
+        const why = `not running in ${r.terminal} any more; nothing was asked or restarted.`;
+        say.push(`${r.bot.name}: ${why}`);
+        report([`${r.bot.name}: ${why}`]);
+        await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, "dropped", why, path, { notify: false });
         continue;
       }
       if (!now.idle) {
@@ -5844,7 +5875,12 @@ async function restartDuePass(opts, keys, dry) {
         await cmdRestart({ cancel: true, json: true, project: r.key }, [r.bot.id]);
         const again = await paneNow(r.terminal);
         if (again.state !== "live") {
-          say.push(`${r.bot.name}: not running in ${r.terminal} any more; nothing was restarted.`);
+          // The seat ended between the handoff and the queued restart: the written handoff was
+          // not queued, so record the drop too (the foreground pass reports it as well, #1556).
+          const why = `its pane ended (${again.state}) after the handoff was written, so it was not queued for a handoff restart.`;
+          say.push(`${r.bot.name}: ${why}`);
+          report([`${r.bot.name}: ${why}`]);
+          await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, "dropped", why, path, { notify: false });
           continue;
         }
         const entry = await queueRestart({ bot: r.bot, key: r.key, old: again.get, screen: again.screen,
