@@ -407,9 +407,11 @@ switch (words[0]) {
     // state.execUnanswered: programs whose call gets no answer (the machine dropped mid-call).
     if ((state.execUnanswered ?? []).includes(argv[0])) fail(JSON.stringify({ error: { kind: "unavailable", message: `${on} stopped answering` } }));
     if (argv[0] === "uname") { out({ code: 0, stdout: b64(`${m.uname}\n`), stderr: "", timed_out: false }); break; }
-    // state.execTimedOut: words whose call hc ends at its --timeout (a login shell that never answers);
+    // state.execTimedOut: words of the program whose call hc ends at its --timeout (a login shell that
+    // never answers): its sh -c script, else its command, never its data words (a scratch path can hold "-lc");
     // state.execTimedOutAfterMs: how long that answer takes to come back over the link, really waited.
-    if ((state.execTimedOut ?? []).some((w) => argv.join(" ").includes(w))) { if (state.execTimedOutAfterMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.execTimedOutAfterMs); out({ code: null, stdout: "", stderr: "", timed_out: true }); break; }
+    const program = argv[0] === "sh" && argv[1] === "-c" ? argv[2] : argv[0];
+    if ((state.execTimedOut ?? []).some((w) => (program ?? "").includes(w))) { if (state.execTimedOutAfterMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.execTimedOutAfterMs); out({ code: null, stdout: "", stderr: "", timed_out: true }); break; }
     // Its login shell is fake-login-shell, never the host's, and never reads a real profile:
     // m.login { path, noise, exit }, the PATH it has (default: the one hc runs programs with).
     // m.paths { [remotePath]: diskPath } maps a linked machine's path to its scratch disk folder.
