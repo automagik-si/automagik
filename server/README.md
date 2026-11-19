@@ -137,7 +137,7 @@ Four preparation/runtime stages, every base digest-pinned (plus the distroless b
 | Stage | What it does |
 |---|---|
 | `builder` | `node:24.22.3-trixie-slim`: installs the pinned harness and pnpm, verifies the release tarballs, installs/prunes the profile, prepares its inspected offline dependency store, writes version/revision metadata |
-| `tools` | `debian:bookworm-slim`: `bash`, `dash` as `/bin/sh`, git core, `ripgrep`, `flock`, `tar`, `gzip`, `find`, their `ldd` closure, and the empty `/data` tree owned by uid 1000. No perl: git's perl subcommands are not shipped |
+| `tools` | `debian:bookworm-slim`: `bash`, `dash` as `/bin/sh`, git core, `ripgrep`, `flock`, `tar`, `gzip`, `find`, their `ldd` closure, and the empty `/data` tree owned by uid 1000. No perl: git's perl subcommands are not shipped. It also strips the distroless Node binary's debug sections with a build-only `binutils` |
 | `gate-deps` | Bun 1.4.4 installs the exact WebAuthn dependency and `server/bun.lock`, with lifecycle scripts disabled, then prunes development files. Bun stays in this stage |
 | `runtime` | `scratch` holding the distroless nodejs24 rootfs (node and glibc), cleaned in the `tools` stage (man pages and changelogs stripped there with coreutils), plus the tools above, the code, nothing else — no apt, npm, curl or build toolchain |
 
@@ -146,6 +146,15 @@ pruned payload keeps everything the composed tree names — office-to-pdf and it
 `libreoffice-kit-wasm` included — and drops the inspector, the voice engine, the musl sharp
 variants, the win32/darwin node-pty prebuilds and the experimental bundles the profile never
 composes.
+
+No debug bytes ship: the `tools` stage strips the distroless Node binary's DWARF sections
+(17,817,400 of its 122,466,960 bytes; `--strip-all` keeps the dynamic symbol table). The
+Emscripten `@img/sharp-wasm32` payload stays: `sharp` falls back to it on an x86-64 CPU without
+v2 and after any native-load failure, so its 9,150,351 bytes are a live fallback, not dead
+weight. On a build of the current tree with content 3.157.2, the strip alone took the image from
+642,998,234 to 625,180,834 bytes flattened (17.0 MiB) and from 216,040,627 to 211,828,001 bytes
+compressed (4.0 MiB); `USER 1000:1000`, the digest-pinned bases and the health check are
+unchanged.
 
 ## Build and smoke
 
