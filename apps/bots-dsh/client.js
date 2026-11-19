@@ -3060,7 +3060,10 @@ Object.assign(ZH, {
   "Installed": "已安装",
   "Not installed": "未安装",
   "State": "状态",
+  "SAMPLE DATA": "示例数据",
   "Included with Automagik": "随 Automagik 提供",
+  "Sample row: nothing is installed from this preview.": "示例行：此预览不会安装任何内容。",
+  "A mock of the Apps page. Nothing here installs; click a row to expand it.": "应用页面的模型：这里不会安装任何内容；点击一行即可展开。",
   "The Main Bot: your team, channels, and memory": "主 Bot：你的团队、频道和记忆",
   "Plans, works, and reports on wishes": "规划、执行并汇报愿望",
   "Claude Code through the Agent Client Protocol": "通过 Agent Client Protocol 使用 Claude Code",
@@ -30582,7 +30585,7 @@ function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
     open === void 0 ? null : (0, import_react81.createElement)(OfficialDetail, { app: open.app, resolved: open.resolved, action: open.action })
   );
 }
-function ConnectorsPage({ roster, actions }) {
+function AppsPage({ roster, actions }) {
   const [query, setQuery] = (0, import_react81.useState)("");
   const [category, setCategory] = (0, import_react81.useState)("");
   const [view, setView] = (0, import_react81.useState)(null);
@@ -30701,8 +30704,176 @@ function ConnectorsPage({ roster, actions }) {
     body
   );
 }
+var MOCK_STATE = Object.freeze({ omni: "installed", genie: "missing", claude: "sign-in", codex: "installed" });
+var MOCK_SAMPLE_ROWS = Object.freeze([
+  Object.freeze({ id: "github", name: "GitHub", category: "dev", about: "Repositories and requests", state: "ready" }),
+  Object.freeze({ id: "notion", name: "Notion", category: "docs", about: "Pages and databases", state: "off" }),
+  Object.freeze({ id: "linear", name: "Linear", category: "work", about: "Issues, projects, and cycles", state: "off" }),
+  Object.freeze({ id: "figma", name: "Figma", category: "design", about: "Design files, components, and comments", state: "off" }),
+  Object.freeze({ id: "paypal", name: "PayPal", category: "commerce", about: "Payments, invoices, and customers", state: "off" }),
+  Object.freeze({ id: "supabase", name: "Supabase", category: "data", about: "Databases, tables, and project settings", state: "off" }),
+  Object.freeze({ id: "exa", name: "Exa", category: "search", about: "Web search for agents", state: "off" })
+]);
+var mockFlag = () => {
+  try {
+    const search = String(window.location?.search ?? "").replace(/^\?/, "");
+    return search.split("&").some((part) => part === "mock-apps" || part.startsWith("mock-apps="));
+  } catch {
+    return false;
+  }
+};
+var mockOfficialRows = () => OFFICIAL_APPS.map((app) => {
+  const state2 = MOCK_STATE[app.id] ?? "missing";
+  return {
+    ...app,
+    official: true,
+    state: state2,
+    about: t(app.about),
+    subtitle: officialStateText(state2),
+    done: state2 === "installed",
+    label: state2 === "installed" ? t("Installed") : state2 === "sign-in" ? t("Sign in") : t("Install")
+  };
+});
+var mockSampleRows = () => MOCK_SAMPLE_ROWS.map((row) => ({
+  ...row,
+  official: false,
+  about: t(row.about),
+  subtitle: t(row.about),
+  done: row.state === "ready",
+  label: row.state === "ready" ? t("Connected") : t("Connect")
+}));
+function MockTile({ app, expanded, onToggle }) {
+  return (0, import_react81.createElement)(
+    "div",
+    { className: "bt-app", "data-state": app.done ? "ready" : "off" },
+    (0, import_react81.createElement)(
+      "button",
+      { type: "button", className: "bt-app-main", "aria-expanded": expanded, onClick: onToggle },
+      (0, import_react81.createElement)("span", { className: "bt-app-icon" }, app.official ? (0, import_react81.createElement)(OfficialMark, { app }) : (0, import_react81.createElement)(AppIcon, { app })),
+      (0, import_react81.createElement)(
+        "span",
+        { className: "bt-app-text" },
+        (0, import_react81.createElement)("span", { className: "bt-app-name" }, app.name, app.official ? (0, import_react81.createElement)("span", { className: "bt-tag" }, t("Official")) : null),
+        (0, import_react81.createElement)("span", { className: "bt-app-status" }, app.subtitle)
+      )
+    ),
+    // A sample control never touches the host: it opens the sample row like the row itself.
+    (0, import_react81.createElement)(
+      "button",
+      { type: "button", className: app.done ? "bt-app-btn bt-app-btn-done" : "bt-app-btn", onClick: onToggle },
+      app.done ? (0, import_react81.createElement)(CheckIcon) : null,
+      app.label
+    )
+  );
+}
+function MockDetail({ app }) {
+  return (0, import_react81.createElement)(
+    "div",
+    { className: "bt-set-card bt-connectors-card bt-app-detail bt-app-expanded" },
+    (0, import_react81.createElement)(
+      "div",
+      { className: "bt-connector", "data-state": app.done ? "ready" : "off" },
+      (0, import_react81.createElement)(
+        "div",
+        { className: "bt-connector-head" },
+        (0, import_react81.createElement)("span", { className: "bt-connector-mark" }, app.official ? (0, import_react81.createElement)(OfficialMark, { app, size: 20 }) : (0, import_react81.createElement)(ConnectorMark, { connector: app })),
+        (0, import_react81.createElement)(
+          "span",
+          { className: "bt-connector-text" },
+          (0, import_react81.createElement)("span", { className: "bt-connector-name" }, app.name, app.official ? (0, import_react81.createElement)("span", { className: "bt-tag" }, t("Official")) : null),
+          (0, import_react81.createElement)("span", { className: "bt-connector-status" }, app.subtitle)
+        )
+      ),
+      (0, import_react81.createElement)(
+        "div",
+        { className: "bt-set-row" },
+        (0, import_react81.createElement)(
+          "span",
+          { className: "bt-set-copy" },
+          (0, import_react81.createElement)("span", { className: "bt-bs-label" }, t("SAMPLE DATA")),
+          (0, import_react81.createElement)("span", { className: "bt-set-hint" }, t("Sample row: nothing is installed from this preview."))
+        )
+      )
+    )
+  );
+}
+function MockSection({ title, hint, rows: rows2, expanded, onToggle }) {
+  if (rows2.length === 0) return null;
+  const open = rows2.find((row) => row.id === expanded);
+  return (0, import_react81.createElement)(
+    "section",
+    { className: "bt-app-section" },
+    title === void 0 && hint === void 0 ? null : (0, import_react81.createElement)(
+      "div",
+      { className: "bt-app-section-head" },
+      title === void 0 ? null : (0, import_react81.createElement)("h3", null, title),
+      hint === void 0 ? null : (0, import_react81.createElement)("span", { className: "bt-app-status" }, hint)
+    ),
+    (0, import_react81.createElement)("div", { className: "bt-app-grid" }, rows2.map((row) => (0, import_react81.createElement)(MockTile, {
+      key: row.id,
+      app: row,
+      expanded: row.id === expanded,
+      onToggle: () => onToggle(row.id)
+    }))),
+    open === void 0 ? null : (0, import_react81.createElement)(MockDetail, { app: open })
+  );
+}
+function MockAppsPage() {
+  const [query, setQuery] = (0, import_react81.useState)("");
+  const [category, setCategory] = (0, import_react81.useState)("");
+  const [expanded, setExpanded] = (0, import_react81.useState)("genie");
+  const rows2 = [...mockOfficialRows(), ...mockSampleRows()];
+  const official = rows2.filter((row) => row.official);
+  const sample = rows2.filter((row) => !row.official);
+  const queryText = query.trim();
+  const searching = queryText !== "" || category !== "";
+  const officialFound = category === "" ? official.filter((row) => matches(queryText, row.name, row.about)) : [];
+  const sampleFound = sample.filter((row) => (category === "" || row.category === category) && matches(queryText, row.name, row.about));
+  const toggle = (id) => setExpanded((current) => current === id ? null : id);
+  const inCategory = (id) => sample.filter((row) => row.category === id);
+  const sections = searching ? [
+    officialFound.length === 0 ? null : (0, import_react81.createElement)(MockSection, { key: "official", title: t("Automagik official"), hint: t("Included with Automagik"), rows: officialFound, expanded, onToggle: toggle }),
+    sampleFound.length === 0 ? null : (0, import_react81.createElement)(MockSection, { key: "found", rows: sampleFound, expanded, onToggle: toggle })
+  ] : [
+    (0, import_react81.createElement)(MockSection, { key: "official", title: t("Automagik official"), hint: t("Included with Automagik"), rows: official, expanded, onToggle: toggle }),
+    ...CATEGORIES.map(([id, label]) => (0, import_react81.createElement)(MockSection, { key: id, title: t(label), rows: inCategory(id), expanded, onToggle: toggle }))
+  ];
+  return (0, import_react81.createElement)(
+    "div",
+    { className: "bt-apps", "data-mock": "apps" },
+    (0, import_react81.createElement)(
+      "div",
+      { className: "bt-app-note", role: "note" },
+      (0, import_react81.createElement)("span", { className: "bt-tag" }, t("SAMPLE DATA")),
+      (0, import_react81.createElement)("span", null, t("A mock of the Apps page. Nothing here installs; click a row to expand it."))
+    ),
+    (0, import_react81.createElement)(
+      "div",
+      { className: "bt-app-bar" },
+      (0, import_react81.createElement)(
+        "label",
+        { className: "bt-app-search" },
+        (0, import_react81.createElement)(SearchIcon),
+        (0, import_react81.createElement)("input", { type: "search", "aria-label": t("Search apps"), placeholder: t("Search apps"), value: query, onChange: (e) => setQuery(e.target.value) })
+      ),
+      (0, import_react81.createElement)("button", { type: "button", className: "bt-app-pill", onClick: () => {
+      } }, (0, import_react81.createElement)(PlusIcon), t("Custom"))
+    ),
+    (0, import_react81.createElement)(
+      "div",
+      { className: "bt-app-chips", role: "group", "aria-label": t("Category") },
+      [["", "All"], ...CATEGORIES].map(([id, label]) => (0, import_react81.createElement)("button", { key: id || "all", type: "button", "aria-pressed": category === id, onClick: () => setCategory(id) }, t(label)))
+    ),
+    searching && officialFound.length === 0 && sampleFound.length === 0 ? (0, import_react81.createElement)("p", { className: "bt-app-empty" }, t("Nothing matches")) : sections
+  );
+}
+function ConnectorsPage(props) {
+  return mockFlag() ? (0, import_react81.createElement)(MockAppsPage) : (0, import_react81.createElement)(AppsPage, props);
+}
 var CONNECTORS_PAGE_CSS = `
 .bt-apps{display:flex;flex-direction:column;gap:14px;container-type:inline-size}
+.bt-app-note{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px;line-height:16px;color:var(--bt-ink-3)}
+.bt-app-note .bt-tag{max-width:none}
 .bt-app-expanded{grid-column:1/-1;margin-top:4px}
 .bt-app-bar{display:flex;align-items:center;gap:8px}
 .bt-app-search{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-card);color:var(--bt-ink-3);cursor:text}

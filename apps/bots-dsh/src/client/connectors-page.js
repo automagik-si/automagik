@@ -286,7 +286,7 @@ function OfficialSection({ apps, roster, actions, expanded, onToggle }) {
     open === undefined ? null : h(OfficialDetail, { app: open.app, resolved: open.resolved, action: open.action }))
 }
 
-export function ConnectorsPage({ roster, actions }) {
+function AppsPage({ roster, actions }) {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('')
   const [view, setView] = useState(null)
@@ -372,8 +372,132 @@ export function ConnectorsPage({ roster, actions }) {
     body)
 }
 
+// --- the mock behind ?mock-apps ------------------------------------------
+//
+// The preview of this page's decided shape: the official rows first, then a sample of the
+// upstream categories, all of it sample data. It reads no roster and calls no action, so it
+// reaches no network and no catalog; every row expands in place and nothing installs. The flag
+// alone selects it, and it is read at render time, so without it the page is the real page.
+
+const MOCK_STATE = Object.freeze({ omni: 'installed', genie: 'missing', claude: 'sign-in', codex: 'installed' })
+const MOCK_SAMPLE_ROWS = Object.freeze([
+  Object.freeze({ id: 'github', name: 'GitHub', category: 'dev', about: 'Repositories and requests', state: 'ready' }),
+  Object.freeze({ id: 'notion', name: 'Notion', category: 'docs', about: 'Pages and databases', state: 'off' }),
+  Object.freeze({ id: 'linear', name: 'Linear', category: 'work', about: 'Issues, projects, and cycles', state: 'off' }),
+  Object.freeze({ id: 'figma', name: 'Figma', category: 'design', about: 'Design files, components, and comments', state: 'off' }),
+  Object.freeze({ id: 'paypal', name: 'PayPal', category: 'commerce', about: 'Payments, invoices, and customers', state: 'off' }),
+  Object.freeze({ id: 'supabase', name: 'Supabase', category: 'data', about: 'Databases, tables, and project settings', state: 'off' }),
+  Object.freeze({ id: 'exa', name: 'Exa', category: 'search', about: 'Web search for agents', state: 'off' }),
+])
+
+const mockFlag = () => {
+  try {
+    const search = String(window.location?.search ?? '').replace(/^\?/, '')
+    return search.split('&').some(part => part === 'mock-apps' || part.startsWith('mock-apps='))
+  } catch {
+    return false
+  }
+}
+
+const mockOfficialRows = () => OFFICIAL_APPS.map((app) => {
+  const state = MOCK_STATE[app.id] ?? 'missing'
+  return {
+    ...app, official: true, state, about: t(app.about), subtitle: officialStateText(state), done: state === 'installed',
+    label: state === 'installed' ? t('Installed') : state === 'sign-in' ? t('Sign in') : t('Install'),
+  }
+})
+
+const mockSampleRows = () => MOCK_SAMPLE_ROWS.map(row => ({
+  ...row, official: false, about: t(row.about), subtitle: t(row.about), done: row.state === 'ready',
+  label: row.state === 'ready' ? t('Connected') : t('Connect'),
+}))
+
+function MockTile({ app, expanded, onToggle }) {
+  return h('div', { className: 'bt-app', 'data-state': app.done ? 'ready' : 'off' },
+    h('button', { type: 'button', className: 'bt-app-main', 'aria-expanded': expanded, onClick: onToggle },
+      h('span', { className: 'bt-app-icon' }, app.official ? h(OfficialMark, { app }) : h(AppIcon, { app })),
+      h('span', { className: 'bt-app-text' },
+        h('span', { className: 'bt-app-name' }, app.name, app.official ? h('span', { className: 'bt-tag' }, t('Official')) : null),
+        h('span', { className: 'bt-app-status' }, app.subtitle))),
+    // A sample control never touches the host: it opens the sample row like the row itself.
+    h('button', { type: 'button', className: app.done ? 'bt-app-btn bt-app-btn-done' : 'bt-app-btn', onClick: onToggle },
+      app.done ? h(CheckIcon) : null, app.label))
+}
+
+function MockDetail({ app }) {
+  return h('div', { className: 'bt-set-card bt-connectors-card bt-app-detail bt-app-expanded' },
+    h('div', { className: 'bt-connector', 'data-state': app.done ? 'ready' : 'off' },
+      h('div', { className: 'bt-connector-head' },
+        h('span', { className: 'bt-connector-mark' }, app.official ? h(OfficialMark, { app, size: 20 }) : h(ConnectorMark, { connector: app })),
+        h('span', { className: 'bt-connector-text' },
+          h('span', { className: 'bt-connector-name' }, app.name, app.official ? h('span', { className: 'bt-tag' }, t('Official')) : null),
+          h('span', { className: 'bt-connector-status' }, app.subtitle))),
+      h('div', { className: 'bt-set-row' },
+        h('span', { className: 'bt-set-copy' },
+          h('span', { className: 'bt-bs-label' }, t('SAMPLE DATA')),
+          h('span', { className: 'bt-set-hint' }, t('Sample row: nothing is installed from this preview.'))))))
+}
+
+function MockSection({ title, hint, rows, expanded, onToggle }) {
+  if (rows.length === 0) return null
+  const open = rows.find(row => row.id === expanded)
+  return h('section', { className: 'bt-app-section' },
+    title === undefined && hint === undefined ? null : h('div', { className: 'bt-app-section-head' },
+      title === undefined ? null : h('h3', null, title),
+      hint === undefined ? null : h('span', { className: 'bt-app-status' }, hint)),
+    h('div', { className: 'bt-app-grid' }, rows.map(row => h(MockTile, {
+      key: row.id, app: row, expanded: row.id === expanded, onToggle: () => onToggle(row.id),
+    }))),
+    open === undefined ? null : h(MockDetail, { app: open }))
+}
+
+function MockAppsPage() {
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState('')
+  const [expanded, setExpanded] = useState('genie')
+  const rows = [...mockOfficialRows(), ...mockSampleRows()]
+  const official = rows.filter(row => row.official)
+  const sample = rows.filter(row => !row.official)
+  const queryText = query.trim()
+  const searching = queryText !== '' || category !== ''
+  const officialFound = category === '' ? official.filter(row => matches(queryText, row.name, row.about)) : []
+  const sampleFound = sample.filter(row => (category === '' || row.category === category) && matches(queryText, row.name, row.about))
+  const toggle = id => setExpanded(current => (current === id ? null : id))
+  const inCategory = id => sample.filter(row => row.category === id)
+  const sections = searching
+    ? [
+      officialFound.length === 0 ? null : h(MockSection, { key: 'official', title: t('Automagik official'), hint: t('Included with Automagik'), rows: officialFound, expanded, onToggle: toggle }),
+      sampleFound.length === 0 ? null : h(MockSection, { key: 'found', rows: sampleFound, expanded, onToggle: toggle }),
+    ]
+    : [
+      h(MockSection, { key: 'official', title: t('Automagik official'), hint: t('Included with Automagik'), rows: official, expanded, onToggle: toggle }),
+      ...CATEGORIES.map(([id, label]) => h(MockSection, { key: id, title: t(label), rows: inCategory(id), expanded, onToggle: toggle })),
+    ]
+  return h('div', { className: 'bt-apps', 'data-mock': 'apps' },
+    h('div', { className: 'bt-app-note', role: 'note' },
+      h('span', { className: 'bt-tag' }, t('SAMPLE DATA')),
+      h('span', null, t('A mock of the Apps page. Nothing here installs; click a row to expand it.'))),
+    h('div', { className: 'bt-app-bar' },
+      h('label', { className: 'bt-app-search' },
+        h(SearchIcon),
+        h('input', { type: 'search', 'aria-label': t('Search apps'), placeholder: t('Search apps'), value: query, onChange: e => setQuery(e.target.value) })),
+      h('button', { type: 'button', className: 'bt-app-pill', onClick: () => {} }, h(PlusIcon), t('Custom'))),
+    h('div', { className: 'bt-app-chips', role: 'group', 'aria-label': t('Category') },
+      [['', 'All'], ...CATEGORIES].map(([id, label]) => h('button', { key: id || 'all', type: 'button', 'aria-pressed': category === id, onClick: () => setCategory(id) }, t(label)))),
+    searching && officialFound.length === 0 && sampleFound.length === 0
+      ? h('p', { className: 'bt-app-empty' }, t('Nothing matches'))
+      : sections)
+}
+
+// The flag is read at render time, so without it the page is the real page, unchanged.
+export function ConnectorsPage(props) {
+  return mockFlag() ? h(MockAppsPage) : h(AppsPage, props)
+}
+
 export const CONNECTORS_PAGE_CSS = `
 .bt-apps{display:flex;flex-direction:column;gap:14px;container-type:inline-size}
+.bt-app-note{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px;line-height:16px;color:var(--bt-ink-3)}
+.bt-app-note .bt-tag{max-width:none}
 .bt-app-expanded{grid-column:1/-1;margin-top:4px}
 .bt-app-bar{display:flex;align-items:center;gap:8px}
 .bt-app-search{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border:1px solid var(--bt-line);border-radius:999px;background:var(--bt-card);color:var(--bt-ink-3);cursor:text}

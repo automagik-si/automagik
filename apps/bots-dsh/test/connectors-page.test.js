@@ -62,8 +62,7 @@ const opened = []
 const clipboard = { writeText: () => Promise.resolve() }
 const dom = new JSDOM('<!doctype html><body></body>')
 const module = { exports: {} }
-// The page no longer reads a ?mock-apps flag; a test sets it on the vm's window to prove it
-// selects nothing.
+// The page reads the ?mock-apps flag from window.location; the tests set it on the vm's window.
 const pageWindow = { matchMedia: () => ({ matches: false }), dshDesktop: {}, open: (url) => { opened.push(url); return null } }
 runInNewContext(outputFiles[0].text, {
   module, exports: module.exports,
@@ -507,20 +506,60 @@ test('the Omni and Genie rows wear their own brand mark, ink or cream, at 32px',
   assert.deepEqual([inDetail.props.width, inDetail.props.height], [32, 32], 'the expanded row does not shrink the mark')
 })
 
-test('?mock-apps selects nothing: the page is the real page with or without it', () => {
+// --- the ?mock-apps preview ----------------------------------------------
+// The preview is a clickable mock of the page: sample rows, a SAMPLE DATA banner, no roster
+// read and no host action. The flag alone selects it; every other query value is the real page.
+const withFlag = (value, run) => {
+  pageWindow.location = { search: value }
+  try { return run() } finally { delete pageWindow.location }
+}
+const expandedRows = () => collect(n => n.type === 'button' && n.props?.className === 'bt-app-main' && n.props?.['aria-expanded'] === true).map(n => flatten(n)[0])
+
+test('?mock-apps alone selects the sample preview, and its rows open in place', () => {
+  slots.length = 0
+  withFlag('?mock-apps', () => {
+    const actions = new Proxy({}, { get: () => () => { throw new Error('the mock calls no host action') } })
+    const roster = {
+      ready: true,
+      connectors: { connectors: [{ id: 'roster-only', name: 'Roster Only', category: 'dev', state: 'off' }], mail: { accounts: [] } },
+    }
+    renderPage({ roster, actions })
+    assert.match(pageText(), /SAMPLE DATA/)
+    assert.match(pageText(), /A mock of the Apps page\. Nothing here installs; click a row to expand it\./)
+    assert.match(pageText(), /Sample row: nothing is installed from this preview\./)
+    assert.doesNotMatch(pageText(), /Roster Only/, 'the mock reads no catalog')
+    const titles = collect(n => n.type === 'h3').map(n => flatten(n).join(''))
+    assert.equal(titles[0], 'Automagik official')
+    for (const name of ['Omni', 'Genie', 'Claude', 'Codex', 'GitHub', 'Notion']) assert.ok(pageText().includes(name), name)
+    assert.deepEqual(expandedRows(), ['Genie'], 'one sample row starts open')
+    mainButton('Claude').props.onClick()
+    assert.deepEqual(expandedRows(), ['Claude'], 'a click opens that row only')
+    assert.equal((pageText().match(/Sample row: nothing is installed from this preview\./g) ?? []).length, 1, 'one sample row open at a time')
+    click('Install')
+    assert.deepEqual(expandedRows(), ['Genie'], 'a sample control opens its own row and calls no host action')
+  })
+})
+
+test('the real page has no sample marker without the flag', () => {
   const page = officialPage({ bots: [{ id: 'main', kind: 'omni', name: 'Omni' }], models: [] })
   slots.length = 0
   renderPage(page)
   const without = pageText()
-  slots.length = 0
-  pageWindow.location = { search: '?mock-apps' }
-  try {
-    renderPage(page)
-    assert.equal(pageText(), without, 'the flag changes nothing')
-    assert.match(without, /Automagik official/)
-    assert.match(without, /Not installed/)
-    assert.doesNotMatch(without, /SAMPLE DATA|A mock of the Apps page/)
-  } finally {
-    pageWindow.location = { search: '' }
+  assert.match(without, /Automagik official/)
+  assert.match(without, /Not installed/)
+  assert.doesNotMatch(without, /SAMPLE DATA|A mock of the Apps page|Sample row:/)
+  for (const search of ['', '?', '?foo=1', '?mock=apps', '?mock-apps-other=1', '?not-mock-apps=1']) {
+    slots.length = 0
+    withFlag(search, () => renderPage(page))
+    assert.equal(pageText(), without, `"${search}" shows the real page`)
   }
+})
+
+test('an unrelated query value is the real page, not the preview', () => {
+  const page = officialPage({ bots: [{ id: 'main', kind: 'omni', name: 'Omni' }], models: [] })
+  slots.length = 0
+  withFlag('?settings=apps', () => renderPage(page))
+  assert.match(pageText(), /Automagik official/)
+  assert.match(pageText(), /Not installed/)
+  assert.doesNotMatch(pageText(), /SAMPLE DATA/)
 })
