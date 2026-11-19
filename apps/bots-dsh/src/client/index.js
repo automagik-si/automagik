@@ -387,6 +387,8 @@ export function apply(ctx) {
   // panel on there (`browser` in the state).
   const bridge = (window.dshDesktop?.protocolVersion === 1 ? window.dshDesktop.browser : globalThis.dsBotApp?.browser) ?? null
   const browsers = bridge ? createBotBrowsers({ bridge, createSource, savedTabs: () => roster.getSnapshot().browserTabs }) : null
+  const holdView = bridge?.views ? (botId, held) => bridge.views.hold(botId, held) : undefined
+  const viewClientId = holdView ? globalThis.crypto.randomUUID() : undefined
   if (browsers) {
     ctx.effect(() => {
       let stopReads = null
@@ -394,7 +396,7 @@ export function apply(ctx) {
         const snapshot = roster.getSnapshot()
         if (!snapshot.ready) return
         const on = snapshot.browser === true
-        if (on && !stopReads) stopReads = serveBrowserReads({ browsers, post: call })
+        if (on && !stopReads) stopReads = serveBrowserReads({ browsers, post: call, clientId: viewClientId, holdView })
         if (!on && stopReads) { stopReads(); stopReads = null }
         // A Bot deleted here or in another window takes its guests and saved tabs along.
         void browsers.retain(snapshot.bots.map(bot => bot.id))
@@ -740,22 +742,10 @@ export function apply(ctx) {
       browserNavigate: (tabId, input) => browsers.navigate(tabId, input),
       browserCommand: (tabId, name) => browsers.command(tabId, name),
       browserFocus: (tabId) => browsers.focus(tabId),
-      browserTakeover: bridge.views ? async botId => {
-        const result = await call('browser-takeover', { botId })
-        await bridge.views.hold(botId, true)
-        return result
-      } : undefined,
-      browserStop: bridge.views ? async botId => {
-        const result = await call('browser-stop', { botId })
-        await bridge.views.hold(botId, true)
-        return result
-      } : undefined,
+      browserTakeover: holdView ? (botId, callId) => call('browser-takeover', { botId, callId, viewClientId }) : undefined,
+      browserStop: holdView ? botId => call('browser-stop', { botId, viewClientId }) : undefined,
       // `answer` is a handoff card's { callId, outcome }; the panel's Give back sends none.
-      browserGiveBack: bridge.views ? async (botId, answer = {}) => {
-        const result = await call('browser-give-back', { botId, ...answer })
-        await bridge.views.hold(botId, false)
-        return result
-      } : undefined,
+      browserGiveBack: holdView ? (botId, answer = {}) => call('browser-give-back', { ...answer, botId, viewClientId }) : undefined,
       // Cookie imports, only where the bridge offers them (the desktop app): a file or an
       // installed browser's profile is previewed, then applied into the Bot's storage key.
       browserImport: typeof bridge.importSources === 'function' ? {
@@ -770,7 +760,7 @@ export function apply(ctx) {
     // Without the bridge a Bot's own browser is a window of the Chrome on this computer: it
     // still hands over to the user, through the host alone, and the team view carries the hold.
     Object.assign(actions, {
-      browserTakeover: botId => call('browser-takeover', { botId }),
+      browserTakeover: (botId, callId) => call('browser-takeover', { botId, callId }),
       browserStop: botId => call('browser-stop', { botId }),
       browserGiveBack: (botId, answer = {}) => call('browser-give-back', { botId, ...answer }),
     })

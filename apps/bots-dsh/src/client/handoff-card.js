@@ -57,7 +57,7 @@ export function PendingHandoff({ sessionId, bot, hold, hooks, actions, inline })
   }
   const answer = outcome => run(() => actions.browserGiveBack(bot.id, { callId: hold.callId, outcome }), true)
   const takeOver = () => run(async () => {
-    await actions.browserTakeover(bot.id)
+    await actions.browserTakeover(bot.id, hold.callId)
     actions.openBrowser?.(bot.id)
   }, false)
   return h('div', {
