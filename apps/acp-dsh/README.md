@@ -399,12 +399,24 @@ No credential file is read, copied or linked by Automagik; each CLI owns its Bot
 CLI `--version` probes use this vendor environment too; package installation keeps its separate
 package-manager environment.
 
-An upgrade retains Bot models and DSH history, but requires a fresh in-app sign-in. Old shared
-consent is not carried. Signed-out or paused Bot work refuses with `MODEL_ACCESS_REQUIRED`,
+The upgrade from shared terminal sign-ins retains Bot models and DSH history, but requires a
+fresh in-app sign-in. Old shared consent is not carried. Signed-out or paused Bot work refuses
+with `MODEL_ACCESS_REQUIRED`,
 without a fallback model. Codex images do not use a legacy ChatGPT grant while signed out.
 Bot settings label Bot and terminal accounts separately; the terminal comparison is a read-only
 CLI account query; Automagik requests no login, logout or token refresh for that comparison.
 Missing identity is shown as unknown.
+
+An installation is identified by its resolved DSH home (`DSH_HOME`, default `~/.dsh`). The
+first installation started with this version keeps the existing `acp/cli-homes` and its sign-ins.
+Other installations use `acp/installations/<id>/cli-homes` and sign in once. Credentials are
+never copied. Two processes or profiles of one DSH home share that installation and still
+refuse account changes while the other is running. An older acp-dsh keeps using `acp/cli-homes`
+and keeps the same refusal alongside its owner until it updates. To choose the owner before
+either installation starts, write `acp/cli-homes/installation.json` with
+`{"version":1,"identity":"/absolute/path/to/the/resolved/dsh-home"}` using the chosen DSH home's
+resolved absolute path. With all installations stopped, remove that file to hand the existing
+root to the next installation that starts.
 
 `authScope: 'isolated'` identifies the service and Claude/Codex status rows. `accountSignOut(id)`
 and `accountSwitch(id, { label? })` use the Bot environment. They block admission, stop
@@ -442,9 +454,9 @@ or unparseable `RETIRED.json` is refused too, because the record of what was dec
 ambiguous. An absent note is reported as absent and a corrupt one as corrupt. A startup line
 counts kept, missing and refused homes separately: it claims retention at a bound path only for
 a home that is still there. Unproved folders,
-including Windows crash records, remain retained. To inspect them, each 0-byte marker under
-`acp/cli-homes/retired/<vendor>/` names a retired generation; its home is
-`acp/cli-homes/homes/<vendor>/<generation>` (the legacy home is `acp/cli-homes/<vendor>`), and
+including Windows crash records, remain retained. Within the installation's CLI root, each
+0-byte marker under `retired/<vendor>/` names a retired generation; its home is
+`homes/<vendor>/<generation>` (the legacy home is `<vendor>`), and
 `RETIRED.json` inside it says what is kept, for how long, and how to keep it.
 Mutexes and app registrations live outside replaceable homes.
 Launches also check the installation's selected generation, so changing an old folder's local
