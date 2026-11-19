@@ -46,16 +46,17 @@ const workerLines = (self, isGit) => {
 /**
  * The hc guard the pack puts first on a dsh-tui pane's PATH (#624, stopgap C). A GUARDRAIL,
  * not a boundary: an absolute hc path, a raw socket or `hc connect` skips it; #631 is the
- * hard boundary, and #628 is the full send/keys/attach scope. The pack's CLI still runs its
- * own trusted hc calls.
+ * hard boundary, and #628 scopes send/keys/attach and the rest of the team boundary. The
+ * pack's CLI still runs its own trusted hc calls.
  */
 export const GUARD_LINE = "The pack puts a deny-by-default hc guard first on a dsh-tui pane's PATH: "
-  + "it allows send, read, ls, get, wait, put, label (own workers only), kill, rm, events, schema, templates "
-  + "and the worker start, and refuses exec, other runs, file writes/reads, machine, server, update, connect, "
+  + "it allows send, read, get and wait (the caller's own pane, its own workers and its team), ls, "
+  + "label (own workers only), kill, rm on its own workers, events, schema, templates "
+  + "and the worker start, and refuses put, exec, other runs, file writes/reads, machine, server, update, connect, "
   + "keys, attach, machine-target addresses on every verb but send, and --on outside an allowed send. "
   + "It is a GUARDRAIL, not a boundary: an absolute hc path, a raw socket or `hc connect` bypasses it. "
-  + "The full send/keys/attach scope is #628; the real fix is the socket mask plus the per-pane proxy wish "
-  + "(#624); #631 is the hard boundary.";
+  + "The send/keys/attach scope and the rest of the team boundary are #628; the real fix is the socket mask "
+  + "plus the per-pane proxy wish (#624); #631 is the hard boundary.";
 
 /**
  * The guard paragraph only in a briefing whose pane gets the guard: a dsh-tui bot (#624).
