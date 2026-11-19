@@ -10,6 +10,7 @@ import { WHATSAPP_SIGNUPS_OPEN } from './waitlist/lib/shared.js'
 import { themeCss, titleFace, brandFonts, statusNames } from './scripts/sync-theme.mjs'
 import { pages, routes, rootFiles, weUnfold, arca, arcaLogo, arcaArk, oiTag, platforms, offered, used, usedCredit, trademarks, brand as siteLogo, icons, manifest as webManifest, family, familyArt, familyButton, familyHost, familyLinks } from './scripts/build-pages.mjs'
 import { BOX, GEOMETRY, LOGO, TONES, logoInner, tagInner } from './scripts/build-lockup.mjs'
+import { checkArt } from './scripts/build-art.mjs'
 
 // The width of each name's lockup in the kit's own units; all are 264 high.
 const LOCKUP_BOX = { Automagik: '1632.34' }
@@ -456,6 +457,12 @@ test('derived art: each file is one recorded rectangle of a hashed source, at 1x
   for (const [file, entry] of Object.entries(art.files)) {
     if (!file.endsWith('-2x.webp')) assert.ok(art.files[file.replace('.webp', '-2x.webp')].width >= entry.width * 1.5, `${file}: 2x is too small`)
   }
+})
+
+test('derived art: each committed file is the picture its recorded source builds', () => {
+  // A digest proves the manifest matches the file, not that the file came from its source: a
+  // stale crop with its sha256 updated passes every hash. Rebuild the picture and compare.
+  assert.deepEqual(checkArt(), [], 'A committed WebP crop does not re-derive from its source: rebuild the art')
 })
 
 test('only Cloud carries the add/removal forms, fields, explicit consent and privacy', () => {
@@ -1141,6 +1148,17 @@ test('the Cloud form offers email only while WhatsApp sign-ups are paused; remov
   // The switch turned on: the same source offers WhatsApp again, with its notice and wording.
   const open = waitlistIntro({ whatsapp: true }) + waitlistForm({ whatsapp: true }) + privacyNote({ whatsapp: true })
   for (const text of ['Choose email or WhatsApp', '<option value="whatsapp">WhatsApp — you send the first message</option>', 'lang="pt-BR">A confirmação pelo WhatsApp pode demorar um pouco', 'WhatsApp shows a code', 'Send a WhatsApp code within half an hour', 'Use email if you prefer']) assert.ok(open.includes(text), text)
+})
+
+
+test('the brand kit WaitlistForm preview shows the form the site serves', () => {
+  const preview = read('../../docs/brand/components/WaitlistForm/preview.html').match(/<form class="waitlist-form"[\s\S]*?<\/form>/)[0]
+  const served = waitlistForm()
+  const names = markup => [...markup.matchAll(/name="([^"]+)"/g)].map(match => match[1])
+  assert.deepEqual(names(preview), names(served), 'The preview carries the served fields, in order')
+  assert.match(preview, /<input type="hidden" name="channel" value="email">/)
+  assert.doesNotMatch(preview, /whatsapp|wa\.me|AMG-/i)
+  assert.equal((preview.match(/<input type="email" name="email" [^>]*required/g) ?? []).length, 1)
 })
 
 
