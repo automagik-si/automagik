@@ -51,7 +51,7 @@ import { autoStatus, readAuto, binDirOf, checkForUpdate, defaultModsDir, install
 import { NO_UPDATE_ENV, PACK_NAME, POCKET_LINK, heldModLine, updatesOff } from "../release.js";
 import { MACHINE_NAME, OPT_IN, decodeExec, hcExecArgs, installOn, linkedMachines, meterScope, recordAfter, resultLine, uninstallOn } from "../meterFleet.js";
 import { readMeterLane } from "../meterLane.mjs";
-import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, entryLine, meterResults, parseState, probeOn, stateAfter, stateLines, updateOn } from "../machineUpdates.js";
+import { LOCK_FILE as MACHINES_LOCK, SET_AUTO, STATE_FILE as MACHINES_STATE, entryLine, linkedUpdate, meterResults, parseState, probeOn, stateAfter, stateLines, updateOn } from "../machineUpdates.js";
 import { SHARED_RENAMES, renamedFrom } from "../migrate.js";
 import { transcriptShape } from "../transcriptFolder.mjs";
 import { REMOTE_TEXT_MAX, RemoteFileError, StaleSnapshot, readRemoteText, removeRemoteText, utf8Length, writeRemoteText } from "../remoteFile.js";
@@ -1889,7 +1889,9 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 this computer only. A machine that fails is a warning. Running
                                 it records your yes (--local: this computer only) for updates
   machines [--machine M]        what this computer and every linked machine run (am, the pack,
-                                usagemeter) and how each one's last update went
+                                usagemeter), both of its switches (its own pack auto setting,
+                                \`am update --auto\`, and the linked updater's, below), and how
+                                each one's last update went
   machines update [--machine M | --linked | --local]
                                 one update of them all now (Herdr starts one every hour): each
                                 connected linked machine runs its own \`am update\` (am, then the
@@ -1897,11 +1899,16 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 against that machine's own keys, each tarball against its
                                 sha256, never an older one, the replaced one kept for a
                                 rollback), then usagemeter as meter install does, where there
-                                is one or you agreed to all. This computer: am and usagemeter
+                                is one or you agreed to all. The pack takes that machine's
+                                automatic path: its own auto setting off, or a release it rolled
+                                back, holds it until someone runs \`am update\` there.
+                                This computer: am and usagemeter
                                 (Herdr installs its pack). A machine that fails says why
   machines --auto on|off|status [--machine M]
-                                whether this computer (or M) takes those updates: on unless
-                                it was switched off; off, nothing is run there
+                                whether this computer (or M) takes those updates from the linked
+                                Herdr: on unless it was switched off; off, nothing is run there.
+                                This is the linked updater's switch, not the machine's own pack
+                                auto setting (am update --auto off, which holds the pack alone)
   meter uninstall               remove it from the linked machines the pack put it on (the
                                 install record says which), only where it is still that version
   dsh-tui install | update      DSH as a Herdr agent: the pinned dsh-TUI ${DSH_TUI.version} in its
@@ -9168,6 +9175,8 @@ const heldLines = (installed) => (installed.held ?? []).map((h) => `\n${heldModL
  * injected by the tests (fetch, env, modsDir, binDir); the pack is the installed one under
  * $HERDR_APP_HOME/mods, never this checkout (update.mjs). The CLI link (~/.local/bin) and the
  * open spaces are looked at only for this computer's own pack: with `io.modsDir`, only `io.binDir`.
+ * `linkedUpdate(env)`: the linked-machine cycle (#1505) asks for the automatic path, so the same
+ * `installUpdate` hold applies to the machine's own setting and its rollback skip.
  */
 export async function cmdUpdate(opts, _rest = [], io = {}) {
   if (opts.auto !== undefined) {
@@ -9181,7 +9190,8 @@ export async function cmdUpdate(opts, _rest = [], io = {}) {
   const host = io.modsDir ? { binDir: io.binDir ?? null, window: false }
     : { binDir: io.binDir ?? binDirOf(io.env ?? process.env), window: liveHome(`${appHome(io.env ?? process.env)}/mods`) };
   const where = { ...(io.env ? { env: io.env } : {}), ...(io.fetch ? { fetch: io.fetch } : {}), ...(io.keys ? { keys: io.keys } : {}), ...(io.modsDir ? { modsDir: io.modsDir } : {}), ...host,
-    ...(opts["retry-skipped"] ? { retrySkipped: true } : {}) };
+    // `--retry-skipped` is the person's explicit retry even beside the cycle's variable.
+    ...(opts["retry-skipped"] ? { retrySkipped: true } : {}), ...(linkedUpdate(io.env ?? process.env) && !opts["retry-skipped"] ? { auto: true } : {}) };
   const failed = (what, e) => new CliError(`${what}: ${String(e?.message ?? e).split("\n")[0]}`);
   // The pack just swapped (or one an older CLI installed) may name its CLI otherwise
   // (bin/automagik-herdr, or only the .mjs before it): the ~/.local/bin link follows, so a
@@ -9237,6 +9247,8 @@ export async function cmdUpdate(opts, _rest = [], io = {}) {
   if (r.installed) {
     return `Updated Automagik Herdr ${current} → ${r.installed.version}. The replaced pack is kept: \`am update --rollback\` puts it back. Herdr reloads its mods on its own.${note}${hooksLines(r.installed.hooks?.hooks)}${heldLines(r.installed)}${meter.lines.map((l) => `\n${l}`).join("")}`;
   }
+  // The linked-machine cycle's automatic path (#1505): the machine's own setting or its skip held it.
+  if (r.held) return `Automagik Herdr ${current} is installed; ${r.update?.version ?? "the release"} was left alone (${r.held}). Run \`am update\` there to install it by hand.`;
   if (r.update) return `Automagik Herdr ${current} is installed; ${r.update.version} is out (${r.update.page}). Run \`am update\` to install it.`;
   return `Automagik Herdr ${current} is installed; the latest release is ${r.latest ?? "none yet"}. Up to date.${note}`;
 }
