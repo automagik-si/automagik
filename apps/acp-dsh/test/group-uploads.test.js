@@ -286,8 +286,9 @@ for (const name of ['report was uploaded.txt', 'report "quoted".txt']) {
     assert.match(prompt[1].text, /verbatim read-only copy saved at/)
     const folder = join(h.home, '.automagik', 'uploads', h.file.attachmentId.slice(7))
     const [leaf] = readdirSync(folder)
-    assert.deepEqual(prompt[1], text(fileHandleText(h.file, join(folder, leaf))))
-    assert.deepEqual(readFileSync(join(folder, leaf)), txt)
+    const path = h.path(h.file, leaf)
+    assert.deepEqual(prompt[1], text(fileHandleText(h.file, path)))
+    assert.deepEqual(readFileSync(path), txt)
     assert.deepEqual(prompt[2], imageLine(h))
   })
 }
