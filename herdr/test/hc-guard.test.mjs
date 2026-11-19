@@ -8,11 +8,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, workerArgs } from "../mods/am-sidebar/workers.js";
+import { GUARD_DIR, KILL_GUARD_DIR, guardPath, guardPathWith, paneGuardOf, stableRootOf, workerArgs } from "../mods/am-sidebar/workers.js";
 import { startArgs } from "../mods/am-sidebar/launchArgs.js";
 import { hcVerbOf } from "../mods/am-sidebar/hcGuard.mjs";
 
@@ -1600,4 +1600,80 @@ test("#1414 the kill shim refuses a send to a held pane too", (t) => {
   const r = shimRun(s, ["send", "t105", "the report"], { HC_TERMINAL_ID: "t103" });
   assertHeld(r, "t105");
   assert.equal(calls(s).some((argv) => hcVerbOf(argv) === "send"), false);
+});
+
+// Older guard/hc shipped in the tags checked for #1728. Keep its bytes, including the final newline.
+const OLD_GUARD_ENTRY = `#!/usr/bin/env node
+// The guard's executable entry (automagik#624): a tiny shim, so the logic stays in
+// hcGuard.mjs, which the pack's node --check gate covers. Dynamic import works whether this
+// extensionless file loads as CommonJS (an installed pack has no package.json) or as ESM
+// (\`herdr/package.json\` says type module). Apache-2.0.
+"use strict";
+import("../hcGuard.mjs").then(
+  ({ runGuard }) => runGuard(process.argv.slice(2), process.env),
+  () => {
+    process.stderr.write("hc guard: failed closed (#624): the guard's logic did not load; this wrapper is a guardrail, not a boundary (#631).\\n");
+    return 1;
+  },
+).then(
+  (code) => { process.exitCode = Number.isInteger(code) ? code : 1; },
+  () => {
+    process.stderr.write("hc guard: failed closed (#624): internal error; this wrapper is a guardrail, not a boundary (#631).\\n");
+    process.exitCode = 1;
+  },
+);
+`;
+
+test("#1728 the CLI vouches for skewed guard entries only at recognized install paths", async (t) => {
+  const { isGuardFolder, isInstalledGuardFolder } = await import("../mods/am-sidebar/hcGuard.mjs");
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "hc-guard-install-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const env = { HOME: root, AM_HOME: join(root, "am") + "/" };
+  const store = join(env.AM_HOME, "parts", "automagik.am");
+  const app = join(root, ".config", "herdr-app");
+  const pack = join(app, "mods", "am-sidebar");
+  const fixture = (parent, name = "guard", entry = readFileSync(join(GUARD_DIR, "hc"))) => {
+    const dir = join(parent, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(parent, "hcGuard.mjs"), "// a different release\n");
+    writeFileSync(join(dir, "hc"), entry);
+    return dir;
+  };
+  const version = fixture(join(store, "3.158.1"));
+  const reinstall = fixture(join(store, "3.158.1-a1b2"), "hc-kill", readFileSync(join(KILL_GUARD_DIR, "hc")));
+  const named = fixture(join(store, "restored"));
+  symlinkSync(dirname(named), join(store, "current"));
+  symlinkSync(dirname(reinstall), join(store, "previous"));
+  const packGuard = fixture(pack, "guard", OLD_GUARD_ENTRY);
+  const alias = join(root, "pane-tools");
+  symlinkSync(packGuard, alias);
+  const linkedApp = join(root, "linked-app");
+  mkdirSync(join(linkedApp, "mods"), { recursive: true });
+  symlinkSync(pack, join(linkedApp, "mods", "am-sidebar"));
+  for (const [name, dir] of [
+    ["version", version],
+    ["hex reinstall", reinstall],
+    ["current pointing to a non-version child", join(store, "current", "guard")],
+    ["non-version child linked as current", named],
+    ["previous", join(store, "previous", "hc-kill")],
+    ["pack mod with the older shipped entry", packGuard],
+    ["stable root", fixture(stableRootOf(env))],
+    ["alias to the guard folder", alias],
+  ]) assert.equal(isInstalledGuardFolder(dir, env), true, name);
+  assert.equal(isInstalledGuardFolder(packGuard, { ...env, HERDR_APP_HOME: linkedApp + "/" }), true, "symlinked pack mod root");
+  assert.equal(isGuardFolder(version), false, "the #643/#721 byte-equal rule still rejects skew");
+
+  const staging = fixture(join(store, ".staging"));
+  unlinkSync(join(store, "previous"));
+  symlinkSync(dirname(staging), join(store, "previous"));
+  for (const [name, dir] of [
+    ["planted outside the roots", fixture(join(root, "planted"))],
+    ["staging even when linked as previous", join(store, "previous", "guard")],
+    ["unlinked non-version child", fixture(join(store, "unlinked"))],
+    ["other folder basename", fixture(pack, "bin")],
+    ["different entry", fixture(join(store, "3.158.2"), "guard", "#!/bin/sh\nexit 1\n")],
+    ["pack kept for rollback", fixture(join(app, "automagik-herdr", ".prev", "am-sidebar"))],
+    ["missing folder", join(root, "missing")],
+    ["empty path", ""],
+  ]) assert.equal(isInstalledGuardFolder(dir, env), false, name);
 });

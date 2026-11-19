@@ -6,7 +6,7 @@ import { startFakeCore } from "./fake-core.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -6647,4 +6647,29 @@ test("#1556 --due refuses to restart a pane other than the one it measured", asy
   assert.equal(s.calls().some((c) => c[0] === "kill"), false, "nothing was ended");
   assert.equal(s.hcState().terminals.find((x) => x.address === "t9").state, "live");
   assert.equal(s.hcState().terminals.find((x) => x.address === "t5").state, "live");
+});
+
+test("#1728 restart from a skewed member pane ends the member seat it replaces", (t) => {
+  const s = captainScene(t, { agent: "codex", extra: [term("t8", { bot: ID.dev })] });
+  const state = s.hcState();
+  for (const pane of state.terminals) pane.cwd = pane.foreground.cwd = s.project;
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify(state));
+  attachSeat(s, "Dev", "t8");
+  const bin = join(s.root, "bin");
+  const pack = join(s.app, "mods", "am-sidebar");
+  cpSync(dirname(KILL_GUARD_DIR), pack, { recursive: true });
+  appendFileSync(join(pack, "hcGuard.mjs"), "\n// A different release for #1728.\n");
+  const shim = join(pack, "hc-kill");
+  assert.ok(readFileSync(join(bin, "hc"), "utf8").includes(FAKE_HC));
+  const env = { PATH: `${shim}:${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HC_TERMINAL_ID: "t8" };
+  const direct = spawnSync(join(shim, "hc"), ["kill", "t6"], { cwd: s.project, env: { ...s.env, ...env }, encoding: "utf8" });
+  assert.equal(direct.status, 2, direct.error?.message ?? direct.stderr);
+  assert.match(direct.stderr, /hc kill shim: refused .*main bot only/);
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), []);
+
+  const r = s.cli(["restart", "Captain", "--json"], { env });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().replaced, "t6");
+  assert.deepEqual(s.calls().filter((call) => call[0] === "kill"), [["kill", "t6"]]);
+  assert.equal(s.hcState().terminals.find((pane) => pane.address === "t6").state, "finished");
 });
