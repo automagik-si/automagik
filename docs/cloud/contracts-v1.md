@@ -462,6 +462,10 @@ Rules:
 - The code is single use. The Cloud service marks it used before it issues a token; a replay, an
   expired code, a code for another workspace and a code presented by another workspace are
   refused. A refusal issues no token and echoes no code.
+- A gate's own replay memory is bounded at 4096 unexpired codes. At the bound the gate refuses a
+  new open before the exchange and keeps every code it already remembers; it never forgets one to
+  make room, so a flood cannot make a replayed code pass the gate's own single-use record. A
+  code's expiry frees its slot, and Cloud's single use remains the backstop.
 - The exchange is server-side. The browser never calls the Cloud service's exchange, and the
   workspace never holds the code after the exchange.
 - The code is not a workspace token, an access token or a refresh token. It grants nothing outside
@@ -574,6 +578,11 @@ Rules:
   `effective_at` and the person may sign in again with the new roles.
 - A list past `expires_at` is not applied; the gate fetches a current one. A missing or
   unverifiable list is a failure, not an empty list.
+- The gate applies a list only while it is current: `issued_at` may be at most 30 seconds after
+  the gate's clock and at most 5 minutes before it. A future-dated list is refused and does not
+  move the gate's applied-list watermark, so it cannot hold a later removal or role cut out of
+  effect; a list older than the bound is a stale feed, and a stale feed is a failure that changes
+  nothing.
 - The gate applies only a list it can authenticate; an unverifiable list changes nothing.
   **Open:** whether the list is signed, and with which key, or authenticated by the gate's fetch
   channel.
