@@ -3027,6 +3027,37 @@ var HOST_ZH = {
   "The note could not be read.": "无法读取笔记。",
   "Read through {date}": "已读到 {date}",
   "This chat": "这个聊天",
+  // The shared kit's interactive backfill card (#1326 K2): a proposal to read, one approval,
+  // and the live runs with a stop.
+  "Read chat history": "读取聊天记录",
+  "Choose the chats to read, then set the dates. Nothing starts until you press Start.": "选择要读取的聊天并设置日期。在你按下“开始”之前，不会启动任何操作。",
+  "Starting…": "正在开始…",
+  "Sending your approval…": "正在发送你的批准…",
+  "Your approval was sent. One backfill is starting for each chat you chose.": "你的批准已发送。你选择的每个聊天都会开始一次历史记录回填。",
+  "Start date": "开始日期",
+  "End date": "结束日期",
+  "The start date must be before the end date.": "开始日期必须早于结束日期。",
+  "There are no chats to read here.": "这里没有可读取的聊天。",
+  "Chats to read": "要读取的聊天",
+  "Stopping…": "正在停止…",
+  "Stop the backfill of {chat}": "停止 {chat} 的回填",
+  "The backfill could not be started.": "无法开始回填。",
+  "The backfill could not be stopped.": "无法停止回填。",
+  "Started {date}": "开始于 {date}",
+  "{count} more chats": "还有 {count} 个聊天",
+  "{count} earlier runs": "更早的 {count} 次运行",
+  "Backfill": "回填",
+  "Backfills": "回填记录",
+  "All available history": "所有可用的历史记录",
+  "From {date}": "从 {date}",
+  "Through {date}": "截至 {date}",
+  "Unnamed chat": "未命名聊天",
+  "{count} chats selected": "已选择 {count} 个聊天",
+  "{count} running": "{count} 个进行中",
+  "{count} done": "{count} 个已完成",
+  "{count} phone did not answer": "{count} 个手机没有响应",
+  "{count} stopped": "{count} 个已停止",
+  "{count} failed": "{count} 个失败",
   // The Bot browser tab beside the conversation (bot-browser-tab.js): the person drives the
   // Bot's own page, then gives it back.
   "Bot browser": "Bot 浏览器",
@@ -37517,6 +37548,7 @@ var genuiNumber = (value) => {
   return typeof parsed === "number" && Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : void 0;
 };
 var genuiInstant = (value) => {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return new Date(value);
   if (typeof value !== "string") return void 0;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? new Date(ms) : void 0;
@@ -37767,6 +37799,111 @@ function personView(data) {
     readThrough: shortDate(note.readThrough)
   };
 }
+var BACKFILL_RUNS_SHOWN = 3;
+var BACKFILL_ROWS_SHOWN = 20;
+var BACKFILL_CHATS_MAX = 200;
+var BACKFILL_ID_MAX = 200;
+var backfillId = (value) => genuiLabel(value, BACKFILL_ID_MAX);
+function backfillDay(value) {
+  const date = genuiInstant(value);
+  if (date === void 0) return "";
+  const pad2 = (number) => String(number).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`;
+}
+function backfillRange(from, to) {
+  const start2 = shortDate(from);
+  const end = shortDate(to);
+  if (start2 !== "" && end !== "") return start2 === end ? start2 : `${start2} – ${end}`;
+  if (start2 !== "") return t("From {date}", { date: start2 });
+  if (end !== "") return t("Through {date}", { date: end });
+  return t("All available history");
+}
+function canCancel(row) {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return false;
+  return backfillId(row.jobId) !== void 0 && row.outcome === null;
+}
+function proposalView(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const id = backfillId(value.id);
+  if (id === void 0) return void 0;
+  const chats = (Array.isArray(value.chats) ? value.chats : []).slice(0, BACKFILL_CHATS_MAX).map((chat) => {
+    if (chat === null || typeof chat !== "object" || Array.isArray(chat)) return void 0;
+    const chatId = backfillId(chat.id);
+    if (chatId === void 0) return void 0;
+    return {
+      id: chatId,
+      name: genuiLabel(chat.name) ?? t("Unnamed chat"),
+      channel: genuiLabel(chat.channel) ?? "",
+      kind: genuiLabel(chat.kind, 24) ?? "",
+      ticked: chat.ticked === true
+    };
+  }).filter(Boolean);
+  return {
+    id,
+    botId: backfillId(value.botId),
+    range: backfillRange(value.from, value.to),
+    from: backfillDay(value.from),
+    to: backfillDay(value.to),
+    chats,
+    ticked: chats.filter((chat) => chat.ticked).map((chat) => chat.id),
+    count: chats.length
+  };
+}
+function backfillSummaryText(summary, rows2) {
+  const list = Array.isArray(rows2) ? rows2 : [];
+  const fromSummary = (key) => {
+    if (summary === null || typeof summary !== "object" || Array.isArray(summary)) return void 0;
+    return genuiNumber(summary[key]);
+  };
+  const counted = (key) => fromSummary(key) ?? 0;
+  const ended = (outcome) => list.filter((row) => row?.outcome === outcome).length;
+  const running2 = fromSummary("running") ?? list.filter((row) => row?.outcome === null).length;
+  const done = fromSummary("done") ?? ended("done");
+  const phone = fromSummary("phoneDidNotAnswer") ?? ended("phone-did-not-answer");
+  const stopped = fromSummary("stopped") ?? ended("stopped");
+  const failed = fromSummary("failed") ?? ended("failed") + ended("not-started");
+  const parts = [];
+  if (running2 > 0) parts.push(t("{count} running", { count: countText2(running2) }));
+  if (done > 0) parts.push(t("{count} done", { count: countText2(done) }));
+  if (phone > 0) parts.push(t("{count} phone did not answer", { count: countText2(phone) }));
+  if (stopped > 0) parts.push(t("{count} stopped", { count: countText2(stopped) }));
+  if (failed > 0) parts.push(t("{count} failed", { count: countText2(failed) }));
+  if (parts.length === 0 && (counted("total") > 0 || list.length > 0)) parts.push(t("{count} chats", { count: countText2(counted("total") || list.length) }));
+  return parts.join(" · ");
+}
+function backfillRowView(row) {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return void 0;
+  const chatId = backfillId(row.chatId);
+  if (chatId === void 0) return void 0;
+  return { ...rowView(row), chatId, jobId: backfillId(row.jobId) ?? null, cancelable: canCancel(row) };
+}
+function runView(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const id = backfillId(value.id);
+  if (id === void 0) return void 0;
+  const rows2 = Array.isArray(value.rows) ? value.rows : [];
+  const shown = rows2.slice(0, BACKFILL_ROWS_SHOWN).map(backfillRowView).filter(Boolean);
+  return {
+    id,
+    botId: backfillId(value.botId),
+    range: backfillRange(value.from, value.to),
+    started: shortDate(value.startedAt),
+    summary: backfillSummaryText(value.summary, rows2),
+    total: rows2.length,
+    rows: shown,
+    more: Math.max(0, rows2.length - shown.length)
+  };
+}
+function backfillView(roster) {
+  const proposals = Array.isArray(roster?.omniBackfillProposals) ? roster.omniBackfillProposals : [];
+  const runs = Array.isArray(roster?.omniBackfills) ? roster.omniBackfills : [];
+  const shown = runs.slice(0, BACKFILL_RUNS_SHOWN).map(runView).filter(Boolean);
+  return {
+    proposals: proposals.map(proposalView).filter(Boolean),
+    runs: shown,
+    moreRuns: Math.max(0, runs.length - shown.length)
+  };
+}
 
 // src/client/genui.js
 var import_react98 = require("react");
@@ -37785,8 +37922,8 @@ function revisionOf(roster) {
   const revision = roster?.genui?.revision;
   return typeof revision === "number" && Number.isFinite(revision) ? revision : 0;
 }
-function ProgressRow({ row }) {
-  const view = rowView(row);
+function ProgressRow({ row, view: given, action }) {
+  const view = given ?? rowView(row);
   return (0, import_react98.createElement)(
     "li",
     { className: "bt-genui-row", "data-state": view.state },
@@ -37809,7 +37946,9 @@ function ProgressRow({ row }) {
         view.media !== "" ? (0, import_react98.createElement)("span", null, view.media) : null,
         view.marks !== "" ? (0, import_react98.createElement)("span", null, view.marks) : null
       ) : null
-    )
+    ),
+    // A card of the kit's own may hang one action off a row (a backfill's Stop).
+    action === void 0 || action === null ? null : (0, import_react98.createElement)("div", { className: "bt-genui-action" }, action)
   );
 }
 function ProgressRows({ rows: list, label }) {
@@ -37883,6 +38022,231 @@ function PersonCard({ chatId, load, revision }) {
     )
   );
 }
+var START_BACKFILL = "start_backfill";
+var CANCEL_BACKFILL = "cancel_backfill";
+var backfillId2 = (value) => typeof value === "string" ? value.trim() : "";
+var backfillMessage = (error, fallback) => typeof error?.message === "string" && error.message !== "" ? error.message : fallback;
+function startBackfill(payload) {
+  const proposalId = backfillId2(payload?.proposalId);
+  const chats = [...new Set((Array.isArray(payload?.chats) ? payload.chats : []).map(backfillId2).filter((id) => id !== ""))];
+  const from = backfillId2(payload?.from);
+  const to = backfillId2(payload?.to);
+  if (proposalId === "" || chats.length === 0 || from === "" || to === "") {
+    return Promise.reject(new Error("A backfill start needs a proposal, at least one chat and both dates"));
+  }
+  return call(START_BACKFILL, { proposalId, chats, from, to });
+}
+function cancelBackfill(payload) {
+  const jobId = backfillId2(payload?.jobId);
+  if (jobId === "") return Promise.reject(new Error("Cancelling a backfill needs its job id"));
+  return call(CANCEL_BACKFILL, { jobId });
+}
+var toggleChat = (list, id) => list.includes(id) ? list.filter((item) => item !== id) : [...list, id];
+function BackfillCard({ roster, start: start2, cancel }) {
+  const starter = (0, import_react98.useRef)(start2 ?? startBackfill);
+  starter.current = start2 ?? startBackfill;
+  const stopper = (0, import_react98.useRef)(cancel ?? cancelBackfill);
+  stopper.current = cancel ?? cancelBackfill;
+  const [forms, setForms] = (0, import_react98.useState)({});
+  const [busy, setBusy] = (0, import_react98.useState)(void 0);
+  const [sent, setSent] = (0, import_react98.useState)(void 0);
+  const [errors, setErrors] = (0, import_react98.useState)({});
+  const [stopping, setStopping] = (0, import_react98.useState)({});
+  const prefix = (0, import_react98.useId)();
+  const view = backfillView(roster);
+  const formOf = (proposal) => forms[proposal.id] ?? { from: proposal.from, to: proposal.to, chats: proposal.ticked };
+  const update = (proposal, patch) => setForms((all) => ({
+    ...all,
+    [proposal.id]: { ...all[proposal.id] ?? { from: proposal.from, to: proposal.to, chats: proposal.ticked }, ...patch }
+  }));
+  const onStart = async (proposal, form) => {
+    const ready = form.chats.length > 0 && form.from !== "" && form.to !== "" && form.from <= form.to;
+    if (busy !== void 0 || !ready) return;
+    setBusy(proposal.id);
+    setErrors((all) => {
+      const next = { ...all };
+      delete next[proposal.id];
+      return next;
+    });
+    try {
+      const answer = await starter.current({ proposalId: proposal.id, chats: form.chats, from: form.from, to: form.to });
+      setSent({ proposalId: proposal.id, runId: answer?.runId });
+    } catch (error) {
+      setErrors((all) => ({ ...all, [proposal.id]: backfillMessage(error, t("The backfill could not be started.")) }));
+    } finally {
+      setBusy(void 0);
+    }
+  };
+  const onCancel = async (run2, row) => {
+    if (stopping[row.jobId] === true) return;
+    setStopping((all) => ({ ...all, [row.jobId]: true }));
+    setErrors((all) => {
+      const next = { ...all };
+      delete next[`run:${run2.id}`];
+      return next;
+    });
+    try {
+      await stopper.current({ jobId: row.jobId });
+    } catch (error) {
+      setErrors((all) => ({ ...all, [`run:${run2.id}`]: backfillMessage(error, t("The backfill could not be stopped.")) }));
+    } finally {
+      setStopping((all) => {
+        const next = { ...all };
+        delete next[row.jobId];
+        return next;
+      });
+    }
+  };
+  const waiting = sent !== void 0 && !view.runs.some((run2) => run2.id === sent.runId) ? sent : void 0;
+  if (waiting === void 0 && view.proposals.length === 0 && view.runs.length === 0) return null;
+  const pickers = view.proposals.filter((proposal) => waiting?.proposalId !== proposal.id).map((proposal) => {
+    const form = formOf(proposal);
+    const starting = busy === proposal.id;
+    const held = busy !== void 0;
+    const ordered = form.chats.length > 0 && form.from !== "" && form.to !== "" && form.from <= form.to;
+    const backwards = form.from !== "" && form.to !== "" && form.from > form.to;
+    return (0, import_react98.createElement)(
+      "section",
+      { key: proposal.id, className: "bt-q bt-genui-backfill", "aria-busy": starting ? "true" : void 0 },
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-q-head" },
+        (0, import_react98.createElement)(
+          "div",
+          { className: "bt-q-text" },
+          (0, import_react98.createElement)("p", { className: "bt-q-title" }, t("Read chat history")),
+          (0, import_react98.createElement)("div", { className: "bt-q-detail" }, proposal.range)
+        ),
+        (0, import_react98.createElement)("button", {
+          type: "button",
+          className: "bt-genui-start",
+          disabled: held || !ordered,
+          onClick: () => onStart(proposal, form)
+        }, starting ? t("Starting…") : t("Start"))
+      ),
+      (0, import_react98.createElement)("p", { className: "bt-genui-note" }, t("Choose the chats to read, then set the dates. Nothing starts until you press Start.")),
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-genui-dates" },
+        (0, import_react98.createElement)(
+          "label",
+          { className: "bt-genui-date-label", htmlFor: `${prefix}-${proposal.id}-from` },
+          t("Start date"),
+          (0, import_react98.createElement)("input", {
+            id: `${prefix}-${proposal.id}-from`,
+            type: "date",
+            className: "bt-genui-date",
+            value: form.from,
+            disabled: held,
+            "aria-label": t("Start date"),
+            onChange: (event) => update(proposal, { from: event.target.value })
+          })
+        ),
+        (0, import_react98.createElement)(
+          "label",
+          { className: "bt-genui-date-label", htmlFor: `${prefix}-${proposal.id}-to` },
+          t("End date"),
+          (0, import_react98.createElement)("input", {
+            id: `${prefix}-${proposal.id}-to`,
+            type: "date",
+            className: "bt-genui-date",
+            value: form.to,
+            disabled: held,
+            "aria-label": t("End date"),
+            onChange: (event) => update(proposal, { to: event.target.value })
+          })
+        )
+      ),
+      proposal.chats.length === 0 ? (0, import_react98.createElement)("p", { className: "bt-genui-muted" }, t("There are no chats to read here.")) : (0, import_react98.createElement)(
+        "ul",
+        { className: "bt-genui-picks", "aria-label": t("Chats to read") },
+        proposal.chats.map((chat) => (0, import_react98.createElement)(
+          "li",
+          { key: chat.id, className: "bt-genui-pick" },
+          (0, import_react98.createElement)(
+            "label",
+            { className: "bt-genui-pick-label" },
+            (0, import_react98.createElement)("input", {
+              type: "checkbox",
+              checked: form.chats.includes(chat.id),
+              disabled: held,
+              onChange: () => update(proposal, { chats: toggleChat(form.chats, chat.id) })
+            }),
+            (0, import_react98.createElement)("span", { className: "bt-genui-name" }, chat.name),
+            chat.channel !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, chat.channel) : null
+          )
+        ))
+      ),
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-genui-foot" },
+        (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("{count} chats selected", { count: countText2(form.chats.length) })),
+        backwards ? (0, import_react98.createElement)("span", { className: "bt-genui-error" }, t("The start date must be before the end date.")) : null,
+        errors[proposal.id] !== void 0 ? (0, import_react98.createElement)("span", { className: "bt-genui-error", role: "status" }, errors[proposal.id]) : null,
+        starting ? (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("Sending your approval…")) : null
+      )
+    );
+  });
+  const waitingNode = waiting === void 0 ? null : (0, import_react98.createElement)(
+    "section",
+    { className: "bt-q bt-genui-backfill", "aria-busy": "true" },
+    (0, import_react98.createElement)(
+      "div",
+      { className: "bt-q-head" },
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-q-text" },
+        (0, import_react98.createElement)("p", { className: "bt-q-title" }, t("Backfill")),
+        (0, import_react98.createElement)("div", { className: "bt-q-detail" }, t("Your approval was sent. One backfill is starting for each chat you chose."))
+      )
+    ),
+    (0, import_react98.createElement)(
+      "div",
+      { className: "bt-genui-foot" },
+      (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("Starting…"))
+    )
+  );
+  const runsNode = view.runs.length === 0 ? null : (0, import_react98.createElement)(
+    "section",
+    { className: "bt-q bt-genui-backfill-runs" },
+    (0, import_react98.createElement)(
+      "div",
+      { className: "bt-q-head" },
+      (0, import_react98.createElement)("div", { className: "bt-q-text" }, (0, import_react98.createElement)("p", { className: "bt-q-title" }, t("Backfills")))
+    ),
+    view.runs.map((run2) => (0, import_react98.createElement)(
+      "div",
+      { key: run2.id, className: "bt-genui-run" },
+      (0, import_react98.createElement)(
+        "div",
+        { className: "bt-genui-run-head" },
+        (0, import_react98.createElement)("span", { className: "bt-genui-run-range" }, run2.range),
+        (0, import_react98.createElement)("span", { className: "bt-genui-num" }, t("{count} chats", { count: countText2(run2.total) })),
+        run2.summary !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-word" }, run2.summary) : null,
+        run2.started !== "" ? (0, import_react98.createElement)("span", { className: "bt-genui-muted" }, t("Started {date}", { date: run2.started })) : null
+      ),
+      (0, import_react98.createElement)(
+        "ul",
+        { className: "bt-genui-rows", "aria-label": run2.range },
+        run2.rows.map((row) => (0, import_react98.createElement)(ProgressRow, {
+          key: row.chatId,
+          view: row,
+          action: row.cancelable ? (0, import_react98.createElement)("button", {
+            type: "button",
+            className: "bt-genui-cancel",
+            disabled: stopping[row.jobId] === true,
+            "aria-label": t("Stop the backfill of {chat}", { chat: row.name }),
+            onClick: () => onCancel(run2, row)
+          }, stopping[row.jobId] === true ? t("Stopping…") : t("Stop")) : null
+        }))
+      ),
+      run2.more > 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-more" }, t("{count} more chats", { count: countText2(run2.more) })) : null,
+      errors[`run:${run2.id}`] !== void 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-foot" }, (0, import_react98.createElement)("span", { className: "bt-genui-error", role: "status" }, errors[`run:${run2.id}`])) : null
+    )),
+    view.moreRuns > 0 ? (0, import_react98.createElement)("div", { className: "bt-genui-more" }, t("{count} earlier runs", { count: countText2(view.moreRuns) })) : null
+  );
+  return (0, import_react98.createElement)(import_react98.Fragment, null, waitingNode, pickers, runsNode);
+}
 var GENUI_CSS = `
 .bt-genui-row{display:flex;align-items:flex-start;gap:10px;min-width:0;padding:8px;border-radius:10px;font:inherit}
 .bt-genui-row+.bt-genui-row{box-shadow:inset 0 1px 0 var(--bt-q-rule-2,var(--bt-line-weak))}
@@ -37915,6 +38279,30 @@ var GENUI_CSS = `
 .bt-genui-retry:focus-visible{outline:2px solid var(--bt-accent);outline-offset:-2px}
 .bt-genui-person{max-width:560px}
 @keyframes bt-genui-pulse{50%{opacity:.45}}
+.bt-genui-backfill,.bt-genui-backfill-runs{max-width:560px}
+.bt-genui-note{margin:0;font-size:13px;line-height:18px;color:var(--bt-ink-2)}
+.bt-genui-dates{display:flex;flex-wrap:wrap;gap:10px}
+.bt-genui-date-label{display:flex;flex-direction:column;gap:4px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--bt-ink-3)}
+.bt-genui-date{height:30px;padding:0 8px;border:1px solid var(--bt-line-2);border-radius:8px;background:var(--bt-card);color:var(--bt-ink);font:inherit;font-size:13px;color-scheme:light}
+body[data-ds-dark-theme] .bt-genui-date{color-scheme:dark}
+.bt-genui-picks{display:flex;flex-direction:column;gap:1px;max-height:220px;overflow:auto;margin:0 -8px;padding:0;list-style:none}
+.bt-genui-pick{min-width:0}
+.bt-genui-pick-label{display:flex;align-items:center;gap:8px;min-width:0;padding:7px 8px;border-radius:10px;cursor:pointer;font-size:13.5px;line-height:19px}
+.bt-genui-pick-label:hover{background:var(--bt-hover)}
+.bt-genui-pick-label input{flex:none;width:15px;height:15px;margin:0;accent-color:var(--bt-accent)}
+.bt-genui-start{flex:none;height:30px;padding:0 12px;border:0;border-radius:999px;background:var(--bt-accent);color:var(--bt-accent-ink);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.bt-genui-start:disabled{opacity:.5;cursor:default}
+.bt-genui-start:focus-visible,.bt-genui-cancel:focus-visible{outline:2px solid var(--bt-accent);outline-offset:2px}
+.bt-genui-cancel{flex:none;height:26px;padding:0 10px;border:1px solid var(--bt-line-2);border-radius:999px;background:none;color:var(--bt-ink-2);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.bt-genui-cancel:hover{background:var(--bt-hover);color:var(--bt-ink)}
+.bt-genui-cancel:disabled{opacity:.5;cursor:default}
+.bt-genui-action{flex:none;margin-top:1px}
+.bt-genui-run{display:flex;flex-direction:column;gap:6px;min-width:0}
+.bt-genui-run+.bt-genui-run{padding-top:10px;border-top:1px solid var(--bt-q-rule-2,var(--bt-line-weak))}
+.bt-genui-run-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 8px;padding:0 8px;font-size:12.5px;line-height:17px}
+.bt-genui-run-range{font-weight:600;color:var(--bt-ink)}
+.bt-genui-more{padding:2px 8px 0;font-size:12.5px;line-height:17px;color:var(--bt-ink-3)}
+.bt-genui-error{color:var(--st-bad-strong,var(--bt-danger))}
 @media (prefers-reduced-motion:reduce){.bt-genui-row[data-state=work] .bt-genui-dot{animation:none}}
 body[data-bt-motion=quiet] .bt-genui-row[data-state=work] .bt-genui-dot{animation:none}
 `;
@@ -38421,18 +38809,32 @@ var omni = Object.freeze({
     ProgressRow,
     ProgressRows,
     CoverageRow,
+    BackfillCard,
     rows: genuiRows,
     revisionOf,
     loadReadingNote,
     READING_NOTE,
+    // The backfill card's actions (#1326 K2): one approval, and one job's stop.
+    startBackfill,
+    cancelBackfill,
+    START_BACKFILL,
+    CANCEL_BACKFILL,
+    backfillView,
     model: Object.freeze({
+      backfillDay,
+      backfillRange,
+      backfillSummaryText,
+      backfillView,
+      canCancel,
       coverageLine,
       coverageOf,
       countText: countText2,
       parseReadingNote,
       percentOf,
       personView,
+      proposalView,
       rowView,
+      runView,
       shortDate,
       spanOf: spanOf2,
       stateId,

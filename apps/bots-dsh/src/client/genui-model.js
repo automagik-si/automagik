@@ -16,6 +16,8 @@ const genuiNumber = (value) => {
   return typeof parsed === 'number' && Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : undefined
 }
 const genuiInstant = (value) => {
+  // A backfill run reports its times in milliseconds; the reading rows report ISO times.
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return new Date(value)
   if (typeof value !== 'string') return undefined
   const ms = Date.parse(value)
   return Number.isFinite(ms) ? new Date(ms) : undefined
@@ -299,5 +301,136 @@ export function personView(data) {
     blocks,
     coverage,
     readThrough: shortDate(note.readThrough),
+  }
+}
+
+
+// The backfill card (#1326 K2): a Bot proposes reading a chat's history over a date range,
+// the person ticks the chats and sets the dates, and one Start sends the approval. The runs
+// move live beside it. These are labels, dates, states and counts only, never a message: the
+// model rebuilds both from the fields it knows, so a preview a caller passed is left out.
+export const BACKFILL_RUNS_SHOWN = 3
+export const BACKFILL_ROWS_SHOWN = 20
+const BACKFILL_CHATS_MAX = 200
+const BACKFILL_ID_MAX = 200
+
+const backfillId = value => genuiLabel(value, BACKFILL_ID_MAX)
+
+/** The day a date input carries: the UTC day of the proposal's or the run's ISO time. */
+export function backfillDay(value) {
+  const date = genuiInstant(value)
+  if (date === undefined) return ''
+  const pad = number => String(number).padStart(2, '0')
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
+}
+
+/** The range a proposal or a run covers: "Mar 1, 2026 – Nov 15, 2026", or the whole history. */
+export function backfillRange(from, to) {
+  const start = shortDate(from)
+  const end = shortDate(to)
+  if (start !== '' && end !== '') return start === end ? start : `${start} – ${end}`
+  if (start !== '') return t('From {date}', { date: start })
+  if (end !== '') return t('Through {date}', { date: end })
+  return t('All available history')
+}
+
+/** Only a queued or fetching job can still be stopped: a job id, and no outcome yet. */
+export function canCancel(row) {
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) return false
+  return backfillId(row.jobId) !== undefined && row.outcome === null
+}
+
+/** One proposal: its id, its range, and the chats the person may tick. */
+export function proposalView(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const id = backfillId(value.id)
+  if (id === undefined) return undefined
+  const chats = (Array.isArray(value.chats) ? value.chats : []).slice(0, BACKFILL_CHATS_MAX).map((chat) => {
+    if (chat === null || typeof chat !== 'object' || Array.isArray(chat)) return undefined
+    const chatId = backfillId(chat.id)
+    if (chatId === undefined) return undefined
+    return {
+      id: chatId,
+      name: genuiLabel(chat.name) ?? t('Unnamed chat'),
+      channel: genuiLabel(chat.channel) ?? '',
+      kind: genuiLabel(chat.kind, 24) ?? '',
+      ticked: chat.ticked === true,
+    }
+  }).filter(Boolean)
+  return {
+    id,
+    botId: backfillId(value.botId),
+    range: backfillRange(value.from, value.to),
+    from: backfillDay(value.from),
+    to: backfillDay(value.to),
+    chats,
+    ticked: chats.filter(chat => chat.ticked).map(chat => chat.id),
+    count: chats.length,
+  }
+}
+
+/**
+ * How a run stands, from its summary or, when it has none, from its rows: running first,
+ * then the ways a row can end. Empty when there is nothing to say.
+ */
+export function backfillSummaryText(summary, rows) {
+  const list = Array.isArray(rows) ? rows : []
+  const fromSummary = key => {
+    if (summary === null || typeof summary !== 'object' || Array.isArray(summary)) return undefined
+    return genuiNumber(summary[key])
+  }
+  const counted = key => fromSummary(key) ?? 0
+  const ended = outcome => list.filter(row => row?.outcome === outcome).length
+  const running = fromSummary('running') ?? list.filter(row => row?.outcome === null).length
+  const done = fromSummary('done') ?? ended('done')
+  const phone = fromSummary('phoneDidNotAnswer') ?? ended('phone-did-not-answer')
+  const stopped = fromSummary('stopped') ?? ended('stopped')
+  const failed = fromSummary('failed') ?? (ended('failed') + ended('not-started'))
+  const parts = []
+  if (running > 0) parts.push(t('{count} running', { count: countText(running) }))
+  if (done > 0) parts.push(t('{count} done', { count: countText(done) }))
+  if (phone > 0) parts.push(t('{count} phone did not answer', { count: countText(phone) }))
+  if (stopped > 0) parts.push(t('{count} stopped', { count: countText(stopped) }))
+  if (failed > 0) parts.push(t('{count} failed', { count: countText(failed) }))
+  // A summary that carries only its total still says so; an empty run says nothing.
+  if (parts.length === 0 && (counted('total') > 0 || list.length > 0)) parts.push(t('{count} chats', { count: countText(counted('total') || list.length) }))
+  return parts.join(' · ')
+}
+
+function backfillRowView(row) {
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) return undefined
+  const chatId = backfillId(row.chatId)
+  if (chatId === undefined) return undefined
+  return { ...rowView(row), chatId, jobId: backfillId(row.jobId) ?? null, cancelable: canCancel(row) }
+}
+
+/** One run: its range, its started day, how its chats stand, and its rows as they move. */
+export function runView(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const id = backfillId(value.id)
+  if (id === undefined) return undefined
+  const rows = Array.isArray(value.rows) ? value.rows : []
+  const shown = rows.slice(0, BACKFILL_ROWS_SHOWN).map(backfillRowView).filter(Boolean)
+  return {
+    id,
+    botId: backfillId(value.botId),
+    range: backfillRange(value.from, value.to),
+    started: shortDate(value.startedAt),
+    summary: backfillSummaryText(value.summary, rows),
+    total: rows.length,
+    rows: shown,
+    more: Math.max(0, rows.length - shown.length),
+  }
+}
+
+/** The card's roster view: the open proposals, then the newest runs and how many came before. */
+export function backfillView(roster) {
+  const proposals = Array.isArray(roster?.omniBackfillProposals) ? roster.omniBackfillProposals : []
+  const runs = Array.isArray(roster?.omniBackfills) ? roster.omniBackfills : []
+  const shown = runs.slice(0, BACKFILL_RUNS_SHOWN).map(runView).filter(Boolean)
+  return {
+    proposals: proposals.map(proposalView).filter(Boolean),
+    runs: shown,
+    moreRuns: Math.max(0, runs.length - shown.length),
   }
 }
