@@ -1459,6 +1459,13 @@ export class AcpAdapter extends LlmAdapter {
                   + `You are ${name}, a Bot on the user's team.`
                   + (role ? ` Your role: ${role}.` : '')
                   + (instructions ? `\n\n${instructions}` : '')
+                  + '\n\nFor a Bot Browser request, use the browser tools this conversation offers. '
+                  + 'Never launch Chrome or another browser from a command. '
+                  + 'When sign-in, payment or verification needs the person, use the offered browser handoff '
+                  + '(`browser_handoff` when available) and stop until they answer. '
+                  + 'If you cannot open the page here, ask the Bot named `browse` only when `message_bot` is offered '
+                  + 'and that Bot is on the team. Say when the request was sent, then report the browser outcome '
+                  + 'when its reply arrives. If the route is unavailable or a call fails, say why.'
               },
               // Which way the Bot's identity went (never its text), for the log.
               onIdentity: takesIdentity ? delivery => {
