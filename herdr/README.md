@@ -3,7 +3,7 @@
 Autonomous teams of coding agents across harnesses (Claude Code, Codex, Antigravity, Kimi, Oh My Pi…)
 with a main bot, captains and members, running in [Herdr](https://dev.herdr.app).
 
-The pack lives in the [Automagik monorepo](https://github.com/automagik-dev/automagik) under
+The pack lives in the [Automagik monorepo](https://github.com/automagik-si/automagik) under
 `herdr/`, and ships on its releases with its one version (`v3.x`): a release carries the pack
 (`automagik-herdr-pack-<v>.tgz`) when `herdr/` changed since the release before. v0.14.x was the
 last release line from the old `automagik-dev/automagik-herdr` repository.
@@ -15,7 +15,7 @@ last release line from the old `automagik-dev/automagik-herdr` repository.
 On macOS or Linux with Node 22.7 or later:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/automagik-dev/automagik/main/herdr/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/automagik-si/automagik/main/herdr/install.sh | bash
 ```
 
 The installer checks Node and [Herdr](https://dev.herdr.app) (herdrdev's app, bundle id
@@ -363,7 +363,7 @@ Or let a coding agent do it. The prompt lives in [docs/agent-install.md](docs/ag
 ```text
 Install Automagik Herdr on this macOS or Linux machine and set up my first bot. The command is am (automagik-herdr still works as an alias).
 
-1. Run: curl -fsSL https://raw.githubusercontent.com/automagik-dev/automagik/main/herdr/install.sh | bash
+1. Run: curl -fsSL https://raw.githubusercontent.com/automagik-si/automagik/main/herdr/install.sh | bash
    If it stops to ask something (install Node or Herdr), ask me; if I say yes, run it again
    with: ... | bash -s -- --yes. If it stops for anything else, tell me what it printed and stop.
    If the output has a layout.switch command, ask me before running that exact command. If

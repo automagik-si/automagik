@@ -22,14 +22,14 @@ Proposals for changes that others rely on. How to write one: [RFC 0000](0000-rfc
 
 | RFC | Title | Status | PR |
 |---|---|---|---|
-| [0000](0000-rfc-process.md) | How this repo proposes and records changes | Draft | automagik-dev/automagik-pocket#21 |
-| [0001](0001-identity.md) | Identity: Automagik name and colours, app ID, repo home | Implemented | automagik-dev/automagik-pocket#14, automagik-dev/automagik-pocket#15, automagik-dev/automagik-pocket#16 |
-| [0002](0002-release-and-update-channel.md) | Release and update channel: v0.N.0 per merge to dev, latest.json | Implemented | automagik-dev/automagik-pocket#6, automagik-dev/automagik-pocket#18 |
-| [0003](0003-pocket-link-pairing.md) | Pocket Link: pair with Herdr desktop over iroh, no SSH | Implemented | automagik-dev/automagik-pocket#4 |
-| [0004](0004-monorepo.md) | One repo: android/ and desktop/pocket-link/ | Implemented | automagik-dev/automagik-pocket#20 |
+| [0000](0000-rfc-process.md) | How this repo proposes and records changes | Draft | automagik-si/automagik-pocket#21 |
+| [0001](0001-identity.md) | Identity: Automagik name and colours, app ID, repo home | Implemented | automagik-si/automagik-pocket#14, automagik-si/automagik-pocket#15, automagik-si/automagik-pocket#16 |
+| [0002](0002-release-and-update-channel.md) | Release and update channel: v0.N.0 per merge to dev, latest.json | Implemented | automagik-si/automagik-pocket#6, automagik-si/automagik-pocket#18 |
+| [0003](0003-pocket-link-pairing.md) | Pocket Link: pair with Herdr desktop over iroh, no SSH | Implemented | automagik-si/automagik-pocket#4 |
+| [0004](0004-monorepo.md) | One repo: android/ and desktop/pocket-link/ | Implemented | automagik-si/automagik-pocket#20 |
 | [0005](0005-usage-meter.md) | Usage meter: token usage per machine as ae/1 rows, a summary doc in herdr-core | Draft | — |
-| [0007](0007-watch-after-reboot.md) | Watch in background comes back after a phone restart (RECEIVE_BOOT_COMPLETED) | Accepted | automagik-dev/automagik-pocket#38 |
-| [0008](0008-drop-ssh.md) | Drop SSH: Pocket Link (QR pairing) is the only way to connect | Accepted | automagik-dev/automagik-pocket#46 |
+| [0007](0007-watch-after-reboot.md) | Watch in background comes back after a phone restart (RECEIVE_BOOT_COMPLETED) | Accepted | automagik-si/automagik-pocket#38 |
+| [0008](0008-drop-ssh.md) | Drop SSH: Pocket Link (QR pairing) is the only way to connect | Accepted | automagik-si/automagik-pocket#46 |
 
 Monorepo RFCs that change Pocket's contract, privacy or permissions (they live in the monorepo's
 [docs/rfcs](../../../../docs/rfcs/)):
