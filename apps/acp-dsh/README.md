@@ -37,8 +37,10 @@ Agents other than DSH's own, as DeepSeek Harness models, over the
   set (standard, or cordis in creator mode) over one stdio MCP server per ACP session, named
   `dsh` and spawned by the adapter with that session's arguments. The bridge has no port; it
   reaches this plugin over a loopback back-channel with a per-session credential
-  (`DSH_BRIDGE_CREDENTIAL`), which binds a request to its Session and is revoked with the
-  bridge. Every DSH tool call is approved in DSH under the Session's level before it runs,
+  (`DSH_BRIDGE_CREDENTIAL`), which binds a request to its Session. A bridge process that exits
+  detaches, and a respawn can re-attach with the same credential. The host revokes it when the
+  ACP session ends, its agent process exits, a fork replaces it, or the probe ends.
+  Every DSH tool call is approved in DSH under the Session's level before it runs,
   whatever the agent's own allow rules or hooks say, and the bridge writes the `tool/call` and
   `tool/result` rows the chat shows. `acp-claude` runs with its built-in tools off
   (`_meta.disableBuiltInTools`); a structured call that is not an MCP name is recorded as

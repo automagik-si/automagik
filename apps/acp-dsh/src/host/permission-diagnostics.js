@@ -329,7 +329,7 @@ export class PermissionDiagnostics {
         out.bridge = { ...entry.bridge }
         if (entry.bridge.on) {
           const bridge = active ? state.bridge : undefined
-          out.bridge.open = bridge !== undefined && bridge.closed !== true
+          out.bridge.open = bridge !== undefined && bridge.closed !== true && bridge.disconnected !== true
         }
       }
       if (entry.modes !== undefined) {

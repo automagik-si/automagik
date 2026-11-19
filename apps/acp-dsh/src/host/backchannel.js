@@ -1,10 +1,10 @@
 // The bridge→DSH leg (RFC 0003, amendment, "The bridge"). The bridge runs as the agent's child,
 // so it cannot inherit a pipe from DSH: it reaches this plugin over a loopback HTTP channel with
 // a per-session credential minted at spawn and passed only in that bridge's env. The credential
-// binds a request to its Session and is revoked with the bridge; it carries no approval, and
-// every DSH tool call still enters DSH's approval service under the Session's level. Nothing
-// here is a boundary against same-user code (it can read the bridge's environment); the
-// boundary is server-side.
+// binds a request to its Session. The host revokes it when the session or agent process ends,
+// a fork replaces it, or a probe ends. A bridge process exit only detaches, so a respawn can
+// use the same credential. Same-user code can read the bearer and impersonate a replacement.
+// DSH's server-side approval service owns each call under the Session's level.
 //
 // This module also owns the tool set the bridge serves: the Session's preset tools (standard,
 // or cordis in creator mode: whatever preset the Session runs), minus the tools its level cannot
@@ -31,6 +31,7 @@ export function bridgeRefusalText(name, outcome, policy) {
 /** How long a bridge's long-poll waits before answering "nothing changed". */
 export const WAIT_MS = 20_000
 const MAX_BODY = 16 * 1024 * 1024
+const MAX_RETIRED = 64
 const OUTPUT_LIMIT = 20_000
 // A reviewer that never answers must not hold the bridge's call forever. Auto only.
 const REVIEW_TIMEOUT_MS = 120_000
@@ -467,8 +468,8 @@ export class Backchannel {
   }
 
   /**
-   * Mint the credential of one ACP session's bridge. Every spawn (a new ACP session, a fork)
-   * gets a fresh value; `revoke` is what ends it.
+   * Mint a Session-bound credential. A respawned bridge process re-attaches with the same
+   * value. The host revokes it on session end, agent exit, fork or probe end.
    * `native`: the agent keeps its own tools (native-tools mode), so this bridge offers and runs
    * only DSH's extras, never a twin of one of them (NATIVE_TWIN_TOOLS).
    * @param {{ sessionId: string, agent: any, name: string, promptRunning?: () => boolean, native?: boolean }} options
@@ -488,6 +489,10 @@ export class Backchannel {
       announced: false,
       listed: false,
       closed: false,
+      attachment: undefined,
+      attachmentAbort: undefined,
+      retired: new Set(),
+      disconnected: false,
       waiters: new Set(),
       approvalCalls: new Set(),
       approvalWaiters: new Set(),
@@ -515,6 +520,7 @@ export class Backchannel {
     if (record === undefined || record.closed) return
     record.closed = true
     this.records.delete(record.credential)
+    record.retired.clear()
     try {
       record.abort.abort()
     } catch {}
@@ -523,6 +529,33 @@ export class Backchannel {
     // The write guard stays while a call of this bridge is still in flight: its step can end
     // before its body does, and the guard is what closes it then (`leave` releases it).
     if (record.controllers.size === 0) record.guard?.release()
+  }
+
+  retire(record, id) {
+    // Bound the history of a respawn storm. Dropping an id would let its process attach again.
+    if (record.retired.size === MAX_RETIRED) return this.revoke(record)
+    record.retired.add(id)
+  }
+
+  detach(record) {
+    const { attachment, attachmentAbort } = record
+    if (attachment !== undefined) this.retire(record, attachment)
+    record.attachment = undefined
+    record.attachmentAbort = undefined
+    record.disconnected = true
+    record.listed = false
+    attachmentAbort?.abort(new Error('the bridge process exited'))
+    this.wake(record)
+  }
+
+  attach(record, id) {
+    if (record.attachment !== undefined) this.detach(record)
+    if (record.closed) return
+    record.attachment = id
+    record.attachmentAbort = new AbortController()
+    record.disconnected = false
+    record.listed = false
+    this.wake(record)
   }
 
   /**
@@ -606,13 +639,37 @@ export class Backchannel {
       request.resume()
       return reply(401, { error: 'refused' })
     }
+    const id = request.headers['x-dsh-bridge-attachment']
+    if (id !== undefined && (typeof id !== 'string' || !/^[0-9a-f]{32}$/.test(id))) {
+      request.resume()
+      return reply(400, { error: 'attachment' })
+    }
+    if (record.retired.has(id)) {
+      request.resume()
+      return reply(401, { error: 'refused' })
+    }
     let body
     try {
       body = await this.body(request)
-    } catch {
-      return reply(400, { error: 'body' })
-    }
+    } catch {}
+    if (record.closed || record.retired.has(id)) return reply(401, { error: 'refused' })
+    if (body === undefined) return reply(400, { error: 'body' })
     const op = body?.op
+    // Headerless clients act for the current attachment. Only a process naming itself in a
+    // handshake can take over, so a late call or poll cannot replace the one that listed.
+    if (op === 'bye') {
+      if (id === undefined || id === record.attachment) this.detach(record)
+      else {
+        this.retire(record, id)
+        if (record.attachment === undefined) this.detach(record)
+      }
+      return reply(200, { ok: true })
+    }
+    if (id !== undefined && id !== record.attachment) {
+      if (op !== 'hello' && op !== 'list') return reply(401, { error: 'refused' })
+      this.attach(record, id)
+      if (record.closed) return reply(401, { error: 'refused' })
+    }
     if (op === 'hello') {
       this.refresh(record)
       return reply(200, { generation: record.generation })
@@ -623,6 +680,7 @@ export class Backchannel {
       return reply(200, { tools: offeredTools(this.ctx, record.agent, { native: record.native }), generation: record.generation })
     }
     if (op === 'call') {
+      const attachmentSignal = record.attachmentAbort?.signal
       // The bridge puts no deadline on a call (a long wait, a slow command and an open approval
       // dialog are all legitimate), so the caller going away is what ends one: an MCP
       // `notifications/cancelled` or a dead bridge closes this request before its answer.
@@ -640,20 +698,23 @@ export class Backchannel {
           arguments: body.arguments ?? {},
           callId: typeof body.callId === 'string' ? body.callId : undefined,
           signal: gone.signal,
+          attachmentSignal,
         })
       } finally {
         record.calls -= 1
         if (record.calls === 0) record.drained?.()
       }
       this.diagnostics?.bridgeCall(record, result)
-      // Revoked while the call was awaiting approval: the caller sees the refusal, not a result.
-      if (result?.revoked === true) return reply(401, { error: 'refused' })
+      // A call that lost its authority while running answers with a refusal.
+      if (record.closed || attachmentSignal?.aborted || result?.revoked === true) return reply(401, { error: 'refused' })
       return reply(200, result)
     }
     if (op === 'wait') {
       const since = Number.isFinite(body.generation) ? body.generation : record.generation
       const timeout = Number.isFinite(body.timeoutMs) ? Math.min(Math.max(body.timeoutMs, 0), WAIT_MS) : WAIT_MS
-      const ready = () => record.closed || (record.announced && record.generation > since)
+      const attachment = record.attachment
+      const ready = () => record.closed || record.disconnected || record.attachment !== attachment
+        || (record.announced && record.generation > since)
       const deadline = Date.now() + timeout
       // A generation bump before `session/new` answered wakes this poll too; it must park again,
       // not answer, or the bridge would announce before the agent can re-list (the spike's rule).
@@ -675,10 +736,6 @@ export class Backchannel {
       // the bridge already knew, so the change is announced only after `session/new`.
       const answerable = record.closed || record.announced
       return reply(200, { generation: answerable ? record.generation : since, ...(record.closed ? { closed: true } : {}) })
-    }
-    if (op === 'bye') {
-      this.revoke(record)
-      return reply(200, { ok: true })
     }
     return reply(400, { error: 'op' })
   }
@@ -791,14 +848,17 @@ export class Backchannel {
    * then does it run. Rows land on the Session as DSH's own tool rows do, so the chat shows the
    * call and its result; the bridge's call is the single record for it.
    * @param {any} record
-   * @param {{ name: string, arguments: any, callId?: string, signal?: AbortSignal }} call `signal` ends this one call (its caller went away)
+   * @param {{ name: string, arguments: any, callId?: string, signal?: AbortSignal, attachmentSignal?: AbortSignal }} call
    */
-  async call(record, { name, arguments: args, callId, signal: callerGone }) {
+  async call(record, { name, arguments: args, callId, signal: callerGone, attachmentSignal = record.attachmentAbort?.signal }) {
     const error = (text) => ({ content: [{ type: 'text', text }], isError: true })
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
     const recordFailed = (text, code = 'BRIDGE_RECORD_FAILED') => ({ ...error(text), error: { name: 'BridgeRecordError', code } })
-    // A revoked bridge (or one whose session ended) may not even write a row.
-    if (record.closed || record.abort.signal.aborted) return { revoked: true }
+    // Stop and a closed caller end individual calls. Detachment and revocation take away
+    // their authority, including calls still waiting for a step or an approval.
+    const authority = attachmentSignal === undefined ? record.abort.signal : AbortSignal.any([record.abort.signal, attachmentSignal])
+    const ended = () => record.closed || authority.aborted
+    if (ended()) return { revoked: true }
     const session = record.agent?.session
     const tools = this.ctx?.get?.('tools')
     if (session === undefined || tools?.execute === undefined) return error(`DSH tools are not available to ${record.name}.`)
@@ -808,8 +868,8 @@ export class Backchannel {
       const waiting = new AbortController()
       record.controllers.add(waiting)
       try {
-        waited = await this.waitForStep(record, waitingTurn, [record.abort.signal, waiting.signal, callerGone].filter(Boolean))
-        if (record.closed || record.abort.signal.aborted) return { revoked: true }
+        waited = await this.waitForStep(record, waitingTurn, [authority, waiting.signal, callerGone].filter(Boolean))
+        if (ended()) return { revoked: true }
         // Stop can arrive after the step wakes us but before this continuation runs.
         if (waiting.signal.aborted || callerGone?.aborted) {
           if (openStepOf(session)?.turn === waitingTurn || betweenStepTurn(session) === waitingTurn) {
@@ -831,7 +891,7 @@ export class Backchannel {
     // without a card (no loadable row exists outside a step); Auto refuses, because Auto review
     // reads a call from its step. A plain refusal here would be a silent dead end for the agent.
     if (openStepOf(session) === undefined && !betweenSteps(session) && record.promptRunning?.() !== true) {
-      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone })
+      return await this.selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended })
     }
     const approval = this.ctx?.get?.('approval')
     const level = levelOf(approval, session, this.ctx?.get?.('sandboxPolicy'), this.ctx?.get?.('permissionPresets'))
@@ -869,13 +929,13 @@ export class Backchannel {
     // From here the call has rows, and its step may end before it does (#957): the write guard
     // (#958) then closes it before the step/end row.
     // This call's own controller: `cancel` (Stop, the turn's end) and its caller going away
-    // abort it; a revocation still aborts every call through the record's signal.
+    // abort it; the authority signal also aborts it when the attachment or record ends.
     const own = new AbortController()
     const onGone = () => own.abort(callerGone.reason)
     if (callerGone?.aborted) onGone()
     else callerGone?.addEventListener('abort', onGone, { once: true })
     record.controllers.add(own)
-    const stopped = AbortSignal.any([record.abort.signal, own.signal])
+    const stopped = AbortSignal.any([authority, own.signal])
     const cancelled = () => settle([{ type: 'text', text: `${name} was stopped before it finished.` }], true, { name: 'BridgeCancelledError', code: 'BRIDGE_CANCELLED' })
     const leave = () => {
       record.controllers.delete(own)
@@ -884,26 +944,28 @@ export class Backchannel {
     }
     // The synthetic block is for the advertisement (and the review on Auto) only.
     let hideSynthetic
-    try {
-      hideSynthetic = advertise(session, { turn, step }, route, { id, name, raw }, this.log)
-    } catch (cause) {
-      leave()
-      return review === undefined
-        ? recordFailed(`The bridge could not advertise ${name}: ${cause?.message ?? cause}`)
-        : unavailable('AUTO_REVIEW_FAILED', `Auto review could not see this call: ${cause?.message ?? cause}`)
-    }
     let callSeq
     try {
-      callSeq = session.append('tool/call', { turn, step, callId: id, name, arguments: raw }).seq
-    } catch (cause) {
-      // A call without its row cannot be reviewed or shown: answer the advertisement (it stays
-      // in the log), take it off the surface and refuse.
-      closeNotStarted(session, { turn, step }, id, this.log)
-      hideSynthetic()
-      leave()
-      return review === undefined
-        ? recordFailed(`The bridge could not record ${name}: ${cause?.message ?? cause}`)
-        : unavailable('AUTO_REVIEW_FAILED', `Auto review could not record this call: ${cause?.message ?? cause}`)
+      try {
+        hideSynthetic = advertise(session, { turn, step }, route, { id, name, raw }, this.log)
+      } catch (cause) {
+        return review === undefined
+          ? recordFailed(`The bridge could not advertise ${name}: ${cause?.message ?? cause}`)
+          : unavailable('AUTO_REVIEW_FAILED', `Auto review could not see this call: ${cause?.message ?? cause}`)
+      }
+      try {
+        callSeq = session.append('tool/call', { turn, step, callId: id, name, arguments: raw }).seq
+      } catch (cause) {
+        // A call without its row cannot be reviewed or shown: answer the advertisement (it stays
+        // in the log), take it off the surface and refuse.
+        closeNotStarted(session, { turn, step }, id, this.log)
+        hideSynthetic()
+        return review === undefined
+          ? recordFailed(`The bridge could not record ${name}: ${cause?.message ?? cause}`)
+          : unavailable('AUTO_REVIEW_FAILED', `Auto review could not record this call: ${cause?.message ?? cause}`)
+      }
+    } finally {
+      if (callSeq === undefined) leave()
     }
     let controller
     const approvalCall = { turn, step, stopped }
@@ -961,6 +1023,10 @@ export class Backchannel {
         ...(info === undefined ? {} : { error: info }),
       }
     }
+    const revoked = async () => {
+      await settle([{ type: 'text', text: `The bridge was revoked before ${name} ran.` }], true, { name: 'BridgeRevokedError', code: 'BRIDGE_REVOKED' })
+      return { revoked: true }
+    }
     let unwatch
     let unwatchPre
     let timer
@@ -989,13 +1055,9 @@ export class Backchannel {
           this.log(`approval for ${name} failed: ${cause?.message ?? cause}`)
         }
         if (outcome !== 'allowed-once') {
-          // A revocation during the ask wins over a late grant: the credential is gone, so the
-          // call is refused rather than answered with a dialog outcome. Its `tool/call` row was
-          // already written, so the row is closed as an error (never left unanswered).
-          if (record.closed || record.abort.signal.aborted) {
-            await settle([{ type: 'text', text: `The bridge was revoked before ${name} ran.` }], true, { name: 'BridgeRevokedError', code: 'BRIDGE_REVOKED' })
-            return { revoked: true }
-          }
+          // If the call lost its authority during the ask, close its row as revoked even
+          // when the dialog returned a different outcome.
+          if (ended()) return await revoked()
           // Stop (or a caller that went away) withdrew the dialog: nobody refused the call.
           if (own.signal.aborted) return await cancelled()
           const text = outcome === 'rejected' && typeof request.bridgeCall.judged?.reason === 'string'
@@ -1004,13 +1066,9 @@ export class Backchannel {
           return await settle([{ type: 'text', text }], true, { name: 'ApprovalDeniedError', code: String(outcome).toUpperCase() })
         }
       }
-      // The ask may have been answered after the bridge was revoked (a grant that lost its
-      // session): nothing may execute then. Checked again after any await, immediately before
-      // dispatch, because the signal alone lets a tool body that ignores it run anyway.
-      if (record.closed || record.abort.signal.aborted) {
-        await settle([{ type: 'text', text: `The bridge was revoked before ${name} ran.` }], true, { name: 'BridgeRevokedError', code: 'BRIDGE_REVOKED' })
-        return { revoked: true }
-      }
+      // A late grant can arrive after the bridge lost its authority. Check again before
+      // dispatch, since a tool body may ignore the abort signal.
+      if (ended()) return await revoked()
       // Stopped while it waited for its approval: nothing may start now.
       if (own.signal.aborted) return await cancelled()
       if (level.auto) {
@@ -1073,10 +1131,7 @@ export class Backchannel {
           signal,
         })
       } catch (cause) {
-        if (record.closed || record.abort.signal.aborted) {
-          await settle([{ type: 'text', text: `The bridge was revoked before ${name} ran.` }], true, { name: 'BridgeRevokedError', code: 'BRIDGE_REVOKED' })
-          return { revoked: true }
-        }
+        if (ended()) return await revoked()
         if (timedOut) {
           return await settle([{ type: 'text', text: `Auto review timed out before ${name} ran.` }], true, { name: 'AutoReviewTimeoutError', code: 'AUTO_REVIEW_TIMEOUT' })
         }
@@ -1095,10 +1150,7 @@ export class Backchannel {
       }
       // A revocation, a timeout or a level change during the review wins over its result: the
       // body must not be reported as executed under a level or credential that no longer holds.
-      if (record.closed || record.abort.signal.aborted) {
-        await settle([{ type: 'text', text: `The bridge was revoked before ${name} ran.` }], true, { name: 'BridgeRevokedError', code: 'BRIDGE_REVOKED' })
-        return { revoked: true }
-      }
+      if (ended()) return await revoked()
       if (timedOut) {
         return await settle([{ type: 'text', text: `Auto review timed out before ${name} ran.` }], true, { name: 'AutoReviewTimeoutError', code: 'AUTO_REVIEW_TIMEOUT' })
       }
@@ -1117,6 +1169,7 @@ export class Backchannel {
       const text = `Error: ${thrownText(cause)}`
       try { this.log(`bridge call ${name} failed: ${thrownText(cause)}`) } catch {}
       if (answered) return error(text)
+      if (ended()) return await revoked()
       return await settle([{ type: 'text', text }], true, { name: 'BridgeCallError', code: 'BRIDGE_CALL_FAILED' })
     } finally {
       clearTimeout(timer)
@@ -1135,9 +1188,9 @@ export class Backchannel {
    * own turn numbering is private. Manual and Full run it without DSH rows and record a plugin
    * record instead; Auto refuses, because Auto review reads the pending call from its step.
    * @param {any} record
-   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal }} call
+   * @param {{ name: string, raw: string, callId?: string, signal?: AbortSignal, authority: AbortSignal, ended: () => boolean }} call
    */
-  async selfOpenedCall(record, { name, raw, callId, signal: callerGone }) {
+  async selfOpenedCall(record, { name, raw, callId, signal: callerGone, authority, ended }) {
     const error = text => ({ content: [{ type: 'text', text }], isError: true })
     const unavailable = (code, text) => ({ ...error(text), error: { name: 'AutoReviewUnavailableError', code } })
     const session = record.agent?.session
@@ -1159,7 +1212,7 @@ export class Backchannel {
     if (callerGone?.aborted) onGone()
     else callerGone?.addEventListener('abort', onGone, { once: true })
     record.controllers.add(own)
-    const stopped = AbortSignal.any([record.abort.signal, own.signal])
+    const stopped = AbortSignal.any([authority, own.signal])
     const cancelled = () => ({ ...error(`${name} was stopped before it finished.`), error: { name: 'BridgeCancelledError', code: 'BRIDGE_CANCELLED' } })
     const leave = () => {
       record.controllers.delete(own)
@@ -1167,7 +1220,7 @@ export class Backchannel {
       if (record.closed && record.controllers.size === 0) record.guard?.release()
     }
     try {
-      if (record.closed || record.abort.signal.aborted) return { revoked: true }
+      if (ended()) return { revoked: true }
       if (!level.full) {
         let outcome = 'unavailable'
         let policy
@@ -1186,16 +1239,16 @@ export class Backchannel {
           this.log(`approval for ${name} failed in an agent-opened turn`)
         }
         if (outcome !== 'allowed-once') {
-          if (record.closed || record.abort.signal.aborted) return { revoked: true }
+          if (ended()) return { revoked: true }
           if (own.signal.aborted) return cancelled()
           note('refused')
           return error(bridgeRefusalText(name, outcome, policy))
         }
       }
-      if (record.closed || record.abort.signal.aborted) return { revoked: true }
+      if (ended()) return { revoked: true }
       if (own.signal.aborted) return cancelled()
       const settled = await tools.execute({ calls: [{ id, name, arguments: raw }], agent: record.agent, signal: stopped })
-      if (record.closed || record.abort.signal.aborted) return { revoked: true }
+      if (ended()) return { revoked: true }
       if (own.signal.aborted) return cancelled()
       const result = settled?.results?.[0]?.result
       if (result === undefined) {
@@ -1210,7 +1263,7 @@ export class Backchannel {
         ...(info === undefined ? {} : { error: info }),
       }
     } catch (cause) {
-      if (record.closed || record.abort.signal.aborted) return { revoked: true }
+      if (ended()) return { revoked: true }
       note('failed')
       return error(`Error: ${thrownText(cause)}`)
     } finally {
