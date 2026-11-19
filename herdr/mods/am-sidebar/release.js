@@ -18,6 +18,11 @@ export const LANE_RELEASE = "herdr-lane";
 export const POINTER_URL = `https://github.com/${REPO}/releases/download/${LANE_RELEASE}/pack.json`;
 export const POINTER_SIG_URL = `${POINTER_URL}.sig`;
 export const POINTER_SCHEMA = 1;
+/** Repository URLs used by the current and historical pack pointer signers. */
+export const POINTER_REPOSITORIES = Object.freeze([
+  "https://github.com/automagik-si/automagik",
+  "https://github.com/automagik-dev/automagik",
+]);
 /** The public keys this pack trusts for the pointer, beside this file: `{ keys: [{ keyId, publicKey (PEM) }] }`. */
 export const PACK_KEYS_FILE = "pack-keys.json";
 /** Where the pack lived until v0.14.x; the monorepo's release of it is the first above 3.0.0. */
@@ -246,23 +251,26 @@ export function compareVersions(a, b) {
 
 /**
  * The update a pointer (pack.json, parsed, its signature already checked) names: `{ version, tag,
- * page, sequence, tarball: { name, url }, sha256, size }`. Throws when it is not this pack's
- * pointer: another schema or part, a version that is not X.Y.Z, no whole-number sequence, a tarball
- * of another name, or a sha256 that is not 64 hex.
+ * page, sequence, tarball: { name, url }, sha256, size }`. Requires this pack's schema, part,
+ * publisher and repository, an X.Y.Z version with a matching vX.Y.Z tag, a whole-number sequence,
+ * and a tarball with the expected name, a URL and a 64-digit hex sha256.
  */
 export function packOfPointer(pointer) {
   const bad = (why) => { throw new Error(`the pack pointer ${why}: refusing it`); };
   if (!pointer || typeof pointer !== "object") bad("is not JSON");
   if (pointer.schemaVersion !== POINTER_SCHEMA) bad(`has schema ${pointer.schemaVersion}, not ${POINTER_SCHEMA}`);
   if (pointer.part !== "herdr") bad(`names part ${pointer.part}, not herdr`);
+  if (pointer.publisher !== "automagik") bad("has an unexpected publisher");
+  if (!POINTER_REPOSITORIES.includes(pointer.repository)) bad("has an unexpected repository");
   const version = pointer.version;
   if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) bad(`names version ${version}`);
+  const tag = `v${version}`;
+  if (pointer.tag !== tag) bad(`must name tag ${tag}`);
   const tarball = pointer.tarball ?? {};
   if (tarball.name !== tarballName(version)) bad(`names ${tarball.name}, not ${tarballName(version)}`);
   if (typeof tarball.url !== "string" || !/^(https|file):\/\//.test(tarball.url)) bad("has no tarball URL");
   if (typeof tarball.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(tarball.sha256)) bad("has no sha256 of 64 hex");
   if (!Number.isSafeInteger(pointer.sequence) || pointer.sequence < 0) bad("has no sequence");
-  const tag = `v${version}`;
   return {
     version, tag, page: `https://github.com/${REPO}/releases/tag/${tag}`, sequence: pointer.sequence,
     tarball: { name: tarball.name, url: tarball.url }, sha256: tarball.sha256, size: Number.isInteger(tarball.size) ? tarball.size : null,
