@@ -16,6 +16,7 @@ import {
 } from "../mods/am-sidebar/update.mjs";
 import { CHECK_FILE, RESTORE_FILE, formatMarker, OFF_BY_DEFAULT, parseMarker } from "../mods/am-sidebar/release.js";
 import { cmdUpdate } from "../mods/am-sidebar/bin/automagik-herdr.mjs";
+import { assertNoFixtureManifest, quietOuterManifestEnv } from "./outer-manifest.mjs";
 import { keys, pointerBytes, signatureOf } from "./pointer.mjs";
 
 /** The herdr-lane release serving the pointer to `version` (pointerBytes' options), signed with the test key. */
@@ -501,8 +502,10 @@ test("update.mjs runs from a copy of the pack outside the repository (no package
   try {
     const pack = join(home, "mods", "am-sidebar");
     cpSync(fileURLToPath(new URL("../mods/am-sidebar", import.meta.url)), pack, { recursive: true });
+    assertNoFixtureManifest(home, dirname(pack), pack);
     const r = spawnSync(process.execPath, [join(pack, "update.mjs"), "check"], {
-      env: { ...process.env, HERDR_APP_HOME: home, AUTOMAGIK_HERDR_NO_UPDATE: "1", NODE_OPTIONS: "" }, encoding: "utf8",
+      env: { ...process.env, HERDR_APP_HOME: home, AUTOMAGIK_HERDR_NO_UPDATE: "1", NODE_OPTIONS: "", ...quietOuterManifestEnv(home) },
+      encoding: "utf8",
     });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, "");
