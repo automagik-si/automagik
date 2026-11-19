@@ -58,7 +58,7 @@ function repository() {
 set -euo pipefail
 echo "$*" >> "\${BUN_LOG:-/dev/null}"
 case "$*" in
-  "scripts/lane.ts next-patch") echo 3.0.1; exit 0 ;;
+  "scripts/lane.ts next-patch") echo "\${FAKE_CUT_VERSION:-3.0.1}"; exit 0 ;;
   "scripts/version.ts next") echo 3.0.1; exit 0 ;;
   "scripts/version.ts set "*) printf '{"version":"%s"}\\n' "$3" > package.json; exit 0 ;;
   "scripts/version.ts check") exit 0 ;;
@@ -97,6 +97,28 @@ echo "$*" >> "\${GH_LOG}"
 case "$*" in
   "release download pocket-lane "*) part=pocket; field=versionName ;;
   "release download meter-lane "*) part=meter; field=version ;;
+  "release view "*)
+    tag="$3"
+    apk="automagik-pocket-\${tag#v}.apk"
+    latest=latest.json
+    prerelease=false; draft=false; published='"2026-11-19T00:00:00Z"'
+    apk_state=uploaded; latest_size=1
+    case "\${FAKE_VIEW_MODE:-error}" in
+      ok) ;;
+      prerelease) prerelease=true ;;
+      draft) draft=true ;;
+      unpublished) published=null ;;
+      no-apk) apk=other.apk ;;
+      no-latest) latest=other.json ;;
+      starter) apk_state=starter ;;
+      zero-size) latest_size=0 ;;
+      wrong-tag) tag=v3.0.0 ;;
+      malformed) echo '{'; exit 0 ;;
+      *) exit 1 ;;
+    esac
+    printf '{"tagName":"%s","isDraft":%s,"isPrerelease":%s,"publishedAt":%s,"assets":[{"name":"%s","state":"%s","size":1},{"name":"%s","state":"uploaded","size":%s}]}\\n' \
+      "$tag" "$draft" "$prerelease" "$published" "$apk" "$apk_state" "$latest" "$latest_size"
+    exit 0 ;;
   "api repos/owner/repo/releases/tags/"*)
     [[ "\${FAKE_RELEASE_MODE:-stable}" != error ]] || exit 1
     tag="\${2##*/}"
@@ -118,6 +140,14 @@ if [[ "$part" == meter && -n "\${FAKE_METER_POINTER_VERSION:-}" ]]; then version
 if [[ "$part" == pocket && -n "\${FAKE_POCKET_POINTER_SECOND:-}" ]]; then
   reads=$(awk '$1 == "release" && $2 == "download" && $3 == "pocket-lane" { n++ } END { print n+0 }' "\${GH_LOG}")
   if (( reads > 1 )); then version="\${FAKE_POCKET_POINTER_SECOND}"; fi
+fi
+if [[ "$part" == pocket && -n "\${FAKE_POCKET_POINTER_LATE:-}" ]]; then
+  reads=$(awk '$1 == "release" && $2 == "download" && $3 == "pocket-lane" { n++ } END { print n+0 }' "\${GH_LOG}")
+  if [[ "$reads" == "\${FAKE_POCKET_POINTER_FAILED_READ:-}" ]]; then exit 1; fi
+  if (( reads > FAKE_POCKET_POINTER_AFTER && reads <= \${FAKE_POCKET_POINTER_LATE_UNTIL:-reads} )); then
+    if [[ -n "\${FAKE_POCKET_POINTER_LATE_READ_SECONDS:-}" ]]; then sleep "\${FAKE_POCKET_POINTER_LATE_READ_SECONDS}"; fi
+    version="\${FAKE_POCKET_POINTER_LATE}"
+  fi
 fi
 printf '{"%s":"%s"}\\n' "$field" "$version"
 `);
@@ -383,6 +413,229 @@ describe('a pointer that advances after the gates (#668)', () => {
     } finally {
       repo.cleanup();
     }
+  });
+});
+
+describe('waiting for the Pocket post (#668)', () => {
+  const start = 1_800_000_000;
+  const pocketRead = 'release download pocket-lane --repo owner/repo -p latest.json -O -';
+  const meterRead = 'release download meter-lane --repo owner/repo -p meter.json -O -';
+  const view = (tag: string) => `release view ${tag} --repo owner/repo --json tagName,isDraft,isPrerelease,publishedAt,assets`;
+  const coverage = (tag: string) => `api repos/owner/repo/releases/tags/${tag}`;
+  const latePost = { FAKE_POCKET_POINTER_AFTER: '2', FAKE_POCKET_POINTER_LATE: '3.0.2' };
+
+  // Advance only when the cut sleeps, so the poll and deadline boundaries are reproducible.
+  function pocketPost(check: (repo: ReturnType<typeof repository>, env: Record<string, string>) => void) {
+    const repo = repository();
+    try {
+      repo.tag('v3.0.2');
+      const clock = join(repo.dir, 'clock');
+      writeFileSync(clock, `${start}\n`);
+      const date = join(repo.bin, 'date');
+      const sleep = join(repo.bin, 'sleep');
+      writeFileSync(date, '#!/usr/bin/env bash\ncat "$FAKE_CUT_CLOCK"\n');
+      writeFileSync(sleep, '#!/usr/bin/env bash\nread -r now < "$FAKE_CUT_CLOCK"\nprintf "%s\\n" "$((now + $1))" > "$FAKE_CUT_CLOCK"\n');
+      chmodSync(date, 0o755);
+      chmodSync(sleep, 0o755);
+      check(repo, {
+        POCKET: 'yes', POCKET_SINCE: 'v3.0.0', FAKE_POCKET_POINTER_VERSION: '3.0.0', FAKE_VIEW_MODE: 'ok',
+        FAKE_CUT_CLOCK: clock, RELEASE_CUT_POINTER_WAIT: '28', RELEASE_CUT_POINTER_POLL: '1',
+      });
+    } finally {
+      repo.cleanup();
+    }
+  }
+
+  test('an attached Pocket build triggers the wait, and a late pointer covers the cut', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, ...latePost, METER: 'yes', METER_SINCE: 'v3.0.0', FAKE_METER_POINTER_VERSION: '3.0.0' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=no\nmeter=yes\n');
+      expect(run.out).toContain('::notice::v3.0.2 carries its Pocket build but pocket-lane still names v3.0.0; waiting up to 28s for its post');
+      expect(run.out).toContain('::notice::pocket-lane now names v3.0.2');
+      expect(run.gh).toEqual([meterRead, pocketRead, view('v3.0.2'), pocketRead, pocketRead, coverage('v3.0.2')]);
+    });
+  });
+
+  test('the same late post with a zero wait budget keeps the build', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, ...latePost, RELEASE_CUT_POINTER_WAIT: '0' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.gh).toEqual([pocketRead]);
+    });
+  });
+
+  test('a failed poll can be followed by a covering pointer', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, ...latePost, FAKE_POCKET_POINTER_FAILED_READ: '2' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=no\n');
+      expect(run.out).toContain('::notice::pocket-lane now names v3.0.2');
+      expect(run.gh).toEqual([pocketRead, view('v3.0.2'), pocketRead, pocketRead, coverage('v3.0.2')]);
+    });
+  });
+
+  test('a failed post with a readable stale pointer runs out of time and keeps the build', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, RELEASE_CUT_POINTER_WAIT: '27' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.out).toContain('::notice::pocket-lane still names v3.0.0 after 2s; keeping the Pocket build');
+      expect(run.gh).toEqual([pocketRead, view('v3.0.2'), pocketRead]);
+    });
+  });
+
+  test('the final sleep is shortened and a read without time for its timeout is skipped', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, RELEASE_CUT_POINTER_WAIT: '27', RELEASE_CUT_POINTER_POLL: '15' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.out).toContain('::notice::pocket-lane still names v3.0.0 after 2s; keeping the Pocket build');
+      expect(run.gh).toEqual([pocketRead, view('v3.0.2')]);
+    });
+  });
+
+  for (const mode of ['prerelease', 'draft', 'unpublished', 'no-apk', 'no-latest', 'starter', 'zero-size', 'wrong-tag', 'error', 'malformed']) {
+    test(`a ${mode} candidate view keeps the build without polling`, () => {
+      pocketPost((repo, env) => {
+        const run = repo.run({ ...env, FAKE_VIEW_MODE: mode });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain('pocket=yes\n');
+        expect(run.gh).toEqual([pocketRead, view('v3.0.2')]);
+        expect(run.bun).not.toContain('scripts/lane.ts pocket v3.0.2');
+      });
+    });
+  }
+
+  test('remaining Pocket changes keep the build without polling', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, FAKE_POCKET_SHIPS: 'yes' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.gh).toEqual([pocketRead, view('v3.0.2')]);
+      expect(run.bun).toContain('scripts/lane.ts pocket v3.0.2');
+    });
+  });
+
+  test('only the newest tag can trigger the wait', () => {
+    pocketPost((repo, env) => {
+      repo.tag('v3.0.10');
+      const run = repo.run({ ...env, FAKE_VIEW_MODE: 'no-apk' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.gh).toEqual([pocketRead, view('v3.0.10')]);
+    });
+  });
+
+  for (const [name, overrides] of [
+    ['the newest tag is already the baseline', { POCKET_SINCE: 'v3.0.2' }],
+    ['the newest tag predates the baseline', { POCKET_SINCE: 'v3.0.3' }],
+    ['the cut is a Pocket patch', { KIND: 'pocket' }],
+    ['the cut is a prerelease', { PRERELEASE: 'true' }],
+    ['the initial pointer is unreadable', { FAKE_POINTER_MODE: 'malformed' }],
+    ['the budget is shorter than the poll interval', { RELEASE_CUT_POINTER_POLL: '29' }],
+  ] as const) {
+    test(`keeps the build without looking up a release when ${name}`, () => {
+      pocketPost((repo, env) => {
+        const run = repo.run({ ...env, ...overrides });
+        expect(run.status).toBe(0);
+        expect(run.output).toContain('pocket=yes\n');
+        expect(run.gh).toEqual([pocketRead]);
+      });
+    });
+  }
+
+  test('a cut without a repository skips the pointer check', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, GITHUB_REPOSITORY: '' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.gh).toEqual([]);
+    });
+  });
+
+  test('an unselected Pocket build never reads the pointer or checks for a post', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, POCKET: 'no' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=no\n');
+      expect(run.gh).toEqual([]);
+    });
+  });
+
+  test('a pointer already at the newest tag goes directly to the coverage check', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, FAKE_POCKET_POINTER_VERSION: '3.0.2' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=no\n');
+      expect(run.gh).toEqual([pocketRead, coverage('v3.0.2')]);
+    });
+  });
+
+  test('a newer pointer ends the wait and still needs a local tag to cover the build', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, FAKE_POCKET_POINTER_AFTER: '1', FAKE_POCKET_POINTER_LATE: '3.0.3' });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.out).toContain('::notice::pocket-lane now names v3.0.3');
+      expect(run.gh).toEqual([pocketRead, view('v3.0.2'), pocketRead]);
+    });
+  });
+
+  test('a long first attempt leaves too little of the deadline to wait and still retry', () => {
+    pocketPost((repo, env) => {
+      const run = repo.run({ ...env, ...latePost, RELEASE_CUT_STARTED: String(start - 600), RELEASE_CUT_DEADLINE: String(start + 650) });
+      expect(run.status).toBe(0);
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.gh).toEqual([pocketRead]);
+    });
+  });
+
+  for (const [name, value] of [['RELEASE_CUT_POINTER_WAIT', 'abc'], ['RELEASE_CUT_POINTER_POLL', 'abc'], ['RELEASE_CUT_POINTER_POLL', '0']] as const) {
+    test(`rejects ${name}=${value} before pushing`, () => {
+      pocketPost((repo, env) => {
+        const run = repo.run({ ...env, [name]: value });
+        expect(run.status).toBe(1);
+        expect(run.err).toContain(`::error::${name} must be seconds`);
+        expect(run.gh).toEqual([]);
+        expect(run.output).toBe('');
+        expect(repo.remote('tag', '--list')).toBe('v3.0.0');
+        expect(repo.remote('log', '-1', '--format=%s', 'dev')).toBe('chore: the base');
+      });
+    });
+  }
+
+  test('a retry uses the remaining run budget and publishes its own Pocket decision', () => {
+    pocketPost((repo, env) => {
+      repo.move();
+      const run = repo.run({
+        ...env, RELEASE_CUT_POINTER_WAIT: '27', FAKE_POCKET_POINTER_AFTER: '1', FAKE_POCKET_POINTER_LATE: '3.0.2',
+        FAKE_POCKET_POINTER_LATE_UNTIL: '2', FAKE_POCKET_POINTER_LATE_READ_SECONDS: '1',
+        FAKE_POCKET: 'yes', HAS_KEYSTORE: 'true', HAS_PASSWORD: 'true',
+      });
+      expect(run.status).toBe(0);
+      expect(run.out).toContain('skipping the pocket build for this attempt');
+      expect(run.out).toContain('re-cutting on the new tip');
+      expect(run.err).toContain('attempt 1 of 3: push rejected after 2s');
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.gh.filter(call => call.startsWith('release view'))).toEqual([view('v3.0.2')]);
+      expect(run.gh.filter(call => call === pocketRead)).toHaveLength(4);
+    });
+  });
+
+  test('a retry looks up the newest pushed tag after deleting the discarded tag', () => {
+    pocketPost((repo, env) => {
+      const pushed = spawnSync('git', ['push', '-q', 'origin', 'v3.0.2'], { cwd: repo.work, encoding: 'utf8' });
+      expect(pushed.status).toBe(0);
+      repo.move();
+      const run = repo.run({ ...env, FAKE_CUT_VERSION: '3.0.3', FAKE_VIEW_MODE: 'error', FAKE_POCKET: 'yes', HAS_KEYSTORE: 'true', HAS_PASSWORD: 'true' });
+      expect(run.status).toBe(0);
+      expect(run.out).toContain('re-cutting on the new tip');
+      expect(run.output).toContain('version=3.0.3\n');
+      expect(run.output).toContain('pocket=yes\n');
+      expect(run.gh.filter(call => call.startsWith('release view'))).toEqual([view('v3.0.2'), view('v3.0.2')]);
+    });
   });
 });
 
