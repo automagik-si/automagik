@@ -229,14 +229,16 @@ switch (words[0]) {
     if (!t) fail(`no terminal ${words[1]}`);
     out({ text: t.screen ?? "" });
     // state.onRead: the screen (and status) changes just after this answer, between two checks.
+    // The look is counted across processes: `nth` can name a read later than the first (the
+    // counter is saved on every look, not only on the one that fires).
     if (state.onRead && state.onRead.terminal === t.address) {
       state.onRead.seen = (state.onRead.seen ?? 0) + 1;
       if (state.onRead.seen === state.onRead.nth) {
         if (state.onRead.status) t.status = { ...(t.status ?? {}), state: state.onRead.status };
         if (state.onRead.screen !== undefined) t.screen = state.onRead.screen;
         delete state.onRead;
-        save();
       }
+      save();
     }
     break;
   }
@@ -244,7 +246,12 @@ switch (words[0]) {
     const t = find(words[1]);
     if (!t) fail(`no terminal ${words[1]}`);
     // state.failLabelExit: the refused label's exit code (127: hc isn't there); else 1.
-    if (state.failLabel === words[1]) fail(`label refused on ${words[1]}`, state.failLabelExit ?? 1);
+    if (state.failLabel === words[1] || state.failLabels?.includes(words[1])) {
+      const reasons = state.failLabelReasons?.[words[1]];
+      const reason = reasons?.shift() ?? `label refused on ${words[1]}`;
+      if (reasons) save();
+      fail(reason, state.failLabelExit ?? 1);
+    }
     t.labels ??= {};
     for (const kv of words.slice(2)) {
       const eq = kv.indexOf("=");
@@ -338,6 +345,12 @@ switch (words[0]) {
     if (!t || t.state !== "live") fail(JSON.stringify({ error: { kind: "not_found", message: `no terminal ${words[1]}` } }), 3);
     if ((state.failSend ?? []).includes(t.address)) fail(JSON.stringify({ error: { kind: "blocked", message: `${t.address} is blocked` } }), 9);
     state.sent = [...(state.sent ?? []), { to: t.address, text: words.slice(2).join(" ") }];
+    // state.onSendWrite: { terminal, path, text }: the file the seat was just asked to write
+    // lands during the send's own round trip (the handoff is ready on the very next look).
+    if (state.onSendWrite && t.address === state.onSendWrite.terminal) {
+      writeFileSync(state.onSendWrite.path, state.onSendWrite.text);
+      delete state.onSendWrite;
+    }
     save();
     out({ address: t.address });
     break;
@@ -350,6 +363,13 @@ switch (words[0]) {
     t.finished_ms = Date.now();
     // state.surviveParent: children that outlive their parent's end anyway (a kill that didn't take).
     for (const c of state.terminals) if (c.parent === t.address && c.state === "live" && c.die_with_parent && !(state.surviveParent ?? []).includes(c.address)) c.state = "finished";
+    // state.afterKill: { terminal, patch }: another pane ends with this kill (a seat that dies
+    // between the cancel of its queued restart and the next look).
+    if (state.afterKill) {
+      const target = find(state.afterKill.terminal);
+      if (target) Object.assign(target, state.afterKill.patch);
+      delete state.afterKill;
+    }
     save();
     out({ address: t.address, state: t.state });
     // Killing the caller's own terminal ends the caller (this fake runs exec'd by the wrapper,

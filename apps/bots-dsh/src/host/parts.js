@@ -1585,7 +1585,10 @@ export function install(rt) {
     if (signal.aborted) throw signal.reason
     const dir = rt.workDirOf(job)
     const intended = dir !== undefined && await rt.isFolder(dir) ? dir : rt.teamFolder()
-    const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, { dir, group: room !== undefined, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}) })
+    const freshId = await rt.createSession(room === undefined ? name : bot === undefined ? room.name : `${name} · ${room.name}`, {
+      dir, group: room !== undefined, botId: job.botId, ...(bot?.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
+      ...(job.fresh ? {} : { readScopeSource: session.id, continueReadScope: true }),
+    })
     const picked = await freshRoute(bot, session, job.target)
     const selected = picked === undefined || await selectRoute(bot, freshId, picked, name)
     if (job.routeChange !== undefined && !selected) {
@@ -2510,6 +2513,7 @@ export function install(rt) {
       } else {
         freshId = await rt.createSession(bot.name, {
           dir: rt.workDirOf({ botId: bot.id }), ...(bot.kind === 'dsh' ? { profile: bot.profile ?? null } : {}),
+          readScopeSource: oldId, continueReadScope: true,
         })
         try {
           check()

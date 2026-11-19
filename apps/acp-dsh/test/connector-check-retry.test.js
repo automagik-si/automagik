@@ -8,12 +8,12 @@
 //    that fails now logs a fixed class, where it stood, how the CLI ended and its version.
 //    Never what the CLI printed.
 //
-// No network, no real CLI and no real clock: npm's answers, the processes and the timers are given.
+// No network or real CLI. The retry clock is scripted. The configured registry cases use a fake pnpm.
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
 import { apply, CHECK_RETRY_MS, SERVICE } from '../index.js'
@@ -129,6 +129,52 @@ test('#970.6: the store\'s record says a check could not reach npm, and everythi
   assert.deepEqual(Object.keys(other.lastFailure(CLAUDE.adapter)).sort(), ['diagnostic', 'logPath', 'message'])
 })
 
+const FIXTURE_REGISTRY = 'https://registry.example.test/'
+const FIXTURE_VERSION = '7.7.7'
+
+function registryStore(t) {
+  const root = scratch(t)
+  const offline = join(root, 'offline')
+  const pnpm = join(root, 'pnpm')
+  writeFileSync(pnpm, `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    --registry*|--config.registry*) exit 1 ;;
+  esac
+done
+if [ -f "\${0%/*}/offline" ]; then
+  printf '%s\\n' '{"err":{"code":"ERR_PNPM_META_FETCH_FAIL","errno":"ENOTFOUND"}}'
+  exit 1
+fi
+version=1.0.0
+if [ "$npm_config_registry" = '${FIXTURE_REGISTRY}' ]; then
+  version='${FIXTURE_VERSION}'
+fi
+printf '{"dependencies":{"%s":"%s"}}\\n' '${CLAUDE.adapter}' "$version" > "$PWD/package.json"
+`, { mode: 0o755 })
+  const fetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('unexpected direct registry fetch') })
+  t.after(() => fetch.mock.restore())
+  const store = new AdapterStore({
+    home: join(root, 'adapters'),
+    env: { PATH: '', AUTOMAGIK_PNPM: pnpm, npm_config_registry: FIXTURE_REGISTRY },
+    install: async (dir, pkg) => {
+      const bin = join(dir, 'node_modules', ...pkg.split('/'), CLAUDE.bin)
+      mkdirSync(dirname(bin), { recursive: true })
+      writeFileSync(bin, '// installed\n')
+    },
+    check: async () => {},
+  })
+  return { store, offline, fetch }
+}
+
+test('#1640: repairing a missing connector resolves its version through the configured registry', { skip: process.platform === 'win32' }, async (t) => {
+  const { store, fetch } = registryStore(t)
+  await store.repair(CLAUDE.adapter, CLAUDE.bin)
+  assert.equal(store.binOf(CLAUDE.adapter, CLAUDE.bin)?.version, FIXTURE_VERSION)
+  assert.equal(fetch.mock.callCount(), 0)
+  assert.equal(store.lastFailure(CLAUDE.adapter), undefined)
+})
+
 // --- 6b. the plugin: the sentence in the row, and the retries -----------------------------------
 
 // A clock the row moves: the timers set, with `advance` running the ones that are due.
@@ -183,7 +229,7 @@ function pluginWith(given, { claude = true, codex = false, cliStore } = {}) {
     effect: (setup) => { cleanups.push(setup()) },
     emit: () => {},
   }
-  const store = world.store = {
+  const store = world.store = given.store ?? {
     binOf: pkg => world.bins[pkg],
     busy: () => false,
     lastError: pkg => world.failures[pkg]?.message,
@@ -216,6 +262,38 @@ function pluginWith(given, { claude = true, codex = false, cliStore } = {}) {
   const stop = () => { for (const cleanup of cleanups.splice(0)) cleanup?.() }
   return { service, row, world, clock, logs, registered, stop }
 }
+
+test('#1640: Retry with the configured registry offline recovers automatically when it returns', { skip: process.platform === 'win32' }, async (t) => {
+  const { store, offline } = registryStore(t)
+  writeFileSync(offline, '')
+  // Keep managed CLI installs out of the connector Retry, even in a desktop test environment.
+  const cliStore = { find: () => undefined, ensure: async () => {}, lastFailure: () => undefined, busy: () => false }
+  const h = pluginWith({ store }, { cliStore })
+  t.after(h.stop)
+  const id = 'acp-claude'
+  const waitForConnector = async (state) => {
+    const deadline = performance.now() + 10_000
+    let row = await h.row(id)
+    while (row.connector.state !== state && performance.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20))
+      row = await h.row(id)
+    }
+    assert.equal(row.connector.state, state, row.connector.error)
+    return row
+  }
+
+  const { agents } = await h.service.retry(id)
+  assert.equal(agents.find(agent => agent.id === id).connector.state, 'installing')
+  const failed = await waitForConnector('failed')
+  assert.equal(failed.connectorUnreachable, true)
+  assert.deepEqual(h.clock.delays, [CHECK_RETRY_MS[0]])
+
+  rmSync(offline)
+  h.clock.advance(CHECK_RETRY_MS[0])
+  const ready = await waitForConnector('ready')
+  assert.equal(ready.connector.version, FIXTURE_VERSION)
+  assert.deepEqual(h.clock.delays, [])
+})
 
 test('#970.6: what the row and a turn say of a failed install is not changed', async (t) => {
   const h = plugin()

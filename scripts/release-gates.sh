@@ -7,7 +7,7 @@
 #   scripts/release-gates.sh herdr           the pack's tests, syntax checks, shellcheck and indexes
 #   scripts/release-gates.sh herdr-imports   every shipped mod's static import graph
 #   scripts/release-gates.sh herdr-app       every shipped mod loads in the pinned herdr-app
-#   scripts/release-gates.sh herdr-key       HERDR_PACK_KEY is a key pack-keys.json lists
+#   scripts/release-gates.sh herdr-key       HERDR_PACK_SIGNER selects a key pack-keys.json lists
 #   scripts/release-gates.sh am              am's tests, syntax check and shellcheck
 #   scripts/release-gates.sh am-key          AM_LANE_KEY signs against am/am-keys.json (or warns)
 #   scripts/release-gates.sh meter           the meter crate's fmt, clippy and tests
@@ -63,7 +63,16 @@ lane() {
   # A merge can leave nothing that reaches an install (a revert of everything since the last
   # release): the re-cut then has nothing to cut, and the queued run finds the same.
   ships=$(bun scripts/lane.ts ships "${last}")
-  { echo "kind=${kind}"; echo "herdr=${herdr}"; echo "pocket=${pocket}"; echo "pocket_since=${pocket_since}"; echo "meter=${meter}"; echo "ships=${ships}"; echo "base=${full#v}"; } >> "${out}"
+  {
+    echo "kind=${kind}"
+    echo "herdr=${herdr}"
+    echo "pocket=${pocket}"
+    echo "pocket_since=${pocket_since}"
+    echo "meter=${meter}"
+    echo "meter_since=${meter_since}"
+    echo "ships=${ships}"
+    echo "base=${full#v}"
+  } >> "${out}"
   echo "since ${full:-the start}: ${kind} release; since ${last:-the start}, the herdr pack: ${herdr}; since ${pocket_since:-the start}, Pocket: ${pocket}; since ${meter_since:-the start}, the meter: ${meter}"
 }
 
@@ -104,7 +113,7 @@ gate_herdr_app() {
   node .github/scripts/herdr-app-check.mjs --strict
 }
 
-# HERDR_PACK_KEY must be a key pack-keys.json lists (release.yml's "The herdr pack's signing key").
+# Validate HERDR_PACK_SIGNER and the selected secret from release.yml against pack-keys.json.
 gate_herdr_key() {
   bun scripts/herdr-lane.ts check-key
 }

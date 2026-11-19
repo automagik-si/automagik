@@ -318,6 +318,8 @@ process.stdout.write(${JSON.stringify(JSON.stringify({ core: "c0", bindings: row
 
 test("startBot runs the CLI: hc run in the project's space, a tab of its own, an attach row by start; the sidebar sets no label", async (t) => {
   const w = await world(t, { terminals: (main) => [term("t7", { bot: ID.cap, cwd: main })] });
+  writeFileSync(join(w.app, "claude-logins.json"), "not json");
+  w.setHc({ ...w.hcState(), failLabel: "t7" });
   state.spaces = [{ id: "s0", folder: "/elsewhere", machine: null, active: true, tabs: [{ id: "x", active: true }] },
     { id: "s1", folder: w.main, machine: null, active: false, tabs: [{ id: "a", active: false }, { id: "b", active: true }] }];
   const r = await startBot(w.main, ID.dev);
@@ -331,9 +333,14 @@ test("startBot runs the CLI: hc run in the project's space, a tab of its own, an
   assert.deepEqual(rows.map((x) => [x.event, x.bot, x.terminal, x.by]), [["attach", ID.cap, "t7", "import"], ["attach", ID.dev, "t100", "start"]]);
   assert.deepEqual(state.hcCalls, [], "the sidebar itself calls no hc: no label, no run");
   assert.deepEqual(state.shared.get("am.sidebar.projects"), [{ key: w.main, machine: null }]);
+  const notice = (body) => ({ title: "Bots", body, level: "warning", timeout: 15000 });
+  const ordinary = "claude-logins.json: is not valid JSON; started on the default login";
+  const relabel = "tidy: t7's labels role=captain weren't set: label refused on t7 (exit 1)";
+  assert.deepEqual(state.notes, [notice(ordinary), notice(relabel)]);
   // Started already: the ledger's pane is focused, never a second one.
   assert.deepEqual(await startBot(w.main, ID.dev), { focused: "t100" });
   assert.deepEqual(state.runs, [["agent.focus", { terminal: "t100" }]]);
+  assert.deepEqual(state.notes, [notice(ordinary), notice(relabel), notice(relabel)]);
   assert.equal(w.calls().filter((a) => a[0] === "run").length, 1);
   assert.match((await startBot(w.main, ID.plan)).refused, /planned/);
 });
@@ -522,6 +529,210 @@ test("startBot: a space that shows after the wait is closed when nothing runs th
   while (Date.now() < until && !state.runs.some(([name]) => name === "space.close")) await new Promise((done) => setTimeout(done, 10));
   assert.deepEqual(state.runs, [["space.new", { name: "proj", folder: w.main, machine: "" }],
     ["space.close", { id: "s9", confirmed: true }]], "the late space is closed, its shell still alone");
+});
+
+// ---- #217: the space.new acknowledgement names the one space this Start may close ----
+// The fake herdr-app has a window ({ spaces: [] }): `do space.new` answers { pane, terminal }
+// (t-sh1), as the CLI already reads it. The sidebar reads the stub's spaces()/panes(), so each
+// test mirrors the created space (sp-new1, tab tb-new1, shell t-sh1) there when it "shows".
+const SHELL = { key: "shell", shell: true, agent: false };
+const ownSpace = (w, { tabs = [{ id: "tb-new1", active: true }] } = {}) => ({ id: "sp-new1", folder: w.main, machine: null, active: true, tabs });
+const ownPane = (extra = {}) => ({ pane: "p-new1", terminal: "t-sh1", tab: "tb-new1", program: SHELL, ...extra });
+const withWindow = (w) => writeFileSync(join(w.root, "herdr-app.json"), JSON.stringify({ spaces: [] }));
+const appCreates = (w) => readJsonLines(join(w.root, "herdr-app.log")).filter((a) => a[0] === "do" && a[1] === "space.new");
+const closes = () => state.runs.filter(([name]) => name === "space.close" || name === "tab.close");
+// The cleanup runs after Start returns, on the test's own sleep: wait for it by the clock.
+const settle = async (ms = 300) => { await new Promise((done) => setTimeout(done, ms)); };
+const FAST = { waitMs: 100, stepMs: 10, lateWaitMs: 100, lateStepMs: 10 };
+const ELSEWHERE = () => ({ id: "s0", folder: "/elsewhere", machine: null, active: true, tabs: [{ id: "x", active: true }] });
+
+test("#217 ack: a rival space seen one poll before this Start's own: the bot uses the rival, only the acknowledged space closes", async (t) => {
+  const w = await world(t);
+  withWindow(w);
+  state.spaces = [ELSEWHERE()];
+  const rival = { id: "s4", folder: w.main, machine: null, active: false, tabs: [{ id: "t4", active: false }] };
+  let looks = 0;
+  const sleep = async () => {
+    looks += 1;
+    if (looks === 1) {
+      state.spaces = [...state.spaces, rival];
+      state.panes = [{ pane: "p4", terminal: "t-sh4", tab: "t4", program: SHELL }];
+    }
+    // The own space shows only after the CLI ran the bot (in the rival).
+    if (w.calls().some((a) => a[0] === "run") && !state.spaces.some((s) => s.id === "sp-new1")) {
+      state.spaces = [...state.spaces, { ...ownSpace(w), active: false }];
+      state.panes = [...state.panes, ownPane()];
+    }
+  };
+  assert.deepEqual(await startBot(w.main, ID.main, { sleep, ...FAST }), { terminal: "t100" });
+  const until = Date.now() + 2000;
+  while (Date.now() < until && !state.runs.some(([n]) => n === "space.close")) await settle(10);
+  await settle(100);
+  const runArgs = w.calls().find((a) => a[0] === "run");
+  assert.ok(runArgs.includes("herdr.space=s4"), runArgs.join(" "));
+  assert.equal(appCreates(w).length, 1, "one create, through herdr-app");
+  assert.deepEqual(state.runs.filter(([n]) => n === "space.new"), [], "no run() create beside it");
+  assert.deepEqual(closes(), [["space.close", { id: "sp-new1", confirmed: true }]], "exactly the acknowledged id; the rival's shell tab stays");
+});
+
+test("#217 ack: after an ordinary Start, a user space opened on the project survives the whole cleanup window", async (t) => {
+  const w = await world(t);
+  withWindow(w);
+  state.spaces = [];
+  const user = { id: "s-user", folder: w.main, machine: null, active: false, tabs: [{ id: "tb-user", active: false }] };
+  let looks = 0;
+  const sleep = async () => {
+    looks += 1;
+    if (looks === 1) { state.spaces = [ownSpace(w)]; state.panes = [ownPane()]; }
+    if (w.calls().some((a) => a[0] === "run") && !state.panes.some((p) => p.terminal === "t100")) {
+      state.spaces = [{ ...state.spaces[0], tabs: [...state.spaces[0].tabs, { id: "tb-bot", active: false }] }];
+      state.panes = [...state.panes, { pane: "p-bot", terminal: "t100", tab: "tb-bot" }];
+      // The user opens a space of their own on the project as the bot shows, left at an idle
+      // prompt: it is in the window for every cleanup read that follows.
+      state.spaces = [...state.spaces, user];
+      state.panes = [...state.panes, { pane: "p-user", terminal: "t-user", tab: "tb-user", program: SHELL }];
+    }
+  };
+  assert.deepEqual(await startBot(w.main, ID.main, { sleep, ...FAST }), { terminal: "t100" });
+  await settle();
+  const runArgs = w.calls().find((a) => a[0] === "run");
+  assert.ok(runArgs.includes("herdr.space=sp-new1"), runArgs.join(" "));
+  // Only the own space's spare shell tab (the ack's terminal) closes; no space ever does.
+  assert.deepEqual(closes(), [["tab.close", { id: "tb-new1" }]]);
+  assert.ok(state.spaces.some((s) => s.id === "s-user"), "the user's space, tab and terminal stay");
+  assert.equal(appCreates(w).length, 1);
+});
+
+test("#217 ack: a user space showing before this Start's late own space is never the one closed, in time or after the wait", async (t) => {
+  for (const timeout of [false, true]) {
+    const w = await world(t);
+    withWindow(w);
+    state.spaces = [ELSEWHERE()];
+    state.panes = [];
+    state.runs = [];
+    const user = { id: "s-user", folder: w.main, machine: null, active: false, tabs: [{ id: "tb-user", active: false }] };
+    let looks = 0;
+    const ran = () => w.calls().some((a) => a[0] === "run");
+    const sleep = async () => {
+      looks += 1;
+      // In time: the user's space shows at the first poll. After the wait: only once the bot ran.
+      if ((timeout ? ran() : looks === 1) && !state.spaces.some((s) => s.id === "s-user")) {
+        state.spaces = [...state.spaces, user];
+        state.panes = [...state.panes, { pane: "p-user", terminal: "t-user", tab: "tb-user", program: SHELL }];
+        return;
+      }
+      if (ran() && state.spaces.some((s) => s.id === "s-user") && !state.spaces.some((s) => s.id === "sp-new1")) {
+        state.spaces = [...state.spaces, { ...ownSpace(w), active: false }];
+        state.panes = [...state.panes, ownPane()];
+      }
+    };
+    assert.equal((await startBot(w.main, ID.main, { sleep, ...FAST })).terminal, "t100");
+    const until = Date.now() + 2000;
+    while (Date.now() < until && !state.runs.some(([n]) => n === "space.close")) await settle(10);
+    await settle(100);
+    const runArgs = w.calls().filter((a) => a[0] === "run").at(-1);
+    assert.ok(runArgs.includes(timeout ? "herdr.space=s0" : "herdr.space=s-user"), runArgs.join(" "));
+    assert.deepEqual(closes(), [["space.close", { id: "sp-new1", confirmed: true }]], `timeout=${timeout}: only the acknowledged id`);
+  }
+});
+
+test("#217 ack: the acknowledged space is left whole when it is not the create's lone idle shell", async (t) => {
+  const cases = [
+    ["a second tab", (w) => ({ space: ownSpace(w, { tabs: [{ id: "tb-new1" }, { id: "tb-x" }] }), panes: [ownPane(), { pane: "px", terminal: "t-x", tab: "tb-x", program: SHELL }] })],
+    ["a second pane", (w) => ({ space: ownSpace(w), panes: [ownPane(), { pane: "px", terminal: "t-x", tab: "tb-new1", program: SHELL }] })],
+    ["a mod pane", (w) => ({ space: ownSpace(w), panes: [ownPane(), { pane: "pm", terminal: null, mod: "board", tab: "tb-new1" }] })],
+    ["a busy shell", (w) => ({ space: ownSpace(w), panes: [ownPane({ program: { key: "nvim", shell: false, agent: false } })] })],
+    ["an unknown program", (w) => ({ space: ownSpace(w), panes: [ownPane({ program: undefined })] })],
+    ["another terminal than the ack's", (w) => ({ space: ownSpace(w), panes: [ownPane({ terminal: "t-other" })] })],
+  ];
+  for (const [what, make] of cases) {
+    const w = await world(t);
+    withWindow(w);
+    state.spaces = [ELSEWHERE()];
+    state.panes = [];
+    state.runs = [];
+    const rival = { id: "s4", folder: w.main, machine: null, active: false, tabs: [{ id: "t4", active: false }] };
+    let looks = 0;
+    const sleep = async () => {
+      if (++looks === 1) {
+        state.spaces = [...state.spaces, rival];
+        state.panes = [{ pane: "p4", terminal: "t-sh4", tab: "t4", program: SHELL }];
+      }
+      if (w.calls().some((a) => a[0] === "run") && !state.spaces.some((s) => s.id === "sp-new1")) {
+        const own = make(w);
+        state.spaces = [...state.spaces, { ...own.space, active: false }];
+        state.panes = [...state.panes, ...own.panes];
+      }
+    };
+    assert.equal((await startBot(w.main, ID.main, { sleep, ...FAST })).terminal, "t100", what);
+    await settle();
+    assert.deepEqual(closes(), [], `${what}: zero closes`);
+  }
+});
+
+test("#217 ack: a reply naming another space or tab than the one showing the terminal closes nothing", async (t) => {
+  const w = await world(t);
+  withWindow(w);
+  exe(join(w.root, "bin", "herdr-app"), `#!/bin/sh\nprintf '%s' '{"space":"sp-other","tab":"tb-new1","terminal":"t-sh1"}'\n`);
+  state.spaces = [ELSEWHERE()];
+  let looks = 0;
+  const sleep = async () => {
+    if (++looks === 1) {
+      state.spaces = [...state.spaces, { id: "s4", folder: w.main, machine: null, active: false, tabs: [{ id: "t4", active: false }] }];
+      state.panes = [{ pane: "p4", terminal: "t-sh4", tab: "t4", program: SHELL }];
+    }
+    if (w.calls().some((a) => a[0] === "run") && !state.spaces.some((s) => s.id === "sp-new1")) {
+      state.spaces = [...state.spaces, { ...ownSpace(w), active: false }];
+      state.panes = [...state.panes, ownPane()];
+    }
+  };
+  assert.equal((await startBot(w.main, ID.main, { sleep, ...FAST })).terminal, "t100");
+  await settle();
+  assert.deepEqual(closes(), []);
+});
+
+test("#217 uncertain: a lost or unusable acknowledgement never creates again and never closes", async (t) => {
+  const replies = [
+    ["exec timed out", (w) => { state.execFault = (command, args) => (command === "env" && args.includes("space.new") ? new Error("env took longer than 5 s and was stopped") : null); }],
+    ["no terminal in the reply", (w) => exe(join(w.root, "bin", "herdr-app"), `#!/bin/sh\nprintf '%s' '{"pane":"p-new1"}'\n`)],
+    ["the window did not answer", (w) => exe(join(w.root, "bin", "herdr-app"), `#!/bin/sh\nprintf '%s\\n' '{"error":"the window did not answer"}'\nexit 1\n`)],
+    ["the window hung up", (w) => exe(join(w.root, "bin", "herdr-app"), `#!/bin/sh\necho 'herdr-app: the window hung up' >&2\nexit 2\n`)],
+  ];
+  for (const [what, arrange] of replies) {
+    const w = await world(t);
+    withWindow(w);
+    arrange(w);
+    t.after(() => { delete state.execFault; });
+    // A project space shows anyway (the create went through, or another start's): the bot uses
+    // it, and nothing closes, it or any other.
+    state.spaces = [ELSEWHERE()];
+    state.panes = [];
+    state.runs = [];
+    let looks = 0;
+    const sleep = async () => {
+      if (++looks === 1) {
+        state.spaces = [...state.spaces, { ...ownSpace(w), active: false }, { id: "s4", folder: w.main, machine: null, active: false, tabs: [{ id: "t4" }] }];
+        state.panes = [ownPane(), { pane: "p4", terminal: "t-sh4", tab: "t4", program: SHELL }];
+      }
+    };
+    assert.equal((await startBot(w.main, ID.main, { sleep, ...FAST })).terminal, "t100", what);
+    await settle();
+    assert.deepEqual(state.runs.filter(([n]) => n === "space.new"), [], `${what}: no second create`);
+    assert.deepEqual(closes(), [], `${what}: zero closes`);
+    delete state.execFault;
+  }
+});
+
+test("#217 uncertain: no space shows and none is shown: Start is refused, the CLI never asked to create one", async (t) => {
+  const w = await world(t);
+  withWindow(w);
+  exe(join(w.root, "bin", "herdr-app"), `#!/bin/sh\nprintf '%s' '{"pane":"p-new1"}'\n`);
+  state.spaces = [];
+  state.focused = null;
+  const r = await startBot(w.main, ID.main, { sleep: async () => {}, ...FAST });
+  assert.match(r.refused ?? "", /no visible space/);
+  assert.equal(w.calls().some((a) => a[0] === "run"), false, "no hc run");
+  assert.deepEqual(state.runs, []);
 });
 
 test("startBot: two Starts at once open one pane", async (t) => {

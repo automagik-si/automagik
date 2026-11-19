@@ -2,7 +2,8 @@
 // (fixtures/left-bar-browser-app.js): round 1.1's sizes, both skins, both themes, at 1440 and 390;
 // every mark named, every picture loaded, nothing cut sideways; a size is a token change; the
 // list's edges say when rows lie under them; a press reaches the caller; the view's switch reads
-// Chat and Terminal.
+// Chat and Terminal; and a channel or a Bot that disappears while its row is open leaves the bar
+// whole and focusable.
 // LEFT_BAR_SHOTS=<folder> saves a screenshot of each case, skin, width and theme there.
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
@@ -355,6 +356,115 @@ test('the view\'s switch reads Chat and Terminal, the open face raised, on both 
   await page.setViewportSize(PHONE)
   await mount(page, { kase: 'team', skin: 'stage', fill: true })
   assert.equal(await page.locator('.lb-face').count(), 0)
+})
+
+test('a channel that disappears while its row is open leaves the bar whole and focusable', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.mountLive())
+  const pip = page.locator('.lb-row[data-kind="bot"][data-id="pip"]')
+  await pip.waitFor()
+  assert.equal(await pip.getAttribute('aria-current'), 'page', 'the Bot opens the case')
+  const active = () => page.evaluate(() => ({ id: document.activeElement?.dataset?.id ?? null, kind: document.activeElement?.dataset?.kind ?? null, tag: document.activeElement?.tagName ?? null }))
+
+  // A channel removed while its Bot's row is open: its row and its chats go; the rest of the
+  // bar keeps its rows and its open Bot, and a row that is still there can take focus.
+  await page.locator('.lb-row[data-kind="chat"][data-id="mika"]').focus()
+  assert.deepEqual(await active(), { id: 'mika', kind: 'chat', tag: 'BUTTON' })
+  await page.evaluate(() => window.live.removeChannel('ch-help'))
+  await page.waitForFunction(() => !document.querySelector('.lb-row[data-id="ch-help"]'))
+  const afterChannel = await page.evaluate(() => ({
+    ids: [...document.querySelectorAll('.lb-row')].map(row => row.dataset.id),
+    current: [...document.querySelectorAll('.lb-row[aria-current="page"]')].map(row => row.dataset.id),
+    expanded: [...document.querySelectorAll('.lb-row[aria-expanded]')].map(row => row.dataset.id),
+    text: document.querySelector('.lb-rows')?.textContent ?? '',
+  }))
+  assert.equal(afterChannel.ids.includes('ch-help'), false, 'the removed channel row is gone')
+  assert.deepEqual(afterChannel.ids.filter(id => ['mika', 'tess', 'notes'].includes(id)), [], 'no chat of the removed channel stays rendered')
+  assert.equal(afterChannel.text.includes('Tess Alves'), false, 'no stale chat name is left on the bar')
+  assert.deepEqual(afterChannel.expanded, ['ch-store'], 'no removed channel is left saying it is open')
+  assert.deepEqual(afterChannel.current, ['pip'], 'the Bot row still owns the open state')
+  await page.locator('.lb-row[data-kind="channel"][data-id="ch-store"]').focus()
+  assert.equal((await active()).id, 'ch-store', 'a row that is still there takes focus')
+
+  // A channel that disappears while one of its chats is selected: the chat row and the
+  // selected state go with it, and nothing is left marked open.
+  await page.evaluate(() => window.live.select('chat:pip/ch-store/order'))
+  await page.waitForFunction(() => document.querySelector('.lb-row[data-id="order"]')?.getAttribute('aria-current') === 'page')
+  await page.locator('.lb-row[data-kind="chat"][data-id="order"]').focus()
+  await page.evaluate(() => window.live.removeChannel('ch-store'))
+  await page.waitForFunction(() => !document.querySelector('.lb-row[data-id="ch-store"]'))
+  const afterChat = await page.evaluate(() => ({
+    ids: [...document.querySelectorAll('.lb-row')].map(row => row.dataset.id),
+    current: [...document.querySelectorAll('.lb-row[aria-current="page"]')].map(row => row.dataset.id),
+  }))
+  assert.equal(afterChat.ids.includes('order'), false, 'the selected chat is gone with its channel')
+  assert.deepEqual(afterChat.current, [], 'no disappeared row is left marked open')
+  assert.deepEqual(afterChat.ids.filter(id => ['ch-help', 'ch-store'].includes(id)), [], 'no channel row is left behind')
+  await page.locator('.lb-row[data-kind="bot"][data-id="pip"]').focus()
+  assert.equal((await active()).id, 'pip', 'the Bot row is still focusable after its channels go')
+})
+
+test('a Bot that disappears while its channels exist takes its rows with it and leaves the bar whole', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.mountLive())
+  const pip = page.locator('.lb-row[data-kind="bot"][data-id="pip"]')
+  await pip.waitFor()
+  assert.equal(await pip.getAttribute('aria-current'), 'page', 'the Bot opens the case')
+  assert.deepEqual(await page.locator('.lb-row[data-kind="channel"]').evaluateAll(rows => rows.map(row => row.dataset.id)), ['ch-help', 'ch-store'], 'both of the Bot\'s channel rows are there before it is removed')
+  assert.ok(await page.locator('.lb-row[data-kind="chat"]').count() > 0, 'the Bot\'s chats are there before it is removed')
+  const active = () => page.evaluate(() => ({ id: document.activeElement?.dataset?.id ?? null, kind: document.activeElement?.dataset?.kind ?? null, tag: document.activeElement?.tagName ?? null }))
+
+  // The Bot itself removed from the roster while its row is open and its channels still exist:
+  // its row, its channels and its chats go, the rest of the bar stays, and a remaining Bot row
+  // and a group take focus.
+  await page.evaluate(() => window.live.removeBot('pip'))
+  await page.waitForFunction(() => !document.querySelector('.lb-row[data-id="pip"]'))
+  const afterBot = await page.evaluate(() => ({
+    bots: [...document.querySelectorAll('.lb-row[data-kind="bot"]')].map(row => row.dataset.id),
+    channels: [...document.querySelectorAll('.lb-row[data-kind="channel"]')].map(row => row.dataset.id),
+    chats: [...document.querySelectorAll('.lb-row[data-kind="chat"]')].map(row => row.dataset.id),
+    current: [...document.querySelectorAll('.lb-row[aria-current="page"]')].map(row => row.dataset.id),
+    labels: [...document.querySelectorAll('.lb-sec')].map(node => node.textContent),
+    groups: [...document.querySelectorAll('.lb-row[data-kind="group"]')].map(row => row.dataset.id),
+  }))
+  assert.deepEqual(afterBot.channels, [], 'none of the removed Bot\'s channel rows stay')
+  assert.deepEqual(afterBot.chats, [], 'none of the removed Bot\'s chat rows stay')
+  assert.deepEqual(afterBot.bots, ['juno', 'otto', 'wren'], 'the removed Bot row is gone; every other Bot row stays')
+  assert.deepEqual(afterBot.current, [], 'no disappeared row is left marked open')
+  assert.deepEqual(afterBot.labels, ['Desk'], 'the section that still holds a Bot keeps its label')
+  assert.deepEqual(afterBot.groups, ['crew'], 'the group row stays')
+  await page.locator('.lb-row[data-kind="bot"][data-id="wren"]').focus()
+  assert.deepEqual(await active(), { id: 'wren', kind: 'bot', tag: 'BUTTON' }, 'a remaining Bot row takes focus')
+  await page.locator('.lb-row[data-kind="group"][data-id="crew"]').focus()
+  assert.equal((await active()).kind, 'group', 'the group row is focusable too')
+})
+
+test('a Bot whose channels are already gone still loses its row and leaves no row open', async (t) => {
+  const page = await fixture(t)
+  if (!page) return
+  await page.evaluate(() => window.mountLive())
+  await page.locator('.lb-row[data-kind="bot"][data-id="pip"]').waitFor()
+  // The source takes both channels away first, then the roster drops the Bot: its own row
+  // still goes and nothing is left claiming to be open.
+  await page.evaluate(() => { window.live.removeChannel('ch-help'); window.live.removeChannel('ch-store') })
+  await page.waitForFunction(() => !document.querySelector('.lb-row[data-kind="channel"]'))
+  assert.equal(await page.locator('.lb-row[data-kind="bot"][data-id="pip"]').count(), 1, 'the Bot row is still there with no channels')
+  await page.evaluate(() => window.live.removeBot('pip'))
+  await page.waitForFunction(() => !document.querySelector('.lb-row[data-id="pip"]'))
+  const after = await page.evaluate(() => ({
+    bots: [...document.querySelectorAll('.lb-row[data-kind="bot"]')].map(row => row.dataset.id),
+    current: [...document.querySelectorAll('.lb-row[aria-current="page"]')].map(row => row.dataset.id),
+    labels: [...document.querySelectorAll('.lb-sec')].map(node => node.textContent),
+    groups: [...document.querySelectorAll('.lb-row[data-kind="group"]')].map(row => row.dataset.id),
+  }))
+  assert.deepEqual(after.bots, ['juno', 'otto', 'wren'], 'the removed Bot row is gone; every other Bot row stays')
+  assert.deepEqual(after.current, [], 'no disappeared row is left marked open')
+  assert.deepEqual(after.labels, ['Desk'], 'the section that still holds a Bot keeps its label')
+  assert.deepEqual(after.groups, ['crew'], 'the group row stays')
+  await page.locator('.lb-row[data-kind="bot"][data-id="wren"]').focus()
+  assert.equal((await page.evaluate(() => document.activeElement?.dataset?.id ?? null)), 'wren', 'a remaining Bot row takes focus')
 })
 
 test('screenshots of every case, skin, width and theme', { skip: !SHOTS && 'set LEFT_BAR_SHOTS to save them' }, async (t) => {

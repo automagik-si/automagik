@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import { state } from "./use-stubs.mjs";
 import { hcFileOps } from "./hc-file-ops.mjs";
 import { scratchRoot } from "./scratch-project.mjs";
-import { PROJECTS_FILE } from "../mods/am-sidebar/model.js";
+import { PROJECTS_FILE, DEFAULT_MAIN_RESTART_AT, checkBots, parseBots, restartAtOf } from "../mods/am-sidebar/model.js";
 import { TimedOut } from "../mods/am-sidebar/discover.js";
 const { discoverProjects, discoverySnapshot, editFolderOf, writeBots, rememberProject, keyOf } = await import("../mods/am-sidebar/bots.js");
 
@@ -533,4 +533,28 @@ test("writeBots on another machine keeps the file's tabs there (#230)", async (t
   const now = readFileSync(path, "utf8");
   assert.equal(firstIndent(now), "\t");
   assert.equal(now, indented(next, "\t"));
+});
+
+// ---- #1556: restartAt, the context threshold a seat restarts at ----
+
+test("#1556 restartAtOf: a main bot defaults to 250000, a member has none, a stored value wins", () => {
+  assert.equal(DEFAULT_MAIN_RESTART_AT, 250_000);
+  assert.equal(restartAtOf({ kind: "main" }), 250_000);
+  assert.equal(restartAtOf({ kind: "main", restartAt: 1000 }), 1000);
+  assert.equal(restartAtOf({ kind: "member" }), null);
+  assert.equal(restartAtOf({ kind: "member", restartAt: 1000 }), 1000);
+  // A malformed value never reaches a decision.
+  assert.equal(restartAtOf({ kind: "main", restartAt: 0 }), 250_000);
+  assert.equal(restartAtOf({ kind: "member", restartAt: "1000" }), null);
+});
+
+test("#1556 parseBots drops a malformed restartAt with a warning and checkBots refuses it", () => {
+  const file = sample();
+  file.bots[0].restartAt = 1000;
+  file.bots[1].restartAt = "lots";
+  const parsed = parseBots(JSON.stringify(file));
+  assert.equal(parsed.file.bots[0].restartAt, 1000);
+  assert.equal(parsed.file.bots[1].restartAt, undefined);
+  assert.ok(parsed.warnings.some((w) => /restartAt .* isn't a positive whole number/.test(w)), parsed.warnings.join("\n"));
+  assert.deepEqual(checkBots(file), [`${ID.dev}: restartAt "lots" isn't a positive whole number of tokens`]);
 });

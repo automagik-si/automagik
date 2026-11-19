@@ -364,7 +364,8 @@ test("M4: switch off keeps the complete start argv byte for byte, even with AM_H
     return s.runs().at(-1);
   };
   const original = argv();
-  // Re-recorded from dev (0524c6e1) after #729; only fixture folders normalised.
+  // Re-recorded from dev (0524c6e1) after #729, and for #1556 (one handoff line in the seat
+  // briefing); only fixture folders normalised.
   // #747's C1 baseline differs only by the fixture bot's "Genie - " prompt prefix.
   const baseline = JSON.parse(readFileSync(new URL("./fixtures/dsh-proxy-off-argv.json",
     import.meta.url), "utf8")).start;

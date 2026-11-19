@@ -437,14 +437,36 @@ this sidebar's attachment. Saved configuration changes use these same choices wh
 them. Pack updates reload mods and do not restart bot panes. The Bots list and the Attach picker open
 on the bots the sidebar already knows and refresh behind.
 
+**Restart at a context threshold.** A running Claude Code seat's `context_tokens` is the newest
+assistant message's input plus cache-read and cache-creation tokens; `am ls --json` and
+`am show <bot>` report it. A bot may store a threshold in tokens (`restartAt`, set with
+`am edit <bot> --restart-at N` or cleared with `--no-restart-at`): a main bot defaults to 250000,
+a member has none until one is set. `am restart --due [--dry-run] [--all]` asks every seat over
+its threshold to write a handoff to `<app home>/automagik-herdr/handoff/<bot>.md` (what is in
+flight, what waits on whom, the next three actions) and end its turn; an idle seat then restarts
+fresh with its helpers (`--fresh --tree`) and the handoff becomes its new conversation's first
+message. A working or blocked seat is queued until its next idle (`am restart --queued` lists
+it). The old conversation is not resumed: what survives is the handoff file, the bot's definition
+and briefing, and its helpers' own conversations (resumed under the new pane); nothing else from
+the old conversation does. A seat that doesn't write the file within the time limit, or a handoff
+home that can't be written, is reported and left running: the pass refuses rather than restarting
+without the handoff. A handoff restart that fails, or is dropped after waiting, is also kept in
+`<app home>/automagik-herdr/handoff-failures.json`: `am restart --queued` lists it after the queued
+watcher's own pane is gone, and a queued watcher tells the project's main bot (the same report
+`am revive` uses). A restart whose handoff can't be sent as the new conversation's first message is
+kept there as a `send` warning: the seat is restarted and the pass exits 0, and the file stays for a
+person to send by hand. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
+nothing.
+
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane
 label `automagik-herdr.needs-owner=<short text>` with `hc label` (and clears it with
 `hc label <terminal> automagik-herdr.needs-owner=` once you have answered). The sidebar draws a
 **Question** chip on its agent, sub-agent, bot or helper row, apart from a blocked pane's
 **Needs you**, and a dot on its space (the narrow rail too), its tooltip naming the text. The chip
 clears the moment the pane works again or the label is removed: the sidebar reads the label from
-the one terminal snapshot it already takes, never by scanning a pane's screen. A label older than
-a day is reported by `am tidy` (`stale-needs-owner`).
+the one terminal snapshot it already takes, never by scanning a pane's screen. It also clears when
+the pane exits or leaves the snapshot, and once the label is past the pack's stale window (a day,
+the same rule as `am tidy`'s `stale-needs-owner`), so a label left behind never keeps asking.
 
 A project on a linked machine (`hc machine ls`) is managed from here too. Its bots' menu has
 Configure, Prompt and Run (Start, Focus, Restart, Attach to a focused pane of that machine,
@@ -461,9 +483,10 @@ once am is installed there, its per-turn hook in that project's
 bot gets the briefing as text. A start never creates an app home on another machine, which may be
 shared: when that app home isn't a folder there, a Claude bot starts with one warning and no
 briefing file or hook. Codex and Hermes bots start there without it, since their own
-config, which may hold a prompt the briefing would replace, is only read on this computer. What
-happened isn't shown for those bots yet. A machine that isn't answering shows its bots as last
-seen, dimmed, and its menu says so.
+config, which may hold a prompt the briefing would replace, is only read on this computer.
+**What happened** shows the attach, detach and end events this computer recorded for the bot on
+that machine and project. A machine that isn't answering shows its bots as last seen, dimmed,
+and its menu says so.
 
 A project there can carry a pane-env file, `<project>/.herdr/pane-env` on that machine, for its
 bots' panes only: other panes there never read it. It takes two keys, one per line:
@@ -549,7 +572,7 @@ am forget <project>
 am worker "<task>" (--branch B [--base REF] | --worktree DIR)
        [[--agent A] [--model M] [--effort E] | --template T] [--name N] [--role dev|test|review|fix]
        [--task ID [--lead BOT]]
-am worker kill <pane>   # from a bot's pane: end one worker that bot started; any other pane is refused
+am worker kill <pane>   # end a worker you started with am worker. Plain hc run cleanup belongs to the project's main bot.
 am update [--check | --rollback | --retry-skipped]
 am meter install [--machine M | --linked | --local] | meter uninstall
 am machines [update [--machine M | --linked | --local] | --auto on|off|status [--machine M]]
@@ -641,8 +664,10 @@ am dsh-tui install | update | uninstall | doctor
   conversation started there by hand. A pane that reports
   no status to hc (Hermes) can't say whether it is waiting for an approval, so `restart` refuses
   it unless `--force`. No command ever sends a pane keys: `--force` starts the new pane and ends
-  the old one only once the new one is up. `worker`, `brief`, `history` and `tidy` stay this
-  computer's.
+  the old one only once the new one is up. `worker`, `brief` and `tidy` stay this computer's.
+- `history <bot> --machine M --project <folder>` shows the attach, detach and end events
+  this computer recorded for that machine's core and project. `--json` adds `machine` beside
+  the bot's identity. Plain `history <bot>` shows this computer's bots' history.
 - A bot is named by its id or by its name. A refusal exits 1, a usage mistake (such as a
   missing `--project` folder) exits 2, and nothing is written.
 - `start` runs the bot's agent in a new pane with `hc run`, labelled `bot=<id>`, and records it
@@ -658,12 +683,12 @@ am dsh-tui install | update | uninstall | doctor
   with the shell itself in front, idle, and no job of its own running (`sleep 99 &` left at
   the prompt keeps it: its child processes are asked with `pgrep -P`, and an answer that
   can't be read keeps it too), so the space is never left empty and nothing else is closed.
-  The sidebar's Start knows the panes. When another start opens a space on the project in the
-  same moment, every start uses the first one, and the sidebar closes the extra space it
-  opened while that space holds only its own shell; a space that shows only after the wait is
-  closed the same way, as soon as it appears. `start` from the command line, `--machine` too, reads
-  them from `herdr-app ls`, which counts no mod pane: it closes the tab only when it saw that
-  shell, right after its own `space.new`, as the new space's one tab and that tab's one
+  When two starts open spaces on the project, they use the first one. The sidebar can close the
+  extra space identified by its own `space.new` reply, even if it appears after the wait, while
+  it still has just its original tab with a single idle shell. A lost reply can leave the extra
+  space open. `start` from the command line, `--machine` too, reads the panes from `herdr-app ls`,
+  which counts no mod pane: it closes the tab only when it saw that shell, right after its own
+  `space.new`, as the new space's one tab and that tab's one
   terminal. `AUTOMAGIK_HERDR_TAB_WAIT_MS` sets how long `start` and `worker` wait for Herdr to show
   the new pane (5000 by default); `0` turns this tab setup off.
 - `restart <bot>` (also `am restart <bot>`) queues a working or blocked bot for its next
@@ -764,15 +789,31 @@ new conversation and the report says why. Manual `am restart` keeps its existing
 Kimi's index format comes from the 2.5.0 package and has not been verified live.
 
 The login service. `install.sh --revive` (or a yes when it asks; `--yes` never installs it)
-runs `am revive service install`: on Linux a systemd user unit,
-`~/.config/systemd/user/automagik-herdr-revive.service`, enabled and never started on the spot.
-The unit has no start timeout (the pass bounds its own waits), and what the pass prints, which
-the user journal keeps, is counts only: no folder, no bot name.
+runs `am revive service install`. On Linux it writes the systemd user unit
+`~/.config/systemd/user/automagik-herdr-revive.service` and enables it; the unit has no start
+timeout (the pass bounds its own waits). On macOS it writes the launchd agent
+`~/Library/LaunchAgents/dev.herdr.automagik-herdr-revive.plist`, which launchd loads at your next
+login: it is never bootstrapped, because that would run the pass now. Neither is started on the
+spot, and what the pass prints — the user journal on Linux, launchd's unified log on macOS — is
+counts only: no folder, no bot name.
 At login it runs `am revive --boot --wait 600`: it waits for herdr-core, runs once
 per boot, and also takes the bots whose ended pane another command swept since the boot.
-`loginctl enable-linger` makes it run at boot with nobody logged in.
-`am revive service uninstall` (and `install.sh --uninstall`) removes the unit when
-it is the pack's. macOS (launchd) is not built yet: run `am revive` by hand there.
+`loginctl enable-linger` makes the unit run at boot with nobody logged in.
+`am revive service uninstall` (and `install.sh --uninstall`) removes the file when it is the
+pack's. On macOS it asks launchd first and removes the plist only when launchd says the job is
+not loaded: exit 113, or its exact "Could not find service". Any other answer — a usage error,
+EPERM, an I/O error — is a refusal that leaves the plist, exits non-zero and names
+`launchctl bootout gui/<uid>/dev.herdr.automagik-herdr-revive`, so a job launchd still holds is
+never orphaned. It asks even when the plist is already gone, so a second run boots out a label an
+earlier run left behind and says so. `install.sh --uninstall` follows the same rule: it calls that
+command first when its read-only `revive service status --json` answer parses as JSON and carries
+the exact launchd label and a path under `Library/LaunchAgents` — also when the plist is gone. A
+pack from before the macOS agent answers `status` with exit 0, but names the systemd unit and no
+launchd job, and refuses only `uninstall`, so its `uninstall` is never asked. A truncated or
+unparseable answer, a missing field, a wrong type or a label without that path falls back the same
+way. When the command is gone, or its bounded read-only question doesn't answer, it asks launchd
+itself — with the same 113/exact-words rule — before it removes the pack and its link. It never
+overrules a refusal from a command that answered.
 Panes on a linked machine are that machine's own to bring back.
 
 ## The attach ledger
@@ -1100,6 +1141,17 @@ labels). Any target outside that team is refused. The launch briefing carries th
 paragraph only for a dsh-tui bot; a claude, omp or hermes briefing is unchanged. On a linked
 machine the seat uses the guard folder that machine has, beside its own `automagik-herdr`; with
 none it gets no guard, no briefing paragraph claiming one, and one warning naming #624.
+
+A send to a pane held by a dialog is refused before anything is typed (#1414). The wrapper
+reads the target's herdr-core status and, when it is neither working nor blocked, its screen
+(the restart planner's `pendingDialog`); a blocked pane or a visible question, permission or
+sign-in dialog gets one JSON error line on stderr, kind `blocked`, naming the pane, and exit 9
+(hc's own `blocked` code), so a relay can tell it from a transport error and route the message
+elsewhere. It never presses a key and never answers the dialog, and `--force` does not bypass
+it. A free pane's send is unchanged; a screen that cannot be read is left to hc's own send, so
+nothing is queued or dropped. This is the pack's wrapper: a sender that bypasses it with an
+absolute hc path, `hc connect` or a raw socket still reaches herdr-core's delivery, where the
+hold belongs.
 
 **This is a guardrail, not a boundary.** A bot can bypass it with an absolute path to the real
 `hc`, a raw socket client, or `hc connect`. The team data is still writable: a bot that edits
@@ -1890,6 +1942,16 @@ terminal's `worker.of` label names the calling bot (the bot the attach ledger bi
 caller's pane to), it is not a bot's seat, it is not the caller's own pane, it is on this
 computer, and hc does not report it as `working`. A worker stuck mid-turn is the main bot's to
 end.
+
+`am worker` registers the worker to the bot's ID in `worker.of`. The same bot can still end
+its worker from its new seat after a restart. Only the project's main bot can end a terminal
+started with plain `hc run`, including after a handoff or restart. In a Git project, seats
+configured for coding (`code` defaults to `true`) can start with `am worker` when they need
+to end the worker themselves.
+
+Before ending a registered worker, the CLI rereads the caller's and target's attach bindings
+and asks hc again for the target's identity, ownership and turn status. hc provides no
+conditional kill, so the bindings or terminal can still change between the recheck and the kill.
 
 Where the rule is enforced:
 

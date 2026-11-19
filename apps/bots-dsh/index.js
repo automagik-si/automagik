@@ -34,6 +34,7 @@ import * as folders from './src/host/folders.js'
 import * as privateBots from './src/host/private-bots.js'
 import * as agents from './src/host/agents.js'
 import * as toolDeny from './src/host/tool-deny.js'
+import * as readScope from './src/host/read-scope.js'
 import * as prompt from './src/host/prompt.js'
 import * as timeContext from './src/host/time-context.js'
 import * as tools from './src/host/tools.js'
@@ -90,7 +91,7 @@ export const inject = ['llm', 'tools', 'systemPrompt', 'sessionController', 'ses
 // installed: channels are Omni's, and a local CLI runs a Bot through the ACP plugin's routes only.
 const MODULES = [
   diagnostics, extend, store, ledger, addressPolicy, models, acpAdoption, subscriptionMove, providers, permissions, auto, ladder, autoJudge, permissionDiagnostics,
-  turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, privateBots, prompt, timeContext,
+  turns, steer, handoffs, requests, delivery, roster, installed, folders, agents, toolDeny, readScope, privateBots, prompt, timeContext,
   tools, chatIndex, groups, goals, approvals, stops, whoRefused, subagentAsks, resume, memory, parts, fallback, modelState, modelAccessHooks, cliLogin, sharedUploads, images, imagegen,
   avatarLibrary, secrets, connectors, capabilities, learning, schedules, browser, browserPlugins, computer, usage,
   update, dshUpdate, thinking, agentSpace, feed, codeSide, genui, channel, appManifest, pocketChat, seatChat, hermesRemote,

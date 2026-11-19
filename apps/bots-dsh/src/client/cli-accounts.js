@@ -1,21 +1,31 @@
 // Account controls stay in the owner's Bot settings, never in team state or a transcript.
 import { createElement as h, useEffect, useState } from 'react'
 import { CLI_NAMES } from './cli-login-model.js'
-import { ACCOUNT_RECOVERY_CODE, ACCOUNT_RECOVERY_HINT } from '../shared/cli-account.js'
+import {
+  ACCOUNT_RECOVERY_CODE, ACCOUNT_RECOVERY_HINT, ACCOUNT_SHARING_HINT, accountChangeFailure,
+} from '../shared/cli-account.js'
 import { t } from './i18n.js'
 
 const botAccountName = account => account?.email ?? account?.org ?? t('Account not shown by the CLI')
 
 export function CliAccounts({ bot, actions }) {
   const [accounts, setAccounts] = useState({})
+  const [installation, setInstallation] = useState(undefined)
   const [pending, setPending] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
-  const refresh = async () => setAccounts((await actions.cliLoginAccounts?.())?.accounts ?? {})
+  const shown = value => {
+    setAccounts(value?.accounts ?? {})
+    setInstallation(value?.installation)
+  }
+  const refresh = async () => {
+    const value = await actions.cliLoginAccounts?.()
+    shown(value)
+  }
   useEffect(() => {
     let alive = true
     Promise.resolve(actions.cliLoginAccounts?.()).then(value => {
-      if (alive) setAccounts(value?.accounts ?? {})
+      if (alive) shown(value)
     }).catch(() => {})
     return () => { alive = false }
   }, [bot.id, actions])
@@ -26,7 +36,7 @@ export function CliAccounts({ bot, actions }) {
       const rows = Object.values(actions.cliLogin.getSnapshot().rows)
       if (!rows.some(row => row.stage === 'done')) return
       Promise.resolve(actions.cliLoginAccounts?.()).then(value => {
-        if (alive) setAccounts(value?.accounts ?? {})
+        if (alive) shown(value)
       }).catch(() => {})
     })
     return () => { alive = false; off?.() }
@@ -51,7 +61,7 @@ export function CliAccounts({ bot, actions }) {
           ...current[provider], signedIn: false, recoveryRequired: true,
         } }))
         setPending(null)
-      } else setError(t('Account change failed. Close other app windows and try again.'))
+      } else setError(accountChangeFailure(error) ?? t('Account change failed. Close other app windows and try again.'))
     } finally { setBusy(false) }
   }
   const entries = Object.entries(accounts).filter(([id, entry]) => (
@@ -60,7 +70,10 @@ export function CliAccounts({ bot, actions }) {
   if (!entries.length) return null
   return h('section', { className: 'bt-set-section' },
     h('h3', null, t('Bot accounts')),
+    installation ? h('p', { className: 'bt-set-hint' },
+      t('This installation: {installation}', { installation })) : null,
     h('p', { className: 'bt-set-hint' }, t('Bots in this installation share these accounts.')),
+    h('p', { className: 'bt-set-hint' }, t(ACCOUNT_SHARING_HINT)),
     h('p', { className: 'bt-set-hint' },
       t('Your terminal login is separate and stays unchanged.')),
     h('div', { className: 'bt-set-card' }, ...entries.map(([provider, entry]) => h('div', {

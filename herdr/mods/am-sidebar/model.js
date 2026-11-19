@@ -13,6 +13,25 @@ export const MAX_INSTRUCTIONS = 4000;
 /** A project's definitions file, relative to its key folder. */
 export const BOTS_PATH = ".herdr/bots.json";
 export const KINDS = ["main", "member"];
+/** A main bot's context threshold when none is stored (#1556): restart it from a handoff over this. */
+export const DEFAULT_MAIN_RESTART_AT = 250_000;
+
+/**
+ * The context threshold a bot restarts at (#1556), in tokens: its own `restartAt` when stored
+ * (a positive whole number), else a main bot's default, else null (a member's, unset until one
+ * is configured). The sidebar, the CLI and the briefing read this one number.
+ */
+export function restartAtOf(bot) {
+  if (Number.isInteger(bot?.restartAt) && bot.restartAt > 0) return bot.restartAt;
+  return bot?.kind === "main" ? DEFAULT_MAIN_RESTART_AT : null;
+}
+
+/** Why a `restartAt` can't be used, or null: a positive whole number of tokens. */
+export function restartAtProblem(value) {
+  if (value === undefined || value === null || value === "") return null;
+  return Number.isInteger(value) && value > 0
+    ? null : `restartAt ${JSON.stringify(value)} isn't a positive whole number of tokens`;
+}
 /**
  * A bot's rank (A16): a closed set, for the pane's `role=` label the event meter reads. The
  * free-text `role` stays for the briefing. Optional. `main` is not a rank: role=main is the
@@ -227,6 +246,13 @@ export function parseBots(text) {
       warnings.push(`${where}: reasoning effort and service tier are Codex's; ignored`);
       delete bot.effort;
       delete bot.tier;
+    }
+    // #1556: the context threshold this seat restarts at, in tokens. A malformed one is
+    // ignored, so a hand-written value never makes a seat restart at an unintended size.
+    const restartWhy = restartAtProblem(bot.restartAt);
+    if (bot.restartAt !== undefined && restartWhy) {
+      warnings.push(`${where}: ${restartWhy}; ignored`);
+      delete bot.restartAt;
     }
     // #1413: a bot's own Claude Code permission mode. Kept as text so `show` can report what was
     // written; a value Claude Code doesn't accept, or one on another agent, is dropped with the
@@ -673,6 +699,8 @@ export function checkBots(file, before = null, { project = null, projects = null
     if ((b.effort !== undefined || b.tier !== undefined) && resolveAgent(b.agent) !== "codex") {
       errors.push(`${at}: reasoning effort and service tier are Codex's (this bot runs ${b.agent ?? "no agent"})`);
     }
+    const restartIssue = restartAtProblem(b.restartAt);
+    if (restartIssue) errors.push(`${at}: ${restartIssue}`);
     // #1413: a bot's own permission mode is Claude Code's, and one of its own names.
     if (b.permissionMode !== undefined) {
       const why = permissionModeProblem(resolveAgent(b.agent), b.permissionMode);
@@ -969,6 +997,9 @@ export function applyBotEdit(raw, entry, newCategory = null) {
   for (const k of ["effort", "tier", "permissionMode"]) {
     if (k in bot && (bot[k] === undefined || bot[k] === null || bot[k] === "")) delete merged[k];
   }
+  // #1556: the context threshold a seat restarts at. A front end that doesn't edit it keeps the
+  // stored one; one that names it empty (--no-restart-at) clears it.
+  if ("restartAt" in bot && (bot.restartAt === undefined || bot.restartAt === null || bot.restartAt === "")) delete merged.restartAt;
   if (("crossMembers" in entry || "members" in entry) && !bot.crossMembers) {
     delete merged.crossMembers;
     delete merged.members;

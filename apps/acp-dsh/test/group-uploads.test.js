@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -83,7 +83,8 @@ async function host(t, name = 'x.txt') {
     model: 'default', sessionId: session.id, messages }))
   const project = () => structuredClone(projectFilesToText([relay], () => '/store/x.txt'))
   const save = () => member.followup(structuredClone(relay))
-  const path = (ref, leaf) => join(home, '.automagik', 'uploads', ref.attachmentId.slice(7), leaf)
+  const copyRoot = join(realpathSync(home), '.automagik', 'uploads')
+  const path = (ref, leaf) => join(copyRoot, ref.attachmentId.slice(7), leaf)
   return { home, session, group, member, person, agents, owners, room, rooms, file, image,
     relay, services, sent, live, adapter, step, project, save, path, store }
 }
@@ -285,8 +286,9 @@ for (const name of ['report was uploaded.txt', 'report "quoted".txt']) {
     assert.match(prompt[1].text, /verbatim read-only copy saved at/)
     const folder = join(h.home, '.automagik', 'uploads', h.file.attachmentId.slice(7))
     const [leaf] = readdirSync(folder)
-    assert.deepEqual(prompt[1], text(fileHandleText(h.file, join(folder, leaf))))
-    assert.deepEqual(readFileSync(join(folder, leaf)), txt)
+    const path = h.path(h.file, leaf)
+    assert.deepEqual(prompt[1], text(fileHandleText(h.file, path)))
+    assert.deepEqual(readFileSync(path), txt)
     assert.deepEqual(prompt[2], imageLine(h))
   })
 }
