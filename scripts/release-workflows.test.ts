@@ -804,7 +804,7 @@ describe('the meter lane (RFC 0017 delivery 4)', () => {
     // The gate script holds the command, so a re-cut on a moved dev runs it again (#1653).
     expect(script('release-gates.sh').join('\n')).toContain('bun scripts/meter-lane.ts check-key');
     const cut = job('cut').map(line => line.trim());
-    expect(cut).toContain('meter: ${{ steps.lane.outputs.meter }}');
+    expect(cut).toContain('meter: ${{ steps.cut.outputs.meter }}');
     expect(cut).toContain('meter_sign: ${{ steps.meterkey.outputs.sign }}');
   });
 
