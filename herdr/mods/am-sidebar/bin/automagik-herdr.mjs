@@ -1752,12 +1752,14 @@ Usage: am <command> [options]                   (every command takes --json and 
                                 written and left for launchd to load at your next login).
                                 install.sh asks before it installs it.
   rate-limit [--all] [--dry-run] [--json]
-                                One sweep of #1557: a running Claude Code seat whose pane tail
-                                shows the rate-limit dialog is parked or switched by the
-                                project's onRateLimit (park, the default, queues am restart <bot>
-                                for one minute after the reset; switch restarts it on another
-                                signed-in login with headroom, else parks). One attention item per
-                                episode; am ls shows it. It never types into the dialog.
+                                One sweep of #1557: a running Claude Code seat blocked on the
+                                rate-limit options dialog is parked or switched by the project's
+                                onRateLimit (park, the default, queues am restart <bot> for one
+                                minute after the reset it shows, or no wake when it shows none;
+                                switch restarts it on another signed-in login whose meter reading
+                                is fresh and which holds this conversation's transcript, else
+                                parks). One attention item per episode; am ls shows it. It never
+                                types into the dialog.
   restart --queued [--project DIR] [--json]   List queued restarts (with a parked seat's wake time).
   restart --cancel <bot> [--project DIR] [--json]   Cancel a queued restart.
   restart --due [--all] [--dry-run] [--json]   Restart from a handoff the seats whose Claude Code
@@ -5362,6 +5364,20 @@ async function readScreenText(terminal) {
   try { return JSON.parse(r.stdout)?.text ?? null; } catch { return null; }
 }
 
+/**
+ * The same read with the difference #1557 needs: an unreadable tail is `{ ok: false }`, never
+ * an empty screen that a caller could mistake for "the dialog is gone" (which would heal an
+ * episode or cancel a queued restart without any evidence).
+ */
+async function readScreenCapture(terminal) {
+  try {
+    const r = await hc(["read", terminal, "--lines", "40", "--json"]);
+    if (r.code !== 0) return { ok: false };
+    const text = JSON.parse(r.stdout)?.text;
+    return typeof text === "string" ? { ok: true, text } : { ok: false };
+  } catch { return { ok: false }; }
+}
+
 /** End a queued watcher only while it is the live pane this queue started (never a reused address). */
 async function killQueuedWatcher(watcher) {
   if (!watcher) return;
@@ -5732,24 +5748,43 @@ async function runQueuedRestart(opts) {
         return PRINTED;
       }
       if (park) {
-        const wait = wakeWait(entry.wake_at);
-        if (wait > 0) {
-          // A seat that recovers on its own before its wake is left running: the dialog is gone
-          // and the pane is idle, so there is nothing to restart. An unreadable or blocked pane
-          // keeps waiting, never guessing.
-          const screen = state.get?.status?.state !== "blocked" ? await readScreenText(entry.terminal) : null;
-          if (screen !== null && !rateLimitDialog(screen) && isPaneIdle(state.get, screen)) {
-            await drop();
-            return PRINTED;
-          }
-          await sleep(Math.min(wait, parkPollMs));
+        // The watcher can always cancel: one readable pane without the dialog is enough
+        // evidence that the seat recovered (or that the text was never the dialog), whatever
+        // the pane's status says. An unreadable pane is no evidence either way, so it waits.
+        const capture = await readScreenCapture(entry.terminal);
+        const showing = capture.ok ? rateLimitDialog(capture.text) : null;
+        if (capture.ok && !showing) {
+          await drop();
+          return PRINTED;
+        }
+        // No reset in the dialog: no wake time was invented, so never restart on a timer. Keep
+        // watching only to cancel when the dialog clears.
+        if (!entry.wake_at) {
+          await sleep(parkPollMs);
           entry = current();
           if (!entry) return PRINTED;
           continue;
         }
-        // Its wake is due: replace the dialog's pane now, resuming the conversation. --force is
-        // internal (a blocked pane would otherwise queue again); the person asked for a restart.
-        // cmdRestart consumes the entry itself, so a cancel that lands first still wins.
+        const wakeMs = Date.parse(entry.wake_at);
+        if (!Number.isFinite(wakeMs)) {
+          // A malformed wake is not a due time: treat it as unknown, never as "now".
+          await sleep(parkPollMs);
+          entry = current();
+          if (!entry) return PRINTED;
+          continue;
+        }
+        const wait = Math.max(0, wakeMs - Date.now());
+        if (wait > 0 || !capture.ok) {
+          // A pane that can't be read is no evidence of the dialog, so a due wake waits too.
+          await sleep(Math.min(wait > 0 ? wait : parkPollMs, parkPollMs));
+          entry = current();
+          if (!entry) return PRINTED;
+          continue;
+        }
+        // Its wake is due and the dialog is still on the readable pane: replace it now, resuming
+        // the conversation. --force is internal (a blocked pane would otherwise queue again);
+        // the person asked for a restart. cmdRestart consumes the entry itself, so a cancel that
+        // lands first still wins.
         const result = await cmdRestart({ project: entry.project, force: true, json: opts.json, _queuedTarget: entry }, [entry.botId]);
         return result;
       }
@@ -5889,7 +5924,8 @@ async function runQueuedRestart(opts) {
 
 async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recovered }) {
   const rateLimited = opts.rateLimit === true;
-  const dialog = pendingDialog(screen) ?? (!rateLimited && old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
+  const dialog = rateLimited ? null
+    : pendingDialog(screen) ?? (old.status?.state === "blocked" ? { question: "confirmation dialog in pane", who: "the owner" } : null);
   const queueId = randomUUID();
   const entry = await editRestartQueue(async (rows) => {
     const i = rows.findIndex((e) => e.botId === bot.id);
@@ -5947,7 +5983,7 @@ async function queueRestart({ bot, key, old, screen, opts, wanted, plan, recover
     watcher: entry.watcher, mode: plan.mode, agent: plan.agent, model: plan.model };
   if (rateLimited) {
     const until = entry.resets_at ? ` until ${entry.resets_at}` : "";
-    return `${bot.name}: rate-limited${until}; parked in ${old.address}, its restart wakes at ${entry.wake_at} `
+    return `${bot.name}: rate-limited${until}; parked in ${old.address}, ${parkedWakeText(entry)} `
       + `(am restart --queued lists it; am restart --cancel ${bot.id} cancels it).`;
   }
   if (opts.handoff) {
@@ -5994,9 +6030,21 @@ function envMs(name, fallback) {
 }
 /** Park restarts a seat this long after the reset the dialog shows (one minute). */
 const RATE_LIMIT_GRACE_MS = envMs("AUTOMAGIK_HERDR_RATE_LIMIT_GRACE_MS", 60_000);
-/** With no reset time to record, a parked seat is looked at again this much later (15 minutes). */
-const RATE_LIMIT_RETRY_MS = envMs("AUTOMAGIK_HERDR_RATE_LIMIT_RETRY_MS", 15 * 60_000);
+/** A meter reading this old cannot prove headroom for a switch (the logger writes every 5 minutes). */
+const RATE_LIMIT_METER_FRESH_MS = envMs("AUTOMAGIK_HERDR_RATE_LIMIT_METER_FRESH_MS", 10 * 60_000);
 const RATE_LIMIT_KIND = "rate-limit";
+
+/**
+ * An episode's key: one dialog wait for one project's bot, however many sweeps see it. It is
+ * stored on the item (`episode`) so a later item cannot be mistaken for the same episode, and
+ * an unreadable sweep leaves the open item untouched instead of closing and reopening it.
+ */
+const rateLimitEpisodeKey = (project, botId) => `${RATE_LIMIT_KIND}:${project}:${botId}`;
+/** How a parked seat's wake is said: its own reset, or plainly that none was invented. */
+const parkedWakeText = (row) => (row.wake_at ? `its restart wakes at ${row.wake_at}` : "no reset time was shown, so it has no timed wake");
+/** Whether `row` is this episode (the key, with project+bot as the fallback for older items). */
+const isEpisode = (row, project, botId) => row.kind === RATE_LIMIT_KIND
+  && (row.episode ? row.episode === rateLimitEpisodeKey(project, botId) : row.project === project && row.botId === botId);
 
 /** The attention items file under the app home: one record per episode, never one per sweep. */
 const attentionPath = () => join(appHome(), "automagik-herdr", "attention.json");
@@ -6043,31 +6091,31 @@ async function editAttention(edit) {
 }
 
 /**
- * One attention item for a bot's rate-limit episode: the open item for that project and bot is
- * returned (`created: false`) instead of a second one, however many sweeps see the same dialog.
- * A new item is written only when no open episode exists, so a seat that never recovers stays
- * at one item until a sweep sees it healthy (healRateLimitAttention) and a later dialog starts
- * a new episode.
+ * One attention item for a bot's rate-limit episode (key `rate-limit:<project>:<bot id>`): the
+ * open item for that episode is returned (`created: false`) instead of a second one, however
+ * many sweeps see the same dialog. A new item is written only when no open episode exists, so a
+ * seat that never recovers stays at one item until a *readable* sweep sees it healthy
+ * (healRateLimitAttention) and a later dialog starts a new episode.
  */
 async function noteRateLimitAttention({ project, bot, terminal, created_ms = null, text, resetsAt = null }) {
   return editAttention((items) => {
-    const open = items.find((row) => row.open === true && row.kind === RATE_LIMIT_KIND && row.project === project && row.botId === bot.id);
+    const open = items.find((row) => row.open === true && isEpisode(row, project, bot.id));
     if (open) return { row: open, created: false };
-    const row = { id: randomUUID(), kind: RATE_LIMIT_KIND, project, botId: bot.id, botName: bot.name,
+    const row = { id: randomUUID(), kind: RATE_LIMIT_KIND, episode: rateLimitEpisodeKey(project, bot.id), project, botId: bot.id, botName: bot.name,
       terminal, created_ms, at: new Date().toISOString(), ...(resetsAt ? { resets_at: resetsAt } : {}), text, open: true };
     items.push(row);
     return { row, created: true };
   });
 }
 
-/** Closes every open rate-limit item of `botId` (its seat is healthy again, or gone). */
+/** Closes every open rate-limit item of `botId` (its seat is readably healthy again, or gone). */
 async function healRateLimitAttention(project, botId, why) {
   // A sweep over a healthy team must not rewrite the store: only an open episode is looked at.
-  if (!readAttention().some((row) => row.open === true && row.kind === RATE_LIMIT_KIND && row.project === project && row.botId === botId)) return 0;
+  if (!readAttention().some((row) => row.open === true && isEpisode(row, project, botId))) return 0;
   return editAttention((items) => {
     let closed = 0;
     for (const row of items) {
-      if (row.open !== true || row.kind !== RATE_LIMIT_KIND || row.project !== project || row.botId !== botId) continue;
+      if (row.open !== true || !isEpisode(row, project, botId)) continue;
       row.open = false;
       row.closed_at = new Date().toISOString();
       row.closed_because = why;
@@ -6108,30 +6156,52 @@ function lastLimitReading(account) {
   } catch { return null; }
 }
 
-/** Whether a reading proves headroom: a known window under 100%; null when no window is known. */
-function headroomOf(row) {
+/**
+ * Whether a reading proves headroom now: an unexpired `ts` and a known window under 100%; null
+ * when there is no fresh reading. The limits logger writes on a change or every 5 minutes, so a
+ * reading older than 10 minutes is stale, not proof: a full window can be hit in between.
+ */
+function headroomOf(row, now = Date.now()) {
+  const measured = Date.parse(row?.ts);
+  if (!Number.isFinite(measured) || measured > now + 60_000 || now - measured > RATE_LIMIT_METER_FRESH_MS) return null;
   const windows = [row?.five_hour, row?.seven_day].filter((w) => w && typeof w.used_percentage === "number");
   return windows.length ? windows.every((w) => w.used_percentage < 100) : null;
 }
 
+/** The transcript a login holds for `session` in `cwd`, as a non-empty file, or null. */
+function transcriptAt(login, cwd, session) {
+  const file = login.id === DEFAULT_LOGIN ? claudeTranscriptPath(home(), cwd, session)
+    : join(login.dir, "projects", claudeSlug(cwd), `${session}.jsonl`);
+  try { const st = statSync(file); return st.isFile() && st.size > 0 ? file : null; } catch { return null; }
+}
+
 /**
- * A second signed-in Claude login with headroom for `live`'s seat (#1557), or null: every login
- * the app home's `claude-logins.json` lists plus the default one, except the login the pane
- * runs, whose own account fingerprint appears in the meter's `claude-limits.jsonl` with every
- * window under 100%. No reading means no proven headroom, never a guess; the caller parks.
+ * The switch a rate-limit dialog gets (#1557): `{ login, why }`, where `login` is a second
+ * signed-in Claude login that can resume this seat's conversation now, or null with the
+ * sentence to say instead. A login proves itself only through its own account's *fresh*
+ * reading in the meter's `claude-limits.jsonl` (every window under 100%) AND the conversation's
+ * transcript in that login's store: switching without it would start a fresh conversation (or
+ * resume an unrelated one), so the caller parks instead. The login the pane runs is skipped.
  */
 function switchLoginFor(live) {
   const currentDir = paneLaunchEnv(live)?.get(CONFIG_VAR);
   const current = typeof currentDir === "string" && isAbsolute(currentDir) ? (realDir(currentDir) ?? currentDir) : null;
+  const defaultDir = join(home(), ".claude");
+  const defaultReal = realDir(defaultDir) ?? defaultDir;
   let listed = [];
   try {
     const record = parseLogins(readText(loginsPath(appHome())) ?? "");
     if (!record.problem) listed = record.logins;
   } catch { /* no record: the default login alone */ }
+  const cwd = live?.foreground?.cwd ?? live?.cwd;
+  const session = sessionFor("claude", paneSession(live, "claude"));
+  const noHeadroom = { login: null, why: "no second signed-in login with headroom" };
+  const reasons = [];
   const seen = new Set();
   for (const login of [{ id: DEFAULT_LOGIN, dir: null }, ...listed]) {
     if (login.id === DEFAULT_LOGIN) {
-      if (!current) continue; // its seat already runs the default login
+      // Its seat already runs the default login (no CLAUDE_CONFIG_DIR, or ~/.claude explicitly).
+      if (!current || current === defaultReal) continue;
     } else {
       const real = realDir(login.dir) ?? login.dir;
       if (seen.has(real) || (current && real === current)) continue;
@@ -6140,9 +6210,17 @@ function switchLoginFor(live) {
     const account = accountHashOf(login);
     if (!account) continue; // not signed in here
     if (headroomOf(lastLimitReading(account)) !== true) continue;
-    return { id: login.id, dir: login.dir, words: login.id === DEFAULT_LOGIN ? ["-u", CONFIG_VAR] : [`${CONFIG_VAR}=${login.dir}`] };
+    if (!session || typeof cwd !== "string" || !isAbsolute(cwd)) {
+      reasons.push(`${loginNameOf(login.id)} has headroom, but this seat has no Claude session id to resume`);
+      continue;
+    }
+    if (!transcriptAt(login, cwd, session)) {
+      reasons.push(`${loginNameOf(login.id)} has headroom, but it has no conversation for this seat to resume`);
+      continue;
+    }
+    return { login: { id: login.id, dir: login.dir, words: login.id === DEFAULT_LOGIN ? ["-u", CONFIG_VAR] : [`${CONFIG_VAR}=${login.dir}`] }, why: null };
   }
-  return null;
+  return reasons.length ? { login: null, why: reasons[0] } : noHeadroom;
 }
 
 /** The rate-limit dialog a bot's live Claude Code pane is blocked on, or null. Read-only. */
@@ -6171,10 +6249,11 @@ async function queuedParkFor(botId) {
  * The `am rate-limit` sweep (#1557), and the same pass a scheduled `am restart --due` runs
  * first: every live Claude Code seat whose pane tail shows the rate-limit dialog is reported,
  * then reacted to by the project's `onRateLimit`. `park` (the default) queues `am restart
- * <bot>` for one minute after the reset (a retry later when the dialog shows none); `switch`
- * restarts it now on another signed-in login with headroom, and parks when there is none. One
- * attention item per episode is written; a seat seen healthy closes its episode. `dry` only
- * reports. Never types into the dialog.
+ * <bot>` for one minute after the reset the dialog shows; when it shows none, no wake time is
+ * invented and the watcher only cancels when the dialog clears. `switch` restarts it now on
+ * another signed-in login with fresh headroom and this conversation's transcript, and parks
+ * otherwise. One attention item per episode is written; a *readable* seat seen healthy closes
+ * it, and an unreadable sweep leaves it open. `dry` only reports. Never types into the dialog.
  */
 async function rateLimitPass(opts, keys, dry, { blockedOnly = false } = {}) {
   const out = { rate_limited: [], parked: [], switched: [], attention: [], notes: [] };
@@ -6202,10 +6281,17 @@ async function rateLimitPass(opts, keys, dry, { blockedOnly = false } = {}) {
         continue;
       }
       // The scheduled pass looks only at a seat herdr-core reports blocked: that is the modal
-      // dialog waiting on a person. The explicit `am rate-limit` sweep reads every seat.
+      // dialog waiting on a person. The explicit `am rate-limit` sweep reads every seat, but a
+      // working seat is taking a turn and its text is output, never the dialog.
       if (blockedOnly && live.status?.state !== "blocked") continue;
-      const screen = await readScreenText(live.address);
-      const dialog = rateLimitDialog(screen);
+      if (live.status?.state === "working") continue;
+      const capture = await readScreenCapture(live.address);
+      if (!capture.ok) {
+        // No evidence either way: the episode stays open (never healed by a blind sweep).
+        out.notes.push(`${bot.name}: its pane tail couldn't be read, so its rate-limit episode was left open.`);
+        continue;
+      }
+      const dialog = rateLimitDialog(capture.text);
       if (!dialog) {
         if (!dry) await healRateLimitAttention(key, bot.id, "it recovered");
         continue;
@@ -6214,40 +6300,46 @@ async function rateLimitPass(opts, keys, dry, { blockedOnly = false } = {}) {
         onRateLimit: mode, ...(dialog.resets_at ? { resets_at: dialog.resets_at } : {}) };
       out.rate_limited.push(seen);
       if (dry) { out.notes.push(`${bot.name}: blocked on the rate-limit dialog; would be ${mode === "switch" ? "switched or parked" : "parked"}.`); continue; }
-      // `noLogin`: the switch was asked for and no login had proven headroom (the item says so);
-      // a switch that failed for another reason parks without that claim.
+      // `noLogin` is the switch that had no eligible login (the item says why); a switch that
+      // failed for another reason parks without that claim.
       let noLogin = false;
+      let noLoginWhy = "";
       if (mode === "switch") {
-        const other = switchLoginFor(live);
-        if (other) {
+        const choice = switchLoginFor(live);
+        if (choice.login) {
           try {
-            const r = await cmdRestart({ project: key, force: true, json: true, _login: { words: other.words, warnings: [] } }, [bot.id]);
+            const r = await cmdRestart({ project: key, force: true, json: true, _login: { words: choice.login.words, warnings: [] } }, [bot.id]);
             const terminal = r && typeof r === "object" ? r.terminal : null;
-            const text = rateLimitLine(bot.name, { outcome: `switched to ${loginNameOf(other.id)}`, resetsAt: dialog.resets_at ?? null });
+            const text = rateLimitLine(bot.name, { outcome: `switched to ${loginNameOf(choice.login.id)}`, resetsAt: dialog.resets_at ?? null });
             const noted = await noteRateLimitAttention({ project: key, bot, terminal: terminal ?? live.address, created_ms: live.created_ms, text, resetsAt: dialog.resets_at });
-            out.switched.push({ ...seen, login: other.id, terminal: terminal ?? live.address });
+            out.switched.push({ ...seen, login: choice.login.id, terminal: terminal ?? live.address });
             if (noted.created) out.attention.push(noted.row);
             viewOnce = null;
             ({ view } = await viewOrError());
             continue;
           } catch (e) {
-            out.notes.push(`${bot.name}: switching to ${loginNameOf(other.id)} failed (${firstSentence(e?.message ?? String(e))}); parking instead.`);
+            out.notes.push(`${bot.name}: switching to ${loginNameOf(choice.login.id)} failed (${firstSentence(e?.message ?? String(e))}); parking instead.`);
           }
-        } else { noLogin = true; out.notes.push(`${bot.name}: no second signed-in login with headroom; parking.`); }
+        } else {
+          noLogin = true;
+          noLoginWhy = choice.why === "no second signed-in login with headroom"
+            ? "no second login with headroom" : "a login has headroom, but it cannot resume this conversation";
+          out.notes.push(`${bot.name}: ${choice.why}; parking.`);
+        }
       }
       const existing = await queuedParkFor(bot.id);
-      const wakeAt = dialog.resets_at
-        ? new Date(Date.parse(dialog.resets_at) + RATE_LIMIT_GRACE_MS).toISOString()
-        : new Date(Date.now() + RATE_LIMIT_RETRY_MS).toISOString();
+      // Never invent a wake: without the dialog's own reset there is no timed restart, only a
+      // watcher that cancels when the dialog clears.
+      const wakeAt = dialog.resets_at ? new Date(Date.parse(dialog.resets_at) + RATE_LIMIT_GRACE_MS).toISOString() : null;
       let entry = existing;
       if (!entry) {
-        entry = await queueRestart({ bot, key, old: live, screen,
-          opts: { json: true, force: true, rateLimit: true, wakeAt, resetsAt: dialog.resets_at ?? null },
+        entry = await queueRestart({ bot, key, old: live, screen: capture.text,
+          opts: { json: true, force: true, rateLimit: true, ...(wakeAt ? { wakeAt } : {}), ...(dialog.resets_at ? { resetsAt: dialog.resets_at } : {}) },
           wanted: null, plan: { mode: "resume", agent: "claude", model: null } });
       }
-      const text = rateLimitLine(bot.name, { outcome: noLogin ? "parked (no second login with headroom)" : "parked", resetsAt: dialog.resets_at ?? null });
+      const text = rateLimitLine(bot.name, { outcome: noLogin ? `parked (${noLoginWhy})` : "parked", resetsAt: dialog.resets_at ?? null });
       const noted = await noteRateLimitAttention({ project: key, bot, terminal: live.address, created_ms: live.created_ms, text, resetsAt: dialog.resets_at });
-      out.parked.push({ ...seen, wake_at: entry.wake_at ?? wakeAt });
+      out.parked.push({ ...seen, ...(entry.wake_at ? { wake_at: entry.wake_at } : {}) });
       if (noted.created) out.attention.push(noted.row);
     }
   }
@@ -6267,7 +6359,7 @@ async function cmdRateLimit(opts) {
     ...result.rate_limited.filter((r) => !result.parked.some((p) => p.id === r.id) && !result.switched.some((p) => p.id === r.id))
       .map((r) => `${r.name} (${r.id}) at ${r.terminal}: blocked on the rate-limit dialog "${r.question}"`
         + `${r.resets_at ? `; resets ${r.resets_at}` : ""}${dry ? " (dry run: nothing was parked or switched)." : "."}`),
-    ...result.parked.map((r) => `${r.name}: parked; its restart wakes at ${r.wake_at} (am restart --queued lists it).`),
+    ...result.parked.map((r) => `${r.name}: parked; ${parkedWakeText(r)} (am restart --queued lists it).`),
     ...result.switched.map((r) => `${r.name}: switched to ${loginNameOf(r.login)} in ${r.terminal}.`),
     ...result.notes,
   ];
@@ -6328,7 +6420,7 @@ async function restartDuePass(opts, keys, dry) {
       // A parked seat has its own wake (its reset plus the grace): no scheduled wake-up before it.
       const parked = await queuedParkFor(bot.id);
       if (parked) {
-        notes.push(`${bot.name}: parked on the rate-limit dialog; its wake is ${parked.wake_at ?? "its reset"}; this pass left it alone.`);
+        notes.push(`${bot.name}: parked on the rate-limit dialog; ${parkedWakeText(parked)}; this pass left it alone.`);
         continue;
       }
       const threshold = restartAtOf(bot);
@@ -6363,7 +6455,7 @@ async function restartDuePass(opts, keys, dry) {
     if (opts.json) return { due: [], restarted: [], queued: [], failed: [], rate_limited: rate.rate_limited,
       parked: rate.parked, switched: rate.switched, attention: rate.attention, notes: [...rate.notes, ...notes] };
     return [...(rate.attention.length ? rate.attention.map((row) => `! ${row.text}`) : []),
-      ...rate.parked.map((r) => `${r.name}: parked; its restart wakes at ${r.wake_at}.`),
+      ...rate.parked.map((r) => `${r.name}: parked; ${parkedWakeText(r)}.`),
       ...rate.switched.map((r) => `${r.name}: switched to ${loginNameOf(r.login)}.`),
       ...rate.notes,
       ...(rate.rate_limited.length ? [] : ["No seat is over its context threshold."]), ...notes].join("\n");
@@ -6487,7 +6579,7 @@ async function restartDuePass(opts, keys, dry) {
   if (opts.json) return { due: due.map((r) => ({ id: r.bot.id, name: r.bot.name, project: r.key, terminal: r.terminal,
     context_tokens: r.tokens, restart_at: r.threshold })), restarted, queued, failed, rate_limited: rate.rate_limited,
     parked: rate.parked, switched: rate.switched, attention: rate.attention, notes: [...rate.notes, ...notes] };
-  return [...rate.attention.map((row) => `! ${row.text}`), ...rate.parked.map((r) => `${r.name}: parked; its restart wakes at ${r.wake_at}.`),
+  return [...rate.attention.map((row) => `! ${row.text}`), ...rate.parked.map((r) => `${r.name}: parked; ${parkedWakeText(r)}.`),
     ...rate.switched.map((r) => `${r.name}: switched to ${loginNameOf(r.login)}.`), ...say, ...rate.notes, ...notes].join("\n");
 }
 

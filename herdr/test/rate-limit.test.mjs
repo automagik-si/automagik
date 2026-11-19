@@ -28,10 +28,11 @@ test("a rate-limit dialog is found in the pane tail, with the reset time it show
   assert.match(found.question, /usage limit|rate limit/i);
   assert.equal(found.resets_at, new Date(NOW + (2 * 60 + 10) * 60_000).toISOString());
   // ANSI colouring and a frame do not hide it.
-  const framed = `\u001b[2m╭─\u001b[0m\n\u001b[1mRate limit reached\u001b[0m\nYour limit resets at 3:00 PM.\n1. Wait\n`;
+  const framed = `\u001b[2m╭─\u001b[0m\n\u001b[1mRate limit reached\u001b[0m\nYour limit resets at 3:00 PM.\n`
+    + `\u001b[2m❯ 1. Wait until it resets\u001b[0m\n  2. Upgrade your plan\n`;
   assert.deepEqual(rateLimitDialog(framed, NOW), { question: "Rate limit reached", resets_at: localIso(15) });
   // A dialog with no time still counts; the reset is omitted, never guessed.
-  const noTime = rateLimitDialog("Rate limit reached\nYou have reached your usage limit.\n1. Wait\n", NOW);
+  const noTime = rateLimitDialog("Rate limit reached\nYou have reached your usage limit.\nTry again later.\n❯ 1. Wait until it resets\n  2. Upgrade your plan\n", NOW);
   assert.ok(noTime);
   assert.equal("resets_at" in noTime, false);
 });
@@ -55,10 +56,38 @@ test("reset times: ISO, a duration, a local clock, tomorrow, and no guess when t
   assert.equal(resetTimeFrom("Your limit resets at 9:15 AM.", NOW), localIso(9, 15, 20), "a time already past is tomorrow");
   assert.equal(resetTimeFrom("resets tomorrow at 9:00 AM", NOW), localIso(9, 0, 20));
   assert.equal(resetTimeFrom("resets at 15:30", NOW), localIso(15, 30));
+  // `tomorrow` means tomorrow even when the clock time is still ahead today (the old rule
+  // ignored the word and saw 9:00 later that same morning as today).
+  const MORNING = new Date(2026, 10, 19, 8, 0, 0).getTime();
+  assert.equal(resetTimeFrom("resets tomorrow at 9:00 AM", MORNING), localIso(9, 0, 20));
+  assert.equal(resetTimeFrom("resets today at 9:00 AM", MORNING), localIso(9, 0, 19));
+  // A timestamp already past is not a reset now: it proves nothing, so it is unknown.
+  assert.equal(resetTimeFrom("resets at 2020-01-01T00:00:00Z", NOW), null);
   // Nothing to read: a bare number, a date without a time, an unknown unit.
   for (const text of ["resets at 5", "resets on 2026-11-20", "resets in 2 fortnights", "resets", ""]) {
     assert.equal(resetTimeFrom(text, NOW), null, text);
   }
+});
+
+test("a report that mentions the limit and lists findings is not the options dialog", () => {
+  // The review's false positive: an idle seat's last turn is a report with the words "rate
+  // limit" and a markdown numbered list. It has no selection cursor and no dialog block.
+  const report = [
+    "I checked the rate limit path in the restart queue.",
+    "",
+    "Findings:",
+    "1. The retry loop waits, but no reset is recorded.",
+    "2. `am ls` reports a rate-limit status.",
+    "3. No test covers the parser.",
+    "",
+  ].join("\n");
+  assert.equal(rateLimitDialog(report, NOW), null);
+  // A quoted markdown list uses ">" for the quote, never the dialog's own cursor.
+  assert.equal(rateLimitDialog("Rate limit report:\n> 1. Wait until it resets\n> 2. Upgrade your plan\n", NOW), null);
+  // Numbered options without the selection cursor are still not the dialog.
+  assert.equal(rateLimitDialog("Rate limit reached\nYour limit resets in 2 hours.\n1. Wait until it resets\n2. Upgrade your plan\n", NOW), null);
+  // Prose after the options means they are scrollback, not the live dialog.
+  assert.equal(rateLimitDialog(`${DIALOG}\nI'll fix the parser next.\n`, NOW), null);
 });
 
 test("duration parsing is exact and ignores words that are not units", () => {

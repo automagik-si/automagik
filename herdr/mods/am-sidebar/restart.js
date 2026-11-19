@@ -809,8 +809,12 @@ export function restartAnswer(r) {
 const RATE_LIMIT_CUE = /\b(?:rate[\s-]?limit(?:ed)?|usage limit|limit reached|reached (?:your|the) (?:usage\s+|rate\s+)?limit|hit (?:your|the) (?:usage\s+|rate\s+)?limit|out of usage|quota (?:reached|exhausted|exceeded))\b/i;
 /** The dialog's reset or retry words: what makes the cue a wait, not a passing error line. */
 const RATE_LIMIT_RESET_WORDS = /\b(?:resets?|reset at|try again|available again|unlimited again|wait until|comes back|continue in)\b/i;
-/** A numbered choice, or a prompt footer: the dialog is waiting on a person, not the agent. */
-const RATE_LIMIT_CHOICE = /^\s*(?:[>❯›*]\s*)?\d+[.)]\s+\S/;
+/**
+ * One of the dialog's numbered options, with its selection cursor when the line carries one.
+ * The cursor is the dialog's own shape: a markdown list is numbered too, so the numbers alone
+ * are never enough (the review's false positive was an ordinary report with a 1./2./3. list).
+ */
+const RATE_LIMIT_OPTION = /^[\s│┃|]*([❯›])?\s*(\d+)[.)]\s+(\S.*)$/;
 const RATE_LIMIT_FOOTER = /\b(?:press enter|enter to (?:confirm|continue|select)|esc to (?:cancel|close|exit)|↑↓|up\/down to|select an option|choose an option)\b/i;
 
 /** The visible tail's lines, ANSI-free, blank lines kept (a dialog's blank lines are its shape). */
@@ -835,8 +839,12 @@ export function durationMs(text) {
   return found ? total : null;
 }
 
-/** A clock time in a dialog's words as the next local instant, or null: `3:00 PM`, `15:00`, `5pm`. */
-function clockTime(segment, now, { tomorrow = false } = {}) {
+/**
+ * A clock time in a dialog's words as the next local instant, or null: `3:00 PM`, `15:00`, `5pm`.
+ * `dayOffset` is the day the dialog itself names (`tomorrow` 1, `today` 0): it is applied even
+ * when the clock time would still be ahead today, so "tomorrow at 9:00" never lands today.
+ */
+function clockTime(segment, now, { dayOffset = null } = {}) {
   const m = /(?:^|\D)(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?(?:\s|$|\()/i.exec(segment);
   if (!m) return null;
   let hour = Number(m[1]);
@@ -849,6 +857,7 @@ function clockTime(segment, now, { tomorrow = false } = {}) {
   const at = new Date(now);
   at.setSeconds(0, 0);
   at.setHours(hour, minute ?? 0, 0, 0);
+  if (dayOffset !== null) at.setDate(at.getDate() + dayOffset);
   if (at.getTime() <= now) at.setDate(at.getDate() + 1);
   return at;
 }
@@ -857,18 +866,20 @@ function clockTime(segment, now, { tomorrow = false } = {}) {
  * The reset instant a rate-limit dialog names, as an ISO string, or null when it names none.
  * Understood, in this order: an ISO 8601 timestamp; a duration after "resets/try again/… in";
  * a clock time after "resets/try again/… at"; a clock time with a meridiem anywhere in the
- * reset sentence; "tomorrow" adds a day to a clock time. A time already past means the next
- * occurrence, never the past. Nothing is guessed: a bare number, a date without a time or a
- * duration with no unit leaves it null (the caller omits the time).
+ * reset sentence; "tomorrow"/"today"/"tonight" choose the day a clock time lands on. A past
+ * ISO timestamp proves nothing about the next reset, so it is unknown (null): it must never
+ * wake a restart immediately. Nothing is guessed: a bare number, a date without a time or a
+ * duration with no unit leaves it null (the caller omits the time, and the wake with it).
  */
 export function resetTimeFrom(text, now = Date.now()) {
   const tail = tailLines(text, 40).join("\n");
   const sentinel = /\b(?:resets?|reset at|try again|available again|unlimited again|comes back|continue in)\b/i;
-  // 1. An explicit timestamp is unambiguous: never reinterpret it.
+  // 1. An explicit timestamp is unambiguous, unless it is already past: then it is unknown,
+  // never a reset that fires a restart now.
   const iso = /\b(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\b/.exec(tail);
   if (iso) {
     const t = Date.parse(iso[1]);
-    if (Number.isFinite(t)) return new Date(t).toISOString();
+    if (Number.isFinite(t)) return t > now ? new Date(t).toISOString() : null;
   }
   // 2. A duration: "resets in 2 hours 10 minutes", "try again in 5m".
   const duration = /(?:resets?|reset at|try again|available again|unlimited again|comes back|continue)[^.\n]{0,40}?\bin\s+([^.();\n]{1,60})/i.exec(tail);
@@ -876,13 +887,13 @@ export function resetTimeFrom(text, now = Date.now()) {
     const ms = durationMs(duration[1]);
     if (ms !== null && ms > 0) return new Date(now + ms).toISOString();
   }
-  // 3. A clock time in the same sentence as the reset words.
+  // 3. A clock time in the same line as the reset words, on the day the line names.
   for (const line of tailLines(text, 40)) {
     if (!sentinel.test(line)) continue;
-    const tomorrow = /\btomorrow\b/i.test(line);
+    const dayOffset = /\btomorrow\b/i.test(line) ? 1 : /\b(?:today|tonight)\b/i.test(line) ? 0 : null;
     const after = /(?:resets?|reset at|try again|available again|unlimited again|comes back)\b[^.\n]{0,30}?\bat\s+([^.\n]{1,40})/i.exec(line);
     const segment = after ? after[1] : line;
-    const at = clockTime(segment, now, { tomorrow });
+    const at = clockTime(segment, now, { dayOffset });
     if (at) return at.toISOString();
   }
   return null;
@@ -890,26 +901,43 @@ export function resetTimeFrom(text, now = Date.now()) {
 
 /**
  * The rate-limit dialog a Claude Code pane is blocked on, from its tail (`hc read`'s text,
- * ANSI allowed), or null. A limit cue is not enough: the tail must also show the dialog
- * waiting on a person (a reset or retry sentence, a numbered choice, or a prompt footer) and
- * the cue must be among the newest lines, so old scrollback and a passing API error never
- * count. `resets_at` is the dialog's own ISO time when it shows one, absent when it does not.
- * Detection is read-only: nothing here types into the pane or answers the dialog.
+ * ANSI allowed), or null. The test is the dialog's own shape, never a word search: a run of at
+ * least two consecutive numbered options must end the visible tail (only a footer may follow),
+ * the options must start at 1 and be consecutive, one of them must carry the selection cursor
+ * (`❯`/`›`), and a limit cue must sit within the ten lines above them. A markdown numbered list
+ * in an ordinary report has no selection cursor and no dialog block, so it cannot match; a
+ * permission dialog has the cursor but no limit cue. `resets_at` is the dialog's own ISO time
+ * when it shows one, absent when it shows none (never guessed). Detection is read-only:
+ * nothing here types into the pane or answers the dialog.
  */
 export function rateLimitDialog(screenText, now = Date.now()) {
   if (typeof screenText !== "string" || !screenText.trim()) return null;
   const lines = tailLines(screenText, 40);
   const visible = lines.map((line, i) => ({ line, i })).filter(({ line }) => line.trim() !== "");
-  const tail = visible.slice(-15);
-  const cue = [...tail].reverse().find(({ line }) => RATE_LIMIT_CUE.test(line));
+  // The options end the dialog: after them only a footer (never prose, never an idle prompt).
+  let last = visible.length - 1;
+  while (last >= 0 && RATE_LIMIT_FOOTER.test(visible[last].line)) last -= 1;
+  if (last < 0 || !RATE_LIMIT_OPTION.test(visible[last].line)) return null;
+  let first = last;
+  while (first > 0 && RATE_LIMIT_OPTION.test(visible[first - 1].line)) first -= 1;
+  const block = visible.slice(first, last + 1);
+  if (block.length < 2) return null;
+  const numbered = block.map(({ line }) => RATE_LIMIT_OPTION.exec(line));
+  // The dialog numbers its choices from 1, in order: a numbered section of a report does not
+  // have to, and never carries the cursor below.
+  if (numbered[0][2] !== "1" || numbered.some((m, i) => Number(m[2]) !== i + 1)) return null;
+  if (!numbered.some((m) => m[1])) return null;
+  // The limit statement belongs to this dialog, not to scrollback far above the options.
+  let cue = null;
+  for (let i = first - 1, seen = 0; i >= 0 && seen < 10; i -= 1) {
+    seen += 1;
+    if (RATE_LIMIT_CUE.test(visible[i].line)) { cue = visible[i]; break; }
+  }
   if (!cue) return null;
-  const window = lines.slice(Math.max(0, cue.i - 3), Math.min(lines.length, cue.i + 12));
-  const waits = window.some((line) => RATE_LIMIT_RESET_WORDS.test(line))
-    || window.some((line) => RATE_LIMIT_CHOICE.test(line))
-    || window.some((line) => RATE_LIMIT_FOOTER.test(line));
-  if (!waits) return null;
+  const dialog = visible.slice(visible.indexOf(cue), last + 1).map(({ line }) => line);
+  if (!dialog.some((line) => RATE_LIMIT_RESET_WORDS.test(line))) return null;
   const question = cue.line.trim().replace(/\s+/g, " ").slice(0, 200);
-  const resetsAt = resetTimeFrom(window.join("\n"), now);
+  const resetsAt = resetTimeFrom(dialog.join("\n"), now);
   return { question, ...(resetsAt ? { resets_at: resetsAt } : {}) };
 }
 
