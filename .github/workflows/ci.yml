@@ -332,8 +332,8 @@ jobs:
     runs-on: ubuntu-24.04
     # Measured: 10m58 on Node 22, 12m32 on Node 24, whose leg also runs the herdr-app
     # system-libraries apt-get (2m33 in the slow run). At 15 that leg was cancelled at its cap
-    # twice in one day on unrelated changes (#1603, #1681) after its tests passed, so 20 keeps
-    # the suite, the install and a slow runner's variance under the cap. Do not trim it back.
+    # twice in one day on unrelated changes (#1603, #1681), recording no result; 20 keeps the
+    # suite, the install and a slow runner's variance under the cap. Do not trim it back.
     timeout-minutes: 20
     strategy:
       fail-fast: false
