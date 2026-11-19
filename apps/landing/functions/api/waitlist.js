@@ -18,10 +18,13 @@ export function networkPrefix(ip) {
     return [...a, ...Array(Math.max(0, 8 - a.length - b.length)).fill('0'), ...b].slice(0, 4).map(part => part.padStart(4, '0')).join(':')
   } catch { return null }
 }
-export async function onRequest({ request, env }) {
+// `whatsappSignupsOpen` is the one switch, `WHATSAPP_SIGNUPS_OPEN`, off by default. The context
+// value lets the tests exercise the on state; the runtime never supplies it, so the deployed
+// gate is the constant alone.
+export async function onRequest({ request, env, whatsappSignupsOpen = WHATSAPP_SIGNUPS_OPEN }) {
   const time = now()
   const url = new URL(request.url)
-  if (request.method === 'GET') return htmlPage('Register your interest in Cloud', waitlistForm() + privacyNote())
+  if (request.method === 'GET') return htmlPage('Register your interest in Cloud', waitlistForm({ whatsapp: whatsappSignupsOpen }) + privacyNote({ whatsapp: whatsappSignupsOpen }))
   if (request.method !== 'POST') return htmlPage('Method not allowed', '', 405)
   if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/x-www-form-urlencoded') return htmlPage('Use the registration form', '', 415)
   let fields
@@ -29,7 +32,7 @@ export async function onRequest({ request, env }) {
   const action = fields.get('action')
   if (!['add', 'remove', 'confirm'].includes(action)) return bad()
   // A stale page or a direct POST gets no new WhatsApp code while sign-ups are paused.
-  if (action === 'add' && fields.get('channel') === 'whatsapp' && !WHATSAPP_SIGNUPS_OPEN) return unavailable()
+  if (action === 'add' && fields.get('channel') === 'whatsapp' && !whatsappSignupsOpen) return unavailable()
   if (!env.WAITLIST_DB || !env.WAITLIST_CONFIRM_SECRET || env.WAITLIST_DATA_JURISDICTION !== 'eu') return unavailable()
   const db = env.WAITLIST_DB
   try {

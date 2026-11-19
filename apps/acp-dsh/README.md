@@ -527,7 +527,11 @@ chat, and acp-dsh validates the bytes, writes a 0400 copy inside the per-draw sc
 an inline image block when the agent advertises image prompts. No read root is added. Edits
 run only when the adapter acknowledged the Bot home's image profile and Codex's resolved
 profile matched it; the read-only fallback refuses
-an edit. The scratch, including the input copy, is removed afterwards.
+an edit. An edit whose pre-session setup stops before a prompt (a connector that cannot spawn, a
+scratch folder that cannot be made, an unreadable configuration, an inert switch, a missing or
+unacknowledged profile, a signed-out Codex, a session that does not start in time) is refused
+with `reason: edit-not-isolated` too, so bots-dsh hands the Bot its own verified copy to edit as
+a file. The scratch, including the input copy, is removed afterwards.
 
 `drawImage` accepts no user-selected local image-input path, registers no ACP filesystem-read
 callback, and receives no pre-read image-tool arguments. Codex selects and reads

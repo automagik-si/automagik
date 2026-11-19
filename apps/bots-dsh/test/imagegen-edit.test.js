@@ -81,7 +81,7 @@ test('Codex edits carry exact input and generation zero, with no generateImage c
 test('legacy grants refuse edits without even refreshing an expired grant', async t => {
   const images = createImageGen({ folder: folder(t), credentials: () => credentials({
     [CODEX_RECORD]: { kind: 'grant', payload: { access: 'test', refresh: 'test', expires: 1 } },
-  }), codex: () => ({ authScope: 'shared', imageAccess: async () => ({ ready: false }), generateImage: () => assert.fail('no draw') }),
+  }), codex: () => ({ authScope: 'shared', imageAccess: async () => ({ ready: false, signedIn: false }), generateImage: () => assert.fail('no draw') }),
   fetch: () => assert.fail('no request') })
   await assert.rejects(images.generate({ prompt: 'edit', input, callId: 'legacy' }), /Editing a picture needs Codex signed in/)
   assert.equal(images.progress('legacy').phase, 'failed')
