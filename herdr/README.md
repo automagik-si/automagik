@@ -450,7 +450,12 @@ it). The old conversation is not resumed: what survives is the handoff file, the
 and briefing, and its helpers' own conversations (resumed under the new pane); nothing else from
 the old conversation does. A seat that doesn't write the file within the time limit, or a handoff
 home that can't be written, is reported and left running: the pass refuses rather than restarting
-without the handoff. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
+without the handoff. A handoff restart that fails, or is dropped after waiting, is also kept in
+`<app home>/automagik-herdr/handoff-failures.json`: `am restart --queued` lists it after the queued
+watcher's own pane is gone, and a queued watcher tells the project's main bot (the same report
+`am revive` uses). A restart whose handoff can't be sent as the new conversation's first message is
+kept there as a `send` warning: the seat is restarted and the pass exits 0, and the file stays for a
+person to send by hand. A timer or the login service can run the pass; `--dry-run` prints the plan and touches
 nothing.
 
 **A question is not a permission.** An agent that ends its turn waiting on you sets the pane

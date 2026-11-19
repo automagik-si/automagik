@@ -47,7 +47,10 @@ am restart <bot> --fresh  # the same, on a new conversation
   `<app home>/automagik-herdr/handoff/<bot>.md` and end its turn, then restarts it fresh from that
   file (its first new message). `--dry-run` lists the seats without touching them; `--all` covers
   the projects this CLI remembers. Set the threshold with `am edit <bot> --restart-at N` (a main
-  bot defaults to 250000; `--no-restart-at` clears it). A working or blocked seat is queued.
+  bot defaults to 250000; `--no-restart-at` clears it). A working or blocked seat is queued. A
+  handoff restart that fails or is dropped is kept in
+  `<app home>/automagik-herdr/handoff-failures.json` and listed by `am restart --queued`; a queued
+  watcher also tells the project's main bot.
 - A Bot that is not running is started.
 - It refuses while helpers run under the Bot's pane, because they would end with it. `--tree` runs
   them again under the new pane; `--force` lets them end.

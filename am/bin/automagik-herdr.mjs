@@ -5204,7 +5204,18 @@ async function queuedRestarts(opts, ref) {
       }
       return rows.filter((e) => !project || e.project === project);
     });
-    return opts.json ? { queued: entries } : entries.length ? entries.map((e) => `${e.botName} (${e.botId}): queued on ${e.terminal} (${e.reason}${e.dialog ? `: "${e.dialog.question}" — ${e.dialog.who} must answer` : ""}) since ${e.at}`).join("\n") : "No restarts queued.";
+    // #1556: a handoff that failed or was dropped is kept in the app home, so the reader that
+    // already answers "what is queued" also answers "what didn't happen" after the watcher's pane went away.
+    const failures = readHandoffFailures().filter((f) => !project || f.project === project);
+    const failureLine = (f) => `${f.botName} (${f.botId}): handoff restart ${f.kind} at ${f.at}: ${f.why}`
+      + `${f.handoff ? ` (handoff: ${f.handoff})` : ""}`
+      + `${f.notified?.sent ? `; the lead was told in ${f.notified.sent}` : f.notified?.unsent ? `; the lead was not told: ${f.notified.unsent}` : ""}.`;
+    const lines = [
+      ...entries.map((e) => `${e.botName} (${e.botId}): queued on ${e.terminal} (${e.reason}${e.dialog ? `: "${e.dialog.question}" — ${e.dialog.who} must answer` : ""}) since ${e.at}`),
+      ...failures.map(failureLine),
+    ];
+    return opts.json ? { queued: entries, ...(failures.length ? { handoff_failures: failures } : {}) }
+      : lines.length ? lines.join("\n") : "No restarts queued.";
   }
   if (!ref) throw new CliError("restart --cancel needs a bot.", 2);
   let bot = null;
@@ -5260,6 +5271,32 @@ function handoffRefusal(path) {
     const fd = openSync(path, "a", 0o600);
     closeSync(fd);
     return null;
+  } catch (e) { return `${path} can't be written (${e?.message ?? e})`; }
+}
+
+/**
+ * Whether a handoff at `path` could be written, without creating anything (#1556, --dry-run).
+ * The same refusal the real pass gives, checked with lstat/access instead of an append open.
+ */
+function handoffWritable(path) {
+  try {
+    let held = null;
+    try { held = lstatSync(path); } catch { /* not there yet */ }
+    if (held && !held.isFile()) return `${path} exists and is not a plain file`;
+    if (held) { accessSync(path, constants.W_OK); return null; }
+    let dir = dirname(path);
+    for (;;) {
+      let st = null;
+      try { st = statSync(dir); } catch { /* not there */ }
+      if (st) {
+        if (!st.isDirectory()) return `${dir} is not a folder`;
+        accessSync(dir, constants.W_OK);
+        return null;
+      }
+      const up = dirname(dir);
+      if (up === dir) return `${path} can't be written`;
+      dir = up;
+    }
   } catch (e) { return `${path} can't be written (${e?.message ?? e})`; }
 }
 
@@ -5321,6 +5358,98 @@ async function sendHandoffMessage(terminal, handoff, path) {
 
 const RETRY_QUEUED = Symbol("retry-queued");
 
+// ---- #1556: a handoff restart that failed or was dropped is kept, and its owner/lead told ----
+
+/** The last failed handoff restart per bot, under the app home; `am restart --queued` reads it. */
+const HANDOFF_FAILURES_PATH = () => join(appHome(), "automagik-herdr", "handoff-failures.json");
+/** How many failed bots the small record keeps; one per bot, newest first. */
+const HANDOFF_FAILURES_MAX = 20;
+
+/** The recorded failures: [{ at, kind, botId, botName, project, terminal, handoff, why, report, notified }]. */
+function readHandoffFailures() {
+  const text = readText(HANDOFF_FAILURES_PATH());
+  if (text === null) return [];
+  try { const rows = JSON.parse(text)?.failures; return Array.isArray(rows) ? rows : []; } catch { return []; }
+}
+
+/** Keeps `failure` as its bot's only row, newest first, 0600, replaced atomically. */
+async function recordHandoffFailure(failure) {
+  const file = HANDOFF_FAILURES_PATH();
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  await withLockAsync(`${file}.lock`, async () => {
+    const rows = [failure, ...readHandoffFailures().filter((row) => row.botId !== failure.botId)].slice(0, HANDOFF_FAILURES_MAX);
+    const tmp = `${file}.${process.pid}.${randomUUID()}`;
+    try {
+      writeFileSync(tmp, unprinted(`${JSON.stringify({ version: 1, failures: rows })}\n`), { mode: 0o600 });
+      chmodSync(tmp, 0o600);
+      renameSync(tmp, file);
+    } finally { try { unlinkSync(tmp); } catch {} }
+  });
+}
+
+/** Drops a bot's failure row after a later handoff restart reaches its new conversation. */
+async function clearHandoffFailure(botId) {
+  const rows = readHandoffFailures();
+  if (!rows.some((row) => row.botId === botId)) return;
+  const file = HANDOFF_FAILURES_PATH();
+  await withLockAsync(`${file}.lock`, async () => {
+    const left = readHandoffFailures().filter((row) => row.botId !== botId);
+    const tmp = `${file}.${process.pid}.${randomUUID()}`;
+    try {
+      writeFileSync(tmp, unprinted(`${JSON.stringify({ version: 1, failures: left })}\n`), { mode: 0o600 });
+      chmodSync(tmp, 0o600);
+      renameSync(tmp, file);
+    } finally { try { unlinkSync(tmp); } catch {} }
+  });
+}
+
+/**
+ * One line to a project's main bot, the pack's existing report path: the same `hc send` `am
+ * revive` uses, to the live pane the attach ledger binds. Never throws: { sent, unsent }.
+ */
+async function reportToMainBot(projectKey, line) {
+  let project;
+  try { project = loadProject(projectKey); } catch (e) { return { sent: null, unsent: `its project couldn't be read (${e?.message ?? e})` }; }
+  const main = mainBotOf(project.file);
+  if (!main) return { sent: null, unsent: "the project has no main bot that can be read" };
+  let view;
+  try { view = await attachView(); } catch (e) { return { sent: null, unsent: `its attach ledger couldn't be read (${e?.message ?? e})` }; }
+  const held = liveFor(view, main.id, project);
+  if (!held) return { sent: null, unsent: `${main.name} has no pane` };
+  const terminal = held.binding.terminal;
+  try {
+    const state = await hcState(terminal);
+    if (state.state !== "live" || state.get?.created_ms !== held.binding.created_ms || !agentInForeground(state.get)) {
+      return { sent: null, unsent: `${main.name}'s pane ${terminal} runs no agent` };
+    }
+    const r = await hc(["send", terminal, line]);
+    if (r.code === 0) return { sent: terminal, unsent: null };
+    return { sent: null, unsent: `hc send ${terminal} failed (${hcSaid((r.stderr || r.stdout).trim())})` };
+  } catch (e) { return { sent: null, unsent: `the report to ${terminal} couldn't be sent (${e?.message ?? e})` }; }
+}
+
+/**
+ * Persists a handoff restart that failed or was dropped (#1556) and tells the project's main
+ * bot through `reportToMainBot` (the revive path) unless `notify` is false (a pass that already
+ * reported it to the person running it). `kind`: "timeout", "refused", "helpers", "dropped" or
+ * "send". Never throws: a failed record or send must not hide the failure itself.
+ */
+async function noteHandoffFailure({ botId, botName, project, terminal }, kind, why, handoff, { notify = true } = {}) {
+  const said = unprinted(String(why ?? ""));
+  const detail = said.startsWith(`${botName}: `) ? said.slice(botName.length + 2) : said;
+  const report = `${botName}: a handoff restart failed (${kind}): ${firstSentence(detail)}.`;
+  let notified = null;
+  if (notify) {
+    try { notified = await reportToMainBot(project, report); } catch (e) { notified = { sent: null, unsent: `the report wasn't sent (${e?.message ?? e})` }; }
+  }
+  try {
+    await recordHandoffFailure({ at: new Date().toISOString(), kind, botId, botName, project: project ?? null, terminal: terminal ?? null,
+      handoff: handoff ?? null, why: said, report, notified });
+  } catch { /* the thrown error and the queue entry already say it */ }
+  return { report, notified };
+}
+
+
 async function runQueuedRestart(opts) {
   const queueId = opts["run-queued"];
   const began = Date.now();
@@ -5339,7 +5468,13 @@ async function runQueuedRestart(opts) {
   const drop = () => editRestartQueue((rows) => { const i = rows.findIndex((e) => e.id === queueId); if (i >= 0) rows.splice(i, 1); });
   try {
     for (;;) {
-      if (Date.now() - began >= maxMs) return PRINTED;
+      if (Date.now() - began >= maxMs) {
+        if (handoff) {
+          await noteHandoffFailure(entry, "dropped", `${entry.botName}: its queued handoff restart waited `
+            + `${Math.round(maxMs / 1000)}s without the seat becoming idle, so it was dropped.`, handoffFile);
+        }
+        return PRINTED;
+      }
       const state = await hcState(entry.terminal);
       if (["gone", "finished"].includes(state.state) || (state.get && entry.created_ms != null && state.get.created_ms !== entry.created_ms)) {
         return PRINTED;
@@ -5360,7 +5495,7 @@ async function runQueuedRestart(opts) {
         if (why) {
           await drop();
           throw new CliError(`${entry.botName}: ${why}, so it was not asked and was not restarted; `
-            + `the seat still runs in ${entry.terminal}.`, 1, { refused: "handoff", terminal: entry.terminal });
+            + `the seat still runs in ${entry.terminal}.`, 1, { refused: "handoff", terminal: entry.terminal, handoffKind: "refused" });
         }
         // Stamped BEFORE the send: an agent that writes during the send's own round trip is
         // still answering this request, never a stale handoff from an earlier pass.
@@ -5370,7 +5505,7 @@ async function runQueuedRestart(opts) {
           await drop();
           throw new CliError(`${entry.botName}: couldn't be asked for its handoff in ${entry.terminal} (hc send: `
             + `${hcSaid((r.stderr || r.stdout).trim())}); it is still running and was not restarted.`, 1,
-          { refused: "handoff", terminal: entry.terminal });
+          { refused: "handoff", terminal: entry.terminal, handoffKind: "refused" });
         }
         // Look again before the first wait: an agent that writes at once ends its turn in it.
         entry = current();
@@ -5383,7 +5518,7 @@ async function runQueuedRestart(opts) {
           await drop();
           throw new CliError(`${entry.botName}: still running in ${entry.terminal}; it didn't write ${handoffFile} `
             + `within ${Math.round(HANDOFF_WAIT_MS / 1000)}s, so it was not restarted.`, 1,
-          { refused: "handoff", terminal: entry.terminal });
+          { refused: "handoff", terminal: entry.terminal, handoffKind: "timeout" });
         }
         await sleep(Math.max(10, Math.min(HANDOFF_POLL_MS, HANDOFF_WAIT_MS - waited)));
         entry = current();
@@ -5397,7 +5532,7 @@ async function runQueuedRestart(opts) {
         if (handoff && !handoffText) {
           await drop();
           throw new CliError(`${entry.botName}: ${handoffFile} is missing or empty, so it was not restarted; `
-            + `the seat still runs in ${entry.terminal}.`, 1, { refused: "handoff", terminal: entry.terminal });
+            + `the seat still runs in ${entry.terminal}.`, 1, { refused: "handoff", terminal: entry.terminal, handoffKind: "refused" });
         }
         const saved = Object.fromEntries(Object.entries(entry.options ?? {}).filter(([, value]) => value !== null));
         const callOpts = { ...saved, "fresh-shared": saved.freshShared, project: entry.project, force: false,
@@ -5410,7 +5545,12 @@ async function runQueuedRestart(opts) {
           const warning = terminal
             ? await sendHandoffMessage(terminal, handoffText, handoffFile)
             : `${handoffFile} wasn't sent: the restart gave no new terminal; read it by hand.`;
-          if (warning) report([warning]);
+          if (warning) {
+            report([warning]);
+            await noteHandoffFailure(entry, "send", warning, handoffFile);
+          } else {
+            await clearHandoffFailure(entry.botId);
+          }
           return opts.json ? { ...result, handoff: handoffFile, ...(warning ? { warning } : {}) }
             : `${entry.botName}: restarted from ${handoffFile}${terminal ? ` in ${terminal}` : ""}${warning ? `; ${warning}` : ""}.`;
         }
@@ -5425,7 +5565,7 @@ async function runQueuedRestart(opts) {
           if (isPaneIdle(state.get, screen)) {
             try { await hc(["send", entry.terminal, `${entry.botName}: queued restart refused — ${helperRefusal}`]); } catch {}
           }
-          throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: entry.terminal });
+          throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: entry.terminal, handoffKind: "helpers" });
         }
       } else {
         helperBlockedSince = null;
@@ -5445,6 +5585,14 @@ async function runQueuedRestart(opts) {
       entry = current();
       if (!entry) return PRINTED;
     }
+  } catch (e) {
+    // #1556: a detached watcher's stderr dies with its --rm pane, so a failed or dropped
+    // handoff is kept under the app home and the project's main bot is told before it exits.
+    if (handoff) {
+      const kind = e?.detail?.handoffKind ?? (e instanceof CliError ? "refused" : "dropped");
+      await noteHandoffFailure(entry, kind, e?.message ?? String(e), handoffFile);
+    }
+    throw e;
   } finally {
     // Every exit path leaves no stale entry: fired, canceled, expired, or a failed fire.
     await drop();
@@ -5602,10 +5750,16 @@ async function restartDuePass(opts, keys, dry) {
   }
   const line = (r) => `${r.bot.name} (${r.bot.id}) at ${r.terminal} in ${r.key}: context ${r.tokens} > restartAt ${r.threshold}`;
   if (dry) {
-    if (opts.json) return { due: due.map((r) => ({ id: r.bot.id, name: r.bot.name, project: r.key,
-      terminal: r.terminal, context_tokens: r.tokens, restart_at: r.threshold })) };
-    return due.length
-      ? due.map((r) => `${line(r)}; would be asked for its handoff, then restarted from it.`).concat(notes).join("\n")
+    const plans = due.map((r) => {
+      const path = handoffPathOf(r.bot.id);
+      return { ...r, path, refusal: handoffWritable(path) };
+    });
+    if (opts.json) return { due: plans.map((r) => ({ id: r.bot.id, name: r.bot.name, project: r.key,
+      terminal: r.terminal, context_tokens: r.tokens, restart_at: r.threshold, handoff: r.path,
+      refused: r.refusal ?? null })) };
+    return plans.length
+      ? plans.map((r) => `${line(r)}; ${r.refusal ? `would be refused: ${r.refusal}; it would not be asked and not restarted.`
+        : "would be asked for its handoff, then restarted from it."}`).concat(notes).join("\n")
       : ["No seat is over its context threshold.", ...notes].join("\n");
   }
   if (!due.length) {
@@ -5616,10 +5770,11 @@ async function restartDuePass(opts, keys, dry) {
   const say = [];
   for (const r of due) {
     const path = handoffPathOf(r.bot.id);
-    const refuse = (why) => {
+    const refuse = async (why, kind = "refused") => {
       failed.push({ id: r.bot.id, name: r.bot.name, terminal: r.terminal, error: why });
       say.push(`${r.bot.name}: not restarted: ${why}`);
       report([`${r.bot.name}: not restarted: ${why}`]);
+      await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal: r.terminal }, kind, why, path, { notify: false });
     };
     // A timer can tick again while this seat's handoff watcher still waits: replacing that
     // entry would kill the watcher every tick and the seat would never restart (#1556).
@@ -5633,7 +5788,7 @@ async function restartDuePass(opts, keys, dry) {
     }
     const why = handoffRefusal(path);
     if (why) {
-      refuse(`${why}; it was not asked for a handoff and was not restarted.`);
+      await refuse(`${why}; it was not asked for a handoff and was not restarted.`);
       continue;
     }
     try {
@@ -5655,7 +5810,7 @@ async function restartDuePass(opts, keys, dry) {
       // Empty before asking: only what the seat writes for THIS request can be sent (#1556).
       const cleared = clearHandoff(path);
       if (cleared) {
-        refuse(`${cleared}; it was not asked for a handoff and was not restarted.`);
+        await refuse(`${cleared}; it was not asked for a handoff and was not restarted.`);
         continue;
       }
       // Ask now, then wait for a file written after the ask and an idle seat.
@@ -5664,16 +5819,16 @@ async function restartDuePass(opts, keys, dry) {
       if (sent.code !== 0) throw new CliError(`couldn't ask for its handoff (hc send: ${hcSaid((sent.stderr || sent.stdout).trim())})`);
       const ready = await waitForHandoff({ terminal: r.terminal, path, since });
       if (ready.timedOut) {
-        refuse(`still running in ${r.terminal}; it didn't write ${path} within ${Math.round(HANDOFF_WAIT_MS / 1000)}s, so it was not restarted.`);
+        await refuse(`still running in ${r.terminal}; it didn't write ${path} within ${Math.round(HANDOFF_WAIT_MS / 1000)}s, so it was not restarted.`, "timeout");
         continue;
       }
       if (ready.state !== "live") {
-        refuse(`its pane ended (${ready.state}) before it wrote ${path}; nothing was restarted.`);
+        await refuse(`its pane ended (${ready.state}) before it wrote ${path}; nothing was restarted.`, "dropped");
         continue;
       }
       const handoff = readHandoff(path);
       if (!handoff) {
-        refuse(`${path} is empty; it was not restarted and ${r.terminal} still runs it.`);
+        await refuse(`${path} is empty; it was not restarted and ${r.terminal} still runs it.`);
         continue;
       }
       const result = await cmdRestart({ fresh: true, tree: true, json: true, project: r.key,
@@ -5702,13 +5857,18 @@ async function restartDuePass(opts, keys, dry) {
       }
       const terminal = result && typeof result === "object" ? result.terminal : null;
       const warning = terminal ? await sendHandoffMessage(terminal, handoff, path) : `${path} wasn't sent: the restart gave no new terminal.`;
-      if (warning) report([warning]);
+      if (warning) {
+        report([warning]);
+        await noteHandoffFailure({ botId: r.bot.id, botName: r.bot.name, project: r.key, terminal }, "send", warning, path, { notify: false });
+      } else {
+        await clearHandoffFailure(r.bot.id);
+      }
       restarted.push({ id: r.bot.id, name: r.bot.name, terminal, handoff: path, context_tokens: r.tokens, restart_at: r.threshold,
         ...(warning ? { warning } : {}) });
       say.push(`${r.bot.name}: context ${r.tokens} > restartAt ${r.threshold}; restarted from ${path}`
         + `${terminal ? ` in ${terminal}` : ""}${warning ? `; ${warning}` : ""}.`);
     } catch (e) {
-      refuse(e?.message ?? String(e));
+      await refuse(e?.message ?? String(e), e?.detail?.handoffKind ?? (e instanceof CliError ? "refused" : "dropped"));
     }
   }
   if (failed.length) exitAfter.code = 1;

@@ -5,7 +5,7 @@ import { startFakeCore } from "./fake-core.mjs";
 // window unless a test opens one). The real hc and window are never touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -5652,6 +5652,24 @@ async function waitUntil(what, fn, ms = 15_000) {
   throw new Error(`timed out waiting for ${what}`);
 }
 const handoffFile = (s, botId) => join(s.app, "automagik-herdr/handoff", `${botId}.md`);
+/**
+ * The fake `hc run --bg` records the watcher's launch but never spawns it, so a detached
+ * watcher's timeout is otherwise only code-read. This starts the very argv that call recorded
+ * (past hc's `/bin/sh -c ... sh K=V ...` wrapper), detached, keeping the fake's own env words.
+ */
+function startRecordedWatcher(s, run, extraEnv = {}) {
+  const words = run.slice(run.indexOf("--") + 1);
+  let i = words.indexOf("sh", 3) + 1;
+  const env = {};
+  while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) {
+    const eq = words[i].indexOf("=");
+    env[words[i].slice(0, eq)] = words[i].slice(eq + 1);
+    i += 1;
+  }
+  assert.ok(i < words.length, `the watcher's argv is in ${JSON.stringify(run)}`);
+  return spawn(words[i], words.slice(i + 1), { cwd: s.project, env: { ...s.env, ...env, ...extraEnv },
+    detached: true, stdio: "ignore" });
+}
 
 test("#1556 ls and show report context_tokens from the newest assistant message", (t) => {
   const s = restartScene(t);
@@ -5850,6 +5868,92 @@ test("#1556 a queued seat that never writes its handoff is left running and the 
   assert.equal(s.calls().some((c) => c[0] === "kill" || (c[0] === "run" && !c.includes("--run-queued"))), false,
     "the seat was not restarted (its queue watcher's own run is the only run)");
   assert.deepEqual(JSON.parse(readFileSync(join(s.app, "automagik-herdr/queued-restarts.json"), "utf8")), []);
+});
+
+test("#1556 a detached watcher's handoff timeout is recorded and the lead is told", async (t) => {
+  const capSession = "5e4f4a3b-8c2d-4e6f-9a8b-7c6d5e4f3a2b";
+  const s = restartScene(t);
+  const captain = term("t6", { bot: ID.cap, cwd: s.project, status: "working" });
+  captain.labels = { ...captain.labels, "agent.session": capSession };
+  const initial = s.hcState();
+  initial.terminals.push(captain);
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(initial));
+  attachSeat(s, "Genie", "t5");
+  attachSeat(s, "Captain", "t6");
+  assert.equal(s.cli(["edit", "Captain", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, capSession, [assistantUsage(5000)]);
+  const due = s.cli(["restart", "--due", "--json"]);
+  assert.equal(due.code, 0, due.err);
+  assert.equal(due.json().queued.length, 1, due.out);
+  // The fake hc does not spawn the watcher: take the launch the queue recorded and start it
+  // detached, as hc would, so the ask -> timeout path runs end to end.
+  const run = s.calls().find((c) => c[0] === "run" && c.includes("--run-queued"));
+  assert.ok(run, "the pass started a detached watcher");
+  const state = s.hcState();
+  state.idleOnWait = "t6";
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  startRecordedWatcher(s, run, { AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "120", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10",
+    AUTOMAGIK_HERDR_QUEUE_POLL_MS: "5" });
+  const record = join(s.app, "automagik-herdr/handoff-failures.json");
+  const queue = join(s.app, "automagik-herdr/queued-restarts.json");
+  await waitUntil("the detached watcher's failure record", () => existsSync(record)
+    && JSON.parse(readFileSync(queue, "utf8")).length === 0, 20_000);
+  const failure = JSON.parse(readFileSync(record, "utf8")).failures[0];
+  assert.equal(failure.botId, ID.cap);
+  assert.equal(failure.botName, "Captain");
+  assert.equal(failure.kind, "timeout");
+  assert.match(failure.why, /didn't write .*b-.*\.md/);
+  assert.equal(failure.handoff, handoffFile(s, ID.cap));
+  assert.equal(failure.notified?.sent, "t5", "the project's main bot was told");
+  assert.ok(s.hcState().sent.some((m) => m.to === "t5" && /Captain.*handoff restart failed/.test(m.text)),
+    JSON.stringify(s.hcState().sent));
+  // The existing reader shows it after the watcher's --rm pane is gone.
+  const listed = s.cli(["restart", "--queued"]);
+  assert.match(listed.out, /Captain.*handoff restart timeout/);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t6").state, "live", "the seat kept running");
+  assert.equal(s.calls().some((c) => c[0] === "run" && !c.includes("--run-queued")), false, "nothing restarted it");
+  assert.equal(s.calls().some((c) => c[0] === "kill"), false, "nothing was ended");
+});
+
+test("#1556 a failed first-message send is a recorded warning, not a failed restart", async (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(5000)]);
+  const state = s.hcState();
+  state.failSend = ["t100"];
+  writeFileSync(join(s.root, "hc.json"), JSON.stringify(state));
+  const running = s.cliAsync(["restart", "--due", "--json"], { env: {
+    AUTOMAGIK_HERDR_HANDOFF_WAIT_MS: "20000", AUTOMAGIK_HERDR_HANDOFF_POLL_MS: "10" } });
+  await waitUntil("the handoff request", () => s.calls().some((c) => c[0] === "send" && c[1] === "t5"));
+  writeFileSync(handoffFile(s, ID.main), "Send-failure handoff: the file stays for a person.\n");
+  const r = await running;
+  assert.equal(r.code, 0, "the restart itself succeeded");
+  const restarted = JSON.parse(r.out).restarted[0];
+  assert.match(restarted.warning, /wasn't sent to t100/);
+  const failure = JSON.parse(readFileSync(join(s.app, "automagik-herdr/handoff-failures.json"), "utf8")).failures[0];
+  assert.equal(failure.botId, ID.main);
+  assert.equal(failure.kind, "send");
+  assert.match(failure.why, /wasn't sent to t100/);
+  const listed = s.cli(["restart", "--queued"]);
+  assert.match(listed.out, /Genie.*handoff restart send/);
+  assert.equal(s.hcState().terminals.find((x) => x.address === "t100").state, "live", "the new conversation runs");
+});
+
+test("#1556 restart --due --dry-run does not say a seat would be asked when its handoff home is a file", (t) => {
+  const s = restartScene(t);
+  attachSeat(s, "Genie", "t5");
+  assert.equal(s.cli(["edit", "Genie", "--restart-at", "1000"]).code, 0);
+  seatTranscript(s, SID, [assistantUsage(1200)]);
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(join(s.app, "automagik-herdr", "handoff"), "not a folder");
+  const dry = s.cli(["restart", "--due", "--dry-run", "--json"]);
+  assert.equal(dry.code, 0, dry.err);
+  assert.match(dry.json().due[0].refused, /is not a folder/);
+  const text = s.cli(["restart", "--due", "--dry-run"]);
+  assert.doesNotMatch(text.out, /would be asked/);
+  assert.match(text.out, /would be refused/);
+  assert.equal(readFileSync(join(s.app, "automagik-herdr", "handoff"), "utf8"), "not a folder", "the dry run touched nothing");
 });
 
 test("#1556 a handoff file left by an earlier pass is emptied before the ask: only the new text is sent", async (t) => {
