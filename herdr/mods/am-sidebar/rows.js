@@ -227,6 +227,31 @@ export const NEEDS_YOU = "Needs you";
 export const NEEDS_YOU_PERMISSION = "Permission";
 export const needsYouText = (report) => (waitsOnPermission(report) ? NEEDS_YOU_PERMISSION : NEEDS_YOU);
 
+// The documented marker a stopped agent sets on its own pane with `hc label`: the short text of
+// what it waits on (tidy.js's NEEDS_OWNER_LABEL, one label with two readers; a test holds them
+// equal). The sidebar draws it apart from the blocked chip; it never scans a pane's screen.
+export const NEEDS_OWNER_LABEL = "automagik-herdr.needs-owner";
+// The owner-question chip's word, drawn by main.js status().
+export const OWNER_QUESTION = "Question";
+/** How much of the label one line can carry; the rest is cut, keeping the chip and its tooltip small. */
+export const OWNER_TEXT_MAX = 160;
+
+/**
+ * The question a pane's needs-owner label carries while it waits on the person, or null. A
+ * working, blocked or failed pane has no owner question: the chip clears in the drawing the
+ * moment the agent works again, even before it removes the label. `status` is the row's drawn
+ * status (a bot row draws `error` as blocked). Blank and whitespace labels say nothing; a long
+ * one is cut to OWNER_TEXT_MAX characters on one line.
+ */
+export function ownerQuestionOf(row, status = row?.status) {
+  if (status === "working" || status === "blocked" || status === "error") return null;
+  const text = row?.labels?.[NEEDS_OWNER_LABEL];
+  if (typeof text !== "string") return null;
+  const line = text.trim().replace(/\s+/g, " ");
+  if (!line) return null;
+  return line.length > OWNER_TEXT_MAX ? `${line.slice(0, OWNER_TEXT_MAX - 3)}...` : line;
+}
+
 /** When the next idle bot turns asleep (ms since the epoch), or null: the view's one wake-up. */
 export function nextWake(live, now) {
   let next = null;
