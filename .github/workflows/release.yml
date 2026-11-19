@@ -303,14 +303,14 @@ jobs:
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.herdr == 'yes'
         run: bash scripts/release-gates.sh herdr-app
 
-      # Before the cut, so a release that packs the pack never goes out without a pointer the
-      # installed packs trust: HERDR_PACK_KEY must be a key pack-keys.json lists (its keyId is the
-      # entry with its public key). The HERDR_PACK_SIGNER variable picks the secret slot, so a
-      # rotation's new key waits in HERDR_PACK_KEY_NEXT until it is switched on (RFC 0011).
+      # Before the cut, check the slot named by HERDR_PACK_SIGNER and its key against pack-keys.json.
+      # An unset or empty selector defaults to HERDR_PACK_KEY. An unknown selector or an empty
+      # selected slot stops the release. The re-cut and signing steps use the same selection.
       - name: The herdr pack's signing key
         if: steps.new.outputs.release == 'true' && steps.lane.outputs.herdr == 'yes'
         env:
-          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY }}
+          HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}
+          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}
         run: bash scripts/release-gates.sh herdr-key
 
       # Every release carries am (RFC 0012): its tests, a syntax check, shellcheck on its launcher,
@@ -392,7 +392,8 @@ jobs:
           METER: ${{ steps.lane.outputs.meter }}
           # A re-cut re-runs the signing-key gates on the new tip: they read the key lists, which a
           # merge in the window can change, so the same secrets the key-check steps got are here.
-          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY }}
+          HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}
+          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}
           AM_LANE_KEY: ${{ vars.AM_LANE_SIGNER == 'AM_LANE_KEY_NEXT' && secrets.AM_LANE_KEY_NEXT || secrets.AM_LANE_KEY }}
           METER_LANE_KEY: ${{ vars.METER_LANE_SIGNER == 'METER_LANE_KEY_NEXT' && secrets.METER_LANE_KEY_NEXT || secrets.METER_LANE_KEY }}
           HAS_KEYSTORE: ${{ secrets.POCKET_SIGNING_KEYSTORE != '' }}
@@ -499,7 +500,8 @@ jobs:
         env:
           VERSION: ${{ steps.cut.outputs.version }}
           SHA: ${{ steps.cut.outputs.sha }}
-          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || secrets.HERDR_PACK_KEY }}
+          HERDR_PACK_SIGNER: ${{ vars.HERDR_PACK_SIGNER }}
+          HERDR_PACK_KEY: ${{ vars.HERDR_PACK_SIGNER == 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY_NEXT || vars.HERDR_PACK_SIGNER != 'HERDR_PACK_KEY_NEXT' && secrets.HERDR_PACK_KEY || '' }}
           HERDR_LANE_REPLACE_UNVERIFIED: ${{ inputs.replace_unverified_herdr_pointer }}
         run: |
           set -euo pipefail

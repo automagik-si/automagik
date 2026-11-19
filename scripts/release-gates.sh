@@ -7,7 +7,7 @@
 #   scripts/release-gates.sh herdr           the pack's tests, syntax checks, shellcheck and indexes
 #   scripts/release-gates.sh herdr-imports   every shipped mod's static import graph
 #   scripts/release-gates.sh herdr-app       every shipped mod loads in the pinned herdr-app
-#   scripts/release-gates.sh herdr-key       HERDR_PACK_KEY is a key pack-keys.json lists
+#   scripts/release-gates.sh herdr-key       HERDR_PACK_SIGNER selects a key pack-keys.json lists
 #   scripts/release-gates.sh am              am's tests, syntax check and shellcheck
 #   scripts/release-gates.sh am-key          AM_LANE_KEY signs against am/am-keys.json (or warns)
 #   scripts/release-gates.sh meter           the meter crate's fmt, clippy and tests
@@ -104,7 +104,7 @@ gate_herdr_app() {
   node .github/scripts/herdr-app-check.mjs --strict
 }
 
-# HERDR_PACK_KEY must be a key pack-keys.json lists (release.yml's "The herdr pack's signing key").
+# Validate HERDR_PACK_SIGNER and the selected secret from release.yml against pack-keys.json.
 gate_herdr_key() {
   bun scripts/herdr-lane.ts check-key
 }
