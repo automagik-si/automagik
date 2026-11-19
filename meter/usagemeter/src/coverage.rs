@@ -1048,19 +1048,25 @@ fn text(r: &Record) -> String {
                 r.incomplete_sources.join(", ")
             );
         }
-        let headline = match w.bot_coverage {
-            None => "bot_coverage null (no counted usage in this window)".to_string(),
-            Some(_) if w.evidence == "none" => format!(
-                "bot_coverage {} (evidence none: every counted token is before evidence, a \
-                 measured 0, not unknown)",
-                fraction(w.bot_coverage)
-            ),
-            Some(_) => format!(
-                "bot_coverage {} of the {} counted tokens (attributed {}, over counted usage)",
-                fraction(w.bot_coverage),
-                w.totals.total,
-                w.totals.attributed
-            ),
+        let headline = if w.totals.total > 0 && w.totals.attributed == 0 && !r.all_vouch {
+            "bot_coverage unknown (no token is attributed and a source is unreadable, so a zero \
+             cannot be vouched for)"
+                .to_string()
+        } else {
+            match w.bot_coverage {
+                None => "bot_coverage null (no counted usage in this window)".to_string(),
+                Some(_) if w.evidence == "none" => format!(
+                    "bot_coverage {} (evidence none: every counted token is before evidence, a \
+                     measured 0, not unknown)",
+                    fraction(w.bot_coverage)
+                ),
+                Some(_) => format!(
+                    "bot_coverage {} of the {} counted tokens (attributed {}, over counted usage)",
+                    fraction(w.bot_coverage),
+                    w.totals.total,
+                    w.totals.attributed
+                ),
+            }
         };
         let _ = writeln!(o, "  {headline}");
         if w.evidence == "partial" {
@@ -1167,6 +1173,13 @@ fn text(r: &Record) -> String {
         );
         for line in &w.bots {
             let _ = writeln!(o, "    {}", bot_text(line, w.totals.total));
+        }
+        if w.bots_shown + w.bots_omitted > 1 {
+            let _ = writeln!(
+                o,
+                "  bot shares are each rounded to four decimals; their sum can differ from the \
+                 attributed share by rounding"
+            );
         }
         if let Some(line) = &w.bots_other {
             let _ = writeln!(

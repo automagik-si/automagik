@@ -175,9 +175,9 @@ test('the sidebar draws the lockup to fit its top row, and the brand slots in th
   const name = draw({ type: BrandName, props: {} })
   // Beside a 24px mark the wordmark is 25px tall: the mark's square is 257.7 of the lockup's 264.
   assert.equal(draw(name.children[0]).props.height, 25)
-  // The top row holds up to five buttons beside the lockup (test/power-shortcut-browser.test.js
-  // measures it). At 21px the lockup is 130px wide: with its padding (6 + 4) it takes 140px,
-  // no more than the picture it replaces did (141px), so the row fits wherever it did.
+  // The top row holds up to five buttons beside the lockup. At 21px the lockup is 130px wide:
+  // with its padding (6 + 4) it takes 140px, no more than the picture it replaced did (141px),
+  // so the row fits wherever it did.
   const source = readFileSync(join(PLUGIN, 'src', 'client', 'sidebar.js'), 'utf8')
   assert.match(source, /h\('span', \{ className: 'bt-brand' \}, h\(Lockup, \{ height: 21 \}\)\)/)
   assert.match(SIDEBAR_CSS, /\.bt-side-top \.bt-brand\{cursor:default;padding-left:6px;padding-right:4px\}/)

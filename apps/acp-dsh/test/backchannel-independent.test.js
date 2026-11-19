@@ -364,7 +364,7 @@ test('B5: a Full bridge call whose tool throws an Error with no .code writes a J
   }
 })
 
-test('B6: no open step and an unwritable advertisement are refused without running the tool or leaving rows', async () => {
+test('B6: no open step and an unwritable advertisement (Manual and Full) are refused without rows', async () => {
   const noStep = await serve(bridgeHost({ level: 'full' }))
   try {
     noStep.session.append('step/end', { turn: 1, step: 1 })
@@ -381,23 +381,25 @@ test('B6: no open step and an unwritable advertisement are refused without runni
     noStep.backchannel.dispose()
   }
 
-  const unwritable = await serve(bridgeHost({ level: 'manual' }))
-  const append = unwritable.session.append.bind(unwritable.session)
-  unwritable.session.append = (type, data, options) => {
-    if (type === 'assistant/message') throw new Error('advertisement blocked')
-    return append(type, data, options)
-  }
-  try {
-    const before = unwritable.session.snapshotEvents()
-    const { status, body } = await postCall(unwritable, { callId: 'probe-b6-no-advertisement' })
-    assert.equal(status, 200)
-    assert.equal(body.isError, true)
-    assert.deepEqual(body.error, { name: 'BridgeRecordError', code: 'BRIDGE_RECORD_FAILED' })
-    assert.equal(unwritable.executed.length, 0, 'an unadvertised call does not run the tool')
-    const events = unwritable.session.snapshotEvents()
-    assert.deepEqual(events, before, 'the refused call leaves no tool/call or tool/result row')
-    assert.equal(events.filter(event => event.type === 'tool/call' || event.type === 'tool/result' || event.type === 'assistant/message').length, 0)
-  } finally {
-    unwritable.backchannel.dispose()
+  for (const level of ['manual', 'full']) {
+    const unwritable = await serve(bridgeHost({ level }))
+    const append = unwritable.session.append.bind(unwritable.session)
+    unwritable.session.append = (type, data, options) => {
+      if (type === 'assistant/message') throw new Error('advertisement blocked')
+      return append(type, data, options)
+    }
+    try {
+      const before = unwritable.session.snapshotEvents()
+      const { status, body } = await postCall(unwritable, { callId: `probe-b6-no-advertisement-${level}` })
+      assert.equal(status, 200)
+      assert.equal(body.isError, true)
+      assert.deepEqual(body.error, { name: 'BridgeRecordError', code: 'BRIDGE_RECORD_FAILED' })
+      assert.equal(unwritable.executed.length, 0, `${level}: an unadvertised call does not run the tool`)
+      const events = unwritable.session.snapshotEvents()
+      assert.deepEqual(events, before, `${level}: the refused call leaves no tool/call or tool/result row`)
+      assert.equal(events.filter(event => event.type === 'tool/call' || event.type === 'tool/result' || event.type === 'assistant/message').length, 0, level)
+    } finally {
+      unwritable.backchannel.dispose()
+    }
   }
 })

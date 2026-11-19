@@ -44,6 +44,20 @@ type Terminal struct {
 	Status *struct {
 		State string `json:"state"`
 	} `json:"status"`
+	// Address, CreatedMS, Cwd, Labels and Foreground are the pane's identity:
+	// what tells a target's live terminal apart from a stale shell, another
+	// project's pane, or a terminal that merely carries the same label (#498).
+	Address    string            `json:"address"`
+	CreatedMS  int64             `json:"created_ms"`
+	Cwd        string            `json:"cwd"`
+	Labels     map[string]string `json:"labels"`
+	Foreground *Foreground       `json:"foreground"`
+}
+
+// Foreground is the program in front of a pane: a shell when its agent has
+// quit, the agent itself while it runs.
+type Foreground struct {
+	Argv []string `json:"argv"`
 }
 
 // ErrNotFound is hc's answer about a terminal it does not have, or no longer.
@@ -164,6 +178,30 @@ func (Client) Read(address string) (string, error) {
 // terminal to pause; a report is not worth holding a run's slot for longer.
 const sendTimeout = 2 * time.Minute
 
+// SendError is a refusal reported by hc as a JSON error envelope.
+type SendError struct {
+	Envelope string
+	message  string
+	err      error
+}
+
+func (e *SendError) Error() string { return "hc send: " + e.message }
+
+func (e *SendError) Unwrap() error { return e.err }
+
+func sendErrorMessage(raw string) string {
+	var envelope, body map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &envelope) != nil || json.Unmarshal(envelope["error"], &body) != nil {
+		return ""
+	}
+	var kind *string
+	var message string
+	if json.Unmarshal(body["kind"], &kind) != nil || kind == nil || json.Unmarshal(body["message"], &message) != nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(message), " ")
+}
+
 // Send pastes text into a terminal and submits it: how one bot messages
 // another. hc refuses a terminal whose program is blocked on a dialog, and
 // that refusal is the answer: a report never answers somebody's dialog.
@@ -181,6 +219,9 @@ func (Client) Send(address, text string) error {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = strings.TrimSpace(stdout.String())
+		}
+		if message := sendErrorMessage(msg); message != "" {
+			return &SendError{Envelope: msg, message: message, err: err}
 		}
 		return fmt.Errorf("hc send: %s (%w)", msg, err)
 	}

@@ -1,6 +1,6 @@
 [package]
 name = "usagemeter"
-version = "3.154.4"
+version = "3.157.12"
 edition = "2024"
 rust-version = "1.89"
 description = "Counts coding-agent token usage per machine as ae/1 rows and publishes a summary doc to herdr-core"

@@ -3,8 +3,8 @@ title: "One shared debug signing key for Pocket PR builds"
 type: decision
 status: Accepted
 created: 2026-11-10
-updated: 2026-11-10
-pr: ""
+updated: 2026-11-18
+pr: "automagik-si/automagik#986"
 tags: [decisions, build, signing, ci]
 ---
 # One shared debug signing key for Pocket PR builds
@@ -34,16 +34,16 @@ Taken by the Orchestrator on 2026-11-10, from the design in this pull request.
 
 ## Current state
 
-- `apps/pocket/android/app/build.gradle.kts:39` reads `POCKET_DEBUG_STORE`, else
-  `-Ppocket.debugStore`; `:66-69` creates the `sharedDebug` signing config from it.
+- `apps/pocket/android/app/build.gradle.kts:41` reads `POCKET_DEBUG_STORE`, else
+  `-Ppocket.debugStore`; `:70-71` creates the `sharedDebug` signing config from it.
 - The debug build type picks the release key first, then `sharedDebug`, then AGP's default debug key
-  (`apps/pocket/android/app/build.gradle.kts:77`). The release build type and
+  (`apps/pocket/android/app/build.gradle.kts:79`). The release build type and
   `signingConfigs.pocket` are unchanged.
 - With no path, debug builds keep AGP's default debug key, including the read-only-home fallback
-  (`apps/pocket/android/app/build.gradle.kts:117-118`).
-- `.github/workflows/ci.yml:367-383` decodes the secret to the runner's temporary folder and exports
-  `POCKET_DEBUG_STORE`; `:393-406` prints `apksigner verify --print-certs` and uploads
-  `app-debug.apk` as `pocket-debug-apk-<pr-or-run>` for 14 days; `:408-410` removes the file.
+  (`apps/pocket/android/app/build.gradle.kts:121-122`).
+- `.github/workflows/ci.yml:658-676` decodes the secret to the runner's temporary folder and exports
+  `POCKET_DEBUG_STORE`; `:685-698` prints `apksigner verify --print-certs` and uploads
+  `app-debug.apk` as `pocket-debug-apk-<pr-or-run>` for 14 days; `:700-702` removes the file.
 - Without the secret (a fork, or before the owner sets it), the job builds with the default key and
   uploads no APK. Fork pull requests cannot read repository secrets.
 
@@ -61,6 +61,11 @@ through a repository secret.
 - Once the owner sets the secret, two PR runs must print the same certificate SHA-256, and their
   APKs must install over each other (`adb install -r`). A run without the secret prints no
   certificate and uploads no APK.
+- The owner set the secret on 2026-11-10. Three PR runs since print the same certificate:
+  `CN=Automagik-Pocket-PR-Debug`, SHA-256
+  `095b43805012910686cd51880c621a85a1ed1071826af8338e1f4d267b8c0ab9` (runs 42929345512,
+  42937994765 and 43353712566). The shared digest is what lets one phone install either PR's APK
+  over the other. A physical install-over check on one device is the next render pass's.
 
 ## Risks
 

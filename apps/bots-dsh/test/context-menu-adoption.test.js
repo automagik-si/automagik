@@ -12,6 +12,10 @@ const bundle = await build({
 })
 const module = { exports: {} }
 let confirmResult = false
+// The menu keeps the confirmation in its own state, so a second render must see the state a
+// click wrote: the cells are read in hook order, as React reads them.
+const states = []
+let stateCursor = 0
 const windowState = { innerWidth: 1280, innerHeight: 800, confirm: () => confirmResult }
 runInNewContext(bundle.outputFiles[0].text, {
   module, exports: module.exports,
@@ -23,7 +27,11 @@ runInNewContext(bundle.outputFiles[0].text, {
       react: {
         createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
         Fragment: 'Fragment',
-        useState: initial => [initial, () => {}],
+        useState(initial) {
+          const index = stateCursor++
+          if (!(index in states)) states[index] = initial
+          return [states[index], next => { states[index] = typeof next === 'function' ? next(states[index]) : next }]
+        },
         useEffect: () => {},
         useLayoutEffect: () => {},
         useMemo: make => make(),
@@ -54,8 +62,14 @@ function labelOf(item) {
   return (span ?? item).children.filter(child => typeof child === 'string').at(-1)
 }
 
+function renderMenu(props) {
+  stateCursor = 0
+  const tree = ContextMenu(props)
+  return typeof tree.type === 'function' ? tree.type(tree.props) : tree
+}
+
 function menuFor(roster, id, actions = new Proxy({}, { get: () => () => {} })) {
-  return ContextMenu({ menu: { kind: 'bot', id, x: 10, y: 10 }, roster, actions })
+  return renderMenu({ menu: { kind: 'bot', id, x: 10, y: 10 }, roster, actions })
 }
 
 const roster = {
@@ -173,15 +187,22 @@ for (const { kind, label, action, args } of [
       [action]: (...received) => { calls.push(received); return Promise.reject(error) },
       reportError: (failure, where) => reported.push([failure, where]),
     }
-    const tree = ContextMenu({
+    const props = {
       menu: { kind, id: kind === 'agent' ? 'agent-1' : 'session-1', agentId: 'agent-1', x: 10, y: 10 },
       roster: { ...roster, agentsById: { 'agent-1': { id: 'agent-1', name: 'Original' } } },
       actions,
-    })
-    const menu = tree.type(tree.props)
-    const item = walk(menu).find(node => node.props?.role === 'menuitem' && labelOf(node) === label)
+    }
+    let item = walk(renderMenu(props)).find(node => node.props?.role === 'menuitem' && labelOf(node) === label)
     assert.ok(item)
     item.props.onClick()
+    // Removing a DSH bot archives its Sessions, so it asks first and runs on the second click.
+    const asked = action === 'removeAgent' ? `${label}?` : undefined
+    if (asked) {
+      assert.deepEqual(calls, [], 'the first click only asks')
+      item = walk(renderMenu(props)).find(node => node.props?.role === 'menuitem' && labelOf(node) === asked)
+      assert.ok(item)
+      item.props.onClick()
+    }
     await new Promise(resolve => setTimeout(resolve, 0))
     assert.deepEqual(calls, ['close', args])
     assert.deepEqual(reported, [[error, 'menu']])

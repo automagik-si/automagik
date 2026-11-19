@@ -113,7 +113,8 @@ and a rollback when this RFC is accepted.
    configures, with one documented default. *Amended by RFC 0024 (2026-11-09):* a self-hosted
    web instance signs its one owner in with a local claim and passkeys, checked by the instance
    itself; Automagik Cloud signs people in through Pocket ID. An optional external OIDC provider
-   for self-hosters is not planned.
+   for self-hosters is not planned. *Cloud's identity provider is now Automagik ID,
+   [RFC 0032](0032-automagik-id.md), not Pocket ID.*
 3. **How is install.sh signed?** Recommended: reuse the release signing that the plugin lane
    already has, with a key of its own, and publish the public key in this repository.
 4. **Windows signing.** Recommended: ship unsigned preview builds, clearly labelled, until a

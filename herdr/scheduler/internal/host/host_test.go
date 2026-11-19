@@ -625,3 +625,13 @@ func TestCloseWorktreeAndRootStillCloseTheWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// backend: auto resolves to the TUI's server when herdr-core is down. A target
+// must fail there, never fall back to the fresh session it exists to replace.
+func TestTargetRefusesWithoutHerdrCore(t *testing.T) {
+	h := &live{ops: &fakeOps{}, knobs: fast()}
+	_, err := h.Provision(config.Automation{Name: "housekeeping", Target: "bot:b-6jrz4bmxml", Repo: "/src/project"})
+	if err == nil || !strings.Contains(err.Error(), "a target needs herdr-core") {
+		t.Fatalf("err %v", err)
+	}
+}
