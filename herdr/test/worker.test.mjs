@@ -2035,6 +2035,7 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
   let child, fresh, watchdog;
   let closed = false;
   let released = false;
+  let terminal = false;
   let out = "", err = "";
   let close;
   try {
@@ -2042,11 +2043,12 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
     let finish;
     const result = new Promise((resolve) => { finish = resolve; });
     close = new Promise((resolve) => child.once("close", (code, signal) => {
+      terminal = true;
       closed = true;
       resolve();
       finish({ code, signal });
     }));
-    const fail = (why) => finish({ failure: why });
+    const fail = (why) => { terminal = true; finish({ failure: why }); };
     child.on("error", (e) => fail(`scratch CLI error: ${e.message}`));
     child.stdout.on("error", (e) => fail(`stdout error: ${e.message}`));
     child.stderr.on("error", (e) => fail(`stderr error: ${e.message}`));
@@ -2055,7 +2057,7 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
     child.stdout.on("data", (d) => { out += d; });
     child.stderr.on("data", (d) => {
       err += d;
-      if (released || !notice.test(err)) return;
+      if (terminal || released || !notice.test(err)) return;
       released = true; // Accumulated stderr keeps matching; never remove a successor's lock.
       clearInterval(fresh);
       clearTimeout(watchdog);
@@ -2082,6 +2084,7 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
     assert.equal(err.split("waiting for").length, 2, "said once");
     assert.equal(s.runs().length, 1);
   } finally {
+    terminal = true; // Keep draining late output without releasing or rearming during teardown.
     clearInterval(fresh);
     clearTimeout(watchdog);
     try {
@@ -2101,6 +2104,8 @@ test("worker #536: a wait for the worktree lock past 3 s is said once on stderr,
         assert.ok(closed, `scratch CLI did not close after termination\nstdout: ${out}\nstderr: ${err}`);
       }
     } finally {
+      clearInterval(fresh);
+      clearTimeout(watchdog);
       if (ownsLock()) rmSync(lock);
     }
   }
