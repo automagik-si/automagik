@@ -147,8 +147,9 @@ plugins (`scripts/herdr-lane.ts`):
   `HERDR_PACK_KEY` Actions secret, never `PLUGIN_LANE_KEY` (t22n's recommendation, t259's ruling): a
   leak of one key does not reach the other part. The pointer's `keyId` is the `pack-keys.json` entry
   whose public key is the secret's, so any listed key signs under its own id. The release verifies
-  what it signed before it posts it, and `herdr-lane.ts check-key` stops a release that would ship
-  the pack before it tags when the secret is missing or its public key is not in `pack-keys.json`.
+  what it signed before it posts it. Before tagging, `herdr-lane.ts check-key` validates the slot
+  named by `HERDR_PACK_SIGNER` and the selected key against `pack-keys.json`. On success it prints
+  the effective slot and `keyId`.
 - The trusted public keys are `herdr/mods/am-sidebar/pack-keys.json`, which the pack tarball
   carries, so the installed copy is the trust anchor. `install.sh` embeds the same list
   (`TRUSTED_KEYS`; `herdr-lane.test.ts` keeps the two equal). Rotation is in two phases ("Making
@@ -215,8 +216,9 @@ A rotation is two phases:
    both files in a later release, and leave its slot for the next rotation.
 
 Switched too early, nothing is installed wrongly: those installs stop updating until they reinstall
-with `install.sh`. A release whose secret is missing or unlisted stops at `check-key`, before it
-tags.
+with `install.sh`. The release stops at `check-key` before it tags if the selector names an
+unknown slot, the selected secret is missing or empty, or its public key is absent from
+`pack-keys.json`.
 
 ## CI
 
