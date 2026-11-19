@@ -296,6 +296,20 @@ const writeStaleDefaultRow = (s, row) => {
   mkdirSync(join(defaultHomePath(s), "automagik-herdr"), { recursive: true });
   writeFileSync(defaultLedgerPath(s), `${JSON.stringify({ ...row, terminal: "t3", created_ms: 1 })}\n`, { mode: 0o600 });
 };
+/** The label is a display hint (the README's "relabelling a pane moves no bot"): drop it, as a
+ * person can with `hc label`, while the ledger row still proves the pane. */
+const dropLabel = (s, terminal) => {
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  const pane = state.terminals.find((x) => x.address === terminal);
+  delete pane.labels?.bot;
+  writeFileSync(s.statePath, JSON.stringify(state));
+};
+/** A live pane is what a restart replaces: its turn has to be idle first. */
+const idlePane = (s, terminal) => {
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.terminals.find((x) => x.address === terminal).status.state = "idle";
+  writeFileSync(s.statePath, JSON.stringify(state));
+};
 
 test("#1128 restart without HERDR_APP_HOME writes the project's app home, never the default one", (t) => {
   const s = scene(t);
@@ -418,4 +432,97 @@ test("#1128 revive from either app-home context never duplicates a live bot", (t
   assert.match(JSON.stringify(JSON.parse(conflict.stdout)), /two app homes/);
   assert.deepEqual(readFileSync(defaultLedgerPath(s)), beforeDefault, "the default ledger untouched");
   assert.deepEqual(readFileSync(attachPath(home)), beforeProject, "the project home's ledger untouched");
+});
+
+// The Tester's F1 (#1128): the live binding is in the project's own app home, its pane lost the
+// display label, and the selected (default) home still has a stale row. Live must win; the row
+// in the default home is not authority and is not written.
+test("#1128 a live project-home binding beats a stale default row on restart, label lost", (t) => {
+  const s = scene(t);
+  const home = withProjectHome(s);
+  const terminal = startIn(s, home);
+  writeStaleDefaultRow(s, attachRowsIn(home).at(-1));
+  dropLabel(s, terminal);
+  idlePane(s, terminal);
+  const beforeDefault = readFileSync(defaultLedgerPath(s));
+  writeFileSync(s.logPath, "");
+  const r = cliWith(s, {}, ["HERDR_APP_HOME"], ["restart", "Genie", "--json"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).replaced, terminal, "the live project-home pane is replaced, never twinned");
+  const launches = runs(s);
+  assert.equal(launches.length, 1, "one replacement");
+  assert.equal(envWord(launches[0], "HERDR_APP_HOME"), `HERDR_APP_HOME=${home}`, "the live binding's home, not the default");
+  assert.equal(liveFor(s, ID.main).length, 1, "exactly one live seat");
+  assert.deepEqual(readFileSync(defaultLedgerPath(s)), beforeDefault, "the default ledger is not written");
+  assert.equal(attachRowsIn(home).filter((row) => row.event === "attach").at(-1).bot, ID.main);
+});
+
+// The Reviewer's HIGH (#1128) from the other side: two live bindings for one bot, the selected
+// home's pane labelled and the project home's pane unlabelled. No launch record decides between
+// two panes, so restart refuses, names both ledgers, and writes nothing.
+test("#1128 two live bindings refuse before any write, even when one lost its label", (t) => {
+  const s = scene(t);
+  const home = withProjectHome(s);
+  const terminal = startIn(s, home);
+  dropLabel(s, terminal);
+  const row = attachRowsIn(home).at(-1);
+  // The selected (default) home's own live pane for the same bot: the split #1128 leaves behind.
+  mkdirSync(join(defaultHomePath(s), "automagik-herdr"), { recursive: true });
+  writeFileSync(defaultLedgerPath(s), `${JSON.stringify({ ...row, terminal: "t8", created_ms: 100 })}\n`, { mode: 0o600 });
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  state.terminals.push({ ...state.terminals.find((x) => x.address === terminal), address: "t8", name: "twin", created_ms: 100,
+    labels: { ...(state.terminals.find((x) => x.address === terminal).labels ?? {}), bot: ID.main } });
+  writeFileSync(s.statePath, JSON.stringify(state));
+  const beforeDefault = readFileSync(defaultLedgerPath(s)), beforeProject = readFileSync(attachPath(home));
+  writeFileSync(s.logPath, "");
+  const r = cliWith(s, {}, ["HERDR_APP_HOME"], ["restart", "Genie", "--json"]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.equal(JSON.parse(r.stdout).refused, "app-home");
+  assert.ok(r.stderr.includes(attachPath(defaultHomePath(s))), `the selected ledger's path: ${r.stderr}`);
+  assert.ok(r.stderr.includes(attachPath(home)), `the project home's path: ${r.stderr}`);
+  assert.deepEqual(calls(s).filter((call) => ["run", "kill"].includes(call[0])), [], "nothing launched or ended");
+  assert.deepEqual(readFileSync(defaultLedgerPath(s)), beforeDefault, "the default ledger untouched");
+  assert.deepEqual(readFileSync(attachPath(home)), beforeProject, "the project home's ledger untouched");
+});
+
+// The same live-over-stale rule on a direct read path: whois (and show) use the one resolver,
+// so the live project-home binding answers there too. A mutation that reads the selected map
+// alone (attachView().live) fails this test.
+test("#1128 whois and show read the same resolver: live project home beats a stale default row", (t) => {
+  const s = scene(t);
+  const home = withProjectHome(s);
+  const terminal = startIn(s, home);
+  writeStaleDefaultRow(s, attachRowsIn(home).at(-1));
+  dropLabel(s, terminal);
+  const whois = cliWith(s, {}, ["HERDR_APP_HOME"], ["whois", "--bot", ID.main, "--json"]);
+  assert.equal(whois.status, 0, whois.stderr);
+  assert.equal(JSON.parse(whois.stdout).terminal, terminal, "the live project-home pane, not the stale default row");
+  assert.equal(JSON.parse(whois.stdout).project, s.project);
+  const show = cliWith(s, {}, ["HERDR_APP_HOME"], ["show", "Genie", "--json"]);
+  assert.equal(show.status, 0, show.stderr);
+  assert.equal(JSON.parse(show.stdout).terminal, terminal, "show reads the same resolved binding");
+  assert.equal(JSON.parse(show.stdout).status !== "not running", true);
+});
+
+// The Tester's F2 (#1128): a pane launched before #650 has no app-home word, and the project
+// has no own app home. There is no second home to read, so restart refuses before any write
+// rather than guess the default one.
+test("#1128 a pre-#650 pane with no project app home refuses without writing", (t) => {
+  const s = scene(t);
+  const away = join(s.root, "away-app");
+  mkdirSync(away, { recursive: true });
+  const terminal = startIn(s, away);
+  const state = JSON.parse(readFileSync(s.statePath, "utf8"));
+  const pane = state.terminals.find((x) => x.address === terminal);
+  pane.argv = pane.argv.filter((word) => !word.startsWith("HERDR_APP_HOME="));
+  writeFileSync(s.statePath, JSON.stringify(state));
+  const beforeAway = readFileSync(attachPath(away));
+  writeFileSync(s.logPath, "");
+  const r = cliWith(s, {}, ["HERDR_APP_HOME"], ["restart", "Genie", "--json"]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.equal(JSON.parse(r.stdout).refused, "attachment");
+  assert.match(r.stderr, /no matching attachment in the selected or carried app home/);
+  assert.deepEqual(calls(s).filter((call) => ["run", "kill"].includes(call[0])), [], "nothing launched or ended");
+  assert.deepEqual(readFileSync(attachPath(away)), beforeAway, "the carried home's ledger untouched");
+  assert.equal(existsSync(defaultLedgerPath(s)), false, "no default ledger written");
 });
