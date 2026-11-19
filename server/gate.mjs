@@ -6,8 +6,10 @@ import { agentMcpHeaders, DSH_HOST, responseHeaders, upstreamHeaders } from './g
 import { samePerson, SIGNATURE_HEADER } from './gate-cloud.mjs'
 
 export const CLOUD_OPEN_PATH = '/_gate/cloud/open'
+export const CLOUD_RENEW_PATH = '/_gate/cloud/renew'
 export const CLOUD_REVOCATION_PATH = '/_gate/cloud/revocation'
 const MAX_OPEN_BODY = 4096
+const MAX_RENEW_BODY = 4096
 const MAX_REVOCATION_BODY = 4096
 
 export function pinOrigin(value) {
@@ -116,10 +118,57 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
     // A fresh open replaces this browser's session; a replayed cookie still revokes its family.
     const previous = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
     if (previous) sessions.revoke(previous)
-    const issued = sessions.issue(origin.origin, opened.principal, { expires: opened.expires })
+    const issued = sessions.issue(origin.origin, opened.principal, { expires: opened.expires, proof: opened.proof })
     res.writeHead(303, { location: '/', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer',
       'set-cookie': sessionCookie(issued.secret, sessions.maxAge(issued.family)) })
     res.end()
+  }
+  // Contracts v2 (delivery 4): a renewing browser sends JSON, never a code. The request is
+  // authenticated only by the gate's current Cloud session; the gate rechecks the role with
+  // Cloud and replaces the session, keeping the rechecked roles and a life of 5 minutes at most.
+  async function cloudRenew(req, res) {
+    const refuse = (status, error) => {
+      auditAccess({ status, request_id: randomUUID() })
+      res.setHeader('connection', 'close')
+      answer(res, status, { error })
+    }
+    if (req.url !== CLOUD_RENEW_PATH) { refuse(400, 'Renewal refused'); return }
+    if (req.method !== 'POST') { refuse(405, 'Renewal takes a JSON post'); return }
+    if (req.headers.host !== origin.host) { refuse(403, 'Invalid renewal origin'); return }
+    if (req.headers.origin !== origin.origin || req.headers['sec-fetch-site'] === 'cross-site') { refuse(403, 'Invalid renewal origin'); return }
+    if (req.headers['content-type']?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') { refuse(415, 'Renewal takes JSON'); return }
+    // A renewal is proved by the session cookie alone: no token, code or bearer is accepted.
+    if (req.headers.authorization !== undefined) { refuse(401, 'Renewal refused'); return }
+    let body
+    try { body = await readBody(req, MAX_RENEW_BODY) } catch { refuse(413, 'Renewal refused'); return }
+    let request
+    try { request = JSON.parse(body) } catch { refuse(401, 'Renewal refused'); return }
+    // Exactly the v2 shape: a v1 body, an unknown field or a role it names is refused whole.
+    const fields = request && typeof request === 'object' && !Array.isArray(request) ? Object.keys(request).sort().join(',') : ''
+    if (fields !== 'renew,version,workspace' || request.version !== 2 || request.renew !== true ||
+      request.workspace !== cloud.config.workspace) { refuse(401, 'Renewal refused'); return }
+    const family = sessions.authenticate(cookieSecret(req.headers.cookie), origin.origin)
+    // An expired or already-revoked session, or one Cloud has dropped, never reaches Cloud.
+    if (!family || cloud.drops(family)) { refuse(401, 'Renewal refused'); return }
+    // The proof is the exact workspace token this gate verified for the session. A missing or
+    // expired held token is refused with no grace, before Cloud is called. `workspace` is v1's
+    // aud, never a host: it must equal both the configured id and the held token's aud.
+    const proof = family.proof
+    if (!proof || proof.aud !== request.workspace || proof.exp * 1000 <= sessions.now()) {
+      refuse(401, 'Renewal refused')
+      return
+    }
+    let renewed
+    try { renewed = await cloud.renew(family.principal, proof) }
+    catch (error) { refuse(error?.status === 429 ? 429 : 401, 'Renewal refused'); return }
+    if (res.destroyed) return
+    if (!samePerson(renewed.principal, family.principal)) { refuse(401, 'Renewal refused'); return }
+    // Rotate the session out and issue the rechecked one, holding the token Cloud just issued;
+    // the old secret never outlives it.
+    sessions.revoke(family)
+    const issued = sessions.issue(origin.origin, renewed.principal, { expires: renewed.expires, proof: renewed.proof })
+    res.setHeader('set-cookie', sessionCookie(issued.secret, sessions.maxAge(issued.family)))
+    answer(res, 200, {})
   }
   // Cloud's signed revocation call (contracts v1, section 6). It needs no browser session and
   // sets none; the detached JWS covers the exact body bytes, and the gate changes nothing
@@ -175,6 +224,7 @@ export function createGate({ origin: value, sessions, credentials, access, cloud
   const server = http.createServer(async (req, res) => {
     if (reservedPathAlias(req.url, origin)) { answer(res, 400, { error: 'Non-canonical gate path' }); return }
     if (cloud && req.url === CLOUD_REVOCATION_PATH) { await cloudRevoke(req, res); return }
+    if (cloud && req.url === CLOUD_RENEW_PATH) { await cloudRenew(req, res); return }
     if (cloud && req.url.split('?', 1)[0] === CLOUD_OPEN_PATH) { await cloudOpen(req, res); return }
     // Literal target only: queries and aliases continue through the ordinary session gate.
     // The upstream exact route admits only agent tokens, never a browser session alone.
