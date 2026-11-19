@@ -106,7 +106,7 @@ test('one image: an empty read-only scratch session, the feature on for this run
   // then gets; the tools are read under the very config the session then gets. The last two
   // renders prove each required switch's effect with only that switch on.
   const clis = trace.filter(entry => entry.event === 'cli')
-  assert.deepEqual(clis.map(entry => entry.cwd), Array(6).fill(run.scratches[0].replace(run.home, realpathSync(run.home))))
+  assert.deepEqual(clis.map(entry => entry.cwd), Array(6).fill(run.scratches[0]))
   assert.deepEqual(clis[0].args, ['mcp', 'list', '--json', '-c', `projects={ '${run.scratches[0]}' = { trust_level = 'trusted' } }`], 'the person\'s MCP servers are listed first')
   assert.deepEqual(clis[1].args, ['features', 'list', '-c', 'features={ image_generation = true, shell_tool = false, view_image = false }'])
   assert.deepEqual(clis[2].args, sessionArgs(config))

@@ -1,6 +1,6 @@
 // The profile fallback's failure paths. Only temp folders and the fake agent are used.
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -13,7 +13,7 @@ import { drawImage, mcpServerNames, STOPPED, TIMED_OUT, UNAVAILABLE } from '../s
 const FAKE = join(import.meta.dirname, '..', 'dev', 'fake-image-agent.mjs')
 
 function fixture(t, profile = 'offer') {
-  const home = mkdtempSync(join(tmpdir(), 'acp-image-review-'))
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'acp-image-review-')))
   t.after(() => rmSync(home, { recursive: true, force: true }))
   const profileModes = ensureChatProfiles(home, { platform: 'linux' })
   const traceFile = join(home, 'trace.jsonl')
