@@ -19,8 +19,8 @@
 #   RELEASE_CUT_ATTEMPTS  whole attempts, default 3 (1 turns the retry off)
 #   RELEASE_CUT_STARTED   first attempt's start in epoch seconds, default script start
 #   RELEASE_CUT_DEADLINE  optional retry deadline in epoch seconds
-#   RELEASE_CUT_POINTER_WAIT  seconds to wait for Pocket across all attempts, default 300
-#   RELEASE_CUT_POINTER_POLL  seconds between Pocket reads, default 15
+#   RELEASE_CUT_POINTER_WAIT  seconds to wait for the Pocket and meter posts across all attempts, default 300
+#   RELEASE_CUT_POINTER_POLL  seconds between pointer reads, default 15
 #   RELEASE_GATES         the gates command, default "bash scripts/release-gates.sh" (a test's own)
 set -euo pipefail
 
@@ -76,113 +76,314 @@ lane_value() {
 }
 
 baseline_pattern='^v3\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$'
-read_lane_pointer() {
-  local part="$1" asset="$2" field="$3" quoted
-  local version_pattern='^"3\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})"$'
-  # Keep the JSON quotes so command substitution cannot strip newlines from the version.
-  quoted=$(timeout --kill-after=5s 20s gh release download "${part}-lane" --repo "${GITHUB_REPOSITORY}" -p "${asset}" -O - 2>/dev/null \
-    | jq -cse --arg field "${field}" 'select(length == 1) | .[0][$field]' 2>/dev/null) || return 1
-  [[ "${quoted}" =~ ${version_pattern} ]] || return 1
-  printf '%s\n' "${quoted}"
+# Allow five minutes beyond the build, attach and post jobs' timeouts.
+pocket_post_window=2700
+meter_post_window=3300
+scratch=$(mktemp -d)
+trap 'rm -rf "${scratch}"' EXIT
+
+has_wait_time() {
+  local end="$1" now
+  [[ "${rate_limited}" == no ]] && now=$(date +%s) && (( end - now >= 26 ))
 }
 
-wait_for_pocket_post() {
-  local -n observed="$1"
-  local since="$2" asset="$3" field="$4"
-  local old="v${observed:1:-1}" candidate newest ships
-  local started now cap end remaining delay poll_started='' polled tag elapsed
-  [[ "${PRERELEASE:-}" != true ]] && (( pointer_wait >= 26 && pointer_wait >= pointer_poll )) || return 0
-  candidate=$(git tag --list 'v3.*' --sort=-v:refname \
-    | grep -E "${baseline_pattern}" | sed -n '1p') || return 0
-  [[ -n "${candidate}" && "${candidate}" != "${old}" ]] || return 0
-  if [[ -n "${since}" ]]; then
-    [[ "${since}" =~ ${baseline_pattern} && "${candidate}" != "${since}" ]] || return 0
+read_release() {
+  local end="$1"
+  shift
+  if [[ -n "${end}" ]]; then has_wait_time "${end}" || return 1; fi
+  if gh_response=$(timeout --kill-after=5s 20s gh "$@" 2>"${scratch}/gh-error"); then
+    return 0
   fi
-  newest=$(printf '%s\n' "${old}" "${since}" "${candidate}" | LC_ALL=C sort -V | tail -n 1) || return 0
-  [[ "${newest}" == "${candidate}" ]] || return 0
-
-  started=$(date +%s) || return 0
-  cap=${pointer_wait}
-  if [[ -n "${deadline}" ]]; then
-    # Leave time for another attempt of this length and for the push.
-    remaining=$((deadline - started - (started - attempt_started) - 60))
-    if (( remaining < cap )); then cap=${remaining}; fi
+  if grep -Eiq 'rate limit|HTTP (403|429)' "${scratch}/gh-error"; then
+    rate_limited=yes
   fi
-  (( cap >= pointer_poll && cap >= 26 )) || return 0
-  # The lookup and the polls share the same allowance across attempts.
-  end=$((started + cap))
+  return 1
+}
 
-  # The APK is attached first. Both uploads have to finish before the post can run.
-  if timeout --kill-after=5s 20s gh release view "${candidate}" --repo "${GITHUB_REPOSITORY}" --json tagName,isDraft,isPrerelease,publishedAt,assets 2>/dev/null \
-    | jq -se --arg tag "${candidate}" --arg apk "automagik-pocket-${candidate#v}.apk" 'length == 1 and (.[0] |
-        .tagName == $tag and .isDraft == false and .isPrerelease == false and .publishedAt != null and
-        any(.assets[]; .name == $apk and .state == "uploaded" and (.size | type == "number" and . > 0)) and
-        any(.assets[]; .name == "latest.json" and .state == "uploaded" and (.size | type == "number" and . > 0)))' >/dev/null 2>&1 &&
-    ships=$(bun scripts/lane.ts pocket "${candidate}") && [[ "${ships}" == no ]]; then
-    poll_started=$(date +%s) || return 0
-    remaining=$((end - poll_started))
-    if (( remaining >= 26 )); then
-      echo "::notice::${candidate} carries its Pocket build but pocket-lane still names ${old}; waiting up to ${remaining}s for its post"
-      while now=$(date +%s) && (( end - now >= 26 )); do
-        # Keep 25 seconds free for the next read, including the timeout's kill grace.
-        delay=$((end - now - 25))
-        if (( pointer_poll < delay )); then delay=${pointer_poll}; fi
-        sleep "${delay}" || break
-        now=$(date +%s) || break
-        (( end - now >= 26 )) || break
-        if polled=$(read_lane_pointer pocket "${asset}" "${field}"); then
-          tag="v${polled:1:-1}"
-          newest=$(printf '%s\n' "${candidate}" "${tag}" | LC_ALL=C sort -V | tail -n 1) || break
-          if [[ "${newest}" == "${tag}" ]]; then
-            observed=${polled}
-            echo "::notice::pocket-lane now names ${tag}"
-            break
-          fi
-        fi
-      done
-      if [[ "v${observed:1:-1}" == "${old}" ]]; then
-        now=$(date +%s) || now=${poll_started}
-        echo "::notice::pocket-lane still names ${old} after $((now - poll_started))s; keeping the Pocket build"
-      fi
+read_lane_pointer() {
+  local part="$1" asset="$2" field="$3" end="${4:-}"
+  local version_pattern='^"3\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})"$'
+  read_release "${end}" release download "${part}-lane" --repo "${GITHUB_REPOSITORY}" -p "${asset}" -O - || return 1
+  # Keep the JSON quotes so command substitution cannot strip newlines from the version.
+  pointer_version=$(jq -cse --arg field "${field}" --arg part "${part}" --arg repo "${GITHUB_REPOSITORY}" '
+    select(length == 1) | .[0] | .[$field] as $version |
+    if $part == "pocket" then
+      select($version | test("^3\\.(0|[1-9][0-9]{0,2})\\.(0|[1-9][0-9]{0,2})\\z")) |
+      ($version | split(".") | map(tonumber)) as [$major, $minor, $patch] |
+      select(.versionCode == ($major * 1000000 + $minor * 1000 + $patch) and
+        .url == "https://github.com/\($repo)/releases/download/v\($version)/automagik-pocket-\($version).apk" and
+        (.sha256 | test("^[0-9a-f]{64}\\z")))
+    else . end | $version' <<< "${gh_response}" 2>/dev/null) || return 1
+  [[ "${pointer_version}" =~ ${version_pattern} ]]
+}
+
+read_part_pointer() {
+  case "$1" in
+    meter) read_lane_pointer meter meter.json version "${2:-}" ;;
+    pocket) read_lane_pointer pocket latest.json versionName "${2:-}" ;;
+  esac
+}
+
+read_meter_pair() {
+  local end="${1:-}" dir version status=1
+  dir=$(mktemp -d "${scratch}/meter.XXXXXX") || return 1
+  if read_release "${end}" release download meter-lane --repo "${GITHUB_REPOSITORY}" \
+      -p meter.json -p meter.json.sig -D "${dir}" &&
+    bun scripts/meter-lane.ts verify "${dir}/meter.json" "${dir}/meter.json.sig" >/dev/null 2>&1 &&
+    version=$(jq -er '.version | select(test("^3\\.[0-9]+\\.[0-9]+\\z"))' "${dir}/meter.json" 2>/dev/null); then
+    pair_tag="v${version}"
+    status=0
+  fi
+  rm -rf "${dir}"
+  return "${status}"
+}
+
+tag_after() {
+  [[ "$1" != "$2" && "$(printf '%s\n' "$1" "$2" | LC_ALL=C sort -V | tail -n 1)" == "$1" ]]
+}
+
+after_baseline() {
+  [[ -z "$2" ]] || { [[ "$2" =~ ${baseline_pattern} ]] && tag_after "$1" "$2"; }
+}
+
+# A pointer must name a local tag and a published stable release whose build covers this checkout.
+coverage_checks() {
+  local part="$1" since="$2" tag="$3" end="${4:-}" ships
+  after_baseline "${tag}" "${since}" || return 1
+  git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" >/dev/null || return 1
+  read_release "${end}" api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" || return 1
+  jq -se --arg tag "${tag}" 'length == 1 and (.[0] |
+    .tag_name == $tag and .draft == false and .prerelease == false and
+    (.published_at | fromdateiso8601 | type == "number"))' <<< "${gh_response}" >/dev/null 2>&1 || return 1
+  ships=$(bun scripts/lane.ts "${part}" "${tag}") && [[ "${ships}" == no ]]
+}
+
+# Both parts share the same release lookups, including failures.
+candidate_view() {
+  local tag="$1"
+  if [[ ! -v 'views[$tag]' ]]; then
+    views[${tag}]=''
+    if read_release "${wait_end}" release view "${tag}" --repo "${GITHUB_REPOSITORY}" \
+        --json tagName,isDraft,isPrerelease,publishedAt,assets; then
+      views[${tag}]=${gh_response}
     fi
   fi
-
-  now=$(date +%s) || return 0
-  elapsed=$((now - started))
-  pointer_wait=$((pointer_wait - elapsed))
-  # Only the polling is left out of the retry estimate: the next attempt repeats the lookup.
-  if [[ -n "${poll_started}" ]]; then
-    pointer_wait_elapsed=$((pointer_wait_elapsed + now - poll_started))
-  fi
-  return 0
+  [[ -n "${views[${tag}]}" ]]
 }
 
-# A pointer can advance while the gates run. Its tag must name a published stable release before
-# it can cover the build. Pocket can still race before both assets attach or after the wait ends.
-# A newer tag can also hide an older pending post. The meter can still post after its check.
+candidate_body() {
+  local tag="$1" note="$2"
+  if [[ ! -v 'bodies[$tag]' ]]; then
+    bodies[${tag}]=''
+    if read_release "${wait_end}" release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json body; then
+      bodies[${tag}]=${gh_response}
+    fi
+  fi
+  [[ -n "${bodies[${tag}]}" ]] &&
+    jq -se --arg note "${note}" 'length == 1 and (.[0].body | contains($note))' \
+      <<< "${bodies[${tag}]}" >/dev/null 2>&1
+}
+
+find_pending_post() {
+  local part="$1" old="$2" since="$3" label="$4"
+  local tag published window asset manifest note now end reason ships
+  case "${part}" in
+    meter) window=${meter_post_window}; asset=meter.json; manifest=meter.json.sig ;;
+    pocket) window=${pocket_post_window}; manifest=latest.json ;;
+  esac
+  for tag in "${recent_tags[@]}"; do
+    if ! { tag_after "${tag}" "${old}" && after_baseline "${tag}" "${since}"; }; then break; fi
+    candidate_view "${tag}" || break
+    # A valid draft, prerelease or unpublished release can be passed over. A bad view ends the search.
+    published=$(jq -rse --arg tag "${tag}" '
+      select(length == 1) | .[0] |
+      select(.tagName == $tag and (.isDraft | type == "boolean") and
+        (.isPrerelease | type == "boolean") and has("publishedAt") and
+        (.assets | type == "array") and all(.assets[]; type == "object")) |
+      if .isDraft or .isPrerelease or .publishedAt == null then "unpublished"
+      else .publishedAt | fromdateiso8601 end' <<< "${views[${tag}]}" 2>/dev/null) || break
+    [[ "${published}" != unpublished ]] || continue
+    if [[ "${part}" == pocket ]]; then asset="automagik-pocket-${tag#v}.apk"; fi
+    end=${wait_end}
+    reason="carries its ${label} build"
+    if ! jq -e --arg asset "${asset}" --arg manifest "${manifest}" '
+      def uploaded($name): any(.assets[]; .name == $name and .state == "uploaded" and
+        (.size | type == "number" and . > 0));
+      uploaded($asset) and uploaded($manifest)' <<< "${views[${tag}]}" >/dev/null 2>&1; then
+      now=$(date +%s)
+      (( now >= published && now - published < window )) || break
+      case "${part}" in
+        meter) note="usagemeter: \`usagemeter-darwin-arm64\`" ;;
+        pocket) note="\`${asset}\` follows" ;;
+      esac
+      candidate_body "${tag}" "${note}" || break
+      if (( published + window < end )); then end=$((published + window)); fi
+      reason="is still building its ${label} build"
+    fi
+    if ! { ships=$(bun scripts/lane.ts "${part}" "${tag}") && [[ "${ships}" == no ]]; }; then break; fi
+    candidates[${part}]=${tag}
+    post_ends[${part}]=${end}
+    post_reasons[${part}]=${reason}
+    break
+  done
+}
+
+poll_delay() {
+  local end="$1" now delay
+  now=$(date +%s)
+  [[ "${rate_limited}" == no ]] && (( end - now >= 26 )) || return 1
+  # Leave the read enough time for the timeout and its kill grace.
+  delay=$((end - now - 25))
+  if (( pointer_poll < delay )); then delay=${pointer_poll}; fi
+  sleep "${delay}"
+}
+
+poll_pending_posts() {
+  local part old tag now next_end end
+  local -A started=()
+  now=$(date +%s)
+  for part in meter pocket; do
+    end=${post_ends[${part}]:-0}
+    has_wait_time "${end}" || continue
+    started[${part}]=${now}
+    echo "::notice::${candidates[${part}]} ${post_reasons[${part}]} but ${part}-lane still names ${observed[${part}]};" \
+      "waiting up to $((end - now))s for its post"
+  done
+
+  while [[ "${rate_limited}" == no ]]; do
+    now=$(date +%s)
+    next_end=0
+    for part in meter pocket; do
+      end=${post_ends[${part}]:-0}
+      if ! { [[ -v 'started[$part]' ]] && (( end - now >= 26 )); }; then continue; fi
+      if (( next_end == 0 || end < next_end )); then next_end=${end}; fi
+    done
+    if ! { (( next_end > 0 )) && poll_delay "${next_end}"; }; then break; fi
+
+    for part in meter pocket; do
+      end=${post_ends[${part}]:-0}
+      if ! { [[ -v 'started[$part]' ]] && has_wait_time "${end}"; }; then continue; fi
+      polled[${part}]=yes
+      if [[ "${part}" == meter ]]; then
+        read_meter_pair "${end}" || continue
+        tag=${pair_tag}
+      else
+        read_part_pointer pocket "${end}" || continue
+        tag="v${pointer_version:1:-1}"
+      fi
+      old=${observed[${part}]}
+      tag_after "${tag}" "${old}" || continue
+      observed[${part}]=${tag}
+      if ! tag_after "${candidates[${part}]}" "${tag}" ||
+        coverage_checks "${part}" "${baselines[${part}]}" "${tag}" "${end}"; then
+        echo "::notice::${part}-lane now names ${tag}"
+        post_ends[${part}]=0
+      fi
+    done
+  done
+
+  now=$(date +%s)
+  for part in meter pocket; do
+    [[ -v 'started[$part]' && "${observed[${part}]}" == "${old_tags[${part}]}" ]] || continue
+    echo "::notice::${part}-lane still names ${old_tags[${part}]} after $((now - started[$part]))s;" \
+      "keeping the ${labels[${part}]} build"
+  done
+}
+
+account_wait() {
+  local elapsed=$(( $(date +%s) - $1 ))
+  pointer_wait=$((pointer_wait - elapsed))
+  pointer_wait_elapsed=$((pointer_wait_elapsed + elapsed))
+}
+
+retry_meter_pair() {
+  local since="$1" tag="$2" status=1 started
+  has_wait_time "${wait_end}" || return 1
+  started=$(date +%s)
+  while poll_delay "${wait_end}"; do
+    if read_meter_pair "${wait_end}"; then
+      if [[ "${pair_tag}" == "${tag}" ]] || coverage_checks meter "${since}" "${pair_tag}" "${wait_end}"; then
+        status=0
+      fi
+      break
+    fi
+  done
+  account_wait "${started}"
+  return "${status}"
+}
+
 build_is_covered() {
-  local part="$1" since="$2" asset="$3" field="$4"
-  local quoted_version tag newest ships
-  [[ -n "${GITHUB_REPOSITORY:-}" ]] || return 1
-  quoted_version=$(read_lane_pointer "${part}" "${asset}" "${field}") || return 1
-  [[ "${KIND}" != "${part}" ]] || return 1
-  if [[ "${part}" == pocket ]]; then
-    wait_for_pocket_post quoted_version "${since}" "${asset}" "${field}"
+  local part="$1" since="$2" tag="$3" started status
+  coverage_checks "${part}" "${since}" "${tag}" || return 1
+  if (( pointer_wait_elapsed > 0 )) && [[ ! -v 'polled[$part]' ]]; then
+    # Check again before skipping a build whose pointer was read before the wait.
+    started=$(date +%s)
+    status=1
+    if read_part_pointer "${part}" "${wait_end}"; then
+      tag="v${pointer_version:1:-1}"
+      if coverage_checks "${part}" "${since}" "${tag}" "${wait_end}"; then status=0; fi
+    fi
+    account_wait "${started}"
+    (( status == 0 )) || return 1
   fi
-  tag="v${quoted_version:1:-1}"
-  if [[ -n "${since}" ]]; then
-    [[ "${since}" =~ ${baseline_pattern} && "${tag}" != "${since}" ]] || return 1
-    newest=$(printf '%s\n' "${since}" "${tag}" | LC_ALL=C sort -V | tail -n 1) || return 1
-    [[ "${newest}" == "${tag}" ]] || return 1
+  if [[ "${part}" == meter ]]; then
+    # The verified pair can come from a newer post than the observation that led us here.
+    if read_meter_pair; then
+      [[ "${pair_tag}" == "${tag}" ]] || coverage_checks meter "${since}" "${pair_tag}" || return 1
+    else
+      retry_meter_pair "${since}" "${tag}" || return 1
+    fi
+    tag=${pair_tag}
   fi
-  git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" >/dev/null || return 1
-  timeout --kill-after=5s 20s gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>/dev/null \
-    | jq -se --arg tag "${tag}" 'length == 1 and (.[0] |
-        .tag_name == $tag and .draft == false and .prerelease == false and
-        (.published_at | fromdateiso8601 | type == "number"))' >/dev/null 2>&1 || return 1
-  ships=$(bun scripts/lane.ts "${part}" "${tag}") || return 1
-  [[ "${ships}" == no ]] || return 1
   echo "::notice::${part}-lane advanced to ${tag} and covers this checkout; skipping the ${part} build for this attempt"
+}
+
+# A post can outlast the wait. A stable tag without build evidence can hide an older post, and
+# more than three intervening drafts or prereleases exhaust discovery. A stale meter that did
+# not trigger a wait can still post while Pocket is polling.
+recheck_builds() {
+  local part remaining cap wait_end=0 started rate_limited=no
+  local gh_response pointer_version pair_tag
+  local -a recent_tags
+  local -A old_tags=() observed=() views=() bodies=() polled=()
+  local -A candidates=() post_ends=() post_reasons=()
+  local -A labels=([meter]=meter [pocket]=Pocket)
+  local -A baselines=([meter]="${meter_since}" [pocket]="${pocket_since}")
+  [[ -n "${GITHUB_REPOSITORY:-}" ]] || return 0
+  for part in meter pocket; do
+    if ! { [[ "${!part}" == yes ]] && read_part_pointer "${part}" && [[ "${KIND}" != "${part}" ]]; }; then
+      continue
+    fi
+    observed[${part}]="v${pointer_version:1:-1}"
+    old_tags[${part}]=${observed[${part}]}
+  done
+
+  started=$(date +%s)
+  cap=${pointer_wait}
+  if [[ -n "${deadline}" ]]; then
+    # Leave time for the rest of this attempt, a retry of the same length and the pushes.
+    remaining=$((deadline - started - 2 * (started - attempt_started) - 120))
+    if (( remaining < cap )); then cap=${remaining}; fi
+  fi
+  if [[ "${PRERELEASE:-}" != true && "${rate_limited}" == no ]] &&
+    (( ${#observed[@]} > 0 && cap >= pointer_poll && cap >= 26 )); then
+    wait_end=$((started + cap))
+    mapfile -t recent_tags < <(git tag --list 'v3.*' --sort=-v:refname |
+      grep -E "${baseline_pattern}" | sed -n '1,3p')
+    for part in meter pocket; do
+      [[ -v 'observed[$part]' ]] || continue
+      find_pending_post "${part}" "${observed[${part}]}" "${baselines[${part}]}" "${labels[${part}]}"
+    done
+    poll_pending_posts
+    account_wait "${started}"
+  fi
+
+  for part in meter pocket; do
+    [[ "${rate_limited}" == no && -v 'observed[$part]' ]] || continue
+    if build_is_covered "${part}" "${baselines[${part}]}" "${observed[${part}]}"; then
+      printf -v "${part}" '%s' no
+    fi
+  done
 }
 
 pocket_since="${POCKET_SINCE-unknown}"
@@ -237,12 +438,7 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
   pocket="${POCKET}"
   meter="${METER}"
   pointer_wait_elapsed=0
-  if [[ "${METER}" == yes ]] && build_is_covered meter "${meter_since}" meter.json version; then
-    meter=no
-  fi
-  if [[ "${POCKET}" == yes ]] && build_is_covered pocket "${pocket_since}" latest.json versionName; then
-    pocket=no
-  fi
+  recheck_builds
 
   version=$(next_version)
   bun scripts/version.ts set "${version}"

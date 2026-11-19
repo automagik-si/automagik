@@ -200,6 +200,10 @@ Proposed `meter/usagemeter/part.json`:
 - Whether a release builds the meter is its own question, whatever the kind:
   `bun scripts/lane.ts meter <tag>` (yes or no), as `herdr` and `pocket` are. The tag is
   `meter-since`: the version `meter-lane` names, or the last release when there is no lane yet.
+  An existing `meter-lane` without a usable pointer pair makes the next release measure
+  from the start and rebuild the meter, and the cut can wait a bounded time for a previous stable
+  release's meter post (#668). Replacing an unverifiable pair needs the owner's
+  `replace_unverified_meter_pointer` dispatch.
   Pocket's reason applies: a prerelease never moves the pointer, so a meter change that shipped
   only in a prerelease is still ahead of the lane and the next release builds it again.
 - `release.yml`: every condition that reads "not herdr and not pocket" today also excludes
