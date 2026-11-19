@@ -154,6 +154,10 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
   const stop = () => { for (const id of timers) clearTimeout(id); timers = [] }
   const later = (fn, ms) => { timers.push(setTimeout(fn, ms)) }
   const place = (node) => { root.replaceChildren(node) }
+  // The modal is the only thing the preview puts in `root`; closing returns to the nod and owns
+  // no layer any more. Without this the seat path only swapped the nod and the full-screen layer
+  // stayed mounted, with `screen()` still saying changes/success/rollback.
+  const clearLayer = () => root.replaceChildren()
 
   const nod = () => {
     stop()
@@ -170,7 +174,9 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
       seatButton?.remove()
       seat.append(button)
       seatButton = button
+      clearLayer()
     } else {
+      // No seat: the nod is the root's only child, which already takes the layer with it.
       place(button)
     }
   }
@@ -317,6 +323,18 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
     place(layer)
   }
 
+  // One Escape listener for the whole mount, and none while the preview rests at its nod: the
+  // same full-screen dialog, dismissed the same way on every screen. It is never added per open,
+  // so reopening after a close cannot stack listeners.
+  const doc = root.ownerDocument ?? globalThis.document
+  const onKeydown = (event) => {
+    if (event.key !== 'Escape') return
+    if (root.querySelector('.su-layer') === null) return
+    event.preventDefault()
+    nod()
+  }
+  doc?.addEventListener('keydown', onKeydown)
+
   nod()
   return {
     open,
@@ -331,8 +349,10 @@ export function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS
     },
     dispose: () => {
       stop()
+      doc?.removeEventListener('keydown', onKeydown)
       seatButton?.remove()
       seatButton = null
+      clearLayer()
       root.remove()
     },
   }

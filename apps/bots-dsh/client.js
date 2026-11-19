@@ -21593,6 +21593,7 @@ function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, succe
   const place = (node) => {
     root.replaceChildren(node);
   };
+  const clearLayer = () => root.replaceChildren();
   const nod = () => {
     stop3();
     const button2 = el("button", "su-nod bt-round");
@@ -21606,6 +21607,7 @@ function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, succe
       seatButton?.remove();
       seat.append(button2);
       seatButton = button2;
+      clearLayer();
     } else {
       place(button2);
     }
@@ -21757,6 +21759,14 @@ function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, succe
     box.append(foot);
     place(layer);
   };
+  const doc = root.ownerDocument ?? globalThis.document;
+  const onKeydown = (event) => {
+    if (event.key !== "Escape") return;
+    if (root.querySelector(".su-layer") === null) return;
+    event.preventDefault();
+    nod();
+  };
+  doc?.addEventListener("keydown", onKeydown);
   nod();
   return {
     open,
@@ -21771,8 +21781,10 @@ function mountSelfUpdateMock(root, { sample = MOCK_DATA, stepMs = STEP_MS, succe
     },
     dispose: () => {
       stop3();
+      doc?.removeEventListener("keydown", onKeydown);
       seatButton?.remove();
       seatButton = null;
+      clearLayer();
       root.remove();
     }
   };
