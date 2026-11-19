@@ -4,10 +4,16 @@
 // a folder above the plugin, else the same search from the plugin's place in the main
 // worktree (a git worktree has no checkout of its own).
 import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { registerHooks } from 'node:module'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+
+// Keep tests away from the real Automagik home and its Bot sign-in claim.
+const testHome = mkdtempSync(join(tmpdir(), 'acp-test-home-'))
+process.env.AUTOMAGIK_HOME = testHome
+process.on('exit', () => rmSync(testHome, { recursive: true, force: true }))
 
 const plugin = resolve(import.meta.dirname, '..')
 const above = (start) => {

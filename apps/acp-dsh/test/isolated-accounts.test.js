@@ -4,19 +4,21 @@ import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { test } from 'node:test'
 import { apply, SERVICE } from '../index.js'
+import { GENERATION_ENV, POINTER_ENV } from '../src/host/cli-generations.js'
 import { CliHomes, HOME_ENV, trackRun } from '../src/host/cli-homes.js'
+import { CONSENT_FILE, ConsentStore } from '../src/host/consent.js'
 import { recordLogin } from '../src/host/login-ownership.js'
 import { MODEL_ACCESS_REQUIRED } from '../src/host/names.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
 const who = email => ({ kind: 'account', id: email, facets: { kind: 'account', email }, email })
 
-function fixture(t, { cold } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'isolated-accounts-'))
+function fixture(t, { cold, root: sharedRoot, installation, deps } = {}) {
+  const root = sharedRoot ?? mkdtempSync(join(tmpdir(), 'isolated-accounts-'))
   const terminalHomes = { claude: join(root, 'terminal', '.claude'),
     codex: join(root, 'terminal', '.codex') }
   const auth = {
@@ -30,6 +32,7 @@ function fixture(t, { cold } = {}) {
   }
   for (const [vendor, name] of [['claude', 'CLAUDE_CONFIG_DIR'], ['codex', 'CODEX_HOME']]) {
     auth.set(terminalHomes[vendor], 'terminal-work@example.test')
+    if (sharedRoot) continue
     const previous = process.env[name]
     process.env[name] = terminalHomes[vendor]
     t.after(() => {
@@ -43,10 +46,11 @@ function fixture(t, { cold } = {}) {
   )
   const calls = []
   const events = []
+  const logs = []
   const cleanups = []
   let service, adapter
   const ctx = {
-    logger: { info() {}, warn() {} },
+    logger: { info: line => logs.push(line), warn() {} },
     agents: { list: () => [], get: () => ({ status: 'idle',
       ctx: { tools: { register: () => () => {} } }, session: { header: {} } }) },
     llm: { registerAdapter(ids, value) { adapter = value; return () => {} },
@@ -140,22 +144,27 @@ function fixture(t, { cold } = {}) {
       done(failLogout ? new Error('invented-private-output') : null)
     },
     imageSetup: (...args) => imageCheck(...args),
+    installation,
+    ...deps,
   })
-  t.after(async () => {
+  let stopped
+  const stopService = async () => {
     for (const child of loginChildren) { child.stuck = false; child.kill() }
     for (const cleanup of cleanups) cleanup()
     await tick()
-    rmSync(root, { recursive: true, force: true })
-  })
-  const login = async id => {
-    const attempt = await service.loginStart(id)
+    if (!sharedRoot) rmSync(root, { recursive: true, force: true })
+  }
+  const stop = () => (stopped ??= stopService())
+  t.after(stop)
+  const waitForLogin = async (id, attempt) => {
     for (let i = 0; i < 30; i++) {
       await tick()
       if (service.loginStatus(id, attempt.attemptId).status === 'ready') return
     }
     assert.fail('fake sign-in did not finish')
   }
-  return { service, adapter, auth, calls, events, root, terminal, login,
+  const login = async id => waitForLogin(id, await service.loginStart(id))
+  return { service, adapter, auth, calls, events, root, terminal, login, logs, stop, waitForLogin,
     next: email => { nextAccount = email }, fail: value => { failLogout = value },
     stallLogin: value => { stuckLogin = value },
     imageCheck: check => { imageCheck = check } }
@@ -464,4 +473,170 @@ test('a stale sign-in completion cannot refresh the catalog after an account res
   assert.equal(probes, 0)
   assert.equal(h.events.length, before)
   assert.notEqual((await h.service.inspect(id)).signedIn, true)
+})
+
+const botIds = ['acp-claude', 'acp-codex']
+const cliRoot = (host, id) => dirname(dirname(host.adapter.agents.get(id).spawn().env[POINTER_ENV]))
+const freshAccount = (host, id) => host.service.account(id, { fresh: true })
+const otherSession = {
+  code: 'acp-account/busy', message: /Close other Automagik sessions/,
+}
+
+function sharedFixture(t) {
+  const root = mkdtempSync(join(tmpdir(), 'shared-acp-'))
+  const legacy = join(root, 'cli-homes')
+  const hosts = []
+  t.after(async () => {
+    await Promise.all(hosts.map(host => host.stop()))
+    rmSync(root, { recursive: true, force: true })
+  })
+  const start = (installation, deps) => {
+    const host = fixture(t, { root, installation, deps })
+    hosts.push(host)
+    return host
+  }
+  return { root, legacy, start }
+}
+
+async function expectAccount(host, id, email) {
+  const state = await freshAccount(host, id)
+  assert.equal(state.signedIn, email !== undefined)
+  assert.equal(state.account?.email, email)
+  assert.equal(state.consent, email === undefined ? undefined : 'given')
+}
+
+test('two live installations can change both Bot sign-ins independently', async t => {
+  const { root, legacy, start } = sharedFixture(t)
+  const a = start(join(root, 'dsh-a'))
+  const b = start(join(root, 'dsh-b'))
+  for (const id of botIds) {
+    assert.equal(cliRoot(a, id), legacy)
+    assert.notEqual(cliRoot(b, id), legacy)
+    const expected = new Map()
+    for (const action of ['login', 'switch', 'sign-out']) {
+      for (const [side, host, peer] of [['a', a, b], ['b', b, a]]) {
+        const email = action === 'sign-out' ? undefined : `${side}-${id}-${action}@example.test`
+        host.next(email)
+        if (action === 'login') await host.login(id)
+        if (action === 'switch') await host.waitForLogin(id, await host.service.accountSwitch(id))
+        if (action === 'sign-out') await host.service.accountSignOut(id)
+        await expectAccount(peer, id, expected.get(peer))
+        await expectAccount(host, id, email)
+        expected.set(host, email)
+      }
+    }
+  }
+})
+
+for (const [kind, dshPath] of [
+  ['desktop', ['desktop', 'dsh']], ['standalone', ['home', '.dsh']], ['server', ['data', 'dsh']],
+]) {
+  for (const layout of ['pre-generation', 'selected generation']) {
+    test(`${kind} upgrade keeps both ${layout} sign-ins and consent across two restarts`, async t => {
+      const { root, legacy, start } = sharedFixture(t)
+      const installation = join(root, ...dshPath)
+      mkdirSync(installation, { recursive: true })
+      const previous = new Map()
+      const file = join(legacy, CONSENT_FILE)
+      const email = id => `${layout === 'pre-generation' ? 'legacy' : 'selected'}-${id}@example.test`
+      if (layout === 'pre-generation') {
+        const consent = new ConsentStore({ file, ids: botIds })
+        for (const id of botIds) {
+          const vendor = id.slice(4)
+          const home = join(legacy, vendor)
+          const config = join(home, `.${vendor}`)
+          mkdirSync(config, { recursive: true })
+          writeFileSync(join(config, 'account'), email(id))
+          consent.confirm(id, who(email(id)))
+          previous.set(id, { [HOME_ENV]: home, [GENERATION_ENV]: 'legacy' })
+        }
+        assert.equal(existsSync(join(legacy, 'current')), false)
+      } else {
+        // An explicit root reproduces dev's layout without claiming it.
+        const old = start(installation, { cliHome: legacy })
+        for (const id of botIds) {
+          await old.service.accountReset(id)
+          old.next(email(id))
+          await old.login(id)
+          await expectAccount(old, id, email(id))
+          const env = old.adapter.agents.get(id).spawn().env
+          assert.notEqual(env[GENERATION_ENV], 'legacy')
+          previous.set(id, env)
+        }
+        assert.deepEqual(old.logs.filter(line => line.includes('Bot sign-ins:')), [])
+        await old.stop()
+      }
+      const consent = readFileSync(file, 'utf8')
+      assert.equal(existsSync(join(legacy, 'installation.json')), false)
+      for (let restart = 0; restart <= 2; restart++) {
+        const upgraded = start(installation)
+        for (const id of botIds) {
+          await expectAccount(upgraded, id, email(id))
+          const env = upgraded.adapter.agents.get(id).spawn().env
+          assert.equal(env[HOME_ENV], previous.get(id)[HOME_ENV])
+          assert.equal(env[GENERATION_ENV], previous.get(id)[GENERATION_ENV])
+        }
+        assert.equal(readFileSync(file, 'utf8'), consent)
+        await upgraded.stop()
+      }
+    })
+  }
+}
+
+test('when B upgrades first, A starts separately without touching B’s legacy sign-ins', async t => {
+  const { root, legacy, start } = sharedFixture(t)
+  const b = start(join(root, 'dsh-b'))
+  for (const id of botIds) await b.login(id)
+  const claim = join(legacy, 'installation.json')
+  const owner = readFileSync(claim, 'utf8')
+  const consent = readFileSync(join(legacy, CONSENT_FILE), 'utf8')
+  const a = start(join(root, 'dsh-a'))
+  for (const id of botIds) {
+    assert.equal(cliRoot(b, id), legacy)
+    assert.notEqual(cliRoot(a, id), legacy)
+    await expectAccount(a, id, undefined)
+    await expectAccount(b, id, 'personal@example.test')
+  }
+  assert.equal(readFileSync(claim, 'utf8'), owner)
+  assert.equal(readFileSync(join(legacy, CONSENT_FILE), 'utf8'), consent)
+  assert.deepEqual(b.logs.filter(line => line.includes('Bot sign-ins:')), [
+    'acp-dsh: Bot sign-ins: this installation keeps the existing Bot sign-in home',
+  ])
+  assert.deepEqual(a.logs.filter(line => line.includes('Bot sign-ins:')), [
+    'acp-dsh: Bot sign-ins: this installation has its own Bot sign-in home',
+  ])
+})
+
+test('an older plugin and a new non-owner are independent, while the new owner still shares', async t => {
+  const { root, legacy, start } = sharedFixture(t)
+  const installation = join(root, 'dsh-owner')
+  await start(installation).stop()
+  const older = start(join(root, 'dsh-older'), { cliHome: legacy })
+  const peer = start(join(root, 'dsh-peer'))
+  for (const id of botIds) {
+    await older.login(id)
+    await expectAccount(peer, id, undefined)
+    peer.next('peer@example.test')
+    await peer.login(id)
+    await expectAccount(older, id, 'personal@example.test')
+  }
+  const owner = start(installation)
+  for (const id of botIds) {
+    assert.equal(cliRoot(owner, id), cliRoot(older, id))
+    await assert.rejects(owner.service.accountSignOut(id), otherSession)
+    await assert.rejects(older.service.accountSwitch(id), otherSession)
+    await expectAccount(owner, id, 'personal@example.test')
+    await expectAccount(peer, id, 'peer@example.test')
+  }
+})
+
+test('profiles "orchard" and "meadow" of one DSH home still refuse account changes', async t => {
+  const { root, start } = sharedFixture(t)
+  const installation = join(root, 'one-dsh-home')
+  const orchard = start(installation)
+  const meadow = start(installation)
+  for (const id of botIds) {
+    assert.equal(cliRoot(orchard, id), cliRoot(meadow, id))
+    await assert.rejects(meadow.service.loginStart(id), otherSession)
+  }
 })
