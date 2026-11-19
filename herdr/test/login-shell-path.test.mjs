@@ -47,7 +47,8 @@ function scene(t) {
 import { appendFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + "\\n");
-if (args[0] === "get") process.stdout.write(JSON.stringify({ address: args[1] ?? "t9", name: "t9", state: "live", labels: {} }) + "\\n");
+if (args[0] === "get") process.stdout.write(JSON.stringify({ address: args[1] ?? "t9", name: "t9", state: "live", labels: {},
+  created_ms: 100, argv: ["/usr/bin/env", ${JSON.stringify(`HERDR_APP_HOME=${app}`)}, "codex"] }) + "\\n");
 else if (args[0] === "ls") process.stdout.write(JSON.stringify({ terminals: [] }) + "\\n");
 process.exit(0);
 `);
@@ -123,7 +124,10 @@ test("a start's Codex command runs in a non-login shell: the kill shim is first 
   const r = runLaunch(s, args, "hc kill t9");
   assertRefused(r);
   assert.equal(read(s.shadowLog), "", "the prepended hc never runs");
-  assert.equal(read(s.log), "", "a member's kill never reaches the real hc");
+  // #628: the guard reads its caller's recorded launch first; no kill reaches hc.
+  assert.equal(read(s.log), `${JSON.stringify(["get", "t100", "--json"])}\n`, "only the caller lookup reaches the real hc");
+  assert.equal(read(s.log).split("\n").filter(Boolean).some((line) => JSON.parse(line).includes("kill")), false,
+    "a member's kill never reaches the real hc");
   // A permitted call still passes through to the real hc.
   writeFileSync(s.log, "");
   const ls = runLaunch(s, args, "hc ls");
@@ -139,7 +143,10 @@ test("a worker's Codex command keeps the same guard-first PATH (#1133)", (t) => 
   const r = runLaunch(s, args, "hc kill t9");
   assertRefused(r);
   assert.equal(read(s.shadowLog), "");
-  assert.equal(read(s.log), "");
+  // #628: the guard reads its caller's recorded launch first; no kill reaches hc.
+  assert.equal(read(s.log), `${JSON.stringify(["get", "t100", "--json"])}\n`, "only the caller lookup reaches the real hc");
+  assert.equal(read(s.log).split("\n").filter(Boolean).some((line) => JSON.parse(line).includes("kill")), false,
+    "a worker's kill never reaches the real hc");
 });
 
 test("a restart's Codex command keeps the same guard-first PATH (#1133)", (t) => {
