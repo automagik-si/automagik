@@ -791,13 +791,17 @@ export class LedgerRefusal extends CliError {}
  * `hc get <t> --json`; null only when hc answers not_found (exit 3), any other failure throws
  * (no answer within `timeout` ms, hc's 15 s when not given, included).
  */
-async function hcLookup(terminal, { timeout } = {}) {
+async function hcLookup(terminal, { timeout, strictNotFound = false } = {}) {
   const r = await hc(["get", terminal, "--json"], { timeout });
-  if (r.code === 0) return parsed(r, ["get", terminal]);
+  if (r.code === 0) {
+    const get = parsed(r, ["get", terminal]);
+    if (strictNotFound && (!get || typeof get !== "object" || Array.isArray(get))) throw new CliError(`hc get ${terminal} gave incomplete pane identity; nothing was started.`);
+    return get;
+  }
   if (r.killed) throw new CliError(`hc get ${terminal} gave no answer in ${(timeout ?? 15_000) / 1000} s`);
   let kind = null;
   try { kind = JSON.parse(r.stderr || r.stdout)?.error?.kind ?? null; } catch { kind = null; }
-  if (r.code === 3 || kind === "not_found") return null;
+  if (strictNotFound ? r.code === 3 && kind === "not_found" : r.code === 3 || kind === "not_found") return null;
   throw new CliError(`hc get ${terminal} failed: ${(r.stderr || r.stdout).trim()}`);
 }
 
@@ -1078,9 +1082,12 @@ function shownCodexSetting({ argv, pinned, levels = [], fallback = null, fallbac
 }
 
 /** One bot as ls and show print it. With hc failing, the bot is still shown, its pane unknown. */
-function describe(project, bot, view, hcError, projects = null) {
+function describe(project, bot, view, hcError, projects = null, observation = null) {
   const { file } = project;
-  const held = !bot.planned && view ? liveFor(view, bot.id, project) : null;
+  const candidate = observation?.candidate;
+  const held = project.machine ? (candidate ? { get: candidate.get,
+    binding: candidate.binding ?? { terminal: candidate.get.address.split("/")[1], at: null } } : null)
+    : !bot.planned && view ? liveFor(view, bot.id, project) : null;
   const live = held?.get ?? null;
   const projectsMap = projects ?? localProjectsFor(project);
   const lead = bot.kind === "member" || bot.leadProject
@@ -1088,10 +1095,13 @@ function describe(project, bot, view, hcError, projects = null) {
     : { lead: "", leadProject: null, leadBot: null, warning: null };
   const leadName = lead.leadBot?.name ?? (!lead.leadProject && lead.lead ? file.bots.find((b) => b.id === lead.lead)?.name ?? null : null);
   const agentKey = bot.agent ? resolveAgent(bot.agent, agentTable()) : null;
-  const io = modelIo();
-  const texts = agentKey ? configTexts(io.home, io.read) : {};
-  const fallback = bot.agent ? defaultModelFrom(bot.agent, texts) : null;
-  const shown = shownModel({ argv: live?.foreground?.argv, agentKey: bot.agent, pinned: bot.model, fallback });
+  const io = project.machine ? null : modelIo();
+  const texts = agentKey && io ? configTexts(io.home, io.read) : {};
+  const fallback = bot.agent && !project.machine ? defaultModelFrom(bot.agent, texts) : null;
+  // A live/unknown target cannot borrow a stopped roster pin or caller defaults.
+  const observedArgv = project.machine && (held || hcError)
+    ? (Array.isArray(live?.foreground?.argv) ? live.foreground.argv : []) : live?.foreground?.argv;
+  const shown = shownModel({ argv: observedArgv, agentKey: bot.agent, pinned: bot.model, fallback });
   // #1411: the Codex reasoning effort and service tier this bot runs now (its pane's command
   // line), else its own record when it isn't running, else the profile its launch names, else
   // the host's global config, else Codex's own: no effort, the default (standard) tier. A
@@ -1099,13 +1109,13 @@ function describe(project, bot, view, hcError, projects = null) {
   const codex = agentKey === "codex";
   const global = codex ? codexSettingsFrom(texts.codexConfig) : null;
   const profileName = codex ? codexProfileName(live?.foreground?.argv) : null;
-  const profile = profileName ? codexProfileFrom(profileName, io) : null;
+  const profile = profileName && io ? codexProfileFrom(profileName, io) : null;
   const shownEffort = codex
-    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.effort, key: "model_reasoning_effort",
+    ? shownCodexSetting({ argv: observedArgv, pinned: bot.effort, key: "model_reasoning_effort",
       levels: [["profile", profile?.effort], ["global", global?.effort]] })
     : { value: null, source: null };
   const shownTier = codex
-    ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.tier, key: "service_tier", map: tierName, fallback: "standard",
+    ? shownCodexSetting({ argv: observedArgv, pinned: bot.tier, key: "service_tier", map: tierName, fallback: project.machine ? null : "standard",
       levels: [["profile", profile?.tier], ["global", global?.tier]] })
     : { value: null, source: null };
   // The workers' Antigravity mode is shown as the default (auto) when their agent is Antigravity.
@@ -1113,7 +1123,7 @@ function describe(project, bot, view, hcError, projects = null) {
   if (worker && resolveAgent(worker.agent ?? bot.agent) === "antigravity") worker.agyMode = agyModeOf(worker.agyMode);
   let status = "not running";
   if (bot.planned) status = "planned";
-  else if (hcError) status = "hc unavailable";
+  else if (hcError) status = project.machine ? "unknown" : "hc unavailable";
   else if (!held && view && unknownFor(view, bot.id, project)) status = "unknown"; // its machine isn't answering
   else if (held) status = agentInForeground(live) ? live.status?.state ?? "running" : "no agent in front";
   // #823: the effective permission lists the launch carries: a seat's on the project folder,
@@ -1161,6 +1171,99 @@ async function viewOrError() {
     if (e instanceof LedgerRefusal || !(e instanceof CliError)) throw e;
     return { view: null, hcError: e.message };
   }
+}
+
+/** Read the target, never import or sweep the caller's ledger to discover linked panes.
+ * A label is observation only; only an existing, confirmed binding permits replacement.
+ * Each call refreshes machine identity and launch-folder ownership on the target.
+ */
+async function linkedObservation(project, bot) {
+  const { machine, key } = project;
+  const replyMachines = await hcJson(["machine", "ls"]);
+  const targets = replyMachines?.machines?.filter?.((m) => m?.name === machine);
+  if (!Array.isArray(targets) || targets.length !== 1 || !targets[0].id
+      || replyMachines.machines.filter((m) => m?.id === targets[0].id).length !== 1) {
+    throw new CliError(`${machine}'s core identity is missing or ambiguous; nothing was started.`);
+  }
+  const machines = machinesById(replyMachines);
+  const core = coreOfName(machines, machine);
+  if (!core || !machines.get(core)?.connected) throw new CliError(`${machine}'s core cannot be confirmed; nothing was started.`);
+  const bindings = [...foldAttach(readAttachFile(attachPath(appHome())) ?? []).byKey.values()];
+  const binding = bindings.find((b) => b.bot === bot.id && b.project === key && b.core === core && b.machine);
+  if (bindings.some((b) => b.bot === bot.id && b.project === key && b.machine === machine && b.core !== core)) {
+    throw new CliError(`${machine}'s core changed since the attachment; inspect and attach the intended pane before restarting.`);
+  }
+  const reply = await hcJson(["ls", "--label", `${BOT_LABEL}=${bot.id}`]);
+  if (!Array.isArray(reply) && !Array.isArray(reply?.terminals)) throw new CliError(`hc ls gave no pane list for ${bot.name}; nothing was started.`);
+  const addresses = new Set();
+  for (const row of rowsOf(reply)) {
+    if (typeof row?.address !== "string" || !row.address) throw new CliError(`hc ls gave an incomplete pane address for ${bot.name}; nothing was started.`);
+    if (row.address.startsWith(`${machine}/`)) {
+      if (!/^[A-Za-z0-9._-]+$/.test(row.address.slice(machine.length + 1))) throw new CliError(`hc ls gave an invalid target address; nothing was started.`);
+      addresses.add(row.address);
+    }
+  }
+  const bound = binding ? `${machine}/${binding.terminal}` : null;
+  if (bound) addresses.add(bound);
+  const candidates = [];
+  for (const address of addresses) {
+    const get = await checkedPane(address, { strictNotFound: true });
+    if (!get) continue; // actual not_found/finished, never a failed lookup
+    if (!get.labels || typeof get.labels !== "object" || Array.isArray(get.labels)) throw new CliError(`hc get ${address} gave no label map; nothing was started.`);
+    if (address === bound && get.created_ms !== binding.created_ms) throw new CliError(`${address} is another terminal now (its created_ms changed); inspect and attach the intended pane.`);
+    if (address !== bound && get.labels[BOT_LABEL] !== bot.id) throw new CliError(`${address} changed its bot label during observation; nothing was started.`);
+    if (typeof get.cwd !== "string" || !get.cwd.startsWith("/") || (await remoteIo.exec("test", ["-d", get.cwd], machine)).code !== 0) {
+      throw new CliError(`${address}'s launch folder cannot be confirmed; nothing was started.`);
+    }
+    const owner = await remoteProjectOf(machine, get.cwd);
+    const roster = await loadRemoteProject(owner.key, machine);
+    if (!roster.file.bots.some((b) => b.id === bot.id)) throw new CliError(`${address}'s project ownership cannot be confirmed; nothing was started.`);
+    if (owner.key !== key) {
+      if (address === bound) throw new CliError(`${address}'s launch project differs from its attachment; nothing was started.`);
+      continue;
+    }
+    candidates.push({ get, binding: address === bound ? binding : null });
+  }
+  if (candidates.length > 1) throw new CliError(`${bot.name} has duplicate live labels in ${candidates.map((c) => c.get.address).join(", ")}; inspect those panes before starting or restarting.`,
+    1, { refused: "duplicate", duplicate: true });
+  return { core, machine, candidate: candidates[0] ?? null };
+}
+
+async function describeLinked(project, bot) {
+  let observation, error = null;
+  try { observation = await linkedObservation(project, bot); } catch (e) {
+    if (e instanceof LedgerRefusal) throw e;
+    error = e;
+  }
+  return { ...describe(project, bot, null, error?.message ?? null, null, observation),
+    duplicate: error?.detail?.duplicate === true };
+}
+
+function linkedRestartHeld(project, bot, observation) {
+  const candidate = observation.candidate;
+  if (candidate && !candidate.binding) throw new CliError(`${bot.name} already runs in ${candidate.get.address}, without a confirmed caller attachment. Inspect it, then use am attach ${bot.id} ${candidate.get.address} --machine ${project.machine} --project ${project.key} before restarting.`);
+  return candidate;
+}
+
+async function recheckLinkedRestart(project, bot, initial, opts, tree = false) {
+  const current = await linkedObservation(project, bot);
+  const held = linkedRestartHeld(project, bot, current);
+  if (current.core !== initial.core || (held ? attachKey(held.binding) : null) !== (initial.candidate ? attachKey(initial.candidate.binding) : null)) {
+    throw new CliError(`${bot.name}'s target identity changed before restart; nothing was started.`);
+  }
+  if (held && !tree) await checkLinkedRestartPane(bot, held.get, opts);
+  return held;
+}
+
+async function checkLinkedRestartPane(bot, old, opts) {
+  const helpers = await helpersOf(old.address);
+  const helperRefusal = restartRefusal({ name: bot.name, old: { ...old, status: { state: "idle" } }, helpers, force: opts.force, onMachine: true });
+  if (helperRefusal) throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: old.address });
+  const refusal = restartRefusal({ name: bot.name, old, force: opts.force, onMachine: true });
+  if (refusal) throw busyRefusal(refusal, old);
+  if (!old.status && !opts.force) throw new CliError(`${old.address} doesn't tell hc whether ${bot.name}'s agent is busy or waiting for an approval, so a restart `
+    + `could end it mid-turn. Nothing was restarted. Look at the pane first, then pass --force to restart anyway `
+    + `(it sends the pane no keys: it starts a new pane, then ends this one).`);
 }
 
 // ---- the briefing hook (briefingText.mjs installHook, as launch.js afterBind uses it) ----
@@ -1312,6 +1415,13 @@ Usage: am <command> [options]                   (every command takes --json and 
                                plus planned waves, code opt-outs and Antigravity modes
   show <bot>                    one bot in full (--json: the effective effort and tier,
                                 and where each comes from)
+                                Linked ls/show observe target panes without adopting them.
+                                Model/effort/tier come from observed argv; unobserved target
+                                defaults are unknown. A stopped bot can show its configured pin.
+                                Argv does not prove an interactive in-process model change.
+                                Linked start checks existing panes and checks again before run;
+                                independent caller hosts are not serialized. Linked restart
+                                requires an existing pane to have a confirmed attachment.
   create --name N --agent A [--kind main|member] [--role R]
          [--code true|false]            false omits the worker instruction; default true
          [--person-features on|off]     Claude Code only: keep the prompt suggestions, away
@@ -2194,10 +2304,8 @@ async function cmdLs(opts) {
   if (opts.machine !== undefined) {
     if (opts.all) throw new CliError("ls --all lists this computer's projects; give --machine without --all.", 2);
     const project = await projectFor(opts);
-    const { view, hcError } = await viewOrError();
-    const bots = await Promise.all(project.file.bots.map(async (b) => ({
-      ...describe(project, b, view, hcError), duplicate: await duplicateLabel(project, b, view),
-    })));
+    const bots = [];
+    for (const bot of project.file.bots) bots.push(await describeLinked(project, bot));
     const one = { ...placeOf(project), categories: project.file.categories, warnings: project.warnings, bots };
     return opts.json ? { projects: [one] } : lsLines([one]);
   }
@@ -2326,9 +2434,9 @@ async function checkLinkedProxy(project, bot, agent, warn = reportProxyWarning) 
 async function cmdShow(opts, [ref]) {
   const project = await projectFor(opts);
   const bot = await botIn(project, ref, opts);
-  const { view, hcError } = await viewOrError();
-  const info = { ...describe(project, bot, view, hcError), duplicate: await duplicateLabel(project, bot, view),
-    instructions: bot.instructions };
+  const { view, hcError } = project.machine ? {} : await viewOrError();
+  const info = { ...(project.machine ? await describeLinked(project, bot)
+    : { ...describe(project, bot, view, hcError), duplicate: await duplicateLabel(project, bot, view) }), instructions: bot.instructions };
   info.hcProxyState = project.machine ? await proxyStateOn(project, bot)
     : approvedProxyState({ project: project.key, bot });
   if (opts.json) return info;
@@ -3265,6 +3373,11 @@ async function windowPlaceOn(machine, key) {
  */
 async function seatOnMachine(project, bot, over = {}) {
   const { file, key, machine } = project;
+  if (over.recheck) await over.recheck();
+  else {
+    const observed = await linkedObservation(project, bot);
+    if (observed.candidate) return { running: observed.candidate.get.address };
+  }
   await checkLinkedProxy(project, bot, over.agent ?? bot.agent);
   const m = await connectedMachine(machine, "nothing was started");
   const agentKey = over.agent ?? bot.agent;
@@ -3384,10 +3497,11 @@ async function seatOnMachine(project, bot, over = {}) {
     return { address, terminal: address.slice(address.indexOf("/") + 1), created_ms: get.created_ms, machine, core: m.id, argv, labels, place,
       hookWritten: hook.written, warnings };
   };
-  if (over.replacing) return run();
-  const seat = await underLedger(async ({ machines, heldBy, holds, write }) => {
-    const mine = await holds(heldBy(bot.id, m.id));
-    if (mine && mine.binding.project === key) return { running: addressOf(mine.binding, machines) };
+  if (over.replacing) return underLedger(async () => { await over.recheck(); return run(); });
+  const seat = await underLedger(async ({ write }) => {
+    const observed = await linkedObservation(project, bot);
+    if (observed.core !== m.id) throw new CliError(`${machine}'s core changed before launch; nothing was started.`);
+    if (observed.candidate) return { running: observed.candidate.get.address };
     const seat = await run();
     try {
       write([attachRow({ event: "attach", bot: bot.id, project: key, terminal: seat.terminal, core: m.id, created_ms: seat.created_ms, machine, by: "start" })]);
@@ -3413,16 +3527,10 @@ const seatOnJson = (bot, seat) => ({ id: bot.id, terminal: seat.terminal, machin
 
 /** start --machine: the bot's pane there (seatOnMachine); one that runs already is reported. */
 async function startOnMachine(opts, project, bot) {
-  await connectedMachine(project.machine, "nothing was started");
-  const view = await attachView();
-  const held = liveFor(view, bot.id, project);
-  if (held) {
-    const at = addressOf(held.binding, view.machines);
-    return opts.json ? { id: bot.id, running: held.binding.terminal, machine: held.binding.machine } : `${bot.name} is already running in ${at}.`;
-  }
-  if (unknownFor(view, bot.id, project)) {
-    const b = unknownFor(view, bot.id, project);
-    throw new CliError(`${bot.name}'s pane on ${b.machine} (${b.terminal}) can't be checked: ${b.machine} isn't answering. Nothing was started.`);
+  const observed = await linkedObservation(project, bot);
+  if (observed.candidate) {
+    const at = observed.candidate.get.address;
+    return opts.json ? { id: bot.id, running: at.split("/")[1], machine: project.machine } : `${bot.name} is already running in ${at}.`;
   }
   if (opts.space) throw new CliError("--space and --tab are this computer's window places; a start on a linked machine finds its own.", 2);
   const seat = await seatOnMachine(project, bot);
@@ -3440,9 +3548,8 @@ async function restartTreeOnMachine(opts, project, bot) {
   if (opts.space) throw new CliError("A restart on a linked machine keeps the old pane's window place.", 2);
   const { machine, key } = project;
   const m = await connectedMachine(machine, "nothing was restarted");
-  const view = await attachView();
-  const held = liveFor(view, bot.id, project);
-  if (unknownFor(view, bot.id, project)) throw new CliError(`${machine} isn't answering; reconnect it and retry the restart.`);
+  const observed = await linkedObservation(project, bot);
+  const held = linkedRestartHeld(project, bot, observed);
   const paneEnv = await paneEnvOn(machine, key);
   if (paneEnv.refused) throw new CliError(`The project's pane environment on ${machine} could not be read; fix it and retry the restart.`);
   const args = ["restart", bot.id, "--project", key, "--tree", "--json"];
@@ -3466,6 +3573,7 @@ if [ -n "$restart_terminal" ]; then
   "$restart_cli" attach "$restart_bot" "$restart_terminal" --project "$restart_project" --json >/dev/null || exit $?
 fi
 exec "$restart_cli" "$@"`;
+  await recheckLinkedRestart(project, bot, observed, opts, true);
   const result = await remoteIo.exec("sh", ["-c", script, "sh", paneEnv.appHome ?? "", paneEnv.prepend ?? "",
     held?.binding.terminal ?? "", bot.id, key, ...args], machine, { cwd: key, timeout: 540 });
   let out;
@@ -3515,29 +3623,15 @@ exec "$restart_cli" "$@"`;
  * conversation: refused while another bot's same agent runs in that folder there); the old
  * pane is ended (hc kill) only once the new one has kept its agent in front. No keys are sent.
  */
-async function restartOnMachine(opts, project, bot, entry) {
+async function restartOnMachine(opts, project, bot, entry, observed) {
   if (opts.space) throw new CliError("--space and --tab are this computer's window places; a restart on a linked machine keeps the old pane's.", 2);
   const { file, key, machine } = project;
   await checkLinkedProxy(project, bot, opts.agent ?? bot.agent, () => {});
   const m = await connectedMachine(machine, "nothing was restarted");
-  const view = await attachView();
-  const held = liveFor(view, bot.id, project);
-  if (!held && unknownFor(view, bot.id, project)) {
-    throw new CliError(`${bot.name}'s pane on ${machine} can't be checked: ${machine} isn't answering. Nothing was restarted.`);
-  }
-  const old = held ? { ...held.get, address: addressOf(held.binding, view.machines) } : null;
-  if (old) {
-    const helpers = await helpersOf(old.address);
-    const helperRefusal = restartRefusal({ name: bot.name, old: { ...old, status: { state: "idle" } }, helpers, force: opts.force, onMachine: true });
-    if (helperRefusal) throw new CliError(helperRefusal, 1, { refused: "helpers", terminal: old.address });
-    const refusal = restartRefusal({ name: bot.name, old, force: opts.force, onMachine: true });
-    if (refusal) throw busyRefusal(refusal, old);
-    if (!old.status && !opts.force) {
-      throw new CliError(`${old.address} doesn't tell hc whether ${bot.name}'s agent is busy or waiting for an approval, so a restart `
-        + `could end it mid-turn. Nothing was restarted. Look at the pane first, then pass --force to restart anyway `
-        + `(it sends the pane no keys: it starts a new pane, then ends this one).`);
-    }
-  }
+  const held = linkedRestartHeld(project, bot, observed);
+  const old = held?.get ?? null;
+  if (old) await checkLinkedRestartPane(bot, old, opts);
+  const recheck = () => recheckLinkedRestart(project, bot, observed, opts);
   const agentKey = entry?.agent ?? bot.agent;
   const run = agentTable()[agentKey]?.run;
   if (!run?.length) throw new CliError(`${bot.name}'s coding agent "${agentKey}" isn't one Herdr can start.`);
@@ -3587,7 +3681,7 @@ async function restartOnMachine(opts, project, bot, entry) {
     if (refusal) throw new CliError(refusal);
   }
   let seat = await seatOnMachine(project, bot, { agent: plan.agent, argv: plan.argv, cwd, place: old ? placementFrom([old]) : undefined,
-    carry: { ...carriedLabels(old), ...(session ?? plan.sessionId ? { [SESSION_LABEL]: session ?? plan.sessionId } : {}) }, replacing: Boolean(old) });
+    carry: { ...carriedLabels(old), ...(session ?? plan.sessionId ? { [SESSION_LABEL]: session ?? plan.sessionId } : {}) }, replacing: Boolean(old), recheck });
   if (seat.running) return opts.json ? { id: bot.id, running: seat.running } : `${bot.name} is already running in ${seat.running}.`;
   const warnings = [...(turnNote ? [turnNote] : []), ...seat.warnings];
   // #597: the replacement is built from bots.json, never the pane's command; when they differ,
@@ -3610,7 +3704,7 @@ async function restartOnMachine(opts, project, bot, entry) {
       session = null;
       warnings.push(`${bot.name} starts on a new conversation: ${note}.`);
       report([warnings.at(-1)]);
-      const again = await seatOnMachine(project, bot, { agent: plan.agent, argv: plan.argv, cwd, place: placementFrom([old]), carry: { ...carriedLabels(old), ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, replacing: true });
+      const again = await seatOnMachine(project, bot, { agent: plan.agent, argv: plan.argv, cwd, place: placementFrom([old]), carry: { ...carriedLabels(old), ...(plan.sessionId ? { [SESSION_LABEL]: plan.sessionId } : {}) }, replacing: true, recheck });
       if (again.running) throw new CliError(`${bot.name} is running in ${again.running} now, so no new pane was started; ${old.address} still runs it, untouched.`);
       warnings.push(...again.warnings);
       report(again.warnings);
@@ -5076,8 +5170,8 @@ function paneLaunchEnv(get) {
 
 const sameHome = (left, right) => (realDir(left) ?? resolvePath(left)) === (realDir(right) ?? resolvePath(right));
 
-async function checkedPane(address) {
-  const get = await hcLookup(address);
+async function checkedPane(address, options) {
+  const get = await hcLookup(address, options);
   if (!get) return null;
   if (get.address !== address || !["live", "finished"].includes(get.state)
       || (get.state === "live" && !Number.isSafeInteger(get.created_ms))) {
@@ -5236,7 +5330,12 @@ async function cmdRestart(opts, [ref]) {
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
   if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
-  if (project.machine) return restartResolved(opts, project, bot, wanted, swap);
+  if (project.machine) {
+    // Observe before swap/model validation can refresh a caller-side model cache.
+    const observed = await linkedObservation(project, bot);
+    linkedRestartHeld(project, bot, observed);
+    return restartResolved(opts, project, bot, wanted, swap, observed);
+  }
   const explicit = process.env.HERDR_APP_HOME;
   const requested = appHome();
   const target = await restartTarget(project, bot, requested, Boolean(explicit), !opts._queuedTarget);
@@ -5284,7 +5383,7 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
           + `Pick one with am edit ${bot.id} --model <model>, restart it on one with --model <model>, or clear the pin with --no-model.`);
     }
   }
-  if (project.machine) return restartOnMachine(opts, project, bot, entry);
+  if (project.machine) return restartOnMachine(opts, project, bot, entry, target);
   const view = await attachView({ readOnly: true });
   const held = target.held;
   let old = held?.get ?? null;

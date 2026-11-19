@@ -876,7 +876,7 @@ test("a same-id bot on this computer is never touched by --machine: start, resta
 test("restart --machine: an old pane whose id is another terminal by the kill is left alone, and says so", (t) => {
   const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" }, labels: {} })] });
   assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
-  s.setState((st) => { const p = st.terminals.find((x) => x.address === "vm/t8"); p.reuseAfterGets = 1; p.reuseCreated = 77; });
+  s.setState((st) => { const p = st.terminals.find((x) => x.address === "vm/t8"); p.reuseAfterGets = 3; p.reuseCreated = 77; });
   const r = s.cli(["restart", "Atlas", ...s.on, "--fresh"]);
   assert.equal(r.code, 0, r.err);
   assert.match(r.err, /vm\/t8 is another terminal now \(its created_ms changed\), so it wasn't ended/);
@@ -1360,7 +1360,7 @@ test("start and restart --machine (#1033): on Darwin when security show-keychain
   exe(join(vmBin, "security"), `#!/bin/sh\nif [ "$1" = show-keychain-info ]; then\n  echo "${denied}" >&2\n  exit 36\nfi\nexit 2\n`);
   s.setState((st) => {
     st.machines[0].uname = "Darwin arm64";
-    st.terminals.push(atlasPane({ foreground: { argv: ["agy"], name: "agy" }, status: { state: "idle", app: "agy" } }));
+    st.terminals.push(atlasPane({ cwd: s.project, foreground: { argv: ["agy"], name: "agy" }, status: { state: "idle", app: "agy" } }));
   });
   assert.equal(s.cli(["attach", "Atlas", "vm/t8", ...s.on]).code, 0);
   const beforeCalls = s.calls().length;
@@ -1583,4 +1583,213 @@ test("#1173 start --machine leaves a Claude pin alone when the target lists none
   const at = words.indexOf("--model");
   assert.ok(at > 0, words.join(" "));
   assert.equal(words[at + 1], "claude-target-only");
+});
+
+// #1634: the caller ledger is not the target's inventory. All observations below
+// use the existing fake linked filesystem/HC transport, with no real machine calls.
+function seedCallerLedger(s, rows = []) {
+  mkdirSync(join(s.app, "automagik-herdr"), { recursive: true });
+  writeFileSync(attachPath(s.app), rows.map((row) => JSON.stringify(row) + "\n").join(""), { mode: 0o600 });
+}
+function linkedRow(s, extra = {}) {
+  return { v: 1, event: "attach", bot: ATLAS, project: s.project, terminal: "t8", core: CORE,
+    created_ms: 1700000000008, machine: "vm", at: "2026-11-18T00:00:00.000Z", by: "attach", ...extra };
+}
+function linkedBytes(s) {
+  return [attachPath(s.app), join(s.project, ".herdr/bots.json")].map((p) => existsSync(p) ? readFileSync(p, "utf8") : null);
+}
+function noLaunchOrKill(s, from = 0) {
+  assert.deepEqual(s.calls().slice(from).filter((c) => ["run", "kill", "send", "keys", "label"].includes(c[0])), []);
+}
+
+for (const ledger of ["absent", "empty", "unrelated"]) test(`#1634 target-only working pane across ${ledger} caller ledger is read-only and prevents start/restart`, (t) => {
+  const s = scene(t, { terminals: [atlasPane({ labels: { bot: ATLAS }, status: { state: "working", app: "hermes" } })] });
+  if (ledger !== "absent") seedCallerLedger(s, ledger === "empty" ? [] : [linkedRow(s, { bot: HEDGE, terminal: "t77" })]);
+  const before = linkedBytes(s);
+  for (const args of [["ls"], ["show", "Atlas"]]) {
+    const r = s.cli([...args, ...s.on, "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const b = args[0] === "ls" ? r.json().projects[0].bots[0] : r.json();
+    assert.equal(b.status, "working");
+    assert.equal(b.terminal, "t8");
+  }
+  const start = s.cli(["start", "Atlas", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  assert.equal(start.json().running, "t8");
+  for (const flags of [[], ["--force", "--fresh"], ["--tree", "--force"]]) {
+    const r = s.cli(["restart", "Atlas", ...s.on, ...flags, "--json"]);
+    assert.equal(r.code, 1, r.err);
+    assert.match(r.err, /without a confirmed caller attachment.*am attach/);
+  }
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s);
+  assert.equal(s.calls().some((c) => c[0] === "exec" && c.includes("--tree")), false);
+});
+
+test("#1634 linked model/effort/tier describe argv, stopped pins or unknown, never caller config", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ labels: { bot: ATLAS }, status: { state: "working", app: "codex" },
+    foreground: { argv: ["codex", "--model", "target-B", "-c", 'model_reasoning_effort="high"', "-c", 'service_tier="priority"'] } })] });
+  seedCallerLedger(s);
+  const file = join(s.project, ".herdr/bots.json"), roster = JSON.parse(readFileSync(file));
+  Object.assign(roster.bots[0], { agent: "codex", model: "stale-C", effort: "low", tier: "standard" });
+  writeFileSync(file, JSON.stringify(roster));
+  mkdirSync(join(s.home, ".codex"));
+  writeFileSync(join(s.home, ".codex/config.toml"), 'model="caller-A"\nmodel_reasoning_effort="ultra"\nservice_tier="priority"\n[profiles.caller]\nmodel="caller-profile"\nmodel_reasoning_effort="max"\n');
+  const before = linkedBytes(s);
+  for (const phase of ["explicit", "no-model", "unknown", "stopped-pinned", "stopped-unpinned"]) {
+    s.setState((state) => {
+      state.failGet = phase === "unknown" ? ["vm/t8"] : [];
+      state.terminals[0].state = phase.startsWith("stopped") ? "finished" : "live";
+      if (phase !== "explicit") state.terminals[0].foreground.argv = ["codex", "--profile", "caller"];
+    });
+    if (phase === "stopped-unpinned") {
+      for (const field of ["model", "effort", "tier"]) delete roster.bots[0][field];
+      writeFileSync(file, JSON.stringify(roster));
+    }
+    for (const args of [["ls"], ["show", "Atlas"]]) {
+      const r = s.cli([...args, ...s.on, "--json"]);
+      assert.equal(r.code, 0, r.err);
+      const b = args[0] === "ls" ? r.json().projects[0].bots[0] : r.json();
+      assert.equal(b.status, phase === "unknown" ? "unknown" : phase.startsWith("stopped") ? "not running" : "working");
+      assert.deepEqual([b.model, b.modelSource], phase === "explicit" ? ["target-B", "detected"] : phase === "stopped-pinned" ? ["stale-C", "pinned"] : [null, null]);
+      assert.deepEqual([b.effort, b.effortSource, b.tier, b.tierSource], phase === "explicit" ? ["high", "detected", "fast", "detected"]
+        : phase === "stopped-pinned" ? ["low", "roster", "standard", "roster"] : [null, null, null, null]);
+      const human = s.cli([...args, ...s.on]);
+      assert.equal(human.code, 0, human.err);
+      assert.doesNotMatch(human.out, /caller-A|caller-profile|ultra|\(global\)|\(profile\)/);
+      if (phase === "explicit") assert.match(human.out, /target-B \(detected\)/);
+      if (phase === "unknown") assert.match(human.out, /unknown/);
+    }
+  }
+  assert.equal(linkedBytes(s)[0], before[0]);
+  noLaunchOrKill(s);
+});
+
+test("#1634 scope uses target launch project, ignoring foreground cwd, clones and other cores", (t) => {
+  const s = scene(t);
+  seedCallerLedger(s);
+  const bots = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json")));
+  execFileSync("git", ["init", "-q", s.project]);
+  execFileSync("git", ["-C", s.project, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "fixture"]);
+  const worktree = join(s.root, "target-worktree");
+  execFileSync("git", ["-C", s.project, "worktree", "add", "--detach", worktree], { stdio: "pipe" });
+  const clone = scratchProject(s.root, "other-project", { bots });
+  s.setState((state) => {
+    state.machines.push({ name: "other", id: "other-core", state: "connected" });
+    state.terminals = [atlasPane({ cwd: worktree, labels: { bot: ATLAS }, foreground: { argv: KEEP, cwd: clone } }),
+      atlasPane({ address: "vm/t9", created_ms: 9, cwd: clone, labels: { bot: ATLAS } }),
+      atlasPane({ address: "other/t8", cwd: s.project, labels: { bot: ATLAS } }),
+      atlasPane({ address: "t8", cwd: s.project, labels: { bot: ATLAS } })];
+  });
+  const start = s.cli(["start", "Atlas", ...s.on, "--json"]);
+  assert.equal(start.code, 0, start.err);
+  assert.equal(start.json().running, "t8");
+  assert.equal(s.cli(["show", "Atlas", ...s.on, "--json"]).json().duplicate, false);
+  noLaunchOrKill(s);
+});
+
+for (const failure of ["no-cwd", "gone-cwd", "no-roster", "malformed-ls", "malformed-get", "null-get", "get-unavailable", "false-not-found", "duplicate", "no-core", "ambiguous-core", "reused-core", "reused-id"]) {
+  test(`#1634 ${failure}: unknown target and refusal leave ledger, roster and pane untouched`, (t) => {
+    const s = scene(t, { terminals: [atlasPane({ labels: { bot: ATLAS } })] });
+    seedCallerLedger(s, failure.startsWith("reused") ? [linkedRow(s)] : []);
+    s.setState((state) => {
+      const pane = state.terminals[0];
+      if (failure === "no-cwd") delete pane.cwd;
+      if (failure === "gone-cwd") pane.cwd = join(s.root, "missing");
+      if (failure === "no-roster") pane.cwd = s.home;
+      if (failure === "malformed-ls") state.lsReply = {};
+      if (failure === "malformed-get") state.badGet = ["vm/t8"];
+      if (failure === "null-get") state.getReply = { "vm/t8": null };
+      if (failure === "get-unavailable" || failure === "false-not-found") state.failGet = ["vm/t8"];
+      if (failure === "false-not-found") state.failGetExit = 3;
+      if (failure === "duplicate") state.terminals.push(atlasPane({ address: "vm/t9", cwd: s.project, created_ms: 9, labels: { bot: ATLAS } }));
+      if (failure === "no-core") state.machines[0].id = "";
+      if (failure === "ambiguous-core") state.machines.push({ ...state.machines[0], id: "another-core" });
+      if (failure === "reused-core") state.machines[0].id = "new-core";
+      if (failure === "reused-id") pane.created_ms = 77;
+    });
+    const before = linkedBytes(s);
+    const show = s.cli(["show", "Atlas", ...s.on, "--json"]);
+    assert.equal(show.code, 0, show.err);
+    assert.equal(show.json().status, "unknown");
+    if (failure === "duplicate") assert.equal(show.json().duplicate, true);
+    for (const args of [["start"], ["restart", "--force", "--fresh"], ["restart", "--tree", "--force"]]) {
+      const r = s.cli([args[0], "Atlas", ...args.slice(1), ...s.on, "--json"]);
+      assert.equal(r.code, 1, `${failure}: ${r.out} ${r.err}`);
+    }
+    assert.deepEqual(linkedBytes(s), before);
+    assert.equal(s.hcState().terminals[0].state, "live");
+    noLaunchOrKill(s);
+  });
+}
+
+test("#1634 confirmed unlabeled attachment is observed; actual not_found is stopped without sweeping", (t) => {
+  const s = scene(t, { terminals: [atlasPane()] });
+  seedCallerLedger(s, [linkedRow(s)]);
+  const before = linkedBytes(s);
+  assert.equal(s.cli(["show", "Atlas", ...s.on, "--json"]).json().terminal, "t8");
+  s.setState((state) => { state.terminals = []; });
+  const r = s.cli(["show", "Atlas", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.json().status, "not running");
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s);
+});
+
+for (const nth of [1, 3]) test(`#1634 target pane appearing after list ${nth} prevents a duplicate launch`, (t) => {
+  const s = scene(t);
+  seedCallerLedger(s);
+  const before = linkedBytes(s);
+  s.setState((state) => { state.addAfterLs = { nth, terminal: atlasPane({ cwd: s.project, labels: { bot: ATLAS } }) }; });
+  const r = s.cli(["start", "Atlas", ...s.on, "--json"]);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.json().running, /t8$/);
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s);
+  // The late check may follow legitimate briefing/window preparation; it is not
+  // a claim that preparation is rolled back or independent hosts are atomic.
+});
+
+for (const tree of [false, true]) test(`#1634 ${tree ? "tree" : "direct"} restart rechecks reused identity before replacement`, (t) => {
+  const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" } })] });
+  seedCallerLedger(s, [linkedRow(s)]);
+  s.setState((state) => { Object.assign(state.terminals[0], { reuseAfterGets: 1, reuseCreated: 77 }); });
+  const before = linkedBytes(s);
+  const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--force", ...(tree ? ["--tree"] : []), "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /created_ms changed/);
+  assert.deepEqual(linkedBytes(s), before);
+  noLaunchOrKill(s);
+  assert.equal(s.calls().some((c) => c[0] === "exec" && c.includes("--tree")), false);
+});
+
+test("#1634 a nested target roster owns its subfolder; its same-id pane is not the parent's", (t) => {
+  const s = scene(t);
+  seedCallerLedger(s);
+  const bots = JSON.parse(readFileSync(join(s.project, ".herdr/bots.json")));
+  const nested = scratchProject(s.project, "nested", { bots });
+  const subdir = join(nested, "src");
+  mkdirSync(subdir);
+  s.setState((state) => { state.terminals = [atlasPane({ cwd: subdir, labels: { bot: ATLAS } })]; });
+  const nestedShow = s.cli(["show", "Atlas", "--machine", "vm", "--project", nested, "--json"]);
+  assert.equal(nestedShow.code, 0, nestedShow.err);
+  assert.equal(nestedShow.json().terminal, "t8");
+  const parentShow = s.cli(["show", "Atlas", ...s.on, "--json"]);
+  assert.equal(parentShow.code, 0, parentShow.err);
+  assert.equal(parentShow.json().status, "not running");
+  assert.equal(parentShow.json().terminal, null);
+  noLaunchOrKill(s);
+});
+
+test("#1634 a second target label appearing during restart preparation refuses before run or kill", (t) => {
+  const s = scene(t, { terminals: [atlasPane({ status: { state: "idle", app: "hermes" }, labels: { bot: ATLAS } })] });
+  seedCallerLedger(s, [linkedRow(s)]);
+  const before = linkedBytes(s);
+  s.setState((state) => { state.addAfterLs = { nth: 3, terminal: atlasPane({ address: "vm/t9", created_ms: 9, cwd: s.project, labels: { bot: ATLAS } }) }; });
+  const r = s.cli(["restart", "Atlas", ...s.on, "--fresh", "--json"]);
+  assert.equal(r.code, 1, r.err);
+  assert.match(r.err, /duplicate live labels/);
+  assert.deepEqual(linkedBytes(s), before);
+  assert.equal(s.hcState().terminals[0].state, "live");
+  noLaunchOrKill(s);
 });
