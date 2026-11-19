@@ -31,7 +31,7 @@ import { addressOf, attachKey, attachLine, attachPath, attachRow, closingRow, co
 import { PANE_ENV_PATH, agentOnMachine, interpreterPath, paneEnvOf } from "../agentPath.mjs";
 import { briefingFilePath, installHook, launchBriefingText, screenTail, stableBriefingPath, withExclude } from "../briefingText.mjs";
 import { gatherBriefing } from "../briefing.mjs";
-import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
+import { codexTrustKeptWarning, codexTrustPlan, codexTrustWarning, withCodexTrust, AGENTS, AGY_MODE_DEFAULT, AGY_MODES, AUTO_MODE, AUTO_MODE_NONE, PERMISSION_MODE_DEFAULT, PERMISSION_MODE_WHAT, agentKeyOfArgv, agyGuarded, agyModeArgs, agyModeOf, agyModeProblem, agyModeWarning, agyPermissionPlan, agyRuleProblem, agySandbox, agySettingsArgs, agySettingsDir, agySettingsPlan, autoModeArgs, codexClean, codexCleanNote, codexConfigValue, codexEffortProblem, codexProfileFrom, codexProfileName, codexSettingsFrom, CODEX_DIR_VARS, codexGrantPaths, codexGrantPlan, codexWithheldWarning, codexKeepDirs, codexWhere, codexWhereThere, absPath, cleanPath, configTexts, defaultModel, defaultModelFrom, seatSettingsArgs, tierName, tierProblem, withCodexGrants, choosesSession, continuesAnywhere, briefingHook, briefingLaunch, briefingOwnConfig, briefingWay, configPaths, detectModel, knownModels, knownModelsFrom, agModelsPath, launchRun, modelArgs, modelRefusal, ownPromptIn, ownsSession, permissionModeArgs, permissionModeFrom, permissionModeProblem, permissionModesOf, resolveAgent, resumeAfterTurn, resumesById,
   promptByMessage, sessionIdArgs, shownModel, withAgySettings, withBriefing, withOverrides } from "../models.js";
 import { AG_MODELS_TIMEOUT_MS, agModelsSpawnResult, refreshAgModelsSync } from "../modelCache.js";
 import { EFFORT_SHAPE, HC_NAME_MAX, LEAD_RANKS, LEAD_SHAPE, LEDGER_FILE, ROLES, WORKER_OF_LABEL, WORKER_ROLE_LABEL, WORKER_TEMPLATE_LABEL, WORKTREES_EXCLUDE,
@@ -1108,12 +1108,15 @@ function describe(project, bot, view, hcError, projects = null) {
     ? shownCodexSetting({ argv: live?.foreground?.argv, pinned: bot.tier, key: "service_tier", map: tierName, fallback: "standard",
       levels: [["profile", profile?.tier], ["global", global?.tier]] })
     : { value: null, source: null };
-  // #1413: the Claude Code permission mode this bot runs now (its pane's command line), else its
-  // own record when it isn't running, else the pack's auto default. Only Claude Code has one.
+  // #1413 F1: the Claude Code permission mode this bot runs now, read from its live pane's
+  // command line; only when it isn't running does the record say what its next start runs. A
+  // live pane whose command line names none has no effective mode to report: the record's mode
+  // is not this process's, so claiming it (source "roster") would lie about what runs.
   const permissionModes = permissionModesOf(agentKey);
-  const detectedPermission = live && permissionModes ? permissionModeFrom(live.foreground?.argv) : null;
+  const paneArgv = Array.isArray(live?.foreground?.argv) ? live.foreground.argv : null;
+  const detectedPermission = paneArgv && permissionModes ? permissionModeFrom(paneArgv) : null;
   const shownPermission = !permissionModes ? { value: null, source: null }
-    : detectedPermission ? { value: detectedPermission, source: "detected" }
+    : paneArgv ? (detectedPermission ? { value: detectedPermission, source: "detected" } : { value: null, source: "live" })
       : bot.permissionMode ? { value: bot.permissionMode, source: "roster" }
         : { value: PERMISSION_MODE_DEFAULT, source: "default" };
   // The workers' Antigravity mode is shown as the default (auto) when their agent is Antigravity.
@@ -1135,6 +1138,14 @@ function describe(project, bot, view, hcError, projects = null) {
   const workerTrusted = ["<worktree>"];
   const workerAgy = workerAgent === "antigravity"
     ? agyPermissionPlan({ bot, scope: "worker", role: workerRoleOf, folder: null, realpath: realDir, homeDir: home() }) : null;
+  // #1413 F1: the `auto mode` line is what the live pane runs too, never the mode a restart
+  // would apply; a live command line this pack reads no mode on says exactly that.
+  const auto = bot.agent ? autoModeOf(bot, !project.machine) : null;
+  const autoMode = auto && permissionModes && paneArgv
+    ? { ...auto, args: detectedPermission ? permissionModeArgs("claude", detectedPermission) : [],
+      note: detectedPermission ? PERMISSION_MODE_WHAT[detectedPermission]
+        : "this pack reads no --permission-mode on its live command line" }
+    : auto;
   const out = {
     id: bot.id, name: bot.name, kind: bot.kind, ...placeOf(project),
     lead: lead.lead || null, leadName,
@@ -1150,7 +1161,7 @@ function describe(project, bot, view, hcError, projects = null) {
     terminal: held?.binding.terminal ?? null, status, duplicate: false, since: held?.binding.at ?? null,
     role: bot.role, rank: bot.rank ?? null, code: bot.code !== false, look: bot.look,
     hcProxy: bot.hcProxy === true,
-    autoMode: bot.agent ? autoModeOf(bot, !project.machine) : null,
+    autoMode,
     worker,
     ...(seatAgy ? { agyPermissions: { allow: seatAgy.allow, deny: seatAgy.deny, trustedWorkspaces: seatAgy.trustedWorkspaces } } : {}),
     ...(workerAgy ? { workerAgyPermissions: { allow: workerAgy.allow, deny: workerAgy.deny, trustedWorkspaces: workerTrusted } } : {}),
@@ -2158,6 +2169,21 @@ async function projectFor(opts) {
   if (opts.machine !== undefined) return loadRemoteProject(await remoteKeyOf(opts), opts.machine);
   return loadProject(await commandKeyOf(opts));
 }
+
+// #1413 F3: a warning the loader raised about a bot's record (a hand-edited permission mode it
+// dropped, say) is said on every command that reads the record, not only `am ls` and `am worker`.
+// Warn, never refuse: the rest of the record is valid and the launch runs the field's default, so
+// refusing would keep an operator from starting the bot they must fix. The sentence is the
+// loader's own, once per command; `botId` narrows it to the bot a command is about.
+const saidWarnings = new Set();
+function warnProject(project, botId = null) {
+  for (const w of project?.warnings ?? []) {
+    if (botId && !w.startsWith(`${botId}: `)) continue;
+    if (saidWarnings.has(w)) continue;
+    saidWarnings.add(w);
+    report([w]);
+  }
+}
 /**
  * Where this command's edit is written (RFC 0014 Q16, #234): the git top level of the folder
  * it was run in or named with --project (a worktree's own folder), else the project key (a
@@ -2363,6 +2389,7 @@ async function checkLinkedProxy(project, bot, agent, warn = reportProxyWarning) 
 async function cmdShow(opts, [ref]) {
   const project = await projectFor(opts);
   const bot = await botIn(project, ref, opts);
+  warnProject(project, bot.id);
   const { view, hcError } = await viewOrError();
   const info = { ...describe(project, bot, view, hcError), duplicate: await duplicateLabel(project, bot, view),
     instructions: bot.instructions };
@@ -2385,7 +2412,11 @@ async function cmdShow(opts, [ref]) {
       `  effort       ${info.effort ? `${info.effort} (${info.effortSource})` : "-"}`,
       `  tier         ${info.tier ? `${info.tier} (${info.tierSource})` : "-"}`,
     ] : []),
-    ...(info.permissionMode ? [`  permission   ${info.permissionMode} (${info.permissionModeSource})`] : []),
+    ...(info.permissionMode ? [`  permission   ${info.permissionMode} (${info.permissionModeSource})`]
+      : info.permissionModeSource === "live"
+        ? [`  permission   not named by its live command line (${info.pinnedPermissionMode
+          ? `its record's ${info.pinnedPermissionMode} applies to its next start` : "the pack's auto mode applies to its next start"})`]
+        : []),
     ...(info.agyMode ? [`  agy mode     ${info.agyMode}`] : []),
     ...(info.autoMode ? [`  auto mode    ${info.autoMode.args.length ? `${info.autoMode.args.join(" ")} (${info.autoMode.note})` : `none: ${info.autoMode.note}`}`] : []),
     ...(info.autoMode?.sandbox && info.autoMode.sandbox.state !== "available"
@@ -2949,6 +2980,7 @@ async function cmdStart(opts, [ref]) {
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
   const bot = await botIn(project, ref, opts);
+  warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
   // launch.js checks the folder Start launches in against the project (attachRefusal on
@@ -5271,6 +5303,7 @@ async function cmdRestart(opts, [ref]) {
   const { file, key } = project;
   if (project.text === null) throw new CliError(`No ${BOTS_PATH} in ${key}.`);
   const bot = await botIn(project, ref, opts);
+  warnProject(project, bot.id);
   const why = startRefusal(file, bot.id);
   if (why) throw new CliError(why);
   if (project.machine && opts.tree) return restartTreeOnMachine(opts, project, bot);
@@ -7864,7 +7897,7 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
     if (!projects.has(key)) {
       let loaded = null;
       try { loaded = key ? loadProject(key) : null; } catch { loaded = null; }
-      projects.set(key, { key, file: loaded?.text ? loaded.file : null, results: [] });
+      projects.set(key, { key, file: loaded?.text ? loaded.file : null, warnings: loaded?.warnings ?? [], results: [] });
     }
     return projects.get(key);
   };
@@ -7883,6 +7916,8 @@ async function revivePass(opts, { wait, dry, bootMs, projects }) {
         : me && [t.terminal, states.get(t.terminal)?.get?.name].includes(me) ? "revive runs inside its pane; run it from another terminal" : null;
     return { ...t, name: nameOf(t), bot: t.bot, def: bot, refuse: why, via: parentTarget(t) };
   });
+  // #1413 F3: a record warning about a bot being brought back is said once, as start and restart do.
+  for (const p of plan) if (p.def) warnProject(projectOfKey(p.project), p.bot);
   for (const s of skipped) projectOfKey(s.project).results.push({ name: nameOf(s), bot: s.bot, outcome: "skipped", why: s.why, terminal: s.terminal, helpers: [] });
   if (dry) {
     const lines = plan.map((p) => `${p.name} (${p.bot}) in ${p.project ?? "no project"}: ${p.refuse ? `left alone, ${p.refuse}`

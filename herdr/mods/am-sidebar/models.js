@@ -1349,8 +1349,11 @@ function runNames(run, flags) {
 // Claude Code's --permission-mode names what a session may run without asking. The pack starts
 // every Claude launch in its auto mode (AUTO_MODE); a bot's record may name another of Claude
 // Code's own modes instead, and the launch passes that one from the definition on every path
-// (start, restart, revive, linked start, worker and tree helper). It is independent of the
-// model, reasoning effort and service tier. The names are Claude Code 2.1.328's `--help` list.
+// (start, restart, revive, linked start, worker and a worker's tree helper). It is independent
+// of the model, reasoning effort and service tier. The names are Claude Code 2.1.328's `--help`
+// list; herdr/test/permission-mode.test.mjs reads the `--help` of the Claude Code on the PATH of
+// the gate and fails when the two lists differ, so a CLI upgrade is seen before a mode the newer
+// CLI accepts is refused. Update this list and the README's table together when it fails.
 export const CLAUDE_PERMISSION_MODES = Object.freeze(["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"]);
 
 /** What a Claude launch runs without a stored permission mode. */
@@ -1381,7 +1384,11 @@ export function permissionModeProblem(agentKey, mode) {
   const modes = permissionModesOf(agentKey);
   if (!modes) {
     if (!agentKey) return "permission mode is Claude Code's (--permission-mode); this bot has no coding agent";
-    return `permission mode is Claude Code's (--permission-mode); ${AGENTS[agentKey]?.name ?? agentKey} has none`;
+    const name = AGENTS[agentKey]?.name ?? agentKey;
+    // F2: say what to use instead, so a refusal names the control that does exist.
+    const instead = agentKey === "codex" ? "use its fixed launch mode (#1125) instead"
+      : agentKey === "antigravity" ? "use its execution mode (agyMode) instead" : null;
+    return `permission mode is Claude Code's (--permission-mode); ${name} has none${instead ? `: ${instead}` : ""}`;
   }
   return modes.includes(mode) ? null : `permission mode ${JSON.stringify(mode)} isn't one of ${modes.join(", ")}`;
 }

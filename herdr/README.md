@@ -1341,10 +1341,10 @@ on this computer are labelled. The lead's pane is the one the attach ledger ties
   `am create|edit ... --permission-mode MODE`. One of Claude Code's names (`acceptEdits`, `auto`,
   `bypassPermissions`, `manual`, `dontAsk`, `plan`); `auto` is the pack's default when the field
   is absent, and an empty value clears a stored one. Every start, restart, revive and Claude
-  worker or helper launch passes it from the record, independent of the model, reasoning effort
-  and service tier. A value Claude Code doesn't accept, or one on another agent, is refused with
-  the accepted names rather than passed through or dropped. `show` prints it with its source
-  (`detected`, `roster` or `default`), and `show --json` carries `permissionMode`,
+  worker helper launch passes it from the record, independent of the model, reasoning effort and
+  service tier. A value Claude Code doesn't accept, or one on another agent, is refused with the
+  accepted names rather than passed through or dropped. `show` prints it with its source
+  (`detected`, `live`, `roster` or `default`), and `show --json` carries `permissionMode`,
   `permissionModeSource` and `pinnedPermissionMode`. See
   [Permission mode](#permission-mode-claude-code).
 - `codexAuto` is retired (#1125). It used to opt a bot's Codex seat and workers out of Codex's
@@ -1430,8 +1430,9 @@ launch then passes that mode instead of `auto`, and the rest of the table is unc
 settings: Codex's launch mode is fixed (#1125), and Antigravity always runs without prompts under
 its deny list, its execution mode set by `agyMode`.
 
-Flags read from claude 2.1.322, codex-cli 0.167.0 and agy 1.5.4. No skip-all-approvals flag is
-passed for any agent but Antigravity; one for another agent needs the owner's word first.
+Flags read from claude 2.1.322 (the permission-mode list from 2.1.328), codex-cli 0.167.0 and agy
+1.5.4. No skip-all-approvals flag is passed for any agent but Antigravity; one for another agent
+needs the owner's word first.
 `am show <bot>` prints the bot's `auto mode` line (in `--json`, `autoMode`: its
 words, a note, and for an Antigravity bot on this computer whether agy's sandbox can run here).
 
@@ -1523,17 +1524,32 @@ none (Codex's launch mode is fixed, #1125; Antigravity's execution mode is `agyM
 passed through or dropped. `bypassPermissions` is the one that runs an orchestrator seat with no
 prompt at all; use it only for a bot the owner means to run that way.
 
-Every launch path rebuilds the command from the record: a start, a restart, a revive after a
-reboot, a linked machine's start, a worker and a Restart --tree helper. It is independent of the
-model, reasoning effort and service tier: a model change never rewrites it, and it never changes
-the model. A Claude worker or helper inherits its seat's mode; a worker template owns its command,
-so the pack adds no flag to it (put the mode in the template's command if it needs one).
+Every launch path the pack builds rebuilds the command from the record: a start, a restart, a
+revive after a reboot, a linked machine's start, a worker and a worker's Restart --tree helper.
+It is independent of the model, reasoning effort and service tier: a model change never rewrites
+it, and it never changes the model. A Claude worker helper inherits its seat's mode; a non-worker
+helper keeps the command a person gave it, its own `--permission-mode` included, and the seat's
+mode is never added to one that names none; a worker template owns its command, so the pack adds
+no flag to it (put the mode in the template's command if it needs one).
 
 `am show <bot>` prints `permission <mode> (<source>)`; `show --json` carries `permissionMode`,
 `permissionModeSource` and `pinnedPermissionMode`. A source is `detected` (what the live pane's
-command line runs), `roster` (the bot's own value while it isn't running) or `default` (the pack's
-`auto` when the record stores none). A hand-written value the CLI wouldn't accept is dropped with
-a warning when the file is read, so it never reaches the launch.
+command line runs), `live` (the pane is running and the pack reads no `--permission-mode` in its
+command line: `permissionMode` is `null`, and the record's mode, or the pack's `auto`, applies to
+the next start), `roster` (the bot's own value while it isn't running) or `default` (the pack's
+`auto` when the record stores none). A live pane is never reported as running the record's mode:
+for one that names none, `am show` says the live command line names none and the record's mode
+applies to the next start, and its `auto mode` line names what the pane actually runs.
+A hand-written value the CLI wouldn't accept is dropped with a warning when the file is read, so
+it never reaches the launch; every command that reads the record says that warning once, `am
+start`, `am restart`, `am revive` and `am show` included, not only `am ls` and `am worker`.
+
+The accepted names are pinned, never read from the CLI at launch: `CLAUDE_PERMISSION_MODES` holds
+Claude Code 2.1.328's `--help` list. `herdr/test/permission-mode.test.mjs` compares it with the
+`--help` of the Claude Code on the PATH of a gate that has one and fails when the lists differ, so
+an upgrade that adds a mode is seen in the gate instead of silently refusing a valid value. The
+test skips where Claude Code isn't installed, so the manual step stays: re-read `claude --help` and
+update `CLAUDE_PERMISSION_MODES` in `models.js` and this table together.
 
 ### Codex's launch mode
 

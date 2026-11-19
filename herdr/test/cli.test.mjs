@@ -5353,6 +5353,43 @@ test("#1413: moving a bot off Claude Code clears its permission mode, and naming
   assert.equal(s.cli(["show", "Genie", "--json"]).json().permissionMode, "plan");
 });
 
+test("#1413 F1: show never claims a live pane runs the record's permission mode", (t) => {
+  const s = scene(t, { terminals: [term("t1", { bot: ID.main, argv: ["claude"], cwd: "/x" })] });
+  s.seed(team({ bots: [bot(ID.main, "main", { name: "Orchestrator", permissionMode: "bypassPermissions" })] }));
+  const shown = s.cli(["show", "Orchestrator", "--json"]);
+  assert.equal(shown.code, 0, shown.err);
+  const info = shown.json();
+  assert.equal(info.terminal, "t1", "the pane is live, so its command line is what runs");
+  assert.equal(info.permissionMode, null, "a live pane that names no mode has no effective mode to report");
+  assert.equal(info.permissionModeSource, "live");
+  assert.equal(info.pinnedPermissionMode, "bypassPermissions", "the record still says what the next start runs");
+  const text = s.cli(["show", "Orchestrator"]).out;
+  assert.match(text, /permission\s+not named by its live command line/);
+  assert.match(text, /its record's bypassPermissions applies to its next start/);
+  assert.doesNotMatch(text, /permission\s+bypassPermissions \(roster\)/);
+  assert.doesNotMatch(text, /auto mode\s+--permission-mode bypassPermissions/);
+  // The same pane started with a mode of its own is reported as what it runs, never the record.
+  writeFileSync(s.env.HC_FAKE_STATE, JSON.stringify({ terminals: [term("t1", { bot: ID.main, argv: ["claude", "--permission-mode", "plan"] })], next: 100 }));
+  const detected = s.cli(["show", "Orchestrator", "--json"]).json();
+  assert.deepEqual([detected.permissionMode, detected.permissionModeSource], ["plan", "detected"]);
+});
+
+test("#1413 F3: a hand-edited bad permission mode warns on start, and the launch uses the default", (t) => {
+  const s = scene(t);
+  s.seed(team({ bots: [bot(ID.main, "main", { name: "Genie", permissionMode: "bypassPermission" })] }));
+  const started = s.cli(["start", "Genie"]);
+  assert.equal(started.code, 0, started.err);
+  const warnings = started.err.split("\n").filter((l) => /permission mode/.test(l));
+  assert.equal(warnings.length, 1, started.err);
+  assert.match(warnings[0], /b-aaaaaaaaaa: permission mode "bypassPermission" isn't one of acceptEdits, auto, bypassPermissions, manual, dontAsk, plan; ignored/);
+  const words = plain(agentWords(runCall(s.calls())));
+  assert.equal(words[words.indexOf("--permission-mode") + 1], "auto", "the dropped value never reaches the launch");
+  // Show reads the same record and says the same sentence, once.
+  const shown = s.cli(["show", "Genie"]);
+  assert.equal(shown.code, 0, shown.err);
+  assert.equal(shown.err.split("\n").filter((l) => /permission mode "bypassPermission"/.test(l)).length, 1, shown.err);
+});
+
 // ---- #1411 FIX-FIRST: a standard model keeps the default tier over a profile's or the host's
 // Fast, and show reads the profile a launch names. ----
 

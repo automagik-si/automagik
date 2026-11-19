@@ -5,6 +5,7 @@
 // Pure: no herdr, home or window.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 
 import {
   AGENTS, CLAUDE_PERMISSION_MODES, PERMISSION_MODE_DEFAULT, launchRun, permissionModeArgs,
@@ -83,4 +84,46 @@ test("#1413: what a live pane runs is read from its command line, both spellings
     "the last one wins");
   assert.equal(permissionModeFrom(["claude", "--", "--permission-mode", "plan"]), null, "after -- it is prompt text");
   assert.equal(permissionModeFrom(["claude"]), null);
+});
+
+test("#1413 F2: refusing a mode on Codex or Antigravity names the control to use instead", () => {
+  assert.match(permissionModeProblem("codex", "auto"),
+    /Claude Code's \(--permission-mode\); Codex has none: use its fixed launch mode \(#1125\)/);
+  assert.match(permissionModeProblem("antigravity", "auto"),
+    /Antigravity has none: use its execution mode \(agyMode\)/);
+  assert.equal(permissionModeProblem("claude", "auto"), null, "a Claude mode with a name is accepted");
+});
+
+test("#1413 F4: a worker helper inherits its seat's mode; a non-worker helper keeps its own command", () => {
+  const record = bot({ permissionMode: "bypassPermissions" });
+  const get = (argv) => ({ address: "t7", cwd: "/w", state: "live", argv, foreground: { argv, cwd: "/w" } });
+  // A worker helper is rebuilt from the record, as before.
+  const worker = helperPlan({ get: get(["claude"]), worker: { agent: "claude", worktree: "/w" }, agents: AGENTS, bot: record });
+  assert.equal(worker.error, undefined);
+  assert.equal(permissionOf(withoutPerson(worker.argv)), "bypassPermissions");
+  // A non-worker helper runs the command the person gave it: its own explicit mode stands,
+  // and one that names none is never given the seat's (the README's narrowed rule).
+  const own = helperPlan({ get: get(["claude", "--permission-mode", "plan"]), agents: AGENTS, bot: record });
+  assert.equal(own.error, undefined);
+  assert.equal(permissionOf(withoutPerson(own.argv)), "plan");
+  const plainHelper = helperPlan({ get: get(["claude"]), agents: AGENTS, bot: record });
+  assert.equal(plainHelper.error, undefined);
+  assert.equal(permissionOf(withoutPerson(plainHelper.argv)), null, "the seat's mode is not added to a non-worker helper");
+});
+
+test("#1413 F5: the pinned permission-mode list stays in step with the installed Claude Code", (t) => {
+  const found = spawnSync("sh", ["-c", "command -v claude"], { encoding: "utf8" });
+  const claude = found.status === 0 ? found.stdout.trim() : "";
+  if (!claude) {
+    t.skip("Claude Code isn't on this machine's PATH; the list is pinned from Claude Code 2.1.328's --help");
+    return;
+  }
+  const help = spawnSync(claude, ["--help"], { encoding: "utf8", timeout: 30_000 });
+  const text = `${help.stdout ?? ""}\n${help.stderr ?? ""}`;
+  const at = text.indexOf("--permission-mode");
+  const choices = at < 0 ? null : /\(choices: ([\s\S]*?)\)/.exec(text.slice(at));
+  assert.ok(choices, `Claude Code's --help no longer lists --permission-mode's choices; read it and update CLAUDE_PERMISSION_MODES in models.js`);
+  const modes = [...choices[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(modes.sort(), [...CLAUDE_PERMISSION_MODES].sort(),
+    "Claude Code's --permission-mode list changed: update CLAUDE_PERMISSION_MODES in models.js and the README's permission-mode table, or a valid mode would be refused");
 });
