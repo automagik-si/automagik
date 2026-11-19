@@ -56,6 +56,27 @@ IP loopback URI while preserving its scheme, host, path and query. No origin
 wildcard is configured. Consent is skipped only on the two first-party entries;
 future third-party entries must keep `skipConsent: false`.
 
+## Token lifetimes
+
+These are the contract Desktop and Cloud sessions build on, set as named constants in
+`src/auth.ts`:
+
+| Token | Lifetime | Why |
+| --- | --- | --- |
+| Access token | 15 minutes | Bearer-usable until it expires; a JWT cannot be recalled |
+| ID token | 15 minutes | Proves one sign-in to the client, not a standing credential |
+| Refresh token | 30 days | Keeps Desktop and Cloud signed in through a month of inactivity |
+
+A refresh token is issued only when the authorization asked for `offline_access`.
+It is bound to the client it was issued to, and a confidential client must
+authenticate to use it. Every use rotates it: the response carries a new refresh
+token and the old one fails. There is no reuse grace window. Presenting a rotated
+refresh token again is treated as replay: the provider deletes every refresh token
+that person holds for that client, with the access tokens issued from them, so every
+sign-in of that client must start over. Tokens of other clients survive. Revoking a
+refresh token at `/oauth2/revoke` ends it; another client's revocation request has
+no effect. Each refresh starts a fresh 30-day lifetime for the new token.
+
 The sign-in and consent pages live in `pages/` and follow [PAGES-CONTRACT.md](PAGES-CONTRACT.md):
 `sign-in.html`, `consent.html`, one stylesheet (`id.css`), one script (`id.js`) and
 `assets/` (fonts, wordmark, Genie and Omni face artwork, the app icon and licences).
@@ -108,8 +129,14 @@ serve a page file directly as `.html`, take the passkey site name from the host,
 start on (or configure) a host outside it, accept a look-alike host, let CI
 skip the page browser tests, drop the Content-Security-Policy or nosniff, let
 inline script run, send files and API answers without the security headers, let
-a direct `.html` path through, and rebuild the headers losing Better Auth's cookies,
-one at a time. Each must fail its targeted test; source files are restored
+a direct `.html` path through, rebuild the headers losing Better Auth's cookies,
+lengthen a token lifetime and allow rotated refresh-token replay, one at a time.
+Further checks edit the pinned OAuth provider's own bundle in `node_modules`
+(replaced, never rewritten in place, since it may be a hard link into the package
+cache) so a version bump that drops one of its refresh checks fails a test:
+issuing a refresh token without `offline_access`, keeping a rotated token alive,
+accepting an expired one, dropping its client binding and ignoring its revocation.
+Each must fail its targeted test; source files are restored
 afterward. Announcements and results are printed to stdout.
 `bun scripts/generate-migration.ts` regenerates the initial schema for review;
 never replace an already applied migration when upgrading a deployed database.
