@@ -6479,9 +6479,76 @@ async function restartTarget(project, bot, requestedHome, explicitHome, allowImp
       return restartTarget(project, bot, requestedHome, explicitHome);
     }
   }
-  throw new CliError(`${candidate.address} has ${bot.name}'s label but no matching attachment in the selected or carried app home. `
-    + `Inspect the pane and run am attach ${bot.id} ${candidate.address} --project ${project.key} in its app home before restarting.`,
-    1, { refused: "attachment", terminal: candidate.address });
+  // #1195, the adoption #1633 left open: a live pane carrying this bot's label is the bot even
+  // when no ledger proves that exact launch (the row was lost, written elsewhere, or this command
+  // runs in a home that never saw it). Adopt it into the home its launch names, else the
+  // project's own app home when that is in use, else the selected home, and restart it; never
+  // start a twin beside it.
+  const launchHome = launchHomeOf(candidate);
+  // Two live panes are a twin even when only one carries the label: a binding in one home and a
+  // labelled pane in no ledger have no launch record between them, so refuse and name both.
+  if (get && candidate) {
+    throw new CliError(`${bot.name} has two live panes: ${get.address} in the selected app home, and ${candidate.address} carrying its label. `
+      + "Inspect both, then attach the pane it should run in (or detach the other) before restarting.",
+    1, { refused: "app-home", terminal: candidate.address });
+  }
+  // A selected home that names no live pane still never adopts a launch another home proves:
+  // that would make the second authority the resolver refuses to choose between.
+  const extraHomes = [launchHome ?? carried, ...(explicitHome ? [projectAppHomeOf(project.key)] : [])];
+  const { rows } = await botBindings(project, bot.id, { requestedHome, explicit: explicitHome, extraHomes });
+  const other = rows.find((r) => r.get);
+  if (other) throw appHomeConflict(bot, [requestedHome, other.home]);
+  // An explicit selection that differs from the launch's home is refused, as a proven carried
+  // row above is.
+  if (launchHome) {
+    if (explicitHome && !sameHome(requestedHome, launchHome)) {
+      throw new CliError(`${candidate.address} belongs to a different HERDR_APP_HOME than the one selected; nothing was started.`,
+        1, { refused: "app-home", terminal: candidate.address });
+    }
+    const adopted = await adoptPane(project, bot, candidate, core, launchHome);
+    return { held: { binding: adopted, get: candidate }, dir: launchHome, adopted: true };
+  }
+  const own = projectAppHomeOf(project.key);
+  const home = !explicitHome && existsSync(attachPath(own)) ? own : requestedHome;
+  const adopted = await adoptPane(project, bot, candidate, core, home);
+  return { held: { binding: adopted, get: candidate }, dir: home, adopted: true };
+}
+
+/**
+ * Writes a live labelled pane no ledger proves into `home`'s ledger, under its lock (#1195), and
+ * returns its binding. Another bot's row for that terminal, or another pane that took the bot
+ * meanwhile, is refused rather than overwritten: adoption records the truth, it never guesses.
+ */
+async function adoptPane(project, bot, pane, core, home) {
+  const path = attachPath(home);
+  try {
+    return await withLockAsync(ledgerLock(path), async () => {
+      const fold = foldAttach(readAttachFile(path) ?? []);
+      const other = [...fold.byKey.values()].find((b) => b.terminal === pane.address && b.created_ms === pane.created_ms && b.bot !== bot.id);
+      if (other) {
+        throw new CliError(`${pane.address} is attached to bot ${other.bot} in ${path}; nothing was started.`,
+          1, { refused: "attachment", terminal: pane.address });
+      }
+      const held = heldIn(fold, bot.id);
+      if (held && held.terminal === pane.address && held.created_ms === pane.created_ms) return held;
+      if (held) {
+        // A row no live pane confirms is stale, not authority: the live labelled pane is the bot
+        // (the restart's home checks above already refused a second live binding). Retire the
+        // stale row and adopt the pane the label proves.
+        const still = await bindingPane(held, project.key);
+        if (still) {
+          throw new CliError(`${bot.name} is attached to the live pane ${held.terminal} in ${path}, not ${pane.address}; nothing was started.`,
+            1, { refused: "app-home", terminal: pane.address });
+        }
+      }
+      // The attach first: the fold supersedes the stale row with it, so a crash between the two
+      // writes never leaves the bot unbound. The detach row then records why the old one ended.
+      const adoptedRow = attachRow({ event: "attach", bot: bot.id, project: project.key, terminal: pane.address, core,
+        created_ms: pane.created_ms, by: "import" });
+      appendAttach(path, held ? [adoptedRow, closingRow(held, "detach", "import", "moved")] : [adoptedRow]);
+      return adoptedRow;
+    });
+  } catch (e) { throw asCliError(e); }
 }
 
 function recoveredLogin(old, argv) {
@@ -6498,6 +6565,45 @@ function recoveredLogin(old, argv) {
       + "Select that app home explicitly to apply an account change.", 1, { refused: "login", terminal: old.address });
   }
   return { words, warnings };
+}
+
+/**
+ * The Claude login a restart of an adopted pane keeps (#1195): the words its own launch carried,
+ * never the adopted app home's selection when the two differ. An adopted pane has no recorded
+ * seat to make an Accounts switch an explicit act for it, so keeping its login keeps its memory
+ * folder too; a difference is reported, never silent. A launch that proves no login is only safe
+ * under the default login: any other is refused rather than guessed.
+ */
+function adoptedLogin(old, argv, keep) {
+  const source = paneCommand(old);
+  if (launchAgent(argv) !== "claude" || (source && launchAgent(source.argv ?? ["sh", "-c", source.shell]) !== "claude")) return undefined;
+  const previous = paneLaunchEnv(old)?.get(CONFIG_VAR);
+  const chosenWarnings = [];
+  const chosen = claudeLogin(argv, chosenWarnings);
+  if (previous === undefined) {
+    if (chosen.join(" ") === ["-u", CONFIG_VAR].join(" ")) return { words: chosen, warnings: chosenWarnings };
+    throw new CliError(`${old.address}: its launch proves no Claude login, and the adopted app home selects another. Nothing was started. `
+      + "Set HERDR_APP_HOME to the home its session belongs to, or attach it there before restarting.",
+    1, { refused: "login", terminal: old.address });
+  }
+  const words = previous === null ? ["-u", CONFIG_VAR] : [`${CONFIG_VAR}=${previous}`];
+  const chosenDir = chosen[0] === "-u" ? null : chosen[0]?.startsWith(`${CONFIG_VAR}=`) ? chosen[0].slice(CONFIG_VAR.length + 1) : undefined;
+  const matches = previous === chosenDir || (typeof previous === "string" && isAbsolute(previous) && chosenDir && sameHome(previous, chosenDir));
+  if (matches) return { words, warnings: chosenWarnings };
+  if (previous !== null && (!isAbsolute(previous) || /[\x00-\x1f\x7f]/.test(previous))) {
+    throw new CliError(`${old.address}: its launch names a Claude login this restart can't reuse. Nothing was started. `
+      + "Set HERDR_APP_HOME to the home its session belongs to, or attach it there before restarting.",
+    1, { refused: "login", terminal: old.address });
+  }
+  // Kept only when every later restart recovers the adopted home and checks the login again
+  // (keep: the home is not the selected one). A restart that would fall back to the selected
+  // home cannot promise it, and a second restart would move the bot without a word: refuse.
+  if (keep) {
+    return { words, warnings: [`${old.address}: kept the Claude login its pane was launched with, not the adopted app home's selection; nothing was switched.`] };
+  }
+  throw new CliError(`${old.address}: its launch runs on a different Claude login from ${appHome()}'s selection, and this restart can't keep it. `
+    + "Nothing was started. Set HERDR_APP_HOME to the app home that selects its login, or attach it there before restarting.",
+  1, { refused: "login", terminal: old.address });
 }
 
 async function cmdRestart(opts, [ref]) {
@@ -6600,7 +6706,9 @@ async function restartResolved(opts, project, bot, wanted, swap, target, recover
     if ((current.held ? attachKey(current.held.binding) : null) !== (held ? attachKey(held.binding) : null)) {
       throw new CliError(`${bot.name}'s attachment changed while planning the restart; nothing was started.`);
     }
-    return recovered && current.held ? recoveredLogin(current.held.get, argv) : undefined;
+    if (!current.held) return undefined;
+    if (target.adopted) return adoptedLogin(current.held.get, argv, recovered);
+    return recovered ? recoveredLogin(current.held.get, argv) : undefined;
   };
   if (opts._queuedTarget && (!old || old.address !== opts._queuedTarget.terminal
     || (opts._queuedTarget.created_ms != null && old.created_ms !== opts._queuedTarget.created_ms))) return PRINTED;
