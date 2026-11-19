@@ -5,7 +5,7 @@
 // pages other plugins add (`plugin:<id>`) are added by the dialog itself.
 export const SETTINGS_PAGES = [
   ['general', 'General'], ['models', 'Models'], ['bots', 'Bots'], ['groups', 'Group chats'],
-  ['connectors', 'Connectors'], ['capabilities', 'Capabilities'], ['browser', 'Browser'],
+  ['connectors', 'Apps'], ['capabilities', 'Capabilities'], ['browser', 'Browser'],
   ['computer', 'Computer use'], ['schedules', 'Scheduled tasks'], ['usage', 'Usage'], ['secrets', 'Secrets'],
   ['agent-access', 'Agent access'], ['privacy', 'Privacy'], ['feedback', 'Feedback'],
   ['about', 'About Automagik'],

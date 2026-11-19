@@ -5,7 +5,7 @@
 // usagemeter reads. Pure: no `herdr`, `gpui-*` or `fs`, so `node --test`, the CLI and the
 // briefing hook share it. Apache-2.0.
 
-import { AGENTS, AGY_MODE_DEFAULT, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
+import { AGENTS, AGY_MODE_DEFAULT, CODEX_LOGIN_SHELL, CODEX_NETWORK, agyModeArgs, agyModeOf, agyModeProblem, agyGuarded, agySettingsArgs, codexClean, codexCleanNote, codexDirVar, codexDirsExact, codexOptionArity, effortArgs,
   hasEffortFlag, launchRun, modelArgs, modelRefusal, promptArgs, resolveAgent } from "./models.js";
 import { TEMPLATE_SHAPE } from "./model.js";
 import { envWords } from "./logins.js";
@@ -362,7 +362,8 @@ export function workerKillRefusal({ target, botId, self = null, bound = false })
   const labels = target.labels ?? {};
   if (bound || labels.bot) return `${address} is a bot's pane, not a worker; worker kill ends only a worker you started`;
   const owner = labels[WORKER_OF_LABEL] ?? null;
-  if (!owner) return `${address} isn't a worker (it has no ${WORKER_OF_LABEL} label); worker kill ends only a worker you started`;
+  if (!owner) return `${address} isn't a worker (it has no ${WORKER_OF_LABEL} label). `
+    + "Only the project's main bot can end a terminal started with plain hc run, and worker kill ends only a worker you started";
   if (!botId || owner !== botId) return `${address} is another bot's worker; worker kill ends only a worker you started`;
   // A worker mid-turn is not ended from here: its work would be lost. The project's main bot can.
   if (target.state !== "finished" && target.status?.state === "working") {
@@ -642,12 +643,36 @@ export function codexCommandCheck(command, agents = AGENTS, where = null) {
   const options = runs.map((r) => split(r.args)[0]);
   const all = (test) => options.length > 0 && options.every((a) => test(a));
   const pair = (args, flag, value) => args.some((w, i) => (w === flag && args[i + 1] === value) || w === `${flag}=${value}`);
-  const config = (args, value) => pair(args, "-c", value) || pair(args, "--config", value) || args.includes(`-c${value}`);
+  // A config word's text as Codex reads it: `-c key=value`, `-c=key=value`,
+  // `--config key=value`, `--config=key=value` (or joined `-ckey=value`). The key and value
+  // are trimmed around `=`, so a valid TOML spelling (`-c 'allow_login_shell = false'`) reads
+  // as the same word, not as a missing one or a different key.
+  const configWords = (args) => {
+    const texts = [];
+    for (let i = 0; i < args.length; i += 1) {
+      const w = args[i];
+      if ((w === "-c" || w === "--config") && typeof args[i + 1] === "string") { texts.push(args[i + 1]); i += 1; }
+      else if (typeof w === "string" && w.startsWith("--config=")) texts.push(w.slice("--config=".length));
+      else if (typeof w === "string" && w.startsWith("-c") && w.length > 2) texts.push(w.slice(2));
+    }
+    return texts;
+  };
+  const config = (args, entry) => {
+    const want = /^([^=]+?)\s*=\s*(.*)$/.exec(String(entry).trim());
+    if (!want) return false;
+    return configWords(args).some((text) => {
+      const got = /^([^=]+?)\s*=\s*(.*)$/.exec(text.trim());
+      return Boolean(got) && got[1].trim() === want[1].trim() && got[2].trim() === want[2].trim();
+    });
+  };
   const missing = [];
   if (!all((a) => a.includes("--approve-for-me"))) missing.push("--approve-for-me");
   if (!all((a) => pair(a, "--disable", "hooks") || config(a, "features.hooks=false"))) missing.push("--disable", "hooks");
   if (!all((a) => a.includes("--no-daemon"))) missing.push("--no-daemon");
   if (!all((a) => config(a, CODEX_NETWORK))) missing.push("-c", CODEX_NETWORK);
+  // #1133: a command the pack builds must keep the pane PATH's hc kill shim first at command
+  // time, so its shell never runs as a login shell that can prepend another `hc`.
+  if (!all((a) => config(a, CODEX_LOGIN_SHELL))) missing.push("-c", CODEX_LOGIN_SHELL);
   const inexact = options.some((a) => !codexDirsExact(a, where)) ? ["--add-dir"] : [];
   const conflicts = [...new Set([...options.flatMap((a) => codexClean(["codex", ...a], where).dropped), ...inexact])];
   const lost = [...new Set(runs.flatMap((r) => split(r.args)[1].map(optionName).filter((n) => CODEX_LOST_OPTIONS.has(n))))];
@@ -674,15 +699,63 @@ export function codexTemplateRefusal(template, command, agents = AGENTS) {
 
 /**
  * The warning for a worker template whose command runs Codex without --no-daemon among its
- * options (#1125): hc says Codex must run with it, or its commands run outside hc. The owner's
- * template exception keeps the command as it is (never rewritten, rerouted or refused): this
- * names the fix.
+ * options (#1125), or in a login shell (#1133): hc says Codex must run with --no-daemon, and a
+ * login startup can prepend another `hc` ahead of the pane's kill shim. The owner's template
+ * exception keeps the command as it is (never rewritten, rerouted or refused): this names the
+ * fix.
  */
 export function codexTemplateWarning(template, command, agents = AGENTS) {
   const check = codexCommandCheck(command, agents);
-  if (!check || !check.missing.includes("--no-daemon")) return null;
-  return `Template ${template} runs Codex without --no-daemon, so its commands may run in Codex's shared server, outside hc `
-    + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`;
+  if (!check) return null;
+  const lines = [];
+  if (check.missing.includes("--no-daemon")) {
+    lines.push(`Template ${template} runs Codex without --no-daemon, so its commands may run in Codex's shared server, outside hc `
+      + `(hc --skill). Add --no-daemon to the codex command in that template's file (hc templates lists it).`);
+  }
+  if (check.missing.includes(CODEX_LOGIN_SHELL)) {
+    lines.push(`Template ${template} runs Codex in a login shell, so a profile that prepends a directory can put another hc ahead of `
+      + `the pane's hc kill shim (#1133). Add \`-c ${CODEX_LOGIN_SHELL}\` to the codex command in that template's file (hc templates lists it).`);
+  }
+  return lines.length ? lines.join(" ") : null;
+}
+
+/**
+ * The instruction every worker task ends with (#1278 cause 5): before it reports done it commits
+ * or discards everything it changed, so the sweep never finds an uncommitted worktree to keep.
+ * A writer's work is preserved once committed; a reviewer's own scratch files are discarded. One
+ * line, so it adds one argument to the agent's argv.
+ */
+export const WORKER_DONE_LINE = "Before you report done: commit or discard every change you made "
+  + "and leave the worktree clean (`git status --porcelain` prints nothing).";
+
+/** A worker's task text: the task as given, then the worktree-clean instruction (#1278 cause 5). */
+export function workerTaskText(task) {
+  return `${task}\n\n${WORKER_DONE_LINE}`;
+}
+
+/**
+ * The host a git remote names, of both forms git writes (`https://host/…`, `git@host:…`), or
+ * null for a local path. Only host discovery; the forge itself is `forgeOf`.
+ */
+export function forgeHost(remote) {
+  const text = String(remote ?? "").trim();
+  if (!text) return null;
+  try { return new URL(text).hostname || null; } catch { /* a scp-like remote, below */ }
+  const m = /^(?:[^@/]+@)?([^:/]+):/.exec(text);
+  return m && !/^[A-Za-z]$/.test(m[1]) ? m[1] : null;
+}
+
+/**
+ * The forge a git remote names (#1278 cause 3): "glab" for a GitLab host, "gh" for GitHub, else
+ * null. A local path names no forge. An unknown host is left to the caller (it may try the forge
+ * tool it has).
+ */
+export function forgeOf(remote) {
+  const host = forgeHost(remote);
+  if (!host) return null;
+  if (/gitlab/i.test(host)) return "glab";
+  if (/github/i.test(host)) return "gh";
+  return null;
 }
 
 /** The env program agent workers start under, by its full path (macOS and Linux both have it). */
@@ -752,13 +825,13 @@ const msOrNull = (x) => (Number.isSafeInteger(x) ? x : null);
  * made the worktree. `swap`: the task ran the bot's other arm (planned swaps); `override`: the
  * bot picked the agent, model, effort or template itself; `override_requested`: on a swap task,
  * the { agent?, model?, effort? } it asked for and didn't get, else null. `pid` is the
- * terminal's foreground pid when hc gave one. `template`: the hc template a worker runs (its
- * agent, model and effort are then null), else null. `role`: a worker's role (ROLES), a seat's
- * pane role at launch (launchArgs.js roleOf: main, captain or a rank), else null.
+ * terminal's foreground pid when hc gave one. `template`: the hc template a worker or seat runs
+ * (#1418), else null. A template worker's agent, model and effort are null. `role`: a worker's
+ * role (ROLES), a seat's pane role at launch (launchArgs.js roleOf: main, captain or a rank), else null.
  * RFC 0021: `core` (this computer's hc core id) and `created_ms` (the terminal's, from hc get)
  * key the launch with `terminal`, since hc reuses terminal ids; `squad` (model.js squadOf, frozen
  * here at launch); `session`: the Claude session the launch runs (the id Herdr chose with
- * --session-id, or the one it resumed), else null. A seat's worker fields are null or false.
+ * --session-id, or the one it resumed), else null. A seat's worker-only fields are null or false.
  */
 export function startRow({ kind, terminal, pid, botId, task, branch, project, lead, worktree, base, created, agent, model, effort,
   template, role, swap, override, overrideRequested, core, createdMs, squad, session, at }) {
@@ -1097,10 +1170,11 @@ export function reapCandidates(rows, reaps = [], ownerOf = (project) => orNull(p
  * detached HEAD with commits on no remote is kept whatever its branch's pull requests say. Commits
  * on no remote keep it unless a MERGED pull request names that exact head (a squash merge
  * leaves its commits on no remote once the branch is deleted). CLOSED or an older merge is
- * no proof that the current work is preserved.
+ * no proof that the current work is preserved. `forge` names the tool the proof came from
+ * ("gh" or "glab") for the reason said (#1278 cause 3).
  */
 export function workLeft({ changes, unpushed, prs = null, head = null,
-  branch = null, expected = null }) {
+  branch = null, expected = null, forge = "gh" }) {
   if (changes > 0) return "uncommitted changes";
   if (!branch) {
     return unpushed > 0 ? `HEAD is detached with ${unpushed} ${unpushed === 1 ? "commit" : "commits"} on no remote`
@@ -1115,7 +1189,7 @@ export function workLeft({ changes, unpushed, prs = null, head = null,
     if (/^[0-9a-f]{40,64}$/.test(head ?? "") && Array.isArray(prs)
       && prs.some((p) => p?.state === "MERGED" && p.headRefOid === head)) return null;
     const commits = `${unpushed} ${unpushed === 1 ? "commit" : "commits"} on no remote`;
-    if (prs === null) return `${commits}; gh couldn't prove ${branch}'s current HEAD is merged`;
+    if (prs === null) return `${commits}; ${forge} couldn't prove ${branch}'s current HEAD is merged`;
     if (!prs.length) return `${commits}; ${branch} has no pull request`;
     return `${commits}; no merged pull request proves ${branch}'s current HEAD is preserved`;
   }

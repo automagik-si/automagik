@@ -1,4 +1,4 @@
-// The ds-bot Office skills: `office` (the routing skill, preferred over the
+// The Bot team's Office skills: `office` (the routing skill, preferred over the
 // platform's own bundled router) and `office-tools` (the CLI that inspects,
 // checks and edits Office packages). Registered when a `skills` service exists;
 // the sub-fiber stays inactive where it does not, so the plugin runs the same
@@ -8,7 +8,7 @@ import { dirname, join, sep } from 'node:path'
 import { isSea } from 'node:sea'
 import { fileURLToPath } from 'node:url'
 
-const PROVIDER = 'ds-bot-office'
+const PROVIDER = 'automagik-bots-office'
 const RANK = { office: 550, 'office-tools': 600 }
 const ASSETS = join(dirname(fileURLToPath(import.meta.url)), '..', 'office', 'skills')
 const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'office.js')
@@ -31,8 +31,10 @@ export function cliPath(manifest = CLI) {
 // Where the commands run: the app's Office payload when it shipped, plain Node
 // hosts (DSH Web, a developer Node), or the workspace-dependencies tool's node.
 export function officeNode(env = process.env) {
-  const bundled = env.DS_BOT_OFFICE_NODE
-  if (bundled !== undefined && existsSync(bundled)) return { node: bundled }
+  // Keep upstream DS Bot's variable as a fallback. Only check that the path exists.
+  for (const node of [env.AUTOMAGIK_BOTS_OFFICE_NODE, env.DS_BOT_OFFICE_NODE]) {
+    if (typeof node === 'string' && node.length > 0 && existsSync(node)) return { node }
+  }
   if (process.versions.electron === undefined && !isSea()) return { node: process.execPath }
   return { node: undefined }
 }

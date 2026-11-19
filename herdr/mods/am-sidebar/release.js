@@ -18,6 +18,11 @@ export const LANE_RELEASE = "herdr-lane";
 export const POINTER_URL = `https://github.com/${REPO}/releases/download/${LANE_RELEASE}/pack.json`;
 export const POINTER_SIG_URL = `${POINTER_URL}.sig`;
 export const POINTER_SCHEMA = 1;
+/** Repository URLs used by the current and historical pack pointer signers. */
+export const POINTER_REPOSITORIES = Object.freeze([
+  "https://github.com/automagik-si/automagik",
+  "https://github.com/automagik-dev/automagik",
+]);
 /** The public keys this pack trusts for the pointer, beside this file: `{ keys: [{ keyId, publicKey (PEM) }] }`. */
 export const PACK_KEYS_FILE = "pack-keys.json";
 /** Where the pack lived until v0.14.x; the monorepo's release of it is the first above 3.0.0. */
@@ -246,23 +251,26 @@ export function compareVersions(a, b) {
 
 /**
  * The update a pointer (pack.json, parsed, its signature already checked) names: `{ version, tag,
- * page, sequence, tarball: { name, url }, sha256, size }`. Throws when it is not this pack's
- * pointer: another schema or part, a version that is not X.Y.Z, no whole-number sequence, a tarball
- * of another name, or a sha256 that is not 64 hex.
+ * page, sequence, tarball: { name, url }, sha256, size }`. Requires this pack's schema, part,
+ * publisher and repository, an X.Y.Z version with a matching vX.Y.Z tag, a whole-number sequence,
+ * and a tarball with the expected name, a URL and a 64-digit hex sha256.
  */
 export function packOfPointer(pointer) {
   const bad = (why) => { throw new Error(`the pack pointer ${why}: refusing it`); };
   if (!pointer || typeof pointer !== "object") bad("is not JSON");
   if (pointer.schemaVersion !== POINTER_SCHEMA) bad(`has schema ${pointer.schemaVersion}, not ${POINTER_SCHEMA}`);
   if (pointer.part !== "herdr") bad(`names part ${pointer.part}, not herdr`);
+  if (pointer.publisher !== "automagik") bad("has an unexpected publisher");
+  if (!POINTER_REPOSITORIES.includes(pointer.repository)) bad("has an unexpected repository");
   const version = pointer.version;
   if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) bad(`names version ${version}`);
+  const tag = `v${version}`;
+  if (pointer.tag !== tag) bad(`must name tag ${tag}`);
   const tarball = pointer.tarball ?? {};
   if (tarball.name !== tarballName(version)) bad(`names ${tarball.name}, not ${tarballName(version)}`);
   if (typeof tarball.url !== "string" || !/^(https|file):\/\//.test(tarball.url)) bad("has no tarball URL");
   if (typeof tarball.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(tarball.sha256)) bad("has no sha256 of 64 hex");
   if (!Number.isSafeInteger(pointer.sequence) || pointer.sequence < 0) bad("has no sequence");
-  const tag = `v${version}`;
   return {
     version, tag, page: `https://github.com/${REPO}/releases/tag/${tag}`, sequence: pointer.sequence,
     tarball: { name: tarball.name, url: tarball.url }, sha256: tarball.sha256, size: Number.isInteger(tarball.size) ? tarball.size : null,
@@ -290,16 +298,21 @@ export const noticeText = (update) =>
 
 /**
  * The pack's own update setting and state, beside its record:
- * `<app home>/automagik-herdr/auto-update.json`, `{ "auto": true | false, "skip": "X.Y.Z" }`.
+ * `<app home>/automagik-herdr/auto-update.json`,
+ * `{ "auto": true | false, "skip": "X.Y.Z", "skipCause": "mods" | "runner" }`.
  * `auto`: install verified releases on their own (on unless it says false). `skip`: the version
  * `automagik-herdr update --rollback` rolled away from; auto-update never installs it again and
- * waits for a newer one. The mod, update.mjs and the CLI all read it through parseAuto.
+ * waits for a newer one. `skipCause`: why it was rolled away from, when that was recorded: `mods`
+ * (a mod that does not load) or `runner` (a check that could not start); absent on a manual
+ * rollback and on a skip written before causes were kept. `am update --retry-skipped` clears it.
+ * The mod, update.mjs and the CLI all read it through parseAuto.
  */
 export const AUTO_FILE = "auto-update.json";
 /**
- * Beside the record: `{ version, held }`, the mods the last install held for a layout (#420), for the
- * new build's notice. update.mjs writes it after the swap, since the build that asked for the install
- * usually never hears back (updateCheck.js), and removes it when an install holds nothing.
+ * Beside the record: `{ version, held, notes?, landingId? }`, the mods held for layouts (#420)
+ * and the layout guard's advisories (#524) for the new build's notice. When there are advisories,
+ * update.mjs writes them before the swap, and the notice matches them to the sidebar's apply ID.
+ * A later install overwrites the record or removes it if there are no held mods or notes.
  */
 export const HELD_FILE = "held-mods.json";
 /**
@@ -309,26 +322,57 @@ export const HELD_FILE = "held-mods.json";
  * folders swap and Herdr reloads it), so the restored build reads this at load and says it once.
  * `prevRemoved`: the restore removed the failed release's folders instead of keeping them (#671),
  * so no `.prev` is left and a manual rollback has nothing to put back. `warnings`: what the
- * restore could not remove, and where it stays (the update's answer and notice say it too).
+ * restore could not remove, and where it stays. `notes`: the rollback guard's advisories,
+ * written before the swap for the restored build's notice.
  */
 export const RESTORE_FILE = "restored-mods.json";
 /**
- * Beside the record: `{ version, from, unavailable, at }` when herdr-app could not judge the pack
- * an update just installed (it is kept). The new build reads it at load, since the build that ran
- * the update is usually reloaded away before its answer arrives; it says the update was not checked.
+ * Beside the record: `{ version, from, failed, checked, unavailable, at }` when herdr-app could
+ * not judge the pack an update just installed (it is kept): `checked` false, no mod in `failed`,
+ * `unavailable` why. The new build reads it at load, since the build that ran the update is usually
+ * reloaded away before its answer arrives; it says the update was not checked.
  */
 export const CHECK_FILE = "unchecked-mods.json";
 
-/** The setting as `{ on, skip }`: on unless the file says `"auto": false`; skip a version or null. */
+/**
+ * The setting as `{ on, skip }`, plus `skipCause` when one was recorded: on unless the file says
+ * `"auto": false`; skip a version or null; the cause, `mods` or `runner`, only for a skip that has
+ * one (a manual rollback, and a skip written before causes were kept, carry none). This is the
+ * view the code reads; `parseAutoRecord` is the record as the file holds it, and writes merge into
+ * that, so a value this code does not know is never lost.
+ */
 export function parseAuto(text) {
   let value = null;
   try { value = JSON.parse(text); } catch {}
   const o = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  return { on: o.auto !== false, skip: typeof o.skip === "string" && /^\d+\.\d+\.\d+$/.test(o.skip) ? o.skip : null };
+  const skip = typeof o.skip === "string" && /^\d+\.\d+\.\d+$/.test(o.skip) ? o.skip : null;
+  const skipCause = skip && (o.skipCause === "mods" || o.skipCause === "runner") ? o.skipCause : null;
+  return { on: o.auto !== false, skip, ...(skipCause ? { skipCause } : {}) };
 }
 
-export const formatAuto = ({ on = true, skip = null } = {}) =>
-  `${JSON.stringify({ auto: on !== false, ...(skip ? { skip } : {}) }, null, 2)}\n`;
+/** The record as the file holds it, every field included; a bad or missing file is `{}`. */
+export function parseAutoRecord(text) {
+  let value = null;
+  try { value = JSON.parse(text); } catch {}
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+/**
+ * The record to write for `patch` (`{ on }`, `{ skip }`, `{ skipCause }`), merged into `text` as
+ * it is: a field the patch sets wins, `on` is written as `auto`, a field set to null is removed,
+ * and a field this code does not know (an unrecognised cause, a newer release's) is carried
+ * through untouched, never rebuilt from the known keys alone.
+ */
+export function mergeAuto(text, patch = {}) {
+  const { on, ...rest } = patch;
+  const next = { ...parseAutoRecord(text), ...rest };
+  if (on !== undefined) next.auto = on !== false;
+  for (const [key, value] of Object.entries(next)) if (value === null || value === undefined) delete next[key];
+  if (typeof next.auto !== "boolean") next.auto = true;
+  return next;
+}
+
+export const formatAuto = (record = {}) => `${JSON.stringify(record, null, 2)}\n`;
 
 /**
  * Why auto-update leaves `version` alone, or null when it may install it. `auto`: `{ on, skip,

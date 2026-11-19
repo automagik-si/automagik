@@ -130,6 +130,8 @@ const INSTALL_FIELDS = ['name', 'dependencies', 'peerDependencies', 'optionalDep
 // the last release, deleted ones included, so without it the removal's deleted folders would count as
 // shipping and cut a full release; and an Unfold folder that came back by mistake still cuts none.
 // The server image (server/) ships from no release.
+// The project-toolchain manifest (.automagik-toolchain.json) is read by a checkout's own
+// bootstrap, never by a release: a change to it alone cuts no release.
 // The sandbox runner (apps/dsh-sandbox/: the hc socket-mask wrapper, its profile row snippet and
 // the install/check helper) rides the herdr pack's release, copied byte-equal by the pack at
 // enablement; no release here carries it, so a change to it alone cuts no release, and it must
@@ -145,10 +147,10 @@ const INSTALL_FIELDS = ['name', 'dependencies', 'peerDependencies', 'optionalDep
 // alters what a release builds and ships. Every other file under herdr/scripts/ is tooling the pack
 // never carries (the blanket rule below).
 export const HERDR_SHIPPING_SCRIPTS = /^herdr\/scripts\/pack\.mjs$/;
-const NEVER_SHIPPED = [/^am\/[^/]+\.md$/, /^\.github\//, /^scripts\//, /^plugin-lane\//, /(^|\/)test\//, /^[^/]+\.md$/, /^\.gitignore$/, /^apps\/automagik-pets\//, /^docs\//, /^apps\/unfold-[^/]+\//,
+const NEVER_SHIPPED = [/^am\/[^/]+\.md$/, /^\.github\//, /^scripts\//, /^plugin-lane\//, /(^|\/)test\//, /^[^/]+\.md$/, /^\.gitignore$/, /^\.automagik-toolchain\.json$/, /^apps\/automagik-pets\//, /^docs\//, /^apps\/unfold-[^/]+\//,
   /^herdr\/[^/]+\.md$/, /^herdr\/NOTICE$/, /^herdr\/(\.genie|docs|mockup|catalog)\//, /^herdr\/scheduler\//, /^herdr\/scripts\//,
   /^herdr-layout\/(RECIPE\.md|preview\.png)$/,
-  /^apps\/pocket\/[^/]+\.md$/, /^apps\/pocket\/(docs|android\/scripts)\//, /^apps\/desktop\/wslc\//,
+  /^apps\/pocket\/[^/]+\.md$/, /^apps\/pocket\/(docs|android\/scripts|android\/app\/src\/testGithub)\//, /^apps\/desktop\/wslc\//,
   /^meter\/(statusline|schema)\//, /^meter\/usagemeter\/[^/]+\.md$/, /^meter\/usagemeter\/tests\//,
   /^apps\/landing\//, /^apps\/id\//, /^server\//, /^apps\/dsh-sandbox\//, /^\.genie\//, /^\.claude\//,
   /^skills\//];

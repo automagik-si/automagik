@@ -1,4 +1,4 @@
-// Settings → Connectors: connected rows, a catalog with search and categories,
+// Settings → Apps: connected rows, a catalog with search and categories,
 // an Add menu, and the mailbox. One row component draws the mark, name, status
 // and the expanding panels (browser sign-in, device code, key/token, client).
 import { createElement as h, useEffect, useRef, useState, useSyncExternalStore } from 'react'
@@ -396,7 +396,7 @@ export function AddMenu({ actions, run }) {
           : h('button', { type: 'button', className: 'bt-soft bt-soft-sm', disabled: !ready, onClick: () => void run(kind === 'url' ? actions.connectorAdd({ name: name.trim(), url: url.trim() }) : actions.connectorAdd({ name: name.trim(), command: command.trim() }), reset) }, t('Add')))))
 }
 
-// Bot details → Connectors: one switch per connected connector (default on).
+// Bot details → Apps: one switch per connected app (default on).
 export function BotConnectors({ bot, roster, actions, run }) {
   const data = roster?.connectors
   const list = (data?.connectors ?? []).filter(c => c.state === 'ready')
@@ -404,7 +404,7 @@ export function BotConnectors({ bot, roster, actions, run }) {
   if (list.length === 0 && !mailOn) return null
   const rows = [...list, ...(mailOn ? [{ id: 'mail', name: t('Mailbox'), offFor: (data.mail?.offFor ?? []) }] : [])]
   return h('div', { className: 'bt-drawer-model' },
-    h('div', { key: 't', className: 'bt-section-title' }, t('Connectors')),
+    h('div', { key: 't', className: 'bt-section-title' }, t('Apps')),
     rows.map((connector) => {
       const off = (connector.offFor ?? []).includes(bot.id)
       return h(SwitchRow, { key: connector.id, label: connector.name, on: !off, onChange: (checked) => {

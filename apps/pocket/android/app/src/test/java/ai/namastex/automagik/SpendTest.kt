@@ -265,6 +265,17 @@ class SpendTest {
         assertTrue(widthDp("≥$7.80", 14) <= TodayTiles.textWidthDp(360))
     }
 
+    /** At a large font the tiles reflow to two columns, and the money figure keeps the counts' 22sp (#1068). */
+    @Test fun theMoneyFigureKeepsTheCountSizeAtLargeFontScales() {
+        for ((scale, screen) in listOf(1.2f to 360, 1.3f to 360, 1.3f to 411)) {
+            val columns = TodayTiles.columns(scale)
+            assertEquals("$scale x on $screen dp", 2, columns)
+            assertEquals("$scale x on $screen dp", 22, TodayTiles.amountSp("≥$7.80", TodayTiles.textWidthDp(screen, columns), scale))
+        }
+        // At 1.0x the four tiles are narrow: the figure still steps down to fit rather than clip.
+        assertTrue(TodayTiles.amountSp("≥$7.80", TodayTiles.textWidthDp(360), 1f) < 22)
+    }
+
     /** The four tiles grow with the font setting: two 24sp lines, 20dp padding and 4dp slack at 1.3x. */
     @Test fun todayTileHeightFitsAtTheLargestFontScale() {
         assertEquals(72f, TodayTiles.heightDp(1f).value, 0.01f)

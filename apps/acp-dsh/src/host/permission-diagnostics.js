@@ -90,7 +90,7 @@ function modesOf(values) {
 // cannot explain the decision is `other`.
 function bridgeOf(adapter, agent, state) {
   const on = state.bridge !== undefined
-  const byDefault = agent?.disableBuiltInTools === true
+  const byDefault = state?.bridgeDefault ?? (agent?.disableBuiltInTools === true)
   if (adapter.backchannel === undefined) return { on, why: on ? OTHER : 'no-backchannel' }
   if (agent?.bridge === false) return { on, why: on ? OTHER : 'agent-no-bridge' }
   return { on, why: on === byDefault ? 'agent-default' : 'setting' }
@@ -329,7 +329,7 @@ export class PermissionDiagnostics {
         out.bridge = { ...entry.bridge }
         if (entry.bridge.on) {
           const bridge = active ? state.bridge : undefined
-          out.bridge.open = bridge !== undefined && bridge.closed !== true
+          out.bridge.open = bridge !== undefined && bridge.closed !== true && bridge.disconnected !== true
         }
       }
       if (entry.modes !== undefined) {

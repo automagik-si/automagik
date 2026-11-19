@@ -1,13 +1,26 @@
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { cp } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
+import * as yaml from 'yaml'
+import { hasReadScopeAdapters, mergePatch, replaceProfilePatch } from '../apps/desktop/src/profile-patch.mjs'
 import { pinStore, profileDirOf, PROFILE, seedProfile } from './lib.mjs'
 import { FOLLOW_STATUS, installedPlugins, markSeed, ownership, packageHash, profileState, compareRelease, validBuild, writeJson, readJson } from './profile-state.mjs'
 import { materializePlugins, PLUGINS, pruneImageArchives } from './plugin-payload.mjs'
 import { mergeImageProfile, readLock } from './profile-lock.mjs'
 import { withVolumeLock } from './volume-lock.mjs'
+
+// Reconcile the managed profile with the adapter exports of the Bot package it will run.
+function mergeReadScopePatch(source, profile, readScopeAvailable) {
+  const name = 'cordis.patch.yml'
+  const shipped = readFileSync(join(source, name), 'utf8')
+  const file = join(profile, name)
+  const stat = lstatSync(file, { throwIfNoEntry: false })
+  if (stat !== undefined && !stat.isFile()) throw new Error('Unsupported image profile patch file')
+  const merged = mergePatch(yaml, stat === undefined ? '' : readFileSync(file, 'utf8'), shipped, { readScopeOnly: true, readScopeAvailable })
+  if (merged !== null) replaceProfilePatch(file, merged, stat === undefined ? undefined : stat.mode & 0o777)
+}
 
 /** Copy cache files by rename: an existing store file may be hard-linked by the old profile. */
 async function overlayStore(source, target) {
@@ -116,6 +129,7 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
     try { materializePlugins({ source, target, lock: readLock(target) }) }
     catch { materializePlugins({ source, target }) }
     pinStore(target, dshHome)
+    mergeReadScopePatch(source, target, hasReadScopeAdapters(source) && hasReadScopeAdapters(target))
     return done('matching-image')
   }
   if (compareRelease(build.automagik, own.release) <= 0) return done('update-required')
@@ -138,12 +152,15 @@ async function followImageUnlocked({ dshHome, source, store, build, dshBin, inst
     await cp(target, profile, { recursive: true, verbatimSymlinks: true })
     rmSync(join(profile, 'node_modules'), { recursive: true, force: true })
     const lock = mergeImageProfile({ source, target: profile })
+    const readScope = hasReadScopeAdapters(source)
+    mergeReadScopePatch(source, profile, readScope)
     materializePlugins({ source, target: profile, lock })
     await overlayStore(store, join(dshHome, 'pnpm-store'))
     reuseInstalledIndexes(join(dshHome, 'pnpm-store'))
     pinStore(profile, dshHome)
     await install({ dshBin, profile, dshHome: staging })
     if (!PLUGINS.every(name => installedPlugins(profile)[name] === build.plugins[name])) throw new Error('Image plugin install did not converge')
+    if (readScope && !hasReadScopeAdapters(profile)) throw new Error('Image profile install lost the file-scope adapters')
     if (!extras.every(name => readJson(join(profile, 'node_modules', name, 'package.json'))?.version === addedVersions[name])) throw new Error('Added plugin did not survive image update')
     if (packageHash(target) !== own.packageSha256) return done('owner-managed')
     // Keep the materialized inputs on the data volume for subsequent plugin installs; the

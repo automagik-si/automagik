@@ -126,6 +126,30 @@ test("am update --rollback and --auto are the pack's own update, as its help say
   assert.deepEqual([bad.status, bad.stdout, bad.stderr], [2, "", "am: unknown option --nope (am help)\n"]);
 });
 
+test("am update --retry-skipped is the pack's own recovery, as am's help says (#1486)", (t) => {
+  const s = scratch(t);
+  assert.equal(s.am("self", "install").status, 0);
+  const pack = join(PACK, "bin", "automagik-herdr");
+  // Forwarded as given: the pack decides what each combination does and what it exits with.
+  for (const args of [["update", "--retry-skipped"], ["update", "--retry-skipped", "--json"], ["update", "herdr.pack", "--retry-skipped"],
+    ["update", "--retry-skipped", "--check"], ["update", "--retry-skipped", "--auto", "status"]]) {
+    const want = s.run(pack, args);
+    const got = s.installed(...args);
+    assert.deepEqual([got.status, got.stdout, got.stderr], [want.status, want.stdout, want.stderr], `am ${args.join(" ")}`);
+    assert.doesNotMatch(got.stderr, /unknown option/, `am ${args.join(" ")}`);
+  }
+  // Named at another part, it does not run.
+  for (const args of [["update", "automagik.am", "--retry-skipped"], ["update", "--retry-skipped", "foo"]]) {
+    const got = s.installed(...args);
+    assert.equal(got.status, 2, `am ${args.join(" ")}`);
+    assert.equal(got.stdout, "", `am ${args.join(" ")}`);
+    assert.match(got.stderr, /^am: --retry-skipped is herdr\.pack's own update, not /, `am ${args.join(" ")}`);
+  }
+  // am's own part of the help lists it.
+  const help = s.installed("help").stdout;
+  assert.match(help.slice(0, help.length - s.run(pack, ["--help"]).stdout.length), /--retry-skipped/);
+});
+
 test("self install: the store, the links and the briefing entry; doctor is healthy", (t) => {
   const s = scratch(t);
   const r = s.am("self", "install", "--json");

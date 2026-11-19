@@ -33,6 +33,7 @@ import { drawImage, imageRefusal, imageSupport, MAX_IMAGE_BYTES, SIGNED_OUT, UNA
 import { CliLogins } from './src/host/login.js'
 import { CREDENTIAL_ENV, URL_ENV } from './src/host/names.js'
 import { PermissionDiagnostics } from './src/host/permission-diagnostics.js'
+import { retiredLine } from './src/host/retired-home.js'
 import { enginesFor, PRESSURE_METHOD, pressureGuard } from './src/host/pressure.js'
 import { redactorFor } from './src/host/redact.js'
 import { agentRoute, carryEffort, crossed } from './src/host/switch.js'
@@ -48,7 +49,7 @@ export const inject = ['llm', 'agents']
 // default, so an absent key still reaches the adapter as absent.
 export const DSH_TOOLS_DEFAULT = true
 
-// claude, codex, hermes, antigravity, omp, sideModel and dshTools are live (volatile): DSH's settings service writes them
+// claude, codex, hermes, antigravity, omp, sideModel, dshTools and nativeTools are live (volatile): DSH's settings service writes them
 // without remounting the plugin, and loader/volatile-update brings the change here.
 export const Config = z.object({
   claude: z.boolean().default(true).volatile().description(
@@ -67,7 +68,7 @@ export const Config = z.object({
   }).default({ ...SIDE_MODEL }).volatile().description("The model that writes a Session's title when the Session is on an agent and DSH's default model is an agent too. Never an agent."),
   fakeAgent: z.string().description('Tests only: a script that speaks ACP, served as the acp-fake model. The command comes from these host settings, never from a client route.'),
   // No schema default: absent is the per-agent default (Claude Code on, because only its
-  // adapter can drop the built-in tool set; Codex off, so it never runs two tool sets), and an
+  // adapter can drop the built-in tool set; Codex on for team Bots that need DSH's extras), and an
   // explicit true/false is the person's word. False is also the kill switch and the 2026-11-03
   // behaviour. A schema default would materialise true and erase the difference. Hidden from
   // settings forms (`.hidden()`): it is a rollback lever, not a preference, and stays writable
@@ -76,10 +77,22 @@ export const Config = z.object({
     "Hand DSH's own tools to the agent over a per-session MCP bridge named dsh (the Session's",
     "preset, filtered by its level), approve every DSH tool call in DSH whatever the agent's own",
     "rules say, and turn the agent's built-in tools off where its adapter allows. On by default",
-    "for Claude Code; an agent whose adapter cannot drop its own tools (Codex) bridges only on an",
-    'explicit true. The transcript reaches either agent when a Session moves to it, whatever the',
+    "for Claude Code. Codex bridges on an explicit true or for a team Bot that needs DSH's extras.",
+    'The transcript reaches either agent when a Session moves to it, whatever the',
     'bridge, unless this is false. False is the kill switch and the behaviour without it: each',
     'agent keeps its own tools and approvals, and sees only its own session.',
+  ].join(' ')),
+  // Native-tools mode (#1564). No schema default: absent is today's behaviour for everyone.
+  // `true` is every Claude Code Session; an object turns it on per Bot (its name) or per DSH
+  // Session id, so it can be on for one Bot only. Read at each turn's start: a flip takes
+  // effect on that Session's next turn, in a new agent session. Hidden like dshTools: it is
+  // written through DSH's settings service or the profile patch.
+  nativeTools: z.union([z.boolean(), z.dict(z.boolean())]).volatile().hidden().description([
+    "Claude Code keeps its own tools (Agent, Bash, Read, Edit, Write, Grep, Glob, Skill) and the dsh",
+    "bridge adds only Automagik's extras; true for every Claude Code Session, or Bot names or",
+    'Session ids to true for those only. Each native call still shows as a card and its',
+    "permission request is answered by DSH's approval at the Session's level. Native commands and",
+    "edits run in Claude Code, outside DSH's file sandbox.",
   ].join(' ')),
 })
 
@@ -119,7 +132,7 @@ export function nodeCommand() {
 
 /**
  * @param {any} ctx
- * @param {{ claude?: any, codex?: any, hermes?: any, antigravity?: any, omp?: any, sideModel?: any, fakeAgent?: string, dshTools?: any }}
+ * @param {{ claude?: any, codex?: any, hermes?: any, antigravity?: any, omp?: any, sideModel?: any, fakeAgent?: string, dshTools?: any, nativeTools?: any }}
  *   [config]
  * @param {{ store?: any, cliStore?: any, find?: typeof findCommand, signedIn?: typeof signedInOf, catalogHome?: string, loginSpawn?: typeof spawn, loginTimers?: any, imageSetup?: (launch: any) => Promise<any> }} [deps]
  *   catalogHome: where each agent's models and efforts are kept (beside the adapters by default).
@@ -144,7 +157,10 @@ export function apply(ctx, config = {}, {
       ? join(dirname(store.home), CONSENT_FILE) : undefined,
   logoutRun = execFile, checkTimers = globalThis, profileCheck = canRunProfile,
 } = {}) {
-  const homes = cliHome === undefined ? undefined : new CliHomes(cliHome)
+  const homes = cliHome === undefined ? undefined : new CliHomes(cliHome, {
+    onRecordError: vendor => warn(ctx, `the ${vendor} generation record could not be saved at startup`),
+    onRetired: (vendor, retired) => info(ctx, retiredLine(vendor, retired)),
+  })
   if (homes) for (const vendor of ['claude', 'codex']) {
     try { homes.startup(vendor) } catch {} // Unproved abandoned homes remain untouched.
   }
@@ -189,10 +205,26 @@ export function apply(ctx, config = {}, {
   const turnGates = new Set()
   let ownAnswerer
   let ownContested = false
+  // DSH installs its SIGTERM/SIGINT handlers before plugins load. While the host stops, an ACP
+  // prompt the agent cancels on its way down was cut by the restart, not stopped by the person
+  // or by its own policy (adapter.js). A bare test process has no such handler, so it keeps
+  // Node's default signal behaviour.
+  const hostStopping = { now: false }
+  const stopWatchingSignals = []
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    if (process.listenerCount(signal) === 0) continue
+    const stop = () => { hostStopping.now = true }
+    process.on(signal, stop)
+    stopWatchingSignals.push(() => process.removeListener(signal, stop))
+  }
+  if (stopWatchingSignals.length > 0) {
+    ctx.effect?.(() => () => { for (const stop of stopWatchingSignals) stop() })
+  }
   const adapter = new AcpAdapter(ctx, agents, {
     ownMode: () => (ownContested ? undefined : ownAnswerer?.answer),
     holds: () => [...turnGates].map(entry => entry.gate),
     images: () => imageKeeper,
+    hostStopping: () => hostStopping.now,
     botIdentity: sessionId => {
       let identity
       for (const { reader } of identityReaders) {
@@ -212,6 +244,8 @@ export function apply(ctx, config = {}, {
     },
     // The raw tri-state: an absent setting takes each agent's own switch in AcpAdapter.
     dshTools: () => flagOf(config.dshTools),
+    // The raw native-tools setting: AcpAdapter.nativeOn reads it per Session.
+    nativeTools: () => flagOf(config.nativeTools),
     backchannel,
     redactor: redact,
     onSignedOut: id => signedOut(id),
@@ -717,7 +751,8 @@ export function apply(ctx, config = {}, {
     const bin = cli === undefined || native ? undefined : store.binOf(spec.adapter, spec.bin)
     const busy = !native && store.busy?.(spec.adapter) === true
     // The installer's own failure first; else a connector that waits for the account record.
-    const failure = native ? undefined : store.lastFailure?.(spec.adapter) ?? recordWaits.get(spec.adapter)
+    const installFailure = native ? undefined : store.lastFailure?.(spec.adapter)
+    const failure = installFailure ?? (native ? undefined : recordWaits.get(spec.adapter))
     const connectorState = native ? undefined : store.stateOf?.(spec.adapter)
     // Only a CLI Automagik installs itself has an install to report; any other is found or missing.
     const managed = cliStore !== undefined && spec.cliPackage !== undefined
@@ -776,6 +811,7 @@ export function apply(ctx, config = {}, {
         ...(bin && connectorState?.previous ? { previous: connectorState.previous } : {}),
         ...(bin && connectorState?.rolledBack ? { rolledBack: connectorState.rolledBack } : {}),
       },
+      ...(connector === 'failed' && installFailure?.unreachable !== undefined ? { connectorUnreachable: true } : {}),
       ...(signIns.get(id) === undefined ? {} : { signedIn: signIns.get(id) }),
       ...(homes && !native ? { authScope: 'isolated' } : {}),
       // No `signedIn`: the last check ran and could not tell, and this is why. Absent when no
@@ -1197,13 +1233,17 @@ export function apply(ctx, config = {}, {
       }
     }
     checkAccount()
-    if (!access.ready && access.reason === 'account') throw imageRefusal(UNAVAILABLE, 'Codex is signed in on this computer, but you have not confirmed its account for Automagik. Confirm it in a Bot\'s chat (choose a Codex model there), then try again.')
+    // An edit whose locked run could not be started answers with the reason bots-dsh's
+    // generate_image uses to hand the Bot its own verified copy, so the change is made on the
+    // file itself. A draw keeps its own refusal.
+    const editFallback = refusal => input === undefined ? refusal : Object.assign(refusal, { reason: 'edit-not-isolated' })
+    if (!access.ready && access.reason === 'account') throw editFallback(imageRefusal(UNAVAILABLE, 'Codex is signed in on this computer, but you have not confirmed its account for Automagik. Confirm it in a Bot\'s chat (choose a Codex model there), then try again.'))
     // A Codex config that does not load, or a check that keeps breaking, may have been put
     // right since it was remembered: the draw's own check answers for those.
     if (!access.ready && access.reason !== 'config' && access.reason !== 'unreadable') {
-      if (access.signedIn === false) throw imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, then try again.')
-      if (access.unsupported === true) throw unsupported()
-      throw imageRefusal(UNAVAILABLE, 'Codex cannot draw images here yet: it is off, not installed, or its sign-in could not be checked.')
+      if (access.signedIn === false) throw editFallback(imageRefusal(SIGNED_OUT, 'Codex is not signed in. Sign in to Codex from a Bot\'s chat, then try again.'))
+      if (access.unsupported === true) throw editFallback(unsupported())
+      throw editFallback(imageRefusal(UNAVAILABLE, 'Codex cannot draw images here yet: it is off, not installed, or its sign-in could not be checked.'))
     }
     try {
       return await drawImage({ spawn: () => {
@@ -1389,10 +1429,10 @@ export function apply(ctx, config = {}, {
       return () => { if (ownAnswerer === entry) ownAnswerer = undefined }
     },
     /** Read the provider's own mode, bridge status and answerer availability. */
-    ownModeOf(provider) {
+    ownModeOf(provider, sessionId) {
       const agent = agents.get(provider)
       if (agent?.ownMode === undefined) return undefined
-      return { mode: agent.ownMode, bridged: adapter.bridgeOn(agent), answerer: ownAnswerer !== undefined && !ownContested }
+      return { mode: agent.ownMode, bridged: adapter.bridgeOn(agent, sessionId), answerer: ownAnswerer !== undefined && !ownContested }
     },
     /** Whether a Session is busy on a prompt in its own mode. */
     ownModeIn: sessionId => adapter.ownModeIn(sessionId),

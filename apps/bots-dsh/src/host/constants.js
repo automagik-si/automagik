@@ -25,6 +25,8 @@ export const PET_ROUTE = `${ROUTE}/pet`
 export const PET_CODEX_ROUTE = `${ROUTE}/pet-codex`
 // Generated images (imagegen.js), by id.
 export const IMAGE_ROUTE = `${ROUTE}/image`
+// The gen-UI kit's media bytes (genui.js), by source and id: a card's photo or voice note.
+export const GENUI_MEDIA_ROUTE = `${ROUTE}/genui-media`
 // The Automagik desktop app (OMNI_CLIENT_ID) updates as a whole and carries the Bot browser;
 // upstream's own app says so with DS_BOT_APP.
 export const inDesktopApp = () => process.env.OMNI_CLIENT_ID === 'omni-desktop' || process.env.DS_BOT_APP === '1'
@@ -56,6 +58,10 @@ export const ROOM_REPLY_TIMEOUT_MS = 240_000
 // Lines a member writes less than this apart while it works reach its group together.
 export const ROOM_STEP_GAP_MS = 30_000
 export const SOURCE_KIND = 'bot'
+// The failure code acp-dsh gives a turn the host stopped from outside the app (its SIGTERM at
+// a restart): the work was cut while running, so it is resumed, not marked failed. A Stop the
+// person asked for stays `ABORTED`.
+export const AGENT_INTERRUPTED = 'AGENT_INTERRUPTED'
 // The fixed reply that opens a fresh conversation part; it is never shown or sent on.
 export const HANDOFF_ACK = 'Noted. I have my handoff note and carry on from here.'
 // A result that arrives after the user gave up waiting for it: it settled once

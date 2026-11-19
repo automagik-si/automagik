@@ -32,11 +32,12 @@ the build they have.
 
 1. **Cut** (job "Cut v<version> on dev"), before tagging: checks that the
    `POCKET_SIGNING_KEYSTORE` and `POCKET_SIGNING_PASSWORD` secrets exist (no key, no release),
-   runs the unit tests and lint from `apps/pocket/android/`, then sets the version with
+   runs `testGithubDebugUnitTest`, `lintGithubDebug`, `testPlayDebugUnitTest` and `lintPlayDebug`,
+   then sets the version with
    `bun scripts/version.ts set` (it refuses a minor or patch over 999), commits
    `chore(release): vX.Y.Z`, tags and publishes the release (not Latest, for a patch).
 2. **Pocket** (job "Pocket"), from the tag:
-   1. Builds the release APK, signed with the release key from the secrets.
+   1. Builds `githubRelease`, targeting API 35, signed with the release key from the secrets.
    2. Checks that its `versionName` is the tag and its `versionCode` is
       `major*1_000_000 + minor*1_000 + patch`.
    3. Attaches `automagik-pocket-<version>.apk`, then `latest.json` (`versionCode`, `versionName`,
@@ -52,7 +53,26 @@ Installed copies find the new `latest.json` at their next check (on launch, then
 The usage meter is released from its own repository,
 [automagik-si/usagemeter](https://github.com/automagik-si/usagemeter).
 
-## 3. Check a release
+## 3. Build a Play candidate
+
+The `play` flavor targets API 36 and uses the shared app ID and version code. Google Play
+delivers updates for this flavor. GitHub releases continue to ship the APK and `latest.json`.
+
+From `apps/pocket/android`, set `POCKET_PLAY_SIGNING_STORE` to the upload keystore path,
+`POCKET_PLAY_SIGNING_ALIAS` to its key alias and `POCKET_PLAY_SIGNING_PASSWORD` to its store
+password. Set `POCKET_PLAY_SIGNING_KEY_PASSWORD` if the key has a different password. For local
+validation, use a disposable test key. Run `./gradlew :app:bundlePlayRelease` to produce the signed
+`app/build/outputs/bundle/playRelease/app-play-release.aab`. The owner decides before merge or
+any Play upload.
+
+For candidate verification, inspect the signed APK and AAB and the merged manifests for the
+package ID, version code, target SDK, permissions and receivers. Install the GitHub candidate
+and update it through **Settings → About → Check for updates** using a controlled feed and a
+newer APK signed by the same test key. Install the Play candidate from the bundle, check that
+About has no update controls, and confirm that reopening Pocket makes no updater request. In
+each flavor, verify that **Watch in background** reconnects after package replacement.
+
+## 4. Check a release
 
 1. `gh release view pocket-lane -R automagik-si/automagik` and
    `gh release download pocket-lane -R automagik-si/automagik -p latest.json -O -` show the build
@@ -69,7 +89,7 @@ The usage meter is released from its own repository,
 Releases up to v0.23.0, and the bridge release, are on the archived
 [automagik-si/automagik-pocket](https://github.com/automagik-si/automagik-pocket/releases).
 
-## 4. Don'ts
+## 5. Don'ts
 
 - Don't edit a version by hand: `bun scripts/version.ts` owns it.
 - Don't push to `dev` directly; merge a pull request.
@@ -78,7 +98,7 @@ Releases up to v0.23.0, and the bridge release, are on the archived
   installed copies and forks depend on them.
 - Don't create or edit the `pocket-lane` release by hand, or mark it Latest.
 
-## 5. Forks
+## 6. Forks
 
 A fork publishes with its own key and builds with `-Ppocket.updateUrl=<its latest.json URL>` (or
 sets `pocket.updateUrl` in `apps/pocket/android/gradle.properties`). Its installs can't take updates
